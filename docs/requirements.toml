@@ -1,0 +1,184 @@
+# Hex's requirement registry: the goals of track T7 of kiln's critical path (kiln plan
+# 01a157fe102576a8bf44ccaa5d835de7), each acceptance criterion (AC-T7.n.k) and test (T-T7.n.k) with its ID,
+# from the plan's version below on 2026-10-20. Code comments, commits, tests and benchmarks cite these IDs;
+# kiln's citation gate (CP-T6.6) reads them from kiln's vendored copy. Hex's own IDs join them as
+# its design names them.
+
+plan = "01a157fe102576a8bf44ccaa5d835de7"
+plan_version = 2
+track = "CP-T7"
+
+[[goal]]
+id = "CP-T7.1"
+title = "Hex set up; the node runtime with process and oci classes"
+criteria = [
+  { id = "AC-T7.1.1", text = "Usable now: no build or agent on a Linux runner can starve the machine, and container legs run without a Docker daemon, in a change request that passes the gate; Hex's repository has its CLAUDE.md, STATUS.md and gate" },
+  { id = "AC-T7.1.2", text = "another box's fsync p99 while one box builds kiln at full tilt, against idle is at most 2x, measured by bench noisy_neighbor on adacachy" },
+  { id = "AC-T7.1.3", text = "oci container start p50, image present is at most 50 ms, measured by bench hex_start" },
+  { id = "AC-T7.1.4", text = "OCI runtime-spec validation tests passed is exactly 100%, measured by opencontainers/runtime-tools' validation suite" },
+  { id = "AC-T7.1.5", text = "memory the node agent adds per box is at most 1 MiB, measured by the bench's accounting" },
+]
+tests = [
+  { id = "T-T7.1.1", text = "The CI labs on the hex executor: every leg that passes on docker passes on hex" },
+  { id = "T-T7.1.2", text = "Crash of the node agent mid-start, then recovery — passes when every box is adopted again or cleaned up, none leaked" },
+]
+
+[[goal]]
+id = "CP-T7.2"
+title = "The firecracker and shards classes, with snapshots and warm pools"
+criteria = [
+  { id = "AC-T7.2.1", text = "Usable now: untrusted CI legs run in microVMs (W13-R05, W13-R06; G-25) and CD's microvm target deploys, in a change request that passes the gate" },
+  { id = "AC-T7.2.2", text = "Firecracker leg start, cold is at most 1500 ms, measured by W13-AC05's measure on fedora" },
+  { id = "AC-T7.2.3", text = "Firecracker leg start, warm from a snapshot is at most 300 ms, measured by W13-AC05's measure on fedora" },
+  { id = "AC-T7.2.4", text = "Firecracker restore to the workload's first instruction, p99 is at most 100 ms, measured by bench hex_restore" },
+  { id = "AC-T7.2.5", text = "p50 a Shards run through Hex adds over Shards' own pooled run is at most 1 ms, measured by bench hex_start on the Mac" },
+]
+tests = [
+  { id = "T-T7.2.1", text = "A restore on a host whose CPU differs from the snapshot's — passes when it is refused by name and the template is rebuilt" },
+]
+
+[[goal]]
+id = "CP-T7.3"
+title = "The control plane, from one node to a cell; CI legs placed by resources"
+criteria = [
+  { id = "AC-T7.3.1", text = "Usable now: kiln places CI legs by CPU, memory, disk and devices, never by slot counts (G-02), in a change request that passes the gate" },
+  { id = "AC-T7.3.2", text = "leg submit to start on an idle cell, p99 is at most 200 ms, measured by bench hex_submit across adacachy, fedora and jupiter" },
+  { id = "AC-T7.3.3", text = "workloads lost or started twice over 10,000 crash seeds of the control plane is exactly 0, measured by hex-sim with the nemesis" },
+  { id = "AC-T7.3.4", text = "A control plane restart leaves running workloads running, shown by a test" },
+]
+tests = [
+  { id = "T-T7.3.1", text = "The CI labs end to end on Hex's placement, unchanged in what they check" },
+]
+
+[[goal]]
+id = "CP-T7.4"
+title = "The scheduler: plugins, scoring, sampling, explanations"
+criteria = [
+  { id = "AC-T7.4.1", text = "Usable now: CI legs and agent launches are placed by Hex's scheduler, and every pending one says why in words, in a change request that passes the gate" },
+  { id = "AC-T7.4.2", text = "placement decision p99 at 10,000 placements/s on 10,000 simulated nodes is at most 10 ms, measured by hex-sim" },
+  { id = "AC-T7.4.3", text = "stranded capacity at 90% load, against best fit alone falls by at least 30% compared with best fit alone, measured by hex-sim with a recorded kiln workload" },
+]
+tests = [
+  { id = "T-T7.4.1", text = "A model-based test: placements equal the serial specification's on generated clusters and workloads" },
+]
+
+[[goal]]
+id = "CP-T7.5"
+title = "Priority, quotas, fair share, preemption and gangs"
+criteria = [
+  { id = "AC-T7.5.1", text = "Usable now: kiln CI shares capacity fairly between repositories and people, deploy legs take precedence over batch, and matrix jobs are admitted whole, in a change request that passes the gate" },
+  { id = "AC-T7.5.2", text = "each of 4 equal-weight repositories' share of capacity under contention is within 2% of 25%, measured by hex-sim over a recorded day" },
+  { id = "AC-T7.5.3", text = "disruption budgets broken by preemption is exactly 0, measured by a property test" },
+]
+tests = [
+  { id = "T-T7.5.1", text = "A burst of 1,000 legs from one repository — passes when the others' legs still start within their usual p95" },
+]
+
+[[goal]]
+id = "CP-T7.6"
+title = "Agents as Hex workloads"
+criteria = [
+  { id = "AC-T7.6.1", text = "Usable now: starting an agent picks the best machine on its own and says why, in a change request that passes the gate" },
+  { id = "AC-T7.6.2", text = "agent start, warm pool hit, p50 is at most 300 ms, measured by bench agent_start through Hex" },
+  { id = "AC-T7.6.3", text = "sessions placed on a machine above 90% CPU when another has room is exactly 0, measured by hex-sim with a recorded fleet" },
+]
+tests = [
+  { id = "T-T7.6.1", text = "A machine fills while agents are starting — passes when new agents go elsewhere and running ones are not moved without the person's say" },
+]
+
+[[goal]]
+id = "CP-T7.7"
+title = "Networking"
+criteria = [
+  { id = "AC-T7.7.1", text = "Usable now: CI legs in microVMs get their service containers and only their declared egress, in a change request that passes the gate" },
+  { id = "AC-T7.7.2", text = "flows allowed that no grant names is exactly 0, measured by a property test of generated policies" },
+  { id = "AC-T7.7.3", text = "throughput between two workloads on one host is at least 10 Gbit/s, measured by iperf3 between microVMs on fedora" },
+]
+tests = [
+  { id = "T-T7.7.1", text = "DNS exfiltration from a workload with no DNS grant — passes when it gets no answer and no packet leaves" },
+]
+
+[[goal]]
+id = "CP-T7.8"
+title = "Storage and images"
+criteria = [
+  { id = "AC-T7.8.1", text = "Usable now: CI legs get their caches as volumes, without restoring archives, in a change request that passes the gate" },
+  { id = "AC-T7.8.2", text = "leg setup time with a 2 GB cache, against restoring it from an archive falls by at least 70% compared with restoring the archive, measured by bench leg_cache" },
+  { id = "AC-T7.8.3", text = "bytes written past a scratch quota is exactly 0, measured by a test filling a volume" },
+]
+tests = [
+  { id = "T-T7.8.1", text = "A workload killed mid-write to a volume — passes when the volume is consistent and reusable" },
+]
+
+[[goal]]
+id = "CP-T7.9"
+title = "Autoscaling and capacity"
+criteria = [
+  { id = "AC-T7.9.1", text = "Usable now: CI bursts get machines within the person's budget and give them back after, in a change request that passes the gate" },
+  { id = "AC-T7.9.2", text = "spend over the person's budget is exactly 0, measured by a test with a simulated cloud and a hard cap" },
+  { id = "AC-T7.9.3", text = "pending time of a burst of 500 legs with autoscaling, p95 is at most 3 min, measured by hex-sim with a simulated cloud" },
+]
+tests = [
+  { id = "T-T7.9.1", text = "Scale-in during work — passes when it drains first and loses no leg" },
+]
+
+[[goal]]
+id = "CP-T7.10"
+title = "Maintenance and disruption; runner upgrades drained through Hex"
+criteria = [
+  { id = "AC-T7.10.1", text = "Usable now: upgrading kiln's runners loses no CI leg and interrupts no agent session, in a change request that passes the gate" },
+  { id = "AC-T7.10.2", text = "legs or sessions lost across a rolling upgrade of every runner is exactly 0, measured by the blue/green lab with Hex" },
+  { id = "AC-T7.10.3", text = "A node whose disk stalls is marked and drained before its work fails, shown by a dm-delay drill" },
+]
+tests = [
+  { id = "T-T7.10.1", text = "An upgrade during a matrix build — passes when the build finishes, its legs moved or waited on per budget" },
+]
+
+[[goal]]
+id = "CP-T7.11"
+title = "Scale: a million workloads in one cluster"
+criteria = [
+  { id = "AC-T7.11.1", text = "Usable now: Hex's scale numbers and hex-sim in CI, with kiln's fleet on the sharded control plane, in a change request that passes the gate" },
+  { id = "AC-T7.11.2", text = "time to place 1,000,000 pending workloads on 10,000 simulated nodes is at most 120 s, measured by hex-sim on fedora" },
+  { id = "AC-T7.11.3", text = "Hex's throughput against kube-scheduler's on the same simulated cluster is at least 10x, measured by hex-sim against kwok" },
+  { id = "AC-T7.11.4", text = "control plane memory per workload is at most 4 KiB, measured by hex-sim's accounting" },
+]
+tests = [
+  { id = "T-T7.11.1", text = "Losing a control plane shard at 1,000,000 workloads — passes when its workloads keep running and its share is taken over within 5 s" },
+]
+
+[[goal]]
+id = "CP-T7.12"
+title = "Cells, federation and regions"
+criteria = [
+  { id = "AC-T7.12.1", text = "Usable now: kiln's fleet runs as cells, and a failure in one cell leaves the others' work untouched, in a change request that passes the gate" },
+  { id = "AC-T7.12.2", text = "workloads in other cells disturbed by a cell's control plane loss is exactly 0, measured by the cell-loss drill" },
+  { id = "AC-T7.12.3", text = "The differential suite passes on one node, one cell and three simulated regions" },
+]
+tests = [
+  { id = "T-T7.12.1", text = "A region lost in hex-sim — passes when its work is re-placed in other regions within their capacity" },
+]
+
+[[goal]]
+id = "CP-T7.13"
+title = "The Kubernetes API subset"
+criteria = [
+  { id = "AC-T7.13.1", text = "Usable now: KilnCD deploys to Hex as it does to a Kubernetes cluster, in a change request that passes the gate" },
+  { id = "AC-T7.13.2", text = "kubectl, Helm and kiln-cd pass a conformance subset (the named Kubernetes e2e tests for these kinds)" },
+  { id = "AC-T7.13.3", text = "kiln's own Helm chart deployed on Hex, tests passed is exactly 100%, measured by the chart's tests" },
+]
+tests = [
+  { id = "T-T7.13.1", text = "A Deployment rolled out and rolled back on Hex — passes when it behaves as on Kubernetes" },
+]
+
+[[goal]]
+id = "CP-T7.14"
+title = "Hex on its own, and its bar"
+criteria = [
+  { id = "AC-T7.14.1", text = "Usable now: production kiln runs its CI and agents on Hex with the comparison published, and Hex installs on its own" },
+  { id = "AC-T7.14.2", text = "workloads lost in the fire drills (node off, partition, control plane leader lost, disk stall) is exactly 0, measured by the drills' counts" },
+  { id = "AC-T7.14.3", text = "The same differential suite passes on a laptop, a cell and three regions" },
+]
+tests = [
+  { id = "T-T7.14.1", text = "A fresh machine to a working one-node Hex from its README alone, by a fresh subagent" },
+]

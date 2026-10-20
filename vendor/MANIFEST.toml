@@ -1,0 +1,6 @@
+# What Hex vendors, each project at one revision (kiln's docs/vendoring.md). scripts/vendor.py
+# reads it; kiln, vendoring Hex, holds every project named here at the same revision.
+format = 1
+
+# Hex's gate, run after a re-vendor.
+gate = ["bash scripts/gates.sh"]

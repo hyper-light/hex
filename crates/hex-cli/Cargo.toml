@@ -1,0 +1,16 @@
+[package]
+name = "hex-cli"
+description = "Hex: the scheduler and runtime: agent scheduling orchestration for infinite scale"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hex"
+path = "src/main.rs"
+
+[lints]
+workspace = true
