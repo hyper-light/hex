@@ -8,7 +8,9 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.99.1"
+# The minimum kiln's toolchain can build this vendored under; Hex's own gate runs on 1.99.1
+# (rust-toolchain.toml). Hex uses no feature newer than 1.99.0.
+rust-version = "1.99.0"
 repository = "https://github.com/hyper-light/hex"
 publish = false
 
