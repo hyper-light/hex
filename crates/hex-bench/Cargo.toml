@@ -1,0 +1,22 @@
+[package]
+name = "hex-bench"
+description = "Hex's benchmarks: the records a performance claim names (CLAUDE.md §7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bench]]
+name = "node_memory"
+harness = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hex-api.workspace = true
+hex-node.workspace = true
+hex-runtime.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

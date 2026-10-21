@@ -157,6 +157,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-bench"
+version = "0.1.0"
+dependencies = [
+ "hex-api",
+ "hex-node",
+ "hex-runtime",
+ "tempfile",
+]
+
+[[package]]
 name = "hex-cli"
 version = "0.1.0"
 dependencies = [
