@@ -9,6 +9,19 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::Arc;
 
+/// Ignores SIGINT and SIGTERM in this process, so a wrapper (`hex box run`) outlives the signals
+/// its caller sends the whole process group and stays alive to clean the box up; the boxed child,
+/// in the same group, still receives them. Best-effort: a failure leaves the default disposition.
+pub fn ignore_int_term() {
+    for sig in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: signal(2) with SIG_IGN and a valid signal number; it installs a disposition and
+        // writes nothing of ours. The return value isn't needed (best-effort).
+        unsafe {
+            libc::signal(sig, libc::SIG_IGN);
+        }
+    }
+}
+
 /// Makes `cmd`'s child join the cgroup whose `cgroup.procs` is open as `procs` before it executes,
 /// so the program and everything it starts are in the box from their first instruction.
 pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>) {

@@ -5,6 +5,8 @@
 pub mod selftest;
 
 #[cfg(target_os = "linux")]
+pub mod box_run;
+#[cfg(target_os = "linux")]
 pub mod oci;
 
 /// What `hex` prints for its arguments, where, and the exit status.

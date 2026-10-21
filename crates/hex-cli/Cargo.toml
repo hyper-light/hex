@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
+hex-core.workspace = true
 hex-runtime.workspace = true
 
 [dev-dependencies]
@@ -22,8 +23,6 @@ tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 hex-node.workspace = true
-hex-runtime.workspace = true
-hex-core.workspace = true
 
 [lints]
 workspace = true
