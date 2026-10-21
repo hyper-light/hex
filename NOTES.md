@@ -27,17 +27,32 @@ kiln (`cp/t7-hex`):
   on fedora (`conformance.rs`, needs `HEX_BIN` + delegation; SANDBOX-7 egress deferred to CP-T7.7).
   Builds + clippies clean on kiln's 1.99.0.
 
+kiln (`cp/t7-hex` at **7056744** — focused gate green on fedora/linux: `clippy -p kiln --all-targets
+--locked -D warnings` and the `os::contain` tests both pass; macOS/Windows inert, target-gated. Full
+gate runs in CI at push, which needs Ada's word):
+- **Consumer #1, harness half.** Discovery: kiln's runner consumes no `Sandbox` trait — legs spawn
+  via `proc::spawn_group`, harness via `contain::Group` (membership-only cgroups). So `contain_linux`
+  now has a second backing: with `KILN_HEX_BOX=1` + a delegated subtree it makes each agent's group a
+  **Hex `BoxRoot` box** (`<own>/hex/<id>` with `default_bounds`), vacating the runner to
+  `<own>/supervisor` first; else today's membership-only. Reuses `hex-runtime`'s `BoxRoot` wholesale —
+  **no new cgroup code in kiln**. `crates/kiln` gains a Linux-only dep on `hex-api`/`hex-runtime`.
+  Every harness session (`Group::of`) is boxed for free. Staged behind the flag (default off) until
+  e2e'd on a runner. `default_bounds` = fair-share `cpu.weight`/`io.weight` + a `pids.max` fork-bomb
+  cap; **no memory cap yet** (a RAM-vs-concurrency policy — flagged to Kiln Distro).
+
 ## Next (in order)
 
-1. **Consumer #1 — host CI legs + harness in process boxes** (the incident fix). The lynchpin: the
-   runner must vacate its own cgroup to a leaf and enable controllers (cgroup v2 no-internal-process)
-   before any child cgroup can carry limits. Plan: extend `crates/kiln/src/os/contain_linux.rs`
-   (where `hold_agents()`/`Base::under_own` set up) to (a) move the runner to `<svc>/supervisor` +
-   enable cpu/io/memory/pids on `<svc>` (best-effort; graceful fallback = today's membership-only),
-   (b) add `Group::limits(bounds)` writing via `hex_core::cgroup::writes`. Then box each host leg
-   (`runtime.rs:1889`, the host-only arm) and each harness session (`session.rs:2305`) by creating a
-   limited cgroup and entering the command into it (reuse `Group::enter`). Add `hex-core` as a
-   `crates/kiln` dep. Unit-test the limit computation; e2e needs a runner lab (see infra note).
+1. **Consumer #1 — finish it.** (a) **Gate** the written harness half on fedora once the slot opens
+   (`cargo clippy --all-targets`, `cargo test -p kiln contain`, then the full gate; refresh the lock
+   first with a non-`--locked` resolve). (b) **Leg boxing** (the headline — "no build starves the
+   machine"): box each host leg at `runtime.rs` `exec` (the host arm building `Command::new(&prog)` →
+   `proc::spawn_group`, ~:1889). A leg isn't a session: its `job_id` holds `/`, which `BoxId` rejects,
+   so map it to a valid id (sanitize + a short hash of the full id for uniqueness), create a box with
+   leg bounds, enter the step command (write `0` to the box's `cgroup.procs` in a `pre_exec`, as
+   `Group::enter` does), and remove the box when the leg ends (tie into the leg's existing
+   `st.groups`/cleanup so a crash leaks none — T-T7.1.2). (c) **e2e**: a delegated-scope test of the
+   boxed `contain::Group` path (like kiln-hex's conformance, under `systemd-run --user --scope -p
+   Delegate=yes`) — needs a stable runner lab (asked Kiln Distro).
 2. **Consumer #2 — the `hex` CI executor** (container legs, no Docker). Add `kind == "hex"`
    (proto.rs CAP, probe.rs `executors()`, updates.rs `runner_build`, dispatch.rs `runner_view`,
    runtime.rs dispatch, local.rs validation — the map). It needs to unpack an OCI image to a rootfs
