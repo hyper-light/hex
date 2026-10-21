@@ -66,10 +66,15 @@ aarch64-apple-darwin + x86_64-pc-windows-gnu. Full gate runs in CI at push, whic
 
 ## Infra note
 
-fedora's kiln runner restarts every few minutes (kills long `kiln run`s) and its load swings 2→30
-(other tracks' CI). noisy_neighbor landed in a ~load-3 window; hex_start's longer loop keeps getting
-cut. A bench-calendar slot (quiet machine, load<2, nothing else building) is needed for hex_start and
-for the of-record noisy_neighbor on adacachy. Builds: `kiln run` with
-`CARGO_TARGET_DIR=$HOME/.cache/hex-t7/target` (hex) or `$HOME/.cache/kiln-t7-hex/target` (kiln,
+Benchmarks need a load<2 window and fedora rarely has one: it runs the tracks' gates (T3/T4/T6/T10),
+so its load swings 5→25 and spiked to 254 (OOM) on 2026-10-21. A long bench run is refused or cut by
+that load/OOM — **not** by a runner restart. (Correction: an earlier note here said "the runner
+restarts every few minutes"; the coordinator checked the journal and process ages and fedora's two
+runners have been stable, so that was wrong. What cut earlier long runs was load/OOM, and once an mcp
+`run` shell reset — never a machine restart. All builds/tests this session completed cleanly.) The fix
+is a named quiet slot on the bench calendar, which the coordinator will give (likely at the next usage
+pause). noisy_neighbor's **1.30x** provisional landed in a ~load-3 window; the of-record noisy_neighbor
+and hex_start await the slot, both on **fedora NVMe** (not adacachy — production). Builds: `kiln run`
+with `CARGO_TARGET_DIR=$HOME/.cache/hex-t7/target` (hex) or `$HOME/.cache/kiln-t7-hex/target` (kiln,
 cwd=the kiln worktree). Format + lockfile locally. See memory `hex-kiln-integration-plan`,
 `hex-cgroup-delegation`.
