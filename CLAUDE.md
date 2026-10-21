@@ -83,7 +83,13 @@ depth-first on the call stack. Work is flat: loops with counted budgets and boun
 Linux, macOS and Windows, on x86_64 and aarch64. Platform code sits behind `cfg` with a portable path
 beside it, or a typed refusal naming the platform. `unsafe` is denied; where an OS interface needs it,
 its file is named here with the reason, and every block carries a `// SAFETY:` comment stating its
-invariant.
+invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
+
+- `crates/hex-runtime/src/linux/sys.rs`: the `process` class joins a program to its cgroup in the
+  forked child before `execve` (`pre_exec`), which Rust can't express safely.
+- `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, `waitpid`, `unshare`,
+  `setns`, `kill`, `prctl` capability calls and inherited-fd adoption, none of which rustix wraps
+  safely; the process is single-threaded (it re-exec'd) where this matters.
 
 ## 13. Lean code
 

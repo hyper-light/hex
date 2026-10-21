@@ -8,12 +8,12 @@ for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/c
 for c in $(cat /sys/fs/cgroup/cgroup.controllers); do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; done
 : > "$OUT/results.tsv"
 cd "$RT" || exit 1
-export RUNTIME=/opt/runtime TMPDIR=/tmp
+export RUNTIME=${RUNTIME:-/opt/runtime} TMPDIR=/tmp
 for dir in validation/*/; do
   name=$(basename "$dir")
   [ -x "validation/$name/$name.t" ] || continue
   log="$OUT/$name.log"
-  timeout 300 "validation/$name/$name.t" > "$log" 2>&1
+  timeout 60 "validation/$name/$name.t" > "$log" 2>&1
   code=$?
   first=$(grep -m1 '^not ok' "$log" | tr '\t' ' ')
   # TAP: a test passes when it ran checks, none failed and it exited 0; "ok N # SKIP" lines are

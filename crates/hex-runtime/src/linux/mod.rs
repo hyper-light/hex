@@ -4,6 +4,7 @@
 
 pub mod cgroup;
 pub mod disks;
+pub mod oci;
 pub mod proc;
 pub mod process;
 pub mod sys;

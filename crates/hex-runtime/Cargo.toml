@@ -13,6 +13,7 @@ hex-api.workspace = true
 hex-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true

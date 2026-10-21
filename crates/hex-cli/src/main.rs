@@ -19,6 +19,19 @@ fn main() -> ExitCode {
             return ExitCode::from(status);
         }
     }
+    // The `oci` class's command line and its re-exec'd container init (Linux only).
+    #[cfg(target_os = "linux")]
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && rest.iter().all(Option::is_some)
+    {
+        if first == "__oci-init" {
+            return ExitCode::from(hex_cli::oci::init());
+        }
+        if first == "oci" {
+            let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+            return ExitCode::from(hex_cli::oci::main(&rest));
+        }
+    }
     let reply = hex_cli::reply(&args);
     let wrote = if reply.to_stderr {
         std::io::stderr().lock().write_all(reply.text.as_bytes())

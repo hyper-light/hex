@@ -161,6 +161,7 @@ name = "hex-cli"
 version = "0.1.0"
 dependencies = [
  "hex-api",
+ "hex-core",
  "hex-node",
  "hex-runtime",
  "tempfile",
@@ -199,6 +200,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
