@@ -19,6 +19,7 @@ tempfile.workspace = true
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 hex-node.workspace = true
 hex-runtime.workspace = true
+hex-core.workspace = true
 
 [lints]
 workspace = true
