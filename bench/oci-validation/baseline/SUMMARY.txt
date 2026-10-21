@@ -1,0 +1,7 @@
+# runtime-tools validation baseline (CP-T7.1 decision evidence)
+# host: fedora.attlocal.net, 6.19.10-300.fc44.x86_64, cgroup v2, SELinux enforcing; image registry.fedoraproject.org/fedora:44
+# suite: opencontainers/runtime-tools bd3b0bd (2026-10-17); run 2026-10-20 by bench/oci-validation/run.sh
+# each row: pass fail skip, of 58 tests
+runc   pass=1 fail=57 skip=0  (runc version 1.5.1)
+crun   pass=28 fail=30 skip=0  (crun version 1.27)
+youki  pass=21 fail=37 skip=0  (youki version: 0.7.0)
