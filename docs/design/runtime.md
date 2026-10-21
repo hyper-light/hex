@@ -97,11 +97,43 @@ recovered by running it again. A model-based property test crashes the agent aft
 every generated history and asserts: every box left is whole and adopted, every box that was whole
 survives, nothing is leaked.
 
+## Decision: OCI images become bundles through kiln's registry client, not skopeo/umoci (consumer #2)
+
+**The choice.** The `hex` CI executor runs a container leg by handing the `oci` class a bundle — a
+rootfs and a `config.json` — that it builds itself from the image, using kiln's own registry client
+(`ci/registry`, which already speaks the OCI distribution and image specs). It pulls the image,
+verifies every layer and the config against its digest, then applies the layers in order into a
+rootfs, honouring whiteouts (`.wh.<name>`) and opaque directories (`.wh..wh..opq`). No `skopeo`, no
+`umoci`, no Docker daemon.
+
+**Sources.** OCI Image Format Specification v1.1.0 (manifest, config, the `…layer.v1.tar+gzip`/`+zstd`
+media types, the whiteout rules); OCI Distribution Specification v1.1.0 (digest-addressed pull);
+kiln's `ci/registry`, which already pulls and verifies OCI artifacts for the container CI path.
+
+**Evidence / rationale.**
+1. **No new external dependency, and the no-Docker consumer stays dependency-free.** AC-T7.1.1's
+   second half is that container legs run *without a Docker daemon*; shelling out to `skopeo`/`umoci`
+   would trade one external binary for two. kiln already carries an OCI-speaking registry client, so
+   the executor adds only tar extraction + whiteout handling, kiln's own code held to the bar.
+2. **Digests are checked before anything is applied (CLAUDE.md §3, §4).** Every blob is verified
+   against the digest its manifest names before a byte reaches the rootfs, so a corrupted or
+   substituted layer is a typed refusal, not a poisoned container.
+3. **The bundle is the seam.** Unpacking is image-spec work (layers → a tree); running is
+   runtime-spec work (namespaces, cgroups, caps), already Hex's `oci` class. The executor owns no
+   runtime logic and the `oci` class owns no image logic.
+
+**What would falsify it.** If kiln's registry client can't pull or verify an image class the CI path
+needs, or if layer application can't reach parity with a reference unpacker on the runtime-tools
+image corpus, the executor falls back to a vendored `umoci`-equivalent held to the bar. Measured when
+consumer #2's lab lands.
+
 ## Open (STATUS.md)
 
-- The `oci` class: the runtime-spec lifecycle, namespaces, rootfs, mounts, caps, user namespaces,
-  and the conformance run against crun-parity (AC-T7.1.3, AC-T7.1.4).
 - The `process` box on macOS (QoS and limits) and Windows (job objects); today a typed refusal
   naming the platform (CLAUDE.md §12).
-- The kiln integration: host CI legs and harness processes in `process` boxes, and a `hex` CI
-  executor for container legs, behind a `kiln-seams` adapter (CP-T7.1's first consumers).
+- The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
+  is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
+  legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a
+  build storm throttles builds, not the runner — pending end-to-end validation on a runner lab and
+  then default-on. **Consumer #2 (the `hex` executor for container legs)** is decided (above) and to
+  build.
