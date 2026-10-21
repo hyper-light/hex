@@ -41,8 +41,93 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 .unwrap_or(0),
         )),
         "echo" => Some(echo()),
+        // fsync-probe <file> <iters>: the noisy-neighbour victim — times fsync over small writes
+        // and prints "p50_us=<n> p99_us=<n>" (AC-T7.1.2).
+        "fsync-probe" => Some(fsync_probe(
+            args.first().map(String::as_str).unwrap_or(""),
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(200),
+        )),
+        // disk-hog <file> <seconds>: the noisy-neighbour builder — writes and fsyncs a large buffer
+        // in a tight loop to saturate the disk for that long.
+        "disk-hog" => Some(disk_hog(
+            args.first().map(String::as_str).unwrap_or(""),
+            args.get(1).and_then(|n| n.parse().ok()).unwrap_or(10),
+        )),
         _ => None,
     }
+}
+
+/// The victim: writes `BLOCK` bytes and fsyncs `iters` times at `path`, printing the p50 and p99
+/// fsync latency in microseconds. A box with a tight `io.latency` target keeps this p99 near idle
+/// even while a sibling box saturates the disk.
+fn fsync_probe(path: &str, iters: u32) -> u8 {
+    use std::io::Seek;
+    const BLOCK: usize = 4096;
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "fsync-probe: {path}: {e}");
+            return 1;
+        }
+    };
+    let buf = [b'x'; BLOCK];
+    let mut us: Vec<u128> = Vec::with_capacity(iters as usize);
+    for _ in 0..iters {
+        let _ = file.rewind();
+        if file.write_all(&buf).is_err() {
+            return 1;
+        }
+        let t = std::time::Instant::now();
+        if file.sync_data().is_err() {
+            return 1;
+        }
+        us.push(t.elapsed().as_micros());
+    }
+    us.sort_unstable();
+    // Percentile by integer index (no float cast in production code): index = len*p/100, clamped.
+    let pick = |p: usize| {
+        let i = us.len().saturating_mul(p).checked_div(100).unwrap_or(0);
+        us.get(i.min(us.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
+    };
+    let _ = writeln!(std::io::stdout(), "p50_us={} p99_us={}", pick(50), pick(99));
+    0
+}
+
+/// The builder: writes and fsyncs a 1 MiB buffer in a tight loop for `seconds`, saturating the
+/// disk — the load the victim must be protected from.
+fn disk_hog(path: &str, seconds: u64) -> u8 {
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(_) => return 1,
+    };
+    let buf = vec![b'z'; 1 << 20];
+    let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_secs(seconds));
+    let mut offset = 0u64;
+    while deadline.is_none_or(|d| std::time::Instant::now() < d) {
+        use std::io::{Seek, SeekFrom};
+        let _ = file.seek(SeekFrom::Start(offset));
+        if file.write_all(&buf).is_err() {
+            return 1;
+        }
+        let _ = file.sync_data();
+        offset = offset
+            .checked_add(buf.len() as u64)
+            .filter(|o| *o < (1 << 30))
+            .unwrap_or(0);
+    }
+    0
 }
 
 /// Takes and touches `bytes` of memory, a chunk at a time, then holds it briefly. In a box bounded
