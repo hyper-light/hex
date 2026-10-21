@@ -12,6 +12,25 @@ rust-version = "1.99.1"
 repository = "https://github.com/hyper-light/hex"
 publish = false
 
+# Versions match kiln's lockfile where kiln links the same crate, so vendoring Hex adds no second
+# copy of any of them.
+[workspace.dependencies]
+hex-api = { path = "crates/hex-api", version = "0.1.0" }
+hex-core = { path = "crates/hex-core", version = "0.1.0" }
+hex-runtime = { path = "crates/hex-runtime", version = "0.1.0" }
+hex-node = { path = "crates/hex-node", version = "0.1.0" }
+flate2 = "1.1.10"
+libc = "0.2.190"
+rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+tar = "0.4.46"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+ureq = "3"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+
 # The no-panic rule and the rest of CLAUDE.md as lints. Production code is checked again by
 # scripts/check-production.sh, without the test allowances.
 [workspace.lints.rust]

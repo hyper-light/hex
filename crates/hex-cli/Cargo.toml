@@ -12,5 +12,13 @@ publish.workspace = true
 name = "hex"
 path = "src/main.rs"
 
+[dev-dependencies]
+hex-api.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+hex-node.workspace = true
+hex-runtime.workspace = true
+
 [lints]
 workspace = true

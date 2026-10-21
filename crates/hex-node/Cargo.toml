@@ -1,0 +1,24 @@
+[package]
+name = "hex-node"
+description = "Hex's node agent (hexlet): drives the runtime classes, keeps a durable record of each box, and takes boxes back or cleans them up after a crash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hex-api.workspace = true
+hex-core.workspace = true
+hex-runtime.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

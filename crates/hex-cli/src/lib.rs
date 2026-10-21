@@ -1,5 +1,8 @@
-//! Hex: the scheduler and runtime: agent scheduling orchestration for infinite scale. For now this is the `hex` binary saying what it is; Hex itself
-//! comes with CP-T7.1 (docs/design/README.md, STATUS.md).
+//! Hex: the scheduler and runtime: agent scheduling orchestration for infinite scale. The `hex`
+//! binary: it says what it is, and runs `selftest-box` acts inside a box (CP-T7.1). The runtime
+//! classes are in `hex-runtime`, driven by the node agent in `hex-node`.
+
+pub mod selftest;
 
 /// What `hex` prints for its arguments, where, and the exit status.
 #[derive(Debug, PartialEq, Eq)]

@@ -8,6 +8,17 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.into_string().ok())
         .collect();
+    // `hex selftest-box <act> …` runs a small program inside a box (hex_cli::selftest); it ends the
+    // process itself rather than returning text, so it is handled before the text replies.
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "selftest-box"
+        && rest.iter().all(Option::is_some)
+    {
+        let acts: Vec<String> = rest.iter().flatten().cloned().collect();
+        if let Some(status) = hex_cli::selftest::run(&acts) {
+            return ExitCode::from(status);
+        }
+    }
     let reply = hex_cli::reply(&args);
     let wrote = if reply.to_stderr {
         std::io::stderr().lock().write_all(reply.text.as_bytes())
