@@ -20,15 +20,30 @@ echo "probe ok; timing $N"
 python3 -u - "$N" <<'PY'
 import subprocess,sys,time,os
 N=int(sys.argv[1]); B="/run/bundle"; env=dict(os.environ); ms=[]
+# The oci runtime is detached: `create` leaves the container's init alive (its shim parent in waitpid,
+# its container child blocked opening exec.fifo until `start`), and that init inherits this process's
+# stdout/stderr. So we must NOT pipe-capture the hex calls: subprocess with PIPE (capture_output)
+# drains stdout/stderr to EOF, which cannot come until the container execs and exits, which needs
+# `start`, which we cannot send while still blocked reading `create` -- a deadlock on the first
+# `create` (and a leaked --rm container). This deadlocks against any compliant detached runtime. Send
+# stdio to /dev/null (success) and a reused file (so an error stays legible), and wait only on each
+# call's exit, never on fd EOF.
+dn=open(os.devnull,"wb"); err=open("/opt/out/last_err.txt","w+b")
+def hx(*a):
+    err.seek(0); err.truncate()
+    r=subprocess.run(["/opt/hex","oci",*a],stdout=dn,stderr=err,env=env)
+    if r.returncode:
+        err.seek(0); r.msg=err.read().decode(errors="replace")[:300]
+    return r
 for i in range(10+N):
     cid=f"t{i}"
     t=time.perf_counter_ns()
-    c=subprocess.run(["/opt/hex","oci","create","--bundle",B,cid],capture_output=True,env=env)
-    s=subprocess.run(["/opt/hex","oci","start",cid],capture_output=True,env=env)
+    c=hx("create","--bundle",B,cid)
+    s=hx("start",cid)
     dt=(time.perf_counter_ns()-t)/1e6
-    subprocess.run(["/opt/hex","oci","delete","--force",cid],capture_output=True,env=env)
+    hx("delete","--force",cid)
     if c.returncode or s.returncode:
-        sys.stdout.write("FAIL "+c.stderr.decode()[:150]+s.stderr.decode()[:150]+"\n"); sys.exit(1)
+        sys.stdout.write("FAIL "+(("create "+c.msg) if c.returncode else ("start "+s.msg))+"\n"); sys.exit(1)
     if i>=10: ms.append(dt)   # drop 10 warm-up
     if i%20==0: sys.stdout.write(f"  iter {i}\n")
 ms.sort(); p=lambda q: ms[min(len(ms)-1,int(q*len(ms)))]
