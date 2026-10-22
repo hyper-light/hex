@@ -1,5 +1,14 @@
 # Decision memo: turn `KILN_HEX_BOX` on by default for Linux runners
 
+> **ON HOLD (2026-10-22): the research refutes this memo's central claim.** The cgroup v2 research
+> (`docs/research/runtime/cgroup-v2-resource-control.md`, summarised in `docs/research/runtime/matrix.md`
+> under "Resource control") found that `memory.high` on the legs' parent throttles but never kills —
+> turning a runaway build into a hung job, not a protected host — that the 15% / 8 GiB reserve has no
+> supporting evidence, and that the published CI-host precedents (Meta's Sandcastle, fbtax2) relied on a
+> PSI-driven per-cgroup killer, `memory.min` for host-critical work and IO control instead. The
+> machine-protection design is reopened in the runtime design goal; do not send this memo to Ada until
+> it is rewritten on that evidence.
+
 **For:** Ada (the flip is her call), via Kiln Distro. **Status:** recommended; evidence below.
 **Scope:** Linux runners only. macOS/Windows are unaffected (the boxing path is a no-op stub there).
 

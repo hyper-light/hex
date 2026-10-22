@@ -155,4 +155,31 @@ in their own reports — 0 mismatches.
 
 ## Resource control (machine protection)
 
-_From `cgroup-v2-resource-control.md` — filled when it lands._
+| Mechanism | What the evidence shows | Kind | Source |
+|---|---|---|---|
+| `memory.high` (throttle) | sleeps the allocator per 64-page batch, growing with the square of the overage; capped at 2 s per return to user mode, skipped at ≤ 10 ms; **never kills** — meant for "scenarios where an external process monitors the limited cgroup" | DE (kernel code, docs) | [CG-3][CG-1] |
+| `memory.high` in practice | Kubernetes MemoryQoS: an aggressor with a wide high-to-max gap stayed "throttled indefinitely — still running at 10min, never OOM-killed"; one container's operation latency 0.5 ms → 448 ms at +13.6 MiB over high | MI (single node) | [CG-40][CG-39] |
+| `memory.high` at Meta | put on `system.slice`, then dropped as "more prone to thrashing and OOMs"; replaced with `memory.low`/`memory.min` on the workload and host-critical slices | MV | [CG-25] |
+| `memory.low` / `memory.min` | protect from reclaim, not from a parent's throttle; `low` is best-effort and capped by every ancestor; `min` is the hard floor | DE | [CG-1] |
+| PSI-driven per-cgroup kill (oomd, Meta's CI "Sandcastle") | unexpected host reboots 5% → under 0.5% per day; post-OOM downtime "tens of minutes to just seconds"; +35% build jobs per host | MV | [CG-30] |
+| No protection under a leak (fbtax2 baseline) | at 10-50 MB/s the base machine "never recovers without a reboot" | MV | [CG-29] |
+| IO control (IOCost) | ZooKeeper-like noisy-neighbour test: SLO violations blk-throttle 78, BFQ 13, IOLatency 31, IOCost 2; "memory control alone was insufficient" | MV | [CG-20] |
+| Memory offloading (TMO / Senpai) | 20-32% of memory saved across millions of servers; Senpai holds 0.1% PSI "some" | MV | [CG-21] |
+| The kernel OOM killer | kept "very conservative" by design, policy left to userspace; zram-swap hosts saw 20-30 min brownouts with it never firing | DE; MI | [CG-44][CG-45] |
+| systemd-oomd defaults | kill at 60% `full avg10` sustained 30 s | DE | [CG-36] |
+| Kubernetes eviction | `memory.available<100Mi`, checked every 10 s; "the OOM killer will still be invoked" | DE | [CG-50] |
+| Borg / Twine | Borg: memory is kill-lowest-priority, CPU is throttle; Twine "does not overcommit CPU or memory by default" | DE | [CG-48][CG-49] |
+
+**What this means for consumer #1.** Its machine protection — `memory.high` on the legs' parent at
+machine memory minus max(15%, 8 GiB), `memory.low` on the runner and agents — is **not supported by the
+evidence**: `memory.high` never kills, so a runaway build becomes a hung job rather than a dead host; at
+that setting the throttle reaches its 2 s cap only near 100% of RAM on hosts of 53 GiB and up
+(computed from [CG-3]); no source supports the 15% / 8 GiB constant; and the published precedents that
+did protect CI hosts (Sandcastle, fbtax2) used a PSI-driven per-cgroup killer, `memory.min` for
+host-critical work and IO control, not `memory.high` [CG-30][CG-29][CG-20]. The design is reopened in
+the runtime design goal; the default-on memo (`docs/design/kiln-hex-box-default-on.md`) is on hold until
+then.
+
+*Verified:* the 2 s cap and the 10 ms skip read in `mm/memcontrol.c` (lines 2418, 2608-2617); the
+Sandcastle figures read in the oomd case study; IOCost's 78 / 13 / 31 / 2 read in the paper — 2026-10-22,
+0 mismatches.
