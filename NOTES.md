@@ -6,14 +6,13 @@ kiln: worktree `~/Projects/kiln/.claude/worktrees/t7-hex`, branch `cp/t7-hex` (l
 
 ## In flight (resume here)
 
-- **Bounds refinement — WRITTEN, UNCOMMITTED, gate-pending.** `crates/kiln/src/os/contain_linux.rs`
-  has the machine-protection the coordinator asked for (2026-10-21): legs now sit under a dedicated
-  parent `<own>/hex-legs` capped at `memory.high = machine_mem − max(15%, 8 GiB)` (`protect_machine`,
+- **Bounds refinement — COMMITTED (`cp/t7-hex` e08fe84), gated green** (fedora: `clippy -p kiln
+  --all-targets --locked -D warnings` + the `os::contain` tests; cross-targets unaffected). The
+  machine-protection the coordinator asked for (2026-10-21): legs sit under a dedicated parent
+  `<own>/hex-legs` capped at `memory.high = machine_mem − max(15%, 8 GiB)` (`protect_machine`,
   `Boxing{agents,legs}`, `LEG_ROOT`), and `<own>/supervisor` + `<own>/hex` get `memory.low`, so a
   build storm throttles builds, not the runner. Agent/leg boxes keep fair-share cpu/io + pids (no
-  per-box memory). **To finish:** on fedora, `CARGO_TARGET_DIR=$HOME/.cache/kiln-t7-hex/target
-  cargo clippy -p kiln --all-targets --locked -j12 -- -D warnings` + `cargo test -p kiln --locked
-  os::contain`; cross-targets unaffected (only contain_linux changed). Then commit on `cp/t7-hex`.
+  per-box memory). Still behind `KILN_HEX_BOX` until the runner-lab e2e.
 - **Benchmarks — detached job RUNNING on fedora** (pid 3947515, `setsid`): builds hex release, waits
   for load<2 sustained 5 min (deadline 06:00Z), records noisy_neighbor (AC-T7.1.2) + hex_start
   (AC-T7.1.3) with conditions to `~/.cache/hex-t7/bench-20261021T220059Z/`. Check that dir when back.
@@ -21,8 +20,10 @@ kiln: worktree `~/Projects/kiln/.claude/worktrees/t7-hex`, branch `cp/t7-hex` (l
   via kiln's `ci/registry` (no skopeo/umoci), hands a bundle to the `oci` class. Touchpoints: proto.rs
   CAP, probe.rs `executors()`, updates.rs `runner_build`, dispatch.rs `runner_view`, runtime.rs
   dispatch, local.rs validation.
-- **Blocker 2026-10-21 ~22:10Z:** the kiln MCP server went unreachable (gate + bench-check +
-  coordinator messaging all route through it). The detached bench job is unaffected. Retry when back.
+- **PAUSED for usage 2026-10-21:** the shared Claude account hit 98% weekly (resets 10-26); the
+  master's §5 pauses every track above 95%. The coordinator will message when an account has room.
+  Resume at "Next" below. (Earlier the kiln MCP server had a ~22:10Z outage; it recovered.) The
+  detached bench job keeps waiting for quiet on its own — check its dir first on resume.
 
 ## Done, committed, verified
 
