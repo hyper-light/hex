@@ -27,10 +27,45 @@ kiln: worktree `~/Projects/kiln/.claude/worktrees/t7-hex`, branch `cp/t7-hex` (l
   1063311/1101067/1115707/1123941. Clean with `docker rm -f` **only with Ada's word** (the standing
   rule forbids killing by command line; no PIDs were recorded by me). Fix: `--name`/`--label` the
   harness's containers and remove them explicitly (the running `run_detached.sh` may leave one more).
-- **PAUSED for usage 2026-10-21:** the shared Claude account hit 98% weekly (resets 10-26); the
-  master's §5 pauses every track above 95%. The coordinator will message when an account has room.
-  Resume at "Next" below. (Earlier the kiln MCP server had a ~22:10Z outage; it recovered.) The
-  detached bench job keeps waiting for quiet on its own — check its dir first on resume.
+- **RESUMED 2026-10-22** on an account with room. The overnight bench was **OOM-killed at 22:16Z**
+  (a load-137 spike) while still in its wait-loop — **no numbers recorded**. Re-launched (pid 830857,
+  self-relative 12h budget) and waiting for a load<2 window. Holding heavy fedora builds meanwhile so
+  the bench can catch its quiet window; consumer #2 code is being written locally and gated later.
+
+## Consumer #2 plan — the `hex` CI executor (container legs, no Docker)
+
+Runner-direct, **no kiln-seams change** (`HexSandbox` deliberately refuses `Boundary::Container` —
+"the hex CI executor runs those"). The runner unpacks the OCI image with kiln's own registry client,
+applies layers+whiteouts into one rootfs dir, and runs it via Hex's in-process `oci` class (hex-node
+`ClassSpec::Oci`, exec-per-step = the `docker exec` analog). Add `hex-node` to `crates/kiln`
+(Linux-only, beside hex-api/hex-runtime). kiln's binary must route the `__oci-init` re-exec (the oci
+runtime re-execs `current_exe() __oci-init`) → `hex_runtime::linux::oci::init::run()` in main.rs,
+before clap.
+
+1. **Unpacker** (new `crates/kiln/src/runner/oci_image.rs`, the novel core): reuse
+   `crate::ci::integrations::oci` (`parse_reference`, `Registry::for_name`, `resolve`, `pub(crate)
+   call`/`client`). GET manifest by digest → parse `{config, layers[]}`; for an index pick the
+   runner-arch child. GET+verify config blob → `ImageConfig{Entrypoint,Cmd,Env,WorkingDir,User}`.
+   Each layer lowest-first: GET blob → verify sha256 vs descriptor (pattern: `ci/registry/mirror.rs`
+   blob() + `ci/services/cas.rs`) → gunzip (flate2) → untar into the rootfs applying OCI whiteouts
+   (`.wh.<name>` deletes the target; `.wh..wh..opq` clears the dir) with path-safety (no `..`/abs
+   escape). zstd layers refused by name (no zstd dep yet). Out: merged rootfs `Dir` + `ImageConfig`.
+   Unit-test `apply_layer` on synthetic tars — no network.
+2. **Run path** (runtime.rs): branch parallel to the docker container leg (`try_init_containers`
+   ~:1733 `executor.kind=="docker" && image`): kind=="hex" → unpack → hex-node `Node::create(BoxSpec{
+   class: ClassSpec::Oci(OciSpec{rootfs: Rootfs::Dir(merged), init: pause/entrypoint, mounts from
+   container_map/PathMap, network from a.network})})`; per step `Node::exec(id, Program{args,env,cwd,
+   user}, Stdio pipes)` (arm parallel to exec() ~:1890) bridged into the spawn_group/Reading/Processor
+   stdout/stderr/exit loop.
+3. **Dispatch** (Area-2 anchors): `CAP_HEX = 1<<28` (proto.rs ~:262); probe.rs `executors()` :82 insert
+   "hex" when Hex-oci usable (Linux + delegated cgroup); updates.rs `runner_build` :2197 add `| hex`;
+   dispatch.rs `runner_view` :589 synthesize "hex" from CAP_HEX; **dispatch.rs `assignment` :1468
+   carry the image for "hex" too** (currently only "docker" — easy miss); local.rs :409 accept "hex";
+   untrusted → add to `ci.untrusted.executors`.
+4. **__oci-init routing** in kiln main.rs (before clap).
+
+Status: unpacker core being written; gate (clippy + unit tests on fedora) deferred until fedora is
+free of the bench's quiet-window need.
 
 ## Done, committed, verified
 
