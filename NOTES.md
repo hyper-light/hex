@@ -124,8 +124,10 @@ tests, vendor):
 - **AC-T7.1.5** node memory = **98 B/box** (node_memory bench). **AC-T7.1.2** noisy_neighbor =
   **1.73x of-record** (idle 3616µs → loaded 6267µs), PASS ≤2x, on **fedora NVMe** at 1-min load **1.16**
   in a sustained quiet window, 2026-10-22 05:11:33Z (recorded `bench/noisy_neighbor/RESULT.md`; the AC
-  names adacachy, run on fedora NVMe per the coordinator to keep adacachy for production). MSRV lowered
-  to 1.99.0 so kiln builds it.
+  names adacachy, run on fedora NVMe per the coordinator to keep adacachy for production). **AC-T7.1.3**
+  hex_start = **14.4ms p50** of-record (p99 16.7, max 18.1, N=200), PASS ≤50ms, fedora NVMe (cpuset
+  4-31), 2026-10-22 (`bench/hex_start/RESULT.md`; first clean run after the inside.sh deadlock fix
+  4c76c13). MSRV lowered to 1.99.0 so kiln builds it.
 
 kiln (`cp/t7-hex`):
 - Runner systemd unit sets **`Delegate=yes`** (install.rs) — prerequisite for boxing.
@@ -193,9 +195,8 @@ aarch64-apple-darwin + x86_64-pc-windows-gnu. Full gate runs in CI at push, whic
    without docker (skopeo+umoci, or kiln's registry client) then `hex oci create/start/…`. Larger.
 3. **Build the `hex` binary in kiln** (`.kiln/ci.yaml` release-binary job → `dist/hex-$(uname -m)`)
    and install it on runners, so consumer #2 activates (needs a deploy/merge-train step).
-4. **AC-T7.1.3** hex_start p50 ≤50ms — harness ready and the `inside.sh` deadlock now **fixed**
-   (`4c76c13`). Remaining: run it on fedora NVMe in a load<2 slot and read the p50 (slot step 1).
-   [DONE for **AC-T7.1.2**: of-record noisy_neighbor **1.73x**, `bench/noisy_neighbor/RESULT.md`.]
+4. **AC-T7.1.3** hex_start p50 ≤50ms — **DONE: 14.4ms of-record** (`bench/hex_start/RESULT.md`), the
+   first clean run after the `inside.sh` deadlock fix (`4c76c13`). [AC-T7.1.2 also of-record **1.73x**.]
 5. **T-T7.1.1** CI labs on the hex executor == docker (after #2).
 6. Adversarial check (fresh subagent) of every AC before declaring the goal met.
 

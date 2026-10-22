@@ -13,7 +13,10 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 NAME="kiln-hexstart-$$-$(date -u +%s)"
 cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-timeout 600 docker run --rm --name "$NAME" --label kiln.bench=hex_start \
+# Optional CPU pin (CPUSET=4-31 keeps the bench off a neighbour's reserved cores and isolates the
+# latency measurement). `taskset` on this script would not reach docker's container, so pin here.
+CPUS=${CPUSET:+--cpuset-cpus=$CPUSET}
+timeout 600 docker run --rm --name "$NAME" --label kiln.bench=hex_start $CPUS \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$HEX:/opt/hex:ro" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" -e N="$N" "$IMAGE" bash /opt/lab/inside.sh
 cat "$OUT/result.txt" 2>/dev/null || true
