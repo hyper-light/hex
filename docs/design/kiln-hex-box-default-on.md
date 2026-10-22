@@ -35,11 +35,16 @@ A boxed leg throttles itself; it does not restart the host.
   `supervisor`, cpu/io/memory/pids controllers delegated, agent+leg fair-share bounds, the legs' parent
   `memory.high` set within a page of the computed value, `supervisor`+agents `memory.low` set, and the
   crash **sweep leaves no leg box** (T-T7.1.2).
-- **Dispatched-leg smoke (the integration, not just the mechanism):** _[to fill from the fedora slot —
-  `bench/boxed_leg/`]_ a real CI leg dispatched to a scratch server + lab runner, shown boxed with its
-  bounds, the runner protected while a build storm shaped like the adacachy incident runs, and no leg
-  box left behind; plus a scaled 64 MiB-`memory.high` throttle demo proving the cap holds (hog
-  throttled, host alive).
+- **Boxing scopes to runner daemons, confirmed:** the smoke found that kiln boxes only in a process
+  that called `os::contain::hold_agents()` — the `kiln server` and `kiln agent` daemons do; `kiln
+  workflow run` (a local tool) does not, by a deliberate guard. So turning the default on affects
+  **deployed Linux runners** (where the adacachy build ran), not ad-hoc local `kiln workflow run`
+  invocations — the flip can't accidentally box a developer's cgroup.
+- **Dispatched-leg smoke (the integration):** _[pending a real-`kiln server` run — `bench/boxed_leg/`]_
+  a leg dispatched to a scratch `kiln server` whose local_agent boxes (under a `Delegate=yes` scope,
+  `KILN_HEX_BOX=1`), shown boxed with its bounds, the runner protected under an adacachy-shaped build
+  storm, and no leg box left behind; plus a scaled 64 MiB-`memory.high` throttle demo. (The first slot
+  run confirmed the guard above; this deploy-shaped run is the remaining end-to-end check.)
 - **Overhead is negligible:** per-leg box create+start is **14.4 ms p50** (`bench/hex_start/`), and the
   node agent holds **98 B per box** (`bench/`, AC-T7.1.5). No measurable CI slowdown.
 

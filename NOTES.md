@@ -114,18 +114,19 @@ inside.sh/hex_start diagnosis.
    CAP_HEX=1<<28 (proto.rs + the power-of-two test ~:790), probe.rs `executors()`, updates.rs
    `runner_build`, dispatch.rs `runner_view`/caps/assignment image-carry, kiln-ci routing executor→cap,
    local.rs `--executor` list. (Explore agent mapping the kiln touchpoints precisely.)
-4. **KILN_HEX_BOX smoke — IN PROGRESS (coordinator approved A-first, 2026-10-22).** Harness built +
-   committed: `bench/boxed_leg/` (`run.sh` + `evidence.sh` + `storm.sh`, 21e0f65) — `kiln workflow run
-   --executor host` in "here" mode (scratch server + one runner = this machine) inside
-   `systemd-run --user --scope -p Delegate=yes` + `KILN_HEX_BOX=1`, so a real dispatched leg is boxed by
-   runtime.rs `leg_box`. The heavy job prints its box bounds (evidence.sh), runs an adacachy-shaped
-   build storm with host-liveness sampling (storm.sh), and the driver post-checks no leftover leg box +
-   a scaled 64 MiB-`memory.high` throttle demo. Decision memo for Ada drafted:
-   `docs/design/kiln-hex-box-default-on.md` (motivation = the 11:37Z adacachy restart; evidence =
-   lab + the smoke [to fill]; recommendation = flip on). **Awaiting the coordinator's named fedora
-   slot** (the storm loads fedora); in-slot order = build kiln → dry-run (SMOKE_STORM=0, confirm leg is
-   boxed; fix harness) → heavy run → fill the memo → report. The flip itself is **Ada's call** (the
-   coordinator puts the memo to her). B (consumer #2 `hex oci exec` + wiring) comes after A.
+4. **KILN_HEX_BOX smoke — slot 1 ran; KEY FINDING (2026-10-22).** Harness `bench/boxed_leg/` (21e0f65,
+   fd03708). First run dispatched a real leg (3 steps green) but it ran **UNBOXED** — leg cgroup = the
+   scope root, no supervisor/hex/hex-legs. **Root cause (by design):** kiln boxes only in a process that
+   called `os::contain::hold_agents()`; `base()` returns None otherwise (contain_linux.rs:321). Called by
+   **Cmd::Server (main.rs:459) + Cmd::Agent (:468), NOT Cmd::Workflow/`kiln workflow run` (:785)** — a
+   guard so a tool linking kiln can't box a live runner's cgroup it sits in. So "here" mode is the wrong
+   vehicle (it's a good news: the flip scopes to deployed daemons, not local workflow-run). **Boxed smoke
+   needs a real `kiln server`** (its local_agent boxes) **or `kiln agent`** under the Delegate=yes scope,
+   dispatched via `kiln workflow run --server` — a bigger setup (server config from `kiln default-config`
+   [fields mapped], a bare-mirror repo in the server data_dir, server as a transient `systemd-run --user`
+   unit boxed, dispatch, inspect its cgroup, teardown). **Asked the coordinator** (msg 01a163cd…): build
+   the real-server smoke now, or take the delegation lab + this finding as enough for the memo? Memo
+   `docs/design/kiln-hex-box-default-on.md` updated with the finding; flip is **Ada's call**. B after A.
 
 ### CAP_HEX / `hex`-executor dispatch edit map (from the Explore sweep, 2026-10-22)
 
