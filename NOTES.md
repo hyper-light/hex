@@ -70,8 +70,8 @@ before clap.
 Status: **Increment 1 (unpacker core) DONE** — `crates/kiln/src/runner/oci_image.rs` (cp/t7-hex
 **7da905f**): manifest/index/image-config parsing, `pick_platform`, `verify` (digest), `layer_reader`
 (gzip; zstd refused), and `apply_layer` (OCI whiteouts + path-escape refusal via `safe_rel`). Pure +
-cross-platform; 7 unit tests. Gated on macOS: `clippy -p kiln --all-targets --locked -D warnings`
-clean + the 7 tests pass. (A macOS `cargo test` link emits a harmless `linker_messages` eh_frame>16MB
+cross-platform; 7 unit tests. Gated on macOS **and fedora/Linux** (the primary target): `clippy -p
+kiln --all-targets --locked -D warnings` clean + the 7 tests pass. (A macOS `cargo test` link emits a harmless `linker_messages` eh_frame>16MB
 warning on the big kiln test binary — not clippy, not the Linux gate.) **Next (needs fedora/network):**
 the async `unpack` orchestration (resolve→manifest→config→layers via `ci/integrations/oci`, stream +
 verify each blob, `apply_layer` into one rootfs) and the run-path (hex-node `ClassSpec::Oci` +
