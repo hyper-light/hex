@@ -114,9 +114,18 @@ inside.sh/hex_start diagnosis.
    CAP_HEX=1<<28 (proto.rs + the power-of-two test ~:790), probe.rs `executors()`, updates.rs
    `runner_build`, dispatch.rs `runner_view`/caps/assignment image-carry, kiln-ci routing executor→cap,
    local.rs `--executor` list. (Explore agent mapping the kiln touchpoints precisely.)
-4. **KILN_HEX_BOX smoke:** scratch kiln server + a lab runner (transient `systemd --scope -p
-   Delegate=yes`, `KILN_HEX_BOX=1`) + one real dispatched host leg → confirm it's boxed; then flip the
-   default on.
+4. **KILN_HEX_BOX smoke — IN PROGRESS (coordinator approved A-first, 2026-10-22).** Harness built +
+   committed: `bench/boxed_leg/` (`run.sh` + `evidence.sh` + `storm.sh`, 21e0f65) — `kiln workflow run
+   --executor host` in "here" mode (scratch server + one runner = this machine) inside
+   `systemd-run --user --scope -p Delegate=yes` + `KILN_HEX_BOX=1`, so a real dispatched leg is boxed by
+   runtime.rs `leg_box`. The heavy job prints its box bounds (evidence.sh), runs an adacachy-shaped
+   build storm with host-liveness sampling (storm.sh), and the driver post-checks no leftover leg box +
+   a scaled 64 MiB-`memory.high` throttle demo. Decision memo for Ada drafted:
+   `docs/design/kiln-hex-box-default-on.md` (motivation = the 11:37Z adacachy restart; evidence =
+   lab + the smoke [to fill]; recommendation = flip on). **Awaiting the coordinator's named fedora
+   slot** (the storm loads fedora); in-slot order = build kiln → dry-run (SMOKE_STORM=0, confirm leg is
+   boxed; fix harness) → heavy run → fill the memo → report. The flip itself is **Ada's call** (the
+   coordinator puts the memo to her). B (consumer #2 `hex oci exec` + wiring) comes after A.
 
 ### CAP_HEX / `hex`-executor dispatch edit map (from the Explore sweep, 2026-10-22)
 
