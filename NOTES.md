@@ -81,6 +81,31 @@ stdio bridge; route `__oci-init` in kiln `main`) and the dispatch touchpoints (C
 dispatch/local), then the unpack integration test — plus the KILN_HEX_BOX smoke and the
 inside.sh/hex_start diagnosis.
 
+### Fedora slot playbook (one sitting, coordinator's order; **pin every run `taskset -c 4-31`** off Shards' CPUs 0–3, with `nice`)
+
+1. **inside.sh hang — chase first.** The 17 leaks were a `hex oci` command *blocking*, not failing (a
+   setup failure sends `E<err>` on the sync pipe and `create` returns — see init.rs). Hypotheses:
+   `create` hangs because the container child blocks in `setup_rootfs` before sending `R` (create's
+   handshake read then never completes); or the Python loop hangs on a later iteration from an unclean
+   `delete` leaving cgroups/mounts/state under `/run/hex-oci`. Diagnose: run the bundle setup + probe
+   by hand with `timeout 15` on each `/opt/hex oci create|start|delete` and `set -x` to see which
+   blocks; then `strace -p` the blocked pid, inspect `/run/hex-oci/<id>`, `exec.fifo`, and the
+   init/container pids. (init.rs: `create` returns after the child sends `R` post-setup; `start` blocks
+   on `exec.fifo` RDONLY until the init opens it WRONLY.) Fix at the cause (CLAUDE §4).
+2. **unpack integration test** (`runner::oci_image::unpack`): pull a small public image
+   (`docker.io/library/alpine`, anonymous token) and assert the rootfs (`/bin/sh` via symlink, `/etc`)
+   + `ImageConfig`. Write `#[test] #[ignore]` (run with `--ignored`; needs network), driven by kiln's
+   async test runner (check how kiln tests block_on). Proves `apply_layer` end-to-end on a real image.
+3. **run-path + dispatch.** Add `hex-node` (Linux dep) to `crates/kiln`. In `runtime.rs`, when
+   `executor.kind=="hex"`: `unpack` → `Node::create(ClassSpec::Oci(OciSpec{rootfs: Rootfs::Dir(rootfs),
+   init, mounts, network}))` → `Node::exec` per step (Stdio pipes bridged to the runner's output loop).
+   Route `__oci-init` in kiln `main` (before clap). Dispatch: CAP_HEX (proto.rs), probe.rs
+   `executors()`, updates.rs `runner_build`, dispatch.rs `runner_view` + the assignment image-carry
+   (:1468), local.rs validation.
+4. **KILN_HEX_BOX smoke:** scratch kiln server + a lab runner (transient `systemd --scope -p
+   Delegate=yes`, `KILN_HEX_BOX=1`) + one real dispatched host leg → confirm it's boxed; then flip the
+   default on.
+
 ## Done, committed, verified
 
 Hex (`cp/t7-runtime`, full gate green at fb15d9d — fmt, clippy Linux/macOS/Windows, check-production,
