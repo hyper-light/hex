@@ -118,6 +118,32 @@ inside.sh/hex_start diagnosis.
    Delegate=yes`, `KILN_HEX_BOX=1`) + one real dispatched host leg → confirm it's boxed; then flip the
    default on.
 
+### CAP_HEX / `hex`-executor dispatch edit map (from the Explore sweep, 2026-10-22)
+
+**Key finding:** executor NAME and capability BIT are **decoupled** — there is no generic name→cap
+map. `CAP_FIRECRACKER`/`CAP_SHARDS` are *dead bits* (defined, never enforced); those executors route by
+NAME only (`facts.executors` ↔ `Rule.executor`). So `hex` can route by name alone (firecracker/shards
+pattern) OR wire CAP_HEX like CAP_DOCKER. The only place name↔bit link is `dispatch::runner_view`
+(strips a facts entry unless its cap is advertised). **Do NOT advertise hex (probe/updates) until the
+runtime.rs run-path exists**, or a hex leg dispatches to a runner that can't run it.
+
+Inert scaffolding (safe to land before the run-path; nothing advertises hex): 1) `proto.rs:262` add
+`pub const CAP_HEX: u32 = 1 << 28;`. 2) `proto.rs:621` add `CAP_HEX` to the `ci` power-of-two test array
+(the `all` array at ~:789 does NOT need it). 6) `dispatch.rs:26` add `CAP_HEX` to the `use`. 7)
+`dispatch.rs:592`/`:598` `runner_view`: synth "hex" when `caps&CAP_HEX!=0`, strip when `==0`. 8)
+`dispatch.rs:1468` image-carry: `matches!(executor.as_deref(), Some("docker")|Some("hex"))`. 9)
+`local.rs:409`+`:411` add `"hex"` to the `--executor` `matches!` + bail!. 10) `local.rs:69` help text.
+11) `attest.rs:102` `isolation()` bucket ("container" if container-like). Advertisement (land WITH the
+run-path): 3) new `runner/hex.rs` `find()`/`available()` (parallel `docker.rs:33/46`) + `mod hex;`. 4)
+`probe.rs` insert hex detection **before** the `:85` docker early-return. 5) `updates.rs:2192`/`:2197`
+`let hex = if runner::hex::available() {CAP_HEX} else {0};` OR'd into Build caps (NOT into `RUNNER_CAPS`).
+Execution (the real work, needs `hex oci exec`): `runtime.rs:1012,1687,1735,2603` add hex arms +
+`runner/hex.rs` `Spec`/run path. **Non-parallel traps:** `dispatch.rs:107 route_of` requires CAP_DOCKER
+from the *spec* (container/services/`docker://`) — hex has no implicit spec trigger, so don't mirror it
+unless defining what implies "needs hex"; `dispatch.rs:1301` docker-socket option is docker-only;
+routing.rs `rootless_docker`/`Untrusted` are hard-coded `e=="docker"`; `runtime.rs:3084 "docker"` is an
+action `runs.using` type, NOT the executor — leave it.
+
 ## Done, committed, verified
 
 Hex (`cp/t7-runtime`, full gate green at fb15d9d — fmt, clippy Linux/macOS/Windows, check-production,
