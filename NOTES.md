@@ -117,8 +117,10 @@ tests, vendor):
   **node agent**. Decision in `docs/design/runtime.md`.
 - **`hex box run`** (process box CLI, `box_run_cli.rs`), **`hex oci …`**, **`hex selftest-box`**.
 - **AC-T7.1.5** node memory = **98 B/box** (node_memory bench). **AC-T7.1.2** noisy_neighbor =
-  **1.30x** (idle 4822µs → loaded 6262µs), PASS ≤2x, on fedora at 1-min load ~3 (the AC names adacachy;
-  rerun there for the of-record number — mechanism proven). MSRV lowered to 1.99.0 so kiln builds it.
+  **1.73x of-record** (idle 3616µs → loaded 6267µs), PASS ≤2x, on **fedora NVMe** at 1-min load **1.16**
+  in a sustained quiet window, 2026-10-22 05:11:33Z (recorded `bench/noisy_neighbor/RESULT.md`; the AC
+  names adacachy, run on fedora NVMe per the coordinator to keep adacachy for production). MSRV lowered
+  to 1.99.0 so kiln builds it.
 
 kiln (`cp/t7-hex`):
 - Runner systemd unit sets **`Delegate=yes`** (install.rs) — prerequisite for boxing.
@@ -159,10 +161,10 @@ aarch64-apple-darwin + x86_64-pc-windows-gnu. Full gate runs in CI at push, whic
    without docker (skopeo+umoci, or kiln's registry client) then `hex oci create/start/…`. Larger.
 3. **Build the `hex` binary in kiln** (`.kiln/ci.yaml` release-binary job → `dist/hex-$(uname -m)`)
    and install it on runners, so consumer #2 activates (needs a deploy/merge-train step).
-4. **AC-T7.1.3** hex_start p50 ≤50ms + of-record **AC-T7.1.2** noisy_neighbor — harnesses ready
-   (`bench/hex_start/` needs docker + a hex release binary; `noisy_neighbor` bench needs a delegated
-   subtree). **Blocked on a load<2 lull** (fedora draining from the OOM; its bench slot was T3's until
-   18:30Z). hex_start on fedora NVMe; of-record noisy_neighbor named on fedora NVMe too (not adacachy).
+4. **AC-T7.1.3** hex_start p50 ≤50ms — harness ready (`bench/hex_start/` needs docker + a hex release
+   binary). **Blocked on the `inside.sh` hang** (first timed loop iteration never returns; chase in the
+   fedora slot, coordinator's order), not just the load window. [DONE for **AC-T7.1.2**: of-record
+   noisy_neighbor **1.73x** recorded on fedora NVMe, `bench/noisy_neighbor/RESULT.md`.]
 5. **T-T7.1.1** CI labs on the hex executor == docker (after #2).
 6. Adversarial check (fresh subagent) of every AC before declaring the goal met.
 
@@ -174,9 +176,10 @@ that load/OOM — **not** by a runner restart. (Correction: an earlier note here
 restarts every few minutes"; the coordinator checked the journal and process ages and fedora's two
 runners have been stable, so that was wrong. What cut earlier long runs was load/OOM, and once an mcp
 `run` shell reset — never a machine restart. All builds/tests this session completed cleanly.) The fix
-is a named quiet slot on the bench calendar, which the coordinator will give (likely at the next usage
-pause). noisy_neighbor's **1.30x** provisional landed in a ~load-3 window; the of-record noisy_neighbor
-and hex_start await the slot, both on **fedora NVMe** (not adacachy — production). Builds: `kiln run`
+is a named quiet slot on the bench calendar, which the coordinator gives. noisy_neighbor's of-record
+**1.73x** landed 2026-10-22 05:11Z in a sustained quiet window on **fedora NVMe** (load 1.16),
+superseding the 1.30x ~load-3 provisional (`bench/noisy_neighbor/RESULT.md`); hex_start still awaits
+the slot (and the `inside.sh` fix), on **fedora NVMe** (not adacachy — production). Builds: `kiln run`
 with `CARGO_TARGET_DIR=$HOME/.cache/hex-t7/target` (hex) or `$HOME/.cache/kiln-t7-hex/target` (kiln,
 cwd=the kiln worktree). Format + lockfile locally. See memory `hex-kiln-integration-plan`,
 `hex-cgroup-delegation`.

@@ -26,14 +26,17 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   <limits> -- cmd` (runs a program in a `process` box, for kiln to wrap a CI leg or harness in),
   and `hex selftest-box` (box isolation self-test, incl. `fsync-probe`/`disk-hog` for the bench).
 - **AC-T7.1.5** (node memory ≤ 1 MiB/box): measured at 98 bytes/box (`bench/` node_memory).
+- **AC-T7.1.2** (noisy-neighbor fsync p99 ≤ 2× idle): measured **1.73×** (idle 3616 µs → loaded
+  6267 µs) on fedora NVMe in a sustained load-1.16 window, 2026-10-22 (`bench/noisy_neighbor/RESULT.md`).
 - **kiln runner unit** (kiln `cp/t7-hex`): `Delegate=yes`, so the runner's cgroup can be subdivided
   for Hex boxes (the prerequisite; inert until the `hex` binary is deployed to runners).
 
 ## In progress (CP-T7.1; see NOTES.md)
 
-- Benchmarks: `hex_start` (AC-T7.1.3) and `noisy_neighbor` (AC-T7.1.2) harnesses are built and
-  gate-green; the measured numbers need a bench-calendar slot at load < 2 (fedora has been heavily
-  loaded; noisy_neighbor's AC measures on adacachy).
+- Benchmark `hex_start` (AC-T7.1.3): harness built and gate-green, but the `inside.sh` timed loop
+  hangs on its first iteration (an `oci` lifecycle block, chase in the fedora slot); the p50 number
+  awaits that fix plus a bench-calendar slot at load < 2. (`noisy_neighbor`/AC-T7.1.2 is now of-record
+  above.)
 - kiln integration (first consumers): host CI legs and harness processes in `process` boxes (wrap
   their spawn in `hex box run`), and a `hex` CI executor for container legs via `hex oci`. The
   integration points are mapped; the remaining wiring + deployment waits on how kiln gets the `hex`
