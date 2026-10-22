@@ -72,10 +72,14 @@ Status: **Increment 1 (unpacker core) DONE** — `crates/kiln/src/runner/oci_ima
 (gzip; zstd refused), and `apply_layer` (OCI whiteouts + path-escape refusal via `safe_rel`). Pure +
 cross-platform; 7 unit tests. Gated on macOS **and fedora/Linux** (the primary target): `clippy -p
 kiln --all-targets --locked -D warnings` clean + the 7 tests pass. (A macOS `cargo test` link emits a harmless `linker_messages` eh_frame>16MB
-warning on the big kiln test binary — not clippy, not the Linux gate.) **Next (needs fedora/network):**
-the async `unpack` orchestration (resolve→manifest→config→layers via `ci/integrations/oci`, stream +
-verify each blob, `apply_layer` into one rootfs) and the run-path (hex-node `ClassSpec::Oci` +
-`__oci-init` routing + the dispatch touchpoints).
+warning on the big kiln test binary — not clippy, not the Linux gate.) **Increment 2 (`unpack` orchestration) WRITTEN** — `b302f31`: `resolve`→manifest→config→layers via
+`ci/integrations/oci`, stream + verify each blob (one redirect followed), `apply_layer` into one
+rootfs → rootfs + `ImageConfig`. Compiles + lints on macOS (`clippy -p kiln --lib -D warnings`); it's
+network, so it's integration-tested against a real registry in the fedora slot. **Remaining (fedora
+slot):** the run-path (add the `hex-node` dep; `Node::create(ClassSpec::Oci)` + `exec`-per-step +
+stdio bridge; route `__oci-init` in kiln `main`) and the dispatch touchpoints (CAP_HEX, probe/updates/
+dispatch/local), then the unpack integration test — plus the KILN_HEX_BOX smoke and the
+inside.sh/hex_start diagnosis.
 
 ## Done, committed, verified
 
