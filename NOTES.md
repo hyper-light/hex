@@ -147,10 +147,20 @@ then I adapt `cp/t7-hex` on rebase** (coordinator orders landing). My edits (mec
 `kiln-hex/src/imp.rs:56` egress → accept `Egress::Any`, refuse `Egress::Only(_)`; `imp.rs:64-65` drop
 the `Some(..)` wrap (`memory_bytes`/`processes` are now `Option`, hex `Bounds` already takes `Option`);
 `imp.rs:83` real impl `holds()` = memory/processes/weights **true**, no_egress/egress_by_host **false**;
-`portable.rs:19` stub `holds()` = **all false**; `tests/conformance.rs:63` → `Some(..)`. Open Qs to T4:
-is `Holds::check` called by the consumer (then drop the manual egress refusal) or the suite; confirm
-`Egress::Any` is accepted and both `Only(_)` refused. Consumer #2's run-path is runner-direct (no seam),
-so it is **not** affected — this is a landing-time rebase only.
+`portable.rs:19` stub `holds()` = **all false**; `tests/conformance.rs:63` → `Some(..)`.
+**Resolved with T4 (2026-10-22):** (a) the impl calls `Self::HOLDS.check(&launch)?` at the top of
+`launch()` and returns `HOLDS` from `holds()` — one source of truth — so **drop both** the manual egress
+refusal (imp.rs:56-60) **and** the manual weight-range check (imp.rs:46-50): `check` refuses an off-scale
+weight as `Invalid` first, then whatever's unheld. Before dropping the weight check, confirm the seam's
+weight scale == hex's cgroup range (cpu/io weight 1..=10000) so no bound is silently lost. (b) Egress:
+accept `Any`, refuse `Only(vec![])` ("a run with no egress") and `Only(hosts)` ("egress to named hosts
+alone"). (c) **Defaults trap (bites tests):** `Egress::default() = Only(vec![])` (none),
+`Limits::default() = 1 GiB / 64 proc`, and `Launch::of(program,args)` uses both — so any Launch built
+from defaults asks for no-egress (+ real limits), which Hex refuses. Audit every Launch I construct
+(conformance.rs + any example) and set `egress: Egress::Any` + `Limits::NONE` where I mean today's
+host / no-limit behaviour. Consumer #2's run-path is runner-direct (no seam), so **not** affected —
+landing-time rebase only. T4 sends the landed commit; if the coordinator picks Hex-first, T4 pings on
+its main-merge.
 
 kiln (`cp/t7-hex` — **consumer #1 complete behind `KILN_HEX_BOX`** (default off), two commits:
 **7056744** (harness sessions) + **a724766** (CI legs). Gated green on fedora: `clippy -p kiln
