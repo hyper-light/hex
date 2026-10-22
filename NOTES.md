@@ -136,6 +136,22 @@ kiln (`cp/t7-hex`):
   on fedora (`conformance.rs`, needs `HEX_BIN` + delegation; SANDBOX-7 egress deferred to CP-T7.7).
   Builds + clippies clean on kiln's 1.99.0.
 
+**Landing dependency — CP-T4.1 Sandbox seam (agreed with T4 `01a15e86`, 2026-10-22):** T4's
+`cp/t4-isolation` reshapes `kiln-seams::sandbox`: `Limits.memory_bytes: Option<u64>` +
+`Limits.processes: Option<u32>` (`None` = no limit, `Limits::NONE` all-None); `Launch.egress` →
+`enum Egress { Any, Only(Vec<String>) }` (`Any` = host net; `Only(vec![])` = none; `Only(hosts)` =
+those); and a new required `Sandbox::holds() -> Holds{memory,processes,weights,no_egress,egress_by_host}`
+with `Holds::check(&launch)` refusing `Unsupported` by name for whatever isn't held (conformance
+SANDBOX-5/6/7/10 check a sandbox refuses exactly what it doesn't hold). **Agreed order: T4 lands first,
+then I adapt `cp/t7-hex` on rebase** (coordinator orders landing). My edits (mechanical, mine to make):
+`kiln-hex/src/imp.rs:56` egress → accept `Egress::Any`, refuse `Egress::Only(_)`; `imp.rs:64-65` drop
+the `Some(..)` wrap (`memory_bytes`/`processes` are now `Option`, hex `Bounds` already takes `Option`);
+`imp.rs:83` real impl `holds()` = memory/processes/weights **true**, no_egress/egress_by_host **false**;
+`portable.rs:19` stub `holds()` = **all false**; `tests/conformance.rs:63` → `Some(..)`. Open Qs to T4:
+is `Holds::check` called by the consumer (then drop the manual egress refusal) or the suite; confirm
+`Egress::Any` is accepted and both `Only(_)` refused. Consumer #2's run-path is runner-direct (no seam),
+so it is **not** affected — this is a landing-time rebase only.
+
 kiln (`cp/t7-hex` — **consumer #1 complete behind `KILN_HEX_BOX`** (default off), two commits:
 **7056744** (harness sessions) + **a724766** (CI legs). Gated green on fedora: `clippy -p kiln
 --all-targets --locked -D warnings` + the `os::contain` tests (linux), and `cargo-zigbuild` clippy for
