@@ -20,6 +20,13 @@ kiln: worktree `~/Projects/kiln/.claude/worktrees/t7-hex`, branch `cp/t7-hex` (l
   via kiln's `ci/registry` (no skopeo/umoci), hands a bundle to the `oci` class. Touchpoints: proto.rs
   CAP, probe.rs `executors()`, updates.rs `runner_build`, dispatch.rs `runner_view`, runtime.rs
   dispatch, local.rs validation.
+- **Known issue — hex_start leaves stuck containers (fix on resume).** `bench/hex_start/run.sh` runs
+  `docker run --rm --privileged … /opt/lab/inside.sh`; when a run doesn't exit cleanly the container
+  hangs and never auto-removes. T1 (Amphora) flagged ~12 alive on fedora 2026-10-21, 16–19h old:
+  PIDs 581964, 700031, 852613, 957843, 1137086, 1209221, 1241323, 2674757, 2762933, plus a 6h group
+  1063311/1101067/1115707/1123941. Clean with `docker rm -f` **only with Ada's word** (the standing
+  rule forbids killing by command line; no PIDs were recorded by me). Fix: `--name`/`--label` the
+  harness's containers and remove them explicitly (the running `run_detached.sh` may leave one more).
 - **PAUSED for usage 2026-10-21:** the shared Claude account hit 98% weekly (resets 10-26); the
   master's §5 pauses every track above 95%. The coordinator will message when an account has room.
   Resume at "Next" below. (Earlier the kiln MCP server had a ~22:10Z outage; it recovered.) The
