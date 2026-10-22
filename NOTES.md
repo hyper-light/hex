@@ -101,12 +101,19 @@ inside.sh/hex_start diagnosis.
    (`docker.io/library/alpine`, anonymous token) and assert the rootfs (`/bin/sh` via symlink, `/etc`)
    + `ImageConfig`. Write `#[test] #[ignore]` (run with `--ignored`; needs network), driven by kiln's
    async test runner (check how kiln tests block_on). Proves `apply_layer` end-to-end on a real image.
-3. **run-path + dispatch.** Add `hex-node` (Linux dep) to `crates/kiln`. In `runtime.rs`, when
-   `executor.kind=="hex"`: `unpack` → `Node::create(ClassSpec::Oci(OciSpec{rootfs: Rootfs::Dir(rootfs),
-   init, mounts, network}))` → `Node::exec` per step (Stdio pipes bridged to the runner's output loop).
-   Route `__oci-init` in kiln `main` (before clap). Dispatch: CAP_HEX (proto.rs), probe.rs
-   `executors()`, updates.rs `runner_build`, dispatch.rs `runner_view` + the assignment image-carry
-   (:1468), local.rs validation.
+3. **run-path + dispatch — DESIGN CORRECTED (2026-10-22, `docs/design/runtime.md`).** The playbook's
+   `Node::create(ClassSpec::Oci)`+`Node::exec` plan is **wrong**: `Node::create` refuses the oci class
+   (`hex-node/src/node.rs` → `Unsupported(Class::Oci)`) and `Node::exec` is process-class only. The oci
+   class is CLI-driven (`hex oci create/start/state/kill/delete`), with **no `exec`** yet. Corrected
+   design: the hex executor **shells out to the `hex` binary** like the docker executor shells to
+   `docker` — persistent job container (`hex oci create`+`start`, pause init), **`hex oci exec <id> --
+   … -- <shell> <script>`** per step (foreground, reuses kiln's per-step Command/stdio/mask machinery;
+   no hex-node dep, no stdio-contract change). **Blocker/primitive to build first:** `hex oci exec`
+   does not exist — new oci-runtime (`setns` into the init's namespaces, fork for pid-ns, exec
+   foreground, return exit) + `hex-cli` subcommand, then re-vendor into kiln. THEN kiln dispatch:
+   CAP_HEX=1<<28 (proto.rs + the power-of-two test ~:790), probe.rs `executors()`, updates.rs
+   `runner_build`, dispatch.rs `runner_view`/caps/assignment image-carry, kiln-ci routing executor→cap,
+   local.rs `--executor` list. (Explore agent mapping the kiln touchpoints precisely.)
 4. **KILN_HEX_BOX smoke:** scratch kiln server + a lab runner (transient `systemd --scope -p
    Delegate=yes`, `KILN_HEX_BOX=1`) + one real dispatched host leg → confirm it's boxed; then flip the
    default on.

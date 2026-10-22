@@ -127,6 +127,55 @@ needs, or if layer application can't reach parity with a reference unpacker on t
 image corpus, the executor falls back to a vendored `umoci`-equivalent held to the bar. Measured when
 consumer #2's lab lands.
 
+## Decision: the `hex` executor runs a leg's steps in a persistent container via `hex oci exec` (consumer #2 run-path)
+
+**The choice.** A container leg is a *persistent* job container, the docker executor's shape: from the
+unpacked bundle the executor runs `hex oci create` + `hex oci start` once with a pause init (the
+container stays up while the leg runs), then runs each step with `hex oci exec <id> [--cwd …] [--env
+K=V …] [--user u:g] -- <shell> <script>` — foreground, like `docker exec` — and `hex oci delete
+--force <id>` at the leg's end. The executor **shells out to the `hex` binary** exactly as kiln's
+docker executor shells out to `docker`: each step is a host subprocess, so kiln's existing per-step
+machinery (stdout/stderr streaming, `::add-mask::`, env files, outputs) is reused unchanged, and kiln
+needs **no `hex-node` library dependency** (correcting an earlier plan — see below).
+
+**The primitive this needs (to build).** `hex oci exec` does not exist yet: the `oci` class today is
+`create`/`start`/`state`/`kill`/`delete` only, a standalone CLI-driven runtime (`hex_runtime::linux::
+oci::run::Runtime`). `exec` joins the *running* container's namespaces — the init pid is in the
+container's `state` (`oci/state.rs`), and `setns` is in place (`oci/sys.rs`) — then `chdir`s, drops to
+the requested user, sets the environment and execs the program in the foreground, inheriting the
+caller's stdin/stdout/stderr (so a foreground `hex oci exec` has none of the detached-`create` stdio
+deadlock; the caller captures it as a normal subprocess) and returning its exit status. This is the
+runc/crun `exec` analog (not in the OCI runtime spec, but the de-facto lifecycle extension both
+provide). It is new `oci`-runtime + `hex-cli` work, then re-vendored into kiln.
+
+**Correction to the earlier plan.** An earlier note had the executor drive the `oci` class through
+hex-node's `Node::create(ClassSpec::Oci(…))` + `Node::exec`. That is not implementable: `Node::create`
+**refuses** the `oci` class (`hex-node/src/node.rs` → `Refusal::Unsupported(Class::Oci)`) and
+`Node::exec` runs only the `process` class. The `oci` class is reached through the `hex oci` CLI, not
+the node — so the executor drives the CLI, as above.
+
+**Sources.** OCI Runtime Specification v1.3.0 (the container lifecycle `create`/`start`/`delete`);
+runc and crun `exec` (join the container's namespaces via `setns(2)` on `/proc/<init>/ns/*`, then exec
+in the foreground); GitHub Actions' job-container model (one container per job, a command per step).
+
+**Evidence / rationale.**
+1. **One execution model across executors.** docker legs are a persistent job container plus a
+   subprocess per step; mirroring that (persistent `oci` container plus `hex oci exec` per step) lets
+   a hex leg reuse kiln's step runtime verbatim — the `exec` plan at `runtime.rs` becomes a `hex oci
+   exec` argv where a docker leg's is a `docker exec` argv — instead of a parallel async path.
+2. **Steps share one machine.** GitHub runs a job's steps on one machine; a step may leave a process,
+   a mount or an in-memory state for the next. A persistent container holds that; one-container-per-
+   step would not (it would keep only on-disk rootfs/workspace state).
+3. **Foreground `exec` dodges the stdio problem.** Because `hex oci exec` waits for the step and
+   inherits the caller's fds, kiln captures a step's output as it captures any subprocess — no need
+   for `hex oci create` to grow an explicit container-stdio contract for this path.
+
+**What would falsify it.** If joining a pid namespace for `exec` (which needs a `fork` after `setns`
+so the child is in the container's pid namespace) makes foreground exit-code capture unreliable, or
+if a persistent pause init is unacceptable overhead, the fallback is one container per step over the
+shared `Rootfs::Dir` with the step's exit read from `hex oci state`. Measured when consumer #2's lab
+lands.
+
 ## Open (STATUS.md)
 
 - The `process` box on macOS (QoS and limits) and Windows (job objects); today a typed refusal
