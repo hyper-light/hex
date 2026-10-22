@@ -35,12 +35,20 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 
 ## In progress (CP-T7.1; see NOTES.md)
 
-- Both AC benchmarks are now of-record (see above); the remaining CP-T7.1 work is the second consumer
-  (the `hex` CI executor) and the first-consumer default-on flip.
-- kiln integration (first consumers): host CI legs and harness processes in `process` boxes (wrap
-  their spawn in `hex box run`), and a `hex` CI executor for container legs via `hex oci`. The
-  integration points are mapped; the remaining wiring + deployment waits on how kiln gets the `hex`
-  binary (push Hex to hyper-light/hex and vendor it, or copy-vendor) — a decision for Ada.
+- Both AC benchmarks are now of-record (above). Remaining CP-T7.1 work: the first-consumer default-on
+  flip (gated on a full dispatched-leg smoke) and the second consumer (the `hex` CI executor).
+- **Consumer #1** (host CI legs + harness in `process` boxes, kiln `cp/t7-hex` behind `KILN_HEX_BOX`):
+  the boxed path is e2e-validated under real delegation — the `the_boxed_path_holds_its_bounds_under_
+  delegation` lab passes on fedora (vacate to supervisor, cpu/io/memory/pids delegated, fair-share
+  bounds, legs' parent `memory.high` + runner/agents `memory.low`, crash sweep leaves no leg box).
+  Default-on awaits a full dispatched-leg smoke (a scratch server + a `Delegate=yes` runner + one
+  routed leg) — not flipped unilaterally (it changes every Linux CI host).
+- **Consumer #2** (the `hex` CI executor, container legs, no Docker): the OCI image unpacker is
+  validated end-to-end against a real registry (alpine from Docker Hub, `#[ignore]` integration test).
+  The run-path design is settled (`docs/design/runtime.md`): the executor shells out to `hex oci`
+  (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`). It
+  needs a new `hex oci exec` primitive (setns into the running container) built first, then re-vendor
+  + the dispatch wiring (mapped in NOTES.md).
 
 ## Next
 
