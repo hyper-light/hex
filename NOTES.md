@@ -83,15 +83,20 @@ inside.sh/hex_start diagnosis.
 
 ### Fedora slot playbook (one sitting, coordinator's order; **pin every run `taskset -c 4-31`** off Shards' CPUs 0–3, with `nice`)
 
-1. **inside.sh hang — chase first.** The 17 leaks were a `hex oci` command *blocking*, not failing (a
-   setup failure sends `E<err>` on the sync pipe and `create` returns — see init.rs). Hypotheses:
-   `create` hangs because the container child blocks in `setup_rootfs` before sending `R` (create's
-   handshake read then never completes); or the Python loop hangs on a later iteration from an unclean
-   `delete` leaving cgroups/mounts/state under `/run/hex-oci`. Diagnose: run the bundle setup + probe
-   by hand with `timeout 15` on each `/opt/hex oci create|start|delete` and `set -x` to see which
-   blocks; then `strace -p` the blocked pid, inspect `/run/hex-oci/<id>`, `exec.fifo`, and the
-   init/container pids. (init.rs: `create` returns after the child sends `R` post-setup; `start` blocks
-   on `exec.fifo` RDONLY until the init opens it WRONLY.) Fix at the cause (CLAUDE §4).
+1. **inside.sh hang — DIAGNOSED from code (off-slot) + FIXED (`4c76c13`).** Root cause is a
+   **create-time deadlock**, not an unclean delete: `hex oci create` is detached and its init inherits
+   the harness's stdout/stderr; after `create` returns, the shim parent (waitpid, init.rs:90–99) and the
+   container child (blocked opening `exec.fifo` WRONLY until `start`, init.rs:165–168) both still hold
+   those fds. The timed loop used `subprocess.run(capture_output=True)`, whose `communicate()` drains the
+   pipes to EOF — impossible until the container execs+exits, which needs `start`, which the harness
+   can't send while blocked reading `create`. Deadlock on the *first* `create` (→ the leaked `--rm`
+   containers). The shell probe and the runtime-tools suite (file-redirected fds, oci-validation/
+   inside.sh:16) don't drain a pipe inline, so neither hits it; this would deadlock *any* compliant
+   detached runtime. Fix applied to inside.sh (CLAUDE §4 — wait on process exit, not pipe EOF): stdio →
+   /dev/null (success) + a reused file (errors). **Slot step 1 is now just: run hex_start, read the
+   p50.** Separately, for consumer #2: `hex oci create` should grow an explicit container-stdio contract
+   (fds/paths; default /dev/null) distinct from the CLI's own diagnostics, so kiln captures step output
+   by draining AFTER start — never by reading create to EOF (same deadlock would bite the leg bridge).
 2. **unpack integration test** (`runner::oci_image::unpack`): pull a small public image
    (`docker.io/library/alpine`, anonymous token) and assert the rootfs (`/bin/sh` via symlink, `/etc`)
    + `ImageConfig`. Write `#[test] #[ignore]` (run with `--ignored`; needs network), driven by kiln's
@@ -161,10 +166,9 @@ aarch64-apple-darwin + x86_64-pc-windows-gnu. Full gate runs in CI at push, whic
    without docker (skopeo+umoci, or kiln's registry client) then `hex oci create/start/…`. Larger.
 3. **Build the `hex` binary in kiln** (`.kiln/ci.yaml` release-binary job → `dist/hex-$(uname -m)`)
    and install it on runners, so consumer #2 activates (needs a deploy/merge-train step).
-4. **AC-T7.1.3** hex_start p50 ≤50ms — harness ready (`bench/hex_start/` needs docker + a hex release
-   binary). **Blocked on the `inside.sh` hang** (first timed loop iteration never returns; chase in the
-   fedora slot, coordinator's order), not just the load window. [DONE for **AC-T7.1.2**: of-record
-   noisy_neighbor **1.73x** recorded on fedora NVMe, `bench/noisy_neighbor/RESULT.md`.]
+4. **AC-T7.1.3** hex_start p50 ≤50ms — harness ready and the `inside.sh` deadlock now **fixed**
+   (`4c76c13`). Remaining: run it on fedora NVMe in a load<2 slot and read the p50 (slot step 1).
+   [DONE for **AC-T7.1.2**: of-record noisy_neighbor **1.73x**, `bench/noisy_neighbor/RESULT.md`.]
 5. **T-T7.1.1** CI labs on the hex executor == docker (after #2).
 6. Adversarial check (fresh subagent) of every AC before declaring the goal met.
 
