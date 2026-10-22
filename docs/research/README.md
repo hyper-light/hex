@@ -38,6 +38,10 @@ implementation" and its numbers are established, before any design or code.
 
 ### Scheduler (`scheduler/`)
 
-To come (goal 2): Kubernetes at extreme scale, Borg and Omega, Meta's Twine, RAS and Shard Manager,
-Sparrow, Firmament, Apollo, Hydra and Gödel, DRF, Tetris, Kueue and Volcano, regions and federation,
-heterogeneous hardware, and agent workload characteristics.
+| Note | Covers |
+|---|---|
+| [`cluster-managers-at-scale.md`](scheduler/cluster-managers-at-scale.md) | Kubernetes at extreme scale (kube-scheduler internals, limits, etcd/API-server bottlenecks, sampling, preemption, gangs, multi-cluster), Borg, Omega and the Borg traces, Meta's Twine, RAS and Shard Manager |
+| `placement-algorithms-and-fairness.md` | Sparrow, Firmament/Quincy, Apollo, Hydra, Gödel, Medea, Gavel, Pollux, Themis, Tiresias, 3Sigma, Decima, DRF, Tetris, Kueue, Volcano — in progress |
+| `agentic-workloads.md` | agent burstiness; rate-limit-, token-, context-, model- and hardware-aware placement; LLM and agent scheduling — in progress |
+| `proximity-and-failure-containment.md` | Vivaldi coordinates (Serf, hyper-swim), SWIM and Lifeguard, phi-accrual, gray failure and fail-slow, containing bad workloads — queued |
+| `comparison.md` | how each system places, scales, prioritises, handles mixed hardware and contains failures — after the notes |
