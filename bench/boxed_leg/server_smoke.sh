@@ -79,13 +79,22 @@ systemd-run --user --unit="$UNIT" -p Delegate=yes --quiet \
   --setenv=XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}" \
   -- "$KILN" server --config "$LAB/server.toml" || { echo "systemd-run failed"; exit 1; }
 
-code=000
-for _ in $(seq 1 120); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/" 2>/dev/null || echo 000)
-  [ "$code" != "000" ] && break
-  sleep 0.3
+echo "=== waiting for the server to listen on 127.0.0.1:$HTTP ==="
+upcheck() { python3 -I -c "
+import socket, sys
+s = socket.socket(); s.settimeout(0.5)
+try:
+    s.connect(('127.0.0.1', $HTTP)); sys.exit(0)
+except OSError:
+    sys.exit(1)
+"; }
+up=no
+for _ in $(seq 1 150); do
+  if upcheck >/dev/null 2>&1; then up=yes; break; fi
+  systemctl --user is-active "$UNIT.service" >/dev/null 2>&1 || { echo "server unit exited early — logs:"; systemctl --user status "$UNIT.service" --no-pager -n 20 2>/dev/null || true; break; }
+  sleep 0.2
 done
-echo "server responded http $code"
+echo "server listening: $up"
 UNITCG="/sys/fs/cgroup$(systemctl --user show "$UNIT.service" -p ControlGroup --value 2>/dev/null)"
 echo "unit cgroup: ${UNITCG#/sys/fs/cgroup}"
 
