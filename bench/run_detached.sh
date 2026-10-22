@@ -26,11 +26,11 @@ HEX="$CARGO_TARGET_DIR/release/hex"
 echo "hex binary: $HEX"
 nice -n 10 cargo build --release --bench noisy_neighbor -j 12 || echo "WARN: noisy_neighbor prebuild failed (will retry at measure time)"
 
-echo "=== wait for load<2 sustained 5 min (deadline 06:00Z) ==="
-deadline=$(date -u -d 'tomorrow 06:00' +%s)
-today6=$(date -u -d 'today 06:00' +%s)
-now=$(date -u +%s)
-if [ "$now" -lt "$today6" ]; then deadline=$today6; fi
+echo "=== wait for load<2 sustained 5 min (12 h budget) ==="
+# A self-relative budget: ample for a window to open between the tracks' gates, and it does not
+# silently expire overnight the way a fixed clock time can (the first run died in a load spike at
+# 22:16Z before any window came).
+deadline=$(( $(date -u +%s) + 12 * 3600 ))
 below=0
 quiet=0
 while :; do
