@@ -124,9 +124,16 @@ inside.sh/hex_start diagnosis.
    needs a real `kiln server`** (its local_agent boxes) **or `kiln agent`** under the Delegate=yes scope,
    dispatched via `kiln workflow run --server` — a bigger setup (server config from `kiln default-config`
    [fields mapped], a bare-mirror repo in the server data_dir, server as a transient `systemd-run --user`
-   unit boxed, dispatch, inspect its cgroup, teardown). **Asked the coordinator** (msg 01a163cd…): build
-   the real-server smoke now, or take the delegation lab + this finding as enough for the memo? Memo
-   `docs/design/kiln-hex-box-default-on.md` updated with the finding; flip is **Ada's call**. B after A.
+   unit boxed, dispatch, inspect its cgroup, teardown). **Coordinator said build it** (end-to-end proof
+   before Ada). **Server-path harness PREPARED + committed: `bench/boxed_leg/server_smoke.sh` (bbdfce5)**
+   — writes a minimal all-known-field config (addrs/ports baked, token via `KILN_ADMIN_TOKEN` env,
+   `ci.enabled`+routing host; local-runs needs only ci.enabled per uploads.rs, ci.local correctly false),
+   a bare-mirror repo in `data_dir/git/`, starts `kiln server` as a boxed transient `systemd-run --user`
+   unit, dispatches via `workflow run --server`, inspects protected leaves + leftover leg boxes, tears
+   down. `bash -n` clean. **Awaiting the coordinator's named fedora slot** (they'll message); kiln debug
+   binary already at `$HOME/.cache/kiln-t7-hex/target/debug/kiln`. In-slot: `server_smoke.sh <kiln> dry`
+   (confirm the leg is boxed; fix harness) → `… full` (storm) → fill the memo → report. Memo
+   `docs/design/kiln-hex-box-default-on.md`; flip is **Ada's call**. B after A.
 
 ### CAP_HEX / `hex`-executor dispatch edit map (from the Explore sweep, 2026-10-22)
 
