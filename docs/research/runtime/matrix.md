@@ -35,17 +35,53 @@ hardware.
 Throughput (starts per second), density and per-workload memory/CPU overhead for Hex have **not been
 measured** — the competitive baseline (goal 3) measures them alongside every competitor.
 
-## Process / OCI runtimes
+## Process / OCI runtimes (namespace containers, on one node)
 
-_From `oci-runtimes-and-fast-start.md` — filled when that note lands._
+| Runtime | Start measured (operation, conditions) | Value | Kind | Source |
+|---|---|---|---|---|
+| **crun** (best published) | create + run + delete of `/bin/true`, hyperfine, seccomp-BPF cache (2022) | 5.6 ± 3.0 ms (user 1.0, system 4.5; range 4.2-26.8) | MV | [OCI-44] |
+| crun / youki / runc | `create && start && delete -f`, page cache dropped, ≥100 runs; Ubuntu 22.04, Linux 6.5, 16 cores | crun 47.3 ± 2.8, youki 111.5 ± 11.6, runc 224.6 ± 12.0 ms (runc/crun 4.7x) | MV | [OCI-3] |
+| crun / youki / runc / runsc | 1,000 serial creates through nerdctl + containerd (stack included; "not a scientific benchmark") | means 0.28 / 0.32 / 0.34 / 0.62 s; youki failed 36/1,000 | MI | [OCI-47] |
+| runc | alone, GCP VMs, Linux 6.8 | 44 ms (1 vCPU), > 60 ms (multi-vCPU); up to 50% of it in `percpu_down_write` on the cgroup PID write | MI | [OCI-42] |
+| runc vs crun memory | 100 sequential runs, GNU `time -v` | max RSS 15,120 KB vs 3,752 KB | MV | [OCI-45] |
+| **Hex today** | `oci create` + `start`, `/usr/bin/true`, n=200; **no seccomp, no resource cgroup, delete untimed** | p50 14.4, p99 16.7, max 18.1 ms | MV | `bench/hex_start/RESULT.md` |
+
+No source publishes a p99.9 for any OCI runtime; hyperfine reports mean ± σ and a min-max range. **The
+container-class bar:** crun's 5.6 ms makes 4-5x ≈ **1.1-1.4 ms** for a full create-run-delete
+(DERIVED [OCI-44]) — below every published namespace-container figure; only forks of pre-built
+sandboxes have been measured that low. Hex's 14.4 ms is about 2.6x *slower* than crun's best, before
+seccomp and cgroups are added. In crun's 5.6 ms, 4.5 ms is kernel time: the cost is kernel objects
+(mount-namespace copy, network and IPC namespaces, cgroup create/join, seccomp load), not the runtime's
+language [OCI-44][OCI-45].
+
+*Verified:* the crun/youki/runc figures read in youki's README at the cited commit (lines 42-44) and
+crun's 159.2 → 28.9 → 5.6 ms series read in its author's post, 2026-10-22 — 0 mismatches.
+
+## Fast-start techniques (measured speedups; the levers for the bar)
+
+| Technique | Measured effect | Kind | Source |
+|---|---|---|---|
+| Fork a pre-built seed (zygote / sfork) | Catalyzer fork boot 0.97 ms vs 40 ms cold, 142 ms gVisor baseline; SEUSS hot 0.82 ms vs cold 7.67 ms | MV | [OCI-28][OCI-29] |
+| Seed + pooled objects in production | AFaaS 5.45-9.41 ms start; 5.1-5.5x vs Catalyzer at 24-way; pre-allocates 1,000 veths, 600 cgroups | MV | [OCI-35] |
+| Lean containers + zygotes | SOCK: 18x Docker throughput, 19x latency; zygotes add 3x | MV | [OCI-27] |
+| vfork-class spawn instead of fork | 31.9 µs vs 7,581.8 µs for a 1 GB parent (238x); fork costs ~6.5 ms per GB of parent | MV / MI | [OCI-34][OCI-33] |
+| No per-start network namespace | 200 → 900 containers/s; pre-created endpoints −80% startup at 100 concurrent | MI / MV | [OCI-27][OCI-36] |
+| cgroup pool + `CLONE_INTO_CGROUP` | pool −94% cgroup creation; skipping the cgroup join −27% runc launch | MV / MI | [OCI-31][OCI-42] |
+| Mount table without copying (`OPEN_TREE_NAMESPACE`, kernel 7.0) | mount-ns setup 0.343 → 0.044 ms (7.8x), 21.5x with many host mounts; +40% creation throughput | MV | [OCI-23][OCI-18] |
+| Idmapped mounts instead of recursive chown | container start 37x / 92x / 271x faster (BusyBox / Ubuntu / Fedora) | MV | [OCI-25] |
+| Cached / precompiled seccomp | `crun run` 28.9 → 5.6 ms | MV | [OCI-44] |
+
+None reaches 4-5x alone; they compose. Every seed/fork number is from a VM- or lambda-class system,
+so a seed fork of Hex's actual sandbox (namespaces + mounts + cgroup + seccomp) must be measured on our
+hardware before it counts.
 
 ## Sandbox kernels and microVMs
 
 _From `substrates-and-sandboxes.md` — filled when that note lands._
 
-## Snapshot restore and fast-start techniques
+## Snapshot restore
 
-_From `substrates-and-sandboxes.md` and `oci-runtimes-and-fast-start.md` — filled when they land._
+_From `substrates-and-sandboxes.md` — filled when that note lands._
 
 ## Agent-sandbox platforms (end to end, as a customer sees them)
 
