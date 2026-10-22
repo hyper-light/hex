@@ -75,13 +75,41 @@ None reaches 4-5x alone; they compose. Every seed/fork number is from a VM- or l
 so a seed fork of Hex's actual sandbox (namespaces + mounts + cgroup + seccomp) must be measured on our
 hardware before it counts.
 
-## Sandbox kernels and microVMs
+## Sandbox kernels and microVMs (cold start, on one node)
 
-_From `substrates-and-sandboxes.md` — filled when that note lands._
+| System | Isolation | Start | Throughput | Overhead | Kind |
+|---|---|---|---|---|---|
+| **Firecracker** | KVM microVM | ≤ 125 ms `InstanceStart` → guest `/sbin/init`; VMM up in ≤ 8 CPU-ms (wall 6-60 ms, typically ~12) | "up to 150 MicroVMs per second per host" | VMM ≤ 5 MiB (1 vCPU, 128 MiB guest) | MV, CI-enforced [SUB-9][SUB-11] |
+| **gVisor** | user-space kernel (Systrap default since mid-2023) | 142 ms for a C hello (Catalyzer's baseline) | n/p | vs runc, 2019 (pre-Systrap): syscalls 2.2×, malloc 2.5×, large downloads 2.8×, file opens 216× slower | MI [SUB-7]; MV [OCI-28] |
+| **Kata Containers** | VM per sandbox + in-guest agent | 200 concurrent: Kata-FC 47.6 s, kata-qemu 6.85 s, kata-template 2.98 s (RunD: 1 s) | n/p | n/p | MV [OCI-31] |
+
+The on-node microVM bar is now set by CubeSandbox (47.8 ms create) and Zeroboot (0.79 ms CoW fork) —
+see the self-hostable table above — not by Firecracker's defaults.
 
 ## Snapshot restore
 
-_From `substrates-and-sandboxes.md` — filled when that note lands._
+| Mechanism | Restore / resume | Kind | Source |
+|---|---|---|---|
+| Firecracker snapshot, baseline | guest pages fault in from disk one at a time; docs publish no latency; restore slow under cgroups v1 | DE | [SUB-12][SUB-10] |
+| REAP (record + prefetch the working set) | 3.7× lower cold-start delay than baseline snapshots; 70 → 185 ms from 1 to 8 concurrent; disk-bound beyond | MV | [SUB-12] |
+| CRIU (copy-based restore) | 193-2,278 ms startup with the image in memory (GPU apps); 1.7 s at P99 under heavy load (a competitor's measurement) | MI | [SUB-14][SUB-15] |
+| Process-level C/R in a microVM (DeltaBox) | restore 1.86 ms | MV | [ASP-78] |
+| CubeSandbox resume | avg 41.8 ms (p95 65.1, n=5) | MV | [ASP-75] |
+| CoW fork of a snapshot (Zeroboot) | p50 0.79 ms, p99 1.74 ms | MV | [ASP-77] |
+
+The order is the lesson: copying memory is slowest, faulting it from disk next, prefetching it better,
+and sharing it copy-on-write fastest.
+
+## Agent substrates
+
+| Substrate | Isolation | Resume / activation | Throughput | Density / scale | Kind |
+|---|---|---|---|---|---|
+| **Google Agent Substrate** | gVisor or Kata + Cloud Hypervisor; never plain containers | resume "less than 400ms" (CL); north-star p95 100 ms (target) | "more than 1500 activations per second" (CL); north-star 1,000 wakeups/s per cluster (target) | "10x–30x oversubscription" (CL); demo ~250 actors on 8 pods (MV); north-star 1 billion agents per cluster (target) | CL / DE [SUB-2][SUB-3] |
+| **Google AX** | delegates to Agent Substrate | suspend / resume checkpoints actor state | target "billions of autonomous agent workloads in a cluster" (CL) | n/p | DE / CL [SUB-1] |
+| **Kubernetes Agent Sandbox** | gVisor or Kata via `RuntimeClass` | warm pool (`SandboxWarmPool`) | GKE: 300 sandboxes/s per cluster, 90% ≤ 200 ms (CL) | n/p | DE [SUB-4]; CL [ASP-80] |
+
+Substrate's own architecture document says "Much of this architecture is aspirational, and is not yet
+implemented!" [SUB-3]: its figures are targets and claims, not measurements.
 
 ## Agent-sandbox platforms (end to end, as a customer sees them)
 
@@ -124,10 +152,6 @@ scheduler (MV) [ASP-32]; Daytona reports 1,000 sandboxes ready in 10.8 s on one 
 *Verified:* 15 load-bearing numbers re-checked against their sources on 2026-10-22 — the six burst rows
 above recomputed from ComputeSDK's raw iteration arrays, and the CubeSandbox and Zeroboot figures read
 in their own reports — 0 mismatches.
-
-## Agent substrates
-
-_From `substrates-and-sandboxes.md` — filled when it lands._
 
 ## Resource control (machine protection)
 
