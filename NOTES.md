@@ -151,8 +151,9 @@ the `Some(..)` wrap (`memory_bytes`/`processes` are now `Option`, hex `Bounds` a
 **Resolved with T4 (2026-10-22):** (a) the impl calls `Self::HOLDS.check(&launch)?` at the top of
 `launch()` and returns `HOLDS` from `holds()` — one source of truth — so **drop both** the manual egress
 refusal (imp.rs:56-60) **and** the manual weight-range check (imp.rs:46-50): `check` refuses an off-scale
-weight as `Invalid` first, then whatever's unheld. Before dropping the weight check, confirm the seam's
-weight scale == hex's cgroup range (cpu/io weight 1..=10000) so no bound is silently lost. (b) Egress:
+weight as `Invalid` first, then whatever's unheld. (Weight scale confirmed by T4: the seam uses cgroup
+v2's own — `WEIGHT_MIN=1`, `WEIGHT_MAX=10_000`, `WEIGHT_EVEN=100`, sandbox.rs:34-37 — identical to hex's,
+so dropping the manual range check loses no bound.) (b) Egress:
 accept `Any`, refuse `Only(vec![])` ("a run with no egress") and `Only(hosts)` ("egress to named hosts
 alone"). (c) **Defaults trap (bites tests):** `Egress::default() = Only(vec![])` (none),
 `Limits::default() = 1 GiB / 64 proc`, and `Launch::of(program,args)` uses both — so any Launch built
