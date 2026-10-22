@@ -20,13 +20,16 @@ kiln: worktree `~/Projects/kiln/.claude/worktrees/t7-hex`, branch `cp/t7-hex` (l
   via kiln's `ci/registry` (no skopeo/umoci), hands a bundle to the `oci` class. Touchpoints: proto.rs
   CAP, probe.rs `executors()`, updates.rs `runner_build`, dispatch.rs `runner_view`, runtime.rs
   dispatch, local.rs validation.
-- **Known issue — hex_start leaves stuck containers (fix on resume).** `bench/hex_start/run.sh` runs
-  `docker run --rm --privileged … /opt/lab/inside.sh`; when a run doesn't exit cleanly the container
-  hangs and never auto-removes. T1 (Amphora) flagged ~12 alive on fedora 2026-10-21, 16–19h old:
-  PIDs 581964, 700031, 852613, 957843, 1137086, 1209221, 1241323, 2674757, 2762933, plus a 6h group
-  1063311/1101067/1115707/1123941. Clean with `docker rm -f` **only with Ada's word** (the standing
-  rule forbids killing by command line; no PIDs were recorded by me). Fix: `--name`/`--label` the
-  harness's containers and remove them explicitly (the running `run_detached.sh` may leave one more).
+- **hex_start stale containers — CLEANED + harness FIXED (2026-10-22).** The leaks were `--rm`
+  containers left when `inside.sh` hung (never exited, so `--rm` never fired). With the coordinator's
+  go I removed **17** positively tied to the harness (image `registry.fedoraproject.org/fedora:44`,
+  command `bash /opt/lab/inside.sh`, mounts /opt/hex+/opt/lab, created during my runs) by container
+  ID; left the other 25 (other tracks'). `run.sh` now names + labels its container
+  (`kiln.bench=hex_start`) and removes it via a trap + a 600 s timeout, so a hang can't leak again.
+  **Deeper finding:** all 17 were *running* (hung) → `inside.sh` / the oci-start loop appears to HANG
+  under the privileged-docker + private-cgroupns bench shape — likely the real **AC-T7.1.3** (hex_start
+  p50) blocker, not just the load window. Diagnose `inside.sh` in a fedora slot. noisy_neighbor
+  (AC-T7.1.2, no docker) is unaffected; the running bench will still record it.
 - **RESUMED 2026-10-22** on an account with room. The overnight bench was **OOM-killed at 22:16Z**
   (a load-137 spike) while still in its wait-loop — **no numbers recorded**. Re-launched (pid 830857,
   self-relative 12h budget) and waiting for a load<2 window. Holding heavy fedora builds meanwhile so

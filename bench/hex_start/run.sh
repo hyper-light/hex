@@ -8,6 +8,12 @@ set -euo pipefail
 HEX=$(realpath "${1:?hex binary}"); N=${2:-200}; IMAGE=${3:-registry.fedoraproject.org/fedora:44}
 OUT=$(realpath -m "${4:-$HOME/.cache/hex-t7/hexstart}"); mkdir -p "$OUT"
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+# A unique name and label so a leftover is unmistakably this harness's, and a trap + timeout so a run
+# that hangs (an oci start that never returns) can't leave its `--rm` container alive.
+NAME="kiln-hexstart-$$-$(date -u +%s)"
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+timeout 600 docker run --rm --name "$NAME" --label kiln.bench=hex_start \
+  --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$HEX:/opt/hex:ro" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" -e N="$N" "$IMAGE" bash /opt/lab/inside.sh
-cat "$OUT/result.txt" 2>/dev/null
+cat "$OUT/result.txt" 2>/dev/null || true
