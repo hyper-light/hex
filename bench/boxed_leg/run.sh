@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Consumer #1 dispatched-leg smoke (CP-T7.1, AC-T7.1.1, the machine-protection half). Stands up a
-# scratch kiln server + one lab runner = this machine via `kiln workflow run` in "here" mode, inside a
-# `systemd-run --user --scope -p Delegate=yes` scope with KILN_HEX_BOX=1, so a REAL dispatched CI leg
-# is boxed by the runner runtime (leg_box) — the integration the os::contain unit lab doesn't cover.
+# Consumer #1 dispatched-leg smoke (CP-T7.1, AC-T7.1.1, the machine-protection half).
+#
+# FINDING (2026-10-22, from the first slot run): this "here"-mode vehicle does NOT box the leg, BY
+# DESIGN. kiln boxes only in a process that called `os::contain::hold_agents()` — done by `Cmd::Server`
+# (main.rs:459) and `Cmd::Agent` (:468), NOT by `Cmd::Workflow`/`kiln workflow run` (:785). The guard
+# exists so a tool that merely links kiln (a `kiln workflow run` invoked on a box that is itself a live
+# runner) does not box the runner's cgroup it happens to sit in. So the leg here runs unboxed in the
+# scope root (its cgroup is `<scope>`, not `<scope>/hex-legs/leg.*`), which this script now DOCUMENTS as
+# the guard working. The BOXED smoke needs a real `kiln server` (its local_agent boxes) or `kiln agent`
+# under the Delegate=yes scope, dispatched to via `kiln workflow run --server`. See the server variant.
+#
+# As-is it stands up a scratch server + one runner = this machine via `kiln workflow run` in "here" mode
+# inside `systemd-run --user --scope -p Delegate=yes` with KILN_HEX_BOX=1, and shows (via evidence.sh)
+# that the leg's cgroup is the scope root (unboxed) — the hold_agents guard in effect.
 # The heavy job shows (1) it runs in a Hex box with its bounds, (2) the machine is protected (legs'
 # parent memory.high, runner/agents memory.low) and a build storm doesn't starve the host, (3) no leg
 # box is left behind. A scaled memory.high throttle demo proves the cap safely.
@@ -36,9 +46,14 @@ cat > "$LAB/inner.sh" <<INNER
 set -uo pipefail
 ROOT=/sys/fs/cgroup
 cd "$REPO"
+echo "--- pre-kiln scope diagnostics ---"
+mycg=\$ROOT\$(awk -F: '\$1=="0"{print \$3}' /proc/self/cgroup)
+echo "  my cgroup: \${mycg#\$ROOT}"
+echo "  controllers=[\$(cat "\$mycg/cgroup.controllers" 2>/dev/null)] subtree_control=[\$(cat "\$mycg/cgroup.subtree_control" 2>/dev/null)]"
+echo "  procs in my scope root=\$(wc -l < "\$mycg/cgroup.procs" 2>/dev/null)  KILN_HEX_BOX=\${KILN_HEX_BOX:-unset}"
 echo "=== kiln workflow run (scratch server + one runner = this machine) ==="
-SMOKE_STORM=$([ "$MODE" = dry ] && echo 0 || echo 1) \
-  "$KILN" workflow run smoke --executor host --report "$LAB/report.json"; code=\$?
+SMOKE_STORM=$([ "$MODE" = dry ] && echo 0 || echo 1) RUST_LOG="\${RUST_LOG:-warn,kiln::os=debug}" \
+  "$KILN" workflow run --executor host --report "$LAB/report.json" 2>&1; code=\$?
 echo "=== kiln workflow run exit \$code ==="
 
 # This process was vacated to OWN/supervisor by the runner; find OWN (holds 'supervisor').
