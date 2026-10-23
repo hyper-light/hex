@@ -66,8 +66,9 @@ class E2B:
 
 class Daytona:
     def __init__(self):
-        from daytona import Daytona as Client, DaytonaConfig
+        from daytona import Daytona as Client, DaytonaConfig, DaytonaNotFoundError
         self.client = Client(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"], api_url=os.environ["DAYTONA_API_URL"]))
+        self.NotFound = DaytonaNotFoundError
 
     def create(self):
         return self.client.create()
@@ -76,9 +77,23 @@ class Daytona:
         s.process.exec("true")
 
     def delete(self, s):
-        # The SDK's delete returns at once by default (wait=False); waiting until the sandbox is gone is
-        # what every other row's delete measures.
-        self.client.delete(s, wait=True)
+        # Waiting until the sandbox is gone is what every other row's delete measures. SDK 0.187.0, which
+        # matches the v0.187.0 server, returns once the API accepts the delete and has no option to wait,
+        # so the sandbox is polled until it is destroyed or the API no longer knows it. Every 20 ms: a
+        # fifth of the SDK's own 100 ms state-wait interval (sandbox.py, wait_for_sandbox_stop), so a
+        # delete reads at most one poll and its request late.
+        self.client.delete(s)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                s.refresh_data()
+            except self.NotFound:
+                return
+            if str(getattr(s.state, "value", s.state)) == "destroyed":
+                return
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"sandbox {s.id}: not destroyed within 60 s of delete (state {s.state})")
+            time.sleep(0.02)
 
 
 def run_cmd(argv, timeout=300):
@@ -264,7 +279,8 @@ class Cli:
 
 def own_cgroup(pid):
     with open(f"/proc/{pid}/cgroup") as f:
-        return os.path.join(CG_ROOT, f.read().split("::", 1)[-1].strip().lstrip("/"))
+        rel = f.read().split("::", 1)[-1].strip().strip("/")
+    return os.path.join(CG_ROOT, rel) if rel else CG_ROOT
 
 
 class Stack:
