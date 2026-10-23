@@ -15,8 +15,15 @@ the samples saw.
 
 - **`platform_gate.sh`**: the start gate. It has two conditions:
   - (a) No other benchmark unit is active, and no process outside the platform's stack runs at nice below
-    10 over 50% CPU in a 5-second `top` sample. The stack is the labelled containers and the host's dockerd
-    and containerd. Processes at nice 10 or above are listed but don't block.
+    10 over 50% CPU in a 5-second `top` sample. The stack is:
+    - the labelled containers;
+    - the host's dockerd and containerd;
+    - any `STACK_EXTRA_CG` cgroups (`/e2b` for E2B);
+    - from E2B on, the round's own bench unit.
+
+    Processes at nice 10 or above are listed but don't block. Daytona's rounds ran with the third
+    revision of the script, in which the bench unit could count as foreign. Their samples never caught
+    it, because the Daytona client mostly waits on HTTP.
   - (b) The 1-minute load is under 2 plus the stack's own idle load, read after 5 idle minutes. CLAUDE.md
     §7's load bar holds for the bench; a platform's idle daemons are part of what it costs.
 

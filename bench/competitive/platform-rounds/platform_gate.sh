@@ -1,7 +1,9 @@
 #!/bin/bash
 # platform_gate.sh <platform> <round> <idle-since epoch> <stack label>: the platform-pass gate
-# (T7 agent, 2026-10-23, third revision). <stack label> is the docker label naming the stack's containers,
-# e.g. com.docker.compose.project=hexbench-daytona or io.x-k8s.kind.cluster=hexbench.
+# (T7 agent, 2026-10-23, fourth revision). <stack label> is the docker label naming the stack's containers,
+# e.g. com.docker.compose.project=hexbench-daytona or io.x-k8s.kind.cluster=hexbench. STACK_EXTRA_CG (optional,
+# space-separated cgroup paths such as /e2b, E2B's per-sandbox Firecracker cgroups) adds stack cgroups outside
+# every container; the round's own unit, hexbench-<platform>-r<N>-t<try>.service, is the bench, never foreign.
 #  (a) no other benchmark unit is active, and no process outside the platform's stack runs at a nice below
 #      10 using over 50% CPU, from a 5-second sample (the second frame of `top -b -n 2 -d 5`). The stack is
 #      the processes of the labelled containers (anything under their docker-<id>.scope cgroups, nested
@@ -19,11 +21,15 @@ sample() {  # the second frame of a 5-second top sample, as "pid ni %cpu command
   top -b -n 2 -d 5 -w 512 | awk '/^ *PID /{f++; next} f==2 && NF>=12 {print $1, $4, $9, $12}' | sort -k3,3 -gr > "$SAMPLE"
 }
 KILN_HOST_PID=185421  # the kiln agent host, this session's own parent: tallied separately, never foreign
-whose() {  # "stack", "stack-infra", "kiln-host" or "foreign:<cgroup tail>" for a pid
+whose() {  # "stack", "stack-infra", "bench", "kiln-host" or "foreign:<cgroup tail>" for a pid
   local cg ids
   [ "$1" = "$KILN_HOST_PID" ] && { echo kiln-host; return; }
   cg=$(cut -d: -f3- "/proc/$1/cgroup" 2>/dev/null) || { echo "foreign:exited"; return; }
   [ -z "$cg" ] && { echo "foreign:exited"; return; }
+  # The round's own bench client: (a) admits no other benchmark unit, so the only hexbench unit a sample can
+  # see is the round's own, and its CPU is part of what the round measures.
+  case "${cg##*/}" in hexbench-*.service) echo bench; return ;; esac
+  for x in ${STACK_EXTRA_CG:-}; do case "$cg" in "$x"|"$x"/*) echo stack; return ;; esac; done
   ids=$(docker ps -q --no-trunc --filter "label=$STACK_LABEL" 2>/dev/null)
   for id in $ids; do case "$cg" in *"docker-$id.scope"*|*"/docker/$id"*) echo stack; return ;; esac; done
   case "$cg" in /system.slice/docker.service*|/system.slice/containerd.service*) echo stack-infra; return ;; esac
@@ -71,7 +77,7 @@ while :; do
   fi
   sleep 15
 done
-{ echo "-- gate for $PLATFORM round $ROUND, $(date -u +%FT%TZ) (stack: containers labelled $STACK_LABEL, plus the host's dockerd and containerd)"
+{ echo "-- gate for $PLATFORM round $ROUND, $(date -u +%FT%TZ) (stack: containers labelled $STACK_LABEL${STACK_EXTRA_CG:+, cgroups $STACK_EXTRA_CG}, plus the host's dockerd and containerd)"
   echo "   stack idle load (1-min, after 5 min up and idle, (a) holding): $IDLE; threshold 2 + idle = $THRESH"
   echo "   load at start: $(cut -d' ' -f1-3 /proc/loadavg)"
   [ -n "$forced" ] && echo "   RAN ANYWAY: (a) held but the 1-minute load stayed at or over $THRESH for 45 minutes"
