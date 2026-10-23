@@ -33,6 +33,9 @@ LIMITS = {"hex": ["--memory-max", "268435456", "--pids-max", "64", "--"],
 
 
 def own_cgroup():
+    # The override exists so the driver's control flow can be checked against stand-ins off the bench host.
+    if os.environ.get("HEXBENCH_SELF_CGROUP"):
+        return os.environ["HEXBENCH_SELF_CGROUP"]
     with open("/proc/self/cgroup") as f:
         for line in f:
             if line.startswith("0::"):
@@ -226,7 +229,7 @@ def main():
         f.write("+cpu +io +memory +pids")
     for k in range(32):
         os.makedirs(f"{S}/w{k}", exist_ok=True)
-    user_service_cg = S
+    user_service_cg = os.environ.get("HEXBENCH_USER_CGROUP") or S
     while not os.path.basename(user_service_cg).startswith("user@"):
         user_service_cg = os.path.dirname(user_service_cg)
         if user_service_cg == CG:

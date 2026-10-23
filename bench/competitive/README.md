@@ -43,6 +43,15 @@ systemd-run --user --unit=hexbench --collect bash bench/competitive/host.sh "$CA
 doesn't get one, records the environment and the competitors' versions, and writes everything under
 `~/.cache/hex-bench/out/<UTC time>/`, including `table.md` from `summarize.py`.
 
+### Checking the drivers off the bench host
+
+`HEXBENCH_BIN`, `HEXBENCH_CGROUP` and `HEXBENCH_ERR` (oci_bench.py) and `HEXBENCH_SELF_CGROUP` and
+`HEXBENCH_USER_CGROUP` (box_bench.py) point the drivers at stand-in binaries and a plain directory in
+place of the cgroup tree. That runs every phase's control flow (warm-ups, error stops, teardown, the
+summary) without containers, cgroups or load. The numbers it produces are meaningless. On 2026-10-23 it
+found three bugs before any slot was spent: a container that failed to start counted as running, a dead
+worker that could hang the box driver, and a ratio that divided by zero.
+
 ## Platforms
 
 `platform_bench.py <e2b|daytona> <out> <n> <warmup> <lifecycles> <cap>` drives a platform through its

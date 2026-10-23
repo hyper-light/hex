@@ -58,9 +58,11 @@ def fmt(v, unit):
 
 def ratio(values, lower_better):
     """values: {name: value}; returns (text, ratio) of Hex against the best competitor."""
+    # A value at or below zero (a memory delta the kernel reclaimed away, a cost too small to see) is not a
+    # measurement, so it never enters a ratio.
     hexv = values.get("hex")
-    comp = {k: v for k, v in values.items() if k != "hex" and v is not None}
-    if hexv is None or not comp:
+    comp = {k: v for k, v in values.items() if k != "hex" and v is not None and v > 0}
+    if hexv is None or hexv <= 0 or not comp:
         return "n/a", None
     best = min(comp, key=comp.get) if lower_better else max(comp, key=comp.get)
     r = comp[best] / hexv if lower_better else hexv / comp[best]

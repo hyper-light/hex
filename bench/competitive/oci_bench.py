@@ -28,14 +28,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 CALL_TIMEOUT_S = 60
-CG = "/sys/fs/cgroup"
+# The bench container's paths; the overrides exist so the driver's control flow can be checked against a
+# stand-in runtime off the bench host (see the README).
+CG = os.environ.get("HEXBENCH_CGROUP", "/sys/fs/cgroup")
+BIN = os.environ.get("HEXBENCH_BIN", "/opt/bin")
+ERR = os.environ.get("HEXBENCH_ERR", "/run/err")
 
 RUNTIMES = {
-    "hex": {"argv": ["/opt/bin/hex", "oci"], "env": {"HEX_OCI_ROOT": "/run/hex-oci"}, "exec": False},
-    "runc": {"argv": ["/opt/bin/runc", "--root", "/run/runc"], "env": {}, "exec": True},
-    "crun": {"argv": ["/opt/bin/crun", "--root", "/run/crun"], "env": {}, "exec": True},
-    "youki": {"argv": ["/opt/bin/youki", "--root", "/run/youki"], "env": {}, "exec": True},
-    "runsc": {"argv": ["/opt/bin/runsc", "--root", "/run/runsc", "--network=none"], "env": {}, "exec": True},
+    "hex": {"argv": [f"{BIN}/hex", "oci"], "env": {"HEX_OCI_ROOT": "/run/hex-oci"}, "exec": False},
+    "runc": {"argv": [f"{BIN}/runc", "--root", "/run/runc"], "env": {}, "exec": True},
+    "crun": {"argv": [f"{BIN}/crun", "--root", "/run/crun"], "env": {}, "exec": True},
+    "youki": {"argv": [f"{BIN}/youki", "--root", "/run/youki"], "env": {}, "exec": True},
+    "runsc": {"argv": [f"{BIN}/runsc", "--root", "/run/runsc", "--network=none"], "env": {}, "exec": True},
 }
 
 
@@ -56,7 +60,7 @@ class Runtime:
 
         posix_spawn (vfork-class) and a blocking wait4 keep the harness's own cost and jitter out of
         the timing; a timer kills a call that outlives CALL_TIMEOUT_S."""
-        errfd = os.open(err_path or f"/run/err/{self.name}.err", os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+        errfd = os.open(err_path or f"{ERR}/{self.name}.err", os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
         try:
             actions = [(os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0),
                        (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
@@ -157,7 +161,7 @@ def phase_throughput(rt, lifecycles):
     for conc in (1, 8, 32):
         def one(i, conc=conc):
             cid = f"{rt.name}-c{conc}-{i}"
-            err = f"/run/err/{rt.name}.c{conc}.{i}.err"
+            err = f"{ERR}/{rt.name}.c{conc}.{i}.err"
             rt.create("/run/bundle-true", cid, err_path=err)
             try:
                 rt.start(cid, err_path=err)
@@ -177,7 +181,7 @@ def phase_throughput(rt, lifecycles):
 def phase_density(rt, cap, budget_mib):
     base = mem_bytes()
     budget = budget_mib * 1024 * 1024
-    started = []
+    created, running = [], 0
     t0 = time.perf_counter()
     stop_reason = "cap"
     try:
@@ -185,8 +189,9 @@ def phase_density(rt, cap, budget_mib):
             cid = f"{rt.name}-d{i}"
             try:
                 rt.create("/run/bundle-sleep", cid)
-                started.append(cid)
+                created.append(cid)
                 rt.start(cid)
+                running += 1
             except OpError as e:
                 stop_reason = f"error at {i}: {e}"
                 break
@@ -197,12 +202,12 @@ def phase_density(rt, cap, budget_mib):
         time.sleep(2)  # let the started inits settle before reading memory
         used = mem_bytes() - base
     finally:
-        for cid in started:
+        for cid in created:
             try:
                 rt.delete(cid)
             except OpError:
                 pass
-    count = len(started)
+    count = running
     return {"count": count, "stop": stop_reason, "start_wall_s": wall, "memory_bytes": used,
             "memory_per_container_bytes": used / count if count else None,
             "containers_per_gib": count / (used / 2**30) if used > 0 else None}
