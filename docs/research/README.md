@@ -42,6 +42,6 @@ implementation" and its numbers are established, before any design or code.
 |---|---|
 | [`cluster-managers-at-scale.md`](scheduler/cluster-managers-at-scale.md) | Kubernetes at extreme scale (kube-scheduler internals, limits, etcd/API-server bottlenecks, sampling, preemption, gangs, multi-cluster), Borg, Omega and the Borg traces, Meta's Twine, RAS and Shard Manager |
 | [`placement-algorithms-and-fairness.md`](scheduler/placement-algorithms-and-fairness.md) | Sparrow, Firmament/Quincy, Apollo, Hydra, Gödel, Medea, TetriSched, POP, Sia, Gavel, Pollux, Themis, Tiresias, 3Sigma, Decima, Morpheus, DRF, Tetris, Kueue, Volcano |
-| `agentic-workloads.md` | agent burstiness; rate-limit-, token-, context-, model- and hardware-aware placement; LLM and agent scheduling — draft, references unfinished (agent stopped) |
+| [`agentic-workloads.md`](scheduler/agentic-workloads.md) | Agent workload traces (Copilot, Claude Code, Bailian, M365, TraceLab): session shape, burstiness, idle time; LLM and agent serving (Autellix, Parrot, Llumnix, SAGA, SMetric, Continuum); provider rate limits and subscription windows; gateways; KV- and context-aware placement; model and effort routing; GPU exposure per runtime class |
 | `proximity-and-failure-containment.md` | Vivaldi coordinates (Serf, hyper-swim), SWIM and Lifeguard, phi-accrual, gray failure and fail-slow, containing bad workloads — not yet written (agent stopped) |
 | `comparison.md` | how each system places, scales, prioritises, handles mixed hardware and contains failures — after the notes |
