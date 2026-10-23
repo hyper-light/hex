@@ -158,6 +158,18 @@ class Kubernetes:
                 return
         raise RuntimeError(f"{name}: not ready in {timeout}s")
 
+    def until_ready(self, name, wait, remove):
+        """Waits for an object the API accepted. One that never gets ready is removed, never left to hold a
+        slot: a Pending pod past the node's pod limit took one from each following density try."""
+        try:
+            wait()
+        except Exception as e:
+            try:
+                remove()
+            except Exception as r:
+                raise RuntimeError(f"{e}; removing {name} failed too: {r}") from e
+            raise
+
     def pod_ready(self, ev):
         o = ev["object"]
         st = o.status if hasattr(o, "status") else None
@@ -172,7 +184,8 @@ class Kubernetes:
         name = self.name()
         self.v1.create_namespaced_pod(self.ns, {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name},
                                                 "spec": self.pod_spec()})
-        self.wait(self.v1.list_namespaced_pod, (self.ns,), name, self.pod_ready)
+        self.until_ready(name, lambda: self.wait(self.v1.list_namespaced_pod, (self.ns,), name, self.pod_ready),
+                         lambda: self.delete(name))
         return name
 
     def exec_in(self, pod):
@@ -217,7 +230,9 @@ class AgentSandbox(Kubernetes):
         self.co.create_namespaced_custom_object(self.G, self.V, self.ns, self.P, {
             "apiVersion": f"{self.G}/{self.V}", "kind": "Sandbox", "metadata": {"name": name},
             "spec": {"podTemplate": {"spec": self.pod_spec()}}})
-        self.wait(self.co.list_namespaced_custom_object, (self.G, self.V, self.ns, self.P), name, cr_ready)
+        self.until_ready(name, lambda: self.wait(self.co.list_namespaced_custom_object, (self.G, self.V, self.ns, self.P),
+                                                 name, cr_ready),
+                         lambda: self.delete(name))
         return name
 
     def delete(self, s):
@@ -242,7 +257,15 @@ class AgentSandboxWarm(Kubernetes):
                 found["pod"] = st["sandbox"]["name"]
                 return True
             return False
-        self.wait(self.co.list_namespaced_custom_object, (self.G, self.V, self.ns, self.P), name, ready)
+        # A claim owns the sandbox it adopts or makes (sandboxclaim_controller.go sets itself as its controller
+        # reference), so deleting the claim takes that sandbox too; its pod, once known, is waited out.
+        def remove():
+            self.co.delete_namespaced_custom_object(self.G, self.V, self.ns, self.P, name)
+            if found.get("pod"):
+                self.gone(found["pod"])
+        self.until_ready(name, lambda: self.wait(self.co.list_namespaced_custom_object, (self.G, self.V, self.ns, self.P),
+                                                 name, ready),
+                         remove)
         return (name, found["pod"])
 
     def exec_true(self, s):
