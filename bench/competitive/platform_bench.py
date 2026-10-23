@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """bench/competitive: a sandbox platform end to end through its own API (SDK, CLI or Kubernetes API).
 
-  platform_bench.py <e2b|daytona|docker|k8s|agentsandbox|agentsandbox-warm|cli> <out.json> <n> <warmup>
-                    <lifecycles> <density cap>
+  platform_bench.py <e2b|daytona|modal|docker|k8s|agentsandbox|agentsandbox-warm|cli> <out.json> <n>
+                    <warmup> <lifecycles> <density cap>
 
 Run on the bench host against a self-hosted stack (E2B `embed/` compose, Daytona `docker/` compose), or
-against a hosted platform, which the result then labels hosted (its numbers include the network).
+against a hosted platform (HOSTED=1), which the result then labels hosted (its numbers include the network).
   e2b:      E2B_API_KEY, E2B_DOMAIN or E2B_API_URL as `docker compose exec ready cat /run/e2b/sdk.env`
-            prints them; template "base".
+            prints them (hosted: E2B_API_KEY alone); template "base".
   daytona:  DAYTONA_API_URL, DAYTONA_API_KEY; the default snapshot.
+  modal:    MODAL_IMAGE (a published image), MODAL_RUNTIME, MODAL_APP; `modal setup` authenticates.
   docker:   the Docker Engine CLI; DOCKER_IMAGE (the OCI bundles' rootfs, `docker import`ed), host /usr bound;
             DOCKER_CGROUP_PARENT, a slice listed in STACK_CGROUPS that holds the sandboxes (an idle keeper
             container holds the slice open for the run, so its counters live as long as the run).
@@ -98,6 +99,41 @@ class Daytona:
             if time.monotonic() > deadline:
                 raise RuntimeError(f"sandbox {s.id}: not destroyed within 60 s of delete (state {s.state})")
             time.sleep(0.02)
+
+
+class Modal:
+    """A Modal Sandbox (hosted): create until it has run a command, exec of `true`, terminate until it is gone.
+    Sandbox.create returns before the container starts ("created asynchronously", modal.com/docs/reference/
+    modal.Sandbox), so create runs one `true` before returning, as every other row's create ends with the
+    sandbox able to run one. MODAL_IMAGE names an image published beforehand (Image.from_name), so no image
+    build lands in a timed create; MODAL_RUNTIME pins the runtime (gVisor, Modal's default, unless set), so
+    rounds compare. Authentication is the client's own (`modal setup`)."""
+    def __init__(self):
+        import modal
+        self.modal = modal
+        self.app = modal.App.lookup(os.environ.get("MODAL_APP", "hexbench"), create_if_missing=True)
+        self.image = modal.Image.from_name(os.environ["MODAL_IMAGE"])
+        self.runtime = os.environ.get("MODAL_RUNTIME", "gvisor")
+
+    def create(self):
+        sb = self.modal.Sandbox.create("sleep", "infinity", app=self.app, image=self.image, timeout=900,
+                                       runtime=self.runtime)
+        try:
+            self.exec_true(sb)
+        except Exception:
+            sb.terminate(wait=True)
+            sb.detach()
+            raise
+        return sb
+
+    def exec_true(self, s):
+        rc = s.exec("true").wait()
+        if rc:
+            raise RuntimeError(f"true exited {rc} in sandbox {getattr(s, 'object_id', '?')}")
+
+    def delete(self, s):
+        s.terminate(wait=True)
+        s.detach()
 
 
 def run_cmd(argv, timeout=300):
@@ -401,8 +437,8 @@ def lifecycle(p):
 def main():
     kind, out_path = sys.argv[1], sys.argv[2]
     n, warmup, lifecycles, cap = (int(x) for x in sys.argv[3:7])
-    p = {"e2b": E2B, "daytona": Daytona, "docker": Docker, "k8s": Kubernetes, "agentsandbox": AgentSandbox,
-         "agentsandbox-warm": AgentSandboxWarm, "cli": Cli}[kind]()
+    p = {"e2b": E2B, "daytona": Daytona, "modal": Modal, "docker": Docker, "k8s": Kubernetes,
+         "agentsandbox": AgentSandbox, "agentsandbox-warm": AgentSandboxWarm, "cli": Cli}[kind]()
     if kind == "cli":
         kind = os.environ.get("CLI_NAME", "cli")
     res = {"platform": kind, "hosted": os.environ.get("HOSTED") == "1", "n": n, "phases": {}, "errors": {}}
