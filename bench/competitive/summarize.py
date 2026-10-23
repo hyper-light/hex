@@ -71,9 +71,6 @@ def ratio(values, lower_better):
     return f"{r:.2f}x vs {best}", r
 
 
-# Hex's oci class makes no per-container cgroup, so its delete skips the cgroup teardown every other delete
-# includes (RESULT.md): no ratio is drawn on it until the class has one.
-HEX_DELETE = "not comparable: Hex `oci` makes no per-container cgroup to remove"
 # Memory is what the cgroups hold, page cache aside (cgmem.py), in every table. Rounds measured before that
 # have only memory.current, which the kernel's reclaim moves at will, so they never enter these rows.
 MEMORY_AXIS = "memory held per idle {} (page cache aside)"
@@ -95,14 +92,13 @@ def oci_section(run):
     names = ["hex", "runc", "crun", "youki", "runsc"]
     data = {n: rounds(run, n) for n in names}
     data = {n: r for n, r in data.items() if r}
-    rows = []  # (axis, unit, lower_better, {name: value}[, what stands in for the ratio])
+    rows = []  # (axis, unit, lower_better, {name: value})
     for op in ("create", "start", "exec", "delete"):
         per = {}
         for n, rs in data.items():
             per[n] = best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get(op, []) for r in rs.values()])
         for q in ("p50", "p99", "p99.9", "max"):
-            rows.append((f"{op} {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()},
-                         *([HEX_DELETE] if op == "delete" else [])))
+            rows.append((f"{op} {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()}))
     per = {n: best_dist([r["phases"].get("start_true", {}).get("ms", []) for r in rs.values()]) for n, rs in data.items()}
     for q in ("p50", "p99", "p99.9", "max"):
         rows.append((f"create+start of `true` {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()}))
@@ -177,8 +173,7 @@ def platform_section(run, oci_data):
     rows = []
     for op, label in (("create", "create until it runs a command"), ("exec", "exec of `true`"), ("delete", "delete")):
         for q in ("p50", "p99", "p99.9", "max"):
-            rows.append((f"{label} {q} (ms)", "ms", True, {n: (per[n][op] or {}).get(q) for n in names},
-                         *([HEX_DELETE] if op == "delete" else [])))
+            rows.append((f"{label} {q} (ms)", "ms", True, {n: (per[n][op] or {}).get(q) for n in names}))
     for c in ("1", "8", "32"):
         vals = {"hex": max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in hex_rounds), default=0) or None}
         for name, rs in plats.items():
@@ -239,8 +234,8 @@ def platform_notes(plats):
 def table(title, names, rows):
     out = [f"### {title}", "", "| Axis | " + " | ".join(names) + " | Hex vs best competitor |",
            "|---|" + "---|" * len(names) + "---|"]
-    for axis, unit, lower, vals, *note in rows:
-        txt = note[0] if note else ratio(vals, lower)[0]
+    for axis, unit, lower, vals in rows:
+        txt, _ = ratio(vals, lower)
         out.append(f"| {axis} | " + " | ".join(fmt(vals.get(n), unit) for n in names) + f" | {txt} |")
     return "\n".join(out) + "\n"
 
