@@ -77,6 +77,22 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
   0.66 ms measures less work, so it is not a lead. Waiting, bounded, for the exit is also what a later
   create with the same id needs, so that is the fix; the delete axis is re-measured with it.
 
+### Hex's oci class makes no per-container cgroup, so its create and delete ratios are not like for like
+
+Hex's `oci` class parses `linux.cgroupsPath` but never uses it, and doesn't implement `linux.resources`
+(`crates/hex-runtime/src/linux/oci/`). Its containers get no cgroup of their own and no resource
+limits. runc, crun and youki each make a cgroup per container by default. Their `create` includes
+making it, and their `delete --force` includes waiting for it to empty and removing it, which is most
+of crun's 10.76 ms. So:
+
+- Hex's delete numbers (0.66 ms in run 1, 0.86 ms with the exit wait in run 2) skip work the
+  competitors do. They are not a lead.
+- Hex's create is slower than crun's (8.05 ms against 2.99 ms) while doing less, so the true create gap
+  is wider than 0.37x.
+- It is a correctness gap, not only a benchmark caveat. An `oci` container with no bound breaks
+  CLAUDE.md §2 ("every resource has a bound"). The runtime design (goal 4) must give each `oci`
+  container its own cgroup, with `linux.resources` in force, before any `oci`-class ratio counts.
+
 ### Hex's results are affected by two faults
 
 1. **Hex's OCI create race** (a Hex bug). Under load, `create` failed with "ready before the container
