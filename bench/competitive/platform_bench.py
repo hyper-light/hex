@@ -60,7 +60,9 @@ class Daytona:
         s.process.exec("true")
 
     def delete(self, s):
-        self.client.delete(s)
+        # The SDK's delete returns at once by default (wait=False); waiting until the sandbox is gone is
+        # what every other row's delete measures.
+        self.client.delete(s, wait=True)
 
 
 def run_cmd(argv, timeout=300):
