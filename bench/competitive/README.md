@@ -54,10 +54,15 @@ worker that could hang the box driver, and a ratio that divided by zero.
 
 ## Platforms
 
-`platform_bench.py <e2b|daytona> <out> <n> <warmup> <lifecycles> <cap>` drives a platform through its
-own Python SDK: create until the sandbox runs a command, exec of `true`, delete; whole lifecycles per
-second at concurrency 1, 8 and 32; idle sandboxes up to a cap. A platform's cost is spread over many
-services, so its CPU and memory are host-wide (`/proc/stat`, `MemAvailable`) on an otherwise idle host.
+`platform_bench.py <adapter> <out> <n> <warmup> <lifecycles> <cap>` drives a platform through its own
+API: create until the sandbox runs a command, exec of `true`, delete; whole lifecycles per second at
+concurrency 1, 8 and 32; idle sandboxes up to a cap. A platform's cost is spread over many services, so
+its CPU and memory are its stack's own cgroups' (`STACK_CGROUPS`: the stack's containers,
+`docker.service`, `containerd.service`) plus the client's, never host-wide figures, which on a shared host
+charge the platform with everyone else's work. The stack's idle CPU is measured over a minute first and
+taken out of each phase, so CPU per lifecycle is what a lifecycle adds; the idle cost is a row of its
+own. A density phase lists the processes that appeared outside those cgroups, so a sandbox the list
+misses shows up by name.
 Results go in the run directory as `platform.<name>.r<round>.json`, and `summarize.py` sets them against
 Hex's `oci` class (create+start). **That comparison crosses isolation classes**: E2B isolates each
 sandbox in a Firecracker microVM, Daytona's container class shares the host kernel. The like-for-like

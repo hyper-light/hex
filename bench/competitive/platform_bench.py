@@ -9,7 +9,9 @@ against a hosted platform, which the result then labels hosted (its numbers incl
   e2b:      E2B_API_KEY, E2B_DOMAIN or E2B_API_URL as `docker compose exec ready cat /run/e2b/sdk.env`
             prints them; template "base".
   daytona:  DAYTONA_API_URL, DAYTONA_API_KEY; the default snapshot.
-  docker:   the Docker Engine CLI; DOCKER_IMAGE (the OCI bundles' rootfs, `docker import`ed), host /usr bound.
+  docker:   the Docker Engine CLI; DOCKER_IMAGE (the OCI bundles' rootfs, `docker import`ed), host /usr bound;
+            DOCKER_CGROUP_PARENT, a slice listed in STACK_CGROUPS that holds the sandboxes (an idle keeper
+            container holds the slice open for the run, so its counters live as long as the run).
   k8s:      a Pod through the Kubernetes API (kubeconfig; K8S_NAMESPACE, K8S_IMAGE).
   agentsandbox / agentsandbox-warm: kubernetes-sigs/agent-sandbox, a Sandbox (agents.x-k8s.io/v1beta1), or a
             SandboxClaim from the warm pool AS_WARMPOOL (extensions.agents.x-k8s.io/v1beta1).
@@ -20,17 +22,31 @@ Phases: lifecycle (create until the sandbox runs a command, exec of `true`, dele
 throughput (whole lifecycles at concurrency 1, 8, 32), density (idle sandboxes up to the cap), and, for a
 platform that can suspend, resume (n suspend/resume cycles of one sandbox, each resume timed until the
 sandbox runs a command again).
-A platform's cost lives in many services, so CPU and memory are host-wide here: /proc/stat CPU time
-per lifecycle and the MemAvailable drop per idle sandbox, on an otherwise idle bench host.
+A platform's cost lives in many services, so its CPU and memory are those of its stack's own cgroups,
+STACK_CGROUPS (paths under /sys/fs/cgroup, none inside another, each alive for the whole run: the stack's
+containers, docker.service, containerd.service), plus this client and the CLIs it runs, as Hex's bench
+cgroup holds its harness too. Host-wide figures would charge the platform with whatever else the host
+runs. The stack's own idle CPU is measured first and taken out of each phase's CPU, so CPU per lifecycle
+is what a lifecycle adds; the idle cost is recorded beside it. Without STACK_CGROUPS (a hosted
+platform) CPU and memory are not measured.
 """
+import collections
 import itertools
 import json
 import os
+import resource
 import shlex
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+CG_ROOT = "/sys/fs/cgroup"
+# The idle window must hold the stack's periodic work: Daytona's runner long-polls its API with a 30 s
+# timeout and the API runs a 10-second cron (docs/research/runtime/agent-sandbox-platforms.md, Daytona),
+# and a kubelet reports node status every 10 s (KubeletConfiguration's nodeStatusUpdateFrequency default).
+# Cited, not measured: two of the longest period.
+IDLE_S = 60
 
 
 class E2B:
@@ -75,16 +91,24 @@ def run_cmd(argv, timeout=300):
 class Docker:
     def __init__(self):
         self.image = os.environ.get("DOCKER_IMAGE", "hexbench/rootfs:1")
+        parent = os.environ.get("DOCKER_CGROUP_PARENT")
+        self.parent = ["--cgroup-parent", parent] if parent else []
+        # Sandboxes come and go in the slice; the keeper holds it, and the counters, for the whole run.
+        self.keeper = self.create() if parent else None
 
     def create(self):
         return run_cmd(["docker", "run", "-d", "--network", "none", "-v", "/usr:/usr:ro", "--label",
-                        "hex.bench=competitive", self.image, "/usr/bin/sleep", "infinity"])
+                        "hex.bench=competitive", *self.parent, self.image, "/usr/bin/sleep", "infinity"])
 
     def exec_true(self, s):
         run_cmd(["docker", "exec", s, "/usr/bin/true"])
 
     def delete(self, s):
         run_cmd(["docker", "rm", "-f", s])
+
+    def close(self):
+        if self.keeper:
+            self.delete(self.keeper)
 
 
 class Kubernetes:
@@ -238,19 +262,63 @@ class Cli:
         self.run("delete", s)
 
 
-def host_cpu_s():
-    with open("/proc/stat") as f:
-        v = [int(x) for x in f.readline().split()[1:]]
-    busy = v[0] + v[1] + v[2] + v[5] + v[6] + v[7]  # user nice system irq softirq steal
-    return busy / os.sysconf("SC_CLK_TCK")
+def own_cgroup(pid):
+    with open(f"/proc/{pid}/cgroup") as f:
+        return os.path.join(CG_ROOT, f.read().split("::", 1)[-1].strip().lstrip("/"))
 
 
-def mem_available():
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    raise SystemExit("no MemAvailable")
+class Stack:
+    """The platform's cgroups and this client. A cgroup's cpu.stat keeps the CPU of children it has
+    removed, so sandboxes created and deleted inside a listed cgroup still count; a listed cgroup removed
+    or made anew mid-run (a restarted container) loses its counters, so reading it then is an error."""
+
+    def __init__(self, spec):
+        self.paths = [os.path.join(CG_ROOT, p.strip("/")) for p in spec.split()]
+        for a in self.paths:
+            for b in self.paths:
+                if a != b and b.startswith(a + "/"):
+                    raise SystemExit(f"STACK_CGROUPS: {b} is inside {a}, so it would count twice")
+        if self.holds(own_cgroup("self")):
+            raise SystemExit("STACK_CGROUPS holds this client, so its CPU would count twice")
+        self.ino = {p: os.stat(p).st_ino for p in self.paths}
+
+    def holds(self, path):
+        return any(path == p or path.startswith(p + "/") for p in self.paths)
+
+    def read(self, p, name):
+        if os.stat(p).st_ino != self.ino[p]:
+            raise RuntimeError(f"{p} was made anew mid-run, so its usage since then is unknown")
+        with open(os.path.join(p, name)) as f:
+            return f.read()
+
+    def cpu_s(self):
+        usec = 0
+        for p in self.paths:
+            v = [line.split()[1] for line in self.read(p, "cpu.stat").splitlines() if line.startswith("usage_usec ")]
+            if not v:
+                raise RuntimeError(f"{p}/cpu.stat has no usage_usec")
+            usec += int(v[0])
+        ru = [resource.getrusage(w) for w in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)]
+        return usec / 1e6 + sum(r.ru_utime + r.ru_stime for r in ru)
+
+    def mem_bytes(self):
+        return sum(int(self.read(p, "memory.current")) for p in self.paths)
+
+    def outside(self):
+        """{pid: comm} of every process outside the stack's cgroups."""
+        out = {}
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                cg = own_cgroup(d)
+                with open(f"/proc/{d}/comm") as f:
+                    comm = f.read().strip()
+            except OSError:  # it exited between the listing and the read
+                continue
+            if cg != CG_ROOT and not self.holds(cg):  # the root cgroup holds the kernel's threads
+                out[int(d)] = comm
+        return out
 
 
 def timed(fn, *a):
@@ -279,8 +347,34 @@ def main():
         kind = os.environ.get("CLI_NAME", "cli")
     res = {"platform": kind, "hosted": os.environ.get("HOSTED") == "1", "n": n, "phases": {}, "errors": {}}
     try:
+        phases(p, res, n, warmup, lifecycles, cap)
+    finally:
+        if hasattr(p, "close"):
+            p.close()
+    with open(out_path, "w") as f:
+        json.dump(res, f)
+    print(json.dumps({k: v for k, v in res.items() if k != "phases"}))
+
+
+def phases(p, res, n, warmup, lifecycles, cap):
+    spec = os.environ.get("STACK_CGROUPS")
+    stack = Stack(spec) if spec else None
+    idle = 0.0
+    if stack:
+        c0, t0 = stack.cpu_s(), time.perf_counter()
+        time.sleep(IDLE_S)
+        wall = time.perf_counter() - t0
+        idle = (stack.cpu_s() - c0) / wall
+        res["stack"] = {"cgroups": stack.paths, "idle_window_s": wall, "idle_cpu_s_per_s": idle,
+                        "idle_memory_bytes": stack.mem_bytes()}
+        outside0 = set(stack.outside())
+
+    def cpu_per_lifecycle(c0, wall, count):
+        # What the lifecycles added: the stack's CPU less its own idle CPU over the same wall time.
+        return (stack.cpu_s() - c0 - idle * wall) / count
+    try:
         ms = {"create": [], "exec": [], "delete": []}
-        cpu0 = host_cpu_s()
+        c0, t0 = stack.cpu_s() if stack else None, time.perf_counter()
         for i in range(warmup + n):
             c, e, d = lifecycle(p)
             if i >= warmup:
@@ -288,24 +382,29 @@ def main():
                 if e is not None:
                     ms["exec"].append(e)
                 ms["delete"].append(d)
-        res["phases"]["lifecycle"] = {"ms": ms, "host_cpu_s_per_lifecycle": (host_cpu_s() - cpu0) / (warmup + n)}
+        res["phases"]["lifecycle"] = {"ms": ms}
+        if stack:
+            res["phases"]["lifecycle"]["stack_cpu_s_per_lifecycle"] = cpu_per_lifecycle(
+                c0, time.perf_counter() - t0, warmup + n)
     except Exception as e:
         res["errors"]["lifecycle"] = f"{type(e).__name__}: {e}"
     try:
         tp = {}
         for conc in (1, 8, 32):
-            t0 = time.perf_counter()
+            c0, t0 = stack.cpu_s() if stack else None, time.perf_counter()
             with ThreadPoolExecutor(max_workers=conc) as pool:
                 list(pool.map(lambda _: lifecycle(p), range(lifecycles)))
             wall = time.perf_counter() - t0
             tp[str(conc)] = {"lifecycles": lifecycles, "wall_s": wall, "per_s": lifecycles / wall}
+            if stack:
+                tp[str(conc)]["stack_cpu_s_per_lifecycle"] = cpu_per_lifecycle(c0, wall, lifecycles)
         res["phases"]["throughput"] = tp
     except Exception as e:
         res["errors"]["throughput"] = f"{type(e).__name__}: {e}"
-    held = []
+    held, failed = [], []
     stop = "cap"
     try:
-        base = mem_available()
+        base = stack.mem_bytes() if stack else None
         t0 = time.perf_counter()
         for i in range(cap):
             try:
@@ -313,20 +412,27 @@ def main():
             except Exception as e:  # a platform at its limit refuses: that bound is the density result
                 stop = f"refused at {i}: {type(e).__name__}: {str(e)[:200]}"
                 break
-        wall = time.perf_counter() - t0
-        time.sleep(5)
-        used = base - mem_available()
-        res["phases"]["density"] = {"count": len(held), "stop": stop, "start_wall_s": wall, "memory_bytes": used,
-                                    "memory_per_sandbox_bytes": used / len(held) if held else None,
-                                    "sandboxes_per_gib": len(held) / (used / 2**30) if used > 0 else None}
+        density = {"count": len(held), "stop": stop, "start_wall_s": time.perf_counter() - t0}
+        if stack:
+            time.sleep(5)  # let the sandboxes settle before reading memory
+            used = stack.mem_bytes() - base
+            new = collections.Counter(c for pid, c in stack.outside().items() if pid not in outside0)
+            density.update({"stack_memory_bytes": used,
+                            "stack_memory_per_sandbox_bytes": used / len(held) if held and used > 0 else None,
+                            "stack_sandboxes_per_gib": len(held) / (used / 2**30) if used > 0 else None,
+                            # A sandbox's own processes among these mean STACK_CGROUPS misses part of the stack.
+                            "new_processes_outside_stack": dict(new.most_common(20))})
+        res["phases"]["density"] = density
     except Exception as e:
         res["errors"]["density"] = f"{type(e).__name__} after {len(held)}: {e}"
     finally:
         for s_ in held:
             try:
                 p.delete(s_)
-            except Exception:
-                pass
+            except Exception as e:
+                failed.append(f"{type(e).__name__}: {str(e)[:200]}")
+        if failed:
+            res["errors"]["density_teardown"] = f"{len(failed)} of {len(held)} deletes failed, the first: {failed[0]}"
     if hasattr(p, "suspend"):
         try:
             s_ = p.create()
@@ -345,9 +451,6 @@ def main():
                 p.delete(s_)
         except Exception as e:
             res["errors"]["resume"] = f"{type(e).__name__}: {e}"
-    with open(out_path, "w") as f:
-        json.dump(res, f)
-    print(json.dumps({k: v for k, v in res.items() if k != "phases"}))
 
 
 if __name__ == "__main__":

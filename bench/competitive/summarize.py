@@ -53,6 +53,8 @@ def fmt(v, unit):
         return f"{v / 2**20:.2f} MiB"
     if unit == "per_gib":
         return f"{v:.0f}"
+    if unit == "cpus":
+        return f"{v:.3f} CPUs"
     return str(v)
 
 
@@ -140,6 +142,7 @@ def platform_section(run, oci_data):
     for path in sorted(glob.glob(os.path.join(run, "platform.*.r*.json"))):
         with open(path) as f:
             d = json.load(f)
+        d["round"] = int(re.search(r"\.r(\d+)\.json$", path).group(1))
         name = d["platform"] + (" (hosted)" if d.get("hosted") else "")
         plats.setdefault(name, []).append(d)
     if not plats:
@@ -165,13 +168,56 @@ def platform_section(run, oci_data):
         for name, rs in plats.items():
             vals[name] = max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in rs), default=0) or None
         rows.append((f"lifecycles/s at concurrency {c}", "/s", False, vals))
-    mem = {"hex": min((r["phases"]["density"]["memory_per_container_bytes"] for r in hex_rounds
-                       if r["phases"].get("density", {}).get("memory_per_container_bytes")), default=None)}
+
+    def best(rs, get, lower):
+        vals = [v for v in (get(r) for r in rs) if v is not None and v > 0]
+        return (min(vals) if lower else max(vals)) if vals else None
+
+    def phase(r, name):
+        return r["phases"].get(name) or {}
+    # Hex's figures are its bench cgroup's; a platform's are its stack's cgroups' (platform_bench.py).
+    # Older rounds' host-wide figures have other keys, so they never enter these rows.
+    cpu = {"hex": best(hex_rounds, lambda r: phase(r, "throughput").get("1", {}).get("cpu_s_per_lifecycle"), True)}
+    mem = {"hex": best(hex_rounds, lambda r: phase(r, "density").get("memory_per_container_bytes"), True)}
+    dens = {"hex": best(hex_rounds, lambda r: phase(r, "density").get("containers_per_gib"), False)}
+    idle_cpu, idle_mem = {"hex": None}, {"hex": None}
     for name, rs in plats.items():
-        mem[name] = min((r["phases"]["density"]["memory_per_sandbox_bytes"] for r in rs
-                         if r["phases"].get("density", {}).get("memory_per_sandbox_bytes")), default=None)
-    rows.append(("memory per idle sandbox (platforms: host MemAvailable drop)", "bytes", True, mem))
+        cpu[name] = best(rs, lambda r: phase(r, "throughput").get("1", {}).get("stack_cpu_s_per_lifecycle"), True)
+        mem[name] = best(rs, lambda r: phase(r, "density").get("stack_memory_per_sandbox_bytes"), True)
+        dens[name] = best(rs, lambda r: phase(r, "density").get("stack_sandboxes_per_gib"), False)
+        idle_cpu[name] = best(rs, lambda r: (r.get("stack") or {}).get("idle_cpu_s_per_s"), True)
+        idle_mem[name] = best(rs, lambda r: (r.get("stack") or {}).get("idle_memory_bytes"), True)
+    rows.append(("CPU per lifecycle at concurrency 1 (platforms: what a lifecycle adds to their stack's CPU)",
+                 "cpu", True, cpu))
+    rows.append(("memory per idle sandbox", "bytes", True, mem))
+    rows.append(("density (idle sandboxes per GiB)", "per_gib", False, dens))
+    rows.append(("the stack's own CPU at idle (Hex `oci` runs no daemon)", "cpus", True, idle_cpu))
+    rows.append(("the stack's own memory at idle (Hex `oci` runs no daemon)", "bytes", True, idle_mem))
+    if any(phase(r, "resume") for rs in plats.values() for r in rs):
+        for op in ("suspend", "resume"):
+            per = {"hex": None}
+            for name, rs in plats.items():
+                per[name] = best_dist([phase(r, "resume").get("ms", {}).get(op, []) for r in rs])
+            for q in ("p50", "p99", "p99.9", "max"):
+                rows.append((f"{op} {q} (ms; Hex has none yet)", "ms", True, {n: (per.get(n) or {}).get(q) for n in names}))
     return names, rows, plats
+
+
+def platform_notes(plats):
+    """Per round: where density stopped, the referee's count, processes the stack's cgroups missed, errors."""
+    out = []
+    for name, rs in sorted(plats.items()):
+        for r in sorted(rs, key=lambda r: r["round"]):
+            d = r["phases"].get("density") or {}
+            bits = [f"density stopped at {d.get('count', 0)} ({d.get('stop', 'no density phase')})"]
+            if r.get("referee"):
+                bits.append(f"foreign load in {r['referee']['foreign']} of {r['referee']['samples']} samples")
+            if d.get("new_processes_outside_stack"):
+                bits.append("new processes outside the stack's cgroups: " + json.dumps(d["new_processes_outside_stack"]))
+            if r.get("errors"):
+                bits.append("errors: " + json.dumps(r["errors"]))
+            out.append(f"- {name}, round {r['round']}: " + "; ".join(bits))
+    return "\n".join(out) + "\n"
 
 
 def table(title, names, rows):
@@ -196,6 +242,7 @@ def main():
     pnames, prows, plats = platform_section(run, data)
     if plats:
         parts.append(table("Sandbox platforms (end to end through each SDK) against Hex `oci`", pnames, prows))
+        parts.append(platform_notes(plats))
     methods, rows, rs = box_section(run)
     if rs:
         parts.append(table("Process class (`hex box run` against systemd transient units)", methods, rows))
