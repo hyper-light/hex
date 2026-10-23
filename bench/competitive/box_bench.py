@@ -120,8 +120,14 @@ def run_workers(method, hex_bin, workers, per_worker, warmup, S):
         a, b = ctx.Pipe(duplex=False)
         p = ctx.Process(target=worker, args=(method, hex_bin, f"{S}/w{k}", per_worker, warmup, b))
         p.start()
+        b.close()  # only the worker holds the sending end, so a worker that dies ends recv() with EOFError
         procs.append((p, a))
-    out = [a.recv() for _, a in procs]
+    out = []
+    for p, a in procs:
+        try:
+            out.append(a.recv())
+        except EOFError:
+            out.append({"error": f"worker exited {p.exitcode} without a result"})
     for p, _ in procs:
         p.join(timeout=CALL_TIMEOUT_S)
     errs = [o["error"] for o in out if "error" in o]
