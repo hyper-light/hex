@@ -14,8 +14,8 @@ system), `CL` CLAIMED (no stated method), `DE` DESIGN (a fact from a document, c
 a speed). `n/p` = not published, or not found in what was read. Citations are `[n]` (References at the
 end). Hyper-light code is cited at hyper-raft commit 6a236ae.
 
-*Verified (2026-10-22):* 111 quoted figures and phrases were checked against the saved text of their
-sources: 108 by script, and 3 by reading them where a code comment or a hyphenated line splits them.
+*Verified (2026-10-22):* 147 quoted figures and phrases were checked against the saved text of their
+sources: 143 by script, and 4 by reading them where a code comment or a hyphenated line splits them.
 
 ## Summary
 
@@ -29,7 +29,10 @@ sources: 108 by script, and 3 by reading them where a code comment or a hyphenat
    dimensions plus a height, with no gravity, adjustment term or latency filter. It replaced the
    Serf-style engine that came from Hyperscale (eight dimensions, a height share, an adjustment term
    clamped at ±1 s, 0.99 gravity) [3][4]. Today it ranks only the relays for indirect probes [5], and its
-   accuracy has been checked only on loopback and container links [6].
+   accuracy has been checked only on loopback and container links [6]. Hyperscale's gate is the precedent for
+   placement: it scores each datacenter on a blend of a quality-weighted RTT upper confidence bound and the
+   latency it has observed. A datacenter with no evidence is scored as far away as the farthest known one,
+   and health is never traded for latency [33][34][35] (DE).
 3. **Consul shows what coordinates are for in operations**: sorting service results by estimated RTT
    (`?near=`), failing prepared queries over to the next-closest datacenter, and an `rtt` command. LAN and
    WAN coordinates are separate and cannot be compared [7] (DE).
@@ -126,7 +129,39 @@ the membership [3]. Today the detector uses them to choose indirect-probe relays
 coordinate space" [5] (DE). The repository has never measured them against a wide-area round-trip
 matrix: "its loopback and container round trips are one link's, all alike" [6].
 
-### 1.5 What coordinates do not give
+### 1.5 Hyperscale: coordinates in routing
+
+Hyperscale, hyper-light's Python framework for performance testing and scalable unit and integration
+testing, runs its own Vivaldi engine in distributed mode. It has 8 dimensions, `c_e = 0.25`, a height,
+an adjustment term and a small centering gravity, and keeps a coordinate's error as a moving average of
+its absolute prediction error in seconds [33] (DE). Its gate routes jobs across datacenters with those
+coordinates in four steps [34][35][36] (DE):
+
+- **RTT as an upper confidence bound.** `rtt_ucb = clamp(rtt_hat + K_SIGMA·σ, RTT_MIN, RTT_MAX)` with
+  `K_SIGMA = 2`, σ bounded to 1-500 ms and the estimate to 1 ms-10 s. A coordinate earns full quality
+  (has converged) at 10 samples and an error of at most 20 ms, and expires after 300 s [33].
+- **Blend with what was observed.** A datacenter's estimate is `confidence·observed + (1 − confidence)·
+  (quality·rtt_ucb + (1 − quality)·prior)`. Here `observed` is an EWMA of its time to accept a
+  dispatch, with confidence growing with its sample count. The prior is "the farthest latency evidenced
+  for any datacenter". While the gate's own coordinate has not converged, "Vivaldi distances measured from
+  it are not evidence" [35][36].
+- **Health first.** Unhealthy and initializing datacenters are excluded, as are those with no managers or
+  with every manager's circuit open, each with its reason recorded. "A missing coordinate never
+  excludes." The rest are bucketed HEALTHY, BUSY and DEGRADED, "in that order, never traded for latency".
+  Within a bucket, `score = latency × load_factor × health_severity_weight × slo_routing_factor`, where the
+  load factor adds utilization, queue depth and circuit pressure at one third each [34].
+- **A datacenter that failed a job cools down for that job.** It is routed after every other eligible
+  datacenter for `CIRCUIT_BREAKER_HALF_OPEN_AFTER`, but not excluded, since "it may be the only one left".
+  Ties break on a rendezvous hash of the job id [34].
+
+The record states its own gap: the criterion of under 10 s for losing a datacenter "is **unverified**:
+no test asserts it", and the only tested bound holds death classification to at most 30 s [34]. AD-35
+also dropped scaling failure-detection timeouts by RTT ratio. Probe timeouts pad only for the node's own
+unreliability (Lifeguard's local health), because "the base probe timeout (1s) already exceeds any
+terrestrial round trip" [32].
+
+### 1.6 What coordinates do not give
+
 
 - **Bandwidth.** Vivaldi, Ledlie and Serf model latency only [1][2][4]. None of the sources read
   predicts bandwidth from coordinates; bandwidth-aware placement is a gap here.
@@ -238,6 +273,15 @@ was "rolled out to all of Google's shared compute clusters" [16] (MV). The machi
   ejected hosts is below `max_ejection_percent`. The ejection lasts `base_ejection_time` multiplied by the
   host's consecutive ejections, up to `max_ejection_time`. The multiplier decrements at each healthy check,
   and a load balancer in its "panic" scenario uses ejected hosts anyway [18] (DE).
+- **Borg.** "If a Borglet does not respond to several poll messages its machine is marked as down", and
+  its tasks are rescheduled elsewhere. If the machine comes back, the Borgmaster tells it to kill the
+  rescheduled tasks, to avoid duplicates [37]. Borg also spreads a job's tasks across failure domains
+  (machines, racks, power domains), and limits both the rate of task disruptions and how many of a job's
+  tasks may be down at once during maintenance. It "rate-limits finding new places for tasks from
+  machines that become unreachable, because it cannot distinguish between large-scale machine failure and
+  a network partition", and it "avoids repeating task::machine pairings that cause task or machine
+  crashes" [37] (DE). Running tasks keep running when the Borgmaster or their Borglet is down [37]. The
+  rest of Borg is in [`cluster-managers-at-scale.md`](cluster-managers-at-scale.md).
 - **Nodes.** Kubernetes taints a not-ready or unreachable node `NoExecute`, and pods get an automatic
   toleration of `tolerationSeconds=300`. "The control plane limits the rate of adding new taints to nodes",
   which bounds evictions when many nodes become unreachable at once, for example in a network
@@ -279,7 +323,7 @@ workloads) and node health; the decisions go in `docs/design/` with Hex's own me
 
 | Lesson | Evidence | Falsified if |
 |---|---|---|
-| **Use hyper-swim's coordinates as a soft latency score, weighted by each node's error estimate**: for placing an agent near its gang, its data or its caller, never as a hard filter | 11% median error in Vivaldi's evaluation [1]; higher error and heavy triangle-inequality violation in the wild [2]; the engine exists and is bounded [3][5] | On Hex's own fleet, coordinate-predicted RTT ranks candidate nodes no better than random against measured RTT |
+| **Use hyper-swim's coordinates as a soft latency score, weighted by each node's error estimate**: for placing an agent near its gang, its data or its caller, never as a hard filter | 11% median error in Vivaldi's evaluation [1]; higher error and heavy triangle-inequality violation in the wild [2]; the engine exists and is bounded [3][5]; Hyperscale blends a quality-weighted RTT upper bound with observed latency under a conservative prior, and never trades health for latency [34][35] | On Hex's own fleet, coordinate-predicted RTT ranks candidate nodes no better than random against measured RTT |
 | **Measure the RTT to non-member endpoints directly** (provider APIs, registries, object stores), per node and passively from real calls | Coordinates cover members only; Consul's two pools do not share a space [7] | Providers expose a coordinate-compatible latency signal |
 | **Bandwidth comes from topology and measured transfers, not coordinates** | No source read predicts bandwidth from coordinates [1][2][4] | A coordinate-based bandwidth predictor is found with measured accuracy |
 | **Node liveness is hyper-swim's (SWIM + Lifeguard + NFD-E)**; its verdicts are hints, and the scheduler's committed membership decides | Constant per-member load [8]; 50-100x fewer false positives under slow members [9]; measured-timing detectors [26] | Hex's bursty nodes still show false suspicions at a rate that churns placement |
@@ -371,3 +415,15 @@ the version read.
 [30] N. Bronson, A. Aghayev, A. Charapko, T. Zhu, "Metastable Failures in Distributed Systems", HotOS '21. https://sigops.org/s/conferences/hotos/2021/papers/hotos21-s11-bronson.pdf
 
 [31] Google, "Addressing Cascading Failures", Site Reliability Engineering (the SRE book), chapter 22. https://sre.google/sre-book/addressing-cascading-failures/
+
+[32] hyper-light, Hyperscale `docs/architecture/AD_35.md`, "AD-35: Vivaldi Network Coordinates with Role-Aware Failure Detection" ("As built", 2026-10), at commit 9e7fcda. https://github.com/hyper-light/hyperscale/blob/9e7fcda/docs/architecture/AD_35.md
+
+[33] hyper-light, Hyperscale `hyperscale/distributed/models/vivaldi_config.py` and `hyperscale/distributed/swim/coordinates/coordinate_engine.py`, at commit 9e7fcda. https://github.com/hyper-light/hyperscale/tree/9e7fcda/hyperscale/distributed
+
+[34] hyper-light, Hyperscale `docs/architecture/AD_36.md`, "AD-36: Vivaldi-Based Cross-Datacenter Job Routing" ("As built", 2026-10), at commit 9e7fcda. https://github.com/hyper-light/hyperscale/blob/9e7fcda/docs/architecture/AD_36.md
+
+[35] hyper-light, Hyperscale `hyperscale/distributed/routing/datacenter_latency_estimator.py`, at commit 9e7fcda. https://github.com/hyper-light/hyperscale/blob/9e7fcda/hyperscale/distributed/routing/datacenter_latency_estimator.py
+
+[36] hyper-light, Hyperscale `docs/architecture/AD_45.md`, "AD-45: Adaptive Route Learning", at commit 9e7fcda. https://github.com/hyper-light/hyperscale/blob/9e7fcda/docs/architecture/AD_45.md
+
+[37] A. Verma, L. Pedrosa, M. Korupolu, D. Oppenheimer, E. Tune, J. Wilkes (Google), "Large-scale cluster management at Google with Borg", EuroSys '15. https://storage.googleapis.com/gweb-research2023-media/pubtools/pdf/43438.pdf
