@@ -122,16 +122,26 @@ def runsc(base, bindir):
             h.update(chunk)
     if h.hexdigest() != want:
         raise SystemExit("runsc: gvisor.tar.bz2 sha512 mismatch")
+    # runsc runs its Sentry from gvisor-bin/ beside itself (gvisor_sentry and helpers), so the set is
+    # installed together; only regular files named runsc or directly under gvisor-bin/ are taken.
+    taken = []
     with tarfile.open(path) as tar:
-        member = next((m for m in tar.getmembers() if m.isfile() and os.path.basename(m.name) == "runsc"), None)
-        if member is None:
-            raise SystemExit("runsc: no runsc binary in gvisor.tar.bz2")
-        out = os.path.join(d, "runsc.bin")
-        with tar.extractfile(member) as src, open(out, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-    install(out, bindir, "runsc")
+        for m in tar.getmembers():
+            parts = m.name.split("/")
+            if not m.isfile() or ".." in parts or m.name.startswith("/"):
+                continue
+            if parts == ["runsc"] or (len(parts) == 2 and parts[0] == "gvisor-bin"):
+                dst = os.path.join(bindir, *parts)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                with tar.extractfile(m) as src, open(dst, "wb") as out_f:
+                    shutil.copyfileobj(src, out_f)
+                os.chmod(dst, 0o755)
+                taken.append(m.name)
+    if "runsc" not in taken or "gvisor-bin/gvisor_sentry" not in taken:
+        raise SystemExit(f"runsc: gvisor.tar.bz2 lacks runsc or gvisor-bin/gvisor_sentry (found {taken})")
+    out = os.path.join(bindir, "runsc")
     return {"tag": "release/latest", "url": url, "sha256": sha256(out), "verified": True,
-            "note": "gvisor.tar.bz2 sha512-verified; runsc taken from it"}
+            "note": "gvisor.tar.bz2 sha512-verified; runsc and gvisor-bin/ installed from it: " + ", ".join(sorted(taken))}
 
 
 def main():

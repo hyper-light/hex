@@ -93,16 +93,33 @@ def worker(method, hex_bin, cgroup, count, warmup, conn):
     """A single-threaded worker process: count timed runs of the method; sends samples back."""
     try:
         argv = argv_for(method, hex_bin, ["/usr/bin/true"])
-        cg = cgroup if method == "hex" else None
         ms, cpu = [], []
         for i in range(warmup + count):
+            # `hex box run` takes over the cgroup it starts in and parents its box there, after which
+            # cgroup v2 admits no new process to it; so each Hex run starts in a fresh, empty cgroup,
+            # made before and removed after the timed call.
+            cg = f"{cgroup}-{i}" if method == "hex" else None
+            if cg:
+                os.mkdir(cg)
             a, b = run_once(argv, cg)
+            if cg:
+                remove_tree(cg)
             if i >= warmup:
                 ms.append(a)
                 cpu.append(b)
         conn.send({"ms": ms, "cpu_s": cpu})
     except Exception as e:  # reported, never dropped
         conn.send({"error": f"{type(e).__name__}: {e}"})
+
+
+def remove_tree(cg):
+    """Removes an emptied cgroup and its emptied children, deepest first (bounded by the tree's size)."""
+    dirs = [d for d, _, _ in os.walk(cg)]
+    stand_in = bool(os.environ.get("HEXBENCH_SELF_CGROUP"))  # plain dirs: cgroup.procs is a real file there
+    for d in reversed(dirs):
+        if stand_in and os.path.isfile(os.path.join(d, "cgroup.procs")):
+            os.unlink(os.path.join(d, "cgroup.procs"))
+        os.rmdir(d)
 
 
 def ticks(pid):
@@ -227,8 +244,6 @@ def main():
         f.write(str(os.getpid()))
     with open(S + "/cgroup.subtree_control", "w") as f:
         f.write("+cpu +io +memory +pids")
-    for k in range(32):
-        os.makedirs(f"{S}/w{k}", exist_ok=True)
     user_service_cg = os.environ.get("HEXBENCH_USER_CGROUP") or S
     while not os.path.basename(user_service_cg).startswith("user@"):
         user_service_cg = os.path.dirname(user_service_cg)
