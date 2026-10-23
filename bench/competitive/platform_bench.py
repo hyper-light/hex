@@ -38,6 +38,7 @@ import resource
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -137,6 +138,8 @@ class Kubernetes:
         api = client.ApiClient(cfg)
         self.v1, self.co = client.CoreV1Api(api), client.CustomObjectsApi(api)
         self.watch, self.stream, self.ApiException = watch, stream, client.exceptions.ApiException
+        self.exec_api = lambda: client.CoreV1Api(client.ApiClient(cfg))
+        self.local = threading.local()
         self.ns = os.environ.get("K8S_NAMESPACE", "hexbench")
         self.image = os.environ.get("K8S_IMAGE", "busybox:1.37")
         self.seq = itertools.count()
@@ -170,7 +173,14 @@ class Kubernetes:
         return name
 
     def exec_in(self, pod):
-        self.stream(self.v1.connect_get_namespaced_pod_exec, pod, self.ns, command=["true"],
+        # stream() swaps its ApiClient's call_api for a websocket call while it runs (kubernetes 37.0.1,
+        # stream/stream.py). Every other request on that client meanwhile goes out as a websocket handshake
+        # ("Handshake status 200 OK"), and two overlapping execs can leave it swapped for good. So an exec
+        # never shares a client: each thread makes its own at its first exec (in the lifecycle phase, during
+        # warm-up).
+        if not hasattr(self.local, "v1"):
+            self.local.v1 = self.exec_api()
+        self.stream(self.local.v1.connect_get_namespaced_pod_exec, pod, self.ns, command=["true"],
                     stderr=True, stdin=False, stdout=True, tty=False)
 
     def exec_true(self, s):
