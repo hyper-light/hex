@@ -9,14 +9,18 @@
 # anew mid-run (a restarted container) is void (restarted.try<t>...) and the next try runs; a try whose density
 # found a sandbox's own processes outside STACK_CGROUPS stops the referee (stackmiss.try<t>...), so the list
 # can be fixed. Tries already made can be passed as PRIOR="<try>:<foreign>:<samples> ...".
+# DENSITY_ONLY=1 (a density-only round; the gate's light rule, see platform_gate.sh): one try, no retry; the
+# try is the round whatever its foreign share, which the sampler still measures and the round records.
 P=${1:?platform}; N=${2:?round}; FIRST=${3:?first try}; IDLE=${4:?idle since}; LABEL=${5:?stack label}; CMD=${6:?bench command}
 T7=$HOME/.cache/hex-bench/t7; O=$HOME/.cache/hex-bench/out/20261023T025023Z; F=platform.$P.r$N.json
 rec() { echo "$*" >> "$O/platforms.txt"; }
+keep() { [ -e "$O/$1" ] && { echo "refusing: $1 already exists, so the try cannot be kept under it"; exit 9; }; mv -n "$O/$F" "$O/$1"; }  # never silently skip a rename
 best_t=""; best_h=""; best_n=""
 lower() { awk -v a="$1" -v b="$2" -v c="$3" -v d="$4" 'BEGIN{exit !(b > 0 && (d == 0 || a/b < c/d))}'; }  # a/b < c/d
 for p in ${PRIOR:-}; do IFS=: read -r pt ph pn <<< "$p"
   if [ -z "$best_t" ] || lower "$ph" "$pn" "$best_h" "$best_n"; then best_t=$pt; best_h=$ph; best_n=$pn; fi; done
-for t in $(seq "$FIRST" 3); do
+LAST=3; [ "${DENSITY_ONLY:-0}" = 1 ] && LAST=$FIRST
+for t in $(seq "$FIRST" "$LAST"); do
   [ -e "$O/$F" ] && { echo "refusing: $F already exists"; exit 5; }
   "$T7/platform_gate.sh" "$P" "$N (try $t)" "$IDLE" "$LABEL" || exit 3
   SC=$(STACK_LABEL="$LABEL" "$T7/stack_cgroups.sh" "$P") || { echo "no STACK_CGROUPS for $P"; exit 8; }
@@ -54,20 +58,25 @@ PY
   newproc=$(python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps((d.get("phases",{}).get("density") or {}).get("new_processes_outside_stack")))' "$O/$F")
   case "$verdict" in
     restarted)
-      mv -n "$O/$F" "$O/restarted.try$t.$F"
+      keep "restarted.try$t.$F"
       rec "== referee: $P round $N try $t VOID: a stack cgroup was made anew mid-run (a container restarted), so its CPU and memory are unknown; kept as restarted.try$t.$F; foreign $h of $n samples ($share%)"; rec ""
       echo "$(date '+%T') VOID try $t: a stack cgroup was made anew mid-run"; continue ;;
     stackmiss*)
-      mv -n "$O/$F" "$O/stackmiss.try$t.$F"
+      keep "stackmiss.try$t.$F"
       rec "== referee: $P round $N try $t STOPPED: density found a sandbox's own processes outside STACK_CGROUPS (${verdict#stackmiss }), so the list misses part of the stack; kept as stackmiss.try$t.$F; new processes outside the stack: $newproc"; rec ""
       echo "$(date '+%T') STACKMISS try $t: ${verdict#stackmiss }; new outside: $newproc"; exit 7 ;;
   esac
+  if [ "${DENSITY_ONLY:-0}" = 1 ]; then
+    rec "== referee: $P round $N try $t KEPT, DENSITY ONLY (one try, no retry): foreign load in $h of $n samples ($share%), recorded, not judged; kiln host over 50% in $kh samples; new processes outside the stack at density: $newproc"
+    [ "$h" -gt 0 ] && sed 's/^/     /' "$T7/sampler.$tag.log" | head -15 >> "$O/platforms.txt"; rec ""
+    echo "$(date '+%T') KEPT (density only) $F try $t: foreign $h/$n ($share%), kiln host $kh; new outside: $newproc"; exit 0
+  fi
   if awk -v h="$h" -v n="$n" 'BEGIN{exit !(n > 0 && h/n < 0.10)}'; then
     rec "== referee: $P round $N try $t ACCEPTED: foreign load in $h of $n samples ($share%), under 10%; kiln host over 50% in $kh samples (not counted); new processes outside the stack at density: $newproc"
     [ "$h" -gt 0 ] && sed 's/^/     /' "$T7/sampler.$tag.log" >> "$O/platforms.txt"; rec ""
     echo "$(date '+%T') ACCEPTED $F try $t: foreign $h/$n ($share%), kiln host $kh; new outside: $newproc"; exit 0
   fi
-  mv -n "$O/$F" "$O/foreignload.try$t.$F"
+  keep "foreignload.try$t.$F"
   rec "== referee: $P round $N try $t REJECTED: foreign load in $h of $n samples ($share%); kiln host over 50% in $kh samples (not counted); kept as foreignload.try$t.$F; new processes outside the stack at density: $newproc"
   sed 's/^/     /' "$T7/sampler.$tag.log" | head -15 >> "$O/platforms.txt"; rec ""
   echo "$(date '+%T') REJECTED try $t: foreign $h/$n ($share%); new outside: $newproc"

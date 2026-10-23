@@ -39,6 +39,16 @@ the samples saw.
   - A try during which a stack container restarted is void, since its cgroup counters reset.
   - A try whose density phase found a sandbox's own processes outside `STACK_CGROUPS` stops the referee,
     so the list can be fixed.
+  - A rename that would overwrite a file is refused.
+- **Density-only rounds (`DENSITY_ONLY=1`)** run one try with no retry. The gate checks only for other
+  benchmark units: no idle wait, no (b). The sampler's share is recorded but doesn't judge the round.
+
+  Why: held memory doesn't depend on other people's CPU load. k8s round 3's three tries gave 7.93, 7.74
+  and 7.87 MiB per Pod at 51.3%, 15.4% and 20.5% foreign load (within 2.5%), and the stack's idle held
+  memory read 1.31 GiB in each. A density round's start time isn't reported.
+- **Benchmark units** are `.service` and `.scope` units named for the bench. A `.slice` doesn't count: an
+  empty one stays active until stopped, and the box bench's density slice held k8s round 4's gate shut
+  for an hour before `box_bench.py` learned to stop it.
 - **`stack_cgroups.sh <platform>`**: `STACK_CGROUPS` for a platform. It lists:
   - the scopes of the stack's running containers;
   - `system.slice/docker.service` and `system.slice/containerd.service`;

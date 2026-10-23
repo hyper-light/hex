@@ -1,18 +1,22 @@
 #!/bin/bash
 # platform_gate.sh <platform> <round> <idle-since epoch> <stack label>: the platform-pass gate
-# (T7 agent, 2026-10-23, fourth revision). <stack label> is the docker label naming the stack's containers,
+# (T7 agent, 2026-10-23, fifth revision). <stack label> is the docker label naming the stack's containers,
 # e.g. com.docker.compose.project=hexbench-daytona or io.x-k8s.kind.cluster=hexbench. STACK_EXTRA_CG (optional,
 # space-separated cgroup paths such as /e2b, E2B's per-sandbox Firecracker cgroups) adds stack cgroups outside
 # every container; the round's own unit, hexbench-<platform>-r<N>-t<try>.service, is the bench, never foreign.
-#  (a) no other benchmark unit is active, and no process outside the platform's stack runs at a nice below
-#      10 using over 50% CPU, from a 5-second sample (the second frame of `top -b -n 2 -d 5`). The stack is
-#      the processes of the labelled containers (anything under their docker-<id>.scope cgroups, nested
-#      container engines included) and the host's dockerd and containerd (shims too), which serve them.
-#      A busy process that exits before its cgroup can be read counts as outside the stack. Processes at
-#      nice 10 or above never block (a); each one using CPU is listed in the round's record.
+#  (a) no other benchmark unit is active (a .service or .scope unit whose name holds bench, routing-gate or
+#      big-goals-check; never a .slice, which stays active empty until stopped), and no process outside the
+#      platform's stack runs at a nice below 10 using over 50% CPU, from a 5-second sample (the second frame of
+#      `top -b -n 2 -d 5`). The stack is the processes of the labelled containers (anything under their
+#      docker-<id>.scope cgroups, nested container engines included) and the host's dockerd and containerd
+#      (shims too), which serve them. A busy process that exits before its cgroup can be read counts as
+#      outside the stack. Processes at nice 10 or above never block (a); each one using CPU is listed in the
+#      round's record.
 #  (b) the 1-minute load is under 2 plus the stack's idle load: the 1-minute load once the stack has sat up
 #      and idle for 5 minutes with no rounds running, read at a moment when (a) holds.
 # With (a) holding and (b) not, it waits up to 45 minutes, then lets the round run anyway, saying so.
+# DENSITY_ONLY=1 (a density-only round: held memory does not depend on other work's CPU load): (a) checks only
+# benchmark units, not foreign load, and the 5-minute idle wait and (b) are skipped.
 # Appends the round's idle load, start load, top 5 processes and niced CPU users to $OUT/platforms.txt.
 PLATFORM=${1:?platform}; ROUND=${2:?round}; IDLE_SINCE=${3:?idle since}; STACK_LABEL=${4:?stack label}
 O=$HOME/.cache/hex-bench/out/20261023T025023Z; SAMPLE=$HOME/.cache/hex-bench/t7/gate.sample  # overwritten by each reading
@@ -35,21 +39,46 @@ whose() {  # "stack", "stack-infra", "bench", "kiln-host" or "foreign:<cgroup ta
   case "$cg" in /system.slice/docker.service*|/system.slice/containerd.service*) echo stack-infra; return ;; esac
   echo "foreign:${cg##*/}"
 }
+bench_units() {  # active benchmark units: .service and .scope only, never a .slice
+  systemctl --user list-units --no-legend --plain --state=active,activating,deactivating 2>/dev/null \
+    | awk '{print $1}' | grep -E '\.(service|scope)$' | grep -E 'bench|routing-gate|big-goals-check' | tr '\n' ' '
+}
 why_not_a() {  # prints why (a) fails, nothing when it holds; takes a fresh sample
   local units busy pid ni cpu comm w
   sample
-  units=$(systemctl --user list-units --no-legend --plain --state=active,activating,deactivating 2>/dev/null \
-    | awk '{print $1}' | grep -E 'bench|routing-gate|big-goals-check' | tr '\n' ' ')
+  units=$(bench_units)
   busy=""
-  while read -r pid ni cpu comm; do
-    awk -v c="$cpu" -v n="$ni" 'BEGIN{exit !(c > 50 && n < 10)}' || continue
-    w=$(whose "$pid")
-    case "$w" in foreign:*) busy="$busy$comm pid $pid nice $ni $cpu% (${w#foreign:}) " ;; esac
-  done < "$SAMPLE"
+  if [ "${DENSITY_ONLY:-0}" != 1 ]; then
+    while read -r pid ni cpu comm; do
+      awk -v c="$cpu" -v n="$ni" 'BEGIN{exit !(c > 50 && n < 10)}' || continue
+      w=$(whose "$pid")
+      case "$w" in foreign:*) busy="$busy$comm pid $pid nice $ni $cpu% (${w#foreign:}) " ;; esac
+    done < "$SAMPLE"
+  fi
   [ -n "$units" ] && printf 'benchmark units active: %s' "$units"
   [ -n "$busy" ] && printf 'busy processes outside the stack: %s' "$busy"
 }
 log() { echo "$(date '+%T') $*"; }
+
+if [ "${DENSITY_ONLY:-0}" = 1 ]; then
+  # Density only: no idle wait and no (b); (a) waits only for other benchmark units (3 hours at most).
+  t0=$(date +%s); last=""
+  while w=$(why_not_a); [ -n "$w" ]; do
+    [ "$w" != "$last" ] && { log "(a) does not hold: $w"; last=$w; }
+    [ $(( $(date +%s) - t0 )) -ge 10800 ] && { log "GIVING UP: (a) has not held for 3 hours"; exit 4; }
+    sleep 15
+  done
+  { echo "-- gate for $PLATFORM round $ROUND, $(date -u +%FT%TZ), DENSITY ONLY (stack: containers labelled $STACK_LABEL${STACK_EXTRA_CG:+, cgroups $STACK_EXTRA_CG}, plus the host's dockerd and containerd)"
+    echo "   density-only rule: (a) checks only benchmark units; the idle wait and (b) are skipped"
+    echo "   load at start: $(cut -d' ' -f1-3 /proc/loadavg)"
+    echo "   top 5 by current CPU at start (5-second top sample; pid nice %cpu command, whose):"
+    head -5 "$SAMPLE" | while read -r pid ni cpu comm; do echo "     $pid $ni $cpu $comm, $(whose "$pid")"; done
+    echo "   processes at nice 10 or above using CPU in that sample (they do not block (a)):"
+    awk '$2>=10 && $3>0 {print "     " $0}' "$SAMPLE" | grep . || echo "     none"
+  } >> "$O/platforms.txt"
+  log "GO (density only): load at start $(load1)"
+  exit 0
+fi
 
 # 5 minutes up and idle with no rounds running.
 now=$(date +%s); [ "$now" -lt $((IDLE_SINCE + 300)) ] && { log "stack idle since $(date -d @"$IDLE_SINCE" '+%T'); waiting until 5 minutes have passed"; sleep $((IDLE_SINCE + 300 - now)); }
