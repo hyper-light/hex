@@ -16,9 +16,18 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
   - runc, crun and youki: 02:50-05:35Z (run 1).
   - Hex `oci` and gVisor runsc: 06:50-07:20Z (run 2).
   - Process boxes: 07:25-07:45Z (run 2).
+  - Density with held memory (below), on the same binaries (`FETCH=0`, their sums checked against run 2's):
+    all five OCI runtimes at 17:22-17:34Z (rounds 3-4, start load 0.85), and the process boxes at
+    18:52-18:58Z (rounds 5-6, start load 1.04).
   - Each pass started only at a 1-minute load under 2 (CLAUDE.md §7). During passes it rose to 3-8 from
     other people's work on fedora, not confined to CPUs 0-3. **The tail figures (p99.9, max) carry that
     noise.** Within a pass, runtimes ran in shuffled order across rounds.
+- **Memory, in every table, is what the cgroup holds, page cache aside** (`cgmem.py`): `memory.current`
+  less file cache, keeping shmem, plus swap. The kernel fills and reclaims page cache on its own schedule.
+  On this shared host a Kubernetes stack's `memory.current` read anywhere from 1.7 to 7.0 GiB in one
+  afternoon, while its held memory read 1.31 GiB in each of three tries. Rounds 1-2 measured only
+  `memory.current`, so the memory and density rows come from the density rounds. Best of N takes each
+  axis from the rounds that measured it.
 - **Hex:** release build of `cp/t7-runtime` with ed5758d's four fixes (described below), built on fedora
   after all seven gates passed (binary sha256 523b88e2bffaa473…). Run 1's measurements of the faulty
   binary are kept on fedora as `hex.faulty.r*.json` and `box.faulty.r*.json`.
@@ -54,8 +63,8 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 | throughput, concurrency 8 (lifecycles/s) | 353 | 59 | 1,015 | 398 | 230 | 0.35x vs crun |
 | throughput, concurrency 32 (lifecycles/s) | 1,187 | 214 | 1,038 | 732 | 346 | 1.14x vs crun |
 | CPU per lifecycle, concurrency 1 (whole bench cgroup) | 5.48 ms | 23.09 ms | 4.68 ms | 18.43 ms | 52.90 ms | 0.86x vs crun |
-| memory per idle container | 0.54 MiB | 0.40 MiB | 0.37 MiB | 0.37 MiB | 12.43 MiB | 0.68x vs crun |
-| density (idle containers per GiB) | 1,899 | 2,536 | 2,774 | 2,771 | 82 | 0.68x vs crun |
+| memory held per idle container | 0.55 MiB | 0.41 MiB | 0.39 MiB | 0.39 MiB | 12.49 MiB | 0.71x vs crun |
+| density (idle containers per GiB held) | 1,871 | 2,514 | 2,640 | 2,633 | 82 | 0.71x vs crun |
 
 ### Process class
 
@@ -69,15 +78,20 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 | throughput, concurrency 8 (runs/s) | 759 | 195 | 143 | 3.89x vs scope |
 | throughput, concurrency 32 (runs/s) | 783 | 160 | 192 | 4.08x vs service |
 | CPU per run (the call, plus systemd's manager and bus) | 2.51 ms | 7.81 ms | 13.92 ms | 3.11x vs scope |
-| memory per idle box | 0.70 MiB | 1.12 MiB | 0.42 MiB | 0.60x vs service |
-| density (idle boxes per GiB) | 1,458 | 916 | 2,424 | 0.60x vs service |
+| memory held per idle box | 0.71 MiB | 1.11 MiB (see below) | 0.36 MiB | 0.50x vs service |
+| density (idle boxes per GiB held) | 1,434 | 919 | 2,884 | 0.50x vs service |
+
+systemd-scope's figure counts the bench driver's cgroup, which forks each scope box. Watching only the
+scope gave 0.01 MiB per box, and watching the driver too gave 1.11 MiB: far more than the task and kernel
+stack a fork leaves behind (cgroup-v2.rst, "Memory Ownership"). `probes/scope_charge.py` will name the
+charge by kind before this cell is final. It doesn't move the ratio, which is against systemd services.
 
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**
   - crun is 3-9x faster than runc and youki on create and start.
-  - Hex is behind crun on create (0.37x), start (0.08x), create+start (0.23x), CPU (0.86x) and memory
-    and density (0.68x).
+  - Hex is behind crun on create (0.37x), start (0.08x), create+start (0.23x), CPU (0.86x) and held
+    memory and density (0.71x).
   - Hex leads only on throughput at concurrency 32 (1.14x).
   - Reaching the 4x floor would mean Hex getting faster by a factor of 11 on create (4 × 8.04 / 2.99),
     50 on start and 17 on create+start.
@@ -89,8 +103,9 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 - **Process class: Hex is 2-4x ahead of systemd on latency, throughput and CPU**, and reaches the 4x bar
   only on throughput at concurrency 32. Its p99.9 is level with systemd scopes. Each idle box keeps its
   `hex box run` wrapper process alive, which a systemd service doesn't, so Hex is behind on memory
-  (0.60x).
-- **gVisor runsc** costs its user-space kernel on every axis: 12.4 MiB and 52.9 ms of CPU per container.
+  (0.50x: 0.71 MiB held per box against a service's 0.36).
+- **gVisor runsc** costs its user-space kernel on every axis: 12.5 MiB held and 52.9 ms of CPU per
+  container.
 
 ## Hex's oci class makes no per-container cgroup, so its create and delete ratios are not like for like
 
@@ -125,10 +140,30 @@ of crun's 10.76 ms. So:
   - Container ids must be fixed width: runsc refused an ambiguous prefix under concurrency 32 (50279b1).
     Its first pass is kept as `runsc.idclash.r*.json`.
   - A density phase that stops early mustn't produce a negative memory figure (912ef34).
+  - Memory was `memory.current`, which counts page cache the kernel reclaims at will. Now it's what the
+    cgroup holds, page cache aside, everywhere (79137b8).
+  - The box bench watched the whole user manager for systemd's density, so other people's user units
+    were in it. Now it watches the boxes' own slice, the manager and the bus (79137b8), plus the driver's
+    cgroup for every method, since forks are charged there (ec1d841). That slice is stopped when done
+    (84f7321).
+  - Re-running only some phases needs `ROUND_FIRST`, `HEXBENCH_PHASES` and `FETCH=0`. Without `FETCH=0`,
+    `fetch.py` would resolve each competitor's latest release again (79137b8, fff1f6d).
+  - The platform harness's own faults are listed with the platform results.
 
 ## Not yet measured
 
-- **Self-hosted platforms, running now:** Daytona, then Docker, E2B (approved by Ada on fedora, host
-  changes included), Kubernetes (kind) with the Kubernetes Agent Sandbox, Agent Substrate and Google AX.
+- **Self-hosted platforms, in progress.** Each round is refereed for other people's load
+  (`platform-rounds/`).
+  - Measured: Daytona (latency, throughput and CPU), Kubernetes pods on kind (complete), and Agent
+    Sandbox round 1.
+  - Still to run:
+    - Agent Sandbox's remaining rounds and its warm pool.
+    - E2B (approved by Ada on fedora, host changes included).
+    - Agent Substrate and Google AX.
+    - Docker, refereed.
+    - Daytona's held-memory rounds.
+
+  The fedora worker that runs them hit its account's weekly limit on 2026-10-23 at 19:50Z, and it
+  resumes on 2026-10-24 at 20:00Z (Ada's call to wait). The platform table goes here when they're done.
 - **Hosted-only platforms** (E2B Cloud, Daytona Cloud, Modal, Morph, CodeSandbox, Fly Machines, Vercel,
   Cloudflare): no accounts or API keys exist for them, so they are not measured.
