@@ -109,23 +109,28 @@ def main():
     except Exception as e:
         res["errors"]["throughput"] = f"{type(e).__name__}: {e}"
     held = []
+    stop = "cap"
     try:
         base = mem_available()
         t0 = time.perf_counter()
-        for _ in range(cap):
-            held.append(p.create())
+        for i in range(cap):
+            try:
+                held.append(p.create())
+            except Exception as e:  # a platform at its limit refuses: that bound is the density result
+                stop = f"refused at {i}: {type(e).__name__}: {str(e)[:200]}"
+                break
         wall = time.perf_counter() - t0
         time.sleep(5)
         used = base - mem_available()
-        res["phases"]["density"] = {"count": len(held), "start_wall_s": wall, "memory_bytes": used,
+        res["phases"]["density"] = {"count": len(held), "stop": stop, "start_wall_s": wall, "memory_bytes": used,
                                     "memory_per_sandbox_bytes": used / len(held) if held else None,
                                     "sandboxes_per_gib": len(held) / (used / 2**30) if used > 0 else None}
     except Exception as e:
         res["errors"]["density"] = f"{type(e).__name__} after {len(held)}: {e}"
     finally:
-        for s in held:
+        for s_ in held:
             try:
-                p.delete(s)
+                p.delete(s_)
             except Exception:
                 pass
     with open(out_path, "w") as f:
