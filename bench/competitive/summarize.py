@@ -90,9 +90,11 @@ def oci_section(run):
     rows.append(("CPU per lifecycle, concurrency 1 (whole bench cgroup)", "cpu", True,
                  {n: min((r["phases"]["throughput"]["1"]["cpu_s_per_lifecycle"] for r in rs.values()
                           if "throughput" in r["phases"]), default=None) for n, rs in data.items()}))
+    # A density phase stopped early (a runtime error, leftovers) can leave a zero or negative memory
+    # delta; it is not a measurement, so it never wins the minimum.
     rows.append(("memory per idle container", "bytes", True,
-                 {n: min((r["phases"]["density"]["memory_per_container_bytes"] for r in rs.values()
-                          if r["phases"].get("density", {}).get("memory_per_container_bytes")), default=None)
+                 {n: min((m for m in (r["phases"].get("density", {}).get("memory_per_container_bytes")
+                                      for r in rs.values()) if m and m > 0), default=None)
                   for n, rs in data.items()}))
     rows.append(("density (idle containers per GiB)", "per_gib", False,
                  {n: max((r["phases"]["density"]["containers_per_gib"] for r in rs.values()
