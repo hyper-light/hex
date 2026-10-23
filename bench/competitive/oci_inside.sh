@@ -30,7 +30,7 @@ mkdir -p /sys/fs/cgroup/lab
 for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/cgroup.procs 2>/dev/null || true; done
 for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true; done
 
-{ for rt in $RUNTIMES; do printf '%s\t' "$rt"; case $rt in hex) echo "hex (cp/t7-runtime release build)";; *) /opt/bin/$rt --version 2>&1 | head -1;; esac; done; } > $OUT/runtime_versions.tsv
+{ for rt in $RUNTIMES; do printf '%s\t' "$rt"; case $rt in hex) echo "hex (cp/t7-runtime release build)";; *) /opt/bin/$rt --version 2>&1 | head -1;; esac; done; } >> $OUT/runtime_versions.tsv
 
 ok_runtimes=""
 for rt in $RUNTIMES; do # one full lifecycle per runtime before timing anything

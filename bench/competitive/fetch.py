@@ -110,18 +110,28 @@ def youki(base, bindir):
 
 
 def runsc(base, bindir):
-    url = "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc"
+    """gVisor's releases ship as gvisor.tar.bz2 (with a .sha512) since 2026; runsc is taken from it."""
+    url = "https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/gvisor.tar.bz2"
     d = fresh(base, "runsc")
-    path = os.path.join(d, "runsc")
+    path = os.path.join(d, "gvisor.tar.bz2")
     get(url, path)
     want = get(url + ".sha512").decode().split()[0]
     h = hashlib.sha512()
-    with open(path, "rb") as f:
-        h.update(f.read())
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
     if h.hexdigest() != want:
-        raise SystemExit("runsc: sha512 mismatch")
-    install(path, bindir, "runsc")
-    return {"tag": "release/latest", "url": url, "sha256": sha256(path), "verified": True, "note": "sha512 verified"}
+        raise SystemExit("runsc: gvisor.tar.bz2 sha512 mismatch")
+    with tarfile.open(path) as tar:
+        member = next((m for m in tar.getmembers() if m.isfile() and os.path.basename(m.name) == "runsc"), None)
+        if member is None:
+            raise SystemExit("runsc: no runsc binary in gvisor.tar.bz2")
+        out = os.path.join(d, "runsc.bin")
+        with tar.extractfile(member) as src, open(out, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+    install(out, bindir, "runsc")
+    return {"tag": "release/latest", "url": url, "sha256": sha256(out), "verified": True,
+            "note": "gvisor.tar.bz2 sha512-verified; runsc taken from it"}
 
 
 def main():

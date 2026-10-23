@@ -12,7 +12,8 @@ export CPUSET=${CPUSET:-4-31} ROUNDS=${ROUNDS:-3} N=${N:-10000} WARMUP=${WARMUP:
 export N_OVERRIDE=${N_OVERRIDE:-runsc:3000} LIFECYCLES=${LIFECYCLES:-2000} CAP=${CAP:-1000} BUDGET_MIB=${BUDGET_MIB:-8192}
 BOX_BUDGET_MIB=${BOX_BUDGET_MIB:-4096}; PHASES=${PHASES:-"oci box"}
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
-OUT="$BASE/out/$(date -u +%Y%m%dT%H%M%SZ)"
+# OUT_DIR adds a pass (e.g. RUNTIMES=runsc PHASES=oci) to an existing run directory.
+OUT=${OUT_DIR:-"$BASE/out/$(date -u +%Y%m%dT%H%M%SZ)"}
 mkdir -p "$OUT" "$BASE/bin"
 
 # CLAUDE.md §7: load average under 2. Wait up to 15 minutes for it; refuse rather than measure noise.
@@ -23,13 +24,13 @@ for i in $(seq 1 90); do
   sleep 10
 done
 
-{ echo "host: $(hostname)"; echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
+{ echo "--- pass started $(date -u +%FT%TZ): PHASES=$PHASES RUNTIMES=${RUNTIMES:-all}"; echo "host: $(hostname)"; echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; echo "params: ROUNDS=$ROUNDS N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB"
-} > "$OUT/env.txt"
+} >> "$OUT/env.txt"
 
-python3 -I "$HERE/fetch.py" "$BASE" > "$OUT/versions.json"
+python3 -I "$HERE/fetch.py" "$BASE" > "$OUT/versions.$(date -u +%H%M%S).json"
 cp "$HEX" "$BASE/bin/hex"
 
 if [[ " $PHASES " == *" oci "* ]]; then
