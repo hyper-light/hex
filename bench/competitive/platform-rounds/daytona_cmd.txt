@@ -1,0 +1,1 @@
+DAYTONA_API_URL=http://localhost:3000/api DAYTONA_API_KEY="$(cat "$HOME/.cache/hex-bench/daytona.key")" "$HOME/.cache/hex-bench/venv-daytona/bin/python" "$HOME/.cache/hex-bench/harness/bench/competitive/platform_bench.py" daytona "$OUTF" 300 10 100 200 > "$LOG" 2>&1
