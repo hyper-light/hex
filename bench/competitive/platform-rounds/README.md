@@ -24,8 +24,13 @@ the samples saw.
     Processes at nice 10 or above are listed but don't block. Daytona's rounds ran with the third
     revision of the script, in which the bench unit could count as foreign. Their samples never caught
     it, because the Daytona client mostly waits on HTTP.
-  - (b) The 1-minute load is under 2 plus the stack's own idle load, read after 5 idle minutes. CLAUDE.md
-    §7's load bar holds for the bench; a platform's idle daemons are part of what it costs.
+  - (b) The 1-minute load is under 2 plus the stack's own idle CPU. CLAUDE.md §7's load bar holds for the
+    bench, and a platform's idle daemons are part of what it costs.
+
+    The idle CPU comes from the stack's cgroups: their `cpu.stat` usage over a minute, after 5 idle
+    minutes, with (a) holding throughout. It is not the host's load average, which remembers everyone's
+    last minutes. Through the fifth revision it was, and a busy host lifted one round's threshold to
+    15.29, which the sixth revision fixes. The referee's samples judged that round all the same.
 
   With (a) holding and (b) not, it runs anyway after 45 minutes and says so.
 - **`round_sampler.sh`**: while the round's unit runs, a 5-second `top` sample about every 10 s. A sample

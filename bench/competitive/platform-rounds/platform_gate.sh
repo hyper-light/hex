@@ -1,6 +1,6 @@
 #!/bin/bash
 # platform_gate.sh <platform> <round> <idle-since epoch> <stack label>: the platform-pass gate
-# (T7 agent, 2026-10-23, fifth revision). <stack label> is the docker label naming the stack's containers,
+# (T7 agent, 2026-10-23, sixth revision). <stack label> is the docker label naming the stack's containers,
 # e.g. com.docker.compose.project=hexbench-daytona or io.x-k8s.kind.cluster=hexbench. STACK_EXTRA_CG (optional,
 # space-separated cgroup paths such as /e2b, E2B's per-sandbox Firecracker cgroups) adds stack cgroups outside
 # every container; the round's own unit, hexbench-<platform>-r<N>-t<try>.service, is the bench, never foreign.
@@ -12,14 +12,24 @@
 #      (shims too), which serve them. A busy process that exits before its cgroup can be read counts as
 #      outside the stack. Processes at nice 10 or above never block (a); each one using CPU is listed in the
 #      round's record.
-#  (b) the 1-minute load is under 2 plus the stack's idle load: the 1-minute load once the stack has sat up
-#      and idle for 5 minutes with no rounds running, read at a moment when (a) holds.
+#  (b) the 1-minute load is under 2 plus the stack's idle CPU. A load average remembers every process's last
+#      minutes, so it can't measure the stack alone: the idle figure is the stack's own CPU use while idle,
+#      from its cgroups (STACK_CGROUPS, from stack_cgroups.sh, as run_refereed.sh computes them). Once the
+#      stack has sat up and idle for 5 minutes with no rounds running, the sum of their cpu.stat usage_usec
+#      is read, again after a minute with (a) holding throughout (checked by back-to-back 5-second samples;
+#      the minute starts over when (a) breaks, or when a stack cgroup goes, appears or is made anew within
+#      it), and IDLE = the sum's increase / the minute's measured length / 1e6, in CPUs: the stack's
+#      contribution to the load average, its runnable tasks, near enough. The minute's length is measured
+#      between the two reads, 60 s and at most one sample's 5 s more. A stack cgroup absent at both reads
+#      (docker's hexbench.slice before its first container) counts 0 and is named in the record.
 # With (a) holding and (b) not, it waits up to 45 minutes, then lets the round run anyway, saying so.
 # DENSITY_ONLY=1 (a density-only round: held memory does not depend on other work's CPU load): (a) checks only
 # benchmark units, not foreign load, and the 5-minute idle wait and (b) are skipped.
-# Appends the round's idle load, start load, top 5 processes and niced CPU users to $OUT/platforms.txt.
+# Appends the round's idle CPU and how it was read, the start load, top 5 processes and niced CPU users to
+# $OUT/platforms.txt.
 PLATFORM=${1:?platform}; ROUND=${2:?round}; IDLE_SINCE=${3:?idle since}; STACK_LABEL=${4:?stack label}
-O=$HOME/.cache/hex-bench/out/20261023T025023Z; SAMPLE=$HOME/.cache/hex-bench/t7/gate.sample  # overwritten by each reading
+O=$HOME/.cache/hex-bench/out/20261023T025023Z; T7=$HOME/.cache/hex-bench/t7
+SAMPLE=$T7/gate.sample  # overwritten by each reading
 load1() { cut -d' ' -f1 /proc/loadavg; }
 sample() {  # the second frame of a 5-second top sample, as "pid ni %cpu command" lines, busiest first
   top -b -n 2 -d 5 -w 512 | awk '/^ *PID /{f++; next} f==2 && NF>=12 {print $1, $4, $9, $12}' | sort -k3,3 -gr > "$SAMPLE"
@@ -59,6 +69,13 @@ why_not_a() {  # prints why (a) fails, nothing when it holds; takes a fresh samp
   [ -n "$busy" ] && printf 'busy processes outside the stack: %s' "$busy"
 }
 log() { echo "$(date '+%T') $*"; }
+cpu_usec() {  # "<cgroup> <usage_usec>" per stack cgroup in $SC, "<cgroup> -" for one that isn't there
+  local c f
+  for c in $SC; do
+    f=/sys/fs/cgroup/${c#/}/cpu.stat
+    if [ -r "$f" ]; then echo "$c $(awk '$1 == "usage_usec" {print $2}' "$f")"; else echo "$c -"; fi
+  done
+}
 
 if [ "${DENSITY_ONLY:-0}" = 1 ]; then
   # Density only: no idle wait and no (b); (a) waits only for other benchmark units (3 hours at most).
@@ -83,15 +100,49 @@ fi
 # 5 minutes up and idle with no rounds running.
 now=$(date +%s); [ "$now" -lt $((IDLE_SINCE + 300)) ] && { log "stack idle since $(date -d @"$IDLE_SINCE" '+%T'); waiting until 5 minutes have passed"; sleep $((IDLE_SINCE + 300 - now)); }
 
-# The idle load, read when (a) holds (3 hours at most waiting for (a)).
-t0=$(date +%s); last=""
-while w=$(why_not_a); [ -n "$w" ]; do
-  [ "$w" != "$last" ] && { log "(a) does not hold: $w"; last=$w; }
-  [ $(( $(date +%s) - t0 )) -ge 10800 ] && { log "GIVING UP: (a) has not held for 3 hours"; exit 4; }
-  sleep 15
+# The stack's idle CPU: its cgroups' usage over a minute with (a) holding throughout (3 hours at most
+# waiting for (a) and a clean minute).
+t0=$(date +%s); last=""; restarts=0
+while :; do
+  while w=$(why_not_a); [ -n "$w" ]; do
+    [ "$w" != "$last" ] && { log "(a) does not hold: $w"; last=$w; }
+    [ $(( $(date +%s) - t0 )) -ge 10800 ] && { log "GIVING UP: (a) has not held through an idle minute for 3 hours"; exit 4; }
+    sleep 15
+  done
+  last=""
+  SC=$(STACK_LABEL="$STACK_LABEL" "$T7/stack_cgroups.sh" "$PLATFORM") || { log "no STACK_CGROUPS for $PLATFORM"; exit 5; }
+  s0=$(cpu_usec); n0=$(date +%s%N); broke=""
+  while [ $(( $(date +%s%N) - n0 )) -lt 60000000000 ]; do
+    w=$(why_not_a)
+    [ -n "$w" ] && { broke=$w; break; }
+  done
+  s1=$(cpu_usec); n1=$(date +%s%N)
+  if [ -n "$broke" ]; then
+    restarts=$((restarts + 1)); log "(a) broke within the idle minute ($broke); the minute starts over"; continue
+  fi
+  # "ok <usec> <cgroups read> <absent at both reads>" or "redo <why>"
+  verdict=$(awk -v a="$s0" -v b="$s1" 'BEGIN {
+      n = split(a, x, "\n"); for (i = 1; i <= n; i++) { split(x[i], f, " "); v0[f[1]] = f[2] }
+      m = split(b, y, "\n"); sum = 0; read = 0; absent = ""
+      for (i = 1; i <= m; i++) {
+        split(y[i], f, " "); c = f[1]; v1 = f[2]
+        if (v0[c] == "-" && v1 == "-") { absent = absent c ","; continue }
+        if (v0[c] == "-" || v1 == "-") { print "redo " c " went or appeared within the minute"; exit }
+        if (v1 + 0 < v0[c] + 0) { print "redo " c " was made anew within the minute"; exit }
+        sum += v1 - v0[c]; read++
+      }
+      printf "ok %d %d %s\n", sum, read, (absent == "" ? "none" : absent) }')
+  case "$verdict" in
+    ok*) break ;;
+    *) restarts=$((restarts + 1)); log "idle minute void: ${verdict#redo }; the minute starts over" ;;
+  esac
 done
-IDLE=$(load1); THRESH=$(awk -v i="$IDLE" 'BEGIN{printf "%.2f", 2 + i}')
-log "idle load $IDLE with (a) holding; threshold $THRESH"
+read -r _ DELTA NREAD ABSENT <<< "$verdict"
+WINDOW=$(awk -v a="$n0" -v b="$n1" 'BEGIN{printf "%.3f", (b - a) / 1e9}')
+IDLE=$(awk -v d="$DELTA" -v w="$WINDOW" 'BEGIN{printf "%.3f", d / w / 1e6}')
+THRESH=$(awk -v i="$IDLE" 'BEGIN{printf "%.2f", 2 + i}')
+IDLE_LOAD1=$(load1)
+log "stack idle CPU $IDLE CPUs ($DELTA usec over $NREAD cgroups in $WINDOW s, (a) holding throughout, $restarts restarts); 1-minute load then $IDLE_LOAD1; threshold $THRESH"
 
 # (b), with (a) re-checked at every reading; the 45 minutes count only time with (a) holding.
 held_since=""; forced=""; last=""
@@ -107,7 +158,9 @@ while :; do
   sleep 15
 done
 { echo "-- gate for $PLATFORM round $ROUND, $(date -u +%FT%TZ) (stack: containers labelled $STACK_LABEL${STACK_EXTRA_CG:+, cgroups $STACK_EXTRA_CG}, plus the host's dockerd and containerd)"
-  echo "   stack idle load (1-min, after 5 min up and idle, (a) holding): $IDLE; threshold 2 + idle = $THRESH"
+  echo "   stack idle CPU (after 5 min up and idle): $IDLE CPUs = the rise in cpu.stat usage_usec summed over the stack's $NREAD cgroups, $DELTA usec, / the $WINDOW s between the reads / 1e6; (a) held throughout that minute (minutes started over: $restarts); stack cgroups absent at both reads, counted 0: $ABSENT"
+  echo "   stack cgroups: $SC"
+  echo "   threshold 2 + idle CPU = $THRESH (1-minute load when the idle CPU was read: $IDLE_LOAD1, not used)"
   echo "   load at start: $(cut -d' ' -f1-3 /proc/loadavg)"
   [ -n "$forced" ] && echo "   RAN ANYWAY: (a) held but the 1-minute load stayed at or over $THRESH for 45 minutes"
   echo "   top 5 by current CPU at start (5-second top sample; pid nice %cpu command, whose):"
