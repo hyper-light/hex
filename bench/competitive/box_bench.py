@@ -16,7 +16,8 @@ Every call is spawned the same way (fork, then execve in a single-threaded worke
 child first writes itself into its worker cgroup, a few microseconds the systemd children skip.
 Phases: latency (n sequential runs), throughput (1, 8, 32 worker processes), CPU (the call's own
 rusage, plus the user manager's and the user bus's CPU for systemd), density (boxes holding `sleep
-infinity` until the cap or the memory budget).
+infinity` until the cap or the memory budget; the memory the watched cgroup holds per box, cgmem.py).
+HEXBENCH_PHASES names the phases to run (all three by default).
 """
 import json
 import multiprocessing as mp
@@ -25,6 +26,9 @@ import signal
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # cgmem.py, beside this file even under -I
+import cgmem  # noqa: E402
 
 CG = "/sys/fs/cgroup"
 CALL_TIMEOUT_S = 60
@@ -43,14 +47,20 @@ def own_cgroup():
     raise SystemExit("no cgroup v2 membership")
 
 
-def argv_for(method, hex_bin, program, unit=None):
+# Density's systemd boxes go in a slice of their own, so their memory is read there rather than in the whole
+# user manager, which on a shared host holds everyone's user units. No dash: systemd would nest the name.
+DENSITY_SLICE = "hexbenchdensity.slice"
+
+
+def argv_for(method, hex_bin, program, unit=None, slice_=None):
     if method == "hex":
         return [hex_bin, "box", "run"] + LIMITS["hex"] + program
+    where = [f"--slice={slice_}"] if slice_ else []
     if method == "systemd-scope":
-        return ["systemd-run", "--user", "--scope", "--quiet"] + LIMITS["systemd"] + program
+        return ["systemd-run", "--user", "--scope", "--quiet"] + where + LIMITS["systemd"] + program
     if method == "systemd-service":
         extra = ["--wait", "--collect"] if unit is None else ["--unit", unit, "--collect"]
-        return ["systemd-run", "--user", "--quiet"] + extra + LIMITS["systemd"] + program
+        return ["systemd-run", "--user", "--quiet"] + extra + where + LIMITS["systemd"] + program
     raise ValueError(method)
 
 
@@ -175,14 +185,32 @@ def phase_throughput(method, hex_bin, lifecycles, S):
     return res
 
 
-def mem(path):
-    with open(path + "/memory.current") as f:
-        return int(f.read())
+def mem(paths):
+    """memory.current summed over the cgroups that exist (the density slice appears with its first box)."""
+    total = 0
+    for p in paths:
+        if os.path.isdir(p):
+            with open(p + "/memory.current") as f:
+                total += int(f.read())
+    return total
+
+
+def held(paths):
+    return sum(cgmem.held_bytes(p) for p in paths if os.path.isdir(p))
+
+
+def helper_cgroups():
+    """The cgroups of the user's systemd manager and bus, whose memory grows with every unit."""
+    out = set()
+    for pid in pids_of("systemd") + pids_of("dbus-broker"):
+        with open(f"/proc/{pid}/cgroup") as f:
+            out.add(CG + f.read().split("::", 1)[1].strip())
+    return sorted(out)
 
 
 def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
-    watch = S if method == "hex" else user_service_cg
-    base = mem(watch)
+    watch = [S] if method == "hex" else [f"{user_service_cg}/{DENSITY_SLICE}"] + helper_cgroups()
+    base, held0 = mem(watch), held(watch)
     kids, units, stop = [], [], "cap"
     t0 = time.perf_counter()
     for i in range(cap):
@@ -191,10 +219,10 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
             os.makedirs(cg, exist_ok=True)
             kids.append((spawn(argv_for("hex", hex_bin, ["/usr/bin/sleep", "infinity"]), cg), cg))
         elif method == "systemd-scope":
-            kids.append((spawn(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"])), None))
+            kids.append((spawn(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"], slice_=DENSITY_SLICE)), None))
         else:
             unit = f"hexbench-d{os.getpid()}-{i}"
-            r = subprocess.run(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"], unit=unit),
+            r = subprocess.run(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"], unit=unit, slice_=DENSITY_SLICE),
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=CALL_TIMEOUT_S)
             if r.returncode:
                 stop = f"systemd-run exit {r.returncode} at {i}"
@@ -206,6 +234,7 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
     wall = time.perf_counter() - t0
     time.sleep(3)
     used = mem(watch) - base
+    held_rise = held(watch) - held0
     count = len(kids) + len(units)
     # teardown: end each box's program; the hex wrappers then clean their boxes and exit
     for pid, cg in kids:
@@ -231,7 +260,8 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=CALL_TIMEOUT_S)
     return {"count": count, "stop": stop, "start_wall_s": wall, "memory_bytes": used,
             "memory_per_box_bytes": used / count if count else None,
-            "boxes_per_gib": count / (used / 2**30) if used > 0 else None}
+            "boxes_per_gib": count / (used / 2**30) if used > 0 else None,
+            "watched": watch, "held": cgmem.per_unit(held_rise, count)}
 
 
 def main():
@@ -250,11 +280,14 @@ def main():
         if user_service_cg == CG:
             raise SystemExit("not under a user@ service")
     result = {"n": n, "warmup": warmup, "methods": {}}
+    wanted = (os.environ.get("HEXBENCH_PHASES") or "latency throughput density").split()
     for method in ("hex", "systemd-scope", "systemd-service"):
         m = result["methods"][method] = {"phases": {}, "errors": {}}
         for phase, fn in (("latency", lambda: phase_latency_cpu(method, hex_bin, n, warmup, S)),
                           ("throughput", lambda: phase_throughput(method, hex_bin, lifecycles, S)),
                           ("density", lambda: phase_density(method, hex_bin, cap, budget, S, user_service_cg))):
+            if phase not in wanted:
+                continue
             t0 = time.perf_counter()
             try:
                 m["phases"][phase] = fn()

@@ -21,14 +21,14 @@ against a hosted platform, which the result then labels hosted (its numbers incl
 Phases: lifecycle (create until the sandbox runs a command, exec of `true`, delete; n sequential),
 throughput (whole lifecycles at concurrency 1, 8, 32), density (idle sandboxes up to the cap), and, for a
 platform that can suspend, resume (n suspend/resume cycles of one sandbox, each resume timed until the
-sandbox runs a command again).
+sandbox runs a command again). HEXBENCH_PHASES names the phases to run (all by default).
 A platform's cost lives in many services, so its CPU and memory are those of its stack's own cgroups,
 STACK_CGROUPS (paths under /sys/fs/cgroup, none inside another, each alive for the whole run: the stack's
 containers, docker.service, containerd.service), plus this client and the CLIs it runs, as Hex's bench
 cgroup holds its harness too. Host-wide figures would charge the platform with whatever else the host
 runs. The stack's own idle CPU is measured first and taken out of each phase's CPU, so CPU per lifecycle
-is what a lifecycle adds; the idle cost is recorded beside it. Without STACK_CGROUPS (a hosted
-platform) CPU and memory are not measured.
+is what a lifecycle adds; the idle cost is recorded beside it. Memory is what the cgroups hold, page
+cache aside (cgmem.py). Without STACK_CGROUPS (a hosted platform) CPU and memory are not measured.
 """
 import collections
 import itertools
@@ -41,6 +41,9 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # cgmem.py, beside this file even under -I
+import cgmem  # noqa: E402
 
 CG_ROOT = "/sys/fs/cgroup"
 # The idle window must hold the stack's periodic work: Daytona's runner long-polls its API with a 30 s
@@ -311,9 +314,12 @@ class Stack:
     def holds(self, path):
         return any(path == p or path.startswith(p + "/") for p in self.paths)
 
-    def read(self, p, name):
+    def check(self, p):
         if os.stat(p).st_ino != self.ino[p]:
             raise RuntimeError(f"{p} was made anew mid-run, so its usage since then is unknown")
+
+    def read(self, p, name):
+        self.check(p)
         with open(os.path.join(p, name)) as f:
             return f.read()
 
@@ -327,8 +333,13 @@ class Stack:
         ru = [resource.getrusage(w) for w in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)]
         return usec / 1e6 + sum(r.ru_utime + r.ru_stime for r in ru)
 
-    def mem_bytes(self):
-        return sum(int(self.read(p, "memory.current")) for p in self.paths)
+    def held_bytes(self):
+        """The memory the stack's cgroups hold (cgmem.py)."""
+        total = 0
+        for p in self.paths:
+            self.check(p)
+            total += cgmem.held_bytes(p)
+        return total
 
     def outside(self):
         """{pid: comm} of every process outside the stack's cgroups."""
@@ -385,6 +396,7 @@ def main():
 def phases(p, res, n, warmup, lifecycles, cap):
     spec = os.environ.get("STACK_CGROUPS")
     stack = Stack(spec) if spec else None
+    wanted = (os.environ.get("HEXBENCH_PHASES") or "lifecycle throughput density resume").split()
     idle = 0.0
     if stack:
         c0, t0 = stack.cpu_s(), time.perf_counter()
@@ -392,12 +404,23 @@ def phases(p, res, n, warmup, lifecycles, cap):
         wall = time.perf_counter() - t0
         idle = (stack.cpu_s() - c0) / wall
         res["stack"] = {"cgroups": stack.paths, "idle_window_s": wall, "idle_cpu_s_per_s": idle,
-                        "idle_memory_bytes": stack.mem_bytes()}
+                        "idle_held_bytes": stack.held_bytes()}
         outside0 = set(stack.outside())
 
     def cpu_per_lifecycle(c0, wall, count):
         # What the lifecycles added: the stack's CPU less its own idle CPU over the same wall time.
         return (stack.cpu_s() - c0 - idle * wall) / count
+    if "lifecycle" in wanted:
+        lifecycle_phase(p, res, n, warmup, stack, cpu_per_lifecycle)
+    if "throughput" in wanted:
+        throughput_phase(p, res, lifecycles, stack, cpu_per_lifecycle)
+    if "density" in wanted:
+        density_phase(p, res, cap, stack, outside0 if stack else None)
+    if "resume" in wanted and hasattr(p, "suspend"):
+        resume_phase(p, res, n, warmup)
+
+
+def lifecycle_phase(p, res, n, warmup, stack, cpu_per_lifecycle):
     try:
         ms = {"create": [], "exec": [], "delete": []}
         c0, t0 = stack.cpu_s() if stack else None, time.perf_counter()
@@ -414,6 +437,9 @@ def phases(p, res, n, warmup, lifecycles, cap):
                 c0, time.perf_counter() - t0, warmup + n)
     except Exception as e:
         res["errors"]["lifecycle"] = f"{type(e).__name__}: {e}"
+
+
+def throughput_phase(p, res, lifecycles, stack, cpu_per_lifecycle):
     try:
         tp = {}
         for conc in (1, 8, 32):
@@ -427,56 +453,58 @@ def phases(p, res, n, warmup, lifecycles, cap):
         res["phases"]["throughput"] = tp
     except Exception as e:
         res["errors"]["throughput"] = f"{type(e).__name__}: {e}"
-    held, failed = [], []
+
+
+def density_phase(p, res, cap, stack, outside0):
+    sandboxes, failed = [], []
     stop = "cap"
     try:
-        base = stack.mem_bytes() if stack else None
+        base = stack.held_bytes() if stack else None
         t0 = time.perf_counter()
         for i in range(cap):
             try:
-                held.append(p.create())
+                sandboxes.append(p.create())
             except Exception as e:  # a platform at its limit refuses: that bound is the density result
                 stop = f"refused at {i}: {type(e).__name__}: {str(e)[:200]}"
                 break
-        density = {"count": len(held), "stop": stop, "start_wall_s": time.perf_counter() - t0}
+        density = {"count": len(sandboxes), "stop": stop, "start_wall_s": time.perf_counter() - t0}
         if stack:
             time.sleep(5)  # let the sandboxes settle before reading memory
-            used = stack.mem_bytes() - base
             new = collections.Counter(c for pid, c in stack.outside().items() if pid not in outside0)
-            density.update({"stack_memory_bytes": used,
-                            "stack_memory_per_sandbox_bytes": used / len(held) if held and used > 0 else None,
-                            "stack_sandboxes_per_gib": len(held) / (used / 2**30) if used > 0 else None,
+            density.update({"held": cgmem.per_unit(stack.held_bytes() - base, len(sandboxes)),
                             # A sandbox's own processes among these mean STACK_CGROUPS misses part of the stack.
                             "new_processes_outside_stack": dict(new.most_common(20))})
         res["phases"]["density"] = density
     except Exception as e:
-        res["errors"]["density"] = f"{type(e).__name__} after {len(held)}: {e}"
+        res["errors"]["density"] = f"{type(e).__name__} after {len(sandboxes)}: {e}"
     finally:
-        for s_ in held:
+        for s_ in sandboxes:
             try:
                 p.delete(s_)
             except Exception as e:
                 failed.append(f"{type(e).__name__}: {str(e)[:200]}")
         if failed:
-            res["errors"]["density_teardown"] = f"{len(failed)} of {len(held)} deletes failed, the first: {failed[0]}"
-    if hasattr(p, "suspend"):
+            res["errors"]["density_teardown"] = f"{len(failed)} of {len(sandboxes)} deletes failed, the first: {failed[0]}"
+
+
+def resume_phase(p, res, n, warmup):
+    try:
+        s_ = p.create()
         try:
-            s_ = p.create()
-            try:
-                sus, resu = [], []
-                for i in range(warmup + n):
-                    _, a = timed(p.suspend, s_)
-                    _, b = timed(p.resume, s_)
-                    if p.exec_true:
-                        p.exec_true(s_)
-                    if i >= warmup:
-                        sus.append(a)
-                        resu.append(b)
-                res["phases"]["resume"] = {"ms": {"suspend": sus, "resume": resu}}
-            finally:
-                p.delete(s_)
-        except Exception as e:
-            res["errors"]["resume"] = f"{type(e).__name__}: {e}"
+            sus, resu = [], []
+            for i in range(warmup + n):
+                _, a = timed(p.suspend, s_)
+                _, b = timed(p.resume, s_)
+                if p.exec_true:
+                    p.exec_true(s_)
+                if i >= warmup:
+                    sus.append(a)
+                    resu.append(b)
+            res["phases"]["resume"] = {"ms": {"suspend": sus, "resume": resu}}
+        finally:
+            p.delete(s_)
+    except Exception as e:
+        res["errors"]["resume"] = f"{type(e).__name__}: {e}"
 
 
 if __name__ == "__main__":

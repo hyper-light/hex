@@ -13,7 +13,9 @@ Phases, in order; a phase that fails records its error and the next one still ru
   throughput  create+start+delete --force of `true` containers at concurrency 1, 8 and 32: lifecycles/s,
               and CPU-seconds per lifecycle from the bench cgroup's cpu.stat.
   density     `sleep` containers started one after another until the cap or the memory budget, then
-              memory per container from the bench cgroup's memory.current; all deleted afterwards.
+              memory per container from the bench cgroup: the memory it holds (cgmem.py), and its
+              memory.current, which the budget bounds; all deleted afterwards.
+HEXBENCH_PHASES names the phases to run (all four by default).
 
 Every CLI call's stdio goes to /dev/null or a reused error file, never a pipe: a detached `create` leaves
 the container's init holding the caller's stdio, so reading a pipe to EOF would deadlock (hex_start's
@@ -26,6 +28,9 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # cgmem.py, beside this file even under -I
+import cgmem  # noqa: E402
 
 CALL_TIMEOUT_S = 60
 # The bench container's paths; the overrides exist so the driver's control flow can be checked against a
@@ -183,7 +188,7 @@ def phase_throughput(rt, lifecycles):
 
 
 def phase_density(rt, cap, budget_mib):
-    base = mem_bytes()
+    base, held0 = mem_bytes(), cgmem.held_bytes(CG)
     budget = budget_mib * 1024 * 1024
     created, running = [], 0
     t0 = time.perf_counter()
@@ -205,6 +210,7 @@ def phase_density(rt, cap, budget_mib):
         wall = time.perf_counter() - t0
         time.sleep(2)  # let the started inits settle before reading memory
         used = mem_bytes() - base
+        held = cgmem.held_bytes(CG) - held0
     finally:
         for cid in created:
             try:
@@ -214,7 +220,8 @@ def phase_density(rt, cap, budget_mib):
     count = running
     return {"count": count, "stop": stop_reason, "start_wall_s": wall, "memory_bytes": used,
             "memory_per_container_bytes": used / count if count else None,
-            "containers_per_gib": count / (used / 2**30) if used > 0 else None}
+            "containers_per_gib": count / (used / 2**30) if used > 0 else None,
+            "held": cgmem.per_unit(held, count)}
 
 
 def main():
@@ -222,10 +229,13 @@ def main():
     n, warmup, lifecycles, cap, budget = (int(x) for x in sys.argv[3:8])
     rt = Runtime(name)
     result = {"runtime": name, "n": n, "warmup": warmup, "phases": {}, "errors": {}}
+    wanted = (os.environ.get("HEXBENCH_PHASES") or "lifecycle start_true throughput density").split()
     for phase, fn in (("lifecycle", lambda: phase_lifecycle(rt, n, warmup)),
                       ("start_true", lambda: phase_start_true(rt, n, warmup)),
                       ("throughput", lambda: phase_throughput(rt, lifecycles)),
                       ("density", lambda: phase_density(rt, cap, budget))):
+        if phase not in wanted:
+            continue
         t0 = time.perf_counter()
         try:
             result["phases"][phase] = fn()

@@ -3,10 +3,11 @@
 # Builds the two bundles, vacates the cgroup root to a leaf so runtimes can make container cgroups,
 # probes each runtime once, then runs oci_bench.py for every runtime in ROUNDS rounds, each round in a
 # shuffled order so drift over the run does not favour one runtime.
-# Env: RUNTIMES ("hex runc crun youki runsc"), ROUNDS (3), N (10000), WARMUP (100), N_OVERRIDE
-# ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192).
+# Env: RUNTIMES ("hex runc crun youki runsc"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
+# N_OVERRIDE ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192),
+# HEXBENCH_PHASES (oci_bench.py's phases, all by default).
 set -uo pipefail
-RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc"}; ROUNDS=${ROUNDS:-3}; N=${N:-10000}; WARMUP=${WARMUP:-100}
+RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
 
@@ -42,7 +43,7 @@ for rt in $RUNTIMES; do # one full lifecycle per runtime before timing anything
   fi
 done
 
-for round in $(seq 1 "$ROUNDS"); do
+for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
   for rt in $(printf '%s\n' $ok_runtimes | shuf); do
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done
     echo "round $round: $rt (n=$n)"

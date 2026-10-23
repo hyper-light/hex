@@ -22,10 +22,15 @@ measures where Hex stands today. `RESULT.md` records each run of record.
 - **Throughput**: create+start+delete of `true` containers at concurrency 1, 8 and 32; lifecycles per second.
 - **CPU per workload**: the whole bench cgroup's `cpu.stat` usage per lifecycle (CLI, shims, sandboxes and
   workload together); per-call CLI CPU from `wait4` rusage is also kept.
-- **Memory and density**: `sleep` containers started until a cap (1,000) or a memory budget (8 GiB), memory
-  per container from the bench cgroup's `memory.current`, and containers per GiB.
+- **Memory and density**: `sleep` containers started until a cap (1,000) or a memory budget (8 GiB). The
+  measure is the memory the bench cgroup holds per container, and containers per GiB of it. "Held" means
+  `memory.current` less file cache, keeping shmem, plus swap (`cgmem.py`). Page cache is left out because
+  the kernel fills and reclaims it on its own schedule: on fedora a stack's `memory.current` fell from
+  7 GiB to 1.7 GiB in minutes under other work's pressure. Every table uses this one measure.
 - **Process boxes**: the same axes for running `true` (latency, throughput) or `sleep` (density) in a box
-  bounded at 256 MiB and 64 pids. systemd's CPU includes the user manager's and the user bus's.
+  bounded at 256 MiB and 64 pids. systemd's CPU includes the user manager's and the user bus's. So does
+  its memory: its density boxes go in a slice of their own, which is watched along with the manager and
+  the bus, and not the whole user manager, which on a shared host holds everyone's user units.
 
 Every call's stdio goes to `/dev/null` or an error file, never a pipe (a detached `create` holds the
 caller's stdio; commit 4c76c13). Calls are spawned with `posix_spawn` (OCI) or `fork`+`execve` (boxes,
@@ -42,6 +47,16 @@ systemd-run --user --unit=hexbench --collect bash bench/competitive/host.sh "$CA
 `host.sh` refuses any host but fedora, waits up to 15 minutes for a load average under 2 and refuses if it
 doesn't get one, records the environment and the competitors' versions, and writes everything under
 `~/.cache/hex-bench/out/<UTC time>/`, including `table.md` from `summarize.py`.
+
+A later pass adds rounds to a run directory without touching its earlier ones. For example, the density
+rounds of the run of record were added like this:
+
+```
+OUT_DIR=<run dir> FETCH=0 ROUND_FIRST=3 ROUNDS=2 HEXBENCH_PHASES=density host.sh <hex>
+```
+
+`FETCH=0` keeps the competitors' binaries already fetched, recording their sha256, rather than resolving
+each project's latest release again. Best of N takes each axis from the rounds that measured it.
 
 ### Checking the drivers off the bench host
 
@@ -61,8 +76,8 @@ its CPU and memory are its stack's own cgroups' (`STACK_CGROUPS`: the stack's co
 `docker.service`, `containerd.service`) plus the client's, never host-wide figures, which on a shared host
 charge the platform with everyone else's work. The stack's idle CPU is measured over a minute first and
 taken out of each phase, so CPU per lifecycle is what a lifecycle adds; the idle cost is a row of its
-own. A density phase lists the processes that appeared outside those cgroups, so a sandbox the list
-misses shows up by name.
+own. Memory is what those cgroups hold, as above. A density phase lists the processes that appeared
+outside those cgroups, so a sandbox the list misses shows up by name.
 Results go in the run directory as `platform.<name>.r<round>.json`, and `summarize.py` sets them against
 Hex's `oci` class (create+start). **That comparison crosses isolation classes**: E2B isolates each
 sandbox in a Firecracker microVM, Daytona's container class shares the host kernel. The like-for-like

@@ -74,6 +74,21 @@ def ratio(values, lower_better):
 # Hex's oci class makes no per-container cgroup, so its delete skips the cgroup teardown every other delete
 # includes (RESULT.md): no ratio is drawn on it until the class has one.
 HEX_DELETE = "not comparable: Hex `oci` makes no per-container cgroup to remove"
+# Memory is what the cgroups hold, page cache aside (cgmem.py), in every table. Rounds measured before that
+# have only memory.current, which the kernel's reclaim moves at will, so they never enter these rows.
+MEMORY_AXIS = "memory held per idle {} (page cache aside)"
+DENSITY_AXIS = "density (idle {} per GiB held)"
+
+
+def best(rs, get, lower):
+    """Best of N: the lowest (or highest) positive value across rounds. A value at or below zero (a density
+    phase stopped early, a rise reclaim hid) is not a measurement, so it never wins."""
+    vals = [v for v in (get(r) for r in rs) if v is not None and v > 0]
+    return (min(vals) if lower else max(vals)) if vals else None
+
+
+def held(density, key):
+    return ((density or {}).get("held") or {}).get(key)
 
 
 def oci_section(run):
@@ -98,15 +113,11 @@ def oci_section(run):
     rows.append(("CPU per lifecycle, concurrency 1 (whole bench cgroup)", "cpu", True,
                  {n: min((r["phases"]["throughput"]["1"]["cpu_s_per_lifecycle"] for r in rs.values()
                           if "throughput" in r["phases"]), default=None) for n, rs in data.items()}))
-    # A density phase stopped early (a runtime error, leftovers) can leave a zero or negative memory
-    # delta; it is not a measurement, so it never wins the minimum.
-    rows.append(("memory per idle container", "bytes", True,
-                 {n: min((m for m in (r["phases"].get("density", {}).get("memory_per_container_bytes")
-                                      for r in rs.values()) if m and m > 0), default=None)
+    rows.append((MEMORY_AXIS.format("container"), "bytes", True,
+                 {n: best(rs.values(), lambda r: held(r["phases"].get("density"), "per_unit_bytes"), True)
                   for n, rs in data.items()}))
-    rows.append(("density (idle containers per GiB)", "per_gib", False,
-                 {n: max((r["phases"]["density"]["containers_per_gib"] for r in rs.values()
-                          if r["phases"].get("density", {}).get("containers_per_gib")), default=None)
+    rows.append((DENSITY_AXIS.format("containers"), "per_gib", False,
+                 {n: best(rs.values(), lambda r: held(r["phases"].get("density"), "per_gib"), False)
                   for n, rs in data.items()}))
     return list(data), rows, data
 
@@ -131,14 +142,12 @@ def box_section(run):
         return sum(lat["call_cpu_s"]) / len(lat["call_cpu_s"]) + lat.get("helper_cpu_s_per_run", 0)
     rows.append(("CPU per run (the call, plus systemd's manager and bus)", "cpu", True,
                  {m: min((v for v in (cpu(r, m) for r in rs.values()) if v is not None), default=None) for m in methods}))
-    rows.append(("memory per idle box", "bytes", True,
-                 {m: min((r["methods"][m]["phases"]["density"]["memory_per_box_bytes"] for r in rs.values()
-                          if r["methods"].get(m, {}).get("phases", {}).get("density", {}).get("memory_per_box_bytes")),
-                         default=None) for m in methods}))
-    rows.append(("density (idle boxes per GiB)", "per_gib", False,
-                 {m: max((r["methods"][m]["phases"]["density"]["boxes_per_gib"] for r in rs.values()
-                          if r["methods"].get(m, {}).get("phases", {}).get("density", {}).get("boxes_per_gib")),
-                         default=None) for m in methods}))
+    def density(r, m):
+        return r["methods"].get(m, {}).get("phases", {}).get("density")
+    rows.append((MEMORY_AXIS.format("box"), "bytes", True,
+                 {m: best(rs.values(), lambda r: held(density(r, m), "per_unit_bytes"), True) for m in methods}))
+    rows.append((DENSITY_AXIS.format("boxes"), "per_gib", False,
+                 {m: best(rs.values(), lambda r: held(density(r, m), "per_gib"), False) for m in methods}))
     return methods, rows, rs
 
 
@@ -176,30 +185,26 @@ def platform_section(run, oci_data):
             vals[name] = max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in rs), default=0) or None
         rows.append((f"lifecycles/s at concurrency {c}", "/s", False, vals))
 
-    def best(rs, get, lower):
-        vals = [v for v in (get(r) for r in rs) if v is not None and v > 0]
-        return (min(vals) if lower else max(vals)) if vals else None
-
     def phase(r, name):
         return r["phases"].get(name) or {}
     # Hex's figures are its bench cgroup's; a platform's are its stack's cgroups' (platform_bench.py).
     # Older rounds' host-wide figures have other keys, so they never enter these rows.
     cpu = {"hex": best(hex_rounds, lambda r: phase(r, "throughput").get("1", {}).get("cpu_s_per_lifecycle"), True)}
-    mem = {"hex": best(hex_rounds, lambda r: phase(r, "density").get("memory_per_container_bytes"), True)}
-    dens = {"hex": best(hex_rounds, lambda r: phase(r, "density").get("containers_per_gib"), False)}
+    mem = {"hex": best(hex_rounds, lambda r: held(phase(r, "density"), "per_unit_bytes"), True)}
+    dens = {"hex": best(hex_rounds, lambda r: held(phase(r, "density"), "per_gib"), False)}
     idle_cpu, idle_mem = {"hex": None}, {"hex": None}
     for name, rs in plats.items():
         cpu[name] = best(rs, lambda r: phase(r, "throughput").get("1", {}).get("stack_cpu_s_per_lifecycle"), True)
-        mem[name] = best(rs, lambda r: phase(r, "density").get("stack_memory_per_sandbox_bytes"), True)
-        dens[name] = best(rs, lambda r: phase(r, "density").get("stack_sandboxes_per_gib"), False)
+        mem[name] = best(rs, lambda r: held(phase(r, "density"), "per_unit_bytes"), True)
+        dens[name] = best(rs, lambda r: held(phase(r, "density"), "per_gib"), False)
         idle_cpu[name] = best(rs, lambda r: (r.get("stack") or {}).get("idle_cpu_s_per_s"), True)
-        idle_mem[name] = best(rs, lambda r: (r.get("stack") or {}).get("idle_memory_bytes"), True)
+        idle_mem[name] = best(rs, lambda r: (r.get("stack") or {}).get("idle_held_bytes"), True)
     rows.append(("CPU per lifecycle at concurrency 1 (platforms: what a lifecycle adds to their stack's CPU)",
                  "cpu", True, cpu))
-    rows.append(("memory per idle sandbox", "bytes", True, mem))
-    rows.append(("density (idle sandboxes per GiB)", "per_gib", False, dens))
+    rows.append((MEMORY_AXIS.format("sandbox"), "bytes", True, mem))
+    rows.append((DENSITY_AXIS.format("sandboxes"), "per_gib", False, dens))
     rows.append(("the stack's own CPU at idle (Hex `oci` runs no daemon)", "cpus", True, idle_cpu))
-    rows.append(("the stack's own memory at idle (Hex `oci` runs no daemon)", "bytes", True, idle_mem))
+    rows.append(("the stack's own memory held at idle (Hex `oci` runs no daemon)", "bytes", True, idle_mem))
     if any(phase(r, "resume") for rs in plats.values() for r in rs):
         for op in ("suspend", "resume"):
             per = {"hex": None}
