@@ -1,83 +1,98 @@
 # Competitive baseline: results
 
 The baseline goal is Hex against named competitors on every axis, with Hex's ratio to the best competitor.
-This file records each run of record. **The baseline is incomplete:** see "Not yet measured" below.
+This file records the runs of record. **The baseline is incomplete:** the sandbox platforms are being
+measured now, and the hosted platforms are not measured (see the end).
 
 Ratios are the best competitor's value over Hex's for lower-is-better axes, and Hex's over the best
 competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research bar is 4-5x.
 
-## Run 1: OCI runtimes and process boxes (2026-10-23)
+## Run of record (2026-10-23, fedora)
 
 - **Host:** fedora.attlocal.net, Intel Core i9-14900HX (32 CPUs, the bench pinned to CPUs 4-31), 62 GiB,
-  kernel 6.19.10-300.fc44.x86_64. The run directory on fedora is
-  `~/.cache/hex-bench/out/20261023T025023Z/`.
-- **When:** 02:50:23Z to 05:35:17Z.
-- **Load:** CLAUDE.md §7 asks for a load average under 2. It was 1.86 at the start (5- and 15-minute: 3.25,
-  3.46). Mid-run it rose to 3.7-7.8 from other people's work (a `clippy-driver` build and KDE's Baloo
-  indexer, not confined to CPUs 0-3), and it ended at 3.75. **The tail figures (p99.9, max) carry that
-  noise**, and the runtimes were measured in shuffled order across two rounds so it isn't biased toward
-  one of them.
-- **Hex:** a release build of `cp/t7-runtime` at fb15d9d (binary sha256 a2558d2e13d906fe…). Its OCI
-  runtime has a create race, fixed in a later commit (see "Hex's results are affected" below).
-- **Competitors:** runc v1.5.2 (sha256-verified), crun 1.30.1 (static release binary), youki v0.7.0
-  (from the release tarball). runsc's probe failed and it was not measured (see below).
-- **Parameters:** 2 rounds, best of 2 per metric; n = 10,000 per round after 100 warm-ups; 1,000
-  lifecycles per concurrency level; density capped at 1,000 containers or 8 GiB (process boxes: 4 GiB).
+  kernel 6.19.10-300.fc44.x86_64. Everything is in one run directory on fedora,
+  `~/.cache/hex-bench/out/20261023T025023Z/`, written by `bench/competitive/host.sh` one pass at a time.
+- **Passes:**
+  - runc, crun and youki: 02:50-05:35Z (run 1).
+  - Hex `oci` and gVisor runsc: 06:50-07:20Z (run 2).
+  - Process boxes: 07:25-07:45Z (run 2).
+  - Each pass started only at a 1-minute load under 2 (CLAUDE.md §7). During passes it rose to 3-8 from
+    other people's work on fedora, not confined to CPUs 0-3. **The tail figures (p99.9, max) carry that
+    noise.** Within a pass, runtimes ran in shuffled order across rounds.
+- **Hex:** release build of `cp/t7-runtime` with ed5758d's four fixes (described below), built on fedora
+  after all seven gates passed (binary sha256 523b88e2bffaa473…). Run 1's measurements of the faulty
+  binary are kept on fedora as `hex.faulty.r*.json` and `box.faulty.r*.json`.
+- **Competitors:**
+  - runc v1.5.2 (sha256-verified), crun 1.30.1 (static release binary), youki v0.7.0 (from the release
+    tarball).
+  - gVisor runsc release-20261019.0 (sha512-verified tarball, with its `gvisor-bin/` Sentry).
+  - systemd's transient scopes and services (`systemd-run --user`).
+- **Parameters:**
+  - Two rounds, best of 2 per metric. n = 10,000 per round after 100 warm-ups; runsc n = 2,000.
+  - 1,000 lifecycles per concurrency level.
+  - Density capped at 1,000 containers or 8 GiB (process boxes: 4 GiB).
 
 ### OCI class
 
-| Axis | Hex | runc | crun | youki | Hex vs best |
-|---|---|---|---|---|---|
-| create p50 (ms) | 8.41 | 27.54 | 2.99 | 21.94 | 0.36x vs crun |
-| create p99 (ms) | 11.19 | 69.11 | 6.87 | 36.42 | 0.61x vs crun |
-| create p99.9 (ms) | 16.04 | 141.71 | 8.98 | 126.16 | 0.56x vs crun |
-| create max (ms) | 39.43 | 228.07 | 19.97 | 220.71 | 0.51x vs crun |
-| start p50 (ms) | 6.55 | 3.53 | 0.51 | 5.31 | 0.08x vs crun |
-| start p99 (ms) | 9.18 | 6.34 | 1.14 | 8.39 | 0.12x vs crun |
-| start p99.9 (ms) | 12.31 | 10.84 | 1.43 | 10.87 | 0.12x vs crun |
-| start max (ms) | 36.17 | 36.58 | 1.91 | 16.80 | 0.05x vs crun |
-| exec p50 / p99 / p99.9 / max (ms) | n/a: Hex has no exec yet | 8.42 / 15.01 / 36.58 / 129.45 | 1.64 / 3.50 / 4.28 / 73.99 | 6.78 / 31.10 / 82.67 / 178.16 | n/a |
-| delete p50 (ms) | 0.66 | 104.48 | 10.76 | 25.58 | 16.29x vs crun, **not comparable** |
-| delete p99 (ms) | 0.92 | 107.67 | 11.84 | 28.55 | 12.88x vs crun, **not comparable** |
-| delete p99.9 (ms) | 1.15 | 117.70 | 22.94 | 33.33 | 20.04x vs crun, **not comparable** |
-| delete max (ms) | 1.38 | 244.60 | 32.11 | 47.77 | 23.22x vs crun, **not comparable** |
-| create+start of `true` p50 (ms) | 14.72 | 30.83 | 3.34 | 20.08 | 0.23x vs crun |
-| create+start of `true` p99 (ms) | 26.27 | 65.20 | 6.00 | 40.87 | 0.23x vs crun |
-| create+start of `true` p99.9 (ms) | 40.07 | 129.01 | 8.88 | 124.15 | 0.22x vs crun |
-| create+start of `true` max (ms) | 223.75 | 759.89 | 28.02 | 223.19 | 0.13x vs crun |
-| throughput, concurrency 1 / 8 / 32 (lifecycles/s) | failed (create race) | 7 / 59 / 214 | 87 / 1,015 / 1,038 | 38 / 398 / 732 | n/a |
-| CPU per lifecycle, concurrency 1 | failed (create race) | 23.09 ms | 4.68 ms | 18.43 ms | n/a |
-| memory per idle container | 0.54 MiB | 0.40 MiB | 0.37 MiB | 0.37 MiB | 0.68x vs crun |
-| density (idle containers per GiB) | 1,895 | 2,536 | 2,774 | 2,771 | 0.68x vs crun |
+| Axis | Hex | runc | crun | youki | runsc | Hex vs best |
+|---|---|---|---|---|---|---|
+| create p50 (ms) | 8.04 | 27.54 | 2.99 | 21.94 | 19.01 | 0.37x vs crun |
+| create p99 (ms) | 12.06 | 69.11 | 6.87 | 36.42 | 28.69 | 0.57x vs crun |
+| create p99.9 (ms) | 23.12 | 141.71 | 8.98 | 126.16 | 35.40 | 0.39x vs crun |
+| create max (ms) | 64.02 | 228.07 | 19.97 | 220.71 | 40.06 | 0.31x vs crun |
+| start p50 (ms) | 6.35 | 3.53 | 0.51 | 5.31 | 8.89 | 0.08x vs crun |
+| start p99 (ms) | 10.08 | 6.34 | 1.14 | 8.39 | 13.93 | 0.11x vs crun |
+| start p99.9 (ms) | 21.40 | 10.84 | 1.43 | 10.87 | 18.18 | 0.07x vs crun |
+| start max (ms) | 26.73 | 36.58 | 1.91 | 16.80 | 19.68 | 0.07x vs crun |
+| exec p50 / p99 / p99.9 / max (ms) | n/a: Hex has no exec yet | 8.42 / 15.01 / 36.58 / 129.45 | 1.64 / 3.50 / 4.28 / 73.99 | 6.78 / 31.10 / 82.67 / 178.16 | 6.12 / 11.42 / 13.24 / 14.48 | n/a |
+| delete p50 / p99 / p99.9 / max (ms) | 0.80 / 2.11 / 2.67 / 4.83 | 104.48 / 107.67 / 117.70 / 244.60 | 10.76 / 11.84 / 22.94 / 32.11 | 25.58 / 28.55 / 33.33 / 47.77 | 5.19 / 9.03 / 105.63 / 106.01 | **not comparable** (below) |
+| create+start of `true` p50 (ms) | 14.59 | 30.83 | 3.34 | 20.08 | 27.99 | 0.23x vs crun |
+| create+start of `true` p99 (ms) | 26.32 | 65.20 | 6.00 | 40.87 | 38.91 | 0.23x vs crun |
+| create+start of `true` p99.9 (ms) | 36.09 | 129.01 | 8.88 | 124.15 | 52.43 | 0.25x vs crun |
+| create+start of `true` max (ms) | 63.85 | 759.89 | 28.02 | 223.19 | 55.23 | 0.44x vs crun |
+| throughput, concurrency 1 (lifecycles/s) | 65 | 7 | 87 | 38 | 31 | 0.75x vs crun |
+| throughput, concurrency 8 (lifecycles/s) | 353 | 59 | 1,015 | 398 | 230 | 0.35x vs crun |
+| throughput, concurrency 32 (lifecycles/s) | 1,187 | 214 | 1,038 | 732 | 346 | 1.14x vs crun |
+| CPU per lifecycle, concurrency 1 (whole bench cgroup) | 5.48 ms | 23.09 ms | 4.68 ms | 18.43 ms | 52.90 ms | 0.86x vs crun |
+| memory per idle container | 0.54 MiB | 0.40 MiB | 0.37 MiB | 0.37 MiB | 12.43 MiB | 0.68x vs crun |
+| density (idle containers per GiB) | 1,899 | 2,536 | 2,774 | 2,771 | 82 | 0.68x vs crun |
 
 ### Process class
 
 | Axis | Hex `box run` | systemd scope | systemd service | Hex vs best |
 |---|---|---|---|---|
-| box run of `true` p50 / p99 / p99.9 / max (ms) | failed (harness, see below) | 6.56 / 8.22 / 10.14 / 27.94 | 11.79 / 36.75 / 43.67 / 49.48 | n/a |
-| throughput, concurrency 1 / 8 / 32 (runs/s) | failed (harness) | 156 / 239 / 187 | 84 / 147 / 202 | n/a |
-| CPU per run (the call, plus systemd's manager and bus) | failed (harness) | 7.08 ms | 13.65 ms | n/a |
-| memory per idle box | 0.72 MiB | 1.17 MiB | 0.44 MiB | 0.62x vs systemd service |
-| density (idle boxes per GiB) | 1,429 | 878 | 2,308 | 0.62x vs systemd service |
+| run of `true` p50 (ms) | 2.73 | 7.13 | 12.11 | 2.61x vs scope |
+| run of `true` p99 (ms) | 6.06 | 9.16 | 35.49 | 1.51x vs scope |
+| run of `true` p99.9 (ms) | 13.90 | 13.15 | 43.11 | 0.95x vs scope |
+| run of `true` max (ms) | 28.30 | 34.54 | 50.55 | 1.22x vs scope |
+| throughput, concurrency 1 (runs/s) | 314 | 145 | 76 | 2.17x vs scope |
+| throughput, concurrency 8 (runs/s) | 759 | 195 | 143 | 3.89x vs scope |
+| throughput, concurrency 32 (runs/s) | 783 | 160 | 192 | 4.08x vs service |
+| CPU per run (the call, plus systemd's manager and bus) | 2.51 ms | 7.81 ms | 13.92 ms | 3.11x vs scope |
+| memory per idle box | 0.70 MiB | 1.12 MiB | 0.42 MiB | 0.60x vs service |
+| density (idle boxes per GiB) | 1,458 | 916 | 2,424 | 0.60x vs service |
 
-### What this run shows
+## What the run shows
 
-- **Hex is behind crun on the start path.** Its `create` takes 2.8x crun's time, its `start` 12.8x, and
-  create+start of a `true` container 4.4x. Hex's own AC-T7.1.3 bar (start p50 under 50 ms) is met,
-  but the research bar is missed. Reaching even the 4x floor means Hex getting faster by a factor of 11
-  on create (4 × 8.41 / 2.99), 51 on start and 18 on create+start. crun is the competitor to beat: 3-9x faster than runc and youki on create and start.
-- **Hex's `start` is the largest gap: 6.55 ms against crun's 0.51 ms.** `start` only opens the exec FIFO
-  that the container blocks on, so the time is the container's own wake-up and setup after the FIFO
-  opens. This is the first thing the runtime design (goal 4) must fix.
-- **Memory and density:** Hex uses 0.54 MiB per idle container against crun's 0.37, mostly its shim
-  process (one per container; crun leaves none).
-- **Hex's delete lead is not real.** `Runtime::delete` with `--force` (`crates/hex-runtime/src/linux/oci/run.rs`)
-  sends SIGKILL to the container's process group and removes its state at once, without waiting for the
-  container to exit. crun's `delete --force` waits for the exit, which is most of its 10.76 ms. Hex's
-  0.66 ms measures less work, so it is not a lead. Waiting, bounded, for the exit is also what a later
-  create with the same id needs, so that is the fix; the delete axis is re-measured with it.
+- **OCI class: Hex misses the bar, and crun is the competitor to beat.**
+  - crun is 3-9x faster than runc and youki on create and start.
+  - Hex is behind crun on create (0.37x), start (0.08x), create+start (0.23x), CPU (0.86x) and memory
+    and density (0.68x).
+  - Hex leads only on throughput at concurrency 32 (1.14x).
+  - Reaching the 4x floor would mean Hex getting faster by a factor of 11 on create (4 × 8.04 / 2.99),
+    50 on start and 17 on create+start.
+  - Hex's own AC-T7.1.3 bar (start p50 under 50 ms) is met.
+- **Hex's `start` is the largest gap: 6.35 ms against crun's 0.51 ms.** The container side is already the
+  cheap shape: it signals ready, blocks on the exec FIFO, writes one byte and execs. The runtime side
+  writes its state durably on every operation (temp file, fsync, rename, directory fsync). That is the
+  leading suspect, to be confirmed by profiling before the runtime design (goal 4) changes it.
+- **Process class: Hex is 2-4x ahead of systemd on latency, throughput and CPU**, and reaches the 4x bar
+  only on throughput at concurrency 32. Its p99.9 is level with systemd scopes. Each idle box keeps its
+  `hex box run` wrapper process alive, which a systemd service doesn't, so Hex is behind on memory
+  (0.60x).
+- **gVisor runsc** costs its user-space kernel on every axis: 12.4 MiB and 52.9 ms of CPU per container.
 
-### Hex's oci class makes no per-container cgroup, so its create and delete ratios are not like for like
+## Hex's oci class makes no per-container cgroup, so its create and delete ratios are not like for like
 
 Hex's `oci` class parses `linux.cgroupsPath` but never uses it, and doesn't implement `linux.resources`
 (`crates/hex-runtime/src/linux/oci/`). Its containers get no cgroup of their own and no resource
@@ -85,33 +100,35 @@ limits. runc, crun and youki each make a cgroup per container by default. Their 
 making it, and their `delete --force` includes waiting for it to empty and removing it, which is most
 of crun's 10.76 ms. So:
 
-- Hex's delete numbers (0.66 ms in run 1, 0.86 ms with the exit wait in run 2) skip work the
-  competitors do. They are not a lead.
-- Hex's create is slower than crun's (8.05 ms against 2.99 ms) while doing less, so the true create gap
-  is wider than 0.37x.
+- Hex's delete (0.80 ms, now waiting for the container to exit) skips work the others do. It is not a
+  lead.
+- Hex's create is slower than crun's while doing less, so the true create gap is wider than 0.37x.
 - It is a correctness gap, not only a benchmark caveat. An `oci` container with no bound breaks
-  CLAUDE.md §2 ("every resource has a bound"). The runtime design (goal 4) must give each `oci`
-  container its own cgroup, with `linux.resources` in force, before any `oci`-class ratio counts.
+  CLAUDE.md §2 ("every resource has a bound"). The runtime design must give each `oci` container its own
+  cgroup, with `linux.resources` in force, before any `oci`-class ratio counts.
 
-### Hex's results are affected by two faults
+## Faults the bench found, and their fixes
 
-1. **Hex's OCI create race** (a Hex bug). Under load, `create` failed with "ready before the container
-   pid". The shim's pid message and the container's ready message come from two processes on one pipe,
-   in either order, and the reader only accepted one order. A failed create also left its container and
-   shim running. It broke Hex's throughput and CPU phases in both rounds, its create+start phase in round
-   1, and its lifecycle phase in round 2. The numbers above are from the phases that completed. The fix
-   (an order-independent reader, cleanup on failure, unit tests for every message order) is being
-   gated on fedora, and Hex will be measured again with it.
-2. **The process-box harness** (a bench bug). `hex box run` takes over the cgroup it starts in and parents
-   its box there, after which cgroup v2 admits no new process to it. The harness reused one cgroup per
-   worker, so every Hex run after the first exited 127. Fixed in 66e985a (a fresh cgroup per run); the
-   density phase already used one per box, which is why its numbers stand.
+- **In Hex (ed5758d):**
+  1. `create` raced: the shim's pid message and the container's ready message come from two processes
+     on one pipe, in either order, and the reader accepted only one.
+  2. A failed `create` left its container and shim running.
+  3. `delete --force` returned without waiting for the container to exit. Run 1 showed it 16x
+     faster than crun's.
+  4. A box's memory bound didn't cover swap. The gates caught this on fedora's zram: a 512 MiB hog
+     finished in a 64 MiB box. Recorded in `docs/design/runtime.md`.
 
-### Not yet measured
+  Each fix has tests, and all seven gates passed on fedora.
+- **In the bench:**
+  - `hex box run` needs a fresh cgroup per run (66e985a).
+  - gVisor's 2026 releases run the Sentry from `gvisor-bin/` beside `runsc` (66e985a).
+  - Container ids must be fixed width: runsc refused an ambiguous prefix under concurrency 32 (50279b1).
+    Its first pass is kept as `runsc.idclash.r*.json`.
+  - A density phase that stops early mustn't produce a negative memory figure (912ef34).
 
-- **runsc:** gVisor's 2026 releases run the Sentry from `gvisor-bin/` beside `runsc`, and the first
-  fetch installed `runsc` alone. Fixed in 66e985a; runsc runs next.
-- **Self-hosted platforms:** Daytona, E2B (approved by Ada on fedora, host changes included), Docker,
-  Kubernetes (kind) with the Kubernetes Agent Sandbox, Agent Substrate and Google AX.
+## Not yet measured
+
+- **Self-hosted platforms, running now:** Daytona, then Docker, E2B (approved by Ada on fedora, host
+  changes included), Kubernetes (kind) with the Kubernetes Agent Sandbox, Agent Substrate and Google AX.
 - **Hosted-only platforms** (E2B Cloud, Daytona Cloud, Modal, Morph, CodeSandbox, Fly Machines, Vercel,
   Cloudflare): no accounts or API keys exist for them, so they are not measured.
