@@ -43,6 +43,10 @@ RUNTIMES = {
 }
 
 
+# Container ids are fixed width, so none is a prefix of another: runsc (like docker) falls back to a
+# prefix lookup when an exact id misses, and refuses an ambiguous one (fedora run 2, concurrency 32).
+
+
 class OpError(Exception):
     pass
 
@@ -118,7 +122,7 @@ def phase_lifecycle(rt, n, warmup):
     ops = {"create": [], "start": [], "exec": [], "delete": []}
     cpu = {"create": [], "start": [], "exec": [], "delete": []}
     for i in range(warmup + n):
-        cid = f"{rt.name}-l{i}"
+        cid = f"{rt.name}-l{i:06d}"
         timed = [("create", lambda: rt.create("/run/bundle-sleep", cid)), ("start", lambda: rt.start(cid))]
         if rt.has_exec:
             timed.append(("exec", lambda: rt.exec_true(cid)))
@@ -145,7 +149,7 @@ def phase_lifecycle(rt, n, warmup):
 def phase_start_true(rt, n, warmup):
     ms_all = []
     for i in range(warmup + n):
-        cid = f"{rt.name}-t{i}"
+        cid = f"{rt.name}-t{i:06d}"
         a, _ = rt.create("/run/bundle-true", cid)
         try:
             b, _ = rt.start(cid)
@@ -160,7 +164,7 @@ def phase_throughput(rt, lifecycles):
     out = {}
     for conc in (1, 8, 32):
         def one(i, conc=conc):
-            cid = f"{rt.name}-c{conc}-{i}"
+            cid = f"{rt.name}-c{conc:02d}-{i:06d}"
             err = f"{ERR}/{rt.name}.c{conc}.{i}.err"
             rt.create("/run/bundle-true", cid, err_path=err)
             try:
@@ -186,7 +190,7 @@ def phase_density(rt, cap, budget_mib):
     stop_reason = "cap"
     try:
         for i in range(cap):
-            cid = f"{rt.name}-d{i}"
+            cid = f"{rt.name}-d{i:06d}"
             try:
                 rt.create("/run/bundle-sleep", cid)
                 created.append(cid)
