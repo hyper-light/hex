@@ -45,12 +45,29 @@ doesn't get one, records the environment and the competitors' versions, and writ
 
 ## Platforms
 
-- **E2B** is self-hostable on one Linux host with KVM through `embed/` (Docker Compose, real Firecracker
-  sandboxes) in `e2b-dev/runtime`
-  ([`agent-sandbox-platforms.md`](../../docs/research/runtime/agent-sandbox-platforms.md)).
-- **Daytona**'s frozen v0.190.0 tree is AGPL-3.0 and Docker-based. It needs Postgres, Redis, a registry
-  and S3-compatible storage.
+`platform_bench.py <e2b|daytona> <out> <n> <warmup> <lifecycles> <cap>` drives a platform through its
+own Python SDK: create until the sandbox runs a command, exec of `true`, delete; whole lifecycles per
+second at concurrency 1, 8 and 32; idle sandboxes up to a cap. A platform's cost is spread over many
+services, so its CPU and memory are host-wide (`/proc/stat`, `MemAvailable`) on an otherwise idle host.
+Results go in the run directory as `platform.<name>.r<round>.json`, and `summarize.py` sets them against
+Hex's `oci` class (create+start). **That comparison crosses isolation classes**: E2B isolates each
+sandbox in a Firecracker microVM, Daytona's container class shares the host kernel. The like-for-like
+comparison for E2B is Hex's `firecracker` or `shards` class, which does not exist yet; the table says so.
+
+- **E2B** is self-hostable on one Linux host with KVM through `embed/compose` in `e2b-dev/runtime`
+  ([`agent-sandbox-platforms.md`](../../docs/research/runtime/agent-sandbox-platforms.md)): `docker
+  compose up -d --wait`, then `eval "$(docker compose exec ready cat /run/e2b/sdk.env)"` and the SDK
+  `e2b==2.46.0` in a venv under `~/.cache`. **It changes the host**: it loads `nbd`, `tun` and `kvm`, writes
+  `/etc/modules-load.d/e2b.conf`, `/etc/modprobe.d/e2b-nbd.conf`, a udev rule and `/etc/sysctl.d/90-e2b.conf`
+  (raising `net.ipv4.tcp_max_syn_backlog` and `vm.max_map_count`), adds one iptables mangle rule, and
+  reserves hugepages (4 GiB by default). `docker compose down -v` then `docker compose --profile purge run
+  --rm host-teardown` undoes it, except `kvm` and `tun` stay loaded and the two sysctls stay raised until a
+  reboot. On fedora, a shared host, that needs the coordinator's and Ada's go-ahead first.
+- **Daytona**: its `docker/docker-compose.yaml` (14 services: API, proxy, a privileged runner, SSH gateway,
+  Dex, Postgres, Redis, a registry, MinIO, tracing) runs inside Docker without host changes. Its images are
+  untagged (`latest`), so the run records each image's digest; the frozen v0.190.0 tree
+  (`01c502bb`) is what the research read. An API key comes from its dashboard (Dex dev login).
 - **Hosted-only platforms** (E2B Cloud, Daytona Cloud, Modal, Morph, CodeSandbox, Fly Machines, Vercel,
   Cloudflare) can be measured only end to end, from the bench host through their public APIs, with
-  accounts and API keys that only Ada can provide. They are labelled hosted, as their numbers include the
-  network.
+  accounts and API keys that only Ada can provide. Their results are labelled hosted (`HOSTED=1`), as the
+  numbers include the network.

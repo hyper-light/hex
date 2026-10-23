@@ -130,6 +130,46 @@ def box_section(run):
     return methods, rows, rs
 
 
+def platform_section(run, oci_data):
+    """Sandbox platforms against Hex's oci class: create until the sandbox runs (Hex: create+start)."""
+    plats = {}
+    for path in sorted(glob.glob(os.path.join(run, "platform.*.r*.json"))):
+        with open(path) as f:
+            d = json.load(f)
+        name = d["platform"] + (" (hosted)" if d.get("hosted") else "")
+        plats.setdefault(name, []).append(d)
+    if not plats:
+        return [], [], {}
+    names = ["hex"] + sorted(plats)
+    hex_rounds = list(oci_data.get("hex", {}).values())
+
+    def hex_create_until_running(r):
+        lc = r["phases"].get("lifecycle", {}).get("ms", {})
+        return [a + b for a, b in zip(lc.get("create", []), lc.get("start", []))]
+    per = {"hex": {"create": best_dist([hex_create_until_running(r) for r in hex_rounds]),
+                   "exec": None,
+                   "delete": best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get("delete", []) for r in hex_rounds])}}
+    for name, rs in plats.items():
+        per[name] = {op: best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get(op, []) for r in rs])
+                     for op in ("create", "exec", "delete")}
+    rows = []
+    for op, label in (("create", "create until it runs a command"), ("exec", "exec of `true`"), ("delete", "delete")):
+        for q in ("p50", "p99", "p99.9", "max"):
+            rows.append((f"{label} {q} (ms)", "ms", True, {n: (per[n][op] or {}).get(q) for n in names}))
+    for c in ("1", "8", "32"):
+        vals = {"hex": max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in hex_rounds), default=0) or None}
+        for name, rs in plats.items():
+            vals[name] = max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in rs), default=0) or None
+        rows.append((f"lifecycles/s at concurrency {c}", "/s", False, vals))
+    mem = {"hex": min((r["phases"]["density"]["memory_per_container_bytes"] for r in hex_rounds
+                       if r["phases"].get("density", {}).get("memory_per_container_bytes")), default=None)}
+    for name, rs in plats.items():
+        mem[name] = min((r["phases"]["density"]["memory_per_sandbox_bytes"] for r in rs
+                         if r["phases"].get("density", {}).get("memory_per_sandbox_bytes")), default=None)
+    rows.append(("memory per idle sandbox (platforms: host MemAvailable drop)", "bytes", True, mem))
+    return names, rows, plats
+
+
 def table(title, names, rows):
     out = [f"### {title}", "", "| Axis | " + " | ".join(names) + " | Hex vs best competitor |",
            "|---|" + "---|" * len(names) + "---|"]
@@ -149,6 +189,9 @@ def main():
         errs = {n: e for n, e in errs.items() if e}
         if errs:
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
+    pnames, prows, plats = platform_section(run, data)
+    if plats:
+        parts.append(table("Sandbox platforms (end to end through each SDK) against Hex `oci`", pnames, prows))
     methods, rows, rs = box_section(run)
     if rs:
         parts.append(table("Process class (`hex box run` against systemd transient units)", methods, rows))
