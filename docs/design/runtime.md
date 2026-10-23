@@ -56,6 +56,84 @@ validation subset within CP-T7.1–T7.2, or if its start latency exceeds 50 ms p
 present, the decision is revisited in favour of vendoring youki and paying down its lint debt. The
 measurements live in `bench/` and are re-run per the bar.
 
+## Decision: every `oci` container gets its own cgroup, with `linux.resources` in force (AC-T7.1.4, AC-T7.1.1)
+
+**The gap.** Until 2026-10-23 the `oci` class parsed `linux.cgroupsPath` and ignored it, and never
+read `linux.resources`. Its containers had no cgroup, no limits and no device rules. A container
+breaking CLAUDE.md §2 ("every resource has a bound"), and a root container could `mknod` and open
+any host device despite a spec that denied them. The competitive baseline found it
+(`bench/competitive/RESULT.md`): Hex's `delete` was not comparable with runc's and crun's, which
+remove a cgroup.
+
+**The choice.**
+- **Where.** `cgroupsPath` when absolute is relative to the cgroup v2 mount point, as the spec
+  requires; a relative one is rooted there too, and an unset one is `/<id>`, as crun's cgroupfs driver
+  does (`src/libcrun/cgroup-cgroupfs.c`, `make_cgroup_path`). Paths with empty, `.` or `..`
+  components, control characters or the systemd driver's `slice:prefix:name` form are refused (the
+  spec lets a runtime refuse a value). `create` makes the cgroup before the shim starts, hands each
+  ancestor the controllers the container needs, and refuses an existing cgroup that holds processes
+  (the spec's own example of a cgroup unfit for create).
+- **Who is inside.** Only the container. The shim stays out, as containerd's does, so the limits
+  bound the workload alone. The shim opens `cgroup.procs` before it touches any namespace; the
+  container writes `0` to it as its first act, then unshares its cgroup namespace, so the
+  namespace's root is its own cgroup. The kernel checks a migration against the credentials and
+  cgroup namespace a file was opened with (Linux 5.16, the fix for CVE-2021-4197), so this works from
+  inside a user namespace too.
+- **What is in force.** `linux.resources` becomes cgroup v2 writes by crun's documented conversions
+  (`crun.1.md`, "CGROUP v2"): `memory.limit` → `memory.max`, `reservation` → `memory.low`, `swap` →
+  `memory.swap.max` as `swap − limit`; `cpu.shares` → `cpu.weight` by crun's quadratic in log2
+  (`src/libcrun/cgroup-internal.h`, `convert_shares_to_weight`: 2 → 1, 1024 → 100, 262144 → 10000,
+  rounded up); `quota`/`period` → `cpu.max`; `cpus`/`mems` → `cpuset.*`; blkio weights → `io.weight`
+  linearly onto 1-10000; throttles → `io.max`; hugepages → `hugetlb.<size>.max`; `pids.limit` →
+  `pids.max`; RDMA → `rdma.max`; `unified` keys as given, last. Unlike Hex's boxes, an `oci`
+  container's memory limit doesn't also set `memory.swap.max` 0: the spec gives swap its own field,
+  and runc and crun leave swap alone when it is unset.
+- **What is refused, by name.** The spec: "If the conversion is not possible the runtime MUST
+  generate an error" (config-linux.md, "Unified"). cgroup v2 has no `memory.kernel`, `kernelTCP`,
+  `swappiness` or OOM-killer switch, no realtime CPU bandwidth, no blkio leaf weight, and no
+  `net_cls`/`net_prio`; each, when set, refuses the container. So does a controller the resources
+  need that the parent can't hand down.
+- **Devices.** cgroup v2 controls device access with a `BPF_PROG_TYPE_CGROUP_DEVICE` program
+  attached to the cgroup (`Documentation/admin-guide/cgroup-v2.rst`, "Device controller"). The
+  steps:
+  - It starts from deny, as runc's emulator does (its zero value) and crun's program does (it ends
+    denying).
+  - The spec's list, which "MUST" be applied in order, runs through cgroup v1's own update rules
+    (`security/device_cgroup.c`, `devcgroup_update_access`).
+  - crun's default devices are allowed last (`src/libcrun/cgroup-resources.c`, `default_devices`):
+    `mknod` of any node, and the nodes the spec says a runtime "MUST also supply" (null, zero, full,
+    random, urandom, tty), plus console, ptmx, `pts/*` and tun. runc appends the same list, but
+    console.
+  - The result, a default and its exceptions, is compiled to a program that decides as v1's checks did
+    (`match_exception` under a deny default, `match_exception_partial` under an allow default), and
+    loaded and attached with `BPF_F_ALLOW_MULTI`.
+
+  A spec with no list gets the same policy as a deny-all one, as under runc and crun. Only a list that
+  ends allowing everything gets no program. At most 256 exceptions, under the verifier's
+  4,096-instruction limit for unprivileged programs. The first version started from allow and added
+  no defaults. runtime-tools' generated spec denies every device, so every init's `mknod` of
+  `/dev/null` was refused, and the validation suite fell from 28 passes to 4; a test now pins that a
+  deny-all list keeps the supplied devices.
+- **Delete and kill.** `delete` writes `cgroup.kill`, waits (bounded, 10 s, as `hex box run`'s
+  cleanup) for `cgroup.events` to say the cgroup is empty, and removes it; past the bound it refuses
+  and keeps the state for a later delete. `kill --all` signals every process in the cgroup, not the
+  process group, which a process leaves with `setsid`. A failed `create` ends whatever it started in
+  the cgroup and removes it.
+
+**Evidence.** The spec text is runtime-spec `main` at 469dd5b6233c (2026-10-16), config-linux.md
+"Control groups", "Cgroups Path" and "Unified". crun's table and code are at commit 48514cefa6dd
+(2026-10-23). The conversions are pinned by tests against reference values computed independently
+with IEEE doubles and libm `pow`, as crun's C computes them. The device compiler is checked
+model-based: for random rule lists and requests, the compiled program, run by a small eBPF
+interpreter in the test, decides exactly as cgroup v1's checks do on the state the rules leave
+(`hex_runtime::linux::oci::resources`). A root-only lab test on fedora exercises the kernel side.
+
+**What would falsify it.** A spec, from runc's `spec` or containerd, whose device list or resources
+this refuses or decides differently from runc or crun on the same host. A measurement showing the
+join (a migration through `cgroup.procs`) is a material part of `create`'s cost, under the
+concurrency the benchmark runs. That would move the container's birth into its cgroup with
+`clone3(CLONE_INTO_CGROUP)`, as crun does, which skips the migration lock.
+
 ## The `process` box (Linux) — AC-T7.1.1, AC-T7.1.2, AC-T7.1.5
 
 **Source.** The kernel's cgroup v2 documentation (`Documentation/admin-guide/cgroup-v2.rst`);

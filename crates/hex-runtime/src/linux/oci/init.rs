@@ -28,6 +28,8 @@ pub const ENV_MAP_R: &str = "HEX_OCI_MAP_R";
 pub const ENV_DIR: &str = "HEX_OCI_DIR";
 pub const ENV_BUNDLE: &str = "HEX_OCI_BUNDLE";
 pub const ENV_ID: &str = "HEX_OCI_ID";
+/// The container's cgroup directory, which `create` has made with its resources in force.
+pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
 /// (path, major, minor, mode); all character devices.
@@ -57,7 +59,8 @@ pub fn run() -> u8 {
 }
 
 /// The shim: unshares namespaces, forks the container, reports its pid, then reaps it and records
-/// the stop.
+/// the stop. The shim stays outside the container's cgroup, as a container manager's shim does, so
+/// the container's limits bound the container alone.
 fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     let container_dir = PathBuf::from(env_var(ENV_DIR)?);
     let bundle = env_var(ENV_BUNDLE)?;
@@ -66,6 +69,19 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
         &fs::read(Path::new(&bundle).join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?,
     )?;
+    // The cgroup's `cgroup.procs`, opened before any namespace changes: the kernel checks a migration
+    // against the credentials and cgroup namespace the file was opened with (Linux 5.16, the fix for
+    // CVE-2021-4197), so the container can join through it from inside a user namespace.
+    let procs = std::env::var_os(ENV_CGROUP)
+        .map(|dir| {
+            rustix::fs::open(
+                Path::new(&dir).join("cgroup.procs"),
+                OFlags::WRONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| OciError::os("opening the container's cgroup.procs", e))
+        })
+        .transpose()?;
 
     if spec.makes_namespace("user") {
         sys::unshare(UnshareFlags::NEWUSER)?;
@@ -80,14 +96,17 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     sys::unshare(namespace_flags(&spec))?;
 
     match sys::fork()? {
-        sys::Fork::Child => Ok(match container(&spec, &bundle, &container_dir, sync) {
-            Ok(()) => 0,
-            Err(e) => {
-                msg(sync, &format!("E{e}"));
-                127
-            }
-        }),
+        sys::Fork::Child => Ok(
+            match container(&spec, &bundle, &container_dir, sync, procs) {
+                Ok(()) => 0,
+                Err(e) => {
+                    msg(sync, &format!("E{e}"));
+                    127
+                }
+            },
+        ),
         sys::Fork::Parent(container_pid) => {
+            drop(procs);
             msg(sync, &format!("P{container_pid}"));
             let _ = sys::waitpid(container_pid)?;
             let dir = Dir::at(&container_dir);
@@ -100,13 +119,32 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     }
 }
 
-/// The container (PID 1 of its namespaces): set up the world, signal ready, wait for `start`, exec.
+/// The container (PID 1 of its namespaces): join its cgroup, set up the world, signal ready, wait for
+/// `start`, exec.
 fn container(
     spec: &Spec,
     bundle: &str,
     container_dir: &Path,
     sync: BorrowedFd<'_>,
+    procs: Option<OwnedFd>,
 ) -> Result<(), OciError> {
+    // First of all, before it allocates or starts anything: into its cgroup, so its limits and
+    // accounting cover all it does. Then a fresh cgroup namespace, so the namespace's root is the
+    // container's own cgroup (the shim no longer unshares it: it isn't in that cgroup).
+    if let Some(procs) = procs {
+        let n = rustix::io::write(&procs, b"0")
+            .map_err(|e| OciError::os("joining the container's cgroup", e))?;
+        if n != 1 {
+            return Err(OciError::os(
+                "joining the container's cgroup",
+                "a short write to cgroup.procs",
+            ));
+        }
+    }
+    if spec.makes_namespace("cgroup") {
+        sys::unshare(UnshareFlags::NEWCGROUP)?;
+    }
+
     // The exec FIFO lives in the runtime's state dir, outside the rootfs; open its directory now,
     // before pivot_root removes that path from view, and open the FIFO through this fd later.
     let fifo_dir = rustix::fs::open(
@@ -266,7 +304,8 @@ fn join_namespace_paths(spec: &Spec) -> Result<(), OciError> {
     Ok(())
 }
 
-/// The namespace flags the spec asks to make fresh (those without a `path`).
+/// The namespace flags the shim makes fresh for the container (those without a `path`). A fresh
+/// cgroup namespace isn't among them: the container makes it once it has joined its own cgroup.
 fn namespace_flags(spec: &Spec) -> UnshareFlags {
     let mut flags = UnshareFlags::empty();
     for (kind, flag) in [
@@ -274,7 +313,6 @@ fn namespace_flags(spec: &Spec) -> UnshareFlags {
         ("uts", UnshareFlags::NEWUTS),
         ("ipc", UnshareFlags::NEWIPC),
         ("network", UnshareFlags::NEWNET),
-        ("cgroup", UnshareFlags::NEWCGROUP),
         ("pid", UnshareFlags::NEWPID),
     ] {
         if spec.makes_namespace(kind) {

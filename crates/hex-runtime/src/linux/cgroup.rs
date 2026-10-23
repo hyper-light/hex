@@ -234,6 +234,12 @@ pub struct BoxCgroup {
 }
 
 impl BoxCgroup {
+    /// The cgroup at `dir`, wherever it is: an `oci` container's cgroup goes where its spec puts it,
+    /// not under a box root, and is killed, waited out and removed as a box's is.
+    pub fn at(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -396,7 +402,8 @@ pub fn write_file(path: &Path, value: &str) -> Result<(), Refusal> {
     }
 }
 
-fn read_set(path: &Path) -> Result<BTreeSet<String>, Refusal> {
+/// The words of a cgroup file that lists controllers (`cgroup.controllers`, `cgroup.subtree_control`).
+pub(crate) fn read_set(path: &Path) -> Result<BTreeSet<String>, Refusal> {
     let text =
         fs::read_to_string(path).map_err(|e| os_err("reading cgroup controllers", path, e))?;
     Ok(text.split_ascii_whitespace().map(str::to_owned).collect())

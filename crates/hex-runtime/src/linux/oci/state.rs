@@ -46,6 +46,10 @@ pub struct State {
     pub bundle: String,
     #[serde(default)]
     pub annotations: std::collections::BTreeMap<String, String>,
+    /// The container's cgroup directory: Hex's own field beside the spec's, so `delete` finds the
+    /// cgroup whatever has become of the bundle. Absent in state written before the class made one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<String>,
 }
 
 impl State {
@@ -57,6 +61,7 @@ impl State {
             pid: 0,
             bundle: bundle.to_owned(),
             annotations: std::collections::BTreeMap::new(),
+            cgroup: None,
         }
     }
 
@@ -171,6 +176,21 @@ mod tests {
         assert!(dir.exists());
         dir.remove().unwrap();
         assert!(dir.get("c1").is_err());
+    }
+
+    // AC-T7.1.4, append-only wire format: state written before the cgroup field reads as having none,
+    // and the field round-trips once set.
+    #[test]
+    fn state_without_a_cgroup_still_reads_and_one_with_it_round_trips() {
+        let old = br#"{"ociVersion":"1.3.0","id":"c1","status":"created","pid":7,"bundle":"/b"}"#;
+        let st: State = serde_json::from_slice(old).unwrap();
+        assert_eq!(st.cgroup, None);
+        let json: serde_json::Value = serde_json::from_slice(&st.to_json().unwrap()).unwrap();
+        assert!(json.get("cgroup").is_none());
+        let mut with = st;
+        with.cgroup = Some("/sys/fs/cgroup/c1".to_owned());
+        let back: State = serde_json::from_slice(&with.to_json().unwrap()).unwrap();
+        assert_eq!(back, with);
     }
 
     #[test]

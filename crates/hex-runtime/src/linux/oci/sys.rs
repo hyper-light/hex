@@ -196,6 +196,165 @@ fn prctl2(option: libc::c_int, arg2: libc::c_ulong, what: &'static str) -> Resul
     }
 }
 
+// `bpf(2)`'s commands and the device program's type and attach point (include/uapi/linux/bpf.h).
+const BPF_PROG_LOAD: libc::c_long = 5;
+const BPF_PROG_ATTACH: libc::c_long = 8;
+const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
+const BPF_CGROUP_DEVICE: u32 = 6;
+/// `BPF_F_ALLOW_MULTI` (1 << 1): the program joins whatever the cgroup's ancestors attached, all of
+/// which must allow an access, as runc and crun attach theirs.
+const BPF_F_ALLOW_MULTI: u32 = 2;
+/// Most bytes of the verifier's log kept when it refuses a program: enough for the refusing
+/// instruction and its context; the kernel truncates the log at the buffer's end.
+const VERIFIER_LOG_BYTES: usize = 65_536;
+
+/// The `union bpf_attr` member `BPF_PROG_LOAD` reads, as the kernel lays it out; fields past
+/// `expected_attach_type` are absent, which the kernel takes as zero.
+#[repr(C)]
+struct ProgLoadAttr {
+    prog_type: u32,
+    insn_cnt: u32,
+    insns: u64,
+    license: u64,
+    log_level: u32,
+    log_size: u32,
+    log_buf: u64,
+    kern_version: u32,
+    prog_flags: u32,
+    prog_name: [u8; 16],
+    prog_ifindex: u32,
+    expected_attach_type: u32,
+}
+
+/// The `union bpf_attr` member `BPF_PROG_ATTACH` reads.
+#[repr(C)]
+struct ProgAttachAttr {
+    target_fd: u32,
+    attach_bpf_fd: u32,
+    attach_type: u32,
+    attach_flags: u32,
+    replace_bpf_fd: u32,
+}
+
+/// An address the kernel reads through, as `bpf_attr`'s `__aligned_u64`.
+fn user_ptr<T: ?Sized>(p: *const T) -> Result<u64, OciError> {
+    u64::try_from(p.cast::<u8>().expose_provenance())
+        .map_err(|_| OciError::os("bpf", "an address wider than 64 bits"))
+}
+
+/// Loads a `BPF_PROG_TYPE_CGROUP_DEVICE` program ([`super::resources::compile`]'s output). When the
+/// verifier refuses it, the error carries the tail of the verifier's log.
+pub fn load_device_program(
+    insns: &[super::resources::Insn],
+) -> Result<std::os::fd::OwnedFd, OciError> {
+    let insn_cnt = u32::try_from(insns.len())
+        .map_err(|_| OciError::os("loading the device program", "too many instructions"))?;
+    let license = c"MIT";
+    // The verifier's log, only asked for when a first load is refused; it lives to the function's end,
+    // past every call that may write it.
+    let mut log: Vec<u8> = Vec::new();
+    let mut attr = ProgLoadAttr {
+        prog_type: BPF_PROG_TYPE_CGROUP_DEVICE,
+        insn_cnt,
+        insns: user_ptr(insns.as_ptr())?,
+        license: user_ptr(license.as_ptr())?,
+        log_level: 0,
+        log_size: 0,
+        log_buf: 0,
+        kern_version: 0,
+        prog_flags: 0,
+        prog_name: *b"hex_devices\0\0\0\0\0",
+        prog_ifindex: 0,
+        expected_attach_type: 0,
+    };
+    for verbose in [false, true] {
+        if verbose {
+            log = vec![0u8; VERIFIER_LOG_BYTES];
+            attr.log_level = 1;
+            attr.log_size = u32::try_from(log.len()).unwrap_or(u32::MAX);
+            attr.log_buf = user_ptr(log.as_mut_ptr())?;
+        }
+        // SAFETY: bpf(BPF_PROG_LOAD) reads `attr` (a live, initialised repr(C) struct of the size
+        // passed) and, through it, `insns` (insn_cnt live instructions laid out as struct bpf_insn), the
+        // NUL-terminated license, and writes at most log_size bytes into `log`, which outlives the call.
+        // The return value is checked before it is owned.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_bpf,
+                BPF_PROG_LOAD,
+                &raw const attr,
+                std::mem::size_of::<ProgLoadAttr>(),
+            )
+        };
+        if r >= 0 {
+            let fd =
+                i32::try_from(r).map_err(|_| OciError::os("bpf", "a descriptor out of range"))?;
+            use std::os::fd::FromRawFd;
+            // SAFETY: a successful BPF_PROG_LOAD returns a new descriptor no one else holds.
+            return Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+        }
+        let err = std::io::Error::last_os_error();
+        if verbose || err.raw_os_error() != Some(libc::EINVAL) {
+            let text = String::from_utf8_lossy(&log);
+            let tail: String = text
+                .trim_end_matches('\0')
+                .chars()
+                .rev()
+                .take(500)
+                .collect();
+            let tail: String = tail.chars().rev().collect();
+            return Err(OciError::os(
+                "loading the device program",
+                if tail.is_empty() {
+                    err.to_string()
+                } else {
+                    format!("{err}: verifier: {tail}")
+                },
+            ));
+        }
+    }
+    Err(OciError::os(
+        "loading the device program",
+        "the verifier refused it",
+    ))
+}
+
+/// Attaches device program `prog` to the cgroup whose directory is open as `cgroup`.
+pub fn attach_device_program(
+    cgroup: std::os::fd::BorrowedFd<'_>,
+    prog: std::os::fd::BorrowedFd<'_>,
+) -> Result<(), OciError> {
+    use std::os::fd::AsRawFd;
+    let fd = |f: std::os::fd::BorrowedFd<'_>| {
+        u32::try_from(f.as_raw_fd()).map_err(|_| OciError::os("bpf", "a negative descriptor"))
+    };
+    let attr = ProgAttachAttr {
+        target_fd: fd(cgroup)?,
+        attach_bpf_fd: fd(prog)?,
+        attach_type: BPF_CGROUP_DEVICE,
+        attach_flags: BPF_F_ALLOW_MULTI,
+        replace_bpf_fd: 0,
+    };
+    // SAFETY: bpf(BPF_PROG_ATTACH) reads `attr`, a live, initialised repr(C) struct of the size
+    // passed, holding two descriptors this process has open; it writes nothing of ours.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_PROG_ATTACH,
+            &raw const attr,
+            std::mem::size_of::<ProgAttachAttr>(),
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(OciError::os(
+            "attaching the device program",
+            std::io::Error::last_os_error(),
+        ))
+    }
+}
+
 /// Owns an inherited file-descriptor number the runtime passed through the environment.
 pub fn own_fd(fd: std::os::fd::RawFd) -> Result<std::os::fd::OwnedFd, OciError> {
     use std::os::fd::FromRawFd;

@@ -175,6 +175,169 @@ pub struct Linux {
     pub rootfs_propagation: Option<String>,
     #[serde(default)]
     pub cgroups_path: Option<String>,
+    #[serde(default)]
+    pub resources: Option<Resources>,
+}
+
+/// `linux.resources` (config-linux.md, "Control groups"): cgroup v1-shaped limits, which
+/// [`super::resources`] converts to cgroup v2 files, and `unified`, cgroup v2 files by name.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resources {
+    /// The allowed device list, applied in order.
+    #[serde(default)]
+    pub devices: Vec<DeviceRule>,
+    #[serde(default)]
+    pub memory: Option<Memory>,
+    #[serde(default)]
+    pub cpu: Option<Cpu>,
+    #[serde(default, rename = "blockIO")]
+    pub block_io: Option<BlockIo>,
+    #[serde(default)]
+    pub hugepage_limits: Vec<HugepageLimit>,
+    /// `net_cls` and `net_prio`, which cgroup v2 doesn't have: present is refused, whatever it holds.
+    #[serde(default)]
+    pub network: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    pub pids: Option<Pids>,
+    #[serde(default)]
+    pub rdma: std::collections::BTreeMap<String, Rdma>,
+    #[serde(default)]
+    pub unified: std::collections::BTreeMap<String, String>,
+}
+
+/// One entry of the allowed device list.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRule {
+    pub allow: bool,
+    /// `a` (all), `c` (char) or `b` (block); unset is all.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// Unset is every major (minor).
+    #[serde(default)]
+    pub major: Option<i64>,
+    #[serde(default)]
+    pub minor: Option<i64>,
+    /// Some of `r`, `w` and `m`; unset is all three.
+    #[serde(default)]
+    pub access: Option<String>,
+}
+
+/// `linux.resources.memory`, in bytes, `-1` for unlimited.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Memory {
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub reservation: Option<i64>,
+    /// Memory plus swap, as cgroup v1 counts it.
+    #[serde(default)]
+    pub swap: Option<i64>,
+    #[serde(default)]
+    pub kernel: Option<i64>,
+    #[serde(default, rename = "kernelTCP")]
+    pub kernel_tcp: Option<i64>,
+    #[serde(default)]
+    pub swappiness: Option<u64>,
+    #[serde(default, rename = "disableOOMKiller")]
+    pub disable_oom_killer: Option<bool>,
+    #[serde(default)]
+    pub use_hierarchy: Option<bool>,
+    #[serde(default)]
+    pub check_before_update: Option<bool>,
+}
+
+/// `linux.resources.cpu`: times in microseconds.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cpu {
+    #[serde(default)]
+    pub shares: Option<u64>,
+    #[serde(default)]
+    pub quota: Option<i64>,
+    #[serde(default)]
+    pub burst: Option<u64>,
+    #[serde(default)]
+    pub period: Option<u64>,
+    #[serde(default)]
+    pub realtime_runtime: Option<i64>,
+    #[serde(default)]
+    pub realtime_period: Option<u64>,
+    #[serde(default)]
+    pub cpus: Option<String>,
+    #[serde(default)]
+    pub mems: Option<String>,
+    #[serde(default)]
+    pub idle: Option<i64>,
+}
+
+/// `linux.resources.blockIO`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockIo {
+    #[serde(default)]
+    pub weight: Option<u16>,
+    #[serde(default)]
+    pub leaf_weight: Option<u16>,
+    #[serde(default)]
+    pub weight_device: Vec<WeightDevice>,
+    #[serde(default)]
+    pub throttle_read_bps_device: Vec<ThrottleDevice>,
+    #[serde(default)]
+    pub throttle_write_bps_device: Vec<ThrottleDevice>,
+    #[serde(default, rename = "throttleReadIOPSDevice")]
+    pub throttle_read_iops_device: Vec<ThrottleDevice>,
+    #[serde(default, rename = "throttleWriteIOPSDevice")]
+    pub throttle_write_iops_device: Vec<ThrottleDevice>,
+}
+
+/// One device's IO weight.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeightDevice {
+    pub major: i64,
+    pub minor: i64,
+    #[serde(default)]
+    pub weight: Option<u16>,
+    #[serde(default)]
+    pub leaf_weight: Option<u16>,
+}
+
+/// One device's IO rate limit, in bytes or operations per second.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThrottleDevice {
+    pub major: i64,
+    pub minor: i64,
+    pub rate: u64,
+}
+
+/// A HugeTLB limit for one page size (`2MB`, `1GB`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HugepageLimit {
+    pub page_size: String,
+    pub limit: u64,
+}
+
+/// `linux.resources.pids`: `-1` is no limit, and `0` is a limit of zero.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pids {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// One RDMA device's limits.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rdma {
+    #[serde(default)]
+    pub hca_handles: Option<u32>,
+    #[serde(default)]
+    pub hca_objects: Option<u32>,
 }
 
 /// A namespace the container runs in; `path` joins an existing one instead of making a new one.
@@ -298,6 +461,46 @@ mod tests {
         assert!(spec.makes_namespace("pid"));
         assert!(!spec.makes_namespace("network"));
         assert_eq!(spec.linux.masked_paths, ["/proc/kcore"]);
+    }
+
+    // AC-T7.1.4: linux.resources parses under the spec's own field names, several of which aren't
+    // plain camelCase (blockIO, kernelTCP, disableOOMKiller, throttleReadIOPSDevice): a wrong name
+    // would read as absent, and the limit it holds would silently not be applied.
+    #[test]
+    fn resources_parse_under_the_specs_field_names() {
+        let json = MINIMAL.replace(
+            "\"maskedPaths\": [\"/proc/kcore\"]",
+            r#""maskedPaths": ["/proc/kcore"], "cgroupsPath": "/a/b",
+               "resources": {"devices": [{"allow": false, "access": "rwm"}],
+                 "memory": {"limit": 1024, "swap": 2048, "kernelTCP": 1, "disableOOMKiller": false},
+                 "cpu": {"shares": 1024, "realtimeRuntime": 1, "cpus": "0-1"},
+                 "blockIO": {"weight": 500, "throttleReadIOPSDevice": [{"major": 8, "minor": 0, "rate": 100}]},
+                 "hugepageLimits": [{"pageSize": "2MB", "limit": 1}],
+                 "network": {"classID": 1},
+                 "pids": {"limit": -1},
+                 "rdma": {"mlx5_0": {"hcaHandles": 1}},
+                 "unified": {"memory.high": "1"}}"#,
+        );
+        let spec = Spec::parse(json.as_bytes()).unwrap();
+        assert_eq!(spec.linux.cgroups_path.as_deref(), Some("/a/b"));
+        let r = spec.linux.resources.unwrap();
+        assert!(!r.devices[0].allow);
+        let m = r.memory.unwrap();
+        assert_eq!(
+            (m.limit, m.swap, m.kernel_tcp, m.disable_oom_killer),
+            (Some(1024), Some(2048), Some(1), Some(false))
+        );
+        let c = r.cpu.unwrap();
+        assert_eq!((c.shares, c.realtime_runtime), (Some(1024), Some(1)));
+        assert_eq!(c.cpus.as_deref(), Some("0-1"));
+        let b = r.block_io.unwrap();
+        assert_eq!(b.weight, Some(500));
+        assert_eq!(b.throttle_read_iops_device[0].rate, 100);
+        assert_eq!(r.hugepage_limits[0].page_size, "2MB");
+        assert!(r.network.is_some());
+        assert_eq!(r.pids.unwrap().limit, Some(-1));
+        assert_eq!(r.rdma["mlx5_0"].hca_handles, Some(1));
+        assert_eq!(r.unified["memory.high"], "1");
     }
 
     #[test]

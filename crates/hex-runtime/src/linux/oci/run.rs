@@ -1,23 +1,69 @@
 //! The OCI lifecycle the runtime-tools suite drives: `create`, `start`, `state`, `kill`, `delete`.
-//! `create` forks the shim ([`super::init`]), runs the sync protocol (user-namespace maps, the
-//! container pid, the ready signal), and writes the state; the container then blocks until `start`
-//! opens the exec FIFO.
+//! `create` makes the container's cgroup with its resources in force, forks the shim
+//! ([`super::init`]), runs the sync protocol (user-namespace maps, the container pid, the ready
+//! signal), and writes the state; the container then blocks until `start` opens the exec FIFO.
+//! `delete` kills what is left in the cgroup, waits for it to empty and removes it.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use hex_api::Refusal;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::FdFlags;
 use rustix::process::PidfdFlags;
 
+use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
 use crate::linux::oci::init;
-use crate::linux::oci::spec::{IdMapping, Spec};
+use crate::linux::oci::resources::{self, Plan};
+use crate::linux::oci::spec::{IdMapping, Resources, Spec};
 use crate::linux::oci::state::{Dir, State, Status};
 use crate::linux::oci::{OciError, sys};
+
+/// The controllers a container's cgroup gets, beyond those its resources need, where its parent has
+/// them: what Hex's boxes get ([`hex_core::cgroup::CONTROLLERS`]), so a container's memory, CPU, IO
+/// and pids are accounted whether or not it is limited (the spec lets a runtime attach more
+/// controllers than its resources need, config-linux.md "Cgroups Path").
+const DEFAULT_CONTROLLERS: [&str; 4] = hex_core::cgroup::CONTROLLERS;
+
+/// The longest container id: a file name's limit (`NAME_MAX`, 255 bytes), since the id names the
+/// container's state directory.
+const MAX_ID_BYTES: usize = 255;
+
+/// Refuses an id that isn't a plain name, before anything is touched. The id names the container's
+/// state directory and its default cgroup, so a `/` or `..` would reach outside the state root, and
+/// `delete` would remove whatever directory it reached. Ids are `[A-Za-z0-9_+.-]`, as runc takes
+/// them, and neither `.` nor `..`.
+fn check_id(id: &str) -> Result<(), OciError> {
+    let plain = !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'.' | b'-'));
+    if plain {
+        Ok(())
+    } else {
+        Err(OciError::Config(format!(
+            "container id {id:?} isn't a plain name of [A-Za-z0-9_+.-]"
+        )))
+    }
+}
+
+fn from_refusal(r: Refusal) -> OciError {
+    match r {
+        Refusal::Os { op, why } => OciError::Os { op, why },
+        other => OciError::Os {
+            op: "cgroup",
+            why: other.to_string(),
+        },
+    }
+}
 
 /// The OCI runtime: containers under one state root.
 pub struct Runtime {
@@ -41,15 +87,16 @@ impl Runtime {
         PathBuf::from("/run/hex-oci")
     }
 
-    fn dir(&self, id: &str) -> Dir {
-        Dir::new(&self.root, id)
+    fn dir(&self, id: &str) -> Result<Dir, OciError> {
+        check_id(id)?;
+        Ok(Dir::new(&self.root, id))
     }
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
     /// FIFO, in the `created` state. `bundle` holds `config.json`; `pid_file`, if given, receives
     /// the container init's pid.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
-        let dir = self.dir(id);
+        let dir = self.dir(id)?;
         dir.create(id)?;
         let result = self.create_inner(id, bundle, &dir, pid_file);
         if result.is_err() {
@@ -68,8 +115,32 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
+        // A spec without resources still gets the default device policy, as runc's and crun's do.
+        let plan = resources::plan(
+            spec.linux
+                .resources
+                .as_ref()
+                .unwrap_or(&Resources::default()),
+        )?;
         make_fifo(&dir.fifo())?;
+        let cgroup = make_cgroup(&spec, id, &plan)?;
+        let result = self.start_shim(id, bundle, dir, pid_file, &spec, &cgroup);
+        if result.is_err() {
+            // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
+            let _ = end_cgroup(&cgroup, id);
+        }
+        result
+    }
 
+    fn start_shim(
+        &self,
+        id: &str,
+        bundle: &Path,
+        dir: &Dir,
+        pid_file: Option<&Path>,
+        spec: &Spec,
+        cgroup: &BoxCgroup,
+    ) -> Result<(), OciError> {
         // Two pipes: the init writes the sync pipe, the runtime writes the map pipe.
         let (sync_r, sync_w) = rustix::pipe::pipe().map_err(|e| OciError::os("pipe", e))?;
         let (map_r, map_w) = rustix::pipe::pipe().map_err(|e| OciError::os("pipe", e))?;
@@ -84,7 +155,8 @@ impl Runtime {
             .env(init::ENV_MAP_R, map_r.as_raw_fd().to_string())
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
-            .env(init::ENV_ID, id);
+            .env(init::ENV_ID, id)
+            .env(init::ENV_CGROUP, cgroup.dir());
         let mut shim = cmd
             .spawn()
             .map_err(|e| OciError::os("starting the container init", e))?;
@@ -93,7 +165,7 @@ impl Runtime {
         drop(map_r);
 
         let mut container_pid = None;
-        let outcome = self.handshake(id, &spec, sync_r, map_w, &mut container_pid);
+        let outcome = self.handshake(id, spec, sync_r, map_w, &mut container_pid);
         if outcome.is_err() {
             // A create that fails leaves nothing running: the container the shim forked, if it said
             // which, and the shim itself, killed and reaped here (it detaches only on success).
@@ -109,6 +181,7 @@ impl Runtime {
                 state.status = Status::Created;
                 state.pid = container_pid;
                 state.annotations = spec.annotations.clone();
+                state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
                 dir.put(&state)?;
                 if let Some(path) = pid_file {
                     std::fs::write(path, format!("{container_pid}\n"))
@@ -153,7 +226,7 @@ impl Runtime {
     /// Starts the container (OCI `start`): opens the exec FIFO, which the init is blocked on, then
     /// records `running`.
     pub fn start(&self, id: &str) -> Result<(), OciError> {
-        let dir = self.dir(id);
+        let dir = self.dir(id)?;
         let mut state = dir.get(id)?;
         if state.status != Status::Created {
             return Err(OciError::WrongState(
@@ -179,17 +252,17 @@ impl Runtime {
     /// The container's state (OCI `state`), with `stopped` reflected when the init is gone even if
     /// the shim has not yet recorded it.
     pub fn state(&self, id: &str) -> Result<State, OciError> {
-        let mut state = self.dir(id).get(id)?;
+        let mut state = self.dir(id)?.get(id)?;
         if matches!(state.status, Status::Created | Status::Running) && !sys::alive(state.pid) {
             state.status = Status::Stopped;
         }
         Ok(state)
     }
 
-    /// Sends signal `sig` to the container (OCI `kill`). `all` sends it to every process (the
-    /// process group); otherwise only the init.
+    /// Sends signal `sig` to the container (OCI `kill`): with `all`, to every process in its cgroup
+    /// (its process group, for a container made before it had one); otherwise to the init alone.
     pub fn kill(&self, id: &str, sig: i32, all: bool) -> Result<(), OciError> {
-        let state = self.dir(id).get(id)?;
+        let state = self.dir(id)?.get(id)?;
         if !matches!(state.status, Status::Created | Status::Running) {
             return Err(OciError::WrongState(
                 id.to_owned(),
@@ -204,24 +277,34 @@ impl Runtime {
                 "created or running",
             ));
         }
-        sys::kill(state.pid, sig, all)
+        match (&state.cgroup, all) {
+            // `--all` is every process in the container's cgroup, which a process group isn't (a
+            // process can leave its group with setsid); KILL goes to all of them at once.
+            (Some(cg), true) => signal_cgroup(&BoxCgroup::at(PathBuf::from(cg)), sig),
+            _ => sys::kill(state.pid, sig, all),
+        }
     }
 
     /// Removes the container (OCI `delete`). A running container is refused unless `force`, which
-    /// kills it first.
+    /// kills it first. The container's cgroup goes with it: whatever still runs there (a stopped
+    /// container's init may leave processes behind without a pid namespace) is killed, the cgroup
+    /// waited out and removed.
     pub fn delete(&self, id: &str, force: bool) -> Result<(), OciError> {
-        let dir = self.dir(id);
+        let dir = self.dir(id)?;
         let state = dir.get(id)?;
         let running =
             matches!(state.status, Status::Created | Status::Running) && sys::alive(state.pid);
-        if running {
-            if !force {
-                return Err(OciError::WrongState(
-                    id.to_owned(),
-                    state.status.name(),
-                    "stopped",
-                ));
-            }
+        if running && !force {
+            return Err(OciError::WrongState(
+                id.to_owned(),
+                state.status.name(),
+                "stopped",
+            ));
+        }
+        if let Some(cg) = &state.cgroup {
+            // Its state is kept when the cgroup won't empty, so a later delete can finish this one.
+            end_cgroup(&BoxCgroup::at(PathBuf::from(cg)), id)?;
+        } else if running {
             // The pidfd is opened before the kill, so the wait below is for this container and
             // not a later process given its pid; a container already gone has none to wait on.
             let pidfd = rustix::process::Pid::from_raw(state.pid)
@@ -272,6 +355,173 @@ fn wait_exited(pidfd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
             Err(e) => return Err(OciError::os("poll on the container's pidfd", e)),
         }
     }
+}
+
+/// Makes the container's cgroup with `plan` in force.
+///
+/// Each ancestor below the mount point is made when missing and asked to hand down the controllers
+/// the container uses. Those its resources need must be there: "The OCI runtime MUST ensure that the
+/// needed cgroup controllers are enabled for the cgroup" and "MUST generate an error when the
+/// configuration refers to a cgroup controller that is not present or that cannot be enabled"
+/// (config-linux.md, "Unified"); [`DEFAULT_CONTROLLERS`] are added where the parent has them. The
+/// cgroup itself is made, or reused when it exists empty; an occupied one is refused, as the spec
+/// lets a runtime refuse a cgroup unfit for create, naming "a non-empty cgroup" (config-linux.md,
+/// "Control groups"). Then the writes, in order, and the device program. A cgroup this made is removed
+/// again when a later step fails.
+fn make_cgroup(spec: &Spec, id: &str, plan: &Plan) -> Result<BoxCgroup, OciError> {
+    let root = Path::new(CGROUP_ROOT);
+    if !root.join("cgroup.controllers").exists() {
+        return Err(OciError::os(
+            "making the container's cgroup",
+            format!("no cgroup v2 hierarchy at {CGROUP_ROOT}; Hex's oci class runs on cgroup v2"),
+        ));
+    }
+    let rel = resources::cgroup_path(spec.linux.cgroups_path.as_deref(), id)?;
+    let name = rel
+        .file_name()
+        .ok_or_else(|| OciError::Config(format!("linux.cgroupsPath: {rel:?} names no cgroup")))?;
+    let mut wanted: BTreeSet<String> = DEFAULT_CONTROLLERS
+        .iter()
+        .map(|c| (*c).to_owned())
+        .collect();
+    wanted.extend(plan.controllers.iter().cloned());
+    let mut dir = root.to_path_buf();
+    for part in rel.parent().map(Path::components).into_iter().flatten() {
+        enable_controllers(&dir, &wanted, &plan.controllers)?;
+        dir.push(part);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(OciError::os(
+                    "making a cgroup above the container's",
+                    format!("{}: {e}", dir.display()),
+                ));
+            }
+        }
+    }
+    enable_controllers(&dir, &wanted, &plan.controllers)?;
+    let path = dir.join(name);
+    let made = match std::fs::create_dir(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if BoxCgroup::at(path.clone())
+                .populated()
+                .map_err(from_refusal)?
+            {
+                return Err(OciError::Config(format!(
+                    "linux.cgroupsPath: {} already holds processes, and a new container's cgroup must be empty",
+                    path.display()
+                )));
+            }
+            false
+        }
+        Err(e) => {
+            return Err(OciError::os(
+                "making the container's cgroup",
+                format!("{}: {e}", path.display()),
+            ));
+        }
+    };
+    let cg = BoxCgroup::at(path);
+    if let Err(e) = apply(&cg, plan) {
+        if made {
+            let _ = cg.remove();
+        }
+        return Err(e);
+    }
+    Ok(cg)
+}
+
+/// The plan's writes into the cgroup, in order, then its device program, attached to it.
+fn apply(cg: &BoxCgroup, plan: &Plan) -> Result<(), OciError> {
+    for w in &plan.writes {
+        write_file(&cg.dir().join(&w.file), &w.value).map_err(from_refusal)?;
+    }
+    if let Some(insns) = &plan.devices {
+        let prog = sys::load_device_program(insns)?;
+        let dir = cg.open_dir().map_err(from_refusal)?;
+        sys::attach_device_program(dir.as_fd(), prog.as_fd())?;
+    }
+    Ok(())
+}
+
+/// Asks cgroup `dir` to hand controllers down to its children: each of `required` must be available
+/// there and enabled, or the container is refused by name; the rest of `wanted` are added where they
+/// are available. An optional controller the parent can't hand down (it holds processes of its own,
+/// which cgroup v2's no-internal-processes rule forbids beside enabled controllers) leaves the
+/// container accounted in its parent for that controller, as before it had a cgroup, and bounded by
+/// nothing it asked for.
+fn enable_controllers(
+    dir: &Path,
+    wanted: &BTreeSet<String>,
+    required: &BTreeSet<String>,
+) -> Result<(), OciError> {
+    let available =
+        crate::linux::cgroup::read_set(&dir.join("cgroup.controllers")).map_err(from_refusal)?;
+    if let Some(missing) = required.iter().find(|c| !available.contains(*c)) {
+        return Err(OciError::Config(format!(
+            "linux.resources: the {missing} controller isn't available at {} (it has {available:?})",
+            dir.display()
+        )));
+    }
+    let enabled = crate::linux::cgroup::read_set(&dir.join("cgroup.subtree_control"))
+        .map_err(from_refusal)?;
+    let control = dir.join("cgroup.subtree_control");
+    let missing = |only_required: bool| -> Vec<String> {
+        wanted
+            .iter()
+            .filter(|c| available.contains(*c) && !enabled.contains(*c))
+            .filter(|c| required.contains(*c) == only_required)
+            .map(|c| format!("+{c}"))
+            .collect()
+    };
+    let needed = missing(true);
+    if !needed.is_empty() {
+        write_file(&control, &needed.join(" ")).map_err(|e| {
+            OciError::Config(format!(
+                "linux.resources: {} can't hand down {}: {} (a cgroup holding processes of its own can't; run under a leaf)",
+                dir.display(),
+                needed.join(" "),
+                from_refusal(e)
+            ))
+        })?;
+    }
+    let optional = missing(false);
+    if !optional.is_empty() {
+        let _ = write_file(&control, &optional.join(" "));
+    }
+    Ok(())
+}
+
+/// Ends what runs in the container's cgroup and removes it: `cgroup.kill`, a wait bounded by
+/// [`DELETE_PATIENCE`] for it to empty, then `rmdir`. A cgroup already gone is done.
+fn end_cgroup(cg: &BoxCgroup, id: &str) -> Result<(), OciError> {
+    if !cg.dir().is_dir() {
+        return Ok(());
+    }
+    cg.kill().map_err(from_refusal)?;
+    if !cg.wait_empty(DELETE_PATIENCE).map_err(from_refusal)? {
+        return Err(OciError::Broken(format!(
+            "container {id}'s cgroup still held processes {DELETE_PATIENCE:?} after cgroup.kill"
+        )));
+    }
+    cg.remove().map_err(from_refusal)
+}
+
+/// Sends `sig` to every process in the container's cgroup: KILL to all at once through
+/// `cgroup.kill`, any other to each process listed (at most [`crate::linux::cgroup::MAX_SIGNALLED`]).
+fn signal_cgroup(cg: &BoxCgroup, sig: i32) -> Result<(), OciError> {
+    if sig == libc::SIGKILL {
+        return cg.kill().map_err(from_refusal);
+    }
+    for pid in cg.procs().map_err(from_refusal)? {
+        if let Ok(pid) = i32::try_from(pid) {
+            // A process that ended since the list was read is no longer the container's to signal.
+            let _ = sys::kill(pid, sig, false);
+        }
+    }
+    Ok(())
 }
 
 /// The sync protocol's reading half, apart from any pipe: `U<pid>` asks for the user-namespace maps
@@ -491,6 +741,46 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    // Hostile input (CLAUDE.md §6): a container id is a directory name under the state root, so one
+    // that could name another place is refused before anything is touched; `delete ../../x` would
+    // otherwise remove a directory outside the root. runc takes ids of [\w+.-] alone.
+    #[test]
+    fn an_id_that_isnt_a_plain_name_is_refused_before_anything_is_touched() {
+        let root = tempfile::tempdir().unwrap();
+        let rt = Runtime::new(root.path().join("state"));
+        let victim = root.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("state.json"), b"{}").unwrap();
+        for id in [
+            "",
+            ".",
+            "..",
+            "../victim",
+            "a/b",
+            "a\0b",
+            "a b",
+            &"x".repeat(256),
+        ] {
+            for result in [
+                rt.create(id, root.path(), None),
+                rt.start(id),
+                rt.kill(id, 9, true),
+                rt.delete(id, true),
+                rt.state(id).map(|_| ()),
+            ] {
+                match result {
+                    Err(OciError::Config(why)) => assert!(why.contains("id"), "{id:?}: {why}"),
+                    other => panic!("{id:?}: {other:?}"),
+                }
+            }
+        }
+        assert!(victim.join("state.json").exists(), "the victim survives");
+        assert!(!root.path().join("state").exists(), "nothing was made");
+        for id in ["c1", "hex-l000001", "a.b+c_d"] {
+            assert!(check_id(id).is_ok(), "{id}");
+        }
+    }
 
     fn read(wire: &str) -> (Result<i32, OciError>, Option<i32>, Vec<i32>) {
         let mut maps = Vec::new();

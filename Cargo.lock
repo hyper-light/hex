@@ -206,6 +206,7 @@ dependencies = [
  "hex-api",
  "hex-core",
  "libc",
+ "proptest",
  "rustix",
  "serde",
  "serde_json",
