@@ -7,10 +7,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::FdFlags;
+use rustix::process::PidfdFlags;
 
 use crate::linux::oci::init;
 use crate::linux::oci::spec::{IdMapping, Spec};
@@ -83,15 +85,24 @@ impl Runtime {
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
             .env(init::ENV_ID, id);
-        let child = cmd
+        let mut shim = cmd
             .spawn()
             .map_err(|e| OciError::os("starting the container init", e))?;
         // The runtime holds the read end of sync and the write end of map; the init holds the others.
         drop(sync_w);
         drop(map_r);
-        let _ = child; // the shim detaches; the runtime does not wait on it.
 
-        let outcome = self.handshake(id, &spec, dir, sync_r, map_w);
+        let mut container_pid = None;
+        let outcome = self.handshake(id, &spec, sync_r, map_w, &mut container_pid);
+        if outcome.is_err() {
+            // A create that fails leaves nothing running: the container the shim forked, if it said
+            // which, and the shim itself, killed and reaped here (it detaches only on success).
+            if let Some(pid) = container_pid {
+                let _ = sys::kill(pid, libc::SIGKILL, false);
+            }
+            let _ = shim.kill();
+            let _ = shim.wait();
+        }
         match outcome {
             Ok(container_pid) => {
                 let mut state = State::new(id, &bundle.to_string_lossy());
@@ -114,64 +125,29 @@ impl Runtime {
     }
 
     /// Reads the sync pipe: writes the user-namespace maps when asked, then returns the container
-    /// pid once the init signals ready.
+    /// pid once the init has sent both it and its ready signal. `container_pid` holds the pid as
+    /// soon as it is known, so a create that fails can still end the container.
     fn handshake(
         &self,
         id: &str,
         spec: &Spec,
-        _dir: &Dir,
         sync_r: OwnedFd,
         map_w: OwnedFd,
+        container_pid: &mut Option<i32>,
     ) -> Result<i32, OciError> {
         let mut reader = BufReader::new(std::fs::File::from(sync_r));
         let mut map_w = std::fs::File::from(map_w);
-        let mut container_pid: Option<i32> = None;
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = reader
-                .read_line(&mut line)
-                .map_err(|e| OciError::os("reading the sync pipe", e))?;
-            if n == 0 {
-                return Err(OciError::Broken(format!(
-                    "the container init for {id} closed without a ready signal"
-                )));
-            }
-            let msg = line.trim_end();
-            let mut chars = msg.chars();
-            let tag = chars.next();
-            let rest = chars.as_str();
-            match tag {
-                Some('U') => {
-                    let pid: i32 = rest
-                        .parse()
-                        .map_err(|_| OciError::Broken(format!("bad map request {msg:?}")))?;
-                    write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
-                    map_w
-                        .write_all(&[1])
-                        .map_err(|e| OciError::os("acking the maps", e))?;
-                }
-                Some('P') => {
-                    container_pid = Some(
-                        rest.parse()
-                            .map_err(|_| OciError::Broken(format!("bad pid {msg:?}")))?,
-                    )
-                }
-                Some('R') => {
-                    return container_pid.ok_or_else(|| {
-                        OciError::Broken("ready before the container pid".to_owned())
-                    });
-                }
-                Some('E') => {
-                    return Err(OciError::Os {
-                        op: "container init",
-                        why: rest.to_owned(),
-                    });
-                }
-                None => {}
-                _ => return Err(OciError::Broken(format!("unknown sync message {msg:?}"))),
-            }
-        }
+        read_sync(
+            &mut reader,
+            id,
+            |pid| {
+                write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
+                map_w
+                    .write_all(&[1])
+                    .map_err(|e| OciError::os("acking the maps", e))
+            },
+            container_pid,
+        )
     }
 
     /// Starts the container (OCI `start`): opens the exec FIFO, which the init is blocked on, then
@@ -246,7 +222,19 @@ impl Runtime {
                     "stopped",
                 ));
             }
+            // The pidfd is opened before the kill, so the wait below is for this container and
+            // not a later process given its pid; a container already gone has none to wait on.
+            let pidfd = rustix::process::Pid::from_raw(state.pid)
+                .and_then(|p| rustix::process::pidfd_open(p, PidfdFlags::empty()).ok());
             sys::kill(state.pid, 9, true)?;
+            if let Some(pidfd) = pidfd
+                && !wait_exited(&pidfd, DELETE_PATIENCE)?
+            {
+                // Its state is kept, so a later delete can finish what this one could not.
+                return Err(OciError::Broken(format!(
+                    "container {id} did not exit within {DELETE_PATIENCE:?} of SIGKILL"
+                )));
+            }
         }
         // poststop hooks run after the container is stopped, before its directory is removed.
         if let Some(hooks) = load_hooks(&state) {
@@ -255,6 +243,95 @@ impl Runtime {
             run_hooks(&hooks.poststop, &stopped)?;
         }
         dir.remove()
+    }
+}
+
+/// How long `delete --force` waits for the killed container to exit: `hex box run`'s cleanup patience
+/// (`crates/hex-cli/src/box_run.rs`, `CLEANUP_PATIENCE`). A SIGKILLed process exits once it is
+/// scheduled unless it is blocked in uninterruptible I/O; past this the delete is refused, typed.
+const DELETE_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Waits up to `patience` for the process behind `pidfd` to exit; a pidfd turns readable then, whether
+/// or not its parent (the shim) has reaped it yet. Returns whether it exited.
+fn wait_exited(pidfd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
+    let deadline = Instant::now().checked_add(patience);
+    loop {
+        let left = match deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()),
+            None => patience,
+        };
+        let ts = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+        match rustix::event::poll(&mut fds, Some(&ts)) {
+            Ok(n) if n > 0 => return Ok(true),
+            Ok(_) if left.is_zero() => return Ok(false),
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(OciError::os("poll on the container's pidfd", e)),
+        }
+    }
+}
+
+/// The sync protocol's reading half, apart from any pipe: `U<pid>` asks for the user-namespace maps
+/// (`on_map`), `P<pid>` is the container's pid, `R` its ready signal, `E<why>` a setup failure.
+/// Returns the pid once both `P` and `R` have come, in either order: the shim writes `P` after its
+/// fork and the container writes `R` after its setup, two processes on one pipe, so under load the
+/// container can finish first. `container_pid` holds the pid as soon as it arrives.
+fn read_sync(
+    reader: &mut impl BufRead,
+    id: &str,
+    mut on_map: impl FnMut(i32) -> Result<(), OciError>,
+    container_pid: &mut Option<i32>,
+) -> Result<i32, OciError> {
+    let mut ready = false;
+    let mut line = String::new();
+    loop {
+        if ready && let Some(pid) = *container_pid {
+            return Ok(pid);
+        }
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| OciError::os("reading the sync pipe", e))?;
+        if n == 0 {
+            let what = if ready {
+                "a ready signal but no container pid"
+            } else {
+                "no ready signal"
+            };
+            return Err(OciError::Broken(format!(
+                "the container init for {id} closed after {what}"
+            )));
+        }
+        let msg = line.trim_end();
+        let mut chars = msg.chars();
+        let tag = chars.next();
+        let rest = chars.as_str();
+        match tag {
+            Some('U') => {
+                let pid: i32 = rest
+                    .parse()
+                    .map_err(|_| OciError::Broken(format!("bad map request {msg:?}")))?;
+                on_map(pid)?;
+            }
+            Some('P') => {
+                *container_pid = Some(
+                    rest.parse()
+                        .map_err(|_| OciError::Broken(format!("bad pid {msg:?}")))?,
+                );
+            }
+            Some('R') => ready = true,
+            Some('E') => {
+                return Err(OciError::Os {
+                    op: "container init",
+                    why: rest.to_owned(),
+                });
+            }
+            None => {}
+            _ => return Err(OciError::Broken(format!("unknown sync message {msg:?}"))),
+        }
     }
 }
 
@@ -403,4 +480,111 @@ pub fn read_pid_file(path: &Path) -> Result<i32, OciError> {
     s.trim()
         .parse()
         .map_err(|_| OciError::Broken(format!("pid file {path:?} isn't a pid")))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The sync protocol's reading half (AC-T7.1.4: a conforming `create`). The competitive bench
+    //! found `create` failing under load with "ready before the container pid": the shim's `P` and
+    //! the container's `R` come from two processes, in either order.
+
+    use std::io::Cursor;
+
+    use super::*;
+
+    fn read(wire: &str) -> (Result<i32, OciError>, Option<i32>, Vec<i32>) {
+        let mut maps = Vec::new();
+        let mut pid = None;
+        let got = read_sync(
+            &mut Cursor::new(wire.as_bytes()),
+            "c1",
+            |p| {
+                maps.push(p);
+                Ok(())
+            },
+            &mut pid,
+        );
+        (got, pid, maps)
+    }
+
+    #[test]
+    fn ready_before_the_pid_still_gives_the_pid() {
+        let (got, pid, _) = read("R\nP4242\n");
+        assert_eq!(got.unwrap(), 4242);
+        assert_eq!(pid, Some(4242));
+    }
+
+    #[test]
+    fn the_pid_then_ready_gives_the_pid() {
+        assert_eq!(read("P17\nR\n").0.unwrap(), 17);
+    }
+
+    #[test]
+    fn a_map_request_is_answered_and_the_pid_still_follows() {
+        let (got, _, maps) = read("U900\nP901\nR\n");
+        assert_eq!(got.unwrap(), 901);
+        assert_eq!(maps, vec![900]);
+    }
+
+    #[test]
+    fn a_setup_failure_is_the_error_and_keeps_the_pid_for_cleanup() {
+        let (got, pid, _) = read("P55\nEpivot_root: EINVAL\n");
+        assert!(
+            matches!(got, Err(OciError::Os { op: "container init", ref why }) if why == "pivot_root: EINVAL")
+        );
+        assert_eq!(
+            pid,
+            Some(55),
+            "a failed create must still know the container to end"
+        );
+    }
+
+    #[test]
+    fn closing_without_ready_is_refused_with_the_pid_kept() {
+        let (got, pid, _) = read("P8\n");
+        assert!(matches!(got, Err(OciError::Broken(ref why)) if why.contains("no ready signal")));
+        assert_eq!(pid, Some(8));
+    }
+
+    #[test]
+    fn closing_after_ready_without_a_pid_is_refused() {
+        let (got, pid, _) = read("R\n");
+        assert!(matches!(got, Err(OciError::Broken(ref why)) if why.contains("no container pid")));
+        assert_eq!(pid, None);
+    }
+
+    /// `delete --force` waits for the killed container to exit (AC-T7.1.4); the competitive bench
+    /// found it returning at once, which made its delete look 16x faster than crun's.
+    fn sleeper() -> (std::process::Child, OwnedFd) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty()).unwrap();
+        (child, pidfd)
+    }
+
+    #[test]
+    fn a_killed_process_is_seen_to_exit() {
+        let (mut child, pidfd) = sleeper();
+        child.kill().unwrap();
+        assert!(wait_exited(&pidfd, Duration::from_secs(10)).unwrap());
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_live_process_outlasts_a_short_patience() {
+        let (mut child, pidfd) = sleeper();
+        assert!(!wait_exited(&pidfd, Duration::from_millis(50)).unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_unknown_message_is_refused() {
+        assert!(
+            matches!(read("Xhello\n").0, Err(OciError::Broken(ref why)) if why.contains("unknown sync message"))
+        );
+    }
 }

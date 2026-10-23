@@ -66,6 +66,17 @@ Borg/Twine's resource isolation (EuroSys'15, OSDI'20).
   `cpu.max` (quota/period in µs), `memory.max`/`memory.high` (bytes), `io.weight`, `io.latency`
   (µs) and `io.max` (per disk), `pids.max`. A bound whose controller isn't delegated is refused by
   name before anything is made (CLAUDE.md §3).
+- **Decision: a memory bound covers swap.** A box with `memory.max` also gets `memory.swap.max` 0.
+  - *Evidence.* `memory.swap.max` is the cgroup's "swap usage hard limit", default `max`, and at it
+    "anonymous memory of the cgroup will not be swapped out" (`cgroup-v2.rst`, [CG-1] in
+    `docs/research/runtime/cgroup-v2-resource-control.md`). Without it, a box past `memory.max`
+    swaps instead of being killed. On 2026-10-23, `hex box run`'s conformance test saw a 512 MiB hog
+    finish in a 64 MiB box on fedora, a host with zram swap. Operators report 20-30 minute
+    brownouts, with the OOM path never running, on zram-only swap [CG-44][CG-45].
+  - *Kernels without swap accounting* have no `memory.swap.max`. A box there is made only if no swap
+    is on (`/proc/swaps`); with swap on, its memory bound is refused by name, never silently weakened.
+  - *Falsified by* a workload class that needs swap under a bound. That would add an explicit swap
+    bound to `Bounds`, not lift this default.
 - **The io bound targets whole disks.** The kernel takes `io.latency`/`io.max` per block device, not
   per partition, so Hex follows a path's filesystem to its disk(s) — through a partition to its
   parent, through device-mapper (LUKS/LVM) to the disks below — in `hex_runtime::linux::disks`.

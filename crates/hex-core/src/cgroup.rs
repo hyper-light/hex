@@ -49,6 +49,10 @@ pub fn writes(bounds: &Bounds, disks: &[Dev]) -> Result<Vec<Write>, Refusal> {
     }
     if let Some(max) = bounds.memory_max {
         out.push(w("memory.max", max.to_string()));
+        // The bound covers all of the box's memory: with swap open, a box past memory.max swaps
+        // instead of being killed, so on a host with swap it is no bound (a 512 MiB hog finished
+        // in a 64 MiB box on zram, 2026-10-23). memory.swap.max 0 keeps its anonymous memory in RAM.
+        out.push(w("memory.swap.max", "0".to_owned()));
     }
     if let Some(high) = bounds.memory_high {
         out.push(w("memory.high", high.to_string()));
@@ -180,6 +184,7 @@ mod tests {
             ("cpu.weight", "50".into()),
             ("cpu.max", "150000 100000".into()),
             ("memory.max", "2147483648".into()),
+            ("memory.swap.max", "0".into()),
             ("memory.high", "1073741824".into()),
             ("io.weight", "default 25".into()),
             ("io.latency", "259:0 target=5000".into()),

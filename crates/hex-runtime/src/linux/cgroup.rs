@@ -175,6 +175,25 @@ impl BoxRoot {
         }
         let cg = BoxCgroup { dir };
         for w in writes {
+            // A kernel without swap accounting has no memory.swap.max. With no swap on, the memory
+            // bound holds without it; with swap on it cannot hold, so the box is refused by name.
+            if w.file == "memory.swap.max" && !cg.dir.join(w.file).exists() {
+                match swap_active() {
+                    Ok(false) => continue,
+                    Ok(true) => {
+                        let _ = fs::remove_dir(&cg.dir);
+                        return Err(Refusal::Platform {
+                            what: "a memory bound",
+                            platform: "linux",
+                            why: "swap is on but this kernel has no swap accounting (no memory.swap.max), so a box could swap past its memory bound".to_owned(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = fs::remove_dir(&cg.dir);
+                        return Err(e);
+                    }
+                }
+            }
             if let Err(e) = write_file(&cg.dir.join(w.file), &w.value) {
                 // A box is made whole or not at all; its empty cgroup goes with the refusal.
                 let _ = fs::remove_dir(&cg.dir);
@@ -352,6 +371,14 @@ impl BoxCgroup {
 }
 
 /// Writes `value` to a cgroup file: one write(2), as the kernel takes a cgroup file's value.
+/// Whether any swap is on: `/proc/swaps` lists one device per line past its header.
+fn swap_active() -> Result<bool, Refusal> {
+    let path = Path::new("/proc/swaps");
+    let text =
+        fs::read_to_string(path).map_err(|e| os_err("reading the active swap list", path, e))?;
+    Ok(text.lines().skip(1).any(|l| !l.trim().is_empty()))
+}
+
 pub fn write_file(path: &Path, value: &str) -> Result<(), Refusal> {
     let fd = rustix::fs::open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
         .map_err(|e| os_err("opening a cgroup file", path, e))?;

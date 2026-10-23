@@ -12,7 +12,8 @@ pub struct Bounds {
     pub cpu_weight: Option<u16>,
     /// Most CPU it may use, in thousandths of a CPU (`cpu.max`): 1,500 is one and a half CPUs.
     pub cpu_max_milli: Option<u32>,
-    /// Most memory, in bytes (`memory.max`): past it the kernel reclaims, then kills in the box.
+    /// Most memory, in bytes (`memory.max`): past it the kernel reclaims, then kills in the box. The
+    /// box may not swap (`memory.swap.max` 0), so the bound holds on a host with swap too.
     pub memory_max: Option<u64>,
     /// Memory past which the box is throttled and reclaimed (`memory.high`), in bytes.
     pub memory_high: Option<u64>,
