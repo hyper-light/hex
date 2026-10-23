@@ -37,10 +37,10 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 | start p99.9 (ms) | 12.31 | 10.84 | 1.43 | 10.87 | 0.12x vs crun |
 | start max (ms) | 36.17 | 36.58 | 1.91 | 16.80 | 0.05x vs crun |
 | exec p50 / p99 / p99.9 / max (ms) | n/a: Hex has no exec yet | 8.42 / 15.01 / 36.58 / 129.45 | 1.64 / 3.50 / 4.28 / 73.99 | 6.78 / 31.10 / 82.67 / 178.16 | n/a |
-| delete p50 (ms) | 0.66 | 104.48 | 10.76 | 25.58 | 16.29x vs crun, **unverified** |
-| delete p99 (ms) | 0.92 | 107.67 | 11.84 | 28.55 | 12.88x vs crun, **unverified** |
-| delete p99.9 (ms) | 1.15 | 117.70 | 22.94 | 33.33 | 20.04x vs crun, **unverified** |
-| delete max (ms) | 1.38 | 244.60 | 32.11 | 47.77 | 23.22x vs crun, **unverified** |
+| delete p50 (ms) | 0.66 | 104.48 | 10.76 | 25.58 | 16.29x vs crun, **not comparable** |
+| delete p99 (ms) | 0.92 | 107.67 | 11.84 | 28.55 | 12.88x vs crun, **not comparable** |
+| delete p99.9 (ms) | 1.15 | 117.70 | 22.94 | 33.33 | 20.04x vs crun, **not comparable** |
+| delete max (ms) | 1.38 | 244.60 | 32.11 | 47.77 | 23.22x vs crun, **not comparable** |
 | create+start of `true` p50 (ms) | 14.72 | 30.83 | 3.34 | 20.08 | 0.23x vs crun |
 | create+start of `true` p99 (ms) | 26.27 | 65.20 | 6.00 | 40.87 | 0.23x vs crun |
 | create+start of `true` p99.9 (ms) | 40.07 | 129.01 | 8.88 | 124.15 | 0.22x vs crun |
@@ -71,9 +71,11 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
   opens. This is the first thing the runtime design (goal 4) must fix.
 - **Memory and density:** Hex uses 0.54 MiB per idle container against crun's 0.37, mostly its shim
   process (one per container; crun leaves none).
-- **Hex's delete is unverified.** It measures 0.66 ms against crun's 10.76 ms, but crun's `delete --force`
-  kills the container and waits for it to exit. Hex's figure must be checked against the same semantics
-  before it counts as a lead.
+- **Hex's delete lead is not real.** `Runtime::delete` with `--force` (`crates/hex-runtime/src/linux/oci/run.rs`)
+  sends SIGKILL to the container's process group and removes its state at once, without waiting for the
+  container to exit. crun's `delete --force` waits for the exit, which is most of its 10.76 ms. Hex's
+  0.66 ms measures less work, so it is not a lead. Waiting, bounded, for the exit is also what a later
+  create with the same id needs, so that is the fix; the delete axis is re-measured with it.
 
 ### Hex's results are affected by two faults
 
