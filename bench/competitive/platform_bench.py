@@ -204,6 +204,8 @@ class Cli:
     def __init__(self):
         self.cmd = {k: os.environ.get("CLI_" + k.upper()) for k in ("create", "ready", "exec", "delete", "suspend", "resume")}
         self.seq = itertools.count()
+        if not self.cmd["exec"]:  # a platform without an exec verb: its exec rows read n/a, never a no-op's time
+            self.exec_true = None
         if self.cmd["suspend"] and self.cmd["resume"]:
             self.suspend = lambda s: self.run("suspend", s)
             self.resume = lambda s: (self.run("resume", s), self.until_ready(s))
@@ -257,8 +259,10 @@ def timed(fn, *a):
 
 def lifecycle(p):
     s, c = timed(p.create)
+    e = None
     try:
-        _, e = timed(p.exec_true, s)
+        if p.exec_true:
+            _, e = timed(p.exec_true, s)
     finally:
         _, d = timed(p.delete, s)
     return c, e, d
@@ -279,7 +283,8 @@ def main():
             c, e, d = lifecycle(p)
             if i >= warmup:
                 ms["create"].append(c)
-                ms["exec"].append(e)
+                if e is not None:
+                    ms["exec"].append(e)
                 ms["delete"].append(d)
         res["phases"]["lifecycle"] = {"ms": ms, "host_cpu_s_per_lifecycle": (host_cpu_s() - cpu0) / (warmup + n)}
     except Exception as e:
@@ -328,7 +333,8 @@ def main():
                 for i in range(warmup + n):
                     _, a = timed(p.suspend, s_)
                     _, b = timed(p.resume, s_)
-                    p.exec_true(s_)
+                    if p.exec_true:
+                        p.exec_true(s_)
                     if i >= warmup:
                         sus.append(a)
                         resu.append(b)
