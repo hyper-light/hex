@@ -76,6 +76,17 @@ comparison for E2B is Hex's `firecracker` or `shards` class, which does not exis
   Dex, Postgres, Redis, a registry, MinIO, tracing) runs inside Docker without host changes. Its images are
   untagged (`latest`), so the run records each image's digest; the frozen v0.190.0 tree
   (`01c502bb`) is what the research read. An API key comes from its dashboard (Dex dev login).
+- **Docker** (`docker` adapter): the Docker Engine stack most people run (dockerd, containerd, runc shim),
+  through its CLI: `run -d` until it runs, `exec`, `rm -f`, with the OCI bundles' rootfs `docker import`ed
+  and the host's `/usr` bound read-only, so the workload is the same.
+- **Kubernetes** (`k8s` adapter): a Pod on a single-node kind cluster (inside Docker, no host changes)
+  through the API: create until Running and Ready, exec, delete until it is gone.
+- **Kubernetes Agent Sandbox** (`agentsandbox`, `agentsandbox-warm`): kubernetes-sigs/agent-sandbox on the
+  same cluster, a `Sandbox` until Ready, or a `SandboxClaim` from a `SandboxWarmPool`.
+- **Agent Substrate and Google AX** (`cli` adapter): agent-substrate/substrate (`kubectl ate`: actors from
+  an actor template, with suspend and resume, its claimed sub-400 ms resume) and google/ax (`ax apply`)
+  on top of it, on the kind cluster. Substrate runs actors only in gVisor or a microVM, so the kind node
+  needs runsc as a containerd runtime. Hex has no suspend or resume yet, so those rows show Hex n/a.
 - **Hosted-only platforms** (E2B Cloud, Daytona Cloud, Modal, Morph, CodeSandbox, Fly Machines, Vercel,
   Cloudflare) can be measured only end to end, from the bench host through their public APIs, with
   accounts and API keys that only Ada can provide. Their results are labelled hosted (`HOSTED=1`), as the
