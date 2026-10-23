@@ -209,7 +209,10 @@ def helper_cgroups():
 
 
 def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
-    watch = [S] if method == "hex" else [f"{user_service_cg}/{DENSITY_SLICE}"] + helper_cgroups()
+    # S holds the driver, which forks every box's first process: that task's kernel stack and struct stay
+    # charged to S when the process moves on (cgroup-v2.rst, "Memory Ownership"), so S is watched for every
+    # method, not only Hex's, whose boxes live under it.
+    watch = [S] + ([] if method == "hex" else [f"{user_service_cg}/{DENSITY_SLICE}"] + helper_cgroups())
     base, held0 = mem(watch), held(watch)
     kids, units, stop = [], [], "cap"
     t0 = time.perf_counter()
