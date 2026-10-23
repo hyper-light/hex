@@ -37,6 +37,7 @@ import json
 import os
 import resource
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -417,6 +418,20 @@ class Stack:
         return out
 
 
+def connect_ms(endpoint, n=20):
+    """TCP connect time from the bench host to a hosted platform's API (host:port), which every hosted
+    figure includes at least once: min and p50 of n connects, the first (with DNS) left out."""
+    host, port = endpoint.rsplit(":", 1)
+    times = []
+    for _ in range(n + 1):
+        t0 = time.perf_counter_ns()
+        with socket.create_connection((host, int(port)), timeout=10):
+            pass
+        times.append((time.perf_counter_ns() - t0) / 1e6)
+    times = sorted(times[1:])
+    return {"endpoint": endpoint, "connect_ms_min": times[0], "connect_ms_p50": times[len(times) // 2]}
+
+
 def timed(fn, *a):
     t0 = time.perf_counter_ns()
     r = fn(*a)
@@ -442,6 +457,8 @@ def main():
     if kind == "cli":
         kind = os.environ.get("CLI_NAME", "cli")
     res = {"platform": kind, "hosted": os.environ.get("HOSTED") == "1", "n": n, "phases": {}, "errors": {}}
+    if os.environ.get("HOSTED_ENDPOINT"):
+        res["network"] = connect_ms(os.environ["HOSTED_ENDPOINT"])
     try:
         phases(p, res, n, warmup, lifecycles, cap)
     finally:

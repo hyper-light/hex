@@ -224,6 +224,10 @@ def platform_notes(plats):
             bits = [f"density stopped at {d.get('count', 0)} ({d.get('stop', 'no density phase')})"]
             if r.get("referee"):
                 bits.append(f"foreign load in {r['referee']['foreign']} of {r['referee']['samples']} samples")
+            if r.get("network"):
+                nw = r["network"]
+                bits.append(f"TCP connect to {nw['endpoint']}: min {nw['connect_ms_min']:.1f} ms, "
+                            f"p50 {nw['connect_ms_p50']:.1f} ms")
             if d.get("new_processes_outside_stack"):
                 bits.append("new processes outside the stack's cgroups: " + json.dumps(d["new_processes_outside_stack"]))
             if r.get("errors"):
