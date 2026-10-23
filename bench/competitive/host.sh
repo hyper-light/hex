@@ -35,7 +35,8 @@ done
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
-  (cd "$BASE/bin" && sha256sum -- *) > "$OUT/versions.$(date -u +%H%M%S).kept.sha256"
+  # Every file, runsc's gvisor-bin/ Sentry set included: a bare glob would hand sha256sum a directory.
+  (cd "$BASE/bin" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$OUT/versions.$(date -u +%H%M%S).kept.sha256"
 else
   python3 -I "$HERE/fetch.py" "$BASE" > "$OUT/versions.$(date -u +%H%M%S).json"
 fi
