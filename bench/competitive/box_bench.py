@@ -261,7 +261,15 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
     for unit in units:
         subprocess.run(["systemctl", "--user", "kill", "--signal=SIGKILL", unit + ".service"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=CALL_TIMEOUT_S)
-    return {"count": count, "stop": stop, "start_wall_s": wall, "memory_bytes": used,
+    slice_left = None
+    if method != "hex":
+        # An empty slice stays active until stopped, and an active unit named for the bench holds the platform
+        # gate shut (it held k8s round 4's for an hour). Stopping it also stops any of its units still going.
+        r = subprocess.run(["systemctl", "--user", "stop", DENSITY_SLICE], capture_output=True, text=True,
+                           timeout=CALL_TIMEOUT_S)
+        if r.returncode:
+            slice_left = r.stderr.strip()[:200] or f"exit {r.returncode}"
+    return {"count": count, "stop": stop, "start_wall_s": wall, "memory_bytes": used, "slice_not_stopped": slice_left,
             "memory_per_box_bytes": used / count if count else None,
             "boxes_per_gib": count / (used / 2**30) if used > 0 else None,
             "watched": watch, "held": cgmem.per_unit(held_rise, count)}
