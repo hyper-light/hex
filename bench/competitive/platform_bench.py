@@ -463,9 +463,11 @@ def lifecycle_phase(p, res, n, warmup, stack, cpu_per_lifecycle):
 
 
 def throughput_phase(p, res, lifecycles, stack, cpu_per_lifecycle):
-    try:
-        tp = {}
-        for conc in (1, 8, 32):
+    # Each concurrency keeps its result as it finishes. A level where a lifecycle fails has no rate, and is
+    # where the platform stopped keeping up, so the higher levels aren't tried.
+    tp = res["phases"]["throughput"] = {}
+    for conc in (1, 8, 32):
+        try:
             c0, t0 = stack.cpu_s() if stack else None, time.perf_counter()
             with ThreadPoolExecutor(max_workers=conc) as pool:
                 list(pool.map(lambda _: lifecycle(p), range(lifecycles)))
@@ -473,9 +475,9 @@ def throughput_phase(p, res, lifecycles, stack, cpu_per_lifecycle):
             tp[str(conc)] = {"lifecycles": lifecycles, "wall_s": wall, "per_s": lifecycles / wall}
             if stack:
                 tp[str(conc)]["stack_cpu_s_per_lifecycle"] = cpu_per_lifecycle(c0, wall, lifecycles)
-        res["phases"]["throughput"] = tp
-    except Exception as e:
-        res["errors"]["throughput"] = f"{type(e).__name__}: {e}"
+        except Exception as e:
+            res["errors"]["throughput"] = f"at concurrency {conc}: {type(e).__name__}: {e}"
+            break
 
 
 def density_phase(p, res, cap, stack, outside0):
