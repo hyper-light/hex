@@ -4,10 +4,11 @@
 //!
 //! It needs a cgroup v2 subtree the test owns, with cpu, io, memory and pids delegated. Where this
 //! process's own cgroup is already private and delegated (a cgroupns-root CI pod), the test uses it
-//! directly. Where it is shared (a developer shell, a kiln runner's service cgroup), the test
-//! re-runs itself once inside a transient `systemd-run --user --scope -p Delegate=yes`, which gives
-//! it a private subtree. Where neither is possible, it returns early with a printed reason rather
-//! than a false pass. Run it on a Linux host with cgroup v2 (fedora); the recorded run is CP-T7.1's
+//! directly. Where it is shared (a developer shell, a kiln runner's service cgroup) or lacks one of
+//! those controllers (a `kiln run` command's own cgroup), the test re-runs itself once inside a
+//! transient `systemd-run --user --scope -p Delegate=yes`, which gives it a private, delegated
+//! subtree. Where neither is possible, it returns early with a printed reason rather than a false
+//! pass. Run it on a Linux host with cgroup v2 (fedora); the recorded run is CP-T7.1's
 //! evidence.
 #![cfg(target_os = "linux")]
 #![allow(
@@ -71,23 +72,36 @@ fn own_cgroup() -> PathBuf {
     PathBuf::from("/sys/fs/cgroup").join(rel)
 }
 
-/// Moves this process into a leaf of its own cgroup and confirms the cgroup can hand its controllers
-/// down (a box root opens). Returns the own cgroup dir on success; `Err` when the cgroup isn't ours
-/// to subdivide (shared with other processes, or controllers not delegated).
+/// Moves this process into a leaf of its own cgroup and confirms the cgroup can hand every controller
+/// down (a box root opens with all of them). Returns the own cgroup dir on success; `Err` when the
+/// cgroup isn't ours to subdivide (shared with other processes, or controllers not delegated).
 fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
     let own = own_cgroup();
     let leaf = own.join("hex-agent");
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    // A probe root proves the controllers are delegated before the real roots are opened.
-    hex_runtime::linux::cgroup::BoxRoot::open(
+    // A probe root proves the controllers are delegated before the real roots are opened. It opens
+    // with whichever of them the cgroup has, none included, so each is checked.
+    let probe = hex_runtime::linux::cgroup::BoxRoot::open(
         &own.join("hex-probe"),
         hex_runtime::linux::disks::under(disk).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
+    let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
+        .into_iter()
+        .filter(|c| !probe.controllers().contains(*c))
+        .collect();
     let _ = std::fs::remove_dir(own.join("hex-probe"));
-    Ok(own)
+    if missing.is_empty() {
+        Ok(own)
+    } else {
+        Err(format!(
+            "{} can't hand down the {} controllers",
+            own.display(),
+            missing.join(", ")
+        ))
+    }
 }
 
 fn cache_dir() -> PathBuf {
