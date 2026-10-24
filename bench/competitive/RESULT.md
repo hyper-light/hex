@@ -2,8 +2,8 @@
 
 The baseline goal is Hex against named competitors on every axis, with Hex's ratio to the best competitor.
 This file records the runs of record. **The baseline is incomplete:** the sandbox platforms and the
-other open-source competitors Ada asked for are being measured now, and the hosted platforms are not
-measured (see the end).
+other open-source competitors Ada asked for are being measured now. The hosted-only platforms are not
+measured: Ada chose open-source alternatives in their place (see the end).
 
 Ratios are the best competitor's value over Hex's for lower-is-better axes, and Hex's over the best
 competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research bar is 4-5x.
@@ -223,4 +223,7 @@ Faults the platform harness had, each fixed before the rounds above:
     (QEMU and Cloud Hypervisor) through containerd;
   - sandbox platforms: Microsandbox, Zeroboot, Beam beta9, and CubeSandbox (which Ada will install).
 - **Hosted-only platforms** (E2B Cloud, Daytona Cloud, Modal, Morph, CodeSandbox, Fly Machines, Vercel,
-  Cloudflare): no accounts or API keys exist for them yet, so they are not measured.
+  Cloudflare) are not measured, by Ada's decision (2026-10-23, confirmed 2026-10-24). Rather than open
+  accounts, she chose the open-source alternatives above, which run on the same hardware as Hex. The
+  harness can still run a hosted round, labelled hosted, with its network round trip recorded
+  (`platform_bench.py`, HOSTED=1).
