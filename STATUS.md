@@ -1,6 +1,6 @@
 # Status
 
-Updated 2026-10-20. A piece is done when its tests pass in the gate (`scripts/gates.sh`: Linux, with the
+Updated 2026-10-24. A piece is done when its tests pass in the gate (`scripts/gates.sh`: Linux, with the
 macOS and Windows lints) and the evidence its requirement names is recorded.
 
 ## Implemented
@@ -18,8 +18,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   pass (`hex-cli/tests/process_box.rs`).
 - **The `oci` class** (`hex-runtime`, Linux): Hex's own OCI runtime (`hex oci …`), at **crun parity
   on opencontainers/runtime-tools** (28/58, the set crun passes on this cgroup-v2 host; AC-T7.1.4),
-  recorded in `bench/oci-validation/`. The runtime decision and its evidence are in
-  `docs/design/runtime.md`.
+  recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
+  its device list in force, and is born in it (`bench/oci-validation/cgroups.sh`, 19 checks). The
+  runtime decision and its evidence are in `docs/design/runtime.md`.
 - **The node agent** (`hex-node`, Linux): `Runtime` over the `process` class, durable per-box records
   and recovery.
 - **The `hex` binary**: `hex --version`/`--help`, `hex oci …` (the OCI runtime), `hex box run
@@ -28,8 +29,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **AC-T7.1.5** (node memory ≤ 1 MiB/box): measured at 98 bytes/box (`bench/` node_memory).
 - **AC-T7.1.2** (noisy-neighbor fsync p99 ≤ 2× idle): measured **1.73×** (idle 3616 µs → loaded
   6267 µs) on fedora NVMe in a sustained load-1.16 window, 2026-10-22 (`bench/noisy_neighbor/RESULT.md`).
-- **AC-T7.1.3** (oci container start p50 ≤ 50 ms): measured **14.4 ms** (p99 16.7, max 18.1; N=200) on
-  fedora NVMe, 2026-10-22 (`bench/hex_start/RESULT.md`).
+- **AC-T7.1.3** (oci container start p50 ≤ 50 ms): measured **20.6 ms** (p99 26.4, max 31.2; N=200) on
+  fedora NVMe, 2026-10-24, on the binary whose containers each have a cgroup and are born in it
+  (`bench/hex_start/RESULT.md`; 14.4 ms on 2026-10-22, before containers had cgroups).
 - **kiln runner unit** (kiln `cp/t7-hex`): `Delegate=yes`, so the runner's cgroup can be subdivided
   for Hex boxes (the prerequisite; inert until the `hex` binary is deployed to runners).
 
