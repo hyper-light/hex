@@ -116,6 +116,8 @@ Lifecycles/s, and the bench cgroup's CPU ms per lifecycle in brackets:
   1,029 in run 1: below the old driver's ceiling, so Hex's rows were its own. Through the new driver, Hex is at
   0.66x crun at concurrency 32, where `RESULT.md` has it level (0.99x), and step 5's run of record re-measures
   every runtime's throughput.
-- **Both drivers write the same JSON.** Run off the bench host against the stand-in (adacachy, 2026-10-24), each
-  writes the same top-level keys and the same throughput fields, and `summarize.py` makes the same table, row for
-  row, from a run directory written by either.
+- **Both drivers write the same JSON.** In this run, `ceiling.standin.json` (new) and `ceiling.standin.old.json`
+  (old) have the same top-level keys and the same throughput fields (`cpu_s_per_lifecycle`, `lifecycles`,
+  `per_s`, `wall_s`). Set into a run directory each, as `crun.r1.json`, they make the same table in
+  `summarize.py`, row for row: 35 lines, differing only in the numbers. The same holds off the bench host,
+  against the stand-in (adacachy).
