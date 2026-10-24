@@ -11,7 +11,9 @@ Phases, in order; a phase that fails records its error and the next one still ru
               container; each operation timed alone (wall clock around the CLI call).
   start_true  n sequential create+start of a `true` container (AC-T7.1.3's measure), deleted untimed.
   throughput  create+start+delete --force of `true` containers at concurrency 1, 8 and 32: lifecycles/s,
-              and CPU-seconds per lifecycle from the bench cgroup's cpu.stat.
+              and CPU-seconds per lifecycle from the bench cgroup's cpu.stat. Each concurrency slot is a
+              worker process of its own: CPython holds its interpreter lock across posix_spawn
+              (Modules/posixmodule.c), so threads would spawn one at a time and cap the rate.
   density     `sleep` containers started one after another until the cap or the memory budget, then
               memory per container from the bench cgroup: the memory it holds (cgmem.py), and its
               memory.current, which the budget bounds; all deleted afterwards.
@@ -25,9 +27,9 @@ import json
 import os
 import signal
 import sys
+import multiprocessing as mp
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # cgmem.py, beside this file even under -I
 import cgmem  # noqa: E402
@@ -169,23 +171,74 @@ def phase_start_true(rt, n, warmup):
     return {"ms": ms_all}
 
 
+def throughput_lifecycle(rt, conc, i):
+    cid = f"{rt.name}-c{conc:02d}-{i:06d}"
+    err = f"{ERR}/{rt.name}.c{conc}.{i}.err"
+    rt.create("/run/bundle-true", cid, err_path=err)
+    try:
+        rt.start(cid, err_path=err)
+    finally:
+        rt.delete(cid, err_path=err)
+    os.unlink(err)
+
+
+def throughput_worker(name, conc, lifecycles, claimed, start, failed, out):
+    """One concurrency slot: after the start barrier, claims lifecycle numbers until none are left or
+    another slot has failed, then sends {} or {"error": why}. Only the claim takes the shared lock."""
+    rt = Runtime(name)
+    try:
+        start.wait(timeout=CALL_TIMEOUT_S)
+        while not failed.is_set():
+            with claimed.get_lock():
+                i = claimed.value
+                if i >= lifecycles:
+                    break
+                claimed.value = i + 1
+            throughput_lifecycle(rt, conc, i)
+        out.send({})
+    except Exception as e:  # recorded in the parent; the level stops
+        failed.set()
+        out.send({"error": f"{type(e).__name__}: {e}"})
+    finally:
+        out.close()
+
+
 def phase_throughput(rt, lifecycles):
+    ctx = mp.get_context("spawn")
     out = {}
     for conc in (1, 8, 32):
-        def one(i, conc=conc):
-            cid = f"{rt.name}-c{conc:02d}-{i:06d}"
-            err = f"{ERR}/{rt.name}.c{conc}.{i}.err"
-            rt.create("/run/bundle-true", cid, err_path=err)
+        claimed, start, failed = ctx.Value("q", 0), ctx.Barrier(conc + 1), ctx.Event()
+        workers, results = [], []
+        try:
+            for _ in range(conc):
+                a, b = ctx.Pipe(duplex=False)
+                w = ctx.Process(target=throughput_worker, args=(rt.name, conc, lifecycles, claimed, start, failed, b))
+                w.start()
+                b.close()  # only the worker holds the sending end, so one that dies ends recv() with EOFError
+                workers.append((w, a))
+            # Every slot is up before the clock starts: a worker's interpreter start-up isn't a lifecycle.
             try:
-                rt.start(cid, err_path=err)
-            finally:
-                rt.delete(cid, err_path=err)
-            os.unlink(err)
-        cpu0, t0 = cpu_usec(), time.perf_counter()
-        with ThreadPoolExecutor(max_workers=conc) as pool:
-            list(pool.map(one, range(lifecycles)))
-        wall = time.perf_counter() - t0
-        cpu_s = (cpu_usec() - cpu0) / 1e6
+                start.wait(timeout=CALL_TIMEOUT_S)
+            except threading.BrokenBarrierError:
+                raise OpError(f"concurrency {conc}: a worker wasn't up within {CALL_TIMEOUT_S}s") from None
+            cpu0, t0 = cpu_usec(), time.perf_counter()
+            for w, a in workers:
+                try:
+                    results.append(a.recv())
+                except EOFError:
+                    results.append({"error": f"a worker exited {w.exitcode} without a result"})
+            wall = time.perf_counter() - t0
+            cpu_s = (cpu_usec() - cpu0) / 1e6
+        finally:
+            # No worker outlives its level: each call has its own timeout, so one past this is stuck.
+            for w, _ in workers:
+                w.join(timeout=CALL_TIMEOUT_S)
+                if w.is_alive():
+                    w.kill()
+                    w.join()
+        errs = [r["error"] for r in results if "error" in r]
+        if errs:
+            raise OpError(f"concurrency {conc}: {errs[0]}")
         out[str(conc)] = {"lifecycles": lifecycles, "wall_s": wall, "per_s": lifecycles / wall,
                           "cpu_s_per_lifecycle": cpu_s / lifecycles}
     return out

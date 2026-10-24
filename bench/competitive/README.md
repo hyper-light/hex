@@ -34,8 +34,11 @@ measures where Hex stands today. `RESULT.md` records each run of record.
 
 Every call's stdio goes to `/dev/null` or an error file, never a pipe (a detached `create` holds the
 caller's stdio; commit 4c76c13). Calls are spawned with `posix_spawn` (OCI) or `fork`+`execve` (boxes,
-identically for every method) and waited with a blocking `wait4`, with a timeout on each. Rounds run in
-a shuffled runtime order, and the best of 3 rounds is reported per metric.
+identically for every method) and waited with a blocking `wait4`, with a timeout on each. Each throughput
+slot is a worker process of its own, started before the clock and released together: CPython holds its
+interpreter lock across `posix_spawn` (`Modules/posixmodule.c`), so threads would spawn one at a time and
+cap the rate (`probes/oci_breakdown.md`, step 5). Rounds run in a shuffled runtime order, and the best of 3
+rounds is reported per metric.
 
 ## Running it (fedora, in a bench-calendar slot)
 
@@ -65,7 +68,9 @@ each project's latest release again. Best of N takes each axis from the rounds t
 place of the cgroup tree. That runs every phase's control flow (warm-ups, error stops, teardown, the
 summary) without containers, cgroups or load. The numbers it produces are meaningless. On 2026-10-23 it
 found three bugs before any slot was spent: a container that failed to start counted as running, a dead
-worker that could hang the box driver, and a ratio that divided by zero.
+worker that could hang the box driver, and a ratio that divided by zero. `check_driver.sh` runs it for
+oci_bench.py's throughput phase and checks three things: each lifecycle is counted once per level, a
+failing call ends its level with its error, and no worker process outlives the phase.
 
 ## Platforms
 

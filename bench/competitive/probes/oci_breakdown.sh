@@ -3,7 +3,8 @@
 # pass, on the competitors' binaries host.sh fetched ($HEX_BENCH/bin) and the given Hex binary. On fedora,
 # in a quiet moment, under a systemd user unit:
 #   systemd-run --user --unit=hexbench-breakdown --collect bash bench/competitive/probes/oci_breakdown.sh <hex>
-# Env: N, WARMUP, LIFECYCLES, RUNTIMES, STEPS (oci_breakdown_inside.sh's), CPUSET (4-31).
+# Env: N, WARMUP, LIFECYCLES, RUNTIMES, STEPS (oci_breakdown_inside.sh's), CPUSET (4-31), and OLD_DRIVER_REV: a
+# commit whose oci_bench.py step 5 also runs, right after this tree's, to compare the two drivers' ceilings.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
 HEX=$(realpath "${1:?hex release binary}")
@@ -19,6 +20,11 @@ for i in $(seq 1 90); do
   sleep 10
 done
 { echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; (cd "$BASE/bin" && sha256sum crun); } > "$OUT/versions.txt"
+if [ -n "${OLD_DRIVER_REV:-}" ]; then
+  mkdir -p "$OUT/old-driver"
+  for f in oci_bench.py cgmem.py; do git -C "$LAB" show "$OLD_DRIVER_REV:bench/competitive/$f" > "$OUT/old-driver/$f"; done
+  echo "old driver: $OLD_DRIVER_REV" >> "$OUT/versions.txt"
+fi
 NAME=hexbench-breakdown-$$
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \

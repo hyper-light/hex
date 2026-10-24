@@ -109,9 +109,14 @@ step 4 && for ns in net nonet; do
   done
 done
 # 5. the driver's own ceiling: `crun` is /usr/bin/true, so create, start and delete each spawn and exit at once.
+#    This tree's driver, then (OLD_DRIVER_REV) an older one's, back to back.
 if step 5; then
   mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
   HEXBENCH_BIN=/run/standin HEXBENCH_PHASES=throughput python3 -I /opt/lab/oci_bench.py crun "$OUT/ceiling.standin.json" 1 0 \
     "$LIFECYCLES" 0 64 > "$OUT/ceiling.standin.log" 2>&1
+  if [ -f "$OUT/old-driver/oci_bench.py" ]; then
+    HEXBENCH_BIN=/run/standin HEXBENCH_PHASES=throughput python3 -I "$OUT/old-driver/oci_bench.py" crun \
+      "$OUT/ceiling.standin.old.json" 1 0 "$LIFECYCLES" 0 64 > "$OUT/ceiling.standin.old.log" 2>&1
+  fi
 fi
 echo "load at end: $(cat /proc/loadavg)" >> "$OUT/env.txt"
