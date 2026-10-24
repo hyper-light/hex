@@ -89,7 +89,7 @@ def held(density, key):
 
 
 def oci_section(run):
-    names = ["hex", "runc", "crun", "youki", "runsc"]
+    names = ["hex", "runc", "crun", "youki", "runsc", "krun"]
     data = {n: rounds(run, n) for n in names}
     data = {n: r for n, r in data.items() if r}
     rows = []  # (axis, unit, lower_better, {name: value})
@@ -211,9 +211,13 @@ def platform_section(run, oci_data):
 
 
 def platform_notes(plats):
-    """Per round: where density stopped, the referee's count, processes the stack's cgroups missed, errors."""
+    """What a platform's lifecycle is, where it differs; then per round: where density stopped, the referee's
+    count, processes the stack's cgroups missed, errors."""
     out = []
     for name, rs in sorted(plats.items()):
+        about = next((r["about"] for r in rs if r.get("about")), None)
+        if about:
+            out.append(f"- {name}: {about}")
         for r in sorted(rs, key=lambda r: r["round"]):
             d = r["phases"].get("density") or {}
             bits = [f"density stopped at {d.get('count', 0)} ({d.get('stop', 'no density phase')})"]
@@ -231,12 +235,69 @@ def platform_notes(plats):
     return "\n".join(out) + "\n"
 
 
+def lab_section(run, prefix, run_label, unit, units):
+    """A lab pass (sandbox_bench.py, vm_bench.py): each method as commonly used, against `hex box run`
+    where the pass has it."""
+    rs = rounds(run, prefix)
+    seen = {m for r in rs.values() for m in r["methods"]}
+    if not seen:
+        return [], [], rs
+    methods = (["hex"] if "hex" in seen else []) + sorted(seen - {"hex"})
+
+    def phase(r, m, name):
+        return r["methods"].get(m, {}).get("phases", {}).get(name) or {}
+    rows = []
+    per = {m: best_dist([phase(r, m, "latency").get("ms", []) for r in rs.values()]) for m in methods}
+    for q in ("p50", "p99", "p99.9", "max"):
+        rows.append((f"{run_label} {q} (ms)", "ms", True, {m: (d or {}).get(q) for m, d in per.items()}))
+    for c in ("1", "8", "32"):
+        rows.append((f"throughput at concurrency {c} (runs/s)", "/s", False,
+                     {m: best(rs.values(), lambda r: phase(r, m, "throughput").get(c, {}).get("per_s"), False)
+                      for m in methods}))
+    rows.append(("CPU per run at concurrency 1 (the lab cgroup's)", "cpu", True,
+                 {m: best(rs.values(), lambda r: phase(r, m, "throughput").get("1", {}).get("cpu_s_per_run"), True)
+                  for m in methods}))
+    rows.append((MEMORY_AXIS.format(unit), "bytes", True,
+                 {m: best(rs.values(), lambda r: held(phase(r, m, "density"), "per_unit_bytes"), True)
+                  for m in methods}))
+    rows.append((DENSITY_AXIS.format(units), "per_gib", False,
+                 {m: best(rs.values(), lambda r: held(phase(r, m, "density"), "per_gib"), False) for m in methods}))
+    return methods, rows, rs
+
+
+def lab_notes(methods, rs):
+    """What each method enforces, then per round: where density stopped and why, how long its sandboxes
+    took to start, and errors."""
+    out = []
+    for m in methods:
+        enforces = next((r["methods"][m]["enforces"] for r in rs.values() if m in r["methods"]), "")
+        out.append(f"- {m}: {enforces}")
+        for n, r in sorted(rs.items()):
+            d = r["methods"].get(m, {})
+            den = d.get("phases", {}).get("density") or {}
+            bits = []
+            if den:
+                bits.append(f"density stopped at {den.get('count', 0)} ({den.get('stop')}), started one at a "
+                            f"time in {den.get('up_wall_s', 0):.1f} s")
+                if den.get("ended_after_up"):
+                    bits.append(f"{den['ended_after_up']} ended after they came up")
+                if den.get("exited_why"):
+                    bits.append("the one that exited said: " + json.dumps(den["exited_why"][:200]))
+            if d.get("errors"):
+                bits.append("errors: " + json.dumps(d["errors"]))
+            if bits:
+                out.append(f"  - round {n}: " + "; ".join(bits))
+    return "\n".join(out) + "\n"
+
+
 def table(title, names, rows):
-    out = [f"### {title}", "", "| Axis | " + " | ".join(names) + " | Hex vs best competitor |",
-           "|---|" + "---|" * len(names) + "---|"]
+    """A section's table; the ratio column only where Hex has a class in it."""
+    ratios = "hex" in names
+    out = [f"### {title}", "", "| Axis | " + " | ".join(names) + (" | Hex vs best competitor |" if ratios else " |"),
+           "|---|" + "---|" * len(names) + ("---|" if ratios else "")]
     for axis, unit, lower, vals in rows:
-        txt, _ = ratio(vals, lower)
-        out.append(f"| {axis} | " + " | ".join(fmt(vals.get(n), unit) for n in names) + f" | {txt} |")
+        cells = f"| {axis} | " + " | ".join(fmt(vals.get(n), unit) for n in names) + " |"
+        out.append(cells + (f" {ratio(vals, lower)[0]} |" if ratios else ""))
     return "\n".join(out) + "\n"
 
 
@@ -245,7 +306,7 @@ def main():
     parts = []
     names, rows, data = oci_section(run)
     if data:
-        parts.append(table("OCI class (Hex `oci` against runc, crun, youki, gVisor runsc)", names, rows))
+        parts.append(table("OCI class (Hex `oci` against runc, crun, youki, gVisor runsc, crun+libkrun)", names, rows))
         errs = {n: {k: v for r in rs.values() for k, v in r.get("errors", {}).items()} for n, rs in data.items()}
         errs = {n: e for n, e in errs.items() if e}
         if errs:
@@ -257,6 +318,15 @@ def main():
     methods, rows, rs = box_section(run)
     if rs:
         parts.append(table("Process class (`hex box run` against systemd transient units)", methods, rows))
+    for prefix, title, run_label, unit, units in (
+            ("sandbox", "Process sandboxes (each as commonly used) against `hex box run`", "run of `true`", "sandbox",
+             "sandboxes"),
+            ("vm", "MicroVM monitors run directly: the baseline for CP-T7.2's microVM classes (Hex has none yet)",
+             "boot of a VM whose init ends it at once", "VM", "VMs")):
+        lmethods, lrows, lrs = lab_section(run, prefix, run_label, unit, units)
+        if lmethods:
+            parts.append(table(title, lmethods, lrows))
+            parts.append(lab_notes(lmethods, lrs))
     print("\n".join(parts))
 
 

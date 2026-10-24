@@ -45,6 +45,10 @@ RUNTIMES = {
     "crun": {"argv": [f"{BIN}/crun", "--root", "/run/crun"], "env": {}, "exec": True},
     "youki": {"argv": [f"{BIN}/youki", "--root", "/run/youki"], "env": {}, "exec": True},
     "runsc": {"argv": [f"{BIN}/runsc", "--root", "/run/runsc", "--network=none"], "env": {}, "exec": True},
+    # crun's libkrun handler (Fedora's crun, named krun; fetch.py): each container a microVM, at crun's
+    # defaults (vCPUs as the CPUs it may use, up to 16; 1024 MiB). Nothing can exec into its guest.
+    "krun": {"argv": [f"{BIN}/krun", "--root", "/run/krun"], "env": {"LD_LIBRARY_PATH": "/opt/krun/lib"},
+             "exec": False},
 }
 
 
