@@ -53,6 +53,11 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`).
   `hex oci exec` is built (2026-10-24); next come the re-vendor and the dispatch wiring (mapped in
   NOTES.md).
+- **The `oci` class ignores a spec's `linux.seccomp`, `process.apparmorProfile`, `process.selinuxLabel`
+  and `linux.mountLabel`**: `spec.rs` doesn't read them, so `Spec::check` can't refuse them, and a
+  container whose spec names a seccomp profile runs without one (found 2026-10-24). CLAUDE.md §3 asks
+  for a typed refusal until each is implemented. The competitive bench is unaffected: its bundles name
+  none of them, for every runtime.
 
 ## Next
 
