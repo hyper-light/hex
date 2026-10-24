@@ -145,6 +145,19 @@ def oci_section(run):
     return list(data), rows, data
 
 
+def sustained_windows(data):
+    """Each runtime's sustained rate in every window, from the round its table row takes (the best rate)."""
+    lines = []
+    for n, rs in data.items():
+        s = max((r["phases"]["sustained"] for r in rs.values() if "sustained" in r["phases"]),
+                key=lambda s: s["per_s"], default=None)
+        if s:
+            lines.append(f"- {n}: " + ", ".join(f"{w:.0f}" for w in s["window_per_s"]))
+    if not lines:
+        return ""
+    return "Sustained at concurrency 32, lifecycles/s in each window of 1,000:\n" + "\n".join(lines) + "\n"
+
+
 def box_section(run):
     # seam_box writes its rounds (boxseam.r<N>.json) apart from box_bench.py's, in the same JSON; best of N
     # takes each method's rounds wherever they are.
@@ -345,6 +358,8 @@ def main():
         errs = {n: e for n, e in errs.items() if e}
         if errs:
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
+        if sustained_windows(data):
+            parts.append(sustained_windows(data))
     pnames, prows, plats = platform_section(run, data)
     if plats:
         parts.append(table("Sandbox platforms (end to end through each SDK) against Hex `oci`", pnames, prows))
