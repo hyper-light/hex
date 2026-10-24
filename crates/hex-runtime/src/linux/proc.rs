@@ -36,6 +36,15 @@ impl PidfdProc {
         })
     }
 
+    /// Watches child `pid` through the pidfd its clone made (`CLONE_PIDFD`).
+    pub fn of_clone(pid: u32, pidfd: OwnedFd) -> Self {
+        Self {
+            pid,
+            pidfd,
+            exit: None,
+        }
+    }
+
     /// The pidfd: readable once the process has ended, for an event loop to wait on.
     pub fn pidfd(&self) -> BorrowedFd<'_> {
         self.pidfd.as_fd()

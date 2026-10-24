@@ -6,6 +6,7 @@
 #![allow(unsafe_code)]
 
 use crate::linux::oci::OciError;
+use crate::linux::sys::{CLONE_INTO_CGROUP, CloneArgs};
 
 /// What [`fork`] returns.
 pub enum Fork {
@@ -28,28 +29,6 @@ pub fn fork() -> Result<Fork, OciError> {
         child => Ok(Fork::Parent(child)),
     }
 }
-
-/// `struct clone_args` through its `cgroup` field (`CLONE_ARGS_SIZE_VER2`, 88 bytes), as Linux's
-/// `include/uapi/linux/sched.h` lays it out: every field an `__aligned_u64`.
-#[repr(C, align(8))]
-struct CloneArgs {
-    flags: u64,
-    pidfd: u64,
-    child_tid: u64,
-    parent_tid: u64,
-    exit_signal: u64,
-    stack: u64,
-    stack_size: u64,
-    tls: u64,
-    set_tid: u64,
-    set_tid_size: u64,
-    cgroup: u64,
-}
-
-/// `CLONE_INTO_CGROUP` (Linux 5.7, `include/uapi/linux/sched.h`): the child starts in the cgroup
-/// `clone_args.cgroup` names. libc's constant is an `i32` that overflows (libc issue 3584), so it is
-/// written here.
-const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 
 /// Forks into a cgroup: `clone3` with `CLONE_INTO_CGROUP`, so the child is born in the cgroup that
 /// the open directory `cgroup` is, and nothing migrates it there. A migration takes the cgroup

@@ -120,6 +120,7 @@ fn process_boxes_hold_the_contract_and_recover() {
         Ok(own) => {
             exercise_conformance(&own, &cache, &exe);
             exercise_recovery(&own, &cache, &exe);
+            exercise_clone_into_cgroup(&own);
         }
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
             let has_systemd = Command::new("systemd-run")
@@ -152,6 +153,85 @@ fn process_boxes_hold_the_contract_and_recover() {
             eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
         }
     }
+}
+
+/// AC-T7.1.1 and decision 7 (docs/design/runtime-architecture.md): a box's program is cloned straight
+/// into the box's cgroup, and the cgroup it reads as its own is the box's. A program that isn't there
+/// comes back as ENOENT, its child reaped and the box left empty. Where a seccomp profile refuses
+/// clone3 (a container's default), the clone hands the program back and the conformance run above
+/// has already held the fork path to the contract.
+fn exercise_clone_into_cgroup(own: &Path) {
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::fd::{AsFd, OwnedFd};
+
+    use hex_api::{Exit, Proc};
+    use hex_runtime::linux::sys::{Cloned, Spawn, clone_into_cgroup};
+
+    let root = hex_runtime::linux::cgroup::BoxRoot::open(&own.join("hex-clone"), Vec::new())
+        .expect("a box root for the clone");
+    let cg = root
+        .create(&BoxId::new("cloned").unwrap(), &Bounds::default())
+        .expect("a box");
+    let null_in = || OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+    let null_out = || {
+        OwnedFd::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .unwrap(),
+        )
+    };
+    let c = |s: &str| CString::new(s).unwrap();
+    let (mut out, w) = std::io::pipe().unwrap();
+    let spawn = Spawn::new(
+        vec![c("/usr/bin/cat")],
+        vec![c("cat"), c("/proc/self/cgroup")],
+        vec![],
+        None,
+        [null_in(), OwnedFd::from(w), null_out()],
+    )
+    .unwrap();
+    let dir = cg.open_dir().unwrap();
+    match clone_into_cgroup(dir.as_fd(), spawn).expect("clone3 into the box") {
+        Cloned::Started { pid, pidfd } => {
+            let mut p = hex_runtime::linux::proc::PidfdProc::of_clone(pid, pidfd);
+            assert_eq!(
+                p.wait_for(Duration::from_secs(10)).unwrap(),
+                Some(Exit::Code(0))
+            );
+            let mut seen = String::new();
+            out.read_to_string(&mut seen).unwrap();
+            let rel = cg.dir().strip_prefix("/sys/fs/cgroup").unwrap();
+            assert_eq!(
+                seen.trim(),
+                format!("0::/{}", rel.display()),
+                "the cloned program's own cgroup is the box's"
+            );
+            let missing = Spawn::new(
+                vec![c("/nonexistent/hex-test-program")],
+                vec![c("hex-test-program")],
+                vec![],
+                None,
+                [null_in(), null_out(), null_out()],
+            )
+            .unwrap();
+            let e = match clone_into_cgroup(dir.as_fd(), missing) {
+                Err(e) => e,
+                Ok(_) => panic!("a missing program was started"),
+            };
+            assert_eq!(e.raw_os_error(), Some(2), "{e}");
+            assert!(
+                cg.procs().unwrap().is_empty(),
+                "the failed clone's child was reaped"
+            );
+        }
+        Cloned::Unsupported(_) => eprintln!(
+            "NOTE: clone3 into a cgroup refused here (a seccomp profile or a kernel before 5.7); the fork path served the conformance run"
+        ),
+    }
+    cg.remove().unwrap();
+    std::fs::remove_dir(root.dir()).unwrap();
 }
 
 /// AC-T7.1.1: the `process` class holds the runtime contract on real cgroups and processes.

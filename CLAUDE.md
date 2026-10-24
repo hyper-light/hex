@@ -85,8 +85,10 @@ beside it, or a typed refusal naming the platform. `unsafe` is denied; where an 
 its file is named here with the reason, and every block carries a `// SAFETY:` comment stating its
 invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at its top):
 
-- `crates/hex-runtime/src/linux/sys.rs`: the `process` class joins a program to its cgroup in the
-  forked child before `execve` (`pre_exec`), which Rust can't express safely.
+- `crates/hex-runtime/src/linux/sys.rs`: the `process` class clones a program straight into its box's
+  cgroup (`clone3` with `CLONE_INTO_CGROUP` and `CLONE_PIDFD`) and executes it in the child, or, where
+  the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
+  Rust can express neither safely.
 - `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` that starts a
   container in its cgroup, `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program,
