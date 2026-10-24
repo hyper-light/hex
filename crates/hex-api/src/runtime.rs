@@ -12,8 +12,13 @@ pub trait Runtime: Send + Sync {
     fn classes(&self) -> Vec<Class>;
 
     /// Makes a box with its bounds in force. A `process` box is empty when this returns; an `oci`
-    /// box's init is running.
+    /// box's init is made and waits for [`Runtime::start`], [`BoxState::Created`].
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal>;
+
+    /// Lets a created `oci` box's init run its program: the runtime-spec's `start`, which `create`
+    /// leaves to a later call so a box can be made before it's needed. A `process` box has no init to
+    /// start, and an `oci` box that has started already can't start again: each is refused.
+    fn start(&self, id: &BoxId) -> Result<(), Refusal>;
 
     /// Runs `program` in box `id` with `stdio`: a host process in a `process` box, a process in the
     /// container's namespaces in an `oci` box.
@@ -97,6 +102,8 @@ pub enum BoxState {
     Empty,
     /// At least one process runs in it.
     Running,
+    /// An `oci` box whose init waits for [`Runtime::start`].
+    Created,
 }
 
 /// A box as its runtime holds it.

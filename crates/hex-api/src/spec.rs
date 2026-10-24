@@ -41,13 +41,18 @@ pub enum ClassSpec {
     Process,
     /// An OCI container.
     Oci(Box<OciSpec>),
+    /// An OCI container from a runtime-spec bundle: a directory holding `config.json` and the root
+    /// filesystem it names, run as its config says, in the box's cgroup under its bounds. For callers
+    /// that already speak the runtime-spec: kiln's executor, which unpacks images into bundles, and the
+    /// bench, which runs one bundle under every runtime.
+    Bundle(PathBuf),
 }
 
 impl ClassSpec {
     pub fn class(&self) -> Class {
         match self {
             Self::Process => Class::Process,
-            Self::Oci(_) => Class::Oci,
+            Self::Oci(_) | Self::Bundle(_) => Class::Oci,
         }
     }
 }

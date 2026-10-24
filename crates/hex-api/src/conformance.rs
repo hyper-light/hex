@@ -6,7 +6,9 @@
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use crate::{Bounds, BoxId, BoxSpec, BoxState, Exit, Program, Refusal, Runtime, Signal, Stdio};
+use crate::{
+    Bounds, BoxId, BoxSpec, BoxState, Class, Exit, Program, Refusal, Runtime, Signal, Stdio,
+};
 
 /// What a fixture's program does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +102,11 @@ pub const CASES: &[Case] = &[
         says: "stdin reaches the program: what is written comes back on stdout",
         run: stdin,
     },
+    Case {
+        id: "HEX-RT-10",
+        says: "an oci box is Created until start and Running after it, and a second start is refused; a process box's start is refused",
+        run: start,
+    },
 ];
 
 /// Runs every case on fresh boxes; returns the failures.
@@ -118,12 +125,17 @@ fn ensure(ok: bool, why: impl FnOnce() -> String) -> Result<(), String> {
     if ok { Ok(()) } else { Err(why()) }
 }
 
+/// A fresh box of the fixture's class, started when it is an `oci` box.
 fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Result<BoxId, String> {
     let id = id(name)?;
     // A box left by an earlier run of the suite is removed first; absent is the usual case.
     let _ = rt.delete(&id);
-    rt.create(fx.spec(id.clone(), bounds))
-        .map_err(|e| format!("create: {e}"))?;
+    let spec = fx.spec(id.clone(), bounds);
+    let class = spec.class.class();
+    rt.create(spec).map_err(|e| format!("create: {e}"))?;
+    if class == Class::Oci {
+        rt.start(&id).map_err(|e| format!("start: {e}"))?;
+    }
     Ok(id)
 }
 
@@ -148,8 +160,8 @@ fn create_and_exists(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     ensure(info.class == class, || {
         format!("inspect says class {:?}", info.class)
     })?;
-    // An oci box's init runs from create on; a process box is empty until exec.
-    if class == crate::Class::Process {
+    // A process box is empty until exec; an oci box's init runs from its start on (HEX-RT-10).
+    if class == Class::Process {
         ensure(info.state == BoxState::Empty, || {
             format!("a new box is {:?}", info.state)
         })?;
@@ -268,6 +280,7 @@ fn delete(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         ("inspect", rt.inspect(&id).err()),
         ("usage", rt.usage(&id).err()),
         ("signal", rt.signal(&id, Signal::KILL).err()),
+        ("start", rt.start(&id).err()),
         (
             "exec",
             rt.exec(&id, fx.program(&Act::Wait), Stdio::null()).err(),
@@ -335,4 +348,41 @@ fn stdin(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     rt.delete(&id).map_err(|e| e.to_string())?;
     ensure(exit == Exit::Code(0), || format!("exit {exit:?}"))?;
     ensure(out == "round trip\n", || format!("stdout {out:?}"))
+}
+
+fn start(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = id("start")?;
+    let _ = rt.delete(&id);
+    let spec = fx.spec(id.clone(), Bounds::default());
+    let class = spec.class.class();
+    rt.create(spec).map_err(|e| format!("create: {e}"))?;
+    let outcome = started(rt, &id, class);
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    outcome
+}
+
+/// HEX-RT-10 on a box just made: what its start does, by class.
+fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
+    let state = |rt: &dyn Runtime| rt.inspect(id).map(|i| i.state).map_err(|e| e.to_string());
+    if class == Class::Process {
+        let got = rt.start(id);
+        return ensure(
+            matches!(got, Err(Refusal::Invalid { what: "start", .. })),
+            || format!("start of a process box: {got:?}"),
+        );
+    }
+    let before = state(rt)?;
+    ensure(before == BoxState::Created, || {
+        format!("an oci box before its start is {before:?}")
+    })?;
+    rt.start(id).map_err(|e| format!("start: {e}"))?;
+    let after = state(rt)?;
+    ensure(after == BoxState::Running, || {
+        format!("an oci box after its start is {after:?}")
+    })?;
+    let again = rt.start(id);
+    ensure(
+        matches!(again, Err(Refusal::Invalid { what: "start", .. })),
+        || format!("a second start: {again:?}"),
+    )
 }

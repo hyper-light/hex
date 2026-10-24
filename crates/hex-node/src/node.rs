@@ -153,7 +153,7 @@ impl Runtime for Node {
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.bounds.check()?;
-        if let ClassSpec::Oci(_) = spec.class {
+        if spec.class.class() == Class::Oci {
             return Err(Refusal::Unsupported(Class::Oci));
         }
         if self.record(&spec.id)?.is_some() || self.root.get(&spec.id).is_some() {
@@ -171,6 +171,20 @@ impl Runtime for Node {
         record.phase = Phase::Ready;
         self.store.put(&record)?;
         self.info(&record, false)
+    }
+
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        // Every box this node holds is a `process` box (it refuses the `oci` class at create), and a
+        // process box has no init to start: exec runs its programs. Refused as the simulator refuses
+        // it (HEX-RT-10), after confirming the box is one it knows.
+        match self.record(id)?.map(|r| r.spec.class) {
+            None => Err(Refusal::NoSuchBox(id.clone())),
+            Some(ClassSpec::Process) => Err(Refusal::Invalid {
+                what: "start",
+                why: format!("box {id} is a process box, which has no init to start"),
+            }),
+            Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => Err(Refusal::Unsupported(Class::Oci)),
+        }
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {

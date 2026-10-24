@@ -1,7 +1,8 @@
 //! [`SimRuntime`]: boxes in memory, running built-in programs that do what the conformance suite
 //! asks for (say words, fail, wait, use memory, start processes, echo stdin), with the bounds
 //! enforced as the kernel would: past `memory_max` a program is killed and the kill counted; past
-//! `pids_max` a fork is refused and counted.
+//! `pids_max` a fork is refused and counted. An `oci` box has an init, made at create and waiting
+//! until start, which runs until it is signalled or the box is deleted.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -30,6 +31,10 @@ struct SimBox {
     spec: BoxSpec,
     usage: Usage,
     procs: Vec<Arc<SimProc>>,
+    /// An `oci` box's init.
+    init: Option<Arc<SimProc>>,
+    /// Whether its init has been started.
+    started: bool,
 }
 
 #[derive(Default)]
@@ -68,13 +73,19 @@ impl SimRuntime {
 
     fn info(b: &SimBox) -> Result<BoxInfo, Refusal> {
         let mut running = false;
-        for p in &b.procs {
+        for p in b.procs.iter().chain(&b.init) {
             running |= p.exit()?.is_none();
         }
+        let waiting = match &b.init {
+            Some(init) if !b.started => init.exit()?.is_none(),
+            _ => false,
+        };
         Ok(BoxInfo {
             id: b.spec.id.clone(),
             class: b.spec.class.class(),
-            state: if running {
+            state: if waiting {
+                BoxState::Created
+            } else if running {
                 BoxState::Running
             } else {
                 BoxState::Empty
@@ -116,14 +127,41 @@ impl Runtime for SimRuntime {
         if boxes.len() >= SIM_BOXES {
             return Err(Refusal::Full(SIM_BOXES));
         }
+        let init = (spec.class.class() == Class::Oci).then(|| Arc::new(SimProc::default()));
         let b = SimBox {
             spec,
             usage: Usage::default(),
             procs: Vec::new(),
+            init,
+            started: false,
         };
         let info = Self::info(&b)?;
         boxes.insert(b.spec.id.clone(), b);
         Ok(info)
+    }
+
+    fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut boxes = self.boxes()?;
+        let b = boxes
+            .get_mut(id)
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let Some(init) = &b.init else {
+            return Err(Refusal::Invalid {
+                what: "start",
+                why: format!("box {id} is a process box, which has no init to start"),
+            });
+        };
+        if b.started {
+            return Err(Refusal::Invalid {
+                what: "start",
+                why: format!("box {id} has started already"),
+            });
+        }
+        if init.exit()?.is_some() {
+            return Err(Refusal::NotRunning(id.clone(), "start"));
+        }
+        b.started = true;
+        Ok(())
     }
 
     fn exec(
@@ -225,7 +263,7 @@ impl Runtime for SimRuntime {
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         let mut any = false;
-        for p in &b.procs {
+        for p in b.procs.iter().chain(&b.init) {
             if p.exit()?.is_none() {
                 p.end(Exit::Signal(signal.number()))?;
                 any = true;
@@ -254,7 +292,7 @@ impl Runtime for SimRuntime {
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         let mut u = b.usage;
         let mut running = 0u64;
-        for p in &b.procs {
+        for p in b.procs.iter().chain(&b.init) {
             if p.exit()?.is_none() {
                 running = running.saturating_add(1);
             }
@@ -272,7 +310,7 @@ impl Runtime for SimRuntime {
             .boxes()?
             .remove(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        for p in &b.procs {
+        for p in b.procs.iter().chain(&b.init) {
             p.end(Exit::Signal(Signal::KILL.number()))?;
         }
         Ok(())
@@ -315,14 +353,18 @@ mod tests {
     use crate::conformance::{self, Act, Fixture};
     use crate::{Bounds, ClassSpec};
 
-    struct SimFixture;
+    /// The simulator's programs, in boxes of either class.
+    struct SimFixture(Class);
 
     impl Fixture for SimFixture {
         fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
             BoxSpec {
                 id,
                 bounds,
-                class: ClassSpec::Process,
+                class: match self.0 {
+                    Class::Process => ClassSpec::Process,
+                    Class::Oci => ClassSpec::Bundle("/bundle".into()),
+                },
             }
         }
         fn program(&self, act: &Act) -> Program {
@@ -339,8 +381,10 @@ mod tests {
 
     #[test]
     fn the_simulator_passes_the_conformance_suite() {
-        let failures = conformance::run(&SimRuntime::new(), &SimFixture);
-        assert!(failures.is_empty(), "{failures:#?}");
+        for class in [Class::Process, Class::Oci] {
+            let failures = conformance::run(&SimRuntime::new(), &SimFixture(class));
+            assert!(failures.is_empty(), "{class:?}: {failures:#?}");
+        }
     }
 
     #[test]
@@ -348,11 +392,12 @@ mod tests {
         let rt = SimRuntime::new();
         for i in 0..SIM_BOXES {
             let id = BoxId::new(&format!("b{i}")).unwrap();
-            rt.create(SimFixture.spec(id, Bounds::default())).unwrap();
+            rt.create(SimFixture(Class::Process).spec(id, Bounds::default()))
+                .unwrap();
         }
         let id = BoxId::new("one-more").unwrap();
         assert_eq!(
-            rt.create(SimFixture.spec(id, Bounds::default())),
+            rt.create(SimFixture(Class::Process).spec(id, Bounds::default())),
             Err(Refusal::Full(SIM_BOXES))
         );
     }
