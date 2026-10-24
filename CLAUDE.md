@@ -87,10 +87,11 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
 
 - `crates/hex-runtime/src/linux/sys.rs`: the `process` class joins a program to its cgroup in the
   forked child before `execve` (`pre_exec`), which Rust can't express safely.
-- `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, `waitpid`, `unshare`,
-  `setns`, `kill`, `prctl` capability calls, inherited-fd adoption, and the `bpf` calls that load
-  and attach a container's cgroup device program, none of which rustix wraps safely; the process is
-  single-threaded (it re-exec'd) where this matters.
+- `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` that starts a
+  container in its cgroup, `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
+  inherited-fd adoption, and the `bpf` calls that load and attach a container's cgroup device
+  program, none of which rustix wraps safely; the process is single-threaded (it re-exec'd) where
+  this matters.
 
 ## 13. Lean code
 

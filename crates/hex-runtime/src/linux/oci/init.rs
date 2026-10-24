@@ -69,19 +69,27 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
         &fs::read(Path::new(&bundle).join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?,
     )?;
-    // The cgroup's `cgroup.procs`, opened before any namespace changes: the kernel checks a migration
-    // against the credentials and cgroup namespace the file was opened with (Linux 5.16, the fix for
-    // CVE-2021-4197), so the container can join through it from inside a user namespace.
-    let procs = std::env::var_os(ENV_CGROUP)
+    // The cgroup, opened before any namespace changes: its directory, for the container to be born in
+    // (`clone3` with `CLONE_INTO_CGROUP`), and its `cgroup.procs`, for it to join by migration where it
+    // can't be. The kernel checks a migration against the credentials and cgroup namespace the file was
+    // opened with (Linux 5.16, the fix for CVE-2021-4197), so the join works from inside a user
+    // namespace too.
+    let cgroup = std::env::var_os(ENV_CGROUP)
         .map(|dir| {
-            rustix::fs::open(
-                Path::new(&dir).join("cgroup.procs"),
-                OFlags::WRONLY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|e| OciError::os("opening the container's cgroup.procs", e))
+            let dir = Path::new(&dir);
+            let open = |path: &Path, flags: OFlags| {
+                rustix::fs::open(path, flags | OFlags::CLOEXEC, Mode::empty())
+                    .map_err(|e| OciError::os("opening the container's cgroup", e))
+            };
+            Ok::<_, OciError>((
+                open(dir, OFlags::RDONLY | OFlags::DIRECTORY)?,
+                open(&dir.join("cgroup.procs"), OFlags::WRONLY)?,
+            ))
         })
         .transpose()?;
+    // A birth in the cgroup is checked against the credentials the clone runs with, and in a user
+    // namespace the shim's are no longer the caller's, so there the container joins by migration.
+    let born_with_callers_credentials = !spec.linux.namespaces.iter().any(|n| n.kind == "user");
 
     if spec.makes_namespace("user") {
         sys::unshare(UnshareFlags::NEWUSER)?;
@@ -95,7 +103,17 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     join_namespace_paths(&spec)?;
     sys::unshare(namespace_flags(&spec))?;
 
-    match sys::fork()? {
+    // Born in its cgroup where it can be: a migration takes the cgroup threadgroup lock, whose writer can
+    // wait out an RCU grace period (docs/design/runtime.md). Otherwise forked, to join by migration.
+    let born = match &cgroup {
+        Some((dir, _)) if born_with_callers_credentials => sys::fork_into_cgroup(dir.as_fd())?,
+        _ => None,
+    };
+    let (forked, procs) = match (born, cgroup) {
+        (Some(forked), _) => (forked, None),
+        (None, cgroup) => (sys::fork()?, cgroup.map(|(_, procs)| procs)),
+    };
+    match forked {
         sys::Fork::Child => Ok(
             match container(&spec, &bundle, &container_dir, sync, procs) {
                 Ok(()) => 0,
@@ -119,8 +137,8 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     }
 }
 
-/// The container (PID 1 of its namespaces): join its cgroup, set up the world, signal ready, wait for
-/// `start`, exec.
+/// The container (PID 1 of its namespaces): join its cgroup through `procs` (when it wasn't born there),
+/// set up the world, signal ready, wait for `start`, exec.
 fn container(
     spec: &Spec,
     bundle: &str,

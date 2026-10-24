@@ -94,5 +94,24 @@ bundle "$W/occupied" '["true"]' ', "cgroupsPath": "/lab"' ""
 if err=$(/opt/hex oci create --bundle "$W/occupied" occupied 2>&1); then fail "an occupied cgroup was accepted"
 else pass "an occupied cgroup refused: $err"; fi
 
+# 4. The container is born in its cgroup: create migrates no process into it. A write to cgroup.procs is
+# a migration, which the kernel serializes on a lock whose writer can wait a whole RCU grace period
+# (docs/design/runtime.md); clone3(CLONE_INTO_CGROUP) starts the init there instead. The oracle is the
+# kernel's own cgroup_attach_task tracepoint, read in a trace instance of this lab's own.
+T=/sys/kernel/tracing
+mountpoint -q "$T" || mount -t tracefs nodev "$T"
+I="$T/instances/hexlab-$$"
+if mkdir "$I" 2>/dev/null; then
+  echo 1 > "$I/events/cgroup/cgroup_attach_task/enable"
+  bundle "$W/born" '["sleep", "infinity"]' "" ""
+  /opt/hex oci create --bundle "$W/born" born || fail "create born"
+  echo 0 > "$I/events/cgroup/cgroup_attach_task/enable"
+  check "migrations into the new container's cgroup during create" 0 "$(grep -c 'dst_path=[^ ]*/born ' "$I/trace")"
+  rmdir "$I"
+  /opt/hex oci delete --force born || fail "delete born"
+else
+  fail "no trace instance under $T, so migrations can't be seen"
+fi
+
 echo "cgroups lab: $fails failure(s)"
 exit $((fails > 0))

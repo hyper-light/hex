@@ -74,11 +74,13 @@ remove a cgroup.
   ancestor the controllers the container needs, and refuses an existing cgroup that holds processes
   (the spec's own example of a cgroup unfit for create).
 - **Who is inside.** Only the container. The shim stays out, as containerd's does, so the limits
-  bound the workload alone. The shim opens `cgroup.procs` before it touches any namespace; the
-  container writes `0` to it as its first act, then unshares its cgroup namespace, so the
-  namespace's root is its own cgroup. The kernel checks a migration against the credentials and
-  cgroup namespace a file was opened with (Linux 5.16, the fix for CVE-2021-4197), so this works from
-  inside a user namespace too.
+  bound the workload alone. The shim opens the cgroup's directory and its `cgroup.procs` before it
+  touches any namespace. The container is born in the cgroup: the shim clones it there with
+  `clone3(CLONE_INTO_CGROUP)` (Linux 5.7), as crun does (below, "Born in its cgroup"). It then
+  unshares its cgroup namespace, so the namespace's root is its own cgroup. Where it can't be born
+  there, it joins as its first act by writing `0` to that `cgroup.procs`. The kernel checks a
+  migration against the credentials and cgroup namespace the file was opened with (Linux 5.16, the
+  fix for CVE-2021-4197), so the join works from inside a user namespace too.
 - **What is in force.** `linux.resources` becomes cgroup v2 writes by crun's documented conversions
   (`crun.1.md`, "CGROUP v2"): `memory.limit` → `memory.max`, `reservation` → `memory.low`, `swap` →
   `memory.swap.max` as `swap − limit`; `cpu.shares` → `cpu.weight` by crun's quadratic in log2
@@ -129,10 +131,60 @@ interpreter in the test, decides exactly as cgroup v1's checks do on the state t
 (`hex_runtime::linux::oci::resources`). A root-only lab test on fedora exercises the kernel side.
 
 **What would falsify it.** A spec, from runc's `spec` or containerd, whose device list or resources
-this refuses or decides differently from runc or crun on the same host. A measurement showing the
-join (a migration through `cgroup.procs`) is a material part of `create`'s cost, under the
-concurrency the benchmark runs. That would move the container's birth into its cgroup with
-`clone3(CLONE_INTO_CGROUP)`, as crun does, which skips the migration lock.
+this refuses or decides differently from runc or crun on the same host. It also named a measurement
+showing that the join, a migration through `cgroup.procs`, is a material part of `create`'s cost.
+That measurement came (next).
+
+### Born in its cgroup (2026-10-24)
+
+**The finding.** With a cgroup per container, `create`'s p50 went from 8.0 ms to 25.1 and 27.2 ms
+(two rounds, fedora, `bench/competitive/`), and `hex_start`'s create+start p50 from 14.4 ms to
+28.5 ms. A migration write-locks the cgroup threadgroup lock (`kernel/cgroup/cgroup.c`,
+`cgroup_attach_lock`), a percpu rwsem unless the hierarchy is mounted `favordynmods`. Its writer
+enters through `rcu_sync_enter`, which waits out a full RCU grace period (`synchronize_rcu`) unless
+another writer passed one within the last grace period (`kernel/rcu/sync.c`). So a migration that
+comes soon after another is cheap, and one after a quiet spell costs a grace period. A benchmark's
+creates, and a node's, come after quiet spells. `hex box run`'s bench, back to back, didn't show it.
+
+**Evidence.** `bench/competitive/probes/join_cost.py`, fedora, 2026-10-24, kernel 6.19, load 1.23:
+200 migrations per gap between two sibling cgroups.
+
+| gap before the migration | p50 | p90 | max |
+|---|---|---|---|
+| 0 ms | 0.004 ms | 0.005 ms | 0.073 ms |
+| 1 ms | 0.101 ms | 0.119 ms | 0.151 ms |
+| 5 ms | 0.114 ms | 0.129 ms | 0.242 ms |
+| 20 ms | 9.745 ms | 13.610 ms | 24.971 ms |
+| 50 ms | 9.872 ms | 17.721 ms | 26.863 ms |
+| 100 ms | 11.987 ms | 18.986 ms | 22.981 ms |
+| 200 ms | 9.901 ms | 16.854 ms | 27.881 ms |
+
+runc's and youki's creates, which also join by migration, take 27.5 and 21.9 ms on the same host;
+crun's, which clones into the cgroup, 3.0 ms. cgroup-v2.rst, on `favordynmods`: "The static usage
+pattern of creating a cgroup, enabling controllers, and then seeding it with CLONE_INTO_CGROUP is not
+affected by this option."
+
+**The choice.** The shim clones the container with `clone3(CLONE_INTO_CGROUP)`, so it is born in its
+cgroup and nothing migrates it (`oci/sys.rs`, `fork_into_cgroup`). libc's `CLONE_INTO_CGROUP` is an
+`i32` that overflows, so the constant and `struct clone_args` come from `include/uapi/linux/sched.h`.
+The container joins by migration, as before, in three cases. `clone3` answers `ENOSYS`: before
+Linux 5.3, or under a seccomp profile like Docker's default, which answers `clone3` so for a process
+without `CAP_SYS_ADMIN` (`moby/profiles`, `seccomp/default.json`). It answers `E2BIG`: before 5.7,
+which doesn't know the `cgroup` field. Or the container makes or joins a user namespace. A birth in a
+cgroup is checked against the credentials the clone runs with (`cgroup_css_set_fork`), and once the
+shim is in the new namespace those are no longer the caller's, while a migration is checked against
+the credentials `cgroup.procs` was opened with.
+
+**Evidence of the change.** `bench/oci-validation/cgroups_inside.sh`'s check 4 enables the kernel's
+`cgroup_attach_task` tracepoint, in a trace instance of its own, across one `hex oci create`, and
+wants no migration into the new container's cgroup. The binary before the change failed it (got 1);
+the binary after passes it, and the lab's other 18 checks, and runtime-tools' 28 of 30, test for
+test (fedora, 2026-10-24, `hex-cg2-2f0c122c`).
+
+**What would falsify it.** A trace that shows a migration in a `create` without a user namespace, or
+a spec this starts differently from before the change. The `process` class still joins its boxes by
+migration, in `pre_exec`; its bench runs back to back, so it pays the grace period only when runs are
+spaced, and moving its births into their cgroups is the same change for a different spawn path.
 
 ## The `process` box (Linux) — AC-T7.1.1, AC-T7.1.2, AC-T7.1.5
 

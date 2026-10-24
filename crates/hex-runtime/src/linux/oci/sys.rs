@@ -29,6 +29,84 @@ pub fn fork() -> Result<Fork, OciError> {
     }
 }
 
+/// `struct clone_args` through its `cgroup` field (`CLONE_ARGS_SIZE_VER2`, 88 bytes), as Linux's
+/// `include/uapi/linux/sched.h` lays it out: every field an `__aligned_u64`.
+#[repr(C, align(8))]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
+/// `CLONE_INTO_CGROUP` (Linux 5.7, `include/uapi/linux/sched.h`): the child starts in the cgroup
+/// `clone_args.cgroup` names. libc's constant is an `i32` that overflows (libc issue 3584), so it is
+/// written here.
+const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+
+/// Forks into a cgroup: `clone3` with `CLONE_INTO_CGROUP`, so the child is born in the cgroup that
+/// the open directory `cgroup` is, and nothing migrates it there. A migration takes the cgroup
+/// threadgroup lock, whose writer can wait out a whole RCU grace period (docs/design/runtime.md); a
+/// birth in the cgroup takes no such lock. `None` when this kernel or sandbox has no such clone:
+/// `ENOSYS` (before Linux 5.3, or a seccomp profile like Docker's default, which answers `clone3`
+/// so) or `E2BIG` (before 5.7, which doesn't know the `cgroup` field). The caller must be
+/// single-threaded, as for [`fork`].
+pub fn fork_into_cgroup(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Option<Fork>, OciError> {
+    use std::os::fd::AsRawFd;
+    let fd = u64::try_from(cgroup.as_raw_fd())
+        .map_err(|_| OciError::os("clone3 into a cgroup", "a negative file descriptor"))?;
+    let exit_signal = u64::try_from(libc::SIGCHLD)
+        .map_err(|_| OciError::os("clone3 into a cgroup", "SIGCHLD is negative"))?;
+    let args = CloneArgs {
+        flags: CLONE_INTO_CGROUP,
+        pidfd: 0,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: fd,
+    };
+    // SAFETY: clone3(2) with a valid pointer to a fully initialized `CloneArgs` and its exact size,
+    // which the kernel only reads. With no stack given, the child goes on with a copy of the caller's
+    // stack, as after fork(2), and no flag shares anything with the parent (no CLONE_VM, CLONE_FILES
+    // or CLONE_THREAD), so the child owns a faithful copy of the address space. fork's one
+    // constraint, that the child of a multi-threaded process may touch only async-signal-safe state,
+    // doesn't apply: every caller has re-exec'd and is single-threaded, so no other thread held a lock
+    // across the clone, and Hex registers no atfork handler for libc's fork to have run. The return
+    // value is checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            &args as *const CloneArgs,
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    match r {
+        -1 => {
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::ENOSYS) | Some(libc::E2BIG) => Ok(None),
+                _ => Err(OciError::os("clone3 into the container's cgroup", e)),
+            }
+        }
+        0 => Ok(Some(Fork::Child)),
+        child => Ok(Some(Fork::Parent(i32::try_from(child).map_err(|_| {
+            OciError::os("clone3 into a cgroup", "a pid out of range")
+        })?))),
+    }
+}
+
 /// Reaps child `pid`, waiting for it to end; its exit as a `waitpid` status, or the error.
 pub fn waitpid(pid: i32) -> Result<WaitStatus, OciError> {
     let mut status: libc::c_int = 0;
