@@ -105,6 +105,12 @@ def held(density, key):
 def oci_section(run):
     names = ["hex", "runc", "crun", "youki", "runsc", "krun", "libcrun"]
     data = {n: rounds(run, n) for n in names}
+    # The oci class through the Runtime seam (seam_oci writes ociseam.r<N>.json): a second Hex column,
+    # beside `hex`, its ratio against the in-process rival (libcrun). It measures lifecycle and
+    # throughput only, so the sustained, nonet, start_true and density rows read n/a for it.
+    seam = rounds(run, "ociseam")
+    if seam:
+        data["hex-seam"] = seam
     data = {n: r for n, r in data.items() if r}
     rows = []  # (axis, unit, lower_better, {name: value})
     for op in ("create", "start", "exec", "delete"):

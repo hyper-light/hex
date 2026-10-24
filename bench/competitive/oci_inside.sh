@@ -81,12 +81,23 @@ fi
 # in for the runtime, so every call is a spawn and an exit and nothing else. Once a round, in the shuffle with
 # the runtimes, so it shares their conditions.
 mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
+# The oci class through the Runtime seam, in process (seam_oci; SEAM_OCI names its binary in /opt/bin):
+# the node agent runs in this container, as root, with its box root beside the runtimes' container
+# cgroups, so its create, start, exec and delete are compared with libcrun's in-process calls. It runs
+# once a round, in the shuffle, as the runtimes do. hex-seam's phases are lifecycle and throughput.
+SEAM=""; [ -n "${SEAM_OCI:-}" ] && [ -x "$SEAM_OCI" ] && SEAM=hex-seam
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
-  for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) | shuf); do
+  for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) $SEAM | shuf); do
     if [ "$rt" = standin ]; then
       echo "round $round: the stand-in (/usr/bin/true as crun)"
       HEXBENCH_BIN=/run/standin HEXBENCH_PHASES=throughput python3 /opt/lab/oci_bench.py crun "$OUT/ceiling.standin.r$round.json" \
         1 0 "$LIFECYCLES" 0 64
+      continue
+    fi
+    if [ "$rt" = hex-seam ]; then
+      echo "round $round: the oci class through the Runtime seam (seam_oci, in process)"
+      "$SEAM_OCI" "$OUT/ociseam.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" /opt/bin/hex /run/bundle-sleep /run/bundle-true \
+        2>&1 | tee -a "$OUT/ociseam.log" || echo "ociseam round $round exited $?"
       continue
     fi
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done

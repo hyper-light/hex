@@ -61,6 +61,13 @@ else
   python3 -I "$HERE/fetch.py" "$BASE" > "$OUT/versions.$(date -u +%H%M%S).json"
 fi
 cp "$HEX" "$BASE/bin/hex"
+# The oci class through the Runtime seam (seam_oci): SEAM_OCI_BIN names its release binary, staged
+# into the oci pass's container as /opt/bin/seam_oci, where oci_inside.sh runs it as root. Its sha256
+# is recorded beside hex's.
+if [ -n "${SEAM_OCI_BIN:-}" ]; then
+  cp "$(realpath "$SEAM_OCI_BIN")" "$BASE/bin/seam_oci"
+  echo "seam_oci: $BASE/bin/seam_oci ($(sha256sum "$BASE/bin/seam_oci" | cut -c1-16))" >> "$OUT/env.txt"
+fi
 
 NAMES=()  # the bench's containers, removed however this script ends
 cleanup() { for n in "${NAMES[@]}"; do docker rm -f "$n" >/dev/null 2>&1 || true; done; }
@@ -96,11 +103,12 @@ if [[ " $PHASES " == *" oci "* ]]; then
   fi
   # One privileged container, private cgroup namespace, no network; host /usr read-only provides the
   # workloads and python3. --memory bounds the density phase on top of its own budget.
+  SEAM_OCI_ENV=(); [ -x "$BASE/bin/seam_oci" ] && SEAM_OCI_ENV=(-e "SEAM_OCI=/opt/bin/seam_oci")
   timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory=40g \
     --privileged --security-opt label=disable --cgroupns=private --network=none \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
-    -e STANDIN registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag
