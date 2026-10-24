@@ -22,8 +22,10 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
     per container, joined by migration, 2026-10-23 23:01Z).
   - Process boxes: 07:25-07:45Z (run 2).
   - Density with held memory (below), on the same binaries (`FETCH=0`, their sums checked against run 2's):
-    runc, crun, youki and runsc at 17:22-17:34Z (rounds 3-4, start load 0.85), and the process boxes at
-    18:52-18:58Z (rounds 5-6, start load 1.04). Hex's own rounds measure held memory too.
+    runc, crun, youki and runsc at 17:22-17:34Z (rounds 3-4, start load 0.85). Hex's own rounds measure
+    held memory too. The process boxes' density: 2026-10-24 08:42-08:44Z (rounds 7-8, density only, so
+    without the load gate: held memory doesn't depend on other people's CPU load), on `hex-cg2-2f0c122c`,
+    whose process class is unchanged from the box rounds' binary.
   - Each pass started only at a 1-minute load under 2 (CLAUDE.md §7). During passes it rose to 3-8 from
     other people's work on fedora, not confined to CPUs 0-3. **The tail figures (p99.9, max) carry that
     noise.** Within a pass, runtimes ran in shuffled order across rounds.
@@ -93,13 +95,16 @@ and 86 ms, and round 1's max is 67 ms.
 | throughput, concurrency 8 (runs/s) | 759 | 195 | 143 | 3.89x vs scope |
 | throughput, concurrency 32 (runs/s) | 783 | 160 | 192 | 4.08x vs service |
 | CPU per run (the call, plus systemd's manager and bus) | 2.51 ms | 7.81 ms | 13.92 ms | 3.11x vs scope |
-| memory held per idle box | 0.71 MiB | 1.11 MiB (see below) | 0.36 MiB | 0.50x vs service |
-| density (idle boxes per GiB held) | 1,434 | 919 | 2,884 | 0.50x vs service |
+| memory held per idle box | 0.74 MiB | 0.28 MiB | 0.39 MiB | 0.38x vs scope |
+| density (idle boxes per GiB held) | 1,388 | 3,615 | 2,607 | 0.38x vs scope |
 
-systemd-scope's figure counts the bench driver's cgroup, which forks each scope box. Watching only the
-scope gave 0.01 MiB per box, and watching the driver too gave 1.11 MiB: far more than the task and kernel
-stack a fork leaves behind (cgroup-v2.rst, "Memory Ownership"). `probes/scope_charge.py` will name the
-charge by kind before this cell is final. It doesn't move the ratio, which is against systemd services.
+The density rounds before these, 5 and 6, gave systemd scopes 1.11 MiB per box. That was the bench, not
+systemd. They spawned every box, slept 3 s and read memory. At 1,000 boxes the user manager hadn't
+started a single scope by then, so the reading was 1,000 `systemd-run` clients still waiting
+(`probes/scope_charge.py`, fedora 2026-10-24). Now each box is up, its `sleep` running in its own cgroup,
+before the next starts. Rounds 5 and 6 are kept on fedora as `box.settle3s.r*`. Per box, a scope holds 31
+KiB in the driver's cgroup (the kernel stack and slab a fork leaves), about 255 KiB in its own (the
+process, its page tables and the cgroup's per-CPU counters), and about 90-150 KiB in the user manager.
 
 ## What the run shows
 
@@ -118,8 +123,8 @@ charge by kind before this cell is final. It doesn't move the ratio, which is ag
   is the leading suspect, to be confirmed by profiling before the runtime design (goal 4) changes it.
 - **Process class: Hex is 2-4x ahead of systemd on latency, throughput and CPU**, and reaches the 4x bar
   only on throughput at concurrency 32. Its p99.9 is level with systemd scopes. Each idle box keeps its
-  `hex box run` wrapper process alive, which a systemd service doesn't, so Hex is behind on memory
-  (0.50x: 0.71 MiB held per box against a service's 0.36).
+  `hex box run` wrapper process alive, which a systemd scope doesn't, so Hex is behind on memory
+  (0.38x: 0.74 MiB held per box against a scope's 0.28).
 - **gVisor runsc** costs its user-space kernel on every axis: 12.5 MiB held and 52.9 ms of CPU per
   container.
 

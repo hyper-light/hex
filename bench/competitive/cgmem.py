@@ -12,11 +12,17 @@ memory.swap.current (no swap accounting) is an error, not a zero.
 
 Hugepages are held too, but memory.current counts them only when the hierarchy is mounted with
 `memory_hugetlb_accounting` (cgroup-v2.rst: "Count HugeTLB memory usage towards the cgroup's overall memory
-usage"). Without it, a cgroup's hugepages are its `hugetlb.<size>.current` files, so they're added from there.
-E2B backs each sandbox's guest memory with 2 MiB hugepages; no other stack here uses any.
+usage"). Without it, a cgroup's faulted hugepages are its `hugetlb.<size>.current`, so they're added from there.
+Its `hugetlb.<size>.rsvd.current` counts reservations, and a faulted page stays charged there too
+(cgroup-v1/hugetlb.rst), so the reservations are a figure of their own (`hugetlb_reserved_bytes`), never added
+to what's held. E2B backs each sandbox's guest memory with 2 MiB hugepages; no other stack here uses any.
 """
 import glob
 import os
+import re
+
+_HUGETLB_USAGE = re.compile(r"hugetlb\.[0-9]+[KMG]B\.current")
+_HUGETLB_RSVD = re.compile(r"hugetlb\.[0-9]+[KMG]B\.rsvd\.current")
 
 
 def _hugetlb_counted():
@@ -31,13 +37,23 @@ def _hugetlb_counted():
 HUGETLB_IN_CURRENT = _hugetlb_counted()
 
 
-def hugetlb_bytes(path):
-    """The hugepage memory the cgroup holds, of every page size; 0 where the hugetlb controller isn't on."""
+def _hugetlb_sum(path, pattern):
     total = 0
-    for f in glob.glob(os.path.join(path, "hugetlb.*.current")):
-        with open(f) as fh:
-            total += int(fh.read())
+    for f in glob.glob(os.path.join(path, "hugetlb.*")):
+        if pattern.fullmatch(os.path.basename(f)):
+            with open(f) as fh:
+                total += int(fh.read())
     return total
+
+
+def hugetlb_bytes(path):
+    """The faulted hugepage memory the cgroup holds, of every page size; 0 where the hugetlb controller isn't on."""
+    return _hugetlb_sum(path, _HUGETLB_USAGE)
+
+
+def hugetlb_reserved_bytes(path):
+    """The hugepage memory reserved for the cgroup (faulted or not), of every page size."""
+    return _hugetlb_sum(path, _HUGETLB_RSVD)
 
 
 def held_bytes(path):

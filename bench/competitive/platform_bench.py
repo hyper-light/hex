@@ -543,6 +543,10 @@ class Stack:
             total += cgmem.held_bytes(p)
         return total
 
+    def hugetlb_reserved_bytes(self):
+        """The hugepages reserved for the stack's cgroups, faulted or not (cgmem.py)."""
+        return sum(cgmem.hugetlb_reserved_bytes(p) for p in self.paths)
+
     def outside(self):
         """{pid: comm} of every process outside the stack's cgroups."""
         out = {}
@@ -690,6 +694,7 @@ def density_phase(p, res, cap, stack, outside0):
     stop = "cap"
     try:
         base = stack.held_bytes() if stack else None
+        rsvd0 = stack.hugetlb_reserved_bytes() if stack else None
         t0 = time.perf_counter()
         for i in range(cap):
             try:
@@ -701,6 +706,9 @@ def density_phase(p, res, cap, stack, outside0):
         if stack:
             time.sleep(5)  # let the sandboxes settle before reading memory
             new = collections.Counter(c for pid, c in stack.outside().items() if pid not in outside0)
+            rsvd = stack.hugetlb_reserved_bytes() - rsvd0
+            if rsvd > 0:  # a stack whose sandboxes reserve hugepages: the pool bounds them by reservation
+                density["hugetlb_reserved"] = cgmem.per_unit(rsvd, len(sandboxes))
             density.update({"held": cgmem.per_unit(stack.held_bytes() - base, len(sandboxes)),
                             # A sandbox's own processes among these mean STACK_CGROUPS misses part of the stack.
                             "new_processes_outside_stack": dict(new.most_common(20))})
