@@ -1,8 +1,9 @@
 //! AC-T7.1.5: the memory the node agent adds per box is at most 1 MiB. The agent keeps no per-box
 //! threads or buffers — a box is a cgroup (the kernel's memory) and a record (on disk) — so this
 //! measures the agent process's resident-set growth across creating many boxes and divides by the
-//! count. It needs a delegated cgroup v2 subtree; where this process's cgroup is shared, it re-runs
-//! itself once inside a `systemd-run --user --scope -p Delegate=yes`. Recorded in bench/.
+//! count. It needs a cgroup v2 subtree with every one of cpu, io, memory and pids delegated; where this
+//! process's cgroup lacks one, it re-runs itself once inside a `systemd-run --user --scope -p Delegate=yes`.
+//! Recorded in bench/.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -57,10 +58,24 @@ fn main() {
         std::fs::create_dir_all(&leaf).map_err(|e| format!("leaf: {e}"))?;
         std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
             .map_err(|e| format!("move self: {e}"))?;
-        hex_runtime::linux::cgroup::BoxRoot::open(&own.join("hex-probe"), Vec::new())
+        // The probe root opens with whichever controllers the cgroup has, none included, so each is
+        // checked: a cgroup without memory or pids would measure nothing it bounds.
+        let probe = hex_runtime::linux::cgroup::BoxRoot::open(&own.join("hex-probe"), Vec::new())
             .map_err(|e| e.to_string())?;
+        let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
+            .into_iter()
+            .filter(|c| !probe.controllers().contains(*c))
+            .collect();
         let _ = std::fs::remove_dir(own.join("hex-probe"));
-        Ok(own)
+        if missing.is_empty() {
+            Ok(own)
+        } else {
+            Err(format!(
+                "{} can't hand down the {} controllers",
+                own.display(),
+                missing.join(", ")
+            ))
+        }
     }
 
     let own = match prepare() {
@@ -138,8 +153,9 @@ fn main() {
     }
 
     println!(
-        "node_memory: boxes={BOXES} rss_before={before} rss_after={after} per_box_bytes={per_box} ({} KiB)",
-        per_box / 1024
+        "node_memory: boxes={BOXES} rss_before={before} rss_after={after} per_box_bytes={per_box} ({} KiB) in {}",
+        per_box / 1024,
+        own.display()
     );
     println!(
         "AC-T7.1.5 (<=1 MiB/box): {}",

@@ -161,8 +161,10 @@ name = "hex-bench"
 version = "0.1.0"
 dependencies = [
  "hex-api",
+ "hex-core",
  "hex-node",
  "hex-runtime",
+ "serde_json",
  "tempfile",
 ]
 

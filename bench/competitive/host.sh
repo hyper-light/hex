@@ -4,7 +4,8 @@
 #   systemd-run --user --unit=hexbench --collect bash bench/competitive/host.sh <hex release binary>
 # Env (defaults): CPUSET 4-31, ROUNDS 3, N 10000, WARMUP 100, N_OVERRIDE "runsc:3000", LIFECYCLES 2000,
 # CAP 1000, BUDGET_MIB 8192 (OCI density), BOX_BUDGET_MIB 4096 (box, sandbox and VM density), PHASES "oci box"
-# (add "sandbox" for the process-sandbox pass and "vm" for the microVM pass; METHODS picks their methods).
+# (add "sandbox" for the process-sandbox pass and "vm" for the microVM pass; METHODS picks their methods; add
+# "boxseam" for the process class through the Runtime seam, with SEAM_BIN naming seam_box's release binary).
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
 # ones there, HEXBENCH_PHASES picks the drivers' phases (all), and FETCH=0 keeps the competitors' binaries
 # already in $BASE/bin (their sha256 is recorded) rather than resolving each project's latest release again.
@@ -24,6 +25,9 @@ export N_OVERRIDE=${N_OVERRIDE:-runsc:3000} LIFECYCLES=${LIFECYCLES:-2000} CAP=$
 BOX_BUDGET_MIB=${BOX_BUDGET_MIB:-4096}; PHASES=${PHASES:-"oci box"}
 export ROUND_FIRST=${ROUND_FIRST:-1} HEXBENCH_PHASES=${HEXBENCH_PHASES:-}
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
+if [[ " $PHASES " == *" boxseam "* ]]; then
+  SEAM=$(realpath "${SEAM_BIN:?SEAM_BIN: the seam_box binary, from cargo bench --no-run -p hex-bench --bench seam_box}")
+fi
 # OUT_DIR adds a pass (e.g. RUNTIMES=runsc PHASES=oci) to an existing run directory.
 OUT=${OUT_DIR:-"$BASE/out/$(date -u +%Y%m%dT%H%M%SZ)"}
 mkdir -p "$OUT" "$BASE/bin"
@@ -46,7 +50,8 @@ done
   fi
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
-  echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all}"
+  echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
@@ -126,6 +131,17 @@ if [[ " $PHASES " == *" box "* ]]; then
       --setenv=HEXBENCH_PHASES="$HEXBENCH_PHASES" \
       taskset -c "$CPUSET" python3 -I "$HERE/box_bench.py" "$OUT/box.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" \
       "$CAP" "$BOX_BUDGET_MIB" "$BASE/bin/hex" 2>&1 | tee -a "$OUT/box.log"
+  done
+fi
+
+if [[ " $PHASES " == *" boxseam "* ]]; then
+  for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
+    # The node agent in seam_box's own process, in a delegated user service as box_bench.py runs; it makes
+    # its agent leaf and box root under the service's cgroup.
+    timeout 36000 systemd-run --user --unit="hexbench-boxseam-$$-$round" --property=Delegate=yes --wait --collect --pipe \
+      --setenv=HEXBENCH_PHASES="$HEXBENCH_PHASES" \
+      taskset -c "$CPUSET" "$SEAM" "$OUT/boxseam.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" "$CAP" "$BOX_BUDGET_MIB" \
+      2>&1 | tee -a "$OUT/boxseam.log"
   done
 fi
 

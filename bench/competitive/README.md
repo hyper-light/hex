@@ -11,6 +11,7 @@ measures where Hex stands today. `RESULT.md` records each run of record.
 |---|---|---|
 | `oci` (`hex oci create/start/exec/state/kill/delete`) | runc, crun, youki, gVisor `runsc` (each project's latest release, fetched and verified by `fetch.py`) | one privileged bench container, private cgroup namespace, no network |
 | `process` (`hex box run`) | systemd transient scopes (`systemd-run --user --scope`) and services (`systemd-run --user --wait`) | a delegated systemd user service on the host |
+| `process` through the hex-api `Runtime` seam (`hex-seam`: the node agent in the bench's own process, `crates/hex-bench/benches/seam_box.rs`) | the same systemd units | a delegated systemd user service on the host |
 | sandbox platforms | Daytona (self-hosted, v0.190.0 tree, Docker-based) and E2B (`embed/`, Firecracker on one KVM host); hosted platforms end to end, labelled hosted | see "Platforms" below |
 
 ## What is measured
@@ -35,6 +36,13 @@ measures where Hex stands today. `RESULT.md` records each run of record.
   bounded at 256 MiB and 64 pids. systemd's CPU includes the user manager's and the user bus's. So does
   its memory: its density boxes go in a slice of their own, which is watched along with the manager and
   the bus, and not the whole user manager, which on a shared host holds everyone's user units.
+- **Process boxes through the seam** (`seam_box`, the `boxseam` pass): the same phases, each call a
+  `Runtime` method on a node agent in the bench's process (create, exec, wait, delete), and throughput from
+  threads sharing it. Its CPU per run is the bench cgroup's `cpu.stat` usage, agent and boxes together.
+  The agent's records are durable today, seven fsyncs a run of `true`, so the result names the filesystem
+  under its state (`state.fs`). Density runs first: a removed cgroup's kernel memory is charged to its
+  parent and freed after the cgroup goes, so a reading right after a churn phase starts high and its rise
+  comes out low. Density then fails its phase if any box or cgroup is left after it removes them.
 
 Every call's stdio goes to `/dev/null` or an error file, never a pipe (a detached `create` holds the
 caller's stdio; commit 4c76c13). Calls are spawned with `posix_spawn` (OCI) or `fork`+`execve` (boxes,
@@ -64,6 +72,18 @@ OUT_DIR=<run dir> FETCH=0 ROUND_FIRST=3 ROUNDS=2 HEXBENCH_PHASES=density host.sh
 
 `FETCH=0` keeps the competitors' binaries already fetched, recording their sha256, rather than resolving
 each project's latest release again. Best of N takes each axis from the rounds that measured it.
+
+The seam pass needs seam_box's release binary, which `cargo bench --no-run` names
+(`Executable benches/seam_box.rs (.../release/deps/seam_box-<hash>)`):
+
+```
+cargo bench --no-run -p hex-bench --bench seam_box   # nice -n 10, CARGO_TARGET_DIR under ~/.cache
+SEAM_BIN=<that binary> PHASES=boxseam host.sh <hex>
+```
+
+Run on its own (`seam_box <out.json> <n> <warmup> <lifecycles> <density cap> <density budget MiB>`), it
+re-runs itself in a delegated `systemd-run --user --scope` when its cgroup can't hand down every one of
+cpu, io, memory and pids.
 
 ### Checking the drivers off the bench host
 

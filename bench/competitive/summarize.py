@@ -6,7 +6,9 @@
 Percentiles are nearest-rank over each round's samples. Best of N: for each runtime and metric, the
 round with the best value (lowest p50 for a latency, highest rate, lowest cost, highest density). Hex's
 ratio is the best competitor's value over Hex's for lower-is-better metrics and Hex's over the best
-competitor's for higher-is-better ones, so above 1 means Hex is ahead and 4 meets the 4-5x bar.
+competitor's for higher-is-better ones, so above 1 means Hex is ahead and 4 meets the 4-5x bar. Each of
+Hex's own columns (`hex`, and `hex-seam` for the process class through the Runtime seam) gets its own
+ratio, against competitors only.
 """
 import glob
 import json
@@ -60,12 +62,13 @@ def fmt(v, unit):
     return str(v)
 
 
-def ratio(values, lower_better):
-    """values: {name: value}; returns (text, ratio) of Hex against the best competitor."""
+def ratio(values, lower_better, me="hex"):
+    """values: {name: value}; returns (text, ratio) of Hex's column `me` against the best competitor, which is
+    never one of Hex's own columns."""
     # A value at or below zero (a memory delta the kernel reclaimed away, a cost too small to see) is not a
     # measurement, so it never enters a ratio.
-    hexv = values.get("hex")
-    comp = {k: v for k, v in values.items() if k != "hex" and v is not None and v > 0}
+    hexv = values.get(me)
+    comp = {k: v for k, v in values.items() if not k.startswith("hex") and v is not None and v > 0}
     if hexv is None or hexv <= 0 or not comp:
         return "n/a", None
     best = min(comp, key=comp.get) if lower_better else max(comp, key=comp.get)
@@ -134,17 +137,20 @@ def oci_section(run):
 
 
 def box_section(run):
-    rs = rounds(run, "box")
-    methods = ["hex", "systemd-scope", "systemd-service"]
+    # seam_box writes its rounds (boxseam.r<N>.json) apart from box_bench.py's, in the same JSON; best of N
+    # takes each method's rounds wherever they are.
+    seam = rounds(run, "boxseam")
+    rs = list(rounds(run, "box").values()) + list(seam.values())
+    methods = ["hex"] + (["hex-seam"] if seam else []) + ["systemd-scope", "systemd-service"]
     rows = []
-    per = {m: best_dist([r["methods"].get(m, {}).get("phases", {}).get("latency", {}).get("ms", []) for r in rs.values()])
+    per = {m: best_dist([r["methods"].get(m, {}).get("phases", {}).get("latency", {}).get("ms", []) for r in rs])
            for m in methods}
     for q in ("p50", "p99", "p99.9", "max"):
         rows.append((f"box run of `true` {q} (ms)", "ms", True, {m: (d or {}).get(q) for m, d in per.items()}))
     for c in ("1", "8", "32"):
         rows.append((f"throughput at concurrency {c} (runs/s)", "/s", False,
                      {m: max((r["methods"].get(m, {}).get("phases", {}).get("throughput", {}).get(c, {}).get("per_s") or 0
-                              for r in rs.values()), default=None) or None for m in methods}))
+                              for r in rs), default=None) or None for m in methods}))
 
     def cpu(r, m):
         lat = r["methods"].get(m, {}).get("phases", {}).get("latency")
@@ -152,13 +158,13 @@ def box_section(run):
             return None
         return sum(lat["call_cpu_s"]) / len(lat["call_cpu_s"]) + lat.get("helper_cpu_s_per_run", 0)
     rows.append(("CPU per run (the call, plus systemd's manager and bus)", "cpu", True,
-                 {m: min((v for v in (cpu(r, m) for r in rs.values()) if v is not None), default=None) for m in methods}))
+                 {m: min((v for v in (cpu(r, m) for r in rs) if v is not None), default=None) for m in methods}))
     def density(r, m):
         return r["methods"].get(m, {}).get("phases", {}).get("density")
     rows.append((MEMORY_AXIS.format("box"), "bytes", True,
-                 {m: best(rs.values(), lambda r: held(density(r, m), "per_unit_bytes"), True) for m in methods}))
+                 {m: best(rs, lambda r: held(density(r, m), "per_unit_bytes"), True) for m in methods}))
     rows.append((DENSITY_AXIS.format("boxes"), "per_gib", False,
-                 {m: best(rs.values(), lambda r: held(density(r, m), "per_gib"), False) for m in methods}))
+                 {m: best(rs, lambda r: held(density(r, m), "per_gib"), False) for m in methods}))
     return methods, rows, rs
 
 
@@ -306,14 +312,15 @@ def lab_notes(methods, rs):
 
 
 def table(title, names, rows):
-    """A section's table; the ratio column only where Hex has a class in it, and n/a on a row whose
+    """A section's table; a ratio column for each of Hex's own columns in it, and n/a on a row whose
     lower_better is None."""
-    ratios = "hex" in names
-    out = [f"### {title}", "", "| Axis | " + " | ".join(names) + (" | Hex vs best competitor |" if ratios else " |"),
-           "|---|" + "---|" * len(names) + ("---|" if ratios else "")]
+    hexes = [n for n in names if n.startswith("hex")]
+    heads = "".join(" Hex vs best competitor |" if h == "hex" else f" {h} vs best competitor |" for h in hexes)
+    out = [f"### {title}", "", "| Axis | " + " | ".join(names) + " |" + heads,
+           "|---|" + "---|" * (len(names) + len(hexes))]
     for axis, unit, lower, vals in rows:
         cells = f"| {axis} | " + " | ".join(fmt(vals.get(n), unit) for n in names) + " |"
-        out.append(cells + (f" {ratio(vals, lower)[0] if lower is not None else 'n/a'} |" if ratios else ""))
+        out.append(cells + "".join(f" {ratio(vals, lower, h)[0] if lower is not None else 'n/a'} |" for h in hexes))
     return "\n".join(out) + "\n"
 
 
@@ -333,7 +340,9 @@ def main():
         parts.append(platform_notes(plats))
     methods, rows, rs = box_section(run)
     if rs:
-        parts.append(table("Process class (`hex box run` against systemd transient units)", methods, rows))
+        parts.append(table("Process class (`hex box run`, and the Runtime seam in process, against systemd transient units)"
+                           if "hex-seam" in methods else "Process class (`hex box run` against systemd transient units)",
+                           methods, rows))
     for prefix, title, run_label, unit, units in (
             ("sandbox", "Process sandboxes (each as commonly used) against `hex box run`", "run of `true`", "sandbox",
              "sandboxes"),
