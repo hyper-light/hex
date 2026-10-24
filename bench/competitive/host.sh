@@ -88,7 +88,9 @@ if [[ " $PHASES " == *" oci "* ]]; then
       || { rm -rf -- "${CTX:?}"; echo "refusing: the libcrun driver didn't build ($OUT/libcrun-image.log)" >&2; exit 5; }
     rm -rf -- "${CTX:?}"
     CID=$(docker create hexbench/libcrun:1)
-    docker cp "$CID:/usr/local/bin/libcrun-driver" "$BASE/bin/libcrun-driver" && docker rm "$CID" >/dev/null
+    docker cp "$CID:/usr/local/bin/libcrun-driver" "$BASE/bin/libcrun-driver" \
+      || { docker rm "$CID" >/dev/null; echo "refusing: the libcrun driver didn't copy out of its image" >&2; exit 5; }
+    docker rm "$CID" >/dev/null
     echo "libcrun $(docker image inspect hexbench/libcrun:1 --format '{{.Id}}') driver $(sha256sum "$BASE/bin/libcrun-driver" | cut -c1-16)" \
       >> "$OUT/lab-image.ids"
   fi

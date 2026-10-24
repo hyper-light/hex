@@ -5,7 +5,7 @@
 FROM registry.fedoraproject.org/fedora:44
 
 RUN dnf -y install --setopt=install_weak_deps=False \
-        gcc make findutils python3 pkgconf-pkg-config json-c-devel libcap-devel libseccomp-devel \
+        gcc make findutils diffutils tar gzip python3 pkgconf-pkg-config json-c-devel libcap-devel libseccomp-devel \
     && dnf clean all
 
 COPY crun.tar.gz driver.c build.sh /src/
