@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bench/competitive: oci_bench.py's throughput, sustained and lifecycle_nonet phases against a stand-in runtime,
-# and box_bench.py's throughput against stand-in `hex` and `systemd-run`, off the bench host (the README's
+# its in-process runtime (libcrun) against a stand-in libcrun-driver, and box_bench.py's throughput against
+# stand-in `hex` and `systemd-run`, off the bench host (the README's
 # HEXBENCH_* overrides): no containers, cgroups or load, so its numbers mean nothing. It checks the control flow:
 #   1. every lifecycle is counted once at each concurrency level (the stand-in logs each create);
 #   2. a failing call ends its level, with its error recorded as the phase's;
@@ -8,7 +9,10 @@
 #   4. the sustained phase's windows add up to the lifecycles it ran, and a failure keeps its count;
 #   5. lifecycle_nonet times every operation, under ids of its own;
 #   6. box_bench.py's throughput runs each method's lifecycles once per level, a failing run ends its level
-#      with its error, and no worker outlives the phase.
+#      with its error, and no worker outlives the phase;
+#   7. the in-process runtime's calls go through one driver per process: each lifecycle once per level, a
+#      failing call ends its level with the driver's error, the lifecycle phase times every operation, and
+#      no driver outlives its process.
 #   check_driver.sh [lifecycles per level (64)]
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
@@ -41,7 +45,7 @@ CHECK_LOG=$T/creates.log HEXBENCH_CHECK_MARK=$marker python3 -I "$HERE/oci_bench
 check "the phase ran without an error" "python3 -I -c 'import json,sys; sys.exit(1 if json.load(open(sys.argv[1]))[\"errors\"] else 0)' $T/ok.json"
 for c in 1 8 32; do
   n=$(grep -c "^crun-c$(printf %02d $c)-" "$T/creates.log" || true)
-  u=$(grep "^crun-c$(printf %02d $c)-" "$T/creates.log" | sort -u | wc -l)
+  u=$( (grep "^crun-c$(printf %02d $c)-" "$T/creates.log" || true) | sort -u | wc -l)
   check "concurrency $c: $L lifecycles, each once (created $n, distinct $u)" "[ $n -eq $L ] && [ $u -eq $L ]"
 done
 check "no worker outlived the clean run" "[ \$(leftover) -eq 0 ]"
@@ -104,4 +108,37 @@ boxrun "$T/boxfail.json" $((L + L / 2))
 check "box_bench: a failing run at concurrency 8 is hex's phase error, and concurrency 32 didn't run" \
   "python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1]))[\"methods\"][\"hex\"][\"errors\"].get(\"throughput\",\"\"); sys.exit(0 if e.startswith(\"RuntimeError: concurrency 8:\") and \"exit 3\" in e else 1)' $T/boxfail.json && [ \$(grep -c '^hex ' $T/box/runs.log) -le $((2 * L)) ]"
 check "no box_bench worker outlived its runs" "[ \$(leftover) -eq 0 ]"
+# 7: libcrun through a stand-in driver, which speaks driver.c's protocol on fds 3 and 4, logs each create,
+# and fails the start of $FAIL_ID.
+cat > "$T/bin/libcrun-driver" <<'PY'
+#!/usr/bin/env python3
+import os
+fail = os.environ.get("FAIL_ID", "")
+replies = os.fdopen(4, "w")
+for line in os.fdopen(3):
+    w = line.split()
+    if w[0] == "create":
+        with open(os.environ["CHECK_LOG"], "a") as f:
+            f.write(w[2] + "\n")
+    replies.write(f"err the stand-in fails {w[1]}\n" if w[0] == "start" and w[1] == fail else "ok 1000000 2000000\n")
+    replies.flush()
+PY
+chmod +x "$T/bin/libcrun-driver"
+: > "$T/creates.log"
+CHECK_LOG=$T/creates.log HEXBENCH_CHECK_MARK=$marker HEXBENCH_PHASES="lifecycle throughput" \
+  python3 -I "$HERE/oci_bench.py" libcrun "$T/lib.json" 20 2 "$L" 0 64 > "$T/lib.out"
+for c in 1 8 32; do
+  n=$(grep -c "^libcrun-c$(printf %02d $c)-" "$T/creates.log" || true)
+  u=$( (grep "^libcrun-c$(printf %02d $c)-" "$T/creates.log" || true) | sort -u | wc -l)
+  check "libcrun at concurrency $c: $L lifecycles, each once (created $n, distinct $u)" "[ $n -eq $L ] && [ $u -eq $L ]"
+done
+check "libcrun: the lifecycle phase times 20 of each operation at the driver's 1 ms, and no phase errs" \
+  "python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); m=d[\"phases\"][\"lifecycle\"][\"ms\"]; sys.exit(0 if not d[\"errors\"] and all(m[o]==[1.0]*20 for o in (\"create\",\"start\",\"exec\",\"delete\")) else 1)' $T/lib.json"
+: > "$T/creates.log"
+CHECK_LOG=$T/creates.log FAIL_ID=libcrun-c08-000010 HEXBENCH_CHECK_MARK=$marker HEXBENCH_PHASES=throughput \
+  python3 -I "$HERE/oci_bench.py" libcrun "$T/libfail.json" 1 0 "$L" 0 64 > "$T/libfail.out"
+check "libcrun: a failing start at concurrency 8 is the phase's error, with the driver's message" \
+  "python3 -I -c 'import json,sys; e=json.load(open(sys.argv[1]))[\"errors\"].get(\"throughput\",\"\"); sys.exit(0 if e.startswith(\"concurrency 8:\") and \"the stand-in fails libcrun-c08-000010\" in e else 1)' $T/libfail.json"
+check "libcrun: concurrency 32 didn't run after the failing level" "! grep -q '^libcrun-c32-' $T/creates.log"
+check "no libcrun driver or worker outlived its runs" "[ \$(leftover) -eq 0 ]"
 [ "$fails" -eq 0 ] && echo "all checks passed" || { echo "$fails checks failed"; exit 1; }

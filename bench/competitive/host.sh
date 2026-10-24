@@ -74,6 +74,24 @@ if [[ " $PHASES " == *" oci "* ]]; then
     [ -d "$BASE/krun/lib" ] || { echo "refusing: no $BASE/krun/lib (fetch.py's record is in $OUT)" >&2; exit 4; }
     KRUN=(-v "$BASE/krun:/opt/krun:ro")
   fi
+  # libcrun in process (libcrun/) runs when RUNTIMES is oci_inside.sh's default or names it: its driver is
+  # built from crun's pinned source in an image of its own (the one step here that uses the network), and
+  # copied out to $BASE/bin, where the pass's container finds it.
+  if [ -z "${RUNTIMES:-}" ] || [[ " $RUNTIMES " == *" libcrun "* ]]; then
+    REC="$OUT/versions.$(date -u +%H%M%S).crun-src.json"
+    python3 -I "$HERE/fetch.py" "$BASE" crun-src > "$REC"
+    SRC=$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1]))["crun-src"]; print(r.get("path", ""))' "$REC")
+    [ -n "$SRC" ] || { echo "refusing: crun's source didn't fetch ($REC)" >&2; exit 4; }
+    CTX=$(mktemp -d "$BASE/libcrun-image.XXXXXX")
+    cp "$SRC" "$CTX/crun.tar.gz" && cp "$HERE/libcrun/Dockerfile" "$HERE/libcrun/driver.c" "$HERE/libcrun/build.sh" "$CTX/"
+    docker build --progress=plain -t hexbench/libcrun:1 "$CTX" > "$OUT/libcrun-image.log" 2>&1 \
+      || { rm -rf -- "${CTX:?}"; echo "refusing: the libcrun driver didn't build ($OUT/libcrun-image.log)" >&2; exit 5; }
+    rm -rf -- "${CTX:?}"
+    CID=$(docker create hexbench/libcrun:1)
+    docker cp "$CID:/usr/local/bin/libcrun-driver" "$BASE/bin/libcrun-driver" && docker rm "$CID" >/dev/null
+    echo "libcrun $(docker image inspect hexbench/libcrun:1 --format '{{.Id}}') driver $(sha256sum "$BASE/bin/libcrun-driver" | cut -c1-16)" \
+      >> "$OUT/lab-image.ids"
+  fi
   # One privileged container, private cgroup namespace, no network; host /usr read-only provides the
   # workloads and python3. --memory bounds the density phase on top of its own budget.
   timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory=40g \

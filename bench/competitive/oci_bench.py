@@ -2,7 +2,9 @@
 """bench/competitive: one OCI runtime's lifecycle, throughput, CPU, memory and density.
 
 Runs inside the bench container (see oci_inside.sh), as root, with the runtime's binary under /opt/bin
-and the bundle at /run/bundle-sleep (workload `sleep infinity`) and /run/bundle-true (`true`).
+and the bundle at /run/bundle-sleep (workload `sleep infinity`) and /run/bundle-true (`true`). `libcrun` is
+libcrun in process: each process that calls it starts its own libcrun-driver (libcrun/driver.c), which
+makes and times each call the way crun's command line does, with no process spawned per call.
 
   oci_bench.py <runtime> <out.json> <n> <warmup> <throughput lifecycles> <density cap> <density budget MiB>
 
@@ -29,8 +31,10 @@ Every CLI call's stdio goes to /dev/null or a reused error file, never a pipe: a
 the container's init holding the caller's stdio, so reading a pipe to EOF would deadlock (hex_start's
 lesson, commit 4c76c13). Every call has a timeout, so a hung runtime ends the phase with an error.
 """
+import fcntl
 import json
 import os
+import select
 import signal
 import sys
 import multiprocessing as mp
@@ -57,6 +61,8 @@ RUNTIMES = {
     # defaults (vCPUs as the CPUs it may use, up to 16; 1024 MiB). Nothing can exec into its guest.
     "krun": {"argv": [f"{BIN}/krun", "--root", "/run/krun"], "env": {"LD_LIBRARY_PATH": "/opt/krun/lib"},
              "exec": False},
+    # libcrun in process, built from crun's pinned release (libcrun/build.sh).
+    "libcrun": {"driver": f"{BIN}/libcrun-driver", "root": "/run/libcrun", "exec": True},
 }
 
 
@@ -68,13 +74,81 @@ class OpError(Exception):
     pass
 
 
+class Driver:
+    """An in-process runtime's driver (libcrun/driver.c), started by the first call in the process that makes
+    it: requests a line on its fd 3, replies a line on its fd 4, each call timed inside it. Its stdio is the
+    CLI calls': /dev/null, and stderr to an error file."""
+
+    def __init__(self, name, path, root):
+        self.name, self.path, self.root, self.pid = name, path, root, None
+
+    def start(self):
+        req_r, self.req_w = os.pipe()
+        self.rep_r, rep_w = os.pipe()
+        # Its ends above 4, so neither dup2 onto 3 or 4 overwrites the other.
+        ends = [fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10) for fd in (req_r, rep_w)]
+        os.close(req_r)
+        os.close(rep_w)
+        errfd = os.open(f"{ERR}/{self.name}.driver.{os.getpid()}.err", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            actions = [(os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0),
+                       (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
+                       (os.POSIX_SPAWN_DUP2, errfd, 2), (os.POSIX_SPAWN_DUP2, ends[0], 3),
+                       (os.POSIX_SPAWN_DUP2, ends[1], 4)]
+            self.pid = os.posix_spawn(self.path, [self.path, self.root], dict(os.environ), file_actions=actions)
+        finally:
+            for fd in ends + [errfd]:
+                os.close(fd)
+
+    def ask(self, *words):
+        """One call: (wall ms, CPU s) as the driver timed it. A failed call, a driver that exits and one
+        silent past CALL_TIMEOUT_S (then killed) each raise OpError."""
+        if self.pid is None:
+            self.start()
+        try:
+            os.write(self.req_w, (" ".join(words) + "\n").encode())
+        except BrokenPipeError:
+            raise OpError(f"{words[0]}: the driver exited {self.end(0)}") from None
+        deadline, reply = time.monotonic() + CALL_TIMEOUT_S, b""
+        while not reply.endswith(b"\n"):
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([self.rep_r], [], [], left)[0]:
+                raise OpError(f"{words[0]}: no reply within {CALL_TIMEOUT_S}s; the driver exited {self.end(0)}")
+            chunk = os.read(self.rep_r, 4096)
+            if not chunk:
+                raise OpError(f"{words[0]}: the driver exited {self.end(CALL_TIMEOUT_S)}")
+            reply += chunk
+        kind, _, rest = reply.decode(errors="replace").strip().partition(" ")
+        if kind != "ok":
+            raise OpError(f"{words[0]}: {rest}")
+        wall_ns, cpu_ns = rest.split()
+        return int(wall_ns) / 1e6, int(cpu_ns) / 1e9
+
+    def end(self, patience):
+        """Ends the driver: EOF on its requests, then at most `patience` s before it's killed; its exit."""
+        if self.pid is None:
+            return None
+        os.close(self.req_w)
+        os.close(self.rep_r)
+        pidfd = os.pidfd_open(self.pid)
+        try:
+            if not select.select([pidfd], [], [], patience)[0]:
+                os.kill(self.pid, signal.SIGKILL)
+        finally:
+            os.close(pidfd)
+        _, status = os.waitpid(self.pid, 0)
+        self.pid = None
+        return os.waitstatus_to_exitcode(status)
+
+
 class Runtime:
     def __init__(self, name):
         spec = RUNTIMES[name]
         self.name = name
-        self.argv = spec["argv"]
+        self.argv = spec.get("argv")
         self.has_exec = spec["exec"]
-        self.env = dict(os.environ, **spec["env"])
+        self.env = dict(os.environ, **spec.get("env", {}))
+        self.driver = Driver(name, spec["driver"], spec["root"]) if "driver" in spec else None
 
     def call(self, *args, err_path=None):
         """Runs one CLI call; returns (wall ms, CPU s of the call). Raises OpError on failure.
@@ -106,16 +180,30 @@ class Runtime:
             os.close(errfd)
 
     def create(self, bundle, cid, **kw):
+        if self.driver:
+            return self.driver.ask("create", bundle, cid)
         return self.call("create", "--bundle", bundle, cid, **kw)
 
     def start(self, cid, **kw):
+        if self.driver:
+            return self.driver.ask("start", cid)
         return self.call("start", cid, **kw)
 
     def exec_true(self, cid, **kw):
+        if self.driver:
+            return self.driver.ask("exec", cid)
         return self.call("exec", cid, "/usr/bin/true", **kw)
 
     def delete(self, cid, **kw):
+        if self.driver:
+            return self.driver.ask("delete", cid)
         return self.call("delete", "--force", cid, **kw)
+
+    def close(self):
+        """Ends an in-process runtime's driver, which has nothing left to do once the process's calls are
+        done; a CLI runtime has none."""
+        if self.driver:
+            self.driver.end(CALL_TIMEOUT_S)
 
 
 def cg_read(name):
@@ -185,7 +273,8 @@ def throughput_lifecycle(rt, conc, i):
         rt.start(cid, err_path=err)
     finally:
         rt.delete(cid, err_path=err)
-    os.unlink(err)
+    if not rt.driver:  # a CLI call's error file; a driver's errors come back in its replies
+        os.unlink(err)
 
 
 def throughput_worker(name, conc, lifecycles, claimed, start, failed, out):
@@ -195,6 +284,8 @@ def throughput_worker(name, conc, lifecycles, claimed, start, failed, out):
     rt = Runtime(name)
     done = []
     try:
+        if rt.driver:  # up before the clock, as the interpreter is
+            rt.driver.start()
         start.wait(timeout=CALL_TIMEOUT_S)
         while not failed.is_set():
             with claimed.get_lock():
@@ -210,6 +301,7 @@ def throughput_worker(name, conc, lifecycles, claimed, start, failed, out):
         out.send({"error": f"{type(e).__name__}: {e}", "done": done})
     finally:
         out.close()
+        rt.close()
 
 
 def run_level(rt, conc, lifecycles):
@@ -337,6 +429,7 @@ def main():
         sys.stdout.write(f"{name} {phase}: {time.perf_counter() - t0:.0f}s"
                          f"{' ERROR ' + result['errors'][phase][:200] if phase in result['errors'] else ''}\n")
         sys.stdout.flush()
+    rt.close()
     with open(out_path, "w") as f:
         json.dump(result, f)
 

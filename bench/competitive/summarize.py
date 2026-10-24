@@ -8,7 +8,8 @@ round with the best value (lowest p50 for a latency, highest rate, lowest cost, 
 ratio is the best competitor's value over Hex's for lower-is-better metrics and Hex's over the best
 competitor's for higher-is-better ones, so above 1 means Hex is ahead and 4 meets the 4-5x bar. Each of
 Hex's own columns (`hex`, and `hex-seam` for the process class through the Runtime seam) gets its own
-ratio, against competitors only.
+ratio, against competitors of its own layer: Hex's command line against command lines, and its seam against
+the runtimes driven in process (libcrun) where a table has them.
 """
 import glob
 import json
@@ -62,13 +63,21 @@ def fmt(v, unit):
     return str(v)
 
 
+# Runtimes driven in process: competitors of Hex's Runtime seam, not of its command line, which pays a
+# process spawn per call that a library call doesn't (docs/design/runtime-architecture.md, "Two layers").
+IN_PROCESS = {"libcrun"}
+
+
 def ratio(values, lower_better, me="hex"):
-    """values: {name: value}; returns (text, ratio) of Hex's column `me` against the best competitor, which is
-    never one of Hex's own columns."""
+    """values: {name: value}; returns (text, ratio) of Hex's column `me` against the best competitor of its
+    layer, which is never one of Hex's own columns."""
+    names = [k for k in values if not k.startswith("hex")]
+    in_process = [k for k in names if k in IN_PROCESS]
+    rivals = in_process if me == "hex-seam" and in_process else [k for k in names if k not in IN_PROCESS]
     # A value at or below zero (a memory delta the kernel reclaimed away, a cost too small to see) is not a
     # measurement, so it never enters a ratio.
     hexv = values.get(me)
-    comp = {k: v for k, v in values.items() if not k.startswith("hex") and v is not None and v > 0}
+    comp = {k: values[k] for k in rivals if values[k] is not None and values[k] > 0}
     if hexv is None or hexv <= 0 or not comp:
         return "n/a", None
     best = min(comp, key=comp.get) if lower_better else max(comp, key=comp.get)
@@ -94,7 +103,7 @@ def held(density, key):
 
 
 def oci_section(run):
-    names = ["hex", "runc", "crun", "youki", "runsc", "krun"]
+    names = ["hex", "runc", "crun", "youki", "runsc", "krun", "libcrun"]
     data = {n: rounds(run, n) for n in names}
     data = {n: r for n, r in data.items() if r}
     rows = []  # (axis, unit, lower_better, {name: value})
@@ -329,7 +338,9 @@ def main():
     parts = []
     names, rows, data = oci_section(run)
     if data:
-        parts.append(table("OCI class (Hex `oci` against runc, crun, youki, gVisor runsc, crun+libkrun)", names, rows))
+        parts.append(table("OCI class (Hex `oci` against runc, crun, youki, gVisor runsc, crun+libkrun)" if "libcrun" not in names
+                           else "OCI class (Hex `oci` against runc, crun, youki, gVisor runsc, crun+libkrun; libcrun in process, "
+                                "the competitor of Hex's seam, outside the command line's ratio)", names, rows))
         errs = {n: {k: v for r in rs.values() for k, v in r.get("errors", {}).items()} for n, rs in data.items()}
         errs = {n: e for n, e in errs.items() if e}
         if errs:

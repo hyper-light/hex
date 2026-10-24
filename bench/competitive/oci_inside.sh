@@ -3,11 +3,11 @@
 # Builds the two bundles, vacates the cgroup root to a leaf so runtimes can make container cgroups,
 # probes each runtime once, then runs oci_bench.py for every runtime in ROUNDS rounds, each round in a
 # shuffled order so drift over the run does not favour one runtime.
-# Env: RUNTIMES ("hex runc crun youki runsc"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
+# Env: RUNTIMES ("hex runc crun youki runsc libcrun"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
 # N_OVERRIDE ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192),
 # HEXBENCH_PHASES (oci_bench.py's phases, all by default).
 set -uo pipefail
-RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
+RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
 
@@ -34,7 +34,7 @@ mkdir -p /sys/fs/cgroup/lab
 for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/cgroup.procs 2>/dev/null || true; done
 for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true; done
 
-{ for rt in $RUNTIMES; do printf '%s\t' "$rt"; case $rt in hex) echo "hex (cp/t7-runtime release build)";; *) /opt/bin/$rt --version 2>&1 | head -1;; esac; done; } >> $OUT/runtime_versions.tsv
+{ for rt in $RUNTIMES; do printf '%s\t' "$rt"; case $rt in hex) echo "hex (cp/t7-runtime release build)";; libcrun) /opt/bin/libcrun-driver --version 2>&1;; *) /opt/bin/$rt --version 2>&1 | head -1;; esac; done; } >> $OUT/runtime_versions.tsv
 
 ok_runtimes=""
 for rt in $RUNTIMES; do # one full lifecycle per runtime before timing anything
@@ -45,6 +45,37 @@ for rt in $RUNTIMES; do # one full lifecycle per runtime before timing anything
     echo "probe FAILED: $rt (see $rt.probe.json / $rt.probe.log)"
   fi
 done
+
+# libcrun in process: a broken config.json is refused with libcrun's own error, and the same driver goes on to
+# serve the next call; otherwise the driver is wrong, and libcrun runs no round.
+if [[ " $ok_runtimes " == *" libcrun "* ]]; then
+  mkdir -p /run/bundle-broken && ln -sfn /run/bundle-true/rootfs /run/bundle-broken/rootfs
+  head -c 40 /run/bundle-true/config.json > /run/bundle-broken/config.json
+  if ! python3 - "$OUT/libcrun.broken.json" <<'PY'
+import json, sys
+sys.path.insert(0, "/opt/lab")
+import oci_bench as ob
+rt, out = ob.Runtime("libcrun"), {}
+try:
+    rt.create("/run/bundle-broken", "libcrun-broken")
+    out["broken"] = "created"
+except ob.OpError as e:
+    out["broken"] = str(e)
+try:
+    rt.create("/run/bundle-true", "libcrun-after")
+    rt.start("libcrun-after")
+    rt.delete("libcrun-after")
+    out["after"] = "ok"
+except ob.OpError as e:
+    out["after"] = str(e)
+rt.close()
+json.dump(out, open(sys.argv[1], "w"))
+ok = out["broken"] != "created" and out["after"] == "ok"
+print(f"probe {'ok' if ok else 'FAILED'}: libcrun refuses a broken config.json, then serves the next call: {json.dumps(out)}")
+sys.exit(0 if ok else 1)
+PY
+  then ok_runtimes=$(printf '%s\n' $ok_runtimes | grep -vx libcrun | tr '\n' ' '); fi
+fi
 
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
   for rt in $(printf '%s\n' $ok_runtimes | shuf); do

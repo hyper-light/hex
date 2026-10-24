@@ -7,7 +7,8 @@
 By default the OCI runtimes (runc, crun, youki, runsc), each its project's latest release, resolved now
 and recorded (tag, URL, SHA-256, and whether an upstream checksum verified it), so a result names exactly
 what it measured. Named, the others: `krun` (crun's libkrun handler, from Fedora's signed packages) for
-the OCI pass, and each at a pinned release, `codex` for the process-sandbox pass, `firecracker`,
+the OCI pass, and each at a pinned release, `crun-src` (crun's source, into <base>/src, for libcrun in
+process), `codex` for the process-sandbox pass, `firecracker`,
 `cloud-hypervisor` and `guest-kernel` for the microVM pass, `containerd`, `nerdctl` and `kata` for the
 containerd lab, and `zeroboot-firecracker` and `zeroboot-kernel` (into <base>/zeroboot) for Zeroboot's. Nothing is executed from a download directory; an archive is never extracted wholesale
 (only the members named, or for kata only its opt/kata/ tree, are copied).
@@ -95,6 +96,29 @@ def crun(base, bindir):
     install(path, bindir, "crun")
     return {"tag": rel["tag_name"], "url": a["browser_download_url"], "sha256": sha256(path), "verified": False,
             "note": "static release binary; the release publishes signatures, not a SHA-256 list"}
+
+
+# libcrun's source, for the in-process driver (libcrun/build.sh): the release whose CLI the rounds of record
+# ran (1.30.1, commit 079ff6a7), so libcrun in process and crun's command line are the same code.
+CRUN_SRC = ("1.30.1", "99d036d95113552b6df66c7c879432835504bf0e525fc0372745071df129527b")
+
+
+def crun_src(base, bindir):
+    tag, want = CRUN_SRC
+    rel = json.loads(get(f"https://api.github.com/repos/containers/crun/releases/tags/{tag}"))
+    a = asset(rel, rf"crun-{re.escape(tag)}\.tar\.gz")
+    d = os.path.join(base, "src")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, a["name"])
+    get(a["browser_download_url"], path)
+    got = sha256(path)
+    sums = get(asset(rel, r"CHECKSUMS")["browser_download_url"]).decode()
+    listed = next((l.split()[0] for l in sums.splitlines() if l.split()[-1:] == [a["name"]]), None)
+    if got != want or listed != want:
+        os.unlink(path)
+        raise SystemExit(f"crun-src: {a['name']} is {got}; pinned {want}, the release's CHECKSUMS lists {listed}")
+    return {"tag": tag, "url": a["browser_download_url"], "sha256": got, "verified": True, "path": path,
+            "note": "the pinned sha256, which the release's CHECKSUMS also lists"}
 
 
 def youki(base, bindir):
@@ -423,7 +447,8 @@ def main():
     bindir = os.path.join(base, "bin")
     os.makedirs(bindir, exist_ok=True)
     out = {}
-    fetchers = {"runc": runc, "crun": crun, "youki": youki, "runsc": runsc, "krun": krun, "codex": codex,
+    fetchers = {"runc": runc, "crun": crun, "crun-src": crun_src, "youki": youki, "runsc": runsc, "krun": krun,
+                "codex": codex,
                 "firecracker": firecracker, "cloud-hypervisor": cloud_hypervisor, "guest-kernel": guest_kernel,
                 "containerd": containerd, "nerdctl": nerdctl, "kata": kata,
                 "zeroboot-firecracker": zeroboot_firecracker, "zeroboot-kernel": zeroboot_kernel}

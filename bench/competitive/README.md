@@ -10,6 +10,7 @@ measures where Hex stands today. `RESULT.md` records each run of record.
 | Hex class | Competitors | Where |
 |---|---|---|
 | `oci` (`hex oci create/start/exec/state/kill/delete`) | runc, crun, youki, gVisor `runsc` (each project's latest release, fetched and verified by `fetch.py`) | one privileged bench container, private cgroup namespace, no network |
+| `oci` through the `Runtime` seam (implementation goal 3) | libcrun in process, built from crun 1.30.1's release source (`libcrun/`); outside the command line's ratio | the same container, in the same shuffled rounds |
 | `process` (`hex box run`) | systemd transient scopes (`systemd-run --user --scope`) and services (`systemd-run --user --wait`) | a delegated systemd user service on the host |
 | `process` through the hex-api `Runtime` seam (`hex-seam`: the node agent in the bench's own process, `crates/hex-bench/benches/seam_box.rs`) | the same systemd units | a delegated systemd user service on the host |
 | sandbox platforms | Daytona (self-hosted, v0.190.0 tree, Docker-based) and E2B (`embed/`, Firecracker on one KVM host); hosted platforms end to end, labelled hosted | see "Platforms" below |
@@ -85,6 +86,26 @@ Run on its own (`seam_box <out.json> <n> <warmup> <lifecycles> <density cap> <de
 re-runs itself in a delegated `systemd-run --user --scope` when its cgroup can't hand down every one of
 cpu, io, memory and pids.
 
+### libcrun in process
+
+`libcrun/driver.c` serves libcrun 1.30.1's calls in its own process: one request a line on its fd 3
+(`create <bundle> <id>`, `start <id>`, `exec <id>`, `delete <id>`), one reply a line on its fd 4 (`ok <wall
+ns> <cpu ns>` or `err <why>`). Each makes the libcrun calls crun's command line makes for the same command
+(`src/run_create.c`, `start.c`, `exec.c` and `delete.c`), so the two differ only in the process the CLI spawns
+per call. oci_bench.py's `libcrun` runtime starts one driver in each process that calls it (the main one,
+and each throughput worker before the clock), and runs its phases unchanged, so its JSON is the CLI
+runtimes'. A call's wall time is the libcrun call's alone, and its CPU is the driver's and its reaped
+children's over it. libcrun's create clones the container's init from the calling process, so every init is
+the driver's child, and delete reaps it, untimed. In the ratio column, Hex's command line is compared with
+the command lines only: libcrun is the competitor of Hex's seam (`docs/design/runtime-architecture.md`).
+
+host.sh builds the driver whenever RUNTIMES is the default or names `libcrun`: `fetch.py crun-src` fetches
+the pinned tarball and checks its sha256 against the pin and the release's `CHECKSUMS`, and
+`libcrun/Dockerfile` builds it on Fedora 44 with `libcrun/build.sh` (libcrun static, without systemd, with
+crun's embedded blake3). The driver lands in `$BASE/bin`, and its image's id and sha256 in `lab-image.ids`.
+Before the rounds, oci_inside.sh checks that a broken `config.json` comes back as libcrun's error and the
+same driver then serves a whole lifecycle (`libcrun.broken.json`); if not, libcrun runs no round.
+
 ### Checking the drivers off the bench host
 
 `HEXBENCH_BIN`, `HEXBENCH_CGROUP` and `HEXBENCH_ERR` (oci_bench.py) and `HEXBENCH_SELF_CGROUP` and
@@ -93,12 +114,14 @@ place of the cgroup tree. That runs every phase's control flow (warm-ups, error 
 summary) without containers, cgroups or load. The numbers it produces are meaningless. On 2026-10-23 it
 found three bugs before any slot was spent: a container that failed to start counted as running, a dead
 worker that could hang the box driver, and a ratio that divided by zero. `check_driver.sh` runs it for
-oci_bench.py's throughput, sustained and lifecycle_nonet phases, and checks five things:
+oci_bench.py's throughput, sustained and lifecycle_nonet phases, its libcrun runtime against a stand-in
+driver, and box_bench.py's throughput, and checks:
 - each lifecycle is counted once per level;
 - a failing call ends its level with its error;
-- no worker process outlives the phase;
+- no worker process, and no driver, outlives its phase;
 - the sustained windows add up to the lifecycles run, and a failure keeps its count;
-- lifecycle_nonet times every operation.
+- lifecycle_nonet times every operation;
+- box_bench.py runs each method's lifecycles once per level, and a failing run ends its level.
 
 ## Platforms
 
