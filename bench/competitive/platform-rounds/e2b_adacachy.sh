@@ -25,7 +25,7 @@ SC="system.slice/docker-$id.scope"
 echo "round $ROUND: start $(date -u +%FT%TZ), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/e2b-adacachy.txt"
 # A delegated user unit of its own, so the client is alone in its cgroup, outside the stack's.
 systemd-run --user --unit="hexbench-e2b-r$ROUND" --property=Delegate=yes --wait --collect --pipe \
-  --setenv=STACK_CGROUPS="$SC" --setenv=E2B_NAME=e2b \
+  --setenv=STACK_CGROUPS="$SC" --setenv=E2B_NAME=e2b --setenv=HEXBENCH_PHASES="${HEXBENCH_PHASES:-}" \
   bash -c 'set -a; . "$1"; set +a; shift; exec "$@"' _ "$E/sdk.env" \
   taskset -c 4-31 "$V/bin/python" -I "$HERE/../platform_bench.py" e2b "$OUT/platform.e2b.r$ROUND.json" \
   "$N" "$WARMUP" "$LIFECYCLES" "$CAP" 2>&1 | tee -a "$OUT/e2b.log"

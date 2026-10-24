@@ -233,13 +233,20 @@ unrefereed. Hex's tail rows carry that load most: 10,000 samples per round again
   that hop stays inside it, so the host's firewall was never changed. Two settings for the bench: 9,216 2
   MiB hugepages (18 GiB, enough for 32 concurrent creates of a 512 MiB sandbox), and its seeded tier's
   limit of 20 concurrent sandboxes raised to 1,000, as Daytona's admin quotas were. Each round's density
-  stopped at 35 sandboxes, the hugepage pool: each idle sandbox maps its whole 512 MiB guest from it.
+  stopped at 35-36 sandboxes, the hugepage pool: each sandbox reserves its whole 512 MiB guest from it.
 - **Hex:** `hex-adacachy-d2c8636a`, built on adacachy from the same source as fedora's `hex-cg2` (05af083's
   crates), 2026-10-24 05:57-06:46Z.
-- **Memory counts hugepages.** E2B's guest memory is hugepages, which `memory.current` leaves out unless
-  the hierarchy is mounted with `memory_hugetlb_accounting`. Held memory now adds each cgroup's
-  `hugetlb.*.current` (`cgmem.py`). A first round that left them out (6.7 MiB per sandbox), and whose
-  density stopped at the tier limit of 20, is kept apart as `limit20.platform.e2b.r1.json`.
+- **Memory counts hugepages, once.** E2B's guest memory is hugepages, which `memory.current` leaves out
+  unless the hierarchy is mounted with `memory_hugetlb_accounting`. So held memory adds each cgroup's
+  faulted hugepages, `hugetlb.<size>.current` (`cgmem.py`). The reservations, `hugetlb.<size>.rsvd.current`,
+  are recorded apart. A faulted page stays charged there too, so adding both counts it twice.
+  - The rows below take memory from density-only rounds 3 and 4.
+  - Rounds 1 and 2 (lifecycle, throughput) added both and read 675 MiB per sandbox.
+  - A first round left hugepages out (6.7 MiB per sandbox) and stopped at the tier limit of 20. It's kept
+    apart as `limit20.platform.e2b.r1.json`.
+- **Each sandbox reserves 512 MiB of hugepages** from the pool: exactly its guest's size, faulted or not.
+  So E2B fits 2 sandboxes per GiB of hugepage pool, whatever they hold. The density row is per GiB held,
+  like every other row.
 
 | Axis | Hex | E2B | Hex vs E2B |
 |---|---|---|---|
@@ -256,14 +263,15 @@ unrefereed. Hex's tail rows carry that load most: 10,000 samples per round again
 | lifecycles/s at concurrency 8 | 165 | 21 | 7.71x |
 | lifecycles/s at concurrency 32 | 154 | 25 | 6.28x |
 | CPU per lifecycle at concurrency 1 (E2B: what a lifecycle adds to its stack's CPU) | 8.47 ms | 260.15 ms | 30.73x |
-| memory held per idle sandbox | 0.66 MiB | 674.53 MiB | 1,024.50x |
-| density (idle sandboxes per GiB held) | 1,555 | 2 | 1,024.50x |
-| the stack's own CPU at idle (Hex `oci` runs no daemon) | n/a | 0.101 CPUs | n/a |
-| the stack's own memory held at idle (Hex `oci` runs no daemon) | n/a | 2,686.19 MiB | n/a |
+| memory held per idle sandbox | 0.66 MiB | 180.89 MiB | 274.74x |
+| density (idle sandboxes per GiB held) | 1,555 | 6 | 274.74x |
+| the stack's own CPU at idle (Hex `oci` runs no daemon) | n/a | 0.091 CPUs | n/a |
+| the stack's own memory held at idle (Hex `oci` runs no daemon) | n/a | 1,915.69 MiB | n/a |
 
 E2B's create restores a sandbox from its template's memory snapshot rather than booting one, and its p50
 (62 ms) is that restore. When the rounds were done, everything of E2B's was removed from adacachy: the
-container and its volumes, the hugepages (back to 0) and the nbd module.
+container and its volumes, the hugepages (back to 0) and the nbd module. Rounds 1-2 ran 2026-10-24
+08:42-08:47Z at load 64-95, and the density rounds 3-4 10:20-10:24Z at load 34-46.
 
 ## Not yet measured
 
