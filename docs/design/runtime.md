@@ -279,15 +279,29 @@ docker executor shells out to `docker`: each step is a host subprocess, so kiln'
 machinery (stdout/stderr streaming, `::add-mask::`, env files, outputs) is reused unchanged, and kiln
 needs **no `hex-node` library dependency** (correcting an earlier plan — see below).
 
-**The primitive this needs (to build).** `hex oci exec` does not exist yet: the `oci` class today is
-`create`/`start`/`state`/`kill`/`delete` only, a standalone CLI-driven runtime (`hex_runtime::linux::
-oci::run::Runtime`). `exec` joins the *running* container's namespaces — the init pid is in the
-container's `state` (`oci/state.rs`), and `setns` is in place (`oci/sys.rs`) — then `chdir`s, drops to
-the requested user, sets the environment and execs the program in the foreground, inheriting the
-caller's stdin/stdout/stderr (so a foreground `hex oci exec` has none of the detached-`create` stdio
-deadlock; the caller captures it as a normal subprocess) and returning its exit status. This is the
-runc/crun `exec` analog (not in the OCI runtime spec, but the de-facto lifecycle extension both
-provide). It is new `oci`-runtime + `hex-cli` work, then re-vendored into kiln.
+**The primitive (built, 2026-10-24).** `hex oci exec [--cwd dir] [--env K=V]... [--user uid[:gid]]
+<id> [--] <program> [args]...`, runc's command shape (`oci/exec.rs`, `hex-cli/src/oci.rs`):
+- **How it runs.** `exec` turns itself into a helper, `hex __oci-exec`, by execve, so it is
+  single-threaded, as joining a user or mount namespace needs, and a signal its caller sends lands on
+  the helper. The helper opens the cgroup and each of the container init's namespaces
+  (`/proc/<pid>/ns/*`) that differ from its own, before joining any. It joins them, user first and
+  mount last, then clones the child straight into the container's cgroup (`clone3(CLONE_INTO_CGROUP)`,
+  as `create` does, with the same fallback to a migration), and through the pid namespace into the
+  container's pid namespace.
+- **What the program becomes.** The container's process, by the same code as its first process
+  (`init::become_process`: OOM score, limits, capabilities around the uid change, no_new_privs,
+  umask). The request overrides the working directory, the environment by key, and the user; a user
+  override drops the spec's supplementary groups.
+- **Foreground.** The program runs on the caller's stdin, stdout and stderr, so a foreground `hex oci
+  exec` has none of the detached `create`'s stdio deadlock, and its status is exec's: the exit code,
+  or 128 plus the signal that ended it. 126 means it couldn't start, 127 that the program isn't there.
+- **Signals.** SIGHUP, SIGINT, SIGQUIT and SIGTERM sent to the helper are passed on to the program,
+  read from a `signalfd`, so a caller that ends a step ends the program, not just the helper.
+
+It runs in a created or running container and refuses a stopped one. The lab checks each of these
+against the kernel (`bench/oci-validation/cgroups_inside.sh`, section 5), including no migration into
+the cgroup, by the `cgroup_attach_task` tracepoint. It's the runc/crun `exec` analog (not in the OCI
+runtime spec, but the de-facto lifecycle extension both provide). Next it is re-vendored into kiln.
 
 **Correction to the earlier plan.** An earlier note had the executor drive the `oci` class through
 hex-node's `Node::create(ClassSpec::Oci(…))` + `Node::exec`. That is not implementable: `Node::create`

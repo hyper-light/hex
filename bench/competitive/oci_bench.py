@@ -40,7 +40,7 @@ BIN = os.environ.get("HEXBENCH_BIN", "/opt/bin")
 ERR = os.environ.get("HEXBENCH_ERR", "/run/err")
 
 RUNTIMES = {
-    "hex": {"argv": [f"{BIN}/hex", "oci"], "env": {"HEX_OCI_ROOT": "/run/hex-oci"}, "exec": False},
+    "hex": {"argv": [f"{BIN}/hex", "oci"], "env": {"HEX_OCI_ROOT": "/run/hex-oci"}, "exec": True},
     "runc": {"argv": [f"{BIN}/runc", "--root", "/run/runc"], "env": {}, "exec": True},
     "crun": {"argv": [f"{BIN}/crun", "--root", "/run/crun"], "env": {}, "exec": True},
     "youki": {"argv": [f"{BIN}/youki", "--root", "/run/youki"], "env": {}, "exec": True},

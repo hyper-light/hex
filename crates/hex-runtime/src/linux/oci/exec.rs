@@ -1,0 +1,350 @@
+//! `hex oci exec`: a program run in the foreground in a created or running container, the runc and
+//! crun `exec` analog (docs/design/runtime.md, "the `hex` executor runs a leg's steps in a persistent
+//! container via `hex oci exec`").
+//!
+//! The runtime execs itself as `hex __oci-exec`, so the helper is single-threaded, as joining a user or
+//! mount namespace needs. It joins each of the container init's namespaces (`/proc/<pid>/ns/*`) that
+//! differ from its own, user first. Then it clones a child into the container's cgroup, as `create`
+//! does (`clone3(CLONE_INTO_CGROUP)` where it can), and through the pid namespace it joined into the
+//! container's pid namespace. The child becomes the container's process, as its spec gives it and the
+//! request overrides (environment, working directory, user), and execs the program on the caller's
+//! stdin, stdout and stderr. The helper passes SIGHUP, SIGINT, SIGQUIT and SIGTERM on to it, and exits
+//! with its status once it ends: its exit code, or 128 plus the signal that ended it, as a shell
+//! reports one. The wait lasts as long as the program does, which the caller bounds by signalling.
+
+use std::fs;
+use std::io::Write;
+use std::os::fd::{AsFd, OwnedFd};
+use std::path::Path;
+
+use rustix::event::{PollFd, PollFlags};
+use rustix::fs::{Mode, OFlags};
+use serde::{Deserialize, Serialize};
+
+use crate::linux::oci::spec::{Process, Spec};
+use crate::linux::oci::{OciError, init, sys};
+
+/// The request the runtime hands `hex __oci-exec`, as JSON.
+pub const ENV_REQUEST: &str = "HEX_OCI_EXEC";
+
+/// What `hex oci exec` runs, and in which container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Request {
+    /// The container init's pid, whose namespaces the program joins.
+    pub pid: i32,
+    /// The container's bundle, whose `config.json` gives the process the program becomes.
+    pub bundle: String,
+    /// The container's cgroup directory, which the program is born in.
+    pub cgroup: Option<String>,
+    pub args: Vec<String>,
+    /// Overrides the process's working directory.
+    pub cwd: Option<String>,
+    /// `K=V` entries, each overriding the process's entry for `K` or adding one.
+    pub env: Vec<String>,
+    /// Overrides the process's user: a uid, and a gid (the process's own when absent).
+    pub user: Option<(u32, Option<u32>)>,
+}
+
+/// A helper that fails before the program can start exits as a shell does for a program it can't run
+/// (126), and for one that doesn't exist (127).
+const CANNOT_RUN: u8 = 126;
+const NOT_FOUND: u8 = 127;
+
+/// The namespaces joined, in this order: user first, since it grants the capabilities joining the
+/// rest needs; mount last, since it changes what every path names.
+const NAMESPACES: [(&str, i32); 7] = [
+    ("user", libc::CLONE_NEWUSER),
+    ("ipc", libc::CLONE_NEWIPC),
+    ("uts", libc::CLONE_NEWUTS),
+    ("net", libc::CLONE_NEWNET),
+    ("pid", libc::CLONE_NEWPID),
+    ("cgroup", libc::CLONE_NEWCGROUP),
+    ("mnt", libc::CLONE_NEWNS),
+];
+
+/// The signals the helper passes on to the program.
+const FORWARDED: [i32; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
+
+/// The `hex __oci-exec` entry: the program's status, or 126 or 127 with why on stderr.
+pub fn run() -> u8 {
+    match helper() {
+        Ok(status) => status,
+        Err((status, e)) => {
+            let _ = writeln!(std::io::stderr().lock(), "hex oci exec: {e}");
+            status
+        }
+    }
+}
+
+fn helper() -> Result<u8, (u8, OciError)> {
+    let cannot = |e| (CANNOT_RUN, e);
+    let raw = std::env::var(ENV_REQUEST)
+        .map_err(|e| cannot(OciError::os("reading the exec request", e)))?;
+    let req: Request = serde_json::from_str(&raw)
+        .map_err(|e| cannot(OciError::Broken(format!("the exec request: {e}"))))?;
+    let spec = Spec::parse(
+        &fs::read(Path::new(&req.bundle).join("config.json"))
+            .map_err(|e| cannot(OciError::os("reading config.json", e)))?,
+    )
+    .map_err(cannot)?;
+    let process = process_for(spec.process.unwrap_or_default(), &req);
+
+    // The cgroup is opened before any namespace changes, as the shim opens it (init.rs): its path
+    // names nothing once the mount namespace is the container's.
+    let cgroup = req
+        .cgroup
+        .as_deref()
+        .map(|dir| open_cgroup(Path::new(dir)))
+        .transpose()
+        .map_err(cannot)?;
+    let joins = namespaces_to_join(req.pid).map_err(cannot)?;
+    // A birth in the cgroup is checked against the credentials the clone runs with, which a joined
+    // user namespace has changed; there the program joins by migration (init.rs, the shim).
+    let in_userns = joins.iter().any(|(kind, _, _)| *kind == "user");
+    for (_, flag, fd) in &joins {
+        sys::setns(fd.as_fd(), *flag).map_err(cannot)?;
+    }
+    drop(joins);
+
+    let signals = sys::forward_signals(&FORWARDED).map_err(cannot)?;
+    let born = match &cgroup {
+        Some((dir, _)) if !in_userns => sys::fork_into_cgroup(dir.as_fd()).map_err(cannot)?,
+        _ => None,
+    };
+    let (forked, procs) = match (born, cgroup) {
+        (Some(forked), _) => (forked, None),
+        (None, cgroup) => (sys::fork().map_err(cannot)?, cgroup.map(|(_, procs)| procs)),
+    };
+    match forked {
+        // The child returns only if it couldn't exec; its status leaves through `main`, as the
+        // init's does.
+        sys::Fork::Child => Err(child(&process, procs, &signals)),
+        sys::Fork::Parent(pid) => {
+            drop(procs);
+            wait_forwarding(pid, &signals).map_err(cannot)
+        }
+    }
+}
+
+/// The container's process with the request's overrides: its program, working directory, user and
+/// environment entries.
+pub fn process_for(mut process: Process, req: &Request) -> Process {
+    process.args = req.args.clone();
+    if let Some(cwd) = &req.cwd {
+        process.cwd = cwd.clone();
+    }
+    if let Some((uid, gid)) = req.user {
+        process.user.uid = uid;
+        process.user.gid = gid.unwrap_or(process.user.gid);
+        // Supplementary groups belong to the user they were given for.
+        process.user.additional_gids.clear();
+    }
+    for entry in &req.env {
+        let key = entry.split_once('=').map_or(entry.as_str(), |(k, _)| k);
+        let same_key = |e: &String| e.split_once('=').map_or(e.as_str(), |(k, _)| k) == key;
+        match process.env.iter_mut().find(|e| same_key(e)) {
+            Some(existing) => existing.clone_from(entry),
+            None => process.env.push(entry.clone()),
+        }
+    }
+    process
+}
+
+/// The cgroup's directory (for `clone3`) and its `cgroup.procs` (to join by migration where a birth
+/// there can't be), opened now.
+fn open_cgroup(dir: &Path) -> Result<(OwnedFd, OwnedFd), OciError> {
+    let open = |path: &Path, flags: OFlags| {
+        rustix::fs::open(path, flags | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| OciError::os("opening the container's cgroup", e))
+    };
+    Ok((
+        open(dir, OFlags::RDONLY | OFlags::DIRECTORY)?,
+        open(&dir.join("cgroup.procs"), OFlags::WRONLY)?,
+    ))
+}
+
+/// Each of the init's namespaces that isn't this process's own, opened before any is joined: once the
+/// mount namespace is joined, `/proc` is the container's.
+fn namespaces_to_join(pid: i32) -> Result<Vec<(&'static str, i32, OwnedFd)>, OciError> {
+    let mut out = Vec::new();
+    for (kind, flag) in NAMESPACES {
+        let theirs = rustix::fs::open(
+            format!("/proc/{pid}/ns/{kind}"),
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening the container's namespace", e))?;
+        let a = rustix::fs::fstat(&theirs).map_err(|e| OciError::os("stat of a namespace", e))?;
+        let b = rustix::fs::stat(format!("/proc/self/ns/{kind}"))
+            .map_err(|e| OciError::os("stat of a namespace", e))?;
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino) {
+            out.push((kind, flag, theirs));
+        }
+    }
+    Ok(out)
+}
+
+/// The child: into its cgroup by migration when it wasn't born there, the signals unblocked, the
+/// container's process become, then the program. Returns only when one of those failed: the status to
+/// exit with, and why.
+fn child(
+    process: &Process,
+    procs: Option<OwnedFd>,
+    signals: &sys::ForwardedSignals,
+) -> (u8, OciError) {
+    let setup = || -> Result<(), OciError> {
+        if let Some(procs) = procs {
+            let n = rustix::io::write(&procs, b"0")
+                .map_err(|e| OciError::os("joining the container's cgroup", e))?;
+            if n != 1 {
+                return Err(OciError::os(
+                    "joining the container's cgroup",
+                    "a short write to cgroup.procs",
+                ));
+            }
+        }
+        signals.restore()?;
+        init::become_process(process)
+    };
+    if let Err(e) = setup() {
+        return (CANNOT_RUN, e);
+    }
+    let program = match process.args.first() {
+        Some(p) => p,
+        None => {
+            return (
+                CANNOT_RUN,
+                OciError::Config("exec needs a program".to_owned()),
+            );
+        }
+    };
+    match init::resolve_program(program, &process.env) {
+        Ok(path) if path.exists() => {}
+        Ok(path) => {
+            return (
+                NOT_FOUND,
+                OciError::Config(format!("{} doesn't exist in the container", path.display())),
+            );
+        }
+        Err(e) => return (NOT_FOUND, e),
+    }
+    match init::exec(process) {
+        Err(e) => (CANNOT_RUN, e),
+        Ok(()) => (
+            CANNOT_RUN,
+            OciError::Broken("execve returned without an error".to_owned()),
+        ),
+    }
+}
+
+/// Waits for the program, passing on each forwarded signal the helper receives, then reports its
+/// status as a shell does.
+fn wait_forwarding(pid: i32, signals: &sys::ForwardedSignals) -> Result<u8, OciError> {
+    let raw = rustix::process::Pid::from_raw(pid)
+        .ok_or_else(|| OciError::os("clone", "the child's pid isn't a pid"))?;
+    let pidfd = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())
+        .map_err(|e| OciError::os("opening the program's pidfd", e))?;
+    loop {
+        let mut fds = [
+            PollFd::new(&pidfd, PollFlags::IN),
+            PollFd::from_borrowed_fd(signals.fd(), PollFlags::IN),
+        ];
+        match rustix::event::poll(&mut fds, None) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(e) => return Err(OciError::os("waiting for the program", e)),
+        }
+        let [ended, signalled] = &fds;
+        if signalled.revents().contains(PollFlags::IN) {
+            let sig = signals.next()?;
+            // A program that has just exited can't take it; the pidfd says so next.
+            let _ = sys::kill(pid, sig, false);
+        }
+        if ended.revents().contains(PollFlags::IN) {
+            return status_of(&sys::waitpid(pid)?);
+        }
+    }
+}
+
+/// A shell's status for an ended process: its exit code, or 128 plus the signal that ended it.
+pub fn status_of(status: &sys::WaitStatus) -> Result<u8, OciError> {
+    let code = match (status.exit_code(), status.term_signal()) {
+        (Some(code), _) => code,
+        (None, Some(sig)) => sig
+            .checked_add(128)
+            .ok_or_else(|| OciError::os("the program's status", "a signal out of range"))?,
+        (None, None) => {
+            return Err(OciError::os(
+                "the program's status",
+                "neither exited nor signalled",
+            ));
+        }
+    };
+    u8::try_from(code).map_err(|_| OciError::os("the program's status", "a status out of range"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(env: &[&str], cwd: Option<&str>, user: Option<(u32, Option<u32>)>) -> Request {
+        Request {
+            pid: 1,
+            bundle: "/b".to_owned(),
+            cgroup: None,
+            args: vec!["sh".to_owned(), "-c".to_owned(), "true".to_owned()],
+            cwd: cwd.map(str::to_owned),
+            env: env.iter().map(|s| (*s).to_owned()).collect(),
+            user,
+        }
+    }
+
+    fn base() -> Process {
+        let mut p = Process {
+            cwd: "/".to_owned(),
+            args: vec!["sleep".to_owned(), "infinity".to_owned()],
+            env: vec!["PATH=/usr/bin".to_owned(), "HOME=/root".to_owned()],
+            ..Process::default()
+        };
+        p.user.uid = 0;
+        p.user.gid = 5;
+        p.user.additional_gids = vec![10, 11];
+        p
+    }
+
+    /// Exec takes the container's process and overrides only what the request names (docs/design/
+    /// runtime.md, `hex oci exec`; AC-T7.1.4).
+    #[test]
+    fn exec_overrides_only_what_it_names() {
+        let p = process_for(base(), &req(&[], None, None));
+        assert_eq!(p.args, ["sh", "-c", "true"]);
+        assert_eq!(p.cwd, "/");
+        assert_eq!(p.env, ["PATH=/usr/bin", "HOME=/root"]);
+        assert_eq!((p.user.uid, p.user.gid), (0, 5));
+        assert_eq!(p.user.additional_gids, [10, 11]);
+    }
+
+    /// An env entry replaces the process's entry for its key, in place, or is added at the end; a
+    /// working directory and a user replace the process's.
+    #[test]
+    fn exec_env_replaces_by_key_and_user_drops_supplementary_groups() {
+        let p = process_for(
+            base(),
+            &req(&["HOME=/tmp", "FOO=bar"], Some("/work"), Some((1000, None))),
+        );
+        assert_eq!(p.env, ["PATH=/usr/bin", "HOME=/tmp", "FOO=bar"]);
+        assert_eq!(p.cwd, "/work");
+        assert_eq!((p.user.uid, p.user.gid), (1000, 5));
+        assert!(p.user.additional_gids.is_empty());
+        let p = process_for(base(), &req(&[], None, Some((1000, Some(1000)))));
+        assert_eq!((p.user.uid, p.user.gid), (1000, 1000));
+    }
+
+    /// The request survives the trip to the helper unchanged.
+    #[test]
+    fn exec_request_round_trips_as_json() {
+        let r = req(&["A=b"], Some("/x"), Some((7, Some(8))));
+        let back: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+    }
+}

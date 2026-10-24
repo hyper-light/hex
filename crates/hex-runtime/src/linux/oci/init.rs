@@ -192,30 +192,7 @@ fn container(
         let _ = rustix::io::write(&fifo, b"0");
         return Ok(());
     };
-    // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
-    if let Some(adj) = process.oom_score_adj {
-        fs::write("/proc/self/oom_score_adj", adj.to_string())
-            .map_err(|e| OciError::os("writing oom_score_adj", e))?;
-    }
-    apply_rlimits(&process)?;
-    // Capabilities around the uid change (runc's order): drop the bounding set while still root
-    // (needs effective CAP_SETPCAP), keep the permitted set across setuid, then set the sets exactly
-    // as the dropped user, so a non-root container still holds the capabilities its spec grants.
-    if let Some(c) = &process.capabilities {
-        caps::drop_bounding(c)?;
-        sys::set_keepcaps(true)?;
-        set_user(&process)?;
-        caps::set_process(c)?;
-        sys::set_keepcaps(false)?;
-    } else {
-        set_user(&process)?;
-    }
-    if process.no_new_privileges {
-        rustix::thread::set_no_new_privs(true).map_err(|e| OciError::os("set_no_new_privs", e))?;
-    }
-    if let Some(mask) = process.user.umask {
-        rustix::process::umask(Mode::from_bits_truncate(mask));
-    }
+    become_process(&process)?;
 
     // Ready: the runtime may now report `created`. Then block until `start` opens the FIFO.
     msg(sync, "R");
@@ -227,8 +204,39 @@ fn container(
     exec(&process)
 }
 
+/// Becomes the container's process as its spec gives it: its OOM score, limits, capabilities, user,
+/// no_new_privs and umask. The container's first process does this before `start`, and each one
+/// `hex oci exec` runs does it before it execs.
+pub(crate) fn become_process(process: &Process) -> Result<(), OciError> {
+    // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
+    if let Some(adj) = process.oom_score_adj {
+        fs::write("/proc/self/oom_score_adj", adj.to_string())
+            .map_err(|e| OciError::os("writing oom_score_adj", e))?;
+    }
+    apply_rlimits(process)?;
+    // Capabilities around the uid change (runc's order): drop the bounding set while still root
+    // (needs effective CAP_SETPCAP), keep the permitted set across setuid, then set the sets exactly
+    // as the dropped user, so a non-root container still holds the capabilities its spec grants.
+    if let Some(c) = &process.capabilities {
+        caps::drop_bounding(c)?;
+        sys::set_keepcaps(true)?;
+        set_user(process)?;
+        caps::set_process(c)?;
+        sys::set_keepcaps(false)?;
+    } else {
+        set_user(process)?;
+    }
+    if process.no_new_privileges {
+        rustix::thread::set_no_new_privs(true).map_err(|e| OciError::os("set_no_new_privs", e))?;
+    }
+    if let Some(mask) = process.user.umask {
+        rustix::process::umask(Mode::from_bits_truncate(mask));
+    }
+    Ok(())
+}
+
 /// `execve`s the workload, resolving `args[0]` in `PATH` when it has no slash. Only returns on error.
-fn exec(process: &Process) -> Result<(), OciError> {
+pub(crate) fn exec(process: &Process) -> Result<(), OciError> {
     let prog = process
         .args
         .first()
@@ -249,7 +257,7 @@ fn exec(process: &Process) -> Result<(), OciError> {
 }
 
 /// Resolves a program name to a path: used as-is when it has a slash, else searched in `PATH`.
-fn resolve_program(prog: &str, env: &[String]) -> Result<PathBuf, OciError> {
+pub(crate) fn resolve_program(prog: &str, env: &[String]) -> Result<PathBuf, OciError> {
     if prog.contains('/') {
         return Ok(PathBuf::from(prog));
     }

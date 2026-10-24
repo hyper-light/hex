@@ -113,5 +113,37 @@ else
   fail "no trace instance under $T, so migrations can't be seen"
 fi
 
+# 5. `hex oci exec` runs a program inside a running container (docs/design/runtime.md): in its cgroup,
+# born there, and in its namespaces; the program's status is exec's; the request's cwd, env and user
+# override the spec's; a signal to exec reaches the program; a stopped container is refused.
+bundle "$W/ex" '["sleep", "infinity"]' "" ""
+/opt/hex oci create --bundle "$W/ex" --pid-file "$W/ex.pid" ex && /opt/hex oci start ex || fail "create/start ex"
+ipid=$(cat "$W/ex.pid")
+seen=$(/opt/hex oci exec ex sh -c 'cat /proc/self/cgroup; hostname; readlink /proc/self/ns/pid' 2>&1 | tr '\n' ' ')
+check "exec's cgroup, hostname and pid namespace" "0::/ lab $(readlink /proc/$ipid/ns/pid) " "$seen"
+/opt/hex oci exec ex sh -c 'exit 7'; check "exec passes the program's exit code on" 7 "$?"
+/opt/hex oci exec ex sh -c 'kill -TERM $$'; check "exec reports a signal's death as 128 + its number" 143 "$?"
+/opt/hex oci exec ex /no/such/program 2> /dev/null; check "exec of a program that isn't there" 127 "$?"
+check "exec's --cwd, --env and --user" "bar /tmp 1000:1000" \
+  "$(/opt/hex oci exec --cwd /tmp --env FOO=bar --user 1000:1000 ex sh -c 'echo "$FOO $(pwd) $(id -u):$(id -g)"' 2>&1)"
+if mkdir "$I" 2>/dev/null; then
+  echo 1 > "$I/events/cgroup/cgroup_attach_task/enable"
+  /opt/hex oci exec ex true || fail "exec true"
+  echo 0 > "$I/events/cgroup/cgroup_attach_task/enable"
+  check "migrations into the container's cgroup during exec" 0 "$(grep -c 'dst_path=[^ ]*/ex ' "$I/trace")"
+  rmdir "$I"
+else
+  fail "no trace instance under $T, so exec's migrations can't be seen"
+fi
+/opt/hex oci exec ex sleep 300 & xpid=$!
+for _ in $(seq 1 50); do [ "$(wc -l < $CG/ex/cgroup.procs)" -ge 2 ] && break; sleep 0.1; done
+kill -TERM "$xpid"; wait "$xpid"; check "a SIGTERM to exec ends the program, reported as 143" 143 "$?"
+check "the program is gone from the container's cgroup" 1 "$(wc -l < $CG/ex/cgroup.procs)"
+/opt/hex oci kill ex KILL
+for _ in $(seq 1 50); do grep -q '"status": *"stopped"' <(/opt/hex oci state ex) && break; sleep 0.1; done
+if err=$(/opt/hex oci exec ex true 2>&1); then fail "exec into a stopped container was accepted"
+else case "$err" in *stopped*) pass "exec into a stopped container refused: $err" ;; *) fail "exec into a stopped container refused without saying why: $err" ;; esac; fi
+/opt/hex oci delete --force ex || fail "delete ex"
+
 echo "cgroups lab: $fails failure(s)"
 exit $((fails > 0))

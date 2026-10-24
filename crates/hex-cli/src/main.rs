@@ -27,6 +27,9 @@ fn main() -> ExitCode {
         if first == "__oci-init" {
             return ExitCode::from(hex_cli::oci::init());
         }
+        if first == "__oci-exec" {
+            return ExitCode::from(hex_cli::oci::exec_helper());
+        }
         if first == "oci" {
             let rest: Vec<String> = rest.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::oci::main(&rest));

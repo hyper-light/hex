@@ -10,6 +10,7 @@
 //! [`run`] and [`init`]; the system calls that need `unsafe` are in [`sys`].
 
 pub mod caps;
+pub mod exec;
 pub mod init;
 pub mod mount;
 pub mod resources;

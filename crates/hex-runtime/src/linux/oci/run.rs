@@ -249,6 +249,53 @@ impl Runtime {
         Ok(())
     }
 
+    /// The command that runs `args` in the container (`hex oci exec`): the helper `hex __oci-exec`,
+    /// for the caller to exec into, so a signal its own caller sends reaches the helper that passes it
+    /// on (exec.rs). The container must be created or running, its init alive.
+    pub fn exec_command(
+        &self,
+        id: &str,
+        args: Vec<String>,
+        cwd: Option<String>,
+        env: Vec<String>,
+        user: Option<(u32, Option<u32>)>,
+    ) -> Result<Command, OciError> {
+        let state = self.dir(id)?.get(id)?;
+        if !matches!(state.status, Status::Created | Status::Running) {
+            return Err(OciError::WrongState(
+                id.to_owned(),
+                state.status.name(),
+                "created or running",
+            ));
+        }
+        if !sys::alive(state.pid) {
+            return Err(OciError::WrongState(
+                id.to_owned(),
+                "stopped",
+                "created or running",
+            ));
+        }
+        if args.is_empty() {
+            return Err(OciError::Config("exec needs a program".to_owned()));
+        }
+        let request = crate::linux::oci::exec::Request {
+            pid: state.pid,
+            bundle: state.bundle,
+            cgroup: state.cgroup,
+            args,
+            cwd,
+            env,
+            user,
+        };
+        let json = serde_json::to_string(&request)
+            .map_err(|e| OciError::Broken(format!("the exec request: {e}")))?;
+        let exe = std::env::current_exe().map_err(|e| OciError::os("finding the hex binary", e))?;
+        let mut cmd = Command::new(exe);
+        cmd.arg("__oci-exec")
+            .env(crate::linux::oci::exec::ENV_REQUEST, json);
+        Ok(cmd)
+    }
+
     /// The container's state (OCI `state`), with `stopped` reflected when the init is gone even if
     /// the shim has not yet recorded it.
     pub fn state(&self, id: &str) -> Result<State, OciError> {

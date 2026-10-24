@@ -1,6 +1,17 @@
 //! Hex: the scheduler and runtime: agent scheduling orchestration for infinite scale. The `hex`
 //! binary: it says what it is, and runs `selftest-box` acts inside a box (CP-T7.1). The runtime
 //! classes are in `hex-runtime`, driven by the node agent in `hex-node`.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::disallowed_macros
+    )
+)]
 
 pub mod selftest;
 

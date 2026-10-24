@@ -19,8 +19,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **The `oci` class** (`hex-runtime`, Linux): Hex's own OCI runtime (`hex oci …`), at **crun parity
   on opencontainers/runtime-tools** (28/58, the set crun passes on this cgroup-v2 host; AC-T7.1.4),
   recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
-  its device list in force, and is born in it (`bench/oci-validation/cgroups.sh`, 19 checks). The
-  runtime decision and its evidence are in `docs/design/runtime.md`.
+  its device list in force, and is born in it. `hex oci exec` runs a program in the foreground inside a
+  created or running container: born in its cgroup, in its namespaces, as its process, with the
+  program's status as exec's and the caller's signals passed on (`bench/oci-validation/cgroups.sh`, 28
+  checks). The runtime decision and its evidence are in `docs/design/runtime.md`.
 - **The node agent** (`hex-node`, Linux): `Runtime` over the `process` class, durable per-box records
   and recovery.
 - **The `hex` binary**: `hex --version`/`--help`, `hex oci …` (the OCI runtime), `hex box run
@@ -48,9 +50,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **Consumer #2** (the `hex` CI executor, container legs, no Docker): the OCI image unpacker is
   validated end-to-end against a real registry (alpine from Docker Hub, `#[ignore]` integration test).
   The run-path design is settled (`docs/design/runtime.md`): the executor shells out to `hex oci`
-  (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`). It
-  needs a new `hex oci exec` primitive (setns into the running container) built first, then re-vendor
-  + the dispatch wiring (mapped in NOTES.md).
+  (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`).
+  `hex oci exec` is built (2026-10-24); next come the re-vendor and the dispatch wiring (mapped in
+  NOTES.md).
 
 ## Next
 

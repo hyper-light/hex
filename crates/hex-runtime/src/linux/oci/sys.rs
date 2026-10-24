@@ -107,6 +107,88 @@ pub fn fork_into_cgroup(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Option<Fo
     }
 }
 
+/// Signals blocked for this process and read from a `signalfd` instead, so a parent can pass them on to
+/// a child it waits on, with no handler: `hex oci exec` forwards the signals a caller ends a step with.
+pub struct ForwardedSignals {
+    old: libc::sigset_t,
+    fd: std::os::fd::OwnedFd,
+}
+
+/// Blocks `signals` and opens a `signalfd` that reads them. The caller is single-threaded (it
+/// re-exec'd), so the process's mask is this thread's.
+pub fn forward_signals(signals: &[i32]) -> Result<ForwardedSignals, OciError> {
+    // SAFETY: `sigset_t` is plain data, and sigemptyset initializes it before anything reads it.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: sigemptyset(3) on a valid pointer to a local `sigset_t`; the return value is checked.
+    if unsafe { libc::sigemptyset(&mut set) } == -1 {
+        return Err(OciError::os("sigemptyset", std::io::Error::last_os_error()));
+    }
+    for &sig in signals {
+        // SAFETY: sigaddset(3) on a valid pointer to the initialized set; the return value is checked.
+        if unsafe { libc::sigaddset(&mut set, sig) } == -1 {
+            return Err(OciError::os("sigaddset", std::io::Error::last_os_error()));
+        }
+    }
+    // SAFETY: as above; sigprocmask fills it with the mask it replaces before anything reads it.
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: sigprocmask(2) with valid pointers to two local sets; it writes only `old`. The return
+    // value is checked.
+    if unsafe { libc::sigprocmask(libc::SIG_BLOCK, &set, &mut old) } == -1 {
+        return Err(OciError::os("sigprocmask", std::io::Error::last_os_error()));
+    }
+    // SAFETY: signalfd(2) with -1 makes a new descriptor reading the signals in `set`, a valid
+    // pointer; the return value is checked.
+    let fd = unsafe { libc::signalfd(-1, &set, libc::SFD_CLOEXEC) };
+    if fd == -1 {
+        let e = std::io::Error::last_os_error();
+        // SAFETY: sigprocmask(2) restoring the mask just saved; nothing else to undo.
+        unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+        return Err(OciError::os("signalfd", e));
+    }
+    // SAFETY: `fd` is the new descriptor signalfd just returned, owned by nothing else.
+    let fd = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    Ok(ForwardedSignals { old, fd })
+}
+
+impl ForwardedSignals {
+    /// The `signalfd`, for polling beside the child's pidfd.
+    pub fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.fd)
+    }
+
+    /// Unblocks the signals again, as they were before: what a forked child does before it execs,
+    /// which would otherwise inherit them blocked.
+    pub fn restore(&self) -> Result<(), OciError> {
+        // SAFETY: sigprocmask(2) setting the mask saved when the signals were blocked, a valid
+        // pointer; it writes nothing. The return value is checked.
+        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut()) } == -1 {
+            return Err(OciError::os("sigprocmask", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// The next pending signal's number, read from the `signalfd` (call it once poll says it's
+    /// readable).
+    pub fn next(&self) -> Result<i32, OciError> {
+        let mut info = [0u8; std::mem::size_of::<libc::signalfd_siginfo>()];
+        let n = rustix::io::read(&self.fd, &mut info)
+            .map_err(|e| OciError::os("reading the signalfd", e))?;
+        if n != info.len() {
+            return Err(OciError::os(
+                "reading the signalfd",
+                "a short read of signalfd_siginfo",
+            ));
+        }
+        // `ssi_signo`, the struct's first field, a `u32` (signalfd(2)).
+        let signo = info
+            .first_chunk::<4>()
+            .map(|b| u32::from_ne_bytes(*b))
+            .ok_or_else(|| OciError::os("reading the signalfd", "no ssi_signo"))?;
+        i32::try_from(signo)
+            .map_err(|_| OciError::os("reading the signalfd", "a signal out of range"))
+    }
+}
+
 /// Reaps child `pid`, waiting for it to end; its exit as a `waitpid` status, or the error.
 pub fn waitpid(pid: i32) -> Result<WaitStatus, OciError> {
     let mut status: libc::c_int = 0;
