@@ -1,7 +1,7 @@
-//! Hex's node agent ("hexlet", CP-T7.1): it drives a runtime class on one node, keeps a durable
-//! record of every box ([`store`]), and after a restart takes each box back or cleans it up so none
-//! is leaked ([`recover`], T-T7.1.2). The scheduling and control plane that drive many nodes come in
-//! CP-T7.3; this is the node by itself.
+//! Hex's node agent ("hexlet", CP-T7.1): it drives a runtime class on one node, keeps a record of
+//! every box that its own crash leaves whole ([`store`]), and after a restart takes each box back or
+//! cleans it up so none is leaked ([`recover`], T-T7.1.2). The scheduling and control plane that drive
+//! many nodes come in CP-T7.3; this is the node by itself.
 
 #![cfg_attr(
     test,

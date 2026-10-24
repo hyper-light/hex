@@ -23,8 +23,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   created or running container: born in its cgroup, in its namespaces, as its process, with the
   program's status as exec's and the caller's signals passed on (`bench/oci-validation/cgroups.sh`, 28
   checks). The runtime decision and its evidence are in `docs/design/runtime.md`.
-- **The node agent** (`hex-node`, Linux): `Runtime` over the `process` class, durable per-box records
-  and recovery.
+- **The node agent** (`hex-node`, Linux): `Runtime` over the `process` class, per-box records that a
+  crash of the agent leaves whole (fsynced only for a box that owns directories, design decision 1), and
+  recovery.
 - **The `hex` binary**: `hex --version`/`--help`, `hex oci …` (the OCI runtime), `hex box run
   <limits> -- cmd` (runs a program in a `process` box, for kiln to wrap a CI leg or harness in),
   and `hex selftest-box` (box isolation self-test, incl. `fsync-probe`/`disk-hog` for the bench).

@@ -1,6 +1,10 @@
-//! The node agent's durable store of box records (CLAUDE.md §4: durable before acknowledged). Each
-//! box is one file, written whole by a temp file, fsync, rename, then an fsync of the directory, so
-//! a crash leaves either the old record or the new one, never a torn one (T-T7.1.2).
+//! The node agent's store of box records. Each box is one file, written whole to a temp file and
+//! renamed into place, so a crash of the node agent leaves either the old record or the new one,
+//! never a torn one (T-T7.1.2): the page cache outlives the process, and rename(2) replaces
+//! atomically. Only a record of a box that owns directories is fsynced too, file and directory, since
+//! only it must outlive the host: after a host crash every box's cgroup is gone, so recovery scrubs
+//! each record it finds, torn or whole, and only a record naming directories points at anything left
+//! to remove (docs/design/runtime-architecture.md, decision 1).
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -29,22 +33,29 @@ impl Store {
         self.dir.join(format!("{id}.json"))
     }
 
-    /// Writes `record` durably: either the old file or the whole new one survives a crash.
+    /// Writes `record` whole: either the old file or the new one survives a crash of the node
+    /// agent, and a record that must outlive the host ([`must_outlive_host`]) is fsynced too.
     pub fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
         let bytes = record.encode()?;
         let final_path = self.path(&record.spec.id);
         let tmp = self.dir.join(format!(".{}.tmp", record.spec.id));
+        let durable = must_outlive_host(record);
         {
             let mut f =
                 File::create(&tmp).map_err(|e| Refusal::os("making a record temp file", e))?;
             f.write_all(&bytes)
                 .map_err(|e| Refusal::os("writing a record", e))?;
-            f.sync_all()
-                .map_err(|e| Refusal::os("flushing a record", e))?;
+            if durable {
+                f.sync_all()
+                    .map_err(|e| Refusal::os("flushing a record", e))?;
+            }
         }
         fs::rename(&tmp, &final_path)
             .map_err(|e| Refusal::os("renaming a record into place", e))?;
-        self.sync_dir()
+        if durable {
+            self.sync_dir()?;
+        }
+        Ok(())
     }
 
     /// The record for `id`, if the store holds one. An unreadable file is returned as its reason,
@@ -57,10 +68,11 @@ impl Store {
         }
     }
 
-    /// Removes `id`'s record; absent already is removed.
+    /// Removes `id`'s record; absent already is removed. Not fsynced: the box's directories are gone
+    /// before its record is, so a removal a host crash undoes leaves a record recovery scrubs again.
     pub fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
         match fs::remove_file(self.path(id)) {
-            Ok(()) => self.sync_dir(),
+            Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Refusal::os("removing a record", e)),
         }
@@ -97,12 +109,18 @@ impl Store {
         Ok(out)
     }
 
-    /// fsync the directory, so a rename or a remove is durable.
+    /// fsync the directory, so a rename is durable.
     fn sync_dir(&self) -> Result<(), Refusal> {
         File::open(&self.dir)
             .and_then(|d| d.sync_all())
             .map_err(|e| Refusal::os("flushing the record directory", e))
     }
+}
+
+/// Whether a record must outlive the host, and so is fsynced: one naming directories the box owns.
+/// A record of processes and cgroups alone describes nothing a host crash leaves behind.
+fn must_outlive_host(record: &BoxRecord) -> bool {
+    !record.dirs.is_empty()
 }
 
 #[cfg(test)]
@@ -130,6 +148,23 @@ mod tests {
         assert_eq!(store.get(&r.spec.id).unwrap(), Some(Ok(r.clone())));
         store.remove(&r.spec.id).unwrap();
         assert_eq!(store.get(&r.spec.id).unwrap(), None);
+    }
+
+    /// T-T7.1.2 and decision 1: a record of processes and cgroups alone skips the fsync, and one
+    /// naming directories keeps it, so recovery after a host crash still finds what to remove.
+    #[test]
+    fn only_a_record_owning_directories_must_outlive_the_host() {
+        assert!(!must_outlive_host(&record("a")));
+        let mut owning = record("b");
+        owning.dirs.push(PathBuf::from("/var/lib/hex/boxes/b"));
+        assert!(must_outlive_host(&owning));
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.put(&owning).unwrap();
+        assert_eq!(
+            store.get(&owning.spec.id).unwrap(),
+            Some(Ok(owning.clone()))
+        );
     }
 
     #[test]

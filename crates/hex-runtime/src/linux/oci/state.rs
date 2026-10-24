@@ -1,5 +1,5 @@
-//! The container state the OCI spec defines (`state`'s output), kept durably in the container's
-//! state directory. The status follows the spec's lifecycle: `creating`, `created`, `running`,
+//! The container state the OCI spec defines (`state`'s output), kept in the container's state
+//! directory and replaced whole on each write. The status follows the spec's lifecycle: `creating`, `created`, `running`,
 //! `stopped`.
 
 use std::fs::{self, File};
@@ -117,7 +117,10 @@ impl Dir {
         Ok(())
     }
 
-    /// Writes the state durably: temp file, fsync, rename, directory fsync.
+    /// Writes the state atomically, as runc and crun do: a temp file renamed into place, never
+    /// fsynced. rename(2) leaves no moment without a whole state.json, and the page cache outlives a
+    /// crash of this process. A host crash ends every container the state describes, and the state
+    /// root is under /run, emptied at boot (docs/design/runtime-architecture.md, decision 1).
     pub fn put(&self, state: &State) -> Result<(), OciError> {
         let bytes = serde_json::to_vec(state)
             .map_err(|e| OciError::Broken(format!("encoding state: {e}")))?;
@@ -126,14 +129,8 @@ impl Dir {
             let mut f = File::create(&tmp).map_err(|e| OciError::os("writing state", e))?;
             f.write_all(&bytes)
                 .map_err(|e| OciError::os("writing state", e))?;
-            f.sync_all()
-                .map_err(|e| OciError::os("flushing state", e))?;
         }
-        fs::rename(&tmp, self.dir.join("state.json"))
-            .map_err(|e| OciError::os("renaming state", e))?;
-        File::open(&self.dir)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| OciError::os("flushing the container directory", e))
+        fs::rename(&tmp, self.dir.join("state.json")).map_err(|e| OciError::os("renaming state", e))
     }
 
     /// The container's state, or [`OciError::NoSuchContainer`].
