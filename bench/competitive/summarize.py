@@ -55,6 +55,8 @@ def fmt(v, unit):
         return f"{v:.0f}"
     if unit == "cpus":
         return f"{v:.3f} CPUs"
+    if unit == "x":
+        return f"{v:.2f}x"
     return str(v)
 
 
@@ -99,6 +101,11 @@ def oci_section(run):
             per[n] = best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get(op, []) for r in rs.values()])
         for q in ("p50", "p99", "p99.9", "max"):
             rows.append((f"{op} {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()}))
+    for op in ("create", "delete"):
+        per = {n: best_dist([r["phases"].get("lifecycle_nonet", {}).get("ms", {}).get(op, []) for r in rs.values()])
+               for n, rs in data.items()}
+        rows.append((f"{op} p50 without a network namespace (ms)", "ms", True,
+                     {n: (d or {}).get("p50") for n, d in per.items()}))
     per = {n: best_dist([r["phases"].get("start_true", {}).get("ms", []) for r in rs.values()]) for n, rs in data.items()}
     for q in ("p50", "p99", "p99.9", "max"):
         rows.append((f"create+start of `true` {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()}))
@@ -106,6 +113,14 @@ def oci_section(run):
         rows.append((f"throughput at concurrency {c} (lifecycles/s)", "/s", False,
                      {n: max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in rs.values()), default=None) or None
                       for n, rs in data.items()}))
+    # The sustained round with the best rate, and how far its last window fell from its first.
+    sus = {n: max((r["phases"]["sustained"] for r in rs.values() if "sustained" in r["phases"]),
+                  key=lambda s: s["per_s"], default=None) for n, rs in data.items()}
+    rows.append(("sustained lifecycles/s at concurrency 32 (HEXBENCH_SUSTAINED of them)", "/s", False,
+                 {n: (s or {}).get("per_s") for n, s in sus.items()}))
+    # No ratio: a last window faster than the first (warm-up) isn't better than one level with it.
+    rows.append(("sustained: the last 1,000 lifecycles' rate against the first's", "x", None,
+                 {n: (s or {}).get("last_over_first") for n, s in sus.items()}))
     rows.append(("CPU per lifecycle, concurrency 1 (whole bench cgroup)", "cpu", True,
                  {n: min((r["phases"]["throughput"]["1"]["cpu_s_per_lifecycle"] for r in rs.values()
                           if "throughput" in r["phases"]), default=None) for n, rs in data.items()}))
@@ -291,13 +306,14 @@ def lab_notes(methods, rs):
 
 
 def table(title, names, rows):
-    """A section's table; the ratio column only where Hex has a class in it."""
+    """A section's table; the ratio column only where Hex has a class in it, and n/a on a row whose
+    lower_better is None."""
     ratios = "hex" in names
     out = [f"### {title}", "", "| Axis | " + " | ".join(names) + (" | Hex vs best competitor |" if ratios else " |"),
            "|---|" + "---|" * len(names) + ("---|" if ratios else "")]
     for axis, unit, lower, vals in rows:
         cells = f"| {axis} | " + " | ".join(fmt(vals.get(n), unit) for n in names) + " |"
-        out.append(cells + (f" {ratio(vals, lower)[0]} |" if ratios else ""))
+        out.append(cells + (f" {ratio(vals, lower)[0] if lower is not None else 'n/a'} |" if ratios else ""))
     return "\n".join(out) + "\n"
 
 

@@ -20,6 +20,10 @@ measures where Hex stands today. `RESULT.md` records each run of record.
   (AC-T7.1.3's measure). n = 10,000 per round after 100 warm-ups (runsc 3,000, as each lifecycle takes far
   longer); p50, p99, p99.9 (nearest rank) and max.
 - **Throughput**: create+start+delete of `true` containers at concurrency 1, 8 and 32; lifecycles per second.
+  Then a sustained run at concurrency 32, 10,000 lifecycles by default (`HEXBENCH_SUSTAINED`), with the
+  rate in each window of 1,000, so decay under churn shows.
+- **Without a network namespace**: the lifecycle phase again on a bundle without one, so create and delete
+  are timed with it and without it.
 - **CPU per workload**: the whole bench cgroup's `cpu.stat` usage per lifecycle (CLI, shims, sandboxes and
   workload together); per-call CLI CPU from `wait4` rusage is also kept.
 - **Memory and density**: `sleep` containers started until a cap (1,000) or a memory budget (8 GiB). The
@@ -69,8 +73,12 @@ place of the cgroup tree. That runs every phase's control flow (warm-ups, error 
 summary) without containers, cgroups or load. The numbers it produces are meaningless. On 2026-10-23 it
 found three bugs before any slot was spent: a container that failed to start counted as running, a dead
 worker that could hang the box driver, and a ratio that divided by zero. `check_driver.sh` runs it for
-oci_bench.py's throughput phase and checks three things: each lifecycle is counted once per level, a
-failing call ends its level with its error, and no worker process outlives the phase.
+oci_bench.py's throughput, sustained and lifecycle_nonet phases, and checks five things:
+- each lifecycle is counted once per level;
+- a failing call ends its level with its error;
+- no worker process outlives the phase;
+- the sustained windows add up to the lifecycles run, and a failure keeps its count;
+- lifecycle_nonet times every operation.
 
 ## Platforms
 

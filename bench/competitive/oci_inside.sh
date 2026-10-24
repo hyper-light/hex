@@ -11,8 +11,9 @@ RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc"}; ROUNDS=${ROUNDS:-3}; ROUND_FI
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
 
-bundle() { # bundle <dir> <args json>
-  local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
+ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
+bundle() { # bundle <dir> <args json> [namespaces json, all five by default]
+  local B=$1 NS=${3:-$ALL_NS}; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
   ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin )
   cat > "$B/config.json" <<JSON
 { "ociVersion":"1.0.2","root":{"path":"rootfs","readonly":false},"hostname":"b",
@@ -20,11 +21,13 @@ bundle() { # bundle <dir> <args json>
   "mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},
             {"destination":"/proc","type":"proc","source":"proc"},
             {"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],
-  "linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]} }
+  "linux":{"namespaces":$NS} }
 JSON
 }
 bundle /run/bundle-sleep '["/usr/bin/sleep","infinity"]'
 bundle /run/bundle-true '["/usr/bin/true"]'
+# lifecycle_nonet's: the same container without a network namespace of its own.
+bundle /run/bundle-sleep-nonet '["/usr/bin/sleep","infinity"]' '[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]'
 
 # cgroup v2's no-internal-process rule: move everything to a leaf so the root can parent containers.
 mkdir -p /sys/fs/cgroup/lab

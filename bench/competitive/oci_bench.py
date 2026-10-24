@@ -9,15 +9,21 @@ and the bundle at /run/bundle-sleep (workload `sleep infinity`) and /run/bundle-
 Phases, in order; a phase that fails records its error and the next one still runs:
   lifecycle   n sequential create, start, exec (when the runtime has one), delete --force of a `sleep`
               container; each operation timed alone (wall clock around the CLI call).
+  lifecycle_nonet  the same, on a bundle without a network namespace, so create and delete are timed with
+              and without one.
   start_true  n sequential create+start of a `true` container (AC-T7.1.3's measure), deleted untimed.
   throughput  create+start+delete --force of `true` containers at concurrency 1, 8 and 32: lifecycles/s,
               and CPU-seconds per lifecycle from the bench cgroup's cpu.stat. Each concurrency slot is a
               worker process of its own: CPython holds its interpreter lock across posix_spawn
               (Modules/posixmodule.c), so threads would spawn one at a time and cap the rate.
+  sustained   the throughput lifecycle at concurrency 32 for HEXBENCH_SUSTAINED lifecycles (10,000): the
+              rate in each window of 1,000, and the last window's against the first's. A short burst can't
+              show decay under churn, which one production system saw fall from 110 to 45 starts/s over an
+              hour (docs/research/runtime/oci-runtimes-and-fast-start.md §4.4).
   density     `sleep` containers started one after another until the cap or the memory budget, then
               memory per container from the bench cgroup: the memory it holds (cgmem.py), and its
               memory.current, which the budget bounds; all deleted afterwards.
-HEXBENCH_PHASES names the phases to run (all four by default).
+HEXBENCH_PHASES names the phases to run (all six by default).
 
 Every CLI call's stdio goes to /dev/null or a reused error file, never a pipe: a detached `create` leaves
 the container's init holding the caller's stdio, so reading a pipe to EOF would deadlock (hex_start's
@@ -129,12 +135,12 @@ def mem_bytes():
     return int(cg_read("memory.current"))
 
 
-def phase_lifecycle(rt, n, warmup):
+def phase_lifecycle(rt, n, warmup, bundle="/run/bundle-sleep", tag="l"):
     ops = {"create": [], "start": [], "exec": [], "delete": []}
     cpu = {"create": [], "start": [], "exec": [], "delete": []}
     for i in range(warmup + n):
-        cid = f"{rt.name}-l{i:06d}"
-        timed = [("create", lambda: rt.create("/run/bundle-sleep", cid)), ("start", lambda: rt.start(cid))]
+        cid = f"{rt.name}-{tag}{i:06d}"
+        timed = [("create", lambda: rt.create(bundle, cid)), ("start", lambda: rt.start(cid))]
         if rt.has_exec:
             timed.append(("exec", lambda: rt.exec_true(cid)))
         created = False
@@ -184,8 +190,10 @@ def throughput_lifecycle(rt, conc, i):
 
 def throughput_worker(name, conc, lifecycles, claimed, start, failed, out):
     """One concurrency slot: after the start barrier, claims lifecycle numbers until none are left or
-    another slot has failed, then sends {} or {"error": why}. Only the claim takes the shared lock."""
+    another slot has failed, then sends {"done": [each lifecycle's end, perf_counter]} or {"error": why}.
+    Only the claim takes the shared lock."""
     rt = Runtime(name)
+    done = []
     try:
         start.wait(timeout=CALL_TIMEOUT_S)
         while not failed.is_set():
@@ -195,53 +203,77 @@ def throughput_worker(name, conc, lifecycles, claimed, start, failed, out):
                     break
                 claimed.value = i + 1
             throughput_lifecycle(rt, conc, i)
-        out.send({})
+            done.append(time.perf_counter())
+        out.send({"done": done})
     except Exception as e:  # recorded in the parent; the level stops
         failed.set()
-        out.send({"error": f"{type(e).__name__}: {e}"})
+        out.send({"error": f"{type(e).__name__}: {e}", "done": done})
     finally:
         out.close()
 
 
-def phase_throughput(rt, lifecycles):
+def run_level(rt, conc, lifecycles):
+    """`lifecycles` throughput lifecycles from `conc` worker processes: (wall s from the start barrier,
+    the bench cgroup's CPU s over it, the sorted end times relative to the start)."""
     ctx = mp.get_context("spawn")
+    claimed, start, failed = ctx.Value("q", 0), ctx.Barrier(conc + 1), ctx.Event()
+    workers, results = [], []
+    try:
+        for _ in range(conc):
+            a, b = ctx.Pipe(duplex=False)
+            w = ctx.Process(target=throughput_worker, args=(rt.name, conc, lifecycles, claimed, start, failed, b))
+            w.start()
+            b.close()  # only the worker holds the sending end, so one that dies ends recv() with EOFError
+            workers.append((w, a))
+        # Every slot is up before the clock starts: a worker's interpreter start-up isn't a lifecycle.
+        try:
+            start.wait(timeout=CALL_TIMEOUT_S)
+        except threading.BrokenBarrierError:
+            raise OpError(f"concurrency {conc}: a worker wasn't up within {CALL_TIMEOUT_S}s") from None
+        cpu0, t0 = cpu_usec(), time.perf_counter()
+        for w, a in workers:
+            try:
+                results.append(a.recv())
+            except EOFError:
+                results.append({"error": f"a worker exited {w.exitcode} without a result"})
+        wall = time.perf_counter() - t0
+        cpu_s = (cpu_usec() - cpu0) / 1e6
+    finally:
+        # No worker outlives its level: each call has its own timeout, so one past this is stuck.
+        for w, _ in workers:
+            w.join(timeout=CALL_TIMEOUT_S)
+            if w.is_alive():
+                w.kill()
+                w.join()
+    errs = [r["error"] for r in results if "error" in r]
+    if errs:
+        count = sum(len(r.get("done", [])) for r in results)
+        raise OpError(f"concurrency {conc}: {errs[0]} (after {count} of {lifecycles} lifecycles)")
+    return wall, cpu_s, sorted(t - t0 for r in results for t in r["done"])
+
+
+def phase_throughput(rt, lifecycles):
     out = {}
     for conc in (1, 8, 32):
-        claimed, start, failed = ctx.Value("q", 0), ctx.Barrier(conc + 1), ctx.Event()
-        workers, results = [], []
-        try:
-            for _ in range(conc):
-                a, b = ctx.Pipe(duplex=False)
-                w = ctx.Process(target=throughput_worker, args=(rt.name, conc, lifecycles, claimed, start, failed, b))
-                w.start()
-                b.close()  # only the worker holds the sending end, so one that dies ends recv() with EOFError
-                workers.append((w, a))
-            # Every slot is up before the clock starts: a worker's interpreter start-up isn't a lifecycle.
-            try:
-                start.wait(timeout=CALL_TIMEOUT_S)
-            except threading.BrokenBarrierError:
-                raise OpError(f"concurrency {conc}: a worker wasn't up within {CALL_TIMEOUT_S}s") from None
-            cpu0, t0 = cpu_usec(), time.perf_counter()
-            for w, a in workers:
-                try:
-                    results.append(a.recv())
-                except EOFError:
-                    results.append({"error": f"a worker exited {w.exitcode} without a result"})
-            wall = time.perf_counter() - t0
-            cpu_s = (cpu_usec() - cpu0) / 1e6
-        finally:
-            # No worker outlives its level: each call has its own timeout, so one past this is stuck.
-            for w, _ in workers:
-                w.join(timeout=CALL_TIMEOUT_S)
-                if w.is_alive():
-                    w.kill()
-                    w.join()
-        errs = [r["error"] for r in results if "error" in r]
-        if errs:
-            raise OpError(f"concurrency {conc}: {errs[0]}")
+        wall, cpu_s, _ = run_level(rt, conc, lifecycles)
         out[str(conc)] = {"lifecycles": lifecycles, "wall_s": wall, "per_s": lifecycles / wall,
                           "cpu_s_per_lifecycle": cpu_s / lifecycles}
     return out
+
+
+SUSTAINED_WINDOW = 1000
+
+
+def phase_sustained(rt, lifecycles):
+    wall, cpu_s, ends = run_level(rt, 32, lifecycles)
+    # Each window's rate from the end of the window before it (the start, for the first) to its own last end.
+    windows, prev = [], 0.0
+    for k in range(SUSTAINED_WINDOW - 1, len(ends), SUSTAINED_WINDOW):
+        windows.append(SUSTAINED_WINDOW / (ends[k] - prev))
+        prev = ends[k]
+    return {"concurrency": 32, "lifecycles": lifecycles, "wall_s": wall, "per_s": lifecycles / wall,
+            "cpu_s_per_lifecycle": cpu_s / lifecycles, "window": SUSTAINED_WINDOW, "window_per_s": windows,
+            "last_over_first": windows[-1] / windows[0] if len(windows) > 1 else None}
 
 
 def phase_density(rt, cap, budget_mib):
@@ -286,10 +318,14 @@ def main():
     n, warmup, lifecycles, cap, budget = (int(x) for x in sys.argv[3:8])
     rt = Runtime(name)
     result = {"runtime": name, "n": n, "warmup": warmup, "phases": {}, "errors": {}}
-    wanted = (os.environ.get("HEXBENCH_PHASES") or "lifecycle start_true throughput density").split()
+    wanted = (os.environ.get("HEXBENCH_PHASES")
+              or "lifecycle lifecycle_nonet start_true throughput sustained density").split()
+    sustained = int(os.environ.get("HEXBENCH_SUSTAINED", "10000"))
     for phase, fn in (("lifecycle", lambda: phase_lifecycle(rt, n, warmup)),
+                      ("lifecycle_nonet", lambda: phase_lifecycle(rt, n, warmup, "/run/bundle-sleep-nonet", "n")),
                       ("start_true", lambda: phase_start_true(rt, n, warmup)),
                       ("throughput", lambda: phase_throughput(rt, lifecycles)),
+                      ("sustained", lambda: phase_sustained(rt, sustained)),
                       ("density", lambda: phase_density(rt, cap, budget))):
         if phase not in wanted:
             continue
