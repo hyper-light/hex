@@ -9,8 +9,35 @@ swapped out is still held, counted at its full size). On a zswap host memory.cur
 compressed copies of pages memory.swap.current already counts, so `zswap` comes off. The fields are the
 kernel's: Documentation/admin-guide/cgroup-v2.rst, memory.stat and memory.swap.current. A cgroup without
 memory.swap.current (no swap accounting) is an error, not a zero.
+
+Hugepages are held too, but memory.current counts them only when the hierarchy is mounted with
+`memory_hugetlb_accounting` (cgroup-v2.rst: "Count HugeTLB memory usage towards the cgroup's overall memory
+usage"). Without it, a cgroup's hugepages are its `hugetlb.<size>.current` files, so they're added from there.
+E2B backs each sandbox's guest memory with 2 MiB hugepages; no other stack here uses any.
 """
+import glob
 import os
+
+
+def _hugetlb_counted():
+    with open("/proc/mounts") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) > 3 and parts[2] == "cgroup2":
+                return "memory_hugetlb_accounting" in parts[3].split(",")
+    return False
+
+
+HUGETLB_IN_CURRENT = _hugetlb_counted()
+
+
+def hugetlb_bytes(path):
+    """The hugepage memory the cgroup holds, of every page size; 0 where the hugetlb controller isn't on."""
+    total = 0
+    for f in glob.glob(os.path.join(path, "hugetlb.*.current")):
+        with open(f) as fh:
+            total += int(fh.read())
+    return total
 
 
 def held_bytes(path):
@@ -20,7 +47,8 @@ def held_bytes(path):
         current = int(f.read())
     with open(os.path.join(path, "memory.swap.current")) as f:
         swapped = int(f.read())
-    return current - stat["file"] + stat["shmem"] - stat.get("zswap", 0) + swapped
+    huge = 0 if HUGETLB_IN_CURRENT else hugetlb_bytes(path)
+    return current - stat["file"] + stat["shmem"] - stat.get("zswap", 0) + swapped + huge
 
 
 def per_unit(held, count):
