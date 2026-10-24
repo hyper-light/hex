@@ -8,8 +8,9 @@
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
 # ones there, HEXBENCH_PHASES picks the drivers' phases (all), and FETCH=0 keeps the competitors' binaries
 # already in $BASE/bin (their sha256 is recorded) rather than resolving each project's latest release again.
-# Another host only by name (BENCH_HOST_OK=<its hostname>), and LOAD_GATE=0 skips the wait for load under 2:
-# Ada's call for E2B's same-hardware rounds on adacachy (2026-10-24); env.txt records both and the load.
+# Another host only by name (BENCH_HOST_OK=<its hostname>): Ada's call for E2B's same-hardware rounds on adacachy
+# (2026-10-24). LOAD_GATE=0 skips the wait for load under 2: for those rounds, and for a density-only pass
+# (HEXBENCH_PHASES=density), whose held memory doesn't depend on load. env.txt records which, and the load.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 HEX=$(realpath "${1:?hex release binary}")
@@ -36,7 +37,13 @@ mkdir -p "$OUT" "$BASE/bin"
 done
 
 { echo "--- pass started $(date -u +%FT%TZ): PHASES=$PHASES RUNTIMES=${RUNTIMES:-all}"; echo "host: $(hostname)"; echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
-  [ "${LOAD_GATE:-1}" = 0 ] && echo "load gate: skipped (LOAD_GATE=0), so this pass is not of record by CLAUDE.md §7"
+  if [ "${LOAD_GATE:-1}" = 0 ]; then
+    if [ "$HEXBENCH_PHASES" = density ]; then
+      echo "load gate: skipped (LOAD_GATE=0) for a density-only pass: held memory doesn't depend on other people's CPU load (platform-rounds/README.md, density-only rounds)"
+    else
+      echo "load gate: skipped (LOAD_GATE=0), so this pass is not of record by CLAUDE.md §7"
+    fi
+  fi
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all}"

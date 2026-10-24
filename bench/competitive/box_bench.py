@@ -208,6 +208,46 @@ def helper_cgroups():
     return sorted(out)
 
 
+def sleep_in(cg):
+    """Whether a `sleep` runs anywhere in cgroup `cg`'s tree."""
+    for d, _, _ in os.walk(cg):
+        try:
+            with open(d + "/cgroup.procs") as f:
+                pids = f.read().split()
+        except FileNotFoundError:  # removed as this walked
+            continue
+        for pid in pids:
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    if f.read().strip() == "sleep":
+                        return True
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+    return False
+
+
+def comm_is_sleep(pid):
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip() == "sleep"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+def wait_up(up, gone):
+    """Waits, bounded by CALL_TIMEOUT_S, until the box is up (`up()`) or its launcher has gone (`gone()`, which
+    returns why); None when up."""
+    deadline = time.monotonic() + CALL_TIMEOUT_S
+    while not up():
+        why = gone()
+        if why:
+            return why
+        if time.monotonic() > deadline:
+            return f"not up {CALL_TIMEOUT_S}s after it started"
+        time.sleep(0.002)
+    return None
+
+
 def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
     # S holds the driver, which forks every box's first process: that task's kernel stack and struct stay
     # charged to S when the process moves on (cgroup-v2.rst, "Memory Ownership"), so S is watched for every
@@ -216,13 +256,24 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
     base, held0 = mem(watch), held(watch)
     kids, units, stop = [], [], "cap"
     t0 = time.perf_counter()
+    # One box at a time, each up (its `sleep` running in its own cgroup) before the next starts, so the reading
+    # is of running boxes: systemd's user manager can fall seconds behind a burst of scope requests, and a 3 s
+    # settle then read 1,000 waiting `systemd-run` clients instead of 1,000 scopes (probes/scope_charge.py).
+    def exited(pid):
+        done, status = os.waitpid(pid, os.WNOHANG)
+        return f"its launcher exited {os.waitstatus_to_exitcode(status)}" if done else None
     for i in range(cap):
         if method == "hex":
             cg = f"{S}/d{i}"
             os.makedirs(cg, exist_ok=True)
-            kids.append((spawn(argv_for("hex", hex_bin, ["/usr/bin/sleep", "infinity"]), cg), cg))
+            pid = spawn(argv_for("hex", hex_bin, ["/usr/bin/sleep", "infinity"]), cg)
+            kids.append((pid, cg))
+            why = wait_up(lambda: sleep_in(cg + "/.hexbox"), lambda: exited(pid))
         elif method == "systemd-scope":
-            kids.append((spawn(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"], slice_=DENSITY_SLICE)), None))
+            pid = spawn(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"], slice_=DENSITY_SLICE))
+            kids.append((pid, None))
+            # systemd-run execs the program once the manager has made its scope and moved it in.
+            why = wait_up(lambda: comm_is_sleep(pid), lambda: exited(pid))
         else:
             unit = f"hexbench-d{os.getpid()}-{i}"
             r = subprocess.run(argv_for(method, hex_bin, ["/usr/bin/sleep", "infinity"], unit=unit, slice_=DENSITY_SLICE),
@@ -231,11 +282,15 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
                 stop = f"systemd-run exit {r.returncode} at {i}"
                 break
             units.append(unit)
+            ucg = f"{user_service_cg}/{DENSITY_SLICE}/{unit}.service"
+            why = wait_up(lambda: sleep_in(ucg), lambda: None if os.path.isdir(ucg) else "its unit's cgroup is gone")
+        if why:
+            stop = f"box {i}: {why}"
+            break
         if mem(watch) - base > budget_mib * 2**20:
             stop = "memory budget"
             break
     wall = time.perf_counter() - t0
-    time.sleep(3)
     used = mem(watch) - base
     held_rise = held(watch) - held0
     count = len(kids) + len(units)
