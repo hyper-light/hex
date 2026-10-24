@@ -143,8 +143,6 @@ pub enum Refusal {
     Exists(BoxId),
     #[error("box {0} has nothing running to {1}")]
     NotRunning(BoxId, &'static str),
-    #[error("this runtime doesn't run the {} class", .0.name())]
-    Unsupported(Class),
     #[error("{what} isn't available on {platform}: {why}")]
     Platform {
         what: &'static str,

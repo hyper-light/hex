@@ -205,15 +205,35 @@ impl WaitStatus {
     }
 }
 
-/// Sets signal `sig` to its default disposition and raises it on this process, so the process ends
-/// the way the signal says: `hex __oci-exec` in seam mode ends by the signal that ended its program,
-/// so the node agent's pidfd watch reads that outcome. Returns only if the raise didn't end it.
+/// Sets signal `sig` to its default disposition, unblocks `sig` alone, and raises it on this process,
+/// so the process ends the way the signal says: `hex __oci-exec` in seam mode ends by the signal that
+/// ended its program, so the node agent's pidfd watch reads that outcome. Only `sig` is unblocked, so
+/// another forwarded signal left pending can't be delivered first and misreport. Returns only if the
+/// raise didn't end it.
 pub fn raise_default(sig: i32) -> Result<(), OciError> {
     // SAFETY: signal(2) with SIG_DFL and a valid signal number installs the default disposition and
     // writes nothing of ours; the return value is checked against SIG_ERR.
     if unsafe { libc::signal(sig, libc::SIG_DFL) } == libc::SIG_ERR {
         return Err(OciError::os(
             "signal SIG_DFL",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `sigset_t` is plain data; sigemptyset then sigaddset initialize it before it is read.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: sigemptyset(3) on a valid pointer to the local set; return checked.
+    if unsafe { libc::sigemptyset(&mut set) } == -1 {
+        return Err(OciError::os("sigemptyset", std::io::Error::last_os_error()));
+    }
+    // SAFETY: sigaddset(3) adding `sig` to the initialized local set; return checked.
+    if unsafe { libc::sigaddset(&mut set, sig) } == -1 {
+        return Err(OciError::os("sigaddset", std::io::Error::last_os_error()));
+    }
+    // SAFETY: sigprocmask(2) unblocking just `sig` from a valid local set; the old-mask pointer is
+    // null, so it writes nothing of ours. Return checked.
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut()) } == -1 {
+        return Err(OciError::os(
+            "sigprocmask SIG_UNBLOCK",
             std::io::Error::last_os_error(),
         ));
     }

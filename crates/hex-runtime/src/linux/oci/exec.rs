@@ -271,10 +271,10 @@ fn wait_forwarding(pid: i32, signals: &sys::ForwardedSignals, seam: bool) -> Res
             let status = sys::waitpid(pid)?;
             if seam && let Some(sig) = status.term_signal() {
                 // End the helper by the same signal, so the node's pidfd watch reads the program's
-                // outcome and reports `Signal(sig)`. The forwarded signals are unblocked and set back
-                // to their default first, so the raise ends the helper rather than being caught or
-                // ignored; a signal that can't be raised falls through to the shell mapping.
-                signals.restore()?;
+                // outcome and reports `Signal(sig)`. `raise_default` sets that signal to its default
+                // and unblocks only it before raising, so a different forwarded signal left pending
+                // can't be delivered first; a signal that can't be raised falls through to the shell
+                // mapping below.
                 let _ = sys::raise_default(sig);
             }
             return status_of(&status);

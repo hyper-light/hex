@@ -321,7 +321,22 @@ impl Runtime for Node {
                 what: "start",
                 why: format!("box {id} is a process box, which has no init to start"),
             }),
-            Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => Ok(self.oci().start(id.as_str())?),
+            // An oci box follows the container's lifecycle, refused as the simulator refuses it
+            // (HEX-RT-10): `created` starts; `running` has started already (Invalid); `stopped` or
+            // mid-create has no live init to start (NotRunning). Mapped here so the node and the
+            // simulator agree, rather than passing the oci runtime's WrongState (a generic Os refusal).
+            Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
+                match self.oci().state(id.as_str())?.status {
+                    Status::Created => Ok(self.oci().start(id.as_str())?),
+                    Status::Running => Err(Refusal::Invalid {
+                        what: "start",
+                        why: format!("container {id} has started already"),
+                    }),
+                    Status::Creating | Status::Stopped => {
+                        Err(Refusal::NotRunning(id.clone(), "start"))
+                    }
+                }
+            }
         }
     }
 
@@ -427,13 +442,15 @@ fn init_proc_id(pid: i32, start_time: Option<u64>) -> Option<ProcId> {
     })
 }
 
-/// Whether the very process a record named as its container's init still runs: its pid is live with
-/// the start time recorded, as crun's `process-start-time` tells a container from a recycled pid.
+/// Whether the very process a record named as its container's init still runs: a live process at its
+/// pid with the start time recorded, as crun's `process-start-time` tells a container from a recycled
+/// pid. A recorded start time of 0 means it wasn't known at record time (state without the field), so
+/// the pid alone decides, as [`hex_runtime::linux::oci::state::State::init_alive`] does for that case.
 fn init_alive(init: ProcId) -> bool {
-    i32::try_from(init.pid)
-        .ok()
-        .and_then(start_time)
-        .is_some_and(|now| now == init.start_ticks)
+    match i32::try_from(init.pid).ok().and_then(start_time) {
+        None => false,
+        Some(now) => init.start_ticks == 0 || now == init.start_ticks,
+    }
 }
 
 /// Sets a command's standard streams from a box's [`Stdio`]: each stream the caller gave, else the
@@ -478,6 +495,16 @@ mod tests {
         assert!(
             !init_alive(moved),
             "a different start time isn't the same init"
+        );
+        // A 0 start time means it wasn't recorded (state without the field): the live pid decides,
+        // as the oci runtime's own init_alive does, so recovery doesn't scrub a running container.
+        let unknown = ProcId {
+            pid: here.pid,
+            start_ticks: 0,
+        };
+        assert!(
+            init_alive(unknown),
+            "a live pid with an unrecorded start time is alive"
         );
         assert_eq!(init_proc_id(0, Some(1)), None, "pid 0 names no init");
         assert_eq!(

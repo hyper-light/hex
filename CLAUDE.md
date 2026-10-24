@@ -92,8 +92,10 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
 - `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` that starts a
   container in its cgroup, `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program,
-  and the signal mask and `signalfd` through which `hex oci exec` passes signals on, none of which
-  rustix wraps safely; the process is single-threaded (it re-exec'd) where this matters.
+  the signal mask and `signalfd` through which `hex oci exec` passes signals on, and the
+  signal-disposition reset and `raise` by which `hex oci exec` ends the way its program did when the
+  node agent drives it (seam mode), none of which rustix wraps safely; the process is single-threaded
+  (it re-exec'd) where this matters.
 
 ## 13. Lean code
 
