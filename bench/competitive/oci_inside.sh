@@ -5,7 +5,7 @@
 # shuffled order so drift over the run does not favour one runtime.
 # Env: RUNTIMES ("hex runc crun youki runsc libcrun"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
 # N_OVERRIDE ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192),
-# HEXBENCH_PHASES (oci_bench.py's phases, all by default).
+# HEXBENCH_PHASES (oci_bench.py's phases, all by default), STANDIN (1: the driver's own ceiling each round).
 set -uo pipefail
 RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
@@ -77,8 +77,18 @@ PY
   then ok_runtimes=$(printf '%s\n' $ok_runtimes | grep -vx libcrun | tr '\n' ' '); fi
 fi
 
+# The driver's own ceiling (probes/oci_breakdown.md, step 5): its throughput phase with /usr/bin/true standing
+# in for the runtime, so every call is a spawn and an exit and nothing else. Once a round, in the shuffle with
+# the runtimes, so it shares their conditions.
+mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
-  for rt in $(printf '%s\n' $ok_runtimes | shuf); do
+  for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) | shuf); do
+    if [ "$rt" = standin ]; then
+      echo "round $round: the stand-in (/usr/bin/true as crun)"
+      HEXBENCH_BIN=/run/standin HEXBENCH_PHASES=throughput python3 /opt/lab/oci_bench.py crun "$OUT/ceiling.standin.r$round.json" \
+        1 0 "$LIFECYCLES" 0 64
+      continue
+    fi
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done
     echo "round $round: $rt (n=$n)"
     python3 /opt/lab/oci_bench.py "$rt" "$OUT/$rt.r$round.json" "$n" "$WARMUP" "$LIFECYCLES" "$CAP" "$BUDGET_MIB"

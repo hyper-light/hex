@@ -145,6 +145,18 @@ def oci_section(run):
     return list(data), rows, data
 
 
+def standin_ceiling(run):
+    """The driver's own ceiling: its throughput phase with /usr/bin/true standing in for the runtime, the best
+    rate of its rounds at each concurrency."""
+    rs = rounds(run, "ceiling.standin")
+    if not rs:
+        return ""
+    best = [max((r["phases"].get("throughput", {}).get(c, {}).get("per_s") or 0 for r in rs.values()), default=0)
+            for c in ("1", "8", "32")]
+    return (f"The driver's own ceiling, /usr/bin/true standing in for the runtime (best of {len(rs)}), lifecycles/s at "
+            f"concurrency 1 / 8 / 32: {best[0]:.0f} / {best[1]:.0f} / {best[2]:.0f}\n")
+
+
 def sustained_windows(data):
     """Each runtime's sustained rate in every window, from the round its table row takes (the best rate)."""
     lines = []
@@ -360,6 +372,8 @@ def main():
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
         if sustained_windows(data):
             parts.append(sustained_windows(data))
+    if standin_ceiling(run):
+        parts.append(standin_ceiling(run))
     pnames, prows, plats = platform_section(run, data)
     if plats:
         parts.append(table("Sandbox platforms (end to end through each SDK) against Hex `oci`", pnames, prows))

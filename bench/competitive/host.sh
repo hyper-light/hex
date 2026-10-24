@@ -98,7 +98,7 @@ if [[ " $PHASES " == *" oci "* ]]; then
     --privileged --security-opt label=disable --cgroupns=private --network=none \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
-    registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e STANDIN registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag

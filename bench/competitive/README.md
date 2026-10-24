@@ -24,6 +24,9 @@ measures where Hex stands today. `RESULT.md` records each run of record.
 - **Throughput**: create+start+delete of `true` containers at concurrency 1, 8 and 32; lifecycles per second.
   Then a sustained run at concurrency 32, 10,000 lifecycles by default (`HEXBENCH_SUSTAINED`), with the
   rate in each window of 1,000, so decay under churn shows.
+- **The driver's own ceiling**: each round also runs the throughput phase with `/usr/bin/true` standing
+  in for the runtime (`ceiling.standin.r<N>.json`; `STANDIN=0` skips it), so every call is a spawn and an
+  exit and nothing else. A rate the runtimes share near it is the driver's, not theirs.
 - **Without a network namespace**: the lifecycle phase again on a bundle without one, so create and delete
   are timed with it and without it.
 - **CPU per workload**: the whole bench cgroup's `cpu.stat` usage per lifecycle (CLI, shims, sandboxes and
