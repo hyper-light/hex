@@ -7,8 +7,9 @@
  *   -> "ok <wall ns> <cpu ns>" or "err <why>"
  *
  * Each call makes the libcrun calls crun's command line makes for the same command (src/run_create.c,
- * start.c, exec.c and delete.c at 1.30.1), in this process: no process is spawned per call but libcrun's
- * own. oci_bench.py runs one driver per concurrency slot and its phases unchanged, so the phases, their
+ * start.c, exec.c and delete.c at 1.30.1), in this process: no program is loaded per call. Only exec
+ * forks, and only because libcrun's exec waits for its caller to have no child left (do_exec).
+ * oci_bench.py runs one driver per concurrency slot and its phases unchanged, so the phases, their
  * JSON and the CLI runtimes' are the same code. The wall time is the libcrun call's alone; the CPU is
  * this process's and its reaped children's over it (getrusage), as wait4 gives the CLI call's.
  *
@@ -22,6 +23,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,15 +115,42 @@ do_start (const char *id, libcrun_error_t *err)
   return libcrun_container_start (&con, id, err);
 }
 
+/* Waits on `pid`'s pidfd until it ends, at most CALL_TIMEOUT_S: 1 when it has (a pid that's gone has),
+ * 0 when the bound passed first. */
+static int
+ended_within_bound (pid_t pid, libcrun_error_t *err)
+{
+  struct pollfd p;
+  int fd, r;
+
+  fd = (int) syscall (SYS_pidfd_open, pid, 0);
+  if (fd < 0)
+    return errno == ESRCH ? 1 : libcrun_make_error (err, errno, "pidfd_open of %d", pid);
+  p.fd = fd;
+  p.events = POLLIN;
+  r = poll (&p, 1, CALL_TIMEOUT_S * 1000);
+  close (fd);
+  if (r < 0)
+    return libcrun_make_error (err, errno, "waiting for %d", pid);
+  return r;
+}
+
 /* `crun exec <id> /usr/bin/true`: the process crun's exec builds from its arguments, merged with the
- * container's environment; libcrun waits for it and returns its exit status. */
+ * container's environment. libcrun's exec makes its caller a child subreaper and waits until the caller
+ * has no child left (reap_subprocesses: waitpid(-1) until ECHILD). That holds for crun's command line,
+ * whose only child is the exec'd process, but here every container's init is the driver's child too, so
+ * the wait would never end. So the call runs in a fork of the driver, whose only child is the process it
+ * execs, and which exits with that process's status. The fork is part of the call's time. */
 static int
 do_exec (const char *id, libcrun_error_t *err)
 {
   libcrun_context_t con;
   struct libcrun_container_exec_options_s opts;
   runtime_spec_schema_config_schema_process *process;
-  int ret;
+  char why[512];
+  ssize_t got;
+  int ret, status, msg[2];
+  pid_t helper;
 
   ret = context_for (&con, id, err);
   if (ret < 0)
@@ -140,11 +169,55 @@ do_exec (const char *id, libcrun_error_t *err)
   opts.struct_size = sizeof (opts);
   opts.process = process;
   opts.merge_env = true;
-  ret = libcrun_container_exec_with_options (&con, id, &opts, err);
+  if (pipe2 (msg, O_CLOEXEC) < 0)
+    {
+      free_runtime_spec_schema_config_schema_process (process);
+      return libcrun_make_error (err, errno, "a pipe for exec's error");
+    }
+  helper = fork ();
+  if (helper < 0)
+    {
+      free_runtime_spec_schema_config_schema_process (process);
+      close (msg[0]);
+      close (msg[1]);
+      return libcrun_make_error (err, errno, "fork for exec");
+    }
+  if (helper == 0)
+    {
+      close (msg[0]);
+      ret = libcrun_container_exec_with_options (&con, id, &opts, err);
+      if (ret < 0)
+        {
+          const char *m = (*err && (*err)->msg) ? (*err)->msg : "exec failed";
+          _exit (write (msg[1], m, strlen (m)) < 0 ? 254 : 255);
+        }
+      _exit (ret & 0xff);
+    }
+  close (msg[1]);
   free_runtime_spec_schema_config_schema_process (process);
-  if (ret > 0)
-    return libcrun_make_error (err, 0, "exec of /usr/bin/true exited %d", ret);
-  return ret;
+  ret = ended_within_bound (helper, err);
+  if (ret <= 0)
+    {
+      kill (helper, SIGKILL);
+      waitpid (helper, NULL, 0);
+      close (msg[0]);
+      return ret < 0 ? ret : libcrun_make_error (err, 0, "exec still running %d s after it began", CALL_TIMEOUT_S);
+    }
+  if (waitpid (helper, &status, 0) < 0)
+    {
+      close (msg[0]);
+      return libcrun_make_error (err, errno, "reaping exec's fork");
+    }
+  got = read (msg[0], why, sizeof (why) - 1);
+  close (msg[0]);
+  if (got > 0)
+    {
+      why[got] = '\0';
+      return libcrun_make_error (err, 0, "%s", why);
+    }
+  if (! WIFEXITED (status) || WEXITSTATUS (status) != 0)
+    return libcrun_make_error (err, 0, "exec of /usr/bin/true ended with wait status %d", status);
+  return 0;
 }
 
 /* `crun delete --force <id>`: libcrun reads the container's config from its state. */
@@ -177,25 +250,16 @@ init_pid (const char *id)
   return pid;
 }
 
-/* Reaps a deleted container's init: waits on its pidfd, at most CALL_TIMEOUT_S. One that isn't this
- * process's child (never was, or already reaped) has nothing to reap. */
+/* Reaps a deleted container's init, once it has ended within the bound. One that isn't this process's
+ * child (never was, or already reaped) has nothing to reap. */
 static int
 reap (pid_t pid, libcrun_error_t *err)
 {
-  struct pollfd p;
-  int fd, r;
-
-  fd = (int) syscall (SYS_pidfd_open, pid, 0);
-  if (fd < 0)
-    return errno == ESRCH ? 0 : libcrun_make_error (err, errno, "pidfd_open of init %d", pid);
-  p.fd = fd;
-  p.events = POLLIN;
-  r = poll (&p, 1, CALL_TIMEOUT_S * 1000);
-  close (fd);
+  int r = ended_within_bound (pid, err);
+  if (r < 0)
+    return r;
   if (r == 0)
     return libcrun_make_error (err, 0, "init %d still running %d s after its delete", pid, CALL_TIMEOUT_S);
-  if (r < 0)
-    return libcrun_make_error (err, errno, "waiting for init %d", pid);
   if (waitpid (pid, NULL, 0) < 0 && errno != ECHILD)
     return libcrun_make_error (err, errno, "reaping init %d", pid);
   return 0;

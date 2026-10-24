@@ -95,7 +95,9 @@ cpu, io, memory and pids.
 (`create <bundle> <id>`, `start <id>`, `exec <id>`, `delete <id>`), one reply a line on its fd 4 (`ok <wall
 ns> <cpu ns>` or `err <why>`). Each makes the libcrun calls crun's command line makes for the same command
 (`src/run_create.c`, `start.c`, `exec.c` and `delete.c`), so the two differ only in the process the CLI spawns
-per call. oci_bench.py's `libcrun` runtime starts one driver in each process that calls it (the main one,
+per call. Exec alone forks the driver: libcrun's exec waits until its caller has no child left
+(`reap_subprocesses`), which holds for crun's command line but never for a driver whose children include every
+container's init, so the call runs in a fork whose only child is the process it execs, and the fork is in its time. oci_bench.py's `libcrun` runtime starts one driver in each process that calls it (the main one,
 and each throughput worker before the clock), and runs its phases unchanged, so its JSON is the CLI
 runtimes'. A call's wall time is the libcrun call's alone, and its CPU is the driver's and its reaped
 children's over it. libcrun's create clones the container's init from the calling process, so every init is
