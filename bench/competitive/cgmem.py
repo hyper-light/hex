@@ -19,10 +19,19 @@ usage"). Without it, a cgroup's faulted hugepages are its `hugetlb.<size>.curren
 Its `hugetlb.<size>.rsvd.current` counts reservations, and a faulted page stays charged there too
 (cgroup-v1/hugetlb.rst), so the reservations are a figure of their own (`hugetlb_reserved_bytes`), never added
 to what's held. E2B backs each sandbox's guest memory with 2 MiB hugepages; no other stack here uses any.
+
+A density phase reads its baseline only once no cgroup under what it watches is still being torn down
+(settle). The kernel charges a new memory cgroup's own statistics to its parent (mm/memcontrol.c,
+mem_cgroup_css_alloc: set_active_memcg(parent)) and frees them only after the cgroup is released, so a baseline
+read right after cgroups came and went starts high and the phase's rise comes out low. On adacachy, right after
+300 cgroups were made and removed, a baseline read at once stood 15.1-17.1 MiB above a reading 0.5 s later, and
+one read once settle returned (41-56 ms) stood 2.0-3.2 MiB above it (four runs): what the kernel frees after a
+release (RCU-deferred), under 1% of a density phase's rise over 1,000 units.
 """
 import glob
 import os
 import re
+import time
 
 _HUGETLB_USAGE = re.compile(r"hugetlb\.[0-9]+[KMG]B\.current")
 _HUGETLB_RSVD = re.compile(r"hugetlb\.[0-9]+[KMG]B\.rsvd\.current")
@@ -68,6 +77,30 @@ def held_bytes(path):
         swapped = int(f.read())
     huge = 0 if HUGETLB_IN_CURRENT else hugetlb_bytes(path)
     return current - stat["file"] + stat["shmem"] - stat.get("zswap", 0) + swapped + huge
+
+
+def dying(path):
+    """How many cgroups under `path` are removed but not yet released (cgroup.stat nr_dying_descendants); 0 for a
+    stand-in directory off the bench host, which has no cgroup.stat."""
+    try:
+        with open(os.path.join(path, "cgroup.stat")) as f:
+            for line in f:
+                k, v = line.split()
+                if k == "nr_dying_descendants":
+                    return int(v)
+    except FileNotFoundError:
+        pass
+    return 0
+
+
+def settle(paths, timeout_s):
+    """Waits, at most timeout_s, until no cgroup under `paths` is dying; returns how many still were."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        left = sum(dying(p) for p in paths if os.path.isdir(p))
+        if left == 0 or time.monotonic() > deadline:
+            return left
+        time.sleep(0.005)
 
 
 def per_unit(held, count):

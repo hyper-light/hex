@@ -221,6 +221,29 @@ mod linux {
         std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep")
     }
 
+    /// How many cgroups under `cg` are removed but not yet released (`cgroup.stat` nr_dying_descendants).
+    fn dying(cg: &Path) -> i64 {
+        read(&cg.join("cgroup.stat"))
+            .lines()
+            .find_map(|l| l.strip_prefix("nr_dying_descendants "))
+            .and_then(|v| v.trim().parse().ok())
+            .expect("nr_dying_descendants in cgroup.stat")
+    }
+
+    /// Waits, at most CALL_TIMEOUT, until no cgroup under `cg` is dying, as cgmem.py's settle does: the
+    /// kernel frees a removed cgroup's statistics, charged to its parent, only once it's released.
+    /// Returns how many still were.
+    fn settle(cg: &Path) -> i64 {
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        loop {
+            let left = dying(cg);
+            if left == 0 || Instant::now() > deadline {
+                return left;
+            }
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    }
+
     /// Boxes holding `sleep infinity`, one at a time, each up before the next, until the cap or the
     /// memory budget; then what the cgroup's tree holds per box. Every box is removed afterwards, and a
     /// box or cgroup left behind is the phase's error.
@@ -231,6 +254,7 @@ mod linux {
         cap: usize,
         budget_mib: i64,
     ) -> Result<Value, String> {
+        let dying_at_start = settle(own);
         let (base, held0) = (read_i64(&own.join("memory.current")), held_bytes(own));
         let (mut ids, mut procs): (Vec<BoxId>, Vec<Box<dyn Proc>>) = (Vec::new(), Vec::new());
         let mut stop = "cap".to_owned();
@@ -297,7 +321,7 @@ mod linux {
         });
         Ok(
             json!({"count": count, "stop": stop, "start_wall_s": wall.as_secs_f64(), "memory_bytes": used,
-                  "watched": [own], "held": held}),
+                  "dying_at_start": dying_at_start, "watched": [own], "held": held}),
         )
     }
 

@@ -369,6 +369,7 @@ def phase_sustained(rt, lifecycles):
 
 
 def phase_density(rt, cap, budget_mib):
+    dying = cgmem.settle([CG], CALL_TIMEOUT_S)
     base, held0 = mem_bytes(), cgmem.held_bytes(CG)
     budget = budget_mib * 1024 * 1024
     created, running = [], 0
@@ -399,7 +400,7 @@ def phase_density(rt, cap, budget_mib):
             except OpError:
                 pass
     count = running
-    return {"count": count, "stop": stop_reason, "start_wall_s": wall, "memory_bytes": used,
+    return {"count": count, "stop": stop_reason, "start_wall_s": wall, "memory_bytes": used, "dying_at_start": dying,
             "memory_per_container_bytes": used / count if count else None,
             "containers_per_gib": count / (used / 2**30) if used > 0 else None,
             "held": cgmem.per_unit(held, count)}

@@ -273,6 +273,7 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
     # charged to S when the process moves on (cgroup-v2.rst, "Memory Ownership"), so S is watched for every
     # method, not only Hex's, whose boxes live under it.
     watch = [S] + ([] if method == "hex" else [f"{user_service_cg}/{DENSITY_SLICE}"] + helper_cgroups())
+    dying = cgmem.settle(watch, CALL_TIMEOUT_S)
     base, held0 = mem(watch), held(watch)
     kids, units, stop = [], [], "cap"
     t0 = time.perf_counter()
@@ -344,7 +345,8 @@ def phase_density(method, hex_bin, cap, budget_mib, S, user_service_cg):
                            timeout=CALL_TIMEOUT_S)
         if r.returncode:
             slice_left = r.stderr.strip()[:200] or f"exit {r.returncode}"
-    return {"count": count, "stop": stop, "start_wall_s": wall, "memory_bytes": used, "slice_not_stopped": slice_left,
+    return {"count": count, "stop": stop, "start_wall_s": wall, "memory_bytes": used, "dying_at_start": dying,
+            "slice_not_stopped": slice_left,
             "memory_per_box_bytes": used / count if count else None,
             "boxes_per_gib": count / (used / 2**30) if used > 0 else None,
             "watched": watch, "held": cgmem.per_unit(held_rise, count)}
