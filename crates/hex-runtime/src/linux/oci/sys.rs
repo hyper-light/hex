@@ -205,6 +205,25 @@ impl WaitStatus {
     }
 }
 
+/// Sets signal `sig` to its default disposition and raises it on this process, so the process ends
+/// the way the signal says: `hex __oci-exec` in seam mode ends by the signal that ended its program,
+/// so the node agent's pidfd watch reads that outcome. Returns only if the raise didn't end it.
+pub fn raise_default(sig: i32) -> Result<(), OciError> {
+    // SAFETY: signal(2) with SIG_DFL and a valid signal number installs the default disposition and
+    // writes nothing of ours; the return value is checked against SIG_ERR.
+    if unsafe { libc::signal(sig, libc::SIG_DFL) } == libc::SIG_ERR {
+        return Err(OciError::os(
+            "signal SIG_DFL",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: raise(3) with a valid signal number; no pointers, writes nothing. Checked.
+    if unsafe { libc::raise(sig) } != 0 {
+        return Err(OciError::os("raise", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 /// Sends signal `sig` to the container: to the process group when `all`, else to the init `pid`.
 pub fn kill(pid: i32, sig: i32, all: bool) -> Result<(), OciError> {
     let target = if all {

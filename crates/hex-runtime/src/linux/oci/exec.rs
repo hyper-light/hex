@@ -43,6 +43,12 @@ pub struct Request {
     pub env: Vec<String>,
     /// Overrides the process's user: a uid, and a gid (the process's own when absent).
     pub user: Option<(u32, Option<u32>)>,
+    /// Seam mode: the helper is spawned by the node agent and watched by its pidfd, not a shell, so
+    /// a program ended by a signal makes the helper die by that same signal (the node reports
+    /// `Signal(n)`), rather than exiting 128 + n as a shell reports. A program that exits normally
+    /// exits the helper with its code either way. Absent in a request from the command line.
+    #[serde(default)]
+    pub seam: bool,
 }
 
 /// A helper that fails before the program can start exits as a shell does for a program it can't run
@@ -121,7 +127,7 @@ fn helper() -> Result<u8, (u8, OciError)> {
         sys::Fork::Child => Err(child(&process, procs, &signals)),
         sys::Fork::Parent(pid) => {
             drop(procs);
-            wait_forwarding(pid, &signals).map_err(cannot)
+            wait_forwarding(pid, &signals, req.seam).map_err(cannot)
         }
     }
 }
@@ -238,8 +244,9 @@ fn child(
 }
 
 /// Waits for the program, passing on each forwarded signal the helper receives, then reports its
-/// status as a shell does.
-fn wait_forwarding(pid: i32, signals: &sys::ForwardedSignals) -> Result<u8, OciError> {
+/// status: a shell's (the exit code, or 128 + the signal), or in `seam` mode by ending the helper
+/// the same way the program ended, so the node's pidfd watch sees the program's own outcome.
+fn wait_forwarding(pid: i32, signals: &sys::ForwardedSignals, seam: bool) -> Result<u8, OciError> {
     let raw = rustix::process::Pid::from_raw(pid)
         .ok_or_else(|| OciError::os("clone", "the child's pid isn't a pid"))?;
     let pidfd = rustix::process::pidfd_open(raw, rustix::process::PidfdFlags::empty())
@@ -261,7 +268,16 @@ fn wait_forwarding(pid: i32, signals: &sys::ForwardedSignals) -> Result<u8, OciE
             let _ = sys::kill(pid, sig, false);
         }
         if ended.revents().contains(PollFlags::IN) {
-            return status_of(&sys::waitpid(pid)?);
+            let status = sys::waitpid(pid)?;
+            if seam && let Some(sig) = status.term_signal() {
+                // End the helper by the same signal, so the node's pidfd watch reads the program's
+                // outcome and reports `Signal(sig)`. The forwarded signals are unblocked and set back
+                // to their default first, so the raise ends the helper rather than being caught or
+                // ignored; a signal that can't be raised falls through to the shell mapping.
+                signals.restore()?;
+                let _ = sys::raise_default(sig);
+            }
+            return status_of(&status);
         }
     }
 }
@@ -296,6 +312,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             env: env.iter().map(|s| (*s).to_owned()).collect(),
             user,
+            seam: false,
         }
     }
 

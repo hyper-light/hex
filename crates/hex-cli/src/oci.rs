@@ -83,7 +83,7 @@ fn usage() -> OciError {
 /// The command `hex oci exec` becomes (`Runtime::exec_command`).
 fn exec(rest: &[String]) -> Result<std::process::Command, OciError> {
     let e = parse_exec(rest)?;
-    Runtime::new(Runtime::default_root()).exec_command(&e.id, e.args, e.cwd, e.env, e.user)
+    Runtime::new(Runtime::default_root()).exec_command(&e.id, e.args, e.cwd, e.env, e.user, false)
 }
 
 /// `hex oci exec`'s command line.

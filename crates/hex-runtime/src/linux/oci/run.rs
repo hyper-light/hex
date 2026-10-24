@@ -71,11 +71,42 @@ fn from_refusal(r: Refusal) -> OciError {
 /// The OCI runtime: containers under one state root.
 pub struct Runtime {
     root: PathBuf,
+    /// The binary re-exec'd as `hex __oci-init` (the shim) and `hex __oci-exec` (the exec helper).
+    /// `None` is this process's own binary, as the `hex oci` command line uses: it handles those
+    /// subcommands. A library caller whose binary doesn't — the node agent linked into another
+    /// program, the bench — names the `hex` binary explicitly ([`Runtime::with_helper`]).
+    helper: Option<PathBuf>,
+}
+
+/// Where a container's cgroup comes from.
+enum Cgroup {
+    /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
+    FromSpec,
+    /// Made and bounded already by the caller (the `Runtime` seam, the node agent's box root).
+    Provided(BoxCgroup),
 }
 
 impl Runtime {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, helper: None }
+    }
+
+    /// The runtime with its container init and exec helper re-exec'd from `helper` (the `hex`
+    /// binary), for a caller whose own binary isn't `hex`: the node agent behind the `Runtime` seam,
+    /// and the bench that drives it.
+    pub fn with_helper(root: PathBuf, helper: PathBuf) -> Self {
+        Self {
+            root,
+            helper: Some(helper),
+        }
+    }
+
+    /// The binary to re-exec for the shim and the exec helper.
+    fn helper_exe(&self) -> Result<PathBuf, OciError> {
+        match &self.helper {
+            Some(exe) => Ok(exe.clone()),
+            None => std::env::current_exe().map_err(|e| OciError::os("finding the hex binary", e)),
+        }
     }
 
     /// The default state root: `$HEX_OCI_ROOT`, else `$XDG_RUNTIME_DIR/hex-oci`, else
@@ -97,11 +128,38 @@ impl Runtime {
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
     /// FIFO, in the `created` state. `bundle` holds `config.json`; `pid_file`, if given, receives
-    /// the container init's pid.
+    /// the container init's pid. The container's cgroup is made from the spec's `cgroupsPath` under
+    /// the cgroup root, as the runtime-spec's command line does.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
+        self.create_with(id, bundle, pid_file, Cgroup::FromSpec)
+    }
+
+    /// Makes the container in a cgroup the caller already made and bounded, rather than from the
+    /// spec: the `Runtime` seam's path, where the node agent puts each container under its own
+    /// delegated box root with the box's bounds in force (as the `process` class does), so one code
+    /// path makes and bounds every box's cgroup. The spec's device list still governs the container's
+    /// device access; its `cgroupsPath` and `linux.resources` are ignored, the box's bounds standing
+    /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
+    pub fn create_in_cgroup(
+        &self,
+        id: &str,
+        bundle: &Path,
+        pid_file: Option<&Path>,
+        cgroup: BoxCgroup,
+    ) -> Result<(), OciError> {
+        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup))
+    }
+
+    fn create_with(
+        &self,
+        id: &str,
+        bundle: &Path,
+        pid_file: Option<&Path>,
+        cgroup: Cgroup,
+    ) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
-        let result = self.create_inner(id, bundle, &dir, pid_file);
+        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup);
         if result.is_err() {
             let _ = dir.remove();
         }
@@ -114,6 +172,7 @@ impl Runtime {
         bundle: &Path,
         dir: &Dir,
         pid_file: Option<&Path>,
+        cgroup: Cgroup,
     ) -> Result<(), OciError> {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
@@ -126,9 +185,18 @@ impl Runtime {
                 .unwrap_or(&Resources::default()),
         )?;
         make_fifo(&dir.fifo())?;
-        let cgroup = make_cgroup(&spec, id, &plan)?;
+        // A caller-provided cgroup is already made and bounded, so only the spec's device program is
+        // attached to it; one made from the spec takes the whole plan (its resource writes and device
+        // program). The provided cgroup is the caller's to remove, so a failure here leaves it.
+        let (cgroup, caller_owns) = match cgroup {
+            Cgroup::FromSpec => (make_cgroup(&spec, id, &plan)?, false),
+            Cgroup::Provided(cg) => {
+                attach_device_program(&cg, &plan)?;
+                (cg, true)
+            }
+        };
         let result = self.start_shim(id, bundle, dir, pid_file, &spec, &cgroup);
-        if result.is_err() {
+        if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
             let _ = end_cgroup(&cgroup, id);
         }
@@ -151,7 +219,7 @@ impl Runtime {
         keep_across_exec(&sync_w)?;
         keep_across_exec(&map_r)?;
 
-        let exe = std::env::current_exe().map_err(|e| OciError::os("finding the hex binary", e))?;
+        let exe = self.helper_exe()?;
         let mut cmd = Command::new(exe);
         cmd.arg("__oci-init")
             .env(init::ENV_SYNC_W, sync_w.as_raw_fd().to_string())
@@ -278,7 +346,8 @@ impl Runtime {
 
     /// The command that runs `args` in the container (`hex oci exec`): the helper `hex __oci-exec`,
     /// for the caller to exec into, so a signal its own caller sends reaches the helper that passes it
-    /// on (exec.rs). The container must be created or running, its init alive.
+    /// on (exec.rs). The container must be created or running, its init alive. `seam` makes the helper
+    /// end the way its program did (for the node agent's pidfd watch) rather than as a shell reports.
     pub fn exec_command(
         &self,
         id: &str,
@@ -286,6 +355,7 @@ impl Runtime {
         cwd: Option<String>,
         env: Vec<String>,
         user: Option<(u32, Option<u32>)>,
+        seam: bool,
     ) -> Result<Command, OciError> {
         let state = self.dir(id)?.get(id)?;
         if !matches!(state.status, Status::Created | Status::Running) {
@@ -313,10 +383,11 @@ impl Runtime {
             cwd,
             env,
             user,
+            seam,
         };
         let json = serde_json::to_string(&request)
             .map_err(|e| OciError::Broken(format!("the exec request: {e}")))?;
-        let exe = std::env::current_exe().map_err(|e| OciError::os("finding the hex binary", e))?;
+        let exe = self.helper_exe()?;
         let mut cmd = Command::new(exe);
         cmd.arg("__oci-exec")
             .env(crate::linux::oci::exec::ENV_REQUEST, json);
@@ -543,6 +614,12 @@ fn apply(cg: &BoxCgroup, plan: &Plan) -> Result<(), OciError> {
     for w in &plan.writes {
         write_file(&cg.dir().join(&w.file), &w.value).map_err(from_refusal)?;
     }
+    attach_device_program(cg, plan)
+}
+
+/// Attaches the plan's device program to the cgroup, if it has one; the device access a container
+/// gets is the spec's, whether its cgroup was made from the spec or by the node under its box root.
+fn attach_device_program(cg: &BoxCgroup, plan: &Plan) -> Result<(), OciError> {
     if let Some(insns) = &plan.devices {
         let prog = sys::load_device_program(insns)?;
         let dir = cg.open_dir().map_err(from_refusal)?;
