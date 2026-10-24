@@ -91,8 +91,13 @@ impl Spawn {
         stdio: [OwnedFd; 3],
     ) -> std::io::Result<Self> {
         let [a, b, c] = stdio;
+        // Each stdio fd ends up at 3 or above and close-on-exec, so the child's `dup2` onto 0, 1 and
+        // 2 makes the only copies the workload keeps (dup2 clears close-on-exec on its target) and
+        // the original closes on exec rather than leaking in beside it. One already above 2 keeps its
+        // number but is marked close-on-exec; one at 0..=2 is moved above 2 (which sets it too).
         let above = |fd: OwnedFd| -> std::io::Result<OwnedFd> {
             if fd.as_raw_fd() > 2 {
+                rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
                 Ok(fd)
             } else {
                 Ok(rustix::io::fcntl_dupfd_cloexec(&fd, 3)?)
@@ -181,7 +186,18 @@ pub fn clone_into_cgroup(cgroup: BorrowedFd<'_>, spawn: Spawn) -> std::io::Resul
             let pid = u32::try_from(child_pid)
                 .map_err(|_| std::io::Error::other("clone3 returned a pid out of range"))?;
             let mut errno = [0u8; 4];
-            match read_fully(&err_r, &mut errno)? {
+            let got = match read_fully(&err_r, &mut errno) {
+                Ok(got) => got,
+                Err(e) => {
+                    // The clone succeeded but reading its errno pipe failed unexpectedly, so the
+                    // child's state is unknown: end it and reap it rather than leak it (CLAUDE.md §2),
+                    // then report the read failure. A SIGKILL to a child that has already exited is a
+                    // harmless ESRCH; the pidfd reap can't take a recycled pid.
+                    reap_cloned(child_pid, pidfd.as_fd());
+                    return Err(e);
+                }
+            };
+            match got {
                 0 => Ok(Cloned::Started { pid, pidfd }),
                 n => {
                     // The child has written why and exits; reap it, so its pid isn't left a zombie.
@@ -198,6 +214,21 @@ pub fn clone_into_cgroup(cgroup: BorrowedFd<'_>, spawn: Spawn) -> std::io::Resul
             }
         }
     }
+}
+
+/// Ends a cloned child and reaps it, so a spawn that fails after the clone leaves neither a zombie
+/// nor a running workload (CLAUDE.md §2). The child is unreaped, so its pid can't have been recycled;
+/// the reap waits on the pidfd, which names the child itself.
+fn reap_cloned(child_pid: i64, pidfd: BorrowedFd<'_>) {
+    if let Ok(pid) = c_int::try_from(child_pid) {
+        // SAFETY: kill(2) with the child's pid and SIGKILL; no pointers, writes nothing. The return
+        // value isn't needed — a child that has already exited gives ESRCH, which the reap below
+        // handles; a pid out of `c_int` range can't be a real one, so the kill is skipped.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    let _ = rustix::process::waitid(WaitId::PidFd(pidfd), WaitIdOptions::EXITED);
 }
 
 /// `strs` as the null-terminated array of pointers execve(2) takes; `strs` must outlive it.

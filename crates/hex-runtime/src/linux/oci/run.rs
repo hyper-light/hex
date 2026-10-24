@@ -332,9 +332,16 @@ impl Runtime {
                 OciError::WrongState(id.to_owned(), "stopped", "created")
             });
         }
+        // The init writes one byte as it takes the start. A zero-byte read is end-of-file: the init
+        // opened the FIFO and then died (killed, or OOM'd) without writing, so the FIFO's write end
+        // closed and `poll` returned a hang-up. The container is stopped, not running; refused, never
+        // recorded running (CLAUDE.md §3).
         let mut byte = [0u8; 1];
-        let _ = rustix::io::read(&fifo, &mut byte)
+        let n = rustix::io::read(&fifo, &mut byte)
             .map_err(|e| OciError::os("reading the exec fifo", e))?;
+        if n == 0 {
+            return Err(OciError::WrongState(id.to_owned(), "stopped", "created"));
+        }
         state.status = Status::Running;
         dir.put(&state)?;
         // poststart hooks run after the workload has started (OCI §Lifecycle).
