@@ -8,7 +8,10 @@ memory, which reclaim can't drop), plus memory.swap.current (fedora swaps to zra
 swapped out is still held, counted at its full size). On a zswap host memory.current also holds zswap's
 compressed copies of pages memory.swap.current already counts, so `zswap` comes off. The fields are the
 kernel's: Documentation/admin-guide/cgroup-v2.rst, memory.stat and memory.swap.current. A cgroup without
-memory.swap.current (no swap accounting) is an error, not a zero.
+memory.swap.current (no swap accounting) is an error, not a zero. memory.stat is a cached view, flushed on a
+read only where enough updates are pending and otherwise every 2 s (mm/memcontrol.c), so a reading right after
+a burst can miss its newest `file`, `shmem` and `zswap` updates. probes/scope_charge.py measured what that
+costs a density reading: 371.4 KiB per box against 370.8 KiB once flushed, 0.2% (adacachy, 100 boxes).
 
 Hugepages are held too, but memory.current counts them only when the hierarchy is mounted with
 `memory_hugetlb_accounting` (cgroup-v2.rst: "Count HugeTLB memory usage towards the cgroup's overall memory

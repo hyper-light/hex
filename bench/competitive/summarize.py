@@ -165,7 +165,7 @@ def platform_section(run, oci_data):
         lc = r["phases"].get("lifecycle", {}).get("ms", {})
         return [a + b for a, b in zip(lc.get("create", []), lc.get("start", []))]
     per = {"hex": {"create": best_dist([hex_create_until_running(r) for r in hex_rounds]),
-                   "exec": None,
+                   "exec": best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get("exec", []) for r in hex_rounds]),
                    "delete": best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get("delete", []) for r in hex_rounds])}}
     for name, rs in plats.items():
         per[name] = {op: best_dist([r["phases"].get("lifecycle", {}).get("ms", {}).get(op, []) for r in rs])

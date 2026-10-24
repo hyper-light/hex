@@ -9,8 +9,11 @@ against a hosted platform (HOSTED=1), which the result then labels hosted (its n
   e2b:      E2B_API_KEY, E2B_DOMAIN or E2B_API_URL as `docker compose exec ready cat /run/e2b/sdk.env`
             prints them (hosted: E2B_API_KEY alone); template E2B_TEMPLATE ("base"). Also any platform that
             serves E2B's API, named E2B_NAME in the result (e2b by default): CubeSandbox, with E2B_API_URL its
-            CubeAPI, E2B_SANDBOX_URL its CubeProxy (the SDK names the sandbox in a header) and E2B_TEMPLATE
-            the template cubemastercli made.
+            CubeAPI (http://127.0.0.1:3000; api.cube.app reaches CubeProxy, which can't route it), E2B_API_KEY
+            its CUBE_API_KEY, E2B_TEMPLATE a template it made, and E2B_SANDBOX_URL unset: CubeProxy routes a
+            sandbox by Host <port>-<id>.cube.app or by path, never by header, so envd goes to
+            https://49983-<id>.cube.app, trusted through SSL_CERT_FILE (the SDK's TLS takes it in place of the
+            system store).
   daytona:  DAYTONA_API_URL, DAYTONA_API_KEY; the default snapshot.
   modal:    MODAL_IMAGE (a published image), MODAL_RUNTIME, MODAL_APP; `modal setup` authenticates.
   docker:   a Docker-compatible engine's CLI, ENGINE (docker, podman or nerdctl; docker by default), with

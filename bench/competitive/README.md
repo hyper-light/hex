@@ -9,7 +9,7 @@ measures where Hex stands today. `RESULT.md` records each run of record.
 
 | Hex class | Competitors | Where |
 |---|---|---|
-| `oci` (`hex oci create/start/state/kill/delete`) | runc, crun, youki, gVisor `runsc` (each project's latest release, fetched and verified by `fetch.py`) | one privileged bench container, private cgroup namespace, no network |
+| `oci` (`hex oci create/start/exec/state/kill/delete`) | runc, crun, youki, gVisor `runsc` (each project's latest release, fetched and verified by `fetch.py`) | one privileged bench container, private cgroup namespace, no network |
 | `process` (`hex box run`) | systemd transient scopes (`systemd-run --user --scope`) and services (`systemd-run --user --wait`) | a delegated systemd user service on the host |
 | sandbox platforms | Daytona (self-hosted, v0.190.0 tree, Docker-based) and E2B (`embed/`, Firecracker on one KVM host); hosted platforms end to end, labelled hosted | see "Platforms" below |
 
@@ -91,7 +91,9 @@ comparison for E2B is Hex's `firecracker` or `shards` class, which does not exis
   (raising `net.ipv4.tcp_max_syn_backlog` and `vm.max_map_count`), adds one iptables mangle rule, and
   reserves hugepages (4 GiB by default). `docker compose down -v` then `docker compose --profile purge run
   --rm host-teardown` undoes it, except `kvm` and `tun` stay loaded and the two sysctls stay raised until a
-  reboot. On fedora, a shared host, that needs the coordinator's and Ada's go-ahead first.
+  reboot. It ran on adacachy, by Ada's decision (2026-10-24), inside one privileged container with its own
+  Docker daemon and network namespace (`e2b-dind/`, `platform-rounds/e2b_adacachy.sh`), so adacachy's
+  firewall stayed as it was; fedora couldn't reserve the contiguous hugepages it needs.
 - **Daytona**: its `docker/docker-compose.yaml` (14 services: API, proxy, a privileged runner, SSH gateway,
   Dex, Postgres, Redis, a registry, MinIO, tracing) runs inside Docker without host changes. Its images are
   untagged (`latest`), so the run records each image's digest; the frozen v0.190.0 tree
@@ -108,6 +110,6 @@ comparison for E2B is Hex's `firecracker` or `shards` class, which does not exis
   on top of it, on the kind cluster. Substrate runs actors only in gVisor or a microVM, so the kind node
   needs runsc as a containerd runtime. Hex has no suspend or resume yet, so those rows show Hex n/a.
 - **Hosted-only platforms** (E2B Cloud, Daytona Cloud, Modal, Morph, CodeSandbox, Fly Machines, Vercel,
-  Cloudflare) can be measured only end to end, from the bench host through their public APIs, with
-  accounts and API keys that only Ada can provide. Their results are labelled hosted (`HOSTED=1`), as the
-  numbers include the network.
+  Cloudflare) are not measured, by Ada's decision (2026-10-23): the open-source alternatives run on the same
+  hardware as Hex instead. The harness can still measure one end to end, from the bench host through its
+  public API, labelled hosted (`HOSTED=1`), as its numbers include the network.
