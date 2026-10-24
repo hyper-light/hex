@@ -14,9 +14,10 @@ Methods (each runs /usr/bin/true, or sleep for density, under the same limits: m
 
 Every call is spawned the same way (fork, then execve in a single-threaded worker process); the Hex
 child first writes itself into its worker cgroup, a few microseconds the systemd children skip.
-Phases: latency (n sequential runs), throughput (1, 8, 32 worker processes), CPU (the call's own
-rusage, plus the user manager's and the user bus's CPU for systemd), density (boxes holding `sleep
-infinity` until the cap or the memory budget; the memory the watched cgroup holds per box, cgmem.py).
+Phases: latency (n sequential runs), throughput (1, 8, 32 worker processes, timed from when all are up),
+CPU (the call's own rusage, plus the user manager's and the user bus's CPU for systemd), density (boxes
+holding `sleep infinity` until the cap or the memory budget; the memory the watched cgroup holds per box,
+cgmem.py).
 HEXBENCH_PHASES names the phases to run (all three by default).
 """
 import json
@@ -25,6 +26,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))  # cgmem.py, beside this file even under -I
@@ -99,10 +101,12 @@ def run_once(argv, cgroup):
     return ms, ru.ru_utime + ru.ru_stime
 
 
-def worker(method, hex_bin, cgroup, count, warmup, conn):
-    """A single-threaded worker process: count timed runs of the method; sends samples back."""
+def worker(method, hex_bin, cgroup, count, warmup, start, conn):
+    """A single-threaded worker process: after the start barrier, count timed runs of the method; sends
+    samples back."""
     try:
         argv = argv_for(method, hex_bin, ["/usr/bin/true"])
+        start.wait(timeout=CALL_TIMEOUT_S)
         ms, cpu = [], []
         for i in range(warmup + count):
             # `hex box run` takes over the cgroup it starts in and parents its box there, after which
@@ -144,32 +148,47 @@ def pids_of(name):
 
 
 def run_workers(method, hex_bin, workers, per_worker, warmup, S):
+    """`workers` worker processes released together once every one is up: (their results, the wall s from
+    the release to the last result). A worker's interpreter start-up isn't a run, so it's off the clock."""
     ctx = mp.get_context("spawn")
+    start = ctx.Barrier(workers + 1)
     procs = []
-    for k in range(workers):
-        a, b = ctx.Pipe(duplex=False)
-        p = ctx.Process(target=worker, args=(method, hex_bin, f"{S}/w{k}", per_worker, warmup, b))
-        p.start()
-        b.close()  # only the worker holds the sending end, so a worker that dies ends recv() with EOFError
-        procs.append((p, a))
-    out = []
-    for p, a in procs:
+    try:
+        for k in range(workers):
+            a, b = ctx.Pipe(duplex=False)
+            p = ctx.Process(target=worker, args=(method, hex_bin, f"{S}/w{k}", per_worker, warmup, start, b))
+            p.start()
+            b.close()  # only the worker holds the sending end, so a worker that dies ends recv() with EOFError
+            procs.append((p, a))
         try:
-            out.append(a.recv())
-        except EOFError:
-            out.append({"error": f"worker exited {p.exitcode} without a result"})
-    for p, _ in procs:
-        p.join(timeout=CALL_TIMEOUT_S)
+            start.wait(timeout=CALL_TIMEOUT_S)
+        except threading.BrokenBarrierError:
+            raise RuntimeError(f"a worker wasn't up within {CALL_TIMEOUT_S}s") from None
+        t0 = time.perf_counter()
+        out = []
+        for p, a in procs:
+            try:
+                out.append(a.recv())
+            except EOFError:
+                out.append({"error": f"worker exited {p.exitcode} without a result"})
+        wall = time.perf_counter() - t0
+    finally:
+        # No worker outlives its phase: each call has its own timeout, so one past this is stuck.
+        for p, _ in procs:
+            p.join(timeout=CALL_TIMEOUT_S)
+            if p.is_alive():
+                p.kill()
+                p.join()
     errs = [o["error"] for o in out if "error" in o]
     if errs:
         raise RuntimeError(errs[0])
-    return out
+    return out, wall
 
 
 def phase_latency_cpu(method, hex_bin, n, warmup, S):
     helpers = pids_of("systemd") + pids_of("dbus-broker") if method != "hex" else []
     before = sum(ticks(p) for p in helpers)
-    out = run_workers(method, hex_bin, 1, n, warmup, S)[0]
+    out = run_workers(method, hex_bin, 1, n, warmup, S)[0][0]
     helper_s = (sum(ticks(p) for p in helpers) - before) / os.sysconf("SC_CLK_TCK")
     return {"ms": out["ms"], "call_cpu_s": out["cpu_s"], "helper_cpu_s_per_run": helper_s / n}
 
@@ -178,9 +197,10 @@ def phase_throughput(method, hex_bin, lifecycles, S):
     res = {}
     for conc in (1, 8, 32):
         per = max(1, lifecycles // conc)
-        t0 = time.perf_counter()
-        run_workers(method, hex_bin, conc, per, 0, S)
-        wall = time.perf_counter() - t0
+        try:
+            _, wall = run_workers(method, hex_bin, conc, per, 0, S)
+        except RuntimeError as e:
+            raise RuntimeError(f"concurrency {conc}: {e}") from None
         res[str(conc)] = {"lifecycles": per * conc, "wall_s": wall, "per_s": per * conc / wall}
     return res
 
