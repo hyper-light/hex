@@ -84,3 +84,38 @@ Without its network namespace, a lifecycle at concurrency 32 is 5% faster for He
 for crun (1,251 against 1,171). On this kernel the namespace isn't what caps throughput near 1,000-1,250/s. SOCK
 measured 200 against 900 containers/s on a 2018 kernel, before network-namespace creation was fixed
 (`docs/research/runtime/oci-runtimes-and-fast-start.md` §4.3).
+
+## Run 2: step 5, the driver's own ceiling (2026-10-24, fedora)
+
+- **Host:** fedora.attlocal.net, as in run 1, kernel 6.19.10-300.fc44.x86_64.
+- **When and load:** 2026-10-24T18:29:13Z, once Quiver's exclusive window had ended. The 1-minute load was 0.86
+  at the start (the 5-minute load was still 8.37 from the window) and 0.95 at the end.
+- **The drivers:** the new one is `oci_bench.py` at c532eef (sha256 93b17d7f…): each concurrency slot is a
+  worker process of its own. The old one is 25f65cf's (76bbf549…), a thread pool. Both ran
+  `STEPS=5 OLD_DRIVER_REV=25f65cf oci_breakdown.sh`, back to back. Out dir on fedora:
+  `~/.cache/hex-bench/out/breakdown-20261024T182913Z/`.
+- **Parameters:** 1,000 lifecycles per concurrency level. Both passes recorded errors `{}`.
+
+### 5. The driver's own ceiling: `/usr/bin/true` standing in for the runtime
+
+The throughput phase with `/usr/bin/true` as crun, so every call is a spawn and an exit and nothing else.
+Lifecycles/s, and the bench cgroup's CPU ms per lifecycle in brackets:
+
+| Driver | concurrency 1 | 8 | 32 |
+|---|---|---|---|
+| old: threads, 25f65cf | 647 (1.98) | 1,062 (2.46) | 1,394 (1.86) |
+| new: a worker process per slot, c532eef | 612 (2.06) | 6,868 (1.39) | 12,776 (1.88) |
+
+- **The new driver drives 12,776 lifecycles/s at concurrency 32:** 3.1x the 4,152/s the design's targets need,
+  and 9.2x the old driver's.
+- **The old driver's own ceiling at concurrency 32 was 1,394/s,** 7% above the plan's line of about 1,300/s.
+- **The old driver was the cap for crun, not for Hex.** In the first verification pass through the new driver
+  (2026-10-24T18:58Z, 1-minute load 1.70 at its start, `~/.cache/hex-bench/out/20261024T185457Z/`, the same
+  binaries), crun ran 1,565 lifecycles/s at concurrency 32. The old driver ran it at 1,171 in run 1, and could
+  drive at most 1,394, so crun's rows of record at concurrency 32 measured the old driver. Hex ran 1,027 against
+  1,029 in run 1: below the old driver's ceiling, so Hex's rows were its own. Through the new driver, Hex is at
+  0.66x crun at concurrency 32, where `RESULT.md` has it level (0.99x), and step 5's run of record re-measures
+  every runtime's throughput.
+- **Both drivers write the same JSON.** Run off the bench host against the stand-in (adacachy, 2026-10-24), each
+  writes the same top-level keys and the same throughput fields, and `summarize.py` makes the same table, row for
+  row, from a run directory written by either.
