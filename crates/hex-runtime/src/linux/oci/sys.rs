@@ -226,14 +226,6 @@ impl WaitStatus {
     }
 }
 
-/// Whether process `pid` exists (sending signal 0), so `state` can tell a live container from a
-/// stopped one without reaping it.
-pub fn alive(pid: i32) -> bool {
-    // SAFETY: kill(pid, 0) checks for the process's existence and delivers no signal; it writes
-    // nothing. Any error (ESRCH, EPERM) is turned into a bool.
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
 /// Sends signal `sig` to the container: to the process group when `all`, else to the init `pid`.
 pub fn kill(pid: i32, sig: i32, all: bool) -> Result<(), OciError> {
     let target = if all {

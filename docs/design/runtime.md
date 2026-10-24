@@ -73,8 +73,8 @@ remove a cgroup.
   spec lets a runtime refuse a value). `create` makes the cgroup before the shim starts, hands each
   ancestor the controllers the container needs, and refuses an existing cgroup that holds processes
   (the spec's own example of a cgroup unfit for create).
-- **Who is inside.** Only the container. The shim stays out, as containerd's does, so the limits
-  bound the workload alone. The shim opens the cgroup's directory and its `cgroup.procs` before it
+- **Who is inside.** Only the container. The shim stays out, so the limits bound the workload alone,
+  and it exits once it has forked the container (runtime-architecture.md, decision 2). The shim opens the cgroup's directory and its `cgroup.procs` before it
   touches any namespace. The container is born in the cgroup: the shim clones it there with
   `clone3(CLONE_INTO_CGROUP)` (Linux 5.7), as crun does (below, "Born in its cgroup"). It then
   unshares its cgroup namespace, so the namespace's root is its own cgroup. Where it can't be born

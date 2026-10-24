@@ -1,8 +1,11 @@
 //! The OCI lifecycle the runtime-tools suite drives: `create`, `start`, `state`, `kill`, `delete`.
-//! `create` makes the container's cgroup with its resources in force, forks the shim
+//! `create` makes the container's cgroup with its resources in force, starts the shim
 //! ([`super::init`]), runs the sync protocol (user-namespace maps, the container pid, the ready
-//! signal), and writes the state; the container then blocks until `start` opens the exec FIFO.
-//! `delete` kills what is left in the cgroup, waits for it to empty and removes it.
+//! signal), and writes the state; the container then blocks until `start` opens the exec FIFO. The
+//! shim exits once it has forked the container, so nothing of Hex's stays beside it, and `stopped` is
+//! never written: it is a recorded init that no longer runs ([`State::init_alive`]; decision 2 of
+//! docs/design/runtime-architecture.md). `delete` kills what is left in the cgroup, waits for it to
+//! empty and removes it.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -21,7 +24,7 @@ use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
 use crate::linux::oci::init;
 use crate::linux::oci::resources::{self, Plan};
 use crate::linux::oci::spec::{IdMapping, Resources, Spec};
-use crate::linux::oci::state::{Dir, State, Status};
+use crate::linux::oci::state::{self, Dir, State, Status};
 use crate::linux::oci::{OciError, sys};
 
 /// The controllers a container's cgroup gets, beyond those its resources need, where its parent has
@@ -155,7 +158,6 @@ impl Runtime {
             .env(init::ENV_MAP_R, map_r.as_raw_fd().to_string())
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
-            .env(init::ENV_ID, id)
             .env(init::ENV_CGROUP, cgroup.dir());
         let mut shim = cmd
             .spawn()
@@ -165,10 +167,20 @@ impl Runtime {
         drop(map_r);
 
         let mut container_pid = None;
-        let outcome = self.handshake(id, spec, sync_r, map_w, &mut container_pid);
+        let outcome = self
+            .handshake(id, spec, sync_r, map_w, &mut container_pid)
+            .and_then(|pid| {
+                // The container is blocked at the exec FIFO, so its start time is its own.
+                let start_time = state::start_time(pid).ok_or_else(|| {
+                    OciError::Broken(format!("container {id}'s init ended during create"))
+                })?;
+                end_shim(&mut shim)?;
+                Ok((pid, start_time))
+            });
         if outcome.is_err() {
             // A create that fails leaves nothing running: the container the shim forked, if it said
-            // which, and the shim itself, killed and reaped here (it detaches only on success).
+            // which, and the shim itself, killed and reaped here (on success it exits by itself and
+            // end_shim reaps it).
             if let Some(pid) = container_pid {
                 let _ = sys::kill(pid, libc::SIGKILL, false);
             }
@@ -176,10 +188,11 @@ impl Runtime {
             let _ = shim.wait();
         }
         match outcome {
-            Ok(container_pid) => {
+            Ok((container_pid, start_time)) => {
                 let mut state = State::new(id, &bundle.to_string_lossy());
                 state.status = Status::Created;
                 state.pid = container_pid;
+                state.start_time = Some(start_time);
                 state.annotations = spec.annotations.clone();
                 state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
                 dir.put(&state)?;
@@ -235,8 +248,22 @@ impl Runtime {
                 "created",
             ));
         }
-        let fifo = rustix::fs::open(dir.fifo(), OFlags::RDONLY, Mode::empty())
+        if !state.init_alive() {
+            return Err(OciError::WrongState(id.to_owned(), "stopped", "created"));
+        }
+        // Opened without blocking: a blocking open would wait for ever on an init that has died. The
+        // init, blocked opening the FIFO to write, writes its byte as soon as this opens it to read.
+        let fifo = rustix::fs::open(dir.fifo(), OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())
             .map_err(|e| OciError::os("opening the exec fifo", e))?;
+        if !wait_readable(&fifo, START_PATIENCE)? {
+            return Err(if state.init_alive() {
+                OciError::Broken(format!(
+                    "container {id} did not take the start within {START_PATIENCE:?}"
+                ))
+            } else {
+                OciError::WrongState(id.to_owned(), "stopped", "created")
+            });
+        }
         let mut byte = [0u8; 1];
         let _ = rustix::io::read(&fifo, &mut byte)
             .map_err(|e| OciError::os("reading the exec fifo", e))?;
@@ -268,7 +295,7 @@ impl Runtime {
                 "created or running",
             ));
         }
-        if !sys::alive(state.pid) {
+        if !state.init_alive() {
             return Err(OciError::WrongState(
                 id.to_owned(),
                 "stopped",
@@ -296,11 +323,10 @@ impl Runtime {
         Ok(cmd)
     }
 
-    /// The container's state (OCI `state`), with `stopped` reflected when the init is gone even if
-    /// the shim has not yet recorded it.
+    /// The container's state (OCI `state`): `stopped` once its recorded init no longer runs.
     pub fn state(&self, id: &str) -> Result<State, OciError> {
         let mut state = self.dir(id)?.get(id)?;
-        if matches!(state.status, Status::Created | Status::Running) && !sys::alive(state.pid) {
+        if matches!(state.status, Status::Created | Status::Running) && !state.init_alive() {
             state.status = Status::Stopped;
         }
         Ok(state)
@@ -317,7 +343,7 @@ impl Runtime {
                 "created or running",
             ));
         }
-        if !sys::alive(state.pid) {
+        if !state.init_alive() {
             return Err(OciError::WrongState(
                 id.to_owned(),
                 "stopped",
@@ -340,7 +366,7 @@ impl Runtime {
         let dir = self.dir(id)?;
         let state = dir.get(id)?;
         let running =
-            matches!(state.status, Status::Created | Status::Running) && sys::alive(state.pid);
+            matches!(state.status, Status::Created | Status::Running) && state.init_alive();
         if running && !force {
             return Err(OciError::WrongState(
                 id.to_owned(),
@@ -381,9 +407,41 @@ impl Runtime {
 /// scheduled unless it is blocked in uninterruptible I/O; past this the delete is refused, typed.
 const DELETE_PATIENCE: Duration = Duration::from_secs(10);
 
+/// How long `start` waits for the init's byte on the exec FIFO, and `create` for the shim to exit once
+/// it has forked the container: delete's patience. Both are already blocked or done when the wait
+/// begins, so missing it is a fault to report, typed.
+const START_PATIENCE: Duration = DELETE_PATIENCE;
+
+/// Ends the shim once the container is forked and ready: it exits by itself (init.rs), and is reaped
+/// here; one that outlives [`START_PATIENCE`] is killed first.
+fn end_shim(shim: &mut std::process::Child) -> Result<(), OciError> {
+    let pid = i32::try_from(shim.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| OciError::Broken("the shim's pid".to_owned()))?;
+    let pidfd = rustix::process::pidfd_open(pid, PidfdFlags::empty())
+        .map_err(|e| OciError::os("pidfd_open of the shim", e))?;
+    if !wait_exited(&pidfd, START_PATIENCE)? {
+        let _ = shim.kill();
+    }
+    shim.wait()
+        .map_err(|e| OciError::os("reaping the shim", e))?;
+    Ok(())
+}
+
+/// Waits up to `patience` for `fd` to turn readable. Returns whether it did.
+fn wait_readable(fd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
+    wait_for(fd, patience, "poll on the exec fifo")
+}
+
 /// Waits up to `patience` for the process behind `pidfd` to exit; a pidfd turns readable then, whether
-/// or not its parent (the shim) has reaped it yet. Returns whether it exited.
+/// or not its parent has reaped it yet. Returns whether it exited.
 fn wait_exited(pidfd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
+    wait_for(pidfd, patience, "poll on the container's pidfd")
+}
+
+/// Polls `fd` for input until it has some or `patience` passes; whether it had.
+fn wait_for(fd: &OwnedFd, patience: Duration, what: &'static str) -> Result<bool, OciError> {
     let deadline = Instant::now().checked_add(patience);
     loop {
         let left = match deadline {
@@ -394,12 +452,12 @@ fn wait_exited(pidfd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
             tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
             tv_nsec: i64::from(left.subsec_nanos()),
         };
-        let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+        let mut fds = [PollFd::new(fd, PollFlags::IN)];
         match rustix::event::poll(&mut fds, Some(&ts)) {
             Ok(n) if n > 0 => return Ok(true),
             Ok(_) if left.is_zero() => return Ok(false),
             Ok(_) | Err(rustix::io::Errno::INTR) => {}
-            Err(e) => return Err(OciError::os("poll on the container's pidfd", e)),
+            Err(e) => return Err(OciError::os(what, e)),
         }
     }
 }

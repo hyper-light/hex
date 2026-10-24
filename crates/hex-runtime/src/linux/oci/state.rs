@@ -50,6 +50,11 @@ pub struct State {
     /// cgroup whatever has become of the bundle. Absent in state written before the class made one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cgroup: Option<String>,
+    /// The init's start time ([`start_time`]), recorded at create: Hex's own field, as crun's
+    /// `process-start-time`, so a later process given the init's pid isn't taken for it. Nothing
+    /// writes `stopped`; it's whatever this no longer matches. Absent in state written before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<u64>,
 }
 
 impl State {
@@ -62,6 +67,17 @@ impl State {
             bundle: bundle.to_owned(),
             annotations: std::collections::BTreeMap::new(),
             cgroup: None,
+            start_time: None,
+        }
+    }
+
+    /// Whether the container's init still runs: a live process at its pid with the start time create
+    /// recorded. State written before the class recorded one is judged by the pid alone.
+    pub fn init_alive(&self) -> bool {
+        match (self.start_time, start_time(self.pid)) {
+            (_, None) => false,
+            (Some(recorded), Some(now)) => recorded == now,
+            (None, Some(_)) => true,
         }
     }
 
@@ -155,9 +171,53 @@ impl Dir {
     }
 }
 
+/// The start time of process `pid`, in clock ticks since boot (proc_pid_stat(5), field 22), or None
+/// when no live process has that pid: none at all, or one that has exited and waits to be reaped.
+pub fn start_time(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    parse_start_time(&fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// `/proc/<pid>/stat`'s start time, from the fields after the command name, which is parenthesized
+/// and may itself hold spaces or parentheses: the state (field 3), then nineteen on, the start time.
+fn parse_start_time(stat: &str) -> Option<u64> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    match fields.next()? {
+        // Z exited and unreaped, X dead: neither runs.
+        "Z" | "X" => None,
+        _ => fields.nth(18)?.parse().ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 2: a process's start time comes from its stat line, a command with spaces and
+    /// parentheses included, and an exited process has none.
+    #[test]
+    fn a_start_time_is_read_from_the_stat_line_and_an_exited_process_has_none() {
+        let fields = "S 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10";
+        assert_eq!(
+            parse_start_time(&format!("42 (sleep) {fields}")),
+            Some(987_654)
+        );
+        assert_eq!(
+            parse_start_time(&format!("42 (a (b) c) {fields}")),
+            Some(987_654)
+        );
+        assert_eq!(
+            parse_start_time(&format!("42 (sleep) {}", fields.replacen('S', "Z", 1))),
+            None
+        );
+        assert_eq!(parse_start_time("42 (sleep) S 1"), None);
+        assert_eq!(parse_start_time("garbage"), None);
+        assert_eq!(start_time(0), None);
+        assert!(start_time(i32::try_from(std::process::id()).unwrap()).is_some());
+    }
 
     #[test]
     fn state_is_put_got_and_removed() {

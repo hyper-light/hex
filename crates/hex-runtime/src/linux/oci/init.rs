@@ -1,7 +1,9 @@
-//! The container init, reached by re-exec (`hex __oci-init`): the shim unshares the namespaces and
-//! forks the container, which sets up its root filesystem, devices, paths, limits, capabilities and
-//! user, then blocks on the exec FIFO until `start` and finally `execve`s the workload. Because the
-//! process re-exec'd, it is single-threaded when it forks (see [`super::sys`]).
+//! The container init, reached by re-exec (`hex __oci-init`): the shim unshares the namespaces,
+//! forks the container and exits, leaving the container to the caller's subreaper as crun's create
+//! does (decision 2 of docs/design/runtime-architecture.md). The container sets up its root
+//! filesystem, devices, paths, limits, capabilities and user, then blocks on the exec FIFO until
+//! `start` and finally `execve`s the workload. Because the process re-exec'd, it is single-threaded
+//! when it forks (see [`super::sys`]).
 //!
 //! It talks to the `create` runtime over two inherited pipes (fd numbers in the environment): a sync
 //! pipe the init writes (`U`ser-ns map request, container `P`id, `R`eady, or `E`rror), and a map
@@ -18,7 +20,6 @@ use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::thread::UnshareFlags;
 
 use crate::linux::oci::spec::{Device, Process, Spec};
-use crate::linux::oci::state::{Dir, Status};
 use crate::linux::oci::{OciError, caps, sys};
 
 /// Environment the `create` runtime sets for `hex __oci-init`.
@@ -27,7 +28,6 @@ pub const ENV_MAP_R: &str = "HEX_OCI_MAP_R";
 /// The container's own state directory (holds `state.json` and `exec.fifo`).
 pub const ENV_DIR: &str = "HEX_OCI_DIR";
 pub const ENV_BUNDLE: &str = "HEX_OCI_BUNDLE";
-pub const ENV_ID: &str = "HEX_OCI_ID";
 /// The container's cgroup directory, which `create` has made with its resources in force.
 pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
 
@@ -58,13 +58,12 @@ pub fn run() -> u8 {
     }
 }
 
-/// The shim: unshares namespaces, forks the container, reports its pid, then reaps it and records
-/// the stop. The shim stays outside the container's cgroup, as a container manager's shim does, so
-/// the container's limits bound the container alone.
+/// The shim: unshares namespaces, forks the container, reports its pid and exits. Nothing waits on the
+/// container: `state` finds it stopped once its recorded init no longer runs. The shim stays outside
+/// the container's cgroup, so the container's limits bound the container alone.
 fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     let container_dir = PathBuf::from(env_var(ENV_DIR)?);
     let bundle = env_var(ENV_BUNDLE)?;
-    let id = env_var(ENV_ID)?;
     let spec = Spec::parse(
         &fs::read(Path::new(&bundle).join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?,
@@ -126,12 +125,6 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
         sys::Fork::Parent(container_pid) => {
             drop(procs);
             msg(sync, &format!("P{container_pid}"));
-            let _ = sys::waitpid(container_pid)?;
-            let dir = Dir::at(&container_dir);
-            if let Ok(mut st) = dir.get(&id) {
-                st.status = Status::Stopped;
-                let _ = dir.put(&st);
-            }
             Ok(0)
         }
     }
