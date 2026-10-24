@@ -172,27 +172,33 @@ creates); crun clones its init straight into the cgroup (3.0 ms). Since 05af083 
 
 Each platform end to end through its own API, against Hex `oci` (create+start for "create until it
 runs a command"). Each round is refereed for other people's load (`platform-rounds/`); CPU and memory
-are the stack's own cgroups'. Docker's round predates that method, so it has no CPU or memory rows yet.
+are the stack's own cgroups'. Docker's earlier rounds predate the referee and the stack-cgroup method,
+so they're kept on fedora as `unrefereed.*` and its column waits for its refereed rounds.
 
-| Axis | Hex | agentsandbox | agentsandbox-warm | daytona | docker | k8s | Hex vs best |
-|---|---|---|---|---|---|---|---|
-| create until it runs a command p50 (ms) | 16.96 | 434.86 | 48.96 | 407.92 | 223.86 | 408.92 | 2.89x vs agentsandbox-warm |
-| create until it runs a command p99 (ms) | 24.36 | 544.33 | 465.19 | 488.21 | 377.81 | 501.13 | 15.51x vs docker |
-| create until it runs a command p99.9 (ms) | 47.26 | 689.10 | 763.29 | 502.48 | 484.13 | 559.45 | 10.24x vs docker |
-| create until it runs a command max (ms) | 172.87 | 689.10 | 763.29 | 502.48 | 538.80 | 559.45 | 2.91x vs daytona |
-| exec of `true` p50 / p99 / p99.9 / max (ms) | n/a: Hex has no exec yet | 42.43 / 54.68 / 97.31 / 97.31 | 32.82 / 90.60 / 125.57 / 125.57 | 12.54 / 25.11 / 27.95 / 27.95 | 37.89 / 51.20 / 69.64 / 71.85 | 41.63 / 53.13 / 60.44 / 60.44 | n/a |
-| delete p50 (ms) | 1.28 | 30.54 | 43.16 | 237.01 | 130.04 | 27.32 | 21.42x vs k8s |
-| delete p99 (ms) | 3.12 | 61.91 | 155.86 | 293.34 | 185.95 | 47.87 | 15.33x vs k8s |
-| delete p99.9 (ms) | 12.06 | 87.34 | 176.57 | 350.24 | 244.90 | 79.13 | 6.56x vs k8s |
-| delete max (ms) | 23.00 | 87.34 | 176.57 | 350.24 | 30,013.14 | 79.13 | 3.44x vs k8s |
-| lifecycles/s at concurrency 1 | 54 | 2 | 6 | 2 | 2 | 2 | 9.48x vs agentsandbox-warm |
-| lifecycles/s at concurrency 8 | 308 | 6 | 6 | 7 | 7 | 6 | 42.39x vs daytona |
-| lifecycles/s at concurrency 32 | 1,029 | 6 | 6 | 8 | 8 | 7 | 124.53x vs daytona |
-| CPU per lifecycle at concurrency 1 (platforms: what a lifecycle adds to their stack's CPU) | 8.62 ms | 881.71 ms | 535.41 ms | 511.92 ms | n/a | 806.63 ms | 59.42x vs daytona |
-| memory held per idle sandbox | 0.63 MiB | 4.94 MiB | 5.18 MiB | n/a | n/a | 7.74 MiB | 7.87x vs agentsandbox |
-| density (idle sandboxes per GiB held) | 1,633 | 207 | 198 | n/a | n/a | 132 | 7.87x vs agentsandbox |
-| the stack's own CPU at idle (Hex `oci` runs no daemon) | n/a | 0.136 CPUs | 0.192 CPUs | 0.046 CPUs | n/a | 0.120 CPUs | n/a |
-| the stack's own memory held at idle (Hex `oci` runs no daemon) | n/a | 1,305.79 MiB | 2,096.97 MiB | n/a | n/a | 1,307.31 MiB | n/a |
+| Axis | Hex | agentsandbox | agentsandbox-warm | daytona | k8s | Hex vs best |
+|---|---|---|---|---|---|---|
+| create until it runs a command p50 (ms) | 16.96 | 434.86 | 48.96 | 407.92 | 408.92 | 2.89x vs agentsandbox-warm |
+| create until it runs a command p99 (ms) | 24.36 | 544.33 | 465.19 | 488.21 | 501.13 | 19.09x vs agentsandbox-warm |
+| create until it runs a command p99.9 (ms) | 47.26 | 689.10 | 763.29 | 502.48 | 559.45 | 10.63x vs daytona |
+| create until it runs a command max (ms) | 172.87 | 689.10 | 763.29 | 502.48 | 559.45 | 2.91x vs daytona |
+| exec of `true` p50 / p99 / p99.9 / max (ms) | n/a: Hex has no exec yet | 42.43 / 54.68 / 97.31 / 97.31 | 32.82 / 90.60 / 125.57 / 125.57 | 12.54 / 25.11 / 27.95 / 27.95 | 41.63 / 53.13 / 60.44 / 60.44 | n/a |
+| delete p50 (ms) | 1.28 | 30.54 | 43.16 | 237.01 | 27.32 | 21.42x vs k8s |
+| delete p99 (ms) | 3.12 | 61.91 | 155.86 | 293.34 | 47.87 | 15.33x vs k8s |
+| delete p99.9 (ms) | 12.06 | 87.34 | 176.57 | 350.24 | 79.13 | 6.56x vs k8s |
+| delete max (ms) | 23.00 | 87.34 | 176.57 | 350.24 | 79.13 | 3.44x vs k8s |
+| lifecycles/s at concurrency 1 | 54 | 2 | 6 | 2 | 2 | 9.48x vs agentsandbox-warm |
+| lifecycles/s at concurrency 8 | 308 | 6 | 6 | 7 | 6 | 42.39x vs daytona |
+| lifecycles/s at concurrency 32 | 1,029 | 6 | 6 | 8 | 7 | 124.53x vs daytona |
+| CPU per lifecycle at concurrency 1 (platforms: what a lifecycle adds to their stack's CPU) | 8.62 ms | 881.71 ms | 535.41 ms | 511.92 ms | 806.63 ms | 59.42x vs daytona |
+| memory held per idle sandbox | 0.63 MiB | 4.94 MiB | 5.18 MiB | 30.86 MiB | 7.74 MiB | 7.87x vs agentsandbox |
+| density (idle sandboxes per GiB held) | 1,633 | 207 | 198 | 33 | 132 | 7.87x vs agentsandbox |
+| the stack's own CPU at idle (Hex `oci` runs no daemon) | n/a | 0.136 CPUs | 0.192 CPUs | 0.046 CPUs | 0.120 CPUs | n/a |
+| the stack's own memory held at idle (Hex `oci` runs no daemon) | n/a | 1,305.79 MiB | 2,096.97 MiB | 1,228.50 MiB | 1,307.31 MiB | n/a |
+
+Where density stopped: Daytona at the cap of 200 in each of four rounds (its held memory from round 4,
+with no foreign load in 18 samples; round 3's 94.7% foreign share is recorded, as a density-only round
+is never retried). Kubernetes pods and agentsandbox stopped at 99-100, each refused there by the
+cluster ("not ready in 300s"), and the warm pool at its cap of 30.
 
 agentsandbox is kubernetes-sigs/agent-sandbox, a Sandbox per lifecycle; agentsandbox-warm claims one
 from a warm pool of 32. k8s is a Pod through the Kubernetes API on kind.

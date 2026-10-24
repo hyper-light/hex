@@ -3,11 +3,12 @@
 
   scope_charge.py <boxes>     (in a delegated user service, as box_bench.py runs)
 
-box_bench.py's density phase found systemd-scope boxes adding ~1.1 MiB each to the driver's cgroup and
-~0.01 MiB to their own scopes (fedora, 2026-10-23, rounds 5-6). This starts <boxes> scope boxes exactly as
-the density phase does (box_bench.spawn of `systemd-run --user --scope --slice=...`) and prints, per box,
-how each memory.stat field of the driver's cgroup S and of the scopes' slice moved, so the charge can be
-named by kind (anon, pagetables, kernel_stack, slab, sock, shmem...) rather than guessed.
+box_bench.py's density phase found systemd-scope boxes holding ~1.1 MiB each across what it watches: the
+driver's cgroup S, the scopes' slice, and the user manager's and bus's cgroups (fedora, 2026-10-23, rounds
+5-6). This starts <boxes> scope boxes exactly as the density phase does (box_bench.spawn of `systemd-run
+--user --scope --slice=...`) and prints, per box, how each memory.stat field of each of those cgroups moved,
+so the charge can be named by kind (anon, pagetables, kernel_stack, slab, sock, shmem...) and by place
+rather than guessed. The first run (2026-10-23) read only S and the slice: 33 KiB and ~253 KiB per box.
 """
 import os
 import signal
@@ -36,13 +37,15 @@ def main():
     while not os.path.basename(user).startswith("user@"):
         user = os.path.dirname(user)
     sl = f"{user}/{bb.DENSITY_SLICE}"
-    s0, l0 = stat(S), stat(sl)
+    places = [("S (the driver's service)", S), ("the scopes' slice", sl)] + [
+        (f"helper {h[len(bb.CG):]}", h) for h in bb.helper_cgroups()]
+    before = [stat(path) for _, path in places]
     kids = [bb.spawn(bb.argv_for("systemd-scope", None, ["/usr/bin/sleep", "infinity"], slice_=bb.DENSITY_SLICE))
             for _ in range(boxes)]
     time.sleep(3)
-    s1, l1 = stat(S), stat(sl)
+    after = [stat(path) for _, path in places]
     try:
-        for name, a, b in (("S (the driver's service)", s0, s1), ("the scopes' slice", l0, l1)):
+        for (name, _), a, b in zip(places, before, after):
             moved = {k: (b.get(k, 0) - a.get(k, 0)) / boxes for k in sorted(set(a) | set(b))}
             print(f"{name}, per box, fields that moved by 1 KiB or more:")
             for k, v in sorted(moved.items(), key=lambda kv: -abs(kv[1])):
