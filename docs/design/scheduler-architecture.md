@@ -32,10 +32,10 @@ cluster that misses deadlines or wastes provider quota has failed the objective.
 
 This is a deliberate split from the production cluster managers, which prioritise by admission quota and
 priority bands and measure packing, not goodput (Borg CM[1], Twine CM[4], Kubernetes CM[25], `DE`). The
-goodput systems that beat them — 30-93% lower average job completion time (Sia, Pollux PA[10][12]),
-2.2-3.25x fairer worst cases (Themis PA[13]), 4.0x fewer SLO misses (3Sigma PA[15]), all `MV` — are
-research-scale (44-256 GPUs). Hex takes their objective to the production scale the cluster managers
-reach (comparison finding 4).
+goodput systems that beat them — 30-93% lower average job completion time (Sia PA[10]; Pollux's own is
+37-50% PA[12]), 2.2-3.25x fairer worst cases (Themis PA[13]), 4.0x fewer SLO misses (3Sigma PA[15]),
+all `MV` — are research-scale (44-256 GPUs or nodes). Hex takes their objective to the production scale
+the cluster managers reach (comparison finding 4).
 
 ## The bar
 
@@ -44,7 +44,7 @@ The scheduler's own numbers (`docs/requirements.toml`), with where the research 
 | Axis | Bar | Where it sits |
 |---|---|---|
 | placement throughput | 1,000,000 workloads on 10,000 nodes in ≤120 s = 8,333/s (`AC-T7.11.2`) | between the sampled placers (Hydra 40,000/s PA[3], Apollo 20,000/s PA[2]) and the Kubernetes family (GKE ≤1,000/s CM[38], kube-scheduler ~790/s CM[30]) (finding 2) |
-| vs kube-scheduler | ≥10x on the same simulated cluster (`AC-T7.11.3`, against kwok) | kube-scheduler is ~790-1,000 pods/s CM[30][38]; 10x is ~8,000/s, the same line |
+| vs kube-scheduler | ≥10x on the same simulated cluster (`AC-T7.11.3`, against kwok) | kube-scheduler's own floor is ~790 pods/s CM[30] (GKE's ~1,000/s CM[38] is its Kueue-backed control plane, not the default scheduler); 10x is ~7,900/s, the same line |
 | decision latency | p99 ≤10 ms at 10,000/s on 10,000 nodes (`AC-T7.4.2`) | faster than every published tail (RAS p99 2.45K s CM[5], Shard Manager p99 ~50 s CM[6], Hydra p99 ≤10 s PA[3]); no competitor publishes p99.9 (finding 1), so Hex measures its own |
 | packing | stranded capacity at 90% load ≥30% below best-fit alone (`AC-T7.4.3`) | Borg's best+worst-fit mix CM[1]; Tetris ~30% better makespan PA[19] |
 | fair share | 4 equal-weight repositories within 2% of 25% under contention (`AC-T7.5.2`) | DRF max-min dominant share PA[18]; Kueue cohorts PA[20] |
@@ -69,14 +69,14 @@ utility over runtime distributions (PA[15], `MV`); Themis's finish-time fairness
 Tiresias's least-attained-service (PA[14], `MV`). For agents, effective throughput within TTFT/TPOT SLOs
 (DistServe AW[29], Mooncake AW[30]) and program-level cumulative service (Autellix AW[8], `MV`).
 
-**Evidence.** The goodput objective reports 30-93% lower average JCT (Sia, Pollux), 4.0x fewer SLO
-misses (3Sigma) and 2.2-3.25x fairer worst cases (Themis) than balance- or priority-only baselines on 44
-to 256 GPUs (finding 4). Best-fit packing alone strands capacity that a best+worst-fit mix recovers
+**Evidence.** The goodput objective reports 30-93% lower average JCT (Sia; Pollux 37-50%), 4.0x fewer
+SLO misses (3Sigma) and 2.2-3.25x fairer worst cases (Themis) than balance- or priority-only baselines
+on 44 to 256 GPUs or nodes (finding 4). Best-fit packing alone strands capacity that a best+worst-fit mix recovers
 (Borg CM[1]); `AC-T7.4.3` holds Hex to ≥30% less stranded capacity than best-fit at 90% load.
 
 **What would falsify it.** A balance-only or best-fit-only scorer matching the goodput objective on the
 recorded kiln workload in hex-sim (`AC-T7.4.3`), or the goodput model costing more to evaluate than the
-10 ms p99 budget allows at 8,333/s (`AC-T7.4.2`) — in which case goodput moves to the optimiser tier
+10 ms p99 budget allows at 10,000/s (`AC-T7.4.2`) — in which case goodput moves to the optimiser tier
 (S2) and the fast path scores a cheap proxy.
 
 ### S2. Placement is tiered: a sampled, late-bound fast path, with an optimiser tier beside it
@@ -143,12 +143,16 @@ models the quotas and the competitive baseline measures them.
 
 ### S4. Network proximity is Vivaldi coordinates carried on hyper-swim
 
-**The choice.** The scheduler scores proximity — latency and bandwidth between a workload and the data,
+**The choice.** The scheduler scores **latency** proximity — the RTT between a workload and the data,
 services and peers it talks to — from Vivaldi synthetic coordinates, built on hyper-raft's `hyper-swim`
 (`coordinates.rs`, the Dabek et al. SIGCOMM 2004 update rule) rather than a new coordinate system. SWIM
 membership and Lifeguard suspicion (`extension.rs`) and the failure detector (`detector.rs`) are the
 same substrate (S8). Proximity is a soft score with a confidence weight, never a hard filter, so a
 high-error or stale coordinate degrades the ranking rather than excluding a feasible placement.
+**Bandwidth is not from the coordinates:** Vivaldi and its kin model latency only, and no source read
+predicts bandwidth from coordinates (`proximity-and-failure-containment.md` §1.6, PF[1][2]). Where the
+objective's bandwidth term matters, it comes from the topology and measured transfers, not the
+coordinate space; that mechanism is unresearched here and is named as a gap (A2 below), not claimed.
 
 **Sources.** Vivaldi predicts RTT at 11% median relative error over 1,740 Internet hosts (PF[1], `MV`);
 Azureus runs it in the wild on a million-node network (PF[2], `MV`) despite 83% of pairs violating the
@@ -206,7 +210,7 @@ concurrency (PA[4a]); the model-based and crash-injection test kinds (CLAUDE.md 
 and observed state with reconcilers on change feeds is the control plane's (CP-T7.3, README).
 
 **Evidence.** No competitor publishes a correctness proof of this kind (the comparison measures
-throughput and tails, finding 1); Hex's bar is the zero in `AC-T7.3.3` and `AC-T7.4.1`'s model
+throughput and tails, finding 1); Hex's bar is the zero in `AC-T7.3.3` and `T-T7.4.1`'s model
 equivalence, both measured, not cited.
 
 **What would falsify it.** A crash seed that loses or doubles a workload, or a generated cluster where
@@ -253,6 +257,13 @@ graded into a continuous suspicion, and acted on with escalating, bounded, forgi
   because sustained retries drove more than half of 22 metastable outages (PF[20], `MI`).
 - **Agent-specific** faults — a stuck tool loop, quota exhaustion that looks like slowness, a partial
   provider outage — are modelled and detected, since no failure-detection study covers them (gap).
+- **Dangerous** workloads — one that trips a runtime security signal (a seccomp denial, an unauthorized
+  egress attempt, a privilege escalation) — are isolated by runtime class: the workload moves to a
+  stronger class (`oci` → a microVM) or is refused, not merely deprioritised. Its network egress is
+  already bounded at admission (S3, `AC-T7.7.2`, `T-T7.7.1`); the runtime-signal-driven move is a design
+  the research only sketches (`proximity-and-failure-containment.md` §4 lessons; security signals are
+  flagged unresearched there, §6), so what counts as a trip and how fast the move is are a gap hex-sim
+  and CP-T7.7's networking lab measure, not a cited bound.
 
 **Sources.** Lifeguard cuts slow-member false positives 50-100x (PF[9], `MV`); Panorama detected 15 of
 15 gray failures in <7 s and IASO isolates a slow node within minutes across 39,000 nodes (PF[12][13],
@@ -266,9 +277,11 @@ failure modes are in none of the studies (gap, comparison §6), so hex-sim injec
 and measures detection and isolation time. `AC-T7.10.3` (a node whose disk stalls is marked and drained
 before its work fails) is the fail-slow drill.
 
-**What would falsify it.** A bad workload or node not deprioritised and isolated within its stated bound
-in hex-sim's nemesis, a slow member's self-doubt still accusing healthy peers, or a correlated fault
-draining a cell past the ejection cap — each fixed at its cause.
+**What would falsify it.** A bad workload or node not deprioritised and isolated within the bound hex-sim
+sets for its fault class (implementation goal 5 states each: crash, gray/fail-slow, antagonist,
+agent-specific, dangerous; `AC-T7.10.3`'s disk-stall "before its work fails" is the one already fixed),
+a slow member's self-doubt still accusing healthy peers, or a correlated fault draining a cell past the
+ejection cap — each fixed at its cause.
 
 ## Where a bar must be measured, not cited
 
@@ -278,9 +291,13 @@ measures its own rather than citing one:
 - **A1. No p99.9 or maximum placement latency is published** anywhere; the best tails are p95 or p99 on
   the authors' own systems (finding 1). Hex measures its p99.9 and maximum in hex-sim (`AC-T7.4.2` sets
   the p99; the p99.9 and max are recorded beside it).
-- **A2. Network proximity's benefit is unmeasured** (finding 9, S4): neither Consul nor Hyperscale
-  reports how much latency-aware placement improves outcomes, and hyper-swim's WAN accuracy is unknown.
-  hex-sim measures it; until then proximity is a soft score that can only help the ranking (S4).
+- **A2. Network proximity's benefit is unmeasured, and bandwidth has no model** (finding 9, S4):
+  neither Consul nor Hyperscale reports how much latency-aware placement improves outcomes, and
+  hyper-swim's WAN accuracy is unknown; hex-sim measures the latency term's benefit, and until then
+  proximity can only help the ranking (S4). Bandwidth-aware placement is a further gap — Vivaldi models
+  latency only (`proximity-and-failure-containment.md` §1.6, PF[1][2]), so the objective's bandwidth
+  term must come from topology and measured transfers, which no source read here evaluates; hex-sim
+  models it and the design leaves it a soft score until measured.
 - **A3. No scheduler is evaluated against real provider quotas at agent scale** (finding; AW[13][14][15]
   are all mock). hex-sim models provider quotas and the competitive baseline measures Hex against them.
 - **A4. Agent-specific failure modes** — stuck tool loops, quota exhaustion that reads as slowness,
@@ -321,9 +338,10 @@ bench) shows its number of record:
 4. **Priority, fair share, gangs, preemption (CP-T7.5, S5):** done when `AC-T7.5.2` (4 repos within 2%
    of 25%), `AC-T7.5.3` (disruption breaches = 0) and `T-T7.5.1` pass.
 5. **Failure detection and isolation (S8):** Lifeguard membership, gray/fail-slow by correlation,
-   antagonist throttling, retry budgets, the agent-specific faults. Done when hex-sim's nemesis shows
-   each bad workload or node deprioritised and isolated within its bound, and `AC-T7.10.3` (disk-stall
-   drain) passes.
+   antagonist throttling, retry budgets, the agent-specific faults, and the dangerous-workload move to a
+   stronger runtime class. Done when hex-sim's nemesis states and meets a detection-and-isolation bound
+   for each fault class (crash, gray/fail-slow, antagonist, agent-specific, dangerous) and `AC-T7.10.3`
+   (disk-stall drain) passes.
 6. **Scale and shards (CP-T7.11):** done when `AC-T7.11.2` (1,000,000 on 10,000 in ≤120 s), `AC-T7.11.3`
    (≥10x kube-scheduler against kwok), `AC-T7.11.4` (≤4 KiB/workload) and `T-T7.11.1` (shard loss) pass.
 7. **Cells and regions (CP-T7.12, S7):** done when the differential suite passes on one node, one cell

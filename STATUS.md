@@ -60,6 +60,33 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   for a typed refusal until each is implemented. The competitive bench is unaffected: its bundles name
   none of them, for every runtime.
 
+## Design decided, implementation under way (2026-10-24)
+
+After the runtime research, the competitive baseline and the runtime design, the track moved to
+implementing the runtime's architecture and deciding the scheduler's. Built, decided and validated are
+three different things (CLAUDE.md "Working here"):
+
+- **The runtime's architecture** (`docs/design/runtime-architecture.md`, decided + pushed): the two
+  layers (the OCI command line and the `Runtime` seam) against the 4-5x bar, with eight decisions and
+  the cited arguments where an axis can't reach it. Its implementation goals:
+  - **goal 0, the bench** — `bench/competitive` gains the seam driver, libcrun in process, a stand-in
+    ceiling, the sustained and lifecycle_nonet phases. Code-complete, 25/25 local control-flow checks;
+    the run of record awaits a quiet fedora pass.
+  - **goals 1, 2, 7** (no fsync of state; no shim, `stopped` from the init's pid+start-time; the
+    `process` box cloned straight into its cgroup) — committed on `cp/t7-runtime`, **built and
+    reviewed locally, awaiting fedora gates and measurements**.
+  - **goal 3, the `oci` class behind the `Runtime` seam** — `hex-node` serves `ClassSpec::Bundle` in
+    process (cgroup under the box root, `create_in_cgroup`, `exec` through a seam-mode `hex __oci-exec`
+    helper), with `seam_oci` to measure it against libcrun. Built and reviewed locally; its runtime
+    path needs a fedora root lab to validate, and its exec-latency target likely needs goal 5's seed.
+  - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
+    copying) — open.
+- **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
+  balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
+  proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
+  specification, one code path from a laptop to a region, and fast isolation of bad workloads and
+  nodes, all measured in **hex-sim** (built first). Implementation open.
+
 ## Next
 
 - **CP-T7.2**: The `firecracker` and `shards` classes, with snapshot templates and warm pools.
