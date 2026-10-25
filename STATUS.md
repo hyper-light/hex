@@ -70,8 +70,10 @@ three different things (CLAUDE.md "Working here"):
   layers (the OCI command line and the `Runtime` seam) against the 4-5x bar, with eight decisions and
   the cited arguments where an axis can't reach it. Its implementation goals:
   - **goal 0, the bench** — `bench/competitive` gains the seam driver, libcrun in process, a stand-in
-    ceiling, the sustained and lifecycle_nonet phases. Code-complete, 25/25 local control-flow checks;
-    the run of record awaits a quiet fedora pass.
+    ceiling, the sustained and lifecycle_nonet phases. **Run of record recorded 2026-10-25**
+    (`bench/competitive/RESULT.md`, run `ror-step5`): libcrun in process, the stand-in ceiling (13,577
+    lifecycles/s at concurrency 32, above the 4,152 target), the process class through the seam, and
+    throughput re-measured through the new worker-per-slot driver. 25/25 local control-flow checks.
   - **goals 1, 2, 7** (no fsync of state; no shim, `stopped` from the init's pid+start-time; the
     `process` box cloned straight into its cgroup) — committed on `cp/t7-runtime`, **built and
     reviewed locally, awaiting fedora gates and measurements**.

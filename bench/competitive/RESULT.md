@@ -77,9 +77,9 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 | create+start of `true` p99 (ms) | 29.30 | 65.20 | 6.00 | 40.87 | 38.91 | 0.20x vs crun |
 | create+start of `true` p99.9 (ms) | 68.88 | 129.01 | 8.88 | 124.15 | 52.43 | 0.13x vs crun |
 | create+start of `true` max (ms) | 934.36 | 759.89 | 28.02 | 223.19 | 55.23 | 0.03x vs crun |
-| throughput, concurrency 1 (lifecycles/s) | 52 | 7 | 87 | 38 | 31 | 0.60x vs crun |
-| throughput, concurrency 8 (lifecycles/s) | 325 | 59 | 1,015 | 398 | 230 | 0.32x vs crun |
-| throughput, concurrency 32 (lifecycles/s) | 1,030 | 214 | 1,038 | 732 | 346 | 0.99x vs crun |
+| throughput, concurrency 1 (lifecycles/s) | 57 | 7 | 90 | n/a | 29 | 0.63x vs crun |
+| throughput, concurrency 8 (lifecycles/s) | 339 | 59 | 954 | n/a | 217 | 0.35x vs crun |
+| throughput, concurrency 32 (lifecycles/s) | 1,146 | 221 | 1,711 | n/a | 311 | 0.67x vs crun |
 | CPU per lifecycle, concurrency 1 (whole bench cgroup) | 7.02 ms | 23.09 ms | 4.68 ms | 18.43 ms | 52.90 ms | 0.67x vs crun |
 | memory held per idle container | 0.63 MiB | 0.41 MiB | 0.39 MiB | 0.39 MiB | 12.49 MiB | 0.62x vs crun |
 | density (idle containers per GiB held) | 1,636 | 2,514 | 2,640 | 2,633 | 82 | 0.62x vs crun |
@@ -87,20 +87,31 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 Hex's create+start max (934 ms) is one of a few stalls in each round: round 2's next-slowest samples
 are 706, 400 and 126 ms, and round 1's max is 1,114 ms, with 185 ms next.
 
+The three throughput rows were re-measured on 2026-10-25 through the worker-process-per-slot driver (the
+2026-10-25 run of record below); every other row is the 2026-10-23/24 run's. The old lock-serialized driver
+capped concurrent spawns, most at concurrency 32 (old rows: hex 52/325/1,030, runc 7/59/214, crun
+87/1,015/1,038, youki 38/398/732, runsc 31/230/346 lifecycles/s at concurrency 1/8/32;
+`probes/oci_breakdown.md`, run 2). crun's concurrency-32 rate rose the most, 1,038 → 1,711/s, which is why
+Hex is no longer level there. **youki is n/a:** under the new driver its delete raced at concurrency 32 (it
+lost a container's state when the init exited before it read `/proc/<pid>/stat`, and the next round's reused
+id then collided), so neither round completed youki's concurrency-32 lifecycles; the old driver's lock
+serialized the spawns and masked it. CPU per lifecycle is still the 2026-10-23/24 run's (concurrency 1, which
+the old driver did not cap).
+
 ### Process class
 
-| Axis | Hex `box run` | systemd scope | systemd service | Hex vs best |
-|---|---|---|---|---|
-| run of `true` p50 (ms) | 2.73 | 7.13 | 12.11 | 2.61x vs scope |
-| run of `true` p99 (ms) | 6.06 | 9.16 | 35.49 | 1.51x vs scope |
-| run of `true` p99.9 (ms) | 13.90 | 13.15 | 43.11 | 0.95x vs scope |
-| run of `true` max (ms) | 28.30 | 34.54 | 50.55 | 1.22x vs scope |
-| throughput, concurrency 1 (runs/s) | 314 | 145 | 76 | 2.17x vs scope |
-| throughput, concurrency 8 (runs/s) | 759 | 195 | 143 | 3.89x vs scope |
-| throughput, concurrency 32 (runs/s) | 783 | 160 | 192 | 4.08x vs service |
-| CPU per run (the call, plus systemd's manager and bus) | 2.51 ms | 7.81 ms | 13.92 ms | 3.11x vs scope |
-| memory held per idle box | 0.74 MiB | 0.28 MiB | 0.39 MiB | 0.38x vs scope |
-| density (idle boxes per GiB held) | 1,388 | 3,615 | 2,607 | 0.38x vs scope |
+| Axis | Hex `box run` | Hex seam | systemd scope | systemd service | Hex vs best |
+|---|---|---|---|---|---|
+| run of `true` p50 (ms) | 2.73 | 0.87 | 7.13 | 12.11 | 2.61x vs scope |
+| run of `true` p99 (ms) | 6.06 | 1.67 | 9.16 | 35.49 | 1.51x vs scope |
+| run of `true` p99.9 (ms) | 13.90 | 2.44 | 13.15 | 43.11 | 0.95x vs scope |
+| run of `true` max (ms) | 28.30 | 22.60 | 34.54 | 50.55 | 1.22x vs scope |
+| throughput, concurrency 1 (runs/s) | 314 | 1,306 | 145 | 76 | 2.17x vs scope |
+| throughput, concurrency 8 (runs/s) | 759 | 3,664 | 195 | 143 | 3.89x vs scope |
+| throughput, concurrency 32 (runs/s) | 783 | 2,910 | 160 | 192 | 4.08x vs service |
+| CPU per run (the call, plus systemd's manager and bus) | 2.51 ms | 0.89 ms | 7.81 ms | 13.92 ms | 3.11x vs scope |
+| memory held per idle box | 0.74 MiB | 0.27 MiB | 0.28 MiB | 0.39 MiB | 0.38x vs scope |
+| density (idle boxes per GiB held) | 1,388 | 3,811 | 3,615 | 2,607 | 0.38x vs scope |
 
 The density rounds before these, 5 and 6, gave systemd scopes 1.11 MiB per box. That was the bench, not
 systemd. They spawned every box, slept 3 s and read memory. At 1,000 boxes the user manager hadn't
@@ -110,12 +121,83 @@ before the next starts. Rounds 5 and 6 are kept on fedora as `box.settle3s.r*`. 
 KiB in the driver's cgroup (the kernel stack and slab a fork leaves), about 255 KiB in its own (the
 process, its page tables and the cgroup's per-CPU counters), and about 90-150 KiB in the user manager.
 
+## Run of record (2026-10-25, fedora): the in-process driver, the ceiling, the seam, and re-measured throughput
+
+Goal 0's bench gained libcrun driven in process (the competitor of Hex's `Runtime` seam), a sustained and a
+no-network-namespace phase, a stand-in ceiling, and the worker-process-per-slot throughput driver. This run
+records them on the same host and competitors as the run above, in three load-gated passes into one
+directory (`~/.cache/hex-bench/out/ror-step5-20261025T100031Z`), each started at a 1-minute load under 2
+(`env.txt`: libcrun pass 0.89, OCI-CLI-throughput pass 1.98, seam pass 1.89). The host is shared, so load
+rose during the passes; best of 2 takes each metric from its quieter round, and the tails (p99.9, max) and
+throughput carry that noise, as on the run above.
+
+- **libcrun** is built in process from crun 1.30.1's pinned release (tarball sha256 99d036d9…), driver
+  `bench/competitive/libcrun/driver.c`. It is the competitor of Hex's seam, so it is outside the command
+  line's ratio (`docs/design/runtime-architecture.md`).
+- **hex (command line)** is `hex-cg3` (c7fc78f, sha256 8947ea21…), the binary of the OCI table above; only
+  its throughput is re-measured here.
+- **seam_box** (the process class through the `Runtime` seam) is HEAD of `cp/t7-runtime` (sha256 0000dda1…),
+  which carries decisions 1, 2 and 7 (no state fsync, no shim, the box cloned into its cgroup).
+
+**The driver's own ceiling** (`/usr/bin/true` standing in for the runtime, best of 4 rounds): **1,014 /
+6,862 / 13,577** lifecycles/s at concurrency 1 / 8 / 32. At concurrency 32 that is 13,577/s, far above the
+4,152/s the design's targets need a bench to drive, and 9.7x the old lock-serialized driver's ~1,394/s
+(`probes/oci_breakdown.md`, run 2). So the driver no longer caps any runtime's concurrency-32 rate.
+
+### In-process (the `Runtime` seam's layer): libcrun, against Hex's seam
+
+libcrun's calls run in the driver's own process; the one difference from crun's command line is the process
+crun spawns per call. Hex's `oci`-class seam column is **waiting for goal 3** (the oci class behind the seam,
+`seam_oci`), whose of-record numbers come with that goal.
+
+| Axis | libcrun | Hex seam (`oci`) |
+|---|---|---|
+| create p50 (ms) | 3.59 | waiting (goal 3) |
+| create p99 (ms) | 7.04 | waiting (goal 3) |
+| create p99.9 (ms) | 7.58 | waiting (goal 3) |
+| create max (ms) | 12.49 | waiting (goal 3) |
+| start p50 (ms) | 0.10 | waiting (goal 3) |
+| start p99 (ms) | 0.28 | waiting (goal 3) |
+| start p99.9 (ms) | 0.38 | waiting (goal 3) |
+| start max (ms) | 0.54 | waiting (goal 3) |
+| exec p50 (ms) | 2.42 | waiting (goal 3) |
+| exec p99 (ms) | 4.75 | waiting (goal 3) |
+| exec p99.9 (ms) | 14.30 | waiting (goal 3) |
+| exec max (ms) | 22.78 | waiting (goal 3) |
+| delete p50 (ms) | 10.46 | waiting (goal 3) |
+| delete p99 (ms) | 10.98 | waiting (goal 3) |
+| delete p99.9 (ms) | 25.74 | waiting (goal 3) |
+| delete max (ms) | 35.98 | waiting (goal 3) |
+| create+start of `true` p50 (ms) | 2.79 | waiting (goal 3) |
+| create+start of `true` p99 (ms) | 38.16 | waiting (goal 3) |
+| create+start of `true` p99.9 (ms) | 82.66 | waiting (goal 3) |
+| create+start of `true` max (ms) | 163.78 | waiting (goal 3) |
+| throughput, concurrency 1 (lifecycles/s) | 71 | waiting (goal 3) |
+| throughput, concurrency 8 (lifecycles/s) | 617 | waiting (goal 3) |
+| throughput, concurrency 32 (lifecycles/s) | 1,927 | waiting (goal 3) |
+| CPU per lifecycle, concurrency 1 (whole bench cgroup) | 3.21 ms | waiting (goal 3) |
+
+libcrun without a network namespace (lifecycle_nonet): create p50 2.36 ms, delete p50 10.34 ms. Its sustained
+rate at concurrency 32 (best round): 1,903/s, the last 1,000 lifecycles 0.89x the first's (windows 2,075,
+1,949, 2,007, 1,997, 2,000, 1,500, 1,757, 1,996, 2,066, 1,854).
+
+### The process class through the seam (the Hex seam column above)
+
+The process table above gains a **Hex seam** column from `seam_box` (the node agent in the bench's own
+process, each call a `Runtime` method). On the HEAD binary its run of `true` is 0.87 ms p50: decision 1 (no
+state fsync) removes the seven fsyncs that made it 37 ms when the seam was first measured (2026-10-24), and
+with no command-line spawn and no wrapper process it is below both `hex box run` (2.73 ms) and a systemd
+scope (7.13 ms). It holds 0.27 MiB per idle box, below a scope's 0.28. Goal 7 judges these against the scope;
+its own ratio column comes then.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**
   - crun is 3-9x faster than runc and youki on create and start.
   - Hex is behind crun on create (0.33x), start (0.08x), create+start (0.21x), CPU (0.67x) and held
-    memory and density (0.62x). It is level at concurrency 32 (0.99x).
+    memory and density (0.62x). At concurrency 32 its throughput is 0.67x crun's (1,146 against 1,711/s),
+    re-measured 2026-10-25 through the new driver; the old lock-serialized driver had capped crun's rate
+    there and made Hex look level (0.99x).
   - Hex's exec is close behind crun's at p50 (1.85 ms against 1.64, 0.89x), just ahead at p99
     (1.05x), and behind at p99.9 (0.39x). At p50 it is 3-5x faster than runc's, youki's and runsc's.
   - Hex's delete is the fastest of all (0.97 ms p50, 11x crun's), now that it removes a real cgroup
