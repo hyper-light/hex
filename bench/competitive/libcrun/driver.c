@@ -46,6 +46,10 @@
 static const char *state_root;
 static struct custom_handler_manager_s *handlers;
 static FILE *replies;
+/* The logging handler, set once (as crun's CLI sets it once per process), reused by every call: a
+ * long-lived process must not re-init it per request. */
+static crun_output_handler driver_output_handler;
+static void *driver_output_handler_arg;
 
 static long long
 now_ns (void)
@@ -80,7 +84,11 @@ context_for (libcrun_context_t *con, const char *id, libcrun_error_t *err)
   con->fifo_exec_wait_fd = -1;
   con->bundle = ".";
   con->handler_manager = handlers;
-  return libcrun_init_logging (&con->output_handler, &con->output_handler_arg, id, NULL, err);
+  con->output_handler = driver_output_handler;
+  con->output_handler_arg = driver_output_handler_arg;
+  (void) id;
+  (void) err;
+  return 0;
 }
 
 /* `crun create --bundle <bundle> <id>`: chdir to the bundle, load its config.json, create. */
@@ -102,6 +110,11 @@ do_create (const char *bundle, const char *id, libcrun_error_t *err)
   con.bundle = bundle;
   ret = libcrun_container_create (&con, container, 0, err);
   libcrun_container_free (container);
+  /* create opens the container's exec fifo (con.fifo_exec_wait_fd) to gate `start`; crun's command line
+   * closes it by exiting after the command, so a long-lived driver must close it itself or it leaks one
+   * fd per container (start re-opens the fifo from the state). */
+  if (con.fifo_exec_wait_fd >= 0)
+    close (con.fifo_exec_wait_fd);
   return ret;
 }
 
@@ -315,6 +328,11 @@ main (int argc, char **argv)
     }
   handlers = libcrun_handler_manager_create (&err);
   if (handlers == NULL)
+    {
+      reply_err (&err);
+      return 1;
+    }
+  if (libcrun_init_logging (&driver_output_handler, &driver_output_handler_arg, "libcrun-driver", NULL, &err) < 0)
     {
       reply_err (&err);
       return 1;
