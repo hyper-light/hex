@@ -121,3 +121,52 @@ Lifecycles/s, and the bench cgroup's CPU ms per lifecycle in brackets:
   `per_s`, `wall_s`). Set into a run directory each, as `crun.r1.json`, they make the same table in
   `summarize.py`, row for row: 35 lines, differing only in the numbers. The same holds off the bench host,
   against the stand-in (adacachy).
+
+## Run 3 (2026-10-26, adacachy): the no-fsync binary, step 1
+
+Decision 1 landed: the `oci` class now writes `state.json` with a temp file and `rename(2)` and **no fsync**
+(`state.rs`). Re-running step 1 on the no-fsync binary shows the fsync penalty run 1 measured is gone.
+
+- **Host:** adacachy, kernel 7.2.9-2-cachyos (32 CPUs, the container pinned 4-31). **Hex:** static-glibc HEAD
+  of `cp/t7-runtime`, sha256 00eb00954a7f88d3 (built `--target x86_64-unknown-linux-gnu` with `+crt-static`).
+  **crun:** 1.30.1, as run 1.
+- **When and load:** 2026-10-26T04:09Z, 1-minute load ~15 — noisy. CLAUDE.md §7's load<2 is unreachable on the
+  shared hosts right now (fedora overloaded/offline, adacachy oscillating 7–218); this step's overlay-vs-tmpfs
+  and hex-vs-crun figures are same-run ratios that cancel other people's CPU load, so they hold noisy
+  (noisy-is-default). `LOAD_GATE=0`. Out dir: `~/.cache/hex-bench/out/breakdown-20261026T040921Z/`.
+- **Parameters:** n = 500 per pass after 50 warm-ups, interleaved a (overlay) b (tmpfs) a b.
+
+### 1. The fsync penalty is gone: overlay ≈ tmpfs
+
+p50 in ms (best of the two passes each).
+
+| Pass | create | start | delete |
+|---|---|---|---|
+| hex overlay (a) | 2.68 | 0.341 | 7.34 |
+| hex tmpfs (b) | 4.39 | 0.336 | 6.14 |
+| crun overlay (a) | 1.68 | 0.325 | 0.43 |
+| crun tmpfs (b) | 1.58 | 0.293 | 0.37 |
+
+- **Hex's start is within 1.5% overlay-to-tmpfs** (0.341 against 0.336 ms), against run 1's 8.39 ms overlay /
+  1.68 ms tmpfs with fsyncs. The ~6.6 ms fsync penalty run 1 measured on start is gone.
+- **Hex's create shows no overlay penalty** (overlay 2.68 ≤ tmpfs 4.39 ms), against run 1's 12.42 overlay /
+  5.74 tmpfs. create p50 is noisy at this load (overlay passes 4.31 and 2.68, tmpfs 5.44 and 4.39), so the two
+  sides span rather than land within a literal 10%, but there is no overlay penalty, which is the point.
+- **crun (the control) is overlay ≈ tmpfs** either way, so the host and the overlay are not the variable.
+- **With its fsyncs gone, Hex's start is 1.05x crun's** here (0.341 against 0.325), within the 1.45x the design
+  argues (run 1's tmpfs projection, 1.68 against 1.16 ms). This is *this breakdown probe's* hex-vs-crun figure;
+  the competitive OCI pass of record (`RESULT.md`) was built from the pre-no-fsync binary (c7fc78f, which still
+  fsynced: start 6.74 ms, ~13x crun), so it does **not** yet confirm this. A competitive OCI pass on the
+  no-fsync binary is still owed (it needs the bench host; fedora is offline). (An earlier revision of this line
+  wrongly claimed the pass of record agreed at 1.07x — it does not; corrected 2026-10-26.)
+- **Delete is kernel-variable and is not the state write.** Hex delete is ~7 ms here (overlay ≈ tmpfs, so not
+  fsync/disk), against 2.05 ms on fedora's kernel in run 1; crun delete is ~0.4 ms here against ~11.6 ms in
+  run 1. The two runtimes' teardown reverses between fedora 6.19 and CachyOS 7.2.9: Hex waits for the cgroup to
+  empty (`cgroup.kill` then `cgroup.events`), whose POLLPRI notification lags the actual depopulation on this
+  kernel, where crun's return does not.
+- **Fixed** (`cgroup.rs`, `wait_empty`): capping the `cgroup.events` poll so `populated` is re-read every
+  500 µs, rather than waiting on the lagged POLLPRI, cut Hex's delete here from ~7 ms to **0.9 ms** (re-run on
+  the fixed binary, sha 1cd7deb7, same kernel; crun 0.4 ms in the same run). Start, create and the
+  overlay-vs-tmpfs figures are unchanged — the cap only affects the empty-wait, which only `delete` uses — and
+  it cannot regress a kernel whose POLLPRI is already prompt, since it only re-reads sooner. Correctness is
+  unchanged: `wait_empty` still returns only when `populated` is false or the deadline passes.

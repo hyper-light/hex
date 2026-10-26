@@ -54,11 +54,23 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   (persistent container + `hex oci exec` per step, like the docker executor shells to `docker`).
   `hex oci exec` is built (2026-10-24); next come the re-vendor and the dispatch wiring (mapped in
   NOTES.md).
-- **The `oci` class ignores a spec's `linux.seccomp`, `process.apparmorProfile`, `process.selinuxLabel`
-  and `linux.mountLabel`**: `spec.rs` doesn't read them, so `Spec::check` can't refuse them, and a
-  container whose spec names a seccomp profile runs without one (found 2026-10-24). CLAUDE.md §3 asks
-  for a typed refusal until each is implemented. The competitive bench is unaffected: its bundles name
-  none of them, for every runtime.
+- **Seccomp is applied; apparmor/SELinux/mountLabel are refused, not dropped** (CLAUDE.md §3; was: the
+  `oci` class ignored all four, found 2026-10-24). `spec.rs` now reads all four. The class compiles a
+  spec's `linux.seccomp` to a BPF program (vendored seccompiler, `oci/seccomp.rs`) and loads it in the
+  container init after `no_new_privs`, before `execve`. The containers/common default profile compiles
+  — it needs per-rule actions, its `socket` refusing `AF_NETLINK`+`NETLINK_AUDIT` with EINVAL while
+  allowing every other `socket` — and a behavioral test proves a denied syscall is refused inside a
+  rootless container while the rest run (`hex-cli/tests/oci_seccomp.rs`, through the seam: probe exits
+  42 with the profile, 10 without). An unsupported profile is a typed refusal. `process.apparmorProfile`,
+  `process.selinuxLabel` and `linux.mountLabel` stay refused by name in `Spec::check` (their apply path
+  is LSM-host-dependent, unvalidatable on the bench hosts) — a typed refusal until each is implemented,
+  never a silent drop. The competitive bench is unaffected: its bundles name none of them.
+- **Rootless device policy, enforced by construction** (`docs/design/runtime.md`, "Rootless devices"):
+  a rootless runtime can't load the cgroup device program (CAP_BPF, which it lacks), so a deny-by-default
+  allow-list is enforced by construction instead — only its devices get nodes, `mknod` is refused across
+  the user-namespace boundary, and the mapped host uid's DAC governs access (measured). An allow-by-default
+  policy with denials is refused (§3). Without this the `oci` class could start no standard container
+  rootless. crun/runc/podman do the same.
 
 ## Design decided, implementation under way (2026-10-24)
 
@@ -75,8 +87,18 @@ three different things (CLAUDE.md "Working here"):
     lifecycles/s at concurrency 32, above the 4,152 target), the process class through the seam, and
     throughput re-measured through the new worker-per-slot driver. 25/25 local control-flow checks.
   - **goals 1, 2, 7** (no fsync of state; no shim, `stopped` from the init's pid+start-time; the
-    `process` box cloned straight into its cgroup) — committed on `cp/t7-runtime`, **built and
-    reviewed locally, awaiting fedora gates and measurements**.
+    `process` box cloned straight into its cgroup) — committed on `cp/t7-runtime`; all seven gates
+    green. **No-fsync measured** (`bench/competitive/probes/oci_breakdown.md` Run 3, 2026-10-26,
+    no-fsync binary sha 1cd7deb7; fedora offline, so adacachy with interleaved overlay/tmpfs A/B passes
+    that cancel load): with its fsyncs gone Hex's start is within 1.5% overlay-to-tmpfs (0.341 vs
+    0.336 ms; the ~6.6 ms penalty gone) and create shows no overlay penalty (overlay 2.68 ≤ tmpfs
+    4.39 ms — overlay faster, stronger than the within-10% the goal asks, though create p50 is too
+    load-noisy to land within a literal 10%); crun the control is flat either way. A competitive OCI
+    pass on the HEAD binary (3e5444d8, adacachy, LOAD_GATE=0, fedora offline) has start p50 at 0.94x
+    crun (0.27 vs 0.25 ms; the 1.45x target met) and held memory per idle container 0.42 vs 0.40 MiB,
+    with no process beside any idle container (step 3) and runtime-tools at exact crun parity; the
+    held-memory criterion of goal 2 is still open (~20 KiB/container above crun). The OCI table of
+    record in `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).
   - **goal 3, the `oci` class behind the `Runtime` seam** — `hex-node` serves `ClassSpec::Bundle` in
     process (cgroup under the box root, `create_in_cgroup`, `exec` through a seam-mode `hex __oci-exec`
     helper), with `seam_oci` to measure it against libcrun. Built and reviewed locally; its runtime

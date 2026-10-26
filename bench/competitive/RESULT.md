@@ -87,6 +87,16 @@ competitor's for higher-is-better ones. Above 1 means Hex is ahead; the research
 Hex's create+start max (934 ms) is one of a few stalls in each round: round 2's next-slowest samples
 are 706, 400 and 126 ms, and round 1's max is 1,114 ms, with 185 ms next.
 
+**The OCI table's hex rows predate decisions 1 and 2** (binary c7fc78f, which fsynced its state and left
+a shim per container), so its start p50 (6.74 ms) carries the ~6.6 ms fsync penalty and its held memory
+(0.63 MiB) the shim. A pass on the no-fsync, no-shim binary (3e5444d8, adacachy, 2026-10-26, hex and crun
+only, interleaved; LOAD_GATE=0, so not of record by §7, but the hex-vs-crun ratios cancel the shared host's
+load) measures what those two decisions changed: **start p50 0.27 ms against crun's 0.25 (0.94x)** — the
+fsync penalty is gone — and **held memory per idle container 0.42 MiB against crun's 0.40 (0.95x)**, down
+from 0.63, with no process left beside any idle container (`probes/oci_breakdown.sh` step 3: hex leaves only
+the workload, as crun does). Held memory is still ~20 KiB/container above crun's, which decision 2 does not
+close; the of-record table refresh on the no-fsync binary awaits fedora.
+
 The three throughput rows were re-measured on 2026-10-25 through the worker-process-per-slot driver (the
 2026-10-25 run of record below); every other row is the 2026-10-23/24 run's. The old lock-serialized driver
 capped concurrent spawns, most at concurrency 32 (old rows: hex 52/325/1,030, runc 7/59/214, crun
