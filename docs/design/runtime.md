@@ -186,6 +186,56 @@ a spec this starts differently from before the change. The `process` class still
 migration, in `pre_exec`; its bench runs back to back, so it pays the grace period only when runs are
 spaced, and moving its births into their cgroups is the same change for a different spawn path.
 
+### Rootless devices: enforced by construction, not the program (2026-10-26)
+
+**The finding.** The `oci` class runs rootless (its own decision). A rootless runtime can't load the
+device program: `bpf(BPF_PROG_LOAD)` for a `BPF_PROG_TYPE_CGROUP_DEVICE` program, and the attach to
+the cgroup, are privileged operations (`kernel/bpf/syscall.c`; the cgroup device controller is
+CAP_SYS_ADMIN), and an unprivileged process has no such capability in the cgroup's owning (initial)
+user namespace — being uid 0 inside its own user namespace does not grant it. Measured: a `bpf` load
+from an unprivileged process returns `EPERM`. A spec with no device list, or any ordinary one, gets
+the deny-by-default allow-list (above), which compiles to a program — so **every** rootless start
+tried to load one and failed, and the class could start no standard container at all.
+
+**The choice.** When the container makes a user namespace (`spec.makes_namespace("user")`, the same
+signal `init.rs` uses), a deny-by-default allow-list is enforced by construction instead of by the
+program, and the program is not loaded:
+
+- Only the policy's devices get nodes. The init creates the default devices and the spec's
+  `linux.devices`, no others (`init.rs`, `make_default_devices`/`make_device`).
+- No new node can be made. `mknod` has no effect across the user-namespace boundary — CAP_MKNOD in
+  the container's namespace does not reach the host (`user_namespaces(7)`), which `init.rs` already
+  relies on to bind devices rather than create them.
+- Access to any node — one the init made, or one baked into the image's rootfs — is governed by the
+  mapped host uid's DAC. The container's "root" is an unprivileged host uid that owns nothing
+  dangerous, so it can open the world-readable nodes a container needs (`/dev/null`, `/dev/zero`) and
+  not the owned ones (`/dev/mem`, a disk).
+
+So the policy's *outcome* — the allowed nodes usable, the rest not — holds without the program. This
+is what crun, runc and podman do for rootless containers (they skip the device cgroup). An
+allow-by-default policy with denials (`a *:* rwm` then a deny) has no construction that reproduces it:
+a denied node the init still creates would be reachable. Rootless refuses such a spec by name
+(`run::attach_device_program`, a typed `Config` error) rather than silently under-enforce it
+(CLAUDE.md §3). The privileged path (a container with no user namespace, e.g. a root-run bench)
+loads the program as before.
+
+**Evidence.** Measured on the running hardware (adacachy, kernel 7.2.9-2-cachyos, 2026-10-26): in a
+user namespace mapped to container-root (`unshare -Ur`), `mknod` of a new block node is refused
+(`EPERM`); `/dev/null` and `/dev/zero` (root:root/root, mode 0666) open for read; `/dev/nvme0n1`
+(root:disk, 0660) and `/dev/mem` (root:kmem, 0640) are denied. The behavioral test
+`crates/hex-cli/tests/oci_seccomp.rs` then starts a rootless container end to end (it could not
+before this change) and the deny-mkdir seccomp probe reports 42, the control 10 (AC-T7.1.4). crun's
+rootless device handling is at commit 48514cefa6dd (`src/libcrun/linux.c`, the device cgroup is set up
+only with a cgroup manager, absent rootless); runc's is in `libcontainer/`'s rootless cgroup manager,
+which applies no device rules.
+
+**What would falsify it.** A rootless container that opens a device its deny-by-default policy
+denies — a dangerous node (e.g. `/dev/mem`, a disk, `/dev/kmsg`) world-accessible or owned by the
+runtime's unprivileged host uid, reachable despite the policy. Or the refusal firing on a policy a
+rootless container *can* enforce by construction (a deny-by-default allow-list). Or a host where an
+unprivileged `bpf` load of a cgroup device program succeeds, which would mean the program could be
+loaded rootless after all.
+
 ## The `process` box (Linux) — AC-T7.1.1, AC-T7.1.2, AC-T7.1.5
 
 **Source.** The kernel's cgroup v2 documentation (`Documentation/admin-guide/cgroup-v2.rst`);

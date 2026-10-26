@@ -21,7 +21,7 @@ use rustix::event::{PollFd, PollFlags};
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
-use crate::linux::oci::spec::{Process, Spec};
+use crate::linux::oci::spec::{Process, Seccomp, Spec};
 use crate::linux::oci::{OciError, init, sys};
 
 /// The request the runtime hands `hex __oci-exec`, as JSON.
@@ -123,8 +123,14 @@ fn helper() -> Result<u8, (u8, OciError)> {
     };
     match forked {
         // The child returns only if it couldn't exec; its status leaves through `main`, as the
-        // init's does.
-        sys::Fork::Child => Err(child(&process, procs, &signals)),
+        // init's does. The container's seccomp profile binds an exec'd program too (runc and crun
+        // apply it on exec): setns does not inherit the init's filter, so Hex reapplies it here.
+        sys::Fork::Child => Err(child(
+            &process,
+            spec.linux.seccomp.as_ref(),
+            procs,
+            &signals,
+        )),
         sys::Fork::Parent(pid) => {
             drop(procs);
             wait_forwarding(pid, &signals, req.seam).map_err(cannot)
@@ -195,6 +201,7 @@ fn namespaces_to_join(pid: i32) -> Result<Vec<(&'static str, i32, OwnedFd)>, Oci
 /// exit with, and why.
 fn child(
     process: &Process,
+    seccomp: Option<&Seccomp>,
     procs: Option<OwnedFd>,
     signals: &sys::ForwardedSignals,
 ) -> (u8, OciError) {
@@ -210,7 +217,7 @@ fn child(
             }
         }
         signals.restore()?;
-        init::become_process(process)
+        init::become_process(process, seccomp)
     };
     if let Err(e) = setup() {
         return (CANNOT_RUN, e);

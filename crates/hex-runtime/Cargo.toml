@@ -18,6 +18,7 @@ thiserror.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 rustix.workspace = true
+seccompiler.workspace = true
 
 [dev-dependencies]
 proptest = "1.12.0"

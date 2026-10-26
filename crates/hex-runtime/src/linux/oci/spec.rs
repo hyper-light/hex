@@ -107,6 +107,13 @@ pub struct Process {
     pub no_new_privileges: bool,
     #[serde(default)]
     pub oom_score_adj: Option<i32>,
+    /// The AppArmor profile to switch to on exec. Hex does not yet apply it, so `Spec::check` refuses a
+    /// spec that sets it rather than run the container without the profile it asked for (CLAUDE.md §3).
+    #[serde(default)]
+    pub apparmor_profile: Option<String>,
+    /// The SELinux process label. Same: refused until Hex applies it, never silently dropped (§3).
+    #[serde(default)]
+    pub selinux_label: Option<String>,
 }
 
 fn root_cwd() -> String {
@@ -177,6 +184,65 @@ pub struct Linux {
     pub cgroups_path: Option<String>,
     #[serde(default)]
     pub resources: Option<Resources>,
+    /// `linux.seccomp`: the syscall filter. Hex compiles it to a BPF program and loads it in the
+    /// container init before `execve` (see [`super::seccomp`]). A profile the compiler can't honour
+    /// is refused there, by name (CLAUDE.md §3), never run unfiltered.
+    #[serde(default)]
+    pub seccomp: Option<Seccomp>,
+    /// `linux.mountLabel`: the SELinux label for the container's mounts. Refused until applied (§3).
+    #[serde(default)]
+    pub mount_label: Option<String>,
+}
+
+/// `linux.seccomp` (config-linux.md, "Seccomp"): a syscall filter. `default_action` is taken when
+/// no `syscalls` entry matches; each entry names syscalls, the action for them, and optional
+/// argument conditions. [`super::seccomp`] compiles this to a BPF program.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Seccomp {
+    /// The action when no rule matches, e.g. `SCMP_ACT_ERRNO`. Required; a missing one is malformed.
+    pub default_action: String,
+    /// The errno `default_action` returns when it is `SCMP_ACT_ERRNO`/`SCMP_ACT_TRACE`; else unset.
+    #[serde(default)]
+    pub default_errno_ret: Option<u32>,
+    /// The `SCMP_ARCH_*` the profile applies to; empty means the native architecture only.
+    #[serde(default)]
+    pub architectures: Vec<String>,
+    /// `SECCOMP_FILTER_FLAG_*` for the `seccomp(2)` call.
+    #[serde(default)]
+    pub flags: Vec<String>,
+    /// The syscall groups, each an action for the syscalls it names under its argument conditions.
+    #[serde(default)]
+    pub syscalls: Vec<SeccompSyscall>,
+}
+
+/// One `linux.seccomp.syscalls` entry: an action for the named syscalls, under all of `args`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeccompSyscall {
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// This group's action, e.g. `SCMP_ACT_ALLOW`. Required; a missing one is malformed.
+    pub action: String,
+    /// The errno this group returns when its action is `SCMP_ACT_ERRNO`/`SCMP_ACT_TRACE`.
+    #[serde(default)]
+    pub errno_ret: Option<u32>,
+    /// The argument conditions; all must hold for the group to match (AND). Empty matches always.
+    #[serde(default)]
+    pub args: Vec<SeccompArg>,
+}
+
+/// One `args` condition: compares syscall argument `index` against `value` (and `value_two` for a
+/// masked compare) with `op` (an `SCMP_CMP_*`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeccompArg {
+    pub index: u32,
+    pub value: u64,
+    #[serde(default)]
+    pub value_two: Option<u64>,
+    /// The comparison, e.g. `SCMP_CMP_EQ`. Required; a missing one is malformed.
+    pub op: String,
 }
 
 /// `linux.resources` (config-linux.md, "Control groups"): cgroup v1-shaped limits, which
@@ -422,10 +488,49 @@ impl Spec {
                 return Err(OciError::Config(format!("path {p:?} isn't absolute")));
             }
         }
-        if let Some(process) = &self.process
-            && process.args.first().is_none_or(String::is_empty)
+        if let Some(process) = &self.process {
+            if process.args.first().is_none_or(String::is_empty) {
+                return Err(OciError::Config("process.args is empty".to_owned()));
+            }
+            // A spec that names a security control Hex can't yet apply is refused by name, never run
+            // without it (CLAUDE.md §3: a dropped security control is a silent failure).
+            if process
+                .apparmor_profile
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(OciError::Config(
+                    "process.apparmorProfile is set: Hex does not yet apply an AppArmor profile, and \
+                     refuses rather than run the container without the one it asked for"
+                        .to_owned(),
+                ));
+            }
+            if process
+                .selinux_label
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                return Err(OciError::Config(
+                    "process.selinuxLabel is set: Hex does not yet apply a SELinux process label, and \
+                     refuses rather than run without it"
+                        .to_owned(),
+                ));
+            }
+        }
+        // linux.seccomp is honoured: the container init compiles it and loads the BPF filter before
+        // execve (super::seccomp). A profile the compiler can't honour is refused there, by name, so
+        // the refusal is no longer blanket here.
+        if self
+            .linux
+            .mount_label
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
         {
-            return Err(OciError::Config("process.args is empty".to_owned()));
+            return Err(OciError::Config(
+                "linux.mountLabel is set: Hex does not yet apply a SELinux mount label, and refuses \
+                 rather than run without it"
+                    .to_owned(),
+            ));
         }
         Ok(())
     }
@@ -461,6 +566,99 @@ mod tests {
         assert!(spec.makes_namespace("pid"));
         assert!(!spec.makes_namespace("network"));
         assert_eq!(spec.linux.masked_paths, ["/proc/kcore"]);
+    }
+
+    #[test]
+    fn a_security_control_hex_cannot_yet_apply_is_refused_not_dropped() {
+        // CLAUDE.md §3: a security control Hex can't honour is refused by name, never run without
+        // (a dropped LSM control is a silent security failure). Parse runs check. linux.seccomp is
+        // no longer here: Hex compiles and loads it (the compiler refuses an unsupported profile by
+        // name, super::seccomp), so a settable seccomp profile is honoured, not refused wholesale.
+        let cases = [
+            (
+                "process.apparmorProfile",
+                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+                    "process":{"args":["/bin/sh"],"apparmorProfile":"docker-default"},"linux":{}}"#,
+            ),
+            (
+                "process.selinuxLabel",
+                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},
+                    "process":{"args":["/bin/sh"],"selinuxLabel":"system_u:system_r:container_t:s0"}}"#,
+            ),
+            (
+                "linux.mountLabel",
+                r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
+                    "linux":{"mountLabel":"system_u:object_r:container_file_t:s0"}}"#,
+            ),
+        ];
+        for (field, json) in cases {
+            let r = Spec::parse(json.as_bytes());
+            assert!(
+                matches!(&r, Err(OciError::Config(why)) if why.contains(field)),
+                "{field} should be refused with a Config error naming it, got {r:?}"
+            );
+        }
+    }
+
+    // AC-T7.1.4 / CLAUDE.md §6: linux.seccomp now parses into its fields (it is no longer refused at
+    // the spec), so a wrong field name wouldn't silently drop part of the filter. The compile step
+    // (super::seccomp) is what refuses an unsupported profile; here we only check the model reads.
+    #[test]
+    fn a_seccomp_profile_parses_into_its_fields() {
+        let json = r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
+            "linux":{"seccomp":{
+                "defaultAction":"SCMP_ACT_ERRNO","defaultErrnoRet":38,
+                "architectures":["SCMP_ARCH_X86_64","SCMP_ARCH_X86"],
+                "flags":["SECCOMP_FILTER_FLAG_TSYNC"],
+                "syscalls":[
+                    {"names":["read","write"],"action":"SCMP_ACT_ALLOW"},
+                    {"names":["socket"],"action":"SCMP_ACT_ERRNO","errnoRet":22,
+                     "args":[{"index":0,"value":16,"op":"SCMP_CMP_EQ"},
+                             {"index":2,"value":9,"valueTwo":9,"op":"SCMP_CMP_MASKED_EQ"}]}
+                ]}}}"#;
+        let spec = Spec::parse(json.as_bytes()).unwrap();
+        let sc = spec.linux.seccomp.unwrap();
+        assert_eq!(sc.default_action, "SCMP_ACT_ERRNO");
+        assert_eq!(sc.default_errno_ret, Some(38));
+        assert_eq!(sc.architectures, ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86"]);
+        assert_eq!(sc.flags, ["SECCOMP_FILTER_FLAG_TSYNC"]);
+        assert_eq!(sc.syscalls.len(), 2);
+        assert_eq!(sc.syscalls[0].names, ["read", "write"]);
+        assert_eq!(sc.syscalls[0].action, "SCMP_ACT_ALLOW");
+        let netlink = &sc.syscalls[1];
+        assert_eq!(
+            (netlink.action.as_str(), netlink.errno_ret),
+            ("SCMP_ACT_ERRNO", Some(22))
+        );
+        assert_eq!(netlink.args[0].index, 0);
+        assert_eq!(
+            (netlink.args[1].value, netlink.args[1].value_two),
+            (9, Some(9))
+        );
+        assert_eq!(netlink.args[1].op, "SCMP_CMP_MASKED_EQ");
+    }
+
+    // Hostile input to the seccomp model is a typed error, not a panic (CLAUDE.md §6): a group
+    // missing its required `action`, or an arg missing `op`, is malformed and refused at parse.
+    #[test]
+    fn a_malformed_seccomp_profile_is_a_reason_not_a_panic() {
+        for bad in [
+            // syscalls entry with no action
+            r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
+                "linux":{"seccomp":{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["read"]}]}}}"#,
+            // no defaultAction
+            r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
+                "linux":{"seccomp":{"syscalls":[]}}}"#,
+            // arg with no op
+            r#"{"ociVersion":"1.0.0","root":{"path":"rootfs"},"process":{"args":["/bin/sh"]},
+                "linux":{"seccomp":{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[
+                    {"names":["read"],"action":"SCMP_ACT_ERRNO","args":[{"index":0,"value":1}]}]}}}"#,
+        ] {
+            assert!(
+                matches!(Spec::parse(bad.as_bytes()), Err(OciError::Config(_))),
+                "malformed seccomp should be a Config error: {bad}"
+            );
+        }
     }
 
     // AC-T7.1.4: linux.resources parses under the spec's own field names, several of which aren't

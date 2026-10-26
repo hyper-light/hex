@@ -19,8 +19,8 @@ use rustix::fs::{Mode, OFlags};
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::thread::UnshareFlags;
 
-use crate::linux::oci::spec::{Device, Process, Spec};
-use crate::linux::oci::{OciError, caps, sys};
+use crate::linux::oci::spec::{Device, Process, Seccomp, Spec};
+use crate::linux::oci::{OciError, caps, seccomp, sys};
 
 /// Environment the `create` runtime sets for `hex __oci-init`.
 pub const ENV_SYNC_W: &str = "HEX_OCI_SYNC_W";
@@ -185,7 +185,7 @@ fn container(
         let _ = rustix::io::write(&fifo, b"0");
         return Ok(());
     };
-    become_process(&process)?;
+    become_process(&process, spec.linux.seccomp.as_ref())?;
 
     // Ready: the runtime may now report `created`. Then block until `start` opens the FIFO.
     msg(sync, "R");
@@ -198,9 +198,15 @@ fn container(
 }
 
 /// Becomes the container's process as its spec gives it: its OOM score, limits, capabilities, user,
-/// no_new_privs and umask. The container's first process does this before `start`, and each one
-/// `hex oci exec` runs does it before it execs.
-pub(crate) fn become_process(process: &Process) -> Result<(), OciError> {
+/// no_new_privs and umask, and finally the seccomp filter. The container's first process does this
+/// before `start`, and each one `hex oci exec` runs does it before it execs.
+///
+/// The seccomp filter is applied last, so the few syscalls Hex itself makes before this point
+/// (setuid, setrlimit, …) run unfiltered, and only the workload's `execve` and what follows are
+/// bound by it. The init re-exec'd, so it is single-threaded: [`seccompiler::apply_filter`] binds
+/// its one thread, which is the thread that `execve`s (CLAUDE.md §12: no new `unsafe`; seccompiler
+/// makes the `seccomp(2)` call).
+pub(crate) fn become_process(process: &Process, seccomp: Option<&Seccomp>) -> Result<(), OciError> {
     // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
     if let Some(adj) = process.oom_score_adj {
         fs::write("/proc/self/oom_score_adj", adj.to_string())
@@ -224,6 +230,14 @@ pub(crate) fn become_process(process: &Process) -> Result<(), OciError> {
     }
     if let Some(mask) = process.user.umask {
         rustix::process::umask(Mode::from_bits_truncate(mask));
+    }
+    // The seccomp filter last: a profile Hex can't honour is refused here by name (seccomp::compile),
+    // never run unfiltered (CLAUDE.md §3). apply_filter also sets PR_SET_NO_NEW_PRIVS, which a
+    // seccomp filter needs when the thread isn't privileged.
+    if let Some(profile) = seccomp {
+        let program = seccomp::compile(profile)?;
+        seccompiler::apply_filter(&program)
+            .map_err(|e| OciError::os("loading the seccomp filter", e))?;
     }
     Ok(())
 }

@@ -2,8 +2,9 @@
 # bench/competitive/probes: where an OCI runtime's time and memory go, inside the bench container
 # (oci_breakdown.sh starts it as host.sh starts the OCI pass). The runtime design rests on these:
 #   1. fsync: each runtime's lifecycle with its state root on the container's overlay, then on a tmpfs,
-#      interleaved A B A B. Hex writes state with two fsyncs per write (state.rs); a root on tmpfs makes
-#      them free, so the difference is what they cost.
+#      interleaved A B A B. Hex writes state with a temp file and rename and no fsync (state.rs, decision 1),
+#      so overlay should match tmpfs; the step confirms it, and would catch a reintroduced fsync, which a
+#      tmpfs root makes free.
 #   2. the CLI floor: posix_spawn and wait of `true`, and of each runtime's `--version` and `state`, the
 #      least any CLI-driven operation can cost.
 #   3. processes per idle container: what each runtime leaves running beside the workload.

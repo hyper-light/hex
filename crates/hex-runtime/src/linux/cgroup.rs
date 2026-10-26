@@ -335,10 +335,17 @@ impl BoxCgroup {
             if left.is_zero() {
                 return Ok(false);
             }
-            // The kernel marks cgroup.events modified (POLLPRI) when `populated` changes.
+            // The kernel marks cgroup.events modified (POLLPRI) when `populated` changes, but on some
+            // kernels that notification lags the actual depopulation by several ms (CachyOS 7.2;
+            // probes/oci_breakdown.md run 3), which would leave `delete` waiting on a late wake. Cap the
+            // poll so `populated` is re-read at least every POLL_CAP; 500 µs is well under crun's ~0.4 ms
+            // delete there and far below the observed lag. Correctness is unchanged: it still returns only
+            // when `populated` is false, or when the deadline passes.
+            const POLL_CAP: Duration = Duration::from_micros(500);
+            let poll_for = left.min(POLL_CAP);
             let ts = rustix::event::Timespec {
-                tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
-                tv_nsec: i64::from(left.subsec_nanos()),
+                tv_sec: i64::try_from(poll_for.as_secs()).unwrap_or(i64::MAX),
+                tv_nsec: i64::from(poll_for.subsec_nanos()),
             };
             let borrowed = fd.as_fd();
             let mut fds = [rustix::event::PollFd::new(

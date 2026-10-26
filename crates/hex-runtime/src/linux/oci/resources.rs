@@ -32,6 +32,11 @@ pub struct Plan {
     pub controllers: BTreeSet<String>,
     pub writes: Vec<Write>,
     pub devices: Option<Vec<Insn>>,
+    /// Whether the device policy allows by default (the spec has an `a *:* rwm` allow). A rootless
+    /// container can't load the cgroup device program, so a deny-by-default allow-list it enforces by
+    /// construction instead (`run::attach_device_program`); an allow-by-default policy with denials has
+    /// no such construction and is refused there. `false` (deny by default) is the safe default value.
+    pub devices_allow_by_default: bool,
 }
 
 impl Plan {
@@ -118,6 +123,9 @@ pub fn plan(r: &Resources) -> Result<Plan, OciError> {
         p.write(&unified_controller(key)?, key.clone(), value.clone());
     }
     p.devices = devices(&r.devices)?;
+    // A rootless container enforces an allow-list device policy by construction, not with the device
+    // program; whether the policy instead allows by default decides that (`run::attach_device_program`).
+    p.devices_allow_by_default = device_state(&r.devices)?.allow_by_default;
     Ok(p)
 }
 

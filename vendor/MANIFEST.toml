@@ -4,3 +4,16 @@ format = 1
 
 # Hex's gate, run after a re-vendor.
 gate = ["bash scripts/gates.sh"]
+
+# seccompiler (rust-vmm): compiles an OCI seccomp profile to a BPF program and loads it in the
+# container init. Vendored so Hex can profile and lean its compile path (decision: runtime.md).
+[projects.seccompiler]
+kind = "git"
+repository = "https://github.com/rust-vmm/seccompiler"
+commit = "c3cf77d65815037931ae5bc2fca010713defdc8c"
+path = "vendor/seccompiler"
+# rust-vmm-ci is the shared CI submodule, not a build dependency of the library; excluded so the
+# vendored tree is the crate's own source.
+exclude = ["rust-vmm-ci"]
+# Hex's own files in the vendored tree (not upstream's): the record of what Hex changed and why.
+own = ["UPSTREAM.md"]

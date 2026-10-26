@@ -24,6 +24,9 @@ hex-node = { path = "crates/hex-node", version = "0.1.0" }
 flate2 = "1.1.10"
 libc = "0.2.190"
 rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio"] }
+# OCI seccomp: compiles a profile to a BPF program and loads it in the container init. Vendored
+# (vendor/seccompiler) so Hex can lean its compile path; patched to that copy below.
+seccompiler = "0.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10.9"
@@ -73,3 +76,9 @@ debug = "line-tables-only"
 
 [profile.bench]
 inherits = "release"
+
+# Hex vendors seccompiler (vendor/MANIFEST.toml) and builds against that copy, as the no-package-takes-
+# a-kiln-name rule has kiln patch its own vendored products (CLAUDE.md, Vendoring). vendor/ is its own
+# workspace (excluded above); the patch points at the crate directory inside it.
+[patch.crates-io]
+seccompiler = { path = "vendor/seccompiler" }

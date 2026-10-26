@@ -8,12 +8,16 @@
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
 HEX=$(realpath "${1:?hex release binary}")
-case "$(hostname)" in fedora*) ;; *) echo "refusing: the bench host is fedora, not $(hostname)" >&2; exit 2 ;; esac
+# Another host only by name (BENCH_HOST_OK=<its hostname>), as host.sh allows: the "fedora" runner's box is
+# now hostname kiln-a094a12d after a reprovision, and Ada's call runs these on adacachy.
+case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
 OUT="$BASE/out/breakdown-$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$OUT"
 [ -x "$BASE/bin/crun" ] || { echo "refusing: no $BASE/bin/crun (host.sh fetches it)" >&2; exit 4; }
-# CLAUDE.md §7: load average under 2, waited for up to 15 minutes, as host.sh does.
-for i in $(seq 1 90); do
+# CLAUDE.md §7: load average under 2, waited for up to 15 minutes, as host.sh does. LOAD_GATE=0 skips the
+# wait, as host.sh allows: this probe's measures are overlay-vs-tmpfs and hex-vs-crun ratios in one run,
+# which cancel other people's CPU load (noisy-is-default).
+[ "${LOAD_GATE:-1}" = 0 ] || for i in $(seq 1 90); do
   load=$(cut -d' ' -f1 /proc/loadavg)
   awk -v l="$load" 'BEGIN { exit !(l < 2) }' && break
   [ "$i" = 90 ] && { echo "refusing: 1-minute load average $load is not under 2" >&2; exit 3; }

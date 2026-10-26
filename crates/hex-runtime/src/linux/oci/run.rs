@@ -191,7 +191,7 @@ impl Runtime {
         let (cgroup, caller_owns) = match cgroup {
             Cgroup::FromSpec => (make_cgroup(&spec, id, &plan)?, false),
             Cgroup::Provided(cg) => {
-                attach_device_program(&cg, &plan)?;
+                attach_device_program(&cg, &plan, spec.makes_namespace("user"))?;
                 (cg, true)
             }
         };
@@ -607,7 +607,7 @@ fn make_cgroup(spec: &Spec, id: &str, plan: &Plan) -> Result<BoxCgroup, OciError
         }
     };
     let cg = BoxCgroup::at(path);
-    if let Err(e) = apply(&cg, plan) {
+    if let Err(e) = apply(&cg, plan, spec.makes_namespace("user")) {
         if made {
             let _ = cg.remove();
         }
@@ -617,21 +617,42 @@ fn make_cgroup(spec: &Spec, id: &str, plan: &Plan) -> Result<BoxCgroup, OciError
 }
 
 /// The plan's writes into the cgroup, in order, then its device program, attached to it.
-fn apply(cg: &BoxCgroup, plan: &Plan) -> Result<(), OciError> {
+fn apply(cg: &BoxCgroup, plan: &Plan, rootless: bool) -> Result<(), OciError> {
     for w in &plan.writes {
         write_file(&cg.dir().join(&w.file), &w.value).map_err(from_refusal)?;
     }
-    attach_device_program(cg, plan)
+    attach_device_program(cg, plan, rootless)
 }
 
 /// Attaches the plan's device program to the cgroup, if it has one; the device access a container
 /// gets is the spec's, whether its cgroup was made from the spec or by the node under its box root.
-fn attach_device_program(cg: &BoxCgroup, plan: &Plan) -> Result<(), OciError> {
-    if let Some(insns) = &plan.devices {
-        let prog = sys::load_device_program(insns)?;
-        let dir = cg.open_dir().map_err(from_refusal)?;
-        sys::attach_device_program(dir.as_fd(), prog.as_fd())?;
+///
+/// A rootless container can't load a `BPF_PROG_TYPE_CGROUP_DEVICE` program: loading one needs CAP_BPF
+/// in the cgroup's owning (initial) user namespace, which an unprivileged runtime lacks. A
+/// deny-by-default allow-list it enforces by construction instead — only its devices get nodes, `mknod`
+/// is refused across the user-namespace boundary (`init.rs`), and the mapped host uid's DAC governs
+/// access (docs/design/runtime.md, "Rootless devices", measured on the running hardware). An
+/// allow-by-default policy with denials has no such construction, so it's refused here rather than
+/// silently under-enforced (CLAUDE.md §3).
+fn attach_device_program(cg: &BoxCgroup, plan: &Plan, rootless: bool) -> Result<(), OciError> {
+    let Some(insns) = &plan.devices else {
+        return Ok(());
+    };
+    if rootless {
+        if plan.devices_allow_by_default {
+            return Err(OciError::Config(
+                "linux.resources.devices: a rootless container can't enforce an allow-by-default \
+                 device policy with denials — loading the cgroup device program needs CAP_BPF, which \
+                 an unprivileged runtime lacks; express the policy as a deny-by-default allow-list, \
+                 which a rootless container enforces by construction"
+                    .to_owned(),
+            ));
+        }
+        return Ok(());
     }
+    let prog = sys::load_device_program(insns)?;
+    let dir = cg.open_dir().map_err(from_refusal)?;
+    sys::attach_device_program(dir.as_fd(), prog.as_fd())?;
     Ok(())
 }
 
