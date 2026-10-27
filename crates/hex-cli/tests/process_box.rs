@@ -47,6 +47,10 @@ impl Fixture for BinFixture {
         }
     }
 
+    fn init(&self, id: BoxId, _act: &Act) -> BoxSpec {
+        self.spec(id, Bounds::default())
+    }
+
     fn program(&self, act: &Act) -> Program {
         let mut args = vec![self.exe.clone(), "selftest-box".to_owned()];
         match act {

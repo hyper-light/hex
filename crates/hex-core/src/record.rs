@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use hex_api::{BoxSpec, Class, Refusal};
+use hex_api::{BoxSpec, Class, Exit, Refusal};
 use serde::{Deserialize, Serialize};
 
 /// The record format's version; a record of another is refused, never guessed at.
@@ -23,6 +23,10 @@ pub struct BoxRecord {
     pub init: Option<ProcId>,
     /// Directories the box owns and removes with itself.
     pub dirs: Vec<PathBuf>,
+    /// How the container's init ended, once the node agent reaped it (`oci`). Added within version 1,
+    /// so a record without it reads as `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<Exit>,
 }
 
 /// Where a box is in its life.
@@ -53,6 +57,7 @@ impl BoxRecord {
             phase,
             init: None,
             dirs,
+            exit: None,
         }
     }
 

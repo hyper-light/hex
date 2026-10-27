@@ -59,7 +59,8 @@ pub enum Exit {
     Code(i32),
     /// This signal ended it.
     Signal(i32),
-    /// It ended while the node agent was down, and the kernel kept no record of how.
+    /// It ended where its node agent couldn't collect how: while the agent was down, or (an `oci`
+    /// box's init) after a restart, when the init is no longer the agent's child.
     Unknown,
 }
 
@@ -115,6 +116,11 @@ pub struct BoxInfo {
     pub bounds: Bounds,
     /// Taken back after its node agent restarted, rather than made by this one.
     pub adopted: bool,
+    /// How an `oci` box's init ended, once it has: the container's own exit. `None` while it runs,
+    /// and for a `process` box, which has no init. Added after the first release, so absent on the
+    /// wire means `None` (append-only, CLAUDE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<Exit>,
 }
 
 /// What a box has used, and holds now.
@@ -151,6 +157,9 @@ pub enum Refusal {
     },
     #[error("the node holds its most boxes ({0})")]
     Full(usize),
+    /// A per-node budget other than the box count is spent: `what` names it, `bound` is its size.
+    #[error("the node holds its most {what} ({bound})")]
+    Exhausted { what: &'static str, bound: usize },
     #[error("{op} failed: {why}")]
     Os { op: &'static str, why: String },
     #[error("the node agent's state is unusable: {0}")]
@@ -178,5 +187,21 @@ mod tests {
         assert!(Signal::new(-9).is_err());
         assert_eq!(Signal::new(9).unwrap(), Signal::KILL);
         assert_eq!(Signal::new(64).unwrap().number(), 64);
+    }
+
+    /// Append-only wire (CLAUDE.md): a `BoxInfo` written before `exit` existed reads as `None`, and
+    /// one with no exit is written without the field, so an older reader sees what it always did.
+    #[test]
+    fn a_box_info_without_an_exit_reads_and_writes_as_before() {
+        let old = r#"{"id":"b","class":"oci","state":"empty","bounds":{},"adopted":false}"#;
+        let info: BoxInfo = serde_json::from_str(old).unwrap();
+        assert_eq!(info.exit, None);
+        assert!(!serde_json::to_string(&info).unwrap().contains("exit"));
+        let ended = BoxInfo {
+            exit: Some(Exit::Signal(9)),
+            ..info
+        };
+        let back: BoxInfo = serde_json::from_str(&serde_json::to_string(&ended).unwrap()).unwrap();
+        assert_eq!(back.exit, Some(Exit::Signal(9)));
     }
 }

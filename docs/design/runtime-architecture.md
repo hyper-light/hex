@@ -106,10 +106,35 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
 
 **The choice.** `create` leaves no Hex process beside the container.
 - **Through the command line,** the container's parent is the caller's subreaper, as with crun.
-- **Through the `Runtime` seam,** the node agent is every container's parent. It sets `PR_SET_CHILD_SUBREAPER`,
-  holds each init's pidfd, and records exits.
+- **Through the `Runtime` seam,** the node agent is every container's parent. Built
+  (`crates/hex-node/src/supervise.rs`):
+  - **Subreaper.** The node agent sets `PR_SET_CHILD_SUBREAPER` when it opens. The shim's exit makes each
+    init the agent's child once `create` returns.
+  - **Watching each init.** `create` opens the init's pidfd and checks that the process is the agent's child
+    with the start time `create` recorded (`/proc/<pid>/stat` fields 4 and 22), so a recycled pid is never
+    taken for it.
+  - **The budget.** The pidfds are held within a budget (`INIT_BUDGET`, 65,536 by default; set per node).
+    Past it, `create` refuses with `Refusal::Exhausted` naming the budget before anything is made, so no
+    init is left unwatched.
+  - **Recording exits.** One thread waits on every pidfd through an epoll set. When one turns readable it
+    reaps the init with `waitid(P_PIDFD)` and records the exit in the box's record. `inspect` reports it in
+    `BoxInfo.exit` (an optional field, added append-only) and reaps an ended init itself if the thread
+    hasn't yet, so a stopped box is never read without its exit.
+  - **Orphans.** Being a subreaper, the agent also inherits a box's other orphans. A sweep every second
+    (`SWEEP_PERIOD`, at most 4,096 children each) reaps those that have ended. It takes only zombies in the
+    node's box cgroups that no `Proc` handle or watched init owns. Spawns and sweeps exclude each other, so a
+    sweep never takes a child before its owner has claimed it.
+  - **After a restart.** An agent restarted while its boxes run is no longer their inits' parent. It judges
+    them by pid and start time as `state` does, and reports an init that ended out of its sight as
+    `Exit::Unknown`.
 - **`state`** derives `stopped` from the init's pid and start time, as crun's status file does with
   `process-start-time` (`status.c:258-268`), so nothing has to write it.
+- **A zombie init.** Hex counts an init that has exited but not been reaped (state `Z`) as stopped. crun
+  rejects only a changed start time or state `X` (`status.c:804`, on main: `if (status->process_start_time !=
+  st.starttime || st.state == 'X')`), so it counts that zombie as running until it is reaped. Hex's reading
+  is the runtime-spec's: a container is stopped once "the container process has exited" (runtime.md,
+  Lifecycle step 10). Through the seam the difference lasts only until the agent reaps the init.
+  (Kiln research `01a178e67ccd7764b6746e5880187422`, f19-f20.)
 
 **Sources.**
 - PR_SET_CHILD_SUBREAPER(2const): "A subreaper fulfills the role of init(1) for its descendant processes."

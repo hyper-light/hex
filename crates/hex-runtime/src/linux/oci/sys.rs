@@ -208,9 +208,23 @@ impl WaitStatus {
 /// Sets signal `sig` to its default disposition, unblocks `sig` alone, and raises it on this process,
 /// so the process ends the way the signal says: `hex __oci-exec` in seam mode ends by the signal that
 /// ended its program, so the node agent's pidfd watch reads that outcome. Only `sig` is unblocked, so
-/// another forwarded signal left pending can't be delivered first and misreport. Returns only if the
-/// raise didn't end it.
+/// another forwarded signal left pending can't be delivered first and misreport. SIGKILL is raised as
+/// it is: its disposition can't be changed nor the signal blocked, and signal(2) refuses to try
+/// (EINVAL; signal(7)), which would leave the program's SIGKILL reported as an exit of 137. Returns
+/// only if the raise didn't end it.
 pub fn raise_default(sig: i32) -> Result<(), OciError> {
+    if sig != libc::SIGKILL {
+        default_and_unblock(sig)?;
+    }
+    // SAFETY: raise(3) with a valid signal number; no pointers, writes nothing. Checked.
+    if unsafe { libc::raise(sig) } != 0 {
+        return Err(OciError::os("raise", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Sets `sig` to its default disposition and unblocks it alone.
+fn default_and_unblock(sig: i32) -> Result<(), OciError> {
     // SAFETY: signal(2) with SIG_DFL and a valid signal number installs the default disposition and
     // writes nothing of ours; the return value is checked against SIG_ERR.
     if unsafe { libc::signal(sig, libc::SIG_DFL) } == libc::SIG_ERR {
@@ -236,10 +250,6 @@ pub fn raise_default(sig: i32) -> Result<(), OciError> {
             "sigprocmask SIG_UNBLOCK",
             std::io::Error::last_os_error(),
         ));
-    }
-    // SAFETY: raise(3) with a valid signal number; no pointers, writes nothing. Checked.
-    if unsafe { libc::raise(sig) } != 0 {
-        return Err(OciError::os("raise", std::io::Error::last_os_error()));
     }
     Ok(())
 }

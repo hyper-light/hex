@@ -3,10 +3,12 @@
 //! in a cgroup under its own box root with the box's bounds in force, as the `process` class does, so
 //! one code path makes, bounds, deletes and recovers every box's cgroup; the container's init and
 //! `exec` programs run through the `hex` binary's `__oci-init` and `__oci-exec` helpers (decision 3
-//! of docs/design/runtime-architecture.md).
+//! of docs/design/runtime-architecture.md). The node agent is its containers' parent, holding each
+//! init's pidfd and recording how it ended ([`crate::supervise`], decision 2).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hex_api::{
@@ -23,6 +25,7 @@ use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
 use crate::store::Store;
+use crate::supervise::{self, Supervisor};
 
 /// How long [`Runtime::delete`] waits for a box to empty after killing it before it reports the
 /// kernel is wedged. A `cgroup.kill` empties a box in milliseconds; a minute is far past any real
@@ -39,6 +42,8 @@ pub struct Node {
     /// when this process's own binary is `hex` (it handles `__oci-init`/`__oci-exec`). A node linked
     /// into another program, or the bench, names it ([`Node::with_oci_helper`]).
     oci_helper: Option<PathBuf>,
+    /// The `oci` boxes' inits, watched and reaped; orphaned box processes, reaped.
+    supervisor: Arc<Supervisor>,
 }
 
 /// What a recovery did.
@@ -55,28 +60,35 @@ impl Node {
     /// the `io` bounds applying to the disks under `disk_path`. Does not recover; call [`Node::recover`].
     pub fn open(box_root: &Path, state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
         let disks = disks::under(disk_path)?;
-        let root = BoxRoot::open(box_root, disks)?;
-        let store = Store::open(state_dir)?;
-        Ok(Self {
-            root,
-            store,
-            oci_root: state_dir.join("oci"),
-            oci_helper: None,
-        })
+        Self::with_root(BoxRoot::open(box_root, disks)?, state_dir)
     }
 
     /// Opens a node agent in a cgroup subtree beside this process's own cgroup (the usual case: the
     /// node agent runs in a delegated leaf and its boxes in a sibling), records under `state_dir`.
     pub fn beside_self(state_dir: &Path, disk_path: &Path) -> Result<Self, Refusal> {
         let disks = disks::under(disk_path)?;
-        let root = BoxRoot::beside_self(disks)?;
+        Self::with_root(BoxRoot::beside_self(disks)?, state_dir)
+    }
+
+    /// The node over `root`, records under `state_dir`; this process becomes a child subreaper, so
+    /// each `oci` box's init is its child once the shim exits.
+    fn with_root(root: BoxRoot, state_dir: &Path) -> Result<Self, Refusal> {
         let store = Store::open(state_dir)?;
+        let supervisor = Supervisor::start(root.dir(), store.clone())?;
         Ok(Self {
             root,
             store,
             oci_root: state_dir.join("oci"),
             oci_helper: None,
+            supervisor,
         })
+    }
+
+    /// Sets how many `oci` boxes' inits the node watches at once, [`supervise::INIT_BUDGET`] unless
+    /// set: past it `create` of an `oci` box is refused with [`Refusal::Exhausted`].
+    pub fn with_init_budget(self, budget: usize) -> Result<Self, Refusal> {
+        self.supervisor.set_budget(budget)?;
+        Ok(self)
     }
 
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
@@ -127,12 +139,48 @@ impl Node {
                 }
             }
         };
+        let exit = match record.spec.class {
+            ClassSpec::Process => None,
+            // Read after the state, so an init that ended since is reaped here and reported.
+            ClassSpec::Oci(_) | ClassSpec::Bundle(_) => self.init_exit(record, state)?,
+        };
         Ok(BoxInfo {
             id: id.clone(),
             class: record.spec.class.class(),
-            state,
+            // An oci box is its init: once that has ended, the box is empty.
+            state: if exit.is_some() {
+                BoxState::Empty
+            } else {
+                state
+            },
             bounds: record.spec.bounds.clone(),
             adopted,
+            exit,
+        })
+    }
+
+    /// How an `oci` box's init ended: as the supervisor reaped it, or as the box's record holds it
+    /// (reaped since `record` was read, or before a restart). An init that ended where the agent
+    /// couldn't reap it, not its child after a restart, ended in a way no one recorded:
+    /// [`Exit::Unknown`].
+    fn init_exit(
+        &self,
+        record: &BoxRecord,
+        state: BoxState,
+    ) -> Result<Option<hex_api::Exit>, Refusal> {
+        let id = &record.spec.id;
+        if let Some(exit) = self.supervisor.exit(id)? {
+            return Ok(Some(exit));
+        }
+        let recorded = match self.record(id)? {
+            Some(now) => now.exit,
+            None => record.exit,
+        };
+        let ended_unseen = state == BoxState::Empty && record.init.is_some();
+        Ok(match recorded {
+            Some(exit) => Some(exit),
+            None if ended_unseen => Some(hex_api::Exit::Unknown),
+            None => None,
         })
     }
 
@@ -225,6 +273,12 @@ impl Node {
     /// the container's init started in it from `bundle`, blocked at the exec FIFO until
     /// [`Runtime::start`]. The container's state dir is the box's, removed with it by [`Node::scrub`].
     fn create_oci(&self, spec: BoxSpec, bundle: &Path) -> Result<BoxInfo, Refusal> {
+        // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
+        // left unwatched.
+        let slot = self.supervisor.reserve()?;
+        // From the shim's spawn until the init is watched, no sweep runs: the shim is reaped by
+        // create and the init by the supervisor, never by a sweep.
+        let _spawning = self.supervisor.spawning()?;
         let id = spec.id.clone();
         // The container's own state directory, which the oci class makes; recorded as the box's, so
         // delete and recovery remove it with the box.
@@ -247,12 +301,26 @@ impl Node {
             let _ = self.scrub(&id);
             return Err(e.into());
         }
-        // The init is blocked at the exec FIFO, alive; record which process it is so a later restart
-        // can tell it from a recycled pid (recovery's init_alive).
-        let state = self.oci().state(id.as_str())?;
-        record.init = init_proc_id(state.pid, state.start_time);
-        record.phase = Phase::Ready;
-        self.store.put(&record)?;
+        // The init is blocked at the exec FIFO, alive, and the agent's child since the shim exited;
+        // record which process it is so a later restart can tell it from a recycled pid (recovery's
+        // init_alive), and watch it through its pidfd from now on.
+        let watched = self
+            .oci()
+            .state(id.as_str())
+            .map_err(Refusal::from)
+            .and_then(|state| {
+                record.init = init_proc_id(state.pid, state.start_time);
+                record.phase = Phase::Ready;
+                self.store.put(&record)?;
+                let start_ticks = state.start_time.ok_or_else(|| {
+                    Refusal::Broken(format!("container {id}'s state has no start time"))
+                })?;
+                self.supervisor.watch(slot, &id, state.pid, start_ticks)
+            });
+        if let Err(e) = watched {
+            let _ = self.scrub(&id);
+            return Err(e);
+        }
         self.info(&record, false)
     }
 
@@ -277,12 +345,14 @@ impl Node {
             self.oci()
                 .exec_command(id.as_str(), program.args, program.cwd, env, user, true)?;
         set_stdio(&mut cmd, stdio);
+        let _spawning = self.supervisor.spawning()?;
         let child = cmd
             .spawn()
             .map_err(|e| Refusal::os("starting a program in a container", e))?;
         // The child stays unwaited (dropping a std Child neither waits nor kills), so its pid is ours
         // until the pidfd reaps it.
-        Ok(Box::new(PidfdProc::of_child(child.id())?))
+        self.supervisor
+            .own(Box::new(PidfdProc::of_child(child.id())?))
     }
 }
 
@@ -348,7 +418,9 @@ impl Runtime for Node {
                     .root
                     .get(id)
                     .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-                Ok(Box::new(process::exec(&cg, &program, stdio)?))
+                let _spawning = self.supervisor.spawning()?;
+                self.supervisor
+                    .own(Box::new(process::exec(&cg, &program, stdio)?))
             }
             Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => self.exec_oci(id, program, stdio),
         }
@@ -392,6 +464,7 @@ impl Runtime for Node {
                     state: BoxState::Empty,
                     bounds: hex_api::Bounds::default(),
                     adopted: false,
+                    exit: None,
                 });
             }
         }
@@ -403,11 +476,15 @@ impl Runtime for Node {
         if record.is_none() && self.root.get(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
+        // Unwatched first, so nothing writes the record on the init's behalf once delete has.
+        let init = self.supervisor.forget(id)?;
         if let Some(mut record) = record {
             record.phase = Phase::Deleting;
             self.store.put(&record)?;
         }
-        self.scrub(id)
+        self.scrub(id)?;
+        // The box is empty, so its init has ended: reaped here, leaving no zombie of it.
+        init.as_ref().map_or(Ok(()), supervise::reap)
     }
 }
 

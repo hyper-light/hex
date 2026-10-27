@@ -2,7 +2,10 @@
 //! asks for (say words, fail, wait, use memory, start processes, echo stdin), with the bounds
 //! enforced as the kernel would: past `memory_max` a program is killed and the kill counted; past
 //! `pids_max` a fork is refused and counted. An `oci` box has an init, made at create and waiting
-//! until start, which runs until it is signalled or the box is deleted.
+//! until start. From a [`ClassSpec::Oci`] it runs the spec's init program, so `fail N` ends it with N
+//! at start and `say` with 0; any other init, and a bundle's, runs until it is signalled or the box
+//! is deleted. Once the init has ended the box is empty and inspect reports how it ended, as the node
+//! agent does for a container whose init it reaped.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -10,8 +13,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, Exit, Proc, Program, Refusal, Runtime, Signal, Stdio,
-    Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, Proc, Program, Refusal, Runtime,
+    Signal, Stdio, Usage,
 };
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
@@ -35,6 +38,8 @@ struct SimBox {
     init: Option<Arc<SimProc>>,
     /// Whether its init has been started.
     started: bool,
+    /// How its init ends once started, from its program; `None` runs until signalled.
+    init_ends: Option<Exit>,
 }
 
 #[derive(Default)]
@@ -80,11 +85,18 @@ impl SimRuntime {
             Some(init) if !b.started => init.exit()?.is_none(),
             _ => false,
         };
+        // An oci box is its init: once that has ended the box is empty, whatever else still runs.
+        let exit = match &b.init {
+            Some(init) => init.exit()?,
+            None => None,
+        };
         Ok(BoxInfo {
             id: b.spec.id.clone(),
             class: b.spec.class.class(),
             state: if waiting {
                 BoxState::Created
+            } else if exit.is_some() {
+                BoxState::Empty
             } else if running {
                 BoxState::Running
             } else {
@@ -92,7 +104,21 @@ impl SimRuntime {
             },
             bounds: b.spec.bounds.clone(),
             adopted: false,
+            exit,
         })
+    }
+}
+
+/// How a simulated init ends once started: `fail N` with N, `say` with 0, anything else (and a
+/// bundle, whose program the simulator can't read) not until it is signalled.
+fn init_ends(class: &ClassSpec) -> Result<Option<Exit>, Refusal> {
+    let ClassSpec::Oci(spec) = class else {
+        return Ok(None);
+    };
+    match spec.init.args.first().map(String::as_str) {
+        Some("fail") => Ok(Some(Exit::Code(arg(&spec.init, 1)?))),
+        Some("say") => Ok(Some(Exit::Code(0))),
+        _ => Ok(None),
     }
 }
 
@@ -128,12 +154,14 @@ impl Runtime for SimRuntime {
             return Err(Refusal::Full(SIM_BOXES));
         }
         let init = (spec.class.class() == Class::Oci).then(|| Arc::new(SimProc::default()));
+        let init_ends = init_ends(&spec.class)?;
         let b = SimBox {
             spec,
             usage: Usage::default(),
             procs: Vec::new(),
             init,
             started: false,
+            init_ends,
         };
         let info = Self::info(&b)?;
         boxes.insert(b.spec.id.clone(), b);
@@ -159,6 +187,9 @@ impl Runtime for SimRuntime {
         }
         if init.exit()?.is_some() {
             return Err(Refusal::NotRunning(id.clone(), "start"));
+        }
+        if let Some(exit) = b.init_ends {
+            init.end(exit)?;
         }
         b.started = true;
         Ok(())
@@ -351,7 +382,7 @@ impl Proc for SimHandle {
 mod tests {
     use super::*;
     use crate::conformance::{self, Act, Fixture};
-    use crate::{Bounds, ClassSpec};
+    use crate::{Bounds, Network, OciSpec, Rootfs};
 
     /// The simulator's programs, in boxes of either class.
     struct SimFixture(Class);
@@ -365,6 +396,24 @@ mod tests {
                     Class::Process => ClassSpec::Process,
                     Class::Oci => ClassSpec::Bundle("/bundle".into()),
                 },
+            }
+        }
+        fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
+            let class = match self.0 {
+                Class::Process => ClassSpec::Process,
+                Class::Oci => ClassSpec::Oci(Box::new(OciSpec {
+                    rootfs: Rootfs::Dir("/rootfs".into()),
+                    init: self.program(act),
+                    mounts: Vec::new(),
+                    hostname: None,
+                    network: Network::Private,
+                    hosts: Vec::new(),
+                })),
+            };
+            BoxSpec {
+                id,
+                bounds: Bounds::default(),
+                class,
             }
         }
         fn program(&self, act: &Act) -> Program {

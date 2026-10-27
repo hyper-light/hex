@@ -31,6 +31,9 @@ pub enum Act {
 pub trait Fixture {
     /// A box of the class under test, with `bounds`.
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec;
+    /// An `oci` box whose init does `act` once started; for the `process` class, a box as
+    /// [`Fixture::spec`] makes (it has no init, and the cases that use this check it reports none).
+    fn init(&self, id: BoxId, act: &Act) -> BoxSpec;
     /// A program that does `act`.
     fn program(&self, act: &Act) -> Program;
 }
@@ -106,6 +109,16 @@ pub const CASES: &[Case] = &[
         id: "HEX-RT-10",
         says: "an oci box is Created until start and Running after it, and a second start is refused; a process box's start is refused",
         run: start,
+    },
+    Case {
+        id: "HEX-RT-11",
+        says: "an oci box whose init exits with 3 is Empty once it has ended, and inspect reports Code(3); a process box reports no exit",
+        run: init_exit,
+    },
+    Case {
+        id: "HEX-RT-12",
+        says: "an oci box whose init waits reports no exit while it runs; signal KILL ends it, and inspect reports Signal(9)",
+        run: init_killed,
     },
 ];
 
@@ -385,4 +398,84 @@ fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
         matches!(again, Err(Refusal::Invalid { what: "start", .. })),
         || format!("a second start: {again:?}"),
     )
+}
+
+/// Polls `inspect` until the box reports an exit, for at most [`PATIENCE`]: the fact the exit cases
+/// wait on, never a guessed delay.
+fn exit_of(rt: &dyn Runtime, id: &BoxId) -> Result<crate::BoxInfo, String> {
+    let deadline = std::time::Instant::now().checked_add(PATIENCE);
+    loop {
+        let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
+        if info.exit.is_some() {
+            return Ok(info);
+        }
+        if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
+            return Err(format!("no exit reported after {PATIENCE:?}: {info:?}"));
+        }
+        // park_timeout (thread::sleep is disallowed) yields between looks at the fact.
+        std::thread::park_timeout(Duration::from_millis(10));
+    }
+}
+
+/// A box whose init does `act`, made and started; `None` for a `process` box, after checking it
+/// reports no exit.
+fn made_init(
+    rt: &dyn Runtime,
+    fx: &dyn Fixture,
+    name: &str,
+    act: &Act,
+) -> Result<Option<BoxId>, String> {
+    let id = id(name)?;
+    let _ = rt.delete(&id);
+    let spec = fx.init(id.clone(), act);
+    let class = spec.class.class();
+    let info = rt.create(spec).map_err(|e| format!("create: {e}"))?;
+    if class == Class::Process {
+        let outcome = ensure(info.exit.is_none(), || {
+            format!("a process box reports an exit: {info:?}")
+        });
+        rt.delete(&id).map_err(|e| e.to_string())?;
+        return outcome.map(|()| None);
+    }
+    if let Err(e) = rt.start(&id) {
+        let _ = rt.delete(&id);
+        return Err(format!("start: {e}"));
+    }
+    Ok(Some(id))
+}
+
+fn init_exit(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let Some(id) = made_init(rt, fx, "init-exit", &Act::Fail(3))? else {
+        return Ok(());
+    };
+    let info = exit_of(rt, &id);
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    let info = info?;
+    ensure(info.exit == Some(Exit::Code(3)), || {
+        format!("exit {:?}", info.exit)
+    })?;
+    ensure(info.state == BoxState::Empty, || {
+        format!("a box whose init ended is {:?}", info.state)
+    })
+}
+
+fn init_killed(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let Some(id) = made_init(rt, fx, "init-killed", &Act::Wait)? else {
+        return Ok(());
+    };
+    let outcome = (|| {
+        let running = rt.inspect(&id).map_err(|e| format!("inspect: {e}"))?;
+        ensure(
+            running.exit.is_none() && running.state == BoxState::Running,
+            || format!("a box whose init waits: {running:?}"),
+        )?;
+        rt.signal(&id, Signal::KILL)
+            .map_err(|e| format!("signal: {e}"))?;
+        let info = exit_of(rt, &id)?;
+        ensure(info.exit == Some(Exit::Signal(9)), || {
+            format!("exit {:?}", info.exit)
+        })
+    })();
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    outcome
 }
