@@ -27,6 +27,12 @@ read right after cgroups came and went starts high and the phase's rise comes ou
 300 cgroups were made and removed, a baseline read at once stood 15.1-17.1 MiB above a reading 0.5 s later, and
 one read once settle returned (41-56 ms) stood 2.0-3.2 MiB above it (four runs): what the kernel frees after a
 release (RCU-deferred), under 1% of a density phase's rise over 1,000 units.
+
+A density phase also records what its held rise is made of (breakdown, rise): memory.stat's anon, shmem, kernel
+and sock, which with swap, less zswap, and hugepages make up what's held (memory.current charges anonymous,
+file and kernel pages and socket buffers; file includes shmem), and kernel's own parts (slab, percpu,
+pagetables, sec_pagetables, kernel_stack, vmalloc). So one runtime's held memory over another's is named by
+entry: shmem for runtime state on a tmpfs, slab for kernel objects its container setup leaves charged.
 """
 import glob
 import os
@@ -35,6 +41,7 @@ import time
 
 _HUGETLB_USAGE = re.compile(r"hugetlb\.[0-9]+[KMG]B\.current")
 _HUGETLB_RSVD = re.compile(r"hugetlb\.[0-9]+[KMG]B\.rsvd\.current")
+_COUNT = re.compile(r"[0-9]+")  # ASCII digits only: str.isdigit takes "²", which int() refuses
 
 
 def _hugetlb_counted():
@@ -68,15 +75,123 @@ def hugetlb_reserved_bytes(path):
     return _hugetlb_sum(path, _HUGETLB_RSVD)
 
 
+# The memory.stat entries a density phase records (cgroup-v2.rst, memory.stat). What a cgroup holds is the sum of
+# HELD_PARTS: anon, shmem (tmpfs and shared memory), kernel (every kernel allocation charged to the cgroup) and
+# sock, with swap added and zswap's compressed copies taken off as held_bytes does. KERNEL_PARTS are the named
+# parts of kernel; what kernel holds beyond them is kernel_other.
+STAT_ENTRIES = ("anon", "file", "shmem", "kernel", "slab", "percpu", "pagetables", "kernel_stack", "sock", "vmalloc")
+HELD_PARTS = ("anon", "shmem", "kernel", "sock")
+KERNEL_PARTS = ("slab", "percpu", "pagetables", "sec_pagetables", "kernel_stack", "vmalloc")
+
+
+def parse_stat(text):
+    """memory.stat's text as ({entry: bytes}, [reasons]): a line that isn't one name and one non-negative
+    integer, or a name given twice, is a reason and is left out, as is each of STAT_ENTRIES that's missing."""
+    stat, reasons = {}, []
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) != 2 or not _COUNT.fullmatch(parts[1]):
+            reasons.append(f"line {n}: not a name and a non-negative integer: {line[:80]!r}")
+        elif parts[0] in stat:
+            reasons.append(f"line {n}: {parts[0]} given twice")
+        else:
+            stat[parts[0]] = int(parts[1])
+    reasons += [f"no {k}" for k in STAT_ENTRIES if k not in stat]
+    return stat, reasons
+
+
+def _read_int(path):
+    with open(path) as f:
+        return int(f.read())
+
+
+def snapshot(path):
+    """One reading of the cgroup: memory.current, memory.swap.current, faulted hugepages not in memory.current,
+    and memory.stat with the reasons it couldn't be read whole. held and breakdown take the same reading."""
+    with open(os.path.join(path, "memory.stat"), "rb") as f:
+        stat, reasons = parse_stat(f.read().decode(errors="replace"))  # a byte that isn't text is a malformed line
+    return {"current": _read_int(os.path.join(path, "memory.current")),
+            "swap": _read_int(os.path.join(path, "memory.swap.current")),
+            "huge": 0 if HUGETLB_IN_CURRENT else hugetlb_bytes(path), "stat": stat, "reasons": reasons}
+
+
+def held(snap):
+    """What the cgroup holds, from a snapshot; a memory.stat without file or shmem is a ValueError."""
+    stat = snap["stat"]
+    missing = [k for k in ("file", "shmem") if k not in stat]
+    if missing:
+        raise ValueError(f"memory.stat has no {', '.join(missing)}: {'; '.join(snap['reasons'])}")
+    return snap["current"] - stat["file"] + stat["shmem"] - stat.get("zswap", 0) + snap["swap"] + snap["huge"]
+
+
 def held_bytes(path):
-    with open(os.path.join(path, "memory.stat")) as f:
-        stat = {k: int(v) for k, v in (line.split() for line in f if line.strip())}
-    with open(os.path.join(path, "memory.current")) as f:
-        current = int(f.read())
-    with open(os.path.join(path, "memory.swap.current")) as f:
-        swapped = int(f.read())
-    huge = 0 if HUGETLB_IN_CURRENT else hugetlb_bytes(path)
-    return current - stat["file"] + stat["shmem"] - stat.get("zswap", 0) + swapped + huge
+    return held(snapshot(path))
+
+
+def breakdown(snap):
+    """A snapshot's held memory by part: STAT_ENTRIES and sec_pagetables as memory.stat has them (an entry it
+    lacks is None), swap, zswap and huge, kernel_other (kernel less KERNEL_PARTS) and unattributed (held less
+    HELD_PARTS, swap and huge, zswap taken off); `reasons` names what memory.stat lacked or had malformed, and
+    a sum that needs a missing entry is None."""
+    stat = snap["stat"]
+    out = {k: stat.get(k) for k in STAT_ENTRIES + ("sec_pagetables",)}
+    out.update(swap=snap["swap"], zswap=stat.get("zswap", 0), huge=snap["huge"], reasons=list(snap["reasons"]))
+    kernel_parts = [stat.get(k, 0 if k == "sec_pagetables" else None) for k in KERNEL_PARTS]
+    out["kernel_other"] = (stat["kernel"] - sum(kernel_parts)
+                           if "kernel" in stat and None not in kernel_parts else None)
+    parts = [stat.get(k) for k in HELD_PARTS]
+    try:
+        whole = held(snap)
+    except ValueError:
+        whole = None
+    out["held"] = whole
+    out["unattributed"] = (whole - sum(parts) - snap["swap"] - snap["huge"] + out["zswap"]
+                           if whole is not None and None not in parts else None)
+    return out
+
+
+def rise(peak, base):
+    """Each numeric part's rise from a baseline breakdown to a peak one (None where either lacks it), with both
+    readings' reasons."""
+    out = {k: (v - base[k] if isinstance(v, int) and isinstance(base.get(k), int) else None)
+           for k, v in peak.items() if k != "reasons"}
+    out["reasons"] = [f"base: {r}" for r in base["reasons"]] + [f"peak: {r}" for r in peak["reasons"]]
+    return out
+
+
+# A state root holds a few files per container; a walk past this many entries stops, its count marked short.
+TREE_ENTRY_BUDGET = 1_000_000
+
+
+def tree_bytes(root):
+    """The bytes under a runtime's state root: files and directories counted (symlinks not followed), their
+    apparent size, and the blocks they take (st_blocks, what a tmpfs charges as shmem). A walk is flat, with a
+    stack, and stops at TREE_ENTRY_BUDGET entries ("short": True); an entry that goes while it's walked is
+    skipped, and a root that isn't there reads zero."""
+    out = {"root": root, "entries": 0, "apparent_bytes": 0, "allocated_bytes": 0, "short": False}
+    stack = [root]
+    while stack:
+        top = stack.pop()
+        try:
+            with os.scandir(top) as it:
+                for e in it:
+                    if out["entries"] >= TREE_ENTRY_BUDGET:
+                        out["short"] = True
+                        return out
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    out["entries"] += 1
+                    out["apparent_bytes"] += st.st_size
+                    out["allocated_bytes"] += st.st_blocks * 512
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+    return out
 
 
 def dying(path):

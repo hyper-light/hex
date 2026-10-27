@@ -24,7 +24,10 @@ Phases, in order; a phase that fails records its error and the next one still ru
               hour (docs/research/runtime/oci-runtimes-and-fast-start.md §4.4).
   density     `sleep` containers started one after another until the cap or the memory budget, then
               memory per container from the bench cgroup: the memory it holds (cgmem.py), and its
-              memory.current, which the budget bounds; all deleted afterwards.
+              memory.current, which the budget bounds; all deleted afterwards. Beside the held figure, its
+              memory.stat rise by entry (cgmem.breakdown) and the bytes under the runtime's state root, so a
+              difference in held memory between runtimes is attributed to named entries
+              (probes/held_attribution.py).
 HEXBENCH_PHASES names the phases to run (all six by default).
 
 Every CLI call's stdio goes to /dev/null or a reused error file, never a pipe: a detached `create` leaves
@@ -52,17 +55,19 @@ BIN = os.environ.get("HEXBENCH_BIN", "/opt/bin")
 ERR = os.environ.get("HEXBENCH_ERR", "/run/err")
 
 RUNTIMES = {
-    "hex": {"argv": [f"{BIN}/hex", "oci"], "env": {"HEX_OCI_ROOT": "/run/hex-oci"}, "exec": True},
-    "runc": {"argv": [f"{BIN}/runc", "--root", "/run/runc"], "env": {}, "exec": True},
-    "crun": {"argv": [f"{BIN}/crun", "--root", "/run/crun"], "env": {}, "exec": True},
-    "youki": {"argv": [f"{BIN}/youki", "--root", "/run/youki"], "env": {}, "exec": True},
-    "runsc": {"argv": [f"{BIN}/runsc", "--root", "/run/runsc", "--network=none"], "env": {}, "exec": True},
+    "hex": {"argv": [f"{BIN}/hex", "oci"], "env": {"HEX_OCI_ROOT": "/run/hex-oci"}, "exec": True,
+            "state": "/run/hex-oci"},
+    "runc": {"argv": [f"{BIN}/runc", "--root", "/run/runc"], "env": {}, "exec": True, "state": "/run/runc"},
+    "crun": {"argv": [f"{BIN}/crun", "--root", "/run/crun"], "env": {}, "exec": True, "state": "/run/crun"},
+    "youki": {"argv": [f"{BIN}/youki", "--root", "/run/youki"], "env": {}, "exec": True, "state": "/run/youki"},
+    "runsc": {"argv": [f"{BIN}/runsc", "--root", "/run/runsc", "--network=none"], "env": {}, "exec": True,
+              "state": "/run/runsc"},
     # crun's libkrun handler (Fedora's crun, named krun; fetch.py): each container a microVM, at crun's
     # defaults (vCPUs as the CPUs it may use, up to 16; 1024 MiB). Nothing can exec into its guest.
     "krun": {"argv": [f"{BIN}/krun", "--root", "/run/krun"], "env": {"LD_LIBRARY_PATH": "/opt/krun/lib"},
-             "exec": False},
+             "exec": False, "state": "/run/krun"},
     # libcrun in process, built from crun's pinned release (libcrun/build.sh).
-    "libcrun": {"driver": f"{BIN}/libcrun-driver", "root": "/run/libcrun", "exec": True},
+    "libcrun": {"driver": f"{BIN}/libcrun-driver", "root": "/run/libcrun", "exec": True, "state": "/run/libcrun"},
 }
 
 
@@ -147,6 +152,7 @@ class Runtime:
         self.name = name
         self.argv = spec.get("argv")
         self.has_exec = spec["exec"]
+        self.state = spec["state"]
         self.env = dict(os.environ, **spec.get("env", {}))
         self.driver = Driver(name, spec["driver"], spec["root"]) if "driver" in spec else None
 
@@ -370,7 +376,8 @@ def phase_sustained(rt, lifecycles):
 
 def phase_density(rt, cap, budget_mib):
     dying = cgmem.settle([CG], CALL_TIMEOUT_S)
-    base, held0 = mem_bytes(), cgmem.held_bytes(CG)
+    base, snap0 = mem_bytes(), cgmem.snapshot(CG)
+    held0, state0 = cgmem.held(snap0), cgmem.tree_bytes(rt.state)
     budget = budget_mib * 1024 * 1024
     created, running = [], 0
     t0 = time.perf_counter()
@@ -392,7 +399,9 @@ def phase_density(rt, cap, budget_mib):
         wall = time.perf_counter() - t0
         time.sleep(2)  # let the started inits settle before reading memory
         used = mem_bytes() - base
-        held = cgmem.held_bytes(CG) - held0
+        snap = cgmem.snapshot(CG)
+        held = cgmem.held(snap) - held0
+        state = cgmem.tree_bytes(rt.state)
     finally:
         for cid in created:
             try:
@@ -403,7 +412,11 @@ def phase_density(rt, cap, budget_mib):
     return {"count": count, "stop": stop_reason, "start_wall_s": wall, "memory_bytes": used, "dying_at_start": dying,
             "memory_per_container_bytes": used / count if count else None,
             "containers_per_gib": count / (used / 2**30) if used > 0 else None,
-            "held": cgmem.per_unit(held, count)}
+            "held": cgmem.per_unit(held, count),
+            # What the held rise is made of (memory.stat at the peak less at the baseline, one reading each with
+            # the held figures above), and the runtime's state root at both.
+            "stat_rise": cgmem.rise(cgmem.breakdown(snap), cgmem.breakdown(snap0)),
+            "state_root": {"base": state0, "peak": state}}
 
 
 def main():
