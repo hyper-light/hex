@@ -250,7 +250,7 @@ neither.
 **What it is.** `hex node --socket <path> --state <dir> [--box-root <cgroup>]` runs the node agent as a process of
 its own and serves the seam on a Unix `SOCK_SEQPACKET` socket (`crates/hex-node/src/serve.rs`). `hex-client`'s
 `Client` is a `hex_api::Runtime` over it, so a caller that doesn't link Hex holds the same contract, the conformance
-suite (HEX-RT-1 to 12) included (`crates/hex-cli/tests/node_socket.rs`, over a live `hex node`, on `oci` and `process`
+suite (HEX-RT-1 to 13) included (`crates/hex-cli/tests/node_socket.rs`, over a live `hex node`, on `oci` and `process`
 boxes). `SOCK_SEQPACKET` because the kernel keeps each message whole and in order: "a sequenced-packet socket that is
 connection-oriented, preserves message boundaries, and delivers messages in the order that they were sent"
 (unix(7)). One message is one request or answer, so the codec needs no framing and a malformed message can't
@@ -317,6 +317,14 @@ naming it, and every request is answered once. 6, the disconnect rule: a gone cl
 counted, a released one left running, a release sent just before a reset honoured. 7, programs past the bound are
 refused naming it. 8, stdio crosses as descriptors, and only a pipe's right end is taken. 9, the plan's example over
 a live `hex node`.
+
+**What it costs** (`bench/competitive/probes/socket_cost.md`, run 1: fedora, 2026-10-27, 0f41abb, both drivers in one
+run, load 12 to 15, so not of record). A call over the socket costs 0.031 ms more than in process at p50: `inspect`
+of a running box, whose work is the same either way, is 0.053 ms against 0.022 (p99 0.211 against 0.027). An exec of
+`true` costs 0.204 ms more, its program's end being a second message, and a start 0.126 ms. Both are far under a
+spawn, decision 3's falsifier: 0.666 ms on fedora (`probes/oci_breakdown.md` §2). Throughput holds: 42, 54 and 55
+lifecycles/s at concurrency 1, 8 and 32 over the socket, against 43, 55 and 52 in process, with 32 threads sharing
+one client.
 
 ### 4. Network-namespace work off the critical path (rewritten after the probe)
 

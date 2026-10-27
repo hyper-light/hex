@@ -33,10 +33,12 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `hex node --socket <path> --state <dir>` serves the `Runtime` seam on a Unix `SOCK_SEQPACKET` socket, in a
   versioned wire format that changes append-only (`hex-core::wire`, a pure core with version 1's bytes recorded),
   exec's stdio crossing as `SCM_RIGHTS` descriptors and a program's end coming back as a message. `hex-client` is a
-  `Runtime` over it, and the conformance suite (HEX-RT-1 to 12) passes against it over a live `hex node`, on `oci`
+  `Runtime` over it, and the conformance suite (HEX-RT-1 to 13) passes against it over a live `hex node`, on `oci`
   and `process` boxes. Its bounds (connections, message size, requests in flight, programs watched) are refused
   past by type, naming them; hostile messages are refused and the connection served after; a client that goes away
   has the programs it still watches ended, reaped and counted in their box (`BoxInfo::abandoned`). HEX-SOCK-1 to 9.
+  A call costs 0.031 ms more over the socket than in process at p50, an exec 0.204 ms, both drivers measured in one
+  run on fedora (`bench/competitive/probes/socket_cost.md`, not of record: load 12 to 15).
 - **The `hex` binary**: `hex --version`/`--help`, `hex oci …` (the OCI runtime), `hex box run
   <limits> -- cmd` (runs a program in a `process` box, for kiln to wrap a CI leg or harness in),
   and `hex selftest-box` (box isolation self-test, incl. `fsync-probe`/`disk-hog` for the bench).

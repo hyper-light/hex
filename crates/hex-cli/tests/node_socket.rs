@@ -3,7 +3,7 @@
 //! socket, with `hex-client`'s `Runtime`. "do X, expect Y" (§6):
 //! - HEX-SOCK-9: connect, create a `Bundle` box, start it, exec `/usr/bin/true` with its stdout a pipe
 //!   this test holds, read the output, and wait on the `Proc` for `Code(0)`, all over one socket;
-//! - the hex-api conformance suite (HEX-RT-1 to 12) over the socket, on `oci` and on `process` boxes;
+//! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes;
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running.
