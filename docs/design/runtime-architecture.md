@@ -227,8 +227,9 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
 
 ### 3. The fast path is the `Runtime` seam; the OCI command line stays for compatibility
 
-**The choice.** The node agent implements the `oci` class behind `hex-api::Runtime`. Today it refuses it
-(`crates/hex-node/src/node.rs:150-157`). It serves the class in process for callers that link Hex, and over a
+**The choice.** The node agent implements the `oci` class behind `hex-api::Runtime`: from a runtime-spec
+`Bundle`, and from the structured `OciSpec`, which it renders to one (`docs/design/runtime.md`, "a box
+from an OciSpec"). It serves the class in process for callers that link Hex, and over a
 local socket for the rest. No operation on this path spawns a process except the container's own. `hex oci`
 stays the runtime-spec's command line, with decisions 1 and 2.
 

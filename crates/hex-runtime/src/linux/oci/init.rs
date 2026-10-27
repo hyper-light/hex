@@ -19,8 +19,9 @@ use rustix::fs::{Mode, OFlags};
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::thread::UnshareFlags;
 
+use crate::linux::oci::inroot::{self, Make};
 use crate::linux::oci::spec::{Device, Process, Seccomp, Spec};
-use crate::linux::oci::{OciError, caps, seccomp, sys};
+use crate::linux::oci::{OciError, caps, net, seccomp, sys};
 
 /// Environment the `create` runtime sets for `hex __oci-init`.
 pub const ENV_SYNC_W: &str = "HEX_OCI_SYNC_W";
@@ -169,6 +170,11 @@ fn container(
     .map_err(|e| OciError::os("opening the container directory", e))?;
 
     let _ = rustix::process::setsid();
+    // A network namespace of the container's own holds loopback, down until it's brought up, as
+    // runc and crun bring it up.
+    if spec.makes_namespace("network") {
+        net::loopback_up()?;
+    }
     if spec.makes_namespace("mount") {
         setup_rootfs(spec, bundle)?;
     }
@@ -367,7 +373,8 @@ fn namespace_flags(spec: &Spec) -> UnshareFlags {
 }
 
 /// Prepares the container's root: private propagation, the spec mounts, default devices and
-/// symlinks, masked and readonly paths, then `pivot_root` into it.
+/// symlinks, masked and readonly paths, then `pivot_root` into it. Every path in the root is resolved
+/// inside it ([`inroot`]): until the pivot `/` is the host's, and an image's links may point there.
 fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     let rootfs = {
         let p = Path::new(&spec.root.path);
@@ -388,8 +395,8 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
     // devices are bind-mounted from the host instead of created.
     let in_userns = spec.makes_namespace("user");
-    for op in crate::linux::oci::mount::plan(&spec.mounts, &rootfs)? {
-        do_mount(&op)?;
+    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
+        do_mount(&rootfs, &op)?;
     }
     make_default_devices(&rootfs, in_userns)?;
     for dev in &spec.linux.devices {
@@ -437,36 +444,64 @@ fn propagation(name: &str) -> Option<MountPropagationFlags> {
     Some(f)
 }
 
-fn do_mount(op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
-    ensure_target(op)?;
+fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
+    // Which mount failed, and of what, with why.
+    let failed = |e: rustix::io::Errno| {
+        format!(
+            "{} at {}: {e}",
+            if op.is_bind {
+                op.kind_source.as_str()
+            } else {
+                op.fstype.as_str()
+            },
+            op.destination
+        )
+    };
+    let make = if op.is_bind && Path::new(&op.kind_source).is_file() {
+        Make::File
+    } else {
+        Make::Dir
+    };
+    let target_fd = target(rootfs, &op.destination, make)?;
+    let at = inroot::fd_path(&target_fd);
     if op.is_bind {
         if op.recursive_bind {
-            rustix::mount::mount_bind_recursive(&op.kind_source, &op.target)
-                .map_err(|e| OciError::os("bind mount", e))?;
+            rustix::mount::mount_bind_recursive(&op.kind_source, &at)
+                .map_err(|e| OciError::os("bind mount", failed(e)))?;
         } else {
-            rustix::mount::mount_bind(&op.kind_source, &op.target)
-                .map_err(|e| OciError::os("bind mount", e))?;
+            rustix::mount::mount_bind(&op.kind_source, &at)
+                .map_err(|e| OciError::os("bind mount", failed(e)))?;
         }
         if op.flags.intersects(MountFlags::RDONLY) {
-            rustix::mount::mount_remount(&op.target, op.flags | MountFlags::BIND, op.data.as_str())
-                .map_err(|e| OciError::os("remounting bind", e))?;
+            // Opened again, the destination is the bind just made on top of the target.
+            let top_fd = target(rootfs, &op.destination, Make::Nothing)?;
+            let top = inroot::fd_path(&top_fd);
+            rustix::mount::mount_remount(&top, op.flags | MountFlags::BIND, op.data.as_str())
+                .map_err(|e| OciError::os("remounting bind", failed(e)))?;
         }
     } else {
         let data = data_cstr(&op.data)?;
         rustix::mount::mount(
             op.kind_source.as_str(),
-            &op.target,
+            &at,
             op.fstype.as_str(),
             op.flags,
             data.as_deref(),
         )
-        .map_err(|e| OciError::os("mount", e))?;
+        .map_err(|e| OciError::os("mount", failed(e)))?;
     }
     if let Some(prop) = op.propagation {
-        rustix::mount::mount_change(&op.target, prop)
-            .map_err(|e| OciError::os("mount propagation", e))?;
+        let top_fd = target(rootfs, &op.destination, Make::Nothing)?;
+        rustix::mount::mount_change(inroot::fd_path(&top_fd), prop)
+            .map_err(|e| OciError::os("mount propagation", failed(e)))?;
     }
     Ok(())
+}
+
+/// `dest` opened in the container's root, made as `make` says when it's missing.
+fn target(rootfs: &Path, dest: &str, make: Make) -> Result<OwnedFd, OciError> {
+    inroot::open(rootfs, dest, make)?
+        .ok_or_else(|| OciError::Config(format!("{dest} isn't in the container's root")))
 }
 
 /// A mount's data string as a C string, or `None` when empty.
@@ -480,33 +515,17 @@ fn data_cstr(data: &str) -> Result<Option<std::ffi::CString>, OciError> {
     }
 }
 
-fn ensure_target(op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
-    if op.is_bind && Path::new(&op.kind_source).is_file() {
-        if let Some(parent) = op.target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| OciError::os("making a mount target's parent", e))?;
-        }
-        if !op.target.exists() {
-            fs::File::create(&op.target)
-                .map_err(|e| OciError::os("making a mount target file", e))?;
-        }
-    } else {
-        fs::create_dir_all(&op.target).map_err(|e| OciError::os("making a mount target", e))?;
-    }
-    Ok(())
-}
-
 fn make_default_devices(rootfs: &Path, in_userns: bool) -> Result<(), OciError> {
     for (path, major, minor, mode) in DEFAULT_DEVICES {
-        let target = crate::linux::oci::mount::under_rootfs(rootfs, path)?;
-        if target.exists() {
+        if inroot::open(rootfs, path, Make::Nothing)?.is_some() {
             continue;
         }
         if in_userns {
-            bind_host_device(path, &target)?;
+            bind_host_device(rootfs, path, path)?;
         } else {
             make_node(
-                &target,
+                rootfs,
+                path,
                 rustix::fs::FileType::CharacterDevice,
                 mode,
                 major,
@@ -518,15 +537,11 @@ fn make_default_devices(rootfs: &Path, in_userns: bool) -> Result<(), OciError> 
 }
 
 fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciError> {
-    let target = crate::linux::oci::mount::under_rootfs(rootfs, &dev.path)?;
-    if target.exists() {
+    if inroot::open(rootfs, &dev.path, Make::Nothing)?.is_some() {
         return Ok(());
     }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| OciError::os("making a device's parent", e))?;
-    }
     if in_userns {
-        return bind_host_device(&dev.path, &target);
+        return bind_host_device(rootfs, &dev.path, &dev.path);
     }
     let kind = match dev.kind.as_str() {
         "c" | "u" => rustix::fs::FileType::CharacterDevice,
@@ -542,41 +557,50 @@ fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciEr
         .map_err(|_| OciError::Config("device major out of range".to_owned()))?;
     let minor = u32::try_from(dev.minor.unwrap_or(0))
         .map_err(|_| OciError::Config("device minor out of range".to_owned()))?;
-    make_node(&target, kind, dev.file_mode.unwrap_or(0o666), major, minor)?;
+    make_node(
+        rootfs,
+        &dev.path,
+        kind,
+        dev.file_mode.unwrap_or(0o666),
+        major,
+        minor,
+    )?;
     if let (Some(uid), Some(gid)) = (dev.uid, dev.gid) {
-        let u = rustix::fs::Uid::from_raw(uid);
-        let g = rustix::fs::Gid::from_raw(gid);
+        let (dir, name) = inroot::parent(rootfs, &dev.path)?;
         rustix::fs::chownat(
-            rustix::fs::CWD,
-            &target,
-            Some(u),
-            Some(g),
-            rustix::fs::AtFlags::empty(),
+            &dir,
+            name.as_str(),
+            Some(rustix::fs::Uid::from_raw(uid)),
+            Some(rustix::fs::Gid::from_raw(gid)),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
         )
         .map_err(|e| OciError::os("chowning a device", e))?;
     }
     Ok(())
 }
 
-/// Makes a device node, then sets its mode exactly (mknod's mode is masked by the umask).
+/// Makes a device node at `dest` in the root, then sets its mode exactly (mknod's mode is masked by
+/// the umask).
 fn make_node(
-    target: &Path,
+    rootfs: &Path,
+    dest: &str,
     kind: rustix::fs::FileType,
     mode: u32,
     major: u32,
     minor: u32,
 ) -> Result<(), OciError> {
+    let (dir, name) = inroot::parent(rootfs, dest)?;
     rustix::fs::mknodat(
-        rustix::fs::CWD,
-        target,
+        &dir,
+        name.as_str(),
         kind,
         Mode::from_bits_truncate(mode),
         rustix::fs::makedev(major, minor),
     )
     .map_err(|e| OciError::os("making a device", e))?;
     rustix::fs::chmodat(
-        rustix::fs::CWD,
-        target,
+        &dir,
+        name.as_str(),
         Mode::from_bits_truncate(mode),
         rustix::fs::AtFlags::empty(),
     )
@@ -584,15 +608,14 @@ fn make_node(
     Ok(())
 }
 
-/// Binds a host device file into the container (the user-namespace path, where mknod is refused).
-fn bind_host_device(host_path: &str, target: &Path) -> Result<(), OciError> {
+/// Binds the host's device file `host_path` at `dest` in the container (the user-namespace path,
+/// where mknod is refused).
+fn bind_host_device(rootfs: &Path, host_path: &str, dest: &str) -> Result<(), OciError> {
     if !Path::new(host_path).exists() {
         return Ok(());
     }
-    if !target.exists() {
-        fs::File::create(target).map_err(|e| OciError::os("making a device bind target", e))?;
-    }
-    rustix::mount::mount_bind(host_path, target)
+    let target_fd = target(rootfs, dest, Make::File)?;
+    rustix::mount::mount_bind(host_path, inroot::fd_path(&target_fd))
         .map_err(|e| OciError::os("binding a host device", e))
 }
 
@@ -606,50 +629,54 @@ fn make_default_symlinks(rootfs: &Path) -> Result<(), OciError> {
         ("pts/ptmx", "/dev/ptmx"),
     ];
     for (target, link) in links {
-        let at = crate::linux::oci::mount::under_rootfs(rootfs, link)?;
-        if at.exists() {
+        if inroot::open(rootfs, link, Make::Nothing)?.is_some() {
             continue;
         }
-        if let Some(parent) = at.parent() {
-            fs::create_dir_all(parent).map_err(|e| OciError::os("making a symlink's parent", e))?;
+        let (dir, name) = inroot::parent(rootfs, link)?;
+        match rustix::fs::symlinkat(target, &dir, name.as_str()) {
+            // A link there already, to what isn't mounted yet.
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(OciError::os("making a /dev link", format!("{link}: {e}"))),
         }
-        let _ = std::os::unix::fs::symlink(target, &at);
     }
     Ok(())
 }
 
 /// A masked path is hidden: a directory gets a read-only empty tmpfs, a file a bind of /dev/null.
 fn mask_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let target = crate::linux::oci::mount::under_rootfs(rootfs, path)?;
-    if !target.exists() {
+    let Some(target) = inroot::open(rootfs, path, Make::Nothing)? else {
         return Ok(());
-    }
-    if target.is_dir() {
-        rustix::mount::mount(
-            "tmpfs",
-            &target,
-            "tmpfs",
-            MountFlags::RDONLY,
-            Some(c"size=0k"),
-        )
-        .map_err(|e| OciError::os("masking a directory", e))?;
+    };
+    let dir = rustix::fs::fstat(&target)
+        .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
+        .map_err(|e| OciError::os("masking a path", format!("{path}: {e}")))?;
+    let at = inroot::fd_path(&target);
+    if dir {
+        rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(c"size=0k"))
+            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
     } else {
-        rustix::mount::mount_bind("/dev/null", &target)
-            .map_err(|e| OciError::os("masking a file", e))?;
+        rustix::mount::mount_bind("/dev/null", &at)
+            .map_err(|e| OciError::os("masking a file", format!("{path}: {e}")))?;
     }
     Ok(())
 }
 
 /// A readonly path is bound onto itself and remounted read-only.
 fn readonly_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let target = crate::linux::oci::mount::under_rootfs(rootfs, path)?;
-    if !target.exists() {
+    let Some(target) = inroot::open(rootfs, path, Make::Nothing)? else {
         return Ok(());
-    }
-    rustix::mount::mount_bind(&target, &target)
-        .map_err(|e| OciError::os("binding a readonly path", e))?;
-    rustix::mount::mount_remount(&target, MountFlags::RDONLY | MountFlags::BIND, "")
-        .map_err(|e| OciError::os("remounting a readonly path", e))?;
+    };
+    let at = inroot::fd_path(&target);
+    rustix::mount::mount_bind(&at, &at)
+        .map_err(|e| OciError::os("binding a readonly path", format!("{path}: {e}")))?;
+    // Opened again, the path is the bind just made on top of it.
+    let top_fd = self::target(rootfs, path, Make::Nothing)?;
+    rustix::mount::mount_remount(
+        inroot::fd_path(&top_fd),
+        MountFlags::RDONLY | MountFlags::BIND,
+        "",
+    )
+    .map_err(|e| OciError::os("remounting a readonly path", format!("{path}: {e}")))?;
     Ok(())
 }
 

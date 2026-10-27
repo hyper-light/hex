@@ -146,6 +146,9 @@ impl Runtime for SimRuntime {
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.bounds.check()?;
+        if let ClassSpec::Oci(oci) = &spec.class {
+            oci.check()?;
+        }
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id));
@@ -384,36 +387,48 @@ mod tests {
     use crate::conformance::{self, Act, Fixture};
     use crate::{Bounds, Network, OciSpec, Rootfs};
 
-    /// The simulator's programs, in boxes of either class.
-    struct SimFixture(Class);
+    /// The simulator's programs, in boxes of either class; an `oci` box made from a bundle or from
+    /// the structured spec.
+    #[derive(Debug, Clone, Copy)]
+    enum SimFixture {
+        Process,
+        Bundle,
+        Spec,
+    }
+
+    impl SimFixture {
+        fn oci(&self, act: &Act) -> ClassSpec {
+            ClassSpec::Oci(Box::new(OciSpec {
+                rootfs: Rootfs::Dir("/rootfs".into()),
+                init: self.program(act),
+                mounts: Vec::new(),
+                hostname: None,
+                network: Network::Private,
+                hosts: Vec::new(),
+            }))
+        }
+    }
 
     impl Fixture for SimFixture {
         fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
             BoxSpec {
                 id,
                 bounds,
-                class: match self.0 {
-                    Class::Process => ClassSpec::Process,
-                    Class::Oci => ClassSpec::Bundle("/bundle".into()),
+                class: match self {
+                    Self::Process => ClassSpec::Process,
+                    Self::Bundle => ClassSpec::Bundle("/bundle".into()),
+                    Self::Spec => self.oci(&Act::Wait),
                 },
             }
         }
         fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
-            let class = match self.0 {
-                Class::Process => ClassSpec::Process,
-                Class::Oci => ClassSpec::Oci(Box::new(OciSpec {
-                    rootfs: Rootfs::Dir("/rootfs".into()),
-                    init: self.program(act),
-                    mounts: Vec::new(),
-                    hostname: None,
-                    network: Network::Private,
-                    hosts: Vec::new(),
-                })),
-            };
             BoxSpec {
                 id,
                 bounds: Bounds::default(),
-                class,
+                class: match self {
+                    Self::Process => ClassSpec::Process,
+                    Self::Bundle | Self::Spec => self.oci(act),
+                },
             }
         }
         fn program(&self, act: &Act) -> Program {
@@ -430,9 +445,9 @@ mod tests {
 
     #[test]
     fn the_simulator_passes_the_conformance_suite() {
-        for class in [Class::Process, Class::Oci] {
-            let failures = conformance::run(&SimRuntime::new(), &SimFixture(class));
-            assert!(failures.is_empty(), "{class:?}: {failures:#?}");
+        for fixture in [SimFixture::Process, SimFixture::Bundle, SimFixture::Spec] {
+            let failures = conformance::run(&SimRuntime::new(), &fixture);
+            assert!(failures.is_empty(), "{fixture:?}: {failures:#?}");
         }
     }
 
@@ -441,12 +456,12 @@ mod tests {
         let rt = SimRuntime::new();
         for i in 0..SIM_BOXES {
             let id = BoxId::new(&format!("b{i}")).unwrap();
-            rt.create(SimFixture(Class::Process).spec(id, Bounds::default()))
+            rt.create(SimFixture::Process.spec(id, Bounds::default()))
                 .unwrap();
         }
         let id = BoxId::new("one-more").unwrap();
         assert_eq!(
-            rt.create(SimFixture(Class::Process).spec(id, Bounds::default())),
+            rt.create(SimFixture::Process.spec(id, Bounds::default())),
             Err(Refusal::Full(SIM_BOXES))
         );
     }

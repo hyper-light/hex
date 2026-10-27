@@ -9,13 +9,17 @@
 //! [`seccomp`] compiles `linux.seccomp` into a BPF program the init loads before `execve`, and
 //! [`devshare`] lets containers with one device policy share one loaded device program. The
 //! imperative shell that makes the cgroup and namespaces, pivots the root and runs the init is in
-//! [`run`] and [`init`]; the system calls that need `unsafe` are in [`sys`].
+//! [`run`] and [`init`], which resolves every path in the container's root inside it ([`inroot`]) and
+//! brings up the loopback of a network namespace it makes ([`net`]); the system calls that need
+//! `unsafe` are in [`sys`].
 
 pub mod caps;
 pub mod devshare;
 pub mod exec;
 pub mod init;
+pub mod inroot;
 pub mod mount;
+pub mod net;
 pub mod resources;
 pub mod run;
 pub mod seccomp;

@@ -1,7 +1,8 @@
 //! Hex's sans-IO cores (CLAUDE.md §9): what to write to a box's cgroup for its bounds, what its
-//! cgroup files say it used, the record the node agent keeps of each box, and the plan that takes
-//! every box back or removes it after the node agent crashed (T-T7.1.2). Shells in `hex-runtime`
-//! and `hex-node` do the I/O these decide.
+//! cgroup files say it used, the runtime-spec bundle an `oci` box's structured spec renders to, the
+//! record the node agent keeps of each box, and the plan that takes every box back or removes it
+//! after the node agent crashed (T-T7.1.2). Shells in `hex-runtime` and `hex-node` do the I/O these
+//! decide.
 
 #![cfg_attr(
     test,
@@ -15,6 +16,7 @@
     )
 )]
 
+pub mod bundle;
 pub mod cgroup;
 pub mod record;
 pub mod recovery;

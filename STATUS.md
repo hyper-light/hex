@@ -126,6 +126,18 @@ three different things (CLAUDE.md "Working here"):
     process (cgroup under the box root, `create_in_cgroup`, `exec` through a seam-mode `hex __oci-exec`
     helper), with `seam_oci` to measure it against libcrun. Built and reviewed locally; its runtime
     path needs a fedora root lab to validate, and its exec-latency target likely needs goal 5's seed.
+    **Plan step 5, `ClassSpec::Oci`** (built, lab-validated on adacachy 2026-10-27; of record with step 6):
+    the node renders the structured `OciSpec` to a bundle in a directory of the box's own (a pure core,
+    `hex_core::bundle`, with golden tests) and runs it as `docker run` runs an image that names nothing
+    else; `Rootfs::Layers` is an overlay the container mounts in its own mount namespace over the box's
+    writable layer, which delete removes, and an unrenderable spec is refused by name (HEX-RT-13). The lab
+    (`crates/hex-cli/tests/oci_spec_box.rs`) passes rootless and as root in a privileged container. It
+    found two faults in the `oci` class, both fixed with a failing check first: a container's own network
+    namespace had its loopback down (now brought up, as runc and crun do), and an image's absolute link
+    let the init write a mount target on the host (now every path in a root resolves inside it,
+    `openat2(RESOLVE_IN_ROOT)`); runtime-tools gives the same 26 of 58 before and after on adacachy.
+    Open for Ada: whether OciSpec boxes get the default seccomp profile Docker applies
+    (`docs/design/runtime.md`, "a box from an OciSpec").
   - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
     copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
