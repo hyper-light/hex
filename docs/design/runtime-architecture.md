@@ -49,7 +49,7 @@ can't be reached, with what the design reaches instead.
 | create+start of `true` | 16.26 / 29.30 / 68.88 / 934.36 | crun 3.34 / 6.00 / 8.88 / 28.02 | 0.84 / 1.50 / 2.22 / 7.01 | Through the seam: decisions 1, 2, 4, 5, 6 and 8. Through the command line: A2. |
 | lifecycles/s at 1 / 8 / 32 | 52 / 325 / 1,030 | crun 87 / 1,015 / 1,038 | 348 / 4,060 / 4,152 | Through the seam: decisions 2, 3 and 5. At 32, the ceiling is open (below). |
 | CPU per lifecycle | 7.02 | crun 4.68 | 1.17 | With a network namespace per container: A4. Without one: decisions 1, 2, 3 and 5. |
-| held memory per idle container | 0.63 MiB | crun 0.39 | 0.10 MiB | A1. Decision 2 reaches crun's. |
+| held memory per idle container | 0.63 MiB | crun 0.39 | 0.10 MiB | A1. Decision 2 reaches crun's: 0.99x on adacachy (run `20261027T043711Z`), of record on fedora to come. |
 | density (per GiB held) | 1,636 | crun 2,640 | 10,560 | A1. Decision 2 reaches crun's. |
 
 **The `process` class** (ms unless stated):
@@ -135,10 +135,34 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
   is the runtime-spec's: a container is stopped once "the container process has exited" (runtime.md,
   Lifecycle step 10). Through the seam the difference lasts only until the agent reaps the init.
   (Kiln research `01a178e67ccd7764b6746e5880187422`, f19-f20.)
+- **Nothing per container but the container.** With the shim gone, two things were still kept per idle
+  container that crun doesn't keep (Evidence). Built in plan step 2:
+  - **One device program per policy** (`oci/devshare.rs`). Containers whose device policies are the same
+    share one loaded program. `create` still loads its own copy, which tells it the program's tag. The hints
+    file in the state root (`.device-programs.json`: at most 64 programs, read up to 64 KiB) names a program
+    loaded before with that tag. `create` attaches that one only once the kernel shows it's the same
+    program: the same type, tag and lengths, and the same translated instructions byte for byte (f29). Its
+    own copy then drops, and the kernel frees it. A stale or wrong hint costs the sharing, never the policy.
+    A spec without `linux.resources` keeps the default device policy, as runc's does (f30).
+  - **Nothing of the runtime's in the program.** The create handshake's two pipes are made close-on-exec,
+    and the shim sets close-on-exec again on the two ends it's handed (`run.rs:219-227`,
+    `init.rs:691-702`). The program holds only its stdio, as crun's does (f26, f27).
 
 **Sources.**
 - PR_SET_CHILD_SUBREAPER(2const): "A subreaper fulfills the role of init(1) for its descendant processes."
 - pidfd_open(2): a child's pidfd "can be waited on using waitid(2)" (f7).
+- execve(2): "By default, file descriptors remain open across an execve()" (f23).
+- Linux v7.2 `fs/pipe.c:184,193,898`: a pipe's pages are charged to the writer's memory cgroup, and a page
+  read empty is kept for the next write (f24).
+- Linux v7.2 `include/uapi/linux/bpf.h:1209-1210,7309-7314`: with `BPF_F_ALLOW_MULTI` a cgroup's programs run
+  "in addition to" its ancestors', and a device program's context is the access type, major and minor (f28).
+- Linux v7.2 `kernel/bpf/syscall.c:4959,5218-5247`: opening a program by id needs CAP_SYS_ADMIN; the info call
+  dumps the translated instructions to a capable caller, or withholds them. `kernel/bpf/core.c:334`: the tag
+  is 8 bytes of a SHA-256 of the instructions (f29).
+- crun, `src/libcrun/container.c:1473` and `utils.c:2053` on main: every descriptor from 3 + `preserve_fds` is
+  marked close-on-exec before the container's exec (f26).
+- runc, `libcontainer/specconv/spec_linux.go:984` on main: "Append the default allowed devices to the end of
+  the list", whatever the spec's resources (f30).
 
 **Evidence.**
 - **The second process and exec.** Hex's `create` execs the hex binary again as `__oci-init`
@@ -146,38 +170,59 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
 - **What it holds.** In the probe, each idle container kept that shim at 3,140-3,328 KiB RSS beside its `sleep`.
   crun kept nothing; its containers' `sleep`s were reparented and ran alone (`probes/oci_breakdown.md` §3; f16).
   That is the gap between Hex's 0.63 MiB held per idle container and crun's 0.39.
-- **What's left without the shim: a device program per container.** On the no-shim binary, Hex still holds
-  11.4, 12.6 and 12.9 KiB more per idle container than crun in three interleaved density rounds. That's run
-  `20261027T033009Z` (adacachy, binary 3e5444d8, 1,000 containers each; `bench/competitive/RESULT.md`).
-  memory.stat's named entries account for all of each round's difference: none of it is left unattributed.
-  - **Where it is.** Nearly all of it is the cgroup's `kernel` memory: +11.5/+12.7/+12.8 KiB. shmem rose by
-    nothing for either runtime, and Hex's state root takes 4 KiB per container against crun's 8, so the gap
-    isn't runtime state on a tmpfs.
-  - **The entries.** Within `kernel`:
-    - **slab** is the largest, +4.3 to +4.6 KiB.
-    - **vmalloc** is +4,096 bytes in every round, and crun's is 0.
-    - **percpu** is +1.2 KiB in every round.
-  - **What makes them.** A loaded BPF program takes those charges. `bpf_prog_alloc_no_stats` rounds the
-    program up to whole pages and `__vmalloc`s it, then allocates its `aux` and its per-CPU `active` counters.
-    `bpf_prog_alloc` adds the per-CPU `stats`. All of these use `bpf_memcg_flags`, so they're charged to the
-    loader's cgroup (`kernel/bpf/core.c:102-118,149-159`, master).
-  - **Why only Hex loads one.** The bench's bundle has no `linux.resources` (`oci_inside.sh:24`). Hex gives such
-    a spec its deny-by-default device policy and loads that program for every container
-    (`run.rs:180,637-656`; `resources.rs:815`). crun loads a device program only when the spec lists devices
-    (`src/libcrun/cgroup-resources.c:1383` at 1.30.1's 079ff6a7: `if (need_bpf_dev && resources->devices_len)`).
-    So `run.rs:180`'s comment, "as runc's and crun's do", is half wrong: runc applies the default policy to a
-    resource-less spec, and crun doesn't.
-  - **Not yet observed directly.** No one has seen the program attached to a Hex container's cgroup and absent
-    from crun's yet; that needs bpftool inside the privileged bench container.
-  - **What closes it** is plan step 2's decision. One default-policy program shared by every container keeps
-    the policy and pays its pages once per node.
+- **What was left without the shim: a device program and two pipes per container.** On the no-shim binary,
+  Hex still held 11.4, 12.6 and 12.9 KiB more per idle container than crun in three interleaved density
+  rounds. That's run `20261027T033009Z` (adacachy, binary 3e5444d8, 1,000 containers each;
+  `bench/competitive/RESULT.md`). memory.stat's named entries account for all of each round's difference.
+  Nearly all of it is the cgroup's `kernel` memory. shmem rose by nothing for either runtime, and Hex's state
+  root takes 4 KiB per container against crun's 8, so the gap isn't runtime state on a tmpfs.
+  - **A device program per container.** vmalloc rose 4,096 bytes per container in every round and percpu
+    1.2 KiB, where crun's rose by nothing. A loaded BPF program takes those charges.
+    `bpf_prog_alloc_no_stats` rounds the program up to whole pages and `__vmalloc`s it, then allocates its
+    `aux` and its per-CPU `active` counters. `bpf_prog_alloc` adds the per-CPU `stats`. All of these use
+    `bpf_memcg_flags`, so they're charged to the loader's cgroup (`kernel/bpf/core.c:102-118,149-159`,
+    master). The bench's bundle has no `linux.resources` (`oci_inside.sh:24`). Hex gave such a spec its
+    deny-by-default policy and loaded that program for every container. crun loads a device program only when
+    the spec lists devices (`src/libcrun/cgroup-resources.c:1383` at 1.30.1's 079ff6a7: `if (need_bpf_dev &&
+    resources->devices_len)`). runc applies its default rules to every container (f30).
+  - **Two pipes per container.** Each idle container's program held four descriptors beyond its stdio: both
+    ends of the create handshake's sync and map pipes. crun's held 0, 1 and 2 alone (f22). The pipes were
+    made without close-on-exec, and the shim never set it again on the ends it was handed, so all four went
+    on through the container's exec of its program (f23). An open pipe keeps its inode, files and buffers,
+    and the sync pipe keeps the page its messages were written through (f24). In a lab of 500 idle
+    containers a round, the cgroup the runtime ran in held 4.1 KiB per Hex container outside slab, percpu,
+    vmalloc, page tables and stacks, and none per crun container: that page (f25).
+  - **Each change measured** (adacachy, three interleaved rounds of 1,000 idle containers each; Hex less crun
+    per container; f31):
+
+    | binary | run | Hex less crun, KiB | held, Hex / crun |
+    |---|---|---:|---:|
+    | no shim | `20261027T033009Z` | +11.4 / +12.6 / +12.9 | |
+    | the program shared | `20261027T034522Z` | +5.19 / +4.21 / +5.34 | |
+    | the pipes closed, the program not shared | `20261027T044129Z` | +3.76 / +2.90 / +2.25 | 1.0090 / 1.0070 / 1.0054 |
+    | both | `20261027T043711Z` | -3.31 / -2.75 / -3.90 | 0.9920 / 0.9934 / 0.9906 |
+
+    Sharing took vmalloc's and percpu's rise to 0. Without it, they were back at +4.00 and +1.20 KiB. Either
+    change alone leaves Hex above crun, and both bring it below.
+  - **Every guarantee kept.** In the cgroups lab (`bench/oci-validation/cgroups.sh`), a second container takes
+    the first's program and, the first deleted, still reads `/dev/zero` and is refused a disk. The started
+    program's descriptors are 0, 1 and 2. All 32 checks pass. On 203ae0a's binary, the descriptor check
+    failed with `0 1 2 3 4 5 6`. On the changed binary, `probes/oci_breakdown.sh` step 3 finds only the
+    workload in Hex's container cgroups and no Hex process anywhere. runtime-tools bd3b0bd gives Hex and crun
+    the same 9 passes and 49 failures on adacachy, none differing (f32).
 - **The third fsync.** The shim's stop write is the lifecycle's third fsync'd write.
 - **Delete.** The probe found Hex's delete slower with its state on a tmpfs (4.13 against 2.05 ms). The shim
   writes the stopped state while the delete runs, and the probe doesn't explain the difference; delete is
   measured again once the shim is gone.
 
-**What would falsify it.** An OCI operation that needs a process per container. runtime-tools' 28 passing tests,
-crun's set on this host, are the check.
+**What would falsify it.**
+- **The shim's removal:** an OCI operation that needs a process per container. runtime-tools' 28 passing tests,
+  crun's set on this host, are the check.
+- **Sharing:** a device program that keeps state per container, such as a map, which Hex's doesn't (it reads
+  only its context, f28). Or a kernel that charges each attachment as much as a program, so that sharing saves
+  nothing: the density phase's vmalloc and percpu rise per container would show it, and they're 0.
+- **Held memory at most crun's:** the density phase of record on fedora (plan step 4) showing Hex's held memory
+  per idle container above crun's.
 
 ### 3. The fast path is the `Runtime` seam; the OCI command line stays for compatibility
 

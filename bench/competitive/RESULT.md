@@ -94,10 +94,10 @@ only, interleaved; LOAD_GATE=0, so not of record by §7, but the hex-vs-crun rat
 load) measures what those two decisions changed: **start p50 0.27 ms against crun's 0.25 (0.94x)** — the
 fsync penalty is gone — and **held memory per idle container 0.42 MiB against crun's 0.40 (0.95x)**, down
 from 0.63, with no process left beside any idle container (`probes/oci_breakdown.sh` step 3: hex leaves only
-the workload, as crun does). Held memory is still ~20 KiB/container above crun's, which decision 2 does not
-close; the of-record table refresh on the no-fsync binary awaits fedora.
+the workload, as crun does). Held memory was still ~20 KiB/container above crun's on that binary; plan step 2
+closed it (below), to 0.99x crun's. The of-record table refresh on the changed binary awaits fedora.
 
-**What that residual is: a device program per container** (runtime-architecture.md, decision 2).
+**What that residual was: a device program and two pipes per container** (runtime-architecture.md, decision 2).
 
 The run: density only, Hex and crun interleaved, 3 rounds of 1,000 idle containers each. Run
 `20261027T033009Z`, adacachy, binary 3e5444d8, bench code fa409c7, LOAD_GATE=0, 2026-10-27 03:30Z. Held memory
@@ -139,9 +139,33 @@ Hex less crun, in KiB per idle container:
   - percpu, +1.20 KiB, the program's per-CPU `stats` and `active`.
 - **Why only Hex loads a program.** The bench bundle has no `linux.resources`, so crun attaches no device program
   (`cgroup-resources.c:1383`: `if (need_bpf_dev && resources->devices_len)`). Hex gives the spec its
-  deny-by-default policy and loads one program per container.
-- **Not yet observed directly.** No one has seen one program attached to each Hex container's cgroup and none to
-  crun's yet. That needs bpftool inside the privileged bench container.
+  deny-by-default policy and loaded one program per container.
+- **The rest: two pipes per idle container.** `/proc/<pid>/fd` of an idle Hex container's `sleep` listed four
+  pipe descriptors, both ends of the create handshake's two pipes; crun's listed 0, 1 and 2. The pipes were
+  made without close-on-exec, so they went on through the container's exec. In a lab of 500 idle containers a
+  round, the cgroup the runtime ran in held 4.1 KiB per Hex container of the kernel's rest, one pipe page, and
+  none per crun container.
+
+**What closed it.** Two changes (decision 2, "Nothing per container but the container"): containers with one
+device policy share one loaded program, and the handshake's pipes are close-on-exec, so the program holds only
+its stdio. Each was measured alone, in the same shape of run as above (adacachy, density only, Hex and crun
+interleaved, 3 rounds of 1,000 idle containers, LOAD_GATE=0, 2026-10-27). Hex less crun, in KiB per idle
+container, and Hex's held memory over crun's:
+
+| binary | run | round 1 | round 2 | round 3 | held, Hex / crun |
+|---|---|---:|---:|---:|---|
+| no shim (3e5444d8) | `20261027T033009Z` | +11.36 | +12.64 | +12.88 | |
+| the program shared (423797c7) | `20261027T034522Z` | +5.19 | +4.21 | +5.34 | |
+| the pipes closed, the program not shared (57b21894) | `20261027T044129Z` | +3.76 | +2.90 | +2.25 | 1.0090 / 1.0070 / 1.0054 |
+| both (1063a51f) | `20261027T043711Z` | -3.31 | -2.75 | -3.90 | 0.9920 / 0.9934 / 0.9906 |
+
+- **Sharing** took vmalloc's rise per container from +4.00 KiB to 0 and percpu's from +1.20 to 0. Without it,
+  both were back.
+- **Either change alone** leaves Hex above crun; both bring it below, by 2.8-3.9 KiB per container, 422 KiB held
+  against crun's 425-426.
+- **Unattributed:** in `034522Z` and `043711Z`, at most 0.73% of any round's difference. In `044129Z`'s third
+  round, 12.1%: 0.27 KiB per container in Hex's own readings, as some of Hex's pages went to swap during that
+  round (anon -6.12 KiB, swap +6.21 against crun), which held counts either way. Every reading was quiet.
 - **The earlier run.** Run `20261027T031736Z` (bench code 4cf9b28) read memory.stat without waiting for a flush.
   It left 6.8%, 18.7% and 8.7% unattributed. Each runtime's own named-entry rise there was 0.6-3.3 KiB per
   container off its held rise, because memory.stat may trail by up to 64 pages a CPU between flushes

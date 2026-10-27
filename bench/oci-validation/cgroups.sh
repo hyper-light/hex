@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The `oci` class's per-container cgroups against the kernel (docs/design/runtime.md, "every oci
 # container gets its own cgroup"; AC-T7.1.4, AC-T7.1.1): limits in force, the container and only the
-# container inside, its cgroup namespace rooted there, device rules enforced, `kill --all` and
+# container inside, its cgroup namespace rooted there, device rules enforced (containers with one
+# device policy sharing one program, which still refuses for each, decision 2), `kill --all` and
 # `delete` reaching every process, refusals leaving nothing behind, the container born in its cgroup
 # (create migrates nothing, by the kernel's cgroup_attach_task tracepoint), and `hex oci exec` running a
 # program inside, born there too, with its status, overrides and signals. As root in a

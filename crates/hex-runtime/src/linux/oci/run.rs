@@ -9,15 +9,17 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::FdFlags;
+use rustix::pipe::PipeFlags;
 use rustix::process::PidfdFlags;
 
 use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
@@ -25,7 +27,7 @@ use crate::linux::oci::init;
 use crate::linux::oci::resources::{self, Plan};
 use crate::linux::oci::spec::{IdMapping, Resources, Spec};
 use crate::linux::oci::state::{self, Dir, State, Status};
-use crate::linux::oci::{OciError, sys};
+use crate::linux::oci::{OciError, devshare, sys};
 
 /// The controllers a container's cgroup gets, beyond those its resources need, where its parent has
 /// them: what Hex's boxes get ([`hex_core::cgroup::CONTROLLERS`]), so a container's memory, CPU, IO
@@ -177,7 +179,9 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
-        // A spec without resources still gets the default device policy, as runc's and crun's do.
+        // A spec without resources still gets the default device policy, as runc's does. crun's attaches
+        // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
+        // Hex keeps the guarantee and shares one program among such containers (devshare).
         let plan = resources::plan(
             spec.linux
                 .resources
@@ -189,9 +193,9 @@ impl Runtime {
         // attached to it; one made from the spec takes the whole plan (its resource writes and device
         // program). The provided cgroup is the caller's to remove, so a failure here leaves it.
         let (cgroup, caller_owns) = match cgroup {
-            Cgroup::FromSpec => (make_cgroup(&spec, id, &plan)?, false),
+            Cgroup::FromSpec => (make_cgroup(&spec, id, &plan, &self.root)?, false),
             Cgroup::Provided(cg) => {
-                attach_device_program(&cg, &plan, spec.makes_namespace("user"))?;
+                attach_device_program(&cg, &plan, spec.makes_namespace("user"), &self.root)?;
                 (cg, true)
             }
         };
@@ -212,9 +216,12 @@ impl Runtime {
         spec: &Spec,
         cgroup: &BoxCgroup,
     ) -> Result<(), OciError> {
-        // Two pipes: the init writes the sync pipe, the runtime writes the map pipe.
-        let (sync_r, sync_w) = rustix::pipe::pipe().map_err(|e| OciError::os("pipe", e))?;
-        let (map_r, map_w) = rustix::pipe::pipe().map_err(|e| OciError::os("pipe", e))?;
+        // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. Made close-on-exec,
+        // so the runtime's own ends never reach the shim, and through it the container's program.
+        let pipe =
+            || rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(|e| OciError::os("pipe", e));
+        let (sync_r, sync_w) = pipe()?;
+        let (map_r, map_w) = pipe()?;
         // The init inherits sync_w and map_r across exec; clear their close-on-exec.
         keep_across_exec(&sync_w)?;
         keep_across_exec(&map_r)?;
@@ -321,8 +328,13 @@ impl Runtime {
         }
         // Opened without blocking: a blocking open would wait for ever on an init that has died. The
         // init, blocked opening the FIFO to write, writes its byte as soon as this opens it to read.
-        let fifo = rustix::fs::open(dir.fifo(), OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())
-            .map_err(|e| OciError::os("opening the exec fifo", e))?;
+        // Close-on-exec, so the poststart hooks below don't inherit it.
+        let fifo = rustix::fs::open(
+            dir.fifo(),
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening the exec fifo", e))?;
         if !wait_readable(&fifo, START_PATIENCE)? {
             return Err(if state.init_alive() {
                 OciError::Broken(format!(
@@ -551,7 +563,12 @@ fn wait_for(fd: &OwnedFd, patience: Duration, what: &'static str) -> Result<bool
 /// lets a runtime refuse a cgroup unfit for create, naming "a non-empty cgroup" (config-linux.md,
 /// "Control groups"). Then the writes, in order, and the device program. A cgroup this made is removed
 /// again when a later step fails.
-fn make_cgroup(spec: &Spec, id: &str, plan: &Plan) -> Result<BoxCgroup, OciError> {
+fn make_cgroup(
+    spec: &Spec,
+    id: &str,
+    plan: &Plan,
+    state_root: &Path,
+) -> Result<BoxCgroup, OciError> {
     let root = Path::new(CGROUP_ROOT);
     if !root.join("cgroup.controllers").exists() {
         return Err(OciError::os(
@@ -607,7 +624,7 @@ fn make_cgroup(spec: &Spec, id: &str, plan: &Plan) -> Result<BoxCgroup, OciError
         }
     };
     let cg = BoxCgroup::at(path);
-    if let Err(e) = apply(&cg, plan, spec.makes_namespace("user")) {
+    if let Err(e) = apply(&cg, plan, spec.makes_namespace("user"), state_root) {
         if made {
             let _ = cg.remove();
         }
@@ -617,11 +634,11 @@ fn make_cgroup(spec: &Spec, id: &str, plan: &Plan) -> Result<BoxCgroup, OciError
 }
 
 /// The plan's writes into the cgroup, in order, then its device program, attached to it.
-fn apply(cg: &BoxCgroup, plan: &Plan, rootless: bool) -> Result<(), OciError> {
+fn apply(cg: &BoxCgroup, plan: &Plan, rootless: bool, state_root: &Path) -> Result<(), OciError> {
     for w in &plan.writes {
         write_file(&cg.dir().join(&w.file), &w.value).map_err(from_refusal)?;
     }
-    attach_device_program(cg, plan, rootless)
+    attach_device_program(cg, plan, rootless, state_root)
 }
 
 /// Attaches the plan's device program to the cgroup, if it has one; the device access a container
@@ -634,7 +651,12 @@ fn apply(cg: &BoxCgroup, plan: &Plan, rootless: bool) -> Result<(), OciError> {
 /// access (docs/design/runtime.md, "Rootless devices", measured on the running hardware). An
 /// allow-by-default policy with denials has no such construction, so it's refused here rather than
 /// silently under-enforced (CLAUDE.md §3).
-fn attach_device_program(cg: &BoxCgroup, plan: &Plan, rootless: bool) -> Result<(), OciError> {
+fn attach_device_program(
+    cg: &BoxCgroup,
+    plan: &Plan,
+    rootless: bool,
+    state_root: &Path,
+) -> Result<(), OciError> {
     let Some(insns) = &plan.devices else {
         return Ok(());
     };
@@ -650,10 +672,88 @@ fn attach_device_program(cg: &BoxCgroup, plan: &Plan, rootless: bool) -> Result<
         }
         return Ok(());
     }
-    let prog = sys::load_device_program(insns)?;
+    let prog = device_program(insns, state_root)?;
     let dir = cg.open_dir().map_err(from_refusal)?;
     sys::attach_device_program(dir.as_fd(), prog.as_fd())?;
     Ok(())
+}
+
+/// The device program to attach for `insns` (decision 2; [`devshare`]): one loaded before for the same
+/// policy, when the hints name one the kernel confirms is the same program, else the copy loaded now,
+/// which is then remembered. Loading a copy is how the program's tag is known; when another program is
+/// attached instead, the copy drops at the end of this call and, held by nothing, the kernel frees it.
+fn device_program(insns: &[resources::Insn], state_root: &Path) -> Result<OwnedFd, OciError> {
+    let ours = sys::load_device_program(insns)?;
+    // Without the copy's identity and instructions there's nothing to match it against; it enforces
+    // the policy all the same, so it's attached, only not shared.
+    let Some(mine) = loaded(ours.as_fd()) else {
+        return Ok(ours);
+    };
+    let path = state_root.join(devshare::HINTS_FILE);
+    let mut hints = read_hints(&path);
+    if let Some(shared) = hints
+        .candidate(&mine.identity.tag)
+        .and_then(|id| same_loaded_program(id, &mine))
+    {
+        return Ok(shared);
+    }
+    hints.remember(&mine.identity.tag, mine.identity.id);
+    write_hints(&path, &hints)?;
+    Ok(ours)
+}
+
+/// Program `id`, if it's still loaded and the kernel shows it's the same program as `mine`. One gone,
+/// or one that can't be opened or read, is no match, and the copy loaded now is attached instead.
+fn same_loaded_program(id: u32, mine: &devshare::Loaded) -> Option<OwnedFd> {
+    let fd = sys::program_by_id(id).ok()??;
+    let theirs = loaded(fd.as_fd())?;
+    if devshare::same_program(mine, &theirs) {
+        Some(fd)
+    } else {
+        None
+    }
+}
+
+/// The loaded program open as `prog`, as the kernel describes it, or `None` when it can't be read.
+fn loaded(prog: BorrowedFd<'_>) -> Option<devshare::Loaded> {
+    let identity = sys::program_identity(prog).ok()?;
+    let insns = sys::program_instructions(prog, identity.xlated_len).ok()??;
+    Some(devshare::Loaded { identity, insns })
+}
+
+/// The hints in the state root. None, or a file that isn't one, is no hints: a hint is advisory, and
+/// the next program remembered rewrites the file whole. A file past the bound isn't read past it.
+fn read_hints(path: &Path) -> devshare::Hints {
+    let mut bytes = Vec::new();
+    // One byte past the bound tells a file longer than it.
+    let read = std::fs::File::open(path).and_then(|f| {
+        f.take(devshare::MAX_HINT_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+    });
+    match read {
+        Ok(n) if u64::try_from(n).is_ok_and(|n| n <= devshare::MAX_HINT_BYTES) => {
+            devshare::Hints::parse(&bytes)
+        }
+        _ => devshare::Hints::default(),
+    }
+}
+
+/// Writes the hints whole: a temp file of this writer's own, renamed into place, never fsynced, like
+/// the state beside it (decision 1). Concurrent writers each rename a whole file in; the last stays.
+fn write_hints(path: &Path, hints: &devshare::Hints) -> Result<(), OciError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{n}.tmp",
+        devshare::HINTS_FILE,
+        std::process::id()
+    ));
+    std::fs::write(&tmp, hints.to_bytes()?)
+        .map_err(|e| OciError::os("writing the device program hints", e))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        OciError::os("renaming the device program hints", e)
+    })
 }
 
 /// Asks cgroup `dir` to hand controllers down to its children: each of `required` must be available

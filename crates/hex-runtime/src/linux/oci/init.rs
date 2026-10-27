@@ -45,7 +45,7 @@ const DEFAULT_DEVICES: [(&str, u32, u32, u32); 6] = [
 /// The `hex __oci-init` entry. Returns the process exit code; a setup failure is reported to the
 /// runtime over the sync pipe before returning non-zero.
 pub fn run() -> u8 {
-    let sync = match env_fd(ENV_SYNC_W) {
+    let sync = match inherited_fd(ENV_SYNC_W) {
         Ok(fd) => fd,
         Err(_) => return 125,
     };
@@ -90,14 +90,17 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     // namespace the shim's are no longer the caller's, so there the container joins by migration.
     let born_with_callers_credentials = !spec.linux.namespaces.iter().any(|n| n.kind == "user");
 
+    // The map pipe's end is read only for a user namespace's maps, and is the shim's to close either
+    // way, before the container is forked.
+    let map = inherited_fd(ENV_MAP_R)?;
     if spec.makes_namespace("user") {
         sys::unshare(UnshareFlags::NEWUSER)?;
         msg(sync, &format!("U{}", std::process::id()));
-        let map = env_fd(ENV_MAP_R)?;
         let mut ack = [0u8; 1];
         rustix::io::read(&map, &mut ack).map_err(|e| OciError::os("reading the map ack", e))?;
         become_userns_root()?;
     }
+    drop(map);
 
     join_namespace_paths(&spec)?;
     sys::unshare(namespace_flags(&spec))?;
@@ -685,12 +688,17 @@ fn env_var(name: &str) -> Result<String, OciError> {
         .map_err(|_| OciError::Broken(format!("{name} not set for the container init")))
 }
 
-/// Takes an inherited fd number from the environment, owning it.
-fn env_fd(name: &str) -> Result<OwnedFd, OciError> {
+/// A pipe end the runtime passed across its exec of the shim, named by `name`. It goes no further: it's
+/// made close-on-exec again, so the program the container execs never holds it (crun's holds only its
+/// stdio, and so does Hex's).
+fn inherited_fd(name: &str) -> Result<OwnedFd, OciError> {
     let n: RawFd = env_var(name)?
         .parse()
         .map_err(|_| OciError::Broken(format!("{name} isn't an fd")))?;
-    sys::own_fd(n)
+    let fd = sys::own_fd(n)?;
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
+        .map_err(|e| OciError::os("setting close-on-exec", e))?;
+    Ok(fd)
 }
 
 /// Writes one newline-terminated sync message; a broken pipe is ignored (the runtime has gone).

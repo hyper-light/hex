@@ -379,6 +379,8 @@ fn prctl2(option: libc::c_int, arg2: libc::c_ulong, what: &'static str) -> Resul
 // `bpf(2)`'s commands and the device program's type and attach point (include/uapi/linux/bpf.h).
 const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_ATTACH: libc::c_long = 8;
+const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
+const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
 const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
 const BPF_CGROUP_DEVICE: u32 = 6;
 /// `BPF_F_ALLOW_MULTI` (1 << 1): the program joins whatever the cgroup's ancestors attached, all of
@@ -532,6 +534,171 @@ pub fn attach_device_program(
             "attaching the device program",
             std::io::Error::last_os_error(),
         ))
+    }
+}
+
+/// The `union bpf_attr` member `BPF_PROG_GET_FD_BY_ID` reads.
+#[repr(C)]
+struct GetFdByIdAttr {
+    prog_id: u32,
+    next_id: u32,
+    open_flags: u32,
+}
+
+/// The `union bpf_attr` member `BPF_OBJ_GET_INFO_BY_FD` reads.
+#[repr(C)]
+struct InfoByFdAttr {
+    bpf_fd: u32,
+    info_len: u32,
+    info: u64,
+}
+
+/// What the kernel says a loaded program is: the head of `struct bpf_prog_info`
+/// (include/uapi/linux/bpf.h) as far as `xlated_prog_len`. The tag is the first 8 bytes of the digest
+/// the kernel takes of the instructions it was loaded from (SHA-256 in Linux 7.2: kernel/bpf/core.c,
+/// `bpf_prog_calc_tag`): a quick check, not a proof, that two programs are one;
+/// [`program_instructions`] is the proof. The two lengths are zero on the way in, which asks the
+/// kernel for no instruction dump.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramIdentity {
+    pub prog_type: u32,
+    pub id: u32,
+    pub tag: [u8; 8],
+    pub jited_len: u32,
+    pub xlated_len: u32,
+}
+
+/// The head of `struct bpf_prog_info` through `xlated_prog_insns`: with `xlated_prog_len` and
+/// `xlated_prog_insns` set, the kernel dumps the program's translated instructions there.
+#[repr(C)]
+#[derive(Default)]
+struct InfoWithDump {
+    head: ProgramIdentity,
+    jited_prog_insns: u64,
+    xlated_prog_insns: u64,
+}
+
+/// Most bytes of translated instructions [`program_instructions`] reads: `BPF_MAXINSNS` (4,096,
+/// include/uapi/linux/bpf_common.h) instructions of 8 bytes, which Hex's device programs stay under
+/// (`resources::MAX_DEVICE_EXCEPTIONS`).
+const MAX_DUMP_BYTES: u32 = 4096 * 8;
+
+/// The identity of the loaded program open as `prog`.
+pub fn program_identity(prog: std::os::fd::BorrowedFd<'_>) -> Result<ProgramIdentity, OciError> {
+    use std::os::fd::AsRawFd;
+    let mut info = ProgramIdentity::default();
+    let attr = InfoByFdAttr {
+        bpf_fd: u32::try_from(prog.as_raw_fd())
+            .map_err(|_| OciError::os("bpf", "a negative descriptor"))?,
+        info_len: u32::try_from(std::mem::size_of::<ProgramIdentity>())
+            .map_err(|_| OciError::os("bpf", "an info size out of range"))?,
+        info: user_ptr((&raw mut info).cast_const())?,
+    };
+    // SAFETY: bpf(BPF_OBJ_GET_INFO_BY_FD) reads `attr`, a live, initialised repr(C) struct of the size
+    // passed, and writes at most `info_len` bytes into `info`, a live repr(C) struct of exactly that
+    // size that outlives the call; its zero lengths ask for no dump through any pointer. Checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_OBJ_GET_INFO_BY_FD,
+            &raw const attr,
+            std::mem::size_of::<InfoByFdAttr>(),
+        )
+    };
+    if r == 0 {
+        Ok(info)
+    } else {
+        Err(OciError::os(
+            "reading a device program's identity",
+            std::io::Error::last_os_error(),
+        ))
+    }
+}
+
+/// The translated instructions of the loaded program open as `prog`, as the kernel dumps them
+/// (kernel/bpf/syscall.c, `bpf_prog_get_info_by_fd`), when there are exactly `len` bytes of them.
+/// `None` when there aren't, when `len` passes [`MAX_DUMP_BYTES`], or when the kernel dumps none: it
+/// withholds them from a caller without CAP_BPF, and from one without raw-dump rights when it blinded
+/// the program's constants (clearing the pointer to say so).
+pub fn program_instructions(
+    prog: std::os::fd::BorrowedFd<'_>,
+    len: u32,
+) -> Result<Option<Vec<u8>>, OciError> {
+    use std::os::fd::AsRawFd;
+    if len == 0 || len > MAX_DUMP_BYTES {
+        return Ok(None);
+    }
+    let mut buf = vec![
+        0u8;
+        usize::try_from(len)
+            .map_err(|_| OciError::os("bpf", "a dump length out of range"))?
+    ];
+    let mut info = InfoWithDump::default();
+    info.head.xlated_len = len;
+    info.xlated_prog_insns = user_ptr(buf.as_mut_ptr())?;
+    let attr = InfoByFdAttr {
+        bpf_fd: u32::try_from(prog.as_raw_fd())
+            .map_err(|_| OciError::os("bpf", "a negative descriptor"))?,
+        info_len: u32::try_from(std::mem::size_of::<InfoWithDump>())
+            .map_err(|_| OciError::os("bpf", "an info size out of range"))?,
+        info: user_ptr((&raw mut info).cast_const())?,
+    };
+    // SAFETY: bpf(BPF_OBJ_GET_INFO_BY_FD) reads `attr`, a live, initialised repr(C) struct of the size
+    // passed. It writes at most `info_len` bytes into `info`, a live repr(C) struct of exactly that
+    // size, and at most `xlated_len` bytes through `xlated_prog_insns` into `buf`, a live buffer of
+    // that length; both outlive the call. `jited_len` is zero, so nothing is written through
+    // `jited_prog_insns`. Checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_OBJ_GET_INFO_BY_FD,
+            &raw const attr,
+            std::mem::size_of::<InfoByFdAttr>(),
+        )
+    };
+    if r != 0 {
+        return Err(OciError::os(
+            "reading a device program's instructions",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // The kernel reports the whole translation's length, and a cleared pointer when it withheld it.
+    if info.head.xlated_len != len || info.xlated_prog_insns == 0 {
+        return Ok(None);
+    }
+    Ok(Some(buf))
+}
+
+/// A descriptor for loaded program `id`, or `None` when no program has that id now. Opening a
+/// program by id needs CAP_SYS_ADMIN, which the runtime that loads device programs has.
+pub fn program_by_id(id: u32) -> Result<Option<std::os::fd::OwnedFd>, OciError> {
+    let attr = GetFdByIdAttr {
+        prog_id: id,
+        next_id: 0,
+        open_flags: 0,
+    };
+    // SAFETY: bpf(BPF_PROG_GET_FD_BY_ID) reads `attr`, a live, initialised repr(C) struct of the size
+    // passed; it writes nothing of ours. The return value is checked before it is owned.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_PROG_GET_FD_BY_ID,
+            &raw const attr,
+            std::mem::size_of::<GetFdByIdAttr>(),
+        )
+    };
+    if r >= 0 {
+        let fd = i32::try_from(r).map_err(|_| OciError::os("bpf", "a descriptor out of range"))?;
+        use std::os::fd::FromRawFd;
+        // SAFETY: a successful BPF_PROG_GET_FD_BY_ID returns a new descriptor no one else holds.
+        return Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ENOENT) {
+        Ok(None)
+    } else {
+        Err(OciError::os("opening a device program by id", err))
     }
 }
 

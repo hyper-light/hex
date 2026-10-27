@@ -21,8 +21,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
   its device list in force, and is born in it. `hex oci exec` runs a program in the foreground inside a
   created or running container: born in its cgroup, in its namespaces, as its process, with the
-  program's status as exec's and the caller's signals passed on (`bench/oci-validation/cgroups.sh`, 28
-  checks). The runtime decision and its evidence are in `docs/design/runtime.md`.
+  program's status as exec's and the caller's signals passed on, also where cgroup2 is mounted
+  `nsdelegate`. Containers with one device policy share one loaded device program, and a container's
+  program holds only its stdio (`bench/oci-validation/cgroups.sh`, 32 checks). The runtime decision and
+  its evidence are in `docs/design/runtime.md`.
 - **The node agent** (`hex-node`, Linux): `Runtime` over the `process` class, per-box records that a
   crash of the agent leaves whole (fsynced only for a box that owns directories, design decision 1), and
   recovery.
@@ -96,9 +98,17 @@ three different things (CLAUDE.md "Working here"):
     load-noisy to land within a literal 10%); crun the control is flat either way. A competitive OCI
     pass on the HEAD binary (3e5444d8, adacachy, LOAD_GATE=0, fedora offline) has start p50 at 0.94x
     crun (0.27 vs 0.25 ms; the 1.45x target met) and held memory per idle container 0.42 vs 0.40 MiB,
-    with no process beside any idle container (step 3) and runtime-tools at exact crun parity; the
-    held-memory criterion of goal 2 is still open (~20 KiB/container above crun). The OCI table of
-    record in `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).
+    with no process beside any idle container (step 3) and runtime-tools at exact crun parity. **Goal 2's
+    plan step 2 closed the held-memory gap** (decision 2, "Nothing per container but the container"): the
+    ~12 KiB/container left was a device program per container and the create handshake's two pipes, leaked
+    into every container's program. One program is now shared per device policy and the pipes are
+    close-on-exec; held per idle container is 0.99x crun's (run `20261027T043711Z`, adacachy,
+    LOAD_GATE=0), and each change alone leaves Hex above crun (A/B run `20261027T044129Z`).
+    runtime-tools is still at crun parity and step 3 still clean. Of record on fedora (plan step 4)
+    awaits fedora. `hex oci exec` failed where cgroup2 is mounted `nsdelegate` (adacachy's 7.2 kernel):
+    it joined the container's cgroup namespace before cloning into its cgroup, which the kernel refuses
+    there with ENOENT; the child now joins it from inside. The OCI table of record in
+    `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).
   - **goal 3, the `oci` class behind the `Runtime` seam** — `hex-node` serves `ClassSpec::Bundle` in
     process (cgroup under the box root, `create_in_cgroup`, `exec` through a seam-mode `hex __oci-exec`
     helper), with `seam_oci` to measure it against libcrun. Built and reviewed locally; its runtime

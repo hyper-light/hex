@@ -6,11 +6,13 @@
 //! Layering, sans-IO core first (CLAUDE.md §9): [`spec`] parses `config.json`, [`state`] is the
 //! on-disk container state, [`mount`] turns a spec's mounts and paths into an ordered plan of
 //! operations, [`resources`] turns `linux.resources` into cgroup v2 writes and a device program,
-//! [`seccomp`] compiles `linux.seccomp` into a BPF program the init loads before `execve`. The
+//! [`seccomp`] compiles `linux.seccomp` into a BPF program the init loads before `execve`, and
+//! [`devshare`] lets containers with one device policy share one loaded device program. The
 //! imperative shell that makes the cgroup and namespaces, pivots the root and runs the init is in
 //! [`run`] and [`init`]; the system calls that need `unsafe` are in [`sys`].
 
 pub mod caps;
+pub mod devshare;
 pub mod exec;
 pub mod init;
 pub mod mount;

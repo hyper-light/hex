@@ -64,8 +64,9 @@ if [ "$(cat $W/out/disk.rc 2>&1)" != 0 ]; then pass "a denied device (block 8:0)
 /opt/hex oci delete --force limits || fail "delete limits"
 [ -d "$CG/limits" ] && fail "delete left the cgroup" || pass "delete removed the cgroup"
 
-# 1b. No resources at all: the default device policy, as under runc and crun. The supplied devices
-# work (the init made /dev/null and the rest), a disk doesn't.
+# 1b. No resources at all: the default device policy, as under runc (crun attaches no device program
+# to a spec without devices). The supplied devices work (the init made /dev/null and the rest), a
+# disk doesn't.
 rm -f "$W/out/"*
 bundle "$W/plain" '["sh", "-c", "head -c 4 /dev/zero | wc -c > /out/zero; (mknod /tmp/disk b 8 0 && head -c 1 /tmp/disk) > /out/disk 2>&1; echo $? > /out/disk.rc"]' "" "$OUT"
 /opt/hex oci create --bundle "$W/plain" plain && /opt/hex oci start plain || fail "create/start plain"
@@ -73,6 +74,31 @@ for _ in $(seq 1 50); do [ -s "$W/out/disk.rc" ] && break; sleep 0.1; done
 check "no resources: /dev/zero reads" 4 "$(tr -d ' ' < $W/out/zero 2>&1)"
 if [ "$(cat $W/out/disk.rc 2>&1)" != 0 ]; then pass "no resources: a disk is still refused: $(head -c 120 $W/out/disk)"; else fail "no resources: block 8:0 was readable"; fi
 /opt/hex oci delete --force plain || fail "delete plain"
+
+# 1c. Containers with one device policy share one device program (decision 2; oci/devshare.rs): the
+# second takes the first's, so the hints keep the first's id (only a miss rewrites them). Once the
+# first is deleted the second still refuses a disk and reads /dev/zero: the program lives on in the
+# second's cgroup and decides for it as its own copy would.
+hint_id() { grep -o '"id":[0-9]*' "$HEX_OCI_ROOT/.device-programs.json" 2>/dev/null | head -1 | cut -d: -f2; }
+bundle "$W/share1" '["sleep", "infinity"]' "" ""
+bundle "$W/share2" '["sleep", "infinity"]' "" ""
+/opt/hex oci create --bundle "$W/share1" --pid-file "$W/share1.pid" share1 && /opt/hex oci start share1 || fail "create/start share1"
+first=$(hint_id)
+# The started program holds its stdio and no descriptor of the runtime's (crun's holds 0, 1 and 2 alone):
+# read from outside, so the listing opens nothing of its own in the program.
+check "the program's descriptors, once started" "0 1 2" "$(ls /proc/$(cat $W/share1.pid)/fd | sort -n | xargs)"
+if [ -n "$first" ]; then pass "the first container's device program is remembered (id $first)"; else fail "no device program hint after the first container"; fi
+/opt/hex oci create --bundle "$W/share2" share2 && /opt/hex oci start share2 || fail "create/start share2"
+check "a second container with the same device policy takes the first's program" "$first" "$(hint_id)"
+/opt/hex oci delete --force share1 || fail "delete share1"
+# One exec reports all three, so an exec that never ran its program can't pass: /dev/zero read, the
+# node made (the default policy allows mknod, as runc's), and reading it refused (head exits 1).
+got=$(/opt/hex oci exec share2 sh -c 'echo "zero $(head -c 4 /dev/zero | wc -c | tr -d " ")"; mknod /tmp/disk b 8 0 && echo made; head -c 1 /tmp/disk > /dev/null 2>&1; echo "read $?"' 2>&1)
+case "$got" in
+  *"zero 4"*"made"*"read 1"*) pass "the sharing container, the first gone, reads /dev/zero and refuses a disk: $(echo $got)" ;;
+  *) fail "the sharing container once the first was deleted: $(echo $got)" ;;
+esac
+/opt/hex oci delete --force share2 || fail "delete share2"
 
 # 2. kill --all reaches a process that left the init's process group (setsid).
 bundle "$W/escape" '["sh", "-c", "setsid sleep infinity & exec sleep infinity"]' "" ""
