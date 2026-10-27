@@ -97,6 +97,59 @@ from 0.63, with no process left beside any idle container (`probes/oci_breakdown
 the workload, as crun does). Held memory is still ~20 KiB/container above crun's, which decision 2 does not
 close; the of-record table refresh on the no-fsync binary awaits fedora.
 
+**What that residual is: a device program per container** (runtime-architecture.md, decision 2).
+
+The run: density only, Hex and crun interleaved, 3 rounds of 1,000 idle containers each. Run
+`20261027T031736Z`, adacachy, binary 3e5444d8, bench code 4cf9b28, LOAD_GATE=0, 2026-10-27 03:17Z. Held memory
+doesn't depend on load, but this run isn't of record by §7 all the same.
+
+How it's measured: the density phase records the bench cgroup's memory.stat rise by entry, from the same two
+readings as its held figure, and the bytes under each runtime's state root. `probes/held_attribution.py` pairs
+round k of Hex with round k of crun.
+
+Hex less crun, in KiB per idle container:
+
+| part | round 1 | round 2 | round 3 | mean |
+|---|---:|---:|---:|---:|
+| held | +12.36 | +11.87 | +15.40 | +13.21 |
+| anon | -0.33 | +1.91 | -0.05 | +0.51 |
+| shmem | 0.00 | 0.00 | 0.00 | 0.00 |
+| sock, swap, zswap, hugepages | +0.02 | 0.00 | 0.00 | +0.01 |
+| kernel | +11.83 | +12.18 | +14.11 | +12.71 |
+| kernel: slab | +4.09 | +4.94 | +6.64 | +5.22 |
+| kernel: vmalloc | +4.00 | +4.00 | +4.00 | +4.00 |
+| kernel: percpu | +1.20 | +1.20 | +1.31 | +1.24 |
+| kernel: pagetables | -0.07 | -0.06 | -0.07 | -0.07 |
+| kernel: the rest | +2.62 | +2.10 | +2.24 | +2.32 |
+| named entries' sum | +11.52 | +14.09 | +14.06 | +13.22 |
+| left unattributed | 6.8% | 18.7% | 8.7% | 0.1% |
+| state root allocated (Hex; crun) | 4.00; 8.00 | 4.00; 8.00 | 4.00; 8.00 | 4.00; 8.00 |
+
+- **Where the residual is.** It's kernel memory, not runtime state on a tmpfs: shmem rose by nothing for either
+  runtime, and Hex's state root is half the size of crun's.
+- **The steady part.** The steadiest entries are the ones a loaded BPF program charges to its loader's
+  cgroup (`kernel/bpf/core.c:102-118,149-159`):
+  - vmalloc, exactly one page per container, where crun's rise is 0;
+  - percpu, the program's per-CPU `stats` and `active`.
+- **The largest named entry is slab**, +5.2 KiB per container on the mean. It also moves the most between
+  rounds.
+- **Why only Hex loads a program.** The bench bundle has no `linux.resources`, so crun attaches no device program
+  (`cgroup-resources.c:1383`: `if (need_bpf_dev && resources->devices_len)`). Hex gives the spec its
+  deny-by-default policy and loads one program per container.
+- **Not yet observed directly.** No one has seen one program attached to each Hex container's cgroup and none to
+  crun's yet. That needs bpftool inside the privileged bench container.
+
+How the 10% bar reads:
+- **The run as a whole meets it.** Over the mean of its three rounds, 0.1% of the held difference is left
+  unattributed. The median round leaves 8.7%.
+- **Round 2 alone misses it** (18.7%), and it is kept. Its excess is anon (+1.91 KiB, against about 0 in the
+  other rounds), which no runtime difference explains.
+- **Why single rounds scatter.** In each runtime's own reading, the named entries' rise and the held rise differ
+  by 0.6-3.3 KiB per container. memory.stat is a cached view, flushed every 2 s or when enough updates are
+  pending (cgmem.py), while memory.current isn't. That leaves a round's per-container difference of about
+  12 KiB uncertain by a few KiB.
+- **The fix for that scatter** is a reading that waits for a flushed memory.stat, not a looser bar.
+
 The three throughput rows were re-measured on 2026-10-25 through the worker-process-per-slot driver (the
 2026-10-25 run of record below); every other row is the 2026-10-23/24 run's. The old lock-serialized driver
 capped concurrent spawns, most at concurrency 32 (old rows: hex 52/325/1,030, runc 7/59/214, crun

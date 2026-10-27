@@ -146,6 +146,31 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
 - **What it holds.** In the probe, each idle container kept that shim at 3,140-3,328 KiB RSS beside its `sleep`.
   crun kept nothing; its containers' `sleep`s were reparented and ran alone (`probes/oci_breakdown.md` §3; f16).
   That is the gap between Hex's 0.63 MiB held per idle container and crun's 0.39.
+- **What's left without the shim: a device program per container.** On the no-shim binary, Hex still holds
+  13.2 KiB more per idle container than crun. That is the mean of three interleaved density rounds
+  (12.4/11.9/15.4 KiB), from run `20261027T031736Z` (adacachy, binary 3e5444d8, 1,000 containers each;
+  `bench/competitive/RESULT.md`).
+  - **Where it is.** Nearly all of it is the cgroup's `kernel` memory: +11.8/+12.2/+14.1 KiB. shmem rose by
+    nothing for either runtime, and Hex's state root takes 4 KiB per container against crun's 8, so the gap
+    isn't runtime state on a tmpfs.
+  - **The steady entries.** Within `kernel`:
+    - **vmalloc** is +4,096 bytes in every round, and crun's is 0.
+    - **percpu** is about +1.2 KiB.
+    - **slab** is +4.1 to +6.6 KiB, and moves the most between rounds.
+  - **What makes them.** A loaded BPF program takes those charges. `bpf_prog_alloc_no_stats` rounds the
+    program up to whole pages and `__vmalloc`s it, then allocates its `aux` and its per-CPU `active` counters.
+    `bpf_prog_alloc` adds the per-CPU `stats`. All of these use `bpf_memcg_flags`, so they're charged to the
+    loader's cgroup (`kernel/bpf/core.c:102-118,149-159`, master).
+  - **Why only Hex loads one.** The bench's bundle has no `linux.resources` (`oci_inside.sh:24`). Hex gives such
+    a spec its deny-by-default device policy and loads that program for every container
+    (`run.rs:180,637-656`; `resources.rs:815`). crun loads a device program only when the spec lists devices
+    (`src/libcrun/cgroup-resources.c:1383` at 1.30.1's 079ff6a7: `if (need_bpf_dev && resources->devices_len)`).
+    So `run.rs:180`'s comment, "as runc's and crun's do", is half wrong: runc applies the default policy to a
+    resource-less spec, and crun doesn't.
+  - **Not yet observed directly.** No one has seen the program attached to a Hex container's cgroup and absent
+    from crun's yet; that needs bpftool inside the privileged bench container.
+  - **What closes it** is plan step 2's decision. One default-policy program shared by every container keeps
+    the policy and pays its pages once per node.
 - **The third fsync.** The shim's stop write is the lifecycle's third fsync'd write.
 - **Delete.** The probe found Hex's delete slower with its state on a tmpfs (4.13 against 2.05 ms). The shim
   writes the stopped state while the delete runs, and the probe doesn't explain the difference; delete is
