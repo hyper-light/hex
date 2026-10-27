@@ -1,7 +1,8 @@
 //! Compiles an OCI `linux.seccomp` profile ([`Seccomp`]) to a BPF program and loads it in the
 //! container init before `execve` (`init::become_process`). The compile is sans-IO (CLAUDE.md §9):
 //! it turns the parsed profile into a [`seccompiler::BpfProgram`], and the init makes the one
-//! `seccomp(2)` call through [`seccompiler::apply_filter`].
+//! `seccomp(2)` call: through [`seccompiler::apply_filter`] when the spec asks for no_new_privs, and
+//! through `sys::load_seccomp_filter`, before the user and capabilities change, when it doesn't.
 //!
 //! A profile Hex can't honour is refused by a typed [`OciError`], never run with the control dropped
 //! (CLAUDE.md §3): an unknown or `SCMP_ACT_NOTIFY` action, an unknown comparison, an argument index

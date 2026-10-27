@@ -93,7 +93,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   container in its cgroup, `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program
   and that open a loaded one by id and read its identity and translated instructions (so containers
-  with one device policy share one program), the signal mask and `signalfd` through which
+  with one device policy share one program), the `seccomp(2)` call that loads a container's filter
+  without no_new_privs when its spec doesn't ask for it, the signal mask and `signalfd` through which
   `hex oci exec` passes signals on, and the signal-disposition reset and `raise` by which
   `hex oci exec` ends the way its program did when the node agent drives it (seam mode), none of
   which rustix wraps safely; the process is single-threaded (it re-exec'd) where this matters.

@@ -537,6 +537,51 @@ pub fn attach_device_program(
     }
 }
 
+/// Loads seccomp filter `program` on the calling thread and leaves no_new_privs as it is: the kernel
+/// takes a filter from a thread without no_new_privs when it has CAP_SYS_ADMIN in its user namespace
+/// (seccomp(2), `SECCOMP_SET_MODE_FILTER`). [`seccompiler::apply_filter`] sets no_new_privs first,
+/// which a spec without `noNewPrivileges` doesn't ask for.
+pub fn load_seccomp_filter(program: &[seccompiler::sock_filter]) -> Result<(), OciError> {
+    let insns: Vec<libc::sock_filter> = program
+        .iter()
+        .map(|f| libc::sock_filter {
+            code: f.code,
+            jt: f.jt,
+            jf: f.jf,
+            k: f.k,
+        })
+        .collect();
+    let len = u16::try_from(insns.len()).map_err(|_| {
+        OciError::os(
+            "loading the seccomp filter",
+            "more instructions than a filter holds",
+        )
+    })?;
+    let prog = libc::sock_fprog {
+        len,
+        filter: insns.as_ptr().cast_mut(),
+    };
+    // SAFETY: seccomp(SECCOMP_SET_MODE_FILTER) reads `prog`, a live sock_fprog whose `filter` points at
+    // `len` live, initialised sock_filter instructions that outlive the call; the kernel copies them
+    // and keeps no pointer into them, and it writes nothing of ours. Checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            0,
+            &raw const prog,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(OciError::os(
+            "loading the seccomp filter",
+            std::io::Error::last_os_error(),
+        ))
+    }
+}
+
 /// The `union bpf_attr` member `BPF_PROG_GET_FD_BY_ID` reads.
 #[repr(C)]
 struct GetFdByIdAttr {

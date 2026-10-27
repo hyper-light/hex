@@ -59,14 +59,21 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **Seccomp is applied; apparmor/SELinux/mountLabel are refused, not dropped** (CLAUDE.md §3; was: the
   `oci` class ignored all four, found 2026-10-24). `spec.rs` now reads all four. The class compiles a
   spec's `linux.seccomp` to a BPF program (vendored seccompiler, `oci/seccomp.rs`) and loads it in the
-  container init after `no_new_privs`, before `execve`. The containers/common default profile compiles
-  — it needs per-rule actions, its `socket` refusing `AF_NETLINK`+`NETLINK_AUDIT` with EINVAL while
-  allowing every other `socket` — and a behavioral test proves a denied syscall is refused inside a
-  rootless container while the rest run (`hex-cli/tests/oci_seccomp.rs`, through the seam: probe exits
-  42 with the profile, 10 without). An unsupported profile is a typed refusal. `process.apparmorProfile`,
-  `process.selinuxLabel` and `linux.mountLabel` stay refused by name in `Spec::check` (their apply path
-  is LSM-host-dependent, unvalidatable on the bench hosts) — a typed refusal until each is implemented,
-  never a silent drop. The competitive bench is unaffected: its bundles name none of them.
+  container init before `execve`: before the user and capabilities change when the spec leaves
+  `noNewPrivileges` off (as runc does), last when it sets it. no_new_privs is exactly the spec's (it
+  had been set for every filter, which failed ten runtime-tools tests on fedora, 2026-10-27). The
+  containers/common default profile compiles — it needs per-rule actions, its `socket` refusing
+  `AF_NETLINK`+`NETLINK_AUDIT` with EINVAL while allowing every other `socket` — and a behavioral test
+  proves a denied syscall is refused inside a rootless container while the rest run
+  (`hex-cli/tests/oci_seccomp.rs`, through the seam: probe exits 42 with the profile, 10 without). An
+  unsupported profile is a typed refusal. `process.apparmorProfile`, `process.selinuxLabel` and
+  `linux.mountLabel` stay refused by name in `Spec::check` (their apply path is LSM-host-dependent,
+  unvalidatable on the bench hosts) — a typed refusal until each is implemented, never a silent drop.
+  That costs two runtime-tools tests crun passes on fedora, `linux_mount_label` and
+  `linux_process_apparmor_profile`: in the suite's container neither SELinux nor AppArmor is visible,
+  and crun runs the container without the label or profile. Ada's call (2026-10-27): keep refusing,
+  and count those two as deliberate differences. The competitive bench is unaffected: its bundles name
+  none of them.
 - **Rootless device policy, enforced by construction** (`docs/design/runtime.md`, "Rootless devices"):
   a rootless runtime can't load the cgroup device program (CAP_BPF, which it lacks), so a deny-by-default
   allow-list is enforced by construction instead — only its devices get nodes, `mknod` is refused across

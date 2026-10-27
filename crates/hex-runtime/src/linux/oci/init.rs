@@ -200,22 +200,31 @@ fn container(
     exec(&process)
 }
 
-/// Becomes the container's process as its spec gives it: its OOM score, limits, capabilities, user,
-/// no_new_privs and umask, and finally the seccomp filter. The container's first process does this
-/// before `start`, and each one `hex oci exec` runs does it before it execs.
+/// Becomes the container's process as its spec gives it: its OOM score, limits, seccomp filter,
+/// capabilities, user, no_new_privs and umask. The container's first process does this before
+/// `start`, and each one `hex oci exec` runs does it before it execs.
 ///
-/// The seccomp filter is applied last, so the few syscalls Hex itself makes before this point
-/// (setuid, setrlimit, …) run unfiltered, and only the workload's `execve` and what follows are
-/// bound by it. The init re-exec'd, so it is single-threaded: [`seccompiler::apply_filter`] binds
-/// its one thread, which is the thread that `execve`s (CLAUDE.md §12: no new `unsafe`; seccompiler
-/// makes the `seccomp(2)` call).
+/// no_new_privs is exactly the spec's `noNewPrivileges`, so the seccomp filter goes on where that
+/// allows, as runc puts it on (libcontainer/standard_init_linux.go). Without no_new_privs, loading a
+/// filter needs CAP_SYS_ADMIN (seccomp(2)), so it goes on before the user and capabilities change,
+/// and the profile also binds Hex's own calls from there to `execve`. With no_new_privs, it goes on
+/// last, so as few of Hex's own calls as possible run under it. The init re-exec'd, so it is
+/// single-threaded: the filter binds its one thread, which is the thread that `execve`s.
 pub(crate) fn become_process(process: &Process, seccomp: Option<&Seccomp>) -> Result<(), OciError> {
+    // A profile Hex can't honour is refused by name before anything about the process changes
+    // (seccomp::compile), never run unfiltered (CLAUDE.md §3).
+    let filter = seccomp.map(seccomp::compile).transpose()?;
     // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
     if let Some(adj) = process.oom_score_adj {
         fs::write("/proc/self/oom_score_adj", adj.to_string())
             .map_err(|e| OciError::os("writing oom_score_adj", e))?;
     }
     apply_rlimits(process)?;
+    if !process.no_new_privileges
+        && let Some(program) = &filter
+    {
+        sys::load_seccomp_filter(program)?;
+    }
     // Capabilities around the uid change (runc's order): drop the bounding set while still root
     // (needs effective CAP_SETPCAP), keep the permitted set across setuid, then set the sets exactly
     // as the dropped user, so a non-root container still holds the capabilities its spec grants.
@@ -234,12 +243,11 @@ pub(crate) fn become_process(process: &Process, seccomp: Option<&Seccomp>) -> Re
     if let Some(mask) = process.user.umask {
         rustix::process::umask(Mode::from_bits_truncate(mask));
     }
-    // The seccomp filter last: a profile Hex can't honour is refused here by name (seccomp::compile),
-    // never run unfiltered (CLAUDE.md §3). apply_filter also sets PR_SET_NO_NEW_PRIVS, which a
-    // seccomp filter needs when the thread isn't privileged.
-    if let Some(profile) = seccomp {
-        let program = seccomp::compile(profile)?;
-        seccompiler::apply_filter(&program)
+    // apply_filter sets no_new_privs first, which the spec asked for here.
+    if process.no_new_privileges
+        && let Some(program) = &filter
+    {
+        seccompiler::apply_filter(program)
             .map_err(|e| OciError::os("loading the seccomp filter", e))?;
     }
     Ok(())

@@ -100,6 +100,29 @@ case "$got" in
 esac
 /opt/hex oci delete --force share2 || fail "delete share2"
 
+# 1d. A seccomp profile binds the program, and no_new_privs is what the spec's noNewPrivileges says
+# (config.md, "noNewPrivileges"). Without it, the filter is loaded while the init still holds
+# CAP_SYS_ADMIN, as runc loads it (standard_init_linux.go), so the program runs filtered with
+# no_new_privs unset. The profile refuses mknodat, so a refused mknod shows the filter in force.
+SECCOMP='"seccomp": {"defaultAction": "SCMP_ACT_ALLOW", "syscalls": [{"names": ["mknodat"], "action": "SCMP_ACT_ERRNO", "errnoRet": 1}]}'
+for nnp in false true; do
+  rm -f "$W/out/"*
+  bundle "$W/nnp-$nnp" '["sh", "-c", "grep -E \"^(NoNewPrivs|Seccomp):\" /proc/self/status | tr -s \"\\t\\n \" \"  \" > /out/status; mknod /tmp/null c 1 3 2> /dev/null; echo $? > /out/mknod.rc"]' ", $SECCOMP" "$OUT"
+  python3 - "$W/nnp-$nnp/config.json" "$nnp" <<'PY'
+import json, sys
+path, nnp = sys.argv[1], sys.argv[2] == "true"
+spec = json.load(open(path))
+spec["process"]["noNewPrivileges"] = nnp
+json.dump(spec, open(path, "w"))
+PY
+  /opt/hex oci create --bundle "$W/nnp-$nnp" "nnp-$nnp" && /opt/hex oci start "nnp-$nnp" || fail "create/start nnp-$nnp"
+  for _ in $(seq 1 50); do [ -s "$W/out/mknod.rc" ] && break; sleep 0.1; done
+  want=0; [ "$nnp" = true ] && want=1
+  check "noNewPrivileges $nnp: the program's no_new_privs and seccomp mode" "NoNewPrivs: $want Seccomp: 2 " "$(cat $W/out/status 2>&1)"
+  if [ "$(cat $W/out/mknod.rc 2>&1)" = 1 ]; then pass "noNewPrivileges $nnp: the filter refuses mknod"; else fail "noNewPrivileges $nnp: mknod returned $(cat $W/out/mknod.rc 2>&1), not refused"; fi
+  /opt/hex oci delete --force "nnp-$nnp" || fail "delete nnp-$nnp"
+done
+
 # 2. kill --all reaches a process that left the init's process group (setsid).
 bundle "$W/escape" '["sh", "-c", "setsid sleep infinity & exec sleep infinity"]' "" ""
 /opt/hex oci create --bundle "$W/escape" escape && /opt/hex oci start escape || fail "create/start escape"

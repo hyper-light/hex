@@ -344,9 +344,18 @@ needs **no `hex-node` library dependency** (correcting an earlier plan — see b
   out of view. Joined first, the clone failed with ENOENT (kiln research
   `01a178e67ccd7764b6746e5880187422`, f33).
 - **What the program becomes.** The container's process, by the same code as its first process
-  (`init::become_process`: OOM score, limits, capabilities around the uid change, no_new_privs,
-  umask). The request overrides the working directory, the environment by key, and the user; a user
-  override drops the spec's supplementary groups.
+  (`init::become_process`: OOM score, limits, seccomp filter, capabilities around the uid change,
+  no_new_privs, umask). The request overrides the working directory, the environment by key, and the
+  user; a user override drops the spec's supplementary groups.
+- **The seccomp filter and no_new_privs.** no_new_privs is exactly the spec's `noNewPrivileges`. A
+  filter without it needs CAP_SYS_ADMIN in the caller's user namespace (seccomp(2): "capability in its
+  user namespace, or the thread must" already have no_new_privs set), so Hex loads it before the user
+  and capabilities change, as runc does (`libcontainer/standard_init_linux.go:196-209` on main); the
+  profile then also binds Hex's own calls up to `execve`. With no_new_privs, the filter goes on last
+  (`:244-249`), so as few of Hex's calls as possible run under it. Hex had loaded every filter through
+  seccompiler's `apply_filter`, which sets no_new_privs first: runtime-tools on fedora failed ten
+  tests crun passes with `has expected noNewPrivileges` (kiln research
+  `01a178e67ccd7764b6746e5880187422`, f34-f36).
 - **Foreground.** The program runs on the caller's stdin, stdout and stderr, so a foreground `hex oci
   exec` has none of the detached `create`'s stdio deadlock, and its status is exec's: the exit code,
   or 128 plus the signal that ended it. 126 means it couldn't start, 127 that the program isn't there.
