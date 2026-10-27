@@ -116,7 +116,9 @@ three different things (CLAUDE.md "Working here"):
     kiln-a094a12d, 92b3b91, 2026-10-27): held 0.9849 and 0.9887 of crun's (run `20261027T061920Z`, 2
     rounds of 1,000, LOAD_GATE=0 at load 9-18: a same-run ratio), step 3 clean, and runtime-tools
     26/28 with the two LSM refusals kept by Ada's call. The fedora run also found every seccomp
-    container running with no_new_privs set, fixed in 92b3b91. `hex oci exec` failed where cgroup2 is mounted `nsdelegate` (adacachy's 7.2 kernel):
+    container running with no_new_privs set, fixed in 92b3b91. On adas-mac-studio-2 (Docker Desktop's
+    aarch64 VM, load ~3): held 0.9975 and 0.9754, step 3 clean, runtime-tools 23/25 with the same two
+    refusals. `hex oci exec` failed where cgroup2 is mounted `nsdelegate` (adacachy's 7.2 kernel):
     it joined the container's cgroup namespace before cloning into its cgroup, which the kernel refuses
     there with ENOENT; the child now joins it from inside. The OCI table of record in
     `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).

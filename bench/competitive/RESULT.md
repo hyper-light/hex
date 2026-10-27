@@ -187,6 +187,20 @@ Fedora's glibc-static: a static build from adacachy dies there, since CachyOS bu
   Hex process anywhere.
 - **runtime-tools** on the same binary: `bench/oci-validation/SUMMARY-hex.txt` (26 against crun's 28; the two
   differences are Hex's refusals of a mount label and an AppArmor profile it can't apply, kept by Ada's call).
+
+**Also on adas-mac-studio-2** (Ada's call, 2026-10-27: the Mac Studios too). Docker Desktop's Linux VM
+(LinuxKit 6.12.65, aarch64, 14 CPUs, 33.6 GB) runs the containers. The bench containers' `/usr` is the
+hexbench/mac:44 image's, Fedora 44 with python3, since the Mac's `/usr` is macOS's; otherwise `oci_inside.sh`
+runs as host.sh runs it. Hex is 92b3b91, built static-glibc for aarch64 in that image (60c29228); crun is
+1.30.1's arm64 release. The VM's load was 2.94 at the start and 3.40 at the end.
+
+| binary | rounds | Hex less crun, KiB | held, Hex / crun |
+|---|---|---:|---:|
+| 92b3b91 (60c29228, aarch64) | 2 of 1,000 | -1.39 / -13.74 | 0.9975 / 0.9754 |
+
+vmalloc and percpu rose by 0 per Hex container, and nothing was unattributed in either round. Step 3 there
+finds only the workload in Hex's container cgroups and no Hex process anywhere. runtime-tools there gives Hex 23
+and crun 25, and the same two differences, Hex's refusals (`bench/oci-validation/SUMMARY-hex.txt`).
 - **The earlier run.** Run `20261027T031736Z` (bench code 4cf9b28) read memory.stat without waiting for a flush.
   It left 6.8%, 18.7% and 8.7% unattributed. Each runtime's own named-entry rise there was 0.6-3.3 KiB per
   container off its held rise, because memory.stat may trail by up to 64 pages a CPU between flushes
