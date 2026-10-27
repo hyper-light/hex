@@ -7,7 +7,8 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use crate::{
-    Bounds, BoxId, BoxSpec, BoxState, Class, Exit, Program, Refusal, Runtime, Signal, Stdio,
+    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Mount, Network, OciSpec, Program,
+    Refusal, Rootfs, Runtime, Signal, Stdio,
 };
 
 /// What a fixture's program does.
@@ -119,6 +120,11 @@ pub const CASES: &[Case] = &[
         id: "HEX-RT-12",
         says: "an oci box whose init waits reports no exit while it runs; signal KILL ends it, and inspect reports Signal(9)",
         run: init_killed,
+    },
+    Case {
+        id: "HEX-RT-13",
+        says: "create of an oci box whose spec names a value that can't be rendered is refused as Invalid naming the field, and makes nothing",
+        run: unrenderable,
     },
 ];
 
@@ -478,4 +484,62 @@ fn init_killed(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     })();
     rt.delete(&id).map_err(|e| e.to_string())?;
     outcome
+}
+
+/// A change that breaks one value of a spec.
+type Break = fn(&mut OciSpec);
+
+/// HEX-RT-13: each spec breaks one value no runtime can render; create refuses it before it makes
+/// anything, naming the field (CLAUDE.md §3). Runtimes without the `oci` class have nothing to check.
+fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    if !rt.classes().contains(&Class::Oci) {
+        return Ok(());
+    }
+    let id = id("unrenderable")?;
+    let _ = rt.delete(&id);
+    let base = OciSpec {
+        rootfs: Rootfs::Dir("/hex-conformance/rootfs".into()),
+        init: fx.program(&Act::Wait),
+        mounts: vec![Mount {
+            source: "/hex-conformance/data".into(),
+            destination: "/data".to_owned(),
+            read_only: true,
+        }],
+        hostname: Some("conformance".to_owned()),
+        network: Network::Private,
+        hosts: vec![("db".to_owned(), "10.0.0.2".to_owned())],
+    };
+    let broken: [(&str, Break); 5] = [
+        ("mounts[0].destination", |s| {
+            s.mounts = vec![Mount {
+                source: "/hex-conformance/data".into(),
+                destination: "data".to_owned(),
+                read_only: true,
+            }];
+        }),
+        ("rootfs.layers", |s| s.rootfs = Rootfs::Layers(Vec::new())),
+        ("hosts[0].address", |s| {
+            s.hosts = vec![("db".to_owned(), "db.example".to_owned())];
+        }),
+        ("hostname", |s| s.hostname = Some("two words".to_owned())),
+        ("init.cwd", |s| s.init.cwd = Some("relative".to_owned())),
+    ];
+    for (field, break_it) in broken {
+        let mut spec = base.clone();
+        break_it(&mut spec);
+        let got = rt.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Oci(Box::new(spec)),
+        });
+        ensure(
+            matches!(&got, Err(Refusal::Invalid { what: "oci spec", why }) if why.contains(field)),
+            || format!("create with a broken {field}: {got:?}"),
+        )?;
+        let left = rt.inspect(&id);
+        ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
+            format!("a refused create (broken {field}) made {left:?}")
+        })?;
+    }
+    Ok(())
 }

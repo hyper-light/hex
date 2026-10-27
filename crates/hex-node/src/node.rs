@@ -3,19 +3,24 @@
 //! in a cgroup under its own box root with the box's bounds in force, as the `process` class does, so
 //! one code path makes, bounds, deletes and recovers every box's cgroup; the container's init and
 //! `exec` programs run through the `hex` binary's `__oci-init` and `__oci-exec` helpers (decision 3
-//! of docs/design/runtime-architecture.md). The node agent is its containers' parent, holding each
-//! init's pidfd and recording how it ended ([`crate::supervise`], decision 2).
+//! of docs/design/runtime-architecture.md). A box made from the structured [`hex_api::OciSpec`] runs
+//! from a bundle the node renders into a directory of the box's own ([`hex_core::bundle`]), holding
+//! its writable layer, which goes when the box does. The node agent is its containers' parent,
+//! holding each init's pidfd and recording how it ended ([`crate::supervise`], decision 2).
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal,
-    Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, OciSpec, Proc, Program, Refusal, Rootfs,
+    Runtime, Signal, Stdio, Usage,
 };
+use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::recovery::{self, Decision, Seen, Why};
@@ -25,13 +30,23 @@ use hex_runtime::linux::oci::state::{Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
+use crate::remove::remove_tree;
 use crate::store::Store;
 use crate::supervise::{self, Supervisor};
+
+/// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
+/// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
+const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 
 /// How long [`Runtime::delete`] waits for a box to empty after killing it before it reports the
 /// kernel is wedged. A `cgroup.kill` empties a box in milliseconds; a minute is far past any real
 /// delay, so missing it is a fault to report, not a limit to raise (CLAUDE.md §4).
 pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
+/// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
+/// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
+pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
@@ -48,6 +63,21 @@ pub struct Node {
     /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record, by box:
     /// kept and reported until a record write takes them, never dropped (§3).
     abandoned: Mutex<BTreeMap<BoxId, u64>>,
+    /// Where each box made from an [`OciSpec`] has its bundle: `<bundles>/<id>`, its writable layer
+    /// in it.
+    bundles: PathBuf,
+    /// Who this node runs as, which decides the user namespace its containers get.
+    owner: Owner,
+    /// The host's paths every container has masked beyond Docker's list ([`Place::masked`]).
+    masked: Vec<String>,
+}
+
+/// Where an `oci` box's bundle comes from.
+enum Source {
+    /// The caller's ([`ClassSpec::Bundle`]), run as it is.
+    Given(PathBuf),
+    /// Rendered from the box's [`OciSpec`], to be written in this directory of the box's own.
+    Rendered(PathBuf, Bundle),
 }
 
 /// What a recovery did.
@@ -78,6 +108,18 @@ impl Node {
     /// each `oci` box's init is its child once the shim exits.
     fn with_root(root: BoxRoot, state_dir: &Path) -> Result<Self, Refusal> {
         let store = Store::open(state_dir)?;
+        // Readable by the node alone: a bundle's config.json holds its init's environment.
+        let bundles = state_dir.join("bundles");
+        fs::create_dir_all(&bundles)
+            .and_then(|()| fs::set_permissions(&bundles, fs::Permissions::from_mode(0o700)))
+            .map_err(|e| Refusal::os("making the bundles directory", e))?;
+        let owner = match (
+            rustix::process::geteuid().as_raw(),
+            rustix::process::getegid().as_raw(),
+        ) {
+            (0, _) => Owner::Root,
+            (uid, gid) => Owner::Rootless { uid, gid },
+        };
         let supervisor = Supervisor::start(root.dir(), store.clone())?;
         Ok(Self {
             root,
@@ -86,6 +128,9 @@ impl Node {
             oci_helper: None,
             supervisor,
             abandoned: Mutex::new(BTreeMap::new()),
+            bundles,
+            owner,
+            masked: thermal_throttle()?,
         })
     }
 
@@ -280,7 +325,7 @@ impl Node {
         }
         if let Some(Ok(r)) = self.store.get(id)? {
             for dir in &r.dirs {
-                remove_tree(dir)?;
+                remove_tree(dir, REMOVE_PATIENCE)?;
             }
         }
         self.store.remove(id)
@@ -303,9 +348,10 @@ impl Node {
     }
 
     /// An `oci` box: its cgroup under the box root with the bounds in force (as a `process` box), and
-    /// the container's init started in it from `bundle`, blocked at the exec FIFO until
-    /// [`Runtime::start`]. The container's state dir is the box's, removed with it by [`Node::scrub`].
-    fn create_oci(&self, spec: BoxSpec, bundle: &Path) -> Result<BoxInfo, Refusal> {
+    /// the container's init started in it from its bundle, blocked at the exec FIFO until
+    /// [`Runtime::start`]. The container's state dir is the box's, removed with it by [`Node::scrub`],
+    /// and so is a rendered bundle's directory, its writable layer with it.
+    fn create_oci(&self, spec: BoxSpec, source: Source) -> Result<BoxInfo, Refusal> {
         // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
         // left unwatched.
         let slot = self.supervisor.reserve()?;
@@ -314,20 +360,34 @@ impl Node {
         let _spawning = self.supervisor.spawning()?;
         let id = spec.id.clone();
         // The container's own state directory, which the oci class makes; recorded as the box's, so
-        // delete and recovery remove it with the box.
-        let oci_dir = self.oci_root.join(id.as_str());
-        let mut record = BoxRecord::new(spec.clone(), Phase::Creating, vec![oci_dir]);
+        // delete and recovery remove it with the box, as they remove a rendered bundle.
+        let mut dirs = vec![self.oci_root.join(id.as_str())];
+        if let Source::Rendered(dir, _) = &source {
+            dirs.push(dir.clone());
+        }
+        let mut record = BoxRecord::new(spec.clone(), Phase::Creating, dirs);
         self.store.put(&record)?;
+        let bundle = match source {
+            Source::Given(bundle) => bundle,
+            Source::Rendered(dir, rendered) => match write_bundle(&dir, &rendered) {
+                Ok(()) => dir,
+                Err(e) => {
+                    let _ = self.scrub(&id);
+                    return Err(e);
+                }
+            },
+        };
         let cgroup = match self.root.create(&id, &spec.bounds) {
             Ok(cgroup) => cgroup,
             Err(e) => {
-                let _ = self.store.remove(&id);
+                // No cgroup, so scrub removes the directories and the record alone.
+                let _ = self.scrub(&id);
                 return Err(e);
             }
         };
         if let Err(e) = self
             .oci()
-            .create_in_cgroup(id.as_str(), bundle, None, cgroup)
+            .create_in_cgroup(id.as_str(), &bundle, None, cgroup)
         {
             // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
             // the state dir and the record.
@@ -355,6 +415,52 @@ impl Node {
             return Err(e);
         }
         self.info(&record, false)
+    }
+
+    /// A box's [`OciSpec`] as a bundle in a directory of its own, rendered ([`bundle::render`]) and
+    /// checked against this host before anything is made: its root and each mount's source are there,
+    /// and a layered root's writable layer can go where the node keeps bundles. What can't be is
+    /// refused by name (CLAUDE.md §3).
+    fn render(&self, id: &BoxId, spec: &OciSpec) -> Result<Source, Refusal> {
+        let dir = self.bundles.join(id.as_str());
+        let rendered = bundle::render(
+            spec,
+            &Place {
+                dir: &dir,
+                owner: self.owner,
+                masked: &self.masked,
+            },
+        )?;
+        match &spec.rootfs {
+            Rootfs::Dir(root) => a_dir("rootfs.dir", root)?,
+            Rootfs::Layers(layers) => {
+                for (i, layer) in layers.iter().enumerate() {
+                    a_dir(&format!("rootfs.layers[{i}]"), layer)?;
+                }
+                let fs = rustix::fs::statfs(&self.bundles)
+                    .map_err(|e| Refusal::os("reading the bundles directory's filesystem", e))?;
+                if i128::from(fs.f_type) == OVERLAYFS_SUPER_MAGIC {
+                    return Err(Refusal::Platform {
+                        what: "an oci box from layers",
+                        platform: "a node whose state is on overlayfs",
+                        why: format!(
+                            "{} is on overlayfs, which can't hold an overlay's writable layer",
+                            self.bundles.display()
+                        ),
+                    });
+                }
+            }
+        }
+        for (i, m) in spec.mounts.iter().enumerate() {
+            // Followed, as mount(2) follows a bind's source.
+            if let Err(e) = fs::metadata(&m.source) {
+                return Err(Refusal::Invalid {
+                    what: "oci spec",
+                    why: format!("mounts[{i}].source {}: {e}", m.source.display()),
+                });
+            }
+        }
+        Ok(Source::Rendered(dir, rendered))
     }
 
     /// `exec` in an `oci` box: the `hex __oci-exec` helper, spawned (not exec'd into) and watched by
@@ -396,23 +502,20 @@ impl Runtime for Node {
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.bounds.check()?;
+        // A structured spec is checked before anything else, as the simulator checks it: what can't
+        // be rendered is refused by name whether or not the id is taken (HEX-RT-13).
+        if let ClassSpec::Oci(oci) = &spec.class {
+            oci.check()?;
+        }
         if self.record(&spec.id)?.is_some() || self.root.get(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
         }
-        match &spec.class {
-            ClassSpec::Process => self.create_process(spec),
-            ClassSpec::Bundle(bundle) => {
-                let bundle = bundle.clone();
-                self.create_oci(spec, &bundle)
-            }
-            // The structured `OciSpec` (kiln-seams' shape) isn't rendered to a bundle yet; callers
-            // through the seam use `Bundle`. Refused by name rather than run half-configured.
-            ClassSpec::Oci(_) => Err(Refusal::Invalid {
-                what: "oci spec",
-                why: "the node runs an oci box from a Bundle; the structured OciSpec isn't rendered yet"
-                    .to_owned(),
-            }),
-        }
+        let source = match &spec.class {
+            ClassSpec::Process => return self.create_process(spec),
+            ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
+            ClassSpec::Oci(oci) => self.render(&spec.id, oci)?,
+        };
+        self.create_oci(spec, source)
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -542,13 +645,72 @@ fn why_text(why: &Why) -> String {
     }
 }
 
-/// Removes a directory tree the box owns; absent already is removed.
-fn remove_tree(dir: &PathBuf) -> Result<(), Refusal> {
-    match std::fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(Refusal::os("removing a box's directory", e)),
+/// Refuses, by the spec's field, a path that isn't a directory on this host.
+fn a_dir(field: &str, path: &Path) -> Result<(), Refusal> {
+    let why = match fs::metadata(path) {
+        Ok(m) if m.is_dir() => return Ok(()),
+        Ok(_) => "isn't a directory".to_owned(),
+        Err(e) => e.to_string(),
+    };
+    Err(Refusal::Invalid {
+        what: "oci spec",
+        why: format!("{field} {}: {why}", path.display()),
+    })
+}
+
+/// Writes a rendered bundle into its own directory, made here and readable by the node alone, since
+/// its config.json holds the init's environment. The container's `/etc/hosts` is readable by all, as a
+/// hosts file is. A layered root's directories are mode 0755: the writable layer's mode is the one the
+/// container sees on its `/`. Nothing is fsynced: after a host crash recovery removes the box with its
+/// bundle (decision 1 of docs/design/runtime-architecture.md).
+fn write_bundle(dir: &Path, rendered: &Bundle) -> Result<(), Refusal> {
+    let mode = |path: &Path, mode: u32| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    fs::create_dir(dir)
+        .and_then(|()| mode(dir, 0o700))
+        .map_err(|e| Refusal::os("making a box's bundle directory", e))?;
+    let config = dir.join(bundle::CONFIG);
+    let hosts = dir.join(bundle::HOSTS);
+    fs::write(&config, &rendered.config)
+        .and_then(|()| mode(&config, 0o600))
+        .and_then(|()| fs::write(&hosts, &rendered.hosts))
+        .and_then(|()| mode(&hosts, 0o644))
+        .map_err(|e| Refusal::os("writing a box's bundle", e))?;
+    for d in &rendered.dirs {
+        fs::create_dir(d)
+            .and_then(|()| mode(d, 0o755))
+            .map_err(|e| Refusal::os("making a box's writable layer", e))?;
     }
+    Ok(())
+}
+
+/// The host's CPUs' `thermal_throttle` directories, which every container has masked, as Docker's and
+/// containerd's do (GHSA-6fw5-f8r9-fgfm): `/sys/devices/system/cpu/cpu<N>/thermal_throttle` for each
+/// CPU that has one, in CPU order. A host without them has none to mask.
+fn thermal_throttle() -> Result<Vec<String>, Refusal> {
+    let cpus = Path::new("/sys/devices/system/cpu");
+    let entries = match fs::read_dir(cpus) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Refusal::os("listing the host's CPUs", e)),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| Refusal::os("listing the host's CPUs", e))?;
+        let Some(cpu) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.strip_prefix("cpu"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/thermal_throttle");
+        if Path::new(&path).is_dir() {
+            found.push((cpu, path));
+        }
+    }
+    found.sort_unstable();
+    Ok(found.into_iter().map(|(_, path)| path).collect())
 }
 
 /// The identity of a container's init, from its oci state: its pid and the start time create read, so
@@ -637,5 +799,197 @@ mod tests {
             start_ticks: 1,
         };
         assert!(!init_alive(gone), "a pid with no live process isn't alive");
+    }
+}
+
+#[cfg(test)]
+mod rendered {
+    use super::*;
+    use hex_api::{Mount, Network, User};
+    use hex_runtime::linux::oci::spec::{MAX_CONFIG_BYTES, Spec};
+
+    /// Doc-truth (CLAUDE.md §6): the renderer's bound on config.json is the runtime's.
+    #[test]
+    fn the_renderers_bound_is_the_runtimes() {
+        assert_eq!(bundle::MAX_CONFIG_BYTES, MAX_CONFIG_BYTES);
+    }
+
+    /// Doc-truth (AC-T7.1.1): the `oci` class reads every shape the renderer writes, through its own
+    /// model and check, with each field where the renderer put it. The runtime ignores a field it
+    /// doesn't know, so a field the renderer misnamed would be dropped without a word; this is
+    /// where that shows.
+    #[test]
+    fn the_runtime_reads_every_rendered_shape_as_rendered() {
+        let dir = Path::new("/var/lib/hex/bundles/b");
+        let rootless = Owner::Rootless {
+            uid: 1000,
+            gid: 100,
+        };
+        for (owner, network, layered) in [
+            (Owner::Root, Network::Private, true),
+            (Owner::Root, Network::Host, false),
+            (rootless, Network::Private, true),
+            (rootless, Network::Host, false),
+        ] {
+            let mut init = Program::of(&["/bin/sh", "-c", "exec sleep infinity"]);
+            init.cwd = Some("/work".to_owned());
+            if owner == Owner::Root {
+                init.user = Some(User {
+                    uid: 7,
+                    gid: 8,
+                    groups: vec![9],
+                });
+            }
+            let spec = OciSpec {
+                rootfs: if layered {
+                    Rootfs::Layers(vec!["/images/base".into(), "/images/app".into()])
+                } else {
+                    Rootfs::Dir("/srv/rootfs".into())
+                },
+                init: init.clone(),
+                mounts: vec![Mount {
+                    source: "/srv/data".into(),
+                    destination: "/data".to_owned(),
+                    read_only: true,
+                }],
+                hostname: Some("box".to_owned()),
+                network,
+                hosts: vec![("db".to_owned(), "10.0.0.2".to_owned())],
+            };
+            let masked = ["/sys/devices/system/cpu/cpu0/thermal_throttle".to_owned()];
+            let place = Place {
+                dir,
+                owner,
+                masked: &masked,
+            };
+            let rendered = bundle::render(&spec, &place).unwrap();
+            let read = Spec::parse(&rendered.config).unwrap();
+            let shape = format!("{owner:?} {network:?} layered {layered}");
+
+            assert_eq!(read.hostname.as_deref(), Some("box"), "{shape}");
+            assert!(!read.root.readonly, "{shape}");
+            let root = if layered {
+                "/var/lib/hex/bundles/b/rootfs"
+            } else {
+                "/srv/rootfs"
+            };
+            assert_eq!(read.root.path, root, "{shape}");
+
+            let process = read.process.clone().unwrap();
+            assert_eq!(process.args, init.args, "{shape}");
+            assert_eq!(
+                process.env,
+                ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned()],
+                "{shape}"
+            );
+            assert_eq!(process.cwd, "/work", "{shape}");
+            let user = init.user.unwrap_or_default();
+            assert_eq!(
+                (
+                    process.user.uid,
+                    process.user.gid,
+                    process.user.additional_gids
+                ),
+                (user.uid, user.gid, user.groups),
+                "{shape}"
+            );
+            let caps = process.capabilities.unwrap();
+            for set in [&caps.bounding, &caps.effective, &caps.permitted] {
+                assert_eq!(set, &bundle::CAPABILITIES, "{shape}");
+            }
+            assert!(
+                caps.inheritable.is_empty() && caps.ambient.is_empty(),
+                "{shape}"
+            );
+            assert!(!process.no_new_privileges && !process.terminal, "{shape}");
+
+            for kind in ["pid", "ipc", "uts", "mount", "cgroup"] {
+                assert!(read.makes_namespace(kind), "{shape}: {kind}");
+            }
+            assert_eq!(
+                read.makes_namespace("network"),
+                network == Network::Private,
+                "{shape}"
+            );
+            let maps = |m: &[hex_runtime::linux::oci::spec::IdMapping]| {
+                m.iter()
+                    .map(|m| (m.container_id, m.host_id, m.size))
+                    .collect::<Vec<_>>()
+            };
+            match owner {
+                Owner::Root => {
+                    assert!(!read.makes_namespace("user"), "{shape}");
+                    assert!(read.linux.uid_mappings.is_empty(), "{shape}");
+                }
+                Owner::Rootless { uid, gid } => {
+                    assert!(read.makes_namespace("user"), "{shape}");
+                    assert_eq!(maps(&read.linux.uid_mappings), [(0, uid, 1)], "{shape}");
+                    assert_eq!(maps(&read.linux.gid_mappings), [(0, gid, 1)], "{shape}");
+                }
+            }
+            let devices = &read.linux.resources.as_ref().unwrap().devices;
+            assert!(
+                devices.len() == 1 && !devices[0].allow && devices[0].kind.is_none(),
+                "{shape}: deny all"
+            );
+            assert_eq!(devices[0].access.as_deref(), Some("rwm"), "{shape}");
+            let mut want_masked: Vec<String> = bundle::MASKED_PATHS.map(str::to_owned).to_vec();
+            want_masked.extend(masked.iter().cloned());
+            assert_eq!(read.linux.masked_paths, want_masked, "{shape}");
+            assert_eq!(read.linux.readonly_paths, bundle::READONLY_PATHS, "{shape}");
+
+            // The mounts, in order: the overlay first for a layered root, every default, the hosts
+            // file, then the spec's.
+            let mounts: Vec<(String, String, String, Vec<String>)> = read
+                .mounts
+                .iter()
+                .map(|m| {
+                    (
+                        m.destination.clone(),
+                        m.kind.clone().unwrap_or_default(),
+                        m.source.clone().unwrap_or_default(),
+                        m.options.clone(),
+                    )
+                })
+                .collect();
+            let first = mounts.first().unwrap();
+            if layered {
+                assert_eq!((first.0.as_str(), first.1.as_str()), ("/", "overlay"));
+                assert_eq!(
+                    first.3[0], "lowerdir=/images/app:/images/base",
+                    "{shape}: top layer first"
+                );
+                assert_eq!(
+                    first.3.contains(&"userxattr".to_owned()),
+                    owner != Owner::Root,
+                    "{shape}"
+                );
+            } else {
+                assert_eq!(first.0, "/proc", "{shape}");
+            }
+            let hosts = mounts.iter().position(|m| m.0 == "/etc/hosts").unwrap();
+            assert_eq!(mounts[hosts].2, "/var/lib/hex/bundles/b/hosts", "{shape}");
+            assert_eq!(
+                mounts.last().unwrap(),
+                &(
+                    "/data".to_owned(),
+                    "bind".to_owned(),
+                    "/srv/data".to_owned(),
+                    vec!["bind".to_owned(), "ro".to_owned()]
+                ),
+                "{shape}"
+            );
+            let sys = mounts.iter().find(|m| m.0 == "/sys").unwrap();
+            let host_sys = owner != Owner::Root && network == Network::Host;
+            assert_eq!(sys.1, if host_sys { "bind" } else { "sysfs" }, "{shape}");
+            let cgroup = mounts
+                .iter()
+                .rposition(|m| m.0 == "/sys/fs/cgroup")
+                .unwrap();
+            assert_eq!(
+                mounts[cgroup].1, "cgroup2",
+                "{shape}: the box's own, on top"
+            );
+        }
     }
 }

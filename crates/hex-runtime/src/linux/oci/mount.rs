@@ -1,8 +1,6 @@
-//! Turning a spec's mounts into mount operations, and carrying them out inside the container's
-//! mount namespace: the rootfs, the spec mounts (proc, sysfs, tmpfs, bind, …), masked and readonly
-//! paths. The option parsing is pure and tested; the imperative apply sits on rustix's mount calls.
-
-use std::path::{Component, Path, PathBuf};
+//! Turning a spec's mounts into mount operations, which the container init carries out in its
+//! mount namespace, each at its destination resolved inside the container's root ([`super::inroot`]).
+//! The option parsing is pure and tested; the imperative apply sits on rustix's mount calls.
 
 use rustix::mount::{MountFlags, MountPropagationFlags};
 
@@ -88,22 +86,14 @@ pub fn parse_options(options: &[String]) -> Options {
     out
 }
 
-/// Resolves a container-absolute `destination` to a host path under `rootfs`, with no `..` escaping
-/// the rootfs. Returns the joined path.
-pub fn under_rootfs(rootfs: &Path, destination: &str) -> Result<PathBuf, OciError> {
-    let mut out = rootfs.to_path_buf();
-    for comp in Path::new(destination).components() {
-        match comp {
-            Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(OciError::Config(format!(
-                    "mount destination {destination:?} has a '..' component"
-                )));
-            }
-            Component::Normal(c) => out.push(c),
-        }
+/// Refuses a destination with a `..` component: a mount names where it goes plainly.
+fn check_destination(destination: &str) -> Result<(), OciError> {
+    if destination.split('/').any(|part| part == "..") {
+        return Err(OciError::Config(format!(
+            "mount destination {destination:?} has a '..' component"
+        )));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The kind of mount to carry out.
@@ -115,10 +105,11 @@ pub enum Kind<'a> {
     Bind(&'a str),
 }
 
-/// One mount to carry out, resolved under the rootfs.
+/// One mount to carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op {
-    pub target: PathBuf,
+    /// Where it goes in the container: resolved inside the root as the mount is made.
+    pub destination: String,
     pub kind_source: String,
     pub is_bind: bool,
     pub recursive_bind: bool,
@@ -128,16 +119,16 @@ pub struct Op {
     pub data: String,
 }
 
-/// The ordered mount operations for a spec's mounts, each resolved under `rootfs`.
-pub fn plan(mounts: &[Mount], rootfs: &Path) -> Result<Vec<Op>, OciError> {
+/// The ordered mount operations for a spec's mounts.
+pub fn plan(mounts: &[Mount]) -> Result<Vec<Op>, OciError> {
     let mut ops = Vec::with_capacity(mounts.len());
     for m in mounts {
-        let target = under_rootfs(rootfs, &m.destination)?;
+        check_destination(&m.destination)?;
         let opts = parse_options(&m.options);
         let fstype = m.kind.clone().unwrap_or_default();
         let is_bind = opts.is_bind || fstype == "bind";
         ops.push(Op {
-            target,
+            destination: m.destination.clone(),
             kind_source: m.source.clone().unwrap_or_default(),
             is_bind,
             recursive_bind: opts.recursive_bind,
@@ -191,14 +182,16 @@ mod tests {
     }
 
     #[test]
-    fn a_destination_is_resolved_under_the_rootfs_and_cant_escape_it() {
-        let rootfs = Path::new("/run/hex/c1/rootfs");
-        assert_eq!(under_rootfs(rootfs, "/proc").unwrap(), rootfs.join("proc"));
-        assert_eq!(
-            under_rootfs(rootfs, "/dev/pts").unwrap(),
-            rootfs.join("dev/pts")
-        );
-        assert!(under_rootfs(rootfs, "/../etc").is_err());
+    fn a_destination_with_a_parent_component_is_refused() {
+        let at = |destination: &str| Mount {
+            destination: destination.into(),
+            kind: Some("tmpfs".into()),
+            source: Some("tmpfs".into()),
+            options: vec![],
+        };
+        assert!(plan(&[at("/proc")]).is_ok());
+        assert!(plan(&[at("/../etc")]).is_err());
+        assert!(plan(&[at("/a/../../etc")]).is_err());
     }
 
     #[test]
@@ -217,7 +210,7 @@ mod tests {
                 options: vec!["rbind".into(), "ro".into()],
             },
         ];
-        let ops = plan(&mounts, Path::new("/root")).unwrap();
+        let ops = plan(&mounts).unwrap();
         assert_eq!(ops[0].fstype, "proc");
         assert!(!ops[0].is_bind);
         assert!(ops[1].is_bind && ops[1].recursive_bind);

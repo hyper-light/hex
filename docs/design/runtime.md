@@ -371,7 +371,9 @@ runtime spec, but the de-facto lifecycle extension both provide). Next it is re-
 hex-node's `Node::create(ClassSpec::Oci(…))` + `Node::exec`. That is not implementable: `Node::create`
 **refuses** the `oci` class (`hex-node/src/node.rs` → `Refusal::Unsupported(Class::Oci)`) and
 `Node::exec` runs only the `process` class. The `oci` class is reached through the `hex oci` CLI, not
-the node — so the executor drives the CLI, as above.
+the node — so the executor drives the CLI, as above. (Since 2026-10-27 the node serves the `oci`
+class too, from a `Bundle` or a structured `OciSpec`, below; the executor's choice of the command line
+stands on point 1.)
 
 **Sources.** OCI Runtime Specification v1.3.0 (the container lifecycle `create`/`start`/`delete`);
 runc and crun `exec` (join the container's namespaces via `setns(2)` on `/proc/<init>/ns/*`, then exec
@@ -394,6 +396,100 @@ so the child is in the container's pid namespace) makes foreground exit-code cap
 if a persistent pause init is unacceptable overhead, the fallback is one container per step over the
 shared `Rootfs::Dir` with the step's exit read from `hex oci state`. Measured when consumer #2's lab
 lands.
+
+## Decision: a box from an OciSpec runs as `docker run` runs its image (runtime goal 3, plan step 5)
+
+**The choice.** The node agent serves the structured `ClassSpec::Oci(OciSpec)` by rendering it to a
+runtime-spec bundle in a directory of the box's own (`<state>/bundles/<id>`) and creating that bundle as it
+creates a `ClassSpec::Bundle`. The rendering is a pure core, `hex_core::bundle::render`, with golden tests;
+the node only checks the host (the root and each mount's source are there; the bundles directory isn't on
+overlayfs) and writes the files. What the container gets:
+
+- **Its root.** `Rootfs::Dir` is used in place. `Rootfs::Layers` is an overlay with the layers as its lower
+  directories, top first, over the box's writable layer (`upper/`, with overlayfs's `work/`). It is the
+  first mount in `config.json`, at `/`, so the container mounts it in its own mount namespace, and every
+  other mount lands on it. Nothing is mounted on the host: the mount goes with the container's last process,
+  and delete removes the writable layer with the bundle. A rootless container mounts it in its user namespace,
+  where overlayfs keeps its attributes as `user.overlay.` (`userxattr`).
+- **What `docker run` gives an image that names nothing else**, as far as the runtime-spec carries it:
+  Docker's fourteen capabilities, mounts, masked and read-only paths (with the host's CPUs'
+  `thermal_throttle`, as Docker and containerd mask them), pid, ipc, uts, mount and cgroup namespaces,
+  devices denied but those every container has, no `noNewPrivileges` and no rlimits. `/sys/fs/cgroup` is
+  the box's own cgroup2, read-only. `/etc/hosts` is Docker's lines and then the spec's, bound in from the
+  bundle.
+- **The spec's fields.** `init` is `process`: its arguments, environment, working folder (`/` unless given) and
+  user. Mounts are binds: read-only ones not recursive, since a recursive bind remounted read-only leaves the
+  mounts beneath it writable. `hostname` is the UTS hostname. `Network::Private` is a network namespace of
+  the box's own, `Network::Host` none.
+- **A node that isn't root** gives the container a user namespace mapping its own uid and gid, alone, to
+  root, with runc's rootless changes: no `gid=5` for the terminals and, on the host's network, the host's
+  `/sys` bound in (a sysfs needs a network namespace the user namespace owns). That bind must be
+  recursive, and it carries the host's cgroup2 mount, writable under the read-only `/sys`, where a box's
+  processes, running as the node's uid, could write every box's cgroup files. So the box's own cgroup2 goes
+  over it, with a read-only tmpfs between: mount(2) refuses a filesystem over its own root (EBUSY).
+- **Refused by name, nothing made** (CLAUDE.md §3): any value `OciSpec::check` refuses (a relative path, a
+  `..`, a NUL, a hostname or hosts name that isn't 1-64 or 1-253 printable characters without a space or
+  `#`, an address that isn't one, no layers, a mount over `/`), which the simulator refuses too (HEX-RT-13);
+  then a user a rootless node can't map, more than 500 layers (`OVL_MAX_STACK`), overlay options past the
+  4,095 bytes a mount(2) call carries, a layer or bundle path holding overlayfs's `,` `:` or `\`, a
+  `config.json` past the runtime's 1 MiB, a record past the store's 1 MiB, and a root or mount source that
+  isn't on the host.
+
+Two fixes to the `oci` class came with it, each found by the step's lab, each a failing check first:
+
+- **Loopback is brought up** in a network namespace a container makes, as runc and crun do: a fresh
+  namespace's `lo` is down (flags 0x8), so even 127.0.0.1 was unreachable in a Hex container. One rtnetlink
+  RTM_NEWLINK sets IFF_UP on interface 1 (`oci/net.rs`), built as bytes, with no `unsafe`.
+- **Every path in a container's root is resolved inside it** (`oci/inroot.rs`). The init sets the root up
+  before it pivots, while `/` is the host's, and it made a missing mount target with an ordinary path walk:
+  a layer whose `/etc` was an absolute link to a host directory made the node write `hosts` there, on the
+  host, as the node's user, as root for a root node. Now each mount target, masked and read-only path,
+  device node and `/dev` link is opened with `openat2(RESOLVE_IN_ROOT)`, missing parts are made relative to
+  the directory it resolved to, and a mount goes on the descriptor through `/proc/self/fd`, as runc mounts.
+  A path whose link leads to nothing in the root is refused by name. Every `Bundle` box gets this fix too.
+
+**Sources** (`docs/research/runtime/oci-spec-defaults.md`): moby's default spec (`daemon/pkg/oci/defaults.go`,
+`caps/defaults.go`) and `/etc/hosts` (`daemon/libnetwork/etchosts`); containerd's default spec
+(`pkg/oci/spec.go`, `mounts.go`); runc's `ToRootless` (`libcontainer/specconv/example.go:161-220`) and
+`mountViaFds` (`libcontainer/mount_linux.go:146-200`); the kernel at v6.19 (overlayfs.rst, `OVL_MAX_STACK`,
+`copy_mount_options`, "Refuse the same filesystem on the same mount point", `LOOPBACK_IFINDEX`);
+openat2(2).
+
+**Evidence.**
+- Golden tests (`crates/hex-core/src/bundle.rs`, `testdata/bundle/`): four shapes (layers or a directory;
+  root or rootless; a private or the host's network), each `config.json` compared field by field with one
+  written from this section, and every hostile value above refused by name.
+- Doc-truth (`hex-node`, `node::rendered`): every shape parses through the runtime's own model and check
+  with each field where it was rendered, so a misnamed field can't be dropped unseen.
+- The lab (`crates/hex-cli/tests/oci_spec_box.rs`), on adacachy, Linux 7.2.9, 2026-10-27, both rootless
+  (uid 1000, a delegated systemd scope) and as root (a privileged container, the bench's setting). The plan
+  step's example, layers [base, app] with `sleep infinity`, one read-only bind and a private network: the
+  root is the overlay over the box's own layer; `/usr` is the bind and refuses a write; the hostname,
+  `/etc/hosts` and network namespace are the spec's, the network holding `lo` alone, up; a new file, a
+  changed layer file and a removed one land in the box's layer as a file, a copy and a whiteout, the layers
+  untouched. A directory root on the host's network writes in place. After every delete, nothing of the box
+  is left: no bundle, no container state, no cgroup, no record, no mount. HEX-RT-1 to 13 pass on
+  OciSpec boxes. A link out of the root writes nothing on the host and is refused by name, and a link inside
+  it is followed there. Recovery removes a half-made bundle whose layer has a mode-0 directory and a deep
+  tree.
+- runtime-tools bd3b0bd on adacachy (`bench/oci-validation/run_hex.sh`, fedora:44, Linux 7.2.9,
+  2026-10-27), the same suite against `hex` before this step (a78b37f) and after it: 26 of 58 pass for
+  both and no test's result differs. The 26 include `default`, `mounts`, `linux_devices`,
+  `root_readonly_true` and `linux_rootfs_propagation`, which go through every path the resolver now opens;
+  the 32 that fail for both fail for this host's reasons, as they did before (cgroup v1 files the suite
+  looks for, among them).
+
+**What would falsify it.** A leg that passes under `docker run` failing in an OciSpec box because of a
+default here (T-T7.1.1): `noNewPrivileges` left off, no rlimit, or `/etc/hosts` written fresh where Docker
+copies the host's (the host's network with no lines added). An image whose layers' options pass a page,
+which the new mount API's `lowerdir+` (Linux 6.8) would carry. A kernel that refuses unprivileged
+overlayfs.
+
+**Open, for Ada.** Docker also applies its default seccomp profile and, where the host has AppArmor, the
+`docker-default` profile. An OciSpec box gets neither: the spec names none, and Hex applies no LSM profile
+(Ada's call, 2026-10-27, keeps those refused). Docker's default spec also has a time namespace, which Hex's
+runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
+is a security posture for the person to choose.
 
 ## Open (STATUS.md)
 

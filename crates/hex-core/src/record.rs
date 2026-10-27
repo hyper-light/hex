@@ -71,10 +71,21 @@ impl BoxRecord {
         }
     }
 
+    /// The record's file: refused past [`MAX_RECORD_BYTES`], which [`BoxRecord::decode`] would refuse
+    /// to read back, so a box whose spec is that large is never made.
     pub fn encode(&self) -> Result<Vec<u8>, Refusal> {
         let mut out = serde_json::to_vec(self)
             .map_err(|e| Refusal::Broken(format!("encoding a record: {e}")))?;
         out.push(b'\n');
+        if out.len() > MAX_RECORD_BYTES {
+            return Err(Refusal::Invalid {
+                what: "box spec",
+                why: format!(
+                    "its record is {} bytes, over the {MAX_RECORD_BYTES} the node agent reads back",
+                    out.len()
+                ),
+            });
+        }
         Ok(out)
     }
 
@@ -154,7 +165,7 @@ pub const REMOVE_STEPS: &[Step] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hex_api::{Bounds, BoxId, ClassSpec};
+    use hex_api::{Bounds, BoxId, ClassSpec, Network, OciSpec, Program, Rootfs};
     use proptest::prelude::*;
 
     fn record() -> BoxRecord {
@@ -208,6 +219,31 @@ mod tests {
                 .contains("version 2")
         );
         assert!(BoxRecord::decode(&vec![b' '; MAX_RECORD_BYTES + 1]).is_err());
+    }
+
+    /// CLAUDE.md §2: a record too large to read back is refused when it's written, typed, rather than
+    /// written for recovery to find unreadable.
+    #[test]
+    fn a_record_too_large_to_read_back_is_refused_when_written() {
+        let mut init = Program::of(&["sleep", "infinity"]);
+        init.env
+            .push(("BIG".to_owned(), "x".repeat(MAX_RECORD_BYTES)));
+        let mut r = record();
+        r.spec.class = ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: Rootfs::Dir(PathBuf::from("/srv/rootfs")),
+            init,
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Private,
+            hosts: Vec::new(),
+        }));
+        assert!(matches!(
+            r.encode(),
+            Err(Refusal::Invalid {
+                what: "box spec",
+                ..
+            })
+        ));
     }
 
     proptest! {
