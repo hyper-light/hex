@@ -4,9 +4,10 @@
 //!
 //! The runtime execs itself as `hex __oci-exec`, so the helper is single-threaded, as joining a user or
 //! mount namespace needs. It joins each of the container init's namespaces (`/proc/<pid>/ns/*`) that
-//! differ from its own, user first. Then it clones a child into the container's cgroup, as `create`
-//! does (`clone3(CLONE_INTO_CGROUP)` where it can), and through the pid namespace it joined into the
-//! container's pid namespace. The child becomes the container's process, as its spec gives it and the
+//! differ from its own, user first, but the cgroup namespace. Then it clones a child into the
+//! container's cgroup, as `create` does (`clone3(CLONE_INTO_CGROUP)` where it can), and through the
+//! pid namespace it joined into the container's pid namespace. The child joins the cgroup namespace
+//! from inside the cgroup and becomes the container's process, as its spec gives it and the
 //! request overrides (environment, working directory, user), and execs the program on the caller's
 //! stdin, stdout and stderr. The helper passes SIGHUP, SIGINT, SIGQUIT and SIGTERM on to it, and exits
 //! with its status once it ends: its exit code, or 128 plus the signal that ended it, as a shell
@@ -57,7 +58,11 @@ const CANNOT_RUN: u8 = 126;
 const NOT_FOUND: u8 = 127;
 
 /// The namespaces joined, in this order: user first, since it grants the capabilities joining the
-/// rest needs; mount last, since it changes what every path names.
+/// rest needs; mount last, since it changes what every path names. The cgroup namespace is the child's
+/// to join, once it's in the container's cgroup: where cgroup2 is mounted `nsdelegate`, a clone into a
+/// cgroup needs the caller's own cgroup reachable from the caller's cgroup namespace
+/// (kernel/cgroup/cgroup.c, `cgroup_procs_write_permission`), and from the container's, rooted at its
+/// cgroup, the helper's isn't: joining it first made `clone3` fail with ENOENT.
 const NAMESPACES: [(&str, i32); 7] = [
     ("user", libc::CLONE_NEWUSER),
     ("ipc", libc::CLONE_NEWIPC),
@@ -107,10 +112,14 @@ fn helper() -> Result<u8, (u8, OciError)> {
     // A birth in the cgroup is checked against the credentials the clone runs with, which a joined
     // user namespace has changed; there the program joins by migration (init.rs, the shim).
     let in_userns = joins.iter().any(|(kind, _, _)| *kind == "user");
-    for (_, flag, fd) in &joins {
-        sys::setns(fd.as_fd(), *flag).map_err(cannot)?;
+    let mut cgroup_ns = None;
+    for (kind, flag, fd) in joins {
+        if kind == "cgroup" {
+            cgroup_ns = Some(fd);
+            continue;
+        }
+        sys::setns(fd.as_fd(), flag).map_err(cannot)?;
     }
-    drop(joins);
 
     let signals = sys::forward_signals(&FORWARDED).map_err(cannot)?;
     let born = match &cgroup {
@@ -129,10 +138,11 @@ fn helper() -> Result<u8, (u8, OciError)> {
             &process,
             spec.linux.seccomp.as_ref(),
             procs,
+            cgroup_ns,
             &signals,
         )),
         sys::Fork::Parent(pid) => {
-            drop(procs);
+            drop((procs, cgroup_ns));
             wait_forwarding(pid, &signals, req.seam).map_err(cannot)
         }
     }
@@ -196,13 +206,14 @@ fn namespaces_to_join(pid: i32) -> Result<Vec<(&'static str, i32, OwnedFd)>, Oci
     Ok(out)
 }
 
-/// The child: into its cgroup by migration when it wasn't born there, the signals unblocked, the
-/// container's process become, then the program. Returns only when one of those failed: the status to
-/// exit with, and why.
+/// The child: into its cgroup by migration when it wasn't born there, then into the container's cgroup
+/// namespace (NAMESPACES says why only now), the signals unblocked, the container's process become,
+/// then the program. Returns only when one of those failed: the status to exit with, and why.
 fn child(
     process: &Process,
     seccomp: Option<&Seccomp>,
     procs: Option<OwnedFd>,
+    cgroup_ns: Option<OwnedFd>,
     signals: &sys::ForwardedSignals,
 ) -> (u8, OciError) {
     let setup = || -> Result<(), OciError> {
@@ -215,6 +226,9 @@ fn child(
                     "a short write to cgroup.procs",
                 ));
             }
+        }
+        if let Some(ns) = cgroup_ns {
+            sys::setns(ns.as_fd(), libc::CLONE_NEWCGROUP)?;
         }
         signals.restore()?;
         init::become_process(process, seccomp)

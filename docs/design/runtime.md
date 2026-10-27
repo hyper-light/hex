@@ -337,7 +337,12 @@ needs **no `hex-node` library dependency** (correcting an earlier plan — see b
   (`/proc/<pid>/ns/*`) that differ from its own, before joining any. It joins them, user first and
   mount last, then clones the child straight into the container's cgroup (`clone3(CLONE_INTO_CGROUP)`,
   as `create` does, with the same fallback to a migration), and through the pid namespace into the
-  container's pid namespace.
+  container's pid namespace. The cgroup namespace is the child's to join, once it's in the cgroup:
+  where cgroup2 is mounted `nsdelegate`, the kernel lets a clone into a cgroup only a caller that sees
+  both its own cgroup and the target from its cgroup namespace (Linux v7.2
+  `kernel/cgroup/cgroup.c:5371-5377`), and from the container's namespace the helper's own cgroup is
+  out of view. Joined first, the clone failed with ENOENT (kiln research
+  `01a178e67ccd7764b6746e5880187422`, f33).
 - **What the program becomes.** The container's process, by the same code as its first process
   (`init::become_process`: OOM score, limits, capabilities around the uid change, no_new_privs,
   umask). The request overrides the working directory, the environment by key, and the user; a user
