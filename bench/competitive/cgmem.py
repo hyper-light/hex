@@ -117,6 +117,32 @@ def snapshot(path):
             "huge": 0 if HUGETLB_IN_CURRENT else hugetlb_bytes(path), "stat": stat, "reasons": reasons}
 
 
+# A reading of memory.stat is in step with memory.current once the cgroup has been still for two of the kernel's
+# periodic flushes: below MEMCG_CHARGE_BATCH * nr_cpus pending updates (64 pages a CPU, 8 MiB on 32 CPUs) only the
+# flusher, every FLUSH_TIME (2 s), brings memory.stat up to date, and the kernel's own ratelimited readers take
+# "one full cycle late" as the bound (mm/memcontrol.c:743-756, 826-839). Still is memory.current moving at most
+# QUIET_DRIFT across the window: 16 pages, 0.06% of a density phase's rise over 1,000 containers.
+FLUSH_S = 2.0
+QUIET_WINDOW_S = 2 * FLUSH_S + 0.5
+QUIET_DRIFT = 16 * 4096
+QUIET_TRIES = 15
+
+
+def quiet_snapshot(path, sleep=time.sleep):
+    """A snapshot taken once memory.current has held still (within QUIET_DRIFT) across QUIET_WINDOW_S, so the
+    kernel has flushed memory.stat since the cgroup's last charge; at most QUIET_TRIES windows, after which the
+    last snapshot stands with quiet False. Returns (snapshot, {"quiet", "windows", "drift_bytes"})."""
+    before = snapshot(path)
+    for n in range(1, QUIET_TRIES + 1):
+        sleep(QUIET_WINDOW_S)
+        after = snapshot(path)
+        drift = after["current"] - before["current"]
+        if abs(drift) <= QUIET_DRIFT:
+            return after, {"quiet": True, "windows": n, "drift_bytes": drift}
+        before = after
+    return after, {"quiet": False, "windows": QUIET_TRIES, "drift_bytes": drift}
+
+
 def held(snap):
     """What the cgroup holds, from a snapshot; a memory.stat without file or shmem is a ValueError."""
     stat = snap["stat"]

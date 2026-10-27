@@ -62,7 +62,11 @@ def pair(a, b):
                        "per_container": {k: v / p["count"] for k, v in rise.items()} if rise else None}
     return {"count": [a["count"], b["count"]], "held_diff_per_container": held, "parts": parts, "kernel": kernel,
             "named_sum": named, "unattributed_share": share, "largest": {"part": largest[0], "bytes": largest[1]},
-            "state_root": state, "reasons": a["stat_rise"]["reasons"] + b["stat_rise"]["reasons"]}
+            "state_root": state, "reasons": a["stat_rise"]["reasons"] + b["stat_rise"]["reasons"],
+            # Each run's own held rise less its named entries' (memory.stat out of step with memory.current),
+            # and whether its two readings came once the cgroup held still (cgmem.quiet_snapshot).
+            "own_unattributed_per_container": {"runtime": per(a, "unattributed"), "reference": per(b, "unattributed")},
+            "readings": {"runtime": a.get("readings"), "reference": b.get("readings")}}
 
 
 def kib(v):
@@ -99,7 +103,10 @@ def main():
         r = out["rounds"][k]
         share = r["unattributed_share"]
         print(f"round {k}: unattributed {'n/a' if share is None else f'{share:.1%}'}; largest {r['largest']['part']}"
-              f" ({kib(r['largest']['bytes'])} KiB); reasons: {r['reasons'] or 'none'}")
+              f" ({kib(r['largest']['bytes'])} KiB); each run's own unattributed (KiB/container): "
+              f"{kib(r['own_unattributed_per_container']['runtime'])} {rt}, "
+              f"{kib(r['own_unattributed_per_container']['reference'])} {ref}; readings {r['readings']}; "
+              f"reasons: {r['reasons'] or 'none'}")
 
 
 if __name__ == "__main__":

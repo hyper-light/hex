@@ -376,7 +376,8 @@ def phase_sustained(rt, lifecycles):
 
 def phase_density(rt, cap, budget_mib):
     dying = cgmem.settle([CG], CALL_TIMEOUT_S)
-    base, snap0 = mem_bytes(), cgmem.snapshot(CG)
+    snap0, quiet0 = cgmem.quiet_snapshot(CG)
+    base = snap0["current"]
     held0, state0 = cgmem.held(snap0), cgmem.tree_bytes(rt.state)
     budget = budget_mib * 1024 * 1024
     created, running = [], 0
@@ -397,9 +398,8 @@ def phase_density(rt, cap, budget_mib):
                 stop_reason = "memory budget"
                 break
         wall = time.perf_counter() - t0
-        time.sleep(2)  # let the started inits settle before reading memory
-        used = mem_bytes() - base
-        snap = cgmem.snapshot(CG)
+        snap, quiet = cgmem.quiet_snapshot(CG)  # the started inits settled, and memory.stat flushed since
+        used = snap["current"] - base
         held = cgmem.held(snap) - held0
         state = cgmem.tree_bytes(rt.state)
     finally:
@@ -416,6 +416,8 @@ def phase_density(rt, cap, budget_mib):
             # What the held rise is made of (memory.stat at the peak less at the baseline, one reading each with
             # the held figures above), and the runtime's state root at both.
             "stat_rise": cgmem.rise(cgmem.breakdown(snap), cgmem.breakdown(snap0)),
+            "stat_base": cgmem.breakdown(snap0), "stat_peak": cgmem.breakdown(snap),
+            "readings": {"base": quiet0, "peak": quiet},
             "state_root": {"base": state0, "peak": state}}
 
 

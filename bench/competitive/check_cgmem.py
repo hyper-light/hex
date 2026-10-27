@@ -10,7 +10,9 @@ phase's attribution, runtime-architecture.md decision 2).
      negative, non-ASCII digits, bytes that aren't text, an empty file and a long line each come back as a
      reason (and the entry left out), never an exception; a breakdown over such a reading is None where a
      sum needs what's missing.
-  4. tree_bytes: a state root's entries and bytes, a missing root as zero, and the entry budget's stop.
+  4. quiet_snapshot: a reading waits for memory.current to hold still across two of the kernel's stat flushes,
+     at most QUIET_TRIES windows, and one that never does is marked.
+  5. tree_bytes: a state root's entries and bytes, a missing root as zero, and the entry budget's stop.
 
   python3 -I check_cgmem.py
 """
@@ -144,6 +146,45 @@ class Hostile(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no file, shmem"):
             cgmem.held(snap)
         self.assertIsNone(cgmem.breakdown(snap)["held"])
+
+
+class Quiet(unittest.TestCase):
+    def readings(self, currents):
+        """quiet_snapshot over a stand-in cgroup whose memory.current is each of `currents` in turn, one per
+        window (the stand-in sleep writes the next)."""
+        with tempfile.TemporaryDirectory(dir=os.path.expanduser("~/.cache")) as d:
+            cgroup(d, KNOWN, currents[0])
+            left = list(currents[1:])
+            slept = []
+
+            def sleep(s):
+                slept.append(s)
+                with open(os.path.join(d, "memory.current"), "w") as f:
+                    f.write(f"{left.pop(0)}\n")
+            snap, how = cgmem.quiet_snapshot(d, sleep=sleep)
+        return snap, how, slept
+
+    def test_a_still_cgroup_is_read_after_one_window(self):
+        """Read a cgroup whose memory.current holds still; expect it read after one window of two flushes."""
+        snap, how, slept = self.readings([5000000, 5000000 + cgmem.QUIET_DRIFT])
+        self.assertEqual(how, {"quiet": True, "windows": 1, "drift_bytes": cgmem.QUIET_DRIFT})
+        self.assertEqual(slept, [cgmem.QUIET_WINDOW_S])
+        self.assertGreater(cgmem.QUIET_WINDOW_S, 2 * cgmem.FLUSH_S)
+        self.assertEqual(snap["current"], 5000000 + cgmem.QUIET_DRIFT)
+
+    def test_a_moving_cgroup_waits_until_it_holds_still(self):
+        """Read a cgroup that grows for two windows, then holds; expect the reading after the third."""
+        snap, how, _ = self.readings([1000000, 3000000, 6000000, 6000000])
+        self.assertEqual(how, {"quiet": True, "windows": 3, "drift_bytes": 0})
+        self.assertEqual(snap["current"], 6000000)
+
+    def test_a_cgroup_that_never_holds_still_is_marked(self):
+        """Read a cgroup that grows every window; expect the last reading after QUIET_TRIES, marked not quiet."""
+        currents = [1000000 * (i + 1) for i in range(cgmem.QUIET_TRIES + 1)]
+        snap, how, slept = self.readings(currents)
+        self.assertEqual(how, {"quiet": False, "windows": cgmem.QUIET_TRIES, "drift_bytes": 1000000})
+        self.assertEqual(len(slept), cgmem.QUIET_TRIES)
+        self.assertEqual(snap["current"], currents[-1])
 
 
 class Tree(unittest.TestCase):
