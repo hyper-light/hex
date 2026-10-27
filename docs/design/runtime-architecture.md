@@ -147,16 +147,16 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
   crun kept nothing; its containers' `sleep`s were reparented and ran alone (`probes/oci_breakdown.md` §3; f16).
   That is the gap between Hex's 0.63 MiB held per idle container and crun's 0.39.
 - **What's left without the shim: a device program per container.** On the no-shim binary, Hex still holds
-  13.2 KiB more per idle container than crun. That is the mean of three interleaved density rounds
-  (12.4/11.9/15.4 KiB), from run `20261027T031736Z` (adacachy, binary 3e5444d8, 1,000 containers each;
-  `bench/competitive/RESULT.md`).
-  - **Where it is.** Nearly all of it is the cgroup's `kernel` memory: +11.8/+12.2/+14.1 KiB. shmem rose by
+  11.4, 12.6 and 12.9 KiB more per idle container than crun in three interleaved density rounds. That's run
+  `20261027T033009Z` (adacachy, binary 3e5444d8, 1,000 containers each; `bench/competitive/RESULT.md`).
+  memory.stat's named entries account for all of each round's difference: none of it is left unattributed.
+  - **Where it is.** Nearly all of it is the cgroup's `kernel` memory: +11.5/+12.7/+12.8 KiB. shmem rose by
     nothing for either runtime, and Hex's state root takes 4 KiB per container against crun's 8, so the gap
     isn't runtime state on a tmpfs.
-  - **The steady entries.** Within `kernel`:
+  - **The entries.** Within `kernel`:
+    - **slab** is the largest, +4.3 to +4.6 KiB.
     - **vmalloc** is +4,096 bytes in every round, and crun's is 0.
-    - **percpu** is about +1.2 KiB.
-    - **slab** is +4.1 to +6.6 KiB, and moves the most between rounds.
+    - **percpu** is +1.2 KiB in every round.
   - **What makes them.** A loaded BPF program takes those charges. `bpf_prog_alloc_no_stats` rounds the
     program up to whole pages and `__vmalloc`s it, then allocates its `aux` and its per-CPU `active` counters.
     `bpf_prog_alloc` adds the per-CPU `stats`. All of these use `bpf_memcg_flags`, so they're charged to the
