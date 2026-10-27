@@ -49,7 +49,7 @@ can't be reached, with what the design reaches instead.
 | create+start of `true` | 16.26 / 29.30 / 68.88 / 934.36 | crun 3.34 / 6.00 / 8.88 / 28.02 | 0.84 / 1.50 / 2.22 / 7.01 | Through the seam: decisions 1, 2, 4, 5, 6 and 8. Through the command line: A2. |
 | lifecycles/s at 1 / 8 / 32 | 52 / 325 / 1,030 | crun 87 / 1,015 / 1,038 | 348 / 4,060 / 4,152 | Through the seam: decisions 2, 3 and 5. At 32, the ceiling is open (below). |
 | CPU per lifecycle | 7.02 | crun 4.68 | 1.17 | With a network namespace per container: A4. Without one: decisions 1, 2, 3 and 5. |
-| held memory per idle container | 0.63 MiB | crun 0.39 | 0.10 MiB | A1. Decision 2 reaches crun's: 0.98-0.99x of record on fedora (run `20261027T061920Z`). |
+| held memory per idle container | 0.63 MiB | crun 0.39 | 0.10 MiB | A1. Decision 2 reaches crun's: parity, 0.998-1.002x on adacachy once each container's loopback is up as crun's is (run `20261027T165449Z`). The 0.98-0.99x of record on fedora (`20261027T061920Z`) left Hex's loopback down. |
 | density (per GiB held) | 1,636 | crun 2,640 | 10,560 | A1. Decision 2 reaches crun's. |
 
 **The `process` class** (ms unless stated):
@@ -223,7 +223,9 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
   nothing: the density phase's vmalloc and percpu rise per container would show it, and they're 0.
 - **Held memory at most crun's:** a density phase on fedora showing Hex's held memory per idle container above
   crun's. Of record (plan step 4, run `20261027T061920Z`, 92b3b91): 0.9849 and 0.9887 of crun's, 2 rounds of
-  1,000 (`bench/competitive/RESULT.md`, "Of record on fedora").
+  1,000 (`bench/competitive/RESULT.md`, "Of record on fedora"). That binary left each container's loopback
+  down, which crun brings up. With it up (3bb57d3, adacachy run `20261027T165449Z`), Hex holds 0.9981, 1.0018 and
+  1.0002 of crun's: parity, two rounds a hair above. A fedora run with loopback up is to come.
 
 ### 3. The fast path is the `Runtime` seam; the OCI command line stays for compatibility
 

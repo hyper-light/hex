@@ -124,7 +124,9 @@ three different things (CLAUDE.md "Working here"):
     LOAD_GATE=0), and each change alone leaves Hex above crun (A/B run `20261027T044129Z`).
     runtime-tools is still at crun parity and step 3 still clean. **Of record on fedora** (plan step 4,
     kiln-a094a12d, 92b3b91, 2026-10-27): held 0.9849 and 0.9887 of crun's (run `20261027T061920Z`, 2
-    rounds of 1,000, LOAD_GATE=0 at load 9-18: a same-run ratio), step 3 clean, and runtime-tools
+    rounds of 1,000, LOAD_GATE=0 at load 9-18: a same-run ratio), but with each container's loopback left
+    down, which crun brings up. With it up (3bb57d3, adacachy), held is 0.9981 / 1.0018 / 1.0002 of crun's:
+    parity, and a fedora run with loopback up is to come. Step 3 clean, and runtime-tools
     26/28 with the two LSM refusals kept by Ada's call. The fedora run also found every seccomp
     container running with no_new_privs set, fixed in 92b3b91. On adas-mac-studio-2 (Docker Desktop's
     aarch64 VM, load ~3): held 0.9975 and 0.9754, step 3 clean, runtime-tools 23/25 with the same two

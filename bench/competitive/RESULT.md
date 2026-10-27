@@ -95,8 +95,9 @@ load) measures what those two decisions changed: **start p50 0.27 ms against cru
 fsync penalty is gone — and **held memory per idle container 0.42 MiB against crun's 0.40 (0.95x)**, down
 from 0.63, with no process left beside any idle container (`probes/oci_breakdown.sh` step 3: hex leaves only
 the workload, as crun does). Held memory was still ~20 KiB/container above crun's on that binary; plan step 2
-closed it (below): 0.99x crun's on adacachy, and 0.98-0.99x of record on fedora. The OCI table's other rows
-are still the earlier binary's.
+closed it (below): 0.99x crun's on adacachy, and 0.98-0.99x of record on fedora, with Hex's loopback down. With
+it up, as crun's is, Hex is at parity (below, "Loopback up"). The OCI table's other rows are still the earlier
+binary's.
 
 **What that residual was: a device program and two pipes per container** (runtime-architecture.md, decision 2).
 
@@ -187,6 +188,15 @@ Fedora's glibc-static: a static build from adacachy dies there, since CachyOS bu
   Hex process anywhere.
 - **runtime-tools** on the same binary: `bench/oci-validation/SUMMARY-hex.txt` (26 against crun's 28; the two
   differences are Hex's refusals of a mount label and an AppArmor profile it can't apply, kept by Ada's call).
+
+**Loopback up: parity, not a lead** (2026-10-27). Every run above left each Hex container's loopback down:
+until 3bb57d3 the init never brought `lo` up, so 127.0.0.1 was unreachable in a container with its own network
+namespace (goal 3's plan step 5 found it; `oci/net.rs` now brings it up with one rtnetlink request, as runc and
+crun do). crun brings it up, so part of Hex's lead was loopback state Hex didn't make. On 3bb57d3 (adacachy, run
+`20261027T165449Z`, 3 interleaved rounds of 1,000, LOAD_GATE=0), Hex holds 0.9981, 1.0018 and 1.0002 of crun's
+memory per idle container (-0.80, +0.75 and +0.08 KiB), its slab now 0.39 to 0.96 KiB above crun's where it
+was 5.4 to 6.5 below. Round 2 left 45.7% of a 0.75 KiB difference unattributed, swap moving during it. Goal 2's
+"at most crun's" stands at parity, two rounds a hair above, and wants a fedora run with loopback up.
 
 **Also on adas-mac-studio-2** (Ada's call, 2026-10-27: the Mac Studios too). Docker Desktop's Linux VM
 (LinuxKit 6.12.65, aarch64, 14 CPUs, 33.6 GB) runs the containers. The bench containers' `/usr` is the
