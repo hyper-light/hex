@@ -121,6 +121,16 @@ pub struct BoxInfo {
     /// wire means `None` (append-only, CLAUDE.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
+    /// Programs exec'd in the box that its node agent ended because the caller watching them went
+    /// away: its connection to the node agent's socket closed while they ran. Each was signalled KILL
+    /// and reaped, never left running unwatched (decision 3 of docs/design/runtime-architecture.md).
+    /// Added after the first release, so absent on the wire means 0 (append-only, CLAUDE.md).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub abandoned: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// What a box has used, and holds now.
@@ -203,5 +213,21 @@ mod tests {
         };
         let back: BoxInfo = serde_json::from_str(&serde_json::to_string(&ended).unwrap()).unwrap();
         assert_eq!(back.exit, Some(Exit::Signal(9)));
+    }
+
+    /// HEX-SOCK-6, append-only: a `BoxInfo` written before `abandoned` existed reads as 0, one with
+    /// none abandoned is written without the field, and a count round-trips.
+    #[test]
+    fn a_box_info_without_abandoned_programs_reads_and_writes_as_before() {
+        let old = r#"{"id":"b","class":"process","state":"running","bounds":{},"adopted":false}"#;
+        let info: BoxInfo = serde_json::from_str(old).unwrap();
+        assert_eq!(info.abandoned, 0);
+        assert!(!serde_json::to_string(&info).unwrap().contains("abandoned"));
+        let left = BoxInfo {
+            abandoned: 2,
+            ..info
+        };
+        let back: BoxInfo = serde_json::from_str(&serde_json::to_string(&left).unwrap()).unwrap();
+        assert_eq!(back.abandoned, 2);
     }
 }

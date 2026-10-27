@@ -12,14 +12,17 @@
 //! stdin, stdout and stderr. The helper passes SIGHUP, SIGINT, SIGQUIT and SIGTERM on to it, and exits
 //! with its status once it ends: its exit code, or 128 plus the signal that ended it, as a shell
 //! reports one. The wait lasts as long as the program does, which the caller bounds by signalling.
+//! Run by the node agent (seam mode), the program dies with the helper, so the agent ending the helper
+//! ends the program too.
 
 use std::fs;
 use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 
-use rustix::event::{PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
+use rustix::pipe::PipeFlags;
 use serde::{Deserialize, Serialize};
 
 use crate::linux::oci::spec::{Process, Seccomp, Spec};
@@ -122,6 +125,19 @@ fn helper() -> Result<u8, (u8, OciError)> {
     }
 
     let signals = sys::forward_signals(&FORWARDED).map_err(cannot)?;
+    // Seam mode: the node agent watches the helper as the program's stand-in and, when the caller
+    // watching it goes away, ends it (decision 3's disconnect rule); the program dies with it
+    // (`die_with_helper`), so none outlives that unwatched. The lifeline's write end stays with the
+    // helper until it ends. Step 2 of goal 3 supersedes this: its seed makes the program the agent's
+    // own child, ended by its own pidfd.
+    let lifeline = if req.seam {
+        Some(
+            rustix::pipe::pipe_with(PipeFlags::CLOEXEC)
+                .map_err(|e| cannot(OciError::os("making the exec helper's lifeline", e)))?,
+        )
+    } else {
+        None
+    };
     let born = match &cgroup {
         Some((dir, _)) if !in_userns => sys::fork_into_cgroup(dir.as_fd()).map_err(cannot)?,
         _ => None,
@@ -140,8 +156,10 @@ fn helper() -> Result<u8, (u8, OciError)> {
             procs,
             cgroup_ns,
             &signals,
+            lifeline.map(|(read, _write)| read),
         )),
         sys::Fork::Parent(pid) => {
+            let _lifeline = lifeline.map(|(_read, write)| write);
             drop((procs, cgroup_ns));
             wait_forwarding(pid, &signals, req.seam).map_err(cannot)
         }
@@ -208,13 +226,15 @@ fn namespaces_to_join(pid: i32) -> Result<Vec<(&'static str, i32, OwnedFd)>, Oci
 
 /// The child: into its cgroup by migration when it wasn't born there, then into the container's cgroup
 /// namespace (NAMESPACES says why only now), the signals unblocked, the container's process become,
-/// then the program. Returns only when one of those failed: the status to exit with, and why.
+/// bound to die with the helper when it has a `lifeline` (seam mode), then the program. Returns only
+/// when one of those failed: the status to exit with, and why.
 fn child(
     process: &Process,
     seccomp: Option<&Seccomp>,
     procs: Option<OwnedFd>,
     cgroup_ns: Option<OwnedFd>,
     signals: &sys::ForwardedSignals,
+    lifeline: Option<OwnedFd>,
 ) -> (u8, OciError) {
     let setup = || -> Result<(), OciError> {
         if let Some(procs) = procs {
@@ -231,7 +251,8 @@ fn child(
             sys::setns(ns.as_fd(), libc::CLONE_NEWCGROUP)?;
         }
         signals.restore()?;
-        init::become_process(process, seccomp)
+        init::become_process(process, seccomp)?;
+        lifeline.as_ref().map_or(Ok(()), die_with_helper)
     };
     if let Err(e) = setup() {
         return (CANNOT_RUN, e);
@@ -262,6 +283,31 @@ fn child(
             OciError::Broken("execve returned without an error".to_owned()),
         ),
     }
+}
+
+/// Makes the child die with its helper: KILL once the helper ends (PR_SET_PDEATHSIG, prctl(2)). Set
+/// after the child has become the container's process, since a change of its user clears it (as does
+/// exec'ing a set-user-ID program, a gap step 2's seed closes). A helper that ended before it was set
+/// has closed the lifeline's last write end, so the child ends too, rather than outlive it.
+fn die_with_helper(lifeline: &OwnedFd) -> Result<(), OciError> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
+        .map_err(|e| OciError::os("binding the program to its exec helper", e))?;
+    let mut fds = [PollFd::new(lifeline, PollFlags::IN)];
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut fds, Some(&now))
+        .map_err(|e| OciError::os("looking for the exec helper", e))?;
+    if fds
+        .iter()
+        .any(|f| f.revents().intersects(PollFlags::HUP | PollFlags::ERR))
+    {
+        return Err(OciError::Broken(
+            "the exec helper ended before its program started".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Waits for the program, passing on each forwarded signal the helper receives, then reports its

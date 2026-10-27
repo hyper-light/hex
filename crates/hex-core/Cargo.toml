@@ -1,6 +1,6 @@
 [package]
 name = "hex-core"
-description = "Hex's sans-IO cores: bounds as cgroup writes, usage from cgroup files, box records and crash recovery"
+description = "Hex's sans-IO cores: bounds as cgroup writes, usage from cgroup files, box records, crash recovery and the node agent's wire format"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,7 @@ publish.workspace = true
 hex-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest = "1.12.0"

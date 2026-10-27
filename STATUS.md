@@ -29,6 +29,14 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **The node agent** (`hex-node`, Linux): `Runtime` over the `process` class, per-box records that a
   crash of the agent leaves whole (fsynced only for a box that owns directories, design decision 1), and
   recovery.
+- **The node agent's local socket** (goal 3, plan step 4; decision 3 of `docs/design/runtime-architecture.md`):
+  `hex node --socket <path> --state <dir>` serves the `Runtime` seam on a Unix `SOCK_SEQPACKET` socket, in a
+  versioned wire format that changes append-only (`hex-core::wire`, a pure core with version 1's bytes recorded),
+  exec's stdio crossing as `SCM_RIGHTS` descriptors and a program's end coming back as a message. `hex-client` is a
+  `Runtime` over it, and the conformance suite (HEX-RT-1 to 12) passes against it over a live `hex node`, on `oci`
+  and `process` boxes. Its bounds (connections, message size, requests in flight, programs watched) are refused
+  past by type, naming them; hostile messages are refused and the connection served after; a client that goes away
+  has the programs it still watches ended, reaped and counted in their box (`BoxInfo::abandoned`). HEX-SOCK-1 to 9.
 - **The `hex` binary**: `hex --version`/`--help`, `hex oci …` (the OCI runtime), `hex box run
   <limits> -- cmd` (runs a program in a `process` box, for kiln to wrap a CI leg or harness in),
   and `hex selftest-box` (box isolation self-test, incl. `fsync-probe`/`disk-hog` for the bench).

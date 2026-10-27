@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use hex_api::{BoxId, Refusal};
 use hex_core::record::BoxRecord;
@@ -18,6 +19,10 @@ use hex_core::record::BoxRecord;
 #[derive(Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
+    /// Held by each write, so [`Store::update`]'s read and write of a record are one change: two
+    /// users changing one record at once (the supervisor recording an init's exit, the socket counting
+    /// an abandoned program) never lose either's change.
+    writes: Arc<Mutex<()>>,
 }
 
 impl Store {
@@ -26,7 +31,14 @@ impl Store {
         fs::create_dir_all(dir).map_err(|e| Refusal::os("making the record directory", e))?;
         Ok(Self {
             dir: dir.to_owned(),
+            writes: Arc::new(Mutex::new(())),
         })
+    }
+
+    fn one_write(&self) -> Result<MutexGuard<'_, ()>, Refusal> {
+        self.writes
+            .lock()
+            .map_err(|_| Refusal::Broken("the record store's lock was poisoned".to_owned()))
     }
 
     fn path(&self, id: &BoxId) -> PathBuf {
@@ -36,6 +48,23 @@ impl Store {
     /// Writes `record` whole: either the old file or the new one survives a crash of the node
     /// agent, and a record that must outlive the host ([`must_outlive_host`]) is fsynced too.
     pub fn put(&self, record: &BoxRecord) -> Result<(), Refusal> {
+        let _one = self.one_write()?;
+        self.write(record)
+    }
+
+    /// Changes `id`'s record by `change` and writes it, as one change among the store's writes;
+    /// `false` when there's no readable record to change.
+    pub fn update(&self, id: &BoxId, change: impl FnOnce(&mut BoxRecord)) -> Result<bool, Refusal> {
+        let _one = self.one_write()?;
+        let Some(Ok(mut record)) = self.get(id)? else {
+            return Ok(false);
+        };
+        change(&mut record);
+        self.write(&record)?;
+        Ok(true)
+    }
+
+    fn write(&self, record: &BoxRecord) -> Result<(), Refusal> {
         let bytes = record.encode()?;
         let final_path = self.path(&record.spec.id);
         let tmp = self.dir.join(format!(".{}.tmp", record.spec.id));
@@ -165,6 +194,28 @@ mod tests {
             store.get(&owning.spec.id).unwrap(),
             Some(Ok(owning.clone()))
         );
+    }
+
+    /// HEX-SOCK-6: an update reads and writes a record as one change, so changes made from many
+    /// threads at once all land; a record that isn't there is no update.
+    #[test]
+    fn updates_from_many_threads_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = record("a");
+        store.put(&r).unwrap();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..25 {
+                        assert!(store.update(&r.spec.id, |r| r.abandoned += 1).unwrap());
+                    }
+                });
+            }
+        });
+        let back = store.get(&r.spec.id).unwrap().unwrap().unwrap();
+        assert_eq!(back.abandoned, 200);
+        assert!(!store.update(&BoxId::new("none").unwrap(), |_| {}).unwrap());
     }
 
     #[test]

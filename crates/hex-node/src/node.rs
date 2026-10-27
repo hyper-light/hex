@@ -6,9 +6,10 @@
 //! of docs/design/runtime-architecture.md). The node agent is its containers' parent, holding each
 //! init's pidfd and recording how it ended ([`crate::supervise`], decision 2).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hex_api::{
@@ -44,6 +45,9 @@ pub struct Node {
     oci_helper: Option<PathBuf>,
     /// The `oci` boxes' inits, watched and reaped; orphaned box processes, reaped.
     supervisor: Arc<Supervisor>,
+    /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record, by box:
+    /// kept and reported until a record write takes them, never dropped (§3).
+    abandoned: Mutex<BTreeMap<BoxId, u64>>,
 }
 
 /// What a recovery did.
@@ -81,6 +85,7 @@ impl Node {
             oci_root: state_dir.join("oci"),
             oci_helper: None,
             supervisor,
+            abandoned: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -156,7 +161,35 @@ impl Node {
             bounds: record.spec.bounds.clone(),
             adopted,
             exit,
+            abandoned: record.abandoned.saturating_add(self.unrecorded(id)?),
         })
+    }
+
+    /// Counts in box `id` a program exec'd in it that the node ended because the caller watching it
+    /// went away: its connection to the node's socket closed while it ran (decision 3's disconnect
+    /// rule, [`crate::serve`]). Written to the box's record, which inspect reports. A count a write
+    /// can't take now is kept, reported all the same, and written with the next; a box with no
+    /// readable record (deleted since) has none to take it.
+    pub fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
+        let mut pending = self.abandoned.lock().map_err(|_| {
+            Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
+        })?;
+        let count = pending.entry(id.clone()).or_insert(0);
+        // Saturating: 2^64 programs is past any box's life, so the cap is never met.
+        *count = count.saturating_add(1);
+        let add = *count;
+        self.store
+            .update(id, |r| r.abandoned = r.abandoned.saturating_add(add))?;
+        pending.remove(id);
+        Ok(())
+    }
+
+    /// Box `id`'s abandoned programs not yet in its record.
+    fn unrecorded(&self, id: &BoxId) -> Result<u64, Refusal> {
+        let pending = self.abandoned.lock().map_err(|_| {
+            Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
+        })?;
+        Ok(pending.get(id).copied().unwrap_or(0))
     }
 
     /// How an `oci` box's init ended: as the supervisor reaped it, or as the box's record holds it
@@ -465,6 +498,7 @@ impl Runtime for Node {
                     bounds: hex_api::Bounds::default(),
                     adopted: false,
                     exit: None,
+                    abandoned: 0,
                 });
             }
         }
@@ -483,8 +517,17 @@ impl Runtime for Node {
             self.store.put(&record)?;
         }
         self.scrub(id)?;
+        if let Ok(mut pending) = self.abandoned.lock() {
+            pending.remove(id);
+        }
         // The box is empty, so its init has ended: reaped here, leaving no zombie of it.
         init.as_ref().map_or(Ok(()), supervise::reap)
+    }
+}
+
+impl crate::serve::Host for Node {
+    fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
+        Node::abandoned(self, id)
     }
 }
 

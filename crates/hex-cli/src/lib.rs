@@ -1,6 +1,7 @@
 //! Hex: the scheduler and runtime: agent scheduling orchestration for infinite scale. The `hex`
 //! binary: it says what it is, and runs `selftest-box` acts inside a box (CP-T7.1). The runtime
-//! classes are in `hex-runtime`, driven by the node agent in `hex-node`.
+//! classes are in `hex-runtime`, driven by the node agent in `hex-node`, which `hex node` runs as a
+//! process serving its local socket.
 #![cfg_attr(
     test,
     allow(
@@ -17,6 +18,8 @@ pub mod selftest;
 
 #[cfg(target_os = "linux")]
 pub mod box_run;
+#[cfg(target_os = "linux")]
+pub mod node;
 #[cfg(target_os = "linux")]
 pub mod oci;
 

@@ -105,6 +105,8 @@ impl SimRuntime {
             bounds: b.spec.bounds.clone(),
             adopted: false,
             exit,
+            // A simulated program has no caller to lose: only the node agent's socket abandons one.
+            abandoned: 0,
         })
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "hex-client"
+description = "Hex's Runtime seam over the node agent's local socket: a hex_api::Runtime whose boxes are a node agent's in another process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hex-api.workspace = true
+hex-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -161,6 +161,7 @@ name = "hex-bench"
 version = "0.1.0"
 dependencies = [
  "hex-api",
+ "hex-client",
  "hex-core",
  "hex-node",
  "hex-runtime",
@@ -173,9 +174,21 @@ name = "hex-cli"
 version = "0.1.0"
 dependencies = [
  "hex-api",
+ "hex-client",
  "hex-core",
  "hex-node",
  "hex-runtime",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
+name = "hex-client"
+version = "0.1.0"
+dependencies = [
+ "hex-api",
+ "hex-core",
+ "rustix",
  "tempfile",
 ]
 
@@ -187,6 +200,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -194,6 +208,7 @@ name = "hex-node"
 version = "0.1.0"
 dependencies = [
  "hex-api",
+ "hex-client",
  "hex-core",
  "hex-runtime",
  "rustix",

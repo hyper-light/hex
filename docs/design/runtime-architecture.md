@@ -244,6 +244,79 @@ neither.
 **What would falsify it.** A seam call that costs as much as a spawn, measured by the in-process and socket drivers
 (implementation goal 0).
 
+#### The local socket (goal 3, plan step 4)
+
+**What it is.** `hex node --socket <path> --state <dir> [--box-root <cgroup>]` runs the node agent as a process of
+its own and serves the seam on a Unix `SOCK_SEQPACKET` socket (`crates/hex-node/src/serve.rs`). `hex-client`'s
+`Client` is a `hex_api::Runtime` over it, so a caller that doesn't link Hex holds the same contract, the conformance
+suite (HEX-RT-1 to 12) included (`crates/hex-cli/tests/node_socket.rs`, over a live `hex node`, on `oci` and `process`
+boxes). `SOCK_SEQPACKET` because the kernel keeps each message whole and in order: "a sequenced-packet socket that is
+connection-oriented, preserves message boundaries, and delivers messages in the order that they were sent"
+(unix(7)). One message is one request or answer, so the codec needs no framing and a malformed message can't
+desynchronize the next. A Unix socket also carries an exec's stdio as descriptors: `SCM_RIGHTS`, "Send or receive a
+set of open file descriptors from another process" (unix(7)), received close-on-exec. And a message too large for
+the receiver's buffer still reports its size, `MSG_TRUNC`: "return the real size of the packet or datagram, even when
+it was longer than the passed buffer" (recv(2), for sequenced-packet sockets since Linux 3.4), so an oversized one is
+refused naming its size and the bound.
+
+**The wire** (`crates/hex-core/src/wire.rs`, a pure core): a 16-byte header (magic, version, kind, id) and a body
+each kind defines; integers little-endian, strings and paths length-prefixed, options and enums tagged. Version 1's
+bytes are recorded in its tests, and the format changes append-only: a later version adds kinds and appends fields,
+and reads every earlier version's messages as they were. A reader refuses bytes past what a message's version
+defines, so an extension an older agent can't apply is refused, never dropped (CLAUDE.md §3). A list's answer comes
+in as many messages as its boxes need, so a dense node answers it whole.
+
+**Bounds** (`serve::LIMITS`, told to each client in its hello), each refused past by type, naming it:
+
+| Bound | Default | Past it | Why this size |
+|---|---|---|---|
+| connections | 64 | `Exhausted`, "connections to the node agent's socket", then closed | a node's local callers are few |
+| bytes in one message | 131,072 | `Invalid`, naming the size and the bound | under the kernel's bound on a `SOCK_SEQPACKET` record, the send buffer less 32 bytes (`net/unix/af_unix.c`): 212,960 under the default 212,992-byte buffer, measured on adacachy (Linux 7.2.9) |
+| requests in flight on a connection | 64 | `Exhausted`, "requests in flight on one connection" | twice the bench's 32 threads sharing one client |
+| programs a connection watches | 1,024 | exec refused `Exhausted`, "programs watched by one connection" | 64 connections' worth is 65,536 pidfds, the supervisor's `INIT_BUDGET` |
+| answers waiting to be sent on a connection | in flight + programs + 1, by construction | its requests aren't read until they drain | a client that doesn't read can't grow the agent's memory |
+| workers running calls | 128 | calls wait in the queue the in-flight bounds hold | twice one connection's in-flight bound |
+
+**The disconnect rule.** When a connection closes, every program its execs started that it still watches is sent
+KILL through its pidfd, reaped, and counted in its box (`BoxInfo::abandoned`, appended to the seam with a default of
+0, which inspect reports); none is left running unwatched. A program its client released first (it dropped the
+`Proc`) runs on, as dropping an in-process `Proc` lets it. A request the agent read before the close is carried out;
+one it hadn't read goes with the connection. The node ends the program rather than let it run to its end because:
+- Its stdio are the gone client's pipes, so its output goes nowhere. Its next write raises SIGPIPE: "If all file
+  descriptors referring to the read end of a pipe have been closed, then a write(2) will cause a SIGPIPE signal to be
+  generated for the calling process" (pipe(7)). Until then it holds its box's CPU, memory and process budgets for
+  work whose result no one can collect.
+- No one is left to collect its end: the exit the agent would send has no reader, and a caller that comes back holds
+  no `Proc` to wait on.
+- An agent's step that outlives its caller can still act (write files, call out), and a caller that restarts and
+  runs the step again runs it twice. Ending it makes "the caller went away" mean "its work stopped", the contract of
+  a login session's processes ("Configures whether the processes of a user should be killed when the user logs
+  out", logind.conf(5), `KillUserProcesses=`) and of a child bound to its parent (`PR_SET_PDEATHSIG(2const)`).
+- The signal goes through the program's pidfd, so it can't reach a process given its pid since: "a PID file
+  descriptor is a stable reference to a specific process" (pidfd_send_signal(2)).
+
+Until the seed (plan step 2) makes an exec'd `oci` program the agent's own child, the agent watches the
+`hex __oci-exec` helper as the program's stand-in, and in seam mode the program dies with it: `PR_SET_PDEATHSIG` is
+set once the program has become the container's process, since "the parent-death signal setting is also cleared upon
+changes to any of the following thread credentials: effective user ID, effective group ID, filesystem user ID, or
+filesystem group ID" (`PR_SET_PDEATHSIG(2const)`); a pipe the helper holds tells the program whether the helper
+ended before the signal was set. One gap stays until step 2 supersedes this: exec'ing a set-user-ID program clears
+the signal too (the same page).
+
+**What would falsify the rule.** A caller that needs a program to outlive its connection: an executor that, when it
+restarts, reattaches to a step still running rather than running it again. Then exec gains a detached form
+(appended to the wire's exec), whose program the agent releases at the close, and the rule holds for the rest.
+
+**Tests** (HEX-SOCK-n, cited beside each): 1, hostile bytes to the codec are refused by type, never a panic: every
+truncation and bit flip, random bytes, unknown versions and kinds, trailing bytes, descriptors where none belong.
+2, the format is append-only: version 1's bytes as recorded, every message round-trips, a long list splits. 3,
+hostile messages to a live server are refused, and the connection is served after each. 4, connections past the
+bound are refused naming it, and the next is served once one closes. 5, requests past the in-flight bound are refused
+naming it, and every request is answered once. 6, the disconnect rule: a gone client's programs killed, reaped and
+counted, a released one left running, a release sent just before a reset honoured. 7, programs past the bound are
+refused naming it. 8, stdio crosses as descriptors, and only a pipe's right end is taken. 9, the plan's example over
+a live `hex node`.
+
 ### 4. Network-namespace work off the critical path (rewritten after the probe)
 
 **What changed.** The plan behind this document expected pooled network namespaces and cgroups to lift the

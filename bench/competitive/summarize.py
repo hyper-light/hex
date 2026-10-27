@@ -7,9 +7,10 @@ Percentiles are nearest-rank over each round's samples. Best of N: for each runt
 round with the best value (lowest p50 for a latency, highest rate, lowest cost, highest density). Hex's
 ratio is the best competitor's value over Hex's for lower-is-better metrics and Hex's over the best
 competitor's for higher-is-better ones, so above 1 means Hex is ahead and 4 meets the 4-5x bar. Each of
-Hex's own columns (`hex`, and `hex-seam` for the process class through the Runtime seam) gets its own
-ratio, against competitors of its own layer: Hex's command line against command lines, and its seam against
-the runtimes driven in process (libcrun) where a table has them.
+Hex's own columns (`hex`, `hex-seam` for a class through the Runtime seam in process, and `hex-seam-socket`
+for the oci class through the seam over the node agent's socket) gets its own ratio, against competitors of
+its own layer: Hex's command line against command lines, and its seam against the runtimes driven in process
+(libcrun) where a table has them.
 """
 import glob
 import json
@@ -73,7 +74,8 @@ def ratio(values, lower_better, me="hex"):
     layer, which is never one of Hex's own columns."""
     names = [k for k in values if not k.startswith("hex")]
     in_process = [k for k in names if k in IN_PROCESS]
-    rivals = in_process if me == "hex-seam" and in_process else [k for k in names if k not in IN_PROCESS]
+    seam = me in ("hex-seam", "hex-seam-socket")
+    rivals = in_process if seam and in_process else [k for k in names if k not in IN_PROCESS]
     # A value at or below zero (a memory delta the kernel reclaimed away, a cost too small to see) is not a
     # measurement, so it never enters a ratio.
     hexv = values.get(me)
@@ -111,6 +113,10 @@ def oci_section(run):
     seam = rounds(run, "ociseam")
     if seam:
         data["hex-seam"] = seam
+    # The same through the node agent's socket (seam_oci's socket driver, ociseamsock.r<N>.json).
+    sock = rounds(run, "ociseamsock")
+    if sock:
+        data["hex-seam-socket"] = sock
     data = {n: r for n, r in data.items() if r}
     rows = []  # (axis, unit, lower_better, {name: value})
     for op in ("create", "start", "exec", "delete"):
@@ -149,6 +155,33 @@ def oci_section(run):
                  {n: best(rs.values(), lambda r: held(r["phases"].get("density"), "per_gib"), False)
                   for n, rs in data.items()}))
     return list(data), rows, data
+
+
+def socket_cost(data):
+    """The node agent's socket's cost per call: each operation's p50 through the socket less its p50 in
+    process, both best of N from the same run, and the rtt phase's inspect of a running box (the same work
+    either way) at p50 and p99."""
+    inproc, sock = data.get("hex-seam"), data.get("hex-seam-socket")
+    if not inproc or not sock:
+        return ""
+    lines = ["The node agent's socket, cost per call (seam_oci's two drivers, best of N, same run; ms):", "",
+             "| Call | in process p50 | over the socket p50 | socket's cost p50 | in process p99 | over the socket p99 |",
+             "|---|---|---|---|---|---|"]
+
+    def ms(rs, phase, op=None):
+        def samples(r):
+            got = r["phases"].get(phase, {}).get("ms", {})
+            return got.get(op, []) if op else got
+        return best_dist([samples(r) for r in rs.values()])
+    for label, phase, op in (("create", "lifecycle", "create"), ("start", "lifecycle", "start"),
+                             ("exec of `true`", "lifecycle", "exec"), ("delete", "lifecycle", "delete"),
+                             ("inspect (rtt)", "rtt", None)):
+        a, b = ms(inproc, phase, op), ms(sock, phase, op)
+        if not a or not b:
+            continue
+        lines.append(f"| {label} | {a['p50']:.3f} | {b['p50']:.3f} | {b['p50'] - a['p50']:.3f} | "
+                     f"{a['p99']:.3f} | {b['p99']:.3f} |")
+    return "\n".join(lines) + "\n"
 
 
 def standin_ceiling(run):
@@ -378,6 +411,8 @@ def main():
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
         if sustained_windows(data):
             parts.append(sustained_windows(data))
+        if socket_cost(data):
+            parts.append(socket_cost(data))
     if standin_ceiling(run):
         parts.append(standin_ceiling(run))
     pnames, prows, plats = platform_section(run, data)

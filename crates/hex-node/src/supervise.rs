@@ -291,12 +291,9 @@ impl Supervisor {
         let exit = init.exit;
         // Kept in memory until the record holds it; a failed write is tried again on the next
         // inspect or sweep, never dropped (§3). A box with no readable record has none to hold it:
-        // inspect refuses such a box as broken, and recovery removes it.
-        if let Some(record) = self.store.get(id)?.and_then(Result::ok) {
-            let mut record = record;
-            record.exit = exit;
-            self.store.put(&record)?;
-        }
+        // inspect refuses such a box as broken, and recovery removes it. One change of the record, so
+        // a count the socket writes at the same moment isn't lost.
+        self.store.update(id, |record| record.exit = exit)?;
         inits.by_box.remove(id);
         inits.by_token.retain(|_, b| b != id);
         Ok(exit)

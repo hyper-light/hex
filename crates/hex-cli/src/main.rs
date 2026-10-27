@@ -34,6 +34,11 @@ fn main() -> ExitCode {
             let rest: Vec<String> = rest.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::oci::main(&rest));
         }
+        // `hex node --socket …` serves the Runtime seam on the node agent's local socket.
+        if first == "node" {
+            let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+            return ExitCode::from(hex_cli::node::main(&rest));
+        }
         // `hex box run <limits> -- program args…` runs a program in a process box.
         if first == "box"
             && let [Some(verb), box_args @ ..] = rest

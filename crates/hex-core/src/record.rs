@@ -27,6 +27,15 @@ pub struct BoxRecord {
     /// so a record without it reads as `None` (append-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<Exit>,
+    /// Programs exec'd in the box that the node agent ended because their caller's connection to its
+    /// socket closed while they ran (decision 3), which inspect reports. Added within version 1, so a
+    /// record without it reads as 0 (append-only).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub abandoned: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Where a box is in its life.
@@ -58,6 +67,7 @@ impl BoxRecord {
             init: None,
             dirs,
             exit: None,
+            abandoned: 0,
         }
     }
 
@@ -168,6 +178,24 @@ mod tests {
             start_ticks: 1234,
         });
         assert_eq!(BoxRecord::decode(&r.encode().unwrap()).unwrap(), r);
+    }
+
+    /// HEX-SOCK-6, append-only: a record written before `abandoned` existed reads as 0, and a record
+    /// with none is written as before, so an older node agent reads it.
+    #[test]
+    fn a_record_without_abandoned_programs_reads_and_writes_as_before() {
+        let r = record();
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(!text.contains("abandoned"), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap().abandoned, 0);
+        let mut left = r;
+        left.abandoned = 3;
+        assert_eq!(
+            BoxRecord::decode(&left.encode().unwrap())
+                .unwrap()
+                .abandoned,
+            3
+        );
     }
 
     #[test]

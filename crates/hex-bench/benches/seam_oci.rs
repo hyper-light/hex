@@ -1,10 +1,14 @@
-//! The `oci` class through the hex-api `Runtime` seam, in process: oci_bench.py's lifecycle and
-//! throughput phases (create, start, exec of `true` and delete of a `sleep` container, each timed
-//! alone; then create+start+delete at concurrency 1, 8 and 32) with the node agent in this process,
-//! so no call spawns a process but the container's own init and exec helper. It writes oci_bench.py's
-//! JSON under the runtime `hex-seam`, which summarize.py sets beside libcrun (the in-process rival),
-//! so runtime design goal 3's targets — exec p50 at most a quarter of libcrun's, start p50 within
-//! 10% of libcrun's (argument A3) — are read from it. Decision 3 of docs/design/runtime-architecture.md.
+//! The `oci` class through the hex-api `Runtime` seam, by either of its two drivers: in process (the
+//! node agent in this process, `HEXBENCH_DRIVER` unset or `inprocess`) or over the node agent's local
+//! socket (`HEXBENCH_DRIVER=socket`: a `hex node` process this starts, reached through `hex-client`).
+//! oci_bench.py's lifecycle and throughput phases (create, start, exec of `true` and delete of a
+//! `sleep` container, each timed alone; then create+start+delete at concurrency 1, 8 and 32), and
+//! `rtt`: inspect of a running box, timed alone, whose work is the same either way, so the socket's
+//! cost per call is the two drivers' difference in one run. No call spawns a process but the
+//! container's own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam`
+//! (or `hex-seam-socket`), which summarize.py sets beside libcrun (the in-process rival), so runtime
+//! design goal 3's targets — exec p50 at most a quarter of libcrun's, start p50 within 10% of
+//! libcrun's (argument A3) — are read from it. Decision 3 of docs/design/runtime-architecture.md.
 //!
 //!   seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle>
 //! (`cargo bench -p hex-bench --bench seam_oci -- ...`, or its binary as host.sh's ociseam pass runs
@@ -35,12 +39,14 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::io::{BufRead, BufReader};
     use std::path::{Path, PathBuf};
-    use std::process::ExitCode;
+    use std::process::{Child, Command, ExitCode, Stdio as Std};
     use std::sync::Barrier;
     use std::time::{Duration, Instant};
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
+    use hex_client::Client;
     use hex_node::Node;
     use serde_json::{Map, Value, json};
 
@@ -89,7 +95,7 @@ mod linux {
     /// One container's create, start, exec of `true` and delete, each timed alone; a slot for the op
     /// that failed records the error. The init is the bundle's `sleep infinity`, so exec runs beside it.
     fn lifecycle_once(
-        node: &Node,
+        node: &dyn Runtime,
         bundle: &Path,
         id: &str,
         ms: &mut Ops,
@@ -141,7 +147,12 @@ mod linux {
     }
 
     /// n timed lifecycles after `warmup` untimed ones, each operation timed alone.
-    fn lifecycle(node: &Node, bundle: &Path, n: usize, warmup: usize) -> Result<Value, String> {
+    fn lifecycle(
+        node: &dyn Runtime,
+        bundle: &Path,
+        n: usize,
+        warmup: usize,
+    ) -> Result<Value, String> {
         let mut ms = Ops::default();
         for i in 0..warmup + n {
             lifecycle_once(node, bundle, &format!("l{i:06}"), &mut ms, i >= warmup)?;
@@ -155,7 +166,7 @@ mod linux {
     /// node, each its share of the lifecycles; the clock starts once every thread is at the barrier.
     /// `own` is the subtree the agent and its boxes share, whose cpu.stat the per-lifecycle CPU is.
     fn throughput(
-        node: &Node,
+        node: &dyn Runtime,
         bundle: &Path,
         own: &Path,
         lifecycles: usize,
@@ -205,13 +216,70 @@ mod linux {
     }
 
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
-    fn run_true_container(node: &Node, bundle: &Path, id: &str) -> Result<(), String> {
+    fn run_true_container(node: &dyn Runtime, bundle: &Path, id: &str) -> Result<(), String> {
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
         node.create(spec(&bid, bundle))
             .map_err(|e| format!("create {id}: {e}"))?;
         let started = node.start(&bid).map_err(|e| format!("start {id}: {e}"));
         node.delete(&bid).map_err(|e| format!("delete {id}: {e}"))?;
         started
+    }
+
+    /// Inspect of one running `sleep` container, `n` times after `warmup`, each timed alone: a call
+    /// whose work (the box's record and its container's state, read) is the same through either
+    /// driver, so the drivers' difference is the socket's cost per call.
+    fn rtt(node: &dyn Runtime, bundle: &Path, n: usize, warmup: usize) -> Result<Value, String> {
+        let id = BoxId::new("rtt").map_err(|e| e.to_string())?;
+        node.create(spec(&id, bundle))
+            .map_err(|e| format!("create rtt: {e}"))?;
+        let timed = (|| -> Result<Vec<f64>, String> {
+            node.start(&id).map_err(|e| format!("start rtt: {e}"))?;
+            let mut ms = Vec::with_capacity(n);
+            for i in 0..warmup + n {
+                let t = Instant::now();
+                node.inspect(&id).map_err(|e| format!("inspect rtt: {e}"))?;
+                if i >= warmup {
+                    ms.push(t.elapsed().as_secs_f64() * 1e3);
+                }
+            }
+            Ok(ms)
+        })();
+        node.delete(&id).map_err(|e| format!("delete rtt: {e}"))?;
+        Ok(json!({ "ms": timed? }))
+    }
+
+    /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; killed when
+    /// dropped.
+    struct Agent(Child);
+
+    impl Agent {
+        fn start(hex: &str, state: &Path, box_root: &Path) -> (Self, PathBuf) {
+            let socket = state.join("node.sock");
+            let mut child = Command::new(hex)
+                .arg("node")
+                .arg("--socket")
+                .arg(&socket)
+                .arg("--state")
+                .arg(state.join("node"))
+                .arg("--box-root")
+                .arg(box_root)
+                .stdout(Std::piped())
+                .spawn()
+                .expect("start hex node");
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().expect("hex node's stdout"))
+                .read_line(&mut line)
+                .expect("hex node's ready line");
+            assert!(line.starts_with("ready "), "hex node said {line:?}");
+            (Self(child), socket)
+        }
+    }
+
+    impl Drop for Agent {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 
     pub(super) fn main() -> ExitCode {
@@ -245,43 +313,67 @@ mod linux {
             .prefix("ociseam-")
             .tempdir_in(&cache)
             .expect("a state dir");
-        let root = parent.join("hex-oci-seam");
-        let node = Node::open(&root, state.path(), state.path())
-            .unwrap_or_else(|e| {
-                panic!(
-                    "the node agent (box root {}; the oci pass runs this as root in its privileged container): {e}",
-                    root.display()
-                )
-            })
-            .with_oci_helper(PathBuf::from(hex));
+        let socket = match std::env::var("HEXBENCH_DRIVER").as_deref() {
+            Ok("socket") => true,
+            Ok("inprocess") | Err(_) => false,
+            Ok(other) => panic!("HEXBENCH_DRIVER={other:?}: inprocess or socket"),
+        };
+        let (runtime, root) = if socket {
+            ("hex-seam-socket", parent.join("hex-oci-seam-sock"))
+        } else {
+            ("hex-seam", parent.join("hex-oci-seam"))
+        };
+        // The socket driver's agent is a process of its own, as a caller that doesn't link Hex meets
+        // it; the in-process driver's is this one.
+        let (agent, node): (Option<Agent>, Box<dyn Runtime>) = if socket {
+            let (agent, path) = Agent::start(hex, state.path(), &root);
+            let client = Client::connect(&path)
+                .unwrap_or_else(|e| panic!("connecting to hex node at {}: {e}", path.display()));
+            (Some(agent), Box::new(client))
+        } else {
+            let node = Node::open(&root, state.path(), state.path())
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "the node agent (box root {}; the oci pass runs this as root in its privileged container): {e}",
+                        root.display()
+                    )
+                })
+                .with_oci_helper(PathBuf::from(hex));
+            (None, Box::new(node))
+        };
         let wanted = std::env::var("HEXBENCH_PHASES")
             .ok()
             .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| "lifecycle throughput".to_owned());
+            .unwrap_or_else(|| "lifecycle throughput rtt".to_owned());
         let (mut phases, mut errors) = (Map::new(), Map::new());
-        for phase in ["lifecycle", "throughput"] {
+        for phase in ["lifecycle", "throughput", "rtt"] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
             }
             let t0 = Instant::now();
             let r = match phase {
-                "lifecycle" => lifecycle(&node, &sleep_bundle, n, warmup),
-                _ => throughput(&node, &true_bundle, &parent, lifecycles),
+                "lifecycle" => lifecycle(node.as_ref(), &sleep_bundle, n, warmup),
+                "rtt" => rtt(node.as_ref(), &sleep_bundle, n, warmup),
+                _ => throughput(node.as_ref(), &true_bundle, &parent, lifecycles),
             };
             let note = r
                 .as_ref()
                 .err()
                 .map(|e| format!(" ERROR {e}"))
                 .unwrap_or_default();
-            println!("hex-seam {phase}: {:.0}s{note}", t0.elapsed().as_secs_f64());
+            println!(
+                "{runtime} {phase}: {:.0}s{note}",
+                t0.elapsed().as_secs_f64()
+            );
             match r {
                 Ok(v) => phases.insert(phase.to_owned(), v),
                 Err(e) => errors.insert(phase.to_owned(), Value::String(e)),
             };
         }
         drop(node);
+        drop(agent);
         let _ = std::fs::remove_dir(&root);
-        let result = json!({"runtime": "hex-seam", "n": n, "warmup": warmup,
+        let result = json!({"runtime": runtime, "n": n, "warmup": warmup,
                             "phases": phases, "errors": errors, "cgroup": parent});
         std::fs::write(out, result.to_string()).expect("writing the result");
         ExitCode::SUCCESS

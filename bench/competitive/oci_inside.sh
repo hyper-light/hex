@@ -81,11 +81,13 @@ fi
 # in for the runtime, so every call is a spawn and an exit and nothing else. Once a round, in the shuffle with
 # the runtimes, so it shares their conditions.
 mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
-# The oci class through the Runtime seam, in process (seam_oci; SEAM_OCI names its binary in /opt/bin):
-# the node agent runs in this container, as root, with its box root beside the runtimes' container
-# cgroups, so its create, start, exec and delete are compared with libcrun's in-process calls. It runs
-# once a round, in the shuffle, as the runtimes do. hex-seam's phases are lifecycle and throughput.
-SEAM=""; [ -n "${SEAM_OCI:-}" ] && [ -x "$SEAM_OCI" ] && SEAM=hex-seam
+# The oci class through the Runtime seam (seam_oci; SEAM_OCI names its binary in /opt/bin), by each of its
+# drivers: in process (hex-seam), and over the node agent's socket (hex-seam-socket: a `hex node` process
+# seam_oci starts). The node agent runs in this container, as root, with its box root beside the runtimes'
+# container cgroups, so its create, start, exec and delete are compared with libcrun's in-process calls.
+# Each driver runs once a round, in the shuffle, as the runtimes do. Their phases are lifecycle, throughput
+# and rtt (inspect of a running box, whose difference between the drivers is the socket's cost per call).
+SEAM=""; [ -n "${SEAM_OCI:-}" ] && [ -x "$SEAM_OCI" ] && SEAM="hex-seam hex-seam-socket"
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
   for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) $SEAM | shuf); do
     if [ "$rt" = standin ]; then
@@ -94,10 +96,11 @@ for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
         1 0 "$LIFECYCLES" 0 64
       continue
     fi
-    if [ "$rt" = hex-seam ]; then
-      echo "round $round: the oci class through the Runtime seam (seam_oci, in process)"
-      "$SEAM_OCI" "$OUT/ociseam.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" /opt/bin/hex /run/bundle-sleep /run/bundle-true \
-        2>&1 | tee -a "$OUT/ociseam.log" || echo "ociseam round $round exited $?"
+    if [ "$rt" = hex-seam ] || [ "$rt" = hex-seam-socket ]; then
+      if [ "$rt" = hex-seam ]; then driver=inprocess; file=ociseam; else driver=socket; file=ociseamsock; fi
+      echo "round $round: the oci class through the Runtime seam (seam_oci, $driver)"
+      HEXBENCH_DRIVER=$driver "$SEAM_OCI" "$OUT/$file.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" /opt/bin/hex \
+        /run/bundle-sleep /run/bundle-true 2>&1 | tee -a "$OUT/$file.log" || echo "$file round $round exited $?"
       continue
     fi
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done

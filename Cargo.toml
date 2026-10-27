@@ -21,6 +21,7 @@ hex-api = { path = "crates/hex-api", version = "0.1.0" }
 hex-core = { path = "crates/hex-core", version = "0.1.0" }
 hex-runtime = { path = "crates/hex-runtime", version = "0.1.0" }
 hex-node = { path = "crates/hex-node", version = "0.1.0" }
+hex-client = { path = "crates/hex-client", version = "0.1.0" }
 flate2 = "1.1.10"
 libc = "0.2.190"
 rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio"] }
