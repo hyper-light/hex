@@ -49,7 +49,7 @@ can't be reached, with what the design reaches instead.
 | create+start of `true` | 16.26 / 29.30 / 68.88 / 934.36 | crun 3.34 / 6.00 / 8.88 / 28.02 | 0.84 / 1.50 / 2.22 / 7.01 | Through the seam: decisions 1, 2, 4, 5, 6 and 8. Through the command line: A2. |
 | lifecycles/s at 1 / 8 / 32 | 52 / 325 / 1,030 | crun 87 / 1,015 / 1,038 | 348 / 4,060 / 4,152 | Through the seam: decisions 2, 3 and 5. At 32, the ceiling is open (below). |
 | CPU per lifecycle | 7.02 | crun 4.68 | 1.17 | With a network namespace per container: A4. Without one: decisions 1, 2, 3 and 5. |
-| held memory per idle container | 0.63 MiB | crun 0.39 | 0.10 MiB | A1. Decision 2 reaches crun's: 0.99x on adacachy (run `20261027T043711Z`), of record on fedora to come. |
+| held memory per idle container | 0.63 MiB | crun 0.39 | 0.10 MiB | A1. Decision 2 reaches crun's: 0.98-0.99x of record on fedora (run `20261027T061920Z`). |
 | density (per GiB held) | 1,636 | crun 2,640 | 10,560 | A1. Decision 2 reaches crun's. |
 
 **The `process` class** (ms unless stated):
@@ -221,8 +221,9 @@ keeps its fsync. The probe's measured cost already rules out the other falsifier
 - **Sharing:** a device program that keeps state per container, such as a map, which Hex's doesn't (it reads
   only its context, f28). Or a kernel that charges each attachment as much as a program, so that sharing saves
   nothing: the density phase's vmalloc and percpu rise per container would show it, and they're 0.
-- **Held memory at most crun's:** the density phase of record on fedora (plan step 4) showing Hex's held memory
-  per idle container above crun's.
+- **Held memory at most crun's:** a density phase on fedora showing Hex's held memory per idle container above
+  crun's. Of record (plan step 4, run `20261027T061920Z`, 92b3b91): 0.9849 and 0.9887 of crun's, 2 rounds of
+  1,000 (`bench/competitive/RESULT.md`, "Of record on fedora").
 
 ### 3. The fast path is the `Runtime` seam; the OCI command line stays for compatibility
 

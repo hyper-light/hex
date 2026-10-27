@@ -95,7 +95,8 @@ load) measures what those two decisions changed: **start p50 0.27 ms against cru
 fsync penalty is gone — and **held memory per idle container 0.42 MiB against crun's 0.40 (0.95x)**, down
 from 0.63, with no process left beside any idle container (`probes/oci_breakdown.sh` step 3: hex leaves only
 the workload, as crun does). Held memory was still ~20 KiB/container above crun's on that binary; plan step 2
-closed it (below), to 0.99x crun's. The of-record table refresh on the changed binary awaits fedora.
+closed it (below): 0.99x crun's on adacachy, and 0.98-0.99x of record on fedora. The OCI table's other rows
+are still the earlier binary's.
 
 **What that residual was: a device program and two pipes per container** (runtime-architecture.md, decision 2).
 
@@ -166,6 +167,26 @@ container, and Hex's held memory over crun's:
 - **Unattributed:** in `034522Z` and `043711Z`, at most 0.73% of any round's difference. In `044129Z`'s third
   round, 12.1%: 0.27 KiB per container in Hex's own readings, as some of Hex's pages went to swap during that
   round (anon -6.12 KiB, swap +6.21 against crun), which held counts either way. Every reading was quiet.
+
+**Of record on fedora** (plan step 4): the bench box, now named kiln-a094a12d.attlocal.net after a reprovision
+(Intel i9-14900HX, 32 CPUs pinned 4-31, 62 GiB, Linux 6.19.10-300.fc44). Density only, Hex and crun interleaved,
+2 rounds of 1,000 idle containers, LOAD_GATE=0: held memory doesn't depend on load, and the ratio is same-run.
+The host carried kiln CI throughout. Hex's binary is the static-glibc release build made on that host against
+Fedora's glibc-static: a static build from adacachy dies there, since CachyOS builds its glibc with AVX-512.
+
+| binary | run | load (start, end) | Hex less crun, KiB | held, Hex / crun |
+|---|---|---|---:|---:|
+| 92b3b91 (d4fd321b) | `20261027T061920Z` | 8.81, 18.05 | -5.96 / -4.44 | 0.9849 / 0.9887 |
+| 80fa5e3 (d088b7eb) | `20261027T055504Z` | 11.54, 5.22 | -4.80 / -4.82 | 0.9878 / 0.9877 |
+
+- **The parts:** vmalloc and percpu rose by 0 per Hex container, and slab by 5.4-6.5 KiB less than crun's.
+  Unattributed: 1.1% and 6.1% in the 92b3b91 run.
+- **Absolute:** Hex holds 396,853 and 397,464 bytes per idle container, against crun's 402,956 and 402,014.
+- **Nothing beside the container:** `probes/oci_breakdown.sh` step 3 on the same binary
+  (`breakdown-20261027T062402Z`) finds Hex's 5 idle containers' cgroups holding only `/usr/bin/sleep`, and no
+  Hex process anywhere.
+- **runtime-tools** on the same binary: `bench/oci-validation/SUMMARY-hex.txt` (26 against crun's 28; the two
+  differences are Hex's refusals of a mount label and an AppArmor profile it can't apply, kept by Ada's call).
 - **The earlier run.** Run `20261027T031736Z` (bench code 4cf9b28) read memory.stat without waiting for a flush.
   It left 6.8%, 18.7% and 8.7% unattributed. Each runtime's own named-entry rise there was 0.6-3.3 KiB per
   container off its held rise, because memory.stat may trail by up to 64 pages a CPU between flushes

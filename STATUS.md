@@ -16,9 +16,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **The `process` class** (`hex-runtime`, Linux): cgroup v2 resource boxes; programs start inside the
   box; pidfd waits; the io bounds target the right disks. Real-cgroup conformance + crash recovery
   pass (`hex-cli/tests/process_box.rs`).
-- **The `oci` class** (`hex-runtime`, Linux): Hex's own OCI runtime (`hex oci …`), at **crun parity
-  on opencontainers/runtime-tools** (28/58, the set crun passes on this cgroup-v2 host; AC-T7.1.4),
-  recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
+- **The `oci` class** (`hex-runtime`, Linux): Hex's own OCI runtime (`hex oci …`), passing **every
+  opencontainers/runtime-tools test crun passes on fedora but two it refuses by decision** (26/58
+  against crun's 28, 2026-10-27, 92b3b91; AC-T7.1.4): a mount label and an AppArmor profile the
+  suite's container can't apply, which crun drops (below), recorded in `bench/oci-validation/`. Each container has its own cgroup, with `linux.resources` and
   its device list in force, and is born in it. `hex oci exec` runs a program in the foreground inside a
   created or running container: born in its cgroup, in its namespaces, as its process, with the
   program's status as exec's and the caller's signals passed on, also where cgroup2 is mounted
@@ -111,8 +112,11 @@ three different things (CLAUDE.md "Working here"):
     into every container's program. One program is now shared per device policy and the pipes are
     close-on-exec; held per idle container is 0.99x crun's (run `20261027T043711Z`, adacachy,
     LOAD_GATE=0), and each change alone leaves Hex above crun (A/B run `20261027T044129Z`).
-    runtime-tools is still at crun parity and step 3 still clean. Of record on fedora (plan step 4)
-    awaits fedora. `hex oci exec` failed where cgroup2 is mounted `nsdelegate` (adacachy's 7.2 kernel):
+    runtime-tools is still at crun parity and step 3 still clean. **Of record on fedora** (plan step 4,
+    kiln-a094a12d, 92b3b91, 2026-10-27): held 0.9849 and 0.9887 of crun's (run `20261027T061920Z`, 2
+    rounds of 1,000, LOAD_GATE=0 at load 9-18: a same-run ratio), step 3 clean, and runtime-tools
+    26/28 with the two LSM refusals kept by Ada's call. The fedora run also found every seccomp
+    container running with no_new_privs set, fixed in 92b3b91. `hex oci exec` failed where cgroup2 is mounted `nsdelegate` (adacachy's 7.2 kernel):
     it joined the container's cgroup namespace before cloning into its cgroup, which the kernel refuses
     there with ENOENT; the child now joins it from inside. The OCI table of record in
     `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).

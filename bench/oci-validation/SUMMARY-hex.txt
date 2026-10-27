@@ -1,9 +1,20 @@
 # hex oci vs crun — runtime-tools validation (AC-T7.1.4)
-# host fedora.attlocal.net 6.19.10-300.fc44.x86_64, cgroup v2, SELinux enforcing; image registry.fedoraproject.org/fedora:44
-# suite opencontainers/runtime-tools bd3b0bd; run 2026-10-20 via bench/oci-validation/run_hex.sh
-# hex is Hex's own OCI runtime (hex oci ...), built from this tree.
-hex   pass=28 fail=30 skip=0
+# host kiln-a094a12d.attlocal.net (the fedora bench box, renamed by a reprovision) 6.19.10-300.fc44.x86_64,
+# cgroup v2, SELinux enforcing; image registry.fedoraproject.org/fedora:44
+# suite opencontainers/runtime-tools bd3b0bd; run 2026-10-27 via bench/oci-validation/run_hex.sh and run.sh
+# hex is Hex's own OCI runtime (hex oci ...): 92b3b91, the static-glibc release binary d4fd321b built on
+# this host; crun 1.30.1.
+hex   pass=26 fail=32 skip=0
 crun  pass=28 (reference)
-# crun-parity: hex passes every test crun passes on this host (gap = none).
+# crun-parity: hex passes every test crun passes on this host but two, by decision:
+#   linux_mount_label and linux_process_apparmor_profile. In the suite's container neither SELinux
+#   (no selinuxfs mounted there) nor AppArmor is visible, so crun runs those containers without the
+#   label and the profile (src/libcrun/utils.c, add_selinux_mount_label and set_apparmor_profile).
+#   Hex refuses a security control it can't apply (CLAUDE.md §3); Ada's call, 2026-10-27, was to keep
+#   refusing and count these two as deliberate differences. hex passes no test crun fails.
 # The ~30 shared failures are cgroup-v1 paths, apparmor/SELinux host setup and hook-timing
 # the suite assumes; crun and youki fail the same set on a cgroup-v2 host (see baseline/).
+# Before: 2026-10-20 on fedora.attlocal.net, hex pass=28 = crun pass=28, from a tree that ignored
+# linux.seccomp and the security labels. 80fa5e3 (2026-10-27) passed 16: every container with a
+# seccomp filter ran with no_new_privs set, which 92b3b91 fixed (docs/design/runtime.md, "The seccomp
+# filter and no_new_privs").
