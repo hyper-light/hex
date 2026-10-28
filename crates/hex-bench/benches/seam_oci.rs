@@ -96,11 +96,13 @@ mod linux {
     }
 
     /// The breakdown probe's markers (bench/competitive/probes/exec_breakdown.md). With
-    /// `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets each timed
-    /// start and exec in the instance's buffer, `hexbd B <op> <id>` before the call and
-    /// `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured it, and the
-    /// instance records only from one to the other: its trace is those calls and what they ran, and
-    /// nothing of create or delete. Each marker is written outside the time it brackets.
+    /// `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets the start
+    /// and exec of every other timed lifecycle in the instance's buffer, `hexbd B <op> <id>` before
+    /// the call and `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured
+    /// it, and the instance records only from one to the other: its trace is those calls and what
+    /// they ran, and nothing of create or delete. The lifecycles between run untraced in the same
+    /// process, so the traced calls are set against calls that met the host as they did. Each marker
+    /// is written outside the time it brackets.
     struct Trace {
         on: File,
         marker: File,
@@ -220,7 +222,7 @@ mod linux {
                 &format!("l{i:06}"),
                 &mut ms,
                 i >= warmup,
-                trace,
+                trace.filter(|_| i % 2 == warmup % 2),
             )?;
         }
         Ok(

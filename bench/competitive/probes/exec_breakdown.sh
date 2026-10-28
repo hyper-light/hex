@@ -29,6 +29,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to ${CPUSET:-4-31}"
   [ "${LOAD_GATE:-1}" = 0 ] && echo "load gate: skipped (LOAD_GATE=0): the comparisons are within this run"
   echo "load at start: $(cat /proc/loadavg)"
+  for r in cpu memory io; do echo "pressure at start, $r: $(head -1 "/proc/pressure/$r")"; done
   echo "hex: $("$OUT/bin/hex" --version) (sha256 $(sha256sum "$OUT/bin/hex" | cut -c1-16)), $(file -b "$OUT/bin/hex" | cut -d, -f1-4)"
   echo "seam_oci: sha256 $(sha256sum "$OUT/bin/seam_oci" | cut -c1-16)"
   echo "exec_floor: sha256 $(sha256sum "$OUT/bin/exec_floor" | cut -c1-16), $(gcc --version | head -1)"
@@ -43,5 +44,6 @@ timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpus
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e FLOOR_N -e FLOOR_WARMUP \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/exec_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
-echo "load at end: $(cat /proc/loadavg)" >> "$OUT/env.txt"
+{ echo "load at end: $(cat /proc/loadavg)"
+  for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done; } >> "$OUT/env.txt"
 echo "results: $OUT"

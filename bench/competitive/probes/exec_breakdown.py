@@ -345,6 +345,18 @@ def lifecycle_ms(path, op):
     return r.get("errors") or {}, r.get("phases", {}).get("lifecycle", {}).get("ms", {}).get(op, [])
 
 
+def split_by_trace(path, op, traced_ids):
+    """A traced seam_oci run's timed `op` samples (ms), as (traced, untraced): its k-th timed lifecycle is
+    l<warmup + k>, and the trace's markers name the ones it traced (every other one)."""
+    with open(path) as f:
+        r = json.load(f)
+    ms = r.get("phases", {}).get("lifecycle", {}).get("ms", {}).get(op, [])
+    w = r["warmup"]
+    traced = [x for k, x in enumerate(ms) if f"l{w + k:06}" in traced_ids]
+    untraced = [x for k, x in enumerate(ms) if f"l{w + k:06}" not in traced_ids]
+    return traced, untraced
+
+
 def floor_ms(path):
     with open(path) as f:
         r = json.load(f)
@@ -368,8 +380,9 @@ def check(run, prefix):
                 if "missing" in c:
                     bad.append(f"{kind}: {c['op']} {c['id']} lacks {c['missing']}")
             for op in OPS:
-                if sum(c["op"] == op for c in got) != timed:
-                    bad.append(f"{kind}: {sum(c['op'] == op for c in got)} {op} calls traced, {timed} timed")
+                # seam_oci traces every other timed lifecycle, the first of them included.
+                if sum(c["op"] == op for c in got) != (timed + 1) // 2:
+                    bad.append(f"{kind}: {sum(c['op'] == op for c in got)} {op} calls traced of {timed} timed")
             print(f"check {prefix}.{kind}: {sum('parts' in c for c in got)} of {len(got)} traced calls cut whole, "
                   f"{unread} trace lines not read as events")
     r, modes = floor_ms(os.path.join(run, f"{prefix}.floor.json"))
@@ -398,33 +411,56 @@ def summarize(run):
     lines = [f"# exec breakdown: {os.path.basename(run.rstrip('/'))}", ""]
     with open(os.path.join(run, "env.txt")) as f:
         lines += ["```", f.read().rstrip(), "```", ""]
-    # libcrun's exec, and the seam's measured start and exec, per round and best of N (lowest p50).
+
+    # The traced rounds' calls, cut into their parts; their ids split each traced run's samples in two.
+    traced = {}
+    for rnd, path in rounds(run, "traced").items():
+        got, unread = calls(path[:-len(".json")] + ".txt")
+        traced[rnd] = {"calls": got, "unread": unread, "lost": lost(path[:-len(".json")] + ".stats"),
+                       "ids": {op: {c["id"] for c in got if c["op"] == op} for op in OPS}}
+
+    # Each round's p50s: libcrun's, the seam's, and the traced run's calls with the tracer recording and not.
+    rows = {}
+    for op in ("start", "exec"):
+        for kind in ("libcrun", "seam"):
+            rows[(kind, op)] = {r: lifecycle_ms(p, op) for r, p in rounds(run, kind).items()}
+        rows[("traced: recording", op)], rows[("traced: between", op)] = {}, {}
+        for rnd, path in rounds(run, "traced").items():
+            errs = lifecycle_ms(path, op)[0]
+            on, off = split_by_trace(path, op, traced[rnd]["ids"][op])
+            rows[("traced: recording", op)][rnd] = (errs, on)
+            rows[("traced: between", op)][rnd] = (errs, off)
     lat = {}
-    for kind in ("libcrun", "seam", "traced"):
-        for op in ("start", "exec"):
-            per = {}
-            for rnd, path in rounds(run, kind).items():
-                errs, ms = lifecycle_ms(path, op)
-                per[rnd] = {"errors": errs, **dist(ms)}
-            ok = {r: d for r, d in per.items() if not d["errors"] and d["n"]}
-            best = min(ok, key=lambda r: ok[r]["p50"]) if ok else None
-            lat[(kind, op)] = {"rounds": per, "best_round": best, "best": ok.get(best)}
+    for key, per in rows.items():
+        d = {r: {"errors": e, **dist(ms)} for r, (e, ms) in per.items()}
+        ok = {r: x for r, x in d.items() if not x["errors"] and x["n"]}
+        best = min(ok, key=lambda r: ok[r]["p50"]) if ok else None
+        lat[key] = {"rounds": d, "best_round": best, "best": ok.get(best)}
     s["latency_ms"] = {f"{k}.{op}": v for (k, op), v in lat.items()}
     nums = sorted({r for v in lat.values() for r in v["rounds"]})
-    lines += ["## Measured p50 (ms), per round", "", "| | " + " | ".join(f"r{r}" for r in nums) + " | best |",
-              "|---|" + "---|" * (len(nums) + 1)]
+    lines += ["## Measured p50 (ms), per round", "",
+              "`traced: recording` is the traced run's calls the tracer recorded, every other one; `traced: "
+              "between` the calls between them, in the same process with the tracer's events armed.", "",
+              "| | " + " | ".join(f"r{r}" for r in nums) + " | best |", "|---|" + "---|" * (len(nums) + 1)]
     for (kind, op), v in lat.items():
         row = [ms3(v["rounds"][r]["p50"]) if r in v["rounds"] else "n/a" for r in nums]
         lines.append(f"| {kind} {op} | " + " | ".join(row) + f" | {ms3((v['best'] or {}).get('p50'))} |")
     lines.append("")
 
-    # The floor under exec, against a quarter of libcrun's exec p50 in this run.
-    floors = {}
+    # The floor under exec, against a quarter of libcrun's exec p50: in each round, where the two ran back to
+    # back, and best of the rounds.
+    floors, pairs = {}, {}
     for rnd, path in rounds(run, "floor").items():
         r, modes = floor_ms(path)
         floors[rnd] = {"joined": r["joined"], "load_start": r["load_start"], "load_end": r["load_end"],
                        **{m: dist(v) for m, v in modes.items()}}
+        lc_r = lat[("libcrun", "exec")]["rounds"].get(rnd)
+        if lc_r and lc_r["p50"]:
+            pairs[rnd] = {"libcrun_exec_p50": lc_r["p50"], "target": lc_r["p50"] / 4,
+                          "floor_p50": floors[rnd]["floor"]["p50"],
+                          "floor_over_target": floors[rnd]["floor"]["p50"] / (lc_r["p50"] / 4)}
     s["floor_ms"] = floors
+    s["floor_against_target_by_round"] = pairs
     lc = lat[("libcrun", "exec")]["best"]
     target = lc["p50"] / 4 if lc else None
     best_floor = min((f["floor"]["p50"] for f in floors.values()), default=None)
@@ -432,47 +468,47 @@ def summarize(run):
     s["target_ms"] = target
     s["floor_best_p50_ms"] = best_floor
     s["floor_above_target"] = None if target is None or best_floor is None else best_floor > target
-    lines += ["## The floor under exec (ms; exec_floor.c, interleaved cycle by cycle)", "",
+    lines += ["## The floor under exec (ms; exec_floor.c, its modes interleaved cycle by cycle)", "",
               "| round | mode | n | p50 | p99 | max | load at start, end |", "|---|---|---|---|---|---|---|"]
     for rnd, f in sorted(floors.items()):
         for m in ("spawn", "clone", "cgroup", "floor"):
             d = f[m]
             lines.append(f"| r{rnd} | {m} | {d['n']} | {ms3(d['p50'])} | {ms3(d['p99'])} | {ms3(d['max'])} | "
                          f"{f['load_start'].split(' ')[0]}, {f['load_end'].split(' ')[0]} |")
+    lines += ["", "| round | libcrun's exec p50 | a quarter of it (the target) | the floor's p50 | the floor over the "
+              "target |", "|---|---|---|---|---|"]
+    for rnd, p in sorted(pairs.items()):
+        lines.append(f"| r{rnd} | {p['libcrun_exec_p50']:.3f} | {p['target']:.3f} | {p['floor_p50']:.3f} | "
+                     f"{p['floor_over_target']:.2f} |")
     n_lc = sum(1 for d in lat[("libcrun", "exec")]["rounds"].values() if d["n"])
-    lines += ["", f"libcrun's exec p50, best of {n_lc} rounds: {ms3(lc and lc['p50'])} ms, so goal 3's exec target "
-              f"(a quarter of it) is {ms3(target)} ms. The floor's best p50: {ms3(best_floor)} ms, "
-              f"{'above' if s['floor_above_target'] else 'under'} the target"
-              + (f" ({best_floor / target:.2f}x it)." if target and best_floor else "."), ""]
+    lines += ["", f"Best of {n_lc} rounds: libcrun's exec p50 {ms3(lc and lc['p50'])} ms, so goal 3's exec target is "
+              f"{ms3(target)} ms; the floor's p50 {ms3(best_floor)} ms, {'above' if s['floor_above_target'] else 'under'} "
+              f"the target" + (f" ({best_floor / target:.2f}x it)." if target and best_floor else "."), ""]
 
-    # The traced calls, cut into their parts, every traced round pooled.
-    traces = sorted(glob.glob(os.path.join(run, "traced.r*.txt")))
-    got, unread, n_lost = [], 0, 0
-    for t in traces:
-        c, u = calls(t)
-        got += c
-        unread += u
-        n_lost += lost(t[:-len(".txt")] + ".stats")
-    s["trace"] = {"files": [os.path.basename(t) for t in traces], "lost_events": n_lost, "unread_lines": unread}
+    # Each op's parts, every traced round pooled, set against the calls between them (the same process, the same
+    # moments) and against the untraced seam rounds.
+    s["trace"] = {f"r{r}": {"lost_events": t["lost"], "unread_lines": t["unread"]} for r, t in traced.items()}
     for op, (spec, _) in OPS.items():
-        whole = [c for c in got if c["op"] == op and "parts" in c]
+        got = [c for t in traced.values() for c in t["calls"] if c["op"] == op]
+        whole = [c for c in got if "parts" in c]
         missing = {}
         for c in got:
-            if c["op"] == op and "missing" in c:
+            if "missing" in c:
                 missing[c["missing"]] = missing.get(c["missing"], 0) + 1
         parts = [dist([c["parts"][k] / 1000 for c in whole]) for k in range(len(spec))]
         span = dist([c["span"] / 1000 for c in whole])
-        measured = dist([c["measured"] / 1000 for c in whole])
-        untraced = dist([x for path in rounds(run, "seam").values() for x in lifecycle_ms(path, op)[1]])
+        recording = dist([x for r in lat[("traced: recording", op)]["rounds"] for x in rows[("traced: recording", op)][r][1]])
+        between = dist([x for r in lat[("traced: between", op)]["rounds"] for x in rows[("traced: between", op)][r][1]])
+        seam = dist([x for r in rows[("seam", op)] for x in rows[("seam", op)][r][1]])
         sum_p50 = sum(p["p50"] for p in parts) if whole else None
         groups = {}
         for (_, group), p in zip(spec, parts):
             g = groups.setdefault(group, {"p50": 0.0, "mean": 0.0})
             g["p50"] += p["p50"] or 0
             g["mean"] += p["mean"] or 0
-        rec = {"calls": len(whole), "missing": missing, "parts": [{"part": n, "group": g, **p} for (n, g), p in
-                                                                   zip(spec, parts)],
-               "groups": groups, "span_ms": span, "measured_traced_ms": measured, "measured_untraced_ms": untraced,
+        rec = {"calls": len(whole), "missing": missing,
+               "parts": [{"part": n, "group": g, **p} for (n, g), p in zip(spec, parts)], "groups": groups,
+               "span_ms": span, "recording_ms": recording, "between_ms": between, "seam_rounds_ms": seam,
                "sum_of_part_p50s_ms": sum_p50}
         lines += [f"## {op} through the seam, in parts ({len(whole)} traced calls"
                   + (f"; {sum(missing.values())} not cut: {missing}" if missing else "") + ")", "",
@@ -482,18 +518,21 @@ def summarize(run):
         lines += ["", "| group | its parts' p50s, summed | their means, summed |", "|---|---|---|"]
         for group, g in groups.items():
             lines.append(f"| {group} | {g['p50']:.3f} | {g['mean']:.3f} |")
-        if whole and measured["p50"] and untraced["p50"]:
-            rec["sum_over_measured_traced"] = sum_p50 / measured["p50"]
-            rec["sum_over_measured_untraced"] = sum_p50 / untraced["p50"]
-            rec["traced_over_untraced"] = measured["p50"] / untraced["p50"]
+        if whole and recording["p50"] and between["p50"] and seam["p50"]:
+            rec["sum_over_between"] = sum_p50 / between["p50"]
+            rec["sum_over_recording"] = sum_p50 / recording["p50"]
+            rec["sum_over_seam_rounds"] = sum_p50 / seam["p50"]
+            rec["recording_over_between"] = recording["p50"] / between["p50"]
             lines += ["", f"The parts' p50s sum to {sum_p50:.3f} ms, and their means to "
                       f"{sum(p['mean'] for p in parts):.3f} ms, the calls' mean span from marker to marker "
-                      f"({span['mean']:.3f} ms). seam_oci measured these calls at p50 {measured['p50']:.3f} ms: the "
-                      f"sum is {rec['sum_over_measured_traced']:.3f} of it. The untraced rounds' {op}, pooled, is p50 "
-                      f"{untraced['p50']:.3f} ms: the sum is {rec['sum_over_measured_untraced']:.3f} of it, and the "
-                      f"tracer cost the traced calls {rec['traced_over_untraced']:.3f}x at p50.", ""]
+                      f"({span['mean']:.3f} ms). Against the calls between the traced ones, p50 {between['p50']:.3f} ms, "
+                      f"the sum is {rec['sum_over_between']:.3f}; against the traced calls as seam_oci timed them, p50 "
+                      f"{recording['p50']:.3f} ms, {rec['sum_over_recording']:.3f}; against the untraced seam rounds, "
+                      f"p50 {seam['p50']:.3f} ms pooled, {rec['sum_over_seam_rounds']:.3f}. Recording cost the traced "
+                      f"calls {rec['recording_over_between']:.3f}x at p50.", ""]
         s[f"{op}_parts"] = rec
-    lines += [f"Trace: {len(traces)} files, {n_lost} events lost, {unread} lines not read as events.", ""]
+    lines += ["Trace: " + ", ".join(f"r{r} {t['lost']} events lost and {t['unread']} lines not read as events"
+                                    for r, t in sorted(traced.items())) + ".", ""]
     with open(os.path.join(run, "summary.json"), "w") as f:
         json.dump(s, f, indent=1)
     print("\n".join(lines))

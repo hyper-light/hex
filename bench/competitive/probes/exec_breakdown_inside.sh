@@ -3,11 +3,12 @@
 # inside the bench container (exec_breakdown.sh starts it with host.sh's OCI-pass flags). After a probe of each,
 # ROUNDS rounds, each running these in a shuffled order, so drift over the run favours none:
 #   libcrun  oci_bench.py's lifecycle phase on libcrun in process: the exec p50 goal 3's target is a quarter of;
+#   floor    exec_floor.c against a running `sleep` container crun made from the same bundle, right before or
+#            after libcrun's, so the two meet the same host;
 #   seam     seam_oci's lifecycle phase, the oci class through the seam in process: its measured p50s;
 #   traced   the same with the breakdown's tracer on (seam_oci's HEXBENCH_TRACE): an ftrace instance of this
-#            run's own records each timed start and exec between seam_oci's markers, and what they ran, cut
-#            into parts by exec_breakdown.py;
-#   floor    exec_floor.c against a running `sleep` container crun made from the same bundle.
+#            run's own records every other timed start and exec between seam_oci's markers, and what they ran,
+#            cut into parts by exec_breakdown.py; the calls between are its untraced twins.
 # Then exec_breakdown.py writes summary.md and summary.json. A round's item that fails is logged and skipped
 # (the summary names what's missing); a probe that fails ends the run before any round. The probes include a
 # detailed trace, which adds each open's entry with its path, so exec_breakdown.py can hold the rounds' cuts to
@@ -131,19 +132,30 @@ python3 -I /opt/lab/probes/exec_breakdown.py check "$OUT" probe >> "$OUT/probe.l
   || { echo "refusing: the probes' results don't read whole ($OUT/probe.log)" >&2; exit 5; }
 echo "probes ok"
 
+# What the host is doing as each item starts: its load, and the share of the last 10 s in which some task was
+# stalled on CPU, memory or I/O (/proc/pressure, the kernel's PSI), so a round that met a different host shows.
+host_now() {
+  echo "load $(cut -d' ' -f1-3 /proc/loadavg); stalled cpu/memory/io $(for r in cpu memory io; do
+    sed -n 's/^some avg10=\([0-9.]*\).*/\1/p' "/proc/pressure/$r"; done | paste -sd/)%"
+}
+# libcrun's exec and the floor run back to back, in either order, so the floor is set against the libcrun exec
+# that met the same host.
 for round in $(seq 1 "$ROUNDS"); do
-  for item in $(printf '%s\n' libcrun seam traced floor | shuf); do
-    echo "round $round: $item (load $(cut -d' ' -f1-3 /proc/loadavg))"
-    case $item in
-      libcrun) HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun "$OUT/libcrun.r$round.json" "$N" "$WARMUP" \
-                 0 0 64 >> "$OUT/libcrun.log" 2>&1 ;;
-      seam) HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
-              /run/bundle-sleep /run/bundle-true >> "$OUT/seam.log" 2>&1 ;;
-      traced) traced "traced.r$round" "$N" "$WARMUP" ;;
-      floor) floor "floor.r$round" "$FLOOR_N" "$FLOOR_WARMUP" ;;
-    esac || echo "round $round: $item FAILED"
+  for item in $(printf '%s\n' pair seam traced | shuf); do
+    [ "$item" = pair ] && item=$(printf '%s\n' libcrun floor | shuf | paste -sd' ')
+    for one in $item; do
+      echo "round $round: $one ($(host_now))"
+      case $one in
+        libcrun) HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun "$OUT/libcrun.r$round.json" "$N" \
+                   "$WARMUP" 0 0 64 >> "$OUT/libcrun.log" 2>&1 ;;
+        seam) HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
+                /run/bundle-sleep /run/bundle-true >> "$OUT/seam.log" 2>&1 ;;
+        traced) traced "traced.r$round" "$N" "$WARMUP" ;;
+        floor) floor "floor.r$round" "$FLOOR_N" "$FLOOR_WARMUP" ;;
+      esac || echo "round $round: $one FAILED"
+    done
   done
 done
-echo "load at end (inside): $(cat /proc/loadavg)" >> "$OUT/env.txt"
+echo "at the end (inside): $(host_now)" >> "$OUT/env.txt"
 python3 -I /opt/lab/probes/exec_breakdown.py summarize "$OUT" > "$OUT/summary.md" || echo "summarize FAILED"
 echo done > "$OUT/inside.done"
