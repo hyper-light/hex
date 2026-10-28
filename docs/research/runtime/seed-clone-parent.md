@@ -30,6 +30,17 @@ handed its pidfd at once — no intermediate, no reparenting, no race. The progr
 namespaces itself (user first, mount last, cgroup last, as `hex __oci-exec`'s child does), becomes the container's
 process and execs.
 
+- `MEASURED` (cachyos 7.2.9, `~/.cache/hex-t7/seed-spike/singleclone.c`, run as root): the whole composition
+  together — a seed `setns(CLONE_NEWPID)` into a container pid namespace, then `clone3(CLONE_PARENT | CLONE_PIDFD |
+  CLONE_INTO_CGROUP, exit_signal = 0)` — is accepted (no `EINVAL`), and the program lands exactly where the design
+  needs it: `NSpid: <host> 2` (pid 2 in the container's namespace, init is 1), `cgroup = 0::/sc-spike` (the target
+  leaf), and the **agent** — the seed's parent, in the host pid namespace — reaps it by `waitid(P_PIDFD)` (CLD_EXITED)
+  across the namespace boundary, so `CLONE_PARENT` reparented it there. A child can be at once reparented to an
+  ancestor-namespace parent and born in a descendant pid namespace and a target cgroup; the kernel does not reject
+  that combination. (`exitsig.c` had shown `CLONE_PARENT | CLONE_PIDFD | CLONE_INTO_CGROUP` with `exit_signal = 0`
+  without the `setns`; `spike.c` had done the `setns` with the wrong `exit_signal = SIGCHLD`, so the combined call had
+  not been exercised until this.)
+
 ## The rootless fallback needs an intermediate
 
 Setting the children's pid namespace is the one step a privileged seed can take that a rootless one cannot.
