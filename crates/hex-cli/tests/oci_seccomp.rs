@@ -180,15 +180,18 @@ fn build_bundle(
     for d in ["proc", "dev", "tmp", "usr"] {
         std::fs::create_dir_all(rootfs.join(d))?;
     }
-    // usr-merge: mirror the host's top-level symlinks so /bin/sh and the loader resolve into /usr.
-    for (link, target) in [
-        ("bin", "usr/bin"),
-        ("sbin", "usr/bin"),
-        ("lib", "usr/lib"),
-        ("lib64", "usr/lib"),
-    ] {
+    // usr-merge: mirror the host's own top-level links, so /bin/sh and the program's loader resolve
+    // into the bound /usr as they do on the host. They differ by distribution: Arch links lib64 to
+    // usr/lib and sbin to usr/bin, Fedora lib64 to usr/lib64 (its loader is there alone) and sbin to
+    // usr/sbin. A host whose top level isn't linked into /usr can't run this rootfs of /usr alone.
+    for link in ["bin", "sbin", "lib", "lib64"] {
         let at = rootfs.join(link);
         if !at.exists() {
+            let target = std::fs::read_link(Path::new("/").join(link)).map_err(|e| {
+                std::io::Error::other(format!(
+                    "the host's /{link} isn't a link into /usr ({e}), so a rootfs of /usr alone can't run its programs"
+                ))
+            })?;
             std::os::unix::fs::symlink(target, at)?;
         }
     }
