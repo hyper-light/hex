@@ -485,45 +485,75 @@ def summarize(run):
               f"{ms3(target)} ms; the floor's p50 {ms3(best_floor)} ms, {'above' if s['floor_above_target'] else 'under'} "
               f"the target" + (f" ({best_floor / target:.2f}x it)." if target and best_floor else "."), ""]
 
-    # Each op's parts, every traced round pooled, set against the calls between them (the same process, the same
-    # moments) and against the untraced seam rounds.
+    # Each op's parts, by traced round and every round pooled. Each round's sum is set against the calls between
+    # its traced ones (its own process and moments) and against its traced calls as seam_oci timed them; the
+    # pooled sum against those pooled and against the untraced seam rounds.
     s["trace"] = {f"r{r}": {"lost_events": t["lost"], "unread_lines": t["unread"]} for r, t in traced.items()}
+    rnds = sorted(traced)
     for op, (spec, _) in OPS.items():
-        got = [c for t in traced.values() for c in t["calls"] if c["op"] == op]
+        by_round = {r: [c for c in traced[r]["calls"] if c["op"] == op] for r in rnds}
+        got = [c for r in rnds for c in by_round[r]]
         whole = [c for c in got if "parts" in c]
         missing = {}
         for c in got:
             if "missing" in c:
                 missing[c["missing"]] = missing.get(c["missing"], 0) + 1
         parts = [dist([c["parts"][k] / 1000 for c in whole]) for k in range(len(spec))]
+        parts_r = {r: [dist([c["parts"][k] / 1000 for c in by_round[r] if "parts" in c]) for k in range(len(spec))]
+                   for r in rnds}
         span = dist([c["span"] / 1000 for c in whole])
-        recording = dist([x for r in lat[("traced: recording", op)]["rounds"] for x in rows[("traced: recording", op)][r][1]])
-        between = dist([x for r in lat[("traced: between", op)]["rounds"] for x in rows[("traced: between", op)][r][1]])
+        recording = dist([x for r in rnds for x in rows[("traced: recording", op)][r][1]])
+        between = dist([x for r in rnds for x in rows[("traced: between", op)][r][1]])
         seam = dist([x for r in rows[("seam", op)] for x in rows[("seam", op)][r][1]])
         sum_p50 = sum(p["p50"] for p in parts) if whole else None
         groups = {}
-        for (_, group), p in zip(spec, parts):
-            g = groups.setdefault(group, {"p50": 0.0, "mean": 0.0})
-            g["p50"] += p["p50"] or 0
-            g["mean"] += p["mean"] or 0
-        rec = {"calls": len(whole), "missing": missing,
-               "parts": [{"part": n, "group": g, **p} for (n, g), p in zip(spec, parts)], "groups": groups,
-               "span_ms": span, "recording_ms": recording, "between_ms": between, "seam_rounds_ms": seam,
-               "sum_of_part_p50s_ms": sum_p50}
+        for k, (_, group) in enumerate(spec):
+            g = groups.setdefault(group, {"rounds": {r: 0.0 for r in rnds}, "p50": 0.0, "mean": 0.0})
+            for r in rnds:
+                g["rounds"][r] += parts_r[r][k]["p50"] or 0
+            g["p50"] += parts[k]["p50"] or 0
+            g["mean"] += parts[k]["mean"] or 0
+        per_round = {}
+        for r in rnds:
+            sp = sum(p["p50"] for p in parts_r[r]) if all(p["n"] for p in parts_r[r]) else None
+            btw = dist(rows[("traced: between", op)][r][1])["p50"]
+            rcd = dist(rows[("traced: recording", op)][r][1])["p50"]
+            per_round[r] = {"sum_of_part_p50s": sp, "between_p50": btw, "recording_p50": rcd,
+                            "sum_over_between": sp / btw if sp and btw else None,
+                            "sum_over_recording": sp / rcd if sp and rcd else None,
+                            "recording_over_between": rcd / btw if rcd and btw else None}
+        rec = {"calls": len(whole), "missing": missing, "by_round": per_round,
+               "parts": [{"part": n, "group": g, "rounds_p50": {r: parts_r[r][k]["p50"] for r in rnds}, **parts[k]}
+                         for k, (n, g) in enumerate(spec)],
+               "groups": groups, "span_ms": span, "recording_ms": recording, "between_ms": between,
+               "seam_rounds_ms": seam, "sum_of_part_p50s_ms": sum_p50}
+        cols = " | ".join(f"r{r} p50" for r in rnds)
         lines += [f"## {op} through the seam, in parts ({len(whole)} traced calls"
                   + (f"; {sum(missing.values())} not cut: {missing}" if missing else "") + ")", "",
-                  "| part | group | p50 | p99 | mean |", "|---|---|---|---|---|"]
-        for (name, group), p in zip(spec, parts):
-            lines.append(f"| {name} | {group} | {ms3(p['p50'])} | {ms3(p['p99'])} | {ms3(p['mean'])} |")
-        lines += ["", "| group | its parts' p50s, summed | their means, summed |", "|---|---|---|"]
+                  f"| part | group | {cols} | pooled p50 | pooled p99 | pooled mean |",
+                  "|---|---|" + "---|" * (len(rnds) + 3)]
+        for k, (name, group) in enumerate(spec):
+            row = " | ".join(ms3(parts_r[r][k]["p50"]) for r in rnds)
+            lines.append(f"| {name} | {group} | {row} | {ms3(parts[k]['p50'])} | {ms3(parts[k]['p99'])} | "
+                         f"{ms3(parts[k]['mean'])} |")
+        lines += ["", f"| group, its parts' p50s summed | {' | '.join(f'r{r}' for r in rnds)} | pooled | pooled means |",
+                  "|---|" + "---|" * (len(rnds) + 2)]
         for group, g in groups.items():
-            lines.append(f"| {group} | {g['p50']:.3f} | {g['mean']:.3f} |")
+            lines.append(f"| {group} | " + " | ".join(f"{g['rounds'][r]:.3f}" for r in rnds)
+                         + f" | {g['p50']:.3f} | {g['mean']:.3f} |")
+        lines += ["", "| round | the parts' p50s, summed | the calls between, p50 | the sum over it | the traced calls "
+                  "as timed, p50 | the sum over it | recording's cost |", "|---|---|---|---|---|---|---|"]
+        for r in rnds:
+            p = per_round[r]
+            lines.append(f"| r{r} | {ms3(p['sum_of_part_p50s'])} | {ms3(p['between_p50'])} | "
+                         f"{ms3(p['sum_over_between'])} | {ms3(p['recording_p50'])} | {ms3(p['sum_over_recording'])} | "
+                         f"{ms3(p['recording_over_between'])}x |")
         if whole and recording["p50"] and between["p50"] and seam["p50"]:
             rec["sum_over_between"] = sum_p50 / between["p50"]
             rec["sum_over_recording"] = sum_p50 / recording["p50"]
             rec["sum_over_seam_rounds"] = sum_p50 / seam["p50"]
             rec["recording_over_between"] = recording["p50"] / between["p50"]
-            lines += ["", f"The parts' p50s sum to {sum_p50:.3f} ms, and their means to "
+            lines += ["", f"Pooled, the parts' p50s sum to {sum_p50:.3f} ms, and their means to "
                       f"{sum(p['mean'] for p in parts):.3f} ms, the calls' mean span from marker to marker "
                       f"({span['mean']:.3f} ms). Against the calls between the traced ones, p50 {between['p50']:.3f} ms, "
                       f"the sum is {rec['sum_over_between']:.3f}; against the traced calls as seam_oci timed them, p50 "
