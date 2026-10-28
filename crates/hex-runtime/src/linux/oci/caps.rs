@@ -5,7 +5,7 @@
 use rustix::thread::{CapabilitySet, CapabilitySets};
 
 use crate::linux::oci::spec::Capabilities;
-use crate::linux::oci::{OciError, sys};
+use crate::linux::oci::{Failure, OciError, sys};
 
 /// The highest capability number this maps (`CAP_CHECKPOINT_RESTORE`); the kernel may define more,
 /// which Hex treats as unknown names.
@@ -74,36 +74,54 @@ fn has(names: &[String], bit: u32) -> bool {
     names.iter().filter_map(|n| cap_bit(n)).any(|b| b == bit)
 }
 
-/// Reduces the bounding set to `caps.bounding` (drops every other capability). This runs while the
-/// process still has `CAP_SETPCAP` in its effective set — before any uid change, which would clear
-/// the effective set and make `PR_CAPBSET_DROP` fail.
-pub fn drop_bounding(caps: &Capabilities) -> Result<(), OciError> {
-    for bit in 0..=LAST_CAP {
-        if !has(&caps.bounding, bit) {
-            sys::capbset_drop(bit)?;
-        }
-    }
-    Ok(())
+/// A process's capability sets made ready before it changes its user: the bounding set's capabilities to
+/// drop, the effective, permitted and inheritable sets, and the ambient capabilities to raise, all by
+/// number, so applying them makes system calls alone ([`crate::linux::oci::init::Becoming`]).
+#[derive(Debug, Clone)]
+pub struct Ready {
+    drop: Vec<u32>,
+    sets: CapabilitySets,
+    ambient: Vec<u32>,
 }
 
-/// Sets the effective/permitted/inheritable sets exactly, then clears and raises the ambient set.
-/// This runs after the uid change (with `PR_SET_KEEPCAPS` having preserved the permitted set), so
-/// the dropped user still holds the capabilities the spec grants. Ambient is last: a capability
-/// must be permitted and inheritable before it can be ambient.
-pub fn set_process(caps: &Capabilities) -> Result<(), OciError> {
-    let sets = CapabilitySets {
-        effective: set_of(&caps.effective),
-        permitted: set_of(&caps.permitted),
-        inheritable: set_of(&caps.inheritable),
-    };
-    rustix::thread::set_capabilities(None, sets).map_err(|e| OciError::os("capset", e))?;
-    sys::ambient_clear()?;
-    for name in &caps.ambient {
-        if let Some(bit) = cap_bit(name) {
-            sys::ambient_raise(bit)?;
-        }
+/// `caps` made ready.
+pub fn ready(caps: &Capabilities) -> Ready {
+    Ready {
+        drop: (0..=LAST_CAP)
+            .filter(|bit| !has(&caps.bounding, *bit))
+            .collect(),
+        sets: CapabilitySets {
+            effective: set_of(&caps.effective),
+            permitted: set_of(&caps.permitted),
+            inheritable: set_of(&caps.inheritable),
+        },
+        ambient: caps.ambient.iter().filter_map(|n| cap_bit(n)).collect(),
     }
-    Ok(())
+}
+
+impl Ready {
+    /// Reduces the bounding set to the spec's (drops every other capability). This runs while the
+    /// process still has `CAP_SETPCAP` in its effective set — before any uid change, which would clear
+    /// the effective set and make `PR_CAPBSET_DROP` fail.
+    pub fn drop_bounding(&self) -> Result<(), Failure> {
+        for bit in &self.drop {
+            sys::capbset_drop(*bit).map_err(Failure::of("PR_CAPBSET_DROP"))?;
+        }
+        Ok(())
+    }
+
+    /// Sets the effective/permitted/inheritable sets exactly, then clears and raises the ambient set.
+    /// This runs after the uid change (with `PR_SET_KEEPCAPS` having preserved the permitted set), so
+    /// the dropped user still holds the capabilities the spec grants. Ambient is last: a capability
+    /// must be permitted and inheritable before it can be ambient.
+    pub fn set_process(&self) -> Result<(), Failure> {
+        rustix::thread::set_capabilities(None, self.sets).map_err(Failure::of("capset"))?;
+        sys::ambient_clear().map_err(Failure::of("PR_CAP_AMBIENT_CLEAR_ALL"))?;
+        for bit in &self.ambient {
+            sys::ambient_raise(*bit).map_err(Failure::of("PR_CAP_AMBIENT_RAISE"))?;
+        }
+        Ok(())
+    }
 }
 
 /// The rustix resource for an OCI `RLIMIT_*` name.

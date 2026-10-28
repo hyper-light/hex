@@ -57,6 +57,29 @@ impl OciError {
     }
 }
 
+/// A system call that failed while a process became the container's: the step and its errno, as plain data.
+/// The child of a vfork-style clone shares its parent's memory and may allocate nothing, not even to say
+/// why it failed, so the steps a clone's child takes return this, and a caller that may allocate turns it
+/// into an [`OciError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure {
+    pub what: &'static str,
+    pub errno: rustix::io::Errno,
+}
+
+impl Failure {
+    /// A closure that names `what` failed with the errno it is given.
+    pub fn of(what: &'static str) -> impl Fn(rustix::io::Errno) -> Self {
+        move |errno| Self { what, errno }
+    }
+}
+
+impl From<Failure> for OciError {
+    fn from(f: Failure) -> Self {
+        OciError::os(f.what, f.errno)
+    }
+}
+
 impl From<OciError> for Refusal {
     fn from(e: OciError) -> Refusal {
         match e {

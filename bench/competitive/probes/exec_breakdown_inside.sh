@@ -13,7 +13,7 @@
 # (the summary names what's missing); a probe that fails ends the run before any round. The probes include a
 # detailed trace, which adds each open's entry with its path, so exec_breakdown.py can hold the rounds' cuts to
 # the files they stand for.
-# Env: N (1000), WARMUP (100), ROUNDS (2), FLOOR_N (1000), FLOOR_WARMUP (100).
+# Env: N (1000), WARMUP (100), ROUNDS (2), FLOOR_N (1000), FLOOR_WARMUP (100), CHECK (1).
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-2}; FLOOR_N=${FLOOR_N:-1000}; FLOOR_WARMUP=${FLOOR_WARMUP:-100}
 OUT=/opt/out; mkdir -p /run/err
@@ -128,7 +128,9 @@ traced probe.traced 3 1 >> "$OUT/probe.log" 2>&1 || { echo "refusing: the traced
 traced probe.detail 20 1 detail >> "$OUT/probe.log" 2>&1 \
   || { echo "refusing: the detailed traced probe failed ($OUT/probe.log)" >&2; exit 5; }
 floor probe.floor 5 1 >> "$OUT/probe.log" 2>&1 || { echo "refusing: the floor's probe failed ($OUT/floor.log)" >&2; exit 5; }
-python3 -I /opt/lab/probes/exec_breakdown.py check "$OUT" probe >> "$OUT/probe.log" 2>&1 \
+# CHECK=0 skips holding the traced probes to exec_breakdown.py's cuts, which name the `hex __oci-exec` helper's
+# path: a seam that execs through a seed (goal 3 plan step 2) is traced raw, its timeline read from the trace.
+[ "${CHECK:-1}" = 0 ] || python3 -I /opt/lab/probes/exec_breakdown.py check "$OUT" probe >> "$OUT/probe.log" 2>&1 \
   || { echo "refusing: the probes' results don't read whole ($OUT/probe.log)" >&2; exit 5; }
 echo "probes ok"
 

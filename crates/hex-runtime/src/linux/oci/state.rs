@@ -1,6 +1,8 @@
 //! The container state the OCI spec defines (`state`'s output), kept in the container's state
 //! directory and replaced whole on each write. The status follows the spec's lifecycle: `creating`, `created`, `running`,
-//! `stopped`.
+//! `stopped`. Only `creating` and `created` are written; `running` and `stopped` are derived, as crun derives
+//! them (libcrun's `libcrun_get_container_state_string`): a live init whose exec FIFO is gone has been started,
+//! and an init no longer live has stopped ([`derive`]). So `start` writes nothing (decision 3, goal 3 plan step 3).
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -55,6 +57,11 @@ pub struct State {
     /// writes `stopped`; it's whatever this no longer matches. Absent in state written before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<u64>,
+    /// Whether the bundle names poststart hooks, recorded at create: Hex's own field, so `start` reads
+    /// `config.json` only when there are hooks to run. Absent in state written before, which `start`
+    /// reads as "maybe" and so reads the config, as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poststart: Option<bool>,
 }
 
 impl State {
@@ -68,17 +75,14 @@ impl State {
             annotations: std::collections::BTreeMap::new(),
             cgroup: None,
             start_time: None,
+            poststart: None,
         }
     }
 
     /// Whether the container's init still runs: a live process at its pid with the start time create
     /// recorded. State written before the class recorded one is judged by the pid alone.
     pub fn init_alive(&self) -> bool {
-        match (self.start_time, start_time(self.pid)) {
-            (_, None) => false,
-            (Some(recorded), Some(now)) => recorded == now,
-            (None, Some(_)) => true,
-        }
+        alive(self.start_time, start_time(self.pid))
     }
 
     /// The JSON the `state` command prints, newline-terminated.
@@ -115,6 +119,16 @@ impl Dir {
 
     pub fn fifo(&self) -> PathBuf {
         self.dir.join("exec.fifo")
+    }
+
+    /// Whether the exec FIFO is still there: `start` removes it once the init has its byte. A failure to
+    /// look other than its absence is taken as present, so a container is never reported started that
+    /// may not be.
+    pub fn fifo_present(&self) -> bool {
+        match fs::symlink_metadata(self.fifo()) {
+            Ok(_) => true,
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        }
     }
 
     pub fn exists(&self) -> bool {
@@ -168,6 +182,31 @@ impl Dir {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(OciError::os("removing the container directory", e)),
         }
+    }
+}
+
+/// A container's status as the runtime-spec defines it, from what create recorded and what is seen now: whether
+/// the exec FIFO is still there (`start` removes it) and whether the init is alive ([`alive`]). As crun derives
+/// it. A recorded `running` is a start from before this derivation, which rewrote the state and left the FIFO, so
+/// it reads as running for as long as its init lives.
+pub fn derive(recorded: Status, fifo_present: bool, init_alive: bool) -> Status {
+    match recorded {
+        Status::Creating => Status::Creating,
+        Status::Stopped => Status::Stopped,
+        Status::Created | Status::Running if !init_alive => Status::Stopped,
+        Status::Created if fifo_present => Status::Created,
+        Status::Created | Status::Running => Status::Running,
+    }
+}
+
+/// Whether a container's init is alive: a live process at its pid (`now`, its start time, `None` for no process
+/// or a zombie) with the start time create recorded, so a later process given the pid isn't taken for it. State
+/// recorded before the class kept a start time is judged by the pid alone.
+pub fn alive(recorded_start: Option<u64>, now: Option<u64>) -> bool {
+    match (recorded_start, now) {
+        (_, None) => false,
+        (Some(recorded), Some(now)) => recorded == now,
+        (None, Some(_)) => true,
     }
 }
 
@@ -246,6 +285,98 @@ mod tests {
         assert!(json.get("cgroup").is_none());
         let mut with = st;
         with.cgroup = Some("/sys/fs/cgroup/c1".to_owned());
+        let back: State = serde_json::from_slice(&with.to_json().unwrap()).unwrap();
+        assert_eq!(back, with);
+    }
+
+    /// Goal 3 plan step 3, the oracle (AC-T7.1.4): every combination of what create recorded, whether the exec
+    /// FIFO is there, whether a process holds the init's pid (live, a zombie, or none) and whether its start time
+    /// matches the recorded one, against the status the runtime-spec gives: `created` before start, `running`
+    /// after it while the init lives, `stopped` once it doesn't.
+    #[test]
+    fn the_derived_status_is_the_runtime_specs_for_every_combination() {
+        // The process at the init's pid: its start time when live, `None` when a zombie or gone.
+        let seen = [
+            ("live, same start", Some(100)),
+            ("live, recycled", Some(200)),
+            ("zombie or gone", None),
+        ];
+        for recorded_start in [Some(100), None] {
+            for (what, now) in seen {
+                let live = match (recorded_start, now) {
+                    (_, None) => false,
+                    (Some(r), Some(n)) => r == n,
+                    (None, Some(_)) => true,
+                };
+                assert_eq!(
+                    alive(recorded_start, now),
+                    live,
+                    "{what}, recorded {recorded_start:?}"
+                );
+                for fifo in [true, false] {
+                    let want = |recorded: Status| match (recorded, live, fifo) {
+                        (Status::Creating, _, _) => Status::Creating,
+                        (Status::Stopped, _, _) => Status::Stopped,
+                        (_, false, _) => Status::Stopped,
+                        (Status::Created, true, true) => Status::Created,
+                        (_, true, _) => Status::Running,
+                    };
+                    for recorded in [
+                        Status::Creating,
+                        Status::Created,
+                        Status::Running,
+                        Status::Stopped,
+                    ] {
+                        assert_eq!(
+                            derive(recorded, fifo, live),
+                            want(recorded),
+                            "recorded {recorded:?}, fifo {fifo}, init {what}, start time recorded {recorded_start:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // The named cases, as the spec reads them.
+        assert_eq!(
+            derive(Status::Created, true, true),
+            Status::Created,
+            "before start"
+        );
+        assert_eq!(
+            derive(Status::Created, false, true),
+            Status::Running,
+            "after start"
+        );
+        assert_eq!(
+            derive(Status::Created, false, false),
+            Status::Stopped,
+            "after the init ends"
+        );
+        assert_eq!(
+            derive(Status::Created, true, false),
+            Status::Stopped,
+            "an init that died before start"
+        );
+        assert_eq!(
+            derive(Status::Running, true, true),
+            Status::Running,
+            "a start from before the derivation"
+        );
+        assert!(
+            !alive(Some(100), Some(200)),
+            "a recycled pid isn't the init"
+        );
+    }
+
+    /// Append-only: state written before the poststart field reads as "maybe" (`None`), which `start` takes as
+    /// a reason to read the config, as it always did; once set, the field round-trips.
+    #[test]
+    fn state_without_a_poststart_field_reads_as_maybe_and_one_with_it_round_trips() {
+        let old = br#"{"ociVersion":"1.3.0","id":"c1","status":"created","pid":7,"bundle":"/b"}"#;
+        let st: State = serde_json::from_slice(old).unwrap();
+        assert_eq!(st.poststart, None);
+        let mut with = st;
+        with.poststart = Some(false);
         let back: State = serde_json::from_slice(&with.to_json().unwrap()).unwrap();
         assert_eq!(back, with);
     }

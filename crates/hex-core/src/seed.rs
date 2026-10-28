@@ -15,11 +15,12 @@
 //! | 4..6 | version |
 //! | 6..8 | kind: a request below `0x8000`, an answer from it |
 //!
-//! An exec [`Request`] carries [`REQUEST_FDS`] descriptors: the program's stdin, stdout and stderr.
-//! The container's cgroup and namespaces aren't descriptors: the request names the cgroup's path,
-//! which the intermediate opens, and the init's pid, whose `/proc/<pid>/ns/*` it joins, as
-//! `hex __oci-exec` does. [`Answer::Started`] carries the program's pidfd, which the agent's supervisor
-//! watches; [`Answer::Refused`] carries none. A node spawns its
+//! An exec [`Request`] carries [`REQUEST_FDS`] descriptors: the program's stdin, stdout and stderr, then
+//! the container init's pidfd, by which the program joins the init's namespaces (`setns(2)` with a pidfd
+//! joins several at once, and names that process, never a later one given its pid). The container's
+//! cgroup isn't a descriptor: the request names its path, which the seed opens. [`Answer::Started`]
+//! carries the program's pidfd, which the agent's supervisor watches; [`Answer::Refused`] carries none.
+//! A node spawns its
 //! seeds from the `hex` binary it is given (the bench names one), so the two sides can be of different
 //! builds: a reader refuses another version's message by type, and the format changes append-only
 //! (CLAUDE.md), as the socket's does.
@@ -41,8 +42,8 @@ pub const MAX_REQUEST: usize = 160 << 10;
 pub const MAX_ANSWER: usize = 4 << 10;
 /// Longest refusal reason an answer carries; the rest is cut, at a character's boundary.
 pub const MAX_WHY: usize = 2 << 10;
-/// Descriptors an exec request carries: stdin, stdout, stderr.
-pub const REQUEST_FDS: usize = 3;
+/// Descriptors an exec request carries: stdin, stdout, stderr, the container init's pidfd.
+pub const REQUEST_FDS: usize = 4;
 /// Descriptors a started answer carries: the program's pidfd.
 pub const STARTED_FDS: usize = 1;
 
@@ -60,7 +61,7 @@ mod kind {
 /// `config.json`, as `hex __oci-exec` does, so the wire carries only what the exec names.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Request {
-    /// The container init's pid, whose `/proc/<pid>/ns/*` the intermediate joins.
+    /// The container init's pid, for what the seed reports; its namespaces are joined by its pidfd.
     pub init_pid: i32,
     /// The container's bundle, whose `config.json` gives the process the program becomes.
     pub bundle: String,

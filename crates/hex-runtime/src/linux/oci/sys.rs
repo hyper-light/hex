@@ -5,7 +5,7 @@
 
 #![allow(unsafe_code)]
 
-use crate::linux::oci::OciError;
+use crate::linux::oci::{Failure, OciError};
 use crate::linux::sys::{CLONE_INTO_CGROUP, CloneArgs};
 
 /// What [`fork`] returns.
@@ -240,6 +240,340 @@ pub enum Sibling {
     Child,
 }
 
+/// The signal state a program starts with, as std's `Command` leaves a child: an empty signal mask and
+/// SIGPIPE at its default (Rust's runtime ignores it, and an ignored signal stays ignored across execve).
+/// Async-signal-safe calls only, for the seed's clone's child, which allocates nothing.
+pub fn default_signals() -> Result<(), rustix::io::Errno> {
+    // SAFETY: `sigset_t` is plain data, initialized by sigemptyset before anything reads it; then
+    // pthread_sigmask and signal(2), both async-signal-safe, with valid arguments.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        let r = libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+        if r != 0 {
+            return Err(rustix::io::Errno::from_raw_os_error(r));
+        }
+        if libc::signal(libc::SIGPIPE, libc::SIG_DFL) == libc::SIG_ERR {
+            return Err(last_errno());
+        }
+    }
+    Ok(())
+}
+
+/// execve(2) of each of `paths` in turn, as execvp(3) tries them, with `argv` and `envp` the
+/// null-terminated arrays execve takes. Returns only when none ran: the errno that ended it, `EACCES`
+/// if a path it may not run came before paths that aren't there, else the last.
+pub fn execve_each(
+    paths: &[std::ffi::CString],
+    argv: &[*const libc::c_char],
+    envp: &[*const libc::c_char],
+) -> i32 {
+    // SAFETY: __errno_location returns this thread's errno.
+    let errno = || unsafe { *libc::__errno_location() };
+    let mut last = libc::ENOENT;
+    let mut denied = false;
+    for path in paths {
+        // SAFETY: execve(2) with a valid C string and null-terminated arrays of valid C strings (the
+        // caller's `argv`/`envp`, built over strings that outlive the call); it returns only on failure.
+        unsafe { libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
+        match errno() {
+            e @ (libc::ENOENT | libc::ENOTDIR) => last = e,
+            libc::EACCES => denied = true,
+            e => return e,
+        }
+    }
+    if denied { libc::EACCES } else { last }
+}
+
+/// `CLONE_VM` and `CLONE_VFORK` (`include/uapi/linux/sched.h`): the child shares the caller's memory,
+/// and the caller's thread waits until the child has exec'd or exited.
+const CLONE_VM: u64 = 0x100;
+const CLONE_VFORK: u64 = 0x4000;
+
+/// The stack a vfork-style clone's child runs on ([`clone_vfork`]): 256 KiB, mapped once per thread that
+/// clones and reused, since the child is done with it by the time the clone returns. Its lowest page is a
+/// guard, inaccessible, so an overflow faults rather than writing into the parent's memory. The child's
+/// frames are shallow (the joins, the credential and capability calls, execve); 256 KiB is a stated
+/// bound well above them, not a tuning.
+pub struct ChildStack {
+    base: *mut libc::c_void,
+    len: usize,
+}
+
+const CHILD_STACK_BYTES: usize = 256 << 10;
+
+impl ChildStack {
+    pub fn map() -> Result<Self, OciError> {
+        let page = page_size()?;
+        // SAFETY: an anonymous private mapping at an address the kernel picks: it aliases nothing. The
+        // result is checked; the guard page is made inaccessible before anything uses the mapping.
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                CHILD_STACK_BYTES,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_STACK,
+                -1,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            return Err(OciError::os(
+                "mapping a child's stack",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        let stack = Self {
+            base,
+            len: CHILD_STACK_BYTES,
+        };
+        // SAFETY: the first page of the mapping just made, which nothing references.
+        if unsafe { libc::mprotect(base, page, libc::PROT_NONE) } != 0 {
+            return Err(OciError::os(
+                "guarding a child's stack",
+                std::io::Error::last_os_error(),
+            ));
+        }
+        Ok(stack)
+    }
+}
+
+impl Drop for ChildStack {
+    fn drop(&mut self) {
+        // SAFETY: the mapping `map` made, which no clone's child uses any more (each clone returned).
+        unsafe {
+            libc::munmap(self.base, self.len);
+        }
+    }
+}
+
+/// The size of a page.
+fn page_size() -> Result<usize, OciError> {
+    // SAFETY: sysconf(3) takes a constant and reads nothing of ours.
+    let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(n).map_err(|_| OciError::os("the page size", "sysconf gave none"))
+}
+
+/// Every signal blocked on the calling thread until dropped, which restores the mask it had. A vfork-style
+/// clone's child inherits the mask, so it runs none of the process's signal handlers before its execve
+/// (which resets them), as posix_spawn blocks them.
+pub struct Blocked {
+    old: libc::sigset_t,
+}
+
+pub fn block_signals() -> Result<Blocked, OciError> {
+    // SAFETY: `sigset_t` is plain data, filled by sigfillset before pthread_sigmask reads it, and `old`
+    // is written by pthread_sigmask; both calls take valid pointers. Checked.
+    unsafe {
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        let r = libc::pthread_sigmask(libc::SIG_BLOCK, &all, &mut old);
+        if r != 0 {
+            return Err(OciError::os(
+                "blocking signals for a clone",
+                std::io::Error::from_raw_os_error(r),
+            ));
+        }
+        Ok(Blocked { old })
+    }
+}
+
+impl Drop for Blocked {
+    fn drop(&mut self) {
+        // SAFETY: the mask `block_signals` saved, a valid sigset_t.
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.old, std::ptr::null_mut());
+        }
+    }
+}
+
+/// Clones a child that shares this process's memory and runs `child` on `stack`, born in the cgroup the
+/// open directory `cgroup` is, with a pidfd for it: `clone3(CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP |
+/// CLONE_PIDFD)`, as posix_spawn clones. No page of this process is copied for the child, and its execve
+/// tears none down; the calling thread waits until the child has exec'd or exited. The caller blocks
+/// signals first ([`block_signals`]). `child` makes system calls alone on memory made before the clone,
+/// and returns only when one failed (the status to exit with, and what): it shares this process's memory
+/// with the process's other threads, so it may take no lock and allocate nothing. `None` on an
+/// architecture without the trampoline below, or a kernel or sandbox without clone3 into a cgroup
+/// (`ENOSYS`, `E2BIG`).
+pub fn clone_vfork<F: Fn() -> (u8, Failure)>(
+    cgroup: std::os::fd::BorrowedFd<'_>,
+    stack: &ChildStack,
+    child: &F,
+) -> Result<Option<(i32, std::os::fd::OwnedFd)>, OciError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    /// The child's start, on its own stack: `child`, then its failure reported and its exit.
+    extern "C" fn entry<F: Fn() -> (u8, Failure)>(arg: *mut libc::c_void) -> ! {
+        // SAFETY: `arg` is `child`, borrowed by the clone below, alive until this child has exec'd or
+        // exited, which the vfork makes its parent thread wait for.
+        let child = unsafe { &*arg.cast::<F>().cast_const() };
+        let (code, failed) = child();
+        report(failed);
+        exit_child(code)
+    }
+    let page = page_size()?;
+    let fd = u64::try_from(cgroup.as_raw_fd())
+        .map_err(|_| OciError::os("clone3 into a cgroup", "a negative file descriptor"))?;
+    let mut pidfd: libc::c_int = -1;
+    let as_u64 = |v: usize| {
+        u64::try_from(v)
+            .map_err(|_| OciError::os("clone3 into a cgroup", "a value wider than 64 bits"))
+    };
+    let args = CloneArgs {
+        flags: CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD,
+        pidfd: as_u64((&raw mut pidfd).addr())?,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: u64::try_from(libc::SIGCHLD)
+            .map_err(|_| OciError::os("clone3 into a cgroup", "SIGCHLD is negative"))?,
+        // The usable stack: above the guard page; the kernel starts the child at its top.
+        stack: as_u64(stack.base.addr().checked_add(page).ok_or_else(|| {
+            OciError::os("clone3 into a cgroup", "a stack past the address space")
+        })?)?,
+        stack_size: as_u64(stack.len.checked_sub(page).ok_or_else(|| {
+            OciError::os("clone3 into a cgroup", "a stack smaller than its guard")
+        })?)?,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: fd,
+    };
+    let entry_fn: extern "C" fn(*mut libc::c_void) -> ! = entry::<F>;
+    let arg = std::ptr::from_ref(child).cast_mut().cast::<libc::c_void>();
+    let Some(r) = clone3_on_stack(&args, entry_fn, arg) else {
+        return Ok(None);
+    };
+    match r {
+        n if n < 0 => match i32::try_from(n.unsigned_abs()).unwrap_or(libc::EIO) {
+            libc::ENOSYS | libc::E2BIG => Ok(None),
+            e => Err(OciError::os(
+                "clone3 the program into the container",
+                std::io::Error::from_raw_os_error(e),
+            )),
+        },
+        child_pid => {
+            // SAFETY: the clone succeeded, so the kernel made `pidfd` for the child and nothing else in
+            // this process owns it.
+            let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) };
+            let pid = i32::try_from(child_pid)
+                .map_err(|_| OciError::os("clone3 into a cgroup", "a pid out of range"))?;
+            Ok(Some((pid, pidfd)))
+        }
+    }
+}
+
+/// The raw clone3 with the child started on `args.stack` at `entry(arg)`: the kernel's return in the
+/// parent (the child's pid, or a negated errno), or `None` on an architecture without this trampoline.
+/// The child never returns here: it calls `entry`, which never returns, on the stack the kernel gave it.
+#[cfg(target_arch = "x86_64")]
+fn clone3_on_stack(
+    args: &CloneArgs,
+    entry: extern "C" fn(*mut libc::c_void) -> !,
+    arg: *mut libc::c_void,
+) -> Option<i64> {
+    let ret: i64;
+    // SAFETY: clone3(2) reads `args` (a fully initialized CloneArgs of the size given) and writes the
+    // child's pidfd where `args.pidfd` points. In the parent the syscall returns in rax, with rcx and r11
+    // clobbered as declared, and touches nothing else of ours. In the child (rax 0) the kernel has set
+    // rsp to the top of the stack `args` names, 16-byte aligned, and kept r12/r13: it calls entry(arg)
+    // there, which never returns, so this function's own frame on the parent's stack is never touched
+    // by the child. CLONE_VFORK keeps the parent's thread stopped until the child has exec'd or exited.
+    unsafe {
+        std::arch::asm!(
+            "syscall",
+            "test rax, rax",
+            "jnz 2f",
+            "mov rdi, r12",
+            "call r13",
+            "ud2",
+            "2:",
+            inlateout("rax") libc::SYS_clone3 => ret,
+            in("rdi") std::ptr::from_ref(args),
+            in("rsi") std::mem::size_of::<CloneArgs>(),
+            in("r12") arg,
+            in("r13") entry,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    Some(ret)
+}
+
+/// The same trampoline on aarch64: the syscall in x8, its arguments in x0 and x1; in the child (x0 0) the
+/// kernel has set sp to the top of the stack `args` names and kept x9/x10, and it branches to entry(arg).
+#[cfg(target_arch = "aarch64")]
+fn clone3_on_stack(
+    args: &CloneArgs,
+    entry: extern "C" fn(*mut libc::c_void) -> !,
+    arg: *mut libc::c_void,
+) -> Option<i64> {
+    let ret: i64;
+    // SAFETY: as the x86_64 trampoline's: clone3(2) reads `args` and writes the child's pidfd where it
+    // points; the parent gets the result in x0 with every other register kept; the child calls
+    // entry(arg) on its own stack and never returns, so this frame is never touched by it.
+    unsafe {
+        std::arch::asm!(
+            "svc 0",
+            "cbnz x0, 2f",
+            "mov x0, x10",
+            "blr x9",
+            "brk #0x1",
+            "2:",
+            inlateout("x0") std::ptr::from_ref(args) => ret,
+            in("x1") std::mem::size_of::<CloneArgs>(),
+            in("x8") libc::SYS_clone3,
+            in("x9") entry,
+            in("x10") arg,
+            options(nostack),
+        );
+    }
+    Some(ret)
+}
+
+/// No trampoline here: the seed's own clone path serves.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn clone3_on_stack(
+    _args: &CloneArgs,
+    _entry: extern "C" fn(*mut libc::c_void) -> !,
+    _arg: *mut libc::c_void,
+) -> Option<i64> {
+    None
+}
+
+/// Writes `hex oci exec: <what>: errno <n>` to stderr with write(2) alone, the number made on the stack:
+/// a vfork-style clone's child reports why it couldn't start the program without allocating.
+pub fn report(failed: Failure) {
+    let mut digits = [0u8; 12];
+    let mut at = digits.len();
+    let mut n = failed.errno.raw_os_error().unsigned_abs();
+    loop {
+        at = at.saturating_sub(1);
+        if let Some(d) = digits.get_mut(at) {
+            *d = b'0'.saturating_add(u8::try_from(n % 10).unwrap_or(0));
+        }
+        n /= 10;
+        if n == 0 || at == 0 {
+            break;
+        }
+    }
+    let number = digits.get(at..).unwrap_or_default();
+    for part in [
+        b"hex oci exec: ".as_slice(),
+        failed.what.as_bytes(),
+        b": errno ",
+        number,
+        b"\n",
+    ] {
+        // SAFETY: write(2) of a live buffer to descriptor 2; async-signal-safe. A short or failed write
+        // loses the report, which the program's exit status still carries.
+        unsafe {
+            libc::write(2, part.as_ptr().cast(), part.len());
+        }
+    }
+}
+
 /// Ends a forked child at once with status `code`, running no `atexit` handler and flushing no
 /// buffer: the seed's intermediate and the program it forks must not return up into the seed's serve
 /// loop, nor flush the seed's buffers a second time (`_exit(2)`, async-signal-safe). The CLI helpers
@@ -440,12 +774,8 @@ pub fn kill(pid: i32, sig: i32, all: bool) -> Result<(), OciError> {
 /// Sets whether the process keeps its permitted capabilities across a uid change
 /// (`PR_SET_KEEPCAPS`), so a container can drop to a non-root user and still hold the capabilities
 /// its spec grants.
-pub fn set_keepcaps(keep: bool) -> Result<(), OciError> {
-    prctl2(
-        libc::PR_SET_KEEPCAPS,
-        libc::c_ulong::from(u8::from(keep)),
-        "PR_SET_KEEPCAPS",
-    )
+pub fn set_keepcaps(keep: bool) -> Result<(), rustix::io::Errno> {
+    prctl2(libc::PR_SET_KEEPCAPS, libc::c_ulong::from(u8::from(keep)))
 }
 
 /// Joins the namespace the open `fd` refers to, checking it is of type `nstype` (a `CLONE_NEW*`
@@ -478,16 +808,12 @@ pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
 }
 
 /// Drops capability number `cap` from the process's bounding set (`PR_CAPBSET_DROP`).
-pub fn capbset_drop(cap: u32) -> Result<(), OciError> {
-    prctl2(
-        libc::PR_CAPBSET_DROP,
-        libc::c_ulong::from(cap),
-        "PR_CAPBSET_DROP",
-    )
+pub fn capbset_drop(cap: u32) -> Result<(), rustix::io::Errno> {
+    prctl2(libc::PR_CAPBSET_DROP, libc::c_ulong::from(cap))
 }
 
 /// Clears the process's ambient capability set (`PR_CAP_AMBIENT_CLEAR_ALL`).
-pub fn ambient_clear() -> Result<(), OciError> {
+pub fn ambient_clear() -> Result<(), rustix::io::Errno> {
     // SAFETY: prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) takes no pointers; checked.
     let r = unsafe {
         libc::prctl(
@@ -498,18 +824,11 @@ pub fn ambient_clear() -> Result<(), OciError> {
             0,
         )
     };
-    if r == -1 {
-        Err(OciError::os(
-            "PR_CAP_AMBIENT_CLEAR_ALL",
-            std::io::Error::last_os_error(),
-        ))
-    } else {
-        Ok(())
-    }
+    if r == -1 { Err(last_errno()) } else { Ok(()) }
 }
 
 /// Raises capability number `cap` in the process's ambient set (`PR_CAP_AMBIENT_RAISE`).
-pub fn ambient_raise(cap: u32) -> Result<(), OciError> {
+pub fn ambient_raise(cap: u32) -> Result<(), rustix::io::Errno> {
     // SAFETY: prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap, 0, 0) takes no pointers; checked.
     let r = unsafe {
         libc::prctl(
@@ -520,25 +839,23 @@ pub fn ambient_raise(cap: u32) -> Result<(), OciError> {
             0,
         )
     };
-    if r == -1 {
-        Err(OciError::os(
-            "PR_CAP_AMBIENT_RAISE",
-            std::io::Error::last_os_error(),
-        ))
-    } else {
-        Ok(())
-    }
+    if r == -1 { Err(last_errno()) } else { Ok(()) }
 }
 
-fn prctl2(option: libc::c_int, arg2: libc::c_ulong, what: &'static str) -> Result<(), OciError> {
+fn prctl2(option: libc::c_int, arg2: libc::c_ulong) -> Result<(), rustix::io::Errno> {
     // SAFETY: prctl with a scalar option and one scalar argument (here a capability number); it
     // takes no pointers and writes nothing. The return value is checked.
     let r = unsafe { libc::prctl(option, arg2, 0, 0, 0) };
-    if r == -1 {
-        Err(OciError::os(what, std::io::Error::last_os_error()))
-    } else {
-        Ok(())
-    }
+    if r == -1 { Err(last_errno()) } else { Ok(()) }
+}
+
+/// This thread's errno, as plain data: no allocation, so the child of a vfork-style clone may read it.
+fn last_errno() -> rustix::io::Errno {
+    rustix::io::Errno::from_raw_os_error(
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO),
+    )
 }
 
 // `bpf(2)`'s commands and the device program's type and attach point (include/uapi/linux/bpf.h).
@@ -706,25 +1023,11 @@ pub fn attach_device_program(
 /// takes a filter from a thread without no_new_privs when it has CAP_SYS_ADMIN in its user namespace
 /// (seccomp(2), `SECCOMP_SET_MODE_FILTER`). [`seccompiler::apply_filter`] sets no_new_privs first,
 /// which a spec without `noNewPrivileges` doesn't ask for.
-pub fn load_seccomp_filter(program: &[seccompiler::sock_filter]) -> Result<(), OciError> {
-    let insns: Vec<libc::sock_filter> = program
-        .iter()
-        .map(|f| libc::sock_filter {
-            code: f.code,
-            jt: f.jt,
-            jf: f.jf,
-            k: f.k,
-        })
-        .collect();
-    let len = u16::try_from(insns.len()).map_err(|_| {
-        OciError::os(
-            "loading the seccomp filter",
-            "more instructions than a filter holds",
-        )
-    })?;
+pub fn load_seccomp_filter(filter: &[libc::sock_filter]) -> Result<(), rustix::io::Errno> {
+    let len = u16::try_from(filter.len()).map_err(|_| rustix::io::Errno::INVAL)?;
     let prog = libc::sock_fprog {
         len,
-        filter: insns.as_ptr().cast_mut(),
+        filter: filter.as_ptr().cast_mut(),
     };
     // SAFETY: seccomp(SECCOMP_SET_MODE_FILTER) reads `prog`, a live sock_fprog whose `filter` points at
     // `len` live, initialised sock_filter instructions that outlive the call; the kernel copies them
@@ -737,14 +1040,7 @@ pub fn load_seccomp_filter(program: &[seccompiler::sock_filter]) -> Result<(), O
             &raw const prog,
         )
     };
-    if r == 0 {
-        Ok(())
-    } else {
-        Err(OciError::os(
-            "loading the seccomp filter",
-            std::io::Error::last_os_error(),
-        ))
-    }
+    if r == 0 { Ok(()) } else { Err(last_errno()) }
 }
 
 /// The `union bpf_attr` member `BPF_PROG_GET_FD_BY_ID` reads.

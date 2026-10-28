@@ -241,6 +241,22 @@ impl Supervisor {
         Ok(())
     }
 
+    /// A duplicate of box `id`'s init pidfd while the init is watched and not yet reaped, else `None`:
+    /// an exec's program joins the container's namespaces by it, so they are that process's and never a
+    /// later one's given its pid (goal 3 plan step 2). Readable once the init has ended (pidfd_open(2)).
+    pub fn init_pidfd(&self, id: &BoxId) -> Result<Option<OwnedFd>, Refusal> {
+        let inits = self.inits()?;
+        inits
+            .by_box
+            .get(id)
+            .and_then(|init| init.pidfd.as_ref())
+            .map(|fd| {
+                rustix::io::fcntl_dupfd_cloexec(fd, 0)
+                    .map_err(|e| Refusal::os("duplicating a container init's pidfd", e))
+            })
+            .transpose()
+    }
+
     /// How box `id`'s init ended, if it is watched and has: reaped now if it has ended and the
     /// supervising thread hasn't come to it yet, so inspect never reads a stopped box without its
     /// exit. `None` when it runs or isn't watched.

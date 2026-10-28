@@ -1,6 +1,6 @@
 # The exec seed's clone: `clone3(CLONE_PARENT)` needs `exit_signal=0`, and the rootless fallback
 
-The evidence behind `docs/design/runtime-architecture.md`, decision 3's "The exec seed (goal 3, plan step 2)".
+The evidence behind `docs/design/runtime-architecture.md`, decision 3's "Exec into a container: straight from the agent's thread, or through a seed (goal 3, plan step 2)".
 Accessed 2026-10-27/28. Man pages from man7.org (`clone(2)`, `setns(2)`, `pid_namespaces(7)`); kernel facts from
 the Linux source named inline. Numbers marked `MEASURED` are from the spikes below; `DESIGN` marks a documented fact.
 

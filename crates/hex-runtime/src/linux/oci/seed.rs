@@ -29,10 +29,12 @@
 //! ([`super::exec`], [`super::init`]); only the plumbing — a socket in place of an inherited request
 //! and a waited status — differs.
 
+use std::collections::VecDeque;
+use std::ffi::{CString, c_char};
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use hex_core::seed::{self, Answer, Failed, Request};
 use rustix::net::{
@@ -40,9 +42,10 @@ use rustix::net::{
     SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketFlags, SocketType,
 };
 use rustix::pipe::PipeFlags;
+use rustix::thread::ThreadNameSpaceType as Ns;
 
-use crate::linux::oci::spec::{Process, Seccomp, Spec};
-use crate::linux::oci::{OciError, exec, init, sys};
+use crate::linux::oci::spec::{Namespace, Process, Spec};
+use crate::linux::oci::{Failure, OciError, exec, init, sys};
 
 /// The environment entry naming the socket, inherited from the node agent, the seed serves on.
 pub const ENV_SOCKET: &str = "HEX_OCI_SEED_SOCKET";
@@ -74,13 +77,14 @@ fn serve() -> Result<(), OciError> {
     rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)
         .map_err(|e| OciError::os("setting close-on-exec on the seed's socket", e))?;
     let mut pid_for = PidFor::open()?;
+    let mut specs = Specs::default();
     let mut buf = vec![0u8; seed::MAX_REQUEST];
     loop {
         match recv_request(socket.as_fd(), &mut buf)? {
             // The agent closed the socket: nothing more will come, so the seed is done.
             Received::Closed => return Ok(()),
             Received::Message { size, stdio } => {
-                let (answer, pidfd) = serve_one(&buf, size, stdio, &mut pid_for);
+                let (answer, pidfd) = serve_one(&buf, size, stdio, &mut pid_for, &mut specs);
                 send_answer(socket.as_fd(), &answer, pidfd.as_ref().map(AsFd::as_fd))?;
             }
         }
@@ -106,13 +110,11 @@ impl PidFor {
         Ok(Self { own, is_own: true })
     }
 
-    /// The container's pid namespace `ns` for the seed's next children. `EPERM` (an unprivileged
-    /// seed) is returned for the caller to take the intermediate path; nothing changed then.
-    fn set(&mut self, ns: BorrowedFd<'_>) -> rustix::io::Result<()> {
-        rustix::thread::move_into_link_name_space(
-            ns,
-            Some(rustix::thread::LinkNameSpaceType::ProcessID),
-        )?;
+    /// The pid namespace of the container init `init` (its pidfd) for the seed's next children.
+    /// `EPERM` (an unprivileged seed) is returned for the caller to take the intermediate path;
+    /// nothing changed then.
+    fn set(&mut self, init: BorrowedFd<'_>) -> rustix::io::Result<()> {
+        rustix::thread::move_into_thread_name_spaces(init, Ns::PROCESS_ID)?;
         self.is_own = false;
         Ok(())
     }
@@ -127,27 +129,84 @@ impl PidFor {
     }
 }
 
-/// What an exec needs, read and opened by the seed before it clones anything: the container's process
-/// with the exec's overrides, its seccomp profile, its cgroup, and the namespaces of its init that
-/// aren't the seed's own.
-struct Prepared {
-    process: Process,
-    seccomp: Option<Seccomp>,
-    /// The cgroup's directory, where the program is born, and its `cgroup.procs`, to join by migration
-    /// where a birth there can't be.
-    cgroup: Option<(OwnedFd, OwnedFd)>,
-    /// In join order: user first, mount last ([`super::exec`]'s order).
-    joins: Vec<(&'static str, i32, OwnedFd)>,
+/// Most parsed `config.json`s a seed keeps ([`Specs`]). A node's seeds meet few bundles at once, and a
+/// parsed config is a few KiB, so 64 bound a seed's memory to well under a MiB; past it the oldest is
+/// dropped and read again at its next exec. A stated bound (CLAUDE.md §2), not a tuning.
+const SPECS: usize = 64;
+
+/// The bundles' parsed `config.json`s, each under the file's identity when it was read (device, inode,
+/// modification time and size): an exec into a container whose config the seed has parsed costs one
+/// `stat`, not a read and a parse, and a config replaced or rewritten since is read again. At most
+/// [`SPECS`], the oldest dropped first.
+#[derive(Default)]
+pub struct Specs {
+    entries: VecDeque<(Identity, Spec)>,
 }
 
-/// Reads the bundle's `config.json`, applies the exec's overrides with `hex __oci-exec`'s own logic
-/// (one code path, CLAUDE.md §8), and opens the container's cgroup and namespaces, while the seed is
-/// still in its own mount namespace.
-fn prepare(req: &Request) -> Result<Prepared, OciError> {
-    let spec = Spec::parse(
-        &std::fs::read(Path::new(&req.bundle).join("config.json"))
-            .map_err(|e| OciError::os("reading config.json", e))?,
-    )?;
+/// A file's identity, as `stat` gives it: a rewrite in place changes the time or the size, and a
+/// replacement the inode.
+#[derive(PartialEq, Eq)]
+struct Identity {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    mtime: (i128, i128),
+    size: i128,
+}
+
+impl Specs {
+    fn get(&mut self, bundle: &str) -> Result<&Spec, OciError> {
+        let path = Path::new(bundle).join("config.json");
+        let st = rustix::fs::stat(&path).map_err(|e| OciError::os("reading config.json", e))?;
+        let id = Identity {
+            path,
+            dev: st.st_dev,
+            ino: st.st_ino,
+            mtime: (i128::from(st.st_mtime), i128::from(st.st_mtime_nsec)),
+            size: i128::from(st.st_size),
+        };
+        let at = match self.entries.iter().position(|(seen, _)| *seen == id) {
+            Some(at) => at,
+            None => {
+                let spec = Spec::parse(
+                    &std::fs::read(&id.path).map_err(|e| OciError::os("reading config.json", e))?,
+                )?;
+                if self.entries.len() >= SPECS {
+                    self.entries.pop_front();
+                }
+                self.entries.push_back((id, spec));
+                self.entries.len().saturating_sub(1)
+            }
+        };
+        self.entries
+            .get(at)
+            .map(|(_, spec)| spec)
+            .ok_or_else(|| OciError::Broken("the seed's parsed configs lost one".to_owned()))
+    }
+}
+
+/// What an exec needs, read and opened by the seed before it clones anything: the container's process
+/// with the exec's overrides, its seccomp profile, its cgroup, the init's pidfd and the namespaces of
+/// the init's to join by it.
+struct Prepared {
+    /// The container's process, ready to become.
+    becoming: init::Becoming,
+    /// The program's execve, made here.
+    launch: Launch,
+    /// The cgroup's directory, where the program is born (or, where a birth there can't be, whose
+    /// `cgroup.procs` it joins by).
+    cgroup: Option<OwnedFd>,
+    /// The container init's pidfd, from the agent.
+    init: OwnedFd,
+    /// The kinds of the init's namespaces that aren't the seed's own.
+    joins: Ns,
+}
+
+/// Applies the exec's overrides to the container's process with `hex __oci-exec`'s own logic (one code
+/// path, CLAUDE.md §8), and opens the container's cgroup while the seed is still in its own mount
+/// namespace.
+fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, OciError> {
+    let spec = specs.get(&req.bundle)?;
     let request = exec::Request {
         pid: req.init_pid,
         bundle: req.bundle.clone(),
@@ -158,16 +217,273 @@ fn prepare(req: &Request) -> Result<Prepared, OciError> {
         user: req.user,
         seam: true,
     };
+    let process = exec::process_for(spec.process.clone().unwrap_or_default(), &request);
     Ok(Prepared {
-        process: exec::process_for(spec.process.unwrap_or_default(), &request),
-        seccomp: spec.linux.seccomp,
+        becoming: init::Becoming::of(&process, spec.linux.seccomp.as_ref())?,
+        launch: Launch::of(&process)?,
+        joins: joins(&spec.linux.namespaces)?,
         cgroup: req
             .cgroup
             .as_deref()
-            .map(|dir| exec::open_cgroup(Path::new(dir)))
+            .map(|dir| {
+                rustix::fs::open(
+                    dir,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(|e| OciError::os("opening the container's cgroup", e))
+            })
             .transpose()?,
-        joins: exec::namespaces_to_join(req.init_pid)?,
+        init,
     })
+}
+
+/// The program's `execve`, made before the clone: its arguments and environment as the null-terminated
+/// arrays execve(2) takes, the paths to try as execvp(3) tries them, and its working directory. So the
+/// clone's child allocates nothing on its way to the program: in a fork every heap write copies a page,
+/// which std's `Command` makes many of (the process class's `Spawn` holds the same discipline).
+struct Launch {
+    /// Owns the strings `argv` points at; moving it moves no string's bytes.
+    _args: Vec<CString>,
+    /// Owns the strings `envp` points at.
+    _env: Vec<CString>,
+    argv: Vec<*const c_char>,
+    envp: Vec<*const c_char>,
+    paths: Vec<CString>,
+    cwd: CString,
+}
+
+impl Launch {
+    /// `process`'s program: its first argument where it names a path, else that name in each folder of
+    /// the process's `PATH` (the usual folders when it has none), as [`init::resolve_program`] finds it.
+    fn of(process: &Process) -> Result<Self, OciError> {
+        let c = |s: &str| {
+            CString::new(s).map_err(|_| OciError::Config(format!("{s:?} holds a NUL byte")))
+        };
+        let program = process
+            .args
+            .first()
+            .ok_or_else(|| OciError::Config("exec needs a program".to_owned()))?;
+        let paths = if program.contains('/') {
+            vec![c(program)?]
+        } else {
+            process
+                .env
+                .iter()
+                .find_map(|e| e.strip_prefix("PATH="))
+                .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+                .split(':')
+                .map(|dir| c(&Path::new(dir).join(program).to_string_lossy()))
+                .collect::<Result<_, _>>()?
+        };
+        let args: Vec<CString> = process
+            .args
+            .iter()
+            .map(|a| c(a))
+            .collect::<Result<_, _>>()?;
+        // As std's Command takes them: an entry without `=` names no variable.
+        let env: Vec<CString> = process
+            .env
+            .iter()
+            .filter(|e| e.contains('='))
+            .map(|e| c(e))
+            .collect::<Result<_, _>>()?;
+        let pointers = |strs: &[CString]| -> Vec<*const c_char> {
+            strs.iter()
+                .map(|s| s.as_ptr())
+                .chain(std::iter::once(std::ptr::null()))
+                .collect()
+        };
+        Ok(Self {
+            argv: pointers(&args),
+            envp: pointers(&env),
+            _args: args,
+            _env: env,
+            paths,
+            cwd: c(&process.cwd)?,
+        })
+    }
+
+    /// In the clone's child: the program's working directory and signal state, then its execve. Returns
+    /// only when it couldn't run: the status a shell gives (127 for a program not there, 126 else) and
+    /// what failed.
+    fn exec(&self) -> (u8, Failure) {
+        if let Err(errno) = rustix::process::chdir(self.cwd.as_c_str()) {
+            return (
+                CANNOT_RUN,
+                Failure::of("the program's working directory")(errno),
+            );
+        }
+        if let Err(errno) = sys::default_signals() {
+            return (CANNOT_RUN, Failure::of("the program's signal state")(errno));
+        }
+        match sys::execve_each(&self.paths, &self.argv, &self.envp) {
+            e @ (libc::ENOENT | libc::ENOTDIR) => (
+                NOT_FOUND,
+                Failure::of("the program isn't in the container")(
+                    rustix::io::Errno::from_raw_os_error(e),
+                ),
+            ),
+            e => (
+                CANNOT_RUN,
+                Failure::of("execve")(rustix::io::Errno::from_raw_os_error(e)),
+            ),
+        }
+    }
+}
+
+/// The kinds of namespace an exec joins: those the container's spec gives it, as crun's exec joins
+/// them. One it made is its own; one it joined by path may be the seed's own, which is left out, since
+/// joining one's own user namespace is refused (`userns_install`) and an unprivileged intermediate may
+/// not join the host's others. A kind Hex doesn't make (`time`) isn't joined, as `hex oci exec` doesn't.
+fn joins(namespaces: &[Namespace]) -> Result<Ns, OciError> {
+    let mut joins = Ns::empty();
+    for ns in namespaces {
+        let (kind, proc_name) = match ns.kind.as_str() {
+            "user" => (Ns::USER, "user"),
+            "ipc" => (Ns::INTER_PROCESS_COMMUNICATION, "ipc"),
+            "uts" => (Ns::HOST_NAME_AND_NIS_DOMAIN_NAME, "uts"),
+            "network" => (Ns::NETWORK, "net"),
+            "pid" => (Ns::PROCESS_ID, "pid"),
+            "cgroup" => (Ns::CONTROL_GROUP, "cgroup"),
+            "mount" => (Ns::MOUNT, "mnt"),
+            _ => continue,
+        };
+        if let Some(path) = &ns.path {
+            let theirs = rustix::fs::stat(path.as_str())
+                .map_err(|e| OciError::os("reading a namespace the container joined", e))?;
+            let ours = rustix::fs::stat(format!("/proc/self/ns/{proc_name}"))
+                .map_err(|e| OciError::os("reading the seed's own namespace", e))?;
+            if (theirs.st_dev, theirs.st_ino) == (ours.st_dev, ours.st_ino) {
+                continue;
+            }
+        }
+        joins |= kind;
+    }
+    Ok(joins)
+}
+
+/// What [`exec_direct`] did.
+pub enum Direct {
+    /// The program runs, the caller's own child: its pid and pidfd.
+    Started(u32, OwnedFd),
+    /// Nothing was started: this thread may not choose the container's pid namespace (a rootless node),
+    /// or there is no vfork-style clone here (an architecture without the trampoline, a kernel or sandbox
+    /// without clone3 into a cgroup), or the container has no cgroup to be born in. Its descriptors come
+    /// back, for the caller to hand the exec to a seed instead.
+    Unable([OwnedFd; 3], OwnedFd),
+}
+
+/// The pid namespace the calling thread's children are born in is the container's for one clone, then the
+/// process's own again: `setns(2)` changes it for the calling thread alone.
+fn own_pid_namespace() -> Result<&'static OwnedFd, OciError> {
+    static OWN: std::sync::OnceLock<OwnedFd> = std::sync::OnceLock::new();
+    if let Some(own) = OWN.get() {
+        return Ok(own);
+    }
+    let own = rustix::fs::open(
+        "/proc/self/ns/pid",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening the node's own pid namespace", e))?;
+    let _ = OWN.set(own);
+    OWN.get()
+        .ok_or_else(|| OciError::Broken("the node's pid namespace wasn't kept".to_owned()))
+}
+
+std::thread_local! {
+    /// The stack a vfork-style clone's child runs on, per thread that clones ([`sys::ChildStack`]); and
+    /// whether this thread's children's pid namespace couldn't be set back after a clone, which makes it
+    /// hand every later exec to a seed rather than clone into a namespace it can't be sure of.
+    static STACK: std::cell::RefCell<Option<sys::ChildStack>> = const { std::cell::RefCell::new(None) };
+    static UNSURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Exec in a container straight from the calling thread (a thread of the node agent), as posix_spawn
+/// starts a program: the thread's children's pid namespace set to the container init `init`'s, then one
+/// `clone3(CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD)` ([`sys::clone_vfork`]). The program
+/// is born in the container's cgroup and pid namespace as the caller's own child, shares the caller's
+/// memory until its execve (so nothing of the caller is copied, and nothing torn down), joins the
+/// container's other namespaces, becomes its process and execs, making system calls alone on what
+/// [`prepare`] made. No process but the program, no seed, no `hex` exec. Where it can't, it says so
+/// ([`Direct::Unable`]) and starts nothing.
+pub fn exec_direct(
+    req: &Request,
+    stdio: [OwnedFd; 3],
+    init: OwnedFd,
+    specs: &mut Specs,
+) -> Result<Direct, OciError> {
+    if UNSURE.with(std::cell::Cell::get) {
+        return Ok(Direct::Unable(stdio, init));
+    }
+    let p = prepare(req, init, specs)?;
+    let Some(cgroup) = &p.cgroup else {
+        return Ok(Direct::Unable(stdio, p.init));
+    };
+    let blocked = sys::block_signals()?;
+    let set = p.joins.contains(Ns::PROCESS_ID);
+    if set {
+        match rustix::thread::move_into_thread_name_spaces(p.init.as_fd(), Ns::PROCESS_ID) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::PERM) => {
+                drop(blocked);
+                return Ok(Direct::Unable(stdio, p.init));
+            }
+            Err(e) => {
+                return Err(OciError::os("choosing the container's pid namespace", e));
+            }
+        }
+    }
+    let rest = p.joins.difference(Ns::PROCESS_ID);
+    let [i, o, e] = &stdio;
+    let child = || {
+        program(
+            &p.becoming,
+            &p.launch,
+            [i.as_fd(), o.as_fd(), e.as_fd()],
+            None,
+            None,
+            (p.init.as_fd(), rest),
+        )
+    };
+    let cloned = STACK.with(|stack| -> Result<_, OciError> {
+        let mut stack = stack
+            .try_borrow_mut()
+            .map_err(|_| OciError::Broken("a thread's child stack is in use".to_owned()))?;
+        if stack.is_none() {
+            *stack = Some(sys::ChildStack::map()?);
+        }
+        match stack.as_ref() {
+            Some(stack) => sys::clone_vfork(cgroup.as_fd(), stack, &child),
+            None => Ok(None),
+        }
+    });
+    // Whatever the clone did, this thread's children are born in the node's own pid namespace again.
+    let reset = if set {
+        own_pid_namespace().and_then(|own| sys::setns(own.as_fd(), libc::CLONE_NEWPID))
+    } else {
+        Ok(())
+    };
+    drop(blocked);
+    if let Err(e) = reset {
+        UNSURE.with(|unsure| unsure.set(true));
+        // A program started into a namespace this thread can't leave must not run unwatched: end it.
+        if let Ok(Some((_, pidfd))) = &cloned {
+            let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+        }
+        return Err(e);
+    }
+    match cloned? {
+        Some((pid, pidfd)) => {
+            let pid = u32::try_from(pid)
+                .map_err(|_| OciError::os("clone3 the program", "a pid out of range"))?;
+            Ok(Direct::Started(pid, pidfd))
+        }
+        None => Ok(Direct::Unable(stdio, p.init)),
+    }
 }
 
 /// Serves one request: prepares it, then starts the program by a single clone where the seed may, or
@@ -176,28 +492,30 @@ fn prepare(req: &Request) -> Result<Prepared, OciError> {
 fn serve_one(
     buf: &[u8],
     size: usize,
-    stdio: Vec<OwnedFd>,
+    fds: Vec<OwnedFd>,
     pid_for: &mut PidFor,
+    specs: &mut Specs,
 ) -> (Answer, Option<OwnedFd>) {
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     let req = match seed::read_request(bytes, size) {
         Ok(req) => req,
         Err(fault) => return refused(Failed::Request, fault.to_string()),
     };
-    let stdio: [OwnedFd; seed::REQUEST_FDS] = match stdio.try_into() {
-        Ok(three) => three,
+    let [stdin, stdout, stderr, init]: [OwnedFd; seed::REQUEST_FDS] = match fds.try_into() {
+        Ok(four) => four,
         Err(got) => {
             return refused(
                 Failed::Request,
                 format!(
-                    "an exec carries {} stdio descriptors, not {}",
+                    "an exec carries {} descriptors, not {} (its stdio and the init's pidfd)",
                     got.len(),
                     seed::REQUEST_FDS
                 ),
             );
         }
     };
-    let prepared = match prepare(&req) {
+    let stdio = [stdin, stdout, stderr];
+    let prepared = match prepare(&req, init, specs) {
         Ok(prepared) => prepared,
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
@@ -214,69 +532,65 @@ enum Single {
     Started(u32, OwnedFd),
     /// Nothing was started: the seed may not choose the container's pid namespace (a rootless seed),
     /// or this kernel has no `clone3` into a cgroup. What it was given comes back for the intermediate.
-    Unable(Box<Prepared>, [OwnedFd; seed::REQUEST_FDS]),
+    Unable(Box<Prepared>, [OwnedFd; 3]),
 }
 
 /// Starts the program by one clone of the seed's: its children's pid namespace set to the container's,
 /// then `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD)`. The program joins the container's
-/// other namespaces itself.
+/// other namespaces itself, all at once by the init's pidfd.
 fn single_clone(
     p: Prepared,
-    stdio: [OwnedFd; seed::REQUEST_FDS],
+    stdio: [OwnedFd; 3],
     pid_for: &mut PidFor,
 ) -> Result<Single, (Failed, OciError)> {
-    let set = p
-        .joins
-        .iter()
-        .find(|(kind, _, _)| *kind == "pid")
-        .map(|(_, _, ns)| pid_for.set(ns.as_fd()));
-    match set {
-        Some(Ok(())) => {}
-        // `pidns_install` wants CAP_SYS_ADMIN in the seed's own user namespace: a rootless seed
-        // hasn't it. The intermediate gains it by joining the container's user namespace first.
-        Some(Err(rustix::io::Errno::PERM)) => return Ok(Single::Unable(Box::new(p), stdio)),
-        Some(Err(e)) => {
-            return Err((
-                Failed::Start,
-                OciError::os("choosing the container's pid namespace", e),
-            ));
+    if p.joins.contains(Ns::PROCESS_ID) {
+        match pid_for.set(p.init.as_fd()) {
+            Ok(()) => {}
+            // `pidns_install` wants CAP_SYS_ADMIN in the seed's own user namespace: a rootless seed
+            // hasn't it. The intermediate gains it by joining the container's user namespace first.
+            Err(rustix::io::Errno::PERM) => return Ok(Single::Unable(Box::new(p), stdio)),
+            Err(e) => {
+                return Err((
+                    Failed::Start,
+                    OciError::os("choosing the container's pid namespace", e),
+                ));
+            }
         }
-        None => pid_for.reset().map_err(|e| (Failed::Seed, e))?,
+    } else {
+        pid_for.reset().map_err(|e| (Failed::Seed, e))?;
     }
-    let cloned = sys::clone_sibling(p.cgroup.as_ref().map(|(dir, _)| dir.as_fd()))
-        .map_err(|e| (Failed::Start, e))?;
+    let cloned =
+        sys::clone_sibling(p.cgroup.as_ref().map(AsFd::as_fd)).map_err(|e| (Failed::Start, e))?;
     match cloned {
         None => Ok(Single::Unable(Box::new(p), stdio)),
         Some(sys::Sibling::Child) => {
             // The program. It returns here only if it couldn't join, become the container's process
-            // or exec; its status then leaves through its exit, which the agent's pidfd reads.
+            // or exec; its status then leaves through its exit, which the agent's pidfd reads. Born in
+            // the container's cgroup and pid namespace, it joins the rest, the cgroup namespace with
+            // them.
             let Prepared {
-                process,
-                seccomp,
+                becoming,
+                launch,
                 cgroup,
+                init,
                 joins,
             } = p;
             drop(cgroup);
-            let mut cgroup_ns = None;
-            let mut rest = Vec::with_capacity(joins.len());
-            for join in joins {
-                match join.0 {
-                    // The seed chose it: the program was born in the container's pid namespace.
-                    "pid" => {}
-                    "cgroup" => cgroup_ns = Some(join.2),
-                    _ => rest.push(join),
-                }
-            }
-            let (code, e) = program(
-                &process,
-                seccomp.as_ref(),
-                rest,
+            let rest = joins.difference(Ns::PROCESS_ID);
+            let [i, o, e] = &stdio;
+            let (code, failed) = program(
+                &becoming,
+                &launch,
+                [i.as_fd(), o.as_fd(), e.as_fd()],
                 None,
-                cgroup_ns,
-                stdio,
                 None,
+                (init.as_fd(), rest),
             );
-            let _ = writeln!(std::io::stderr().lock(), "hex oci exec: {e}");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "hex oci exec: {}",
+                OciError::from(failed)
+            );
             sys::exit_child(code);
         }
         Some(sys::Sibling::Parent { pid, pidfd }) => match u32::try_from(pid) {
@@ -298,7 +612,7 @@ fn single_clone(
 /// an internal socket, reaps it (so the program has reparented to the agent), and returns its answer.
 fn through_intermediate(
     p: Prepared,
-    stdio: [OwnedFd; seed::REQUEST_FDS],
+    stdio: [OwnedFd; 3],
     pid_for: &mut PidFor,
 ) -> (Answer, Option<OwnedFd>) {
     // The intermediate is born in the seed's own pid namespace; it chooses the container's itself.
@@ -360,36 +674,30 @@ fn refused(failed: Failed, why: String) -> (Answer, Option<OwnedFd>) {
     (Answer::Refused { failed, why }, None)
 }
 
-/// The intermediate: joins the container's namespaces and cgroup and clones the program into them (the
-/// same work as [`super::exec`]'s helper), returning the program's pid and the pidfd its clone made.
-/// Returns in the intermediate only; the program (the clone's child) execs and never returns here.
-fn start_program(
-    p: Prepared,
-    stdio: [OwnedFd; seed::REQUEST_FDS],
-) -> Result<(u32, OwnedFd), (Failed, OciError)> {
+/// The intermediate: joins the container's namespaces by the init's pidfd (the user namespace first,
+/// which grants it the rest; the cgroup namespace is left for the program, once it is in the cgroup) and
+/// clones the program into them (the same work as [`super::exec`]'s helper), returning the program's
+/// pid and the pidfd its clone made. Returns in the intermediate only; the program (the clone's child)
+/// execs and never returns here.
+fn start_program(p: Prepared, stdio: [OwnedFd; 3]) -> Result<(u32, OwnedFd), (Failed, OciError)> {
     let start = |e| (Failed::Start, e);
     let Prepared {
-        process,
-        seccomp,
+        becoming,
+        launch,
         cgroup,
+        init,
         joins,
     } = p;
+    rustix::thread::move_into_thread_name_spaces(init.as_fd(), joins.difference(Ns::CONTROL_GROUP))
+        .map_err(|e| start(OciError::os("joining the container's namespaces", e)))?;
     // A birth in the cgroup is checked against the credentials the clone runs with, which a joined
     // user namespace has changed; there the program joins the cgroup by migration instead (as the
-    // shim does), and the cgroup namespace is the child's to join once it is in the cgroup.
-    let in_userns = joins.iter().any(|(kind, _, _)| *kind == "user");
-    let mut cgroup_ns = None;
-    for (kind, flag, fd) in joins {
-        if kind == "cgroup" {
-            cgroup_ns = Some(fd);
-            continue;
-        }
-        sys::setns(fd.as_fd(), flag).map_err(start)?;
-    }
+    // shim does).
+    let in_userns = joins.contains(Ns::USER);
     // Born in the cgroup with a pidfd where it can be; otherwise forked, to migrate in and have its
     // pidfd opened from its pid.
     let born = match &cgroup {
-        Some((dir, _)) if !in_userns => sys::fork_into_cgroup_pidfd(dir.as_fd()).map_err(start)?,
+        Some(dir) if !in_userns => sys::fork_into_cgroup_pidfd(dir.as_fd()).map_err(start)?,
         _ => None,
     };
     // On the migrate path (rootless, or a kernel without clone-into-cgroup) the program joins the box
@@ -408,31 +716,46 @@ fn start_program(
     };
     let (fork, pidfd, procs) = match (born, cgroup) {
         (Some((fork, pidfd)), _) => (fork, pidfd, None),
-        (None, cgroup) => (
-            sys::fork().map_err(start)?,
-            None,
-            cgroup.map(|(_, procs)| procs),
-        ),
+        (None, cgroup) => {
+            // The cgroup.procs the program joins by, opened by its directory before the fork.
+            let procs = cgroup
+                .map(|dir| {
+                    rustix::fs::openat(
+                        &dir,
+                        "cgroup.procs",
+                        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC,
+                        rustix::fs::Mode::empty(),
+                    )
+                    .map_err(|e| start(OciError::os("opening the container's cgroup", e)))
+                })
+                .transpose()?;
+            (sys::fork().map_err(start)?, None, procs)
+        }
     };
     match fork {
         sys::Fork::Child => {
             // The program. It returns here only if it couldn't become the container's process or
             // exec; its status then leaves through the process's exit, which the agent's pidfd reads.
             let joined = joined_pipe.map(|(_read, write)| write);
-            let (code, e) = program(
-                &process,
-                seccomp.as_ref(),
-                Vec::new(),
-                procs,
-                cgroup_ns,
-                stdio,
-                joined,
+            let cgroup_ns = joins.intersection(Ns::CONTROL_GROUP);
+            let [i, o, e] = &stdio;
+            let (code, failed) = program(
+                &becoming,
+                &launch,
+                [i.as_fd(), o.as_fd(), e.as_fd()],
+                procs.as_ref().map(AsFd::as_fd),
+                joined.as_ref().map(AsFd::as_fd),
+                (init.as_fd(), cgroup_ns),
             );
-            let _ = writeln!(std::io::stderr().lock(), "hex oci exec: {e}");
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "hex oci exec: {}",
+                OciError::from(failed)
+            );
             sys::exit_child(code);
         }
         sys::Fork::Parent(pid) => {
-            drop((procs, cgroup_ns, stdio));
+            drop((procs, stdio, init));
             // On the migrate path, wait for the program's one byte, meaning it has joined the box
             // cgroup; if the pipe closes with no byte, the program ended first, so reap it and refuse.
             if let Some((read, _write)) = joined_pipe {
@@ -470,86 +793,56 @@ fn start_program(
     }
 }
 
-/// The program (the clone's child): its stdio set to the ones the caller handed in, into the
-/// container's namespaces that `joins` still names (the single clone's; the intermediate made its own),
-/// migrated into the container's cgroup when it wasn't born there, into the container's cgroup
-/// namespace, then the container's process become and the program exec'd. Its stdio first, so a
-/// failure after it reaches the caller's stderr. Returns the status to exit with and why only when one
-/// of those failed.
+/// The program (the clone's child): its stdio set to the ones the caller handed in, migrated into the
+/// container's cgroup when it wasn't born there, then into the namespaces `joins` names of the init's
+/// (the single clone's all but pid; the intermediate's program's the cgroup namespace alone, once it is
+/// in the cgroup), then the container's process become and the program exec'd. System calls alone on
+/// what was made before the clone, so it allocates nothing. Returns the status to exit with and what
+/// failed only when a step did.
 fn program(
-    process: &Process,
-    seccomp: Option<&Seccomp>,
-    joins: Vec<(&'static str, i32, OwnedFd)>,
-    procs: Option<OwnedFd>,
-    cgroup_ns: Option<OwnedFd>,
-    stdio: [OwnedFd; seed::REQUEST_FDS],
-    joined: Option<OwnedFd>,
-) -> (u8, OciError) {
-    let setup = || -> Result<(), OciError> {
+    becoming: &init::Becoming,
+    launch: &Launch,
+    stdio: [BorrowedFd<'_>; 3],
+    procs: Option<BorrowedFd<'_>>,
+    joined: Option<BorrowedFd<'_>>,
+    (init, joins): (BorrowedFd<'_>, Ns),
+) -> (u8, Failure) {
+    let setup = || -> Result<(), Failure> {
         let [stdin, stdout, stderr] = stdio;
-        rustix::stdio::dup2_stdin(&stdin).map_err(|e| OciError::os("the program's stdin", e))?;
-        rustix::stdio::dup2_stdout(&stdout).map_err(|e| OciError::os("the program's stdout", e))?;
-        rustix::stdio::dup2_stderr(&stderr).map_err(|e| OciError::os("the program's stderr", e))?;
-        for (_, flag, fd) in joins {
-            sys::setns(fd.as_fd(), flag)?;
-        }
+        rustix::stdio::dup2_stdin(stdin).map_err(Failure::of("the program's stdin"))?;
+        rustix::stdio::dup2_stdout(stdout).map_err(Failure::of("the program's stdout"))?;
+        rustix::stdio::dup2_stderr(stderr).map_err(Failure::of("the program's stderr"))?;
         if let Some(procs) = procs {
-            let n = rustix::io::write(&procs, b"0")
-                .map_err(|e| OciError::os("joining the container's cgroup", e))?;
+            let n = rustix::io::write(procs, b"0")
+                .map_err(Failure::of("joining the container's cgroup"))?;
             if n != 1 {
-                return Err(OciError::os(
-                    "joining the container's cgroup",
-                    "a short write to cgroup.procs",
+                return Err(Failure::of("joining the container's cgroup")(
+                    rustix::io::Errno::IO,
                 ));
             }
         }
         // Now a member of the box cgroup (born there, or just migrated in): tell the intermediate, so it
         // reports the program started only once the box's `cgroup.kill` would reach it. Before the
         // program's own setup, so the report can't beat the membership it stands for.
-        if let Some(joined) = &joined {
+        if let Some(joined) = joined {
             let n = rustix::io::write(joined, b"1")
-                .map_err(|e| OciError::os("signalling the container's cgroup was joined", e))?;
+                .map_err(Failure::of("signalling the container's cgroup was joined"))?;
             if n != 1 {
-                return Err(OciError::os(
-                    "signalling the container's cgroup was joined",
-                    "a short write",
+                return Err(Failure::of("signalling the container's cgroup was joined")(
+                    rustix::io::Errno::IO,
                 ));
             }
         }
-        if let Some(ns) = cgroup_ns {
-            sys::setns(ns.as_fd(), libc::CLONE_NEWCGROUP)?;
+        if !joins.is_empty() {
+            rustix::thread::move_into_thread_name_spaces(init, joins)
+                .map_err(Failure::of("joining the container's namespaces"))?;
         }
-        init::become_process(process, seccomp)
+        becoming.apply()
     };
-    if let Err(e) = setup() {
-        return (CANNOT_RUN, e);
+    if let Err(failed) = setup() {
+        return (CANNOT_RUN, failed);
     }
-    let program = match process.args.first() {
-        Some(p) => p,
-        None => {
-            return (
-                CANNOT_RUN,
-                OciError::Config("exec needs a program".to_owned()),
-            );
-        }
-    };
-    match init::resolve_program(program, &process.env) {
-        Ok(path) if path.exists() => {}
-        Ok(path) => {
-            return (
-                NOT_FOUND,
-                OciError::Config(format!("{} doesn't exist in the container", path.display())),
-            );
-        }
-        Err(e) => return (NOT_FOUND, e),
-    }
-    match init::exec(process) {
-        Err(e) => (CANNOT_RUN, e),
-        Ok(()) => (
-            CANNOT_RUN,
-            OciError::Broken("execve returned without an error".to_owned()),
-        ),
-    }
+    launch.exec()
 }
 
 /// What [`recv_request`] read.
@@ -561,20 +854,21 @@ pub enum Received {
     Message { size: usize, stdio: Vec<OwnedFd> },
 }
 
-/// Sends one exec request on `socket`, the program's `stdio` (stdin, stdout, stderr) riding as
-/// descriptors (`SCM_RIGHTS`). The agent's end of the agent↔seed socket (`hex-node`'s pool) sends this.
+/// Sends one exec request on `socket`, its descriptors riding with it (`SCM_RIGHTS`): the program's
+/// stdin, stdout and stderr, then the container init's pidfd. The agent's end of the agent↔seed socket
+/// (`hex-node`'s pool) sends this.
 pub fn send_request(
     socket: BorrowedFd<'_>,
     req: &Request,
-    stdio: [BorrowedFd<'_>; seed::REQUEST_FDS],
+    fds: [BorrowedFd<'_>; seed::REQUEST_FDS],
 ) -> Result<(), OciError> {
     let bytes = seed::request(req)
         .map_err(|f| OciError::Broken(format!("encoding an exec request: {f}")))?;
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(seed::REQUEST_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    if !control.push(SendAncillaryMessage::ScmRights(&stdio)) {
+    if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
         return Err(OciError::os(
-            "sending an exec request's stdio",
+            "sending an exec request's descriptors",
             "no room for the descriptors",
         ));
     }

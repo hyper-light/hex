@@ -4,7 +4,7 @@
 # and exec_floor.c, built here. Every binary is copied into the run's directory, so what ran is kept beside what
 # it measured. On fedora:
 #   exec_breakdown.sh <hex release binary> <seam_oci release binary>
-# Env: N, WARMUP, ROUNDS, FLOOR_N, FLOOR_WARMUP (exec_breakdown_inside.sh's), CPUSET (4-31); LOAD_GATE=0 skips the
+# Env: N, WARMUP, ROUNDS, FLOOR_N, FLOOR_WARMUP, CHECK (exec_breakdown_inside.sh's), CPUSET (4-31); LOAD_GATE=0 skips the
 # wait for load under 2, as host.sh allows: this probe's comparisons are within one run (the floor against
 # libcrun's exec, the parts against their call), which cancel other people's CPU load. BENCH_HOST_OK names
 # another host, as host.sh takes it.
@@ -42,7 +42,7 @@ trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e FLOOR_N -e FLOOR_WARMUP \
+  -e N -e WARMUP -e ROUNDS -e FLOOR_N -e FLOOR_WARMUP -e CHECK \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/exec_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done; } >> "$OUT/env.txt"

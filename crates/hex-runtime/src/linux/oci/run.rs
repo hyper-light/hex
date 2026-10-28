@@ -270,6 +270,7 @@ impl Runtime {
                 state.start_time = Some(start_time);
                 state.annotations = spec.annotations.clone();
                 state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
+                state.poststart = Some(!spec.hooks.poststart.is_empty());
                 dir.put(&state)?;
                 if let Some(path) = pid_file {
                     std::fs::write(path, format!("{container_pid}\n"))
@@ -311,32 +312,49 @@ impl Runtime {
         )
     }
 
-    /// Starts the container (OCI `start`): opens the exec FIFO, which the init is blocked on, then
-    /// records `running`.
+    /// Starts the container (OCI `start`) in one operation on the exec FIFO, as crun does: the state is read once,
+    /// the FIFO the init is blocked on opened, its byte taken, and the FIFO removed. Nothing is written: `running`
+    /// is derived from the FIFO's absence while the init lives ([`state::derive`]), so start costs what libcrun's
+    /// does (decision 3, goal 3 plan step 3). A FIFO already gone is a start that happened: refused as running.
     pub fn start(&self, id: &str) -> Result<(), OciError> {
+        self.start_with(id, &State::init_alive)
+    }
+
+    /// [`Runtime::start`], the init's liveness judged by `init_alive`: the node agent judges it by the
+    /// pidfd it holds for the init, a `poll` in place of reading the init's `/proc` stat.
+    pub fn start_with(
+        &self,
+        id: &str,
+        init_alive: &dyn Fn(&State) -> bool,
+    ) -> Result<(), OciError> {
         let dir = self.dir(id)?;
-        let mut state = dir.get(id)?;
-        if state.status != Status::Created {
+        let state = dir.get(id)?;
+        if !matches!(state.status, Status::Created | Status::Running) {
             return Err(OciError::WrongState(
                 id.to_owned(),
                 state.status.name(),
                 "created",
             ));
         }
-        if !state.init_alive() {
+        if !init_alive(&state) {
             return Err(OciError::WrongState(id.to_owned(), "stopped", "created"));
         }
         // Opened without blocking: a blocking open would wait for ever on an init that has died. The
         // init, blocked opening the FIFO to write, writes its byte as soon as this opens it to read.
         // Close-on-exec, so the poststart hooks below don't inherit it.
-        let fifo = rustix::fs::open(
+        let fifo = match rustix::fs::open(
             dir.fifo(),
             OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
-        )
-        .map_err(|e| OciError::os("opening the exec fifo", e))?;
+        ) {
+            Ok(fifo) => fifo,
+            Err(rustix::io::Errno::NOENT) => {
+                return Err(OciError::WrongState(id.to_owned(), "running", "created"));
+            }
+            Err(e) => return Err(OciError::os("opening the exec fifo", e)),
+        };
         if !wait_readable(&fifo, START_PATIENCE)? {
-            return Err(if state.init_alive() {
+            return Err(if init_alive(&state) {
                 OciError::Broken(format!(
                     "container {id} did not take the start within {START_PATIENCE:?}"
                 ))
@@ -347,18 +365,23 @@ impl Runtime {
         // The init writes one byte as it takes the start. A zero-byte read is end-of-file: the init
         // opened the FIFO and then died (killed, or OOM'd) without writing, so the FIFO's write end
         // closed and `poll` returned a hang-up. The container is stopped, not running; refused, never
-        // recorded running (CLAUDE.md §3).
+        // reported running (CLAUDE.md §3): the FIFO stays, and the init's death says stopped.
         let mut byte = [0u8; 1];
         let n = rustix::io::read(&fifo, &mut byte)
             .map_err(|e| OciError::os("reading the exec fifo", e))?;
         if n == 0 {
             return Err(OciError::WrongState(id.to_owned(), "stopped", "created"));
         }
-        state.status = Status::Running;
-        dir.put(&state)?;
-        // poststart hooks run after the workload has started (OCI §Lifecycle).
-        if let Some(hooks) = load_hooks(&state) {
-            run_hooks(&hooks.poststart, &state)?;
+        // From here the FIFO's absence is what says the container runs.
+        std::fs::remove_file(dir.fifo()).map_err(|e| OciError::os("removing the exec fifo", e))?;
+        // poststart hooks run after the workload has started (OCI §Lifecycle), with the state they see as
+        // running; the config is read only when create found hooks there (or state from before it looked).
+        if state.poststart != Some(false)
+            && let Some(hooks) = load_hooks(&state)
+        {
+            let mut running = state;
+            running.status = Status::Running;
+            run_hooks(&hooks.poststart, &running)?;
         }
         Ok(())
     }
@@ -413,12 +436,19 @@ impl Runtime {
         Ok(cmd)
     }
 
-    /// The container's state (OCI `state`): `stopped` once its recorded init no longer runs.
+    /// The container's state as create recorded it, its status not derived: for a caller that judges the
+    /// init's liveness itself, as the node agent does by the init's pidfd.
+    pub fn recorded(&self, id: &str) -> Result<State, OciError> {
+        self.dir(id)?.get(id)
+    }
+
+    /// The container's state (OCI `state`), its status derived as crun derives it ([`state::derive`]): `created`
+    /// until start takes the exec FIFO, `running` after while the init lives, `stopped` once it doesn't.
     pub fn state(&self, id: &str) -> Result<State, OciError> {
-        let mut state = self.dir(id)?.get(id)?;
-        if matches!(state.status, Status::Created | Status::Running) && !state.init_alive() {
-            state.status = Status::Stopped;
-        }
+        let dir = self.dir(id)?;
+        let mut state = dir.get(id)?;
+        state.status =
+            crate::linux::oci::state::derive(state.status, dir.fifo_present(), state.init_alive());
         Ok(state)
     }
 

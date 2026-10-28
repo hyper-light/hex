@@ -98,10 +98,15 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   with one device policy share one program), the `seccomp(2)` call that loads a container's filter
   without no_new_privs when its spec doesn't ask for it, the signal mask and `signalfd` through which
   `hex oci exec` passes signals on, the signal-disposition reset and `raise` by which
-  `hex oci exec` ends the way its program did when the node agent drives it (seam mode), and the
+  `hex oci exec` ends the way its program did when the node agent drives it (seam mode), the
   `_exit` by which a seed's forked intermediate and program end without running the seed's `atexit`
-  handlers, none of which rustix wraps safely; the process is single-threaded (it re-exec'd) where
-  this matters.
+  handlers, and the vfork-style `clone3` (`CLONE_VM | CLONE_VFORK`) by which a node agent's thread starts
+  an exec'd program as posix_spawn does: an inline-assembly trampoline for x86_64 and aarch64 that runs
+  the child on a stack of its own (mapped with a guard page), every signal blocked around the clone, and
+  the child's `execve` and signal reset, none of which rustix wraps safely. The process is
+  single-threaded (it re-exec'd) where that matters, but for the vfork-style clone's child, which runs in
+  the multi-threaded agent's memory and so makes system calls alone on what was made before the clone,
+  as posix_spawn's child does.
 
 ## 13. Lean code
 

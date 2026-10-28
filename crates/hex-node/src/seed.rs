@@ -1,9 +1,12 @@
 //! The node agent's pool of exec seeds (decision 3 of docs/design/runtime-architecture.md, goal 3
-//! plan step 2). A seed is a prepared `hex __oci-seed` process the agent keeps and reuses, so exec
-//! into an `oci` box spawns no process of the agent's and re-execs no `hex` binary per call: the agent
-//! hands the exec to an idle seed over a `SOCK_SEQPACKET` socket (the request's bytes with the
-//! program's stdio as `SCM_RIGHTS` descriptors) and gets back the program's pidfd, which the
-//! supervisor watches as it watches an init's (`seed.rs` in `hex-runtime` is the seed's own side).
+//! plan step 2), for the execs its own threads can't start: a rootless node's, whose threads may not
+//! choose a container's pid namespace (a node that runs as root starts them straight from the calling
+//! thread, `hex_runtime::linux::oci::seed::exec_direct`). A seed is a prepared `hex __oci-seed` process
+//! the agent keeps and reuses, so such an exec spawns no process of the agent's and re-execs no `hex`
+//! binary per call: the agent hands the exec to an idle seed over a `SOCK_SEQPACKET` socket (the
+//! request's bytes with the program's stdio and the init's pidfd as `SCM_RIGHTS` descriptors) and gets
+//! back the program's pidfd, which the supervisor watches as it watches an init's (`seed.rs` in
+//! `hex-runtime` is the seed's own side).
 //!
 //! Bounds (CLAUDE.md §2), each refused past by a typed [`Refusal`]:
 //! - **seeds**, [`SeedPool::budget`]: the most seed processes one node keeps. Seeds start on demand up
@@ -92,12 +95,18 @@ impl SeedPool {
     }
 
     /// Runs `req` with `stdio` in an idle seed (starting one, or waiting for one, within the bounds),
-    /// and returns the started program's pid and pidfd for the supervisor to own. The caller holds the
-    /// supervisor's spawning lock across this and the own, so the program — the agent's child once its
-    /// seed's intermediate exits — isn't reaped by a sweep before it is owned.
-    pub fn exec(&self, req: &Request, stdio: [OwnedFd; 3]) -> Result<(u32, OwnedFd), Refusal> {
+    /// the program joining the namespaces of the container init `init` (its pidfd), and returns the
+    /// started program's pid and pidfd for the supervisor to own. The caller holds the supervisor's
+    /// spawning lock across this and the own, so the program — the agent's child — isn't reaped by a
+    /// sweep before it is owned.
+    pub fn exec(
+        &self,
+        req: &Request,
+        stdio: [OwnedFd; 3],
+        init: OwnedFd,
+    ) -> Result<(u32, OwnedFd), Refusal> {
         let mut seed = self.acquire()?;
-        match round_trip(&mut seed, req, stdio) {
+        match round_trip(&mut seed, req, stdio, init) {
             Ok(started) => {
                 self.release(seed);
                 Ok(started)
@@ -233,17 +242,23 @@ enum Trip {
     Broken(Refusal),
 }
 
-/// Sends the request and its stdio to the seed and reads the answer: the program's pid and pidfd, or a
-/// refusal.
-fn round_trip(seed: &mut Seed, req: &Request, stdio: [OwnedFd; 3]) -> Result<(u32, OwnedFd), Trip> {
-    let fds = [stdio[0].as_fd(), stdio[1].as_fd(), stdio[2].as_fd()];
+/// Sends the request, its stdio and the init's pidfd to the seed and reads the answer: the program's pid
+/// and pidfd, or a refusal.
+fn round_trip(
+    seed: &mut Seed,
+    req: &Request,
+    stdio: [OwnedFd; 3],
+    init: OwnedFd,
+) -> Result<(u32, OwnedFd), Trip> {
+    let [stdin, stdout, stderr] = &stdio;
+    let fds = [stdin.as_fd(), stdout.as_fd(), stderr.as_fd(), init.as_fd()];
     // The agent↔seed wire lives once in `hex-runtime`'s seed module, used by the seed, its
     // intermediate and here (CLAUDE.md §13). A broken socket is the seed's death: take it for broken.
     rt_seed::send_request(seed.socket.as_fd(), req, fds)
         .map_err(|e| Trip::Broken(Refusal::from(e)))?;
     // The seed holds dups of the stdio now; drop the agent's copies so the program's streams close
     // when it ends, not when the agent does.
-    drop(stdio);
+    drop((stdio, init));
     let (answer, pidfd) =
         rt_seed::recv_answer(seed.socket.as_fd()).map_err(|e| Trip::Broken(Refusal::from(e)))?;
     match answer {

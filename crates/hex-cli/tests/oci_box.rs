@@ -461,7 +461,7 @@ fn program_alone(lab: &Lab, own: &Path) {
             hex_api::Program::of(&["/usr/bin/sleep", "300"]),
             hex_api::Stdio::null(),
         )
-        .expect("exec a program through a seed");
+        .expect("exec a program");
     let pid = first.pid();
     assert_eq!(
         first.try_wait().expect("try_wait"),
@@ -469,8 +469,9 @@ fn program_alone(lab: &Lab, own: &Path) {
         "the program is still running while we look at it"
     );
     // It is the agent's own child: no `hex __oci-exec` helper stands between the agent and the program.
-    // Race-free: the seed reaps its intermediate before the agent is told, so the program has already
-    // reparented to the agent when `exec` returns.
+    // Cloned straight from the agent's thread (as root) it is born so; through a rootless node's seed,
+    // the seed reaps its intermediate before the agent is told, so it has reparented by the time `exec`
+    // returns.
     assert_eq!(
         ppid(pid),
         Some(agent),
@@ -481,21 +482,36 @@ fn program_alone(lab: &Lab, own: &Path) {
         !children.iter().any(|&c| cmdline_has(c, "__oci-exec")),
         "no hex __oci-exec helper runs beside the program"
     );
-    // A reusable seed serves it, and a second exec re-uses the same seed.
+    // Goal 3 plan step 2's acceptance: no process is made per exec but the program, and no hex binary is
+    // exec'd per call. A node that runs as root clones the program from its own thread and keeps no
+    // seed; a rootless one hands the exec to a reusable seed. Either way a second exec adds to the agent's
+    // children its program alone.
     let seeds = |cs: &[u32]| cs.iter().filter(|&&c| cmdline_has(c, "__oci-seed")).count();
-    let before = seeds(&children);
-    assert!(before >= 1, "a reusable seed serves the exec");
+    if lab.rootless {
+        assert!(
+            seeds(&children) >= 1,
+            "a rootless node's exec is served by a reusable seed"
+        );
+    } else {
+        assert_eq!(
+            seeds(&children),
+            0,
+            "a node that runs as root needs no seed"
+        );
+    }
+    let before: std::collections::BTreeSet<u32> = children.into_iter().collect();
     let second = node
         .exec(
             &id,
             hex_api::Program::of(&["/usr/bin/sleep", "300"]),
             hex_api::Stdio::null(),
         )
-        .expect("a second exec through a seed");
+        .expect("a second exec");
+    let after: std::collections::BTreeSet<u32> = children_of(agent).into_iter().collect();
     assert_eq!(
-        seeds(&children_of(agent)),
-        before,
-        "the second exec re-used the seed; no hex binary is exec'd per call"
+        after.difference(&before).copied().collect::<Vec<_>>(),
+        [second.pid()],
+        "the second exec added no process but its program: no helper, no seed, no hex binary exec'd"
     );
     assert_eq!(
         ppid(second.pid()),

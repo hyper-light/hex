@@ -21,7 +21,7 @@ use rustix::thread::UnshareFlags;
 
 use crate::linux::oci::inroot::{self, Make};
 use crate::linux::oci::spec::{Device, Process, Seccomp, Spec};
-use crate::linux::oci::{OciError, caps, net, seccomp, sys};
+use crate::linux::oci::{Failure, OciError, caps, net, seccomp, sys};
 
 /// Environment the `create` runtime sets for `hex __oci-init`.
 pub const ENV_SYNC_W: &str = "HEX_OCI_SYNC_W";
@@ -208,55 +208,147 @@ fn container(
 
 /// Becomes the container's process as its spec gives it: its OOM score, limits, seccomp filter,
 /// capabilities, user, no_new_privs and umask. The container's first process does this before
-/// `start`, and each one `hex oci exec` runs does it before it execs.
+/// `start`, and each one `hex oci exec` runs does it before it execs ([`Becoming`]).
+pub(crate) fn become_process(process: &Process, seccomp: Option<&Seccomp>) -> Result<(), OciError> {
+    Ok(Becoming::of(process, seccomp)?.apply()?)
+}
+
+/// The container's process, made ready to become before a clone (goal 3 plan step 2): its seccomp filter
+/// compiled to the kernel's instructions, its limits, groups and capability sets resolved, its OOM score's
+/// text made. [`Becoming::apply`] then makes system calls alone on what was made here, so the child of a
+/// vfork-style clone, which shares its parent's memory and may not allocate, can become the process.
 ///
 /// no_new_privs is exactly the spec's `noNewPrivileges`, so the seccomp filter goes on where that
 /// allows, as runc puts it on (libcontainer/standard_init_linux.go). Without no_new_privs, loading a
 /// filter needs CAP_SYS_ADMIN (seccomp(2)), so it goes on before the user and capabilities change,
 /// and the profile also binds Hex's own calls from there to `execve`. With no_new_privs, it goes on
-/// last, so as few of Hex's own calls as possible run under it. The init re-exec'd, so it is
-/// single-threaded: the filter binds its one thread, which is the thread that `execve`s.
-pub(crate) fn become_process(process: &Process, seccomp: Option<&Seccomp>) -> Result<(), OciError> {
-    // A profile Hex can't honour is refused by name before anything about the process changes
-    // (seccomp::compile), never run unfiltered (CLAUDE.md §3).
-    let filter = seccomp.map(seccomp::compile).transpose()?;
-    // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
-    if let Some(adj) = process.oom_score_adj {
-        fs::write("/proc/self/oom_score_adj", adj.to_string())
-            .map_err(|e| OciError::os("writing oom_score_adj", e))?;
+/// last, so as few of Hex's own calls as possible run under it.
+pub(crate) struct Becoming {
+    oom: Option<Vec<u8>>,
+    rlimits: Vec<(rustix::process::Resource, rustix::process::Rlimit)>,
+    filter: Option<Vec<libc::sock_filter>>,
+    no_new_privileges: bool,
+    caps: Option<caps::Ready>,
+    uid: rustix::process::Uid,
+    gid: rustix::process::Gid,
+    groups: Vec<rustix::process::Gid>,
+    umask: Option<Mode>,
+}
+
+impl Becoming {
+    /// `process` made ready. A profile Hex can't honour is refused by name here, before anything about
+    /// the process changes (seccomp::compile), never run unfiltered (CLAUDE.md §3).
+    pub(crate) fn of(process: &Process, seccomp: Option<&Seccomp>) -> Result<Self, OciError> {
+        let filter = seccomp.map(seccomp::compile).transpose()?.map(|program| {
+            program
+                .iter()
+                .map(|f| libc::sock_filter {
+                    code: f.code,
+                    jt: f.jt,
+                    jf: f.jf,
+                    k: f.k,
+                })
+                .collect::<Vec<_>>()
+        });
+        if filter
+            .as_ref()
+            .is_some_and(|f| u16::try_from(f.len()).is_err())
+        {
+            return Err(OciError::Config(
+                "the seccomp filter has more instructions than a filter holds".to_owned(),
+            ));
+        }
+        let rlimits = process
+            .rlimits
+            .iter()
+            .map(|limit| {
+                Ok((
+                    caps::rlimit_resource(&limit.kind)?,
+                    rustix::process::Rlimit {
+                        current: Some(limit.soft),
+                        maximum: Some(limit.hard),
+                    },
+                ))
+            })
+            .collect::<Result<_, OciError>>()?;
+        Ok(Self {
+            oom: process
+                .oom_score_adj
+                .map(|adj| adj.to_string().into_bytes()),
+            rlimits,
+            filter,
+            no_new_privileges: process.no_new_privileges,
+            caps: process.capabilities.as_ref().map(caps::ready),
+            uid: rustix::process::Uid::from_raw(process.user.uid),
+            gid: rustix::process::Gid::from_raw(process.user.gid),
+            groups: process
+                .user
+                .additional_gids
+                .iter()
+                .map(|g| rustix::process::Gid::from_raw(*g))
+                .collect(),
+            umask: process.user.umask.map(Mode::from_bits_truncate),
+        })
     }
-    apply_rlimits(process)?;
-    if !process.no_new_privileges
-        && let Some(program) = &filter
-    {
-        sys::load_seccomp_filter(program)?;
+
+    /// Becomes the process: system calls alone, in the order the type's docs give.
+    pub(crate) fn apply(&self) -> Result<(), Failure> {
+        // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
+        if let Some(text) = &self.oom {
+            let fd = rustix::fs::open(
+                c"/proc/self/oom_score_adj",
+                OFlags::WRONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(Failure::of("opening oom_score_adj"))?;
+            rustix::io::write(&fd, text).map_err(Failure::of("writing oom_score_adj"))?;
+        }
+        for (resource, limit) in &self.rlimits {
+            rustix::process::setrlimit(*resource, *limit).map_err(Failure::of("setrlimit"))?;
+        }
+        if !self.no_new_privileges
+            && let Some(filter) = &self.filter
+        {
+            sys::load_seccomp_filter(filter).map_err(Failure::of("loading the seccomp filter"))?;
+        }
+        // Capabilities around the uid change (runc's order): drop the bounding set while still root
+        // (needs effective CAP_SETPCAP), keep the permitted set across setuid, then set the sets exactly
+        // as the dropped user, so a non-root container still holds the capabilities its spec grants.
+        match &self.caps {
+            Some(c) => {
+                c.drop_bounding()?;
+                sys::set_keepcaps(true).map_err(Failure::of("PR_SET_KEEPCAPS"))?;
+                self.set_user()?;
+                c.set_process()?;
+                sys::set_keepcaps(false).map_err(Failure::of("PR_SET_KEEPCAPS"))?;
+            }
+            None => self.set_user()?,
+        }
+        if self.no_new_privileges {
+            rustix::thread::set_no_new_privs(true).map_err(Failure::of("set_no_new_privs"))?;
+        }
+        if let Some(mask) = self.umask {
+            rustix::process::umask(mask);
+        }
+        // With no_new_privs now set, the filter needs no privilege.
+        if self.no_new_privileges
+            && let Some(filter) = &self.filter
+        {
+            sys::load_seccomp_filter(filter).map_err(Failure::of("loading the seccomp filter"))?;
+        }
+        Ok(())
     }
-    // Capabilities around the uid change (runc's order): drop the bounding set while still root
-    // (needs effective CAP_SETPCAP), keep the permitted set across setuid, then set the sets exactly
-    // as the dropped user, so a non-root container still holds the capabilities its spec grants.
-    if let Some(c) = &process.capabilities {
-        caps::drop_bounding(c)?;
-        sys::set_keepcaps(true)?;
-        set_user(process)?;
-        caps::set_process(c)?;
-        sys::set_keepcaps(false)?;
-    } else {
-        set_user(process)?;
+
+    fn set_user(&self) -> Result<(), Failure> {
+        // A user namespace with setgroups denied (the rootless one) refuses this, and the process keeps
+        // the groups it has: none beyond its gid there.
+        let _ = rustix::thread::set_thread_groups(&self.groups);
+        rustix::thread::set_thread_res_gid(self.gid, self.gid, self.gid)
+            .map_err(Failure::of("setgid"))?;
+        rustix::thread::set_thread_res_uid(self.uid, self.uid, self.uid)
+            .map_err(Failure::of("setuid"))?;
+        Ok(())
     }
-    if process.no_new_privileges {
-        rustix::thread::set_no_new_privs(true).map_err(|e| OciError::os("set_no_new_privs", e))?;
-    }
-    if let Some(mask) = process.user.umask {
-        rustix::process::umask(Mode::from_bits_truncate(mask));
-    }
-    // apply_filter sets no_new_privs first, which the spec asked for here.
-    if process.no_new_privileges
-        && let Some(program) = &filter
-    {
-        seccompiler::apply_filter(program)
-            .map_err(|e| OciError::os("loading the seccomp filter", e))?;
-    }
-    Ok(())
 }
 
 /// `execve`s the workload, resolving `args[0]` in `PATH` when it has no slash. Only returns on error.
@@ -685,36 +777,6 @@ fn apply_sysctls(spec: &Spec) -> Result<(), OciError> {
         let path = Path::new("/proc/sys").join(key.replace('.', "/"));
         fs::write(&path, value).map_err(|e| OciError::os("writing a sysctl", e))?;
     }
-    Ok(())
-}
-
-fn apply_rlimits(process: &Process) -> Result<(), OciError> {
-    for limit in &process.rlimits {
-        let resource = caps::rlimit_resource(&limit.kind)?;
-        rustix::process::setrlimit(
-            resource,
-            rustix::process::Rlimit {
-                current: Some(limit.soft),
-                maximum: Some(limit.hard),
-            },
-        )
-        .map_err(|e| OciError::os("setrlimit", e))?;
-    }
-    Ok(())
-}
-
-fn set_user(process: &Process) -> Result<(), OciError> {
-    let groups: Vec<rustix::process::Gid> = process
-        .user
-        .additional_gids
-        .iter()
-        .map(|g| rustix::process::Gid::from_raw(*g))
-        .collect();
-    let _ = rustix::thread::set_thread_groups(&groups);
-    let gid = rustix::process::Gid::from_raw(process.user.gid);
-    rustix::thread::set_thread_res_gid(gid, gid, gid).map_err(|e| OciError::os("setgid", e))?;
-    let uid = rustix::process::Uid::from_raw(process.user.uid);
-    rustix::thread::set_thread_res_uid(uid, uid, uid).map_err(|e| OciError::os("setuid", e))?;
     Ok(())
 }
 
