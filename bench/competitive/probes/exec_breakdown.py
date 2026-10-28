@@ -386,7 +386,7 @@ def check(run, prefix):
             print(f"check {prefix}.{kind}: {sum('parts' in c for c in got)} of {len(got)} traced calls cut whole, "
                   f"{unread} trace lines not read as events")
     r, modes = floor_ms(os.path.join(run, f"{prefix}.floor.json"))
-    for m in ("spawn", "clone", "cgroup", "floor"):
+    for m in ("spawn", "clone", "cgroup", "floor", "spin"):
         if len(modes.get(m, [])) != r["n"]:
             bad.append(f"floor: {len(modes.get(m, []))} {m} samples, {r['n']} asked for")
     print(f"check {prefix}.floor: joined {r['joined']}")
@@ -471,7 +471,7 @@ def summarize(run):
     lines += ["## The floor under exec (ms; exec_floor.c, its modes interleaved cycle by cycle)", "",
               "| round | mode | n | p50 | p99 | max | load at start, end |", "|---|---|---|---|---|---|---|"]
     for rnd, f in sorted(floors.items()):
-        for m in ("spawn", "clone", "cgroup", "floor"):
+        for m in ("spawn", "clone", "cgroup", "floor", "spin"):
             d = f[m]
             lines.append(f"| r{rnd} | {m} | {d['n']} | {ms3(d['p50'])} | {ms3(d['p99'])} | {ms3(d['max'])} | "
                          f"{f['load_start'].split(' ')[0]}, {f['load_end'].split(' ')[0]} |")

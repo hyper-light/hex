@@ -15,7 +15,11 @@
  *           every call (oci_breakdown.md section 2 timed it from Python);
  *   clone   clone3 with a pidfd, exec and wait: no cgroup, no namespaces;
  *   cgroup  the same, born in the container's cgroup: no namespaces;
- *   floor   the same, in the container's namespaces too.
+ *   floor   the same, in the container's namespaces too;
+ * and a gauge of the CPU's speed at those moments, nothing to do with exec:
+ *   spin    SPIN_STEPS steps of a dependent multiply-add chain, with no system call, so its time is the
+ *           clock the host gives a burst of work right then (a hybrid laptop part's, under its governor, swings
+ *           with what else the host is doing).
  * Each cycle is timed alone on CLOCK_MONOTONIC, from before its first system call to after its wait
  * returns. The JSON holds every timed cycle's nanoseconds by mode; exec_breakdown.py takes percentiles.
  * Any failure ends the probe with why on stderr and exit status 1, and no JSON. */
@@ -52,8 +56,13 @@ struct clone3_args {
   uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup;
 };
 
-enum { SPAWN, CLONE, CGROUP, FLOOR, MODES };
-static const char *const MODE_NAME[MODES] = { "spawn", "clone", "cgroup", "floor" };
+enum { SPAWN, CLONE, CGROUP, FLOOR, SPIN, MODES };
+static const char *const MODE_NAME[MODES] = { "spawn", "clone", "cgroup", "floor", "spin" };
+
+/* spin's steps: about 0.1 ms at 4 GHz, a multiply-add's latency each (a dependent chain), so a burst as
+ * long as the parts of an exec it gauges. Its result is stored where the compiler must keep every step. */
+enum { SPIN_STEPS = 100000 };
+volatile uint64_t spin_sink;
 
 /* The container's namespaces the child joins, in this order: the mount namespace last, since it changes
  * what every path names. pid is the parent's to join, for its children (setns(2): a process's own pid
@@ -136,6 +145,14 @@ cycle (const struct target *t, int mode)
   uint64_t t0 = now_ns ();
   siginfo_t info;
 
+  if (mode == SPIN)
+    {
+      uint64_t x = t0;
+      for (int i = 0; i < SPIN_STEPS; i++)
+        x = x * 6364136223846793005u + 1442695040888963407u;
+      spin_sink = x;
+      return now_ns () - t0;
+    }
   if (mode == SPAWN)
     {
       pid_t pid;
