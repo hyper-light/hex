@@ -298,13 +298,14 @@ one it hadn't read goes with the connection. The node ends the program rather th
 - The signal goes through the program's pidfd, so it can't reach a process given its pid since: "a PID file
   descriptor is a stable reference to a specific process" (pidfd_send_signal(2)).
 
-Until the seed (plan step 2) makes an exec'd `oci` program the agent's own child, the agent watches the
-`hex __oci-exec` helper as the program's stand-in, and in seam mode the program dies with it: `PR_SET_PDEATHSIG` is
-set once the program has become the container's process, since "the parent-death signal setting is also cleared upon
-changes to any of the following thread credentials: effective user ID, effective group ID, filesystem user ID, or
-filesystem group ID" (`PR_SET_PDEATHSIG(2const)`); a pipe the helper holds tells the program whether the helper
-ended before the signal was set. One gap stays until step 2 supersedes this: exec'ing a set-user-ID program clears
-the signal too (the same page).
+Plan step 2's exec seed (below) makes an exec'd `oci` program the agent's own child, watched by the program's
+own pidfd, so on the seam path the disconnect rule KILLs the program itself and no `hex __oci-exec` helper stands
+in for it. The command line keeps the helper: it ties the program to itself with `PR_SET_PDEATHSIG` once the
+program has become the container's process, since "the parent-death signal setting is also cleared upon changes
+to any of the following thread credentials: effective user ID, effective group ID, filesystem user ID, or
+filesystem group ID" (`PR_SET_PDEATHSIG(2const)`), and a pipe the helper holds tells the program whether the
+helper ended first. The gap that left — exec'ing a set-user-ID program clears the signal too (the same page) —
+doesn't reach the seam path, where the program is the agent's child from birth, not a helper's.
 
 **What would falsify the rule.** A caller that needs a program to outlive its connection: an executor that, when it
 restarts, reattaches to a step still running rather than running it again. Then exec gains a detached form
@@ -347,6 +348,77 @@ helper: its spawn and re-exec (0.43, of which 0.16 is the static-pie binary star
 read of `config.json` and the container's namespaces, and the hop its own end adds before the node's wait returns. The
 seed removes it. Start, 0.24-0.25 ms against libcrun's 0.10, is half the rewrite of `state.json` as running
 (0.12-0.13), which libcrun doesn't make and plan step 3 removes, with the second read of the state.
+
+#### The exec seed (goal 3, plan step 2)
+
+**What it is.** The node agent keeps a bounded pool of `hex __oci-seed` processes — prepared, single-threaded,
+started on demand and reused — and hands each `oci` exec to one over a `SOCK_SEQPACKET` socketpair: the request
+(`crates/hex-core/src/seed.rs`, its own `HEXS` codec) with the program's stdin, stdout and stderr as `SCM_RIGHTS`
+descriptors. The seed starts the program and answers with its pidfd; the agent's supervisor owns that pidfd as it
+owns an init's, so the exec'd program is the agent's own child and the step spawns no `hex` process of its own and
+re-execs no `hex` binary per call. The command line's `hex oci exec` is unchanged (it still re-execs
+`hex __oci-exec`).
+
+**How a reused seed clones into a container it hasn't joined.** A seed is reused across containers, so it can't
+join any one container's namespaces itself: a user-namespace join is irreversible, and a pid-namespace join governs
+only the joiner's future children (`setns(2)`). So per exec the seed forks a short-lived intermediate; the
+intermediate joins the container's namespaces (user first, the cgroup namespace left for the child), then
+`clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)` clones the program into the container's cgroup and pid namespace. The
+intermediate sends the program's pidfd back to the seed and exits; the program, orphaned, reparents to the agent,
+which is a child subreaper (decision 2), exactly as a container's init does. The intermediate is a fork of the
+seed, no exec, gone before the program runs, so "the program alone" (the acceptance's check of the agent's
+descendants during an exec) and "no `hex` binary exec'd per call" both hold.
+
+**Deviation from the plan's one-call clone (recorded as a decision argument, §5).** Plan step 2 names a single
+`clone3(CLONE_INTO_CGROUP | CLONE_PIDFD | CLONE_PARENT)`. That is impossible on Linux: `clone3` rejects
+`CLONE_PARENT` with `EINVAL` — measured plainly and inside an unprivileged user namespace, with and without
+`CLONE_PIDFD` and a prior `setns`, on cachyos 7.2.9 and fedora 6.19 (`docs/research/runtime/seed-clone-parent.md`;
+the kernel's `copy_process` rejects `CLONE_PARENT` on the clone3 path). Legacy `clone(CLONE_PARENT)` allows it but
+can't carry `CLONE_INTO_CGROUP` (a clone3-only field, Linux 5.7), and a caller can't `setns` *itself* into a pid
+namespace. So the one call can't be made; the intermediate plus subreaper adoption above reaches the same end — the
+program born in the container's cgroup and namespaces as the agent's child — with calls the kernel supports, and
+reuses the adoption the init already relies on.
+
+**The ordering that makes the adoption race-free.** The intermediate answers the *seed*, not the agent, over an
+internal socketpair; the seed reaps the intermediate (`waitpid`) — so the program has reparented to the agent —
+*before* it forwards the answer to the agent. So the agent learns the program's pidfd only once the program is its
+own child, and its `waitid(P_PIDFD)` can reap it (it would be `ECHILD` on a program still the intermediate's child).
+The agent holds the supervisor's spawning lock across the whole round trip and the own, so a sweep can't reap a
+program that exits at once (as `true` does) before it is owned.
+
+**Delete reaps the box's programs.** A container's init (pid 1 of the box's pid namespace) can't finish exiting
+until every process in that namespace is reaped: the kernel holds it in `zap_pid_ns_processes` until then. An exec'd
+program is such a process, and the agent's own child by adoption — reparented, not a descendant of the init — so the
+init can't reap it. So on delete the agent reaps the box's exec'd programs after `cgroup.kill`, which frees the init
+to exit and the box to empty, and records each exit for the caller's `Proc` to read (the caller reaps its own
+program otherwise, but a delete beats it). The `hex __oci-exec` command line's helper did this reap itself, dying
+with its program's signal so the caller saw it; on the seam path the agent does it, so no helper is needed. Each box
+bounds the programs the agent watches for it at once (`crates/hex-node/src/supervise.rs`), refused past by type.
+
+**Bounds** (`crates/hex-node/src/seed.rs`), each refused past by type: the seeds one node keeps at once, and the
+execs that wait for a free one at once. A seed that dies — its socket breaks mid-exec — refuses the exec in flight
+and is reaped and replaced; seeds run in the agent's own cgroup, not a box's, so the supervisor's sweep leaves them
+to the pool.
+
+**Sources.** The seed is decision 5's, applied to exec: SOCK's zygotes, Catalyzer's `sfork`, AFaaS's seeds
+(`oci-runtimes-and-fast-start.md` §5.1-5.4). AFaaS's caveat — a seed is serial, so a node keeps several — is the
+pool.
+
+**Evidence.** Step 1 measured the floor under an exec (a prepared clone into the cgroup with a pidfd, the child
+joining the namespaces) at 0.80 of the target on fedora, and the `hex __oci-exec` helper the seed removes at about
+0.68 ms of the seam exec's 1.41 ms. **Measured (seam_oci beside libcrun, best of 3, adacachy, loaded, so not of
+record by §7; run `20261028T054922Z`, `hex 0.1.0`):** the seed reaches that floor — seam exec p50 **0.47 ms**
+(socket 0.48 ms), down from the helper path's 1.41 ms — and is **1.52× libcrun's 0.72 ms**, faster, with p99 at
+parity (1.24 ms both). So the seed works: exec is at the floor, and the per-exec `hex` spawn is gone.
+
+**What would falsify it, and what the measurement shows about the target.** The stated falsifier was the seam exec
+costing more than a quarter of libcrun's in-process exec. It does: 0.47 ms is 0.65× libcrun's 0.72 ms, not ≤ 0.25×.
+But the quarter-target itself rested on step 1's fedora libcrun of 2.045 ms, which that run flagged as load- and
+IO-stalled (not of record); a non-stalled libcrun exec is ~0.72 ms, only ~1.5× the kernel floor (clone3 + setns +
+`execve` + wait). A quarter of that, 0.18 ms, is below the floor, so no exec seam can reach it: the floor, not the
+helper, now bounds exec. The seed meets exec's achievable bound (the floor, and faster than libcrun); the quarter-
+of-libcrun target is unreachable against a libcrun that isn't stalled, and is Ada's to re-set. Start and create
+stay goal 3 step 3 and goal 5.
 
 ### 4. Network-namespace work off the critical path (rewritten after the probe)
 

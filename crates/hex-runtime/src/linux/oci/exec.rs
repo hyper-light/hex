@@ -192,7 +192,7 @@ pub fn process_for(mut process: Process, req: &Request) -> Process {
 
 /// The cgroup's directory (for `clone3`) and its `cgroup.procs` (to join by migration where a birth
 /// there can't be), opened now.
-fn open_cgroup(dir: &Path) -> Result<(OwnedFd, OwnedFd), OciError> {
+pub(crate) fn open_cgroup(dir: &Path) -> Result<(OwnedFd, OwnedFd), OciError> {
     let open = |path: &Path, flags: OFlags| {
         rustix::fs::open(path, flags | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| OciError::os("opening the container's cgroup", e))
@@ -205,7 +205,7 @@ fn open_cgroup(dir: &Path) -> Result<(OwnedFd, OwnedFd), OciError> {
 
 /// Each of the init's namespaces that isn't this process's own, opened before any is joined: once the
 /// mount namespace is joined, `/proc` is the container's.
-fn namespaces_to_join(pid: i32) -> Result<Vec<(&'static str, i32, OwnedFd)>, OciError> {
+pub(crate) fn namespaces_to_join(pid: i32) -> Result<Vec<(&'static str, i32, OwnedFd)>, OciError> {
     let mut out = Vec::new();
     for (kind, flag) in NAMESPACES {
         let theirs = rustix::fs::open(

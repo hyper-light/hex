@@ -23,6 +23,7 @@ pub mod net;
 pub mod resources;
 pub mod run;
 pub mod seccomp;
+pub mod seed;
 pub mod spec;
 pub mod state;
 pub mod sys;

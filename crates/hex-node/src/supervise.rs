@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Proc, Refusal};
 use rustix::buffer::spare_capacity;
-use rustix::event::Timespec;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
+use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 
@@ -30,6 +30,12 @@ use crate::store::Store;
 /// runtime design targets on one node (10,560 idle containers per GiB held). An operator sets
 /// another with [`crate::Node::with_init_budget`].
 pub const INIT_BUDGET: usize = 65_536;
+
+/// Most exec'd programs the agent watches for one box at once (to reap on its delete), past which exec
+/// is refused ([`Refusal::Exhausted`]), so the per-box tracking is bounded (CLAUDE.md §2). A program
+/// the caller reaps is forgotten at once, so this bounds concurrent unreaped execs, not a box's total;
+/// it sits well above a box's steps, which run one at a time.
+pub const PROGRAM_BUDGET: usize = 1_024;
 
 /// How often the supervisor sweeps for orphaned zombies, and so the longest one waits to be reaped.
 /// A stated bound on a zombie's life, not a tuning: a box would have to orphan and end
@@ -89,6 +95,19 @@ pub struct Supervisor {
     store: Store,
     /// Why the last pass of the supervising thread failed, if it did; cleared by a clean pass.
     fault: Mutex<Option<String>>,
+    /// Exec'd programs by box, each with a pidfd the agent reaps on the box's delete. An `oci` box's
+    /// init blocks in the kernel's pid-namespace teardown until the programs in its pid namespace are
+    /// reaped (decision 3); the caller's [`Proc`] usually reaps its program, but a delete beats it, so
+    /// the agent reaps what is left and records each exit for the caller to read.
+    programs: Mutex<BTreeMap<BoxId, Vec<Program>>>,
+}
+
+/// An exec'd program the agent may reap on its box's delete: the agent's own duplicate of its pidfd,
+/// and the slot its exit is recorded in for the caller's [`Proc`] once the agent has reaped it.
+struct Program {
+    pid: u32,
+    pidfd: OwnedFd,
+    exit: Arc<Mutex<Option<Exit>>>,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -120,6 +139,7 @@ impl Supervisor {
             box_root: Path::new("/").join(rel).to_string_lossy().into_owned(),
             store,
             fault: Mutex::new(None),
+            programs: Mutex::new(BTreeMap::new()),
         });
         let weak = Arc::downgrade(&supervisor);
         std::thread::Builder::new()
@@ -263,6 +283,104 @@ impl Supervisor {
             pid,
             released: false,
         }))
+    }
+
+    /// Owns an exec'd program of box `id` that the agent may have to reap on the box's delete: `proc`
+    /// reaps it for the caller, and `pidfd` (the agent's own duplicate) lets the agent reap it instead
+    /// if a delete beats the caller. The container's init blocks in the kernel until the programs in its
+    /// pid namespace are reaped, so a delete that didn't reap them would never empty the box (decision
+    /// 3). Refused past [`PROGRAM_BUDGET`] watched for the box at once.
+    pub fn own_program(
+        self: &Arc<Self>,
+        id: &BoxId,
+        proc: Box<dyn Proc>,
+        pidfd: OwnedFd,
+    ) -> Result<Box<dyn Proc>, Refusal> {
+        let pid = proc.pid();
+        let exit = Arc::new(Mutex::new(None));
+        {
+            let mut programs = self.programs.lock().map_err(poisoned)?;
+            let watched = programs.entry(id.clone()).or_default();
+            if watched.len() >= PROGRAM_BUDGET {
+                return Err(Refusal::Exhausted {
+                    what: "exec'd programs watched for one box",
+                    bound: PROGRAM_BUDGET,
+                });
+            }
+            watched.push(Program {
+                pid,
+                pidfd,
+                exit: Arc::clone(&exit),
+            });
+        }
+        owned()?.insert(pid);
+        Ok(Box::new(ProgramProc {
+            supervisor: Arc::clone(self),
+            id: id.clone(),
+            proc,
+            pid,
+            exit,
+            done: false,
+        }))
+    }
+
+    /// Reaps every exec'd program still watched for box `id`, recording each exit for its caller's
+    /// [`Proc`] to read. The box's delete calls this after `cgroup.kill`, so the programs — killed, in
+    /// the container's pid namespace — are reaped, letting the init finish exiting and the box empty.
+    pub fn reap_programs(&self, id: &BoxId, patience: Duration) -> Result<(), Refusal> {
+        let watched = self
+            .programs
+            .lock()
+            .map_err(poisoned)?
+            .remove(id)
+            .unwrap_or_default();
+        let mut owned = owned()?;
+        let deadline = Instant::now().checked_add(patience);
+        for program in watched {
+            // Wait (bounded) for the cgroup.kill'd program to end, then reap it, so the container's init
+            // can finish its pid-namespace teardown. Bounded so a process wedged uninterruptibly doesn't
+            // hang the delete; wait_empty then reports the box still populated, as it does for any wedge.
+            let left = deadline
+                .map(|d| d.saturating_duration_since(Instant::now()))
+                .unwrap_or(patience);
+            let ts = Timespec {
+                tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+                tv_nsec: i64::from(left.subsec_nanos()),
+            };
+            let mut fds = [PollFd::new(&program.pidfd, PollFlags::IN)];
+            match rustix::event::poll(&mut fds, Some(&ts)) {
+                Ok(_) | Err(Errno::INTR) => {}
+                Err(e) => return Err(Refusal::os("waiting on a deleted box's program", e)),
+            }
+            let exit = match rustix::process::waitid(
+                WaitId::PidFd(program.pidfd.as_fd()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+            ) {
+                Ok(Some(status)) => Some(exit_of(&status)),
+                Ok(None) | Err(Errno::CHILD) => None,
+                Err(e) => return Err(Refusal::os("reaping a deleted box's program", e)),
+            };
+            if let Some(exit) = exit
+                && let Ok(mut slot) = program.exit.lock()
+            {
+                *slot = Some(exit);
+            }
+            owned.remove(&program.pid);
+        }
+        Ok(())
+    }
+
+    /// Stops watching a program the caller has reaped or let go, freeing the agent's pidfd for it, so
+    /// the box's delete no longer looks for it.
+    fn forget_program(&self, id: &BoxId, pid: u32) {
+        if let Ok(mut programs) = self.programs.lock()
+            && let Some(watched) = programs.get_mut(id)
+        {
+            watched.retain(|p| p.pid != pid);
+            if watched.is_empty() {
+                programs.remove(id);
+            }
+        }
     }
 
     /// Reaps box `id`'s init if it has ended, and records how in its record. Holding `inits`, so a
@@ -483,6 +601,87 @@ impl Drop for Owned {
     // Let go unreaped, an ended program is the sweep's to reap.
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+/// A [`Proc`] for an exec'd program the agent watches for its box's delete. It reaps the program itself
+/// when the caller waits, unless a delete reaped it first — then it reads the exit the agent recorded.
+/// Dropped unreaped, it leaves the program to the sweep (it is the box's) and stops being watched.
+struct ProgramProc {
+    supervisor: Arc<Supervisor>,
+    id: BoxId,
+    proc: Box<dyn Proc>,
+    pid: u32,
+    exit: Arc<Mutex<Option<Exit>>>,
+    done: bool,
+}
+
+impl ProgramProc {
+    /// The exit a delete recorded, if the agent reaped the program.
+    fn recorded(&self) -> Option<Exit> {
+        self.exit.lock().ok().and_then(|slot| *slot)
+    }
+
+    /// Stops watching and leaves [`OWNED`], once the program is reaped or let go.
+    fn done(&mut self, exit: Exit) -> Exit {
+        if !self.done {
+            self.done = true;
+            self.supervisor.forget_program(&self.id, self.pid);
+            if let Ok(mut owned) = OWNED.lock() {
+                owned.remove(&self.pid);
+            }
+        }
+        exit
+    }
+}
+
+impl Proc for ProgramProc {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        if let Some(exit) = self.recorded() {
+            return Ok(Some(self.done(exit)));
+        }
+        match self.proc.try_wait() {
+            Ok(Some(exit)) => Ok(Some(self.done(exit))),
+            Ok(None) => Ok(None),
+            // A delete may have reaped it, so the caller's own wait can't; read what the agent recorded.
+            Err(e) => match self.recorded() {
+                Some(exit) => Ok(Some(self.done(exit))),
+                None => Err(e),
+            },
+        }
+    }
+
+    fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        if let Some(exit) = self.recorded() {
+            return Ok(Some(self.done(exit)));
+        }
+        match self.proc.wait_for(timeout) {
+            Ok(Some(exit)) => Ok(Some(self.done(exit))),
+            Ok(None) => match self.recorded() {
+                Some(exit) => Ok(Some(self.done(exit))),
+                None => Ok(None),
+            },
+            Err(e) => match self.recorded() {
+                Some(exit) => Ok(Some(self.done(exit))),
+                None => Err(e),
+            },
+        }
+    }
+}
+
+impl Drop for ProgramProc {
+    fn drop(&mut self) {
+        if !self.done {
+            // Let go unreaped: leave it to the sweep (it is the box's) and stop watching it.
+            self.supervisor.forget_program(&self.id, self.pid);
+            if let Ok(mut owned) = OWNED.lock() {
+                owned.remove(&self.pid);
+            }
+        }
     }
 }
 

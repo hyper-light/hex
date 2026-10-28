@@ -12,8 +12,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use hex_api::{
@@ -31,6 +30,7 @@ use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
 use crate::remove::remove_tree;
+use crate::seed::SeedPool;
 use crate::store::Store;
 use crate::supervise::{self, Supervisor};
 
@@ -70,6 +70,9 @@ pub struct Node {
     owner: Owner,
     /// The host's paths every container has masked beyond Docker's list ([`Place::masked`]).
     masked: Vec<String>,
+    /// The pool of `hex __oci-seed` processes that run execs into `oci` boxes, started on the first
+    /// such exec from the same `hex` binary the class re-execs for its init ([`Node::seed_pool`]).
+    seeds: OnceLock<SeedPool>,
 }
 
 /// Where an `oci` box's bundle comes from.
@@ -131,6 +134,7 @@ impl Node {
             bundles,
             owner,
             masked: thermal_throttle()?,
+            seeds: OnceLock::new(),
         })
     }
 
@@ -313,11 +317,16 @@ impl Node {
     fn scrub(&self, id: &BoxId) -> Result<(), Refusal> {
         if let Some(cg) = self.root.get(id) {
             cg.kill()?;
+            // The kill reaches every process in the box; now reap the exec'd programs the agent watches
+            // for it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until
+            // the programs in that namespace are reaped — can finish exiting and the box empty.
+            self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
             if !cg.wait_empty(EMPTY_PATIENCE)? {
                 return Err(Refusal::Os {
                     op: "emptying a box",
                     why: format!(
-                        "box {id} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill"
+                        "box {id} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
+                        survivors(&cg)
                     ),
                 });
             }
@@ -463,10 +472,13 @@ impl Node {
         Ok(Source::Rendered(dir, rendered))
     }
 
-    /// `exec` in an `oci` box: the `hex __oci-exec` helper, spawned (not exec'd into) and watched by
-    /// its pidfd, in seam mode so it ends the way its program did. No process is spawned but the
-    /// helper that becomes the container's; a multi-threaded agent stays safe, since the helper
-    /// re-execs to the single-threaded context joining namespaces needs.
+    /// `exec` in an `oci` box through a seed (decision 3, goal 3 plan step 2): the node hands the
+    /// program to a reusable `hex __oci-seed` process ([`Node::seed_pool`]), which clones it into the
+    /// container's cgroup and namespaces and returns its pidfd; no process of the agent's is spawned
+    /// and no `hex` binary is re-exec'd per call. The program, the agent's child once the seed's
+    /// intermediate exits, is owned by the supervisor. The spawning lock is held across the round trip
+    /// and the own, so a sweep doesn't reap the program (which may exit at once, as `true` does) before
+    /// it is owned.
     fn exec_oci(
         &self,
         id: &BoxId,
@@ -474,24 +486,57 @@ impl Node {
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         program.check()?;
+        let state = self.oci().state(id.as_str())?;
+        if !matches!(state.status, Status::Created | Status::Running) || !state.init_alive() {
+            return Err(Refusal::NotRunning(id.clone(), "exec"));
+        }
         let env = program
             .env
             .iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
         let user = program.user.as_ref().map(|u| (u.uid, Some(u.gid)));
-        let mut cmd =
-            self.oci()
-                .exec_command(id.as_str(), program.args, program.cwd, env, user, true)?;
-        set_stdio(&mut cmd, stdio);
+        let request = hex_core::seed::Request {
+            init_pid: state.pid,
+            bundle: state.bundle,
+            cgroup: state.cgroup,
+            args: program.args,
+            cwd: program.cwd,
+            env,
+            user,
+        };
+        let stdio = stdio_fds(stdio)?;
+        let pool = self.seed_pool()?;
         let _spawning = self.supervisor.spawning()?;
-        let child = cmd
-            .spawn()
-            .map_err(|e| Refusal::os("starting a program in a container", e))?;
-        // The child stays unwaited (dropping a std Child neither waits nor kills), so its pid is ours
-        // until the pidfd reaps it.
+        let (pid, pidfd) = pool.exec(&request, stdio)?;
+        // The agent keeps a duplicate pidfd so it can reap the program on this box's delete: the
+        // container's init blocks in the kernel until the programs in its pid namespace are reaped, so a
+        // delete that didn't reap them would never empty the box. The caller's Proc keeps the other end
+        // and reaps the program itself otherwise.
+        let agent_pidfd = pidfd
+            .try_clone()
+            .map_err(|e| Refusal::os("duplicating the program's pidfd", e))?;
         self.supervisor
-            .own(Box::new(PidfdProc::of_child(child.id())?))
+            .own_program(id, Box::new(PidfdProc::of_clone(pid, pidfd)), agent_pidfd)
+    }
+
+    /// The exec seed pool, started on first use from the `hex` binary the class re-execs (so the bench
+    /// and a linked-in node use the binary [`Node::with_oci_helper`] names). Built once; a race to
+    /// build it drops the losing empty pool, which has started no seed.
+    fn seed_pool(&self) -> Result<&SeedPool, Refusal> {
+        if let Some(pool) = self.seeds.get() {
+            return Ok(pool);
+        }
+        let exe = match &self.oci_helper {
+            Some(exe) => exe.clone(),
+            None => {
+                std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
+            }
+        };
+        let _ = self.seeds.set(SeedPool::new(exe));
+        self.seeds
+            .get()
+            .ok_or_else(|| Refusal::Broken("the exec seed pool wasn't built".to_owned()))
     }
 }
 
@@ -634,6 +679,67 @@ impl crate::serve::Host for Node {
     }
 }
 
+/// What a box still holds when a delete can't empty it: each surviving process with its command,
+/// state and parent, so the refusal names what is stuck, not only that something is (§3). Bounded to a
+/// few: enough to see what it is. An empty `cgroup.procs` while the box reads populated means a
+/// descendant cgroup holds them.
+fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
+    let root = cg.dir().to_path_buf();
+    let mut out = String::new();
+    let mut queue = vec![root.clone()];
+    let mut dirs_seen = 0usize;
+    // A flat walk of the box's cgroup subtree (CLAUDE.md §11), bounded in cgroups and pids (§2).
+    while let Some(dir) = queue.pop() {
+        if dirs_seen >= 256 {
+            break;
+        }
+        dirs_seen = dirs_seen.saturating_add(1);
+        let rel = dir
+            .strip_prefix(&root)
+            .ok()
+            .map(|p| p.display().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ".".to_owned());
+        if let Ok(text) = fs::read_to_string(dir.join("cgroup.procs")) {
+            for pid in text
+                .lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .take(16)
+            {
+                let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .map(|s| s.trim().to_owned())
+                    .unwrap_or_default();
+                let (state, ppid) = fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| {
+                        let (_, rest) = stat.rsplit_once(')')?;
+                        let mut f = rest.split_whitespace();
+                        Some((f.next()?.to_owned(), f.next()?.to_owned()))
+                    })
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    " [{rel}/{pid} {comm:?} state {state} ppid {ppid}]"
+                ));
+            }
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten().take(256) {
+                let path = entry.path();
+                if path.is_dir() {
+                    queue.push(path);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        // Populated with nothing in any cgroup.procs: a process the kernel still holds, typically a
+        // container init stuck in its pid-namespace teardown until a process in that namespace is reaped.
+        " (populated but no process listed: a pid namespace is tearing down)".to_owned()
+    } else {
+        out
+    }
+}
+
 fn why_text(why: &Why) -> String {
     match why {
         Why::MidCreate => "the node agent stopped while it was being made".to_owned(),
@@ -737,24 +843,28 @@ fn init_alive(init: ProcId) -> bool {
 
 /// Sets a command's standard streams from a box's [`Stdio`]: each stream the caller gave, else the
 /// null device, as the `oci` exec helper runs on the fds it's handed.
-fn set_stdio(cmd: &mut Command, stdio: Stdio) {
+/// The three descriptors a seed's exec carries, from a [`Stdio`]: each stream's pipe, or the null
+/// device opened for a stream the caller left unset (as a program the agent spawns gets `/dev/null`).
+fn stdio_fds(stdio: Stdio) -> Result<[std::os::fd::OwnedFd; 3], Refusal> {
+    use rustix::fs::{Mode, OFlags};
     use std::os::fd::OwnedFd;
-    use std::process::Stdio as Std;
-    cmd.stdin(
-        stdio
-            .stdin
-            .map_or_else(Std::null, |p| Std::from(OwnedFd::from(p))),
-    );
-    cmd.stdout(
-        stdio
-            .stdout
-            .map_or_else(Std::null, |p| Std::from(OwnedFd::from(p))),
-    );
-    cmd.stderr(
-        stdio
-            .stderr
-            .map_or_else(Std::null, |p| Std::from(OwnedFd::from(p))),
-    );
+    let null = |flags: OFlags| {
+        rustix::fs::open("/dev/null", flags | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| Refusal::os("opening /dev/null for a program's stdio", e))
+    };
+    let stdin = match stdio.stdin {
+        Some(p) => OwnedFd::from(p),
+        None => null(OFlags::RDONLY)?,
+    };
+    let stdout = match stdio.stdout {
+        Some(p) => OwnedFd::from(p),
+        None => null(OFlags::WRONLY)?,
+    };
+    let stderr = match stdio.stderr {
+        Some(p) => OwnedFd::from(p),
+        None => null(OFlags::WRONLY)?,
+    };
+    Ok([stdin, stdout, stderr])
 }
 
 #[cfg(test)]

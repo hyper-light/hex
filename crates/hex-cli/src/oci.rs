@@ -293,6 +293,12 @@ pub fn exec_helper() -> u8 {
     hex_runtime::linux::oci::exec::run()
 }
 
+/// Runs an exec seed (`hex __oci-seed`), the node agent's reusable helper for exec through the seam.
+/// Only reached on Linux.
+pub fn seed() -> u8 {
+    hex_runtime::linux::oci::seed::run()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -30,6 +30,9 @@ fn main() -> ExitCode {
         if first == "__oci-exec" {
             return ExitCode::from(hex_cli::oci::exec_helper());
         }
+        if first == "__oci-seed" {
+            return ExitCode::from(hex_cli::oci::seed());
+        }
         if first == "oci" {
             let rest: Vec<String> = rest.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::oci::main(&rest));

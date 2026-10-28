@@ -86,6 +86,87 @@ pub fn fork_into_cgroup(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Option<Fo
     }
 }
 
+/// `CLONE_PIDFD` (Linux 5.2, `include/uapi/linux/sched.h`): the kernel writes a pidfd for the child
+/// where `clone_args.pidfd` points. libc's constant is the same value, written here to match
+/// [`crate::linux::sys`]'s own.
+const CLONE_PIDFD: u64 = 0x1000;
+
+/// Forks into a cgroup with a pidfd for the child: `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`, so the
+/// child is born in the cgroup that the open directory `cgroup` is, and the parent is handed a pidfd
+/// that it (or a process it sends it to) watches for the child's end. Like [`fork_into_cgroup`] but for
+/// the exec seed (`seed.rs`), whose intermediate hands the pidfd to the node agent rather than waiting
+/// on the child itself. `None` when this kernel or sandbox has no clone into a cgroup (`ENOSYS` or
+/// `E2BIG`, as [`fork_into_cgroup`]); the caller falls back to [`fork`] and a migration. The caller
+/// must be single-threaded, as for [`fork`].
+pub fn fork_into_cgroup_pidfd(
+    cgroup: std::os::fd::BorrowedFd<'_>,
+) -> Result<Option<(Fork, Option<std::os::fd::OwnedFd>)>, OciError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let fd = u64::try_from(cgroup.as_raw_fd())
+        .map_err(|_| OciError::os("clone3 into a cgroup", "a negative file descriptor"))?;
+    let exit_signal = u64::try_from(libc::SIGCHLD)
+        .map_err(|_| OciError::os("clone3 into a cgroup", "SIGCHLD is negative"))?;
+    let mut pidfd: libc::c_int = -1;
+    let pidfd_ptr = u64::try_from((&raw mut pidfd).addr())
+        .map_err(|_| OciError::os("clone3 into a cgroup", "a pointer wider than 64 bits"))?;
+    let args = CloneArgs {
+        flags: CLONE_INTO_CGROUP | CLONE_PIDFD,
+        pidfd: pidfd_ptr,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: fd,
+    };
+    // SAFETY: clone3(2) with a valid pointer to a fully initialized `CloneArgs` and its exact size,
+    // which the kernel only reads, and in `pidfd` the address of a live `c_int` it writes the child's
+    // pidfd to. With no stack given, the child goes on with a copy of the caller's stack, as after
+    // fork(2), and no flag shares memory, files or signal handlers with the parent. fork's one
+    // constraint, that the child of a multi-threaded process may touch only async-signal-safe state,
+    // doesn't apply: every caller has re-exec'd (the seed) and is single-threaded. The return value is
+    // checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            &args as *const CloneArgs,
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    match r {
+        -1 => {
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::ENOSYS) | Some(libc::E2BIG) => Ok(None),
+                _ => Err(OciError::os("clone3 into the container's cgroup", e)),
+            }
+        }
+        0 => Ok(Some((Fork::Child, None))),
+        child => {
+            // SAFETY: the clone succeeded, so the kernel made `pidfd` for the child and nothing else
+            // in this process owns it.
+            let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) };
+            let pid = i32::try_from(child)
+                .map_err(|_| OciError::os("clone3 into a cgroup", "a pid out of range"))?;
+            Ok(Some((Fork::Parent(pid), Some(owned))))
+        }
+    }
+}
+
+/// Ends a forked child at once with status `code`, running no `atexit` handler and flushing no
+/// buffer: the seed's intermediate and the program it forks must not return up into the seed's serve
+/// loop, nor flush the seed's buffers a second time (`_exit(2)`, async-signal-safe). The CLI helpers
+/// that re-exec'd first (`hex __oci-exec`, `hex __oci-init`) return their status up instead; this is
+/// for a fork that did not re-exec.
+pub fn exit_child(code: u8) -> ! {
+    // SAFETY: _exit(2) takes an int and never returns; it makes no allocation and touches no shared
+    // state, so it is sound in a forked child that may run only async-signal-safe calls.
+    unsafe { libc::_exit(i32::from(code)) }
+}
+
 /// Signals blocked for this process and read from a `signalfd` instead, so a parent can pass them on to
 /// a child it waits on, with no handler: `hex oci exec` forwards the signals a caller ends a step with.
 pub struct ForwardedSignals {

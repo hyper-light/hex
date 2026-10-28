@@ -221,6 +221,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     killed_init(&lab, own);
     budget(&lab, own);
     conformance_on_oci(&lab, own);
+    program_alone(&lab, own);
     orphans_are_reaped(&lab, own);
 }
 
@@ -437,6 +438,117 @@ fn conformance_on_oci(lab: &Lab, own: &Path) {
     let node = lab.node(&own.join("hex-oci-conf"), state.path());
     let failures = conformance::run(&node, lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
+}
+
+/// Goal 3 plan step 2: no process is made per exec but the program. Exec a non-hex `sleep` into a
+/// running box through the seam, and find the exec'd program is the agent's own direct child — no
+/// `hex __oci-exec` helper stands beside it, as one did before the seed (agent → helper → program; now
+/// agent → program) — and that a second exec spawns no new `hex __oci-seed`: the seed is reused, so no
+/// `hex` binary is exec'd per call.
+fn program_alone(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-alone"), state.path());
+    let id = BoxId::new("alone").unwrap();
+    // A non-hex, long-lived init and program, so "no hex process beside it" is plain to see.
+    node.create(lab.running(id.clone(), &["/usr/bin/sleep".to_owned(), "600".to_owned()]))
+        .expect("create");
+    node.start(&id).expect("start");
+    let agent = std::process::id();
+
+    let mut first = node
+        .exec(
+            &id,
+            hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+            hex_api::Stdio::null(),
+        )
+        .expect("exec a program through a seed");
+    let pid = first.pid();
+    assert_eq!(
+        first.try_wait().expect("try_wait"),
+        None,
+        "the program is still running while we look at it"
+    );
+    // It is the agent's own child: no `hex __oci-exec` helper stands between the agent and the program.
+    // Race-free: the seed reaps its intermediate before the agent is told, so the program has already
+    // reparented to the agent when `exec` returns.
+    assert_eq!(
+        ppid(pid),
+        Some(agent),
+        "the exec'd program's parent is the node agent itself"
+    );
+    let children = children_of(agent);
+    assert!(
+        !children.iter().any(|&c| cmdline_has(c, "__oci-exec")),
+        "no hex __oci-exec helper runs beside the program"
+    );
+    // A reusable seed serves it, and a second exec re-uses the same seed.
+    let seeds = |cs: &[u32]| cs.iter().filter(|&&c| cmdline_has(c, "__oci-seed")).count();
+    let before = seeds(&children);
+    assert!(before >= 1, "a reusable seed serves the exec");
+    let second = node
+        .exec(
+            &id,
+            hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+            hex_api::Stdio::null(),
+        )
+        .expect("a second exec through a seed");
+    assert_eq!(
+        seeds(&children_of(agent)),
+        before,
+        "the second exec re-used the seed; no hex binary is exec'd per call"
+    );
+    assert_eq!(
+        ppid(second.pid()),
+        Some(agent),
+        "the second program is the agent's child too"
+    );
+
+    node.delete(&id).expect("delete ends the programs");
+    // Each program was a member of the box cgroup, so delete's cgroup.kill reached it: reap it (the
+    // caller's own Proc, as HEX-RT-7 does) and find it ended by a signal, no zombie left.
+    for mut p in [first, second] {
+        let exit = p
+            .wait_for(Duration::from_secs(5))
+            .expect("wait for a deleted program")
+            .expect("the program ended with the box");
+        assert!(
+            matches!(exit, Exit::Signal(_)),
+            "delete ended the program by a signal: {exit:?}"
+        );
+    }
+}
+
+/// `/proc/<pid>/stat` field 4, the parent pid, read past the parenthesized command name (which may
+/// itself hold spaces and parentheses).
+fn ppid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+/// Whether any argument in `/proc/<pid>/cmdline` (NUL-separated) is exactly `needle`.
+fn cmdline_has(pid: u32, needle: &str) -> bool {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|b| b.split(|&c| c == 0).any(|a| a == needle.as_bytes()))
+        .unwrap_or(false)
+}
+
+/// The processes whose parent is `agent`, by scanning `/proc`.
+fn children_of(agent: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>()
+            && ppid(pid) == Some(agent)
+        {
+            out.push(pid);
+        }
+    }
+    out
 }
 
 /// A box's program forks a child and exits, orphaning the child to the agent (its subreaper); the

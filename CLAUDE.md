@@ -89,15 +89,18 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   cgroup (`clone3` with `CLONE_INTO_CGROUP` and `CLONE_PIDFD`) and executes it in the child, or, where
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
   Rust can express neither safely.
-- `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` that starts a
-  container in its cgroup, `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
+- `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` calls that start a
+  container in its cgroup and that clone an exec'd program into it with a pidfd the node agent watches
+  (the exec seed, decision 3), `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program
   and that open a loaded one by id and read its identity and translated instructions (so containers
   with one device policy share one program), the `seccomp(2)` call that loads a container's filter
   without no_new_privs when its spec doesn't ask for it, the signal mask and `signalfd` through which
-  `hex oci exec` passes signals on, and the signal-disposition reset and `raise` by which
-  `hex oci exec` ends the way its program did when the node agent drives it (seam mode), none of
-  which rustix wraps safely; the process is single-threaded (it re-exec'd) where this matters.
+  `hex oci exec` passes signals on, the signal-disposition reset and `raise` by which
+  `hex oci exec` ends the way its program did when the node agent drives it (seam mode), and the
+  `_exit` by which a seed's forked intermediate and program end without running the seed's `atexit`
+  handlers, none of which rustix wraps safely; the process is single-threaded (it re-exec'd) where
+  this matters.
 
 ## 13. Lean code
 

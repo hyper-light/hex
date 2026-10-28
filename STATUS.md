@@ -135,9 +135,9 @@ three different things (CLAUDE.md "Working here"):
     there with ENOENT; the child now joins it from inside. The OCI table of record in
     `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).
   - **goal 3, the `oci` class behind the `Runtime` seam** — `hex-node` serves `ClassSpec::Bundle` in
-    process (cgroup under the box root, `create_in_cgroup`, `exec` through a seam-mode `hex __oci-exec`
-    helper), with `seam_oci` to measure it against libcrun. Built and reviewed locally; its runtime
-    path needs a fedora root lab to validate, and its exec-latency target likely needs goal 5's seed.
+    process (cgroup under the box root, `create_in_cgroup`, `exec` through an exec seed, step 2 below),
+    with `seam_oci` to measure it against libcrun. The command line's `hex oci exec` keeps its
+    `hex __oci-exec` helper; the seam path uses the seed.
     **Plan step 5, `ClassSpec::Oci`** (built, lab-validated on adacachy 2026-10-27; of record with step 6):
     the node renders the structured `OciSpec` to a bundle in a directory of the box's own (a pure core,
     `hex_core::bundle`, with golden tests) and runs it as `docker run` runs an image that names nothing
@@ -157,6 +157,24 @@ three different things (CLAUDE.md "Working here"):
     the floor, about half of it the `hex __oci-exec` helper the seed removes (step 2). Start is 2.4-2.6x libcrun's,
     half of it the rewrite of `state.json` step 3 removes. Every part is timed by a tracer that costs a traced
     call under 5%, and the parts sum to the measured p50 within 7% in each round.
+    **Plan step 2, exec through a seed** (built, lab-validated on fedora 2026-10-28, gate-clean): the node
+    agent keeps a bounded pool of reused `hex __oci-seed` processes and hands each `oci` exec to one over a
+    `SOCK_SEQPACKET` socketpair (`hex-core::seed` codec, stdio by `SCM_RIGHTS`); the seed forks a short-lived
+    intermediate that joins the container's namespaces and `clone3`s the program into its cgroup, and the
+    program — the agent's own child by subreaper adoption — is watched by its pidfd. No `hex` process is spawned
+    and no `hex` binary re-exec'd per call. The plan's one-call `clone3(…|CLONE_PARENT)` is impossible
+    (`clone3` rejects `CLONE_PARENT`, EINVAL on cachyos 7.2.9 and fedora 6.19; `docs/research/runtime/
+    seed-clone-parent.md`), hence the intermediate; the agent reaps the box's exec'd programs on delete, since
+    the container init blocks in the kernel's pid-namespace teardown until they are. The lab
+    (`crates/hex-cli/tests/oci_box.rs`, `program_alone` + the HEX-RT conformance over the node and the socket)
+    passes; it found one fault with a failing test first — delete couldn't empty a box holding an exec'd program
+    (the init stuck on its unreaped pid-namespace member), now reaped on delete. **Measured** (seam_oci beside
+    libcrun, best of 3, adacachy loaded, run `20261028T054922Z`): exec p50 **0.47 ms**, at the step-1 floor and
+    **1.52× libcrun's 0.72 ms** (down 3× from the helper path's 1.41 ms). **Open for Ada:** the plan's
+    exec target of a quarter of libcrun's rested on step 1's fedora libcrun of 2.045 ms, flagged there as
+    load/IO-stalled; a non-stalled libcrun exec (~0.72 ms) is ~1.5× the kernel floor, so a quarter of it is
+    below the floor and unreachable — the seed meets exec's achievable bound (the floor), and the target needs
+    re-setting (`docs/design/runtime-architecture.md`, "The exec seed").
   - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
     copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over

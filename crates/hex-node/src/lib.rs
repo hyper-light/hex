@@ -23,6 +23,8 @@ mod node;
 #[cfg(target_os = "linux")]
 mod remove;
 #[cfg(target_os = "linux")]
+mod seed;
+#[cfg(target_os = "linux")]
 pub mod serve;
 #[cfg(target_os = "linux")]
 pub mod supervise;

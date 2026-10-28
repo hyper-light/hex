@@ -236,7 +236,7 @@ pub enum Fault {
 }
 
 impl Fault {
-    fn value(what: &'static str, why: impl Into<String>) -> Self {
+    pub(crate) fn value(what: &'static str, why: impl Into<String>) -> Self {
         Self::Value {
             what,
             why: why.into(),
@@ -964,27 +964,32 @@ fn name(s: &str) -> Result<&'static str, Fault> {
 }
 
 /// A message being written, refused once it would pass its bound.
-struct Writer {
+pub(crate) struct Writer {
     out: Vec<u8>,
     bound: usize,
 }
 
 impl Writer {
-    fn new(bound: usize) -> Self {
+    pub(crate) fn new(bound: usize) -> Self {
         Self {
             out: Vec::with_capacity(HEADER_BYTES.min(bound)),
             bound,
         }
     }
 
-    fn header(&mut self, version: u16, kind: u16, id: u64) {
+    pub(crate) fn header(&mut self, version: u16, kind: u16, id: u64) {
         self.out.extend_from_slice(&MAGIC);
         self.u16(version);
         self.u16(kind);
         self.u64(id);
     }
 
-    fn done(self) -> Result<Vec<u8>, Fault> {
+    /// Bytes as they are, with no length before them: another message's header.
+    pub(crate) fn raw(&mut self, b: &[u8]) {
+        self.out.extend_from_slice(b);
+    }
+
+    pub(crate) fn done(self) -> Result<Vec<u8>, Fault> {
         if self.out.len() > self.bound {
             return Err(Fault::Oversized {
                 bytes: self.out.len(),
@@ -994,40 +999,40 @@ impl Writer {
         Ok(self.out)
     }
 
-    fn u8(&mut self, v: u8) {
+    pub(crate) fn u8(&mut self, v: u8) {
         self.out.push(v);
     }
 
-    fn u16(&mut self, v: u16) {
+    pub(crate) fn u16(&mut self, v: u16) {
         self.out.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.out.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn u64(&mut self, v: u64) {
+    pub(crate) fn u64(&mut self, v: u64) {
         self.out.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn i32(&mut self, v: i32) {
+    pub(crate) fn i32(&mut self, v: i32) {
         self.out.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn usize(&mut self, v: usize) -> Result<(), Fault> {
+    pub(crate) fn usize(&mut self, v: usize) -> Result<(), Fault> {
         let v =
             u64::try_from(v).map_err(|_| Fault::value("count", format!("{v} is over 64 bits")))?;
         self.u64(v);
         Ok(())
     }
 
-    fn bool(&mut self, v: bool) {
+    pub(crate) fn bool(&mut self, v: bool) {
         self.u8(u8::from(v));
     }
 
     /// A length, refused when what follows it would pass the bound: a caller's huge argument list is
     /// refused before it is copied.
-    fn len(&mut self, n: usize) -> Result<(), Fault> {
+    pub(crate) fn len(&mut self, n: usize) -> Result<(), Fault> {
         let after = self.out.len().checked_add(4).and_then(|l| l.checked_add(n));
         if after.is_none_or(|after| after > self.bound) {
             return Err(Fault::Oversized {
@@ -1043,21 +1048,21 @@ impl Writer {
         Ok(())
     }
 
-    fn bytes(&mut self, b: &[u8]) -> Result<(), Fault> {
+    pub(crate) fn bytes(&mut self, b: &[u8]) -> Result<(), Fault> {
         self.len(b.len())?;
         self.out.extend_from_slice(b);
         Ok(())
     }
 
-    fn string(&mut self, s: &str) -> Result<(), Fault> {
+    pub(crate) fn string(&mut self, s: &str) -> Result<(), Fault> {
         self.bytes(s.as_bytes())
     }
 
-    fn path(&mut self, p: &Path) -> Result<(), Fault> {
+    pub(crate) fn path(&mut self, p: &Path) -> Result<(), Fault> {
         self.bytes(path_bytes(p)?)
     }
 
-    fn option<T>(&mut self, v: Option<T>, put: impl FnOnce(&mut Self, T)) {
+    pub(crate) fn option<T>(&mut self, v: Option<T>, put: impl FnOnce(&mut Self, T)) {
         match v {
             None => self.u8(0),
             Some(v) => {
@@ -1067,7 +1072,7 @@ impl Writer {
         }
     }
 
-    fn option_with<T>(
+    pub(crate) fn option_with<T>(
         &mut self,
         v: Option<T>,
         put: impl FnOnce(&mut Self, T) -> Result<(), Fault>,
@@ -1084,7 +1089,7 @@ impl Writer {
         }
     }
 
-    fn list<T>(
+    pub(crate) fn list<T>(
         &mut self,
         items: &[T],
         mut put: impl FnMut(&mut Self, &T) -> Result<(), Fault>,
@@ -1102,24 +1107,24 @@ impl Writer {
 }
 
 /// A message being read, from the front.
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     rest: &'a [u8],
     len: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self {
             rest: bytes,
             len: bytes.len(),
         }
     }
 
-    fn at(&self) -> usize {
+    pub(crate) fn at(&self) -> usize {
         self.len.saturating_sub(self.rest.len())
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Fault> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], Fault> {
         let Some((head, rest)) = self.rest.split_at_checked(n) else {
             return Err(Fault::Truncated {
                 need: self.at().saturating_add(n),
@@ -1130,7 +1135,7 @@ impl<'a> Reader<'a> {
         Ok(head)
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], Fault> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], Fault> {
         let at = self.at();
         <[u8; N]>::try_from(self.take(N)?).map_err(|_| Fault::Truncated {
             need: at.saturating_add(N),
@@ -1139,7 +1144,7 @@ impl<'a> Reader<'a> {
     }
 
     /// The header: magic first, so a message of something else is refused as that.
-    fn header(&mut self) -> Result<(u16, u16, u64), Fault> {
+    pub(crate) fn header(&mut self) -> Result<(u16, u16, u64), Fault> {
         if self.array::<4>()? != MAGIC {
             return Err(Fault::Magic);
         }
@@ -1147,7 +1152,7 @@ impl<'a> Reader<'a> {
     }
 
     /// That nothing follows what the message's version defines.
-    fn end(&self, kind: u16, version: u16) -> Result<(), Fault> {
+    pub(crate) fn end(&self, kind: u16, version: u16) -> Result<(), Fault> {
         if self.rest.is_empty() {
             Ok(())
         } else {
@@ -1159,33 +1164,33 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn u8(&mut self) -> Result<u8, Fault> {
+    pub(crate) fn u8(&mut self) -> Result<u8, Fault> {
         Ok(u8::from_le_bytes(self.array()?))
     }
 
-    fn u16(&mut self) -> Result<u16, Fault> {
+    pub(crate) fn u16(&mut self) -> Result<u16, Fault> {
         Ok(u16::from_le_bytes(self.array()?))
     }
 
-    fn u32(&mut self) -> Result<u32, Fault> {
+    pub(crate) fn u32(&mut self) -> Result<u32, Fault> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
-    fn u64(&mut self) -> Result<u64, Fault> {
+    pub(crate) fn u64(&mut self) -> Result<u64, Fault> {
         Ok(u64::from_le_bytes(self.array()?))
     }
 
-    fn i32(&mut self) -> Result<i32, Fault> {
+    pub(crate) fn i32(&mut self) -> Result<i32, Fault> {
         Ok(i32::from_le_bytes(self.array()?))
     }
 
-    fn usize(&mut self) -> Result<usize, Fault> {
+    pub(crate) fn usize(&mut self) -> Result<usize, Fault> {
         let v = self.u64()?;
         usize::try_from(v)
             .map_err(|_| Fault::value("count", format!("{v} is over this platform's")))
     }
 
-    fn bool(&mut self, what: &'static str) -> Result<bool, Fault> {
+    pub(crate) fn bool(&mut self, what: &'static str) -> Result<bool, Fault> {
         match self.u8()? {
             0 => Ok(false),
             1 => Ok(true),
@@ -1193,23 +1198,23 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn bytes(&mut self) -> Result<&'a [u8], Fault> {
+    pub(crate) fn bytes(&mut self) -> Result<&'a [u8], Fault> {
         let n = self.u32()?;
         let n = usize::try_from(n)
             .map_err(|_| Fault::value("length", format!("{n} is over this platform's")))?;
         self.take(n)
     }
 
-    fn string(&mut self, what: &'static str) -> Result<String, Fault> {
+    pub(crate) fn string(&mut self, what: &'static str) -> Result<String, Fault> {
         let b = self.bytes()?;
         String::from_utf8(b.to_vec()).map_err(|e| Fault::value(what, format!("isn't UTF-8: {e}")))
     }
 
-    fn path(&mut self) -> Result<PathBuf, Fault> {
+    pub(crate) fn path(&mut self) -> Result<PathBuf, Fault> {
         path_of(self.bytes()?)
     }
 
-    fn option<T>(
+    pub(crate) fn option<T>(
         &mut self,
         get: impl FnOnce(&mut Self) -> Result<T, Fault>,
     ) -> Result<Option<T>, Fault> {
@@ -1225,7 +1230,7 @@ impl<'a> Reader<'a> {
 
     /// A list: its count first, refused when more items are claimed than bytes are left, since each
     /// takes at least one; so a short message never makes room for a long list.
-    fn list<T>(
+    pub(crate) fn list<T>(
         &mut self,
         mut get: impl FnMut(&mut Self) -> Result<T, Fault>,
     ) -> Result<Vec<T>, Fault> {

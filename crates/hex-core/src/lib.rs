@@ -20,4 +20,5 @@ pub mod bundle;
 pub mod cgroup;
 pub mod record;
 pub mod recovery;
+pub mod seed;
 pub mod wire;
