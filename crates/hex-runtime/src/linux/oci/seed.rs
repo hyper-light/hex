@@ -267,7 +267,15 @@ fn single_clone(
                     _ => rest.push(join),
                 }
             }
-            let (code, e) = program(&process, seccomp.as_ref(), rest, None, cgroup_ns, stdio, None);
+            let (code, e) = program(
+                &process,
+                seccomp.as_ref(),
+                rest,
+                None,
+                cgroup_ns,
+                stdio,
+                None,
+            );
             let _ = writeln!(std::io::stderr().lock(), "hex oci exec: {e}");
             sys::exit_child(code);
         }
@@ -411,8 +419,15 @@ fn start_program(
             // The program. It returns here only if it couldn't become the container's process or
             // exec; its status then leaves through the process's exit, which the agent's pidfd reads.
             let joined = joined_pipe.map(|(_read, write)| write);
-            let (code, e) =
-                program(&process, seccomp.as_ref(), Vec::new(), procs, cgroup_ns, stdio, joined);
+            let (code, e) = program(
+                &process,
+                seccomp.as_ref(),
+                Vec::new(),
+                procs,
+                cgroup_ns,
+                stdio,
+                joined,
+            );
             let _ = writeln!(std::io::stderr().lock(), "hex oci exec: {e}");
             sys::exit_child(code);
         }

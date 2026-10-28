@@ -361,27 +361,29 @@ owns an init's, so the exec'd program is the agent's own child and the step spaw
 re-execs no `hex` binary per call. The command line's `hex oci exec` is unchanged (it still re-execs
 `hex __oci-exec`).
 
-**How a reused seed clones into a container it hasn't joined.** A seed is reused across containers, so it can't
-join any one container's namespaces itself: a user-namespace join is irreversible, and a pid-namespace join governs
-only the joiner's future children (`setns(2)`). So per exec the seed forks a short-lived intermediate; the
-intermediate joins the container's namespaces (user first, the cgroup namespace left for the child), then
-`clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)` clones the program into the container's cgroup and pid namespace. The
-intermediate sends the program's pidfd back to the seed and exits; the program, orphaned, reparents to the agent,
-which is a child subreaper (decision 2), exactly as a container's init does. The intermediate is a fork of the
-seed, no exec, gone before the program runs, so "the program alone" (the acceptance's check of the agent's
-descendants during an exec) and "no `hex` binary exec'd per call" both hold.
+**One clone where the seed may; an intermediate where it may not.** The plan's one call is right, with a detail it
+left out: `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD)` works with `exit_signal = 0` (the child inherits
+the caller's exit signal; `CLONE_PARENT` with a non-zero one is `EINVAL`, the kernel's `clone3_args_valid`). So a
+**privileged** seed starts the program in one clone (`sys::clone_sibling`): it sets its children's pid namespace to
+the container's (`setns(CLONE_NEWPID)`, which governs only the caller's future children, not the caller) and clones
+with those three flags — the program born in the container's cgroup and pid namespace, the agent's own child, its
+pidfd handed back at once; the program then joins the container's other namespaces itself (user first, mount last,
+cgroup last, as `hex __oci-exec`'s child does) and becomes the container's process. No intermediate, no reparenting,
+no race.
 
-**Deviation from the plan's one-call clone (recorded as a decision argument, §5).** Plan step 2 names a single
-`clone3(CLONE_INTO_CGROUP | CLONE_PIDFD | CLONE_PARENT)`. That is impossible on Linux: `clone3` rejects
-`CLONE_PARENT` with `EINVAL` — measured plainly and inside an unprivileged user namespace, with and without
-`CLONE_PIDFD` and a prior `setns`, on cachyos 7.2.9 and fedora 6.19 (`docs/research/runtime/seed-clone-parent.md`;
-the kernel's `copy_process` rejects `CLONE_PARENT` on the clone3 path). Legacy `clone(CLONE_PARENT)` allows it but
-can't carry `CLONE_INTO_CGROUP` (a clone3-only field, Linux 5.7), and a caller can't `setns` *itself* into a pid
-namespace. So the one call can't be made; the intermediate plus subreaper adoption above reaches the same end — the
-program born in the container's cgroup and namespaces as the agent's child — with calls the kernel supports, and
-reuses the adoption the init already relies on.
+A **rootless** seed can't take that one step: `setns(CLONE_NEWPID)` needs `CAP_SYS_ADMIN` in both the caller's user
+namespace and the pid namespace's owner (`pidns_install`), which a rootless seed lacks (`EPERM`). So on `EPERM` it
+forks a short-lived intermediate that joins the container's user namespace first — which grants those capabilities —
+then the rest, then `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)` of the program (no `CLONE_PARENT`: the intermediate is
+the parent). The program reparents to the agent (a child subreaper, decision 2) when the intermediate exits, as a
+container's init does. The intermediate is a fork of the seed, no exec, gone before the program runs, so both paths
+keep "the program alone" (the acceptance's check of the agent's descendants during an exec) and "no `hex` binary
+exec'd per call". (An early spike used `exit_signal = SIGCHLD` and so read `CLONE_PARENT` as always `EINVAL`, which
+first sent every exec down the intermediate path; the discriminator is `exit_signal`, not `clone3` vs legacy
+`clone`. `docs/research/runtime/seed-clone-parent.md`, measured on cachyos 7.2.9 and fedora 6.19.)
 
-**The ordering that makes the adoption race-free.** The intermediate answers the *seed*, not the agent, over an
+**On the intermediate path, the ordering that makes the adoption race-free.** The intermediate answers the *seed*,
+not the agent, over an
 internal socketpair; the seed reaps the intermediate (`waitpid`) — so the program has reparented to the agent —
 *before* it forwards the answer to the agent. So the agent learns the program's pidfd only once the program is its
 own child, and its `waitid(P_PIDFD)` can reap it (it would be `ECHILD` on a program still the intermediate's child).

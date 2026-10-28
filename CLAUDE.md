@@ -90,8 +90,9 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
   Rust can express neither safely.
 - `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` calls that start a
-  container in its cgroup and that clone an exec'd program into it with a pidfd the node agent watches
-  (the exec seed, decision 3), `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
+  container in its cgroup and that clone an exec'd program into it with a pidfd the node agent watches —
+  as the agent's own child (`CLONE_PARENT`, `exit_signal` 0) where a privileged seed may, else through an
+  intermediate (the exec seed, decision 3), `waitpid`, `unshare`, `setns`, `kill`, `prctl` capability calls,
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program
   and that open a loaded one by id and read its identity and translated instructions (so containers
   with one device policy share one program), the `seccomp(2)` call that loads a container's filter

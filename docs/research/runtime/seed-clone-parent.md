@@ -1,91 +1,67 @@
-# The exec seed can't use `clone3(CLONE_PARENT)`: why the intermediate, measured
+# The exec seed's clone: `clone3(CLONE_PARENT)` needs `exit_signal=0`, and the rootless fallback
 
-The evidence behind `docs/design/runtime-architecture.md`, decision 3's "The exec seed (goal 3, plan step 2)",
-specifically the deviation from the plan's one-call `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD | CLONE_PARENT)`.
-Accessed 2026-10-27. Man pages are from man7.org (`clone(2)`, `setns(2)`) at that day's text; every number marked
-`MEASURED` is from the spike below, run that day; `DESIGN` marks a documented fact.
+The evidence behind `docs/design/runtime-architecture.md`, decision 3's "The exec seed (goal 3, plan step 2)".
+Accessed 2026-10-27/28. Man pages from man7.org (`clone(2)`, `setns(2)`, `pid_namespaces(7)`); kernel facts from
+the Linux source named inline. Numbers marked `MEASURED` are from the spikes below; `DESIGN` marks a documented fact.
 
-## The claim the plan rests on, and why it can't hold
+## The plan's one call works — with `exit_signal = 0`
 
 Plan step 2 says the seed should, in one call, `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD | CLONE_PARENT)` the program:
-born in the container's cgroup (`CLONE_INTO_CGROUP`), with a pidfd for the agent (`CLONE_PIDFD`), and reparented to
-the seed's own parent — the agent — so the agent owns it (`CLONE_PARENT`). Three facts make that one call impossible
-and shape the implementation instead.
+born in the container's cgroup (`CLONE_INTO_CGROUP`), with a pidfd for the agent (`CLONE_PIDFD`), and parented to
+the seed's own parent — the agent — so the agent owns it (`CLONE_PARENT`). This is right, with one detail the plan
+left out: **`CLONE_PARENT` requires `exit_signal = 0`.**
 
-1. **`clone3` rejects `CLONE_PARENT` with `EINVAL`** — `MEASURED`, on two kernels (below), plainly and inside an
-   unprivileged user namespace, with and without `CLONE_PIDFD`. So the single call the plan names returns `EINVAL`
-   and nothing is cloned.
-2. **Legacy `clone(CLONE_PARENT)` works but can't carry `CLONE_INTO_CGROUP`** — `DESIGN`. `CLONE_INTO_CGROUP`
-   ("since Linux 5.7") sets the child's cgroup through `clone3`'s `cl_args.cgroup` field: it "allows the child
-   process to be created in a different version 2 cgroup" and "has effect only for version 2 cgroups" (`clone(2)`).
-   That field exists only for `clone3` (the `clone(2)` argument table leaves its `clone()` row blank); legacy
-   `clone(2)` has no way to pass it. So `CLONE_PARENT` and `CLONE_INTO_CGROUP` can't be combined in one call on
-   Linux.
-3. **A process can't join a PID namespace itself** — `DESIGN`. `setns(2)` and `unshare(2)` with a PID namespace
-   "do not ... change the PID namespace of the calling process, because doing so would change the caller's idea of
-   its own PID"; they cause "children subsequently created by the caller" to be placed in the namespace instead
-   (`pid_namespaces(7)`). So a reused seed can't `setns` *itself* into a container's PID namespace to then clone a
-   sibling; only a process it forks can be placed there, by that forked process joining the namespace and cloning
-   its own child.
+- `MEASURED` (cachyos 7.2.9 and fedora 6.19, `~/.cache/hex-t7/{seed-spike,clone-parent-probe}`): `clone3` with
+  `CLONE_PARENT` and `exit_signal = SIGCHLD` returns `EINVAL`; with `CLONE_PARENT` and `exit_signal = 0` it
+  **succeeds**, and the child's `getppid()` is the grandparent's (the caller's parent), i.e. `CLONE_PARENT` took
+  effect. `DESIGN`: the kernel's `clone3_args_valid` (kernel/fork.c) rejects `CLONE_PARENT | CLONE_THREAD` together
+  with a non-zero `exit_signal`, because such a child's termination is signalled to the *original* parent with
+  *that parent's* chosen signal, not a new one — the child inherits the caller's exit signal (`copy_process`). A
+  seed the node agent spawned has `SIGCHLD` as its own exit signal, so the program the seed clones reports to the
+  agent with `SIGCHLD`, as the agent's other children do.
+- (An earlier spike here used `exit_signal = SIGCHLD` and so saw only the `EINVAL`, and wrongly concluded
+  `CLONE_PARENT` was impossible under `clone3`. The discriminator is `exit_signal`, not `clone3` vs legacy `clone`.)
 
-Together: the program must be cloned by a process that has itself joined the container's namespaces (fact 3), that
-process can't be the reused seed (a user-namespace join is irreversible, so the seed couldn't serve the next
-container), and the clone that puts the program in the cgroup can't also reparent it (facts 1, 2). So a per-exec
-**intermediate** joins the namespaces and `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)`s the program (no `CLONE_PARENT`);
-the program reaches the agent not by `CLONE_PARENT` but by **subreaper adoption** — the intermediate exits, and the
-orphaned program reparents to the agent, which is `PR_SET_CHILD_SUBREAPER` (decision 2, `crates/hex-node/src/supervise.rs`),
-the same path a container's init already takes.
+So a **privileged** seed does one clone (`sys::clone_sibling`): it sets its children's pid namespace to the
+container's (`setns(CLONE_NEWPID)`, which governs only the caller's *future* children, not the caller —
+`pid_namespaces(7)`), then `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD, exit_signal = 0)`. The program is
+born in the container's cgroup and pid namespace, the agent's child from its first instruction, and the seed is
+handed its pidfd at once — no intermediate, no reparenting, no race. The program then joins the container's other
+namespaces itself (user first, mount last, cgroup last, as `hex __oci-exec`'s child does), becomes the container's
+process and execs.
 
-## The measurement
+## The rootless fallback needs an intermediate
 
-Spike `~/.cache/hex-t7/seed-spike/cp.c` (and the fedora copy under `~/.cache/hex-t7/clone-parent-probe/`). It forks
-a child that calls `clone3` with the given flags and reports the result; `exit_signal = SIGCHLD`, no stack (the
-child continues on a copy of the caller's stack, as after `fork`):
+Setting the children's pid namespace is the one step a privileged seed can take that a rootless one cannot.
 
-```c
-struct ca { unsigned long long flags, pidfd, child_tid, parent_tid, exit_signal, stack,
-            stack_size, tls, set_tid, set_tid_size, cgroup; };
-static void t(const char *w, unsigned long long f) {
-  pid_t c = fork();
-  if (c == 0) { struct ca a; memset(&a, 0, sizeof a); a.flags = f; a.exit_signal = SIGCHLD;
-    long r = syscall(SYS_clone3, &a, sizeof a);
-    if (r == -1) { fprintf(stderr, "[%s] clone3 FAILED: %s\n", w, strerror(errno)); _exit(1); }
-    if (r == 0) _exit(0);
-    fprintf(stderr, "[%s] clone3 OK child=%ld\n", w, r);
-    int s; waitpid(r, &s, 0); _exit(0); }
-  int s; waitpid(c, &s, 0);
-}
-int main(void) {
-  t("clone3 flags=0", 0);
-  t("clone3 CLONE_PARENT", CLONE_PARENT);
-  t("clone3 CLONE_PARENT|CLONE_PIDFD", CLONE_PARENT | 0x1000ULL);
-  return 0;
-}
-```
+- `DESIGN`: `setns(fd, CLONE_NEWPID)` enters a pid namespace through `pidns_install` (kernel/pid_namespace.c),
+  which requires `CAP_SYS_ADMIN` in **both** the caller's own user namespace and the user namespace that owns the
+  target pid namespace. A rootless seed runs in the host user namespace without `CAP_SYS_ADMIN`, so for a container
+  with a user+pid namespace of its own it is refused `EPERM`.
+- `MEASURED` (cachyos 7.2.9): joining a rootless container's pid namespace from outside needs its user namespace
+  joined first — `nsenter --user --preserve-credentials --pid` works, `--pid` alone is `EPERM`.
 
-`MEASURED` results, identical on both kernels, and identical again when the whole program is run under
-`unshare --user --map-root-user` (an unprivileged user namespace):
+So on `EPERM` the seed forks a short-lived **intermediate** (`through_intermediate`): the intermediate joins the
+container's user namespace first (which grants it `CAP_SYS_ADMIN` there), then the rest, then
+`clone3(CLONE_INTO_CGROUP | CLONE_PIDFD)` of the program — **no `CLONE_PARENT`**, since the intermediate is now the
+program's parent inside the joined namespaces. The program reparents to the agent (a child subreaper, decision 2)
+when the intermediate exits; the intermediate answers the *seed* over an internal socketpair, and the seed reaps it
+(`waitpid`) — so the program has reparented — *before* it forwards the answer to the agent, so the agent's
+`waitid(P_PIDFD)` never meets a program that isn't yet its child. The intermediate is a fork of the seed, no exec,
+gone before the program runs. Both paths keep "no process but the program" and "no `hex` exec per call".
 
-| host | kernel | `clone3 flags=0` | `clone3 CLONE_PARENT` | `clone3 CLONE_PARENT\|CLONE_PIDFD` |
-|---|---|---|---|---|
-| cachyos (local) | 7.2.9-2-cachyos | OK | `EINVAL` (Invalid argument) | `EINVAL` |
-| fedora-2 | 6.19.10-300.fc44 | OK | `EINVAL` | `EINVAL` |
+## Why delete must reap the program
 
-cachyos measured 2026-10-27 in the step-2 spike; fedora measured the same day via a kiln run (`gcc -O2`,
-`unshare -Ur` second pass). `flags=0` succeeding on both shows the probe and the `clone_args` layout are right, so
-the `EINVAL` is `CLONE_PARENT`'s, not the call's. Two kernels (a 7.x and a 6.x, the two Hex runs on) rather than
-one, since the plan's call is kernel behaviour, not Hex's.
+`DESIGN` + `MEASURED` (the HEX-RT-7 bug): the exec'd program is in the container's pid namespace but reparented out
+to the agent. When the box is deleted, `cgroup.kill` ends the container's init (pid 1 of that namespace), but the
+kernel holds the init in `zap_pid_ns_processes` (kernel/pid_namespace.c) until every process in the namespace is
+reaped — and the init can't reap a child that is now the agent's. So the agent reaps the box's exec'd programs on
+delete (`supervise::reap_programs` after `cgroup.kill`) and records each exit for the caller's `Proc` to read; the
+`hex __oci-exec` command line's helper did this reap itself. Without it, delete's `wait_empty` times out with the
+box "populated" but nothing in any `cgroup.procs` (the init, mid-teardown) — the shape the bug showed.
 
-## The pid-namespace join order the intermediate uses (for completeness)
+## What would change this
 
-`MEASURED`, cachyos 7.2.9: joining a container's PID namespace from outside needs its user namespace joined first
-when the container is rootless — `nsenter --user --preserve-credentials --pid` works, `nsenter --pid` alone is
-`EPERM`. The intermediate therefore joins user first, then the rest, then clones (the cgroup namespace is left for
-the cloned child to join once it is inside the cgroup, as `hex __oci-exec` already does: joining it first makes the
-clone fail `ENOENT`, `crates/hex-runtime/src/linux/oci/exec.rs`).
-
-## What this would change if it were wrong
-
-If a later kernel accepted `clone3(CLONE_PARENT)` (or added `CLONE_INTO_CGROUP` to legacy `clone`), the intermediate
-could be dropped and the seed could clone the program in one call. The design note's falsifier is unaffected: the
-seam exec's cost is what the bench measures, intermediate or not.
+A kernel that let a rootless `setns(CLONE_NEWPID)` succeed (or let `clone3` choose the child's pid namespace
+directly) would drop the intermediate entirely. A kernel that rejected `CLONE_PARENT` with `exit_signal = 0` would
+force the intermediate on the privileged path too.

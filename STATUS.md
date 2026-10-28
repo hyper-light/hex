@@ -159,16 +159,19 @@ three different things (CLAUDE.md "Working here"):
     call under 5%, and the parts sum to the measured p50 within 7% in each round.
     **Plan step 2, exec through a seed** (built, lab-validated on fedora 2026-10-28, gate-clean): the node
     agent keeps a bounded pool of reused `hex __oci-seed` processes and hands each `oci` exec to one over a
-    `SOCK_SEQPACKET` socketpair (`hex-core::seed` codec, stdio by `SCM_RIGHTS`); the seed forks a short-lived
-    intermediate that joins the container's namespaces and `clone3`s the program into its cgroup, and the
-    program — the agent's own child by subreaper adoption — is watched by its pidfd. No `hex` process is spawned
-    and no `hex` binary re-exec'd per call. The plan's one-call `clone3(…|CLONE_PARENT)` is impossible
-    (`clone3` rejects `CLONE_PARENT`, EINVAL on cachyos 7.2.9 and fedora 6.19; `docs/research/runtime/
-    seed-clone-parent.md`), hence the intermediate; the agent reaps the box's exec'd programs on delete, since
-    the container init blocks in the kernel's pid-namespace teardown until they are. The lab
-    (`crates/hex-cli/tests/oci_box.rs`, `program_alone` + the HEX-RT conformance over the node and the socket)
-    passes; it found one fault with a failing test first — delete couldn't empty a box holding an exec'd program
-    (the init stuck on its unreaped pid-namespace member), now reaped on delete. **Measured** (seam_oci beside
+    `SOCK_SEQPACKET` socketpair (`hex-core::seed` codec, stdio by `SCM_RIGHTS`); the program is the agent's own
+    child, watched by its pidfd. No `hex` process is spawned and no `hex` binary re-exec'd per call. A privileged
+    seed does the plan's one clone — `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD)` with `exit_signal=0`
+    (the detail the plan missed; `CLONE_PARENT` is only `EINVAL` with a non-zero exit signal) — after setns'ing its
+    children into the container's pid namespace; a rootless seed can't setns the pid namespace (needs CAP_SYS_ADMIN,
+    `EPERM`), so it forks a short-lived intermediate that joins the user namespace first, then clones the program,
+    which reparents to the agent (subreaper). `docs/research/runtime/seed-clone-parent.md` (measured cachyos 7.2.9 +
+    fedora 6.19; an early spike's `exit_signal=SIGCHLD` wrongly read `CLONE_PARENT` as impossible). The agent reaps
+    the box's exec'd programs on delete, since the container init blocks in the kernel's pid-namespace teardown until
+    they are. The lab (`crates/hex-cli/tests/oci_box.rs`, `program_alone` + the HEX-RT conformance over the node and
+    the socket, rootless; exercises the intermediate path) passes; it found one fault with a failing test first —
+    delete couldn't empty a box holding an exec'd program (the init stuck on its unreaped pid-namespace member), now
+    reaped on delete. **Measured** (seam_oci beside
     libcrun, best of 3, adacachy loaded, run `20261028T054922Z`): exec p50 **0.47 ms**, at the step-1 floor and
     **1.52× libcrun's 0.72 ms** (down 3× from the helper path's 1.41 ms). **Open for Ada:** the plan's
     exec target of a quarter of libcrun's rested on step 1's fedora libcrun of 2.045 ms, flagged there as
