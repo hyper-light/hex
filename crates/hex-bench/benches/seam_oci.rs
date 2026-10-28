@@ -16,6 +16,8 @@
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
+//! HEXBENCH_TRACE turns on the breakdown probe's markers (`Trace`,
+//! bench/competitive/probes/exec_breakdown.md).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -39,7 +41,8 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::io::{BufRead, BufReader};
+    use std::fs::{File, OpenOptions};
+    use std::io::{BufRead, BufReader, Write};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitCode, Stdio as Std};
     use std::sync::Barrier;
@@ -92,15 +95,66 @@ mod linux {
             .unwrap_or(0)
     }
 
+    /// The breakdown probe's markers (bench/competitive/probes/exec_breakdown.md). With
+    /// `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets each timed
+    /// start and exec in the instance's buffer, `hexbd B <op> <id>` before the call and
+    /// `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured it, and the
+    /// instance records only from one to the other: its trace is those calls and what they ran, and
+    /// nothing of create or delete. Each marker is written outside the time it brackets.
+    struct Trace {
+        on: File,
+        marker: File,
+    }
+
+    impl Trace {
+        fn from_env() -> Option<Self> {
+            let dir = PathBuf::from(std::env::var_os("HEXBENCH_TRACE")?);
+            let open = |name: &str| {
+                let path = dir.join(name);
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap_or_else(|e| panic!("HEXBENCH_TRACE: {}: {e}", path.display()))
+            };
+            Some(Self {
+                on: open("tracing_on"),
+                marker: open("trace_marker"),
+            })
+        }
+
+        /// Starts the instance recording, then marks the call's beginning.
+        fn begin(&self, op: &str, id: &str) -> Result<(), String> {
+            (&self.on)
+                .write_all(b"1")
+                .map_err(|e| format!("tracing_on: {e}"))?;
+            (&self.marker)
+                .write_all(format!("hexbd B {op} {id}").as_bytes())
+                .map_err(|e| format!("trace_marker: {e}"))
+        }
+
+        /// Marks the call's end with its time, then stops the instance recording.
+        fn end(&self, op: &str, id: &str, took: Duration) -> Result<(), String> {
+            (&self.marker)
+                .write_all(format!("hexbd E {op} {id} {}", took.as_nanos()).as_bytes())
+                .map_err(|e| format!("trace_marker: {e}"))?;
+            (&self.on)
+                .write_all(b"0")
+                .map_err(|e| format!("tracing_on: {e}"))
+        }
+    }
+
     /// One container's create, start, exec of `true` and delete, each timed alone; a slot for the op
     /// that failed records the error. The init is the bundle's `sleep infinity`, so exec runs beside it.
+    /// A timed start and exec are bracketed by `trace`'s markers when it's on.
     fn lifecycle_once(
         node: &dyn Runtime,
         bundle: &Path,
         id: &str,
         ms: &mut Ops,
         timed: bool,
+        trace: Option<&Trace>,
     ) -> Result<(), String> {
+        let trace = trace.filter(|_| timed);
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
         let create = Instant::now();
         node.create(spec(&bid, bundle))
@@ -108,9 +162,12 @@ mod linux {
         let create = create.elapsed();
         // start and exec, timed; delete runs whether or not they did, so a box is never left behind.
         let inner = (|| -> Result<(Duration, Duration), String> {
+            trace.map_or(Ok(()), |t| t.begin("start", id))?;
             let start = Instant::now();
             node.start(&bid).map_err(|e| format!("start {id}: {e}"))?;
             let start = start.elapsed();
+            trace.map_or(Ok(()), |t| t.end("start", id, start))?;
+            trace.map_or(Ok(()), |t| t.begin("exec", id))?;
             let exec = Instant::now();
             let mut p = node
                 .exec(&bid, Program::of(&["/usr/bin/true"]), Stdio::null())
@@ -120,6 +177,7 @@ mod linux {
                 .map_err(|e| format!("wait in {id}: {e}"))?
                 .ok_or_else(|| format!("`true` in {id} still running after {CALL_TIMEOUT:?}"))?;
             let exec = exec.elapsed();
+            trace.map_or(Ok(()), |t| t.end("exec", id, exec))?;
             if ended != Exit::Code(0) {
                 return Err(format!("`true` in {id} ended {ended:?}"));
             }
@@ -152,10 +210,18 @@ mod linux {
         bundle: &Path,
         n: usize,
         warmup: usize,
+        trace: Option<&Trace>,
     ) -> Result<Value, String> {
         let mut ms = Ops::default();
         for i in 0..warmup + n {
-            lifecycle_once(node, bundle, &format!("l{i:06}"), &mut ms, i >= warmup)?;
+            lifecycle_once(
+                node,
+                bundle,
+                &format!("l{i:06}"),
+                &mut ms,
+                i >= warmup,
+                trace,
+            )?;
         }
         Ok(
             json!({"ms": {"create": ms.create, "start": ms.start, "exec": ms.exec, "delete": ms.delete}}),
@@ -345,6 +411,7 @@ mod linux {
             .ok()
             .filter(|p| !p.trim().is_empty())
             .unwrap_or_else(|| "lifecycle throughput rtt".to_owned());
+        let trace = Trace::from_env();
         let (mut phases, mut errors) = (Map::new(), Map::new());
         for phase in ["lifecycle", "throughput", "rtt"] {
             if !wanted.split_whitespace().any(|w| w == phase) {
@@ -352,7 +419,7 @@ mod linux {
             }
             let t0 = Instant::now();
             let r = match phase {
-                "lifecycle" => lifecycle(node.as_ref(), &sleep_bundle, n, warmup),
+                "lifecycle" => lifecycle(node.as_ref(), &sleep_bundle, n, warmup, trace.as_ref()),
                 "rtt" => rtt(node.as_ref(), &sleep_bundle, n, warmup),
                 _ => throughput(node.as_ref(), &true_bundle, &parent, lifecycles),
             };
