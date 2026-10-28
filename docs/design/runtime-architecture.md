@@ -328,6 +328,26 @@ spawn, decision 3's falsifier: 0.666 ms on fedora (`probes/oci_breakdown.md` §2
 lifecycles/s at concurrency 1, 8 and 32 over the socket, against 43, 55 and 52 in process, with 32 threads sharing
 one client.
 
+#### The floor under exec, and where exec and start spend their time (goal 3, plan step 1)
+
+The exec target, a quarter of libcrun's exec, is above the floor on fedora, so it stands. Any exec into a running
+container pays at least the floor. It's measured here as a prepared single-threaded process that clones into the
+container's cgroup with a pidfd, has the child join the container's namespaces and exec `/usr/bin/true`, and waits
+(`bench/competitive/probes/exec_floor.c`). Against the libcrun exec that ran beside it, in each of three rounds
+(`probes/exec_breakdown.md`, run 1: fedora, 2026-10-28, `hex 0.1.0 (f59dd3f)`, load 0.6 to 19 and I/O stalled, so not
+of record for absolute numbers), the floor's p50 was 0.75 to 0.83 of a quarter of it: 0.409 ms against 0.511 at best
+of 3. That leaves step 2's seed 0.09 to 0.14 ms over the floor for everything else an exec must do. The day's earlier
+passes met the host in a state where every part of a call took about twice as long. The floor slowed more than
+libcrun's exec there, and reached 0.96 of the target at worst.
+
+The same run cut each traced exec and start into its parts at events of its critical path, and the parts sum to the
+p50 of the untraced calls interleaved with them within 4.5% for exec and 7% for start, in each round. Exec, 1.41-1.42 ms
+at p50 in the two rounds that met the same host, is 3.4x the floor. About half of it, 0.68 ms, is the `hex __oci-exec`
+helper: its spawn and re-exec (0.43, of which 0.16 is the static-pie binary starting before its first system call), its
+read of `config.json` and the container's namespaces, and the hop its own end adds before the node's wait returns. The
+seed removes it. Start, 0.24-0.25 ms against libcrun's 0.10, is half the rewrite of `state.json` as running
+(0.12-0.13), which libcrun doesn't make and plan step 3 removes, with the second read of the state.
+
 ### 4. Network-namespace work off the critical path (rewritten after the probe)
 
 **What changed.** The plan behind this document expected pooled network namespaces and cgroups to lift the

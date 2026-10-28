@@ -150,6 +150,13 @@ three different things (CLAUDE.md "Working here"):
     `openat2(RESOLVE_IN_ROOT)`); runtime-tools gives the same 26 of 58 before and after on adacachy.
     Open for Ada: whether OciSpec boxes get the default seccomp profile Docker applies
     (`docs/design/runtime.md`, "a box from an OciSpec").
+    **Plan step 1, the floor under exec and where the seam's time goes** (measured on fedora 2026-10-28,
+    `bench/competitive/probes/exec_breakdown.md`): the exec target stands. The floor under any exec into a
+    running container (a prepared process cloning `true` into its cgroup and namespaces, waited on a pidfd) is
+    0.75-0.83 of a quarter of the libcrun exec beside it, in each of three rounds. Exec through the seam is 3.4x
+    the floor, about half of it the `hex __oci-exec` helper the seed removes (step 2). Start is 2.4-2.6x libcrun's,
+    half of it the rewrite of `state.json` step 3 removes. Every part is timed by a tracer that costs a traced
+    call under 5%, and the parts sum to the measured p50 within 7% in each round.
   - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
     copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
