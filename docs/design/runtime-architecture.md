@@ -331,7 +331,9 @@ one client.
 
 #### The floor under exec, and where exec and start spend their time (goal 3, plan step 1)
 
-The exec target, a quarter of libcrun's exec, is above the floor on fedora, so it stands. Any exec into a running
+The exec target was a quarter of libcrun's exec, above the floor on fedora's stalled libcrun, so it looked to
+stand; step 2 measured a non-stalled libcrun (0.72 ms) against which a quarter is below the floor, so Ada re-set
+the target to the floor (see "The exec seed"). Any exec into a running
 container pays at least the floor. It's measured here as a prepared single-threaded process that clones into the
 container's cgroup with a pidfd, has the child join the container's namespaces and exec `/usr/bin/true`, and waits
 (`bench/competitive/probes/exec_floor.c`). Against the libcrun exec that ran beside it, in each of three rounds
@@ -416,9 +418,10 @@ costing more than a quarter of libcrun's in-process exec. It does: 0.47 ms is 0.
 But the quarter-target itself rested on step 1's fedora libcrun of 2.045 ms, which that run flagged as load- and
 IO-stalled (not of record); a non-stalled libcrun exec is ~0.72 ms, only ~1.5× the kernel floor (clone3 + setns +
 `execve` + wait). A quarter of that, 0.18 ms, is below the floor, so no exec seam can reach it: the floor, not the
-helper, now bounds exec. The seed meets exec's achievable bound (the floor, and faster than libcrun); the quarter-
-of-libcrun target is unreachable against a libcrun that isn't stalled, and is Ada's to re-set. Start and create
-stay goal 3 step 3 and goal 5.
+helper, now bounds exec. The seed meets exec's achievable bound (the floor, and faster than libcrun). Ada re-set
+the exec target to the floor on 2026-10-28 (the quarter-of-libcrun target had rested on the stalled measurement);
+so exec is met, and the new falsifier is a seam exec slower than libcrun's in one run. Start and create stay goal 3
+step 3 and goal 5.
 
 ### 4. Network-namespace work off the critical path (rewritten after the probe)
 
@@ -568,8 +571,10 @@ shows its target.
    and create p50 with the state root on the overlay within 10% of its tmpfs passes in the same run.
 2. **No shim** (decision 2): done when the held memory per idle container is at most crun's and runtime-tools
    still passes crun's 28.
-3. **The `oci` class behind the seam** (decision 3): done when exec p50 through the seam is at most a quarter of
-   libcrun's in-process exec on the same run, and start through the seam is within 10% of libcrun's (A3).
+3. **The `oci` class behind the seam** (decision 3): done when exec p50 through the seam is at the kernel exec
+   floor — faster than libcrun's in-process exec in the same run — and start through the seam is within 10% of
+   libcrun's (A3). (The exec target was a quarter of libcrun's until 2026-10-28; measured against a non-stalled
+   libcrun that is below the floor, so Ada re-set it to the floor; "The exec seed" has the evidence. Exec is met.)
 4. **Network namespaces off the path** (decision 4): done when Hex's create costs no more with the namespace than
    without it, at p50, through the seam.
 5. **The seed** (decision 5): done when create p50 through the seam is at most a quarter of libcrun's in-process

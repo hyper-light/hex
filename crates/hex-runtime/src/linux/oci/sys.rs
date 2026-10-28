@@ -156,6 +156,90 @@ pub fn fork_into_cgroup_pidfd(
     }
 }
 
+/// `CLONE_PARENT` (`include/uapi/linux/sched.h`): the child's parent is the caller's parent.
+const CLONE_PARENT: u64 = 0x8000;
+
+/// Clones a sibling: `clone3(CLONE_PARENT | CLONE_PIDFD)`, with `CLONE_INTO_CGROUP` when `cgroup` is
+/// given, so the child's parent is the caller's parent (the exec seed's: the node agent), it is born in
+/// the cgroup the open directory `cgroup` is, and the caller is handed its pidfd. `exit_signal` is 0
+/// because `clone3` refuses `CLONE_PARENT` with any other (`clone3_args_valid` in kernel/fork.c): the
+/// child takes the caller's own exit signal instead (`copy_process`), which for a seed the agent
+/// spawned is `SIGCHLD`. `None` when this kernel or sandbox has no `clone3` or no clone into a cgroup
+/// (`ENOSYS` or `E2BIG`, as [`fork_into_cgroup`]); the seed then takes its intermediate path. The caller
+/// must be single-threaded, as for [`fork`].
+pub fn clone_sibling(
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+) -> Result<Option<Sibling>, OciError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let (flags, cgroup) = match cgroup {
+        Some(dir) => (
+            CLONE_PARENT | CLONE_PIDFD | CLONE_INTO_CGROUP,
+            u64::try_from(dir.as_raw_fd())
+                .map_err(|_| OciError::os("clone3 a sibling", "a negative file descriptor"))?,
+        ),
+        None => (CLONE_PARENT | CLONE_PIDFD, 0),
+    };
+    let mut pidfd: libc::c_int = -1;
+    let pidfd_ptr = u64::try_from((&raw mut pidfd).addr())
+        .map_err(|_| OciError::os("clone3 a sibling", "a pointer wider than 64 bits"))?;
+    let args = CloneArgs {
+        flags,
+        pidfd: pidfd_ptr,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: 0,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup,
+    };
+    // SAFETY: clone3(2) with a valid pointer to a fully initialized `CloneArgs` and its exact size,
+    // which the kernel only reads, and in `pidfd` the address of a live `c_int` it writes the child's
+    // pidfd to. With no stack given, the child goes on with a copy of the caller's stack, as after
+    // fork(2), and no flag shares memory, files or signal handlers with the caller. fork's one
+    // constraint, that the child of a multi-threaded process may touch only async-signal-safe state,
+    // doesn't apply: the caller, the seed, re-exec'd and is single-threaded. The return value is
+    // checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            &args as *const CloneArgs,
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    match r {
+        -1 => {
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(libc::ENOSYS) | Some(libc::E2BIG) => Ok(None),
+                _ => Err(OciError::os("clone3 the program into the container", e)),
+            }
+        }
+        0 => Ok(Some(Sibling::Child)),
+        child => {
+            // SAFETY: the clone succeeded, so the kernel made `pidfd` for the child and nothing else
+            // in this process owns it.
+            let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) };
+            let pid = i32::try_from(child)
+                .map_err(|_| OciError::os("clone3 a sibling", "a pid out of range"))?;
+            Ok(Some(Sibling::Parent { pid, pidfd }))
+        }
+    }
+}
+
+/// What [`clone_sibling`] returns in each process.
+pub enum Sibling {
+    /// The caller: the sibling's pid and its pidfd.
+    Parent {
+        pid: i32,
+        pidfd: std::os::fd::OwnedFd,
+    },
+    /// The sibling.
+    Child,
+}
+
 /// Ends a forked child at once with status `code`, running no `atexit` handler and flushing no
 /// buffer: the seed's intermediate and the program it forks must not return up into the seed's serve
 /// loop, nor flush the seed's buffers a second time (`_exit(2)`, async-signal-safe). The CLI helpers
