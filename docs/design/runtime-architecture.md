@@ -544,7 +544,9 @@ created, it is owned by the user namespace in which the creating process was a m
 joining a network namespace takes `CAP_SYS_ADMIN` in the one that owns it (setns(2)). A namespace the agent makes
 ahead is the agent's user namespace's, so the pool serves containers in that user namespace only. A container in
 one of its own, as a rootless node's are, makes its network namespace on the path, where it is its own; so does a
-container whose spec names its namespace by path.
+container whose spec names its namespace by path. The pool counts a namespace made on the path for a container in a
+user namespace of its own as it counts a dry take's, so a rootless node reports every namespace it makes as made on
+the path.
 
 **The bound and the refill.** Measured by `probes/netns_pool.c` (one thread making namespaces as the pool would and
 holding them in a cgroup of its own), two rounds of 500 each: on fedora at 2026-10-29T03:00Z (load 5.14 to 4.14) and
@@ -571,13 +573,26 @@ The pool holds at most **32**: the most creates the bench's busiest phase has in
 a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory on the heavier machine. Its
 32 descriptors sit beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor table
 (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or more;
-whether that keeps up with sustained churn is the sustained phase's to show (goal 4 plan step 5).
+whether that keeps up with sustained churn is the sustained phase's to show (goal 4 plan step 5). A make that fails
+stops the refill until the next take, so a kernel that refuses every make costs that thread one failed make a take,
+never a loop of them (CLAUDE.md §2). Takes go oldest first, so under churn each namespace is handed out within a
+bound's worth of takes of its making, none left in the pool while others come and go.
 
 **Where its memory is charged.** The kernel charges what it can of a namespace to the cgroup of the task that makes
 it, when it is made (`struct net` is `SLAB_ACCOUNT`, `net_namespace.c:1259-1261`), and doesn't move it after. A
 pooled namespace's 108-320 KiB so stays charged to the node agent, not to the box that joins it. The node reports
 what its pool holds, and a density reading of Hex counts the agent's cgroup with its boxes', so a box isn't read as
 lighter than it is (AC-T7.1.5 bounds what the agent adds per box).
+
+**Tests.** The pool's policy is a pure core, `hex_core::netns` (goal 4 plan step 3), held to an oracle under random
+takes, made and failed makes, creates it can't serve and shutdowns, with every path taken over the run: it never
+holds more than its bound, and a namespace made past it is refused and handed back (HEX-NETNS-1); it hands each
+namespace out once, the oldest first, and never takes one back (HEX-NETNS-2); a take from it dry is answered with a
+namespace made on the path, and counted, as is a create it can't serve, which takes nothing (HEX-NETNS-3); after
+shutdown a take is refused, and what it held is handed back and counted as discarded (HEX-NETNS-4); it asks for the
+room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5). Its counts (made
+ahead, taken, made on the path, discarded, failed) are what the bench reads, and they equal the oracle's. A
+doc-truth test holds the core's bound to this decision's.
 
 **Sources.** `docs/research/runtime/netns-pool.md`: the kernel's `net/core/net_namespace.c` at v6.19; namespaces(7),
 setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's networking account (Vogels, 2026); AFaaS

@@ -208,8 +208,14 @@ three different things (CLAUDE.md "Working here"):
     thread (5,260-6,127 a second on fedora, 2,280-3,545 on the Mac Studio), each at most 0.34 and 0.74 MiB of kernel
     memory there, joined by setns, never reused, for containers in the agent's user namespace only, its memory
     charged to the agent and counted in Hex's density readings. A doc-truth test holds decision 4's figures to that
-    record (`crates/hex-bench/tests/doc_truth.rs`). Steps 2-5 (the seam's with-and-without and sustained phases,
-    the pool's core and shell, the pass of record) are next.
+    record (`crates/hex-bench/tests/doc_truth.rs`). **Plan step 3, the pool's core** (built, gate-clean,
+    2026-10-29): `hex_core::netns`, the pool's policy as a pure core. It holds at most its bound and refuses a
+    namespace made past it, hands each out once and the oldest first, answers a dry take with "make one on the
+    path" and counts it, as it counts one made on the path for a create it can't serve (a container with a user
+    namespace of its own), pauses the refill after a failed make until the next take, and refuses every take after
+    shutdown. Its counts (made ahead, taken, made on the path, discarded, failed) equal an oracle's under random
+    histories (HEX-NETNS-1 to 5). No node uses it yet; that is step 4's shell. Steps 2, 4 and 5 (the seam's
+    with-and-without and sustained phases, the pool's shell, the pass of record) are next.
   - goals 5 (a seed per node), 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
