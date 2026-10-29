@@ -451,7 +451,8 @@ f4b4c60b87b6cabf…), load 0.86 to 3.58, best of 2, fedora at rest. Start p50 0.
 **1.005x** (bar 1.1, met). Exec p50 1.086 ms against libcrun's 3.756, **0.289x** (bar 0.25, not met at rest; 0.203
 held awake in `exec-ab-20261029T002311Z`, not of record). The same pass on other machines (`bench/competitive/
 docker_pass.sh`, the containers in Docker Desktop's Linux VM): jupiter (AMD Ryzen AI MAX+ 395, WSL2) exec **0.245x**,
-start 0.815x; adas-mac-studio-3 (Apple M4 Max) exec **0.117x**, start 0.500x.
+start 0.815x; adas-mac-studio-3 (Apple M4 Max) exec **0.117x**, start 0.500x. Ada's call (2026-10-29): the three
+passes together stand for goal 3's record; merged to main at 8cc9b43.
 
 **What would falsify it.** A seam exec p50 above a quarter of libcrun's in one run on fedora. The floor (`exec_floor`,
 step 1) measured beside libcrun in the same runs sits at 0.66-0.94 of that quarter (0.66 in the fast state, 0.82-0.85

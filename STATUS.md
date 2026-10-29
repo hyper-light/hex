@@ -134,7 +134,8 @@ three different things (CLAUDE.md "Working here"):
     it joined the container's cgroup namespace before cloning into its cgroup, which the kernel refuses
     there with ENOENT; the child now joins it from inside. The OCI table of record in
     `bench/competitive/RESULT.md` predates decisions 1 and 2 (start ~13x crun, with fsync).
-  - **goal 3, the `oci` class behind the `Runtime` seam** — `hex-node` serves `ClassSpec::Bundle` and
+  - **goal 3, the `oci` class behind the `Runtime` seam** (merged to main 2026-10-29 at 8cc9b43, on Ada's call
+    from the passes of record below) — `hex-node` serves `ClassSpec::Bundle` and
     `ClassSpec::Oci` in process and over its socket (cgroup under the box root, `create_in_cgroup`, start as one
     FIFO operation, exec with no process but the program: steps 2 and 3 below), with `seam_oci` to measure it
     against libcrun. The command line's `hex oci exec` keeps its `hex __oci-exec` helper.
@@ -183,18 +184,20 @@ three different things (CLAUDE.md "Working here"):
     `stopped` are derived as crun derives them (the FIFO there or not, the init live by pid and start time), an
     oracle table of every combination tested. Start through the seam took 0.084 ms against libcrun's 0.083 in the
     same run, about 1.0x.
-    **Plan step 6, goal 3 of record** (measured on fedora 2026-10-29, `bench/competitive/RESULT.md`, "Goal 3: the oci
-    class through the seam"; not merged): host.sh's OCI pass from 8224f97, libcrun beside the seam in process and
+    **Plan step 6, goal 3 of record** (measured 2026-10-29 on fedora, jupiter and adas-mac-studio-3,
+    `bench/competitive/RESULT.md`, "Goal 3: the oci class through the seam"; merged at 8cc9b43): on fedora,
+    host.sh's OCI pass from 8224f97, libcrun beside the seam in process and
     over the socket, best of 2, load 0.86 to 3.58. Start through the seam is **1.005x** libcrun's (bar 1.1, met).
     Exec is **0.289x** (bar 0.25, not met). The run met fedora at rest, where a short burst of work runs at about a
     third of its clock and a short call's ratio to a long one grows; with one busy loop outside the bench's CPUs
     holding the package awake, the same build's exec is 0.203x libcrun's (`bench/competitive/probes/exec_ab.md`,
     not of record). The same pass on other machines (`bench/competitive/docker_pass.sh`, Docker Desktop's Linux VM;
     Ada's call): jupiter (AMD Ryzen AI MAX+ 395) exec 0.245x and start 0.815x; adas-mac-studio-3 (Apple M4 Max)
-    exec 0.117x and start 0.500x; both bars met on both. **Open for Ada:** whether these stand for goal 3's record,
-    or how a fedora pass holds the host (at rest, as CLAUDE.md §7's load under 2 asks, where the exec bar fails;
-    or with the package held awake, where it is met). Create is 3.3x libcrun's on fedora (19.2 ms against 5.9),
-    2.8x on jupiter and 1.0x on the Mac Studio, outside goal 3's bars; open.
+    exec 0.117x and start 0.500x; both bars met on both. Ada's call (2026-10-29): the three machines' passes
+    together stand for goal 3's record, fedora's at-rest exec recorded beside them, and the branch merged on them.
+    Open: how a fedora pass of record holds the host (at rest, as CLAUDE.md §7's load under 2 asks, where a short
+    call's ratio to a long one grows; or with the package held awake). Create is 3.3x libcrun's on fedora (19.2 ms
+    against 5.9), 2.8x on jupiter and 1.0x on the Mac Studio, outside goal 3's bars; open.
   - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
     copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
