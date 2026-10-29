@@ -551,10 +551,44 @@ path, as today, and counts it. Teardown stays where the kernel puts it, after de
 created, it is owned by the user namespace in which the creating process was a member", user_namespaces(7)), and
 joining a network namespace takes `CAP_SYS_ADMIN` in the one that owns it (setns(2)). A namespace the agent makes
 ahead is the agent's user namespace's, so the pool serves containers in that user namespace only. A container in
-one of its own, as a rootless node's are, makes its network namespace on the path, where it is its own; so does a
-container whose spec names its namespace by path. The pool counts a namespace made on the path for a container in a
-user namespace of its own as it counts a dry take's, so a rootless node reports every namespace it makes as made on
-the path.
+one of its own, made by its spec or joined by path, as a rootless node's are, makes its network namespace on the
+path, where it is its own; a container whose spec names its network namespace by path joins that one and takes
+none. The pool counts a namespace made on the path for a container in a user namespace of its own as it counts a dry
+take's, so a rootless node reports every namespace it makes as made on the path.
+
+**How the node does it** (goal 4 plan step 4: `hex_node::netns`, `oci::net::make_ahead`). A root node starts one
+thread when it opens, `hex-netns`, which makes a namespace whenever the pool asks for one and puts itself back in
+its own namespace after each, on every path, as containerd's maker puts its thread back (`defer origNS.Set()`,
+`netns_linux.go:121-122`), so the thread holds none of the namespaces it makes. A rootless node's pool has a bound
+of 0 and no thread. The runtime asks the pool once it has read the spec, so a bundle is parsed once
+(`run::Networks`): a container that makes a network namespace of its own and has no user namespace takes one; one in
+a user namespace of its own is counted as made on the path; one whose network namespace is given by path, or that
+has none, asks nothing. The take comes last, just before the shim, so a create refused before it takes none, and the
+pool counts at the take, so a create that fails after it is counted all the same; a shut-down pool or a poisoned
+lock refuses the create by type. The shim gets the namespace by the path of the agent's descriptor for it
+(`/proc/<agent>/fd/<n>`), opens it before it changes any namespace, and joins it with `setns` in place of unsharing
+`CLONE_NEWNET`; the agent's descriptor stays close-on-exec throughout and goes once the create's handshake ends. It
+isn't handed over by clearing that flag: the agent is multi-threaded, so any process it started while the flag was
+clear (another create's shim, a seed, a `process` box's program, a hook, an exec's clone) would inherit it, and
+nothing closes a stray descriptor before `execve`, so another container's program would hold this one's namespace
+(the first runtime side did this, 13636cb; HEX-NETNS-6 failed on it). The container's processes are then all that
+hold its namespace, so it ends with them, and the kernel tears it down after delete returns.
+
+**What it measures.** With the pool in the node (5257407), the step-2 phases through `docker_pass.sh` on
+adas-mac-studio-3 (2026-10-29T04:09Z, VM load 3.51 to 5.88, 2 rounds of 1,000, `probes/netns_pool.md`), create p50 in
+ms, best of 2 each:
+
+<!-- record: bench/competitive/probes/netns_pool.md -->
+| adas-mac-studio-3, 5257407 | with the namespace | without | with over without |
+|---|---|---|---|
+| Hex in process, from the pool | 1.723 | 1.714 | 1.01 |
+| Hex over the socket, from the pool | 1.735 | 1.790 | 0.97 |
+| libcrun, made on the path | 1.983 | 1.644 | 1.21 |
+<!-- /record -->
+
+Every create of the lifecycle phase took a namespace from the pool and none was made on the path, so on the machine
+where the namespace was 23% of Hex's create it now costs a create about what a create without one costs; the
+pass of record on fedora, jupiter and this Mac Studio, with the sustained phase, is goal 4 plan step 5's.
 
 **The bound and the refill.** Measured by `probes/netns_pool.c` (one thread making namespaces as the pool would and
 holding them in a cgroup of its own), two rounds of 500 each: on fedora at 2026-10-29T03:00Z (load 5.14 to 4.14) and
@@ -601,9 +635,18 @@ holds more than its bound, and a namespace made past it is refused and handed ba
 namespace out once, the oldest first, and never takes one back (HEX-NETNS-2); a take from it dry is answered with a
 namespace made on the path, and counted, as is a create it can't serve, which takes nothing (HEX-NETNS-3); after
 shutdown a take is refused, and what it held is handed back and counted as discarded (HEX-NETNS-4); it asks for the
-room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5). Its counts (made
-ahead, taken, made on the path, discarded, failed) are what the bench reads, and they equal the oracle's. A
-doc-truth test holds the core's bound to this decision's.
+room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5). Its counts (made ahead,
+taken, made on the path, discarded, failed) are what the bench reads, and they equal the oracle's. A doc-truth test
+holds the core's bound to this decision's. The node's shell (goal 4 plan step 4): a stand-in shim holds no
+descriptor of the namespace made ahead it is handed, reaches it by its path, and finds the agent's descriptor
+close-on-exec meanwhile (HEX-NETNS-6); the runtime takes for a container that makes its own namespace with no user
+namespace, counts one in a user namespace of its own on the path, asks nothing for one given by path or none, and
+refuses the create when the pool refuses (HEX-NETNS-7, against a recording fake); as root, two boxes take one each,
+their namespaces differ from each other's, an earlier box's and the host's, loopback up, and the agent holds neither
+(HEX-NETNS-8, `oci_box`); a pool of 0 makes a box's namespace on the path, loopback up, counted so (HEX-NETNS-9);
+rootless, the box's namespace is made in its own user namespace, which owns it, nothing taken (HEX-NETNS-10); and
+the refill thread fills its pool to the bound as root, each namespace its own with loopback up, or counts each
+failed make where it may not and serves takes on the path (HEX-NETNS-11).
 
 **Sources.** `docs/research/runtime/netns-pool.md`: the kernel's `net/core/net_namespace.c` at v6.19; namespaces(7),
 setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's networking account (Vogels, 2026); AFaaS

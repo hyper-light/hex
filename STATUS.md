@@ -214,8 +214,19 @@ three different things (CLAUDE.md "Working here"):
     path" and counts it, as it counts one made on the path for a create it can't serve (a container with a user
     namespace of its own), pauses the refill after a failed make until the next take, and refuses every take after
     shutdown. Its counts (made ahead, taken, made on the path, discarded, failed) equal an oracle's under random
-    histories (HEX-NETNS-1 to 5). No node uses it yet; that is step 4's shell. Steps 2, 4 and 5 (the seam's
-    with-and-without and sustained phases, the pool's shell, the pass of record) are next.
+    histories (HEX-NETNS-1 to 5). **Plan step 4, the pool's shell** (built, 2026-10-29, 5257407): a root node's
+    thread `hex-netns` makes each namespace off the create path (unshared on that thread, loopback up, the thread
+    back home after), up to the bound; the runtime asks the pool once it has read the spec, and a container that
+    makes its own network namespace with no user namespace joins one with setns in place of unsharing, while one in
+    a user namespace of its own (every rootless node's: bound 0, no thread) makes it on the path, counted. The
+    shim opens the namespace by `/proc/<agent>/fd/<n>`, so the agent's descriptor stays close-on-exec, which fixes
+    the first runtime side's handoff (13636cb), where any process the agent started meanwhile inherited it.
+    HEX-NETNS-6 to 11; rootless, oci_box, oci_spec_box and node_socket pass on adacachy, and as root, in jupiter's
+    Docker Desktop VM (`bench/oci-validation/docker_lab.sh`, seam_root.sh's lab where /usr isn't Fedora's), so do
+    those and oci_seccomp. On adas-mac-studio-3 (`docker_pass.sh` at 5257407, the step-2 phases, best of 2) a
+    create from the pool costs 1.01x a create without a namespace in process and 0.97x over the socket, against
+    1.23x before the pool; every create took from the pool (`bench/competitive/probes/netns_pool.md`). Step 5, the
+    pass of record with the sustained phase on fedora, jupiter and the Mac Studio, is the rest.
   - goals 5 (a seed per node), 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
@@ -237,6 +248,19 @@ three different things (CLAUDE.md "Working here"):
   measurement of exec against the agent's open descriptors and, past where it shows, the program's descriptors
   moved low and the rest left behind at the clone (`close_range(2)`, `CLOSE_RANGE_UNSHARE`) or the exec handed to a
   seed.
+
+- **A create's sync and map pipe ends reach processes the agent starts meanwhile.** `start_shim` clears
+  close-on-exec on the shim's ends of its two pipes (`sync_w`, `map_r`; `run.rs`, `keep_across_exec`) before
+  `Command::spawn`, and the agent is multi-threaded, so any process it starts in that window (another create's shim,
+  a seed, a `process` box's program, a hook, an exec's clone) inherits them and keeps them past its `execve`: nothing
+  closes a stray descriptor before it. A stray `sync_w` holds the pipe open, so a shim that dies before its pid
+  line leaves its create's `read_sync` blocked until the holder ends; a stray `map_r` lets the map ack's write
+  succeed against a dead shim; either way one create's pipe sits in an unrelated container's program. The network
+  namespace made ahead had the same exposure and no longer has it (goal 4 plan step 4: the shim opens it by
+  `/proc/<agent>/fd/<n>`). Closes with one of: the same handoff by path for the pipes, which needs the agent to
+  drop its own `sync_w` once the shim has opened its copy, a change to the sync protocol; a `dup2` onto the
+  descriptor in the child, which std's `Command` allows only through an `unsafe` `pre_exec`, and which costs it
+  `posix_spawn`; or a lock every spawn in the agent takes. Put to Ada as the fix after goal 4.
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
 measured are in `docs/requirements.toml`.

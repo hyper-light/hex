@@ -28,9 +28,9 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
     let ns = ns.try_clone().unwrap();
     std::thread::spawn(move || {
         move_into_link_name_space(ns.as_fd(), Some(LinkNameSpaceType::Network)).unwrap();
+        // The listener lives until the connect is answered.
         std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .and_then(std::net::TcpStream::connect)
+            .and_then(|listener| std::net::TcpStream::connect(listener.local_addr()?))
             .is_ok()
     })
     .join()

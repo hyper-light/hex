@@ -79,6 +79,29 @@ The cgroup's share is steady to the 0.1 KiB across rounds; the host's Slab and P
 host as well, and MemAvailable most of all (fedora is shared), so they bound what a namespace costs the kernel
 system-wide from above rather than measure it.
 
+### A create from the pool (goal 4 plan step 4: docker_pass.sh, the step-2 phases)
+
+With the pool in the node (5257407), the step-2 phases through `docker_pass.sh`: seam_oci's lifecycle (a bundle with
+a network namespace of its own, which a root node's create takes from the pool) and lifecycle_nonet (the same bundle
+without one), each driver, beside libcrun's lifecycle and lifecycle_nonet, 2 rounds of 1,000 after 100 to warm up,
+in a shuffled order. adas-mac-studio-3 (Apple M4 Max, Docker Desktop's LinuxKit VM, Linux 6.12.65-linuxkit aarch64,
+14 CPUs, pinned to 2-13), 2026-10-29T04:09Z, VM load 3.51 at the start and 5.88 at the end; hex 192629d1 and
+seam_oci 81e396ed, built at 5257407; libcrun 1.30.1, driver f9929078 (`~/.cache/hexpass/step4-5257407-20261029T040905Z`
+there). Create in ms, each round's p50 and p99:
+
+```
+hex-seam lifecycle: round 1 p50 1.843 p99 4.103; round 2 p50 1.723 p99 6.253
+hex-seam lifecycle_nonet: round 1 p50 1.779 p99 6.989; round 2 p50 1.714 p99 3.560
+hex-seam-socket lifecycle: round 1 p50 1.735 p99 6.184; round 2 p50 1.809 p99 4.810
+hex-seam-socket lifecycle_nonet: round 1 p50 1.790 p99 3.334; round 2 p50 1.868 p99 3.947
+libcrun lifecycle: round 1 p50 2.003 p99 3.388; round 2 p50 1.983 p99 3.326
+libcrun lifecycle_nonet: round 1 p50 1.663 p99 2.816; round 2 p50 1.644 p99 2.514
+```
+
+The node's counts, alike in each round and driver: lifecycle's 1,100 creates (the warm-up's with them) took 1,100
+namespaces from the pool and made none on the path, the pool made 1,132 ahead and no make failed; lifecycle_nonet's
+1,100 counted none.
+
 ## What follows from them
 
 Each figure decision 4 draws from the records above, with its arithmetic (to two decimals, or one for KiB):
@@ -91,4 +114,7 @@ Each figure decision 4 draws from the records above, with its arithmetic (to two
   349.5 KiB and 236.3 + 98.6 = 334.9 KiB (0.34 MiB at most); the Mac Studio 622.0 + 140.0 = 762.0 KiB and 616.0 +
   139.0 = 755.0 KiB (0.74 MiB at most).
 - A pool of 32 at the Mac Studio's 762.0 KiB: 32 x 762.0 = 24384.0 KiB, 23.8 MiB.
+- With the pool (5257407), Hex's create with the namespace over its create without, best of 2 each, on the Mac
+  Studio: in process 1.723 / 1.714 = 1.01 (+0.5%); over the socket 1.735 / 1.790 = 0.97. libcrun's in the same run,
+  each namespace made on its create's path: 1.983 / 1.644 = 1.21. Before the pool (3db2173) Hex's was 1.23.
 
