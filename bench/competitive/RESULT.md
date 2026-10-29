@@ -366,6 +366,14 @@ same build against libcrun, a minute apart, measured (ms, p50, best of 2; not of
 So whether this bar is met on fedora depends on how the pass holds the host, which is the bench method's to state
 (CLAUDE.md §7 asks for load under 2, the state in which fedora's clock is down).
 
+**A second fedora pass, the package awake but the host contended** (`~/.cache/hex-bench/out/20261029T022447Z`,
+2026-10-29T02:24Z, the same binaries byte for byte, rebuilt from e67e9ac, whose crates and harness are main's ed81e3b;
+load 18.84 at its start and 20.68 at its end, from two CI jobs on fedora, 4 of 32 cores idle). libcrun's exec ran at its
+awake speed, 1.823 ms (1.915 and 1.823 by round); Hex's seam exec 0.548 ms (0.552 and 0.548), **0.301x**; start 0.093
+against 0.107 ms, 0.864x; over the socket exec 0.621 and start 0.166. With few cores idle, Hex's short exec waits for
+a CPU at each of its wakeups (the clone's child is pinned to the agent thread's CPU, which other work may hold), where
+libcrun's long one doesn't move: 0.548 ms here against 0.372 held awake on a quiet host.
+
 **The same pass on other machines** (Ada's call, 2026-10-29: "test on literally any of the other machines we have").
 `bench/competitive/docker_pass.sh` runs host.sh's OCI pass where the containers run in Docker Desktop's Linux VM:
 hex and `seam_oci` at 3db2173 (8224f97's code; static-glibc hex), and the libcrun driver from crun 1.30.1's tarball
