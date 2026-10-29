@@ -198,8 +198,9 @@ three different things (CLAUDE.md "Working here"):
     Open: how a fedora pass of record holds the host (at rest, as CLAUDE.md §7's load under 2 asks, where a short
     call's ratio to a long one grows; or with the package held awake). Create is 3.3x libcrun's on fedora (19.2 ms
     against 5.9), 2.8x on jupiter and 1.0x on the Mac Studio, outside goal 3's bars; open.
-  - **goal 4, network namespaces off the path** (kiln plan `01a185679f8a7616ab21db7fb980ffce`, 5 steps; on
-    `cp/t7-netns`, not merged). **Plan step 1, decision 4 restated** (2026-10-29): probe run 1's 5.5 ms gap is gone;
+  - **goal 4, network namespaces off the path** (kiln plan `01a185679f8a7616ab21db7fb980ffce`, 5 steps; merged to
+    main 2026-10-29 at 6446160, on Ada's call from the passes of record below). **Plan step 1, decision 4 restated**
+    (2026-10-29): probe run 1's 5.5 ms gap is gone;
     through the seam a container's network namespace now costs Hex's create about 0.55 ms on fedora, jupiter and
     the Mac Studio and nothing on delete (the kernel defers its teardown), against libcrun's 0.55, 0.77 and 0.21 ms
     (`bench/competitive/probes/netns_pool.md`). On fedora and jupiter the 5% bar already holds only because Hex's
@@ -240,9 +241,11 @@ three different things (CLAUDE.md "Working here"):
     without a namespace costs (0.99x in process, 0.95x over the socket; libcrun 1.21x); fedora's figures, taken
     under CI's load, are 0.48x and 0.97x (in process each round's own 0.47x and 1.05x, Hex's create moving 11-25 ms
     between rounds). No sustained phase found the pool dry: 0 of 10,000 on each machine, by each driver, in each
-    round. The as-root lab passes on fedora (`seam_root.sh`, 5 of 5). Jupiter's pass of record waits for the
-    machine, held for another project's quiet-gated benchmarks; then the gates on the merged tree and the merge to
-    main.
+    round. The as-root lab passes on fedora (`seam_root.sh`, 5 of 5). Ada's call (2026-10-29): merged to main at
+    6446160 on fedora's and the Mac Studio's passes, all seven gates passing on fedora there; jupiter's pass of
+    record follows when the machine is free (held for another project's quiet-gated benchmarks). The gates found a
+    race older than goal 4, fixed at 6446160: a box's delete reaped an exec'd program before recording its exit, so
+    a caller over the socket could read it ended `Exit::Unknown` (HEX-RT-7, under load).
   - goals 5 (a seed per node), 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi

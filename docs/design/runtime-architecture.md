@@ -612,7 +612,7 @@ where the namespace was 23% of Hex's create, it now costs what a create without 
 pairs a quiet round with a busy one (each round's own was 0.47 and 1.05, Hex's create moving between 11 and 25 ms as
 CI came and went), and over the socket its rounds held at 0.97 and 0.98. And no sustained phase found the pool dry: 0
 of 10,000 on each machine, by each driver, in each round, so one refill thread keeps up with 553 lifecycles a second.
-Jupiter's pass of record waits for the machine.
+Ada's call (2026-10-29): merged to main at 6446160 on these two passes; jupiter's pass of record follows.
 
 **The bound and the refill.** Measured by `probes/netns_pool.c` (one thread making namespaces as the pool would and
 holding them in a cgroup of its own), two rounds of 500 each: on fedora at 2026-10-29T03:00Z (load 5.14 to 4.14) and
