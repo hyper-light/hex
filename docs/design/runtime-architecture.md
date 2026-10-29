@@ -433,14 +433,23 @@ exec_ab.md`), the host in a slower state (below). The pin: the child first runs 
 cgroup with the watched init took 29 µs off the agent's work before the clone (104 µs to 75), inside the rounds'
 spread end to end.
 
-**The host's state.** fedora runs a short burst of work at two speeds. `exec_floor`'s `spin` gauge, a 0.1 ms chain of
-multiply-adds with no system call, took 0.085-0.097 ms in `…T224731Z` and 0.224 ms in `exec-breakdown-20261028T231639Z`
-(load 2-3), the cores the bench ran on (mostly E-cores, CPUs 16-31) clocked down. In the slow state the floor took
-2.4 times as long (0.785-0.815 ms) and libcrun's exec 1.9 times (3.817), so a short call's ratio to a long one grows:
-the floor is 0.165 of libcrun's exec in the fast state and 0.21 in the slow one, and the seam's exec, 0.245 in the
-fast state, was 0.28-0.31 in the slow one in every run since. There the kernel's part and the program's (the clone,
-the `execve`, `true` itself and its exit) are about 1.0 ms of a traced exec's 1.19, and Hex's own about 170 µs: a
-quarter of libcrun's exec in that state would take four fifths of Hex's own time away.
+**The host's state.** fedora runs a short burst of work at two speeds, and which depends on whether anything else
+keeps its package awake. `exec_floor`'s `spin` gauge, a 0.1 ms chain of multiply-adds with no system call, took
+0.085-0.097 ms in `…T224731Z` (load 3-5) and 0.224 ms in `exec-breakdown-20261028T231639Z` (load 2-3). With fedora at
+rest, a burst ran at about a third of the speed it ran with one busy loop on a CPU outside the bench's (0.336 ms
+against 0.104 on a P-core, 0.500 against 0.161 on an E-core; `probes/host_clock.sh`). At rest the floor took 2.4
+times as long (0.785-0.815 ms) and libcrun's exec 1.9 times (3.817), since a long call ramps the clock itself: the
+floor is 0.165 of libcrun's exec held awake and 0.21 at rest. The same build of the seam, against libcrun a minute
+apart, was **0.203** of libcrun's exec held awake (0.372 ms against 1.834) and 0.260 at rest (0.996 against 3.831;
+`probes/exec_ab.md`). At rest the kernel's part and the program's (the clone, the `execve`, `true` itself and its
+exit) are about 1.0 ms of a traced exec's 1.19, and Hex's own about 170 µs: a quarter of libcrun's exec in that state
+would take four fifths of Hex's own time away.
+
+**Of record** (plan step 6; `bench/competitive/RESULT.md`, "Goal 3: the oci class through the seam"): host.sh's OCI
+pass `~/.cache/hex-bench/out/20261029T001409Z` on fedora, 8224f97 (hex sha256 749fd88368188ade…, seam_oci
+f4b4c60b87b6cabf…), load 0.86 to 3.58, best of 2, fedora at rest. Start p50 0.197 ms against libcrun's 0.196,
+**1.005x** (bar 1.1, met). Exec p50 1.086 ms against libcrun's 3.756, **0.289x** (bar 0.25, not met at rest; 0.203
+held awake in `exec-ab-20261029T002311Z`, not of record).
 
 **What would falsify it.** A seam exec p50 above a quarter of libcrun's in one run on fedora. The floor (`exec_floor`,
 step 1) measured beside libcrun in the same runs sits at 0.66-0.94 of that quarter (0.66 in the fast state, 0.82-0.85

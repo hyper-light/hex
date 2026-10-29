@@ -183,6 +183,15 @@ three different things (CLAUDE.md "Working here"):
     `stopped` are derived as crun derives them (the FIFO there or not, the init live by pid and start time), an
     oracle table of every combination tested. Start through the seam took 0.084 ms against libcrun's 0.083 in the
     same run, about 1.0x.
+    **Plan step 6, goal 3 of record** (measured on fedora 2026-10-29, `bench/competitive/RESULT.md`, "Goal 3: the oci
+    class through the seam"; not merged): host.sh's OCI pass from 8224f97, libcrun beside the seam in process and
+    over the socket, best of 2, load 0.86 to 3.58. Start through the seam is **1.005x** libcrun's (bar 1.1, met).
+    Exec is **0.289x** (bar 0.25, not met). The run met fedora at rest, where a short burst of work runs at about a
+    third of its clock and a short call's ratio to a long one grows; with one busy loop outside the bench's CPUs
+    holding the package awake, the same build's exec is 0.203x libcrun's (`bench/competitive/probes/exec_ab.md`,
+    not of record). **Open for Ada:** how a pass of record holds fedora — at rest, as CLAUDE.md §7's load under 2
+    asks and where the exec bar fails, or with the package held awake, where it is met. Create is 3.3x libcrun's
+    (19.2 ms against 5.9), outside goal 3's bars; open.
   - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
     copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over

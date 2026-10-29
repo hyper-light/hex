@@ -35,6 +35,23 @@ exec-breakdown-20261028T231639Z (load 2-3), and every exec with it:
 The slow state stretches the floor 2.4x and libcrun's exec 1.9x, so the ratio of the shorter call to the longer one
 grows with it: the floor itself is 0.165 of libcrun's exec in the fast state and 0.21 in the slow one.
 
+**The slow state is fedora at rest.** `host_clock.sh` times a 100,000-step multiply-add chain, 200 times 2 ms apart,
+on the P-cores and on the E-cores, with the host as it is and then with one busy loop on CPU 0 (outside the bench's
+CPUs) holding the package awake. With nothing else running (2026-10-29T00:22Z, load 0.41, the same program by hand):
+0.336 ms on a P-core and 0.500 on an E-core at rest, 0.104 and 0.161 held. With someone else's work on the host
+(00:28Z, load 2.49): 0.101 and 0.173 at rest, 0.095 and 0.163 held. A burst that finds an idle package runs at about a
+third of its clock; one busy core anywhere keeps it up. A call that runs long ramps the clock itself, a short one
+doesn't, so at rest a short call's ratio to a long one grows. The same build against libcrun, a minute apart
+(`exec_ab.sh`, `N` 600, best of 2):
+
+| run | fedora | libcrun exec p50 | seam exec p50 | seam over libcrun | libcrun start p50 | seam start p50 |
+|---|---|---|---|---|---|---|
+| exec-ab-20261029T002311Z | held awake | 1.834 ms | 0.372 ms | 0.203 | 0.079 ms | 0.078 ms |
+| exec-ab-20261029T002359Z | at rest | 3.831 ms | 0.996 ms | 0.260 | 0.198 ms | 0.174 ms |
+
+The build is 8224f97's (hex sha256 749fd88368188ade, seam_oci f4b4c60b87b6cabf); load 0.45 to 2.53 across the
+first, 2.53 to 2.80 across the second (the busy loop's own share in the first).
+
 ## Records
 
 Each run is on fedora (kernel 6.19.10-300.fc44.x86_64), in its directory under `~/.cache/hex-bench/out/`, with every

@@ -276,8 +276,8 @@ throughput carry that noise, as on the run above.
 ### In-process (the `Runtime` seam's layer): libcrun, against Hex's seam
 
 libcrun's calls run in the driver's own process; the one difference from crun's command line is the process
-crun spawns per call. Hex's `oci`-class seam column is **waiting for goal 3** (the oci class behind the seam,
-`seam_oci`), whose of-record numbers come with that goal.
+crun spawns per call. Hex's `oci`-class seam column came with goal 3 (the oci class behind the seam, `seam_oci`),
+from a run of its own beside libcrun: **"Goal 3: the oci class through the seam"** below.
 
 | Axis | libcrun | Hex seam (`oci`) |
 |---|---|---|
@@ -318,6 +318,53 @@ state fsync) removes the seven fsyncs that made it 37 ms when the seam was first
 with no command-line spawn and no wrapper process it is below both `hex box run` (2.73 ms) and a systemd
 scope (7.13 ms). It holds 0.27 MiB per idle box, below a scope's 0.28. Goal 7 judges these against the scope;
 its own ratio column comes then.
+
+## Goal 3: the oci class through the seam (2026-10-29, fedora)
+
+host.sh's OCI pass, `PHASES=oci RUNTIMES=libcrun HEXBENCH_PHASES=lifecycle`, with `SEAM_OCI_BIN`: libcrun in
+process beside Hex's `oci` class through the `Runtime` seam, in process and over the node agent's socket, each round
+in turn, 2 rounds of 1,000 lifecycles after 100 untimed, best of 2. Run `~/.cache/hex-bench/out/20261029T001409Z`:
+fedora (`kiln-a094a12d`, Intel Core i9-14900HX, Linux 6.19.10-300.fc44, pinned to CPUs 4-31), load 0.86 at its start
+and 3.58 at its end, no load gate (`LOAD_GATE=0`). `hex` is 8224f97 on `cp/t7-runtime`, a static-glibc release
+build (sha256 749fd88368188ade…); `seam_oci` the same commit's (sha256 f4b4c60b87b6cabf…); libcrun 1.30.1 as above.
+
+| Axis | libcrun | Hex seam (`oci`) | Hex seam over the socket | seam over libcrun |
+|---|---|---|---|---|
+| create p50 (ms) | 5.89 | 19.19 | 19.54 | 3.26x |
+| create p99 (ms) | 7.76 | 23.71 | 25.08 | 3.06x |
+| create p99.9 (ms) | 14.67 | 34.32 | 49.88 | 2.34x |
+| create max (ms) | 17.25 | 43.54 | 55.45 | 2.52x |
+| start p50 (ms) | 0.196 | 0.197 | 0.488 | **1.005x** |
+| start p99 (ms) | 0.27 | 0.38 | 0.81 | 1.39x |
+| start p99.9 (ms) | 0.36 | 0.51 | 0.87 | 1.42x |
+| start max (ms) | 0.41 | 0.68 | 1.39 | 1.66x |
+| exec p50 (ms) | 3.756 | 1.086 | 1.372 | **0.289x** |
+| exec p99 (ms) | 4.99 | 2.34 | 2.97 | 0.47x |
+| exec p99.9 (ms) | 23.81 | 16.02 | 18.60 | 0.67x |
+| exec max (ms) | 31.16 | 26.73 | 22.25 | 0.86x |
+| delete p50 (ms) | 10.68 | 7.80 | 8.09 | 0.73x |
+| delete p99 (ms) | 11.84 | 10.96 | 11.93 | 0.93x |
+| delete p99.9 (ms) | 22.64 | 22.44 | 24.84 | 0.99x |
+| delete max (ms) | 33.44 | 29.36 | 41.03 | 0.88x |
+
+Goal 3's bars (plan step 6): start p50 through the seam at most 1.1 of libcrun's, **met** (1.005); exec p50 at most
+0.25 of libcrun's, **not met** in this run (0.289). The socket costs 0.29-0.35 ms a call at p50 (create 0.350, start
+0.291, exec 0.286, delete 0.297). Create is 3.3x libcrun's: goal 3's bars don't cover it; it is open in `STATUS.md`.
+
+**What the exec bar met here: fedora at rest.** The run met fedora with nothing else running, and fedora at rest
+runs a short burst of work slowly. A 100,000-step multiply-add chain with no system call, timed every 2 ms, took 0.336
+ms at p50 on a P-core and 0.500 on an E-core with fedora idle, and 0.104 and 0.161 with one busy loop on CPU 0
+(outside the bench's CPUs) holding the package awake (`bench/competitive/probes/exec_ab.md`, "The host's state"). A
+short call slows more than a long one there, since a long one ramps the clock itself: two `exec_ab.sh` runs of the
+same build against libcrun, a minute apart, measured (ms, p50, best of 2; not of record, `N` 600):
+
+| fedora | libcrun exec | Hex seam exec | over libcrun | libcrun start | Hex seam start |
+|---|---|---|---|---|---|
+| held awake, `exec-ab-20261029T002311Z` | 1.834 | 0.372 | 0.203 | 0.079 | 0.078 |
+| at rest, `exec-ab-20261029T002359Z` | 3.831 | 0.996 | 0.260 | 0.198 | 0.174 |
+
+So whether this bar is met on fedora depends on how the pass holds the host, which is the bench method's to state
+(CLAUDE.md §7 asks for load under 2, the state in which fedora's clock is down).
 
 ## What the run shows
 
