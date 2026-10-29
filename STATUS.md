@@ -213,10 +213,11 @@ three different things (CLAUDE.md "Working here"):
     reads the node's network namespace counts around each phase, in process (`Node::netns`) and over the socket (the
     wire's version 2: a client says hello in version 1 and writes in the highest version both speak); summarize.py
     tables create and delete p50 with the namespace over without, and the sustained phase's count of namespaces made
-    on the path, beside libcrun's. A small-N pass on adas-mac-studio-3 (docker_pass.sh, 2 rounds of 200, sustained
-    2,000; RESULT.md) ran every phase by both drivers with no error, and with no pool yet counted every namespace as
-    made on the path: 2,000 of the sustained phase's 2,000 creates. Fedora's pass waits for its kiln runner, offline
-    at each check from about 2026-10-29T03:30Z to 04:07Z. **Plan step 3, the pool's core** (built, gate-clean,
+    on the path, beside libcrun's. Small-N passes on fedora and adas-mac-studio-3 (docker_pass.sh, 2 rounds of 200,
+    sustained 2,000; RESULT.md) ran every phase by both drivers with no error, and with no pool yet counted every
+    namespace as made on the path: 2,000 of the sustained phase's 2,000 creates. Hex's seam sustains about one
+    create's time per lifecycle at concurrency 32 (53/s on fedora against libcrun's 1,644, 530 against 1,439 on the
+    Mac Studio), as if its creates ran one at a time: open. **Plan step 3, the pool's core** (built, gate-clean,
     2026-10-29): `hex_core::netns`, the pool's policy as a pure core. It holds at most its bound and refuses a
     namespace made past it, hands each out once and the oldest first, answers a dry take with "make one on the
     path" and counts it, as it counts one made on the path for a create it can't serve (a container with a user

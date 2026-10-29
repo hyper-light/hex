@@ -398,30 +398,40 @@ load 20.
 
 ## Goal 4, plan step 2: the seam with and without a network namespace, and sustained churn (2026-10-29, small N)
 
-seam_oci's lifecycle_nonet and sustained phases (2404ec7) by both drivers, beside libcrun's, through `docker_pass.sh`:
-`RUNTIMES=libcrun`, `HEXBENCH_PHASES="lifecycle lifecycle_nonet sustained"`, 2 rounds of 200 lifecycles after 20, the
-sustained phase 2,000 lifecycles at concurrency 32, no load gate, the VM's load recorded. It checks that the phases
-and the node's counts work end to end; the measurement of record is step 5's, with the pool. Best of 2, p50 (ms):
+seam_oci's lifecycle_nonet and sustained phases (2404ec7) by both drivers, beside libcrun's, through `docker_pass.sh`
+on fedora and adas-mac-studio-3: `RUNTIMES=libcrun`, `HEXBENCH_PHASES="lifecycle lifecycle_nonet sustained"`, 2 rounds
+of 200 lifecycles after 20, the sustained phase 2,000 lifecycles at concurrency 32, no load gate, the load recorded. It
+checks that the phases and the node's counts work end to end; the measurement of record is step 5's, with the pool.
+Best of 2, p50 (ms):
 
-| adas-mac-studio-3 (Apple M4 Max, LinuxKit 6.12.65, VM load 4.36-6.22) | create with / without | over | delete with / without | over | sustained /s (last window over first) | made on the path, of creates |
-|---|---|---|---|---|---|---|
-| Hex's seam, in process | 1.897 / 1.794 | 1.06x | 1.923 / 2.042 | 0.94x | 530 (0.99) | 2,000 of 2,000 |
-| Hex's seam, over the socket | 1.954 / 1.713 | 1.14x | 1.822 / 1.983 | 0.92x | 524 (1.05) | 2,000 of 2,000 |
-| libcrun in process | 1.916 / 1.633 | 1.17x | 11.569 / 11.877 | 0.97x | 1,439 (0.98) | |
+| Machine | | create with / without | over | delete with / without | over | sustained /s (last window over first) | made on the path, of creates |
+|---|---|---|---|---|---|---|---|
+| fedora (Intel Core i9-14900HX, Linux 6.19.10, load 10.06-10.46) | Hex's seam, in process | 14.682 / 14.379 | 1.02x | 6.470 / 6.459 | 1.00x | 53 (1.05) | 2,000 of 2,000 |
+| | Hex's seam, over the socket | 14.233 / 14.389 | 0.99x | 6.286 / 6.351 | 0.99x | 53 (0.99) | 2,000 of 2,000 |
+| | libcrun in process | 2.945 / 2.413 | 1.22x | 10.394 / 10.381 | 1.00x | 1,644 (1.03) | |
+| adas-mac-studio-3 (Apple M4 Max, LinuxKit 6.12.65, VM load 4.36-6.22) | Hex's seam, in process | 1.897 / 1.794 | 1.06x | 1.923 / 2.042 | 0.94x | 530 (0.99) | 2,000 of 2,000 |
+| | Hex's seam, over the socket | 1.954 / 1.713 | 1.14x | 1.822 / 1.983 | 0.92x | 524 (1.05) | 2,000 of 2,000 |
+| | libcrun in process | 1.916 / 1.633 | 1.17x | 11.569 / 11.877 | 0.97x | 1,439 (0.98) | |
 
-Run: `~/.cache/hexpass/netns-step2-20261029T040340Z` on adas-mac-studio-3 (hex sha256 3a5f6482f8ff12d8…, aarch64,
-static-glibc; seam_oci 7c6c9c7997298b0a…; libcrun driver 09d07ec1da05f497…, from crun-1.30.1.tar.gz
-99d036d95113552b…). No phase recorded an error. The node keeps no pool yet, so each namespace a create made was made
-on its path, in every round and by both drivers: 220 of 220 creates in the lifecycle phase, none in lifecycle_nonet,
-2,000 of 2,000 in the sustained phase, none taken from a pool or made ahead (the plan's test for a node with no
-pool). At this N the namespace's cost on create moves between rounds (0.34 and 0.10 ms in process); the probe's 2
-rounds of 500 put it at 0.544 ms (decision 4). Each driver's best sustained round held level over its two windows;
-the other rounds moved 0.80-1.27, two windows being too few to read decay from. Hex's seam sustains 530 lifecycles/s
-at concurrency 32 against libcrun's 1,439 (0.37x), though its create alone is level with libcrun's (1.897 against
-1.916 ms): what holds its churn back at concurrency 32 isn't measured here, and is open. The pass image's base pull
-hung in Docker Desktop's credential helper (`docker-credential-desktop get`, 16 minutes), so the pass ran with an
-empty Docker config: the image is public and needs no credentials. Fedora's pass waits for its kiln runner, offline
-at each check from about 2026-10-29T03:30Z to 04:07Z.
+Runs: fedora `~/.cache/hexpass/netns-step2-fedora-20261029T061904Z` (hex sha256 42dd7c68cb4ae797…, x86_64,
+static-glibc; seam_oci cad5a780db23cf93…; libcrun driver 10ac19ada6d8035a…; one CI job beside it, CPUs 4-31);
+adas-mac-studio-3 `~/.cache/hexpass/netns-step2-20261029T040340Z` (hex 3a5f6482f8ff12d8…, aarch64; seam_oci
+7c6c9c7997298b0a…; driver 09d07ec1da05f497…); each driver from crun-1.30.1.tar.gz (99d036d95113552b…). No phase
+recorded an error. The node keeps no pool yet, so each namespace a create made was made on its path, in every round,
+by both drivers, on both machines: 220 of 220 creates in the lifecycle phase, none in lifecycle_nonet, 2,000 of 2,000
+in the sustained phase, none taken from a pool or made ahead (the plan's test for a node with no pool). At this N the
+namespace's cost on create moves between rounds (in process on fedora 0.30 and 0.63 ms, on the Mac Studio 0.34 and
+0.10); the probe's 2 rounds of 500 put it at 0.571 and 0.544 ms (decision 4). Hex's seam sustains 53 lifecycles/s at
+concurrency 32 on fedora against libcrun's 1,644, and 530 against 1,439 on the Mac Studio: on each machine about one
+create's time per lifecycle (fedora's 14.7 ms, about 68 a second; the Mac Studio's 1.9 ms, about 526), as if its
+creates ran one at a time, which its throughput at concurrency 1, 8 and 32 also showed (`probes/socket_cost.md`: 43,
+55 and 52 a second in process, where libcrun's grew 63, 308 and 359). What holds them to that isn't measured here, and
+is open. Each driver's best sustained round held level over its two windows (0.99-1.05); the Mac Studio's others moved
+0.80-1.27, two windows being too few to read decay from. Fedora's kiln runner was offline from about 03:30Z to 05:50Z,
+and the box rebooted at about 06:13Z, ending a first fedora attempt (05:51Z) after its phases had run but before its
+summary, so the pass was run again. On the Mac Studio the pass image's base pull hung in Docker Desktop's credential
+helper (`docker-credential-desktop get`, 16 minutes), so the pass ran with an empty Docker config: the image is public
+and needs no credentials.
 
 ## What the run shows
 
