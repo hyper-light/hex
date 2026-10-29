@@ -3,7 +3,9 @@
 //! socket, with `hex-client`'s `Runtime`. "do X, expect Y" (§6):
 //! - HEX-SOCK-9: connect, create a `Bundle` box, start it, exec `/usr/bin/true` with its stdout a pipe
 //!   this test holds, read the output, and wait on the `Proc` for `Code(0)`, all over one socket;
-//! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes;
+//! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes, and on
+//!   `oci` boxes each with a network namespace of its own: as root they take the agent's pooled ones,
+//!   rootless they make theirs on the create's path (decision 4; goal 4 plan step 4);
 //! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted, as root as one
 //!   taken from the agent's pool, rootless as one made on its create's path, and the counts cross the
 //!   socket (decision 4; goal 4 plan steps 2 and 4);
@@ -237,15 +239,17 @@ fn program(args: &[String]) -> Program {
     Program::of(&args.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-/// `oci` boxes from bundles whose init and programs are `hex selftest-box` acts.
-struct OciBoxes<'a>(&'a Lab);
+/// `oci` boxes from bundles whose init and programs are `hex selftest-box` acts, each with a network
+/// namespace of its own when the second field is set: one taken from the agent's pool as root, made on
+/// the create's path rootless (decision 4).
+struct OciBoxes<'a>(&'a Lab, bool);
 
 impl Fixture for OciBoxes<'_> {
     fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
         BoxSpec {
             id,
             bounds,
-            class: ClassSpec::Bundle(self.0.bundle(&Lab::act(&Act::Wait))),
+            class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(&Act::Wait), self.1)),
         }
     }
 
@@ -253,7 +257,7 @@ impl Fixture for OciBoxes<'_> {
         BoxSpec {
             id,
             bounds: Bounds::default(),
-            class: ClassSpec::Bundle(self.0.bundle(&Lab::act(act))),
+            class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(act), self.1)),
         }
     }
 
@@ -295,11 +299,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         return;
     }
     namespaces_counted(&lab, &client);
-    let failures = conformance::run(&client, &OciBoxes(&lab));
+    let failures = conformance::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
         "oci boxes over the socket: {failures:#?}"
     );
+    conformance_with_namespaces(&lab, &client);
     let failures = conformance::run(&client, &ProcessBoxes(exe));
     assert!(
         failures.is_empty(),
@@ -395,6 +400,34 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
         if lab.rootless { (0, 1) } else { (1, 0) },
         "(taken, made on the path)"
     );
+}
+
+/// The conformance suite again over the socket, every `oci` box with a network namespace of its own
+/// (decision 4): as root, once the agent's pool holds one, the boxes take theirs from it; rootless, each
+/// is made on its create's path and none is taken.
+fn conformance_with_namespaces(lab: &Lab, client: &Client) {
+    if !lab.rootless {
+        wait_for("the agent's pool to hold a namespace", || {
+            let c = client.netns().unwrap();
+            c.made_ahead > c.taken + c.discarded
+        });
+    }
+    let before = client.netns().unwrap();
+    let failures = conformance::run(client, &OciBoxes(lab, true));
+    assert!(
+        failures.is_empty(),
+        "oci boxes with network namespaces of their own over the socket: {failures:#?}"
+    );
+    let after = client.netns().unwrap();
+    if lab.rootless {
+        assert_eq!(after.taken, before.taken, "a rootless agent takes none");
+        assert!(after.made_on_path > before.made_on_path, "{after:?}");
+    } else {
+        assert!(
+            after.taken > before.taken,
+            "the pool served them: {after:?}"
+        );
+    }
 }
 
 /// HEX-SOCK-6 over the live agent: a caller execs a waiting program in an `oci` box and in a `process`
