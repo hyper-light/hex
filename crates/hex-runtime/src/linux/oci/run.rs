@@ -436,12 +436,6 @@ impl Runtime {
         Ok(cmd)
     }
 
-    /// The container's state as create recorded it, its status not derived: for a caller that judges the
-    /// init's liveness itself, as the node agent does by the init's pidfd.
-    pub fn recorded(&self, id: &str) -> Result<State, OciError> {
-        self.dir(id)?.get(id)
-    }
-
     /// The container's state (OCI `state`), its status derived as crun derives it ([`state::derive`]): `created`
     /// until start takes the exec FIFO, `running` after while the init lives, `stopped` once it doesn't.
     pub fn state(&self, id: &str) -> Result<State, OciError> {

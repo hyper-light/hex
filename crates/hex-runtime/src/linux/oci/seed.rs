@@ -203,8 +203,8 @@ struct Prepared {
 }
 
 /// Applies the exec's overrides to the container's process with `hex __oci-exec`'s own logic (one code
-/// path, CLAUDE.md §8), and opens the container's cgroup while the seed is still in its own mount
-/// namespace.
+/// path, CLAUDE.md §8). The cgroup is the caller's to give: a seed opens it ([`open_cgroup`]), and the
+/// node agent holds it open for an exec straight from its threads.
 fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, OciError> {
     let spec = specs.get(&req.bundle)?;
     let request = exec::Request {
@@ -222,22 +222,25 @@ fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, 
         becoming: init::Becoming::of(&process, spec.linux.seccomp.as_ref())?,
         launch: Launch::of(&process)?,
         joins: joins(&spec.linux.namespaces)?,
-        cgroup: req
-            .cgroup
-            .as_deref()
-            .map(|dir| {
-                rustix::fs::open(
-                    dir,
-                    rustix::fs::OFlags::RDONLY
-                        | rustix::fs::OFlags::DIRECTORY
-                        | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::empty(),
-                )
-                .map_err(|e| OciError::os("opening the container's cgroup", e))
-            })
-            .transpose()?,
+        cgroup: None,
         init,
     })
+}
+
+/// The container's cgroup directory, `dir`, opened (while the opener is still in its own mount
+/// namespace) for a clone into it, or for its `cgroup.procs`.
+pub fn open_cgroup(dir: Option<&str>) -> Result<Option<OwnedFd>, OciError> {
+    dir.map(|dir| {
+        rustix::fs::open(
+            dir,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening the container's cgroup", e))
+    })
+    .transpose()
 }
 
 /// The program's `execve`, made before the clone: its arguments and environment as the null-terminated
@@ -371,9 +374,9 @@ pub enum Direct {
     Started(u32, OwnedFd),
     /// Nothing was started: this thread may not choose the container's pid namespace (a rootless node),
     /// or there is no vfork-style clone here (an architecture without the trampoline, a kernel or sandbox
-    /// without clone3 into a cgroup), or the container has no cgroup to be born in. Its descriptors come
-    /// back, for the caller to hand the exec to a seed instead.
-    Unable([OwnedFd; 3], OwnedFd),
+    /// without clone3 into a cgroup), or the container has no cgroup to be born in. The init's pidfd
+    /// comes back, for the caller to hand the exec to a seed instead.
+    Unable(OwnedFd),
 }
 
 /// The pid namespace the calling thread's children are born in is the container's for one clone, then the
@@ -402,27 +405,59 @@ std::thread_local! {
     static UNSURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The calling thread pinned to the CPU it runs on, with the CPUs it may run on kept to give back.
+struct Pin {
+    mask: rustix::thread::CpuSet,
+}
+
+impl Pin {
+    /// Pins the calling thread to its CPU; `None` (and nothing changed) where its mask can't be read or
+    /// set, as on a CPU a cpuset no longer allows.
+    fn here() -> Option<Self> {
+        let mask = rustix::thread::sched_getaffinity(None).ok()?;
+        let mut here = rustix::thread::CpuSet::new();
+        here.set(rustix::thread::sched_getcpu());
+        rustix::thread::sched_setaffinity(None, &here).ok()?;
+        Some(Self { mask })
+    }
+
+    /// Gives the calling thread back the CPUs it had; where the kernel refuses them (a cpuset changed
+    /// since), every CPU, which its cpuset then narrows, so no thread or program stays held to one CPU.
+    /// A system call alone on memory made before, so a vfork-style clone's child may make it.
+    fn release(&self) {
+        if rustix::thread::sched_setaffinity(None, &self.mask).is_err() {
+            let mut all = rustix::thread::CpuSet::new();
+            for cpu in 0..rustix::thread::CpuSet::MAX_CPU {
+                all.set(cpu);
+            }
+            let _ = rustix::thread::sched_setaffinity(None, &all);
+        }
+    }
+}
+
 /// Exec in a container straight from the calling thread (a thread of the node agent), as posix_spawn
 /// starts a program: the thread's children's pid namespace set to the container init `init`'s, then one
 /// `clone3(CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD)` ([`sys::clone_vfork`]). The program
 /// is born in the container's cgroup and pid namespace as the caller's own child, shares the caller's
 /// memory until its execve (so nothing of the caller is copied, and nothing torn down), joins the
 /// container's other namespaces, becomes its process and execs, making system calls alone on what
-/// [`prepare`] made. No process but the program, no seed, no `hex` exec. Where it can't, it says so
-/// ([`Direct::Unable`]) and starts nothing.
+/// [`prepare`] made. `stdio` become its standard streams and `cgroup` (the container's cgroup directory,
+/// which the caller holds open) is where it is born. No process but the program, no seed, no `hex`
+/// exec. Where it can't, it says so ([`Direct::Unable`]) and starts nothing.
 pub fn exec_direct(
     req: &Request,
-    stdio: [OwnedFd; 3],
+    stdio: [BorrowedFd<'_>; 3],
     init: OwnedFd,
+    cgroup: Option<BorrowedFd<'_>>,
     specs: &mut Specs,
 ) -> Result<Direct, OciError> {
     if UNSURE.with(std::cell::Cell::get) {
-        return Ok(Direct::Unable(stdio, init));
+        return Ok(Direct::Unable(init));
     }
-    let p = prepare(req, init, specs)?;
-    let Some(cgroup) = &p.cgroup else {
-        return Ok(Direct::Unable(stdio, p.init));
+    let Some(cgroup) = cgroup else {
+        return Ok(Direct::Unable(init));
     };
+    let p = prepare(req, init, specs)?;
     let blocked = sys::block_signals()?;
     let set = p.joins.contains(Ns::PROCESS_ID);
     if set {
@@ -430,7 +465,7 @@ pub fn exec_direct(
             Ok(()) => {}
             Err(rustix::io::Errno::PERM) => {
                 drop(blocked);
-                return Ok(Direct::Unable(stdio, p.init));
+                return Ok(Direct::Unable(p.init));
             }
             Err(e) => {
                 return Err(OciError::os("choosing the container's pid namespace", e));
@@ -438,12 +473,21 @@ pub fn exec_direct(
         }
     }
     let rest = p.joins.difference(Ns::PROCESS_ID);
-    let [i, o, e] = &stdio;
+    // The child starts on this thread's CPU: the thread is pinned to it for the clone, so the child
+    // inherits the pin and runs as soon as the thread blocks in the vfork, rather than wait for an idle
+    // CPU the kernel's fork balancing picks to wake. Measured on fedora (bench/competitive/probes/
+    // exec_pin.md): the child first runs 18 µs after its fork pinned and 86 µs unpinned (p50s), and
+    // exec's p50 falls from 1.186–1.227 ms to 1.123–1.141. The child gives the pin back before anything
+    // else, so the program never runs pinned, and the thread does after the clone.
+    let pin = Pin::here();
     let child = || {
+        if let Some(pin) = &pin {
+            pin.release();
+        }
         program(
             &p.becoming,
             &p.launch,
-            [i.as_fd(), o.as_fd(), e.as_fd()],
+            stdio,
             None,
             None,
             (p.init.as_fd(), rest),
@@ -457,10 +501,13 @@ pub fn exec_direct(
             *stack = Some(sys::ChildStack::map()?);
         }
         match stack.as_ref() {
-            Some(stack) => sys::clone_vfork(cgroup.as_fd(), stack, &child),
+            Some(stack) => sys::clone_vfork(cgroup, stack, &child),
             None => Ok(None),
         }
     });
+    if let Some(pin) = &pin {
+        pin.release();
+    }
     // Whatever the clone did, this thread's children are born in the node's own pid namespace again.
     let reset = if set {
         own_pid_namespace().and_then(|own| sys::setns(own.as_fd(), libc::CLONE_NEWPID))
@@ -482,7 +529,7 @@ pub fn exec_direct(
                 .map_err(|_| OciError::os("clone3 the program", "a pid out of range"))?;
             Ok(Direct::Started(pid, pidfd))
         }
-        None => Ok(Direct::Unable(stdio, p.init)),
+        None => Ok(Direct::Unable(p.init)),
     }
 }
 
@@ -515,7 +562,10 @@ fn serve_one(
         }
     };
     let stdio = [stdin, stdout, stderr];
-    let prepared = match prepare(&req, init, specs) {
+    let prepared = match prepare(&req, init, specs).and_then(|mut p| {
+        p.cgroup = open_cgroup(req.cgroup.as_deref())?;
+        Ok(p)
+    }) {
         Ok(prepared) => prepared,
         Err(e) => return refused(Failed::Start, e.to_string()),
     };

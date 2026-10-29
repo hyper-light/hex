@@ -222,6 +222,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     budget(&lab, own);
     conformance_on_oci(&lab, own);
     program_alone(&lab, own);
+    exec_reads_no_state(&lab, own);
     orphans_are_reaped(&lab, own);
 }
 
@@ -532,6 +533,35 @@ fn program_alone(lab: &Lab, own: &Path) {
             "delete ended the program by a signal: {exit:?}"
         );
     }
+}
+
+/// Goal 3 plan step 6: an exec into a running box reads nothing of the box's from disk; what it needs
+/// of the container is kept with the init the agent watches. Move the container's state file away, exec
+/// `true` into the box, and find it ran and exited 0; with the file back, the box deletes as usual.
+fn exec_reads_no_state(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-nostate"), state.path());
+    let id = BoxId::new("nostate").unwrap();
+    node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)))
+        .expect("create");
+    node.start(&id).expect("start");
+    let file = state.path().join("oci/nostate/state.json");
+    let aside = state.path().join("state.json.aside");
+    std::fs::rename(&file, &aside).expect("move the container's state away");
+    let ran = node
+        .exec(
+            &id,
+            hex_api::Program::of(&["/usr/bin/true"]),
+            hex_api::Stdio::null(),
+        )
+        .and_then(|mut p| p.wait_for(Duration::from_secs(5)));
+    std::fs::rename(&aside, &file).expect("put the container's state back");
+    assert_eq!(
+        ran,
+        Ok(Some(Exit::Code(0))),
+        "exec ran its program with the container's state file gone"
+    );
+    node.delete(&id).expect("delete");
 }
 
 /// `/proc/<pid>/stat` field 4, the parent pid, read past the parenthesized command name (which may

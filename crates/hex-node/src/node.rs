@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,15 +27,15 @@ use hex_core::recovery::{self, Decision, Seen, Why};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::run::Runtime as OciRuntime;
-use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct};
-use hex_runtime::linux::oci::state::{State, Status, start_time};
+use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
+use hex_runtime::linux::oci::state::{Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
-use crate::supervise::{self, Supervisor};
+use crate::supervise::{self, Live, Supervisor};
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -72,7 +73,7 @@ pub struct Node {
     owner: Owner,
     /// The host's paths every container has masked beyond Docker's list ([`Place::masked`]).
     masked: Vec<String>,
-    /// The null device, open for reading and writing: what an exec's unset stdio streams get, duplicated.
+    /// The null device, open for reading and writing: what an exec's unset stdio streams get.
     null: std::os::fd::OwnedFd,
     /// The bundles' parsed configs an exec straight from the node's threads reads ([`exec_direct`]).
     specs: Mutex<Specs>,
@@ -430,7 +431,12 @@ impl Node {
                 let start_ticks = state.start_time.ok_or_else(|| {
                     Refusal::Broken(format!("container {id}'s state has no start time"))
                 })?;
-                self.supervisor.watch(slot, &id, state.pid, start_ticks)
+                let container = supervise::Container {
+                    bundle: state.bundle,
+                    cgroup: state.cgroup,
+                };
+                self.supervisor
+                    .watch(slot, &id, state.pid, start_ticks, container)
             });
         if let Err(e) = watched {
             let _ = self.scrub(&id);
@@ -485,32 +491,20 @@ impl Node {
         Ok(Source::Rendered(dir, rendered))
     }
 
-    /// `exec` in an `oci` box through a seed (decision 3, goal 3 plan step 2): the node hands the
-    /// program to a reusable `hex __oci-seed` process ([`Node::seed_pool`]), which clones it into the
-    /// container's cgroup and namespaces and returns its pidfd; no process of the agent's is spawned
-    /// and no `hex` binary is re-exec'd per call. The program, the agent's child once the seed's
-    /// intermediate exits, is owned by the supervisor. The spawning lock is held across the round trip
-    /// and the own, so a sweep doesn't reap the program (which may exit at once, as `true` does) before
-    /// it is owned.
+    /// `exec` in an `oci` box whose init runs (`live`, from the supervisor that watches it), straight
+    /// from this thread or through a seed (decision 3, goal 3 plan step 2): the program is cloned into
+    /// the container's cgroup and namespaces as the agent's own child and returned with its pidfd; no
+    /// other process is spawned and no `hex` binary is re-exec'd per call. The supervisor owns the
+    /// program. The spawning lock is held across the start and the own, so a sweep doesn't reap the
+    /// program (which may exit at once, as `true` does) before it is owned.
     fn exec_oci(
         &self,
         id: &BoxId,
-        state: State,
+        live: Live,
         program: Program,
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         program.check()?;
-        // The init's own pidfd, from the supervisor that watches it: the program joins the container's
-        // namespaces by it, and its being readable says the init has ended (pidfd_open(2)). One read of
-        // the state and a poll, so an exec checks no more than it needs (goal 3 plan step 2).
-        let init = match self.supervisor.init_pidfd(id)? {
-            Some(init)
-                if matches!(state.status, Status::Created | Status::Running) && !ended(&init)? =>
-            {
-                init
-            }
-            _ => return Err(Refusal::NotRunning(id.clone(), "exec")),
-        };
         let env = program
             .env
             .iter()
@@ -518,15 +512,23 @@ impl Node {
             .collect();
         let user = program.user.as_ref().map(|u| (u.uid, Some(u.gid)));
         let request = hex_core::seed::Request {
-            init_pid: state.pid,
-            bundle: state.bundle,
-            cgroup: state.cgroup,
+            init_pid: live.pid,
+            bundle: live.container.bundle.clone(),
+            cgroup: live.container.cgroup.clone(),
             args: program.args,
             cwd: program.cwd,
             env,
             user,
         };
-        let stdio = stdio_fds(stdio, &self.null)?;
+        // Each stream the caller gave, else the null device the node holds open, so an exec opens and
+        // duplicates nothing for its stdio. The caller's pipes are closed here once the program has its
+        // own copies, so its streams end when it does.
+        let fds = [
+            stdio.stdin.as_ref().map_or(self.null.as_fd(), AsFd::as_fd),
+            stdio.stdout.as_ref().map_or(self.null.as_fd(), AsFd::as_fd),
+            stdio.stderr.as_ref().map_or(self.null.as_fd(), AsFd::as_fd),
+        ];
+        let cgroup = open_cgroup(live.container.cgroup.as_deref())?;
         let _spawning = self.supervisor.spawning()?;
         // Straight from this thread where it may choose the container's pid namespace (a node that runs
         // as root), as posix_spawn starts a program; through a seed otherwise (a rootless node), whose
@@ -535,12 +537,19 @@ impl Node {
             let mut specs = self.specs.lock().map_err(|_| {
                 Refusal::Broken("the node's parsed configs' lock was poisoned".to_owned())
             })?;
-            exec_direct(&request, stdio, init, &mut specs)?
+            exec_direct(
+                &request,
+                fds,
+                live.pidfd,
+                cgroup.as_ref().map(AsFd::as_fd),
+                &mut specs,
+            )?
         };
         let (pid, pidfd) = match direct {
             Direct::Started(pid, pidfd) => (pid, pidfd),
-            Direct::Unable(stdio, init) => self.seed_pool()?.exec(&request, stdio, init)?,
+            Direct::Unable(init) => self.seed_pool()?.exec(&request, fds, init)?,
         };
+        drop((stdio, cgroup));
         // The agent keeps a duplicate pidfd so it can reap the program on this box's delete: the
         // container's init blocks in the kernel until the programs in its pid namespace are reaped, so a
         // delete that didn't reap them would never empty the box. The caller's Proc keeps the other end
@@ -601,11 +610,7 @@ impl Runtime for Node {
         // plan step 3: start costs one FIFO operation and the state read beside it). The init's liveness is
         // judged by the pidfd the supervisor holds for it, a poll.
         let started = self.oci().start_with(id.as_str(), &|_| {
-            self.supervisor
-                .init_pidfd(id)
-                .ok()
-                .flatten()
-                .is_some_and(|init| matches!(ended(&init), Ok(false)))
+            matches!(self.supervisor.runs(id), Ok(true))
         });
         match started {
             Ok(()) => Ok(()),
@@ -635,11 +640,11 @@ impl Runtime for Node {
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
-        // An oci box's container state is read first, so its exec reads nothing else of the box's: a box
-        // with no container under the oci root is a process box or no box, which its record then says.
-        match self.oci().recorded(id.as_str()) {
-            Ok(state) => self.exec_oci(id, state, program, stdio),
-            Err(OciError::NoSuchContainer(_)) => match self.record(id)?.map(|r| r.spec.class) {
+        // An oci box whose init runs is known to the supervisor, with what its exec needs, so the hot
+        // path reads nothing from disk; any other box's record says what it is.
+        match self.supervisor.live(id)? {
+            Some(live) => self.exec_oci(id, live, program, stdio),
+            None => match self.record(id)?.map(|r| r.spec.class) {
                 None => Err(Refusal::NoSuchBox(id.clone())),
                 Some(ClassSpec::Process) => {
                     let cg = self
@@ -650,12 +655,11 @@ impl Runtime for Node {
                     self.supervisor
                         .own(Box::new(process::exec(&cg, &program, stdio)?))
                 }
-                // An oci box whose container isn't there: mid-create, or its create failed.
+                // An oci box with no running init: mid-create, stopped, or its create failed.
                 Some(ClassSpec::Oci(_) | ClassSpec::Bundle(_)) => {
                     Err(Refusal::NotRunning(id.clone(), "exec"))
                 }
             },
-            Err(e) => Err(e.into()),
         }
     }
 
@@ -891,41 +895,6 @@ fn init_alive(init: ProcId) -> bool {
         None => false,
         Some(now) => init.start_ticks == 0 || now == init.start_ticks,
     }
-}
-
-/// Sets a command's standard streams from a box's [`Stdio`]: each stream the caller gave, else the
-/// null device, as the `oci` exec helper runs on the fds it's handed.
-/// Whether the process a pidfd names has ended: its pidfd is readable then (pidfd_open(2)).
-fn ended(pidfd: &std::os::fd::OwnedFd) -> Result<bool, Refusal> {
-    use rustix::event::{PollFd, PollFlags, Timespec};
-    let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
-    let now = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    rustix::event::poll(&mut fds, Some(&now))
-        .map_err(|e| Refusal::os("looking at a container init's pidfd", e))?;
-    Ok(fds.iter().any(|f| f.revents().contains(PollFlags::IN)))
-}
-
-/// The three descriptors a seed's exec carries, from a [`Stdio`]: each stream's pipe, or for a stream the
-/// caller left unset (as a program the agent spawns gets `/dev/null`) a duplicate of the null device the
-/// node holds open, so an exec opens no file for it.
-fn stdio_fds(
-    stdio: Stdio,
-    null: &std::os::fd::OwnedFd,
-) -> Result<[std::os::fd::OwnedFd; 3], Refusal> {
-    use std::os::fd::OwnedFd;
-    let or_null = |given: Option<OwnedFd>| match given {
-        Some(fd) => Ok(fd),
-        None => rustix::io::fcntl_dupfd_cloexec(null, 0)
-            .map_err(|e| Refusal::os("duplicating /dev/null for a program's stdio", e)),
-    };
-    Ok([
-        or_null(stdio.stdin.map(OwnedFd::from))?,
-        or_null(stdio.stdout.map(OwnedFd::from))?,
-        or_null(stdio.stderr.map(OwnedFd::from))?,
-    ])
 }
 
 #[cfg(test)]

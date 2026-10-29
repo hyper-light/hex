@@ -171,7 +171,13 @@ three different things (CLAUDE.md "Working here"):
     the HEX-RT conformance over the node and the socket) passes rootless (the seed path) and as root
     (`bench/oci-validation/seam_root.sh`, the direct path). On fedora (`exec-breakdown-20261028T224731Z`, load
     3-5) exec through the seam took 0.487 ms against libcrun's 1.983, **0.245x**, down from 0.77 ms through the
-    seed and 1.41 ms through the helper (`docs/design/runtime-architecture.md`, decision 3).
+    seed and 1.41 ms through the helper (`docs/design/runtime-architecture.md`, decision 3). Since (built, lab-
+    validated as root, gate-clean, 2026-10-29): the clone's child starts on the calling thread's CPU (the thread
+    pinned for the clone, the child giving the pin back first), and an exec reads nothing of the box's from disk
+    (what it needs of the container is kept with the init the supervisor watches), each set against the build
+    before it in one run (`bench/competitive/probes/exec_ab.md`): the pin took exec's p50 from 1.19-1.23 ms to
+    1.12-1.14 in fedora's slow state, where every run puts the seam at 0.28-0.31 of libcrun's exec (decision 3,
+    "The host's state").
     **Plan step 3, start in one FIFO operation** (built, gate-clean, 2026-10-28): start reads the state once,
     takes the init's byte from the exec FIFO and removes the FIFO; it writes no state. `created`, `running` and
     `stopped` are derived as crun derives them (the FIFO there or not, the init live by pid and start time), an
@@ -191,6 +197,14 @@ three different things (CLAUDE.md "Working here"):
 - **CP-T7.3**: The control plane, from one node to a cell; kiln's CI legs placed by resources, not slots.
 
 ## Open
+
+- **An exec straight from the agent's thread copies the agent's descriptor table.** The vfork-style clone (goal 3,
+  plan step 2) gives the child a copy of the agent's descriptors (`dup_fd`), and its `execve` closes them again
+  (`do_close_on_exec`), so each such exec costs in proportion to what the agent holds open: one pidfd per live `oci`
+  box, up to `INIT_BUDGET`. Not yet measured at density; a seed (few descriptors) doesn't pay it. Closes with a
+  measurement of exec against the agent's open descriptors and, past where it shows, the program's descriptors
+  moved low and the rest left behind at the clone (`close_range(2)`, `CLOSE_RANGE_UNSHARE`) or the exec handed to a
+  seed.
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
 measured are in `docs/requirements.toml`.

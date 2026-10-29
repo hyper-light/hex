@@ -73,6 +73,29 @@ struct Init {
     pidfd: Option<OwnedFd>,
     /// How it ended, kept until the box's record holds it.
     exit: Option<Exit>,
+    /// What an exec into the box needs of its container.
+    container: Arc<Container>,
+}
+
+/// What an exec into an `oci` box needs of its container that holds while its init lives: the bundle
+/// and cgroup its state names. Kept with the watched init from the box's create, so an exec reads
+/// nothing of the box's from disk (goal 3 plan step 6), and dropped with the init. No descriptor is
+/// held for it: every descriptor the agent holds is copied into an exec's child and closed again at
+/// its execve (`dup_fd` and `do_close_on_exec`), so one per box would grow every exec's cost with the
+/// node's boxes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Container {
+    pub bundle: String,
+    pub cgroup: Option<String>,
+}
+
+/// A box's running init, for an exec into it: its pid, a duplicate of its pidfd (by which the program
+/// joins its namespaces, so they are that process's and never a later one's given its pid) and its
+/// [`Container`].
+pub struct Live {
+    pub pid: i32,
+    pub pidfd: OwnedFd,
+    pub container: Arc<Container>,
 }
 
 #[derive(Default)]
@@ -189,12 +212,14 @@ impl Supervisor {
     /// Watches box `id`'s init, `pid`, which create recorded with `start_ticks`: opens its pidfd,
     /// then checks it is the agent's child with that start time, so a later process given its pid
     /// is never taken for it (proc_pid_stat(5) fields 4 and 22). Uses `slot`'s place in the budget.
+    /// `container` is kept with it for the box's execs.
     pub fn watch(
         &self,
         mut slot: Slot,
         id: &BoxId,
         pid: i32,
         start_ticks: u64,
+        container: Container,
     ) -> Result<(), Refusal> {
         let raw = Pid::from_raw(pid).ok_or_else(|| Refusal::Invalid {
             what: "pid",
@@ -234,6 +259,7 @@ impl Supervisor {
                 pid,
                 pidfd: Some(pidfd),
                 exit: None,
+                container: Arc::new(container),
             },
         );
         inits.reserved = inits.reserved.saturating_sub(1);
@@ -241,20 +267,38 @@ impl Supervisor {
         Ok(())
     }
 
-    /// A duplicate of box `id`'s init pidfd while the init is watched and not yet reaped, else `None`:
-    /// an exec's program joins the container's namespaces by it, so they are that process's and never a
-    /// later one's given its pid (goal 3 plan step 2). Readable once the init has ended (pidfd_open(2)).
-    pub fn init_pidfd(&self, id: &BoxId) -> Result<Option<OwnedFd>, Refusal> {
+    /// Box `id`'s init, if it is watched and runs: not yet reaped, and its pidfd not readable, as it is
+    /// once the init has ended (pidfd_open(2)). `None` for a box with no such init: a `process` box, an
+    /// `oci` box mid-create or stopped, or no box.
+    pub fn live(&self, id: &BoxId) -> Result<Option<Live>, Refusal> {
         let inits = self.inits()?;
-        inits
+        let Some((init, pidfd)) = inits
             .by_box
             .get(id)
-            .and_then(|init| init.pidfd.as_ref())
-            .map(|fd| {
-                rustix::io::fcntl_dupfd_cloexec(fd, 0)
-                    .map_err(|e| Refusal::os("duplicating a container init's pidfd", e))
-            })
-            .transpose()
+            .and_then(|init| init.pidfd.as_ref().map(|fd| (init, fd)))
+        else {
+            return Ok(None);
+        };
+        if ended(pidfd.as_fd())? {
+            return Ok(None);
+        }
+        let dup = rustix::io::fcntl_dupfd_cloexec(pidfd, 0)
+            .map_err(|e| Refusal::os("duplicating a container init's pidfd", e))?;
+        Ok(Some(Live {
+            pid: init.pid,
+            pidfd: dup,
+            container: Arc::clone(&init.container),
+        }))
+    }
+
+    /// Whether box `id`'s init is watched and runs ([`Supervisor::live`]), without a duplicate of its
+    /// pidfd.
+    pub fn runs(&self, id: &BoxId) -> Result<bool, Refusal> {
+        let inits = self.inits()?;
+        match inits.by_box.get(id).and_then(|init| init.pidfd.as_ref()) {
+            Some(pidfd) => Ok(!ended(pidfd.as_fd())?),
+            None => Ok(false),
+        }
     }
 
     /// How box `id`'s init ended, if it is watched and has: reaped now if it has ended and the
@@ -519,6 +563,19 @@ impl Supervisor {
             *fault = outcome.err().map(|e| e.to_string());
         }
     }
+}
+
+/// Whether the process a pidfd names has ended: its pidfd is readable then (pidfd_open(2)). A poll
+/// that doesn't wait.
+fn ended(pidfd: std::os::fd::BorrowedFd<'_>) -> Result<bool, Refusal> {
+    let mut fds = [PollFd::new(&pidfd, PollFlags::IN)];
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut fds, Some(&now))
+        .map_err(|e| Refusal::os("looking at a container init's pidfd", e))?;
+    Ok(fds.iter().any(|f| f.revents().contains(PollFlags::IN)))
 }
 
 /// The supervising thread: waits on the inits' pidfds, collecting each that ends, and sweeps each

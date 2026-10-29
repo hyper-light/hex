@@ -17,7 +17,7 @@
 //! A seed that dies, or a round trip that breaks, refuses its exec and is replaced; the agent reaps
 //! every seed it started (by pidfd), so none is leaked.
 
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -98,11 +98,12 @@ impl SeedPool {
     /// the program joining the namespaces of the container init `init` (its pidfd), and returns the
     /// started program's pid and pidfd for the supervisor to own. The caller holds the supervisor's
     /// spawning lock across this and the own, so the program — the agent's child — isn't reaped by a
-    /// sweep before it is owned.
+    /// sweep before it is owned, and closes its own `stdio` after, so the program's streams end when it
+    /// does.
     pub fn exec(
         &self,
         req: &Request,
-        stdio: [OwnedFd; 3],
+        stdio: [BorrowedFd<'_>; 3],
         init: OwnedFd,
     ) -> Result<(u32, OwnedFd), Refusal> {
         let mut seed = self.acquire()?;
@@ -247,18 +248,17 @@ enum Trip {
 fn round_trip(
     seed: &mut Seed,
     req: &Request,
-    stdio: [OwnedFd; 3],
+    stdio: [BorrowedFd<'_>; 3],
     init: OwnedFd,
 ) -> Result<(u32, OwnedFd), Trip> {
-    let [stdin, stdout, stderr] = &stdio;
-    let fds = [stdin.as_fd(), stdout.as_fd(), stderr.as_fd(), init.as_fd()];
+    let [stdin, stdout, stderr] = stdio;
+    let fds = [stdin, stdout, stderr, init.as_fd()];
     // The agent↔seed wire lives once in `hex-runtime`'s seed module, used by the seed, its
     // intermediate and here (CLAUDE.md §13). A broken socket is the seed's death: take it for broken.
     rt_seed::send_request(seed.socket.as_fd(), req, fds)
         .map_err(|e| Trip::Broken(Refusal::from(e)))?;
-    // The seed holds dups of the stdio now; drop the agent's copies so the program's streams close
-    // when it ends, not when the agent does.
-    drop((stdio, init));
+    // The seed holds its own copy of the init's pidfd now.
+    drop(init);
     let (answer, pidfd) =
         rt_seed::recv_answer(seed.socket.as_fd()).map_err(|e| Trip::Broken(Refusal::from(e)))?;
     match answer {

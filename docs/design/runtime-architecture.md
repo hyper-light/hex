@@ -361,7 +361,9 @@ thread starts the program the way posix_spawn does (`crates/hex-runtime/src/linu
    CLONE_PIDFD)` onto a stack of its own (`sys::clone_vfork`, an inline-assembly trampoline for x86_64 and aarch64;
    a guarded stack mapped once per thread). The program is born in the container's cgroup and pid namespace. It
    shares the agent's memory until its `execve`, so no page of the agent is copied for it and none torn down by its
-   exec, and the thread waits until it has exec'd.
+   exec, and the thread waits until it has exec'd. The thread is pinned to its CPU for the clone, so the child,
+   inheriting the pin, runs there as soon as the thread blocks, rather than wait for an idle CPU the kernel's fork
+   balancing picks to wake; the child gives the pin back before anything else, so the program never runs pinned.
 3. The child joins the container's other namespaces in one `setns` by the init's pidfd, becomes the container's
    process (`init::Becoming`: capabilities, user, seccomp filter, limits, made ready before the clone) and execs
    (its argv, environment and paths made before the clone too). It makes system calls alone on memory made before
@@ -383,8 +385,13 @@ trampoline, or a kernel without clone3 into a cgroup) starts the program in one 
 line's `hex oci exec` is unchanged.
 
 Both paths join the namespaces the container's spec gives it (crun's exec joins the same), by the init's pidfd,
-which names that process and never a later one given its pid. The seed and the agent keep the bundles' parsed
-configs by the file's identity, so an exec costs one `stat` of `config.json`, not a parse.
+which names that process and never a later one given its pid. What an exec needs of the container — its bundle and
+cgroup, as its state names them — is kept with the init the supervisor watches, from the box's create until the init
+is reaped (`supervise::Container`), so an exec reads nothing of the box's from disk; it holds no descriptor for the
+box, since every descriptor the agent holds is copied into an exec's child and closed again at its `execve`. The
+program's stdio are the caller's pipes or the null device the agent holds open, borrowed, not duplicated. The seed
+and the agent keep the bundles' parsed configs by the file's identity, so an exec costs one `stat` of `config.json`,
+not a parse.
 
 **Delete reaps the box's programs.** A container's init (pid 1 of the box's pid namespace) can't finish exiting
 until every process in that namespace is reaped: the kernel holds it in `zap_pid_ns_processes` until then. An exec'd
@@ -420,9 +427,24 @@ copies the seed's page tables, the child's writes copy pages, and the program's 
 vfork-style clone does none of that: in the floor's own modes, `posix_spawn` of `true` ran 0.06-0.09 ms under a
 fork-style clone of it. Cloning from the agent's thread also drops the hop to the seed.
 
+Two changes after the last row were each set against the build before them in one run (`bench/competitive/probes/
+exec_ab.md`), the host in a slower state (below). The pin: the child first runs 18 µs after its fork rather than 86
+(p50s, scheduler traces), and exec's p50 fell from 1.186-1.227 ms to 1.123-1.141. Keeping the container's bundle and
+cgroup with the watched init took 29 µs off the agent's work before the clone (104 µs to 75), inside the rounds'
+spread end to end.
+
+**The host's state.** fedora runs a short burst of work at two speeds. `exec_floor`'s `spin` gauge, a 0.1 ms chain of
+multiply-adds with no system call, took 0.085-0.097 ms in `…T224731Z` and 0.224 ms in `exec-breakdown-20261028T231639Z`
+(load 2-3), the cores the bench ran on (mostly E-cores, CPUs 16-31) clocked down. In the slow state the floor took
+2.4 times as long (0.785-0.815 ms) and libcrun's exec 1.9 times (3.817), so a short call's ratio to a long one grows:
+the floor is 0.165 of libcrun's exec in the fast state and 0.21 in the slow one, and the seam's exec, 0.245 in the
+fast state, was 0.28-0.31 in the slow one in every run since. There the kernel's part and the program's (the clone,
+the `execve`, `true` itself and its exit) are about 1.0 ms of a traced exec's 1.19, and Hex's own about 170 µs: a
+quarter of libcrun's exec in that state would take four fifths of Hex's own time away.
+
 **What would falsify it.** A seam exec p50 above a quarter of libcrun's in one run on fedora. The floor (`exec_floor`,
-step 1) measured beside libcrun in the same runs sits at 0.77-0.94 of that quarter, so the target stands; the seam
-has 0.06-0.17 ms over the floor to spend.
+step 1) measured beside libcrun in the same runs sits at 0.66-0.94 of that quarter (0.66 in the fast state, 0.82-0.85
+in the slow), so the target stands; the seam has 0.06-0.17 ms over the floor to spend.
 
 #### Start in one FIFO operation (goal 3, plan step 3)
 
