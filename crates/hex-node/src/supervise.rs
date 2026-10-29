@@ -9,7 +9,7 @@
 //! box cgroups that no [`Proc`] handle and no watched init owns.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, Weak};
 use std::time::{Duration, Instant};
@@ -412,19 +412,7 @@ impl Supervisor {
                 Ok(_) | Err(Errno::INTR) => {}
                 Err(e) => return Err(Refusal::os("waiting on a deleted box's program", e)),
             }
-            let exit = match rustix::process::waitid(
-                WaitId::PidFd(program.pidfd.as_fd()),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
-            ) {
-                Ok(Some(status)) => Some(exit_of(&status)),
-                Ok(None) | Err(Errno::CHILD) => None,
-                Err(e) => return Err(Refusal::os("reaping a deleted box's program", e)),
-            };
-            if let Some(exit) = exit
-                && let Ok(mut slot) = program.exit.lock()
-            {
-                *slot = Some(exit);
-            }
+            reap_into(program.pidfd.as_fd(), &program.exit)?;
             owned.remove(&program.pid);
         }
         Ok(())
@@ -758,6 +746,22 @@ impl Drop for ProgramProc {
     }
 }
 
+/// Reaps `pidfd`'s process if it has ended and records how in `slot`, for the caller's [`Proc`]. The
+/// slot is held across both, so a caller whose own wait meets the process reaped, and then reads the
+/// slot, finds its exit: never the moment between the reap and its record.
+fn reap_into(pidfd: BorrowedFd<'_>, slot: &Mutex<Option<Exit>>) -> Result<(), Refusal> {
+    let mut slot = slot.lock().map_err(poisoned)?;
+    match rustix::process::waitid(
+        WaitId::PidFd(pidfd),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+    ) {
+        Ok(Some(status)) => *slot = Some(exit_of(&status)),
+        Ok(None) | Err(Errno::CHILD) => {}
+        Err(e) => return Err(Refusal::os("reaping a deleted box's program", e)),
+    }
+    Ok(())
+}
+
 /// How a reaped process ended.
 fn exit_of(status: &WaitIdStatus) -> Exit {
     match (status.exit_status(), status.terminating_signal()) {
@@ -852,6 +856,63 @@ impl Stat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 3 (HEX-RT-7): a deleted box's programs are reaped by its delete, each exit recorded for
+    /// its caller's wait, and a caller whose own wait meets the program already reaped reads the record.
+    /// So the record is there whenever its slot is free and the program is reaped: a caller that reads
+    /// it in the moment between the reap and the record finds nothing, and over the socket the program
+    /// was reported to have ended `Exit::Unknown` (fedora's gates under load, 2026-10-29). Each round a
+    /// child ends and is reaped into its slot on another thread, while this one holds the slot and looks
+    /// whether the child is still there, until it has been reaped.
+    #[test]
+    fn a_deleted_boxs_program_is_never_reaped_with_its_exit_unrecorded() {
+        let mut caught = 0usize;
+        for _ in 0..200 {
+            #[expect(
+                clippy::zombie_processes,
+                reason = "reaped through its pidfd by reap_into, the reap this test watches"
+            )]
+            let child = std::process::Command::new("true").spawn().unwrap();
+            let pidfd =
+                rustix::process::pidfd_open(Pid::from_child(&child), PidfdFlags::empty()).unwrap();
+            let mut fds = [PollFd::new(&pidfd, PollFlags::IN)];
+            rustix::event::poll(&mut fds, None).unwrap();
+            let look = pidfd.try_clone().unwrap();
+            let slot = Arc::new(Mutex::new(None));
+            let reaper = {
+                let slot = Arc::clone(&slot);
+                std::thread::spawn(move || reap_into(pidfd.as_fd(), &slot))
+            };
+            loop {
+                let recorded = slot.lock().unwrap();
+                let gone = matches!(
+                    rustix::process::waitid(
+                        WaitId::PidFd(look.as_fd()),
+                        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                    ),
+                    Err(Errno::CHILD)
+                );
+                if gone {
+                    if recorded.is_none() {
+                        caught += 1;
+                    }
+                    break;
+                }
+                drop(recorded);
+                std::thread::yield_now();
+            }
+            reaper.join().unwrap().unwrap();
+            assert_eq!(
+                *slot.lock().unwrap(),
+                Some(Exit::Code(0)),
+                "the child's exit is recorded"
+            );
+        }
+        assert_eq!(
+            caught, 0,
+            "{caught} of 200 children were reaped with their exit unrecorded"
+        );
+    }
 
     /// Decision 2: the supervisor reads a process's state, parent and start time from its stat line,
     /// a command name with spaces and parentheses included; a truncated or malformed line is no stat.
