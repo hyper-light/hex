@@ -198,8 +198,19 @@ three different things (CLAUDE.md "Working here"):
     Open: how a fedora pass of record holds the host (at rest, as CLAUDE.md §7's load under 2 asks, where a short
     call's ratio to a long one grows; or with the package held awake). Create is 3.3x libcrun's on fedora (19.2 ms
     against 5.9), 2.8x on jupiter and 1.0x on the Mac Studio, outside goal 3's bars; open.
-  - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
-    copying) — open.
+  - **goal 4, network namespaces off the path** (kiln plan `01a185679f8a7616ab21db7fb980ffce`, 5 steps; on
+    `cp/t7-netns`, not merged). **Plan step 1, decision 4 restated** (2026-10-29): probe run 1's 5.5 ms gap is gone;
+    through the seam a container's network namespace now costs Hex's create about 0.55 ms on fedora, jupiter and
+    the Mac Studio and nothing on delete (the kernel defers its teardown), against libcrun's 0.55, 0.77 and 0.21 ms
+    (`bench/competitive/probes/netns_pool.md`). On fedora and jupiter the 5% bar already holds only because Hex's
+    create is 6.0x and 3.2x libcrun's there (goal 5's gap); on the Mac Studio, where it isn't, the namespace is 23%
+    of create. The choice stands with its bound measured: a pool of at most 32 fresh namespaces made ahead on one
+    thread (5,260-6,127 a second on fedora, 2,280-3,545 on the Mac Studio), each at most 0.34 and 0.74 MiB of kernel
+    memory there, joined by setns, never reused, for containers in the agent's user namespace only, its memory
+    charged to the agent and counted in Hex's density readings. A doc-truth test holds decision 4's figures to that
+    record (`crates/hex-bench/tests/doc_truth.rs`). Steps 2-5 (the seam's with-and-without and sustained phases,
+    the pool's core and shell, the pass of record) are next.
+  - goals 5 (a seed per node), 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial

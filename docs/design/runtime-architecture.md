@@ -478,36 +478,94 @@ FIFO there or not, the init live with its start time, live with another, a zombi
 `stopped` as the runtime-spec defines them (`state::tests`, AC-T7.1.4). runtime-tools and the cgroups lab hold start
 and state to the runtime-spec on the command line.
 
-### 4. Network-namespace work off the critical path (rewritten after the probe)
+### 4. Network-namespace work off the critical path (restated on goal 4's measurements, 2026-10-29)
 
-**What changed.** The plan behind this document expected pooled network namespaces and cgroups to lift the
-throughput ceiling, from SOCK's finding: about 200 containers/s with unmodified network namespaces against 900/s
-without them, "due to a single global lock" (Oakes et al., ATC 2018, §2.2; f8). The probe met that decision's
-falsifier. On fedora's Linux 6.19, dropping the bundle's network namespace raised throughput at concurrency 32
-only 5% for Hex (1,029 to 1,079/s) and 7% for crun (1,171 to 1,251/s) (`probes/oci_breakdown.md` §4; f17,
-recorded against f8). SOCK's kernel predates the fixes to namespace creation (`oci-runtimes-and-fast-start.md`
-§4.3). So this decision no longer rests on throughput. The cgroup pool is dropped: no measurement on this host
-puts cgroup creation on the critical path, and CLAUDE.md §13 rules out building ahead of evidence.
+**What the probe showed first.** The plan behind this document expected pooled network namespaces and cgroups to
+lift the throughput ceiling, from SOCK's finding: about 200 containers/s with unmodified network namespaces against
+900/s without them, "due to a single global lock" (Oakes et al., ATC 2018, §2.2; f8). Probe run 1 met that
+decision's falsifier: on fedora's Linux 6.19, dropping the bundle's network namespace raised throughput at
+concurrency 32 only 5% for Hex (1,029 to 1,079/s) and 7% for crun (1,171 to 1,251/s) (`probes/oci_breakdown.md`
+§4). SOCK's kernel predates the fixes to namespace creation (`oci-runtimes-and-fast-start.md` §4.3), so this
+decision doesn't rest on throughput, and the cgroup pool was dropped: no measurement puts cgroup creation on the
+critical path. What the probe did show was latency: at concurrency 1 the namespace cost Hex about 5.5 ms a
+lifecycle, 44 against 58 lifecycles/s, but crun only about 1 ms, 68 against 73.
 
-**What the probe did show.** At concurrency 1, the network namespace costs both runtimes about 5.5 ms of CPU per
-lifecycle: Hex 12.84 against 7.33 ms, crun 10.19 against 4.62. It costs Hex about 5.5 ms of latency, 44 against
-58 lifecycles/s, but crun only about 1 ms, 68 against 73. crun keeps most of that work off its critical path,
-and Hex doesn't.
+**What it shows now.** That gap went with the shim and the state fsyncs (decisions 1 and 2). Through the seam
+today, a container's network namespace costs Hex's create about half a millisecond on each machine measured, and
+its delete nothing; libcrun's create pays a little less to a little more (`bench/competitive/probes/netns_pool.md`;
+kiln research `01a185679f9073d696fc7e1a7c21587e`, f2 and f3). Create and delete p50 in ms, with the namespace and
+without, best of 2:
 
-**The choice.** First find what puts Hex's namespace work on its critical path: the bench measures create and delete
-separately, with and without the namespace. Then move it off. The node agent keeps a bounded pool of fresh network
-namespaces made ahead of demand, and `create` joins one with `setns`. A namespace is never handed to a second
-container. The bound is the node's container capacity. A dry pool falls back to making the namespace on the
-path, and the bench reports how often. Teardown happens after `delete` returns.
+<!-- record: bench/competitive/probes/netns_pool.md -->
+| Machine | Hex create | the namespace | libcrun create | the namespace | Hex delete |
+|---|---|---|---|---|---|
+| fedora (i9-14900HX, Linux 6.19.10) | 15.177 / 14.606 | +0.571 (1.04x) | 2.970 / 2.422 | +0.548 (1.23x) | 6.737 / 6.774 |
+| jupiter (Ryzen AI MAX+ 395, WSL2 6.18) | 14.244 / 13.679 | +0.565 (1.04x) | 5.089 / 4.321 | +0.769 (1.18x) | 5.784 / 5.826 |
+| adas-mac-studio-3 (M4 Max, LinuxKit 6.12) | 2.936 / 2.392 | +0.544 (1.23x) | 2.056 / 1.849 | +0.206 (1.11x) | 2.189 / 2.251 |
+<!-- /record -->
 
-**Sources.**
-- SOCK, as above, for what a namespace costs and why pools are made.
-- AFaaS pre-allocates "1,000 veths and 600 cgroups" in production (Chai et al., §4.2; f10).
-- The kernel's cgroup-v2.rst:194-200 and 620-631: create a cgroup and seed it with `CLONE_INTO_CGROUP`, once at
-  start-up (f11). The class already does this (`runtime.md`, "Born in its cgroup").
+Three things follow. Delete pays nothing because the kernel already defers a namespace's teardown: its last
+reference queues it for a work item (`__put_net`, `net/core/net_namespace.c:739-744` at v6.19), which neither the
+exiting process nor delete waits for. The decision's first falsifier, Hex costing no more with the namespace than
+crun, holds on fedora and jupiter but not on the Mac Studio, where Hex pays 2.6 times libcrun's 0.206 ms. And on
+fedora and jupiter a create with the namespace is within 5% of one without only because Hex's create is slow
+there, 6.0 and 3.2 times libcrun's without a namespace: that gap is goal 5's (the seed), and once it closes, the
+namespace's half millisecond is the 23% it already is on the Mac Studio. So what is left to move is the
+namespace itself. The shim makes it with the container's other fresh namespaces (`unshare`, `init.rs`
+`namespace_flags`), the kernel running every networking subsystem's per-namespace init to do so (`setup_net`,
+`net_namespace.c:445-446`), and the container brings loopback up over route netlink before it is ready
+(`init.rs:175-176`, `net.rs`).
 
-**What would falsify it.** Hex's create and delete costing no more with the namespace than crun's do, which
-leaves nothing to move. Or a pool whose refill can't keep up with the bench's sustained phase.
+**The choice.** The node agent keeps a bounded pool of fresh network namespaces, made ahead on a thread of its own:
+the thread unshares a new one (`unshare(CLONE_NEWNET)` on that thread, as containerd makes a pod's,
+`pkg/netns/netns_linux.go:115-116` at v2.2.0), keeps it alive by an open descriptor, close-on-exec ("As long as
+this file descriptor remains open, the namespace will remain alive", namespaces(7)), and brings its loopback up
+inside it. A create whose container makes a network namespace of its own takes one: its shim joins it with `setns`
+in place of unsharing, and the container finds loopback up. Each pooled namespace goes to one container and is never
+handed back or on, so nothing of one container's network reaches the next and no cleaning is needed (Lambda reuses a
+released network after cleaning it; AFaaS warns that reusing a stack "introduces security risks by reusing the TCP/IP
+stack from previous containers", Chai et al., OSDI 2025, p.504). A dry pool falls back to making the namespace on the
+path, as today, and counts it. Teardown stays where the kernel puts it, after delete returns.
+
+**Who may take one.** A namespace belongs to the user namespace its maker was in ("When a nonuser namespace is
+created, it is owned by the user namespace in which the creating process was a member", user_namespaces(7)), and
+joining a network namespace takes `CAP_SYS_ADMIN` in the one that owns it (setns(2)). A namespace the agent makes
+ahead is the agent's user namespace's, so the pool serves containers in that user namespace only. A container in
+one of its own, as a rootless node's are, makes its network namespace on the path, where it is its own; so does a
+container whose spec names its namespace by path.
+
+**The bound and the refill.** Measured by `probes/netns_pool.c` (one thread making namespaces as the pool would and
+holding them in a cgroup of its own), two rounds of 500 each:
+
+<!-- record: bench/competitive/probes/netns_pool.md -->
+| Machine | make p50 | make p99 | one thread | charged to the maker's cgroup | the host's Slab | the host's Percpu |
+|---|---|---|---|---|---|---|
+| fedora | 0.152, 0.161 ms | 0.333, 0.401 ms | 6,127, 5,260/s | 108.5, 107.8 KiB (slab 97.6, percpu 10.1) | +244.3, +236.3 KiB | +105.2, +98.6 KiB |
+| adas-mac-studio-3 | 0.407, 0.258 ms | 1.119, 0.711 ms | 2,280, 3,545/s | 320.4 KiB (slab 287.1, percpu 33.2) | +622.0, +616.0 KiB | +140.0, +139.0 KiB |
+<!-- /record -->
+
+So a held namespace costs the kernel at most about 0.34 MiB on fedora (349.5 KiB) and 0.74 MiB on the Mac Studio
+(762 KiB), taking the host's Slab and Percpu rises, which other work on the host moves as well, as the upper bound.
+The pool holds at most **32**: the most creates the bench's busiest phase has in flight at once (concurrency 32), so
+a burst of its whole width finds a namespace each. That is at most 24 MiB of the kernel's memory on the heavier
+machine, and 32 descriptors beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor
+table (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or
+more; whether that keeps up with sustained churn is the sustained phase's to show (goal 4 plan step 5).
+
+**Where its memory is charged.** The kernel charges what it can of a namespace to the cgroup of the task that makes
+it, when it is made (`struct net` is `SLAB_ACCOUNT`, `net_namespace.c:1259-1261`), and doesn't move it after. A
+pooled namespace's 108-320 KiB so stays charged to the node agent, not to the box that joins it. The node reports
+what its pool holds, and a density reading of Hex counts the agent's cgroup with its boxes', so a box isn't read as
+lighter than it is (AC-T7.1.5 bounds what the agent adds per box).
+
+**Sources.** `docs/research/runtime/netns-pool.md`: the kernel's `net/core/net_namespace.c` at v6.19; namespaces(7),
+setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's networking account (Vogels, 2026); AFaaS
+(Chai et al., OSDI 2025); Scrivano's `unshare -n` timings (2022); SOCK, for the history.
+
+**What would falsify it.** A create from the pool costing more than 5% over a create without a namespace, at p50
+through the seam, on any machine measured (fedora, jupiter, the Mac Studio): the pool then isn't taking the
+namespace's work off the path. Or a sustained phase in which more than 1% of creates found the pool dry: one thread
+refilling to 32 isn't keeping up.
 
 ### 5. A seed per node clones containers
 
@@ -628,8 +686,9 @@ shows its target.
    still passes crun's 28.
 3. **The `oci` class behind the seam** (decision 3): done when exec p50 through the seam is at most a quarter of
    libcrun's in-process exec on the same run, and start through the seam is within 10% of libcrun's (A3).
-4. **Network namespaces off the path** (decision 4): done when Hex's create costs no more with the namespace than
-   without it, at p50, through the seam.
+4. **Network namespaces off the path** (decision 4): done when Hex's create through the seam with a network
+   namespace is at most 5% above its create without one, at p50, on fedora, jupiter and the Mac Studio, and the
+   sustained phase reports how often the pool ran dry.
 5. **The seed** (decision 5): done when create p50 through the seam is at most a quarter of libcrun's in-process
    create p50, and create+start likewise.
 6. **Mount namespaces without copying** (decision 6): done when create on a 7.x host is measured with and without
