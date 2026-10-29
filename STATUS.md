@@ -242,10 +242,11 @@ three different things (CLAUDE.md "Working here"):
     under CI's load, are 0.48x and 0.97x (in process each round's own 0.47x and 1.05x, Hex's create moving 11-25 ms
     between rounds). No sustained phase found the pool dry: 0 of 10,000 on each machine, by each driver, in each
     round. The as-root lab passes on fedora (`seam_root.sh`, 5 of 5). Ada's call (2026-10-29): merged to main at
-    6446160 on fedora's and the Mac Studio's passes, all seven gates passing on fedora there; jupiter's pass of
-    record follows when the machine is free (held for another project's quiet-gated benchmarks). The gates found a
-    race older than goal 4, fixed at 6446160: a box's delete reaped an exec'd program before recording its exit, so
-    a caller over the socket could read it ended `Exit::Unknown` (HEX-RT-7, under load).
+    6446160 on fedora's and the Mac Studio's passes, all seven gates passing on fedora there; jupiter's followed at
+    6f73f9a (`docker_pass.sh`): a create from the pool 1.04x in process and 1.00x over the socket, libcrun 1.16x,
+    the pool never dry. The gates found a race older than goal 4, fixed at 6446160: a box's delete reaped an exec'd
+    program before recording its exit, so a caller over the socket could read it ended `Exit::Unknown` (HEX-RT-7,
+    under load).
   - goals 5 (a seed per node), 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
@@ -292,17 +293,18 @@ three different things (CLAUDE.md "Working here"):
 - **Over the socket, the sustained phase's rate falls by half as it runs.** On adas-mac-studio-3 (goal 4's pass of
   record, `RESULT.md`) the socket driver's rate over ten windows of 1,000 lifecycles went 579 down to 188-279 a second
   in one round and 577 down to 188-270 in the other, while the in-process driver in the same pass held (570 to 536,
-  491-599); on fedora, at a twentieth of the rate, the socket's held. The pool isn't it (no create found it dry).
-  Something on the socket path slows with the lifecycles it has served: the agent's per-connection or per-box state,
-  the client's, or the wire's. Closes with where the time goes in a late window against an early one, and its fix,
-  shown by a sustained phase over the socket that holds level.
+  491-599); on fedora and jupiter, at about a tenth of the rate, the socket's held. The pool isn't it (no create
+  found it dry). Something on the socket path slows with the lifecycles it has served: the agent's per-connection or
+  per-box state, the client's, or the wire's. Closes with where the time goes in a late window against an early one,
+  and its fix, shown by a sustained phase over the socket that holds level.
 
 - **Hex's seam runs about one create at a time under concurrency.** At concurrency 32 it sustains 26 and 51
-  lifecycles a second on fedora against libcrun's 1,294, and 553 against 1,429 on the Mac Studio (goal 4's pass of
-  record, `RESULT.md`; step 2's passes found the same), about one create's time per lifecycle, as its throughput at
-  concurrency 1, 8 and 32 also showed (`probes/socket_cost.md`: 43, 55 and 52 a second in process). Not yet measured
-  where the 32 in flight wait (the node's lock, the runtime's create, the shim, the host's CPUs). Closes with that
-  measurement and the fix there, shown by the sustained phase's rate rising with concurrency as libcrun's does.
+  lifecycles a second on fedora against libcrun's 1,294, 553 and 352 against 1,429 on the Mac Studio, and 108 and 66
+  against 959 on jupiter (goal 4's pass of record, `RESULT.md`; step 2's passes found the same), about one create's
+  time per lifecycle, as its throughput at concurrency 1, 8 and 32 also showed (`probes/socket_cost.md`: 43, 55 and
+  52 a second in process). Not yet measured where the 32 in flight wait (the node's lock, the runtime's create, the
+  shim, the host's CPUs). Closes with that measurement and the fix there, shown by the sustained phase's rate rising
+  with concurrency as libcrun's does.
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
 measured are in `docs/requirements.toml`.

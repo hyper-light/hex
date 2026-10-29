@@ -590,11 +590,11 @@ Every create of the lifecycle phase took a namespace from the pool and none was 
 where the namespace was 23% of Hex's create it now costs a create about what a create without one costs; the
 pass of record on fedora, jupiter and this Mac Studio, with the sustained phase, is goal 4 plan step 5's.
 
-**Of record** (goal 4 plan step 5, 2026-10-29). The step-2 phases at 378b1d2 (the pool's production code unchanged
-since 5257407), 2 rounds of 1,000 and a sustained phase of 10,000 lifecycles at concurrency 32: on fedora by host.sh
-under CI's load (16.84 to 9.44, not gated), on adas-mac-studio-3 by `docker_pass.sh` (VM load 3.84 to 6.30). Create
-p50 in ms, best of 2 each, and how many of the sustained phase's creates found the pool dry
-(`bench/competitive/RESULT.md`):
+**Of record** (goal 4 plan step 5, 2026-10-29). The step-2 phases at 378b1d2 (the pool's production code unchanged since
+5257407), 2 rounds of 1,000 and a sustained phase of 10,000 lifecycles at concurrency 32: on fedora by host.sh under
+CI's load (16.84 to 9.44, not gated), on adas-mac-studio-3 by `docker_pass.sh` (VM load 3.84 to 6.30), and on jupiter by
+`docker_pass.sh` at 6f73f9a (the same production code but for the reap race's fix; VM load 1.71 to 8.44). Create p50 in
+ms, best of 2 each, and how many of the sustained phase's creates found the pool dry (`bench/competitive/RESULT.md`):
 
 <!-- record: bench/competitive/RESULT.md -->
 | Machine | | with the namespace | without | with over without | sustained /s | made on the path, of the sustained phase's creates |
@@ -605,6 +605,9 @@ p50 in ms, best of 2 each, and how many of the sustained phase's creates found t
 | adas-mac-studio-3 | Hex in process | 1.699 | 1.717 | 0.99 | 553 | 0 of 10,000 |
 | | Hex over the socket | 1.725 | 1.813 | 0.95 | 352 | 0 of 10,000 |
 | | libcrun | 1.970 | 1.629 | 1.21 | 1,429 | |
+| jupiter | Hex in process | 8.590 | 8.298 | 1.04 | 108 | 0 of 10,000 |
+| | Hex over the socket | 12.714 | 12.661 | 1.00 | 66 | 0 of 10,000 |
+| | libcrun | 3.935 | 3.405 | 1.16 | 959 | |
 <!-- /record -->
 
 Neither falsifier is met. No create from the pool costs more than 5% over one without a namespace: on the Mac Studio,
@@ -612,7 +615,8 @@ where the namespace was 23% of Hex's create, it now costs what a create without 
 pairs a quiet round with a busy one (each round's own was 0.47 and 1.05, Hex's create moving between 11 and 25 ms as
 CI came and went), and over the socket its rounds held at 0.97 and 0.98. And no sustained phase found the pool dry: 0
 of 10,000 on each machine, by each driver, in each round, so one refill thread keeps up with 553 lifecycles a second.
-Ada's call (2026-10-29): merged to main at 6446160 on these two passes; jupiter's pass of record follows.
+Ada's call (2026-10-29): merged to main at 6446160 on fedora's and the Mac Studio's passes; jupiter's followed,
+and holds the same: 1.04 in process and 1.00 over the socket, libcrun 1.16, the pool never dry.
 
 **The bound and the refill.** Measured by `probes/netns_pool.c` (one thread making namespaces as the pool would and
 holding them in a cgroup of its own), two rounds of 500 each: on fedora at 2026-10-29T03:00Z (load 5.14 to 4.14) and
