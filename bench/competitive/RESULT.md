@@ -433,6 +433,53 @@ summary, so the pass was run again. On the Mac Studio the pass image's base pull
 helper (`docker-credential-desktop get`, 16 minutes), so the pass ran with an empty Docker config: the image is public
 and needs no credentials.
 
+## Goal 4 of record (plan step 5): a container's network namespace from the pool, and sustained churn (2026-10-29)
+
+seam_oci's lifecycle, lifecycle_nonet and sustained phases by both drivers, beside libcrun's, with the node's pool of
+network namespaces made ahead (goal 4 plan step 4, 5257407; its production code is the same at 378b1d2, the tree the
+passes built): on fedora by host.sh (`PHASES=oci RUNTIMES=libcrun SEAM_OCI_BIN=...`), on adas-mac-studio-3 by
+`docker_pass.sh`; `HEXBENCH_PHASES="lifecycle lifecycle_nonet sustained"`, 2 rounds of 1,000 lifecycles after 100, the
+sustained phase 10,000 lifecycles at concurrency 32, no load gate (Ada's rule for a busy bench host: the load
+recorded, not waited out). Best of 2, p50 (ms):
+
+| Machine | | create with / without | over | delete with / without | over | sustained /s (last window over first) | made on the path, of the sustained phase's creates |
+|---|---|---|---|---|---|---|---|
+| fedora (Intel Core i9-14900HX, Linux 6.19.10, load 16.84 to 9.44, CI beside it) | Hex's seam, in process | 11.323 / 23.545 | 0.48x | 4.991 / 10.912 | 0.46x | 26 (1.06) | 0 of 10,000 |
+| | Hex's seam, over the socket | 14.143 / 14.580 | 0.97x | 6.334 / 6.710 | 0.94x | 51 (1.14) | 0 of 10,000 |
+| | libcrun in process | 3.057 / 2.406 | 1.27x | 10.413 / 10.387 | 1.00x | 1,294 (1.04) | |
+| adas-mac-studio-3 (Apple M4 Max, LinuxKit 6.12.65, VM load 3.84 to 6.30) | Hex's seam, in process | 1.699 / 1.717 | 0.99x | 2.097 / 2.075 | 1.01x | 553 (0.94) | 0 of 10,000 |
+| | Hex's seam, over the socket | 1.725 / 1.813 | 0.95x | 1.936 / 1.949 | 0.99x | 352 (0.48) | 0 of 10,000 |
+| | libcrun in process | 1.970 / 1.629 | 1.21x | 11.600 / 11.846 | 0.98x | 1,429 (1.01) | |
+
+Runs: fedora `~/.cache/hex-bench/out/20261029T064153Z` (hex sha256 d5a123672795bbb5…, x86_64, static-glibc, built in
+the pass image's Fedora 44 for its glibc-static; seam_oci 4e9ef2d68593572b…; libcrun 1.30.1, commit 079ff6a7…, in
+process; CPUs 4-31), the host's clock before and after it (`probes/host_clock.sh`): a short burst's p50 0.108 and
+0.115 ms on the P-cores and 0.186 and 0.177 ms on the E-cores at rest, 0.107 and 0.116, 0.182 and 0.189 held awake;
+adas-mac-studio-3 `~/.cache/hexpass/g4-record-mac-20261029T063927Z` (hex 192629d1bb070de4…, aarch64, static-glibc,
+the same binary step 4's Mac Studio run measured; seam_oci 81e396ed990f0a77…; libcrun driver 2b1061455a7ce4dd…, from
+crun-1.30.1.tar.gz 99d036d95113552b…). No phase recorded an error. On both machines, by both drivers, in both rounds,
+every create of the lifecycle phase took its namespace from the pool (1,100 of 1,100, the warm-up's with them; 1,132
+made ahead, the 32 left in the pool at the phase's end) and so did every create of the sustained phase (10,000 of
+10,000), none made on the path and no make failed: one refill thread keeps up with 553 lifecycles a second, and decision
+4's second falsifier (more than 1% of a sustained phase's creates finding the pool dry) isn't met.
+
+On the Mac Studio, whose quiet VM resolves it, a create from the pool costs what a create without a namespace costs
+(0.99x in process, 0.95x over the socket), where libcrun's namespace costs it 1.21x and Hex's cost 1.23x before the
+pool (`probes/netns_pool.md`); delete is unchanged (1.01x, 0.99x). Fedora's figures are the
+same pass under CI's load, which moved Hex's create between rounds by more than the namespace costs: in process its
+p50 with the namespace was 11.323 ms in round 1 and 24.644 in round 2, without it 24.195 and 23.545, so its best-of-2
+ratio, 0.48x, pairs a quiet moment with a busy one; each round's own ratio was 0.47x and 1.05x. Over the socket, where
+the rounds held steadier, they were 0.97x and 0.98x. On fedora, too, Hex's create is 5-10x libcrun's either way (goal
+5's gap), so a namespace is a small share of it there.
+
+Two things the sustained phase shows, neither the pool's: over the socket on the Mac Studio the rate falls by half
+over the run, in both rounds (579 then 576, 560, 542, 459, 412, 269, 245, 188 and 279 lifecycles a second over its
+ten windows of 1,000; the other round 577 down to 188-270), while in process it holds (570 to 536; the other round
+491-599), so something on the socket path slows with the lifecycles it has served; on fedora, at a twentieth of that
+rate, the socket's held (47-64 a second). And Hex's seam sustains 26 and 51 lifecycles a second on fedora against
+libcrun's 1,294, and 553 against 1,429 on the Mac Studio, as step 2's passes found: about one create's time per
+lifecycle at concurrency 32. Both are open (`STATUS.md`).
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**
