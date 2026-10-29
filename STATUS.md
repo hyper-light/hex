@@ -189,9 +189,12 @@ three different things (CLAUDE.md "Working here"):
     Exec is **0.289x** (bar 0.25, not met). The run met fedora at rest, where a short burst of work runs at about a
     third of its clock and a short call's ratio to a long one grows; with one busy loop outside the bench's CPUs
     holding the package awake, the same build's exec is 0.203x libcrun's (`bench/competitive/probes/exec_ab.md`,
-    not of record). **Open for Ada:** how a pass of record holds fedora — at rest, as CLAUDE.md §7's load under 2
-    asks and where the exec bar fails, or with the package held awake, where it is met. Create is 3.3x libcrun's
-    (19.2 ms against 5.9), outside goal 3's bars; open.
+    not of record). The same pass on other machines (`bench/competitive/docker_pass.sh`, Docker Desktop's Linux VM;
+    Ada's call): jupiter (AMD Ryzen AI MAX+ 395) exec 0.245x and start 0.815x; adas-mac-studio-3 (Apple M4 Max)
+    exec 0.117x and start 0.500x; both bars met on both. **Open for Ada:** whether these stand for goal 3's record,
+    or how a fedora pass holds the host (at rest, as CLAUDE.md §7's load under 2 asks, where the exec bar fails;
+    or with the package held awake, where it is met). Create is 3.3x libcrun's on fedora (19.2 ms against 5.9),
+    2.8x on jupiter and 1.0x on the Mac Studio, outside goal 3's bars; open.
   - goals 4 (network namespaces off the path), 5 (a seed per node), 6 (mount namespaces without
     copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over

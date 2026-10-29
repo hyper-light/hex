@@ -366,6 +366,28 @@ same build against libcrun, a minute apart, measured (ms, p50, best of 2; not of
 So whether this bar is met on fedora depends on how the pass holds the host, which is the bench method's to state
 (CLAUDE.md §7 asks for load under 2, the state in which fedora's clock is down).
 
+**The same pass on other machines** (Ada's call, 2026-10-29: "test on literally any of the other machines we have").
+`bench/competitive/docker_pass.sh` runs host.sh's OCI pass where the containers run in Docker Desktop's Linux VM:
+hex and `seam_oci` at 3db2173 (8224f97's code; static-glibc hex), and the libcrun driver from crun 1.30.1's tarball
+(sha256 99d036d95113552b…, the one fedora's driver is built from), all built in a Fedora 44 image whose `/usr` stands
+in for the host's; then `oci_inside.sh` as host.sh runs it, `RUNTIMES=libcrun`, `SEAM_OCI`, lifecycle, 2 rounds of
+1,000 after 100, the VM's CPUs past an eighth of them, no load gate, the VM's load recorded. Best of 2, p50 (ms):
+
+| Machine | Linux | VM load | libcrun exec | seam exec | over libcrun | libcrun start | seam start | over libcrun |
+|---|---|---|---|---|---|---|---|---|
+| fedora, Intel Core i9-14900HX (the run above) | bare metal, 6.19.10 | 0.86-3.58 | 3.756 | 1.086 | **0.289** | 0.196 | 0.197 | 1.005 |
+| jupiter, AMD Ryzen AI MAX+ 395 | WSL2, 6.18.54, 32 CPUs | 0.26-3.19 | 2.363 | 0.579 | **0.245** | 0.148 | 0.121 | 0.815 |
+| adas-mac-studio-3, Apple M4 Max | LinuxKit, 6.12.65, 14 CPUs | 3.70-5.84 | 1.271 | 0.148 | **0.117** | 0.063 | 0.032 | 0.500 |
+
+Runs: jupiter `C:\Users\corph\.cache\hexpass\jupiter-20261029T004519Z` (hex sha256 4679dec395fcc047…, seam_oci
+13a940f36c5f936e…, driver 11b59748e8212008…); adas-mac-studio-3 `~/.cache/hexpass/studio3-20261029T003900Z` (hex
+73a1355aa81447cf…, aarch64, seam_oci 92f1da0e98159cde…, driver 2ec536e732650bce…). Over the socket, exec 0.797 ms on
+jupiter and 0.202 on the Mac Studio, start 0.287 and 0.083. Create is 2.81x libcrun's on jupiter (10.869 ms against
+3.862) and 1.00x on the Mac Studio (1.969 against 1.975); delete 0.44x and 0.16x. Not run: adas-mac-studio-2, whose
+Docker couldn't pull the base image (its credential helper hung) while another job's builds had been stuck there for
+18 hours; adalundhe-macbook-pro, whose Docker Desktop asks to be signed in; adas-macbook-pro-2, Docker not running and
+load 20.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**
