@@ -396,6 +396,33 @@ Docker couldn't pull the base image (its credential helper hung) while another j
 18 hours; adalundhe-macbook-pro, whose Docker Desktop asks to be signed in; adas-macbook-pro-2, Docker not running and
 load 20.
 
+## Goal 4, plan step 2: the seam with and without a network namespace, and sustained churn (2026-10-29, small N)
+
+seam_oci's lifecycle_nonet and sustained phases (2404ec7) by both drivers, beside libcrun's, through `docker_pass.sh`:
+`RUNTIMES=libcrun`, `HEXBENCH_PHASES="lifecycle lifecycle_nonet sustained"`, 2 rounds of 200 lifecycles after 20, the
+sustained phase 2,000 lifecycles at concurrency 32, no load gate, the VM's load recorded. It checks that the phases
+and the node's counts work end to end; the measurement of record is step 5's, with the pool. Best of 2, p50 (ms):
+
+| adas-mac-studio-3 (Apple M4 Max, LinuxKit 6.12.65, VM load 4.36-6.22) | create with / without | over | delete with / without | over | sustained /s (last window over first) | made on the path, of creates |
+|---|---|---|---|---|---|---|
+| Hex's seam, in process | 1.897 / 1.794 | 1.06x | 1.923 / 2.042 | 0.94x | 530 (0.99) | 2,000 of 2,000 |
+| Hex's seam, over the socket | 1.954 / 1.713 | 1.14x | 1.822 / 1.983 | 0.92x | 524 (1.05) | 2,000 of 2,000 |
+| libcrun in process | 1.916 / 1.633 | 1.17x | 11.569 / 11.877 | 0.97x | 1,439 (0.98) | |
+
+Run: `~/.cache/hexpass/netns-step2-20261029T040340Z` on adas-mac-studio-3 (hex sha256 3a5f6482f8ff12d8…, aarch64,
+static-glibc; seam_oci 7c6c9c7997298b0a…; libcrun driver 09d07ec1da05f497…, from crun-1.30.1.tar.gz
+99d036d95113552b…). No phase recorded an error. The node keeps no pool yet, so each namespace a create made was made
+on its path, in every round and by both drivers: 220 of 220 creates in the lifecycle phase, none in lifecycle_nonet,
+2,000 of 2,000 in the sustained phase, none taken from a pool or made ahead (the plan's test for a node with no
+pool). At this N the namespace's cost on create moves between rounds (0.34 and 0.10 ms in process); the probe's 2
+rounds of 500 put it at 0.544 ms (decision 4). Each driver's best sustained round held level over its two windows;
+the other rounds moved 0.80-1.27, two windows being too few to read decay from. Hex's seam sustains 530 lifecycles/s
+at concurrency 32 against libcrun's 1,439 (0.37x), though its create alone is level with libcrun's (1.897 against
+1.916 ms): what holds its churn back at concurrency 32 isn't measured here, and is open. The pass image's base pull
+hung in Docker Desktop's credential helper (`docker-credential-desktop get`, 16 minutes), so the pass ran with an
+empty Docker config: the image is public and needs no credentials. Fedora's pass waits for its kiln runner, offline
+at each check from about 2026-10-29T03:30Z to 04:07Z.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**
