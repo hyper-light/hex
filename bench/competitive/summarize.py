@@ -61,6 +61,9 @@ def fmt(v, unit):
         return f"{v:.3f} CPUs"
     if unit == "x":
         return f"{v:.2f}x"
+    if unit == "of":  # (count, of how many)
+        made, of = v
+        return f"{made:,} of {of:,} ({made / of:.1%})" if of else f"{made:,} of 0"
     return str(v)
 
 
@@ -108,8 +111,8 @@ def oci_section(run):
     names = ["hex", "runc", "crun", "youki", "runsc", "krun", "libcrun"]
     data = {n: rounds(run, n) for n in names}
     # The oci class through the Runtime seam (seam_oci writes ociseam.r<N>.json): a second Hex column,
-    # beside `hex`, its ratio against the in-process rival (libcrun). It measures lifecycle and
-    # throughput only, so the sustained, nonet, start_true and density rows read n/a for it.
+    # beside `hex`, its ratio against the in-process rival (libcrun). It measures lifecycle, lifecycle_nonet,
+    # throughput and sustained (and rtt, below), so the start_true and density rows read n/a for it.
     seam = rounds(run, "ociseam")
     if seam:
         data["hex-seam"] = seam
@@ -126,10 +129,14 @@ def oci_section(run):
         for q in ("p50", "p99", "p99.9", "max"):
             rows.append((f"{op} {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()}))
     for op in ("create", "delete"):
-        per = {n: best_dist([r["phases"].get("lifecycle_nonet", {}).get("ms", {}).get(op, []) for r in rs.values()])
-               for n, rs in data.items()}
         rows.append((f"{op} p50 without a network namespace (ms)", "ms", True,
-                     {n: (d or {}).get("p50") for n, d in per.items()}))
+                     {n: phase_p50(rs, "lifecycle_nonet", op) for n, rs in data.items()}))
+    # What a container's network namespace costs each runtime: its p50 with one over its p50 without, best of N
+    # each (goal 4's bar, decision 4: Hex's create through the seam at most 1.05x). No ratio between runtimes.
+    for op in ("create", "delete"):
+        rows.append((f"{op} p50 with a network namespace over without (best of N each)", "x", None,
+                     {n: over(phase_p50(rs, "lifecycle", op), phase_p50(rs, "lifecycle_nonet", op))
+                      for n, rs in data.items()}))
     per = {n: best_dist([r["phases"].get("start_true", {}).get("ms", []) for r in rs.values()]) for n, rs in data.items()}
     for q in ("p50", "p99", "p99.9", "max"):
         rows.append((f"create+start of `true` {q} (ms)", "ms", True, {n: (d or {}).get(q) for n, d in per.items()}))
@@ -145,6 +152,11 @@ def oci_section(run):
     # No ratio: a last window faster than the first (warm-up) isn't better than one level with it.
     rows.append(("sustained: the last 1,000 lifecycles' rate against the first's", "x", None,
                  {n: (s or {}).get("last_over_first") for n, s in sus.items()}))
+    # The same round's network namespaces made on a create's path (the node's pool dry, or none kept), of its
+    # creates: decision 4's falsifier is more than 1% of them. Only the seam reports it (seam_oci reads the
+    # node's counts); no ratio.
+    rows.append(("sustained: network namespaces made on the path (the pool dry), of its creates", "of", None,
+                 {n: dry(s) for n, s in sus.items()}))
     rows.append(("CPU per lifecycle, concurrency 1 (whole bench cgroup)", "cpu", True,
                  {n: min((r["phases"]["throughput"]["1"]["cpu_s_per_lifecycle"] for r in rs.values()
                           if "throughput" in r["phases"]), default=None) for n, rs in data.items()}))
@@ -155,6 +167,45 @@ def oci_section(run):
                  {n: best(rs.values(), lambda r: held(r["phases"].get("density"), "per_gib"), False)
                   for n, rs in data.items()}))
     return list(data), rows, data
+
+
+def phase_p50(rs, phase, op):
+    """A runtime's best-of-N p50 of `op` in `phase` across its rounds `rs`, or None."""
+    d = best_dist([r["phases"].get(phase, {}).get("ms", {}).get(op, []) for r in rs.values()])
+    return (d or {}).get("p50")
+
+
+def over(a, b):
+    return a / b if a and b else None
+
+
+def dry(sustained):
+    """A sustained phase's network namespaces made on the path and its creates, where it reports them."""
+    counts = (sustained or {}).get("netns")
+    return (counts["made_on_path"], sustained["lifecycles"]) if counts else None
+
+
+def netns_counts(data):
+    """What the node counted of its containers' network namespaces in each phase of each round that reports it
+    (seam_oci): made on a create's path (the pool dry, or none kept), taken from its pool, made ahead for it, and
+    makes that failed, against the phase's creates."""
+    lines = []
+    for n, rs in data.items():
+        for rnd, r in sorted(rs.items()):
+            bits = []
+            for phase in ("lifecycle", "lifecycle_nonet", "sustained"):
+                p = r["phases"].get(phase) or {}
+                c = p.get("netns")
+                if c is None:
+                    continue
+                creates = p["lifecycles"] if phase == "sustained" else r["n"] + r["warmup"]
+                bits.append(f"{phase}: {c['made_on_path']:,} made on the path, {c['taken']:,} taken from the pool, "
+                            f"{c['made_ahead']:,} made ahead, {c['failed']:,} failed makes, of {creates:,} creates")
+            if bits:
+                lines.append(f"- {n}, round {rnd}: " + "; ".join(bits))
+    if not lines:
+        return ""
+    return "The node's network namespace counts in each phase (seam_oci, read before and after it):\n" + "\n".join(lines) + "\n"
 
 
 def socket_cost(data):
@@ -411,6 +462,8 @@ def main():
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
         if sustained_windows(data):
             parts.append(sustained_windows(data))
+        if netns_counts(data):
+            parts.append(netns_counts(data))
         if socket_cost(data):
             parts.append(socket_cost(data))
     if standin_ceiling(run):

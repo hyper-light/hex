@@ -13,6 +13,7 @@ use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -22,11 +23,12 @@ use hex_api::{
 };
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
+use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::recovery::{self, Decision, Seen, Why};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::OciError;
-use hex_runtime::linux::oci::run::Runtime as OciRuntime;
+use hex_runtime::linux::oci::run::{NetworkNs, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
 use hex_runtime::linux::oci::state::{Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
@@ -80,6 +82,8 @@ pub struct Node {
     /// The pool of `hex __oci-seed` processes that run execs into `oci` boxes, started on the first
     /// such exec from the same `hex` binary the class re-execs for its init ([`Node::seed_pool`]).
     seeds: OnceLock<SeedPool>,
+    /// Network namespaces its containers' shims made on a create's path ([`Node::netns`]).
+    made_on_path: AtomicU64,
 }
 
 /// Where an `oci` box's bundle comes from.
@@ -143,6 +147,7 @@ impl Node {
             masked: thermal_throttle()?,
             seeds: OnceLock::new(),
             specs: Mutex::new(Specs::default()),
+            made_on_path: AtomicU64::new(0),
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
@@ -177,6 +182,17 @@ impl Node {
     /// The disks the node holds boxes' files on, as `io.latency` and `io.max` name them.
     pub fn disks(&self) -> &[Dev] {
         self.root.disks()
+    }
+
+    /// What the node has counted of its containers' network namespaces since it opened (decision 4):
+    /// it keeps no pool of them yet (goal 4 plan step 4), so each container that has one of its own
+    /// had it made on its create's path. The bench reads these after each phase, in process here and
+    /// over the socket ([`crate::serve::Host::netns`]).
+    pub fn netns(&self) -> netns::Counts {
+        netns::Counts {
+            made_on_path: self.made_on_path.load(Ordering::Relaxed),
+            ..netns::Counts::default()
+        }
     }
 
     fn record(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
@@ -408,14 +424,24 @@ impl Node {
                 return Err(e);
             }
         };
-        if let Err(e) = self
+        let network = match self
             .oci()
             .create_in_cgroup(id.as_str(), &bundle, None, cgroup, None)
         {
-            // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
-            // the state dir and the record.
-            let _ = self.scrub(&id);
-            return Err(e.into());
+            Ok(network) => network,
+            Err(e) => {
+                // The container, if it started, is in the cgroup; scrub ends it and removes the
+                // cgroup, the state dir and the record.
+                let _ = self.scrub(&id);
+                return Err(e.into());
+            }
+        };
+        if network == NetworkNs::MadeOnPath {
+            // Saturating: 2^64 creates is past any node's life, so the cap is never met.
+            self.made_on_path
+                .update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    n.saturating_add(1)
+                });
         }
         // The init is blocked at the exec FIFO, alive, and the agent's child since the shim exited;
         // record which process it is so a later restart can tell it from a recycled pid (recovery's
@@ -732,6 +758,10 @@ impl Runtime for Node {
 impl crate::serve::Host for Node {
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
         Node::abandoned(self, id)
+    }
+
+    fn netns(&self) -> netns::Counts {
+        Node::netns(self)
     }
 }
 

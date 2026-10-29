@@ -1,4 +1,4 @@
-//! The socket's own tests (decision 3, HEX-SOCK-3 to 8): a live server in this process, over a host
+//! The socket's own tests (decision 3, HEX-SOCK-3 to 8 and 10): a live server in this process, over a host
 //! whose boxes are the simulator's and whose programs are real processes of this test, so the
 //! server's pidfd watch, its bounds and the disconnect rule meet real programs without a cgroup.
 //! Hostile bytes go in through a raw socket; the rest through `hex-client`, as a caller sends them.
@@ -92,7 +92,20 @@ impl Host for TestHost {
         self.abandoned.lock().unwrap().push(id.clone());
         Ok(())
     }
+
+    fn netns(&self) -> netns::Counts {
+        COUNTS
+    }
 }
+
+/// The test host's network namespace counts, each field a different value.
+const COUNTS: netns::Counts = netns::Counts {
+    made_ahead: 5,
+    taken: 4,
+    made_on_path: 3,
+    discarded: 2,
+    failed: 1,
+};
 
 struct Lab {
     server: Server,
@@ -219,7 +232,7 @@ fn received(bytes: &[u8]) -> Received<'_> {
 }
 
 fn request(id: u64, call: Call) -> Vec<u8> {
-    wire::request(id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
+    wire::request(wire::VERSION, id, &Request::Call(call), wire::MAX_MESSAGE).unwrap()
 }
 
 fn b() -> BoxId {
@@ -251,7 +264,7 @@ struct Hostile<'a>(&'a str, Vec<u8>, Vec<BorrowedFd<'a>>, u64, &'a str);
 fn hostile_messages_are_refused_and_the_connection_is_served_after() {
     let lab = Lab::new(limits());
     let fd = lab.raw();
-    let hello = wire::request(9, &Request::Hello, wire::MAX_MESSAGE).unwrap();
+    let hello = wire::request(wire::FIRST, 9, &Request::Hello, wire::MAX_MESSAGE).unwrap();
     let with = |at: usize, two: [u8; 2]| {
         let mut m = hello.clone();
         m[at..at + 2].copy_from_slice(&two);
@@ -292,8 +305,15 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             0,
             "HEXW",
         ),
-        Hostile("version 2", with(4, [2, 0]), vec![], 9, "version 2"),
-        Hostile("unknown kind", with(6, [0x0b, 0]), vec![], 9, "kind 0x000b"),
+        Hostile("version 3", with(4, [3, 0]), vec![], 9, "version 3"),
+        Hostile("unknown kind", with(6, [0x0c, 0]), vec![], 9, "kind 0x000c"),
+        Hostile(
+            "a version 2 kind in version 1",
+            with(6, [0x0b, 0]),
+            vec![],
+            9,
+            "kind 0x000b isn't a request version 1 defines",
+        ),
         Hostile(
             "an answer kind",
             with(6, [0x03, 0x80]),
@@ -306,7 +326,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             trailing,
             vec![],
             5,
-            "follow what version 1 defines",
+            "follow what version 2 defines",
         ),
         Hostile(
             "oversized",
@@ -364,6 +384,22 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
     assert!(matches!(answer_of(&other), (_, Answer::Hello(_))));
 }
 
+/// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
+/// through `hex-client`, and on a raw connection in version 2, answered in its request's version with
+/// its id.
+#[test]
+fn the_network_namespace_counts_cross_the_socket() {
+    let lab = Lab::new(limits());
+    assert_eq!(lab.client().netns().unwrap(), COUNTS);
+    let fd = lab.raw();
+    send_raw(&fd, &request(4, Call::Netns), &[]);
+    let (h, answer) = answer_of(&fd);
+    assert_eq!(
+        (h.version, h.id, answer),
+        (wire::VERSION, 4, Answer::Netns(COUNTS))
+    );
+}
+
 /// HEX-SOCK-4: connections past the bound are refused by type, naming it, without disturbing the
 /// connections the server holds; once one closes, the next is served.
 #[test]
@@ -408,7 +444,7 @@ fn requests_past_the_in_flight_bound_are_refused_and_none_is_lost() {
         answer_of(&fd),
         (
             Header {
-                version: 1,
+                version: wire::VERSION,
                 kind: 0x8007,
                 id: 3
             },
@@ -691,7 +727,7 @@ fn a_release_sent_before_a_reset_is_honoured() {
         let _held = lab.server.shared.table.lock().unwrap();
         send_raw(
             &fd,
-            &wire::request(1, &Request::Release, wire::MAX_MESSAGE).unwrap(),
+            &wire::request(wire::VERSION, 1, &Request::Release, wire::MAX_MESSAGE).unwrap(),
             &[],
         );
         drop(fd);

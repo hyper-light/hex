@@ -4,6 +4,8 @@
 //! - HEX-SOCK-9: connect, create a `Bundle` box, start it, exec `/usr/bin/true` with its stdout a pipe
 //!   this test holds, read the output, and wait on the `Proc` for `Code(0)`, all over one socket;
 //! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes;
+//! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted as one made on
+//!   its create's path, and the counts cross the socket (decision 4; goal 4 plan step 2);
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running.
@@ -155,12 +157,17 @@ impl Lab {
     }
 
     fn bundle(&self, args: &[String]) -> PathBuf {
+        self.bundle_with(args, false)
+    }
+
+    /// A bundle whose container runs `args`, with a network namespace of its own when `network`.
+    fn bundle_with(&self, args: &[String], network: bool) -> PathBuf {
         let dir = tempfile::Builder::new()
             .prefix("bundle-")
             .tempdir_in(self.bundles.path())
             .expect("bundle dir")
             .keep();
-        let (namespaces, mappings) = if self.rootless {
+        let (mut namespaces, mappings) = if self.rootless {
             (
                 r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#
                     .to_owned(),
@@ -175,6 +182,9 @@ impl Lab {
                 String::new(),
             )
         };
+        if network {
+            namespaces.push_str(r#",{"type":"network"}"#);
+        }
         assert!(args.iter().all(|a| a.is_ascii() && !a.contains('\\')));
         let config = format!(
             r#"{{
@@ -283,6 +293,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         eprintln!("SKIP: rootless OCI unavailable here ({e})");
         return;
     }
+    namespaces_counted(&lab, &client);
     let failures = conformance::run(&client, &OciBoxes(&lab));
     assert!(
         failures.is_empty(),
@@ -351,6 +362,35 @@ fn example(lab: &Lab, client: &Client) -> Result<(), String> {
     Ok(())
 }
 
+/// HEX-SOCK-10 over the live agent (decision 4; goal 4 plan step 2): the agent counts each network
+/// namespace a create made on its path, and the counts cross its socket. It keeps no pool, so a box
+/// with a network namespace of its own counts one made on the path and nothing else; boxes without
+/// one (the example's, and every other here) count none.
+fn namespaces_counted(lab: &Lab, client: &Client) {
+    let before = client.netns().unwrap();
+    assert_eq!(
+        before,
+        hex_core::netns::Counts::default(),
+        "the example's box has no network namespace of its own"
+    );
+    let id = BoxId::new("own-network").unwrap();
+    client
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(lab.bundle_with(&Lab::act(&Act::Wait), true)),
+        })
+        .unwrap();
+    client.delete(&id).unwrap();
+    assert_eq!(
+        client.netns().unwrap(),
+        hex_core::netns::Counts {
+            made_on_path: 1,
+            ..before
+        }
+    );
+}
+
 /// HEX-SOCK-6 over the live agent: a caller execs a waiting program in an `oci` box and in a `process`
 /// box over a connection of its own, then goes away without releasing them. Each program is ended and
 /// reaped (no process of it in its box, no zombie of it under the agent), and its box counts it.
@@ -395,7 +435,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         };
         send(
             &caller,
-            &wire::request(n, &Request::Call(call), wire::MAX_MESSAGE).unwrap(),
+            &wire::request(wire::VERSION, n, &Request::Call(call), wire::MAX_MESSAGE).unwrap(),
         );
         match answer(&caller) {
             (h, Answer::Started { pid }) if h.id == n => pids.push(pid),

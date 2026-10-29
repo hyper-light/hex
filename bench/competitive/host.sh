@@ -7,7 +7,8 @@
 # (add "sandbox" for the process-sandbox pass and "vm" for the microVM pass; METHODS picks their methods; add
 # "boxseam" for the process class through the Runtime seam, with SEAM_BIN naming seam_box's release binary).
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
-# ones there, HEXBENCH_PHASES picks the drivers' phases (all), and FETCH=0 keeps the competitors' binaries
+# ones there, HEXBENCH_PHASES picks the drivers' phases (all), HEXBENCH_SUSTAINED sets the sustained phase's
+# lifecycles (10000), and FETCH=0 keeps the competitors' binaries
 # already in $BASE/bin (their sha256 is recorded) rather than resolving each project's latest release again.
 # Another host only by name (BENCH_HOST_OK=<its hostname>): Ada's call for E2B's same-hardware rounds on adacachy
 # (2026-10-24). LOAD_GATE=0 skips the wait for load under 2: for those rounds, and for a density-only pass
@@ -51,7 +52,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
-  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all}"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
@@ -108,7 +109,7 @@ if [[ " $PHASES " == *" oci "* ]]; then
     --privileged --security-opt label=disable --cgroupns=private --network=none \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
-    -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e HEXBENCH_SUSTAINED -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag

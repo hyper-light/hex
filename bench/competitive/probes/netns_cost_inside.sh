@@ -4,6 +4,8 @@
 # process (oci_bench.py's lifecycle and lifecycle_nonet), and a bare `unshare -n` against `unshare -u`; 2 rounds in
 # a shuffled order, best of 2. Runs in the bench container as root, /opt/bin holding hex, seam_oci and
 # libcrun-driver and /opt/lab bench/competitive (goal 4 of docs/design/runtime-architecture.md, decision 4).
+# The OCI pass measures the same in its own rounds (seam_oci's lifecycle and lifecycle_nonet phases beside
+# oci_bench.py's, goal 4 plan step 2); this stays the quick check, a few minutes with nothing else run.
 # Env: N (500), W (50).
 set -uo pipefail
 mkdir -p /run/err; N=${N:-500}; W=${W:-50}; OUT=/opt/out

@@ -90,6 +90,18 @@ struct Making<'a> {
     pid_file: Option<&'a Path>,
 }
 
+/// Where a created container's network namespace came from: what the node agent counts of them
+/// (decision 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkNs {
+    /// Its shim made it, on the create's path.
+    MadeOnPath,
+    /// It joined one made ahead, which its create was handed.
+    MadeAhead,
+    /// It has none of its own: its spec names none, or one to join by path.
+    NotItsOwn,
+}
+
 /// Where a container's cgroup comes from.
 enum Cgroup {
     /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
@@ -144,6 +156,7 @@ impl Runtime {
     /// the cgroup root, as the runtime-spec's command line does.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
         self.create_with(id, bundle, pid_file, Cgroup::FromSpec, None)
+            .map(|_| ())
     }
 
     /// Makes the container in a cgroup the caller already made and bounded, rather than from the
@@ -155,7 +168,7 @@ impl Runtime {
     /// `network`, when given, is a network namespace made ahead (decision 4's pool, its loopback up),
     /// which the container joins in place of making its own: for a spec that makes a network namespace
     /// of its own and no user namespace, else refused by type. Its descriptor is the container's once
-    /// handed over; the caller keeps no copy.
+    /// handed over; the caller keeps no copy. Says where the container's network namespace came from.
     pub fn create_in_cgroup(
         &self,
         id: &str,
@@ -163,7 +176,7 @@ impl Runtime {
         pid_file: Option<&Path>,
         cgroup: BoxCgroup,
         network: Option<OwnedFd>,
-    ) -> Result<(), OciError> {
+    ) -> Result<NetworkNs, OciError> {
         self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup), network)
     }
 
@@ -174,7 +187,7 @@ impl Runtime {
         pid_file: Option<&Path>,
         cgroup: Cgroup,
         network: Option<OwnedFd>,
-    ) -> Result<(), OciError> {
+    ) -> Result<NetworkNs, OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
         let result = self.create_inner(id, bundle, &dir, pid_file, cgroup, network);
@@ -192,7 +205,7 @@ impl Runtime {
         pid_file: Option<&Path>,
         cgroup: Cgroup,
         network: Option<OwnedFd>,
-    ) -> Result<(), OciError> {
+    ) -> Result<NetworkNs, OciError> {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
@@ -205,6 +218,11 @@ impl Runtime {
                     .to_owned(),
             ));
         }
+        let made = match (spec.makes_namespace("network"), &network) {
+            (false, _) => NetworkNs::NotItsOwn,
+            (true, Some(_)) => NetworkNs::MadeAhead,
+            (true, None) => NetworkNs::MadeOnPath,
+        };
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
         // Hex keeps the guarantee and shares one program among such containers (devshare).
@@ -236,7 +254,7 @@ impl Runtime {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
             let _ = end_cgroup(&cgroup, id);
         }
-        result
+        result.map(|()| made)
     }
 
     fn start_shim(

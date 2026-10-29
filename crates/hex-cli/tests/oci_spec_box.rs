@@ -4,10 +4,12 @@
 //!   hostname, a hosts line and a private network: its root is an overlay; `/usr` is the bind and
 //!   read-only; its hostname, `/etc/hosts` line and network namespace are the spec's, the network
 //!   holding loopback alone, up; what it writes lands in its own writable layer and the layers are
-//!   untouched; after delete nothing of it is left: no bundle (so no writable layer), no container
-//!   state, no cgroup, no record, no mount;
+//!   untouched; its network namespace is counted as one made on its create's path (decision 4); after
+//!   delete nothing of it is left: no bundle (so no writable layer), no container state, no cgroup, no
+//!   record, no mount;
 //! - a box from a directory on the host's network: its writes land in the directory, in place, its
-//!   network namespace is the node's, and after delete nothing of it is left but those writes;
+//!   network namespace is the node's (no namespace is counted), and after delete nothing of it is left
+//!   but those writes;
 //! - the hex-api conformance suite (HEX-RT-1 to 13) on boxes made from OciSpecs;
 //! - a spec this node can't render (a root or a mount source that isn't there, a user a rootless
 //!   node can't map) is refused by the field's name, and nothing is made;
@@ -37,6 +39,7 @@ use hex_api::{
     Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Mount, Network, OciSpec, Program, Refusal,
     Rootfs, Runtime, Stdio, User,
 };
+use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase};
 use hex_node::Node;
 use hex_node::store::Store;
@@ -212,6 +215,15 @@ fn layered_box(lab: &Lab, own: &Path) {
     });
     assert_eq!(made.expect("create").state, BoxState::Created);
     let _cleanup = Deleting(&node, id.clone());
+    // Its private network is a namespace of its own, made on its create's path: the node keeps no
+    // pool of them yet (decision 4; goal 4 plan step 2).
+    assert_eq!(
+        node.netns(),
+        netns::Counts {
+            made_on_path: 1,
+            ..netns::Counts::default()
+        }
+    );
     node.start(&id).expect("start");
     assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
     let layer = state.join("bundles/layered");
@@ -324,6 +336,11 @@ fn in_place_box(lab: &Lab, own: &Path) {
     })
     .expect("create");
     let _cleanup = Deleting(&node, id.clone());
+    assert_eq!(
+        node.netns(),
+        netns::Counts::default(),
+        "the host's network is no namespace of the box's own"
+    );
     node.start(&id).expect("start");
     assert_eq!(
         exit_of(&node, &id, "echo in-place > /written-in-place"),

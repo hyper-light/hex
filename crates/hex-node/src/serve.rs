@@ -1,6 +1,7 @@
 //! The node agent's local socket (decision 3 of docs/design/runtime-architecture.md): the `Runtime`
 //! seam served over a Unix `SOCK_SEQPACKET` socket to callers that don't link Hex, in
-//! [`hex_core::wire`]'s format. An exec's stdio comes in as descriptors with its request
+//! [`hex_core::wire`]'s format, and from its version 2 the node's network namespace counts
+//! ([`Host::netns`]). An exec's stdio comes in as descriptors with its request
 //! (`SCM_RIGHTS`, unix(7)), and a program's end goes out as a message after its exec's answer.
 //!
 //! One thread does every connection's I/O and watches every exec'd program's end, through one epoll
@@ -40,6 +41,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Exit, Proc, Program, Refusal, Runtime, Stdio};
+use hex_core::netns;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
@@ -103,6 +105,9 @@ pub trait Host: Runtime {
     /// Counts in box `id` a program exec'd in it that the node ended because the connection watching
     /// it closed (the disconnect rule): reported as [`hex_api::BoxInfo::abandoned`].
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
+
+    /// The node's network namespace counts (decision 4), which a client of wire version 2 asks for.
+    fn netns(&self) -> netns::Counts;
 }
 
 /// The socket, served until dropped.
@@ -973,6 +978,7 @@ impl Shared {
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => host.delete(&id).map(|()| Answer::Done),
+            Call::Netns => Ok(Answer::Netns(host.netns())),
         };
         self.done(conn)?;
         let answer = answer.unwrap_or_else(Answer::Refused);
@@ -1191,14 +1197,9 @@ fn hung_up(fd: &OwnedFd) -> bool {
 }
 
 /// Answers a connection that won't be served with why, as id 0 (its client hasn't asked anything
-/// yet), then lets it go.
+/// yet), in the first version, which a client of any version reads, then lets it go.
 fn refuse(fd: &OwnedFd, refusal: Refusal) {
-    if let Ok(bytes) = wire::answer(
-        wire::VERSION,
-        0,
-        &Answer::Refused(refusal),
-        wire::MAX_MESSAGE,
-    ) {
+    if let Ok(bytes) = wire::answer(wire::FIRST, 0, &Answer::Refused(refusal), wire::MAX_MESSAGE) {
         let _ = rustix::net::send(fd, &bytes, SendFlags::DONTWAIT | SendFlags::NOSIGNAL);
     }
 }

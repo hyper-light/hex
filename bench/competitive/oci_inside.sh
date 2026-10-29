@@ -5,7 +5,8 @@
 # shuffled order so drift over the run does not favour one runtime.
 # Env: RUNTIMES ("hex runc crun youki runsc libcrun"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
 # N_OVERRIDE ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192),
-# HEXBENCH_PHASES (oci_bench.py's phases, all by default), STANDIN (1: the driver's own ceiling each round).
+# HEXBENCH_PHASES (oci_bench.py's and seam_oci's phases, all by default), HEXBENCH_SUSTAINED (the sustained phase's
+# lifecycles, 10000, read by both), STANDIN (1: the driver's own ceiling each round).
 set -uo pipefail
 RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
@@ -85,8 +86,11 @@ mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
 # drivers: in process (hex-seam), and over the node agent's socket (hex-seam-socket: a `hex node` process
 # seam_oci starts). The node agent runs in this container, as root, with its box root beside the runtimes'
 # container cgroups, so its create, start, exec and delete are compared with libcrun's in-process calls.
-# Each driver runs once a round, in the shuffle, as the runtimes do. Their phases are lifecycle, throughput
-# and rtt (inspect of a running box, whose difference between the drivers is the socket's cost per call).
+# Each driver runs once a round, in the shuffle, as the runtimes do. Their phases are oci_bench.py's lifecycle,
+# lifecycle_nonet (on the bundle without a network namespace), throughput and sustained, and rtt (inspect of a
+# running box, whose difference between the drivers is the socket's cost per call); around each, seam_oci reads
+# the node's network namespace counts (decision 4), so the sustained phase says how often its creates found the
+# namespace pool dry.
 SEAM=""; [ -n "${SEAM_OCI:-}" ] && [ -x "$SEAM_OCI" ] && SEAM="hex-seam hex-seam-socket"
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
   for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) $SEAM | shuf); do
@@ -100,7 +104,8 @@ for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
       if [ "$rt" = hex-seam ]; then driver=inprocess; file=ociseam; else driver=socket; file=ociseamsock; fi
       echo "round $round: the oci class through the Runtime seam (seam_oci, $driver)"
       HEXBENCH_DRIVER=$driver "$SEAM_OCI" "$OUT/$file.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" /opt/bin/hex \
-        /run/bundle-sleep /run/bundle-true 2>&1 | tee -a "$OUT/$file.log" || echo "$file round $round exited $?"
+        /run/bundle-sleep /run/bundle-true /run/bundle-sleep-nonet 2>&1 | tee -a "$OUT/$file.log" \
+        || echo "$file round $round exited $?"
       continue
     fi
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done

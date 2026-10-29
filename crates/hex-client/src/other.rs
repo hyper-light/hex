@@ -6,6 +6,7 @@ use std::path::Path;
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
+use hex_core::netns;
 
 /// A client of the node agent's socket, which this platform can't make.
 pub struct Client {
@@ -26,6 +27,11 @@ impl Client {
                 path.display()
             ),
         })
+    }
+
+    /// The agent's network namespace counts: unreachable, as every call of a client that can't be made.
+    pub fn netns(&self) -> Result<netns::Counts, Refusal> {
+        match self.never {}
     }
 }
 

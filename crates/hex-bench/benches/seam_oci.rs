@@ -1,18 +1,32 @@
 //! The `oci` class through the hex-api `Runtime` seam, by either of its two drivers: in process (the
 //! node agent in this process, `HEXBENCH_DRIVER` unset or `inprocess`) or over the node agent's local
 //! socket (`HEXBENCH_DRIVER=socket`: a `hex node` process this starts, reached through `hex-client`).
-//! oci_bench.py's lifecycle and throughput phases (create, start, exec of `true` and delete of a
-//! `sleep` container, each timed alone; then create+start+delete at concurrency 1, 8 and 32), and
-//! `rtt`: inspect of a running box, timed alone, whose work is the same either way, so the socket's
-//! cost per call is the two drivers' difference in one run. No call spawns a process but the
-//! container's own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam`
-//! (or `hex-seam-socket`), which summarize.py sets beside libcrun (the in-process rival), so runtime
-//! design goal 3's targets — exec p50 at most a quarter of libcrun's, start p50 within 10% of
-//! libcrun's (argument A3) — are read from it. Decision 3 of docs/design/runtime-architecture.md.
+//! oci_bench.py's phases, as it runs them:
+//! - `lifecycle`: create, start, exec of `true` and delete of a `sleep` container, each timed alone;
+//! - `lifecycle_nonet`: the same on a bundle without a network namespace of its own, so create and
+//!   delete are timed with and without one (decision 4);
+//! - `throughput`: create+start+delete of a `true` container at concurrency 1, 8 and 32;
+//! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
+//!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
+//! - `rtt`: inspect of a running box, timed alone, whose work is the same either way, so the socket's
+//!   cost per call is the two drivers' difference in one run.
 //!
-//!   seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle>
+//! Around every phase it reads the node's network namespace counts (made ahead, taken from its pool,
+//! made on a create's path because the pool was dry or the node keeps none, discarded, failed), in
+//! process through `Node::netns` and over the socket through `Client::netns` (the socket's version 2),
+//! and records what the phase added: the sustained phase's made-on-the-path count is how often its
+//! creates found the pool dry (decision 4's falsifier). No call spawns a process but the container's
+//! own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam` (or
+//! `hex-seam-socket`), which summarize.py sets beside libcrun (the in-process rival), so runtime design
+//! goal 3's targets (exec p50 at most a quarter of libcrun's, start p50 within 10% of libcrun's,
+//! argument A3) and goal 4's (create p50 with a network namespace at most 5% over without one) are read
+//! from it. Decisions 3 and 4 of docs/design/runtime-architecture.md.
+//!
+//!   seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle> [<sleep-nonet-bundle>]
 //! (`cargo bench -p hex-bench --bench seam_oci -- ...`, or its binary as host.sh's ociseam pass runs
-//! it). HEXBENCH_PHASES names the phases to run. The `oci` class needs root (a container's cgroup
+//! it). HEXBENCH_PHASES names the phases to run (all five unless set); `lifecycle_nonet` needs the
+//! eighth argument, a bundle like the sleep bundle without a network namespace, and records an error
+//! naming it when it isn't given. The `oci` class needs root (a container's cgroup
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
@@ -46,15 +60,23 @@ mod linux {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitCode, Stdio as Std};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
     use hex_client::Client;
+    use hex_core::netns;
     use hex_node::Node;
     use serde_json::{Map, Value, json};
 
     /// Each call's bound, as oci_bench.py's CALL_TIMEOUT_S.
     const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// The sustained phase's concurrency and the lifecycles in each of its windows, as oci_bench.py's.
+    const SUSTAINED_CONCURRENCY: usize = 32;
+    const SUSTAINED_WINDOW: usize = 1_000;
+    /// The sustained phase's lifecycles unless `HEXBENCH_SUSTAINED` says, as oci_bench.py's.
+    const SUSTAINED_DEFAULT: usize = 10_000;
 
     /// oci_bench.py's bundles bound every container to nothing of their own; the node bounds each box
     /// the way the competitive pass's do, so the comparison is like for like: the kernel's floor plus
@@ -206,12 +228,14 @@ mod linux {
         delete: Vec<f64>,
     }
 
-    /// n timed lifecycles after `warmup` untimed ones, each operation timed alone.
+    /// n timed lifecycles after `warmup` untimed ones, each operation timed alone, its boxes named
+    /// `tag` and their number.
     fn lifecycle(
         node: &dyn Runtime,
         bundle: &Path,
         n: usize,
         warmup: usize,
+        tag: &str,
         trace: Option<&Trace>,
     ) -> Result<Value, String> {
         let mut ms = Ops::default();
@@ -219,7 +243,7 @@ mod linux {
             lifecycle_once(
                 node,
                 bundle,
-                &format!("l{i:06}"),
+                &format!("{tag}{i:06}"),
                 &mut ms,
                 i >= warmup,
                 trace.filter(|_| i % 2 == warmup % 2),
@@ -281,6 +305,81 @@ mod linux {
             );
         }
         Ok(Value::Object(out))
+    }
+
+    /// oci_bench.py's sustained phase: the throughput lifecycle at concurrency 32 for `lifecycles` of
+    /// them, each thread taking the next until none are left or one has failed, the clock started once
+    /// every thread is at the barrier; then the rate in each window of 1,000 by the lifecycles' ends
+    /// (from the end of the window before it, or the start), and the last window's against the first's.
+    /// A short burst can't show decay under churn, which one production system saw fall from 110 to 45
+    /// starts/s over an hour (docs/research/runtime/oci-runtimes-and-fast-start.md §4.4).
+    fn sustained(
+        node: &dyn Runtime,
+        bundle: &Path,
+        own: &Path,
+        lifecycles: usize,
+    ) -> Result<Value, String> {
+        let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let start = Barrier::new(SUSTAINED_CONCURRENCY + 1);
+        let (t0, wall, cpu_s, ends, errs) = std::thread::scope(|s| {
+            let threads: Vec<_> = (0..SUSTAINED_CONCURRENCY)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        let mut ends = Vec::new();
+                        while !failed.load(Ordering::Relaxed) {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            if i >= lifecycles {
+                                break;
+                            }
+                            if let Err(e) = run_true_container(node, bundle, &format!("s{i:06}")) {
+                                failed.store(true, Ordering::Relaxed);
+                                return (ends, Some(e));
+                            }
+                            ends.push(Instant::now());
+                        }
+                        (ends, None)
+                    })
+                })
+                .collect();
+            start.wait();
+            let (c0, t0) = (cpu_usec(own), Instant::now());
+            let (mut ends, mut errs) = (Vec::with_capacity(lifecycles), Vec::new());
+            for t in threads {
+                match t.join() {
+                    Ok((done, err)) => {
+                        ends.extend(done);
+                        errs.extend(err);
+                    }
+                    Err(_) => errs.push("a thread panicked".to_owned()),
+                }
+            }
+            let wall = t0.elapsed();
+            (t0, wall, (cpu_usec(own) - c0) as f64 / 1e6, ends, errs)
+        });
+        if let Some(e) = errs.into_iter().next() {
+            return Err(format!(
+                "{e} (after {} of {lifecycles} lifecycles)",
+                ends.len()
+            ));
+        }
+        let mut at: Vec<f64> = ends
+            .iter()
+            .map(|end| end.saturating_duration_since(t0).as_secs_f64())
+            .collect();
+        at.sort_by(f64::total_cmp);
+        let (mut windows, mut prev) = (Vec::new(), 0.0);
+        for k in (SUSTAINED_WINDOW - 1..at.len()).step_by(SUSTAINED_WINDOW) {
+            windows.push(SUSTAINED_WINDOW as f64 / (at[k] - prev));
+            prev = at[k];
+        }
+        let last_over_first = (windows.len() > 1).then(|| windows[windows.len() - 1] / windows[0]);
+        Ok(
+            json!({"concurrency": SUSTAINED_CONCURRENCY, "lifecycles": lifecycles,
+                  "wall_s": wall.as_secs_f64(), "per_s": lifecycles as f64 / wall.as_secs_f64(),
+                  "cpu_s_per_lifecycle": cpu_s / lifecycles as f64, "window": SUSTAINED_WINDOW,
+                  "window_per_s": windows, "last_over_first": last_over_first}),
+        )
     }
 
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
@@ -350,6 +449,43 @@ mod linux {
         }
     }
 
+    /// The seam, by one of its drivers.
+    enum Driver {
+        /// The node agent in this process.
+        InProcess(Box<Node>),
+        /// A `hex node` of its own, reached through its socket. The client is dropped before the agent
+        /// it holds a connection to, which is kept for its drop alone.
+        Socket { client: Client, _agent: Agent },
+    }
+
+    impl Driver {
+        fn runtime(&self) -> &dyn Runtime {
+            match self {
+                Self::InProcess(node) => node.as_ref(),
+                Self::Socket { client, .. } => client,
+            }
+        }
+
+        /// The node's network namespace counts: a node method in process, a call over the socket.
+        fn netns(&self) -> Result<netns::Counts, String> {
+            match self {
+                Self::InProcess(node) => Ok(node.netns()),
+                Self::Socket { client, .. } => client
+                    .netns()
+                    .map_err(|e| format!("the node's network namespace counts: {e}")),
+            }
+        }
+    }
+
+    /// What the node's network namespace counts rose by from `before` to `after`.
+    fn rise(before: netns::Counts, after: netns::Counts) -> Value {
+        json!({"made_ahead": after.made_ahead - before.made_ahead,
+               "taken": after.taken - before.taken,
+               "made_on_path": after.made_on_path - before.made_on_path,
+               "discarded": after.discarded - before.discarded,
+               "failed": after.failed - before.failed})
+    }
+
     pub(super) fn main() -> ExitCode {
         let args: Vec<String> = std::env::args_os()
             .skip(1)
@@ -359,16 +495,36 @@ mod linux {
             })
             .filter(|a| a != "--bench")
             .collect();
-        let [out, n, warmup, lifecycles, hex, sleep_bundle, true_bundle] = args.as_slice() else {
+        let ([out, n, warmup, lifecycles, hex, sleep_bundle, true_bundle]
+        | [
+            out,
+            n,
+            warmup,
+            lifecycles,
+            hex,
+            sleep_bundle,
+            true_bundle,
+            _,
+        ]) = args.as_slice()
+        else {
             panic!(
-                "usage: seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle>"
+                "usage: seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle> [<sleep-nonet-bundle>]"
             );
         };
+        let nonet_bundle = args.get(7).map(PathBuf::from);
         let (n, warmup, lifecycles): (usize, usize, usize) = (
             n.parse().unwrap(),
             warmup.parse().unwrap(),
             lifecycles.parse().unwrap(),
         );
+        let sustained_lifecycles = std::env::var("HEXBENCH_SUSTAINED")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map_or(SUSTAINED_DEFAULT, |v| {
+                v.trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("HEXBENCH_SUSTAINED={v:?}: {e}"))
+            });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
         // The box root beside the runtimes' container cgroups, under the vacated, delegated cgroup
         // root; the node agent itself stays where it is, and the parent's cpu.stat is the CPU a
@@ -393,11 +549,14 @@ mod linux {
         };
         // The socket driver's agent is a process of its own, as a caller that doesn't link Hex meets
         // it; the in-process driver's is this one.
-        let (agent, node): (Option<Agent>, Box<dyn Runtime>) = if socket {
+        let driver = if socket {
             let (agent, path) = Agent::start(hex, state.path(), &root);
             let client = Client::connect(&path)
                 .unwrap_or_else(|e| panic!("connecting to hex node at {}: {e}", path.display()));
-            (Some(agent), Box::new(client))
+            Driver::Socket {
+                client,
+                _agent: agent,
+            }
         } else {
             let node = Node::open(&root, state.path(), state.path())
                 .unwrap_or_else(|e| {
@@ -407,24 +566,46 @@ mod linux {
                     )
                 })
                 .with_oci_helper(PathBuf::from(hex));
-            (None, Box::new(node))
+            Driver::InProcess(Box::new(node))
         };
+        let node = driver.runtime();
         let wanted = std::env::var("HEXBENCH_PHASES")
             .ok()
             .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| "lifecycle throughput rtt".to_owned());
+            .unwrap_or_else(|| "lifecycle lifecycle_nonet throughput sustained rtt".to_owned());
         let trace = Trace::from_env();
         let (mut phases, mut errors) = (Map::new(), Map::new());
-        for phase in ["lifecycle", "throughput", "rtt"] {
+        for phase in [
+            "lifecycle",
+            "lifecycle_nonet",
+            "throughput",
+            "sustained",
+            "rtt",
+        ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
             }
             let t0 = Instant::now();
-            let r = match phase {
-                "lifecycle" => lifecycle(node.as_ref(), &sleep_bundle, n, warmup, trace.as_ref()),
-                "rtt" => rtt(node.as_ref(), &sleep_bundle, n, warmup),
-                _ => throughput(node.as_ref(), &true_bundle, &parent, lifecycles),
-            };
+            // The node's counts before and after the phase, outside its timing: what it added.
+            let r = driver.netns().and_then(|before| {
+                let mut v = match phase {
+                    "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
+                    "lifecycle_nonet" => match &nonet_bundle {
+                        Some(bundle) => lifecycle(node, bundle, n, warmup, "n", None),
+                        None => Err("it needs the bundle without a network namespace, \
+                                     seam_oci's eighth argument"
+                            .to_owned()),
+                    },
+                    "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
+                    "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
+                    _ => rtt(node, &sleep_bundle, n, warmup),
+                }?;
+                let rose = rise(before, driver.netns()?);
+                if let Value::Object(fields) = &mut v {
+                    fields.insert("netns".to_owned(), rose);
+                }
+                Ok(v)
+            });
             let note = r
                 .as_ref()
                 .err()
@@ -439,8 +620,7 @@ mod linux {
                 Err(e) => errors.insert(phase.to_owned(), Value::String(e)),
             };
         }
-        drop(node);
-        drop(agent);
+        drop(driver);
         let _ = std::fs::remove_dir(&root);
         let result = json!({"runtime": runtime, "n": n, "warmup": warmup,
                             "phases": phases, "errors": errors, "cgroup": parent});

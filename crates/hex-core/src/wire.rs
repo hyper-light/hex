@@ -22,7 +22,12 @@
 //! later version adds kinds and appends fields to a kind's body, and reads every earlier version's
 //! messages as they were; an answer is written in its request's version. A reader refuses a message
 //! with bytes past what its version defines rather than skip them, so a field an older reader can't
-//! act on is never dropped silently (§3); a client learns the version a server speaks from its hello.
+//! act on is never dropped silently (§3), and a kind newer than a message's version is refused as one
+//! that version doesn't define. A client says hello in [`FIRST`], which every node agent reads, learns
+//! from the answer the highest version the agent speaks, and writes the rest in the highest both speak.
+//!
+//! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
+//! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -33,10 +38,15 @@ use hex_api::{
     OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
 };
 
+use crate::netns;
+
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
-/// The version this side writes, and the highest it reads; it reads every one from 1.
-pub const VERSION: u16 = 1;
+/// The highest version this side speaks; it reads and writes every one from [`FIRST`].
+pub const VERSION: u16 = 2;
+/// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
+/// message whose version this side can't tell or doesn't speak.
+pub const FIRST: u16 = 1;
 /// The header's length: magic, version, kind and id.
 pub const HEADER_BYTES: usize = 16;
 /// Largest message either side sends or reads. It sits under the kernel's own bound on a
@@ -50,8 +60,9 @@ pub const MAX_MESSAGE: usize = 128 << 10;
 /// Most descriptors one message carries: exec's stdin, stdout and stderr.
 pub const MAX_FDS: usize = 3;
 
-/// The kinds of version 1. Requests sit below `0x8000`, answers from it.
+/// The kinds, each from the version that added it. Requests sit below `0x8000`, answers from it.
 mod kind {
+    // Version 1's.
     pub const HELLO: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
     pub const START: u16 = 0x0003;
@@ -70,6 +81,18 @@ mod kind {
     pub const BOXES: u16 = 0x8006;
     pub const REFUSED: u16 = 0x8007;
     pub const EXITED: u16 = 0x8008;
+    // Version 2's.
+    pub const NETNS: u16 = 0x000b;
+    pub const NETNS_ANSWER: u16 = 0x8009;
+
+    /// The version that added `kind`: a message of an earlier version is never of it. A kind no
+    /// version defines is refused by the reader's match, whatever this says.
+    pub fn since(kind: u16) -> u16 {
+        match kind {
+            NETNS | NETNS_ANSWER => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// A message's header.
@@ -93,7 +116,7 @@ pub enum Request {
     Release,
 }
 
-/// A call of the `Runtime` seam.
+/// A call of the node agent: the `Runtime` seam's, and from version 2 its network namespace counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
     Create(BoxSpec),
@@ -112,6 +135,8 @@ pub enum Call {
     Usage(BoxId),
     List,
     Delete(BoxId),
+    /// The node agent's network namespace counts ([`netns::Counts`]), version 2's.
+    Netns,
 }
 
 /// Which of a program's standard streams travel with its exec, in this order; the rest are the null
@@ -176,6 +201,8 @@ pub enum Answer {
     Refused(Refusal),
     /// The program the header's id started has ended. Sent unasked, after that exec's answer.
     Exited(Exit),
+    /// netns's, version 2's.
+    Netns(netns::Counts),
 }
 
 /// The answer to a hello.
@@ -264,8 +291,8 @@ pub struct Received<'a> {
     pub descriptors_cut: bool,
 }
 
-/// A request refused: the fault, and where to send the refusal (the request's version and id, or
-/// version [`VERSION`] and id 0 when its header couldn't be read).
+/// A request refused: the fault, and where to send the refusal (the request's version and id; version
+/// [`FIRST`] when the request's isn't one this side speaks, and id 0 when its header couldn't be read).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bad {
     pub version: u16,
@@ -273,25 +300,24 @@ pub struct Bad {
     pub fault: Fault,
 }
 
-/// A request as a message of at most `bound` bytes.
-pub fn request(id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Fault> {
+/// A request as a message of at most `bound` bytes, in `version`: the highest its node agent speaks,
+/// as far as this side does, or [`FIRST`] for a hello. A request of a kind `version` doesn't define is
+/// refused before it is written.
+pub fn request(version: u16, id: u64, request: &Request, bound: usize) -> Result<Vec<u8>, Fault> {
+    speaks(version)?;
     let mut w = Writer::new(bound);
     match request {
-        Request::Hello => w.header(VERSION, kind::HELLO, id),
-        Request::Release => w.header(VERSION, kind::RELEASE, id),
-        Request::Call(call) => put_call(&mut w, id, call)?,
+        Request::Hello => w.header(version, kind::HELLO, id),
+        Request::Release => w.header(version, kind::RELEASE, id),
+        Request::Call(call) => put_call(&mut w, version, id, call)?,
     }
     w.done()
 }
 
-/// An answer as a message of at most `bound` bytes, in `version` (its request's).
+/// An answer as a message of at most `bound` bytes, in `version` (its request's). An answer of a kind
+/// `version` doesn't define is refused before it is written.
 pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Vec<u8>, Fault> {
-    if !(1..=VERSION).contains(&version) {
-        return Err(Fault::Version {
-            got: version,
-            speaks: VERSION,
-        });
-    }
+    speaks(version)?;
     let mut w = Writer::new(bound);
     match answer {
         Answer::Hello(h) => {
@@ -346,6 +372,19 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
         Answer::Exited(exit) => {
             w.header(version, kind::EXITED, id);
             put_exit(&mut w, *exit);
+        }
+        Answer::Netns(counts) => {
+            defines(version, kind::NETNS_ANSWER, "an answer")?;
+            w.header(version, kind::NETNS_ANSWER, id);
+            for n in [
+                counts.made_ahead,
+                counts.taken,
+                counts.made_on_path,
+                counts.discarded,
+                counts.failed,
+            ] {
+                w.u64(n);
+            }
         }
     }
     w.done()
@@ -406,20 +445,21 @@ pub fn boxes(
 pub fn read_request(msg: &Received<'_>, bound: usize) -> Result<(Header, Request), Bad> {
     let mut r = Reader::new(msg.bytes);
     let (version, kind, id) = r.header().map_err(|fault| Bad {
-        version: VERSION,
+        version: FIRST,
         id: 0,
         fault,
     })?;
     let bad = |fault| Bad {
-        version: if (1..=VERSION).contains(&version) {
+        version: if speaks(version).is_ok() {
             version
         } else {
-            VERSION
+            FIRST
         },
         id,
         fault,
     };
     check(msg, bound, version).map_err(bad)?;
+    defines(version, kind, "a request").map_err(bad)?;
     let request = match kind {
         kind::HELLO => Request::Hello,
         kind::RELEASE => Request::Release,
@@ -446,6 +486,7 @@ pub fn read_request(msg: &Received<'_>, bound: usize) -> Result<(Header, Request
         kind::USAGE => Request::Call(Call::Usage(box_id(&mut r).map_err(bad)?)),
         kind::LIST => Request::Call(Call::List),
         kind::DELETE => Request::Call(Call::Delete(box_id(&mut r).map_err(bad)?)),
+        kind::NETNS => Request::Call(Call::Netns),
         _ => {
             return Err(bad(Fault::Kind {
                 kind,
@@ -475,6 +516,7 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
     let mut r = Reader::new(msg.bytes);
     let (version, kind, id) = r.header()?;
     check(msg, bound, version)?;
+    defines(version, kind, "an answer")?;
     if msg.descriptors != 0 {
         return Err(Fault::Descriptors {
             what: "an answer",
@@ -517,6 +559,13 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         },
         kind::REFUSED => Answer::Refused(refusal(&mut r)?),
         kind::EXITED => Answer::Exited(exit(&mut r)?),
+        kind::NETNS_ANSWER => Answer::Netns(netns::Counts {
+            made_ahead: r.u64()?,
+            taken: r.u64()?,
+            made_on_path: r.u64()?,
+            discarded: r.u64()?,
+            failed: r.u64()?,
+        }),
         _ => {
             return Err(Fault::Kind {
                 kind,
@@ -541,13 +590,33 @@ fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
     if msg.descriptors_cut || msg.descriptors > MAX_FDS {
         return Err(Fault::DescriptorsCut);
     }
-    if !(1..=VERSION).contains(&version) {
-        return Err(Fault::Version {
+    speaks(version)
+}
+
+/// That this side speaks `version`.
+fn speaks(version: u16) -> Result<(), Fault> {
+    if (FIRST..=VERSION).contains(&version) {
+        Ok(())
+    } else {
+        Err(Fault::Version {
             got: version,
             speaks: VERSION,
-        });
+        })
     }
-    Ok(())
+}
+
+/// That `version` defines `kind` (`expected`, a request or an answer): a kind a later version added
+/// is refused in an earlier one's message, as one that version doesn't define.
+fn defines(version: u16, kind: u16, expected: &'static str) -> Result<(), Fault> {
+    if version >= kind::since(kind) {
+        Ok(())
+    } else {
+        Err(Fault::Kind {
+            kind,
+            version,
+            expected,
+        })
+    }
 }
 
 fn request_name(kind: u16) -> &'static str {
@@ -562,18 +631,19 @@ fn request_name(kind: u16) -> &'static str {
         kind::LIST => "a list",
         kind::DELETE => "a delete",
         kind::RELEASE => "a release",
+        kind::NETNS => "a netns",
         _ => "a request",
     }
 }
 
-fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
+fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fault> {
     match call {
         Call::Create(spec) => {
-            w.header(VERSION, kind::CREATE, id);
+            w.header(version, kind::CREATE, id);
             put_box_spec(w, spec)
         }
         Call::Start(b) => {
-            w.header(VERSION, kind::START, id);
+            w.header(version, kind::START, id);
             w.string(b.as_str())
         }
         Call::Exec {
@@ -581,14 +651,14 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
             program,
             streams,
         } => {
-            w.header(VERSION, kind::EXEC, id);
+            w.header(version, kind::EXEC, id);
             w.string(b.as_str())?;
             put_program(w, program)?;
             w.u8(streams.bits());
             Ok(())
         }
         Call::Signal { id: b, signal } => {
-            w.header(VERSION, kind::SIGNAL, id);
+            w.header(version, kind::SIGNAL, id);
             w.string(b.as_str())?;
             let n = u8::try_from(signal.number())
                 .map_err(|_| Fault::value("signal", format!("{} isn't a byte", signal.number())))?;
@@ -596,20 +666,25 @@ fn put_call(w: &mut Writer, id: u64, call: &Call) -> Result<(), Fault> {
             Ok(())
         }
         Call::Inspect(b) => {
-            w.header(VERSION, kind::INSPECT, id);
+            w.header(version, kind::INSPECT, id);
             w.string(b.as_str())
         }
         Call::Usage(b) => {
-            w.header(VERSION, kind::USAGE, id);
+            w.header(version, kind::USAGE, id);
             w.string(b.as_str())
         }
         Call::List => {
-            w.header(VERSION, kind::LIST, id);
+            w.header(version, kind::LIST, id);
             Ok(())
         }
         Call::Delete(b) => {
-            w.header(VERSION, kind::DELETE, id);
+            w.header(version, kind::DELETE, id);
             w.string(b.as_str())
+        }
+        Call::Netns => {
+            defines(version, kind::NETNS, "a request")?;
+            w.header(version, kind::NETNS, id);
+            Ok(())
         }
     }
 }

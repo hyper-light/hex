@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, Exit, Proc, Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
+use hex_core::netns;
 use hex_core::wire::{self, Answer, Call, Header, Limits, Received, Request, Streams};
 use rustix::io::Errno;
 use rustix::net::sockopt::Timeout;
@@ -32,6 +33,9 @@ pub struct Client {
     conn: Arc<Conn>,
     classes: Vec<Class>,
     limits: Limits,
+    /// The wire version this client writes: [`wire::FIRST`] for its hello, then the highest both it
+    /// and its agent speak.
+    version: u16,
 }
 
 /// The connection, held by the client and by each `Proc` it returned: it closes when the last goes.
@@ -264,14 +268,21 @@ impl Client {
                 in_flight: 1,
                 programs: 0,
             },
+            // The hello goes in the first version, which an agent of any version reads.
+            version: wire::FIRST,
         };
         match client.call(&Request::Hello, Vec::new(), None)?.1 {
+            Answer::Hello(hello) if hello.version < wire::FIRST => Err(Refusal::Broken(format!(
+                "the node agent says it speaks wire version {}, below the first",
+                hello.version
+            ))),
             Answer::Hello(hello) => {
                 client.classes = hello.classes;
                 client.limits = Limits {
                     message_bytes: hello.limits.message_bytes.min(wire::MAX_MESSAGE),
                     ..hello.limits
                 };
+                client.version = hello.version.min(wire::VERSION);
                 Ok(client)
             }
             Answer::Refused(r) => Err(r),
@@ -282,6 +293,17 @@ impl Client {
     /// The agent's bounds on this connection and its socket, as its hello told them.
     pub fn limits(&self) -> Limits {
         self.limits
+    }
+
+    /// The agent's network namespace counts (decision 4), as [`hex_node::Node::netns`] reads them in
+    /// process. An agent of wire version 1 has none to give: the call is refused by type before it is
+    /// sent, as a kind version 1 doesn't define.
+    pub fn netns(&self) -> Result<netns::Counts, Refusal> {
+        match self.call(&Request::Call(Call::Netns), Vec::new(), None)?.1 {
+            Answer::Netns(counts) => Ok(counts),
+            Answer::Refused(r) => Err(r),
+            other => Err(unexpected("netns", &other)),
+        }
     }
 
     /// Sends `request` with `fds`, closing this side's copies of them once sent, and waits for its
@@ -323,7 +345,7 @@ impl Client {
                 state.programs.remove(&id);
             }
         };
-        let sent = wire::request(id, request, self.limits.message_bytes)
+        let sent = wire::request(self.version, id, request, self.limits.message_bytes)
             .map_err(|fault| Sent::Refused(fault.into()))
             .and_then(|bytes| send(&shared.fd, &bytes, &fds));
         drop(fds);
@@ -434,6 +456,7 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Boxes { .. } => "a list",
         Answer::Refused(_) => "a refusal",
         Answer::Exited(_) => "a program's end",
+        Answer::Netns(_) => "network namespace counts",
     };
     Refusal::Broken(format!("the node agent answered a {call} with {kind}"))
 }
@@ -475,6 +498,7 @@ impl Runtime for Client {
         match answer {
             Answer::Started { pid } => Ok(Box::new(RemoteProc {
                 conn: Arc::clone(&self.conn),
+                version: self.version,
                 exec,
                 pid,
                 ending,
@@ -533,6 +557,8 @@ impl Runtime for Client {
 /// A program a node agent started for this client: its end comes as a message.
 struct RemoteProc {
     conn: Arc<Conn>,
+    /// The wire version its client writes, which its release goes in.
+    version: u16,
     exec: u64,
     pid: u32,
     ending: Arc<Ending>,
@@ -605,7 +631,13 @@ impl Drop for RemoteProc {
         if let Ok(mut state) = shared.state() {
             state.programs.remove(&self.exec);
         }
-        if !ended && let Ok(bytes) = wire::request(self.exec, &Request::Release, wire::MAX_MESSAGE)
+        if !ended
+            && let Ok(bytes) = wire::request(
+                self.version,
+                self.exec,
+                &Request::Release,
+                wire::MAX_MESSAGE,
+            )
         {
             let _ = send(&shared.fd, &bytes, &[]);
         }
@@ -617,11 +649,8 @@ mod tests {
     use super::*;
     use rustix::event::{PollFd, PollFlags, Timespec};
 
-    /// HEX-SOCK-4: an agent that refuses a connection and closes it with the client's hello unread
-    /// leaves the client a reset, reported once and before the refusal it sent; the client still reads
-    /// the refusal, so connect fails with it, typed, rather than with the reset.
-    #[test]
-    fn a_refusal_before_a_reset_is_the_one_connect_returns() {
+    /// A stand-in agent's listening socket, in a directory of its own.
+    fn agent_socket() -> (tempfile::TempDir, std::path::PathBuf, OwnedFd) {
         let cache = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
             .join(".cache/hex-t7/client");
         std::fs::create_dir_all(&cache).unwrap();
@@ -639,6 +668,34 @@ mod tests {
         .unwrap();
         rustix::net::bind(&listener, &SocketAddrUnix::new(&path).unwrap()).unwrap();
         rustix::net::listen(&listener, 1).unwrap();
+        (dir, path, listener)
+    }
+
+    /// The next request on `conn`, waiting at most 30 s for it.
+    fn next_request(conn: &OwnedFd) -> (Header, Request) {
+        let mut ready = [PollFd::new(conn, PollFlags::IN)];
+        let ts = Timespec {
+            tv_sec: 30,
+            tv_nsec: 0,
+        };
+        assert_eq!(rustix::event::poll(&mut ready, Some(&ts)).unwrap(), 1);
+        let mut buf = vec![0u8; wire::MAX_MESSAGE];
+        let (n, _) = rustix::net::recv(conn, &mut buf, RecvFlags::empty()).unwrap();
+        let msg = Received {
+            bytes: &buf[..n],
+            size: n,
+            descriptors: 0,
+            descriptors_cut: false,
+        };
+        wire::read_request(&msg, wire::MAX_MESSAGE).unwrap()
+    }
+
+    /// HEX-SOCK-4: an agent that refuses a connection and closes it with the client's hello unread
+    /// leaves the client a reset, reported once and before the refusal it sent; the client still reads
+    /// the refusal, so connect fails with it, typed, rather than with the reset.
+    #[test]
+    fn a_refusal_before_a_reset_is_the_one_connect_returns() {
+        let (_dir, path, listener) = agent_socket();
         let refusal = Refusal::Exhausted {
             what: "connections to the node agent's socket",
             bound: 2,
@@ -654,17 +711,64 @@ mod tests {
                     tv_nsec: 0,
                 };
                 assert_eq!(rustix::event::poll(&mut hello, Some(&ts)).unwrap(), 1);
-                let bytes = wire::answer(
-                    wire::VERSION,
-                    0,
-                    &Answer::Refused(refusal),
-                    wire::MAX_MESSAGE,
-                )
-                .unwrap();
+                // In the first version, as the node agent refuses a connection.
+                let bytes =
+                    wire::answer(wire::FIRST, 0, &Answer::Refused(refusal), wire::MAX_MESSAGE)
+                        .unwrap();
                 rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL).unwrap();
             })
         };
         assert_eq!(Client::connect(&path).err(), Some(refusal));
         agent.join().unwrap();
+    }
+
+    /// HEX-SOCK-2, append-only: a client of version 2 serves the seam to an agent of version 1. Its
+    /// hello goes in version 1; told the agent speaks version 1 alone, it writes every call in
+    /// version 1, and the network namespace counts, which version 1 doesn't define, are refused by
+    /// type without a message sent: the agent's next request is the call after them.
+    #[test]
+    fn a_version_1_agent_is_served_in_version_1() {
+        let (_dir, path, listener) = agent_socket();
+        let agent = std::thread::spawn(move || {
+            let conn = rustix::net::accept_with(&listener, SocketFlags::CLOEXEC).unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let (h, request) = next_request(&conn);
+                let answer = match request {
+                    Request::Hello => Answer::Hello(wire::Hello {
+                        version: 1,
+                        classes: vec![Class::Process],
+                        limits: Limits {
+                            connections: 1,
+                            message_bytes: wire::MAX_MESSAGE,
+                            in_flight: 1,
+                            programs: 1,
+                        },
+                    }),
+                    Request::Call(Call::Inspect(id)) => Answer::Refused(Refusal::NoSuchBox(id)),
+                    other => panic!("a version 1 agent was sent {other:?}"),
+                };
+                let bytes = wire::answer(1, h.id, &answer, wire::MAX_MESSAGE).unwrap();
+                rustix::net::send(&conn, &bytes, SendFlags::NOSIGNAL).unwrap();
+                seen.push((h.version, h.kind));
+            }
+            seen
+        });
+        let client = Client::connect(&path).unwrap();
+        let b = BoxId::new("b").unwrap();
+        assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
+        assert_eq!(
+            client.netns(),
+            Err(Refusal::Invalid {
+                what: "message",
+                why: "kind 0x000b isn't a request version 1 defines".to_owned(),
+            })
+        );
+        assert_eq!(client.inspect(&b), Err(Refusal::NoSuchBox(b.clone())));
+        assert_eq!(
+            agent.join().unwrap(),
+            [(1, 0x0001), (1, 0x0006), (1, 0x0006)],
+            "the hello and both inspects, each in version 1, and nothing between them"
+        );
     }
 }

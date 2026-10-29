@@ -266,8 +266,14 @@ refused naming its size and the bound.
 each kind defines; integers little-endian, strings and paths length-prefixed, options and enums tagged. Version 1's
 bytes are recorded in its tests, and the format changes append-only: a later version adds kinds and appends fields,
 and reads every earlier version's messages as they were. A reader refuses bytes past what a message's version
-defines, so an extension an older agent can't apply is refused, never dropped (CLAUDE.md §3). A list's answer comes
-in as many messages as its boxes need, so a dense node answers it whole.
+defines, so an extension an older agent can't apply is refused, never dropped (CLAUDE.md §3); a kind a later
+version added is refused in an earlier version's message, as one that version doesn't define. A list's answer comes
+in as many messages as its boxes need, so a dense node answers it whole. Version 2 (goal 4 plan step 2) adds one
+request and its answer, the node's network namespace counts (decision 4), and writes every version 1 kind as
+version 1 does but for its header's version. A client says hello in version 1, which an agent of any version reads,
+learns the highest version the agent speaks from its answer, and writes the rest in the highest both speak; an
+agent answers each request in its version, and refuses what it can't read in version 1, so a client of either
+version reads the refusal.
 
 **Bounds** (`serve::LIMITS`, told to each client in its hello), each refused past by type, naming it:
 
@@ -318,7 +324,9 @@ bound are refused naming it, and the next is served once one closes. 5, requests
 naming it, and every request is answered once. 6, the disconnect rule: a gone client's programs killed, reaped and
 counted, a released one left running, a release sent just before a reset honoured. 7, programs past the bound are
 refused naming it. 8, stdio crosses as descriptors, and only a pipe's right end is taken. 9, the plan's example over
-a live `hex node`.
+a live `hex node`. 10, the node's network namespace counts cross the socket as the node holds them, a box with a
+network namespace of its own counted over a live `hex node`, and a client of version 2 serves the seam to an
+agent of version 1, writing in version 1 and refusing the counts by type, unsent.
 
 **What it costs** (`bench/competitive/probes/socket_cost.md`, run 1: fedora, 2026-10-27, 0f41abb, both drivers in one
 run, load 12 to 15, so not of record). A call over the socket costs 0.031 ms more than in process at p50: `inspect`
@@ -576,7 +584,10 @@ a burst of its whole width finds a namespace each, at most 24 MiB of the kernel'
 whether that keeps up with sustained churn is the sustained phase's to show (goal 4 plan step 5). A make that fails
 stops the refill until the next take, so a kernel that refuses every make costs that thread one failed make a take,
 never a loop of them (CLAUDE.md §2). Takes go oldest first, so under churn each namespace is handed out within a
-bound's worth of takes of its making, none left in the pool while others come and go.
+bound's worth of takes of its making, none left in the pool while others come and go. The node counts what its
+containers' namespaces were (made ahead, taken from the pool, made on a create's path), and seam_oci reads the counts
+around each of its phases, in process (`Node::netns`) and over the socket (the wire's version 2), so the sustained
+phase reports how many of its creates found the pool dry (goal 4 plan step 2).
 
 **Where its memory is charged.** The kernel charges what it can of a namespace to the cgroup of the task that makes
 it, when it is made (`struct net` is `SLAB_ACCOUNT`, `net_namespace.c:1259-1261`), and doesn't move it after. A
