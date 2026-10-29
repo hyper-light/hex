@@ -5,10 +5,17 @@
 //! setting IFF_UP on interface 1, which loopback is in every namespace (`LOOPBACK_IFINDEX`,
 //! include/net/flow.h, which drivers/net/loopback.c checks as it registers it). The request is built,
 //! and the kernel's answer read, as bytes, so this needs no `unsafe` (CLAUDE.md §12).
+//!
+//! A node agent makes such namespaces ahead of the containers that join them ([`make_ahead`]; decision 4
+//! of docs/design/runtime-architecture.md), its loopback brought up the same way.
 
+use std::os::fd::{BorrowedFd, OwnedFd};
+
+use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
+use rustix::thread::UnshareFlags;
 
-use crate::linux::oci::OciError;
+use crate::linux::oci::{OciError, sys};
 
 /// `RTM_NEWLINK` (include/uapi/linux/rtnetlink.h).
 const RTM_NEWLINK: u16 = 16;
@@ -48,6 +55,35 @@ pub fn loopback_up() -> Result<(), OciError> {
     let (got, _) = rustix::net::recv(&fd, &mut answer, RecvFlags::empty())
         .map_err(|e| OciError::os("reading the answer to loopback up", e))?;
     acked(answer.get(..got).unwrap_or_default())
+}
+
+/// The calling thread's network namespace, open close-on-exec (`/proc/thread-self`, proc(5)): a
+/// thread's namespaces are its own, and this is where a thread that makes namespaces ahead goes back
+/// to after each.
+pub fn thread_network() -> Result<OwnedFd, OciError> {
+    rustix::fs::open(
+        "/proc/thread-self/ns/net",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening this thread's network namespace", e))
+}
+
+/// A fresh network namespace for a container to join (decision 4), made on the calling thread with
+/// `unshare(CLONE_NEWNET)` as containerd makes a pod's (`pkg/netns/netns_linux.go` at v2.2.0), its
+/// loopback brought up inside it, and held by the descriptor returned, close-on-exec ("As long as
+/// this file descriptor remains open, the namespace will remain alive", namespaces(7)). The thread
+/// goes back to `home`, its own namespace ([`thread_network`]), before this returns, whether or not
+/// the make worked, so it holds none of the namespaces it makes and each ends with the container it
+/// went to. A thread that can't go back is refused as the make is; its next make moves it on.
+pub fn make_ahead(home: BorrowedFd<'_>) -> Result<OwnedFd, OciError> {
+    sys::unshare(UnshareFlags::NEWNET)?;
+    let made = thread_network().and_then(|ns| loopback_up().map(|()| ns));
+    let back = sys::setns(home, libc::CLONE_NEWNET);
+    match (made, back) {
+        (Ok(ns), Ok(())) => Ok(ns),
+        (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+    }
 }
 
 /// RTM_NEWLINK for interface 1, IFF_UP in its flags and in the mask of flags it changes, the kernel

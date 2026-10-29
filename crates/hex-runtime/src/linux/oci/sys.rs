@@ -793,8 +793,9 @@ pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciErro
 }
 
 /// `unshare` of namespace flags. Hex never passes `CLONE_FILES`, the one flag that makes
-/// `unshare` unsound (it can detach file descriptors another thread is using); this is the init,
-/// single-threaded after its re-exec, and uses only the `NEW*` namespace flags.
+/// `unshare` unsound (it can detach file descriptors another thread is using); its callers, the init
+/// (single-threaded after its re-exec) and the node agent's thread that makes network namespaces ahead
+/// ([`super::net::make_ahead`]), use only the `NEW*` namespace flags.
 pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
     // CLONE_FILES is the one flag that makes `unshare` unsound; clear it defensively (callers only
     // ever pass namespace flags) so the invariant below holds whatever the caller passed.

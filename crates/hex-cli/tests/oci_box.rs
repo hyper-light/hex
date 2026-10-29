@@ -8,6 +8,12 @@
 //! - SIGKILL a box's init: inspect reports `Signal(9)`;
 //! - past the init budget: create is refused with `Exhausted`, naming it, and leaves nothing;
 //! - the hex-api conformance suite on the `oci` class, its exit-report cases included;
+//! - decision 4's network namespaces (goal 4 plan step 4): a box whose bundle makes a network
+//!   namespace of its own runs in one no other box has had, loopback up. HEX-NETNS-9: from a node whose
+//!   pool holds none (bound 0) it is made on the create's path, counted so. HEX-NETNS-8, as root: two
+//!   boxes take one each from the node's pool, and the node keeps no descriptor of either.
+//!   HEX-NETNS-10, rootless: made on the path in the box's own user namespace, which owns it, nothing
+//!   taken;
 //! - a box's process orphaned to the agent, once ended, is reaped by the sweep: no zombie is kept.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
@@ -105,17 +111,23 @@ impl Lab {
 
     /// A bundle whose init runs `args`, in a fresh directory.
     fn bundle(&self, args: &[String]) -> PathBuf {
+        self.bundle_with(args, false)
+    }
+
+    /// A bundle whose init runs `args`, with a network namespace of its own when `network` is set,
+    /// its sysfs mounted at `/sys` to read it by.
+    fn bundle_with(&self, args: &[String], network: bool) -> PathBuf {
         let dir = tempfile::Builder::new()
             .prefix("bundle-")
             .tempdir_in(self.bundles.path())
             .expect("bundle dir")
             .keep();
-        std::fs::write(dir.join("config.json"), self.config(args)).expect("config.json");
+        std::fs::write(dir.join("config.json"), self.config(args, network)).expect("config.json");
         dir
     }
 
-    fn config(&self, args: &[String]) -> String {
-        let (namespaces, mappings) = if self.rootless {
+    fn config(&self, args: &[String], network: bool) -> String {
+        let (mut namespaces, mappings) = if self.rootless {
             (
                 r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#
                     .to_owned(),
@@ -130,6 +142,14 @@ impl Lab {
                 String::new(),
             )
         };
+        let mut sys = String::new();
+        if network {
+            namespaces.push_str(r#",{"type":"network"}"#);
+            sys.push_str(
+                r#",
+    {"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}"#,
+            );
+        }
         let args = json_args(args);
         format!(
             r#"{{
@@ -147,7 +167,7 @@ impl Lab {
     {{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","mode=755","size=65536k"]}},
     {{"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","nodev"]}},
     {{"destination": "/usr", "type": "bind", "source": "/usr", "options": ["rbind","ro"]}},
-    {{"destination": "/hex", "type": "bind", "source": "{exe}", "options": ["bind","ro"]}}
+    {{"destination": "/hex", "type": "bind", "source": "{exe}", "options": ["bind","ro"]}}{sys}
   ],
   "linux": {{"namespaces": [{namespaces}]{mappings}}}
 }}"#,
@@ -162,6 +182,15 @@ impl Lab {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle(args)),
+        }
+    }
+
+    /// A box whose init waits, in a network namespace of its own.
+    fn networked(&self, id: BoxId) -> BoxSpec {
+        BoxSpec {
+            id,
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(self.bundle_with(&Self::act(&Act::Wait), true)),
         }
     }
 
@@ -221,6 +250,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     killed_init(&lab, own);
     budget(&lab, own);
     conformance_on_oci(&lab, own);
+    network_namespaces(&lab, own);
     program_alone(&lab, own);
     exec_reads_no_state(&lab, own);
     orphans_are_reaped(&lab, own);
@@ -278,7 +308,7 @@ fn crash_and_restart(lab: &Lab, own: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&bundle).unwrap();
     std::fs::write(
         bundle.join("config.json"),
-        lab.config(&Lab::act(&Act::Wait)),
+        lab.config(&Lab::act(&Act::Wait), false),
     )
     .unwrap();
 
@@ -439,6 +469,117 @@ fn conformance_on_oci(lab: &Lab, own: &Path) {
     let node = lab.node(&own.join("hex-oci-conf"), state.path());
     let failures = conformance::run(&node, lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
+}
+
+/// Decision 4 (goal 4 plan step 4): each box whose bundle makes a network namespace of its own runs in
+/// a namespace no other box has had, loopback up (its flags, read in the box from the namespace's
+/// sysfs, are IFF_UP | IFF_LOOPBACK), and the node counts where the namespace came from. Namespace
+/// inode numbers are compared while every box named holds its own, since the kernel reuses a freed
+/// one's.
+/// - HEX-NETNS-9: a node whose pool holds none (bound 0) makes a box's namespace on the create's path
+///   and counts it so: made on the path 1, nothing made ahead or taken.
+/// - HEX-NETNS-10, rootless, the same node: the namespace is made in the box's own user namespace,
+///   which owns it, as the box's init mounting its sysfs shows (a sysfs mount takes `CAP_SYS_ADMIN` in
+///   the user namespace that owns the mounter's network namespace, `kobj_ns_current_may_mount`).
+/// - HEX-NETNS-8, as root: once a node's pool holds two, two boxes take one each, their namespaces
+///   differ from each other's, from the first box's and from the host's, and the node keeps no
+///   descriptor of either: the pool's copy is dropped once handed over.
+fn network_namespaces(lab: &Lab, own: &Path) {
+    let host = netns_of(std::process::id());
+    let dry_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let dry = lab
+        .node(&own.join("hex-oci-netns-dry"), dry_state.path())
+        .with_netns_bound(0)
+        .unwrap();
+    let first = BoxId::new("netns-dry").unwrap();
+    dry.create(lab.networked(first.clone())).expect("create");
+    dry.start(&first).expect("start");
+    let made = netns_of(init_pid(dry_state.path(), "netns-dry"));
+    assert_ne!(made, host, "the box's network namespace is its own");
+    assert_eq!(loopback_flags(&dry, &first), "0x9", "its loopback is up");
+    let counts = dry.netns().unwrap();
+    assert_eq!(
+        (counts.made_ahead, counts.taken, counts.made_on_path),
+        (0, 0, 1),
+        "(made ahead, taken, made on the path)"
+    );
+    if lab.rootless {
+        dry.delete(&first).expect("delete");
+        return;
+    }
+
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-netns"), state.path());
+    wait_for(
+        || {
+            let c = node.netns().unwrap();
+            c.made_ahead >= c.taken + c.discarded + 2
+        },
+        "the node's pool to hold two namespaces",
+    );
+    let mut seen = vec![host, made];
+    let mut taken = Vec::new();
+    for name in ["netns-a", "netns-b"] {
+        let id = BoxId::new(name).unwrap();
+        node.create(lab.networked(id.clone())).expect("create");
+        node.start(&id).expect("start");
+        let ns = netns_of(init_pid(state.path(), name));
+        assert!(!seen.contains(&ns), "{name}'s {ns} is no other's: {seen:?}");
+        assert!(
+            !held_by_this_process(&ns),
+            "the node keeps no descriptor of {name}'s {ns}"
+        );
+        assert_eq!(loopback_flags(&node, &id), "0x9", "{name}'s loopback is up");
+        seen.push(ns);
+        taken.push(id);
+    }
+    let counts = node.netns().unwrap();
+    assert_eq!(
+        (counts.taken, counts.made_on_path),
+        (2, 0),
+        "(taken, made on the path)"
+    );
+    for id in &taken {
+        node.delete(id).expect("delete");
+    }
+    dry.delete(&first).expect("delete");
+}
+
+/// The network namespace process `pid` is in, as its `/proc` link names it (`net:[<inode>]`).
+fn netns_of(pid: impl std::fmt::Display) -> String {
+    std::fs::read_link(format!("/proc/{pid}/ns/net"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Whether this process, the node agent, holds a descriptor of network namespace `ns`.
+fn held_by_this_process(ns: &str) -> bool {
+    std::fs::read_dir("/proc/self/fd").unwrap().any(|fd| {
+        std::fs::read_link(fd.unwrap().path()).is_ok_and(|link| link.to_string_lossy() == ns)
+    })
+}
+
+/// Loopback's flags in box `id`'s network namespace, read in the box.
+fn loopback_flags(rt: &dyn Runtime, id: &BoxId) -> String {
+    let (mut out, w) = std::io::pipe().unwrap();
+    let mut proc = rt
+        .exec(
+            id,
+            hex_api::Program::of(&["/usr/bin/cat", "/sys/class/net/lo/flags"]),
+            hex_api::Stdio {
+                stdout: Some(w),
+                ..hex_api::Stdio::null()
+            },
+        )
+        .expect("exec cat");
+    let mut flags = String::new();
+    std::io::Read::read_to_string(&mut out, &mut flags).unwrap();
+    assert_eq!(
+        proc.wait_for(conformance::PATIENCE).unwrap(),
+        Some(Exit::Code(0))
+    );
+    flags.trim().to_owned()
 }
 
 /// Goal 3 plan step 2: no process is made per exec but the program. Exec a non-hex `sleep` into a
@@ -724,7 +865,7 @@ fn json_args(args: &[String]) -> String {
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it
 /// (`/bin`, `/lib64`, …) so the loader and `/bin/sh` resolve as on the host.
 fn build_rootfs(rootfs: &Path) {
-    for d in ["proc", "dev", "tmp", "usr"] {
+    for d in ["proc", "dev", "sys", "tmp", "usr"] {
         std::fs::create_dir_all(rootfs.join(d)).unwrap();
     }
     std::fs::File::create(rootfs.join("hex")).unwrap();

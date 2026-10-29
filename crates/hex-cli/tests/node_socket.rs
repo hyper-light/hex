@@ -4,8 +4,9 @@
 //! - HEX-SOCK-9: connect, create a `Bundle` box, start it, exec `/usr/bin/true` with its stdout a pipe
 //!   this test holds, read the output, and wait on the `Proc` for `Code(0)`, all over one socket;
 //! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes;
-//! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted as one made on
-//!   its create's path, and the counts cross the socket (decision 4; goal 4 plan step 2);
+//! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted, as root as one
+//!   taken from the agent's pool, rootless as one made on its create's path, and the counts cross the
+//!   socket (decision 4; goal 4 plan steps 2 and 4);
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running.
@@ -362,17 +363,23 @@ fn example(lab: &Lab, client: &Client) -> Result<(), String> {
     Ok(())
 }
 
-/// HEX-SOCK-10 over the live agent (decision 4; goal 4 plan step 2): the agent counts each network
-/// namespace a create made on its path, and the counts cross its socket. It keeps no pool, so a box
-/// with a network namespace of its own counts one made on the path and nothing else; boxes without
-/// one (the example's, and every other here) count none.
+/// HEX-SOCK-10 over the live agent (decision 4; goal 4 plan steps 2 and 4): the agent counts each
+/// box's network namespace, and the counts cross its socket. A box with a network namespace of its
+/// own takes one from a root agent's pool, once the pool holds one, and a rootless agent's makes its
+/// own on its create's path; boxes without one (the example's, and every other here) count none.
 fn namespaces_counted(lab: &Lab, client: &Client) {
     let before = client.netns().unwrap();
     assert_eq!(
-        before,
-        hex_core::netns::Counts::default(),
+        (before.taken, before.made_on_path),
+        (0, 0),
         "the example's box has no network namespace of its own"
     );
+    if !lab.rootless {
+        wait_for("the agent's pool to hold a namespace", || {
+            let c = client.netns().unwrap();
+            c.made_ahead > c.taken + c.discarded
+        });
+    }
     let id = BoxId::new("own-network").unwrap();
     client
         .create(BoxSpec {
@@ -382,12 +389,11 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
         })
         .unwrap();
     client.delete(&id).unwrap();
+    let after = client.netns().unwrap();
     assert_eq!(
-        client.netns().unwrap(),
-        hex_core::netns::Counts {
-            made_on_path: 1,
-            ..before
-        }
+        (after.taken, after.made_on_path),
+        if lab.rootless { (0, 1) } else { (1, 0) },
+        "(taken, made on the path)"
     );
 }
 

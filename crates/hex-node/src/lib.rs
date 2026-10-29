@@ -19,6 +19,8 @@
 pub mod store;
 
 #[cfg(target_os = "linux")]
+mod netns;
+#[cfg(target_os = "linux")]
 mod node;
 #[cfg(target_os = "linux")]
 mod remove;

@@ -90,16 +90,19 @@ struct Making<'a> {
     pid_file: Option<&'a Path>,
 }
 
-/// Where a created container's network namespace came from: what the node agent counts of them
-/// (decision 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkNs {
-    /// Its shim made it, on the create's path.
-    MadeOnPath,
-    /// It joined one made ahead, which its create was handed.
-    MadeAhead,
-    /// It has none of its own: its spec names none, or one to join by path.
-    NotItsOwn,
+/// The network namespaces a node agent makes ahead (decision 4's pool), which a create asks once it
+/// has read the spec, for a container that makes a network namespace of its own: [`take`](Self::take)
+/// for one in this process's user namespace, [`on_path`](Self::on_path) for one in a user namespace
+/// of its own. Each answer is the pool's to count, and a refusal refuses the create.
+pub trait Networks {
+    /// A namespace made ahead, its loopback up, now the container's: the caller keeps no copy. `None`
+    /// when there is none to give, and the shim makes the container's on the create's path.
+    fn take(&self) -> Result<Option<OwnedFd>, OciError>;
+
+    /// A container whose network namespace a namespace made ahead can't be, since its user namespace
+    /// isn't this process's and a namespace belongs to its maker's (user_namespaces(7)): its shim makes
+    /// it on the create's path.
+    fn on_path(&self) -> Result<(), OciError>;
 }
 
 /// Where a container's cgroup comes from.
@@ -156,7 +159,6 @@ impl Runtime {
     /// the cgroup root, as the runtime-spec's command line does.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
         self.create_with(id, bundle, pid_file, Cgroup::FromSpec, None)
-            .map(|_| ())
     }
 
     /// Makes the container in a cgroup the caller already made and bounded, rather than from the
@@ -165,19 +167,18 @@ impl Runtime {
     /// path makes and bounds every box's cgroup. The spec's device list still governs the container's
     /// device access; its `cgroupsPath` and `linux.resources` are ignored, the box's bounds standing
     /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
-    /// `network`, when given, is a network namespace made ahead (decision 4's pool, its loopback up),
-    /// which the container joins in place of making its own: for a spec that makes a network namespace
-    /// of its own and no user namespace, else refused by type. Its descriptor is the container's once
-    /// handed over; the caller keeps no copy. Says where the container's network namespace came from.
+    /// `networks`, when given, are the network namespaces the caller makes ahead (decision 4's pool),
+    /// asked once the spec is read: a container that makes a network namespace of its own in this
+    /// process's user namespace joins one in place of making its own.
     pub fn create_in_cgroup(
         &self,
         id: &str,
         bundle: &Path,
         pid_file: Option<&Path>,
         cgroup: BoxCgroup,
-        network: Option<OwnedFd>,
-    ) -> Result<NetworkNs, OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup), network)
+        networks: Option<&dyn Networks>,
+    ) -> Result<(), OciError> {
+        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup), networks)
     }
 
     fn create_with(
@@ -186,11 +187,11 @@ impl Runtime {
         bundle: &Path,
         pid_file: Option<&Path>,
         cgroup: Cgroup,
-        network: Option<OwnedFd>,
-    ) -> Result<NetworkNs, OciError> {
+        networks: Option<&dyn Networks>,
+    ) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
-        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup, network);
+        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup, networks);
         if result.is_err() {
             let _ = dir.remove();
         }
@@ -204,25 +205,11 @@ impl Runtime {
         dir: &Dir,
         pid_file: Option<&Path>,
         cgroup: Cgroup,
-        network: Option<OwnedFd>,
-    ) -> Result<NetworkNs, OciError> {
+        networks: Option<&dyn Networks>,
+    ) -> Result<(), OciError> {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
-        // A namespace made ahead belongs to the user namespace of its maker (user_namespaces(7)), so
-        // it serves only a container that would make its own in this one (decision 4).
-        if network.is_some() && (!spec.makes_namespace("network") || spec.makes_namespace("user")) {
-            return Err(OciError::Config(
-                "a network namespace made ahead is for a container that makes its own network \
-                 namespace and no user namespace"
-                    .to_owned(),
-            ));
-        }
-        let made = match (spec.makes_namespace("network"), &network) {
-            (false, _) => NetworkNs::NotItsOwn,
-            (true, Some(_)) => NetworkNs::MadeAhead,
-            (true, None) => NetworkNs::MadeOnPath,
-        };
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
         // Hex keeps the guarantee and shares one program among such containers (devshare).
@@ -249,12 +236,14 @@ impl Runtime {
             dir,
             pid_file,
         };
-        let result = self.start_shim(&making, &spec, &cgroup, network);
+        // Asked last, just before the shim that joins it, so a create refused before it takes none.
+        let result = network_for(&spec, networks)
+            .and_then(|network| self.start_shim(&making, &spec, &cgroup, network));
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
             let _ = end_cgroup(&cgroup, id);
         }
-        result.map(|()| made)
+        result
     }
 
     fn start_shim(
@@ -288,18 +277,22 @@ impl Runtime {
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
             .env(init::ENV_CGROUP, cgroup.dir());
+        // A network namespace made ahead goes by the path of this process's descriptor for it, which
+        // the shim opens. The descriptor stays close-on-exec, so no process this multi-threaded agent
+        // starts meanwhile (another create's shim, an exec'd program) inherits it, as one would in the
+        // window a cleared flag leaves before the spawn.
         if let Some(network) = &network {
-            keep_across_exec(network)?;
-            cmd.env(init::ENV_NETWORK, network.as_raw_fd().to_string());
+            cmd.env(
+                init::ENV_NETWORK,
+                format!("/proc/{}/fd/{}", std::process::id(), network.as_raw_fd()),
+            );
         }
         let mut shim = cmd
             .spawn()
             .map_err(|e| OciError::os("starting the container init", e))?;
-        // The runtime holds the read end of sync and the write end of map; the init holds the others,
-        // and the network namespace made ahead, now the container's alone.
+        // The runtime holds the read end of sync and the write end of map; the init holds the others.
         drop(sync_w);
         drop(map_r);
-        drop(network);
 
         let mut container_pid = None;
         let outcome = self
@@ -312,6 +305,9 @@ impl Runtime {
                 end_shim(&mut shim)?;
                 Ok((pid, start_time))
             });
+        // The shim has opened the namespace made ahead by its pid line, or never will: it is the
+        // container's alone now.
+        drop(network);
         if outcome.is_err() {
             // A create that fails leaves nothing running: the container the shim forked, if it said
             // which, and the shim itself, killed and reaped here (on success it exits by itself and
@@ -1091,6 +1087,25 @@ fn make_fifo(path: &Path) -> Result<(), OciError> {
     .map_err(|e| OciError::os("setting the exec fifo mode", e))
 }
 
+/// The network namespace made ahead that a container joins, asked of `networks` (decision 4): taken
+/// for a container that makes a network namespace of its own in this process's user namespace; for one
+/// in a user namespace of its own, made by the spec or joined by path, none, its namespace counted as
+/// made on the path; and none asked for a container whose network namespace is given by path or isn't
+/// its own.
+fn network_for(spec: &Spec, networks: Option<&dyn Networks>) -> Result<Option<OwnedFd>, OciError> {
+    let Some(networks) = networks else {
+        return Ok(None);
+    };
+    if !spec.makes_namespace("network") {
+        return Ok(None);
+    }
+    if spec.linux.namespaces.iter().any(|n| n.kind == "user") {
+        networks.on_path()?;
+        return Ok(None);
+    }
+    networks.take()
+}
+
 /// Clears an fd's close-on-exec, so the re-exec'd init inherits it.
 fn keep_across_exec(fd: &OwnedFd) -> Result<(), OciError> {
     rustix::io::fcntl_setfd(fd, FdFlags::empty())
@@ -1270,5 +1285,188 @@ mod tests {
         assert!(
             matches!(read("Xhello\n").0, Err(OciError::Broken(ref why)) if why.contains("unknown sync message"))
         );
+    }
+
+    /// A stand-in for the shim: writes which of its descriptors are network namespaces, what the path
+    /// it was handed for the namespace made ahead names, and the flags the agent's descriptor has
+    /// meanwhile, then ends without a word on the sync pipe.
+    const STAND_IN: &str = r#"#!/bin/sh
+for fd in /proc/$$/fd/*; do
+  case "$(readlink "$fd")" in net:*) echo "inherited $(readlink "$fd")" ;; esac
+done > "$HEX_OCI_DIR/report"
+echo "named $(readlink "$HEX_OCI_NETWORK")" >> "$HEX_OCI_DIR/report"
+sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/#/fdinfo/#')" >> "$HEX_OCI_DIR/report"
+"#;
+
+    /// HEX-NETNS-6 (decision 4, goal 4 plan step 4): a create hands its shim a network namespace made
+    /// ahead by the path of the agent's descriptor for it, which stays close-on-exec, so neither the
+    /// shim nor any process the multi-threaded agent starts meanwhile (another create's shim, an exec'd
+    /// program) inherits it. Do: start a stand-in shim for a container with a namespace made ahead
+    /// (this process's own stands in for it). Expect: none of the stand-in's descriptors is a network
+    /// namespace, the path it was handed names the namespace, and the agent's descriptor is
+    /// close-on-exec while the stand-in runs.
+    #[test]
+    fn a_namespace_made_ahead_reaches_the_shim_by_path_and_no_process_inherits_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let lab = tempfile::tempdir().unwrap();
+        let stand_in = lab.path().join("shim");
+        std::fs::write(&stand_in, STAND_IN).unwrap();
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
+        let dir = rt.dir("c1").unwrap();
+        dir.create("c1").unwrap();
+        let spec = Spec::parse(
+            br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"},"linux":{"namespaces":[{"type":"network"}]}}"#,
+        )
+        .unwrap();
+        let network = rustix::fs::open(
+            "/proc/self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let named = std::fs::read_link("/proc/self/ns/net").unwrap();
+        let making = Making {
+            id: "c1",
+            bundle: lab.path(),
+            dir: &dir,
+            pid_file: None,
+        };
+        let cgroup = BoxCgroup::at(lab.path().to_owned());
+        assert!(
+            rt.start_shim(&making, &spec, &cgroup, Some(network))
+                .is_err(),
+            "the stand-in ends without a word"
+        );
+
+        let report = std::fs::read_to_string(dir.path().join("report")).unwrap();
+        assert!(!report.contains("inherited"), "{report}");
+        let lines: Vec<&str> = report.lines().collect();
+        assert_eq!(lines[0], format!("named {}", named.display()), "{report}");
+        let flags = u32::from_str_radix(lines[1].strip_prefix("flags ").unwrap(), 8).unwrap();
+        assert_ne!(flags & 0o2_000_000, 0, "O_CLOEXEC in {report}");
+    }
+
+    /// A pool that records what it is asked, its take answered by `answer`.
+    struct Recorded {
+        takes: std::cell::Cell<u32>,
+        on_paths: std::cell::Cell<u32>,
+        answer: fn() -> Result<Option<OwnedFd>, OciError>,
+        refuse_on_path: bool,
+    }
+
+    impl Recorded {
+        fn answering(answer: fn() -> Result<Option<OwnedFd>, OciError>) -> Self {
+            Self {
+                takes: std::cell::Cell::new(0),
+                on_paths: std::cell::Cell::new(0),
+                answer,
+                refuse_on_path: false,
+            }
+        }
+
+        fn asked(&self) -> (u32, u32) {
+            (self.takes.get(), self.on_paths.get())
+        }
+    }
+
+    impl Networks for Recorded {
+        fn take(&self) -> Result<Option<OwnedFd>, OciError> {
+            self.takes.set(self.takes.get() + 1);
+            (self.answer)()
+        }
+
+        fn on_path(&self) -> Result<(), OciError> {
+            self.on_paths.set(self.on_paths.get() + 1);
+            if self.refuse_on_path {
+                return Err(OciError::Broken("shut down".to_owned()));
+            }
+            Ok(())
+        }
+    }
+
+    fn pooled() -> Result<Option<OwnedFd>, OciError> {
+        Ok(Some(
+            rustix::fs::open(
+                "/proc/self/ns/net",
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .unwrap(),
+        ))
+    }
+
+    fn dry() -> Result<Option<OwnedFd>, OciError> {
+        Ok(None)
+    }
+
+    fn refused() -> Result<Option<OwnedFd>, OciError> {
+        Err(OciError::Broken(
+            "the network-namespace pool is shut down".to_owned(),
+        ))
+    }
+
+    fn spec_with(namespaces: &str) -> Spec {
+        Spec::parse(
+            format!(
+                r#"{{"ociVersion":"1.2.0","root":{{"path":"rootfs"}},"linux":{{"namespaces":[{namespaces}]}}}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+    }
+
+    /// HEX-NETNS-7 (decision 4, goal 4 plan step 4): a create asks the pool once it has read the spec.
+    /// Do: choose for each kind of container. Expect: one that makes its own network namespace in this
+    /// user namespace takes one, and joins it when the take gives one or makes its own on the path when
+    /// the pool is dry; one with a user namespace of its own, made or joined, is counted on the path and
+    /// takes none; one whose network namespace is given by path, or isn't its own, asks nothing; a
+    /// refused take or count refuses the create; and a create with no pool asks nothing.
+    #[test]
+    fn a_create_asks_the_pool_for_what_its_container_can_join() {
+        let own = spec_with(r#"{"type":"pid"},{"type":"network"}"#);
+        let pool = Recorded::answering(pooled);
+        assert!(network_for(&own, Some(&pool)).unwrap().is_some());
+        assert_eq!(pool.asked(), (1, 0), "one take");
+
+        let pool = Recorded::answering(dry);
+        assert!(network_for(&own, Some(&pool)).unwrap().is_none());
+        assert_eq!(pool.asked(), (1, 0), "a dry take, made on the path");
+
+        for user in [
+            r#"{"type":"user"}"#,
+            r#"{"type":"user","path":"/proc/1/ns/user"}"#,
+        ] {
+            let pool = Recorded::answering(pooled);
+            let spec = spec_with(&format!(r#"{user},{{"type":"network"}}"#));
+            assert!(network_for(&spec, Some(&pool)).unwrap().is_none(), "{user}");
+            assert_eq!(pool.asked(), (0, 1), "counted on the path: {user}");
+        }
+
+        for namespaces in [
+            r#"{"type":"pid"},{"type":"network","path":"/proc/1/ns/net"}"#,
+            r#"{"type":"pid"}"#,
+            r#"{"type":"user"},{"type":"network","path":"/proc/1/ns/net"}"#,
+        ] {
+            let pool = Recorded::answering(pooled);
+            assert!(
+                network_for(&spec_with(namespaces), Some(&pool))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(pool.asked(), (0, 0), "nothing asked: {namespaces}");
+        }
+
+        let pool = Recorded::answering(refused);
+        assert!(network_for(&own, Some(&pool)).is_err(), "a refused take");
+        let pool = Recorded {
+            refuse_on_path: true,
+            ..Recorded::answering(pooled)
+        };
+        let spec = spec_with(r#"{"type":"user"},{"type":"network"}"#);
+        assert!(network_for(&spec, Some(&pool)).is_err(), "a refused count");
+
+        assert!(network_for(&own, None).unwrap().is_none(), "no pool");
     }
 }

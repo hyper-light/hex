@@ -107,7 +107,7 @@ pub trait Host: Runtime {
     fn abandoned(&self, id: &BoxId) -> Result<(), Refusal>;
 
     /// The node's network namespace counts (decision 4), which a client of wire version 2 asks for.
-    fn netns(&self) -> netns::Counts;
+    fn netns(&self) -> Result<netns::Counts, Refusal>;
 }
 
 /// The socket, served until dropped.
@@ -978,7 +978,7 @@ impl Shared {
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),
             Call::Usage(id) => host.usage(&id).map(Answer::Usage),
             Call::Delete(id) => host.delete(&id).map(|()| Answer::Done),
-            Call::Netns => Ok(Answer::Netns(host.netns())),
+            Call::Netns => host.netns().map(Answer::Netns),
         };
         self.done(conn)?;
         let answer = answer.unwrap_or_else(Answer::Refused);

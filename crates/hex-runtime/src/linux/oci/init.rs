@@ -31,8 +31,9 @@ pub const ENV_DIR: &str = "HEX_OCI_DIR";
 pub const ENV_BUNDLE: &str = "HEX_OCI_BUNDLE";
 /// The container's cgroup directory, which `create` has made with its resources in force.
 pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
-/// A network namespace made ahead, its loopback up (decision 4's pool): the shim joins it in place of
-/// making the container's.
+/// A network namespace made ahead, its loopback up (decision 4's pool), by the path of the runtime's
+/// descriptor for it (`/proc/<pid>/fd/<n>`), which stays close-on-exec: the shim opens it, and joins
+/// it in place of making the container's.
 pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
@@ -93,6 +94,29 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     // A birth in the cgroup is checked against the credentials the clone runs with, and in a user
     // namespace the shim's are no longer the caller's, so there the container joins by migration.
     let born_with_callers_credentials = !spec.linux.namespaces.iter().any(|n| n.kind == "user");
+    // A network namespace made ahead (decision 4), opened by its path before any namespace changes,
+    // while this process's /proc is the runtime's. It belongs to the runtime's user namespace, so it
+    // serves only a container that makes its own network namespace there.
+    let network = match std::env::var_os(ENV_NETWORK) {
+        Some(path) => {
+            if !spec.makes_namespace("network") || !born_with_callers_credentials {
+                return Err(OciError::Config(
+                    "a network namespace made ahead is for a container that makes its own network \
+                     namespace and has no user namespace"
+                        .to_owned(),
+                ));
+            }
+            Some(
+                rustix::fs::open(
+                    Path::new(&path),
+                    OFlags::RDONLY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|e| OciError::os("opening the network namespace made ahead", e))?,
+            )
+        }
+        None => None,
+    };
 
     // The map pipe's end is read only for a user namespace's maps, and is the shim's to close either
     // way, before the container is forked.
@@ -107,19 +131,11 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     drop(map);
 
     join_namespace_paths(&spec)?;
-    // A network namespace made ahead (decision 4) is joined in place of a fresh one, and the shim's copy
-    // closed before the fork, so the container holds it by being in it and by nothing else.
+    // The network namespace made ahead is joined in place of a fresh one, and the shim's copy closed
+    // before the fork, so the container holds it by being in it and by nothing else.
     let mut flags = namespace_flags(&spec);
-    let made_ahead = match std::env::var_os(ENV_NETWORK) {
-        Some(_) => {
-            if !flags.contains(UnshareFlags::NEWNET) || spec.makes_namespace("user") {
-                return Err(OciError::Config(
-                    "a network namespace made ahead is for a container that makes its own network \
-                     namespace and no user namespace"
-                        .to_owned(),
-                ));
-            }
-            let network = inherited_fd(ENV_NETWORK)?;
+    let made_ahead = match network {
+        Some(network) => {
             sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
             flags.remove(UnshareFlags::NEWNET);
             true

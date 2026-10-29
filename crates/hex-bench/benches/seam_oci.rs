@@ -469,11 +469,10 @@ mod linux {
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
-                Self::InProcess(node) => Ok(node.netns()),
-                Self::Socket { client, .. } => client
-                    .netns()
-                    .map_err(|e| format!("the node's network namespace counts: {e}")),
+                Self::InProcess(node) => node.netns(),
+                Self::Socket { client, .. } => client.netns(),
             }
+            .map_err(|e| format!("the node's network namespace counts: {e}"))
         }
     }
 

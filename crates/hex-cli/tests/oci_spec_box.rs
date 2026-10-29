@@ -4,12 +4,12 @@
 //!   hostname, a hosts line and a private network: its root is an overlay; `/usr` is the bind and
 //!   read-only; its hostname, `/etc/hosts` line and network namespace are the spec's, the network
 //!   holding loopback alone, up; what it writes lands in its own writable layer and the layers are
-//!   untouched; its network namespace is counted as one made on its create's path (decision 4); after
-//!   delete nothing of it is left: no bundle (so no writable layer), no container state, no cgroup, no
-//!   record, no mount;
+//!   untouched; its network namespace is counted, as root one the node made ahead and the create took,
+//!   rootless one made on its create's path (decision 4); after delete nothing of it is left: no bundle
+//!   (so no writable layer), no container state, no cgroup, no record, no mount;
 //! - a box from a directory on the host's network: its writes land in the directory, in place, its
-//!   network namespace is the node's (no namespace is counted), and after delete nothing of it is left
-//!   but those writes;
+//!   network namespace is the node's (none is taken or made for it), and after delete nothing of it is
+//!   left but those writes;
 //! - the hex-api conformance suite (HEX-RT-1 to 13) on boxes made from OciSpecs;
 //! - a spec this node can't render (a root or a mount source that isn't there, a user a rootless
 //!   node can't map) is refused by the field's name, and nothing is made;
@@ -39,7 +39,6 @@ use hex_api::{
     Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Mount, Network, OciSpec, Program, Refusal,
     Rootfs, Runtime, Stdio, User,
 };
-use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase};
 use hex_node::Node;
 use hex_node::store::Store;
@@ -198,6 +197,9 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
 /// network (with a hostname and a hosts line).
 fn layered_box(lab: &Lab, own: &Path) {
     let (node, box_root, state) = lab.node(own, "layers");
+    if !lab.rootless {
+        pool_holds_one(&node);
+    }
     let before = (snapshot(&lab.base), snapshot(&lab.app));
     let id = BoxId::new("layered").unwrap();
     let spec = OciSpec {
@@ -215,14 +217,12 @@ fn layered_box(lab: &Lab, own: &Path) {
     });
     assert_eq!(made.expect("create").state, BoxState::Created);
     let _cleanup = Deleting(&node, id.clone());
-    // Its private network is a namespace of its own, made on its create's path: the node keeps no
-    // pool of them yet (decision 4; goal 4 plan step 2).
+    // Its private network is a namespace of its own (decision 4): as root, one the node made ahead,
+    // which it takes; rootless, made on its create's path in the box's own user namespace.
     assert_eq!(
-        node.netns(),
-        netns::Counts {
-            made_on_path: 1,
-            ..netns::Counts::default()
-        }
+        boxes_namespaces(&node),
+        if lab.rootless { (0, 1) } else { (1, 0) },
+        "(taken, made on the path)"
     );
     node.start(&id).expect("start");
     assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
@@ -337,8 +337,8 @@ fn in_place_box(lab: &Lab, own: &Path) {
     .expect("create");
     let _cleanup = Deleting(&node, id.clone());
     assert_eq!(
-        node.netns(),
-        netns::Counts::default(),
+        boxes_namespaces(&node),
+        (0, 0),
         "the host's network is no namespace of the box's own"
     );
     node.start(&id).expect("start");
@@ -621,6 +621,30 @@ fn mountinfo(text: &str) -> Vec<MountLine> {
 
 /// Every entry under `dir`, by path: its kind and mode, and a file's bytes or a link's target. Walked
 /// with a stack.
+/// The creates the node counted a network namespace of the box's own for: (taken from its pool, made
+/// on the create's path).
+fn boxes_namespaces(node: &Node) -> (u64, u64) {
+    let counts = node.netns().unwrap();
+    (counts.taken, counts.made_on_path)
+}
+
+/// Waits for the fact a create from the pool needs: a root node's pool holds a namespace, which its
+/// thread makes as soon as the node opens.
+fn pool_holds_one(node: &Node) {
+    let deadline = std::time::Instant::now() + conformance::PATIENCE;
+    while std::time::Instant::now() < deadline {
+        let c = node.netns().unwrap();
+        if c.made_ahead > c.taken + c.discarded {
+            return;
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(1));
+    }
+    panic!(
+        "the node's pool made no namespace in {:?}",
+        conformance::PATIENCE
+    );
+}
+
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (String, u32, Vec<u8>)> {
     let mut out = BTreeMap::new();
     let mut todo = vec![dir.to_path_buf()];

@@ -93,8 +93,8 @@ impl Host for TestHost {
         Ok(())
     }
 
-    fn netns(&self) -> netns::Counts {
-        COUNTS
+    fn netns(&self) -> Result<netns::Counts, Refusal> {
+        Ok(COUNTS)
     }
 }
 
