@@ -94,8 +94,8 @@ fn marked(design: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Decision 4's quoted figures, the namespace's cost on three machines and the pool's measurements, are each
-/// in bench/competitive/probes/netns_pool.md, the record they name.
+/// Decision 4's quoted figures, the namespace's cost on three machines, the pool's measurements and what follows
+/// from them, are each in bench/competitive/probes/netns_pool.md, the record they name.
 #[test]
 fn every_figure_the_design_marks_is_in_its_record() {
     let design = std::fs::read_to_string(repo().join(DESIGN)).expect("the design document");
@@ -105,8 +105,8 @@ fn every_figure_the_design_marks_is_in_its_record() {
         .filter(|(path, _)| path == "bench/competitive/probes/netns_pool.md")
         .collect();
     assert!(
-        netns.len() >= 2,
-        "decision 4 marks its two tables of record, found {}",
+        netns.len() >= 4,
+        "decision 4 marks its four tables of record, found {}",
         netns.len()
     );
     let mut checked = 0;

@@ -493,8 +493,11 @@ lifecycle, 44 against 58 lifecycles/s, but crun only about 1 ms, 68 against 73.
 **What it shows now.** That gap went with the shim and the state fsyncs (decisions 1 and 2). Through the seam
 today, a container's network namespace costs Hex's create about half a millisecond on each machine measured, and
 its delete nothing; libcrun's create pays a little less to a little more (`bench/competitive/probes/netns_pool.md`;
-kiln research `01a185679f9073d696fc7e1a7c21587e`, f2 and f3). Create and delete p50 in ms, with the namespace and
-without, best of 2:
+kiln research `01a185679f9073d696fc7e1a7c21587e`, f2 and f3). The runs: `probes/netns_cost_inside.sh`, 2 rounds of
+500, on fedora (2026-10-29T02:09Z, load 3.66 to 5.11, hex 749fd883 and seam_oci f4b4c60b built at 8224f97), on
+jupiter (Docker Desktop's WSL2 VM, VM load 5.35 to 8.03) and on adas-mac-studio-3 (Docker Desktop's LinuxKit VM,
+VM load 4.38 to 4.90), those two built at 3db2173, 8224f97's code; libcrun 1.30.1 on each. Create and delete p50
+in ms, with the namespace and without, best of 2:
 
 <!-- record: bench/competitive/probes/netns_pool.md -->
 | Machine | Hex create | the namespace | libcrun create | the namespace | Hex delete |
@@ -504,14 +507,23 @@ without, best of 2:
 | adas-mac-studio-3 (M4 Max, LinuxKit 6.12) | 2.936 / 2.392 | +0.544 (1.23x) | 2.056 / 1.849 | +0.206 (1.11x) | 2.189 / 2.251 |
 <!-- /record -->
 
-Three things follow. Delete pays nothing because the kernel already defers a namespace's teardown: its last
-reference queues it for a work item (`__put_net`, `net/core/net_namespace.c:739-744` at v6.19), which neither the
-exiting process nor delete waits for. The decision's first falsifier, Hex costing no more with the namespace than
-crun, holds on fedora and jupiter but not on the Mac Studio, where Hex pays 2.6 times libcrun's 0.206 ms. And on
-fedora and jupiter a create with the namespace is within 5% of one without only because Hex's create is slow
-there, 6.0 and 3.2 times libcrun's without a namespace: that gap is goal 5's (the seed), and once it closes, the
-namespace's half millisecond is the 23% it already is on the Mac Studio. So what is left to move is the
-namespace itself. The shim makes it with the container's other fresh namespaces (`unshare`, `init.rs`
+What follows from it (`netns_pool.md`, "What follows from them", with the arithmetic):
+
+<!-- record: bench/competitive/probes/netns_pool.md -->
+| | fedora | jupiter | adas-mac-studio-3 |
+|---|---|---|---|
+| Hex's create without a namespace, over libcrun's | 6.03x | 3.17x | 1.29x |
+| what the namespace costs Hex, over what it costs libcrun | | | 2.64x |
+| the namespace's share of Hex's create | | | 22.7% |
+<!-- /record -->
+
+Delete pays nothing because the kernel already defers a namespace's teardown: its last reference queues it for a
+work item (`__put_net`, `net/core/net_namespace.c:739-744` at v6.19), which neither the exiting process nor delete
+waits for. The decision's first falsifier, Hex costing no more with the namespace than crun, holds on fedora and
+jupiter but not on the Mac Studio. And on fedora and jupiter a create with the namespace is within 5% of one
+without only because Hex's create is slow there: that gap is goal 5's (the seed), and once it closes, the
+namespace's half millisecond is the share of create it already is on the Mac Studio. So what is left to move is
+the namespace itself. The shim makes it with the container's other fresh namespaces (`unshare`, `init.rs`
 `namespace_flags`), the kernel running every networking subsystem's per-namespace init to do so (`setup_net`,
 `net_namespace.c:445-446`), and the container brings loopback up over route netlink before it is ready
 (`init.rs:175-176`, `net.rs`).
@@ -535,7 +547,8 @@ one of its own, as a rootless node's are, makes its network namespace on the pat
 container whose spec names its namespace by path.
 
 **The bound and the refill.** Measured by `probes/netns_pool.c` (one thread making namespaces as the pool would and
-holding them in a cgroup of its own), two rounds of 500 each:
+holding them in a cgroup of its own), two rounds of 500 each: on fedora at 2026-10-29T03:00Z (load 5.14 to 4.14) and
+on adas-mac-studio-3 at 03:01Z (VM load 2.44 to 2.13), bench/competitive at 5ee4d1f with these probes:
 
 <!-- record: bench/competitive/probes/netns_pool.md -->
 | Machine | make p50 | make p99 | one thread | charged to the maker's cgroup | the host's Slab | the host's Percpu |
@@ -544,13 +557,21 @@ holding them in a cgroup of its own), two rounds of 500 each:
 | adas-mac-studio-3 | 0.407, 0.258 ms | 1.119, 0.711 ms | 2,280, 3,545/s | 320.4 KiB (slab 287.1, percpu 33.2) | +622.0, +616.0 KiB | +140.0, +139.0 KiB |
 <!-- /record -->
 
-So a held namespace costs the kernel at most about 0.34 MiB on fedora (349.5 KiB) and 0.74 MiB on the Mac Studio
-(762 KiB), taking the host's Slab and Percpu rises, which other work on the host moves as well, as the upper bound.
+What a held namespace costs the kernel at most, the host's Slab and Percpu rises together (which other work on the
+host moves as well, so an upper bound), and what a pool of them holds:
+
+<!-- record: bench/competitive/probes/netns_pool.md -->
+| | fedora | adas-mac-studio-3 |
+|---|---|---|
+| kernel memory per held namespace, at most | 349.5, 334.9 KiB (0.34 MiB) | 762.0, 755.0 KiB (0.74 MiB) |
+| a pool of 32 | | 24384.0 KiB (23.8 MiB) |
+<!-- /record -->
+
 The pool holds at most **32**: the most creates the bench's busiest phase has in flight at once (concurrency 32), so
-a burst of its whole width finds a namespace each. That is at most 24 MiB of the kernel's memory on the heavier
-machine, and 32 descriptors beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor
-table (`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or
-more; whether that keeps up with sustained churn is the sustained phase's to show (goal 4 plan step 5).
+a burst of its whole width finds a namespace each, at most 24 MiB of the kernel's memory on the heavier machine. Its
+32 descriptors sit beside the agent's one pidfd per box, which an exec's copy of the agent's descriptor table
+(`STATUS.md`, Open) hardly notices. One thread refills whenever the pool is below its bound, at 2,280/s or more;
+whether that keeps up with sustained churn is the sustained phase's to show (goal 4 plan step 5).
 
 **Where its memory is charged.** The kernel charges what it can of a namespace to the cgroup of the task that makes
 it, when it is made (`struct net` is `SLAB_ACCOUNT`, `net_namespace.c:1259-1261`), and doesn't move it after. A

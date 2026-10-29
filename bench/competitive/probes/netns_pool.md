@@ -78,3 +78,17 @@ round 2: 500 namespaces held; make p50 0.258 ms, p99 0.711 ms, one thread 3545/s
 The cgroup's share is steady to the 0.1 KiB across rounds; the host's Slab and Percpu move with other work on the
 host as well, and MemAvailable most of all (fedora is shared), so they bound what a namespace costs the kernel
 system-wide from above rather than measure it.
+
+## What follows from them
+
+Each figure decision 4 draws from the records above, with its arithmetic (to two decimals, or one for KiB):
+
+- Hex pays the namespace 2.64 times what libcrun does on the Mac Studio: 0.544 / 0.206 = 2.64.
+- Hex's create without a namespace over libcrun's: fedora 14.606 / 2.422 = 6.03; jupiter 13.679 / 4.321 = 3.17;
+  the Mac Studio 2.392 / 1.849 = 1.29.
+- The namespace's share of Hex's create on the Mac Studio: 0.544 / 2.392 = 22.7%.
+- What a held namespace costs the kernel at most, the host's Slab and Percpu rises together: fedora 244.3 + 105.2 =
+  349.5 KiB and 236.3 + 98.6 = 334.9 KiB (0.34 MiB at most); the Mac Studio 622.0 + 140.0 = 762.0 KiB and 616.0 +
+  139.0 = 755.0 KiB (0.74 MiB at most).
+- A pool of 32 at the Mac Studio's 762.0 KiB: 32 x 762.0 = 24384.0 KiB, 23.8 MiB.
+
