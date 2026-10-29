@@ -410,7 +410,7 @@ impl Node {
         };
         if let Err(e) = self
             .oci()
-            .create_in_cgroup(id.as_str(), &bundle, None, cgroup)
+            .create_in_cgroup(id.as_str(), &bundle, None, cgroup, None)
         {
             // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
             // the state dir and the record.

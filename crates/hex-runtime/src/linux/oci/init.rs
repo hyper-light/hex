@@ -31,6 +31,9 @@ pub const ENV_DIR: &str = "HEX_OCI_DIR";
 pub const ENV_BUNDLE: &str = "HEX_OCI_BUNDLE";
 /// The container's cgroup directory, which `create` has made with its resources in force.
 pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
+/// A network namespace made ahead, its loopback up (decision 4's pool): the shim joins it in place of
+/// making the container's.
+pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
 /// (path, major, minor, mode); all character devices.
@@ -104,7 +107,26 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     drop(map);
 
     join_namespace_paths(&spec)?;
-    sys::unshare(namespace_flags(&spec))?;
+    // A network namespace made ahead (decision 4) is joined in place of a fresh one, and the shim's copy
+    // closed before the fork, so the container holds it by being in it and by nothing else.
+    let mut flags = namespace_flags(&spec);
+    let made_ahead = match std::env::var_os(ENV_NETWORK) {
+        Some(_) => {
+            if !flags.contains(UnshareFlags::NEWNET) || spec.makes_namespace("user") {
+                return Err(OciError::Config(
+                    "a network namespace made ahead is for a container that makes its own network \
+                     namespace and no user namespace"
+                        .to_owned(),
+                ));
+            }
+            let network = inherited_fd(ENV_NETWORK)?;
+            sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
+            flags.remove(UnshareFlags::NEWNET);
+            true
+        }
+        None => false,
+    };
+    sys::unshare(flags)?;
 
     // Born in its cgroup where it can be: a migration takes the cgroup threadgroup lock, whose writer can
     // wait out an RCU grace period (docs/design/runtime.md). Otherwise forked, to join by migration.
@@ -118,7 +140,7 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     };
     match forked {
         sys::Fork::Child => Ok(
-            match container(&spec, &bundle, &container_dir, sync, procs) {
+            match container(&spec, &bundle, &container_dir, sync, procs, made_ahead) {
                 Ok(()) => 0,
                 Err(e) => {
                     msg(sync, &format!("E{e}"));
@@ -135,13 +157,15 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
 }
 
 /// The container (PID 1 of its namespaces): join its cgroup through `procs` (when it wasn't born there),
-/// set up the world, signal ready, wait for `start`, exec.
+/// set up the world, signal ready, wait for `start`, exec. `network_made_ahead`: its network namespace
+/// came from the node's pool, its loopback already up.
 fn container(
     spec: &Spec,
     bundle: &str,
     container_dir: &Path,
     sync: BorrowedFd<'_>,
     procs: Option<OwnedFd>,
+    network_made_ahead: bool,
 ) -> Result<(), OciError> {
     // First of all, before it allocates or starts anything: into its cgroup, so its limits and
     // accounting cover all it does. Then a fresh cgroup namespace, so the namespace's root is the
@@ -171,8 +195,8 @@ fn container(
 
     let _ = rustix::process::setsid();
     // A network namespace of the container's own holds loopback, down until it's brought up, as
-    // runc and crun bring it up.
-    if spec.makes_namespace("network") {
+    // runc and crun bring it up; one made ahead had it brought up when it was made.
+    if spec.makes_namespace("network") && !network_made_ahead {
         net::loopback_up()?;
     }
     if spec.makes_namespace("mount") {

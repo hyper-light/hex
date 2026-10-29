@@ -80,6 +80,16 @@ pub struct Runtime {
     helper: Option<PathBuf>,
 }
 
+/// One container's create as its shim is started: its id, bundle, state directory and the pid file
+/// asked for.
+#[derive(Clone, Copy)]
+struct Making<'a> {
+    id: &'a str,
+    bundle: &'a Path,
+    dir: &'a Dir,
+    pid_file: Option<&'a Path>,
+}
+
 /// Where a container's cgroup comes from.
 enum Cgroup {
     /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
@@ -133,7 +143,7 @@ impl Runtime {
     /// the container init's pid. The container's cgroup is made from the spec's `cgroupsPath` under
     /// the cgroup root, as the runtime-spec's command line does.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::FromSpec)
+        self.create_with(id, bundle, pid_file, Cgroup::FromSpec, None)
     }
 
     /// Makes the container in a cgroup the caller already made and bounded, rather than from the
@@ -142,14 +152,19 @@ impl Runtime {
     /// path makes and bounds every box's cgroup. The spec's device list still governs the container's
     /// device access; its `cgroupsPath` and `linux.resources` are ignored, the box's bounds standing
     /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
+    /// `network`, when given, is a network namespace made ahead (decision 4's pool, its loopback up),
+    /// which the container joins in place of making its own: for a spec that makes a network namespace
+    /// of its own and no user namespace, else refused by type. Its descriptor is the container's once
+    /// handed over; the caller keeps no copy.
     pub fn create_in_cgroup(
         &self,
         id: &str,
         bundle: &Path,
         pid_file: Option<&Path>,
         cgroup: BoxCgroup,
+        network: Option<OwnedFd>,
     ) -> Result<(), OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup))
+        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup), network)
     }
 
     fn create_with(
@@ -158,10 +173,11 @@ impl Runtime {
         bundle: &Path,
         pid_file: Option<&Path>,
         cgroup: Cgroup,
+        network: Option<OwnedFd>,
     ) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
-        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup);
+        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup, network);
         if result.is_err() {
             let _ = dir.remove();
         }
@@ -175,10 +191,20 @@ impl Runtime {
         dir: &Dir,
         pid_file: Option<&Path>,
         cgroup: Cgroup,
+        network: Option<OwnedFd>,
     ) -> Result<(), OciError> {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
+        // A namespace made ahead belongs to the user namespace of its maker (user_namespaces(7)), so
+        // it serves only a container that would make its own in this one (decision 4).
+        if network.is_some() && (!spec.makes_namespace("network") || spec.makes_namespace("user")) {
+            return Err(OciError::Config(
+                "a network namespace made ahead is for a container that makes its own network \
+                 namespace and no user namespace"
+                    .to_owned(),
+            ));
+        }
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
         // Hex keeps the guarantee and shares one program among such containers (devshare).
@@ -199,7 +225,13 @@ impl Runtime {
                 (cg, true)
             }
         };
-        let result = self.start_shim(id, bundle, dir, pid_file, &spec, &cgroup);
+        let making = Making {
+            id,
+            bundle,
+            dir,
+            pid_file,
+        };
+        let result = self.start_shim(&making, &spec, &cgroup, network);
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
             let _ = end_cgroup(&cgroup, id);
@@ -209,13 +241,17 @@ impl Runtime {
 
     fn start_shim(
         &self,
-        id: &str,
-        bundle: &Path,
-        dir: &Dir,
-        pid_file: Option<&Path>,
+        making: &Making<'_>,
         spec: &Spec,
         cgroup: &BoxCgroup,
+        network: Option<OwnedFd>,
     ) -> Result<(), OciError> {
+        let Making {
+            id,
+            bundle,
+            dir,
+            pid_file,
+        } = *making;
         // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. Made close-on-exec,
         // so the runtime's own ends never reach the shim, and through it the container's program.
         let pipe =
@@ -234,12 +270,18 @@ impl Runtime {
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
             .env(init::ENV_CGROUP, cgroup.dir());
+        if let Some(network) = &network {
+            keep_across_exec(network)?;
+            cmd.env(init::ENV_NETWORK, network.as_raw_fd().to_string());
+        }
         let mut shim = cmd
             .spawn()
             .map_err(|e| OciError::os("starting the container init", e))?;
-        // The runtime holds the read end of sync and the write end of map; the init holds the others.
+        // The runtime holds the read end of sync and the write end of map; the init holds the others,
+        // and the network namespace made ahead, now the container's alone.
         drop(sync_w);
         drop(map_r);
+        drop(network);
 
         let mut container_pid = None;
         let outcome = self
