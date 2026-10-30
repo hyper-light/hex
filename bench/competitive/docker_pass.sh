@@ -79,9 +79,14 @@ docker run --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" 
     echo "seam_oci: $SHA ($(sha256sum /opt/bin/seam_oci | cut -c1-16))"
     echo "libcrun: crun-'"$CRUN_VERSION"'.tar.gz ($(cat /opt/bin/crun-src.sha256)), driver $(sha256sum /opt/bin/libcrun-driver | cut -c1-16)"
     echo "params: ROUNDS=$ROUNDS N=$N WARMUP=$WARMUP HEXBENCH_PHASES=$HEXBENCH_PHASES HEXBENCH_SUSTAINED=$HEXBENCH_SUSTAINED"
+    echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state"
   } > /opt/out/env.txt'
+# The pass's /run is a tmpfs, as a host's is, where the runtimes keep their state (runc's and crun's, libcrun's, a
+# root Hex node's /run/hex-node), as host.sh gives its own: the image's /run is the container's overlayfs. From goal
+# 5 plan step 2 on; passes before it kept every runtime's state on overlayfs, so ratios across it compare unlike
+# setups.
 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory="${MEMORY:-16g}" \
-  --privileged --security-opt label=disable --cgroupns=private --network=none \
+  --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v "$BIN:/opt/bin:ro" -v "$SRC:/src:ro" -v "$OUTV:/opt/out" \
   -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e ROUND_FIRST=1 -e N="${N:-1000}" -e WARMUP="${WARMUP:-100}" \
   -e N_OVERRIDE="${N_OVERRIDE:-runsc:3000}" -e LIFECYCLES="${LIFECYCLES:-2000}" -e CAP="${CAP:-1000}" \
