@@ -276,12 +276,14 @@ three different things (CLAUDE.md "Working here"):
     bounded by the 65,536-box budget, replace the store's lock, and no lock another box's create takes is held
     across a record write. An init that dies between the shim's spawn and its watch, and is reaped there by a
     sweep, now refuses its create by type and the box is scrubbed (before, the box was made with the init's
-    exit). Pass of record on fedora (20261030T004533Z, /run a tmpfs from 6f7ba39 on): create p50
-    1.928 ms in process, 2.002 over the socket, against libcrun's 2.515; sustained at concurrency 32 2,108 and
-    2,095/s against libcrun's 1,765 (goal 4's record: 26 and 51 against 1,294, /run on overlayfs). Creates no longer
-    run one at a time, which closes that Open item: its cause was the record's fsyncs under the store's one lock.
-    The network-namespace pool ran dry for 1.8-2.8% of sustained creates at that rate, decision 4's second falsifier
-    (Open). Step 4 (the seed) is next; 5 and 6 follow.
+    exit). A box made before the move, its state under `<state>/oci`, is read where its record names it, so it is
+    taken back and managed after an upgrade (b158760, oci_box's `a_box_made_before_the_move_is_adopted`). Pass of
+    record on fedora (20261030T004533Z, /run a tmpfs from 6f7ba39 on): create p50 1.928 ms in process, 2.002 over
+    the socket, against libcrun's 2.515; sustained at concurrency 32 2,108 and 2,095/s against libcrun's 1,765 (goal
+    4's record: 26 and 51 against 1,294, /run on overlayfs). Creates no longer run one at a time, which closes that
+    Open item: its cause was the record's fsyncs under the store's one lock. The network-namespace pool ran dry for
+    1.8-2.8% of sustained creates at that rate, decision 4's second falsifier (Open). Step 4 (the seed) is under
+    way; 5 and 6 follow.
   - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
@@ -346,11 +348,6 @@ three different things (CLAUDE.md "Working here"):
   `state` does, or the supervisor watching adopted inits, shown by a test that restarts the agent between create and
   start.
 
-- **Boxes made before goal 5 plan step 2 aren't found after an upgrade.** A node from defda14 on keeps its
-  containers' state under its runtime directory, so a box made by an earlier node, whose state is under
-  `<state>/oci`, reads as empty to `inspect`; `delete` still removes it. Closes with adoption and later calls
-  reading the state from the directory a box's record names, shown by a test that adopts such a box after the
-  change.
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
 measured are in `docs/requirements.toml`.
