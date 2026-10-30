@@ -274,7 +274,9 @@ three different things (CLAUDE.md "Working here"):
     `/run/hex-node` (`$XDG_RUNTIME_DIR/hex-node` rootless), named `<node key>-<box id>`. A record whose directories
     all lie on tmpfs isn't fsynced (0 per seam lifecycle, record-syncs-20261030T002934Z). Per-box record turns,
     bounded by the 65,536-box budget, replace the store's lock, and no lock another box's create takes is held
-    across a record write. Pass of record on fedora (20261030T004533Z, /run a tmpfs from 6f7ba39 on): create p50
+    across a record write. An init that dies between the shim's spawn and its watch, and is reaped there by a
+    sweep, now refuses its create by type and the box is scrubbed (before, the box was made with the init's
+    exit). Pass of record on fedora (20261030T004533Z, /run a tmpfs from 6f7ba39 on): create p50
     1.928 ms in process, 2.002 over the socket, against libcrun's 2.515; sustained at concurrency 32 2,108 and
     2,095/s against libcrun's 1,765 (goal 4's record: 26 and 51 against 1,294, /run on overlayfs). Creates no longer
     run one at a time, which closes that Open item: its cause was the record's fsyncs under the store's one lock.

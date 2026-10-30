@@ -77,7 +77,10 @@ itself (implementation goal 0), this axis can't be judged.
 on tmpfs or that names none: the node keeps its containers' state where runc and crun keep theirs, under its runtime
 directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless), each container named `<node key>-<box
 id>`. A record naming a directory on disk, such as a rendered bundle's writable layer, is still fsynced, file and
-directory, and no lock another box's create takes is held across a record write (goal 5 plan step 2).
+directory, and no lock another box's create takes is held across a record write (goal 5 plan step 2). So create
+holds the supervisor's spawning lock twice, across the shim's spawn and across the init's watch, and not across the
+Ready record between them: an init that dies in that gap, and is reaped there by a sweep, refuses its create by
+type and the box is scrubbed, where before the box was made showing the init's exit.
 
 **Sources.**
 - rename(2), DESCRIPTION: the target is "atomically replaced, so that there is no point at which another
