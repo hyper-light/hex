@@ -559,9 +559,9 @@ fn serve_one(
 /// the container is made anew in the child (f15). No process but the init, no `hex` exec per create.
 ///
 /// `fds` are the create's: the init's sync pipe (write end), the map pipe (read end), then a network
-/// namespace made ahead when the create says one rides with it. A spec that joins a namespace by path
-/// can't be made by one clone; the seam renders no such bundle, so it is refused by type here, never made
-/// without the namespace it asked for (CLAUDE.md §3).
+/// namespace made ahead when the create says one rides with it. The init joins the namespaces its spec
+/// names by path itself; one that joins a pid or user namespace by path can't be made by one clone, so the
+/// runtime makes it through the shim and never hands it here (`init::needs_shim`).
 fn serve_create(
     create: &seed::Create,
     fds: Vec<OwnedFd>,
@@ -581,10 +581,13 @@ fn serve_create(
         Ok(spec) => spec,
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
-    if spec.linux.namespaces.iter().any(|n| n.path.is_some()) {
+    // The runtime hands a seed no container that joins a pid or user namespace by path (it makes those
+    // through the shim, `init::needs_shim`); one that came anyway is refused by type, never made in the
+    // wrong namespace (CLAUDE.md §3). Every other namespace by path the init joins itself.
+    if init::needs_shim(spec) {
         return refused(
             Failed::Start,
-            "a create through a seed can't join a namespace by path; the seam renders no such bundle"
+            "a container that joins a pid or user namespace by path is made through the shim, not a seed"
                 .to_owned(),
         );
     }
@@ -625,7 +628,10 @@ fn serve_create(
                 Err(_) => {
                     let _ =
                         rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
-                    refused(Failed::Start, "clone3 returned a pid out of range".to_owned())
+                    refused(
+                        Failed::Start,
+                        "clone3 returned a pid out of range".to_owned(),
+                    )
                 }
             }
         }
@@ -702,8 +708,8 @@ fn single_clone(
     } else {
         pid_for.reset().map_err(|e| (Failed::Seed, e))?;
     }
-    let cloned =
-        sys::clone_sibling(p.cgroup.as_ref().map(AsFd::as_fd), 0).map_err(|e| (Failed::Start, e))?;
+    let cloned = sys::clone_sibling(p.cgroup.as_ref().map(AsFd::as_fd), 0)
+        .map_err(|e| (Failed::Start, e))?;
     match cloned {
         None => Ok(Single::Unable(Box::new(p), stdio)),
         Some(sys::Sibling::Child) => {
@@ -1033,8 +1039,8 @@ pub fn send_create(
             fds.len()
         )));
     }
-    let bytes = seed::create(create)
-        .map_err(|f| OciError::Broken(format!("encoding a create: {f}")))?;
+    let bytes =
+        seed::create(create).map_err(|f| OciError::Broken(format!("encoding a create: {f}")))?;
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(seed::MAX_REQUEST_FDS))];
     let mut control = SendAncillaryBuffer::new(&mut space);
     if !control.push(SendAncillaryMessage::ScmRights(fds)) {

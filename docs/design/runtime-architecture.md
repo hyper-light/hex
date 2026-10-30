@@ -785,6 +785,9 @@ p50 (18.297 ms):
    - **What would falsify it:** a seed's clone of a container's init, from the request's arrival to the init's first run,
      costing as much as the spawn and exec it replaces: 0.878 ms in this run. Step 4's bar, `hex --version`'s 1.038 ms,
      is a spawn, exec and exit of the same binary, timed by the earlier probe's spawning process (f1, f3).
+     **Met (goal 5 plan step 4, `bench/competitive/probes/create_breakdown.md`, the seed-path run):** a seed's clone of
+     a container's init, from the seed being scheduled to handle the create to the init's birth, is 0.278 ms p50 (n=320,
+     p99 1.160), a quarter of the 1.038 ms exec it replaces and a third of the 0.878 ms shim spawn and exec.
 3. **A pool of cgroups made ahead** (plan step 5) comes last, if at all.
    - **What it would remove.** Making and bounding the box's cgroup takes 0.473 ms (2.6%): listing the box root to count
      its boxes (0.094 ms), the `mkdir` (0.278) and writing the bounds (0.101). A cgroup made ahead still has its bounds
@@ -846,14 +849,33 @@ each fsync's p99 was 5.719 to 6.333 ms.
 - Once steps 2 and 4 are in, Hex's create through the seam on fedora more than 10% above the 5.142 ms they leave here
   plus the seed's clone: a lever then took less off than its parts measure.
 
-**The choice.** The node agent starts its seeds once.
+**The choice** (built, goal 5 plan step 4). The node agent starts its seeds once.
 - **The seed.** Each is `hex __oci-seed`, exec'd once and single-threaded, with what's common to its containers already
-  set up.
-- **A create.** It hands an idle seed the container's spec over its socket. The seed clones the container's init with
-  `clone3(CLONE_INTO_CGROUP | CLONE_PIDFD | the namespace flags the spec asks for)` (f12), as Hex's exec seed clones
-  already (f13), and passes the pidfd back over `SCM_RIGHTS`.
-- **The child.** It does what the shim's child does today, up to the exec FIFO, then execs the container's program.
-- **The shim.** Its re-exec (`hex __oci-init`) leaves the seam's create; the command line keeps it.
+  set up (`crates/hex-runtime/src/linux/oci/seed.rs`, `serve_create`).
+- **A create.** It hands an idle seed the container's spec and state directory over its socket, with the init's sync and
+  map pipes and a network namespace made ahead as `SCM_RIGHTS` descriptors (`hex_core::seed::Create`). The seed clones
+  the container's init with `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD | the namespace flags the spec asks
+  for)` (f12), as Hex's exec seed clones already (f13), and passes the init's pidfd back over `SCM_RIGHTS`. The
+  `CLONE_PARENT` makes the init the node agent's own child, so the agent reaps it by its pidfd (`waitid(P_PIDFD)`) as it
+  reaps a shim-forked init; `exit_signal` is 0, the one value `clone3` takes with `CLONE_PARENT`.
+  - **One clone serves root and rootless.** `clone(2)`'s ERRORS (man-pages 6.19) still bars `CLONE_PARENT` with
+    `CLONE_NEWPID`, but the kernel dropped that bar before v3.12 (Biederman, "fork: Allow CLONE_PARENT after
+    setns(CLONE_NEWPID)", commit `1f7f4dde5c94`), and v6.19's `copy_process` refuses `CLONE_PARENT` only from an init
+    (`SIGNAL_UNKILLABLE`, `kernel/fork.c:2010-2012`) and `CLONE_NEWUSER`/`CLONE_NEWPID` only with `CLONE_THREAD`
+    (`2018-2022`); `clone3_args_valid` refuses `CLONE_PARENT` with a nonzero `exit_signal` (`2911-2913`). A rootless
+    container's init is born unmapped in its new user namespace by the same clone and asks the runtime for its maps over
+    the sync pipe, which the agent writes against the pid the seed hands back, as the shim did before it forked; so no
+    intermediate fork is needed (measured, `bench/competitive/probes/`: the rootless single clone into a cgroup with a
+    new user namespace works on fedora 6.19 and adacachy 7.2). A spec that joins a namespace by *path* can't be made in
+    one clone; the seam renders no such bundle, so it is refused by type, never made without the namespace it asked for.
+- **The child.** It does what the shim's child does today (`init::clone_child`), up to the exec FIFO, then execs the
+  container's program, so the program's address space is randomized afresh (f17) and any state unique to the container
+  is made anew in the child after the clone (f15).
+- **The shim.** Its re-exec (`hex __oci-init`) leaves the seam's create (`create_in_cgroup_seeded`); the command line
+  keeps it (`create`).
+- **No `hex` exec per create.** strace of `execve` over 50 seam creates on fedora: the hex binary is exec'd exactly
+  once — the one-time `__oci-seed` pool startup — and `__oci-init` (the shim) zero times; each create's init execs only
+  its own program (`/usr/bin/sleep`, `/usr/bin/true`), never hex (goal 5 plan step 4's criterion: 0 per create).
 
 **The seeds a node keeps (plan step 3).** The node's policy for its seeds is a pure core, `hex_core::seeds`
 (`crates/hex-core/src/seeds.rs`, 5f0b474), which step 4's shell drives.

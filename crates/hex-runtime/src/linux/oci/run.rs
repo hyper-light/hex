@@ -105,6 +105,14 @@ pub trait Networks {
     fn on_path(&self) -> Result<(), OciError>;
 }
 
+/// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
+/// may join one of, and how its init is started.
+struct Route<'a> {
+    cgroup: Cgroup,
+    networks: Option<&'a dyn Networks>,
+    start: Start<'a>,
+}
+
 /// How a create starts the container's init: the command line and the legacy adoption path spawn
 /// `hex __oci-init` (the shim, [`Runtime::create`] and [`Runtime::create_in_cgroup`]); the node agent's
 /// seam hands a seed the container to clone ([`Runtime::create_in_cgroup_seeded`], decision 5).
@@ -127,6 +135,11 @@ pub trait CloneInit {
     /// writes). Returns the init's pid in this process's pid namespace and a pidfd for it, the caller's to
     /// own.
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
+
+    /// A container a seed can't make in one clone ([`init::needs_shim`]: it joins a pid or user namespace
+    /// by path) is made through the shim instead: counted here, so a run shows how often a create still
+    /// re-execs the hex binary.
+    fn through_shim(&self);
 }
 
 /// What [`CloneInit::clone_init`] is given: the container to make, its cgroup and a network namespace
@@ -194,7 +207,16 @@ impl Runtime {
     /// the container init's pid. The container's cgroup is made from the spec's `cgroupsPath` under
     /// the cgroup root, as the runtime-spec's command line does.
     pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::FromSpec, None, Start::Shim)
+        self.create_with(
+            id,
+            bundle,
+            pid_file,
+            Route {
+                cgroup: Cgroup::FromSpec,
+                networks: None,
+                start: Start::Shim,
+            },
+        )
     }
 
     /// Makes the container in a cgroup the caller already made and bounded, rather than from the
@@ -214,15 +236,26 @@ impl Runtime {
         cgroup: BoxCgroup,
         networks: Option<&dyn Networks>,
     ) -> Result<(), OciError> {
-        self.create_with(id, bundle, pid_file, Cgroup::Provided(cgroup), networks, Start::Shim)
+        self.create_with(
+            id,
+            bundle,
+            pid_file,
+            Route {
+                cgroup: Cgroup::Provided(cgroup),
+                networks,
+                start: Start::Shim,
+            },
+        )
     }
 
     /// Makes the container as [`Runtime::create_in_cgroup`] does, but starts its init by handing it to a
     /// seed to clone (decision 5, goal 5 plan step 4), in place of the shim's re-exec of the hex binary:
     /// the `Runtime` seam's create, where `seeds` is the node agent's pool of `hex __oci-seed` processes.
     /// The container's namespaces, cgroup, device policy, state and create-time hooks are the same as the
-    /// shim path's; only the init's start differs. A spec that joins a namespace by path is refused by the
-    /// seed, which can't make such a container in one clone; the seam renders no such bundle.
+    /// shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
+    /// be made by a seed's one clone ([`init::needs_shim`]), so it is made through the shim, as the command
+    /// line makes every container, and the seeds count it ([`CloneInit::through_shim`]): the one create
+    /// that still re-execs the hex binary.
     pub fn create_in_cgroup_seeded(
         &self,
         id: &str,
@@ -236,9 +269,11 @@ impl Runtime {
             id,
             bundle,
             pid_file,
-            Cgroup::Provided(cgroup),
-            networks,
-            Start::Seed(seeds),
+            Route {
+                cgroup: Cgroup::Provided(cgroup),
+                networks,
+                start: Start::Seed(seeds),
+            },
         )
     }
 
@@ -247,13 +282,11 @@ impl Runtime {
         id: &str,
         bundle: &Path,
         pid_file: Option<&Path>,
-        cgroup: Cgroup,
-        networks: Option<&dyn Networks>,
-        start: Start<'_>,
+        route: Route<'_>,
     ) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
-        let result = self.create_inner(id, bundle, &dir, pid_file, cgroup, networks, start);
+        let result = self.create_inner(id, bundle, &dir, pid_file, route);
         if result.is_err() {
             let _ = dir.remove();
         }
@@ -266,10 +299,13 @@ impl Runtime {
         bundle: &Path,
         dir: &Dir,
         pid_file: Option<&Path>,
-        cgroup: Cgroup,
-        networks: Option<&dyn Networks>,
-        start: Start<'_>,
+        route: Route<'_>,
     ) -> Result<(), OciError> {
+        let Route {
+            cgroup,
+            networks,
+            start,
+        } = route;
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
@@ -289,7 +325,7 @@ impl Runtime {
         let (cgroup, caller_owns) = match cgroup {
             Cgroup::FromSpec => (make_cgroup(&spec, id, &plan, &self.root)?, false),
             Cgroup::Provided(cg) => {
-                attach_device_program(&cg, &plan, spec.makes_namespace("user"), &self.root)?;
+                attach_device_program(&cg, &plan, spec.in_user_namespace(), &self.root)?;
                 (cg, true)
             }
         };
@@ -302,6 +338,10 @@ impl Runtime {
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
             Start::Shim => self.start_shim(&making, &spec, &cgroup, network),
+            Start::Seed(seeds) if init::needs_shim(&spec) => {
+                seeds.through_shim();
+                self.start_shim(&making, &spec, &cgroup, network)
+            }
             Start::Seed(seeds) => self.start_via_seed(&making, &spec, &cgroup, network, seeds),
         });
         if result.is_err() && !caller_owns {
@@ -424,12 +464,17 @@ impl Runtime {
         })?;
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
         // the init's ends once it had cloned, so the init alone holds them now.
-        let outcome = self.handshake_seed(&sync_r, &map_w, pid, spec).and_then(|()| {
-            // The init is blocked at the exec FIFO, so its start time is its own.
-            state::start_time(pid).ok_or_else(|| {
-                OciError::Broken(format!("container {}'s init ended during create", making.id))
-            })
-        });
+        let outcome = self
+            .handshake_seed(&sync_r, &map_w, pid, spec)
+            .and_then(|()| {
+                // The init is blocked at the exec FIFO, so its start time is its own.
+                state::start_time(pid).ok_or_else(|| {
+                    OciError::Broken(format!(
+                        "container {}'s init ended during create",
+                        making.id
+                    ))
+                })
+            });
         match outcome {
             Ok(start_time) => self.record_created(making, spec, cgroup, pid, start_time),
             Err(e) => {
@@ -481,12 +526,16 @@ impl Runtime {
         pid: i32,
         spec: &Spec,
     ) -> Result<(), OciError> {
-        let mut reader = BufReader::new(std::fs::File::from(sync_r.try_clone().map_err(|e| {
-            OciError::os("duplicating the sync pipe", e)
-        })?));
-        let mut map_w = std::fs::File::from(map_w.try_clone().map_err(|e| {
-            OciError::os("duplicating the map pipe", e)
-        })?);
+        let mut reader = BufReader::new(std::fs::File::from(
+            sync_r
+                .try_clone()
+                .map_err(|e| OciError::os("duplicating the sync pipe", e))?,
+        ));
+        let mut map_w = std::fs::File::from(
+            map_w
+                .try_clone()
+                .map_err(|e| OciError::os("duplicating the map pipe", e))?,
+        );
         let mut line = String::new();
         loop {
             line.clear();
@@ -881,7 +930,7 @@ fn make_cgroup(
         }
     };
     let cg = BoxCgroup::at(path);
-    if let Err(e) = apply(&cg, plan, spec.makes_namespace("user"), state_root) {
+    if let Err(e) = apply(&cg, plan, spec.in_user_namespace(), state_root) {
         if made {
             let _ = cg.remove();
         }

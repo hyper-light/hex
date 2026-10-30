@@ -111,7 +111,11 @@ fn a_create_reads_back_as_written_and_its_bytes_are_recorded() {
         Message::Exec(full())
     );
     assert_eq!(hex(&create(&creates()[0]).unwrap()), GOLDEN_CREATE);
-    assert_eq!(creates()[0].fds(), CREATE_FDS + 1, "network adds the made-ahead netns");
+    assert_eq!(
+        creates()[0].fds(),
+        CREATE_FDS + 1,
+        "network adds the made-ahead netns"
+    );
     assert_eq!(creates()[1].fds(), CREATE_FDS);
     let unable = answer(&Answer::Refused {
         failed: Failed::Unable,
@@ -146,7 +150,11 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
     let exec = request(&minimal()).unwrap();
     assert!(matches!(
         read_message(&exec, exec.len(), 2),
-        Err(Fault::Descriptors { want: 4, got: 2, .. })
+        Err(Fault::Descriptors {
+            want: 4,
+            got: 2,
+            ..
+        })
     ));
     for nameless in [
         Create {

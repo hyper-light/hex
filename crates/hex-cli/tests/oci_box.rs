@@ -163,6 +163,11 @@ impl Lab {
     {"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}"#,
             );
         }
+        self.config_with(args, &namespaces, &mappings, &sys)
+    }
+
+    /// A bundle's config.json with its `linux.namespaces` entries, id mappings and extra mounts as given.
+    fn config_with(&self, args: &[String], namespaces: &str, mappings: &str, sys: &str) -> String {
         let args = json_args(args);
         format!(
             r#"{{
@@ -273,6 +278,109 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
     each_seed_cloned_container_is_randomized_afresh(&lab, own);
     a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
+    a_bundle_joining_a_namespace_by_path_runs_through_the_seam(&lab, own);
+    a_box_root_counts_its_boxes_without_listing(&lab, own);
+}
+
+/// Goal 5 plan step 4: the box bound's count is the root's link count, not a listing (a listing waits
+/// behind every box's `mkdir` and `rmdir` beside it). Do: make three boxes under a box root, then remove
+/// one. Expect: the count equals the listing's at each step — 0, 3, then 2.
+fn a_box_root_counts_its_boxes_without_listing(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let root = BoxRoot::open(
+        &own.join("hex-oci-count"),
+        disks::under(state.path()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!((root.count().unwrap(), root.boxes().unwrap().len()), (0, 0));
+    let ids: Vec<BoxId> = ["c1", "c2", "c3"]
+        .iter()
+        .map(|n| BoxId::new(n).unwrap())
+        .collect();
+    let made: Vec<_> = ids
+        .iter()
+        .map(|id| root.create(id, &Bounds::default()).unwrap())
+        .collect();
+    assert_eq!((root.count().unwrap(), root.boxes().unwrap().len()), (3, 3));
+    made[0].remove().unwrap();
+    assert_eq!((root.count().unwrap(), root.boxes().unwrap().len()), (2, 2));
+    for cg in &made[1..] {
+        cg.remove().unwrap();
+    }
+}
+
+/// Goal 5 plan step 4 (decision 5, T-T7.1.4): a given bundle that joins a namespace by path is made
+/// through the seam, as the shim made it before. Do: run box A with a network namespace of its own;
+/// create and start box B whose bundle names A's network namespace by path — and, rootless, A's user
+/// namespace too, which a rootless container needs to join a namespace A's user namespace owns. Expect: B
+/// runs in A's network namespace (and A's user namespace, rootless). As root, B's init joined A's network
+/// namespace itself after the seed's clone, so no create went through the shim; rootless, a user namespace
+/// by path can't be joined in one clone, so B was made through the shim and counted once — the one kind of
+/// create that still re-execs the hex binary.
+fn a_bundle_joining_a_namespace_by_path_runs_through_the_seam(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-joinpath"), state.path());
+    let host = BoxId::new("join-host").unwrap();
+    node.create(lab.networked(host.clone()))
+        .expect("create the box whose namespaces are joined");
+    node.start(&host).expect("start it");
+    let host_init = init_pid(&node.container_dir(&host));
+    let path = |ns: &str| format!("/proc/{host_init}/ns/{ns}");
+    let rest = r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
+    let namespaces = if lab.rootless {
+        format!(
+            r#"{{"type":"user","path":"{}"}},{{"type":"network","path":"{}"}},{rest}"#,
+            path("user"),
+            path("net")
+        )
+    } else {
+        format!(r#"{{"type":"network","path":"{}"}},{rest}"#, path("net"))
+    };
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(
+        dir.join("config.json"),
+        lab.config_with(&Lab::act(&Act::Wait), &namespaces, "", ""),
+    )
+    .unwrap();
+    let joiner = BoxId::new("join-path").unwrap();
+    node.create(BoxSpec {
+        id: joiner.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir),
+    })
+    .expect("a bundle joining a namespace by path is made through the seam");
+    node.start(&joiner).expect("start the joiner");
+    let joined = init_pid(&node.container_dir(&joiner));
+    assert_eq!(
+        netns_of(joined),
+        netns_of(host_init),
+        "it runs in the network namespace it joined by path"
+    );
+    if lab.rootless {
+        let userns = |pid: i32| std::fs::read_link(format!("/proc/{pid}/ns/user")).unwrap();
+        assert_eq!(
+            userns(joined),
+            userns(host_init),
+            "and the user namespace it joined"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            1,
+            "a user namespace by path is made through the shim, counted"
+        );
+    } else {
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "a network namespace by path is joined by the seed's clone, not the shim"
+        );
+    }
+    node.delete(&joiner).expect("delete the joiner");
+    node.delete(&host).expect("delete the box it joined");
 }
 
 /// The agent the crash kills: a node in this re-exec'd process makes and starts a box whose init
@@ -1091,7 +1199,9 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     // Its cgroup is the box's own (read in this process's cgroup namespace: the full path).
     let cgroup = std::fs::read_to_string(format!("/proc/{init}/cgroup")).unwrap();
     assert!(
-        cgroup.lines().any(|l| l.starts_with("0::") && l.ends_with("/nsbox")),
+        cgroup
+            .lines()
+            .any(|l| l.starts_with("0::") && l.ends_with("/nsbox")),
         "the init is in the box's cgroup: {cgroup:?}"
     );
     // Each namespace its spec makes is its own (differs from the agent's); a rootless box also has a
@@ -1110,7 +1220,9 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     // own child, and no re-exec'd shim stands anywhere among the agent's children.
     assert_eq!(ppid(init), Some(agent), "the init is the agent's own child");
     assert!(
-        !children_of(agent).iter().any(|&c| cmdline_has(c, "__oci-init")),
+        !children_of(agent)
+            .iter()
+            .any(|&c| cmdline_has(c, "__oci-init")),
         "no hex __oci-init shim ran for the create"
     );
     node.delete(&id).expect("delete");
@@ -1159,8 +1271,10 @@ fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
     assert_ne!(v1, v2, "two containers from one seed differ: {v1} vs {v2}");
     assert_ne!(v1, vs, "the first differs from the seed's: {v1} vs {vs}");
     assert_ne!(v2, vs, "the second differs from the seed's: {v2} vs {vs}");
-    node.delete(&BoxId::new("reinit1").unwrap()).expect("delete");
-    node.delete(&BoxId::new("reinit2").unwrap()).expect("delete");
+    node.delete(&BoxId::new("reinit1").unwrap())
+        .expect("delete");
+    node.delete(&BoxId::new("reinit2").unwrap())
+        .expect("delete");
 }
 
 /// Goal 5 plan step 4 (T-T7.1.4), crash injection: a seed that dies mid-create refuses that create by
@@ -1175,7 +1289,8 @@ fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
     let first = BoxId::new("crash-a").unwrap();
     node.create(lab.running(first.clone(), &Lab::act(&Act::Wait)))
         .expect("the first create starts a seed");
-    node.delete(&first).expect("delete the first box, leaving its seed idle");
+    node.delete(&first)
+        .expect("delete the first box, leaving its seed idle");
     let seed = children_of(agent)
         .into_iter()
         .find(|&c| cmdline_has(c, "__oci-seed"))

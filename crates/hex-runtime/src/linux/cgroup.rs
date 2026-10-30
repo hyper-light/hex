@@ -162,7 +162,7 @@ impl BoxRoot {
             }
         }
         let writes = core::writes(bounds, &self.disks)?;
-        if self.boxes()?.len() >= MAX_BOXES {
+        if self.count()? >= MAX_BOXES {
             return Err(Refusal::Full(MAX_BOXES));
         }
         let dir = self.dir.join(id.as_str());
@@ -211,6 +211,22 @@ impl BoxRoot {
         } else {
             None
         }
+    }
+
+    /// How many cgroups are under the root, box or not: the count [`BoxRoot::boxes`] would list, read from
+    /// the root's link count instead. A cgroup v2 directory's link count is its child directories plus two
+    /// (kernfs sets it so, `set_nlink(inode, kn->dir.subdirs + 2)` in `kernfs_refresh_inode`, Linux v6.19
+    /// fs/kernfs/inode.c; measured on fedora: 0, 1, 7 and 32 children, links 2, 3, 9 and 34), and a `stat`
+    /// of it takes only kernfs's attribute lock, shared (`kernfs_iop_getattr`). A listing takes the root
+    /// directory's own lock shared, and every box's `mkdir` and `rmdir` beside it take that lock
+    /// exclusive, so at concurrency 32 a create waited behind them all: 5.7 ms of each lifecycle off the
+    /// CPU, the largest wait a create had (goal 5 plan step 4, bench/competitive/probes/create_serial.md).
+    pub fn count(&self) -> Result<usize, Refusal> {
+        use std::os::unix::fs::MetadataExt;
+        let links = fs::metadata(&self.dir)
+            .map_err(|e| os_err("counting boxes", &self.dir, e))?
+            .nlink();
+        Ok(usize::try_from(links.saturating_sub(2)).unwrap_or(usize::MAX))
     }
 
     /// The name of every cgroup under the root, box or not, bounded by [`MAX_BOXES`].

@@ -177,9 +177,14 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
 /// after the seed's one clone makes the namespaces the shim made by `unshare`. For a user namespace the
 /// child is born unmapped, so it asks the runtime for its maps (`U`; the runtime knows this init's pid
 /// from the seed's answer, so the message carries none), waits the ack on `map`, and becomes root in the
-/// namespace, as the shim does before it forks. A network namespace made ahead (`network`) is joined in
-/// place of the fresh one the clone left out. Then the shared [`container`] setup, born in the cgroup
-/// (`procs` is `None`). Returns only on the no-process case or an error (the caller reports `E`).
+/// namespace, as the shim does before it forks. Then it joins the namespaces its spec names by `path`, in
+/// the shim's order ([`join_namespace_paths`]): the network, ipc, uts, mount and cgroup kinds, which a
+/// `setns` moves the caller itself into. A pid or user namespace by path can't be joined here — a pid
+/// namespace's `setns` moves only the caller's later children, and the clone has already made the fresh
+/// namespaces, owned by the seed's user namespace — so the runtime makes such a container through the shim
+/// instead ([`needs_shim`]). A network namespace made ahead (`network`) is joined in place of the fresh
+/// one the clone left out. Then the shared [`container`] setup, born in the cgroup (`procs` is `None`).
+/// Returns only on the no-process case or an error (the caller reports `E`).
 pub(crate) fn clone_child(
     spec: &Spec,
     bundle: &str,
@@ -196,6 +201,7 @@ pub(crate) fn clone_child(
         rustix::io::read(&map, &mut ack).map_err(|e| OciError::os("reading the map ack", e))?;
         become_userns_root()?;
     }
+    join_namespace_paths(spec)?;
     let made_ahead = match network {
         Some(network) => {
             sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
@@ -520,13 +526,20 @@ fn join_namespace_paths(spec: &Spec) -> Result<(), OciError> {
     Ok(())
 }
 
+/// Whether a container can't be made by a seed's one clone and is made through the shim instead: one
+/// that joins a pid or a user namespace by `path` ([`clone_child`] says why). The node counts each.
+pub fn needs_shim(spec: &Spec) -> bool {
+    spec.linux
+        .namespaces
+        .iter()
+        .any(|n| n.path.is_some() && matches!(n.kind.as_str(), "pid" | "user"))
+}
+
 /// The `CLONE_NEW*` flags a create's one clone makes fresh for the container (decision 5): each
-/// namespace the spec makes (not one joined by `path`), as `clone3` flags, but the cgroup namespace,
-/// which [`container`] unshares once the child is in its cgroup, and the network namespace when one is
-/// made ahead (`made_ahead`), which [`clone_child`] joins by `setns` in its place. A container that
-/// joins a namespace by `path` can't be made by one clone, and the seam renders no such bundle: it is
-/// refused by type where a create is handed to a seed ([`super::seed`]), never made without the
-/// namespace it asked for.
+/// namespace the spec makes (not one joined by `path`, which [`clone_child`] joins), as `clone3` flags,
+/// but the cgroup namespace, which [`container`] unshares once the child is in its cgroup, and the
+/// network namespace when one is made ahead (`made_ahead`), which [`clone_child`] joins by `setns` in
+/// its place.
 pub(crate) fn fresh_clone_flags(spec: &Spec, made_ahead: bool) -> u64 {
     let mut flags: u64 = 0;
     for (kind, flag) in [
@@ -586,7 +599,7 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
 
     // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
     // devices are bind-mounted from the host instead of created.
-    let in_userns = spec.makes_namespace("user");
+    let in_userns = spec.in_user_namespace();
     for op in crate::linux::oci::mount::plan(&spec.mounts)? {
         do_mount(&rootfs, &op)?;
     }

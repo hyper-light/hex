@@ -194,6 +194,12 @@ impl Node {
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
     /// a node whose own binary isn't `hex` (the bench, a node linked into another program).
     pub fn with_oci_helper(mut self, hex_binary: PathBuf) -> Self {
+        // The create seeds are built now, from this binary, so their first spare is up before the first
+        // create (decision 5): no create waits on a seed's exec. A pool that can't be built now is built
+        // at the first create, which reports why.
+        if let Ok(pool) = CreatePool::new(hex_binary.clone()) {
+            let _ = self.create_seeds.set(pool);
+        }
         self.oci_helper = Some(hex_binary);
         self
     }
@@ -700,10 +706,9 @@ impl Node {
             .ok_or_else(|| Refusal::Broken("the exec seed pool wasn't built".to_owned()))
     }
 
-    /// The create seed pool, built once on first use from the same `hex` binary the class re-execs for
-    /// its init (so the bench and a linked-in node use the binary [`Node::with_oci_helper`] names, as
-    /// [`Node::seed_pool`] does). A race to build it drops the losing empty pool, which has started no
-    /// seed.
+    /// The create seed pool: built when [`Node::with_oci_helper`] names the `hex` binary, else here on
+    /// first use from this process's own (as [`Node::seed_pool`] finds it). A race to build it drops the
+    /// losing pool, whose drop stops its starting thread and ends the spare it started.
     fn create_pool(&self) -> Result<&CreatePool, Refusal> {
         if let Some(pool) = self.create_seeds.get() {
             return Ok(pool);
@@ -714,7 +719,7 @@ impl Node {
                 std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
             }
         };
-        let _ = self.create_seeds.set(CreatePool::new(exe));
+        let _ = self.create_seeds.set(CreatePool::new(exe)?);
         self.create_seeds
             .get()
             .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))
@@ -728,6 +733,14 @@ impl Node {
             Some(pool) => pool.counts(),
             None => Ok(hex_core::seeds::Counts::default()),
         }
+    }
+
+    /// How many of the node's creates were made through the shim since its seed pool opened: those whose
+    /// container joins a pid or user namespace by path, which no seed's one clone can make (decision 5).
+    pub fn creates_through_shim(&self) -> u64 {
+        self.create_seeds
+            .get()
+            .map_or(0, CreatePool::creates_through_shim)
     }
 }
 

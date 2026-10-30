@@ -542,6 +542,13 @@ impl Spec {
             .iter()
             .any(|n| n.kind == kind && n.path.is_none())
     }
+
+    /// Whether the container runs in a user namespace of its own or one it joins by `path`: either way
+    /// it is outside the initial user namespace, where `mknod` of a device is refused and a device policy
+    /// is enforced by construction rather than by a cgroup device program the runtime loads.
+    pub fn in_user_namespace(&self) -> bool {
+        self.linux.namespaces.iter().any(|n| n.kind == "user")
+    }
 }
 
 #[cfg(test)]
