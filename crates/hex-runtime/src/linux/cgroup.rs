@@ -221,11 +221,17 @@ impl BoxRoot {
     /// directory's own lock shared, and every box's `mkdir` and `rmdir` beside it take that lock
     /// exclusive, so at concurrency 32 a create waited behind them all: 5.7 ms of each lifecycle off the
     /// CPU, the largest wait a create had (goal 5 plan step 4, bench/competitive/probes/create_serial.md).
+    ///
+    /// A directory whose links don't count its children (fewer than two: btrfs, for one, gives every
+    /// directory one) is listed instead, so the bound holds on any filesystem a root is opened on.
     pub fn count(&self) -> Result<usize, Refusal> {
         use std::os::unix::fs::MetadataExt;
         let links = fs::metadata(&self.dir)
             .map_err(|e| os_err("counting boxes", &self.dir, e))?
             .nlink();
+        if links < 2 {
+            return Ok(self.boxes()?.len());
+        }
         Ok(usize::try_from(links.saturating_sub(2)).unwrap_or(usize::MAX))
     }
 

@@ -76,6 +76,9 @@ struct Inner {
     seeds: Seeds,
     /// Each slot's live seed process, `Some` while the seed is up and not checked out for a create.
     procs: Vec<Option<Proc>>,
+    /// Why the last seed start failed, while none has started since: a create the core refuses names it,
+    /// so a node whose seeds can't start says why (CLAUDE.md §3), not only that none came free.
+    start_failure: Option<String>,
     /// Set as the pool is dropped: the starting thread ends.
     shut: bool,
 }
@@ -102,6 +105,7 @@ impl CreatePool {
             inner: Mutex::new(Inner {
                 seeds: Seeds::new(limits),
                 procs: (0..slots).map(|_| None).collect(),
+                start_failure: None,
                 shut: false,
             }),
             free: Condvar::new(),
@@ -177,12 +181,18 @@ impl CloneInit for CreatePool {
 
 impl Drop for CreatePool {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.shared.inner.lock() {
-            inner.shut = true;
-            for proc in inner.procs.iter_mut().filter_map(Option::take) {
-                end(&proc);
-            }
+        // A poisoned lock still holds the seeds' processes: they are ended either way, none left running
+        // or unreaped.
+        let mut inner = self
+            .shared
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.shut = true;
+        for proc in inner.procs.iter_mut().filter_map(Option::take) {
+            end(&proc);
         }
+        drop(inner);
         self.shared.wake.notify_all();
         self.shared.free.notify_all();
         if let Some(starter) = self.starter.take() {
@@ -212,7 +222,10 @@ impl Shared {
         // freed for a restart, so a wedged seed never holds a slot for ever.
         self.reap_hung(&mut inner);
         let now = self.now();
-        let admit = inner.seeds.create(now).map_err(refused)?;
+        let admit = inner
+            .seeds
+            .create(now)
+            .map_err(|r| refused(r, inner.start_failure.as_deref()))?;
         self.wake.notify_one();
         let ticket = match admit {
             Admit::Seed(id) => return Ok((id, take(&mut inner, id)?)),
@@ -222,7 +235,7 @@ impl Shared {
             let now = self.now();
             let until = match inner.seeds.claim(ticket, now).map_err(stale)? {
                 Claim::Seed(id) => return Ok((id, take(&mut inner, id)?)),
-                Claim::Refused(r) => return Err(refused(r)),
+                Claim::Refused(r) => return Err(refused(r, inner.start_failure.as_deref())),
                 Claim::Wait { until } => until,
             };
             let left = until.saturating_sub(self.now());
@@ -254,16 +267,20 @@ impl Shared {
     /// A healthy seed back to the pool after its create: its process returned to its slot, the core told
     /// it is done, and the create that has waited longest, if any, woken.
     fn done(&self, id: SeedId, proc: Proc) {
-        if let Ok(mut inner) = self.lock() {
-            if let Some(slot) = inner.procs.get_mut(id.slot()) {
-                *slot = Some(proc);
-            }
-            let now = self.now();
-            // Stale only if the seed left meanwhile (it can't: this create held it); either way the
-            // waiters are woken.
-            let _ = inner.seeds.done(id, now);
-            self.free.notify_all();
+        // A pool whose lock is poisoned takes nothing back: the seed is ended and reaped, not dropped.
+        let Ok(mut inner) = self.lock() else {
+            end(&proc);
+            return;
+        };
+        match inner.procs.get_mut(id.slot()) {
+            Some(slot) => *slot = Some(proc),
+            None => end(&proc),
         }
+        let now = self.now();
+        // Stale only if the seed left meanwhile (it can't: this create held it); either way the waiters
+        // are woken.
+        let _ = inner.seeds.done(id, now);
+        self.free.notify_all();
     }
 
     /// An unusable seed ended and its slot freed: killed and reaped, the core told it died (which counts
@@ -330,14 +347,19 @@ fn start_seeds(shared: &Shared) {
             }
             Ok(proc) => match inner.seeds.started(id, shared.now()) {
                 Ok(_handed) => {
-                    if let Some(slot) = inner.procs.get_mut(id.slot()) {
-                        *slot = Some(proc);
+                    inner.start_failure = None;
+                    match inner.procs.get_mut(id.slot()) {
+                        Some(slot) => *slot = Some(proc),
+                        None => end(&proc),
                     }
                 }
                 // The core isn't starting it (it was reported dead meanwhile): end it.
                 Err(_stale) => end(&proc),
             },
-            Err(_e) => {
+            // Counted by the core, which stops asking until the next create; the cause is kept for the
+            // refusals of the creates that find no seed meanwhile.
+            Err(e) => {
+                inner.start_failure = Some(e.to_string());
                 let _ = inner.seeds.start_failed(id);
             }
         }
@@ -469,11 +491,16 @@ fn readable(fd: BorrowedFd<'_>, patience: Duration) -> Result<bool, OciError> {
 }
 
 /// A core refusal as a typed node error naming why (the line was full, the create's seed died or was
-/// taken for hung, or its wait ran out); it reaches the caller as a [`Refusal::Os`].
-fn refused(r: Refused) -> OciError {
+/// taken for hung, or its wait ran out), with why the last seed start failed when none has started since;
+/// it reaches the caller as a [`Refusal::Os`].
+fn refused(r: Refused, start_failure: Option<&str>) -> OciError {
+    let why = match start_failure {
+        Some(cause) => format!("{r}; the last create seed start failed: {cause}"),
+        None => r.to_string(),
+    };
     OciError::Os {
         op: "create via a seed",
-        why: r.to_string(),
+        why,
     }
 }
 
@@ -481,4 +508,42 @@ fn refused(r: Refused) -> OciError {
 /// bug if it happens).
 fn stale(s: Stale) -> OciError {
     OciError::Broken(format!("the create seed pool: {s}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
+    /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
+    /// seed with a wait bound of 50 ms. Expect: the create is refused by type after the wait, naming the
+    /// wait that ran out and the failed start's cause, not only that no seed came free.
+    #[test]
+    fn a_pool_whose_seeds_cannot_start_names_why_it_refuses() {
+        let limits = Limits {
+            wait: Duration::from_millis(50),
+            ..hex_core::seeds::LIMITS
+        };
+        let pool = CreatePool::with_limits(PathBuf::from("/nonexistent/hex-for-the-test"), limits)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pool.counts().unwrap().start_failed == 0 {
+            assert!(Instant::now() < deadline, "the pool never tried a start");
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+        let Err(OciError::Os { op, why }) = pool.shared.acquire() else {
+            panic!("a pool with no seed refuses its create by type");
+        };
+        assert_eq!(op, "create via a seed");
+        assert!(
+            why.contains("the last create seed start failed: starting a create seed"),
+            "the refusal names the failed start's cause: {why}"
+        );
+        let counts = pool.counts().unwrap();
+        assert_eq!(
+            (counts.refused_waited, counts.started),
+            (1, 0),
+            "{counts:?}"
+        );
+    }
 }
