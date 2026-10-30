@@ -342,8 +342,10 @@ three different things (CLAUDE.md "Working here"):
   off create's path (goal 5 plan step 2) the seam ran 2,108 lifecycles a second at concurrency 32, and the pool ran
   dry for 181-279 of each sustained phase's 10,000 creates (1.8-2.8%; `RESULT.md`, 20261030T004533Z), each made on
   the path and counted, none failed: decision 4's second falsifier (more than 1% dry). Goal 4's 553 a second never
-  reached it. Closes with a second refill thread, or a bound sized to the rate, and a sustained phase at that rate
-  with under 1% of its creates finding the pool dry.
+  reached it. A dry create makes its namespace on its path, 0.152-0.161 ms p50 and 0.333-0.401 ms p99 for one
+  thread on an unloaded fedora (`probes/netns_pool.md`), more under load; at 2.5% of creates those sit above a
+  create's p97.5, where goal 5's p99.9 (plan step 6) reads them. Closes with a second refill thread, or a bound sized
+  to the rate, and a sustained phase at that rate with under 1% of its creates finding the pool dry.
 
 - **An adopted box that was created but never started can't be started.** After a node agent's restart, `start`
   judges the init's liveness by the supervisor's pidfd, and an adopted init isn't watched (found in goal 5 plan step
