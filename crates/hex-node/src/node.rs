@@ -867,11 +867,13 @@ impl crate::serve::Host for Node {
 
 /// What a box still holds when a delete can't empty it: each surviving process with its command,
 /// state and parent, so the refusal names what is stuck, not only that something is (§3). Bounded to a
-/// few: enough to see what it is. An empty `cgroup.procs` while the box reads populated means a
-/// descendant cgroup holds them.
+/// few: enough to see what it is. A descendant cgroup's are named under its path. `cgroup.procs`
+/// leaves out a process whose leader has ended while another of its threads hasn't (Linux v6.19,
+/// `kernel/cgroup/cgroup.c:5112-5121`), so with no process listed the box's threads are named
+/// instead, each with its process, state and where it waits.
 fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
     let root = cg.dir().to_path_buf();
-    let mut out = String::new();
+    let (mut out, mut threads) = (String::new(), String::new());
     let mut queue = vec![root.clone()];
     let mut dirs_seen = 0usize;
     // A flat walk of the box's cgroup subtree (CLAUDE.md §11), bounded in cgroups and pids (§2).
@@ -908,6 +910,31 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
                 ));
             }
         }
+        if let Ok(text) = fs::read_to_string(dir.join("cgroup.threads")) {
+            for tid in text
+                .lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .take(16)
+            {
+                let status = fs::read_to_string(format!("/proc/{tid}/status")).unwrap_or_default();
+                let field = |name: &str| {
+                    status
+                        .lines()
+                        .find_map(|l| l.strip_prefix(name))
+                        .map(|v| v.trim().to_owned())
+                        .unwrap_or_default()
+                };
+                let wchan = fs::read_to_string(format!("/proc/{tid}/wchan"))
+                    .map(|s| s.trim().to_owned())
+                    .unwrap_or_default();
+                threads.push_str(&format!(
+                    " [{rel}/{tid} of {} {:?} state {} wchan {wchan}]",
+                    field("Tgid:"),
+                    field("Name:"),
+                    field("State:")
+                ));
+            }
+        }
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten().take(256) {
                 let path = entry.path();
@@ -917,12 +944,14 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
             }
         }
     }
-    if out.is_empty() {
-        // Populated with nothing in any cgroup.procs: a process the kernel still holds, typically a
-        // container init stuck in its pid-namespace teardown until a process in that namespace is reaped.
-        " (populated but no process listed: a pid namespace is tearing down)".to_owned()
-    } else {
-        out
+    match (out.is_empty(), threads.is_empty()) {
+        (false, _) => out,
+        (true, false) => format!(" (no process listed, only threads:{threads})"),
+        // Populated when the wait last read it, nothing listed now: its last task ended in between.
+        (true, true) => {
+            " (populated, but no process or thread listed: the last ended as they were read)"
+                .to_owned()
+        }
     }
 }
 
