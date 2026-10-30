@@ -231,3 +231,27 @@ which takes `read_lock(&tasklist_lock)` and runs `for_each_process_thread(g, p)`
 runs on a node, its own containers included. libcrun's create makes the same call: `ret = pivot_root (".", ".");`
 (crun 1.30.1, `src/libcrun/linux.c:2567` at 079ff6a7), the bench's driver leaving `no_pivot` unset
 (`bench/competitive/libcrun/driver.c:79-91`).
+
+## Run 2 (2026-10-30, fedora): a repeat with the pre-run check, not of record
+
+- **Why:** run on the lead's word, which reached me after run 1 and had crossed with the slot going to step 2.
+  Decision 5 rests on run 1.
+- **The check before each run:** the functional run `create-breakdown-20261030T004109Z` at 00:41:09Z, then the timed
+  run at 00:41:37Z.
+  - Kiln showed fedora's 8 slots idle (`ci.runners.list`, at 00:40:58Z and 00:41:27Z).
+  - `docker ps`, every container listed, showed the same four long-lived ones as before: no hexbench, hexpass or
+    Focal `s5-focal*` container.
+  - Kiln's own builds ran beside it: a traced `cargo build` of kiln, a `cargo test -p kiln --no-run`, and rustc of
+    amphora_engine and turso_core.
+  - The 1-minute load was 9.66, and CPU and I/O stalled 0.08% and 0.24% of the last 10 s (`/proc/pressure`, some,
+    avg10).
+- **The overlap:** step 2's pass, handed fedora's slot meanwhile, ran beside it from 00:42:30Z to about 00:44Z. It made a
+  niced static release build of hex on all cores (00:42:30-00:42:55Z), ran host_clock.sh (to 00:42:58Z) and fetch.py (to
+  about 00:44Z), and stopped before any bench of its own. This run went from 00:41:40Z to about 00:44:55Z, so the overlap
+  falls in its first two rounds; the third ran clear of it.
+- **Binaries:** run 1's. hex sha256 596969cb3a612644; seam_oci rebuilt at 9ff1ddb came out byte for byte run 1's
+  (0656cae0a8464d57).
+- **What it shows beside run 1:** the parts summed to 102.3% of the p50 of the creates between the traced ones, so the
+  step's criterion was met again. The host ran held awake by the builds beside it: a burst took 0.095 and 0.107 ms at
+  rest on a P-core (host_clock.sh before and after), against run 1's 0.238 and 0.223. Its tables aren't quoted here;
+  they are in its run directory on fedora, `~/.cache/hex-bench/out/create-breakdown-20261030T004140Z`.

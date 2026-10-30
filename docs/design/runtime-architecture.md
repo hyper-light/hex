@@ -852,8 +852,8 @@ each fsync's p99 was 5.719 to 6.333 ms.
 - **The child.** It does what the shim's child does today, up to the exec FIFO, then execs the container's program.
 - **The shim.** Its re-exec (`hex __oci-init`) leaves the seam's create; the command line keeps it.
 
-**The seeds a node keeps (plan step 3).** The node's policy for its seeds is a pure core, `hex_core::seeds` (5f0b474 on
-`cp/t7-g5-s3`), which step 4's shell drives.
+**The seeds a node keeps (plan step 3).** The node's policy for its seeds is a pure core, `hex_core::seeds`
+(`crates/hex-core/src/seeds.rs`, 5f0b474), which step 4's shell drives.
 - **The bound.** At most **32** seeds, up or starting, one to a slot. A seed serves one create at a time: "only one
   instance can be cloned from it at a time (serially)" (AFaaS, OSDI 2025, §8; f14). The bench's busiest phase has 32
   creates in flight (concurrency 32, the figure decision 4's pool holds), so with 32 seeds none of that phase's creates
