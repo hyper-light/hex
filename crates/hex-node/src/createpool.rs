@@ -14,9 +14,9 @@
 //!
 //! **Seeds start ahead of the creates, never on one's path.** A thread of the pool's own starts each seed
 //! the core asks for, with the lock let go: it keeps [`SPARE`] seed up and idle beyond the creates
-//! waiting, so a create finds one idle and no create waits on a seed's exec. The pool starts its first
-//! spare as it opens. A create that finds none idle (a burst) waits in line for the seeds busy cloning to
-//! free, while the thread adds more, up to the bound.
+//! waiting, so a create finds one idle and no create's path holds a seed's exec. The pool starts its
+//! first spare as it opens. A create that finds none idle (a burst) waits in line for a seed to free or
+//! to start, while the thread adds more, up to the bound.
 //!
 //! Bounds (CLAUDE.md §2), each a typed refusal past it: at most [`hex_core::seeds::Limits::seeds`] seeds
 //! up or starting, [`Limits::waiting`] creates in line, a wait of [`Limits::wait`], and a seed killed
@@ -44,7 +44,7 @@ use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 /// rather than wait on a seed's exec. A seed is busy for its clone (0.209 ms p50 on fedora at
 /// concurrency 1, `bench/competitive/probes/seed_path.md`), so under a burst the line drains through the
 /// seeds freeing faster than an exec would start one, and the pool grows to the burst's need meanwhile:
-/// on a loaded fedora at concurrency 32 it grew to all 32, and 45 of 10,000 creates waited while it did.
+/// on a loaded fedora at concurrency 32 it grew to all 32, and 45 of 10,000 creates waited for a seed.
 /// A stated bound, not a tuning: each spare holds a seed's memory (1.5 to 2.4 MiB resident, measured on
 /// fedora), charged to the node agent's cgroup.
 pub const SPARE: usize = 1;

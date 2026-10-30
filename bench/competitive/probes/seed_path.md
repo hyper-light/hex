@@ -17,15 +17,20 @@ through a seed:
 
 - **clone**: `seam_oci`'s lifecycle phase (create, start, exec of `true` and delete of a `sleep` container), `N` timed
   after `WARMUP`, under a trace instance of the run's own that records `sched_waking` and `sched_process_fork` for the
-  processes named `hex` (the seeds, and each init until it execs its program). `seed_path.py` takes, for each init a
-  seed clones, the seed's first wakeup after its last clone (the node's request arriving on its socket) to the init's
-  birth (the fork event the seed's `clone3` fires in the seed, after `copy_process` and before the init first runs):
-  the interval decision 5's falsifier for lever 2 names, from the request's arrival to the init.
+  processes named `hex` (the seeds, and each init until it execs its program), and from run 3 `sched_switch` to them.
+  `seed_path.py` takes, for each init a seed clones, from the seed's first wakeup after its last clone (the node's
+  request arriving on its socket) to the init's birth (the fork event the seed's `clone3` fires in the seed, after
+  `copy_process`, `kernel/fork.c:2661` at v6.19) and, from run 3, to the init's first run (the first switch to it):
+  the interval decision 5's falsifier for lever 2 names, from the request's arrival to the init's first run. From run
+  3 only a wakeup by the node agent (`seam_oci`) starts an interval; before, any wakeup of a seed did, so run 1's
+  longest interval began at another wakeup. The interval leaves out the agent's own hand-off of the request and any
+  wait in line for a seed.
 - **execs**: the same phase, `EXECS` creates after 5, under `strace -f -e trace=execve` over the whole process tree:
   each exec of the hex binary by its first argument (`__oci-seed`, a seed's start; `__oci-init`, the shim; `__oci-exec`,
   the exec helper), and each program exec'd.
 - **memory**: each seed's `Pss` (`smaps_rollup`) and `VmRSS`, sampled every 50 ms while the node serves `MEMORY_N`
-  creates.
+  creates; from run 3 the seeds alone, since an init a seed cloned keeps the seed's arguments until it execs (it is
+  told apart by its own pid namespace).
 - **seeds**: `seam_oci`'s sustained phase (`SUSTAINED` lifecycles at concurrency 32) and the node's create seeds'
   counts over it (`seam_oci`'s `seeds`: creates that waited for a seed, seeds started, the most busy at once).
 
@@ -84,9 +89,33 @@ use shows in it only as their share of the cores it runs on.
 - **The memory.** A seed's `VmRSS` is 1.5 to 2.4 MiB (the busier seed's the larger), its `Pss` 0.7 to 1.7 MiB with
   two seeds sharing the binary's pages. So the bound of 32 seeds caps them at 32 x 2,488 KiB, about 78 MiB, counted
   as if they shared nothing.
-- **The seeds' counts.** Under this load the sustained phase used every slot: the shell started all 32 seeds and all
-  32 were busy at once. A seed is busy from its create's handing to its answer, and at concurrency 32 its clone waits
-  on `cgroup_mutex` (`CLONE_INTO_CGROUP` takes it in `copy_process`; `create_serial.md`, run 3, under the same load,
-  timed a fork into a cgroup at 1.014 ms), so the creates in flight hold seeds longer than the clone's p50 at
-  concurrency 1. With 32 creates in flight and at most 32 seeds, a create waits only while the seeds it needs are still
-  starting: 45 of the 10,000 did (0.45%), none was refused.
+- **The seeds' counts.** Under this load the sustained phase started all 32 seeds and had all 32 busy at once. A
+  seed is busy from its create's handing to its answer, and at concurrency 32 its clone waits on `cgroup_mutex`
+  (`CLONE_INTO_CGROUP` takes it in `copy_process`; `create_serial.md`'s run 3, under the same load, timed a fork into
+  a cgroup at 1.014 ms), so the creates in flight hold their seeds longer than the clone's p50 at concurrency 1: 32
+  busy is the clones' queue on the lock, not a need for 32 (fewer seeds would move that queue into the pool's line
+  without changing the rate). 45 of the 10,000 creates waited for a seed, none was refused; the count doesn't say
+  whether a create waited for a seed starting or for one busy.
+
+## Run 3 (2026-10-30, fedora): at 72797aa, the clone to the init's first run
+
+- **Host and load:** as run 1's. 2026-10-30T06:06:13Z, beside the four long-lived containers and kiln CI jobs: the
+  1-minute load 25.53 at the start and 29.59 at the end.
+- **Binaries:** `hex 0.1.0` of 87f4aff (on cp/t7-g5-s4), sha256 32ef384ba04ff6ea, static-pie, built in the pass image
+  (`hexbench/pass:44`, its glibc-static); `seam_oci` of 72797aa, sha256 cb3a2089e909cc7e.
+- **Run:** `~/.cache/hex-bench/out/seed-path-20261030T060613Z` on fedora, the harness at 72797aa. N=300, WARMUP=20,
+  EXECS=50, MEMORY_N=400, SUSTAINED=10000.
+
+| Reading | Result |
+|---|---|
+| a seed's clone of an init, request to the init's birth (ms) | p50 0.225, p90 0.264, p99 1.039, max 1.907; n=320 of 320, all by one seed |
+| the same, request to the init's first run (ms) | p50 0.234, p90 0.278, p99 1.050, max 1.918; n=320 |
+| execs over 55 creates | 113 in all; the hex binary 2 (`__oci-seed` 2, `__oci-init` 0, `__oci-exec` 0); `/usr/bin/sleep` 55, `/usr/bin/true` 55 |
+| a seed's memory, 52 samples of 2 seeds | `Pss` KiB min 731, median 838, max 1,690; `VmRSS` KiB min 1,572, median 1,572, max 2,424 |
+| the seeds over a sustained phase, 10,000 lifecycles at concurrency 32 (1,518/s) | asked 10,000, waited 46, refused 0; started 21, restarted 0, failed to start 0, died 0, hung 0; most busy at once 20 |
+
+- **The clone** to the init's first run is 0.234 ms p50, under a quarter of the 1.038 ms exec it replaces; its p50s
+  to the init's birth and to its first run are 9 us apart.
+- **The execs** are runs 1 and 2's: 0 per create.
+- **The seeds' counts.** Under a lighter load than run 2's the sustained phase used 21 seeds, 20 busy at most: how
+  many a run holds tracks how long its clones wait on `cgroup_mutex`, so it moves with the host's load.

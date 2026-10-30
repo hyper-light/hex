@@ -2,11 +2,9 @@
 
 Goal 5 plan step 4's criterion 4 (decision 5 of `docs/design/runtime-architecture.md`; kiln plan
 `01a1877e05c7748ca8865548aab76445`) asks the seam's sustained lifecycles a second at concurrency 32 to be at least 8x
-its throughput at concurrency 1 in the same run (`seam_oci`'s throughput and sustained phases, through host.sh). The
-OCI pass at ca45e1a (`~/.cache/hex-bench/out/20261030T041910Z` on fedora, ROUNDS=2 N=1000, the 1-minute load 21.81 at
-the start, not of record) read 1,942 against 394 in process (4.93x) and 1,994 against 316 over the socket (6.31x);
-libcrun beside it ran 1,593 sustained against 73 at concurrency 1 (its delete p50 was 10.34 ms). This probe finds what
-the lifecycles wait on at concurrency 32 that they don't at 1, beside libcrun's at 32, and what holds it.
+its throughput at concurrency 1 in the same run (`seam_oci`'s throughput and sustained phases, through host.sh). The OCI
+pass at ca45e1a read 4.93x in process and 6.31x over the socket (below, "The pass"). This probe finds what the
+lifecycles wait on at concurrency 32 that they don't at 1, beside libcrun's at 32, and what holds it.
 
 ## How it runs
 
@@ -19,35 +17,82 @@ workloads share one lifecycle, the throughput phases' (create, start and delete 
 
 - **hex.c1**: `seam_oci`'s start_true, one lifecycle at a time, 520 of them;
 - **hex.c32**: `seam_oci`'s sustained phase, concurrency 32, 5,000;
-- **crun.c1** and **crun.c32**: `oci_bench.py`'s start_true and sustained phases on libcrun in process, the same counts.
+- **crun.c1** and **crun.c32**: `oci_bench.py`'s start_true and sustained phases on libcrun in process, the same counts;
+- **hex.c32nonet** (run 4 on): Hex's sustained phase on a `true` bundle without a network namespace of its own.
 
 Two programs (`MODE`):
 
 - **offcpu**: off-CPU time by kernel stack (`finish_task_switch`), an on-CPU profile at 999 Hz, and each directory
   operation (`vfs_mkdir`, `vfs_rmdir`, `vfs_unlink`, `vfs_mknod`) by the filesystem of the directory it changes. The
   reader sorts the off-CPU time into the locks a create can wait on and the waits for work.
-- **locks**: each `vfs_mkdir` and `vfs_rmdir` timed by its directory (the parent's `i_rwsem` is held exclusively across
-  it: `filename_create` and `do_rmdir`, Linux v6.19 `fs/namei.c`); each wait in an `rw_semaphore`'s slow path timed by
-  the directory whose `i_rwsem` it is; each lookup that missed the dcache (`lookup_slow`) by directory and name; for
-  every process, `cgroup_mutex`'s holders timed whole (`cgroup_mkdir`, `cgroup_rmdir`, `cgroup_kill_write`,
-  `cgroup_bpf_prog_attach`, and the work a removed cgroup queues to kworkers: `css_killed_work_fn`,
-  `css_release_work_fn`, `cgroup_bpf_release`), and a fork from `cgroup_can_fork` to `cgroup_post_fork`'s return,
-  which with `CLONE_INTO_CGROUP` holds `cgroup_mutex` throughout; and the share of the time `cgroup_mutex` is owned and
-  the runtime's cgroup parent's `i_rwsem` held, sampled on every CPU at 999 Hz over the 100 ms buckets in which the
-  runtime made or removed cgroups.
+- **locks**:
+  - each `vfs_mkdir` and `vfs_rmdir` timed by its directory, whose `i_rwsem` is held exclusively across it
+    (`filename_create` and `do_rmdir` through `__start_dirop`, Linux v6.19 `fs/namei.c:2873`);
+  - each wait in an `rw_semaphore`'s slow path timed by the directory whose `i_rwsem` it is (an rwsem that isn't an
+    inode's decodes to no filesystem; a decode whose garbage holds a comma or bracket drops out, so those totals are
+    lower bounds);
+  - each lookup that missed the dcache (`lookup_slow`) by directory and name;
+  - for every process, `cgroup_mutex`'s takers timed whole, their wait for the lock and their hold together
+    (`cgroup_mkdir`, `cgroup_rmdir`, `cgroup_kill_write`, `cgroup_bpf_prog_attach`, and the work a removed cgroup
+    queues to kworkers: `css_killed_work_fn`, `css_release_work_fn`, `cgroup_bpf_release`), and a fork from
+    `cgroup_can_fork` to `cgroup_post_fork`'s return, which with `CLONE_INTO_CGROUP` waits for and holds
+    `cgroup_mutex` throughout;
+  - from run 4, each wait for `cgroup_mutex` timed alone, from its `lock:contention_begin` tracepoint to its
+    `contention_end`;
+  - the state of `cgroup_mutex` and of the runtime's cgroup directory's `i_rwsem`, sampled on every CPU at 999 Hz. From
+    run 4 the lock words are decoded with their flags: a mutex is held while its owner word names a task, and handed
+    off while only its waiter and hand-off flags are set, free until a woken waiter runs; an `i_rwsem` is write-held,
+    read-held (readers counted), handed off (only flags), or free. Run 3 took any nonzero word for held, so it counted
+    a lock handed off as held. The samples are read over the 100 ms buckets in which the runtime made or removed at
+    least half as many cgroups as the median bucket.
 
 `create_serial.py` reads them, per lifecycle. Not a timed pass: the load is recorded, not gated, and the probes cost
-each lifecycle some (a kprobe on each mkdir, rmdir, slow lookup and lock slow path), so the rates under them are below
-the pass's. A holder's time at concurrency 1 is close to its hold; at 32 it includes its wait for the lock.
+each lifecycle some (a kprobe on each mkdir, rmdir, slow lookup and lock slow path; from run 4 the lock contention
+tracepoints, which fire for every contended lock on the host), so the rates under them are below the pass's. A
+taker's time includes its wait for the lock at concurrency 1 too: the kworkers' work for one lifecycle's removed cgroup
+overlaps the next lifecycle's, and they wait on each other.
+
+## The pass (2026-10-30, fedora): 20261030T041910Z, at ca45e1a, not of record
+
+- **Host and load:** fedora-2 (Intel Core i9-14900HX, 32 threads, 62 GiB; Linux 6.19.10-300.fc44.x86_64), pinned to
+  CPUs 4-31. 2026-10-30T04:19:10Z. Run with LOAD_GATE=0, so not of record by CLAUDE.md §7: the 1-minute load was 21.81
+  at the start and 21.02 at the end; a burst took 0.106 and 0.105 ms at rest on a P-core (`probes/host_clock.sh`,
+  before and after).
+- **Binaries:** `hex 0.1.0` of ca45e1a (on cp/t7-g5-s4), sha256 19ce3ac5229fe2f7, static-pie; `seam_oci` of ca45e1a,
+  sha256 476faa01049a8797; libcrun 1.30.1 in process, driver sha256 5c356f2139adc232.
+- **Run:** `~/.cache/hex-bench/out/20261030T041910Z` on fedora: `host.sh` with PHASES=oci RUNTIMES=libcrun ROUNDS=2
+  N=1000 WARMUP=100 LIFECYCLES=2000 HEXBENCH_SUSTAINED=10000 and HEXBENCH_PHASES "lifecycle throughput sustained
+  start_true"; `/run` a tmpfs. Best of the two rounds, as its `table.md` gives them:
+
+| | libcrun | Hex in process | Hex over the socket |
+|---|---|---|---|
+| throughput at concurrency 1 (lifecycles/s) | 73 | 394 | 316 |
+| throughput at concurrency 8 | 627 | 1,539 | 1,556 |
+| throughput at concurrency 32 | 1,562 | 1,952 | 1,954 |
+| sustained at concurrency 32 (10,000 lifecycles) | 1,593 | 1,942 | 1,994 |
+| sustained over concurrency 1 | 21.8x | 4.93x | 6.31x |
+| create p50 (ms) | 2.97 | 1.50 | 1.62 |
+| create+start of `true` p50 (ms) | 2.86 | 1.44 | 1.81 |
+| delete p50 (ms) | 10.34 | 0.76 | 0.82 |
+
+The sustained phases found the network-namespace pool dry for 65 and 71 of their 10,000 creates in process and 137 and
+30 over the socket. libcrun's ratio is high because its lifecycle alone is slow: its delete polls for the container's
+end.
+
+## Run 0 (2026-10-30, fedora): offcpu's first form, at d12c3fe
+
+`~/.cache/hex-bench/out/create-serial-20261030T031750Z`: hex fe92ee109290392c and seam_oci 57c313c0ca84994e of d12c3fe
+(on cp/t7-g5-s4), the harness at f91ce70; 2026-10-30T03:17:50Z, the 1-minute load 28.73 at the start. At concurrency
+32 Hex's lifecycles waited 18.976 ms each on directories' `i_rwsem`s, 5.710 of it in `getdents64` listing the box root
+(each create listed it to count its boxes) behind the `mkdir`s and `rmdir`s holding it. ca45e1a counts the boxes by the
+box root's link count instead (`BoxRoot::count`), and run 1 has no such wait.
 
 ## Run 1 (2026-10-30, fedora): offcpu, at ca45e1a
 
-- **Host and load:** fedora-2 (Intel Core i9-14900HX, 32 threads, 62 GiB; Linux 6.19.10-300.fc44.x86_64), pinned to
-  CPUs 4-31. 2026-10-30T04:26:44Z; the 1-minute load 12.16 at the start and 15.00 at the end. Up beside it: four
-  long-lived containers (`issue556oss-control-plane`, `buildx_buildkit_kagent-builder-v0.23.00`, `kind-registry`,
-  `kiln-t10-minio`).
-- **Binaries:** `hex 0.1.0` of ca45e1a (on cp/t7-g5-s4), sha256 19ce3ac5229fe2f7, static-pie; `seam_oci` of ca45e1a,
-  sha256 476faa01049a8797; libcrun 1.30.1 in process, driver sha256 5c356f2139adc232.
+- **Host and load:** as the pass's. 2026-10-30T04:26:44Z; the 1-minute load 12.16 at the start and 15.00 at the end.
+  Up beside it: four long-lived containers (`issue556oss-control-plane`, `buildx_buildkit_kagent-builder-v0.23.00`,
+  `kind-registry`, `kiln-t10-minio`).
+- **Binaries:** the pass's.
 - **Run:** `~/.cache/hex-bench/out/create-serial-20261030T042644Z`, the harness at ca45e1a with this probe uncommitted
   (its files are `bt.hex.c1.txt`, `bt.hex.c32.txt` and `bt.crun.c32.txt`; the mode's prefix came later). Under it Hex's
   sustained phase ran 1,936/s and libcrun's 1,469/s. The two concurrency-32 profiles filled bpftrace's default map
@@ -66,18 +111,18 @@ Off-CPU ms per lifecycle:
 | work: a socket | 5.866 | 7.248 | 6.126 |
 | work: a pipe or FIFO | 1.199 | 3.110 | 0.308 |
 | work: a poll | 0.813 | 2.084 | 0.000 |
+| work: a child | 0.000 | 0.013 | 0.004 |
 | a sleep (the runtime's own polling) | 0.000 | 0.000 | 4.069 |
+| other | 0.093 | 0.398 | 3.806 |
 
 The directory waits at concurrency 32 are Hex's `rmdir` (2.675 ms), `mkdir` (2.233) and slow lookups (1.626 and
-1.518). The listing of the box root that each create made to count its boxes is gone: the same probe's first form on
-d12c3fe's binaries (`create-serial-20261030T031750Z`, hex fe92ee109290392c) put 5.710 ms per lifecycle on its
-`getdents64`, of 18.976 on directories; ca45e1a counts the boxes by the box root's link count (`BoxRoot::count`).
+1.518).
 
 ## Run 2 (2026-10-30, fedora): locks, at ca45e1a
 
 - **Host and load:** as run 1's. 2026-10-30T04:41:51Z; the 1-minute load 13.56 at the start and 23.16 at the end; the
   same four containers up.
-- **Binaries:** as run 1's.
+- **Binaries:** the pass's.
 - **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261030T044151Z`, the harness at ca45e1a with this probe
   uncommitted, before the lock sampling. Under it Hex's sustained phase ran 1,850/s (5,000 lifecycles in 2.702 s) and
   libcrun's 1,475/s (in 3.390 s).
@@ -93,9 +138,14 @@ libcrun in the bench container's cgroup root. That directory, per lifecycle:
 | waits on its `i_rwsem` to read (ms) | 0.000 | 3.042 | 0.000 | 1.430 |
 | lookups in it that missed the dcache, of the new cgroup's directory | 2 | 2 | 2 | 2 |
 
-`cgroup_mutex`'s holders, each one's time in us (runs a lifecycle at that rate), concurrency 1 then 32:
+At concurrency 32 Hex's `mkdir`s and `rmdir`s held the box root exclusively 0.487 ms a lifecycle, 90% of the run's
+time at 1,850/s, and `cgroup_mkdir` and `cgroup_rmdir` inside them, each waiting for and holding `cgroup_mutex`, took
+0.472 ms of it (87%).
 
-| Holder | Hex | libcrun |
+`cgroup_mutex`'s takers, each one's time in us, wait and hold together (and how many a lifecycle), concurrency 1 then
+32:
+
+| Taker | Hex | libcrun |
 |---|---|---|
 | `cgroup_mkdir`, the runtime's | 161.1, 276.4 (1 a lifecycle) | 129.2, 217.1 (1) |
 | `cgroup_rmdir`, the runtime's | 93.1, 196.0 (1) | 14.0, 92.3 (2.99, 2.17) |
@@ -109,49 +159,101 @@ libcrun in the bench container's cgroup root. That directory, per lifecycle:
 Beside the cgroup directory, Hex's waits at concurrency 32 are on the bench's one bundle's `rootfs`, the mountpoint of
 every container's root (1.133 ms to write; libcrun 0.436), and its mountpoints `proc`, `usr` and `dev` (0.325), on
 rwsems that aren't a directory's (1.285 to write, 0.035 to read), among them the mount namespace's `namespace_sem`, and
-on the node's record directory on the bench container's overlay (0.601 and 0.070).
+on the node's record directory on the bench container's overlay (0.601 to write, 0.070 to read; the same 0.601 as run
+1's futexes, by chance).
 
-## Run 3 (2026-10-30, fedora): locks with the lock sampling, at e302ac8
+## Run 3 (2026-10-30, fedora): locks with the first form of the lock sampling, at e302ac8
 
 - **Host and load:** as run 1's. 2026-10-30T04:56:17Z, beside Focal's fleet test (34 `s5-focal*` containers) and a
   burst of kiln CI jobs: the 1-minute load 74.79 at the start and 36.23 at the end. Under the probe and that load Hex's
   sustained phase ran 1,077/s and libcrun's 867/s.
-- **Binaries:** `hex` as run 1's (e302ac8 changes no line it's built from; the build's sha256 is the same,
+- **Binaries:** `hex` as the pass's (e302ac8 changes no line it's built from; the build's sha256 is the same,
   19ce3ac5229fe2f7); `seam_oci` of e302ac8, sha256 cf0fa3001bbf1d87, which also reads the create seeds' counts.
 - **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261030T045617Z`, the harness at e302ac8.
 
-| Share of the busy time | hex.c1 | hex.c32 | crun.c1 | crun.c32 |
-|---|---|---|---|---|
-| `cgroup_mutex` owned | 21.7% | 90.6% | 10.9% | 76.4% |
-| the cgroup directory's `i_rwsem` held to write | 7.4% | 78.8% | 1.9% | 56.2% |
-| the cgroup directory's `i_rwsem` held to read | 0.2% | 11.5% | 0.1% | 4.6% |
+Its sampler took any nonzero lock word for a held lock, so each share counts a lock handed off as held: each is an
+upper bound on held, and its "read" share is mostly hand-offs (two slow lookups a lifecycle would need about 53 us of
+read hold each to fill it).
 
-The holders and the directory's waits are run 2's, longer under the load: at concurrency 32 the box root's `mkdir`
+| Share of the busy time, nonzero lock word | hex.c1 | hex.c32 | crun.c1 | crun.c32 |
+|---|---|---|---|---|
+| `cgroup_mutex` | 21.7% | 90.6% | 10.9% | 76.4% |
+| the cgroup directory's `i_rwsem`, writer bit set | 7.4% | 78.8% | 1.9% | 56.2% |
+| the cgroup directory's `i_rwsem`, any other nonzero count | 0.2% | 11.5% | 0.1% | 4.6% |
+
+The takers and the directory's waits are run 2's, longer under the load: at concurrency 32 the box root's `mkdir`
 and `rmdir` took 0.417 and 0.303 ms a lifecycle and its waits 6.670 ms to write and 3.885 to read, and a fork into the
 cgroup took 1.014 ms.
 
+## Run 4 (2026-10-30, fedora): locks, the lock words decoded and the waits timed, at 72797aa
+
+- **Host and load:** as run 1's. 2026-10-30T06:04:24Z; the 1-minute load 7.32 at the start and 25.53 at the end; the
+  four long-lived containers up.
+- **Binaries:** `hex 0.1.0` of 87f4aff (on cp/t7-g5-s4), sha256 32ef384ba04ff6ea, static-pie, built in the pass image
+  (`hexbench/pass:44`, its glibc-static); `seam_oci` of 72797aa, sha256 cb3a2089e909cc7e.
+- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261030T060424Z`, the harness at 72797aa. Under it Hex's
+  sustained phase ran 1,359/s, without a network namespace 1,340/s, and libcrun's 1,136/s: the contention tracepoints
+  cost every contended lock on the host, so the rates sit lower than run 2's.
+
+| Share of the busy time | hex.c1 | hex.c32 | hex.c32nonet | crun.c1 | crun.c32 |
+|---|---|---|---|---|---|
+| `cgroup_mutex` held | 24.0% | 83.4% | 83.0% | 8.2% | 74.6% |
+| `cgroup_mutex` handed off | 0.3% | 6.8% | 6.2% | 0.0% | 5.1% |
+| the cgroup directory's `i_rwsem` write-held | 8.6% | 78.2% | 74.6% | 1.8% | 62.0% |
+| the cgroup directory's `i_rwsem` read-held | 0.2% | 15.4% | 17.7% | 0.1% | 5.5% |
+| the cgroup directory's `i_rwsem` handed off | 0.0% | 4.8% | 7.4% | 0.0% | 4.3% |
+
+Waits for `cgroup_mutex` alone, per lifecycle (how many, each one's mean in us, ms in all):
+
+| Waiter | hex.c1 | hex.c32 | hex.c32nonet | crun.c1 | crun.c32 |
+|---|---|---|---|---|---|
+| the runtime's | 0.49, 459.3, 0.224 | 3.76, 476.3, 1.789 | 3.50, 503.3, 1.763 | 0.26, 598.2, 0.153 | 4.11, 404.7, 1.662 |
+| other processes' (the kworkers) | 2.24, 321.2, 0.719 | 11.09, 370.0, 4.104 | 10.97, 348.9, 3.827 | 0.83, 287.6, 0.240 | 15.25, 232.7, 3.549 |
+
+The seeds over Hex's sustained phases: 15 started and 15 waited for of 5,000 creates, 15 busy at once at most; without
+the network namespace 16 started, 23 waited, 15 at most.
+
 ## What the runs find
 
-- **The ceiling at concurrency 32 is `cgroup_mutex`, one lock for the whole host.** It was owned 90.6% of Hex's busy
-  time at concurrency 32 in run 3, under a load of 37 to 75; in run 2, under less, the box root's exclusive holds alone
-  filled 90% of the run's time (0.487 ms a lifecycle at 1,850/s). Hex's lifecycle takes the lock 17 times: the
-  runtime's `mkdir` and `rmdir` of the container's cgroup, its `cgroup.kill`, its device program's attach and its
-  clone into the cgroup, and the kernel's own work for the removed cgroup in kworkers, five csses offlined, six
-  released and its device program released. Each holder's time grows from concurrency 1 to 32 by its wait for the
-  lock (run 2's table).
+- **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
+  lighter probe, the box root's exclusive holds filled 90% of the run's time (0.487 ms a lifecycle at 1,850/s), and
+  `cgroup_mkdir` and `cgroup_rmdir` inside them, each waiting for and holding `cgroup_mutex`, 87%. In run 4, with the
+  lock words decoded, `cgroup_mutex` was held 83.4% of the time and handed off 6.8% more: it was free for less than a
+  tenth of the run. The runtime's own takers waited for it 1.789 ms a lifecycle, and the kworkers' work for the
+  removed cgroup 4.104 ms more.
+- **It is the lock, not the network namespaces.** Without a network namespace of its own Hex's sustained phase ran
+  1,340/s against 1,359/s with one, the lock held 83.0% of the time against 83.4% (run 4).
+- **Hex's lifecycle takes the lock 17 times.** The runtime's `mkdir` and `rmdir` of the container's cgroup, its
+  `cgroup.kill`, its device program's attach and its clone into the cgroup; and the kernel's own work for the removed
+  cgroup in kworkers: five csses offlined, six released, and its BPF state released (`cgroup_bpf_release` runs for
+  every removed cgroup, a program attached or not; Linux v6.19 `kernel/bpf/cgroup.c:314`). Inside the lock
+  `cgroup_mkdir` and `cgroup_rmdir` also take the hierarchy's `kernfs_rwsem` to write, for each interface file they
+  make and once to remove them (`fs/kernfs/dir.c:796`, `1554`), and every lookup in the cgroup filesystem takes it to
+  read as it revalidates (`1145-1146`, `1167`, `1185`).
 - **The cgroup directory's `i_rwsem` is held as long as the lock inside it.** `mkdir` and `rmdir` hold it exclusively
   while `cgroup_mkdir` and `cgroup_rmdir` wait for and hold `cgroup_mutex` (`cgroup_kn_lock_live`), so the box root
-  was held 90.3% of the time (run 3), and each lifecycle's two slow lookups of its new cgroup's directory wait behind
-  those holds: the 3.042 ms to read in run 2.
-- **libcrun is bound by the same.** Its lifecycle takes `cgroup_mutex` more often (more csses, two kills, three
-  rmdirs at concurrency 1), and at its lower rate the lock was owned 76.4% of its busy time; its cgroup directory's
-  waits are 2.916 and 1.430 ms a lifecycle (run 2).
-- **Hex's own waits are not the ceiling.** Its futexes (0.601 ms per lifecycle, run 1) and its record directory
-  (0.671, run 2) are each under a tenth of the cgroup directory's (7.756: 4.714 to write and 3.042 to read, run 2).
+  was write-held 78.2% of the time (run 4), and each lifecycle's two slow lookups of its new cgroup's directory wait
+  behind those holds: the 3.042 ms to read in run 2.
+- **libcrun contends on the same lock.** Its lifecycle takes `cgroup_mutex` more often (more csses, two kills, three
+  rmdirs at concurrency 1), and at its lower rate the lock was held 74.6% of its busy time (run 4). It isn't bound by
+  it as Hex is: it leaves the lock free a fifth of the time, and spends 4.069 ms of each lifecycle in its own polling
+  sleeps (run 1).
+- **Hex's own waits are not the ceiling.** Its futexes (0.601 ms per lifecycle, run 1, a lower bound) and its record
+  directory (0.671, run 2) are each under a tenth of the cgroup directory's (7.756: 4.714 to write and 3.042 to read,
+  run 2).
+- **The ceiling moves with the host's load.** A lock handed off stays unusable until its woken waiter runs, and that
+  wait grows with the host's other work, as the hand-offs' share does; so the rate at concurrency 32, and the ratio
+  with it, depend on the load in a way the rate at concurrency 1 doesn't. The pass ran at a load of 21.81.
 - **So the 8x isn't in reach of this step.** The rate at concurrency 32 is what `cgroup_mutex` admits, however fast a
-  lifecycle runs alone, and the faster one runs alone the further 8x of it sits above that. What would raise the
-  ceiling is fewer holds of the lock per lifecycle: a cgroup reused from one box to the next rather than made and
-  removed for each, which takes the `mkdir`, the `rmdir` and the kworkers' css and device-program work off it, or a
-  kill that doesn't go through `cgroup.kill`. A pool that makes cgroups ahead and removes them after use takes the lock
-  as often, only at other moments. Spreading the boxes' cgroups over several parent directories would part their
-  `i_rwsem`s but not `cgroup_mutex`.
+  lifecycle runs alone, and the faster one runs alone the further 8x of it sits above that. Fewer holds of the lock per
+  lifecycle would raise the ceiling:
+  - a cgroup reused from one box to the next rather than made and removed for each, which takes the `mkdir`, the
+    `rmdir` and the kworkers' 12 holds off it;
+  - fewer controllers enabled for a box: each costs an offline and a release, and its interface files;
+  - one device program attached at the box root for boxes that share a policy, in place of one attach per box;
+  - a kill that doesn't go through `cgroup.kill`.
+- **What wouldn't.** A pool that makes cgroups ahead and removes them after use takes the lock as often: under a
+  sustained rate it moves no hold. Under a burst it can move up to 14 of the 17 out of the burst, if the making comes
+  before it and the removal after. Spreading the boxes' cgroups over several parent directories would part their
+  `i_rwsem`s but not `cgroup_mutex`: with the lock free under a tenth of the time (run 4) it would add about a tenth at
+  most, short of 8x.
