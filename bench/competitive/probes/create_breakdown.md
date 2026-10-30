@@ -249,8 +249,8 @@ runs on a node, its own containers included. libcrun's create makes the same cal
   niced static release build of hex on all cores (00:42:30-00:42:55Z), ran host_clock.sh (to 00:42:58Z) and fetch.py (to
   about 00:44Z), and stopped before any bench of its own. This run went from 00:41:40Z to about 00:44:55Z, so the overlap
   falls in its first two rounds; the third ran clear of it.
-- **Binaries:** run 1's. hex sha256 596969cb3a612644; seam_oci rebuilt at 9ff1ddb came out byte for byte run 1's
-  (0656cae0a8464d57).
+- **Binaries:** run 1's. hex sha256 596969cb3a612644; seam_oci rebuilt at 9ff1ddb (7d9afff on cp/t7-seed) came out
+  byte for byte run 1's (0656cae0a8464d57).
 - **What it shows beside run 1:** the parts summed to 102.3% of the p50 of the creates between the traced ones, so the
   step's criterion was met again. The host ran held awake by the builds beside it: a burst took 0.095 and 0.107 ms at
   rest on a P-core (host_clock.sh before and after), against run 1's 0.238 and 0.223. Its tables aren't quoted here;
