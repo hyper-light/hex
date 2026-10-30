@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""bench/competitive/probes: the create breakdown's trace reader and summary (create_breakdown.md).
+
+  create_breakdown.py drain <trace_pipe> <out file> <stop file>
+  create_breakdown.py check <run dir> <prefix>
+  create_breakdown.py summarize <run dir>
+
+drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
+(exec_breakdown.py's).
+
+check reads one set of results (<prefix>.libcrun.json, <prefix>.seam.json, <prefix>.traced.* and <prefix>.detail.*)
+and exits 1 naming what doesn't read whole: an error recorded, a lost trace event, a traced create not cut into its
+parts, a cut that the detailed trace shows opening another file than the one it stands for.
+
+summarize writes the run's markdown (stdout) and summary.json beside its results: libcrun's create p50, the seam's,
+and each traced create cut into its parts, grouped as decision 5 of docs/design/runtime-architecture.md weighs them:
+the box's record, the cgroup, the shim's spawn and exec, the init's set-up, the handshake, and the runtime's own
+work. A part runs from one event of the call's critical path to the next (create_cuts), so a create's parts cover
+it whole, from seam_oci's marker before it to the one after.
+
+The trace, its markers and its reading are exec_breakdown.py's (its module is imported from beside this one):
+the measured rounds fetch no path but where the kernel fetches one for every call of its kind (mkdir's), so an
+open is told by its place in the call, and the detailed trace, with each open's path, holds every such cut to the
+file it stands for. Percentiles are nearest-rank; the clock is CLOCK_MONOTONIC's, to the microsecond.
+"""
+import json
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import exec_breakdown as eb  # noqa: E402  (beside this file; python3 -I leaves the script's directory off the path)
+from exec_breakdown import Missing, POLLS, RENAMES, enter, exited, first, last_before, named, sched  # noqa: E402
+
+RECORD = "the box's record"
+CGROUP = "the cgroup, made and bounded"
+SHIM = "the shim's spawn and exec"
+INIT = "the init's set-up, to the exec FIFO"
+HANDSHAKE = "the handshake"
+OWN = "the node's and the runtime's own work"
+GROUPS = [RECORD, CGROUP, SHIM, INIT, HANDSHAKE, OWN]
+
+# The parts of a create through the seam (node.rs create_oci, oci/run.rs create_in_cgroup, oci/init.rs's shim and
+# container), each (name, group), in critical-path order: part k runs from cut k to cut k+1 (create_cuts).
+CREATE_PARTS = [
+    ("the call reaches the node; the spec checked; the box's record looked for", OWN),
+    ("its cgroup looked for; a watch slot reserved; the record encoded, its temp file made", RECORD),
+    ("the record written", RECORD),
+    ("the record's fsync (kernel)", RECORD),
+    ("the record closed and renamed into place; the store's directory opened", RECORD),
+    ("the directory's fsync (kernel)", RECORD),
+    ("the box root listed, its boxes counted", CGROUP),
+    ("the cgroup made (kernel)", CGROUP),
+    ("its bounds written: memory.max, memory.swap.max, pids.max", CGROUP),
+    ("the container's state directory made; config.json read and parsed; its device policy planned", OWN),
+    ("the exec FIFO made; the device program's instructions made", OWN),
+    ("the device program loaded (kernel: the verifier)", OWN),
+    ("its identity read; the hints read, the program they name looked for, the hints written; attached", OWN),
+    ("the pipes made; a namespace made ahead taken; the shim's spawn prepared", OWN),
+    ("the shim's clone (vfork, kernel), until its child runs", SHIM),
+    ("the child's set-up; the hex binary's execve (kernel)", SHIM),
+    ("the hex binary starts: relocated, its pages faulted in, libc's start-up", SHIM),
+    ("Rust's start-up; the shim reads its environment; config.json opened", SHIM),
+    ("config.json read and parsed; the cgroup, its procs and the namespace made ahead opened", INIT),
+    ("the namespace made ahead joined (setns, kernel)", INIT),
+    ("the container's other namespaces made: pid, mount, ipc, uts (unshare)", INIT),
+    ("the init's clone into its cgroup (kernel), until it runs", INIT),
+    ("the init's root mounted: the rootfs bound, /usr, /proc and /dev", INIT),
+    ("pivot_root (kernel)", INIT),
+    ("the old root unmounted; the hostname set; the process become (capabilities, user); ready sent", INIT),
+    ("the agent wakes to the ready signal and reads it; the init's stat opened", HANDSHAKE),
+    ("the init's start time read; the shim reaped", HANDSHAKE),
+    ("the container's state written (state.json, renamed into place)", OWN),
+    ("the state read back (state.json); the init's stat opened", OWN),
+    ("the init checked; the record encoded, its temp file made", RECORD),
+    ("the record written", RECORD),
+    ("the record's fsync (kernel)", RECORD),
+    ("the record closed and renamed into place; the store's directory opened", RECORD),
+    ("the directory's fsync (kernel)", RECORD),
+    ("the init watched (its pidfd, its stat checked, the epoll set); the box's info made; the call returns", OWN),
+]
+# The parts a durable record write's fsyncs are (decision 5's first lever, plan step 2), and the cgroup's making
+# a pool made ahead would take off the path, its bounds still written at the take (plan step 5).
+FSYNCS = [k for k, (n, _) in enumerate(CREATE_PARTS) if n.startswith("the record's fsync")
+          or n.startswith("the directory's fsync")]
+CGROUP_MADE = [k for k, (n, _) in enumerate(CREATE_PARTS) if n in ("the box root listed, its boxes counted",
+                                                                     "the cgroup made (kernel)")]
+
+ARG = re.compile(r"\b(\w+): (0x[0-9a-f]+|\d+)")
+BPF_PROG_LOAD, BPF_PROG_ATTACH = 5, 8  # include/uapi/linux/bpf.h, enum bpf_cmd
+CLONE_NEWNET = 0x40000000  # include/uapi/linux/sched.h
+
+
+def arg(e, name):
+    """A syscall entry's integer argument, as tracefs prints it (decimal, or hex with its 0x)."""
+    m = dict(ARG.findall(e.text))
+    if name not in m:
+        raise Missing(f"{e.name}'s {name} argument")
+    return int(m[name], 0)
+
+
+def held(cond, what):
+    if not cond:
+        raise Missing(what)
+
+
+def create_cuts(ev, bench, cid):
+    c = eb.Cuts(ev)
+    tmp = f".{cid}.tmp"
+
+    def opened_last_before(pid, call, before, test, what):
+        """The last exit of `call` by `pid` after the cut before it and before event `before`: an open the call's
+        path puts right before that event."""
+        i = last_before(ev, c.at[-1] + 1, before, exited(pid, call), what)
+        c.at.append(i)
+        c.opens.append((i, pid, call, test, what))
+        return i
+
+    def record_write(n):
+        """A durable record write's cuts: its temp file made, its fsync's entry and exit, the directory's."""
+        sync = first(ev, c.at[-1], enter(bench, "fsync"), f"record write {n}'s fsync")
+        opened_last_before(bench, "openat", sync, lambda p: named(p, tmp), f"record write {n}'s temp file")
+        c.at.append(sync)
+        c.to(exited(bench, "fsync"), f"record write {n}'s fsync returning")
+        c.to(enter(bench, "fsync"), f"record write {n}'s directory fsync")
+        c.to(exited(bench, "fsync"), f"record write {n}'s directory fsync returning")
+
+    c.opened(bench, "openat", 1, 0, lambda p: named(p, f"{cid}.json"), "the node's look for the box's record")
+    record_write(1)
+    made = c.to(enter(bench, "mkdir", "mkdirat"), "the cgroup's mkdir")
+    held(ev[made].path().startswith("/sys/fs/cgroup/") and named(ev[made].path(), cid),
+         f"the first mkdir is the box's cgroup (it made {ev[made].path()!r})")
+    c.to(exited(bench, "mkdir", "mkdirat"), "the cgroup's mkdir returning")
+    state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
+    held("/oci/" in ev[state].path() and named(ev[state].path(), cid),
+         f"the second mkdir is the container's state directory (it made {ev[state].path()!r})")
+    c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
+    load = c.to(enter(bench, "bpf"), "the device program's load")
+    held(arg(ev[load], "cmd") == BPF_PROG_LOAD, "the first bpf call is the device program's load")
+    c.to(exited(bench, "bpf"), "the load returning")
+    spawn = first(ev, c.at[-1], enter(bench, "clone3", "clone"), "the shim's spawn")
+    attach = last_before(ev, c.at[-1] + 1, spawn, exited(bench, "bpf"), "the device program's attach")
+    held(arg(ev[last_before(ev, c.at[-1], attach, enter(bench, "bpf"), "the attach's entry")], "cmd")
+         == BPF_PROG_ATTACH, "the last bpf call before the spawn is the device program's attach")
+    c.at += [attach, spawn]
+    fork = first(ev, spawn, sched(bench, "fork"), "the shim's fork")
+    shim = int(ev[fork].kv["child_pid"])
+    c.to(exited(shim, "clone3", "clone"), "the shim's first run")
+    c.to(sched(shim, "exec"), "the shim's exec event")
+    c.to(exited(shim, *POLLS), "the shim's first traced call (std's poll of its stdio)")
+    joins = first(ev, c.at[-1], enter(shim, "setns"), "the shim's join of the namespace made ahead")
+    cgroup = first(ev, c.at[-1], exited(shim, "open"), "the shim's open of the cgroup")
+    held(cgroup < joins, "the shim opens the cgroup before it joins a namespace")
+    opened_last_before(shim, "openat", cgroup, lambda p: named(p, "config.json"), "the shim's open of config.json")
+    held(arg(ev[joins], "flags") == CLONE_NEWNET, "the shim's setns joins a network namespace")
+    c.at.append(joins)
+    c.to(exited(shim, "setns"), "the join returning")
+    c.to(enter(shim, "clone3"), "the shim's clone of the init")
+    born = first(ev, c.at[-1], sched(shim, "fork"), "the init's fork")
+    init = int(ev[born].kv["child_pid"])
+    c.to(exited(init, "clone3"), "the init's first run")
+    c.to(enter(init, "pivot_root"), "the init's pivot_root")
+    c.to(exited(init, "pivot_root"), "pivot_root returning")
+    ready = c.to(enter(init, "write"), "the init's ready signal")
+    held(arg(ev[ready], "count") == 2, "the init's first write is its ready signal (`R` and a newline)")
+    c.opened(bench, "openat", 1, ready, lambda p: p.startswith("/proc/") and named(p, "stat"),
+             "the agent's open of the init's stat")
+    c.to(exited(bench, "wait4"), "the agent's reaping of the shim")
+    renamed = c.to(exited(bench, *RENAMES), "the container's state renamed into place")
+    c.opened(bench, "openat", 2, renamed, lambda p: p.startswith("/proc/") and named(p, "stat"),
+             "the node's open of the init's stat, reading the state back")
+    record_write(2)
+    return c
+
+
+OPS = {"create": (CREATE_PARTS, create_cuts)}
+
+
+def check(run, prefix):
+    bad = []
+    for kind in ("libcrun", "seam", "traced", "detail"):
+        errs, ms = eb.lifecycle_ms(os.path.join(run, f"{prefix}.{kind}.json"), "create")
+        if errs or not ms:
+            bad.append(f"{kind}: errors {errs}, {len(ms)} creates")
+        if kind in ("traced", "detail"):
+            stats = os.path.join(run, f"{prefix}.{kind}.stats")
+            if eb.lost(stats):
+                bad.append(f"{kind}: the trace lost {eb.lost(stats)} events")
+            got, unread = eb.calls(os.path.join(run, f"{prefix}.{kind}.txt"), OPS)
+            for c in got:
+                if "missing" in c:
+                    bad.append(f"{kind}: create {c['id']} lacks {c['missing']}")
+            # seam_oci traces every other timed lifecycle, the first of them included.
+            if len(got) != (len(ms) + 1) // 2:
+                bad.append(f"{kind}: {len(got)} creates traced of {len(ms)} timed")
+            print(f"check {prefix}.{kind}: {sum('parts' in c for c in got)} of {len(got)} traced creates cut whole, "
+                  f"{unread} trace lines not read as events")
+    for b in bad:
+        print(f"check {prefix}: {b}")
+    return 1 if bad else 0
+
+
+def ratio(a, b):
+    return a / b if a is not None and b else None
+
+
+def summarize(run):
+    s = {"run": run}
+    lines = [f"# create breakdown: {os.path.basename(run.rstrip('/'))}", ""]
+    with open(os.path.join(run, "env.txt")) as f:
+        lines += ["```", f.read().rstrip(), "```", ""]
+
+    traced = {}
+    for rnd, path in eb.rounds(run, "traced").items():
+        got, unread = eb.calls(path[:-len(".json")] + ".txt", OPS)
+        traced[rnd] = {"calls": got, "unread": unread, "lost": eb.lost(path[:-len(".json")] + ".stats"),
+                       "ids": {c["id"] for c in got}}
+    rnds = sorted(traced)
+
+    # Each round's create p50: libcrun's and the seam's untraced runs, and the traced run's creates with the
+    # tracer recording (every other one) and between them.
+    rows = {kind: {r: eb.lifecycle_ms(p, "create") for r, p in eb.rounds(run, kind).items()}
+            for kind in ("libcrun", "seam")}
+    rows["traced: recording"], rows["traced: between"] = {}, {}
+    for rnd, path in eb.rounds(run, "traced").items():
+        errs = eb.lifecycle_ms(path, "create")[0]
+        on, off = eb.split_by_trace(path, "create", traced[rnd]["ids"])
+        rows["traced: recording"][rnd], rows["traced: between"][rnd] = (errs, on), (errs, off)
+    lat = {}
+    for kind, per in rows.items():
+        d = {r: {"errors": e, **eb.dist(ms)} for r, (e, ms) in per.items()}
+        ok = {r: x for r, x in d.items() if not x["errors"] and x["n"]}
+        best = min(ok, key=lambda r: ok[r]["p50"]) if ok else None
+        pooled = eb.dist([x for r, (e, ms) in per.items() if not e for x in ms])
+        lat[kind] = {"rounds": d, "best_round": best, "best": ok.get(best), "pooled": pooled}
+    s["create_ms"] = lat
+    nums = sorted({r for v in lat.values() for r in v["rounds"]})
+    lines += ["## Create p50 (ms), per round", "",
+              "`traced: recording` is the traced run's creates the tracer recorded, every other one; `traced: "
+              "between` the creates between them, in the same process with the tracer's events armed.", "",
+              "| | " + " | ".join(f"r{r}" for r in nums) + " | best | pooled p50 | pooled p99 |",
+              "|---|" + "---|" * (len(nums) + 3)]
+    for kind, v in lat.items():
+        row = [eb.ms3(v["rounds"][r]["p50"]) if r in v["rounds"] else "n/a" for r in nums]
+        lines.append(f"| {kind} | " + " | ".join(row) + f" | {eb.ms3((v['best'] or {}).get('p50'))} | "
+                     f"{eb.ms3(v['pooled']['p50'])} | {eb.ms3(v['pooled']['p99'])} |")
+    lines.append("")
+
+    # The parts, by traced round and pooled, each round's sum set against its own calls.
+    by_round = {r: [c for c in traced[r]["calls"] if "parts" in c] for r in rnds}
+    whole = [c for r in rnds for c in by_round[r]]
+    missing = {}
+    for r in rnds:
+        for c in traced[r]["calls"]:
+            if "missing" in c:
+                missing[c["missing"]] = missing.get(c["missing"], 0) + 1
+    n_parts = len(CREATE_PARTS)
+    parts = [eb.dist([c["parts"][k] / 1000 for c in whole]) for k in range(n_parts)]
+    parts_r = {r: [eb.dist([c["parts"][k] / 1000 for c in by_round[r]]) for k in range(n_parts)] for r in rnds}
+    groups = {g: {"rounds": {r: 0.0 for r in rnds}, "p50": 0.0, "mean": 0.0} for g in GROUPS}
+    for k, (_, g) in enumerate(CREATE_PARTS):
+        for r in rnds:
+            groups[g]["rounds"][r] += parts_r[r][k]["p50"] or 0
+        groups[g]["p50"] += parts[k]["p50"] or 0
+        groups[g]["mean"] += parts[k]["mean"] or 0
+    sum_p50 = sum(p["p50"] for p in parts) if whole else None
+    per_round = {}
+    for r in rnds:
+        sp = sum(p["p50"] for p in parts_r[r]) if all(p["n"] for p in parts_r[r]) else None
+        btw = eb.dist(rows["traced: between"][r][1])["p50"]
+        rcd = eb.dist(rows["traced: recording"][r][1])["p50"]
+        per_round[r] = {"sum_of_part_p50s": sp, "between_p50": btw, "recording_p50": rcd,
+                        "sum_over_between": ratio(sp, btw), "sum_over_recording": ratio(sp, rcd),
+                        "recording_over_between": ratio(rcd, btw)}
+    between, recording = lat["traced: between"]["pooled"], lat["traced: recording"]["pooled"]
+    seam, libcrun = lat["seam"]["pooled"], lat["libcrun"]["pooled"]
+    span = eb.dist([c["span"] / 1000 for c in whole])
+    cols = " | ".join(f"r{r} p50" for r in rnds)
+    lines += [f"## Create through the seam, in parts ({len(whole)} traced creates"
+              + (f"; {sum(missing.values())} not cut: {missing}" if missing else "") + ")", "",
+              f"| # | part | group | {cols} | pooled p50 | pooled p99 | pooled mean |",
+              "|---|---|---|" + "---|" * (len(rnds) + 3)]
+    for k, (name, group) in enumerate(CREATE_PARTS):
+        row = " | ".join(eb.ms3(parts_r[r][k]["p50"]) for r in rnds)
+        lines.append(f"| {k + 1} | {name} | {group} | {row} | {eb.ms3(parts[k]['p50'])} | "
+                     f"{eb.ms3(parts[k]['p99'])} | {eb.ms3(parts[k]['mean'])} |")
+    lines += ["", f"| group, its parts' p50s summed | {' | '.join(f'r{r}' for r in rnds)} | pooled | its share of "
+              "the pooled sum | pooled means |", "|---|" + "---|" * (len(rnds) + 3)]
+    for g in GROUPS:
+        v = groups[g]
+        share = ratio(v["p50"], sum_p50)
+        lines.append(f"| {g} | " + " | ".join(f"{v['rounds'][r]:.3f}" for r in rnds)
+                     + f" | {v['p50']:.3f} | {'n/a' if share is None else f'{100 * share:.1f}%'} | {v['mean']:.3f} |")
+    lines += ["", "| round | the parts' p50s, summed | the creates between, p50 | the sum over it | the traced creates "
+              "as timed, p50 | the sum over it | recording's cost |", "|---|---|---|---|---|---|---|"]
+    for r in rnds:
+        p = per_round[r]
+        lines.append(f"| r{r} | {eb.ms3(p['sum_of_part_p50s'])} | {eb.ms3(p['between_p50'])} | "
+                     f"{eb.ms3(p['sum_over_between'])} | {eb.ms3(p['recording_p50'])} | "
+                     f"{eb.ms3(p['sum_over_recording'])} | {eb.ms3(p['recording_over_between'])}x |")
+    rec = {"calls": len(whole), "missing": missing, "by_round": per_round,
+           "parts": [{"part": n, "group": g, "rounds_p50": {r: parts_r[r][k]["p50"] for r in rnds}, **parts[k]}
+                     for k, (n, g) in enumerate(CREATE_PARTS)],
+           "groups": groups, "span_ms": span, "sum_of_part_p50s_ms": sum_p50,
+           "sum_over_between": ratio(sum_p50, between["p50"]),
+           "sum_over_recording": ratio(sum_p50, recording["p50"]),
+           "sum_over_seam_rounds": ratio(sum_p50, seam["p50"]),
+           "recording_over_between": ratio(recording["p50"], between["p50"])}
+    if whole and between["p50"] and recording["p50"] and seam["p50"]:
+        lines += ["", f"Pooled, the parts' p50s sum to {sum_p50:.3f} ms, and their means to "
+                  f"{sum(p['mean'] for p in parts):.3f} ms, the creates' mean span from marker to marker "
+                  f"({span['mean']:.3f} ms). Against the creates between the traced ones, p50 {between['p50']:.3f} ms, "
+                  f"the sum is {rec['sum_over_between']:.3f}; against the traced creates as seam_oci timed them, p50 "
+                  f"{recording['p50']:.3f} ms, {rec['sum_over_recording']:.3f}; against the untraced seam rounds, p50 "
+                  f"{seam['p50']:.3f} ms pooled, {rec['sum_over_seam_rounds']:.3f}. Recording cost the traced creates "
+                  f"{rec['recording_over_between']:.3f}x at p50.", ""]
+        # Goal 5 plan step 1's criterion: the parts, summed, within 10% of create's p50 in the same run (the creates
+        # between the traced ones, in the same process at the same moments).
+        rec["within_10_percent"] = abs(rec["sum_over_between"] - 1) <= 0.10
+        lines += [f"Goal 5 plan step 1's criterion, the parts summed within 10% of create's p50 in the same run: "
+                  f"{100 * rec['sum_over_between']:.1f}% of the creates between, "
+                  f"{'met' if rec['within_10_percent'] else 'not met'}.", ""]
+
+    # What decision 5's levers take, by the pooled parts: the record's fsyncs (plan step 2), the shim's spawn and
+    # exec (the seed, plan steps 3 and 4), and the cgroup's making (a pool made ahead, plan step 5), each against
+    # the creates between the traced ones; what's left once the first two go; and goal 5's target, a quarter of
+    # libcrun's create p50 in the same run.
+    if whole and between["p50"] and libcrun["p50"]:
+        create = between["p50"]
+        fsyncs = sum(parts[k]["p50"] for k in FSYNCS)
+        shim = groups[SHIM]["p50"]
+        made = sum(parts[k]["p50"] for k in CGROUP_MADE)
+        cg = groups[CGROUP]["p50"]
+        left = sum_p50 - fsyncs - shim
+        target = libcrun["p50"] / 4
+        levers = {"create_p50_ms": create, "libcrun_create_p50_ms": libcrun["p50"], "target_ms": target,
+                  "record_fsyncs_ms": fsyncs, "record_fsyncs_share": fsyncs / create,
+                  "record_ms": groups[RECORD]["p50"], "record_share": groups[RECORD]["p50"] / create,
+                  "shim_ms": shim, "shim_share": shim / create,
+                  "cgroup_ms": cg, "cgroup_share": cg / create, "cgroup_made_ms": made,
+                  "left_after_record_and_shim_ms": left,
+                  "cgroup_share_of_left": ratio(cg, left), "cgroup_made_share_of_left": ratio(made, left),
+                  "left_over_target": ratio(left, target)}
+        s["levers"] = levers
+        lines += ["## What each lever takes (pooled part p50s, against the creates between, p50 "
+                  f"{create:.3f} ms)", "",
+                  "| lever | its parts | ms | share of create |", "|---|---|---|---|",
+                  f"| the record off create's path (plan step 2) | the record's four fsyncs | {fsyncs:.3f} | "
+                  f"{100 * fsyncs / create:.1f}% |",
+                  f"| | the box's record, whole | {groups[RECORD]['p50']:.3f} | "
+                  f"{100 * groups[RECORD]['p50'] / create:.1f}% |",
+                  f"| the seed (plan steps 3 and 4) | the shim's spawn and exec | {shim:.3f} | "
+                  f"{100 * shim / create:.1f}% |",
+                  f"| a pool of cgroups made ahead (plan step 5) | the cgroup, made and bounded | {cg:.3f} | "
+                  f"{100 * cg / create:.1f}% |",
+                  f"| | of it, the making: the box root listed and the mkdir | {made:.3f} | "
+                  f"{100 * made / create:.1f}% |", "",
+                  f"Once the record's fsyncs and the shim's spawn and exec are gone, the parts left sum to {left:.3f} ms "
+                  f"(before whatever a seed's clone costs in the shim's place); the cgroup, made and bounded, is "
+                  f"{eb.ms3(ratio(cg, left))} of that, its making alone {eb.ms3(ratio(made, left))}. Goal 5's target, a "
+                  f"quarter of libcrun's create p50 ({libcrun['p50']:.3f} ms pooled), is {target:.3f} ms: what's left "
+                  f"is {eb.ms3(ratio(left, target))}x it.", ""]
+    s["create_parts"] = rec
+    lines += ["Trace: " + ", ".join(f"r{r} {t['lost']} events lost and {t['unread']} lines not read as events"
+                                    for r, t in sorted(traced.items())) + ".", ""]
+    with open(os.path.join(run, "summary.json"), "w") as f:
+        json.dump(s, f, indent=1)
+    print("\n".join(lines))
+    return 0
+
+
+def main():
+    a = sys.argv[1:]
+    if len(a) == 4 and a[0] == "drain":
+        eb.drain(*a[1:])
+        return 0
+    if len(a) == 3 and a[0] == "check":
+        return check(a[1], a[2])
+    if len(a) == 2 and a[0] == "summarize":
+        return summarize(a[1])
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -94,24 +94,14 @@ fn marked(design: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Decision 4's quoted figures, the namespace's cost on three machines, the pool's measurements and what follows
-/// from them, are each in bench/competitive/probes/netns_pool.md, the record they name.
-#[test]
-fn every_figure_the_design_marks_is_in_its_record() {
-    let design = std::fs::read_to_string(repo().join(DESIGN)).expect("the design document");
-    let spans = marked(&design);
-    let netns: Vec<_> = spans
-        .iter()
-        .filter(|(path, _)| path == "bench/competitive/probes/netns_pool.md")
-        .collect();
-    assert!(
-        netns.len() >= 4,
-        "decision 4 marks its four tables of record, found {}",
-        netns.len()
-    );
+/// Decision 5's record: the create breakdown's run on fedora (goal 5 plan step 1).
+const CREATE_RECORD: &str = "bench/competitive/probes/create_breakdown.md";
+
+/// How many figures `spans` quote, and each one the record its span names doesn't hold.
+fn unheld(spans: &[(String, String)]) -> (usize, Vec<String>) {
     let mut checked = 0;
     let mut missing = Vec::new();
-    for (path, body) in &spans {
+    for (path, body) in spans {
         let record = std::fs::read_to_string(repo().join(path))
             .unwrap_or_else(|e| panic!("the record {path} the design names: {e}"));
         let record = uncommaed(&record);
@@ -122,6 +112,51 @@ fn every_figure_the_design_marks_is_in_its_record() {
             }
         }
     }
+    (checked, missing)
+}
+
+/// The design's marked spans that name `record`.
+fn naming(record: &str) -> Vec<(String, String)> {
+    let design = std::fs::read_to_string(repo().join(DESIGN)).expect("the design document");
+    marked(&design)
+        .into_iter()
+        .filter(|(path, _)| path == record)
+        .collect()
+}
+
+/// `body` with its first figure (as [`numbers`] reads one) written as `to`.
+fn first_figure_as(body: &str, to: &str) -> String {
+    let chars: Vec<char> = body.chars().collect();
+    let start = chars
+        .iter()
+        .position(char::is_ascii_digit)
+        .expect("a span that quotes a figure");
+    let mut end = start;
+    while let Some(&c) = chars.get(end) {
+        let joins = (c == ',' || c == '.') && chars.get(end + 1).is_some_and(char::is_ascii_digit);
+        if !(c.is_ascii_digit() || joins) {
+            break;
+        }
+        end += 1;
+    }
+    let mut out: String = chars[..start].iter().collect();
+    out.push_str(to);
+    out.extend(&chars[end..]);
+    out
+}
+
+/// Every figure the design marks, decision 4's and decision 5's among them, is in the record its span names.
+#[test]
+fn every_figure_the_design_marks_is_in_its_record() {
+    let design = std::fs::read_to_string(repo().join(DESIGN)).expect("the design document");
+    let spans = marked(&design);
+    let netns = naming("bench/competitive/probes/netns_pool.md");
+    assert!(
+        netns.len() >= 4,
+        "decision 4 marks its four tables of record, found {}",
+        netns.len()
+    );
+    let (checked, missing) = unheld(&spans);
     // Non-vacuity: the marked spans hold the figures they were written with, not an empty table.
     assert!(
         checked >= 60,
@@ -131,6 +166,56 @@ fn every_figure_the_design_marks_is_in_its_record() {
         missing.is_empty(),
         "figures the design quotes that their record doesn't hold: {missing:?}"
     );
+}
+
+/// Decision 5's quoted figures (CP-T7.1, AC-T7.1.3: a container's start, of which create is the most; goal 5 plan
+/// step 1: the parts of a seam create on fedora, what each lever takes and what's left) are each in the create
+/// breakdown's record, which names the run they came from.
+#[test]
+fn decision_5s_figures_are_the_create_breakdowns() {
+    let spans = naming(CREATE_RECORD);
+    assert!(
+        spans.len() >= 3,
+        "decision 5 marks its three tables of record (the parts by group, the levers, what's left), found {}",
+        spans.len()
+    );
+    let (checked, missing) = unheld(&spans);
+    // Non-vacuity: the three tables quote 73 figures as written; an emptied one would fall under this.
+    assert!(
+        checked >= 60,
+        "decision 5's marked spans quote {checked} figures"
+    );
+    assert!(
+        missing.is_empty(),
+        "figures decision 5 quotes that the create breakdown's record doesn't hold: {missing:?}"
+    );
+}
+
+/// The check fails when a figure drifts (CP-T7.1, goal 5 plan step 1's test): decision 5's first quoted figure,
+/// written as one its record doesn't hold, is reported, named with the record, and nothing else is.
+#[test]
+fn a_figure_that_drifts_from_its_record_is_reported() {
+    let mut spans = naming(CREATE_RECORD);
+    let drift = "987654.321";
+    let record =
+        uncommaed(&std::fs::read_to_string(repo().join(CREATE_RECORD)).expect("the record"));
+    assert!(
+        !holds(&record, drift),
+        "the drifted figure is one the record doesn't hold"
+    );
+    let (_, body) = spans
+        .first_mut()
+        .expect("decision 5 marks a table of record");
+    *body = first_figure_as(body, drift);
+    let (_, missing) = unheld(&spans);
+    assert_eq!(missing, [format!("{drift} (quoted from {CREATE_RECORD})")]);
+}
+
+#[test]
+fn a_spans_first_figure_is_rewritten_whole() {
+    assert_eq!(first_figure_as("| a | 6,127.5 ms |", "1"), "| a | 1 ms |");
+    assert_eq!(first_figure_as("x 0.571, 2", "9.9"), "x 9.9, 2");
+    assert_eq!(first_figure_as("p50 of r1", "7"), "p7 of r1");
 }
 
 #[test]

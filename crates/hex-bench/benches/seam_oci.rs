@@ -30,8 +30,8 @@
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
-//! HEXBENCH_TRACE turns on the breakdown probe's markers (`Trace`,
-//! bench/competitive/probes/exec_breakdown.md).
+//! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
+//! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -117,17 +117,19 @@ mod linux {
             .unwrap_or(0)
     }
 
-    /// The breakdown probe's markers (bench/competitive/probes/exec_breakdown.md). With
-    /// `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets the start
-    /// and exec of every other timed lifecycle in the instance's buffer, `hexbd B <op> <id>` before
-    /// the call and `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured
-    /// it, and the instance records only from one to the other: its trace is those calls and what
-    /// they ran, and nothing of create or delete. The lifecycles between run untraced in the same
+    /// The breakdown probes' markers (bench/competitive/probes/exec_breakdown.md, create_breakdown.md).
+    /// With `HEXBENCH_TRACE` naming an ftrace instance's directory, the lifecycle phase brackets the
+    /// ops `HEXBENCH_TRACE_OPS` names (`create`, `start`, `exec`; start and exec unless it says) of
+    /// every other timed lifecycle in the instance's buffer, `hexbd B <op> <id>` before the call and
+    /// `hexbd E <op> <id> <ns>` after it, `<ns>` the call's time as this driver measured it, and the
+    /// instance records only from one to the other: its trace is those calls and what they ran, and
+    /// nothing of the ops it doesn't name or of delete. The lifecycles between run untraced in the same
     /// process, so the traced calls are set against calls that met the host as they did. Each marker
     /// is written outside the time it brackets.
     struct Trace {
         on: File,
         marker: File,
+        ops: Vec<String>,
     }
 
     impl Trace {
@@ -140,10 +142,29 @@ mod linux {
                     .open(&path)
                     .unwrap_or_else(|e| panic!("HEXBENCH_TRACE: {}: {e}", path.display()))
             };
+            let ops: Vec<String> = std::env::var("HEXBENCH_TRACE_OPS")
+                .ok()
+                .filter(|o| !o.trim().is_empty())
+                .unwrap_or_else(|| "start exec".to_owned())
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+            if let Some(other) = ops
+                .iter()
+                .find(|o| !["create", "start", "exec"].contains(&o.as_str()))
+            {
+                panic!("HEXBENCH_TRACE_OPS: {other:?} isn't create, start or exec");
+            }
             Some(Self {
                 on: open("tracing_on"),
                 marker: open("trace_marker"),
+                ops,
             })
+        }
+
+        /// Whether calls of `op` are bracketed.
+        fn brackets(&self, op: &str) -> bool {
+            self.ops.iter().any(|o| o == op)
         }
 
         /// Starts the instance recording, then marks the call's beginning.
@@ -169,7 +190,7 @@ mod linux {
 
     /// One container's create, start, exec of `true` and delete, each timed alone; a slot for the op
     /// that failed records the error. The init is the bundle's `sleep infinity`, so exec runs beside it.
-    /// A timed start and exec are bracketed by `trace`'s markers when it's on.
+    /// A timed op `trace` brackets is bracketed by its markers when it's on.
     fn lifecycle_once(
         node: &dyn Runtime,
         bundle: &Path,
@@ -178,20 +199,22 @@ mod linux {
         timed: bool,
         trace: Option<&Trace>,
     ) -> Result<(), String> {
-        let trace = trace.filter(|_| timed);
+        let traced = |op: &str| trace.filter(|t| timed && t.brackets(op));
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
+        traced("create").map_or(Ok(()), |t| t.begin("create", id))?;
         let create = Instant::now();
         node.create(spec(&bid, bundle))
             .map_err(|e| format!("create {id}: {e}"))?;
         let create = create.elapsed();
+        traced("create").map_or(Ok(()), |t| t.end("create", id, create))?;
         // start and exec, timed; delete runs whether or not they did, so a box is never left behind.
         let inner = (|| -> Result<(Duration, Duration), String> {
-            trace.map_or(Ok(()), |t| t.begin("start", id))?;
+            traced("start").map_or(Ok(()), |t| t.begin("start", id))?;
             let start = Instant::now();
             node.start(&bid).map_err(|e| format!("start {id}: {e}"))?;
             let start = start.elapsed();
-            trace.map_or(Ok(()), |t| t.end("start", id, start))?;
-            trace.map_or(Ok(()), |t| t.begin("exec", id))?;
+            traced("start").map_or(Ok(()), |t| t.end("start", id, start))?;
+            traced("exec").map_or(Ok(()), |t| t.begin("exec", id))?;
             let exec = Instant::now();
             let mut p = node
                 .exec(&bid, Program::of(&["/usr/bin/true"]), Stdio::null())
@@ -201,7 +224,7 @@ mod linux {
                 .map_err(|e| format!("wait in {id}: {e}"))?
                 .ok_or_else(|| format!("`true` in {id} still running after {CALL_TIMEOUT:?}"))?;
             let exec = exec.elapsed();
-            trace.map_or(Ok(()), |t| t.end("exec", id, exec))?;
+            traced("exec").map_or(Ok(()), |t| t.end("exec", id, exec))?;
             if ended != Exit::Code(0) {
                 return Err(format!("`true` in {id} ended {ended:?}"));
             }
