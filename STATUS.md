@@ -350,6 +350,16 @@ three different things (CLAUDE.md "Working here"):
   2's crash tests; older than goal 5). Closes with `start` judging an adopted init by its pid and start time, as
   `state` does, or the supervisor watching adopted inits, shown by a test that restarts the agent between create and
   start.
+- **A layered box's delete once waited out its 60 s.** In the gates on fedora at e2bf959 (2026-10-30, 01:28-01:30Z,
+  beside Focal's fleet test), oci_spec_box's `layered` box stayed populated 60 s after `cgroup.kill` with nothing in
+  `cgroup.procs`, and delete refused by type. On Linux v6.19 that means threads of a process whose leader had ended
+  held it (`kernel/cgroup/cgroup.c:5112-5121`), which the refusal didn't read. It didn't recur in 20 runs, 12 of them
+  beside 8 fsync writers on the same disk. The refusal now names such threads, each with its process, state and
+  wchan (3896e46). Closes when a recurrence shows what held the box and that is fixed at its cause. Separately, a
+  layered box's teardown syncs the whole filesystem under its writable layer, as its overlay's unmount does
+  (`fs/super.c:622`, `fs/overlayfs/super.c:262` at v6.19): 22-33 ms at rest and 67-259 ms beside 4 fsync writers on
+  fedora's btrfs, against 3-5 ms with the overlay mounted `volatile`
+  (`Documentation/filesystems/overlayfs.rst:794-795`).
 
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
