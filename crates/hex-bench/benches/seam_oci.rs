@@ -5,6 +5,8 @@
 //! - `lifecycle`: create, start, exec of `true` and delete of a `sleep` container, each timed alone;
 //! - `lifecycle_nonet`: the same on a bundle without a network namespace of its own, so create and
 //!   delete are timed with and without one (decision 4);
+//! - `start_true`: create+start of a `true` container, timed together and deleted untimed (AC-T7.1.3's
+//!   measure, goal 5's create+start of `true`);
 //! - `throughput`: create+start+delete of a `true` container at concurrency 1, 8 and 32;
 //! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
 //!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
@@ -24,7 +26,7 @@
 //!
 //!   seam_oci <out.json> <n> <warmup> <lifecycles> <hex-binary> <sleep-bundle> <true-bundle> [<sleep-nonet-bundle>]
 //! (`cargo bench -p hex-bench --bench seam_oci -- ...`, or its binary as host.sh's ociseam pass runs
-//! it). HEXBENCH_PHASES names the phases to run (all five unless set); `lifecycle_nonet` needs the
+//! it). HEXBENCH_PHASES names the phases to run (all six unless set); `lifecycle_nonet` needs the
 //! eighth argument, a bundle like the sleep bundle without a network namespace, and records an error
 //! naming it when it isn't given. The `oci` class needs root (a container's cgroup
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
@@ -405,6 +407,35 @@ mod linux {
         )
     }
 
+    /// n sequential create+start of a `true` container after `warmup` untimed ones, the two calls'
+    /// times summed and the box deleted untimed, as oci_bench.py's `start_true` times libcrun's
+    /// (AC-T7.1.3's measure): delete runs whether or not start did, so no box is left behind.
+    fn start_true(
+        node: &dyn Runtime,
+        bundle: &Path,
+        n: usize,
+        warmup: usize,
+    ) -> Result<Value, String> {
+        let mut ms = Vec::with_capacity(n);
+        for i in 0..warmup + n {
+            let id = format!("t{i:06}");
+            let bid = BoxId::new(id.as_str()).map_err(|e| e.to_string())?;
+            let create = Instant::now();
+            node.create(spec(&bid, bundle))
+                .map_err(|e| format!("create {id}: {e}"))?;
+            let create = create.elapsed();
+            let start = Instant::now();
+            let started = node.start(&bid).map_err(|e| format!("start {id}: {e}"));
+            let start = start.elapsed();
+            node.delete(&bid).map_err(|e| format!("delete {id}: {e}"))?;
+            started?;
+            if i >= warmup {
+                ms.push((create + start).as_secs_f64() * 1e3);
+            }
+        }
+        Ok(json!({"ms": ms}))
+    }
+
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
     fn run_true_container(node: &dyn Runtime, bundle: &Path, id: &str) -> Result<(), String> {
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
@@ -594,12 +625,15 @@ mod linux {
         let wanted = std::env::var("HEXBENCH_PHASES")
             .ok()
             .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| "lifecycle lifecycle_nonet throughput sustained rtt".to_owned());
+            .unwrap_or_else(|| {
+                "lifecycle lifecycle_nonet start_true throughput sustained rtt".to_owned()
+            });
         let trace = Trace::from_env();
         let (mut phases, mut errors) = (Map::new(), Map::new());
         for phase in [
             "lifecycle",
             "lifecycle_nonet",
+            "start_true",
             "throughput",
             "sustained",
             "rtt",
@@ -618,6 +652,7 @@ mod linux {
                                      seam_oci's eighth argument"
                             .to_owned()),
                     },
+                    "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
                     _ => rtt(node, &sleep_bundle, n, warmup),
