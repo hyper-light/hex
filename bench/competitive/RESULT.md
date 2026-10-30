@@ -519,11 +519,14 @@ Best of 2 (each round's in brackets), ms:
   pass, Hex's seam over libcrun went from 0.02x and 0.04x (26 and 51 against 1,294) to 1.19x and 1.19x (2,108 and 2,095
   against 1,765). The seam no longer runs about one create at a time: its rate held across the ten windows of 1,000
   (2,017-2,191 in process, 1,976-2,164 over the socket).
-- **The network-namespace pool ran dry** for 181-279 of each sustained phase's 10,000 creates (1.8-2.8%) at about 2,100
-  lifecycles a second, each made on the path and counted, none failed; every create of the lifecycle phase took one from
-  the pool (1,100 of 1,100). That trips decision 4's second falsifier (more than 1% of a sustained phase's creates
-  finding the pool dry), which goal 4's passes, at 553 a second at most, didn't reach: at about 2,100 creates a second one
-  refill thread made 97-98% of the namespaces they took.
+- **Decision 4's second falsifier is met: one thread refilling the network-namespace pool to 32 doesn't keep up at
+  about 2,100 creates a second.** In each sustained phase 181-279 of the 10,000 creates (1.8-2.8%) found the pool dry,
+  past the falsifier's 1%. Each made its namespace on its create's path, counted, and none failed; every create of the
+  lifecycle phase, one at a time, took one from the pool (1,100 of 1,100). The pool held at goal 4's rates, 26 to 553
+  a second, and fails at about 40x that. This run doesn't time a dry create (the sustained phase times its windows, not
+  its creates); a namespace made on fedora costs 0.152-0.161 ms p50 and 0.333-0.401 ms p99 (`probes/netns_pool.md`,
+  one thread, unloaded). At 2.5% of creates the dry ones sit in the tail above a create's p97.5, so a p99 or p99.9
+  taken under concurrency reads them, as goal 5's p99.9 criterion (plan step 6) will.
 
 Run: fedora `~/.cache/hex-bench/out/20261030T004533Z` (hex sha256 226b9315661e7a3b…, x86_64, static-glibc, built at
 eb6cae7 in the pass image's Fedora 44; seam_oci 5de18d17af2cfcd4…; libcrun 1.30.1, commit 079ff6a7…, in process, driver
