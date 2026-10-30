@@ -255,3 +255,63 @@ runs on a node, its own containers included. libcrun's create makes the same cal
   step's criterion was met again. The host ran held awake by the builds beside it: a burst took 0.095 and 0.107 ms at
   rest on a P-core (host_clock.sh before and after), against run 1's 0.238 and 0.223. Its tables aren't quoted here;
   they are in its run directory on fedora, `~/.cache/hex-bench/out/create-breakdown-20261030T004140Z`.
+
+## Run 3 (2026-10-30, fedora): after plan step 2, /run a tmpfs, not of record
+
+- **Why:** the lead's interim look at a seam create once its record left the path (step 2), before the seed (step 4),
+  for step 5's cgroup-pool decision and goal 5's bar. Step 5 decides on a run after step 4, with the seed's cuts.
+- **What changed in the probe:** the bench container's `/run` is a tmpfs, as host.sh's OCI pass has it since 6f7ba39
+  (285421a), so the node's records there aren't synced (decision 1). A record write with no fsync is cut from its temp
+  file to its rename's return, and its three later parts read zero (3b69e95); the container's state directory is the
+  node's runtime directory's `<node key>-<box id>` (`/run/hex-node/2413ff8f85d7f9d9-l000001`). Parts 4 to 6 and 32 to 34
+  are zero, and parts 3 and 31 hold the close and the rename.
+- **Host and load:** as run 1's. 2026-10-30T01:24:33Z to about 01:26:15Z. The 1-minute load was 10.65 at the start and
+  16.17 at the end; some task was stalled on CPU 0.01% and 0.06% of the last 10 s, on I/O 1.30% and 0.72%. The host's
+  clock (`probes/host_clock.sh`): a burst took 0.115 and 0.123 ms at rest on a P-core, against 0.104 and 0.122 held
+  awake, so the host was held awake by its load.
+- **What else ran:** 34 of Focal's `s5-focal*` fleet test containers, up 2 minutes at the start, and the four
+  long-lived containers of run 1; at the end a kiln CI job's container as well. No other bench of Hex's ran: the run's
+  check found no hexbench container up.
+- **Binaries:** `hex 0.1.0` of 285421a, sha256 f6ba399a68131377, static-pie, built in the Fedora 44 pass image.
+  `seam_oci` of 285421a, sha256 f4b118b10cb95af8. libcrun 1.30.1 (079ff6a7) in process, driver sha256 5c356f2139adc232.
+- **Run:** `~/.cache/hex-bench/out/create-breakdown-20261030T012433Z` on fedora, the harness at 3b69e95. 3 rounds of
+  1,000 timed lifecycles after 100 untimed; 1,500 traced creates cut into their 35 parts, no trace event lost, no line
+  unread; the probe's 10 detailed creates held every positional cut to its file.
+
+### Create p50 (ms)
+
+| | r1 | r2 | r3 | best | pooled p50 | pooled p99 |
+|---|---|---|---|---|---|---|
+| libcrun | 4.243 | 4.549 | 3.407 | 3.407 | 4.004 | 7.046 |
+| seam | 2.595 | 4.233 | 3.369 | 2.595 | 3.290 | 6.402 |
+| traced: recording | 3.825 | 4.668 | 2.718 | 2.718 | 3.745 | 7.662 |
+| traced: between | 3.738 | 4.533 | 2.630 | 2.630 | 3.630 | 7.464 |
+
+Each round's tail, its p99.9 and max (ms): seam 4.359 and 12.817, 19.465 and 20.927, 6.884 and 23.900; libcrun 16.673
+and 19.306, 21.779 and 22.634, 6.408 and 7.563.
+
+The parts' p50s sum to 3.491 ms pooled: 96.2% of the creates between the traced ones (step 1's criterion met again).
+
+### What's left once the shim's spawn and exec are gone (pooled part p50s)
+
+The shim's spawn and exec (parts 15 to 18), which the seed replaces, took 0.508 ms. What's left sums to 2.983 ms:
+
+| what's left | parts | ms | share |
+|---|---|---|---|
+| the init's root: mounted, then pivot_root | 23, 24 | 1.250 | 41.9% |
+| the init's other set-up: the shim's config read, the namespaces joined and made, the init's clone, the process become | 19, 20, 21, 22, 25 | 0.404 | 13.5% |
+| the device program, loaded and attached | 12, 13 | 0.356 | 11.9% |
+| the record's temp files, writes and renames | 2, 3, 5, 30, 31, 33 | 0.293 | 9.8% |
+| the cgroup, made and bounded | 7, 8, 9 | 0.282 | 9.5% |
+| the node's and the runtime's other work | 1, 10, 11, 14, 35 | 0.224 | 7.5% |
+| the container's state written (state.json) and read back | 28, 29 | 0.088 | 2.9% |
+| the handshake | 26, 27 | 0.086 | 2.9% |
+
+- **Step 5's measure:** the cgroup, made and bounded, is 0.095 of what's left, its making (parts 7 and 8) 0.075: under
+  the tenth by this run, as by run 1 (0.092 and 0.072), though by less.
+- **Goal 5's bar:** a quarter of libcrun's pooled create p50 (4.004 ms) is 1.001 ms; what's left is 2.980x it. Take
+  away as well the init's root, the device program, the record's and the state's writes and the cgroup's making, each
+  whole, and 0.771 ms is left, 0.770 of the bar, where run 1's same sum was 1.145 of it. The init's root alone is 1.250
+  ms, more than the bar: pivot_root's 0.765 ms is its walk over the host's threads (3,669 at the start), as in run 1.
+- **The seed's serial work** (parts 19, 21 and 22, what a seed does per create up to the init's first run) is 0.306 ms
+  at p50, against run 1's 0.527.

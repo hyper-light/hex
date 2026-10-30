@@ -282,8 +282,11 @@ three different things (CLAUDE.md "Working here"):
     the socket, against libcrun's 2.515; sustained at concurrency 32 2,108 and 2,095/s against libcrun's 1,765 (goal
     4's record: 26 and 51 against 1,294, /run on overlayfs). Creates no longer run one at a time, which closes that
     Open item: its cause was the record's fsyncs under the store's one lock. The network-namespace pool ran dry for
-    1.8-2.8% of sustained creates at that rate, decision 4's second falsifier (Open). Step 4 (the seed) is under
-    way; 5 and 6 follow.
+    1.8-2.8% of sustained creates at that rate, decision 4's second falsifier (Open). After step 2 the create
+    breakdown, /run a tmpfs (its run 3, create-breakdown-20261030T012433Z, not of record, fedora loaded by Focal's
+    fleet test), puts a seam create's p50 at 3.290 ms pooled against libcrun's 4.004. Of the 2.983 ms left once the
+    shim goes, the init's root is 1.250 (pivot_root 0.765), the device program 0.356 and the cgroup 0.282 (9.5%,
+    under step 5's tenth); what's left is 2.98x goal 5's bar. Step 4 (the seed) is under way; 5 and 6 follow.
   - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
