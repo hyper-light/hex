@@ -172,9 +172,9 @@ const CLONE_PARENT: u64 = 0x8000;
 /// v3.12), and that ERRORS entry is out of date: v6.19's `copy_process` refuses `CLONE_PARENT` only from
 /// an init (`SIGNAL_UNKILLABLE`, `kernel/fork.c:2010-2012`) and `CLONE_NEWUSER` or `CLONE_NEWPID` only
 /// together with `CLONE_THREAD` (`2018-2022`) (raw.githubusercontent.com/torvalds/linux/v6.19/
-/// kernel/fork.c; measured, `bench/competitive/probes/`). `None` when this kernel or sandbox has no
-/// `clone3` or no clone into a cgroup (`ENOSYS` or `E2BIG`, as [`fork_into_cgroup`]). The caller must be
-/// single-threaded, as for [`fork`].
+/// kernel/fork.c; the lab's `oci_box` tests, rootless and as root). `None` when this kernel or
+/// sandbox has no `clone3` or no clone into a cgroup (`ENOSYS` or `E2BIG`, as [`fork_into_cgroup`]).
+/// The caller must be single-threaded, as for [`fork`].
 pub fn clone_sibling(
     cgroup: Option<std::os::fd::BorrowedFd<'_>>,
     ns: u64,

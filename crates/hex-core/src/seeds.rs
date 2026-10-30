@@ -34,11 +34,12 @@ use std::time::Duration;
 /// holds. A seed serves one create at a time ("only one instance can be cloned from it at a time (serially)", AFaaS:
 /// Chai et al., OSDI 2025, §8), so with this many no create of that phase waits for a seed, whatever share of a
 /// create a seed's clone takes, and the bench host has as many hardware threads (fedora's Core i9-14900HX), so all of
-/// them can clone at once there. Fewer do as a rule: a seed is busy only for its clone of a container's init, 0.278 ms
-/// p50 on fedora (goal 5 plan step 4, the seed-path run of `bench/competitive/probes/create_breakdown.md`), against a
-/// whole create of about 2 ms, so the node's shell starts seeds as load asks, one spare beyond the creates waiting, and
-/// [`Counts::most_busy`] shows how many a run used. The bound caps the memory they hold: an idle seed is 2.4 MiB PSS on
-/// fedora, so 32 hold about 78 MiB, charged to the node agent's cgroup.
+/// them can clone at once there. The node's shell starts seeds as creates wait for them, one spare beyond the creates
+/// waiting, not all at once: at concurrency 1 one seed serves every create (its clone of an init took 0.209 ms p50 on
+/// fedora, goal 5 plan step 4's `bench/competitive/probes/seed_path.md`), and at concurrency 32 on a loaded fedora,
+/// where a clone into a cgroup waits on the kernel's `cgroup_mutex`, a sustained phase had all 32 busy at once.
+/// [`Counts::most_busy`] shows how many a run used. The bound caps the memory they hold: a seed is 1.5 to 2.4 MiB
+/// resident on fedora, so 32 hold at most about 78 MiB, charged to the node agent's cgroup.
 pub const SEEDS: NonZeroUsize = match NonZeroUsize::new(32) {
     Some(n) => n,
     None => NonZeroUsize::MIN,
@@ -49,10 +50,11 @@ pub const SEEDS: NonZeroUsize = match NonZeroUsize::new(32) {
 /// - 128 creates waiting at once: the most calls the node's socket runs at once (`hex_node::serve::WORKERS`), so no
 ///   create over the socket is refused for want of room in line; an in-process caller with more creates waiting is
 ///   refused past it.
-/// - A wait of 1 s. A seed frees as soon as it has cloned, and a seed's clone of a container's init took 0.278 ms p50
-///   on fedora (goal 5 plan step 4), so a full line of 128 behind a single seed clears in about 36 ms of clones. A
-///   create handed none within a second finds the seeds stuck, and is refused so the scheduler can place it elsewhere
-///   rather than hold it for the hang bound.
+/// - A wait of 1 s. A seed frees as soon as it has cloned, and a seed's clone of a container's init took 0.209 ms p50
+///   on fedora at concurrency 1 and a clone into a cgroup about 1 ms at concurrency 32 on a loaded host (goal 5 plan
+///   step 4: `bench/competitive/probes/seed_path.md` and `create_serial.md`), so a full line of 128 behind a single
+///   seed clears in 27 to 130 ms of clones. A create handed none within a second finds the seeds stuck, and is refused
+///   so the scheduler can place it elsewhere rather than hold it for the hang bound.
 /// - 30 s over one create: what decision 3's exec seeds allow a seed's answer (`ANSWER_PATIENCE` in hex-node's
 ///   seed.rs), a bound on a wait for a fact rather than a guess at the work's length (CLAUDE.md §4). It is five orders
 ///   past the clone it bounds, so a healthy seed under any load measured never meets it, and a hung one is replaced
