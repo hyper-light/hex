@@ -247,7 +247,24 @@ three different things (CLAUDE.md "Working here"):
     the pool never dry. The gates found a race older than goal 4, fixed at 6446160: a box's delete reaped an exec'd
     program before recording its exit, so a caller over the socket could read it ended `Exit::Unknown` (HEX-RT-7,
     under load).
-  - goals 5 (a seed per node), 6 (mount namespaces without copying) — open.
+  - **goal 5, a seed per node** (kiln plan `01a1877e05c7748ca8865548aab76445`, research
+    `01a1877e05cc73b495447bf5113ebda3`, 6 steps; on `cp/t7-seed`, not merged). The research found today's seam
+    create on fedora is nearly all two fsynced writes of the box's record (7.1-7.5 ms each on fedora's btrfs), taken
+    under the record store's one lock, so creates run one at a time; the seed's saving of the shim's exec (about 1
+    ms) comes after the record leaves create's path. **Plan step 3, the seeds' core** (built, gate-clean on fedora,
+    2026-10-29, 5f0b474): `hex_core::seeds`, the policy for the node's seeds as a pure core. It keeps at most 32
+    seeds up or starting, one to a slot (a seed serves one create at a time, AFaaS §8; 32 is the bench's busiest
+    concurrency until step 1's measured clone says how many fewer would do), and hands each create an idle seed that
+    is up. With none idle the create waits in line, each seed that frees going to the create that has waited
+    longest; past 128 in line it is refused at once, and if handed none within 1 s it is refused. A seed that dies,
+    or that serves one create for 30 s (taken for hung, for the shell to kill), leaves its slot and its create is
+    refused by type; the slot is started again and the restart counted, and a late report about the seed is refused,
+    never taken for the next one's. A failed start, or a seed dead before it served a create, stops the starting
+    until the next create. Its counts (creates asked, handed, waited, done and refused four ways; seeds started,
+    restarted, failed to start, dead, hung; the most busy at once) and the creates each slot's seeds were handed
+    equal an oracle's under random histories (HEX-SEEDS-1 to 6). Steps 1 (decision 5 restated, a seam create's time
+    measured) and 2 (the record off create's path) are under way; 4 to 6 follow.
+  - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
