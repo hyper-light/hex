@@ -18,7 +18,8 @@
 //! - goal 5 plan step 2: 31 boxes are made at once while another box's durable record write is held
 //!   open, none waiting on it, and none of their records synced with their container state on tmpfs;
 //!   two nodes with state directories of their own each make and start a box of the same id, two
-//!   containers, and deleting one leaves the other running.
+//!   containers, and deleting one leaves the other running; a box made before the container state
+//!   moved, its record naming `<state>/oci/<id>`, is taken back, inspected and deleted by today's node.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
 //! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
@@ -45,7 +46,12 @@ use hex_api::{
     Bounds, BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec, Refusal, Rootfs,
     Runtime,
 };
+use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_node::Node;
+use hex_node::store::Store;
+use hex_runtime::linux::cgroup::BoxRoot;
+use hex_runtime::linux::disks;
+use hex_runtime::linux::oci::run::Runtime as OciRuntime;
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
@@ -263,6 +269,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     orphans_are_reaped(&lab, own);
     held_record_write(&lab, own);
     two_nodes_one_box_id(&lab, own);
+    a_box_made_before_the_move_is_adopted(&lab, own);
 }
 
 /// The agent the crash kills: a node in this re-exec'd process makes and starts a box whose init
@@ -989,6 +996,76 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
     );
     b.delete(&id).expect("delete in b");
     assert!(!in_b.exists(), "b's container state is left");
+}
+
+/// T-T7.1.2 across goal 5 plan step 2's upgrade: a node before cff3699 kept a box's container state in
+/// its state directory, `<state>/oci/<id>`, and the box's record names that directory. A box made so,
+/// its init waiting, is taken back by a node of today restarted on the same state directory, which reads
+/// its state where the record names it (created, not empty with an exit no one saw) and deletes it,
+/// leaving nothing of it.
+fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-legacy");
+    let id = BoxId::new("legacy").unwrap();
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    // The box as the node before cff3699 made it: its cgroup under the box root with its bounds, its
+    // container under `<state>/oci` named by its id, and its record naming that directory.
+    let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
+    let cgroup = root.create(&id, &Bounds::default()).unwrap();
+    let _cleanup = Killing(&root, id.clone());
+    let before = state.path().join("oci");
+    let oci = OciRuntime::with_helper(before.clone(), PathBuf::from(&lab.exe));
+    oci.create_in_cgroup(id.as_str(), &bundle, None, cgroup, None)
+        .unwrap();
+    let made = oci.state(id.as_str()).unwrap();
+    let mut record = BoxRecord::new(
+        BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(bundle),
+        },
+        Phase::Ready,
+        vec![before.join(id.as_str())],
+    );
+    record.init = Some(ProcId {
+        pid: u32::try_from(made.pid).unwrap(),
+        start_ticks: made.start_time.unwrap(),
+    });
+    Store::open(state.path()).unwrap().put(&record).unwrap();
+
+    let node = lab.node(&box_root, state.path());
+    assert_ne!(
+        node.container_dir(&id),
+        before.join(id.as_str()),
+        "today's node keeps its containers elsewhere"
+    );
+    let summary = node.recover().expect("recover");
+    assert!(summary.adopted.contains(&id), "not adopted: {summary:?}");
+    let info = node.inspect(&id).unwrap();
+    assert_eq!(
+        (info.state, info.exit),
+        (BoxState::Created, None),
+        "its state, read where its record names it"
+    );
+    node.delete(&id).expect("delete");
+    assert!(
+        !before.join(id.as_str()).exists(),
+        "its container state is left"
+    );
+    assert!(!box_root.join(id.as_str()).exists(), "its cgroup is left");
+    assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
+}
+
+/// Kills whatever is left in a box's cgroup when dropped, so a check that fails leaves no container
+/// running, holding this test's output open.
+struct Killing<'a>(&'a BoxRoot, BoxId);
+
+impl Drop for Killing<'_> {
+    fn drop(&mut self) {
+        if let Some(cg) = self.0.get(&self.1) {
+            let _ = cg.kill();
+        }
+    }
 }
 
 fn sorted_ms(latencies: &[Duration]) -> Vec<Duration> {

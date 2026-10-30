@@ -32,7 +32,7 @@ use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::run::Runtime as OciRuntime;
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
-use hex_runtime::linux::oci::state::{Status, start_time};
+use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
@@ -213,10 +213,26 @@ impl Node {
 
     /// The `oci` runtime, over the node's state root and helper binary.
     fn oci(&self) -> OciRuntime {
+        self.oci_in(self.oci_root.clone())
+    }
+
+    /// The `oci` runtime over the state root `root`, with the node's helper binary.
+    fn oci_in(&self, root: PathBuf) -> OciRuntime {
         match &self.oci_helper {
-            Some(exe) => OciRuntime::with_helper(self.oci_root.clone(), exe.clone()),
-            None => OciRuntime::new(self.oci_root.clone()),
+            Some(exe) => OciRuntime::with_helper(root, exe.clone()),
+            None => OciRuntime::new(root),
         }
+    }
+
+    /// Where `record`'s box keeps its container's state, as the record names it: the runtime over the
+    /// directory's parent, and the container's name there. Create names the container's directory
+    /// first, so a box made before its node kept container state under the runtime directory (cff3699),
+    /// whose record names `<state>/oci/<id>`, is found there and managed as any other (T-T7.1.2 across
+    /// the upgrade). `None` for a record that names no directory: a `process` box's.
+    fn container_of(&self, record: &BoxRecord) -> Option<(OciRuntime, String)> {
+        let dir = record.dirs.first()?;
+        let name = dir.file_name()?.to_str()?.to_owned();
+        Some((self.oci_in(dir.parent()?.to_path_buf()), name))
     }
 
     /// Box `id`'s container's name under the node's oci root ([`container_name`]).
@@ -269,12 +285,16 @@ impl Node {
             // An oci box follows the container's lifecycle: `created` until `start`, then `running`,
             // then `empty` once its init no longer runs (the oci state's `stopped`).
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
-                match self.oci().state(&self.container(id)).map(|s| s.status) {
-                    Ok(Status::Created) => BoxState::Created,
-                    Ok(Status::Running) => BoxState::Running,
-                    Ok(Status::Creating | Status::Stopped) => BoxState::Empty,
+                // Read where the record says the container's state is, whichever node made it.
+                let status = self
+                    .container_of(record)
+                    .map(|(oci, name)| oci.state(&name).map(|s| s.status));
+                match status {
+                    Some(Ok(Status::Created)) => BoxState::Created,
+                    Some(Ok(Status::Running)) => BoxState::Running,
+                    Some(Ok(Status::Creating | Status::Stopped)) => BoxState::Empty,
                     // No container state yet (mid-create) or it's gone: nothing runs.
-                    Err(_) => BoxState::Empty,
+                    Some(Err(_)) | None => BoxState::Empty,
                 }
             }
         };
@@ -699,12 +719,24 @@ impl Runtime for Node {
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         // An oci box's start is tried first, so the hot path reads only the container's state: a box with
-        // no container under the oci root is a process box or no box, which the record then says (goal 3
-        // plan step 3: start costs one FIFO operation and the state read beside it). The init's liveness is
-        // judged by the pidfd the supervisor holds for it, a poll.
-        let started = self.oci().start_with(&self.container(id), &|_| {
-            matches!(self.supervisor.runs(id), Ok(true))
-        });
+        // no container under the oci root is a process box, no box, or one made before its node kept
+        // container state there, which the record then says (goal 3 plan step 3: start costs one FIFO
+        // operation and the state read beside it). The init's liveness is judged by the pidfd the
+        // supervisor holds for it, a poll.
+        let alive = |_: &State| matches!(self.supervisor.runs(id), Ok(true));
+        let mut started = self.oci().start_with(&self.container(id), &alive);
+        let mut record = None;
+        if matches!(started, Err(OciError::NoSuchContainer(_))) {
+            record = self.record(id)?;
+            // A box made before cff3699: its container's state is where its record names it.
+            let elsewhere = record
+                .as_ref()
+                .filter(|r| r.dirs.first() != Some(&self.container_dir(id)))
+                .and_then(|r| self.container_of(r));
+            if let Some((oci, name)) = elsewhere {
+                started = oci.start_with(&name, &alive);
+            }
+        }
         match started {
             Ok(()) => Ok(()),
             // `running` has started already (Invalid); `stopped` or mid-create has no live init to start
@@ -715,7 +747,7 @@ impl Runtime for Node {
                 why: format!("container {id} has started already"),
             }),
             Err(OciError::WrongState(..)) => Err(Refusal::NotRunning(id.clone(), "start")),
-            Err(OciError::NoSuchContainer(_)) => match self.record(id)?.map(|r| r.spec.class) {
+            Err(OciError::NoSuchContainer(_)) => match record.map(|r| r.spec.class) {
                 None => Err(Refusal::NoSuchBox(id.clone())),
                 // A process box has no init to start: exec runs its programs. Refused as the
                 // simulator refuses it (HEX-RT-10).
