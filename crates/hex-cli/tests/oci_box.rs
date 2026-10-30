@@ -649,22 +649,15 @@ fn program_alone(lab: &Lab, own: &Path) {
         "no hex __oci-exec helper runs beside the program"
     );
     // Goal 3 plan step 2's acceptance: no process is made per exec but the program, and no hex binary is
-    // exec'd per call. A node that runs as root clones the program from its own thread and keeps no
-    // seed; a rootless one hands the exec to a reusable seed. Either way a second exec adds to the agent's
-    // children its program alone.
-    let seeds = |cs: &[u32]| cs.iter().filter(|&&c| cmdline_has(c, "__oci-seed")).count();
-    if lab.rootless {
-        assert!(
-            seeds(&children) >= 1,
-            "a rootless node's exec is served by a reusable seed"
-        );
-    } else {
-        assert_eq!(
-            seeds(&children),
-            0,
-            "a node that runs as root needs no seed"
-        );
-    }
+    // exec'd per call. A node that runs as root clones the program straight from its own thread; a
+    // rootless one hands the exec to a reusable seed. Either way a second exec adds to the agent's
+    // children its program alone (the diff below). A `hex __oci-seed` is up whichever way the node runs:
+    // the box's create is made by a create seed as of goal 5, so the seed count no longer tells a root
+    // node from a rootless one — the diff does.
+    assert!(
+        children.iter().any(|&c| cmdline_has(c, "__oci-seed")),
+        "a create seed is up, having made the box"
+    );
     let before: std::collections::BTreeSet<u32> = children.into_iter().collect();
     let second = node
         .exec(
