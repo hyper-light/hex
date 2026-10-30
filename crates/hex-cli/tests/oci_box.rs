@@ -270,6 +270,9 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     held_record_write(&lab, own);
     two_nodes_one_box_id(&lab, own);
     a_box_made_before_the_move_is_adopted(&lab, own);
+    created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
+    each_seed_cloned_container_is_randomized_afresh(&lab, own);
+    a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
 }
 
 /// The agent the crash kills: a node in this re-exec'd process makes and starts a box whose init
@@ -1054,6 +1057,193 @@ fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
     );
     assert!(!box_root.join(id.as_str()).exists(), "its cgroup is left");
     assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
+}
+
+/// Goal 5 plan step 4 (T-T7.1.4), the lab test as root and rootless: a container made through a seed has
+/// its init in its own cgroup and the namespaces its spec asks for, and no `hex` binary was exec'd for
+/// the create. Do: create and start a box whose init is a non-hex program (`/usr/bin/sleep`) with a
+/// network namespace of its own; read the init's `/proc/<pid>/cgroup`, `ns/*` and `exe`. Expect: the
+/// init is in the box's cgroup, in fresh pid, mount, ipc, uts and network namespaces (and a user
+/// namespace rootless), its `exe` is the program (not the `hex` binary), and no `hex __oci-init` shim
+/// ran — the re-exec the seed replaces.
+fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-seedns");
+    let node = lab.node(&box_root, state.path());
+    let id = BoxId::new("nsbox").unwrap();
+    // A non-hex init, with a network namespace of its own, so the exe is plainly the program and every
+    // namespace the spec asks for can be read.
+    let bundle = lab.bundle_with(&strings(&["/usr/bin/sleep", "600"]), true);
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+    })
+    .expect("create through a seed");
+    node.start(&id).expect("start");
+    let init = u32::try_from(init_pid(&node.container_dir(&id))).unwrap();
+    // Wait until the init has exec'd its program, so `exe`, the namespaces and the cgroup are the
+    // container's and not the seed's clone mid-setup.
+    wait_for(
+        || std::fs::read_link(format!("/proc/{init}/exe")).is_ok_and(|p| p.ends_with("sleep")),
+        "the init to exec its program",
+    );
+
+    let exe = std::fs::read_link(format!("/proc/{init}/exe")).unwrap();
+    assert!(
+        exe.ends_with("sleep") && !exe.to_string_lossy().contains("hex"),
+        "the init is the program, not a hex shim: {}",
+        exe.display()
+    );
+    // Its cgroup is the box's own (read in this process's cgroup namespace: the full path).
+    let cgroup = std::fs::read_to_string(format!("/proc/{init}/cgroup")).unwrap();
+    assert!(
+        cgroup.lines().any(|l| l.starts_with("0::") && l.ends_with("/nsbox")),
+        "the init is in the box's cgroup: {cgroup:?}"
+    );
+    // Each namespace its spec makes is its own (differs from the agent's); a rootless box also has a
+    // user namespace of its own.
+    let agent = std::process::id();
+    let mut kinds = vec!["pid", "mnt", "ipc", "uts", "net"];
+    if lab.rootless {
+        kinds.push("user");
+    }
+    for ns in kinds {
+        let theirs = std::fs::read_link(format!("/proc/{init}/ns/{ns}")).unwrap();
+        let ours = std::fs::read_link(format!("/proc/{agent}/ns/{ns}")).unwrap();
+        assert_ne!(theirs, ours, "the init has its own {ns} namespace");
+    }
+    // No hex shim (`hex __oci-init`) ran for the create: the seed cloned the init, it is the agent's
+    // own child, and no re-exec'd shim stands anywhere among the agent's children.
+    assert_eq!(ppid(init), Some(agent), "the init is the agent's own child");
+    assert!(
+        !children_of(agent).iter().any(|&c| cmdline_has(c, "__oci-init")),
+        "no hex __oci-init shim ran for the create"
+    );
+    node.delete(&id).expect("delete");
+}
+
+/// Goal 5 plan step 4 (T-T7.1.4), the re-initialization test: two containers cloned from one seed are
+/// each randomized afresh, so neither carries the seed's layout (f15, f17: the child execs the
+/// container's program, so its address space is randomized anew, not the seed's copied one). Do: create
+/// two boxes in turn from the same idle seed and read each init's stack base, and the seed's, from
+/// `/proc/<pid>/maps`. Expect: the two inits' stack bases differ, and each differs from the seed's — the
+/// value each child "makes" (its ASLR'd layout) is its own.
+fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-reinit"), state.path());
+    let agent = std::process::id();
+    let base = |pid: u32| {
+        wait_for(
+            || stack_base(pid).is_some(),
+            "a process to have a readable stack mapping",
+        );
+        stack_base(pid).unwrap()
+    };
+    let make = |id: &str| -> u32 {
+        let bid = BoxId::new(id).unwrap();
+        node.create(lab.running(bid.clone(), &strings(&["/usr/bin/sleep", "600"])))
+            .expect("create");
+        node.start(&bid).expect("start");
+        let init = u32::try_from(init_pid(&node.container_dir(&bid))).unwrap();
+        wait_for(
+            || std::fs::read_link(format!("/proc/{init}/exe")).is_ok_and(|p| p.ends_with("sleep")),
+            "the init to exec its program",
+        );
+        init
+    };
+
+    let one = make("reinit1");
+    // The seed that cloned it, now idle: the agent's child running `hex __oci-seed`. The next create
+    // reuses it, so both inits are cloned from this one seed.
+    let seed = children_of(agent)
+        .into_iter()
+        .find(|&c| cmdline_has(c, "__oci-seed"))
+        .expect("a create seed is up");
+    let (v1, vs) = (base(one), base(seed));
+    let two = make("reinit2");
+    let v2 = base(two);
+    assert_ne!(v1, v2, "two containers from one seed differ: {v1} vs {v2}");
+    assert_ne!(v1, vs, "the first differs from the seed's: {v1} vs {vs}");
+    assert_ne!(v2, vs, "the second differs from the seed's: {v2} vs {vs}");
+    node.delete(&BoxId::new("reinit1").unwrap()).expect("delete");
+    node.delete(&BoxId::new("reinit2").unwrap()).expect("delete");
+}
+
+/// Goal 5 plan step 4 (T-T7.1.4), crash injection: a seed that dies mid-create refuses that create by
+/// type, its box is cleaned up, and the next create starts a replacement seed, counted. Do: create a box
+/// (so a seed is up and idle), kill the seed process, create a second box (which is handed the dead
+/// seed), then a third. Expect: the second create is refused by type and left no box; the pool counts a
+/// death and, by the third create, a restart; the third create succeeds.
+fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-seedcrash"), state.path());
+    let agent = std::process::id();
+    let first = BoxId::new("crash-a").unwrap();
+    node.create(lab.running(first.clone(), &Lab::act(&Act::Wait)))
+        .expect("the first create starts a seed");
+    node.delete(&first).expect("delete the first box, leaving its seed idle");
+    let seed = children_of(agent)
+        .into_iter()
+        .find(|&c| cmdline_has(c, "__oci-seed"))
+        .expect("a create seed is up");
+    // Kill the seed and wait until it has ended, so the next create is handed a dead seed — a seed that
+    // dies mid-create, as a crash would leave it.
+    kill(i32::try_from(seed).unwrap(), 9);
+    wait_for(
+        || parent_of(i32::try_from(seed).unwrap()) == 0 || is_zombie(seed),
+        "the seed to die",
+    );
+
+    let dead = BoxId::new("crash-b").unwrap();
+    let refused = node.create(lab.running(dead.clone(), &Lab::act(&Act::Wait)));
+    assert!(
+        matches!(refused, Err(Refusal::Os { .. }) | Err(Refusal::Broken(_))),
+        "a create handed a dead seed is refused by type: {refused:?}"
+    );
+    assert_eq!(
+        node.inspect(&dead),
+        Err(Refusal::NoSuchBox(dead.clone())),
+        "its box is cleaned up"
+    );
+    assert!(!own.join("hex-oci-seedcrash").join("crash-b").exists());
+    let died = node.create_seeds().unwrap().died;
+    assert!(died >= 1, "the seed's death is counted: {died}");
+
+    // The next create starts a replacement seed, counted as a restart, and succeeds.
+    let next = BoxId::new("crash-c").unwrap();
+    node.create(lab.running(next.clone(), &Lab::act(&Act::Wait)))
+        .expect("the next create succeeds");
+    node.start(&next).expect("start the next box");
+    assert_eq!(node.inspect(&next).unwrap().state, BoxState::Running);
+    let counts = node.create_seeds().unwrap();
+    assert!(
+        counts.restarted >= 1,
+        "the seed was restarted and counted: {counts:?}"
+    );
+    node.delete(&next).expect("delete");
+}
+
+/// The start address of `pid`'s main-thread stack, from `/proc/<pid>/maps` (`[stack]`), as a string;
+/// `None` while it can't be read. Randomized afresh at each `execve`, so it tells one container's
+/// address space from another's and from the seed's.
+fn stack_base(pid: u32) -> Option<String> {
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
+    maps.lines()
+        .find(|l| l.ends_with("[stack]"))
+        .and_then(|l| l.split('-').next())
+        .map(str::to_owned)
+}
+
+/// Whether `pid` is a zombie (ended, not yet reaped), from `/proc/<pid>/stat` field 3.
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            s.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
+        })
+        .is_some_and(|state| state == "Z")
 }
 
 /// Kills whatever is left in a box's cgroup when dropped, so a check that fails leaves no container
