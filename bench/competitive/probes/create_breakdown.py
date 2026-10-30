@@ -104,6 +104,13 @@ def held(cond, what):
         raise Missing(what)
 
 
+def state_dir(path, cid):
+    """Whether a traced path is box `cid`'s container state directory: `<node key>-<box id>` under the node's runtime
+    directory (node.rs container_name, goal 5 plan step 2), or `<state>/oci/<box id>` as nodes before it kept it."""
+    return (re.fullmatch(r"[0-9a-f]{16}-" + re.escape(cid), path.rpartition("/")[2]) is not None
+            or ("/oci/" in path and named(path, cid)))
+
+
 def create_cuts(ev, bench, cid):
     c = eb.Cuts(ev)
     tmp = f".{cid}.tmp"
@@ -117,13 +124,21 @@ def create_cuts(ev, bench, cid):
         return i
 
     def record_write(n):
-        """A durable record write's cuts: its temp file made, its fsync's entry and exit, the directory's."""
-        sync = first(ev, c.at[-1], enter(bench, "fsync"), f"record write {n}'s fsync")
-        opened_last_before(bench, "openat", sync, lambda p: named(p, tmp), f"record write {n}'s temp file")
-        c.at.append(sync)
-        c.to(exited(bench, "fsync"), f"record write {n}'s fsync returning")
-        c.to(enter(bench, "fsync"), f"record write {n}'s directory fsync")
-        c.to(exited(bench, "fsync"), f"record write {n}'s directory fsync returning")
+        """A record write's cuts: its temp file made, its fsync's entry and exit, the directory's. A record whose
+        directories all lie on tmpfs isn't synced (decision 1, goal 5 plan step 2). The rounds trace a rename's
+        exit alone (its entry fetches two paths), so such a write's "the record written" runs from its temp file
+        to its rename's return, holding the close and the rename, and the three parts after it are empty."""
+        renamed = first(ev, c.at[-1], exited(bench, *RENAMES), f"record write {n}'s rename")
+        syncs = [i for i in range(c.at[-1], renamed) if enter(bench, "fsync")(ev[i])]
+        if syncs:
+            opened_last_before(bench, "openat", syncs[0], lambda p: named(p, tmp), f"record write {n}'s temp file")
+            c.at.append(syncs[0])
+            c.to(exited(bench, "fsync"), f"record write {n}'s fsync returning")
+            c.to(enter(bench, "fsync"), f"record write {n}'s directory fsync")
+            c.to(exited(bench, "fsync"), f"record write {n}'s directory fsync returning")
+        else:
+            opened_last_before(bench, "openat", renamed, lambda p: named(p, tmp), f"record write {n}'s temp file")
+            c.at += [renamed] * 4
 
     c.opened(bench, "openat", 1, 0, lambda p: named(p, f"{cid}.json"), "the node's look for the box's record")
     record_write(1)
@@ -132,7 +147,7 @@ def create_cuts(ev, bench, cid):
          f"the first mkdir is the box's cgroup (it made {ev[made].path()!r})")
     c.to(exited(bench, "mkdir", "mkdirat"), "the cgroup's mkdir returning")
     state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
-    held("/oci/" in ev[state].path() and named(ev[state].path(), cid),
+    held(state_dir(ev[state].path(), cid),
          f"the second mkdir is the container's state directory (it made {ev[state].path()!r})")
     c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
     load = c.to(enter(bench, "bpf"), "the device program's load")
