@@ -2,8 +2,8 @@
 //! cgroup files say it used, the runtime-spec bundle an `oci` box's structured spec renders to, the
 //! record the node agent keeps of each box, the plan that takes every box back or removes it after
 //! the node agent crashed (T-T7.1.2), the pool of network namespaces it makes ahead for its
-//! containers ([`netns`]), and the node agent's socket as bytes ([`wire`]). Shells in `hex-runtime`,
-//! `hex-node` and `hex-client` do the I/O these decide.
+//! containers ([`netns`]), the seeds it keeps to clone them ([`seeds`]), and the node agent's socket
+//! as bytes ([`wire`]). Shells in `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
 
 #![cfg_attr(
     test,
@@ -23,4 +23,5 @@ pub mod netns;
 pub mod record;
 pub mod recovery;
 pub mod seed;
+pub mod seeds;
 pub mod wire;
