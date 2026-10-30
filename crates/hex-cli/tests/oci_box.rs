@@ -998,7 +998,7 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
     assert!(!in_b.exists(), "b's container state is left");
 }
 
-/// T-T7.1.2 across goal 5 plan step 2's upgrade: a node before cff3699 kept a box's container state in
+/// T-T7.1.2 across goal 5 plan step 2's upgrade: a node before defda14 kept a box's container state in
 /// its state directory, `<state>/oci/<id>`, and the box's record names that directory. A box made so,
 /// its init waiting, is taken back by a node of today restarted on the same state directory, which reads
 /// its state where the record names it (created, not empty with an exit no one saw) and deletes it,
@@ -1008,7 +1008,7 @@ fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
     let box_root = own.join("hex-oci-legacy");
     let id = BoxId::new("legacy").unwrap();
     let bundle = lab.bundle(&Lab::act(&Act::Wait));
-    // The box as the node before cff3699 made it: its cgroup under the box root with its bounds, its
+    // The box as the node before defda14 made it: its cgroup under the box root with its bounds, its
     // container under `<state>/oci` named by its id, and its record naming that directory.
     let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
     let cgroup = root.create(&id, &Bounds::default()).unwrap();

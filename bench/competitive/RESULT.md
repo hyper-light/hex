@@ -490,13 +490,14 @@ passes found: about one create's time per lifecycle at concurrency 32. Both are 
 
 ## Goal 5, plan step 2: a box's record off create's path (2026-10-30, fedora)
 
-seam_oci's lifecycle and sustained phases by both drivers, beside libcrun's, at eb6cae7: each container's state on tmpfs
-under the node's runtime directory, a record whose directories all lie on tmpfs written without its fsyncs, and no lock
-another box's create takes held across a record write (goal 5 plan step 2: cff3699, 53571ab). host.sh (`PHASES=oci
-RUNTIMES=libcrun SEAM_OCI_BIN=...`), `HEXBENCH_PHASES="lifecycle sustained"`, 2 rounds of 1,000 lifecycles after 100, the
-sustained phase 10,000 lifecycles at concurrency 32, no load gate (the load recorded).
+seam_oci's lifecycle and sustained phases by both drivers, beside libcrun's, at eb6cae7 (built on cp/t7-g5-s2; 6f7ba39
+here): each container's state on tmpfs under the node's runtime directory, a record whose directories all lie on tmpfs
+written without its fsyncs, and no lock another box's create takes held across a record write (goal 5 plan step 2:
+defda14, 1f4babe). host.sh (`PHASES=oci RUNTIMES=libcrun SEAM_OCI_BIN=...`), `HEXBENCH_PHASES="lifecycle sustained"`, 2
+rounds of 1,000 lifecycles after 100, the sustained phase 10,000 lifecycles at concurrency 32, no load gate (the load
+recorded).
 
-**A change of method from this pass on.** The OCI pass's container mounts a tmpfs at `/run` (eb6cae7, host.sh and
+**A change of method from this pass on.** The OCI pass's container mounts a tmpfs at `/run` (6f7ba39, host.sh and
 docker_pass.sh), as a host has one, where the runtimes keep their state: libcrun's and crun's and runc's, and a root Hex
 node's `/run/hex-node`. Every pass before it, goal 4's of record among them, kept every runtime's state on the
 container's overlayfs. A ratio within one pass compares like setups; one taken across the change compares unlike ones,

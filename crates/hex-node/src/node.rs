@@ -226,7 +226,7 @@ impl Node {
 
     /// Where `record`'s box keeps its container's state, as the record names it: the runtime over the
     /// directory's parent, and the container's name there. Create names the container's directory
-    /// first, so a box made before its node kept container state under the runtime directory (cff3699),
+    /// first, so a box made before its node kept container state under the runtime directory (defda14),
     /// whose record names `<state>/oci/<id>`, is found there and managed as any other (T-T7.1.2 across
     /// the upgrade). `None` for a record that names no directory: a `process` box's.
     fn container_of(&self, record: &BoxRecord) -> Option<(OciRuntime, String)> {
@@ -728,7 +728,7 @@ impl Runtime for Node {
         let mut record = None;
         if matches!(started, Err(OciError::NoSuchContainer(_))) {
             record = self.record(id)?;
-            // A box made before cff3699: its container's state is where its record names it.
+            // A box made before defda14: its container's state is where its record names it.
             let elsewhere = record
                 .as_ref()
                 .filter(|r| r.dirs.first() != Some(&self.container_dir(id)))

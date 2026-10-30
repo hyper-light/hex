@@ -12,9 +12,10 @@ renames are counted beside the fsyncs: each record write is one, and each contai
 ## Run of record
 
 `record-syncs-20261030T002934Z` (`~/.cache/hex-bench/out` on fedora): fedora-2, Linux 6.19.10-300.fc44,
-2026-10-30T00:29:34Z, load 3.05 at start. hex 0.1.0 (cff3699), sha256 4f1812bd76b1e003; seam_oci sha256
-334402959ca5a176, built at cff3699; strace 7.3 (Fedora's package, unpacked without installing it). The harness
-is cff3699's; kiln's synced copy had dropped the two scripts' exec bits, the only difference env.txt notes.
+2026-10-30T00:29:34Z, load 3.05 at start. hex 0.1.0 (cff3699, on cp/t7-g5-s2; defda14 here), sha256
+4f1812bd76b1e003; seam_oci sha256 334402959ca5a176, built at cff3699; strace 7.3 (Fedora's package, unpacked without
+installing it). The harness is cff3699's; kiln's synced copy had dropped the two scripts' exec bits, the only
+difference env.txt notes.
 
 | `/run` | driver | lifecycles | fsync | fdatasync | syncfs, sync, sync_file_range, msync | renames |
 |---|---|---|---|---|---|---|
