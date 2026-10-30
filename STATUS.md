@@ -270,7 +270,16 @@ three different things (CLAUDE.md "Working here"):
     dead before it served a create, stops the starting until the next create. Its counts (creates asked, handed,
     waited, done and refused four ways; seeds started, restarted, failed to start, dead, hung; the most busy at
     once) and the creates each slot's seeds were handed equal an oracle's under random histories (HEX-SEEDS-1 to 6).
-    Step 2 (the record off create's path) is under way; 4 to 6 follow.
+    **Plan step 2, the record off create's path** (2026-10-30, defda14 to 8416f23): container state is under
+    `/run/hex-node` (`$XDG_RUNTIME_DIR/hex-node` rootless), named `<node key>-<box id>`. A record whose directories
+    all lie on tmpfs isn't fsynced (0 per seam lifecycle, record-syncs-20261030T002934Z). Per-box record turns,
+    bounded by the 65,536-box budget, replace the store's lock, and no lock another box's create takes is held
+    across a record write. Pass of record on fedora (20261030T004533Z, /run a tmpfs from 6f7ba39 on): create p50
+    1.928 ms in process, 2.002 over the socket, against libcrun's 2.515; sustained at concurrency 32 2,108 and
+    2,095/s against libcrun's 1,765 (goal 4's record: 26 and 51 against 1,294, /run on overlayfs). Creates no longer
+    run one at a time, which closes that Open item: its cause was the record's fsyncs under the store's one lock.
+    The network-namespace pool ran dry for 1.8-2.8% of sustained creates at that rate, decision 4's second falsifier
+    (Open). Step 4 (the seed) is next; 5 and 6 follow.
   - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
@@ -322,14 +331,24 @@ three different things (CLAUDE.md "Working here"):
   per-box state, the client's, or the wire's. Closes with where the time goes in a late window against an early one,
   and its fix, shown by a sustained phase over the socket that holds level.
 
-- **Hex's seam runs about one create at a time under concurrency.** At concurrency 32 it sustains 26 and 51
-  lifecycles a second on fedora against libcrun's 1,294, 553 and 352 against 1,429 on the Mac Studio, and 108 and 66
-  against 959 on jupiter (goal 4's pass of record, `RESULT.md`; step 2's passes found the same), about one create's
-  time per lifecycle, as its throughput at concurrency 1, 8 and 32 also showed (`probes/socket_cost.md`: 43, 55 and
-  52 a second in process). Not yet measured where the 32 in flight wait (the node's lock, the runtime's create, the
-  shim, the host's CPUs). Closes with that measurement and the fix there, shown by the sustained phase's rate rising
-  with concurrency as libcrun's does. Measured in part: the record's fsyncs, held under the store's one lock, are
-  12.187 ms of a create's 18.297 (create breakdown run 1); goal 5's step 2 takes them off.
+- **The network-namespace pool's one refill thread falls behind at about 2,100 creates a second.** With the record
+  off create's path (goal 5 plan step 2) the seam ran 2,108 lifecycles a second at concurrency 32, and the pool ran
+  dry for 181-279 of each sustained phase's 10,000 creates (1.8-2.8%; `RESULT.md`, 20261030T004533Z), each made on
+  the path and counted, none failed: decision 4's second falsifier (more than 1% dry). Goal 4's 553 a second never
+  reached it. Closes with a second refill thread, or a bound sized to the rate, and a sustained phase at that rate
+  with under 1% of its creates finding the pool dry.
+
+- **An adopted box that was created but never started can't be started.** After a node agent's restart, `start`
+  judges the init's liveness by the supervisor's pidfd, and an adopted init isn't watched (found in goal 5 plan step
+  2's crash tests; older than goal 5). Closes with `start` judging an adopted init by its pid and start time, as
+  `state` does, or the supervisor watching adopted inits, shown by a test that restarts the agent between create and
+  start.
+
+- **Boxes made before goal 5 plan step 2 aren't found after an upgrade.** A node from defda14 on keeps its
+  containers' state under its runtime directory, so a box made by an earlier node, whose state is under
+  `<state>/oci`, reads as empty to `inspect`; `delete` still removes it. Closes with adoption and later calls
+  reading the state from the directory a box's record names, shown by a test that adopts such a box after the
+  change.
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
 measured are in `docs/requirements.toml`.

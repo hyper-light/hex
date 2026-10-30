@@ -73,8 +73,11 @@ itself (implementation goal 0), this axis can't be judged.
 ### 1. A container's state is written atomically, never fsynced
 
 **The choice.** The `oci` class writes `state.json` as runc and crun do: a temporary file, then `rename(2)`, with no
-`fsync` of the file or its directory. So do the node agent's box records, for every record that describes only
-processes and cgroups.
+`fsync` of the file or its directory. So do the node agent's box records, for every record whose directories all lie
+on tmpfs or that names none: the node keeps its containers' state where runc and crun keep theirs, under its runtime
+directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless), each container named `<node key>-<box
+id>`. A record naming a directory on disk, such as a rendered bundle's writable layer, is still fsynced, file and
+directory, and no lock another box's create takes is held across a record write (goal 5 plan step 2).
 
 **Sources.**
 - rename(2), DESCRIPTION: the target is "atomically replaced, so that there is no point at which another
@@ -83,6 +86,8 @@ processes and cgroups.
   crashes or is rebooted".
 - crun, `src/libcrun/status.c:270-337` at 3fc26242: open, write, close, rename.
 - runc, `libcontainer/container_linux.go:872-896` at 976d95ab: CreateTemp, WriteJSON, Close, Rename.
+- runc, `main.go`, `--root`: "root directory for storage of container state (this should be located in tmpfs)".
+- crun(1), STATE: state under `/run/crun` as root, `$XDG_RUNTIME_DIR/crun` rootless.
 
 Neither competitor fsyncs (f3, f4).
 
@@ -95,12 +100,19 @@ Neither competitor fsyncs (f3, f4).
 - **What the fsyncs buy: nothing** (f5). A process crash leaves the page cache, so a rename-atomic write already
   survives it. A system crash ends every container the state describes, and the default state root is under
   `/run` (`run.rs:78-87`), which is emptied at boot.
-- **The node agent's records** are fsynced today as kiln's lesson from its lost session file (`runtime.md`,
-  "Durability and recovery"). That file described sessions that outlive a restart of the host. A box doesn't:
-  after a host crash, recovery finds no cgroup for any record and scrubs it, torn or whole.
+- **The node agent's records.** An oci box's record always named a directory (its container's state), so a seam
+  create wrote two durable records, four fsyncs: 12.187 ms of create's 18.297 ms p50 in the bench container
+  (create-breakdown-20261030T000822Z). The rule now judges each directory's filesystem: statfs of the directory, or
+  of its nearest existing parent; unreadable counts as disk. A record whose directories all lie on tmpfs isn't
+  synced: 0 fsync and 0 fdatasync over 5 seam lifecycles per driver with /run on tmpfs, against 30 with it on
+  overlayfs (`probes/record_syncs.md`, record-syncs-20261030T002934Z). With the store's lock off the fsyncs too, a
+  seam create's p50 is 0.77x libcrun's and the seam sustains 2,108 lifecycles a second at concurrency 32 against
+  libcrun's 1,765 (`RESULT.md`, 20261030T004533Z).
 
 **What would falsify it.** A record that must outlive the host, such as one for a persistent volume; that record
-keeps its fsync. The probe's measured cost already rules out the other falsifier, a cost under a tenth of start.
+keeps its fsync. The probe's measured cost already rules out the other falsifier, a cost under a tenth of start. A
+host whose runtime directory isn't tmpfs gets durable records: correct, but at the fsyncs' cost. That includes a
+container's /run unless it mounts a tmpfs there, as the bench and lab containers now do.
 
 ### 2. No shim per container: one supervisor per node
 
@@ -685,7 +697,11 @@ setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's netwo
 **What would falsify it.** A create from the pool costing more than 5% over a create without a namespace, at p50
 through the seam, on any machine measured (fedora, jupiter, the Mac Studio): the pool then isn't taking the
 namespace's work off the path. Or a sustained phase in which more than 1% of creates found the pool dry: one thread
-refilling to 32 isn't keeping up.
+refilling to 32 isn't keeping up. That one has been met (goal 5 plan step 2's pass of record on fedora,
+`bench/competitive/RESULT.md`, 20261030T004533Z): once the record left create's path and the seam ran at about 2,100
+creates a second, the pool ran dry for 181-279 of each sustained phase's 10,000 creates (1.8-2.8%), each made on the
+path and counted, none failed. At goal 4's 553 a second at most it kept up; at 2,100 one refill thread doesn't. Open
+(`STATUS.md`).
 
 ### 5. A seed per node clones containers (restated on goal 5's measurements, 2026-10-30)
 
