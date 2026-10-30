@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # bench/competitive/probes: runs create_breakdown_inside.sh in the bench container, with host.sh's OCI-pass flags,
 # on the libcrun driver and crun host.sh built and fetched ($HEX_BENCH/bin) and the given Hex and seam_oci binaries.
+# Its /run is a tmpfs, as a host's is and the OCI pass's is (6f7ba39). Runs before this one's change
+# (create-breakdown-20261030T000822Z and earlier) had /run on the image's overlayfs, where node records are fsynced.
 # Every binary is copied into the run's directory, so what ran is kept beside what it measured. On fedora:
 #   create_breakdown.sh <hex release binary> <seam_oci release binary>
 # Env: N, WARMUP, ROUNDS, PROBE_ONLY (create_breakdown_inside.sh's), CPUSET (4-31); LOAD_GATE=0 skips the wait for
@@ -38,11 +40,12 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "crun: $("$OUT/bin/crun" --version | head -1) (sha256 $(sha256sum "$OUT/bin/crun" | cut -c1-16))"
   echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
+  echo "probe: /run a tmpfs (size 1g), where the runtimes keep their state, as host.sh's OCI pass has it"
 } > "$OUT/env.txt"
 NAME=hexbench-createbd-$$
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
-  --privileged --security-opt label=disable --cgroupns=private --network=none \
+  --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e PROBE_ONLY \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
