@@ -123,6 +123,17 @@ enum Start<'a> {
     Seed(&'a dyn CloneInit),
 }
 
+/// Where a shim's standard streams come from, and through its fork its container's: the init and the
+/// program it execs keep them.
+#[derive(Clone, Copy)]
+enum ShimStdio {
+    /// The caller's, as the command line's `create` passes its own on (runc's pass-through).
+    Inherited,
+    /// The null device: what a seed-made container's streams are (the seed's own), so a seam container's
+    /// streams don't depend on whether a seed or the shim made it, nor carry the node agent's.
+    Null,
+}
+
 /// A seed that clones a container's init for the `Runtime` seam (decision 5, goal 5 plan step 4). The
 /// node agent implements it over its pool of `hex __oci-seed` processes: in place of the shim's re-exec
 /// of the hex binary, a seed clones the init with `clone3` into its cgroup and the fresh namespaces its
@@ -337,10 +348,10 @@ impl Runtime {
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
-            Start::Shim => self.start_shim(&making, &spec, &cgroup, network),
+            Start::Shim => self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Inherited),
             Start::Seed(seeds) if init::needs_shim(&spec) => {
                 seeds.through_shim();
-                self.start_shim(&making, &spec, &cgroup, network)
+                self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Null)
             }
             Start::Seed(seeds) => self.start_via_seed(&making, &spec, &cgroup, network, seeds),
         });
@@ -357,6 +368,7 @@ impl Runtime {
         spec: &Spec,
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
+        stdio: ShimStdio,
     ) -> Result<(), OciError> {
         // `pid_file` and the state write are the shared tail's ([`record_created`]).
         let Making {
@@ -392,6 +404,11 @@ impl Runtime {
                 init::ENV_NETWORK,
                 format!("/proc/{}/fd/{}", std::process::id(), network.as_raw_fd()),
             );
+        }
+        if let ShimStdio::Null = stdio {
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
         }
         let mut shim = cmd
             .spawn()
@@ -1561,7 +1578,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         assert!(
-            rt.start_shim(&making, &spec, &cgroup, Some(network))
+            rt.start_shim(&making, &spec, &cgroup, Some(network), ShimStdio::Inherited)
                 .is_err(),
             "the stand-in ends without a word"
         );

@@ -316,7 +316,8 @@ fn a_box_root_counts_its_boxes_without_listing(lab: &Lab, own: &Path) {
 /// runs in A's network namespace (and A's user namespace, rootless). As root, B's init joined A's network
 /// namespace itself after the seed's clone, so no create went through the shim; rootless, a user namespace
 /// by path can't be joined in one clone, so B was made through the shim and counted once — the one kind of
-/// create that still re-execs the hex binary.
+/// create that still re-execs the hex binary. Either way both inits' streams are the null device, a seed's
+/// and a seam shim's alike, never the node agent's.
 fn a_bundle_joining_a_namespace_by_path_runs_through_the_seam(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-joinpath"), state.path());
@@ -360,6 +361,13 @@ fn a_bundle_joining_a_namespace_by_path_runs_through_the_seam(lab: &Lab, own: &P
         netns_of(host_init),
         "it runs in the network namespace it joined by path"
     );
+    for (who, pid) in [("the seed-made box", host_init), ("the joiner", joined)] {
+        assert_eq!(
+            streams(pid),
+            ["/dev/null"; 3].map(PathBuf::from),
+            "{who}'s init has the null device for its streams"
+        );
+    }
     if lab.rootless {
         let userns = |pid: i32| std::fs::read_link(format!("/proc/{pid}/ns/user")).unwrap();
         assert_eq!(
@@ -1165,8 +1173,9 @@ fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
 /// the create. Do: create and start a box whose init is a non-hex program (`/usr/bin/sleep`) with a
 /// network namespace of its own; read the init's `/proc/<pid>/cgroup`, `ns/*` and `exe`. Expect: the
 /// init is in the box's cgroup, in fresh pid, mount, ipc, uts and network namespaces (and a user
-/// namespace rootless), its `exe` is the program (not the `hex` binary), and no `hex __oci-init` shim
-/// ran — the re-exec the seed replaces.
+/// namespace rootless), its `exe` is the program (not the `hex` binary), the create was handed a seed and
+/// done with it and none went through the shim (the pool's counts: the `hex __oci-init` re-exec the seed
+/// replaces didn't run), and its streams are the null device, the seed's own.
 fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let box_root = own.join("hex-oci-seedns");
@@ -1175,12 +1184,23 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
     // A non-hex init, with a network namespace of its own, so the exe is plainly the program and every
     // namespace the spec asks for can be read.
     let bundle = lab.bundle_with(&strings(&["/usr/bin/sleep", "600"]), true);
+    let before = node.create_seeds().unwrap();
     node.create(BoxSpec {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
     })
     .expect("create through a seed");
+    let after = node.create_seeds().unwrap();
+    assert_eq!(
+        (
+            after.handed - before.handed,
+            after.done - before.done,
+            node.creates_through_shim()
+        ),
+        (1, 1, 0),
+        "the create was handed a seed and done with it, and none went through the shim: {after:?}"
+    );
     node.start(&id).expect("start");
     let init = u32::try_from(init_pid(&node.container_dir(&id))).unwrap();
     // Wait until the init has exec'd its program, so `exe`, the namespaces and the cgroup are the
@@ -1216,14 +1236,13 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
         let ours = std::fs::read_link(format!("/proc/{agent}/ns/{ns}")).unwrap();
         assert_ne!(theirs, ours, "the init has its own {ns} namespace");
     }
-    // No hex shim (`hex __oci-init`) ran for the create: the seed cloned the init, it is the agent's
-    // own child, and no re-exec'd shim stands anywhere among the agent's children.
+    // The seed cloned the init as the agent's own child (`CLONE_PARENT`), and the init's streams are the
+    // seed's: the null device, never the agent's.
     assert_eq!(ppid(init), Some(agent), "the init is the agent's own child");
-    assert!(
-        !children_of(agent)
-            .iter()
-            .any(|&c| cmdline_has(c, "__oci-init")),
-        "no hex __oci-init shim ran for the create"
+    assert_eq!(
+        streams(init),
+        ["/dev/null"; 3].map(PathBuf::from),
+        "the init has the null device for its streams"
     );
     node.delete(&id).expect("delete");
 }
@@ -1278,36 +1297,47 @@ fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
 }
 
 /// Goal 5 plan step 4 (T-T7.1.4), crash injection: a seed that dies mid-create refuses that create by
-/// type, its box is cleaned up, and the next create starts a replacement seed, counted. Do: create a box
-/// (so a seed is up and idle), kill the seed process, create a second box (which is handed the dead
-/// seed), then a third. Expect: the second create is refused by type and left no box; the pool counts a
-/// death and, by the third create, a restart; the third create succeeds.
+/// type, its box is cleaned up, and the seed is restarted, counted, so the next create succeeds. Do:
+/// create and delete a box, so the pool holds two idle seeds, its first (the one the next create is
+/// handed: the core hands the lowest idle slot) and the spare it started beside it; stop the first; create
+/// a second box on another thread and, once the pool has handed it the stopped seed, kill that seed; then
+/// create a third. Expect: the second create is refused by type and left no box; the pool counts the
+/// death and the create its death refused; the third create succeeds and the pool counts a restart.
 fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-seedcrash"), state.path());
     let agent = std::process::id();
     let first = BoxId::new("crash-a").unwrap();
     node.create(lab.running(first.clone(), &Lab::act(&Act::Wait)))
-        .expect("the first create starts a seed");
+        .expect("the first create, through the pool's first seed");
     node.delete(&first)
         .expect("delete the first box, leaving its seed idle");
+    // The pool's first seed, the one started earliest: it served the first create, and is in the lowest
+    // slot, so the next create is handed it.
     let seed = children_of(agent)
         .into_iter()
-        .find(|&c| cmdline_has(c, "__oci-seed"))
+        .filter(|&c| cmdline_has(c, "__oci-seed"))
+        .min_by_key(|&c| start_ticks(c))
         .expect("a create seed is up");
-    // Kill the seed and wait until it has ended, so the next create is handed a dead seed — a seed that
-    // dies mid-create, as a crash would leave it.
-    kill(i32::try_from(seed).unwrap(), 9);
-    wait_for(
-        || parent_of(i32::try_from(seed).unwrap()) == 0 || is_zombie(seed),
-        "the seed to die",
-    );
+    let seed = i32::try_from(seed).unwrap();
+    kill(seed, 19); // SIGSTOP: it holds whatever create it is handed, unanswered
+    let before = node.create_seeds().unwrap();
 
     let dead = BoxId::new("crash-b").unwrap();
-    let refused = node.create(lab.running(dead.clone(), &Lab::act(&Act::Wait)));
+    let refused = std::thread::scope(|scope| {
+        let creating =
+            scope.spawn(|| node.create(lab.running(dead.clone(), &Lab::act(&Act::Wait))));
+        wait_for(
+            || node.create_seeds().unwrap().handed > before.handed,
+            "the second create to be handed the stopped seed",
+        );
+        // Mid-create: the seed holds the create, which waits on its answer. It dies.
+        kill(seed, 9);
+        creating.join().unwrap()
+    });
     assert!(
         matches!(refused, Err(Refusal::Os { .. }) | Err(Refusal::Broken(_))),
-        "a create handed a dead seed is refused by type: {refused:?}"
+        "a create whose seed dies is refused by type: {refused:?}"
     );
     assert_eq!(
         node.inspect(&dead),
@@ -1315,19 +1345,25 @@ fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
         "its box is cleaned up"
     );
     assert!(!own.join("hex-oci-seedcrash").join("crash-b").exists());
-    let died = node.create_seeds().unwrap().died;
-    assert!(died >= 1, "the seed's death is counted: {died}");
+    let counts = node.create_seeds().unwrap();
+    assert_eq!(
+        (
+            counts.died - before.died,
+            counts.refused_died - before.refused_died
+        ),
+        (1, 1),
+        "the seed's death and the create it refused are counted: {counts:?}"
+    );
 
-    // The next create starts a replacement seed, counted as a restart, and succeeds.
+    // The next create is handed a live seed, and the dead one's slot is started again, counted.
     let next = BoxId::new("crash-c").unwrap();
     node.create(lab.running(next.clone(), &Lab::act(&Act::Wait)))
         .expect("the next create succeeds");
     node.start(&next).expect("start the next box");
     assert_eq!(node.inspect(&next).unwrap().state, BoxState::Running);
-    let counts = node.create_seeds().unwrap();
-    assert!(
-        counts.restarted >= 1,
-        "the seed was restarted and counted: {counts:?}"
+    wait_for(
+        || node.create_seeds().unwrap().restarted > before.restarted,
+        "the dead seed's slot to be started again",
     );
     node.delete(&next).expect("delete");
 }
@@ -1343,15 +1379,16 @@ fn stack_base(pid: u32) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Whether `pid` is a zombie (ended, not yet reaped), from `/proc/<pid>/stat` field 3.
-fn is_zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| {
-            s.rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().next().map(str::to_owned))
-        })
-        .is_some_and(|state| state == "Z")
+/// What `pid`'s standard streams are open on: the targets of `/proc/<pid>/fd/0`, `1` and `2`.
+fn streams<P: std::fmt::Display>(pid: P) -> [PathBuf; 3] {
+    [0, 1, 2].map(|fd| std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).unwrap())
+}
+
+/// When `pid` started, in clock ticks after boot (`/proc/<pid>/stat` field 22).
+fn start_ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let (_, rest) = stat.rsplit_once(')').unwrap();
+    rest.split_whitespace().nth(19).unwrap().parse().unwrap()
 }
 
 /// Kills whatever is left in a box's cgroup when dropped, so a check that fails leaves no container

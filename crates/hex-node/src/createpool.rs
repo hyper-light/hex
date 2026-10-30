@@ -41,11 +41,12 @@ use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 
 /// The seeds the pool keeps up and idle beyond the creates waiting: one, so a create finds a seed idle
-/// rather than wait on a seed's exec. A seed is busy only for its clone (0.278 ms p50 on fedora, the
-/// seed-path run of `bench/competitive/probes/create_breakdown.md`), so under a burst the line drains
-/// through the seeds freeing faster than an exec would start one, and the pool grows to the burst's need
-/// meanwhile. A stated bound, not a tuning: each spare holds an idle seed's memory (2.4 MiB PSS measured
-/// on fedora), charged to the node agent's cgroup.
+/// rather than wait on a seed's exec. A seed is busy for its clone (0.209 ms p50 on fedora at
+/// concurrency 1, `bench/competitive/probes/seed_path.md`), so under a burst the line drains through the
+/// seeds freeing faster than an exec would start one, and the pool grows to the burst's need meanwhile:
+/// on a loaded fedora at concurrency 32 it grew to all 32, and 45 of 10,000 creates waited while it did.
+/// A stated bound, not a tuning: each spare holds a seed's memory (1.5 to 2.4 MiB resident, measured on
+/// fedora), charged to the node agent's cgroup.
 pub const SPARE: usize = 1;
 
 /// The node agent's create seeds. Dropped, it stops its starting thread and ends and reaps every seed it

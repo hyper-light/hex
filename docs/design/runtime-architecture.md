@@ -883,7 +883,10 @@ each fsync's p99 was 5.719 to 6.333 ms.
     a namespace another container's user namespace owns needs that user namespace joined too, through the shim.
 - **The child.** It does what the shim's child does today (`init::clone_child`), up to the exec FIFO, then execs the
   container's program, so the program's address space is randomized afresh (f17) and any state unique to the container
-  is made anew in the child after the clone (f15).
+  is made anew in the child after the clone (f15). Its standard streams are the seed's, the null device, as a `process`
+  box's program's and an exec's unset streams are; a seam create made through the shim gives the shim the same, so no
+  seam container holds the node agent's streams, as one did when the shim inherited them. The command line's `create`
+  still passes its caller's streams on, as runc's does.
 - **The shim.** Its re-exec (`hex __oci-init`) leaves the seam's create (`create_in_cgroup_seeded`); the command line
   keeps it (`create`).
 - **No `hex` exec per create.** <!-- record: bench/competitive/probes/seed_path.md -->strace of `execve` over 55 seam
