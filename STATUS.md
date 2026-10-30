@@ -251,19 +251,26 @@ three different things (CLAUDE.md "Working here"):
     `01a1877e05cc73b495447bf5113ebda3`, 6 steps; on `cp/t7-seed`, not merged). The research found today's seam
     create on fedora is nearly all two fsynced writes of the box's record (7.1-7.5 ms each on fedora's btrfs), taken
     under the record store's one lock, so creates run one at a time; the seed's saving of the shim's exec (about 1
-    ms) comes after the record leaves create's path. **Plan step 3, the seeds' core** (built, gate-clean on fedora,
-    2026-10-29, 5f0b474): `hex_core::seeds`, the policy for the node's seeds as a pure core. It keeps at most 32
-    seeds up or starting, one to a slot (a seed serves one create at a time, AFaaS §8; 32 is the bench's busiest
-    concurrency until step 1's measured clone says how many fewer would do), and hands each create an idle seed that
-    is up. With none idle the create waits in line, each seed that frees going to the create that has waited
-    longest; past 128 in line it is refused at once, and if handed none within 1 s it is refused. A seed that dies,
-    or that serves one create for 30 s (taken for hung, for the shell to kill), leaves its slot and its create is
-    refused by type; the slot is started again and the restart counted, and a late report about the seed is refused,
-    never taken for the next one's. A failed start, or a seed dead before it served a create, stops the starting
-    until the next create. Its counts (creates asked, handed, waited, done and refused four ways; seeds started,
-    restarted, failed to start, dead, hung; the most busy at once) and the creates each slot's seeds were handed
-    equal an oracle's under random histories (HEX-SEEDS-1 to 6). Steps 1 (decision 5 restated, a seam create's time
-    measured) and 2 (the record off create's path) are under way; 4 to 6 follow.
+    ms) comes after the record leaves create's path. **Plan step 1, decision 5 restated** (2026-10-30, 37ce17c): the
+    create breakdown (`bench/competitive/probes/create_breakdown.md`, run 1, fedora, hex ef64dbc) cuts a seam create
+    into 35 parts that sum to 99.5% of its p50 (18.297 ms; libcrun 5.015 beside it). The record's four fsyncs are
+    66.6% of it, the shim's spawn and exec 4.8%, the cgroup 2.6% (9.2% of what's left after those two, under step
+    5's tenth, so no pool on this run). The plan's levers leave 5.142 ms, 1.025x libcrun's create and 4.1x goal 5's
+    bar. Most of the rest is the init's root (mounts 0.966, pivot_root 0.873, which walks every thread on the host),
+    the device program loaded with each create (0.583), and the record's and state's writes on the overlay. Open:
+    the bar needs a container's set-up made before the create, which no step of this plan does; put to Ada. **Plan
+    step 3, the seeds' core** (built, gate-clean on fedora, 2026-10-29, 5f0b474): `hex_core::seeds`, the policy for
+    the node's seeds as a pure core. It keeps at most 32 seeds up or starting, one to a slot (a seed serves one
+    create at a time, AFaaS §8; 32 is the bench's busiest concurrency until step 1's measured clone says how many
+    fewer would do), and hands each create an idle seed that is up. With none idle the create waits in line, each
+    seed that frees going to the create that has waited longest; past 128 in line it is refused at once, and if
+    handed none within 1 s it is refused. A seed that dies, or that serves one create for 30 s (taken for hung, for
+    the shell to kill), leaves its slot and its create is refused by type; the slot is started again and the restart
+    counted, and a late report about the seed is refused, never taken for the next one's. A failed start, or a seed
+    dead before it served a create, stops the starting until the next create. Its counts (creates asked, handed,
+    waited, done and refused four ways; seeds started, restarted, failed to start, dead, hung; the most busy at
+    once) and the creates each slot's seeds were handed equal an oracle's under random histories (HEX-SEEDS-1 to 6).
+    Step 2 (the record off create's path) is under way; 4 to 6 follow.
   - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
@@ -321,7 +328,8 @@ three different things (CLAUDE.md "Working here"):
   time per lifecycle, as its throughput at concurrency 1, 8 and 32 also showed (`probes/socket_cost.md`: 43, 55 and
   52 a second in process). Not yet measured where the 32 in flight wait (the node's lock, the runtime's create, the
   shim, the host's CPUs). Closes with that measurement and the fix there, shown by the sustained phase's rate rising
-  with concurrency as libcrun's does.
+  with concurrency as libcrun's does. Measured in part: the record's fsyncs, held under the store's one lock, are
+  12.187 ms of a create's 18.297 (create breakdown run 1); goal 5's step 2 takes them off.
 
 Everything else the track's plan names (kiln plan `01a157fe102576a8bf44ccaa5d835de7`): each goal, its criteria and how each is
 measured are in `docs/requirements.toml`.
