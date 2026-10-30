@@ -219,10 +219,9 @@ impl Node {
         }
     }
 
-    /// Box `id`'s container's name under the node's oci root: the node's key, then the box's id, so
-    /// the boxes of nodes that share the root never share a container.
+    /// Box `id`'s container's name under the node's oci root ([`container_name`]).
     fn container(&self, id: &BoxId) -> String {
-        format!("{}-{id}", self.key)
+        container_name(&self.key, id)
     }
 
     /// Where box `id`'s container keeps its state, its `state.json` and exec FIFO: on tmpfs, under the
@@ -1021,10 +1020,19 @@ fn oci_root(owner: Owner, state_dir: &Path) -> Result<PathBuf, Refusal> {
     Ok(root)
 }
 
+/// A box's container's name under an oci root other nodes share: the node's key, then the box's id,
+/// so two nodes' boxes of one id never share a container.
+fn container_name(key: &str, id: &BoxId) -> String {
+    format!("{key}-{id}")
+}
+
 /// A node's key among the nodes that share its oci root: FNV-1a (64-bit) of its state directory's
 /// canonical path, the node's identity on its host, so a node restarted on the same state directory
-/// finds its containers again and two nodes never name one alike. The offset basis and prime are
-/// FNV-1a's own (IETF draft-eastlake-fnv, "FNV Basics" and "FNV Constants").
+/// finds its containers again and two nodes never name one alike. FNV-1a because the key must come out
+/// the same in every run of every build, which std's hashers don't promise (`DefaultHasher`'s
+/// algorithm may change between releases, `RandomState` is seeded per process), and it takes five
+/// lines rather than a new dependency. The offset basis and prime are FNV-1a's own (IETF
+/// draft-eastlake-fnv, "FNV Basics" and "FNV Constants").
 fn node_key(state_dir: &Path) -> Result<String, Refusal> {
     use std::os::unix::ffi::OsStrExt;
     let path = fs::canonicalize(state_dir)
@@ -1099,6 +1107,22 @@ mod tests {
             "the same directory, named otherwise"
         );
         assert_ne!(node_key(b.path()).unwrap(), key);
+    }
+
+    /// Goal 5 plan step 2: two nodes with state directories of their own name a box of one id two
+    /// containers, and a node restarted on the same directory names it as before.
+    #[test]
+    fn two_nodes_name_a_box_of_one_id_two_containers() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let id = BoxId::new("same").unwrap();
+        let in_a = container_name(&node_key(a.path()).unwrap(), &id);
+        let in_b = container_name(&node_key(b.path()).unwrap(), &id);
+        assert_ne!(in_a, in_b);
+        assert!(
+            in_a.ends_with("-same") && in_b.ends_with("-same"),
+            "{in_a}, {in_b}"
+        );
+        assert_eq!(container_name(&node_key(a.path()).unwrap(), &id), in_a);
     }
 }
 

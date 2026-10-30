@@ -27,6 +27,11 @@ use hex_core::record::BoxRecord;
 /// (CLAUDE.md §4).
 pub const WRITE_PATIENCE: Duration = Duration::from_secs(60);
 
+/// Most boxes whose records are being changed at once: one for each box the node can hold, its box
+/// budget (hex-runtime's `MAX_BOXES`), so the changes of the boxes a node holds never reach it. Past it
+/// a change is refused by type ([`Refusal::Exhausted`]), never kept waiting (CLAUDE.md §2).
+pub const TURNS: usize = 65_536;
+
 /// Box records on disk, one file each, named `<id>.json`.
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -35,8 +40,7 @@ pub struct Store {
     /// [`Store::update`] and [`Store::remove`] of a box wait for the change of it under way, so an
     /// update's read and write of a record are one change and two users changing one record at once
     /// (the supervisor recording an init's exit, the socket counting an abandoned program) never lose
-    /// either's change. A change of another box never waits. Bounded by the threads that change
-    /// records, each changing one at a time.
+    /// either's change. A change of another box never waits. At most [`TURNS`] of them.
     busy: Arc<Busy>,
     /// The fsyncs the store has made since it opened.
     synced: Arc<Synced>,
@@ -47,6 +51,8 @@ struct Busy {
     boxes: Mutex<BTreeSet<BoxId>>,
     /// Told whenever a box is let go.
     free: Condvar,
+    /// Changes that waited for a change of the same box to finish.
+    waited: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -101,10 +107,13 @@ impl Store {
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
-    /// another box's, and refuses past [`WRITE_PATIENCE`].
+    /// another box's, and refuses past [`WRITE_PATIENCE`], or past [`TURNS`] boxes changed at once.
     fn claim(&self, id: &BoxId) -> Result<Claim<'_>, Refusal> {
         let deadline = Instant::now().checked_add(WRITE_PATIENCE);
         let mut boxes = self.busy.boxes.lock().map_err(poisoned)?;
+        if boxes.contains(id) {
+            self.busy.waited.fetch_add(1, Ordering::Relaxed);
+        }
         while boxes.contains(id) {
             let left = deadline.map_or(Duration::ZERO, |d| {
                 d.saturating_duration_since(Instant::now())
@@ -124,11 +133,22 @@ impl Store {
                 .map_err(poisoned)?
                 .0;
         }
+        if boxes.len() >= TURNS {
+            return Err(Refusal::Exhausted {
+                what: "record changes under way",
+                bound: TURNS,
+            });
+        }
         boxes.insert(id.clone());
         Ok(Claim {
             busy: &self.busy,
             id: id.clone(),
         })
+    }
+
+    /// How many changes of a box's record have waited for a change of the same box to finish.
+    pub fn waited(&self) -> u64 {
+        self.busy.waited.load(Ordering::Relaxed)
     }
 
     fn path(&self, id: &BoxId) -> PathBuf {
@@ -294,22 +314,37 @@ fn must_outlive_host(record: &BoxRecord) -> bool {
     record.dirs.iter().any(|dir| !on_tmpfs(dir))
 }
 
-/// Whether `dir` lies on tmpfs, judged by its filesystem, or, when it isn't made yet, by that of the
-/// nearest directory above it that is, where it will be made. A filesystem that can't be read is
-/// taken to outlive the host, so a record that has to be durable is never written without its fsync.
+/// tmpfs's magic number (include/uapi/linux/magic.h, `TMPFS_MAGIC`).
+#[cfg(target_os = "linux")]
+const TMPFS_MAGIC: i128 = 0x0102_1994;
+
+/// Whether `dir` lies on tmpfs, judged by its filesystem ([`filesystem`]).
 #[cfg(target_os = "linux")]
 fn on_tmpfs(dir: &Path) -> bool {
-    // tmpfs's magic number (include/uapi/linux/magic.h, `TMPFS_MAGIC`).
-    const TMPFS_MAGIC: i128 = 0x0102_1994;
+    gone_with_the_host(filesystem(dir))
+}
+
+/// Whether a filesystem, by its magic number, goes with the host: tmpfs, which lives in memory, alone.
+/// Every other (overlayfs, btrfs, ext4, xfs) outlives it, and so does one whose type can't be read, so
+/// a record that has to be durable is never written without its fsync.
+#[cfg(target_os = "linux")]
+fn gone_with_the_host(filesystem: Option<i128>) -> bool {
+    filesystem == Some(TMPFS_MAGIC)
+}
+
+/// The magic number of the filesystem `dir` lies on (statfs(2)'s `f_type`), or, when it isn't made yet,
+/// of the nearest directory above it that is, where it will be made; `None` when that can't be read.
+#[cfg(target_os = "linux")]
+fn filesystem(dir: &Path) -> Option<i128> {
     // As many steps as the path has components.
     for at in dir.ancestors() {
         match rustix::fs::statfs(at) {
-            Ok(fs) => return i128::from(fs.f_type) == TMPFS_MAGIC,
+            Ok(fs) => return Some(i128::from(fs.f_type)),
             Err(rustix::io::Errno::NOENT) => {}
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
-    false
+    None
 }
 
 /// tmpfs is Linux's: elsewhere every directory is taken to outlive the host.
@@ -424,11 +459,12 @@ mod tests {
         assert_eq!(store.syncs(), Syncs { files: 2, dirs: 2 });
     }
 
-    /// Goal 5 plan step 2: no box's record write waits on another box's. While one box's turn is held,
-    /// as its write holds it across the fsyncs, 31 other boxes' records are written from 31 threads at
-    /// once; the held box's own write goes ahead once its turn is let go.
+    /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
+    /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
+    /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
+    /// not written, until the turn is let go, and then is.
     #[test]
-    fn a_write_of_one_box_never_waits_on_another_boxs() {
+    fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let held = record("held");
@@ -447,9 +483,100 @@ mod tests {
             }
         });
         assert_eq!(store.all().unwrap().len(), 31);
-        drop(turn);
-        store.put(&held).unwrap();
+        assert_eq!(store.waited(), 0, "no write of another box waited");
+
+        std::thread::scope(|s| {
+            let second = s.spawn(|| store.put(&held));
+            let deadline = Instant::now() + hex_api::conformance::PATIENCE;
+            while store.waited() == 0 && Instant::now() < deadline {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            assert_eq!(store.waited(), 1, "the second write of the held box waits");
+            assert_eq!(
+                store.get(&held.spec.id).unwrap(),
+                None,
+                "and writes nothing while the turn is held"
+            );
+            drop(turn);
+            second.join().unwrap().unwrap();
+        });
         assert_eq!(store.get(&held.spec.id).unwrap(), Some(Ok(held)));
+    }
+
+    /// CLAUDE.md §2 and §3: with [`TURNS`] boxes' records being changed at once, a change of one more
+    /// is refused by type, writing nothing, and goes ahead once they're done.
+    #[test]
+    fn a_change_past_the_turns_bound_is_refused_by_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let ids: Vec<BoxId> = (0..TURNS)
+            .map(|n| BoxId::new(&format!("b{n}")).unwrap())
+            .collect();
+        let turns: Vec<Claim<'_>> = ids.iter().map(|id| store.claim(id).unwrap()).collect();
+        let past = record("past");
+        assert_eq!(
+            store.put(&past),
+            Err(Refusal::Exhausted {
+                what: "record changes under way",
+                bound: TURNS
+            })
+        );
+        assert_eq!(store.get(&past.spec.id).unwrap(), None, "nothing written");
+        drop(turns);
+        store.put(&past).unwrap();
+    }
+
+    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_turns_bound_is_the_box_budget() {
+        assert_eq!(TURNS, hex_runtime::linux::cgroup::MAX_BOXES);
+    }
+
+    /// Decision 1's rule by filesystem (goal 5 plan step 2), on the magic numbers statfs(2) gives
+    /// (include/uapi/linux/magic.h): tmpfs goes with the host; overlayfs (a container's root) and btrfs
+    /// (fedora's /home), as every filesystem but tmpfs, outlive it, and so does one that can't be read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tmpfs_alone_goes_with_the_host() {
+        const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
+        const BTRFS_SUPER_MAGIC: i128 = 0x9123_683e;
+        assert!(gone_with_the_host(Some(TMPFS_MAGIC)));
+        for outlives in [Some(OVERLAYFS_SUPER_MAGIC), Some(BTRFS_SUPER_MAGIC), None] {
+            assert!(!gone_with_the_host(outlives), "{outlives:x?}");
+        }
+    }
+
+    /// Goal 5 plan step 2: a directory not made yet is judged by the nearest one above it that is,
+    /// where it will be made: three levels below a directory on tmpfs it lies on tmpfs, and below one on
+    /// disk on that disk's filesystem, which the store judges to outlive the host.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_directory_is_judged_by_its_nearest_ancestor() {
+        let (tmpfs, disk) = match tmpfs_and_disk() {
+            Ok(pair) => pair,
+            Err(why) => {
+                eprintln!("SKIP: {why}");
+                return;
+            }
+        };
+        let deep = tmpfs.path().join("a/b/c");
+        assert!(!deep.exists());
+        assert_eq!(filesystem(&deep), Some(TMPFS_MAGIC));
+        assert!(on_tmpfs(&deep));
+        let on_disk = disk.path().join("x/y");
+        assert!(!on_disk.exists());
+        let disk_fs = filesystem(disk.path()).unwrap();
+        assert_eq!(filesystem(&on_disk), Some(disk_fs));
+        assert!(!on_tmpfs(&on_disk));
+        // `/` is overlayfs in a container (the root lab's, seam_root.sh), btrfs or another disk's on a
+        // host: a path under it that isn't made is judged by it.
+        let root_fs = filesystem(Path::new("/")).unwrap();
+        let under_root = Path::new("/hex-no-such-directory/x");
+        assert!(!under_root.exists());
+        assert_eq!(filesystem(under_root), Some(root_fs));
+        assert_eq!(on_tmpfs(under_root), root_fs == TMPFS_MAGIC);
+        eprintln!("the disk here is filesystem {disk_fs:#x}; the root, {root_fs:#x}");
     }
 
     /// HEX-SOCK-6: an update reads and writes a record as one change, so changes made from many

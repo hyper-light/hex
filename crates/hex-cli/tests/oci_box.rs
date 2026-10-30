@@ -16,7 +16,9 @@
 //!   taken;
 //! - a box's process orphaned to the agent, once ended, is reaped by the sweep: no zombie is kept;
 //! - goal 5 plan step 2: 31 boxes are made at once while another box's durable record write is held
-//!   open, none waiting on it, and none of their records synced with their container state on tmpfs.
+//!   open, none waiting on it, and none of their records synced with their container state on tmpfs;
+//!   two nodes with state directories of their own each make and start a box of the same id, two
+//!   containers, and deleting one leaves the other running.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
 //! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
@@ -260,6 +262,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     exec_reads_no_state(&lab, own);
     orphans_are_reaped(&lab, own);
     held_record_write(&lab, own);
+    two_nodes_one_box_id(&lab, own);
 }
 
 /// The agent the crash kills: a node in this re-exec'd process makes and starts a box whose init
@@ -942,6 +945,50 @@ fn held_record_write(lab: &Lab, own: &Path) {
     }
     assert_eq!(node.inspect(&held), Err(Refusal::NoSuchBox(held.clone())));
     assert!(node.list().unwrap().is_empty(), "a box is left");
+}
+
+/// Goal 5 plan step 2: two nodes on one host, each with a state directory of its own, keep their
+/// containers' state in the one root under the runtime directory; a box of the same id in each gets a
+/// container of its own, named for its node. Both are made and start, each its own init; deleting one
+/// leaves the other running, its state where it was.
+fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
+    let (state_a, state_b) = (
+        tempfile::tempdir_in(lab.bundles.path()).unwrap(),
+        tempfile::tempdir_in(lab.bundles.path()).unwrap(),
+    );
+    let a = lab.node(&own.join("hex-oci-two-a"), state_a.path());
+    let b = lab.node(&own.join("hex-oci-two-b"), state_b.path());
+    let id = BoxId::new("same").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    a.create(lab.running(id.clone(), &wait))
+        .expect("create in a");
+    b.create(lab.running(id.clone(), &wait))
+        .expect("create in b");
+    let (in_a, in_b) = (a.container_dir(&id), b.container_dir(&id));
+    assert_ne!(in_a.file_name(), in_b.file_name(), "two containers' names");
+    if in_a.parent() != in_b.parent() {
+        eprintln!(
+            "two_nodes_one_box_id: no runtime directory here, so each node keeps its containers in its state directory"
+        );
+    }
+    for node in [&a, &b] {
+        node.start(&id).expect("start");
+        assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
+    }
+    assert_ne!(init_pid(&in_a), init_pid(&in_b), "two inits");
+    a.delete(&id).expect("delete in a");
+    assert!(!in_a.exists(), "a's container state is left");
+    assert_eq!(
+        b.inspect(&id).unwrap().state,
+        BoxState::Running,
+        "b's box runs on"
+    );
+    assert!(
+        in_b.join("state.json").exists(),
+        "b's container state is kept"
+    );
+    b.delete(&id).expect("delete in b");
+    assert!(!in_b.exists(), "b's container state is left");
 }
 
 fn sorted_ms(latencies: &[Duration]) -> Vec<Duration> {
