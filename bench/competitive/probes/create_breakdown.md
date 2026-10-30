@@ -79,13 +79,19 @@ the microsecond.
 - **Host:** the "fedora" kiln runner (`kiln-a094a12d`, hostname `fedora-2`), Intel Core i9-14900HX (32 CPUs: P-core
   threads 0-15, E-cores 16-31; the container pinned to 4-31), kernel 6.19.10-300.fc44.x86_64.
 - **When and load:** 2026-10-30T00:08:22Z to 00:12:35Z. The 1-minute load was 7.17 at the start and 6.85 at the end,
-  from other work on the host; some task was stalled on CPU 0.20% and 0.63% of the
-  last 10 s at the start and end (`/proc/pressure/cpu`, some, avg10), on I/O 1.16% and 3.41%. Each item's load and
-  pressure as it began are in `probe.out`. `LOAD_GATE=0`: by Ada's rule a busy host is the default, and the comparisons
-  are within this run (each traced create against its untraced twins, Hex's create against libcrun's beside it). The
-  host's clock (`probes/host_clock.sh`, before and after the run): a burst took 0.238 and 0.223 ms at rest on a P-core
-  against 0.114 held awake, so the run met the host in its at-rest state, where short calls run at about half the speed
-  (`exec_ab.md`, "The host's state").
+  from other work on the host; some task was stalled on CPU 0.20% and 0.63% of the last 10 s at the start and end
+  (`/proc/pressure/cpu`, some, avg10), on I/O 1.16% and 3.41%. Each item's load and pressure as it began are in
+  `probe.out`. `LOAD_GATE=0`: by Ada's rule a busy host is the default, and the comparisons are within this run (each
+  traced create against its untraced twins, Hex's create against libcrun's beside it). The host's clock
+  (`probes/host_clock.sh`, before and after the run): a burst took 0.238 and 0.223 ms at rest on a P-core against 0.114
+  held awake, so the run met the host in its at-rest state, where short calls run at about half the speed (`exec_ab.md`,
+  "The host's state").
+- **What else ran:** just before the timed run (about 00:08Z), no other bench was going on fedora. There was no
+  hexbench or hexpass container: `docker ps`, with Focal's `s5-focal*` test containers left out of the listing, showed
+  four containers up for 18 hours, issue556oss-control-plane, buildx_buildkit_kagent-builder-v0.23.00, kind-registry
+  and kiln-t10-minio. There was no host.sh, seam_oci, oci_bench, create_breakdown, exec_breakdown, docker_pass, cargo or
+  rustc process, and the 1-minute load was 10.54. Kiln's queue there wasn't read. The functional run before it (00:07Z,
+  not timed) had no such check.
 - **Binaries:** `hex 0.1.0 (ef64dbc)`, sha256 596969cb3a612644, static-pie, built in the Fedora 44 pass image against
   its glibc-static. `seam_oci` of ef64dbc with this probe's `HEXBENCH_TRACE_OPS`, sha256 0656cae0a8464d57. libcrun
   1.30.1 (079ff6a7) in process, driver sha256 5c356f2139adc232.
