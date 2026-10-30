@@ -17,8 +17,10 @@
 //! made on a create's path because the pool was dry or the node keeps none, discarded, failed), in
 //! process through `Node::netns` and over the socket through `Client::netns` (the socket's version 2),
 //! and records what the phase added: the sustained phase's made-on-the-path count is how often its
-//! creates found the pool dry (decision 4's falsifier). No call spawns a process but the container's
-//! own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam` (or
+//! creates found the pool dry (decision 4's falsifier). In process it reads the node's create seeds'
+//! counts the same way (`Node::create_seeds`; decision 5): the creates that waited for a seed, the
+//! seeds started, the most busy at once, which the seeds' bound is judged by. No call spawns a process
+//! but the container's own init and exec helper. It writes oci_bench.py's JSON under the runtime `hex-seam` (or
 //! `hex-seam-socket`), which summarize.py sets beside libcrun (the in-process rival), so runtime design
 //! goal 3's targets (exec p50 at most a quarter of libcrun's, start p50 within 10% of libcrun's,
 //! argument A3) and goal 4's (create p50 with a network namespace at most 5% over without one) are read
@@ -67,7 +69,7 @@ mod linux {
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
     use hex_client::Client;
-    use hex_core::netns;
+    use hex_core::{netns, seeds};
     use hex_node::Node;
     use serde_json::{Map, Value, json};
 
@@ -520,6 +522,17 @@ mod linux {
             }
         }
 
+        /// The node's create seeds' counts, in process; the socket carries none.
+        fn seeds(&self) -> Result<Option<seeds::Counts>, String> {
+            match self {
+                Self::InProcess(node) => node
+                    .create_seeds()
+                    .map(Some)
+                    .map_err(|e| format!("the node's create seeds' counts: {e}")),
+                Self::Socket { .. } => Ok(None),
+            }
+        }
+
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -537,6 +550,21 @@ mod linux {
                "made_on_path": after.made_on_path - before.made_on_path,
                "discarded": after.discarded - before.discarded,
                "failed": after.failed - before.failed})
+    }
+
+    /// What the node's create seeds' counts rose by from `before` to `after`, and the most busy at once
+    /// so far (a high-water mark, not a rise).
+    fn seeds_rise(before: seeds::Counts, after: seeds::Counts) -> Value {
+        json!({"asked": after.asked - before.asked,
+               "waited": after.waited - before.waited,
+               "refused": (after.refused_busy + after.refused_waited + after.refused_died + after.refused_hung)
+                   - (before.refused_busy + before.refused_waited + before.refused_died + before.refused_hung),
+               "started": after.started - before.started,
+               "restarted": after.restarted - before.restarted,
+               "start_failed": after.start_failed - before.start_failed,
+               "died": after.died - before.died,
+               "hung": after.hung - before.hung,
+               "most_busy": after.most_busy})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -644,6 +672,7 @@ mod linux {
             let t0 = Instant::now();
             // The node's counts before and after the phase, outside its timing: what it added.
             let r = driver.netns().and_then(|before| {
+                let seeds_before = driver.seeds()?;
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -658,8 +687,15 @@ mod linux {
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
+                let seeds_rose = match (seeds_before, driver.seeds()?) {
+                    (Some(before), Some(after)) => Some(seeds_rise(before, after)),
+                    _ => None,
+                };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
+                    if let Some(seeds_rose) = seeds_rose {
+                        fields.insert("seeds".to_owned(), seeds_rose);
+                    }
                 }
                 Ok(v)
             });

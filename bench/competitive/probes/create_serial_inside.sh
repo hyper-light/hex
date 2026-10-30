@@ -1,51 +1,186 @@
 #!/usr/bin/env bash
-# Where do the seam's creates serialize at concurrency 32? Off-CPU and on-CPU time by kernel stack for the
-# bench's threads (seam_oci: the node agent in process; hex: the seeds and the inits before they exec),
-# at concurrency 1 (start_true, sequential) and 32 (sustained), in a privileged container like the pass's.
+# bench/competitive/probes: where creates wait under concurrency, inside the probe container (create_serial.sh).
+# MODE=offcpu (the default): off-CPU time by kernel stack (bpftrace on finish_task_switch) and an on-CPU profile for
+# a runtime's own processes, and each one's directory operations (vfs_mkdir, vfs_rmdir, vfs_unlink, vfs_mknod)
+# counted by the filesystem of the directory they change: cgroup2 (a cgroup parent), tmpfs (a state root) or overlay
+# (the container's own disk). Three runs, back to back on the same host state:
+#   hex.c1    seam_oci's start_true (create, start and delete of `true`, one at a time): the node agent in process
+#             (seam_oci) and its seeds and inits before they exec (hex);
+#   hex.c32   seam_oci's sustained phase, concurrency 32, the same lifecycle;
+#   crun.c32  oci_bench.py's sustained phase on libcrun in process, concurrency 32: its drivers and their inits before
+#             they exec (libcrun-driver).
+# MODE=locks: what holds the locks those waits are on, and which directory each wait is for. For the runtime's own
+# processes: each vfs_mkdir and vfs_rmdir timed by the directory it changes (its parent's i_rwsem is held across
+# it); each wait in an rw_semaphore's slow path timed by the directory whose i_rwsem it is (an rwsem that isn't an
+# inode's reads as no filesystem); each lookup that missed the dcache (lookup_slow) by its directory and name. For
+# every process, the kernel's holders of cgroup_mutex timed (cgroup_mkdir, cgroup_rmdir, cgroup_kill_write,
+# cgroup_bpf_prog_attach, and the css work a removed cgroup queues: css_killed_work_fn, css_release_work_fn,
+# css_free_rwork_fn, cgroup_bpf_release), and a fork from cgroup_can_fork to cgroup_post_fork's return, by whether it
+# clones into a cgroup (CLONE_INTO_CGROUP holds cgroup_mutex across that span). And how much of the time each lock is
+# held, sampled on every CPU at 999 Hz in 100 ms buckets: cgroup_mutex (its owner set), and the i_rwsem of the cgroup
+# directory the runtime last made a cgroup in (write-held, read-held or free); a bucket in which the runtime made or
+# removed a cgroup is a busy one. Four runs: hex.c1, crun.c1 (oci_bench.py's
+# start_true on libcrun), hex.c32, crun.c32. Each run lists the directories under /run and /sys/fs/cgroup with their
+# inode numbers (dirs.<label>.txt), so create_serial.py names the directory each inode is.
+# Env: MODE (offcpu), SUSTAINED (5000).
 set -uo pipefail
-dnf -y -q install perf bpftrace procps-ng util-linux >/run/dnf.log 2>&1 || { echo "dnf failed"; tail -5 /run/dnf.log; exit 3; }
+SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
+dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c >/run/dnf.log 2>&1 \
+  || { echo "dnf failed"; tail -5 /run/dnf.log; exit 3; }
 echo "tools: $(perf --version 2>&1 | head -1); $(bpftrace --version 2>&1 | head -1)"
 mountpoint -q /sys/kernel/tracing || mount -t tracefs nodev /sys/kernel/tracing
 mountpoint -q /sys/kernel/debug || mount -t debugfs nodev /sys/kernel/debug
 CG=/sys/fs/cgroup; mkdir -p "$CG/lab"
 for p in $(cat "$CG/cgroup.procs"); do echo "$p" > "$CG/lab/cgroup.procs" 2>/dev/null || true; done
 echo "+cpu +io +memory +pids" > "$CG/cgroup.subtree_control" 2>/dev/null || true
-mkdir -p "$CG/w"; echo "$BASHPID" > "$CG/w/cgroup.procs"
+mkdir -p "$CG/w"; echo "$BASHPID" > "$CG/w/cgroup.procs"; mkdir -p /run/err
+# The OCI pass's bundles (oci_inside.sh's shape): a `sleep` init and a `true` one, with every namespace of their own.
 B=/run/b; mkdir -p "$B/rootfs"; ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin && mkdir -p usr proc dev tmp )
 mk(){ mkdir -p "$1/rootfs"; cp -r "$B/rootfs/." "$1/rootfs/"; cat > "$1/config.json" <<JSON
-{ "ociVersion":"1.0.2","root":{"path":"rootfs"},"process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin"],"user":{"uid":0,"gid":0}},"mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]} }
+{ "ociVersion":"1.0.2","root":{"path":"rootfs"},"hostname":"b","process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}},"mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]} }
 JSON
 }
-mk /run/sleep '["/usr/bin/sleep","infinity"]'; mk /run/true '["/usr/bin/true"]'
-cat > /run/offcpu.bt <<'BT'
+mk /run/bundle-sleep '["/usr/bin/sleep","infinity"]'; mk /run/bundle-true '["/usr/bin/true"]'
+offcpu(){ # offcpu <filter on a comm value $c>: the off-CPU program for one runtime's processes
+  local f=$1
+  cat <<BT
+config = { max_map_keys = 262144 }
 kprobe:finish_task_switch*
 {
-	$prev = (struct task_struct *)arg0;
-	$pc = $prev->comm;
-	if ($pc == "seam_oci" || $pc == "hex") { @start[(uint64)$prev->pid] = nsecs; }
-	$last = @start[(uint64)curtask->pid];
-	if ($last != 0) {
-		@off[kstack(12), comm] = sum(nsecs - $last);
+	\$prev = (struct task_struct *)arg0;
+	\$c = \$prev->comm;
+	if ($f) { @start[(uint64)\$prev->pid] = nsecs; }
+	\$last = @start[(uint64)curtask->pid];
+	if (\$last != 0) {
+		@off[kstack(12), comm] = sum(nsecs - \$last);
 		delete(@start[(uint64)curtask->pid]);
 	}
 }
-profile:hz:999 /comm == "seam_oci" || comm == "hex"/ { @cpu[kstack(10)] = count(); }
-END { clear(@start); print(@off, 40); print(@cpu, 25); }
-BT
-run(){ # run <label> <phases> [env]
-  local label=$1 phases=$2; shift 2
-  bpftrace /run/offcpu.bt > /run/bt.$label.txt 2>/run/bt.$label.err &
-  local bt=$!; sleep 4
-  env HEXBENCH_PHASES="$phases" "$@" /opt/bin/seam_oci /run/out.$label.json 500 20 600 /opt/bin/hex /run/sleep /run/true > /run/seam.$label.log 2>&1
-  kill -INT $bt; wait $bt 2>/dev/null
-  python3 -I -c "
-import json; d=json.load(open('/run/out.$label.json')); ph=d['phases']
-for k,v in ph.items():
-  if k=='sustained': print('$label', k, '%.0f/s'%v['per_s'], 'n=%d'%v['lifecycles'])
-  elif k=='start_true': print('$label', k, 'n=%d'%len(v['ms']))
-  elif k=='throughput': print('$label', k, {c:round(x['per_s']) for c,x in v.items()})
-print('errors', d['errors'])"
+kprobe:vfs_mkdir, kprobe:vfs_rmdir, kprobe:vfs_unlink, kprobe:vfs_mknod
+{
+	\$c = comm;
+	if ($f) { @dirops[func, str(((struct inode *)arg1)->i_sb->s_type->name)] = count(); }
 }
-run c1 start_true
-run c32 sustained HEXBENCH_SUSTAINED=5000
+profile:hz:999 { \$c = comm; if ($f) { @cpu[kstack(10)] = count(); } }
+END { clear(@start); }
+BT
+}
+locks(){ # locks <filter on a comm value $c>: the locks program for one runtime's processes
+  local f=$1
+  cat <<BT
+config = { max_map_keys = 262144 }
+kprobe:vfs_mkdir, kprobe:vfs_rmdir
+{
+	\$c = comm;
+	if ($f) { @dt[(uint64)curtask->pid] = nsecs; @dd[(uint64)curtask->pid] = (uint64)arg1; }
+}
+kretprobe:vfs_mkdir, kretprobe:vfs_rmdir
+{
+	\$t = @dt[(uint64)curtask->pid];
+	if (\$t != 0) {
+		\$i = (struct inode *)@dd[(uint64)curtask->pid];
+		if (str(\$i->i_sb->s_type->name) == "cgroup2") { @cgparent = (uint64)\$i; @busy[nsecs / 100000000] = count(); }
+		@hold[func, str(\$i->i_sb->s_type->name), \$i->i_ino] = stats(nsecs - \$t);
+		delete(@dt[(uint64)curtask->pid]);
+		delete(@dd[(uint64)curtask->pid]);
+	}
+}
+kprobe:rwsem_down_write_slowpath, kprobe:rwsem_down_read_slowpath
+{
+	\$c = comm;
+	if ($f) { @rt[(uint64)curtask->pid] = nsecs; @rs[(uint64)curtask->pid] = (uint64)arg0; }
+}
+kretprobe:rwsem_down_write_slowpath, kretprobe:rwsem_down_read_slowpath
+{
+	\$t = @rt[(uint64)curtask->pid];
+	if (\$t != 0) {
+		\$i = (struct inode *)(@rs[(uint64)curtask->pid] - offsetof(struct inode, i_rwsem));
+		@rw[func, str(\$i->i_sb->s_type->name), \$i->i_ino] = stats(nsecs - \$t);
+		delete(@rt[(uint64)curtask->pid]);
+		delete(@rs[(uint64)curtask->pid]);
+	}
+}
+kprobe:lookup_slow
+{
+	\$c = comm;
+	if ($f) {
+		\$q = (struct qstr *)arg0;
+		\$d = (struct dentry *)arg1;
+		@lookups[str(\$d->d_sb->s_type->name), str(\$d->d_name.name), str(\$q->name)] = count();
+	}
+}
+kprobe:cgroup_mkdir, kprobe:cgroup_rmdir, kprobe:cgroup_kill_write, kprobe:cgroup_bpf_prog_attach,
+kprobe:css_killed_work_fn, kprobe:css_release_work_fn, kprobe:css_free_rwork_fn, kprobe:cgroup_bpf_release
+{
+	@ft[(uint64)curtask->pid] = nsecs;
+}
+kretprobe:cgroup_mkdir, kretprobe:cgroup_rmdir, kretprobe:cgroup_kill_write, kretprobe:cgroup_bpf_prog_attach,
+kretprobe:css_killed_work_fn, kretprobe:css_release_work_fn, kretprobe:css_free_rwork_fn, kretprobe:cgroup_bpf_release
+{
+	\$t = @ft[(uint64)curtask->pid];
+	if (\$t != 0) {
+		\$c = comm;
+		if ($f) { @fn[func, 1] = stats(nsecs - \$t); } else { @fn[func, 0] = stats(nsecs - \$t); }
+		delete(@ft[(uint64)curtask->pid]);
+	}
+}
+kprobe:cgroup_can_fork
+{
+	\$c = comm;
+	if ($f) {
+		@fk[(uint64)curtask->pid] = nsecs;
+		@fi[(uint64)curtask->pid] = (((struct kernel_clone_args *)arg1)->flags & 0x200000000) != 0 ? 1 : 0;
+	}
+}
+kretprobe:cgroup_post_fork
+{
+	\$t = @fk[(uint64)curtask->pid];
+	if (\$t != 0) {
+		@fork[@fi[(uint64)curtask->pid]] = stats(nsecs - \$t);
+		delete(@fk[(uint64)curtask->pid]);
+		delete(@fi[(uint64)curtask->pid]);
+	}
+}
+profile:hz:999
+{
+	\$m = (struct mutex *)kaddr("cgroup_mutex");
+	@cgm_owned[nsecs / 100000000, \$m->owner.counter != 0 ? 1 : 0] = count();
+	if (@cgparent != 0) {
+		\$n = ((struct inode *)@cgparent)->i_rwsem.count.counter;
+		@dir_held[nsecs / 100000000, (\$n & 1) != 0 ? 2 : (\$n != 0 ? 1 : 0)] = count();
+	}
+}
+END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); }
+BT
+}
+run(){ # run <label> <filter> <command...>: the mode's program over one workload, and the directories it made
+  local label=$1 filter=$2; shift 2
+  "$MODE" "$filter" > "/run/$label.bt"
+  bpftrace "/run/$label.bt" > "/run/bt.$label.txt" 2>"/run/bt.$label.err" &
+  local bt=$!; sleep 5
+  kill -0 $bt 2>/dev/null || { echo "$label: bpftrace ended early: $(head -c 300 /run/bt.$label.err)"; return 1; }
+  ( for i in 1 2 3 4 5 6; do sleep 0.5; find /run /sys/fs/cgroup -maxdepth 4 -type d -printf '%i %p\n' 2>/dev/null; done \
+      | sort -u > "/run/dirs.$label.txt" ) &
+  local dirs=$!
+  "$@" > "/run/$label.log" 2>&1 || echo "$label: the workload failed (/run/$label.log)"
+  wait $dirs
+  kill -INT $bt; wait $bt 2>/dev/null
+  echo "$label: $(wc -l < /run/bt.$label.txt) lines"
+}
+HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'
+hex_c1(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 500 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
+hex_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
+crun_c1(){ env HEXBENCH_PHASES=start_true HEXBENCH_BIN=/opt/bin python3 -I /opt/lab/oci_bench.py libcrun "/run/out.$MODE.crun.c1.json" 500 20 0 0 64; }
+crun_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" HEXBENCH_BIN=/opt/bin python3 -I /opt/lab/oci_bench.py libcrun "/run/out.$MODE.crun.c32.json" 20 0 0 0 64; }
+case $MODE in
+  offcpu) run offcpu.hex.c1 "$HEX" hex_c1; run offcpu.hex.c32 "$HEX" hex_c32; run offcpu.crun.c32 "$CRUN" crun_c32 ;;
+  locks) run locks.hex.c1 "$HEX" hex_c1; run locks.crun.c1 "$CRUN" crun_c1; run locks.hex.c32 "$HEX" hex_c32; run locks.crun.c32 "$CRUN" crun_c32 ;;
+  *) echo "refusing: MODE is offcpu or locks, not $MODE"; exit 2 ;;
+esac
+for f in /run/out.*.json; do python3 -I -c "
+import json,sys; d=json.load(open('$f')); ph=d.get('phases',{})
+for k,v in ph.items():
+  if k=='sustained': print('$f', k, '%.0f/s'%v['per_s'], 'n=%d'%v['lifecycles'])
+  elif k=='start_true': print('$f', k, 'n=%d'%len(v['ms']) if isinstance(v.get('ms'),list) else v)
+print('$f errors', d.get('errors'))"; done
 echo DONE
