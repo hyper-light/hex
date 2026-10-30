@@ -8,11 +8,12 @@ its directory operations (@dirops[func, fs]: count). The off-CPU time is grouped
 
 A MODE=locks run: each directory's exclusive holds (@hold[vfs_mkdir or vfs_rmdir, fs, ino]: stats) beside the waits
 on its i_rwsem (@rw[slow path, fs, ino]: stats), each directory named from the run's dirs.<label>.txt; cgroup_mutex's
-holders (@fn[function, 1 if the runtime's own]: stats) and the forks (@fork[1 if into a cgroup]: stats); the lookups
-that missed the dcache (@lookups[fs, directory, name]: count), with each name's digits and hex runs written as #; and
-the share of the time cgroup_mutex was owned and the runtime's cgroup directory's i_rwsem held (@cgm_owned[bucket,
-owned] and @dir_held[bucket, 2 write-held, 1 read-held, 0 free]: samples), over the 100 ms buckets in which the runtime
-made or removed at least half the median bucket's cgroups (@busy[bucket]: count).
+takers, each timed whole, wait and hold (@fn[function, 1 if the runtime's own]: stats), the forks (@fork[1 if into a
+cgroup]: stats) and the waits for the lock alone (@cgm_wait[1 if the runtime's]: stats); the lookups that missed the
+dcache (@lookups[fs, directory, name]: count), with each name's digits and hex runs written as #; and the share of the
+time cgroup_mutex and the runtime's cgroup directory's i_rwsem were in each state (@cgm_state[bucket, 2 held, 1
+handed off, 0 free] and @dir_state[bucket, 3 write-held, 2 read-held, 1 handed off, 0 free]: samples), over the 100
+ms buckets in which the runtime made or removed at least half the median bucket's cgroups (@busy[bucket]: count).
 
   create_serial.py <label>=<bt file>:<lifecycles> ...
 """
@@ -138,7 +139,7 @@ def report_locks(label, n, txt, named):
     for func, v in sorted(other_rw.items()):
         print(f"  waits on an rwsem that isn't a directory's (namespace_sem, a process's mmap_lock, ...), {func}: "
               f"{v:.3f} ms")
-    print(f"{label}: cgroup_mutex's holders (timed whole; at concurrency 1 a holder's time is its hold), per lifecycle")
+    print(f"{label}: cgroup_mutex's takers, each timed whole (its wait for the lock and its hold), per lifecycle")
     for (func, own), (cnt, tot) in sorted(stats(txt, 'fn', 2).items(), key=lambda kv: -kv[1][1]):
         who = "the runtime's" if own == '1' else "other processes'"
         print(f"  {cnt / n:6.2f} x {tot / max(cnt, 1) / 1e3:8.1f} us = {tot / n / 1e6:7.3f} ms  {func} ({who})")
@@ -151,15 +152,31 @@ def report_locks(label, n, txt, named):
         counts = sorted(busy.values())
         floor = counts[len(counts) // 2] / 2
         window = {b for b, v in busy.items() if v >= floor}
-        for name, title, states in (('cgm_owned', 'cgroup_mutex', {1: 'owned'}),
-                                    ('dir_held', "the cgroup directory's i_rwsem", {2: 'write-held', 1: 'read-held'})):
+        # Each lock's state as the probe decodes its word: the current program's (@cgm_state, @dir_state: an
+        # owner, only the waiter and hand-off flags, or nothing), or the first form's (@cgm_owned, @dir_held),
+        # which took any nonzero word for held and so counted a lock handed off, free until its woken waiter
+        # runs, as held.
+        for name, title, states in (
+                ('cgm_state', 'cgroup_mutex', {2: 'held', 1: 'handed off (free, a woken waiter yet to run)'}),
+                ('dir_state', "the cgroup directory's i_rwsem",
+                 {3: 'write-held', 2: 'read-held', 1: 'handed off (free, waiters queued)'}),
+                ('cgm_owned', 'cgroup_mutex (first form: any nonzero owner word)', {1: 'owner word set'}),
+                ('dir_held', "the cgroup directory's i_rwsem (first form)",
+                 {2: 'write-held', 1: 'any other nonzero count'})):
             samples = defaultdict(int)
             for m in re.finditer(rf'@{name}\[(\d+), (\d+)\]: (\d+)', txt):
                 if int(m.group(1)) in window:
                     samples[int(m.group(2))] += int(m.group(3))
-            total = sum(samples.values()) or 1
+            if not samples:
+                continue
+            total = sum(samples.values())
             shares = ', '.join(f'{what} {100 * samples[k] / total:.1f}%' for k, what in states.items())
-            print(f"{label}: {title}, of {total} samples in {len(window)} busy 100 ms buckets: {shares}")
+            print(f"{label}: {title}, of {total} samples in {len(window)} busy 100 ms buckets (each with at least "
+                  f"half the median bucket's cgroups made or removed): {shares}")
+    for (own,), (cnt, tot) in sorted(stats(txt, 'cgm_wait', 1).items(), reverse=True):
+        who = "the runtime's" if own == '1' else "other processes'"
+        print(f"{label}: waits for cgroup_mutex, {who}: {cnt / n:.2f} a lifecycle, {tot / max(cnt, 1) / 1e3:.1f} us "
+              f"each on average, {tot / n / 1e6:.3f} ms a lifecycle")
     lookups = defaultdict(int)
     for m in re.finditer(r'@lookups\[([^,\]]*), ([^,\]]*), ([^\]]*)\]: (\d+)', txt):
         lookups[(m.group(1), pattern(m.group(2)), pattern(m.group(3)))] += int(m.group(4))

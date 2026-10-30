@@ -2,16 +2,19 @@
 # bench/competitive/probes: the seam's create through its seeds (goal 5 plan step 4), inside the bench container
 # (seed_path.sh). Three readings, each over seam_oci's lifecycle phase: the oci class through the seam in process, as
 # root, on the OCI pass's bundles (oci_inside.sh's shape), each create through a seed (decision 5).
-#   clone   A trace instance of this run's own records two sched events for the processes named hex (the seeds, and
-#           each init until it execs its program): sched_waking and sched_process_fork. seed_path.py takes, for each
-#           init a seed clones, the seed's first wakeup after its last clone (the node's request arriving on its
-#           socket) to the init's birth (the fork event the seed's clone3 fires in the seed): the seed's clone of an
-#           init, request to child. sched events only: they cost a create least, and the syscall events of an
-#           instance recorded none on fedora when this was written (133 forks, 0 syscall events, the same run).
+#   clone   A trace instance of this run's own records three sched events for the processes named hex (the seeds,
+#           and each init until it execs its program): sched_waking, sched_process_fork and sched_switch to them.
+#           seed_path.py takes, for each init a seed clones, from the seed's first wakeup by the node agent since its
+#           last clone (the node's request arriving on its socket) to the init's birth (the fork event the seed's
+#           clone3 fires in the seed) and to its first run: the seed's clone of an init, request to child. sched
+#           events only: they cost a create least, and the syscall events of an instance recorded none on fedora when
+#           this was written (133 forks, 0 syscall events, the same run).
 #   execs   strace -f -e trace=execve over the whole process tree for EXECS creates after 5 warm-up ones: each exec of
 #           the hex binary by its first argument (__oci-seed, a seed's start; __oci-init, the shim; __oci-exec, the
 #           exec helper), and each program exec'd.
-#   memory  Each seed's Pss (smaps_rollup) and VmRSS, sampled every 50 ms while the node serves MEMORY_N creates.
+#   memory  Each seed's Pss (smaps_rollup) and VmRSS, sampled every 50 ms while the node serves MEMORY_N creates: each
+#           `hex __oci-seed` in this pid namespace alone, since an init its seed cloned keeps the seed's arguments
+#           until it execs, in a pid namespace of its own.
 #   seeds   seam_oci's sustained phase (SUSTAINED lifecycles at concurrency 32) and the node's create seeds' counts
 #           over it (seam_oci's `seeds`): the creates that waited for a seed, the seeds started and the most busy at
 #           once, by which decision 5's bound of 32 is judged.
@@ -52,6 +55,7 @@ seam() { # seam <out json> <n> <warmup> [wrapper...]: seam_oci's lifecycle phase
   for ev in sched/sched_process_fork sched/sched_waking; do
     echo 'comm == "hex"' > "$I/events/$ev/filter"; echo 1 > "$I/events/$ev/enable"
   done
+  echo 'next_comm == "hex"' > "$I/events/sched/sched_switch/filter"; echo 1 > "$I/events/sched/sched_switch/enable"
   echo 1 > "$I/tracing_on"
   seam /run/out.clone.json "$N" "$WARMUP" > /run/clone.log 2>&1 || echo "the clone's run failed: $(tail -3 /run/clone.log)"
   echo 0 > "$I/tracing_on"; cat "$I/trace" > "$OUT/trace.txt"
@@ -71,6 +75,7 @@ seam() { # seam <out json> <n> <warmup> [wrapper...]: seam_oci's lifecycle phase
   bench=$!
   while kill -0 $bench 2>/dev/null; do
     for p in $(pgrep -f '__oci-seed'); do
+      [ "$(awk '/^NSpid:/{print NF}' "/proc/$p/status" 2>/dev/null)" = 2 ] || continue
       pss=$(awk '/^Pss:/{print $2}' "/proc/$p/smaps_rollup" 2>/dev/null)
       rss=$(awk '/^VmRSS:/{print $2}' "/proc/$p/status" 2>/dev/null)
       [ -n "$pss" ] && [ -n "$rss" ] && echo "$p $pss $rss"

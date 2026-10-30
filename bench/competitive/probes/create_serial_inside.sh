@@ -13,15 +13,19 @@
 # processes: each vfs_mkdir and vfs_rmdir timed by the directory it changes (its parent's i_rwsem is held across
 # it); each wait in an rw_semaphore's slow path timed by the directory whose i_rwsem it is (an rwsem that isn't an
 # inode's reads as no filesystem); each lookup that missed the dcache (lookup_slow) by its directory and name. For
-# every process, the kernel's holders of cgroup_mutex timed (cgroup_mkdir, cgroup_rmdir, cgroup_kill_write,
-# cgroup_bpf_prog_attach, and the css work a removed cgroup queues: css_killed_work_fn, css_release_work_fn,
-# css_free_rwork_fn, cgroup_bpf_release), and a fork from cgroup_can_fork to cgroup_post_fork's return, by whether it
-# clones into a cgroup (CLONE_INTO_CGROUP holds cgroup_mutex across that span). And how much of the time each lock is
-# held, sampled on every CPU at 999 Hz in 100 ms buckets: cgroup_mutex (its owner set), and the i_rwsem of the cgroup
-# directory the runtime last made a cgroup in (write-held, read-held or free); a bucket in which the runtime made or
-# removed a cgroup is a busy one. Four runs: hex.c1, crun.c1 (oci_bench.py's
-# start_true on libcrun), hex.c32, crun.c32. Each run lists the directories under /run and /sys/fs/cgroup with their
-# inode numbers (dirs.<label>.txt), so create_serial.py names the directory each inode is.
+# every process, the kernel's takers of cgroup_mutex timed whole, their wait for it and their hold together
+# (cgroup_mkdir, cgroup_rmdir, cgroup_kill_write, cgroup_bpf_prog_attach, and the work a removed cgroup queues:
+# css_killed_work_fn, css_release_work_fn, cgroup_bpf_release), and a fork from cgroup_can_fork to cgroup_post_fork's
+# return, by whether it clones into a cgroup (CLONE_INTO_CGROUP holds cgroup_mutex across that span); each wait for
+# cgroup_mutex timed alone, from the lock's contention_begin tracepoint to its contention_end, by whether the waiter
+# is the runtime's. And how much of the time each lock is taken, sampled on every CPU at 999 Hz in 100 ms buckets:
+# cgroup_mutex (held: an owner in its owner word; handed off: only the waiter and hand-off flags, the lock free
+# until a woken waiter runs; free), and the i_rwsem of the cgroup directory the runtime last made a cgroup in
+# (write-held, read-held, handed off, free); a bucket in which the runtime made or removed a cgroup is a busy one.
+# Five runs: hex.c1, crun.c1 (oci_bench.py's start_true on libcrun), hex.c32, crun.c32, and hex.c32nonet, Hex's
+# sustained phase on a `true` bundle without a network namespace of its own. Each run lists the directories under
+# /run and /sys/fs/cgroup (each its own filesystem) with their inode numbers (dirs.<label>.txt), so create_serial.py
+# names the directory each inode is.
 # Env: MODE (offcpu), SUSTAINED (5000).
 set -uo pipefail
 SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
@@ -41,6 +45,8 @@ mk(){ mkdir -p "$1/rootfs"; cp -r "$B/rootfs/." "$1/rootfs/"; cat > "$1/config.j
 JSON
 }
 mk /run/bundle-sleep '["/usr/bin/sleep","infinity"]'; mk /run/bundle-true '["/usr/bin/true"]'
+mk /run/bundle-true-nonet '["/usr/bin/true"]'
+sed -i 's/,{"type":"network"}//' /run/bundle-true-nonet/config.json
 offcpu(){ # offcpu <filter on a comm value $c>: the off-CPU program for one runtime's processes
   local f=$1
   cat <<BT
@@ -110,12 +116,12 @@ kprobe:lookup_slow
 	}
 }
 kprobe:cgroup_mkdir, kprobe:cgroup_rmdir, kprobe:cgroup_kill_write, kprobe:cgroup_bpf_prog_attach,
-kprobe:css_killed_work_fn, kprobe:css_release_work_fn, kprobe:css_free_rwork_fn, kprobe:cgroup_bpf_release
+kprobe:css_killed_work_fn, kprobe:css_release_work_fn, kprobe:cgroup_bpf_release
 {
 	@ft[(uint64)curtask->pid] = nsecs;
 }
 kretprobe:cgroup_mkdir, kretprobe:cgroup_rmdir, kretprobe:cgroup_kill_write, kretprobe:cgroup_bpf_prog_attach,
-kretprobe:css_killed_work_fn, kretprobe:css_release_work_fn, kretprobe:css_free_rwork_fn, kretprobe:cgroup_bpf_release
+kretprobe:css_killed_work_fn, kretprobe:css_release_work_fn, kretprobe:cgroup_bpf_release
 {
 	\$t = @ft[(uint64)curtask->pid];
 	if (\$t != 0) {
@@ -141,16 +147,33 @@ kretprobe:cgroup_post_fork
 		delete(@fi[(uint64)curtask->pid]);
 	}
 }
-profile:hz:999
+tracepoint:lock:contention_begin
 {
-	\$m = (struct mutex *)kaddr("cgroup_mutex");
-	@cgm_owned[nsecs / 100000000, \$m->owner.counter != 0 ? 1 : 0] = count();
-	if (@cgparent != 0) {
-		\$n = ((struct inode *)@cgparent)->i_rwsem.count.counter;
-		@dir_held[nsecs / 100000000, (\$n & 1) != 0 ? 2 : (\$n != 0 ? 1 : 0)] = count();
+	if ((uint64)args.lock_addr == kaddr("cgroup_mutex") && @cw[(uint64)curtask->pid] == 0) {
+		@cw[(uint64)curtask->pid] = nsecs;
 	}
 }
-END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); }
+tracepoint:lock:contention_end
+{
+	if ((uint64)args.lock_addr == kaddr("cgroup_mutex")) {
+		\$t = @cw[(uint64)curtask->pid];
+		if (\$t != 0) {
+			\$c = comm;
+			if ($f) { @cgm_wait[1] = stats(nsecs - \$t); } else { @cgm_wait[0] = stats(nsecs - \$t); }
+			delete(@cw[(uint64)curtask->pid]);
+		}
+	}
+}
+profile:hz:999
+{
+	\$o = (uint64)((struct mutex *)kaddr("cgroup_mutex"))->owner.counter;
+	@cgm_state[nsecs / 100000000, (\$o & 0xfffffffffffffff8) != 0 ? 2 : (\$o != 0 ? 1 : 0)] = count();
+	if (@cgparent != 0) {
+		\$n = (uint64)((struct inode *)@cgparent)->i_rwsem.count.counter;
+		@dir_state[nsecs / 100000000, (\$n & 1) != 0 ? 3 : (((\$n >> 8) & 0x7fffffffffffff) != 0 ? 2 : (\$n != 0 ? 1 : 0))] = count();
+	}
+}
+END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); }
 BT
 }
 run(){ # run <label> <filter> <command...>: the mode's program over one workload, and the directories it made
@@ -159,7 +182,7 @@ run(){ # run <label> <filter> <command...>: the mode's program over one workload
   bpftrace "/run/$label.bt" > "/run/bt.$label.txt" 2>"/run/bt.$label.err" &
   local bt=$!; sleep 5
   kill -0 $bt 2>/dev/null || { echo "$label: bpftrace ended early: $(head -c 300 /run/bt.$label.err)"; return 1; }
-  ( for i in 1 2 3 4 5 6; do sleep 0.5; find /run /sys/fs/cgroup -maxdepth 4 -type d -printf '%i %p\n' 2>/dev/null; done \
+  ( for i in 1 2 3 4 5 6; do sleep 0.5; find /run /sys/fs/cgroup -xdev -maxdepth 4 -type d -printf '%i %p\n' 2>/dev/null; done \
       | sort -u > "/run/dirs.$label.txt" ) &
   local dirs=$!
   "$@" > "/run/$label.log" 2>&1 || echo "$label: the workload failed (/run/$label.log)"
@@ -170,11 +193,13 @@ run(){ # run <label> <filter> <command...>: the mode's program over one workload
 HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'
 hex_c1(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 500 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
+hex_c32nonet(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32nonet.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true-nonet; }
 crun_c1(){ env HEXBENCH_PHASES=start_true HEXBENCH_BIN=/opt/bin python3 -I /opt/lab/oci_bench.py libcrun "/run/out.$MODE.crun.c1.json" 500 20 0 0 64; }
 crun_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" HEXBENCH_BIN=/opt/bin python3 -I /opt/lab/oci_bench.py libcrun "/run/out.$MODE.crun.c32.json" 20 0 0 0 64; }
 case $MODE in
   offcpu) run offcpu.hex.c1 "$HEX" hex_c1; run offcpu.hex.c32 "$HEX" hex_c32; run offcpu.crun.c32 "$CRUN" crun_c32 ;;
-  locks) run locks.hex.c1 "$HEX" hex_c1; run locks.crun.c1 "$CRUN" crun_c1; run locks.hex.c32 "$HEX" hex_c32; run locks.crun.c32 "$CRUN" crun_c32 ;;
+  locks) run locks.hex.c1 "$HEX" hex_c1; run locks.crun.c1 "$CRUN" crun_c1; run locks.hex.c32 "$HEX" hex_c32; run locks.crun.c32 "$CRUN" crun_c32
+    run locks.hex.c32nonet "$HEX" hex_c32nonet ;;
   *) echo "refusing: MODE is offcpu or locks, not $MODE"; exit 2 ;;
 esac
 for f in /run/out.*.json; do python3 -I -c "
