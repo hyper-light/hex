@@ -4,7 +4,9 @@
 //!   hex node --socket <path> --state <dir> [--box-root <cgroup dir>]
 //!
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
-//! cgroup) and their records under `--state`, takes back or cleans up what an agent before it left
+//! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
+//! directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless; decision 1), takes back
+//! or cleans up what an agent before it left
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, binds the socket, says
 //! `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on stderr
 //! and exits 1. A socket an ended agent left at the path is replaced; one a live agent serves is

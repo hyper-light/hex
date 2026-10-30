@@ -11,7 +11,10 @@
 //!   socket (decision 4; goal 4 plan steps 2 and 4);
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
-//!   and counted in its box, which inspect reports; nothing it started is left running.
+//!   and counted in its box, which inspect reports; nothing it started is left running;
+//! - T-T7.1.2 (goal 5 plan step 2): kill the agent at each record write of a create, its boxes'
+//!   records durable and not, and restart it: the box killed mid-create is cleaned up, the one made is
+//!   taken back and deletes, and nothing of either is left.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -31,8 +34,11 @@ use std::process::{Child, Command, Stdio as Std};
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
-use hex_api::{Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Runtime, Stdio};
+use hex_api::{
+    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
+};
 use hex_client::Client;
+use hex_core::record::{BoxRecord, Phase};
 use hex_core::wire::{self, Answer, Call, Request, Streams};
 
 const TEST: &str = "the_seam_holds_its_contract_over_the_node_agents_socket";
@@ -75,7 +81,7 @@ struct Agent {
     child: Child,
     socket: PathBuf,
     box_root: PathBuf,
-    _dir: tempfile::TempDir,
+    _dir: Option<tempfile::TempDir>,
 }
 
 impl Agent {
@@ -84,18 +90,29 @@ impl Agent {
             .prefix("agent-")
             .tempdir_in(cache)
             .unwrap();
-        let socket = dir.path().join("node.sock");
-        let mut child = Command::new(exe)
+        let mut agent = Self::over(exe, dir.path(), box_root, None);
+        agent._dir = Some(dir);
+        agent
+    }
+
+    /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
+    /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
+    fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
+        let socket = dir.join("node.sock");
+        let mut command = Command::new(exe);
+        command
             .arg("node")
             .arg("--socket")
             .arg(&socket)
             .arg("--state")
-            .arg(dir.path().join("state"))
+            .arg(dir.join("state"))
             .arg("--box-root")
             .arg(&box_root)
-            .stdout(Std::piped())
-            .spawn()
-            .expect("start hex node");
+            .stdout(Std::piped());
+        if let Some(runtime) = runtime {
+            command.env("XDG_RUNTIME_DIR", runtime);
+        }
+        let mut child = command.spawn().expect("start hex node");
         // The fact a client needs: the agent says it's ready once its socket listens.
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
@@ -110,7 +127,7 @@ impl Agent {
             child,
             socket,
             box_root,
-            _dir: dir,
+            _dir: None,
         }
     }
 
@@ -165,6 +182,12 @@ impl Lab {
 
     /// A bundle whose container runs `args`, with a network namespace of its own when `network`.
     fn bundle_with(&self, args: &[String], network: bool) -> PathBuf {
+        self.bundle_hooked(args, network, "")
+    }
+
+    /// As [`Lab::bundle_with`], its config ending with `hooks`: a `"hooks"` member after a comma, or
+    /// nothing.
+    fn bundle_hooked(&self, args: &[String], network: bool, hooks: &str) -> PathBuf {
         let dir = tempfile::Builder::new()
             .prefix("bundle-")
             .tempdir_in(self.bundles.path())
@@ -207,7 +230,7 @@ impl Lab {
     {{"destination": "/usr", "type": "bind", "source": "/usr", "options": ["rbind","ro"]}},
     {{"destination": "/hex", "type": "bind", "source": "{exe}", "options": ["bind","ro"]}}
   ],
-  "linux": {{"namespaces": [{namespaces}]{mappings}}}
+  "linux": {{"namespaces": [{namespaces}]{mappings}}}{hooks}
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
@@ -311,6 +334,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         "process boxes over the socket: {failures:#?}"
     );
     disconnect(&lab, &agent, &client);
+    crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
 }
 
@@ -508,6 +532,224 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
     );
     client.delete(&oci).unwrap();
     client.delete(&process).unwrap();
+}
+
+/// Where a crash case keeps the agent's containers' state, and so whether its boxes' records are
+/// durable: on tmpfs, as the node keeps it in its runtime directory, the records not fsynced; or on
+/// disk (an `XDG_RUNTIME_DIR` on disk, as a rootless node with none keeps it in its state directory),
+/// every record fsynced.
+#[derive(Clone, Copy, Debug)]
+enum Kept {
+    Tmpfs,
+    Disk,
+}
+
+/// Where in a create a crash case kills the agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum At {
+    /// In the record write that marks the box creating, before anything of it is made.
+    Creating,
+    /// In the record write that marks it ready, its cgroup, container and init made.
+    Ready,
+    /// After both: the create done.
+    Made,
+}
+
+/// T-T7.1.2 (goal 5 plan step 2): kill the node agent at each record write of a create, then restart
+/// it, with its boxes' records durable and not. The agent is held in a record write by its temp file, a
+/// FIFO no one has opened, and killed once the kernel shows it waiting there: in the write that marks
+/// the box creating, and in the one that marks it ready (the FIFO made while the box's createRuntime
+/// hook holds the create, its container made); and after both. Restarted, the agent cleans up the box
+/// killed mid-create and takes back the one made, which then deletes, so at every point nothing of the
+/// box is left: no record, temp file, cgroup or container state.
+fn crash_at_each_record_write(lab: &Lab, own: &Path, exe: &str) {
+    for kept in [Kept::Tmpfs, Kept::Disk] {
+        for at in [At::Creating, At::Ready, At::Made] {
+            crash_at(lab, own, exe, kept, at);
+        }
+    }
+}
+
+fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
+    let name = format!("crash-{kept:?}-{at:?}").to_lowercase();
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("{name}-"))
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    // The agent's oci root, where the node puts it: a root node's under /run, a rootless node's under
+    // its runtime directory, which this case may set on disk.
+    let (runtime, oci_root) = match (kept, lab.rootless) {
+        (Kept::Tmpfs, false) => (None, PathBuf::from("/run/hex-node")),
+        (Kept::Tmpfs, true) => match std::env::var_os("XDG_RUNTIME_DIR") {
+            Some(xdg) => (None, PathBuf::from(xdg).join("hex-node")),
+            None => {
+                eprintln!("SKIP {name}: no XDG_RUNTIME_DIR");
+                return;
+            }
+        },
+        (Kept::Disk, true) => {
+            let run = dir.path().join("run");
+            std::fs::create_dir(&run).unwrap();
+            let oci_root = run.join("hex-node");
+            (Some(run), oci_root)
+        }
+        (Kept::Disk, false) => {
+            eprintln!("SKIP {name}: a root node keeps its containers' state under /run");
+            return;
+        }
+    };
+    let id = BoxId::new(&name).unwrap();
+    let state = dir.path().join("state");
+    let record = state.join(format!("{id}.json"));
+    let temp = state.join(format!(".{id}.tmp"));
+    let cgroup = own.join(&name).join(id.as_str());
+    let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
+    let bundle = if at == At::Ready {
+        // The create waits in its createRuntime hook, its container made, until this test makes `go`.
+        let script = format!(
+            "touch {} && until [ -e {} ]; do sleep 0.01; done",
+            hooked.display(),
+            go.display()
+        );
+        let hooks = format!(
+            r#",
+  "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
+        );
+        lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks)
+    } else {
+        lab.bundle(&Lab::act(&Act::Wait))
+    };
+    let spec = BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+    };
+    let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
+    if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
+        eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
+        return;
+    }
+    // Made once the agent has recovered, which removes a temp file it finds.
+    if at == At::Creating {
+        mkfifo(&temp);
+    }
+    let socket = agent.socket.clone();
+    let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
+    match at {
+        At::Creating => {}
+        At::Ready => {
+            wait_for("the create's hook to hold it", || hooked.exists());
+            mkfifo(&temp);
+            std::fs::write(&go, b"").unwrap();
+        }
+        At::Made => {
+            wait_for("the create", || create.is_finished());
+        }
+    }
+    if at != At::Made {
+        wait_for("the agent to wait in its record write", || {
+            waits_opening_a_fifo(agent.pid())
+        });
+    }
+    // What the kill leaves, as the point says.
+    let phase = || {
+        std::fs::read(&record)
+            .ok()
+            .map(|bytes| BoxRecord::decode(&bytes).unwrap().phase)
+    };
+    let (written, made) = match at {
+        At::Creating => (None, 0),
+        At::Ready => (Some(Phase::Creating), 1),
+        At::Made => (Some(Phase::Ready), 1),
+    };
+    assert_eq!(phase(), written, "{name}: the record at the kill");
+    assert_eq!(
+        (
+            containers_of(&oci_root, &id).len(),
+            usize::from(cgroup.exists())
+        ),
+        (made, made),
+        "{name}: (container states, cgroups) at the kill"
+    );
+    drop(agent);
+    let created = create.join().unwrap();
+    assert_eq!(
+        created.is_ok(),
+        at == At::Made,
+        "{name}: the create: {created:?}"
+    );
+
+    let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
+    let client = agent.client();
+    if at == At::Made {
+        let info = client.inspect(&id).expect("the box made is taken back");
+        assert_eq!(info.state, BoxState::Created, "{name}: as it was");
+        client.delete(&id).unwrap();
+    } else {
+        assert_eq!(
+            client.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "{name}: the box killed mid-create is cleaned up"
+        );
+    }
+    assert!(client.list().unwrap().is_empty(), "{name}: a box is left");
+    assert!(!record.exists(), "{name}: its record is left");
+    assert!(!temp.exists(), "{name}: its record's temp file is left");
+    assert!(
+        containers_of(&oci_root, &id).is_empty(),
+        "{name}: its container's state is left"
+    );
+    assert!(!cgroup.exists(), "{name}: its cgroup is left");
+    eprintln!(
+        "{name}: killed with the record {written:?} and {made} container made; after the restart {}, nothing left",
+        if at == At::Made {
+            "taken back, then deleted"
+        } else {
+            "cleaned up"
+        }
+    );
+}
+
+/// The state directories under `oci_root` of box `id`'s container, whatever node's: each is named
+/// `<node key>-<box id>`, the key 16 hex digits.
+fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(oci_root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.split_once('-'))
+                .is_some_and(|(key, rest)| {
+                    key.len() == 16
+                        && key.bytes().all(|b| b.is_ascii_hexdigit())
+                        && rest == id.as_str()
+                })
+        })
+        .collect()
+}
+
+/// Whether a thread of process `pid` waits to open a FIFO no one has opened the other end of: the
+/// kernel shows it in `wait_for_partner` (fs/pipe.c), or in `fifo_open` where that's inlined.
+fn waits_opening_a_fifo(pid: i32) -> bool {
+    std::fs::read_dir(format!("/proc/{pid}/task")).is_ok_and(|tasks| {
+        tasks
+            .filter_map(Result::ok)
+            .filter_map(|task| std::fs::read_to_string(task.path().join("wchan")).ok())
+            .any(|wchan| matches!(wchan.trim(), "wait_for_partner" | "fifo_open"))
+    })
+}
+
+fn mkfifo(path: &Path) {
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+}
+
+/// Whether `dir` lies on tmpfs (include/uapi/linux/magic.h, `TMPFS_MAGIC`).
+fn on_tmpfs(dir: &Path) -> bool {
+    rustix::fs::statfs(dir).is_ok_and(|fs| i128::from(fs.f_type) == 0x0102_1994)
 }
 
 /// A connection that sends exactly what it is given, and goes away as a dead process's does: no

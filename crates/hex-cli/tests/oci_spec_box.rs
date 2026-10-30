@@ -490,11 +490,14 @@ fn refusals(lab: &Lab, own: &Path) {
 
 /// T-T7.1.2: the node stopped mid-create, after the record and the rendered bundle and before the
 /// cgroup; its layer already holds a directory of mode 0 and a deep tree, as a container can leave
-/// one. Recovery removes the box, its bundle with it.
+/// one, and its container's state directory is made. Recovery removes the box, its bundle and its
+/// container's state with it.
 fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     let (node, box_root, state) = lab.node(own, "recovery");
-    drop(node);
     let id = BoxId::new("half-made").unwrap();
+    let container = node.container_dir(&id);
+    drop(node);
+    std::fs::create_dir_all(&container).unwrap();
     let bundle = state.join("bundles/half-made");
     let mut deep = bundle.join("upper");
     for _ in 0..200 {
@@ -515,7 +518,7 @@ fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     let record = BoxRecord::new(
         spec,
         Phase::Creating,
-        vec![state.join("oci/half-made"), bundle.clone()],
+        vec![container.clone(), bundle.clone()],
     );
     Store::open(&state).unwrap().put(&record).unwrap();
     let (restarted, _, _) = lab.node(own, "recovery");
@@ -525,6 +528,7 @@ fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
         "not removed: {summary:?}"
     );
     assert!(!bundle.exists(), "the half-made bundle is left");
+    assert!(!container.exists(), "the half-made container state is left");
     nothing_left(&restarted, &id, &box_root, &state);
 }
 
@@ -543,7 +547,7 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
     let bundle = state.join("bundles").join(id.as_str());
     assert!(!bundle.exists(), "{id}'s bundle is left");
     assert!(
-        !state.join("oci").join(id.as_str()).exists(),
+        !node.container_dir(id).exists(),
         "{id}'s container state is left"
     );
     assert!(

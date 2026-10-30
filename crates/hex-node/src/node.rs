@@ -6,14 +6,17 @@
 //! of docs/design/runtime-architecture.md). A box made from the structured [`hex_api::OciSpec`] runs
 //! from a bundle the node renders into a directory of the box's own ([`hex_core::bundle`]), holding
 //! its writable layer, which goes when the box does. The node agent is its containers' parent,
-//! holding each init's pidfd and recording how it ended ([`crate::supervise`], decision 2).
+//! holding each init's pidfd and recording how it ended ([`crate::supervise`], decision 2). Each
+//! container keeps its state on tmpfs, in the runtime directory, as runc's and crun's does: a host
+//! crash takes it with the container, so a box's record that names nothing else isn't fsynced
+//! (decision 1; [`crate::store`]).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use hex_api::{
@@ -57,8 +60,11 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 pub struct Node {
     root: BoxRoot,
     store: Store,
-    /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under.
+    /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under
+    /// ([`oci_root`]), shared with the other nodes on the host that run as this one's user.
     oci_root: PathBuf,
+    /// The node's own key among them, which names its containers ([`Node::container`]).
+    key: String,
     /// The `hex` binary the `oci` class re-execs for a container's init and `exec` helper; `None`
     /// when this process's own binary is `hex` (it handles `__oci-init`/`__oci-exec`). A node linked
     /// into another program, or the bench, names it ([`Node::with_oci_helper`]).
@@ -66,8 +72,10 @@ pub struct Node {
     /// The `oci` boxes' inits, watched and reaped; orphaned box processes, reaped.
     supervisor: Arc<Supervisor>,
     /// Abandoned programs ([`Node::abandoned`]) counted but not yet in their box's record, by box:
-    /// kept and reported until a record write takes them, never dropped (§3).
-    abandoned: Mutex<BTreeMap<BoxId, u64>>,
+    /// kept and reported until a record write takes them, never dropped (§3). Each box's count has a
+    /// lock of its own, held across the write that takes it, so one box's durable write holds up no
+    /// other box's inspect or create (goal 5 plan step 2). An entry goes with its box's delete.
+    abandoned: Mutex<Pending>,
     /// Where each box made from an [`OciSpec`] has its bundle: `<bundles>/<id>`, its writable layer
     /// in it.
     bundles: PathBuf,
@@ -86,6 +94,9 @@ pub struct Node {
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
 }
+
+/// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
+type Pending = BTreeMap<BoxId, Arc<Mutex<u64>>>;
 
 /// Where an `oci` box's bundle comes from.
 enum Source {
@@ -135,6 +146,8 @@ impl Node {
             (0, _) => Owner::Root,
             (uid, gid) => Owner::Rootless { uid, gid },
         };
+        let oci_root = oci_root(owner, state_dir)?;
+        let key = node_key(state_dir)?;
         let supervisor = Supervisor::start(root.dir(), store.clone())?;
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
@@ -146,7 +159,8 @@ impl Node {
         Ok(Self {
             root,
             store,
-            oci_root: state_dir.join("oci"),
+            oci_root,
+            key,
             oci_helper: None,
             supervisor,
             abandoned: Mutex::new(BTreeMap::new()),
@@ -205,6 +219,23 @@ impl Node {
         }
     }
 
+    /// Box `id`'s container's name under the node's oci root: the node's key, then the box's id, so
+    /// the boxes of nodes that share the root never share a container.
+    fn container(&self, id: &BoxId) -> String {
+        format!("{}-{id}", self.key)
+    }
+
+    /// Where box `id`'s container keeps its state, its `state.json` and exec FIFO: on tmpfs, under the
+    /// runtime directory ([`oci_root`]).
+    pub fn container_dir(&self, id: &BoxId) -> PathBuf {
+        self.oci_root.join(self.container(id))
+    }
+
+    /// What the node's record store has fsynced since it opened ([`crate::store::Syncs`]).
+    pub fn record_syncs(&self) -> crate::store::Syncs {
+        self.store.syncs()
+    }
+
     /// The disks the node holds boxes' files on, as `io.latency` and `io.max` name them.
     pub fn disks(&self) -> &[Dev] {
         self.root.disks()
@@ -239,7 +270,7 @@ impl Node {
             // An oci box follows the container's lifecycle: `created` until `start`, then `running`,
             // then `empty` once its init no longer runs (the oci state's `stopped`).
             ClassSpec::Oci(_) | ClassSpec::Bundle(_) => {
-                match self.oci().state(id.as_str()).map(|s| s.status) {
+                match self.oci().state(&self.container(id)).map(|s| s.status) {
                     Ok(Status::Created) => BoxState::Created,
                     Ok(Status::Running) => BoxState::Running,
                     Ok(Status::Creating | Status::Stopped) => BoxState::Empty,
@@ -275,25 +306,30 @@ impl Node {
     /// can't take now is kept, reported all the same, and written with the next; a box with no
     /// readable record (deleted since) has none to take it.
     pub fn abandoned(&self, id: &BoxId) -> Result<(), Refusal> {
-        let mut pending = self.abandoned.lock().map_err(|_| {
-            Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
-        })?;
-        let count = pending.entry(id.clone()).or_insert(0);
+        let count = Arc::clone(self.pending()?.entry(id.clone()).or_default());
+        let mut count = count.lock().map_err(|_| counts_poisoned())?;
         // Saturating: 2^64 programs is past any box's life, so the cap is never met.
         *count = count.saturating_add(1);
         let add = *count;
-        self.store
-            .update(id, |r| r.abandoned = r.abandoned.saturating_add(add))?;
-        pending.remove(id);
+        self.store.update(id, |r| {
+            r.abandoned = r.abandoned.saturating_add(add);
+            true
+        })?;
+        *count = 0;
         Ok(())
     }
 
-    /// Box `id`'s abandoned programs not yet in its record.
+    fn pending(&self) -> Result<MutexGuard<'_, Pending>, Refusal> {
+        self.abandoned.lock().map_err(|_| counts_poisoned())
+    }
+
+    /// Box `id`'s abandoned programs not yet in its record; waits only for a write of its own count.
     fn unrecorded(&self, id: &BoxId) -> Result<u64, Refusal> {
-        let pending = self.abandoned.lock().map_err(|_| {
-            Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
-        })?;
-        Ok(pending.get(id).copied().unwrap_or(0))
+        let Some(count) = self.pending()?.get(id).map(Arc::clone) else {
+            return Ok(0);
+        };
+        let count = count.lock().map_err(|_| counts_poisoned())?;
+        Ok(*count)
     }
 
     /// How an `oci` box's init ended: as the supervisor reaped it, or as the box's record holds it
@@ -324,6 +360,8 @@ impl Node {
     /// After a restart: take each box back or clean it up (T-T7.1.2). Safe to call again after a
     /// crash during it, because removing a box tolerates each part being gone already.
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
+        // What a crash at a record write left: a temp file never renamed into place.
+        self.store.remove_strays()?;
         let mut seen: std::collections::BTreeMap<BoxId, Seen> = std::collections::BTreeMap::new();
         for (id, record) in self.store.all()? {
             seen.insert(
@@ -414,18 +452,17 @@ impl Node {
     /// An `oci` box: its cgroup under the box root with the bounds in force (as a `process` box), and
     /// the container's init started in it from its bundle, blocked at the exec FIFO until
     /// [`Runtime::start`]. The container's state dir is the box's, removed with it by [`Node::scrub`],
-    /// and so is a rendered bundle's directory, its writable layer with it.
+    /// and so is a rendered bundle's directory, its writable layer with it. The box's record is
+    /// written with no lock held that another box's create takes, so a durable record's fsyncs hold
+    /// up no other box (goal 5 plan step 2).
     fn create_oci(&self, spec: BoxSpec, source: Source) -> Result<BoxInfo, Refusal> {
         // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
         // left unwatched.
         let slot = self.supervisor.reserve()?;
-        // From the shim's spawn until the init is watched, no sweep runs: the shim is reaped by
-        // create and the init by the supervisor, never by a sweep.
-        let _spawning = self.supervisor.spawning()?;
         let id = spec.id.clone();
         // The container's own state directory, which the oci class makes; recorded as the box's, so
         // delete and recovery remove it with the box, as they remove a rendered bundle.
-        let mut dirs = vec![self.oci_root.join(id.as_str())];
+        let mut dirs = vec![self.container_dir(&id)];
         if let Source::Rendered(dir, _) = &source {
             dirs.push(dir.clone());
         }
@@ -449,23 +486,34 @@ impl Node {
                 return Err(e);
             }
         };
-        // A container that makes a network namespace of its own in the agent's user namespace joins
-        // one the node made ahead, and the pool counts every container's (decision 4).
-        if let Err(e) =
+        // From the shim's spawn until create has reaped it, no sweep runs: the shim is create's to reap,
+        // never a sweep's.
+        let made = self.supervisor.spawning().and_then(|_spawning| {
+            // A container that makes a network namespace of its own in the agent's user namespace
+            // joins one the node made ahead, and the pool counts every container's (decision 4).
             self.oci()
-                .create_in_cgroup(id.as_str(), &bundle, None, cgroup, Some(&self.netns))
-        {
+                .create_in_cgroup(
+                    &self.container(&id),
+                    &bundle,
+                    None,
+                    cgroup,
+                    Some(&self.netns),
+                )
+                .map_err(Refusal::from)
+        });
+        if let Err(e) = made {
             // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
             // the state dir and the record.
             let _ = self.scrub(&id);
-            return Err(e.into());
+            return Err(e);
         }
         // The init is blocked at the exec FIFO, alive, and the agent's child since the shim exited;
         // record which process it is so a later restart can tell it from a recycled pid (recovery's
-        // init_alive), and watch it through its pidfd from now on.
+        // init_alive), and watch it through its pidfd from now on. Recorded before it's watched, so
+        // the exit the supervisor records goes into a record that names it.
         let watched = self
             .oci()
-            .state(id.as_str())
+            .state(&self.container(&id))
             .map_err(Refusal::from)
             .and_then(|state| {
                 record.init = init_proc_id(state.pid, state.start_time);
@@ -478,6 +526,9 @@ impl Node {
                     bundle: state.bundle,
                     cgroup: state.cgroup,
                 };
+                // Watched under the spawning lock, so no sweep reaps the init before it's owned; until
+                // then a sweep passes it by, alive at the exec FIFO.
+                let _spawning = self.supervisor.spawning()?;
                 self.supervisor
                     .watch(slot, &id, state.pid, start_ticks, container)
             });
@@ -652,7 +703,7 @@ impl Runtime for Node {
         // no container under the oci root is a process box or no box, which the record then says (goal 3
         // plan step 3: start costs one FIFO operation and the state read beside it). The init's liveness is
         // judged by the pidfd the supervisor holds for it, a poll.
-        let started = self.oci().start_with(id.as_str(), &|_| {
+        let started = self.oci().start_with(&self.container(id), &|_| {
             matches!(self.supervisor.runs(id), Ok(true))
         });
         match started {
@@ -757,7 +808,8 @@ impl Runtime for Node {
         if record.is_none() && self.root.get(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
-        // Unwatched first, so nothing writes the record on the init's behalf once delete has.
+        // Unwatched first, so the supervisor stops collecting the init; an exit it's recording as it's
+        // unwatched goes into this box's record alone, which the scrub removes.
         let init = self.supervisor.forget(id)?;
         if let Some(mut record) = record {
             record.phase = Phase::Deleting;
@@ -944,6 +996,49 @@ fn init_alive(init: ProcId) -> bool {
     }
 }
 
+fn counts_poisoned() -> Refusal {
+    Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
+}
+
+/// Where a node keeps its containers' state: on tmpfs, where a host crash takes it with the
+/// containers it describes, as runc and crun keep theirs (decision 1; runc's `--root` "should be
+/// located in tmpfs", crun(1) STATE): `/run/hex-node` for a node that runs as root,
+/// `$XDG_RUNTIME_DIR/hex-node` for one that doesn't, shared by the nodes there, each container named
+/// for its node ([`Node::container_dir`]). A rootless node with no `$XDG_RUNTIME_DIR` keeps it in its
+/// state directory instead, where it outlives the host and its boxes' records are fsynced for it (the
+/// store judges by filesystem). Readable by its owner alone.
+fn oci_root(owner: Owner, state_dir: &Path) -> Result<PathBuf, Refusal> {
+    let root = match owner {
+        Owner::Root => PathBuf::from("/run/hex-node"),
+        Owner::Rootless { .. } => std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .map_or_else(|| state_dir.join("oci"), |dir| dir.join("hex-node")),
+    };
+    fs::create_dir_all(&root)
+        .and_then(|()| fs::set_permissions(&root, fs::Permissions::from_mode(0o700)))
+        .map_err(|e| Refusal::os("making the containers' state directory", e))?;
+    Ok(root)
+}
+
+/// A node's key among the nodes that share its oci root: FNV-1a (64-bit) of its state directory's
+/// canonical path, the node's identity on its host, so a node restarted on the same state directory
+/// finds its containers again and two nodes never name one alike. The offset basis and prime are
+/// FNV-1a's own (IETF draft-eastlake-fnv, "FNV Basics" and "FNV Constants").
+fn node_key(state_dir: &Path) -> Result<String, Refusal> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = fs::canonicalize(state_dir)
+        .map_err(|e| Refusal::os("finding the state directory's path", e))?;
+    Ok(format!("{:016x}", fnv1a(path.as_os_str().as_bytes())))
+}
+
+/// FNV-1a, 64-bit: its arithmetic is modulo 2^64 by definition, so the multiply wraps.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,6 +1081,24 @@ mod tests {
             start_ticks: 1,
         };
         assert!(!init_alive(gone), "a pid with no live process isn't alive");
+    }
+
+    /// Goal 5 plan step 2: a node's key, which names its containers in the oci root it shares with
+    /// other nodes, is its state directory's: the same directory however it's named gives the same
+    /// key, and two directories give two. FNV-1a's 64-bit test vectors for "" and "a" hold.
+    #[test]
+    fn a_nodes_key_is_its_state_directorys() {
+        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let key = node_key(a.path()).unwrap();
+        assert_eq!(key.len(), 16, "{key}");
+        assert_eq!(
+            node_key(&a.path().join(".")).unwrap(),
+            key,
+            "the same directory, named otherwise"
+        );
+        assert_ne!(node_key(b.path()).unwrap(), key);
     }
 }
 
