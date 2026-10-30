@@ -1,7 +1,8 @@
-//! The seed format's tests (decision 3, goal 3 plan step 2: HEX-SEED-1 and HEX-SEED-2): every request
-//! and answer reads back as written; version 1's bytes are the ones recorded here, so a change to them
-//! fails (append-only); and hostile bytes, at every truncation, every bit flip and at random, are
-//! refused by type and never panic.
+//! The seed format's tests (decision 3, goal 3 plan step 2: HEX-SEED-1 and HEX-SEED-2; decision 5, goal 5
+//! plan step 4: HEX-SEED-3): every request and answer reads back as written; version 1's bytes are the
+//! ones recorded here, so a change to them fails (append-only); hostile bytes, at every truncation,
+//! every bit flip and at random, are refused by type and never panic; and a create reads as one only
+//! with the descriptors it says it carries.
 
 use super::*;
 use proptest::prelude::*;
@@ -41,6 +42,23 @@ fn answers() -> Vec<Answer> {
     ]
 }
 
+fn creates() -> Vec<Create> {
+    vec![
+        Create {
+            bundle: "/srv/bundles/box-1".to_owned(),
+            dir: "/run/hex-node/0123456789abcdef-box-1".to_owned(),
+            cgroup: Some("/sys/fs/cgroup/hex/0123456789abcdef-box-1".to_owned()),
+            network: true,
+        },
+        Create {
+            bundle: "/b".to_owned(),
+            dir: "/d".to_owned(),
+            cgroup: None,
+            network: false,
+        },
+    ]
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -73,6 +91,116 @@ fn version_1_messages_are_the_bytes_recorded() {
         assert_eq!(hex(&got), want);
     }
 }
+
+/// HEX-SEED-3: a create reads back as the one written, through [`read_create`] and [`read_message`] with
+/// the descriptors it carries; an exec reads through [`read_message`] as through [`read_request`]; and the
+/// create's bytes are the ones recorded here, the exec's beside them unchanged.
+#[test]
+fn a_create_reads_back_as_written_and_its_bytes_are_recorded() {
+    for want in creates() {
+        let bytes = create(&want).unwrap();
+        assert_eq!(read_create(&bytes, bytes.len()).unwrap(), want);
+        assert_eq!(
+            read_message(&bytes, bytes.len(), want.fds()).unwrap(),
+            Message::Create(want.clone())
+        );
+    }
+    let exec = request(&full()).unwrap();
+    assert_eq!(
+        read_message(&exec, exec.len(), REQUEST_FDS).unwrap(),
+        Message::Exec(full())
+    );
+    assert_eq!(hex(&create(&creates()[0]).unwrap()), GOLDEN_CREATE);
+    assert_eq!(creates()[0].fds(), CREATE_FDS + 1, "network adds the made-ahead netns");
+    assert_eq!(creates()[1].fds(), CREATE_FDS);
+    let unable = answer(&Answer::Refused {
+        failed: Failed::Unable,
+        why: "clone3: ENOSYS".to_owned(),
+    })
+    .unwrap();
+    assert_eq!(
+        read_answer(&unable, unable.len(), 0).unwrap(),
+        Answer::Refused {
+            failed: Failed::Unable,
+            why: "clone3: ENOSYS".to_owned()
+        }
+    );
+}
+
+/// HEX-SEED-3: a create or an exec that came with another count of descriptors than it says it carries,
+/// a create that names no bundle or no state directory, one whose `network` byte is neither 0 nor 1,
+/// and a message of an answer's kind are each refused by type; every truncation of a create is refused,
+/// and its bit flips never panic.
+#[test]
+fn a_malformed_create_is_refused_naming_what_is_wrong() {
+    let with_network = create(&creates()[0]).unwrap();
+    for got in [0, 1, 2, 4] {
+        assert!(
+            matches!(
+                read_message(&with_network, with_network.len(), got),
+                Err(Fault::Descriptors { want: 3, .. })
+            ),
+            "{got} descriptors"
+        );
+    }
+    let exec = request(&minimal()).unwrap();
+    assert!(matches!(
+        read_message(&exec, exec.len(), 2),
+        Err(Fault::Descriptors { want: 4, got: 2, .. })
+    ));
+    for nameless in [
+        Create {
+            bundle: String::new(),
+            ..creates()[1].clone()
+        },
+        Create {
+            dir: String::new(),
+            ..creates()[1].clone()
+        },
+    ] {
+        let bytes = create(&nameless).unwrap();
+        assert!(matches!(
+            read_create(&bytes, bytes.len()),
+            Err(Fault::Value { what: "create", .. })
+        ));
+    }
+    let mut flag = create(&creates()[1]).unwrap();
+    let last = flag.len() - 1;
+    flag[last] = 2;
+    assert!(matches!(
+        read_create(&flag, flag.len()),
+        Err(Fault::Value {
+            what: "network",
+            ..
+        })
+    ));
+    let started = answer(&answers()[0]).unwrap();
+    assert!(matches!(
+        read_message(&started, started.len(), 1),
+        Err(Fault::Kind { kind: 0x8001, .. })
+    ));
+    assert!(matches!(
+        read_create(&exec, exec.len()),
+        Err(Fault::Kind { kind: 0x0001, .. })
+    ));
+    assert!(matches!(
+        read_create(&with_network, MAX_REQUEST + 1),
+        Err(Fault::Oversized { .. })
+    ));
+    for n in 0..with_network.len() {
+        assert!(
+            read_create(&with_network[..n], n).is_err(),
+            "{n} bytes read"
+        );
+    }
+    for bit in 0..with_network.len() * 8 {
+        let mut flipped = with_network.clone();
+        flipped[bit / 8] ^= 1 << (bit % 8);
+        let _ = read_message(&flipped, flipped.len(), 3);
+    }
+}
+
+const GOLDEN_CREATE: &str = "4845585301000200120000002f7372762f62756e646c65732f626f782d31240000002f72756e2f6865782d6e6f64652f303132333435363738396162636465662d626f782d3101290000002f7379732f66732f6367726f75702f6865782f303132333435363738396162636465662d626f782d3101";
 
 const GOLDEN_FULL: &str = "484558530100010092100000120000002f72756e2f6865782f6f63692f626f782d3101180000002f7379732f66732f6367726f75702f6865782f626f782d31020000000c0000002f7573722f62696e2f656e760300000078207901050000002f776f726b020000000d000000504154483d2f7573722f62696e0a000000484f4d453d2f726f6f7401e80300000164000000";
 const GOLDEN_MINIMAL: &str =
@@ -210,10 +338,11 @@ fn a_long_reason_is_cut_to_fit_at_a_character() {
 }
 
 proptest! {
-    /// HEX-SEED-1: random bytes, as a request or as an answer, never panic.
+    /// HEX-SEED-1 and HEX-SEED-3: random bytes, as a request of either kind or as an answer, never panic.
     #[test]
-    fn random_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..3) {
+    fn random_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256), fds in 0usize..5) {
         let _ = read_request(&bytes, bytes.len());
+        let _ = read_message(&bytes, bytes.len(), fds);
         let _ = read_answer(&bytes, bytes.len(), fds);
     }
 

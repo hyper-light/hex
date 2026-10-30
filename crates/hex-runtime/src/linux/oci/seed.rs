@@ -533,9 +533,9 @@ pub fn exec_direct(
     }
 }
 
-/// Serves one request: prepares it, then starts the program by a single clone where the seed may, or
-/// through an intermediate where it may not, and returns the answer with the program's pidfd. A
-/// refusal the seed makes is returned in its place, and the seed stays serving.
+/// Serves one request: an exec into a container ([`serve_exec`]) or a container to make
+/// ([`serve_create`]), read by its kind and the descriptors it carried. A refusal the seed makes is
+/// returned in its place, and the seed stays serving.
 fn serve_one(
     buf: &[u8],
     size: usize,
@@ -544,10 +544,103 @@ fn serve_one(
     specs: &mut Specs,
 ) -> (Answer, Option<OwnedFd>) {
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
-    let req = match seed::read_request(bytes, size) {
-        Ok(req) => req,
-        Err(fault) => return refused(Failed::Request, fault.to_string()),
+    match seed::read_message(bytes, size, fds.len()) {
+        Ok(seed::Message::Exec(req)) => serve_exec(req, fds, pid_for, specs),
+        Ok(seed::Message::Create(create)) => serve_create(&create, fds, specs),
+        Err(fault) => refused(Failed::Request, fault.to_string()),
+    }
+}
+
+/// Makes a container the agent asked for (decision 5, goal 5 plan step 4): the seed opens its cgroup and,
+/// with the fresh namespaces its spec asks for, clones its init as a sibling — the agent's own child,
+/// born in the cgroup, PID 1 of its new pid namespace — and hands the agent its pidfd. The child does
+/// what the shim's child does ([`init::clone_child`]), up to the exec FIFO, then execs the container's
+/// program, so nothing of the seed's address space is carried past the exec (f17) and any state unique to
+/// the container is made anew in the child (f15). No process but the init, no `hex` exec per create.
+///
+/// `fds` are the create's: the init's sync pipe (write end), the map pipe (read end), then a network
+/// namespace made ahead when the create says one rides with it. A spec that joins a namespace by path
+/// can't be made by one clone; the seam renders no such bundle, so it is refused by type here, never made
+/// without the namespace it asked for (CLAUDE.md §3).
+fn serve_create(
+    create: &seed::Create,
+    fds: Vec<OwnedFd>,
+    specs: &mut Specs,
+) -> (Answer, Option<OwnedFd>) {
+    let mut fds = fds.into_iter();
+    let (Some(sync_w), Some(map_r)) = (fds.next(), fds.next()) else {
+        return refused(
+            Failed::Request,
+            format!("a create carries at least {} descriptors", seed::CREATE_FDS),
+        );
     };
+    // `read_message` has already held the descriptor count to the create's, so a third is the network
+    // namespace made ahead exactly when the create said one would ride along.
+    let network = fds.next();
+    let spec = match specs.get(&create.bundle) {
+        Ok(spec) => spec,
+        Err(e) => return refused(Failed::Start, e.to_string()),
+    };
+    if spec.linux.namespaces.iter().any(|n| n.path.is_some()) {
+        return refused(
+            Failed::Start,
+            "a create through a seed can't join a namespace by path; the seam renders no such bundle"
+                .to_owned(),
+        );
+    }
+    let cgroup = match open_cgroup(create.cgroup.as_deref()) {
+        Ok(cgroup) => cgroup,
+        Err(e) => return refused(Failed::Start, e.to_string()),
+    };
+    let made_ahead = network.is_some();
+    let flags = init::fresh_clone_flags(spec, made_ahead);
+    match sys::clone_sibling(cgroup.as_ref().map(AsFd::as_fd), flags) {
+        Ok(None) => refused(
+            Failed::Unable,
+            "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
+        ),
+        Ok(Some(sys::Sibling::Child)) => {
+            // The init. It returns here only if a step before the exec FIFO failed; its error goes to
+            // the agent on the sync pipe, as the shim's does, then it exits (it must not run the seed's
+            // serve loop). Born in the cgroup and the fresh namespaces, the agent's own child.
+            let r = init::clone_child(
+                spec,
+                &create.bundle,
+                Path::new(&create.dir),
+                sync_w.as_fd(),
+                Some(map_r),
+                network,
+            );
+            if let Err(e) = r {
+                init::msg(sync_w.as_fd(), &format!("E{e}"));
+                sys::exit_child(127);
+            }
+            // The no-process case: set up, nothing to run. Its readiness went on the sync pipe already.
+            sys::exit_child(0);
+        }
+        Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
+            drop((sync_w, map_r, network, cgroup));
+            match u32::try_from(pid) {
+                Ok(pid) => (Answer::Started { pid }, Some(pidfd)),
+                Err(_) => {
+                    let _ =
+                        rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+                    refused(Failed::Start, "clone3 returned a pid out of range".to_owned())
+                }
+            }
+        }
+        Err(e) => refused(Failed::Start, e.to_string()),
+    }
+}
+
+/// Serves an exec into a container (decision 3): the program started by a single clone where the seed
+/// may, or through an intermediate where it may not, with its pidfd. A refusal is returned in its place.
+fn serve_exec(
+    req: Request,
+    fds: Vec<OwnedFd>,
+    pid_for: &mut PidFor,
+    specs: &mut Specs,
+) -> (Answer, Option<OwnedFd>) {
     let [stdin, stdout, stderr, init]: [OwnedFd; seed::REQUEST_FDS] = match fds.try_into() {
         Ok(four) => four,
         Err(got) => {
@@ -610,7 +703,7 @@ fn single_clone(
         pid_for.reset().map_err(|e| (Failed::Seed, e))?;
     }
     let cloned =
-        sys::clone_sibling(p.cgroup.as_ref().map(AsFd::as_fd)).map_err(|e| (Failed::Start, e))?;
+        sys::clone_sibling(p.cgroup.as_ref().map(AsFd::as_fd), 0).map_err(|e| (Failed::Start, e))?;
     match cloned {
         None => Ok(Single::Unable(Box::new(p), stdio)),
         Some(sys::Sibling::Child) => {
@@ -919,6 +1012,34 @@ pub fn send_request(
     if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
         return Err(OciError::os(
             "sending an exec request's descriptors",
+            "no room for the descriptors",
+        ));
+    }
+    send(socket, &bytes, &mut control)
+}
+
+/// Sends one create on `socket`, the descriptors it carries riding with it (`SCM_RIGHTS`): the init's
+/// sync pipe (write end) and map pipe (read end), then a network namespace made ahead when one is given.
+/// The agent's end of the agent↔seed socket (`hex-node`'s create pool) sends this.
+pub fn send_create(
+    socket: BorrowedFd<'_>,
+    create: &seed::Create,
+    fds: &[BorrowedFd<'_>],
+) -> Result<(), OciError> {
+    if fds.len() != create.fds() {
+        return Err(OciError::Broken(format!(
+            "a create carries {} descriptors, not {}",
+            create.fds(),
+            fds.len()
+        )));
+    }
+    let bytes = seed::create(create)
+        .map_err(|f| OciError::Broken(format!("encoding a create: {f}")))?;
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(seed::MAX_REQUEST_FDS))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    if !control.push(SendAncillaryMessage::ScmRights(fds)) {
+        return Err(OciError::os(
+            "sending a create's descriptors",
             "no room for the descriptors",
         ));
     }

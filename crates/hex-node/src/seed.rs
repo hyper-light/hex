@@ -275,7 +275,9 @@ fn round_trip(
             };
             match failed {
                 Failed::Seed => Err(Trip::Broken(refusal)),
-                Failed::Request | Failed::Start => Err(Trip::Refused(refusal)),
+                // `Unable` is a create's outcome (no clone3 into a cgroup), which an exec never meets;
+                // were it to, the seed is whole, so the exec is refused by type, not the seed replaced.
+                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(refusal)),
             }
         }
     }

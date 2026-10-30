@@ -36,6 +36,7 @@ use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
+use crate::createpool::CreatePool;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
@@ -90,6 +91,9 @@ pub struct Node {
     /// The pool of `hex __oci-seed` processes that run execs into `oci` boxes, started on the first
     /// such exec from the same `hex` binary the class re-execs for its init ([`Node::seed_pool`]).
     seeds: OnceLock<SeedPool>,
+    /// The pool of `hex __oci-seed` processes that make `oci` boxes: a create hands one the container's
+    /// spec and it clones the init in place of the shim's re-exec (decision 5; [`Node::create_pool`]).
+    create_seeds: OnceLock<CreatePool>,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
@@ -168,6 +172,7 @@ impl Node {
             owner,
             masked: thermal_throttle()?,
             seeds: OnceLock::new(),
+            create_seeds: OnceLock::new(),
             specs: Mutex::new(Specs::default()),
             netns,
             null: rustix::fs::open(
@@ -505,18 +510,20 @@ impl Node {
                 return Err(e);
             }
         };
-        // From the shim's spawn until create has reaped it, no sweep runs: the shim is create's to reap,
-        // never a sweep's.
+        // A create hands an idle seed the container's spec and the seed clones the init as the agent's
+        // own child (decision 5), in place of the shim's re-exec of the hex binary.
+        let seeds = self.create_pool()?;
         let made = self.supervisor.spawning().and_then(|_spawning| {
             // A container that makes a network namespace of its own in the agent's user namespace
             // joins one the node made ahead, and the pool counts every container's (decision 4).
             self.oci()
-                .create_in_cgroup(
+                .create_in_cgroup_seeded(
                     &self.container(&id),
                     &bundle,
                     None,
                     cgroup,
                     Some(&self.netns),
+                    seeds,
                 )
                 .map_err(Refusal::from)
         });
@@ -691,6 +698,36 @@ impl Node {
         self.seeds
             .get()
             .ok_or_else(|| Refusal::Broken("the exec seed pool wasn't built".to_owned()))
+    }
+
+    /// The create seed pool, built once on first use from the same `hex` binary the class re-execs for
+    /// its init (so the bench and a linked-in node use the binary [`Node::with_oci_helper`] names, as
+    /// [`Node::seed_pool`] does). A race to build it drops the losing empty pool, which has started no
+    /// seed.
+    fn create_pool(&self) -> Result<&CreatePool, Refusal> {
+        if let Some(pool) = self.create_seeds.get() {
+            return Ok(pool);
+        }
+        let exe = match &self.oci_helper {
+            Some(exe) => exe.clone(),
+            None => {
+                std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
+            }
+        };
+        let _ = self.create_seeds.set(CreatePool::new(exe));
+        self.create_seeds
+            .get()
+            .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))
+    }
+
+    /// What the node's create seeds have done since the pool opened (decision 5): the counts the bench
+    /// and the node's metrics read, or the pool's default when no create has built it. Read around a
+    /// phase like the network-namespace counts ([`Node::netns`]).
+    pub fn create_seeds(&self) -> Result<hex_core::seeds::Counts, Refusal> {
+        match self.create_seeds.get() {
+            Some(pool) => pool.counts(),
+            None => Ok(hex_core::seeds::Counts::default()),
+        }
     }
 }
 
