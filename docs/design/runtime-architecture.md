@@ -699,10 +699,18 @@ Intel Core i9-14900HX, Linux 6.19.10, the container on CPUs 4-31), 2026-10-30T00
 load was 7.17 at the start and 6.85 at the end, from other work on the host, which ran in its at-rest clock state
 (`probes/host_clock.sh`). Binaries: `hex 0.1.0 (ef64dbc)`, sha256 596969cb3a612644; `seam_oci` sha256
 0656cae0a8464d57; libcrun 1.30.1 in process beside it, in the same three rounds. The node's state was where the OCI pass
-keeps it, on the container's overlay over fedora's btrfs. Each traced create is cut into 35 parts at system calls on
-its critical path, from the call's marker to its return, across the node agent, the shim and the container's init.
-The parts' p50s summed are 99.5% of the p50 of the untraced creates between them (99.1-100.1% by round), so they
-account for the whole create (the step's criterion: within 10%). By group (ms; each group its parts' p50s summed):
+keeps it, on the container's overlay over fedora's btrfs.
+
+**The bench's `/run` was overlayfs.** In the OCI pass's container `/run` is the overlay too (the run's environment;
+only `/dev/shm` is a tmpfs there, as step 2 found), and `oci_bench.py` keeps every runtime's state under it, libcrun's
+in `/run/libcrun` (`oci_bench.py:70`). So in this run both runtimes' state sat on overlayfs, where a host's `/run` is a
+tmpfs. This is the baseline: today's code in today's container. Step 2 mounts a tmpfs at `/run` in the pass's
+containers, so a pass matches a real host.
+
+Each traced create is cut into 35 parts at system calls on its critical path, from the call's marker to its return,
+across the node agent, the shim and the container's init. The parts' p50s summed are 99.5% of the p50 of the untraced
+creates between them (99.1-100.1% by round), so they account for the whole create (the step's criterion: within 10%).
+By group (ms; each group its parts' p50s summed):
 
 <!-- record: bench/competitive/probes/create_breakdown.md -->
 | Group | r1 | r2 | r3 | pooled | share |

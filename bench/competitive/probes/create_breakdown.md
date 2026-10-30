@@ -96,8 +96,12 @@ the microsecond.
   its glibc-static. `seam_oci` of ef64dbc with this probe's `HEXBENCH_TRACE_OPS`, sha256 0656cae0a8464d57. libcrun
   1.30.1 (079ff6a7) in process, driver sha256 5c356f2139adc232.
 - **The node's state:** under `/root/.cache/hex-t7/ociseam` in the container, on the container's overlay, whose
-  layers are on fedora's btrfs (`/dev/nvme1n1p3`, `compress=zstd:1`, as Docker's root). `/run` is on the overlay too.
-  The cgroup root's controllers: cpu, io, memory and pids.
+  layers are on fedora's btrfs (`/dev/nvme1n1p3`, `compress=zstd:1`, as Docker's root). The cgroup root's controllers:
+  cpu, io, memory and pids.
+- **The bench's `/run` was overlayfs:** the container's `/run` is the overlay too (only `/dev/shm` is a tmpfs there,
+  as goal 5's step 2 found), and `oci_bench.py` keeps libcrun's state in `/run/libcrun` (`oci_bench.py:70`). So both
+  runtimes' state sat on overlayfs, where a host's `/run` is a tmpfs: today's code in today's container, the baseline.
+  Step 2 mounts a tmpfs at `/run` in host.sh's and docker_pass.sh's containers, so a pass matches a real host.
 - **Run:** `~/.cache/hex-bench/out/create-breakdown-20261030T000822Z` on fedora, the harness at ef64dbc with this
   probe's changes. 3 rounds of 1,000 timed lifecycles after 100 untimed, each round's libcrun, seam and traced runs in
   a shuffled order. 1,500 traced creates, each cut into its 35 parts; no trace event lost, no line unread. The probe
