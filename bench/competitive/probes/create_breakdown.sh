@@ -24,11 +24,14 @@ cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/crun" "$
   sleep 10
 done
 ROOT=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo unknown)
+# Every container up on the host, so what ran beside the probe is in its record (another bench, or a fleet's checks).
+containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | paste -sd ';' - | sed 's/;/; /g'; }
 { echo "host: $(hostname)"; echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to ${CPUSET:-4-31}"
   [ "${LOAD_GATE:-1}" = 0 ] && echo "load gate: skipped (LOAD_GATE=0): the comparisons are within this run"
   echo "load at start: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at start, $r: $(head -1 "/proc/pressure/$r")"; done
+  echo "containers at start, every one up: $(containers)"
   echo "docker's root: $ROOT, on $(stat -f -c %T "$ROOT" 2>/dev/null || echo unknown) ($(findmnt -n -o SOURCE,FSTYPE,OPTIONS -T "$ROOT" 2>/dev/null | cut -c1-160))"
   echo "hex: $("$OUT/bin/hex" --version) (sha256 $(sha256sum "$OUT/bin/hex" | cut -c1-16)), $(file -b "$OUT/bin/hex" | cut -d, -f1-4)"
   echo "seam_oci: sha256 $(sha256sum "$OUT/bin/seam_oci" | cut -c1-16)"
@@ -44,5 +47,6 @@ timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpus
   -e N -e WARMUP -e ROUNDS -e PROBE_ONLY \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
-  for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done; } >> "$OUT/env.txt"
+  for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done
+  echo "containers at end, every one up: $(containers)"; } >> "$OUT/env.txt"
 echo "results: $OUT"
