@@ -1088,7 +1088,7 @@ concurrency caps a host near one root per walk (about 930 a second at 11,000 thr
 This takes it off create's path on a root node, with no new kernel version (decision 6 needs 7.0+; fedora runs 6.19).
 
 - **The seed prunes its own mount namespace once, at start.** A create seed on a root node, before it serves,
-  `unshare(CLONE_NEWNS)`, makes `/` private, mounts a small `tmpfs` holding an empty `r` and a `proc` directory,
+  `unshare(CLONE_NEWNS)`, makes `/` private, mounts a small `tmpfs` holding an empty `r`,
   `pivot_root`s into it once (one walk per seed's life, off every create's path), detaches the old root and remounts the
   tmpfs read-only. Its namespace then holds exactly two mounts, the namespace's root and that read-only tmpfs: no proc,
   no sysfs, nothing of the host's (f78). Every init the seed clones copies that namespace (`CLONE_NEWNS` copies the

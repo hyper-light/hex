@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rustix::fs::{Mode, OFlags};
-use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
+use rustix::mount::{
+    FsMountFlags, FsOpenFlags, MountAttrFlags, MountFlags, MountPropagationFlags, MoveMountFlags,
+    OpenTreeFlags, UnmountFlags,
+};
 use rustix::thread::UnshareFlags;
 
 use crate::linux::oci::inroot::{self, Make};
@@ -156,7 +159,15 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     };
     match forked {
         sys::Fork::Child => Ok(
-            match container(&spec, &bundle, &container_dir, sync, procs, made_ahead) {
+            match container(
+                &spec,
+                &bundle,
+                FifoDir::Path(&container_dir),
+                sync,
+                procs,
+                made_ahead,
+                Root::Classic,
+            ) {
                 Ok(()) => 0,
                 Err(e) => {
                     msg(sync, &format!("E{e}"));
@@ -209,19 +220,93 @@ pub(crate) fn clone_child(
         }
         None => false,
     };
-    container(spec, bundle, container_dir, sync, None, made_ahead)
+    container(
+        spec,
+        bundle,
+        FifoDir::Path(container_dir),
+        sync,
+        None,
+        made_ahead,
+        Root::Classic,
+    )
+}
+
+/// A create's clone child on the pruned-seed root path (goal 5 plan step 2): what [`clone_child`] does,
+/// but its namespace is a copy of the seed's two-mount pruned namespace, so it builds the root from the
+/// `sources` the agent cloned (the rootfs and one tree per bind mount) rather than from host paths, and
+/// opens the exec FIFO through the state-directory descriptor `fifo_dir` the agent handed it. The pruned
+/// path is only taken on a root node for a container that makes its own mount namespace and joins no user
+/// or mount namespace by path (the runtime's routing), so no user-namespace map handshake runs here.
+pub(crate) fn clone_child_pruned(
+    spec: &Spec,
+    bundle: &str,
+    fifo_dir: OwnedFd,
+    sources: PrunedSources,
+    sync: BorrowedFd<'_>,
+    network: Option<OwnedFd>,
+) -> Result<(), OciError> {
+    join_namespace_paths(spec)?;
+    let made_ahead = match network {
+        Some(network) => {
+            sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
+            true
+        }
+        None => false,
+    };
+    container(
+        spec,
+        bundle,
+        FifoDir::Fd(fifo_dir),
+        sync,
+        None,
+        made_ahead,
+        Root::Pruned(&sources),
+    )
+}
+
+/// Where the container's exec FIFO directory (its state directory) comes from. The shim and the
+/// classic clone child open it by path, as they can; the pruned clone child can't (its namespace holds
+/// no host path), so the agent hands it as a descriptor with the create (goal 5 plan step 2).
+pub(crate) enum FifoDir<'a> {
+    Path(&'a Path),
+    Fd(OwnedFd),
+}
+
+impl FifoDir<'_> {
+    fn open(self) -> Result<OwnedFd, OciError> {
+        match self {
+            FifoDir::Path(p) => rustix::fs::open(
+                p,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| OciError::os("opening the container directory", e)),
+            FifoDir::Fd(fd) => Ok(fd),
+        }
+    }
+}
+
+/// How the container's root is built. The classic path binds the rootfs in a copy of the agent's full
+/// mount namespace and `pivot_root`s into it; the pruned path (goal 5 plan step 2) attaches the rootfs
+/// and bind sources the agent cloned (here) in a copy of the seed's two-mount namespace and ends with
+/// `MS_MOVE` and `chroot`, with no `pivot_root` walk of the host's threads.
+pub(crate) enum Root<'a> {
+    Classic,
+    Pruned(&'a PrunedSources),
 }
 
 /// The container (PID 1 of its namespaces): join its cgroup through `procs` (when it wasn't born there),
 /// set up the world, signal ready, wait for `start`, exec. `network_made_ahead`: its network namespace
-/// came from the node's pool, its loopback already up.
+/// came from the node's pool, its loopback already up. `root` chooses how the root filesystem is built
+/// (classic or the pruned seed's), `fifo` where the exec FIFO's directory comes from.
 pub(crate) fn container(
     spec: &Spec,
     bundle: &str,
-    container_dir: &Path,
+    fifo: FifoDir<'_>,
     sync: BorrowedFd<'_>,
     procs: Option<OwnedFd>,
     network_made_ahead: bool,
+    root: Root<'_>,
 ) -> Result<(), OciError> {
     // First of all, before it allocates or starts anything: into its cgroup, so its limits and
     // accounting cover all it does. Then a fresh cgroup namespace, so the namespace's root is the
@@ -240,14 +325,9 @@ pub(crate) fn container(
         sys::unshare(UnshareFlags::NEWCGROUP)?;
     }
 
-    // The exec FIFO lives in the runtime's state dir, outside the rootfs; open its directory now,
-    // before pivot_root removes that path from view, and open the FIFO through this fd later.
-    let fifo_dir = rustix::fs::open(
-        container_dir,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| OciError::os("opening the container directory", e))?;
+    // The exec FIFO lives in the runtime's state dir, outside the rootfs; its directory is opened now,
+    // before the root switch removes that path from view, and the FIFO opened through this fd later.
+    let fifo_dir = fifo.open()?;
 
     let _ = rustix::process::setsid();
     // A network namespace of the container's own holds loopback, down until it's brought up, as
@@ -256,7 +336,10 @@ pub(crate) fn container(
         net::loopback_up()?;
     }
     if spec.makes_namespace("mount") {
-        setup_rootfs(spec, bundle)?;
+        match root {
+            Root::Classic => setup_rootfs(spec, bundle)?,
+            Root::Pruned(sources) => setup_rootfs_pruned(spec, sources)?,
+        }
     }
     if spec.makes_namespace("uts")
         && let Some(hostname) = &spec.hostname
@@ -635,6 +718,313 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
             .map_err(|e| OciError::os("setting rootfs propagation", e))?;
     }
     Ok(())
+}
+
+/// The sources the agent cloned in its own mount namespace for a pruned create's root (goal 5 plan
+/// step 2): the rootfs and one detached tree per bind mount, in the order the spec lists its bind
+/// mounts. The clone child attaches them with `move_mount`, so nothing of the host is read by path.
+pub(crate) struct PrunedSources {
+    pub rootfs: OwnedFd,
+    pub binds: Vec<OwnedFd>,
+}
+
+/// `move_mount` from one descriptor to another, each named by the descriptor itself (empty paths).
+const FD_TO_FD: MoveMountFlags = MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH
+    .union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
+
+/// Builds the container's root on the pruned-seed path (goal 5 plan step 2), fd-based. The init's
+/// namespace is a copy of the seed's two mounts — its root tmpfs and an empty `/r` — so it attaches the
+/// rootfs the agent cloned at `/r` (a path in its own namespace, not the host's), makes the spec's
+/// mounts beneath (each bind from the tree the agent cloned, by `move_mount`; each filesystem by
+/// `fsopen`/`fsmount`), its devices, symlinks, masks and read-only paths, and ends with `MS_MOVE` onto
+/// `/` and `chroot`, not `pivot_root`: no walk of the host's threads (f6, f75, f80) and a copied table
+/// of two mounts (f9, f76). Every target is resolved inside the rootfs with `openat2(RESOLVE_IN_ROOT)`
+/// ([`inroot`]), as the classic path resolves inside the bound rootfs, and the mount is attached to that
+/// descriptor, there being no `/proc/self/fd` to name it by path in this namespace. MS_MOVE is safe
+/// here, where it is not in a copy of the host's namespace, because nothing of the host lies beneath the
+/// root (`goal5-root.md` §3): the escapes it opens there (E2, E3, a user-namespaced root) are closed.
+fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciError> {
+    let rootfs = Path::new("/r");
+    rustix::mount::move_mount(
+        sources.rootfs.as_fd(),
+        "",
+        rustix::fs::CWD,
+        "/r",
+        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+    )
+    .map_err(|e| OciError::os("attaching the rootfs", e))?;
+
+    let mut binds = sources.binds.iter();
+    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
+        do_mount_pruned(rootfs, &op, &mut binds)?;
+    }
+    if binds.next().is_some() {
+        return Err(OciError::Broken(
+            "the create carried more bind-source trees than the spec has bind mounts".to_owned(),
+        ));
+    }
+    // A pruned create is a root node's, never a user namespace's (the runtime routes those classic), so
+    // devices are made with `mknod`, as the classic path makes them outside a user namespace.
+    make_default_devices(rootfs, false)?;
+    for dev in &spec.linux.devices {
+        make_device(rootfs, dev, false)?;
+    }
+    make_default_symlinks(rootfs)?;
+    for path in &spec.linux.masked_paths {
+        mask_path_pruned(rootfs, path)?;
+    }
+    for path in &spec.linux.readonly_paths {
+        readonly_path_pruned(rootfs, path)?;
+    }
+    if spec.root.readonly {
+        // The rootfs mount alone read-only (not its submounts): not recursive, as the classic path's
+        // remount changes only the bind's top.
+        let top = target(rootfs, "/", Make::Nothing)?;
+        sys::mount_setattr(
+            top.as_fd(),
+            false,
+            &sys::MountAttrs {
+                set: sys::MOUNT_ATTR_RDONLY,
+                clr: 0,
+                propagation: 0,
+            },
+        )
+        .map_err(|e| OciError::os("remounting the rootfs read-only", e))?;
+    }
+
+    // The root switch, with no pivot_root. chdir into the rootfs, move it onto `/`, chroot into it.
+    rustix::process::chdir(rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
+    rustix::mount::mount_move(".", "/").map_err(|e| OciError::os("moving the root onto /", e))?;
+    rustix::process::chroot(".").map_err(|e| OciError::os("chroot into the root", e))?;
+    rustix::process::chdir("/").map_err(|e| OciError::os("chdir /", e))?;
+    if let Some(prop) = spec
+        .linux
+        .rootfs_propagation
+        .as_deref()
+        .and_then(propagation)
+    {
+        rustix::mount::mount_change("/", prop)
+            .map_err(|e| OciError::os("setting rootfs propagation", e))?;
+    }
+    Ok(())
+}
+
+/// One of the spec's mounts on the pruned path: a bind from the next tree the agent cloned (its flags
+/// set on the tree, then attached by `move_mount`), or a filesystem made with `fsopen`/`fsmount` and
+/// attached the same way. The destination is resolved inside the rootfs ([`target`]), as the classic
+/// [`do_mount`] resolves it, and the mount attached to that descriptor (no `/proc/self/fd` here).
+fn do_mount_pruned<'a>(
+    rootfs: &Path,
+    op: &crate::linux::oci::mount::Op,
+    binds: &mut impl Iterator<Item = &'a OwnedFd>,
+) -> Result<(), OciError> {
+    let at = || format!("{} at {}", op.kind_source, op.destination);
+    if op.is_bind {
+        let tree = binds.next().ok_or_else(|| {
+            OciError::Broken(format!("the bind at {} has no source tree", op.destination))
+        })?;
+        let make = if is_regular_file(tree.as_fd())? {
+            Make::File
+        } else {
+            Make::Dir
+        };
+        let target_fd = target(rootfs, &op.destination, make)?;
+        // The source's flags set on the tree before it is attached, recursively for a recursive bind,
+        // so the submounts a recursive bind carries take them too (the classic path remounts each one,
+        // `remount_cgroupfs_readonly`). crun sets a tree's attributes the same way.
+        let set = attr_set(op.flags);
+        if set != 0 {
+            sys::mount_setattr(
+                tree.as_fd(),
+                op.recursive_bind,
+                &sys::MountAttrs {
+                    set,
+                    clr: 0,
+                    propagation: 0,
+                },
+            )
+            .map_err(|e| OciError::os("setting a bind's attributes", format!("{}: {e}", at())))?;
+        }
+        rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("attaching a bind", format!("{}: {e}", at())))?;
+    } else {
+        let target_fd = target(rootfs, &op.destination, Make::Dir)?;
+        let mount = make_fs(&op.fstype, &op.data, op.flags).map_err(|e| {
+            OciError::os(
+                "making a filesystem",
+                format!("{} at {}: {e}", op.fstype, op.destination),
+            )
+        })?;
+        rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD).map_err(
+            |e| {
+                OciError::os(
+                    "attaching a filesystem",
+                    format!("{} at {}: {e}", op.fstype, op.destination),
+                )
+            },
+        )?;
+    }
+    if let Some(prop) = op.propagation {
+        let (ms, rec) = propagation_ms(prop);
+        let top = target(rootfs, &op.destination, Make::Nothing)?;
+        sys::mount_setattr(
+            top.as_fd(),
+            rec,
+            &sys::MountAttrs {
+                set: 0,
+                clr: 0,
+                propagation: ms,
+            },
+        )
+        .map_err(|e| OciError::os("setting a mount's propagation", format!("{}: {e}", at())))?;
+    }
+    Ok(())
+}
+
+/// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its data options the
+/// spec's and its read-only, `nosuid`, `nodev` and `noexec` set at `fsmount`: a detached mount
+/// descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
+/// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`.
+fn make_fs(fstype: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
+    let fs = rustix::mount::fsopen(fstype, FsOpenFlags::empty())
+        .map_err(|e| OciError::os("fsopen", e))?;
+    for opt in data.split(',').filter(|s| !s.is_empty()) {
+        match opt.split_once('=') {
+            Some((key, value)) => rustix::mount::fsconfig_set_string(fs.as_fd(), key, value)
+                .map_err(|e| OciError::os("a filesystem option", format!("{opt}: {e}")))?,
+            None => rustix::mount::fsconfig_set_flag(fs.as_fd(), opt)
+                .map_err(|e| OciError::os("a filesystem flag", format!("{opt}: {e}")))?,
+        }
+    }
+    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| OciError::os("fsconfig create", e))?;
+    rustix::mount::fsmount(fs.as_fd(), FsMountFlags::FSMOUNT_CLOEXEC, attr_flags(flags))
+        .map_err(|e| OciError::os("fsmount", e))
+}
+
+/// Masks a path on the pruned path (goal 5 plan step 2): a directory with a read-only empty tmpfs, a
+/// file by binding the container's own `/dev/null` over it. The classic [`mask_path`] binds the host's
+/// `/dev/null`; this namespace holds none, so the container's own is used, as the research prescribes.
+fn mask_path_pruned(rootfs: &Path, path: &str) -> Result<(), OciError> {
+    let Some(target_fd) = inroot::open(rootfs, path, Make::Nothing)? else {
+        return Ok(());
+    };
+    let is_dir = rustix::fs::fstat(&target_fd)
+        .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
+        .map_err(|e| OciError::os("masking a path", format!("{path}: {e}")))?;
+    if is_dir {
+        let mount = make_fs("tmpfs", "size=0k", MountFlags::RDONLY)
+            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+        rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+    } else {
+        let Some(null) = inroot::open(rootfs, "/dev/null", Make::Nothing)? else {
+            return Err(OciError::Config(format!(
+                "masking {path} needs the container's /dev/null, which isn't there"
+            )));
+        };
+        let tree = rustix::mount::open_tree(
+            null.as_fd(),
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::AT_EMPTY_PATH
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+        )
+        .map_err(|e| OciError::os("masking a file", format!("{path}: {e}")))?;
+        rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("masking a file", format!("{path}: {e}")))?;
+    }
+    Ok(())
+}
+
+/// A read-only path on the pruned path: the target cloned as a detached tree, set read-only on the
+/// tree (recursively), and moved back over itself. The classic [`readonly_path`] binds and remounts
+/// through `/proc/self/fd`, which this namespace has not.
+fn readonly_path_pruned(rootfs: &Path, path: &str) -> Result<(), OciError> {
+    let Some(target_fd) = inroot::open(rootfs, path, Make::Nothing)? else {
+        return Ok(());
+    };
+    let tree = rustix::mount::open_tree(
+        target_fd.as_fd(),
+        "",
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::AT_EMPTY_PATH
+            | OpenTreeFlags::AT_RECURSIVE
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+    )
+    .map_err(|e| OciError::os("a read-only path", format!("{path}: {e}")))?;
+    sys::mount_setattr(
+        tree.as_fd(),
+        true,
+        &sys::MountAttrs {
+            set: sys::MOUNT_ATTR_RDONLY,
+            clr: 0,
+            propagation: 0,
+        },
+    )
+    .map_err(|e| OciError::os("a read-only path", format!("{path}: {e}")))?;
+    rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+        .map_err(|e| OciError::os("a read-only path", format!("{path}: {e}")))?;
+    Ok(())
+}
+
+/// Whether the mount a detached tree's descriptor roots is a regular file (a file-source bind), so its
+/// target is made as a file, not a directory.
+fn is_regular_file(fd: BorrowedFd<'_>) -> Result<bool, OciError> {
+    let st = rustix::fs::fstat(fd).map_err(|e| OciError::os("stat a bind source", e))?;
+    Ok(rustix::fs::FileType::from_raw_mode(st.st_mode) == rustix::fs::FileType::RegularFile)
+}
+
+/// A spec mount's read-only, `nosuid`, `nodev` and `noexec` as `mount_attr`'s `attr_set` bits, for a
+/// bind tree set with [`sys::mount_setattr`].
+fn attr_set(flags: MountFlags) -> u64 {
+    let mut set = 0u64;
+    if flags.contains(MountFlags::RDONLY) {
+        set |= sys::MOUNT_ATTR_RDONLY;
+    }
+    if flags.contains(MountFlags::NOSUID) {
+        set |= sys::MOUNT_ATTR_NOSUID;
+    }
+    if flags.contains(MountFlags::NODEV) {
+        set |= sys::MOUNT_ATTR_NODEV;
+    }
+    if flags.contains(MountFlags::NOEXEC) {
+        set |= sys::MOUNT_ATTR_NOEXEC;
+    }
+    set
+}
+
+/// The same flags as [`MountAttrFlags`], for a filesystem made read-only (and so on) at `fsmount`.
+fn attr_flags(flags: MountFlags) -> MountAttrFlags {
+    let mut a = MountAttrFlags::empty();
+    if flags.contains(MountFlags::RDONLY) {
+        a |= MountAttrFlags::MOUNT_ATTR_RDONLY;
+    }
+    if flags.contains(MountFlags::NOSUID) {
+        a |= MountAttrFlags::MOUNT_ATTR_NOSUID;
+    }
+    if flags.contains(MountFlags::NODEV) {
+        a |= MountAttrFlags::MOUNT_ATTR_NODEV;
+    }
+    if flags.contains(MountFlags::NOEXEC) {
+        a |= MountAttrFlags::MOUNT_ATTR_NOEXEC;
+    }
+    a
+}
+
+/// A mount's propagation as `mount_attr`'s `propagation` value and whether it applies recursively,
+/// for [`sys::mount_setattr`]. Exactly one of unbindable, private, slave (downstream) or shared.
+fn propagation_ms(flags: MountPropagationFlags) -> (u64, bool) {
+    let recursive = flags.contains(MountPropagationFlags::REC);
+    let ms = if flags.contains(MountPropagationFlags::SHARED) {
+        sys::MS_SHARED
+    } else if flags.contains(MountPropagationFlags::DOWNSTREAM) {
+        sys::MS_SLAVE
+    } else if flags.contains(MountPropagationFlags::UNBINDABLE) {
+        sys::MS_UNBINDABLE
+    } else {
+        sys::MS_PRIVATE
+    };
+    (ms, recursive)
 }
 
 /// A rootfs-propagation name (OCI `rootfsPropagation`) as a propagation flag.
