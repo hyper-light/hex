@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +24,7 @@ use rustix::process::PidfdFlags;
 
 use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
 use crate::linux::oci::init;
+use crate::linux::oci::programs::{self, Programs};
 use crate::linux::oci::resources::{self, Plan};
 use crate::linux::oci::spec::{IdMapping, Resources, Spec};
 use crate::linux::oci::state::{self, Dir, State, Status};
@@ -105,11 +106,21 @@ pub trait Networks {
     fn on_path(&self) -> Result<(), OciError>;
 }
 
-/// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
-/// may join one of, and how its init is started.
+/// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
+/// pool), asked once the spec is read, and the device programs it keeps loaded, one per policy
+/// ([`Programs::attach`]; goal 5 extended, step 1). A create given neither makes its container's
+/// network namespace on its path, and finds or loads its device program as the command line does.
+#[derive(Clone, Copy, Default)]
+pub struct Held<'a> {
+    pub networks: Option<&'a dyn Networks>,
+    pub devices: Option<&'a Programs>,
+}
+
+/// How a create makes its container: where its cgroup comes from, what the node holds ready for it, and
+/// how its init is started.
 struct Route<'a> {
     cgroup: Cgroup,
-    networks: Option<&'a dyn Networks>,
+    held: Held<'a>,
     start: Start<'a>,
 }
 
@@ -224,7 +235,7 @@ impl Runtime {
             pid_file,
             Route {
                 cgroup: Cgroup::FromSpec,
-                networks: None,
+                held: Held::default(),
                 start: Start::Shim,
             },
         )
@@ -236,16 +247,16 @@ impl Runtime {
     /// path makes and bounds every box's cgroup. The spec's device list still governs the container's
     /// device access; its `cgroupsPath` and `linux.resources` are ignored, the box's bounds standing
     /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
-    /// `networks`, when given, are the network namespaces the caller makes ahead (decision 4's pool),
-    /// asked once the spec is read: a container that makes a network namespace of its own in this
-    /// process's user namespace joins one in place of making its own.
+    /// `held` is what the caller holds ready for it ([`Held`]): a container that makes a network
+    /// namespace of its own in this process's user namespace joins one made ahead in place of making
+    /// its own, and its device program is one the caller holds.
     pub fn create_in_cgroup(
         &self,
         id: &str,
         bundle: &Path,
         pid_file: Option<&Path>,
         cgroup: BoxCgroup,
-        networks: Option<&dyn Networks>,
+        held: Held<'_>,
     ) -> Result<(), OciError> {
         self.create_with(
             id,
@@ -253,7 +264,7 @@ impl Runtime {
             pid_file,
             Route {
                 cgroup: Cgroup::Provided(cgroup),
-                networks,
+                held,
                 start: Start::Shim,
             },
         )
@@ -273,7 +284,7 @@ impl Runtime {
         bundle: &Path,
         pid_file: Option<&Path>,
         cgroup: BoxCgroup,
-        networks: Option<&dyn Networks>,
+        held: Held<'_>,
         seeds: &dyn CloneInit,
     ) -> Result<(), OciError> {
         self.create_with(
@@ -282,7 +293,7 @@ impl Runtime {
             pid_file,
             Route {
                 cgroup: Cgroup::Provided(cgroup),
-                networks,
+                held,
                 start: Start::Seed(seeds),
             },
         )
@@ -314,7 +325,7 @@ impl Runtime {
     ) -> Result<(), OciError> {
         let Route {
             cgroup,
-            networks,
+            held: Held { networks, devices },
             start,
         } = route;
         let config = std::fs::read(bundle.join("config.json"))
@@ -322,7 +333,8 @@ impl Runtime {
         let spec = Spec::parse(&config)?;
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
-        // Hex keeps the guarantee and shares one program among such containers (devshare).
+        // Hex keeps the guarantee and shares one program per policy (devshare): a node's oci boxes' root
+        // carries the default's, so such a container's create attaches nothing there.
         let plan = resources::plan(
             spec.linux
                 .resources
@@ -336,7 +348,12 @@ impl Runtime {
         let (cgroup, caller_owns) = match cgroup {
             Cgroup::FromSpec => (make_cgroup(&spec, id, &plan, &self.root)?, false),
             Cgroup::Provided(cg) => {
-                attach_device_program(&cg, &plan, spec.in_user_namespace(), &self.root)?;
+                match devices {
+                    Some(held) => held.attach(&cg, &plan, spec.in_user_namespace())?,
+                    None => {
+                        attach_device_program(&cg, &plan, spec.in_user_namespace(), &self.root)?
+                    }
+                }
                 (cg, true)
             }
         };
@@ -964,16 +981,10 @@ fn apply(cg: &BoxCgroup, plan: &Plan, rootless: bool, state_root: &Path) -> Resu
     attach_device_program(cg, plan, rootless, state_root)
 }
 
-/// Attaches the plan's device program to the cgroup, if it has one; the device access a container
-/// gets is the spec's, whether its cgroup was made from the spec or by the node under its box root.
-///
-/// A rootless container can't load a `BPF_PROG_TYPE_CGROUP_DEVICE` program: loading one needs CAP_BPF
-/// in the cgroup's owning (initial) user namespace, which an unprivileged runtime lacks. A
-/// deny-by-default allow-list it enforces by construction instead — only its devices get nodes, `mknod`
-/// is refused across the user-namespace boundary (`init.rs`), and the mapped host uid's DAC governs
-/// access (docs/design/runtime.md, "Rootless devices", measured on the running hardware). An
-/// allow-by-default policy with denials has no such construction, so it's refused here rather than
-/// silently under-enforced (CLAUDE.md §3).
+/// Attaches the plan's device program to the cgroup, if it has one: the command line's path, and a
+/// provided cgroup's whose caller holds no programs. The device access a container gets is the spec's,
+/// whether its cgroup was made from the spec or by the node under its box root. A container in a user
+/// namespace of its own gets no program ([`Plan::check_in_userns`] says why, and what it refuses).
 fn attach_device_program(
     cg: &BoxCgroup,
     plan: &Plan,
@@ -984,64 +995,37 @@ fn attach_device_program(
         return Ok(());
     };
     if rootless {
-        if plan.devices_allow_by_default {
-            return Err(OciError::Config(
-                "linux.resources.devices: a rootless container can't enforce an allow-by-default \
-                 device policy with denials — loading the cgroup device program needs CAP_BPF, which \
-                 an unprivileged runtime lacks; express the policy as a deny-by-default allow-list, \
-                 which a rootless container enforces by construction"
-                    .to_owned(),
-            ));
-        }
-        return Ok(());
+        return plan.check_in_userns();
     }
     let prog = device_program(insns, state_root)?;
     let dir = cg.open_dir().map_err(from_refusal)?;
-    sys::attach_device_program(dir.as_fd(), prog.as_fd())?;
+    sys::attach_device_program(dir.as_fd(), prog.as_fd(), sys::Attach::Multi)?;
     Ok(())
 }
 
-/// The device program to attach for `insns` (decision 2; [`devshare`]): one loaded before for the same
-/// policy, when the hints name one the kernel confirms is the same program, else the copy loaded now,
-/// which is then remembered. Loading a copy is how the program's tag is known; when another program is
-/// attached instead, the copy drops at the end of this call and, held by nothing, the kernel frees it.
+/// The device program to attach for `insns` (decision 2; [`devshare`]): the one the hints name for the
+/// policy's digest, when the kernel shows its translation is `insns` byte for byte
+/// ([`programs::program_for`]), with nothing loaded; else a copy loaded now and remembered under that
+/// digest for the next create (goal 5 extended, step 1). A stale or planted hint costs that load, never
+/// the policy.
 fn device_program(insns: &[resources::Insn], state_root: &Path) -> Result<OwnedFd, OciError> {
-    let ours = sys::load_device_program(insns)?;
-    // Without the copy's identity and instructions there's nothing to match it against; it enforces
-    // the policy all the same, so it's attached, only not shared.
-    let Some(mine) = loaded(ours.as_fd()) else {
-        return Ok(ours);
-    };
+    let digest = devshare::digest(insns);
     let path = state_root.join(devshare::HINTS_FILE);
     let mut hints = read_hints(&path);
     if let Some(shared) = hints
-        .candidate(&mine.identity.tag)
-        .and_then(|id| same_loaded_program(id, &mine))
+        .candidate(digest)
+        .and_then(|id| programs::program_for(id, insns))
     {
         return Ok(shared);
     }
-    hints.remember(&mine.identity.tag, mine.identity.id);
-    write_hints(&path, &hints)?;
-    Ok(ours)
-}
-
-/// Program `id`, if it's still loaded and the kernel shows it's the same program as `mine`. One gone,
-/// or one that can't be opened or read, is no match, and the copy loaded now is attached instead.
-fn same_loaded_program(id: u32, mine: &devshare::Loaded) -> Option<OwnedFd> {
-    let fd = sys::program_by_id(id).ok()??;
-    let theirs = loaded(fd.as_fd())?;
-    if devshare::same_program(mine, &theirs) {
-        Some(fd)
-    } else {
-        None
+    let ours = sys::load_device_program(insns)?;
+    // Without the copy's id there's nothing to remember it by; it enforces the policy all the same, so
+    // it's attached, only not shared.
+    if let Ok(identity) = sys::program_identity(ours.as_fd()) {
+        hints.remember(digest, identity.id);
+        write_hints(&path, &hints)?;
     }
-}
-
-/// The loaded program open as `prog`, as the kernel describes it, or `None` when it can't be read.
-fn loaded(prog: BorrowedFd<'_>) -> Option<devshare::Loaded> {
-    let identity = sys::program_identity(prog).ok()?;
-    let insns = sys::program_instructions(prog, identity.xlated_len).ok()??;
-    Some(devshare::Loaded { identity, insns })
+    Ok(ours)
 }
 
 /// The hints in the state root. None, or a file that isn't one, is no hints: a hint is advisory, and

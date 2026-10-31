@@ -47,11 +47,11 @@ use hex_api::{
     Runtime,
 };
 use hex_core::record::{BoxRecord, Phase, ProcId};
-use hex_node::Node;
 use hex_node::store::Store;
+use hex_node::{Node, OCI_BOXES};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
-use hex_runtime::linux::oci::run::Runtime as OciRuntime;
+use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
@@ -506,7 +506,10 @@ fn crash_and_restart(lab: &Lab, own: &Path) -> Result<(), String> {
         "the ended init to be reaped by its parent",
     );
     restarted.delete(&id).expect("delete");
-    assert!(!box_root.join("crash").exists(), "the box's cgroup is left");
+    assert!(
+        !box_root.join(OCI_BOXES).join("crash").exists(),
+        "the box's cgroup is left"
+    );
     assert!(restarted.list().unwrap().is_empty(), "a box is left");
     Ok(())
 }
@@ -589,7 +592,7 @@ fn budget(lab: &Lab, own: &Path) {
         Err(Refusal::NoSuchBox(second.clone()))
     );
     assert!(
-        !box_root.join("second").exists(),
+        !box_root.join(OCI_BOXES).join("second").exists(),
         "a refused create made a cgroup"
     );
     assert!(
@@ -1127,7 +1130,7 @@ fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
     let _cleanup = Killing(&root, id.clone());
     let before = state.path().join("oci");
     let oci = OciRuntime::with_helper(before.clone(), PathBuf::from(&lab.exe));
-    oci.create_in_cgroup(id.as_str(), &bundle, None, cgroup, None)
+    oci.create_in_cgroup(id.as_str(), &bundle, None, cgroup, Held::default())
         .unwrap();
     let made = oci.state(id.as_str()).unwrap();
     let mut record = BoxRecord::new(
@@ -1344,7 +1347,12 @@ fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
         Err(Refusal::NoSuchBox(dead.clone())),
         "its box is cleaned up"
     );
-    assert!(!own.join("hex-oci-seedcrash").join("crash-b").exists());
+    assert!(
+        !own.join("hex-oci-seedcrash")
+            .join(OCI_BOXES)
+            .join("crash-b")
+            .exists()
+    );
     let counts = node.create_seeds().unwrap();
     assert_eq!(
         (

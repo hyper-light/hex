@@ -82,6 +82,13 @@ open of the box's cgroup is held to that cgroup's path by the detailed trace. Wi
 namespaces the shim made by `unshare` are made by the seed's clone, so they fall in the init's clone. The parts' groups
 are the shim path's, with **the seed: the request and its clone's preparing** in place of the shim's spawn and exec.
 
+**The device program held** (goal 5 extended, step 1, from cp/t7-g5x-s1 on): the node keeps each policy's program
+open once loaded, and on a root node the default policy's sits on the oci boxes' root, so a create loads only a policy
+the node holds no program for, and a box whose policy is the default's attaches nothing. The trace adds the agent's
+`pipe2` entries: a create's first pipe follows its device program, so the program's parts (11 to 13: the FIFO and
+what follows it, the load, the attach) are cut between the FIFO's `mknod` and that pipe, a part with no call empty,
+and the seed's fork is the first after them.
+
 Only events that cost a call little are traced: an open's entry fetches its path from user memory, about 4 µs an event
 (`exec_breakdown.md`), so the rounds trace the opens' exits and tell an open by its place. rustix opens with
 `open(2)` on x86_64, std with `openat(2)`, so both are traced. Percentiles are nearest-rank. tracefs prints the clock to

@@ -153,12 +153,34 @@ container's /run unless it mounts a tmpfs there, as the bench and lab containers
 - **Nothing per container but the container.** With the shim gone, two things were still kept per idle
   container that crun doesn't keep (Evidence). Built in plan step 2:
   - **One device program per policy** (`oci/devshare.rs`). Containers whose device policies are the same
-    share one loaded program. `create` still loads its own copy, which tells it the program's tag. The hints
-    file in the state root (`.device-programs.json`: at most 64 programs, read up to 64 KiB) names a program
-    loaded before with that tag. `create` attaches that one only once the kernel shows it's the same
-    program: the same type, tag and lengths, and the same translated instructions byte for byte (f29). Its
-    own copy then drops, and the kernel frees it. A stale or wrong hint costs the sharing, never the policy.
-    A spec without `linux.resources` keeps the default device policy, as runc's does (f30).
+    share one loaded program. A spec without `linux.resources` keeps the default device policy, as runc's
+    does (f30). As built in plan step 2, `create` loaded its own copy, which told it the program's tag, and
+    attached the program a hints file named for that tag once the kernel showed it was the same program (f29).
+    Goal 5's extension (its step 1) took the load off the create, with the node agent as the holder that
+    outlives its containers (`oci/programs.rs`; research `01a190c51f137042a9697949c8fe2c7a` f40-f61, notes
+    `docs/research/runtime/goal5-cgroup-lock.md`):
+    - **The node holds each policy's program.** Once loaded, it stays open, at most 64 (`MAX_PROGRAMS`);
+      past that the one used longest ago is closed, and it lives on in the cgroups it's attached to (f53). A
+      program is found by Hex's own digest of its instructions (64-bit FNV-1a) and proven by the instructions
+      themselves, so nothing need be loaded to find it, as a kernel tag would need. A create attaches the
+      program held for its policy and loads only a policy the node holds none for (f60).
+    - **The default sits once on the oci boxes' root.** A node's `oci` boxes live under a root of their own,
+      `<box root>/.oci`, apart from its `process` boxes (f44), and a root node's start attaches the default
+      policy's program there with `BPF_F_ALLOW_OVERRIDE`. A box with the default policy attaches nothing. A box
+      with another attaches its own (MULTI), which then decides for it in the root's place (f40-f42). A
+      policy that allows every device carries the allow-all program as its own, so it never takes the default
+      (f43); so does a container in a user namespace of its own, which is held to its device list by
+      construction, as before. The start asks once which program the root carries (`BPF_PROG_QUERY` takes
+      `cgroup_mutex`, f61): one attached with OVERRIDE whose translation is the default's stays, so an agent
+      restarted over its boxes leaves it; anything else is replaced in one attach. A rootless node loads
+      nothing, as before. An `oci` box made before its node kept them apart is still found under the box root.
+    - **The command line looks before it loads.** A process per container, it keeps the hints file in its
+      state root (`.device-programs.json`: at most 64 programs, read up to 64 KiB), keyed by the same digest.
+      A create opens the program a hint names and attaches it only when the kernel shows a cgroup device
+      program whose translated instructions are the policy's byte for byte (f51, f52, f59); else it loads a
+      copy and remembers it. On x86_64 and aarch64 the translation of Hex's program is the program (f55); a
+      kernel that rewrote it would match nothing and load each time. A stale or planted hint costs a load,
+      never the policy.
   - **Nothing of the runtime's in the program.** The create handshake's two pipes are made close-on-exec,
     and the shim sets close-on-exec again on the two ends it's handed (`run.rs:219-227`,
     `init.rs:691-702`). The program holds only its stdio, as crun's does (f26, f27).
@@ -178,6 +200,14 @@ container's /run unless it mounts a tmpfs there, as the bench and lab containers
   marked close-on-exec before the container's exec (f26).
 - runc, `libcontainer/specconv/spec_linux.go:984` on main: "Append the default allowed devices to the end of
   the list", whatever the spec's resources (f30).
+- The device program held by the node (goal 5 extended, step 1; research `01a190c51f137042a9697949c8fe2c7a`):
+  Linux v6.19 `include/uapi/linux/bpf.h:1181,1187-1188`: `BPF_F_ALLOW_OVERRIDE` "the program in this cgroup yields
+  to sub-cgroup program", and an OVERRIDE attach on top of an OVERRIDE one "will release old program and attach
+  the new one" (f40, f42); `kernel/bpf/cgroup.c:444,459` (`compute_effective_progs`): a cgroup's effective
+  programs are its own and only its MULTI ancestors' past them (f40); `:826`: a replacing attach must give the
+  attachment's flags; `:1262`: `BPF_PROG_QUERY` writes `revision` back whatever the size passed, so Hex passes
+  the whole query struct; `:1319`: the query takes `cgroup_mutex` (f61); `kernel/bpf/syscall.c:4620`: it needs
+  CAP_NET_ADMIN or CAP_SYS_ADMIN. FNV-1a's offset basis and prime: IETF draft-eastlake-fnv §2.1.
 
 **Evidence.**
 - **The second process and exec.** Hex's `create` execs the hex binary again as `__oci-init`
@@ -236,6 +266,11 @@ container's /run unless it mounts a tmpfs there, as the bench and lab containers
 - **Sharing:** a device program that keeps state per container, such as a map, which Hex's doesn't (it reads
   only its context, f28). Or a kernel that charges each attachment as much as a program, so that sharing saves
   nothing: the density phase's vmalloc and percpu rise per container would show it, and they're 0.
+- **The program held, the default at the oci boxes' root** (goal 5 extended, step 1): a box with no program of
+  its own reaching a device the default denies; a box with a program of its own refused a device its policy
+  allows, so something besides its own and its MULTI ancestors' decided for it; a `process` box refused a
+  device (each is a case of `crates/hex-cli/tests/oci_devices.rs`). Or a default-policy create through the seam
+  that loads or attaches a program (strace's `bpf` reading in `bench/competitive/probes/seed_path_inside.sh`).
 - **Held memory at most crun's:** a density phase on fedora showing Hex's held memory per idle container above
   crun's. Of record (plan step 4, run `20261027T061920Z`, 92b3b91): 0.9849 and 0.9887 of crun's, 2 rounds of
   1,000 (`bench/competitive/RESULT.md`, "Of record on fedora"). That binary left each container's loopback

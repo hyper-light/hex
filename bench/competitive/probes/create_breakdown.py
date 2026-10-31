@@ -56,7 +56,8 @@ CREATE_PARTS = [
     ("the container's state directory made; config.json read and parsed; its device policy planned", OWN),
     ("the exec FIFO made; the device program's instructions made", OWN),
     ("the device program loaded (kernel: the verifier)", OWN),
-    ("its identity read; the hints read, the program they name looked for, the hints written; attached", OWN),
+    ("the program held for its policy looked up (before goal 5's extension, its identity and the hints read and "
+     "written); attached", OWN),
     ("the pipes made; a namespace made ahead taken; the shim's spawn prepared", OWN),
     ("the shim's clone (vfork, kernel), until its child runs", SHIM),
     ("the child's set-up; the hex binary's execve (kernel)", SHIM),
@@ -190,20 +191,31 @@ def create_cuts(ev, bench, cid, seeded=False):
     state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
     held(state_dir(ev[state].path(), cid),
          f"the second mkdir is the container's state directory (it made {ev[state].path()!r})")
-    c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
-    load = c.to(enter(bench, "bpf"), "the device program's load")
-    held(arg(ev[load], "cmd") == BPF_PROG_LOAD, "the first bpf call is the device program's load")
-    c.to(exited(bench, "bpf"), "the load returning")
+    fifo = c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
+    # The device program, between the FIFO and the create's first pipe: its load where the node holds no program
+    # for the box's policy, then its attach; a box whose program the oci boxes' root carries makes neither call
+    # (goal 5 extended, step 1). A part with no call is empty, cut where the next one starts.
+    pipe = first(ev, fifo, enter(bench, "pipe2"), "the create's first pipe")
+    calls = [i for i in range(fifo, pipe) if enter(bench, "bpf")(ev[i])]
+    loads = [i for i in calls if arg(ev[i], "cmd") == BPF_PROG_LOAD]
+    if loads:
+        c.at.append(loads[0])
+        c.to(exited(bench, "bpf"), "the load returning")
+    else:
+        c.at += [calls[0] if calls else pipe] * 2
+    if calls:
+        held(arg(ev[calls[-1]], "cmd") == BPF_PROG_ATTACH,
+             "the agent's last bpf call before its pipes is the device program's attach")
+        c.at.append(first(ev, calls[-1], exited(bench, "bpf"), "the attach returning"))
+    else:
+        c.at.append(pipe)
     if seeded:
         # A seed opens the box's cgroup and clones the init into it and the namespaces the spec makes; the init
         # joins the network namespace made ahead itself.
         born, seed, init = seed_fork(ev, c.at[-1], bench)
         clone = last_before(ev, c.at[-1] + 1, born, enter(seed, "clone3"), "the seed's clone of the init")
         opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "open"), "the seed's open of the box's cgroup")
-        attach = last_before(ev, c.at[-1] + 1, opened, exited(bench, "bpf"), "the device program's attach")
-        held(arg(ev[last_before(ev, c.at[-1], attach, enter(bench, "bpf"), "the attach's entry")], "cmd")
-             == BPF_PROG_ATTACH, "the agent's last bpf call before the seed's clone is the device program's attach")
-        c.at += [attach, opened, clone]
+        c.at += [opened, clone]
         c.opens.append((opened, seed, "open", lambda p: named(p, cid), "the seed's open of the box's cgroup"))
         c.to(exited(init, "clone3"), "the init's first run")
         joins = c.to(enter(init, "setns"), "the init's join of the namespace made ahead")
@@ -211,10 +223,7 @@ def create_cuts(ev, bench, cid, seeded=False):
         c.to(exited(init, "setns"), "the join returning")
     else:
         spawn = first(ev, c.at[-1], enter(bench, "clone3", "clone"), "the shim's spawn")
-        attach = last_before(ev, c.at[-1] + 1, spawn, exited(bench, "bpf"), "the device program's attach")
-        held(arg(ev[last_before(ev, c.at[-1], attach, enter(bench, "bpf"), "the attach's entry")], "cmd")
-             == BPF_PROG_ATTACH, "the last bpf call before the spawn is the device program's attach")
-        c.at += [attach, spawn]
+        c.at.append(spawn)
         fork = first(ev, spawn, sched(bench, "fork"), "the shim's fork")
         shim = int(ev[fork].kv["child_pid"])
         c.to(exited(shim, "clone3", "clone"), "the shim's first run")

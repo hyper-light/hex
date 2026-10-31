@@ -57,6 +57,7 @@ EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_ex
   syscalls/sys_exit_rename syscalls/sys_exit_renameat syscalls/sys_exit_renameat2
   syscalls/sys_enter_mkdir syscalls/sys_exit_mkdir syscalls/sys_enter_mkdirat syscalls/sys_exit_mkdirat
   syscalls/sys_enter_mknodat syscalls/sys_enter_mknod syscalls/sys_enter_bpf syscalls/sys_exit_bpf
+  syscalls/sys_enter_pipe2
   syscalls/sys_enter_clone3 syscalls/sys_exit_clone3 syscalls/sys_enter_clone syscalls/sys_exit_clone
   syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root
   syscalls/sys_enter_write syscalls/sys_exit_poll syscalls/sys_exit_ppoll syscalls/sys_exit_wait4

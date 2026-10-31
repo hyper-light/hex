@@ -873,11 +873,17 @@ const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_ATTACH: libc::c_long = 8;
 const BPF_PROG_GET_FD_BY_ID: libc::c_long = 13;
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
-const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
+const BPF_PROG_QUERY: libc::c_long = 16;
+pub const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
 const BPF_CGROUP_DEVICE: u32 = 6;
+/// `BPF_F_ALLOW_OVERRIDE` (1 << 0): "the program in this cgroup yields to sub-cgroup program".
+pub const BPF_F_ALLOW_OVERRIDE: u32 = 1;
 /// `BPF_F_ALLOW_MULTI` (1 << 1): the program joins whatever the cgroup's ancestors attached, all of
 /// which must allow an access, as runc and crun attach theirs.
 const BPF_F_ALLOW_MULTI: u32 = 2;
+/// Most program ids a query of one cgroup reads: the oci boxes' root carries one program, so more is
+/// already a root Hex didn't make; the count past it is still reported.
+const MAX_QUERIED: usize = 8;
 /// Most bytes of the verifier's log kept when it refuses a program: enough for the refusing
 /// instruction and its context; the kernel truncates the log at the buffer's end.
 const VERIFIER_LOG_BYTES: usize = 65_536;
@@ -993,10 +999,26 @@ pub fn load_device_program(
     ))
 }
 
-/// Attaches device program `prog` to the cgroup whose directory is open as `cgroup`.
+/// How a device program is attached to a cgroup, which decides how it composes with the programs above
+/// and below it (include/uapi/linux/bpf.h, "BPF_F_ALLOW_OVERRIDE" and "BPF_F_ALLOW_MULTI"; Linux v6.19
+/// kernel/bpf/cgroup.c, `compute_effective_progs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attach {
+    /// With `BPF_F_ALLOW_MULTI`, as a container's own program is: it runs with every MULTI program above.
+    Multi,
+    /// With `BPF_F_ALLOW_OVERRIDE`, as the oci boxes' root carries the default policy's: it decides for
+    /// each cgroup below that has no program of its own, and a cgroup that has one is decided by its own.
+    Override,
+}
+
+/// Attaches device program `prog` to the cgroup whose directory is open as `cgroup`, as `how` says. On
+/// a cgroup that already holds an OVERRIDE program, an OVERRIDE attach replaces it in one call
+/// (include/uapi/linux/bpf.h: "Attaching another program on top of NONE or BPF_F_ALLOW_OVERRIDE will
+/// release old program and attach the new one").
 pub fn attach_device_program(
     cgroup: std::os::fd::BorrowedFd<'_>,
     prog: std::os::fd::BorrowedFd<'_>,
+    how: Attach,
 ) -> Result<(), OciError> {
     use std::os::fd::AsRawFd;
     let fd = |f: std::os::fd::BorrowedFd<'_>| {
@@ -1006,7 +1028,10 @@ pub fn attach_device_program(
         target_fd: fd(cgroup)?,
         attach_bpf_fd: fd(prog)?,
         attach_type: BPF_CGROUP_DEVICE,
-        attach_flags: BPF_F_ALLOW_MULTI,
+        attach_flags: match how {
+            Attach::Multi => BPF_F_ALLOW_MULTI,
+            Attach::Override => BPF_F_ALLOW_OVERRIDE,
+        },
         replace_bpf_fd: 0,
     };
     // SAFETY: bpf(BPF_PROG_ATTACH) reads `attr`, a live, initialised repr(C) struct of the size
@@ -1027,6 +1052,76 @@ pub fn attach_device_program(
             std::io::Error::last_os_error(),
         ))
     }
+}
+
+/// The `union bpf_attr` member `BPF_PROG_QUERY` reads and writes, whole to `revision`: Linux v6.19
+/// writes `revision` back whatever the size passed (kernel/bpf/cgroup.c:1262), so a shorter struct would
+/// have it write past this one.
+#[repr(C)]
+#[derive(Default)]
+struct ProgQueryAttr {
+    target_fd: u32,
+    attach_type: u32,
+    query_flags: u32,
+    attach_flags: u32,
+    prog_ids: u64,
+    prog_cnt: u32,
+    _reserved: u32,
+    prog_attach_flags: u64,
+    link_ids: u64,
+    link_attach_flags: u64,
+    revision: u64,
+}
+
+/// The device programs attached to one cgroup itself, its ancestors' left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Attached {
+    /// The flags they were attached with (0 when none is).
+    pub flags: u32,
+    /// How many there are.
+    pub count: u32,
+    /// The ids of the first [`MAX_QUERIED`] of them.
+    pub ids: Vec<u32>,
+}
+
+/// The device programs attached to the cgroup whose directory is open as `cgroup` (`BPF_PROG_QUERY`,
+/// which needs CAP_NET_ADMIN or CAP_SYS_ADMIN and takes the kernel's `cgroup_mutex`: a node asks it at
+/// its start, never per create).
+pub fn attached_device_programs(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<Attached, OciError> {
+    use std::os::fd::AsRawFd;
+    let mut ids = [0u32; MAX_QUERIED];
+    let mut attr = ProgQueryAttr {
+        target_fd: u32::try_from(cgroup.as_raw_fd())
+            .map_err(|_| OciError::os("bpf", "a negative descriptor"))?,
+        attach_type: BPF_CGROUP_DEVICE,
+        prog_ids: user_ptr(ids.as_mut_ptr().cast_const())?,
+        prog_cnt: u32::try_from(ids.len()).unwrap_or(u32::MAX),
+        ..ProgQueryAttr::default()
+    };
+    // SAFETY: bpf(BPF_PROG_QUERY) reads `attr`, a live, initialised repr(C) struct of the size passed,
+    // and writes into it only its own fields (attach_flags, prog_cnt, revision), all within that size.
+    // Through `prog_ids` it writes at most `prog_cnt` u32s into `ids`, a live array of exactly that many
+    // that outlives the call; `prog_attach_flags` and the link fields are zero, so nothing is written
+    // through them. Checked.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_PROG_QUERY,
+            &raw mut attr,
+            std::mem::size_of::<ProgQueryAttr>(),
+        )
+    };
+    let err = std::io::Error::last_os_error();
+    // ENOSPC: more are attached than `ids` holds; the count and the first ids are written all the same.
+    if r != 0 && err.raw_os_error() != Some(libc::ENOSPC) {
+        return Err(OciError::os("querying a cgroup's device programs", err));
+    }
+    let read = usize::try_from(attr.prog_cnt).map_or(0, |n| n.min(ids.len()));
+    Ok(Attached {
+        flags: attr.attach_flags,
+        count: attr.prog_cnt,
+        ids: ids.iter().copied().take(read).collect(),
+    })
 }
 
 /// Loads seccomp filter `program` on the calling thread and leaves no_new_privs as it is: the kernel

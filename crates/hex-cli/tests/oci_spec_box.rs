@@ -40,8 +40,8 @@ use hex_api::{
     Rootfs, Runtime, Stdio, User,
 };
 use hex_core::record::{BoxRecord, Phase};
-use hex_node::Node;
 use hex_node::store::Store;
+use hex_node::{Node, OCI_BOXES};
 
 const TEST: &str = "oci_spec_boxes_run_from_the_bundles_the_node_renders";
 
@@ -551,7 +551,7 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
         "{id}'s container state is left"
     );
     assert!(
-        !box_root.join(id.as_str()).exists(),
+        !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
         "{id}'s cgroup is left"
     );
     assert!(

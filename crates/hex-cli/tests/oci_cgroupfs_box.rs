@@ -36,7 +36,7 @@ use hex_api::{
     Stdio,
 };
 use hex_core::bundle::{Owner, Place, render};
-use hex_node::Node;
+use hex_node::{Node, OCI_BOXES};
 
 const TEST: &str = "a_rootless_host_network_box_cannot_change_another_boxs_cgroup";
 /// Bounded wait for the box's program that reads its mount table: one that never ends fails rather
@@ -137,7 +137,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         "the box was refused, but not by name: {why}"
     );
     assert!(
-        !box_root.join(attacker.as_str()).exists(),
+        !box_root.join(OCI_BOXES).join(attacker.as_str()).exists(),
         "the refused box left its cgroup"
     );
 

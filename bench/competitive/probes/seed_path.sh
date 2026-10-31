@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # bench/competitive/probes: the seam's create through its seeds (goal 5 plan step 4). Runs seed_path_inside.sh in the
 # bench container, with the create breakdown's flags (create_breakdown.sh), on the given Hex and seam_oci binaries,
-# each copied into the run's directory: a seed's clone of an init, timed by sched events; every exec over a run of
-# creates, by strace -f; a seed's memory; and the node's seeds' counts over a sustained phase. seed_path.py reads the
-# trace. On fedora:
+# each copied into the run's directory: a seed's clone of an init, timed by sched events; every exec and every bpf call
+# over a run of creates, by strace -f; a seed's memory; and the node's seeds' counts over a sustained phase.
+# seed_path.py reads the trace. On fedora:
 #   seed_path.sh <hex release binary> <seam_oci release binary>
 # Env: N, WARMUP, EXECS, MEMORY_N, SUSTAINED (seed_path_inside.sh's), CPUSET (4-31), STRACE (the directory whose
 # usr/bin/strace runs in the container: ~/.cache/hex-t7/strace, Fedora's strace unpacked; the bench host has none).

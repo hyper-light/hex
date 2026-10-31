@@ -28,9 +28,11 @@ use hex_core::cgroup::Dev;
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::recovery::{self, Decision, Seen, Why};
-use hex_runtime::linux::cgroup::BoxRoot;
+use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::OciError;
-use hex_runtime::linux::oci::run::Runtime as OciRuntime;
+use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
+use hex_runtime::linux::oci::programs::{self, Programs};
+use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
 use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
@@ -57,9 +59,21 @@ pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
+/// The cgroup under the box root that the `oci` boxes alone live under, so a root node's default device
+/// program can sit on it without reaching a `process` box (goal 5 extended, step 1; research f44). No
+/// box id starts with `.`, so it can't be a box's.
+pub const OCI_BOXES: &str = ".oci";
+
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
+    /// The `process` boxes' cgroups, and the `oci` boxes' root among them ([`OCI_BOXES`]).
     root: BoxRoot,
+    /// The `oci` boxes' cgroups: under the box root, but apart from the `process` boxes. An `oci` box
+    /// made before its node kept them apart is still found under the box root ([`Node::cgroup`]).
+    oci_boxes: BoxRoot,
+    /// The `oci` boxes' device programs: one held open per policy, and on a root node the default
+    /// policy's on [`Node::oci_boxes`]'s root.
+    devices: Programs,
     store: Store,
     /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under
     /// ([`oci_root`]), shared with the other nodes on the host that run as this one's user.
@@ -160,8 +174,12 @@ impl Node {
             Owner::Root => netns::BOUND,
             Owner::Rootless { .. } => 0,
         })?;
+        let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
+        let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         Ok(Self {
             root,
+            oci_boxes,
+            devices,
             store,
             oci_root,
             key,
@@ -220,6 +238,32 @@ impl Node {
         }
         self.netns = Netns::start(bound)?;
         Ok(self)
+    }
+
+    /// Sets the most device programs the node holds open, one per policy, [`MAX_PROGRAMS`] unless set,
+    /// in place of those it opened with, which it closes (each lives on in the cgroups it's attached to).
+    /// A root node's oci boxes' root keeps its program.
+    pub fn with_device_program_bound(mut self, bound: usize) -> Result<Self, Refusal> {
+        self.devices = device_programs(self.owner, &self.oci_boxes, bound)?;
+        Ok(self)
+    }
+
+    /// What the node's device programs have done since it opened them: the loads, attaches and closes
+    /// tests and the bench count, and whether its start attached the default policy's program to the oci
+    /// boxes' root.
+    pub fn device_programs(&self) -> Result<programs::Counts, Refusal> {
+        self.devices.counts().map_err(Refusal::from)
+    }
+
+    /// The root the node's `oci` boxes alone live under ([`OCI_BOXES`]).
+    pub fn oci_boxes(&self) -> &Path {
+        self.oci_boxes.dir()
+    }
+
+    /// Box `id`'s cgroup: an `oci` box's under the oci boxes' root, else (a `process` box, or an `oci`
+    /// box made before its node kept them apart) under the box root.
+    fn cgroup(&self, id: &BoxId) -> Option<BoxCgroup> {
+        self.oci_boxes.get(id).or_else(|| self.root.get(id))
     }
 
     /// The `oci` runtime, over the node's state root and helper binary.
@@ -403,7 +447,13 @@ impl Node {
                 },
             );
         }
-        for name in self.root.boxes()? {
+        // Both roots' cgroups; the oci boxes' root itself is no box (its name is no id).
+        for name in self
+            .root
+            .boxes()?
+            .into_iter()
+            .chain(self.oci_boxes.boxes()?)
+        {
             if let Ok(id) = BoxId::new(&name) {
                 seen.entry(id).or_insert_with(|| Seen {
                     record: None,
@@ -413,7 +463,7 @@ impl Node {
             }
         }
         for (id, s) in &mut seen {
-            s.cgroup = self.root.get(id).is_some();
+            s.cgroup = self.cgroup(id).is_some();
             // The `process` class has no init; an `oci` box's init is alive when the very process its
             // record named still runs (its pid with the start time create recorded), as crun tells a
             // live container from a recycled pid by `process-start-time`.
@@ -438,7 +488,7 @@ impl Node {
 
     /// Ends what runs in a box and removes every trace of it, each part tolerant of being gone.
     fn scrub(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(cg) = self.root.get(id) {
+        if let Some(cg) = self.cgroup(id) {
             cg.kill()?;
             // The kill reaches every process in the box; now reap the exec'd programs the agent watches
             // for it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until
@@ -508,7 +558,7 @@ impl Node {
                 }
             },
         };
-        let cgroup = match self.root.create(&id, &spec.bounds) {
+        let cgroup = match self.oci_boxes.create(&id, &spec.bounds) {
             Ok(cgroup) => cgroup,
             Err(e) => {
                 // No cgroup, so scrub removes the directories and the record alone.
@@ -521,14 +571,18 @@ impl Node {
         let seeds = self.create_pool()?;
         let made = self.supervisor.spawning().and_then(|_spawning| {
             // A container that makes a network namespace of its own in the agent's user namespace
-            // joins one the node made ahead, and the pool counts every container's (decision 4).
+            // joins one the node made ahead, and the pool counts every container's (decision 4). Its
+            // device program is one the node holds, or the oci boxes' root's (goal 5 extended, step 1).
             self.oci()
                 .create_in_cgroup_seeded(
                     &self.container(&id),
                     &bundle,
                     None,
                     cgroup,
-                    Some(&self.netns),
+                    Held {
+                        networks: Some(&self.netns),
+                        devices: Some(&self.devices),
+                    },
                     seeds,
                 )
                 .map_err(Refusal::from)
@@ -756,7 +810,8 @@ impl Runtime for Node {
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.check()?;
         }
-        if self.record(&spec.id)?.is_some() || self.root.get(&spec.id).is_some() {
+        // A cgroup under either root is a box's, recorded or not: a failed create's scrub would end it.
+        if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
         }
         let source = match &spec.class {
@@ -840,8 +895,7 @@ impl Runtime for Node {
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
         let cg = self
-            .root
-            .get(id)
+            .cgroup(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         cg.signal(id, signal)
     }
@@ -856,8 +910,7 @@ impl Runtime for Node {
 
     fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
         let cg = self
-            .root
-            .get(id)
+            .cgroup(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         Ok(cg.usage())
     }
@@ -886,7 +939,7 @@ impl Runtime for Node {
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
         let record = self.record(id)?;
-        if record.is_none() && self.root.get(id).is_none() {
+        if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
         // Unwatched first, so the supervisor stops collecting the init; an exit it's recording as it's
@@ -1108,6 +1161,16 @@ fn init_alive(init: ProcId) -> bool {
 
 fn counts_poisoned() -> Refusal {
     Refusal::Broken("the node's abandoned-program counts' lock was poisoned".to_owned())
+}
+
+/// The device programs of a node that runs as `owner`, at most `bound` held open: a root node's start
+/// with the default policy's program on its oci boxes' root; a rootless node loads none, its containers
+/// held to their device lists by construction (goal 5 extended, step 1).
+fn device_programs(owner: Owner, oci_boxes: &BoxRoot, bound: usize) -> Result<Programs, Refusal> {
+    match owner {
+        Owner::Root => Programs::at_root(oci_boxes.dir(), bound).map_err(Refusal::from),
+        Owner::Rootless { .. } => Ok(Programs::rootless(bound)),
+    }
 }
 
 /// Where a node keeps its containers' state: on tmpfs, where a host crash takes it with the

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The node agent's seam as root (goal 3 plan step 2's privileged lab): the conformance suite and the oci
-# box tests (crates/hex-cli/tests: oci_box, node_socket, oci_spec_box, oci_seccomp) run as root, where
+# box tests (crates/hex-cli/tests: oci_box, node_socket, oci_spec_box, oci_seccomp, oci_devices) run as root, where
 # an exec is cloned straight from the agent's thread into the container's cgroup and pid namespace
 # (crates/hex-runtime/src/linux/oci/seed.rs, `exec_direct`), not through a seed as rootless runs take
 # it. In a privileged container with a private cgroup namespace, each test in a cgroup of its own under

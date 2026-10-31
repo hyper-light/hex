@@ -5,11 +5,11 @@
 # both), then run as root by seam_root_inside.sh in a privileged container from it, the image's /usr standing in
 # for the host's. The tests' HOME is a volume of the lab's own, since the container's root is overlayfs, which
 # can't hold a layered box's writable layer. Exits non-zero on any failure.
-#   docker_lab.sh <commit> [test]...   (tests: hex-cli's oci_box, node_socket, oci_spec_box and oci_seccomp, and
-#                                      hex-node's own, by default)
+#   docker_lab.sh <commit> [test]...   (tests: hex-cli's oci_box, node_socket, oci_spec_box, oci_seccomp and
+#                                      oci_devices, and hex-node's own, by default)
 set -euo pipefail
 COMMIT=${1:?commit}; shift
-TESTS=${*:-oci_box node_socket oci_spec_box oci_seccomp hex-node}
+TESTS=${*:-oci_box node_socket oci_spec_box oci_seccomp oci_devices hex-node}
 # A Windows shell (Git Bash) is told to leave the containers' paths alone, and hands git a path git.exe reads.
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 HERE=$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })

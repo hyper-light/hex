@@ -41,6 +41,10 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 .unwrap_or(0),
         )),
         "echo" => Some(echo()),
+        // open <r|w>:<path>...: opens each path to read or to write, creating nothing, and prints a line
+        // for each: "<path> ok", or "<path> errno <n>": which devices a box's device program lets it
+        // open, and which it refuses (EPERM) rather than finding no device (ENXIO).
+        "open" => Some(open_each(args)),
         // fsync-probe <file> <iters>: the noisy-neighbour victim — times fsync over small writes
         // and prints "p50_us=<n> p99_us=<n>" (AC-T7.1.2).
         "fsync-probe" => Some(fsync_probe(
@@ -186,6 +190,28 @@ fn spawn(n: u32) -> u8 {
         let _ = child.wait();
     }
     u8::from(refused).saturating_mul(2)
+}
+
+/// Opens each `<r|w>:<path>` of `args`, to read or to write and without creating it, and prints each
+/// outcome on a line of its own; exits 2 for an argument of neither form.
+fn open_each(args: &[String]) -> u8 {
+    let mut out = String::new();
+    for arg in args {
+        let (write, path) = match arg.split_once(':') {
+            Some(("r", path)) => (false, path),
+            Some(("w", path)) => (true, path),
+            _ => return 2,
+        };
+        match std::fs::OpenOptions::new()
+            .read(!write)
+            .write(write)
+            .open(path)
+        {
+            Ok(_) => out.push_str(&format!("{path} ok\n")),
+            Err(e) => out.push_str(&format!("{path} errno {}\n", e.raw_os_error().unwrap_or(0))),
+        }
+    }
+    u8::from(write_all(&mut std::io::stdout(), out.as_bytes()).is_err())
 }
 
 /// Copies stdin to stdout until stdin ends.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench/competitive/probes: the seam's create through its seeds (goal 5 plan step 4), inside the bench container
-# (seed_path.sh). Three readings, each over seam_oci's lifecycle phase: the oci class through the seam in process, as
-# root, on the OCI pass's bundles (oci_inside.sh's shape), each create through a seed (decision 5).
+# (seed_path.sh). Its readings, each over seam_oci's lifecycle phase but the last: the oci class through the seam in
+# process, as root, on the OCI pass's bundles (oci_inside.sh's shape), each create through a seed (decision 5).
 #   clone   A trace instance of this run's own records three sched events for the processes named hex (the seeds,
 #           and each init until it execs its program): sched_waking, sched_process_fork and sched_switch to them.
 #           seed_path.py takes, for each init a seed clones, from the seed's first wakeup by the node agent since its
@@ -12,6 +12,10 @@
 #   execs   strace -f -e trace=execve over the whole process tree for EXECS creates after 5 warm-up ones: each exec of
 #           the hex binary by its first argument (__oci-seed, a seed's start; __oci-init, the shim; __oci-exec, the
 #           exec helper), and each program exec'd.
+#   bpf     strace -f -y -e trace=bpf over the same: each bpf call by its command, and each attach by the cgroup it
+#           targets (goal 5 extended, step 1). The bundles' default policy is the program the node's start puts on its
+#           oci boxes' root, so their creates make no call; the node's start queries that root and, on a fresh one,
+#           loads the default and attaches it there.
 #   memory  Each seed's Pss (smaps_rollup) and VmRSS, sampled every 50 ms while the node serves MEMORY_N creates: each
 #           `hex __oci-seed` in this pid namespace alone, since an init its seed cloned keeps the seed's arguments
 #           until it execs, in a pid namespace of its own.
@@ -70,6 +74,14 @@ seam() { # seam <out json> <n> <warmup> [wrapper...]: seam_oci's lifecycle phase
     "$(grep -c 'execve("/opt/bin/hex"' /run/execs.txt): __oci-seed $(hexes __oci-seed), __oci-init $(hexes __oci-init)," \
     "__oci-exec $(hexes __oci-exec); /usr/bin/sleep $(grep -c 'execve("/usr/bin/sleep"' /run/execs.txt)," \
     "/usr/bin/true $(grep -c 'execve("/usr/bin/true"' /run/execs.txt)"
+  # The device programs.
+  seam /run/out.bpf.json "$EXECS" 5 /opt/strace/usr/bin/strace -f -y -e trace=bpf -qq -o /run/bpf.txt \
+    > /run/bpf.log 2>&1 || echo "the bpf run failed: $(tail -3 /run/bpf.log)"
+  cp /run/bpf.txt "$OUT/bpf.txt"
+  echo "bpf over $((EXECS + 5)) creates, the node's start with them:" \
+    "$(grep -o 'bpf(BPF_[A-Z_]*' /run/bpf.txt | sort | uniq -c | awk '{printf "%s %s, ", substr($2, 5), $1}')" \
+    "attaches by target: $(grep 'bpf(BPF_PROG_ATTACH' /run/bpf.txt | grep -o 'target_fd=[0-9]*<[^>]*>' \
+      | sed 's/^target_fd=[0-9]*//' | sort | uniq -c | xargs)"
   # The memory.
   seam /run/out.memory.json "$MEMORY_N" 20 > /run/memory.log 2>&1 &
   bench=$!

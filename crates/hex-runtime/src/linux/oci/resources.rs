@@ -40,6 +40,27 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Refuses a device policy a container in a user namespace of its own can't be held to. Such a
+    /// container gets no device program of its own: loading one needs CAP_BPF in the cgroup's owning
+    /// (initial) user namespace, which an unprivileged runtime lacks. A deny-by-default allow-list it
+    /// enforces by construction instead — only its devices get nodes, `mknod` is refused across the
+    /// user-namespace boundary (`init.rs`), and the mapped host uid's DAC governs access
+    /// (docs/design/runtime.md, "Rootless devices", measured on the running hardware). An
+    /// allow-by-default policy with denials has no such construction, so it's refused rather than
+    /// silently under-enforced (CLAUDE.md §3).
+    pub fn check_in_userns(&self) -> Result<(), OciError> {
+        if self.devices.is_some() && self.devices_allow_by_default {
+            return Err(OciError::Config(
+                "linux.resources.devices: a rootless container can't enforce an allow-by-default \
+                 device policy with denials — loading the cgroup device program needs CAP_BPF, which \
+                 an unprivileged runtime lacks; express the policy as a deny-by-default allow-list, \
+                 which a rootless container enforces by construction"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Adds a write; `controller` is empty for a `cgroup.*` core file, which needs none.
     fn write(&mut self, controller: &str, file: impl Into<String>, value: impl Into<String>) {
         if !controller.is_empty() {
@@ -569,6 +590,16 @@ pub struct Insn {
     pub imm: i32,
 }
 
+impl Insn {
+    /// The instruction's bytes as `struct bpf_insn` holds them in memory, which is how the kernel dumps
+    /// a loaded program's translated instructions (native byte order).
+    pub fn bytes(&self) -> [u8; 8] {
+        let [o0, o1] = self.off.to_ne_bytes();
+        let [i0, i1, i2, i3] = self.imm.to_ne_bytes();
+        [self.code, self.regs, o0, o1, i0, i1, i2, i3]
+    }
+}
+
 // The opcodes the device program uses (include/uapi/linux/bpf_common.h and bpf.h).
 pub const LDX_MEM_W: u8 = 0x61; // BPF_LDX | BPF_MEM | BPF_W: dst = *(u32 *)(src + off)
 pub const MOV32_X: u8 = 0xbc; // BPF_ALU | BPF_MOV | BPF_X: dst = (u32) src
@@ -602,6 +633,22 @@ pub fn devices(rules: &[DeviceRule]) -> Result<Option<Vec<Insn>>, OciError> {
         return Ok(None);
     }
     Ok(Some(compile(&st)))
+}
+
+/// The default policy's program: what a spec that lists no devices gets, and one that denies them all,
+/// since [`device_state`] allows [`DEFAULT_DEVICES`] after any list.
+pub fn default_program() -> Result<Vec<Insn>, OciError> {
+    Ok(compile(&device_state(&[])?))
+}
+
+/// The program for a policy that allows every device. Under the node's oci boxes' root, whose program is
+/// the default policy's, a box with such a policy carries this as its own, so it never takes the root's
+/// (goal 5 extended, step 1); elsewhere such a policy gets no program, as crun's does.
+pub fn allow_all() -> Vec<Insn> {
+    compile(&DeviceState {
+        allow_by_default: true,
+        exceptions: Vec::new(),
+    })
 }
 
 /// Compiles a device state: r1 points at `bpf_cgroup_dev_ctx`; the program returns 1 to allow.
@@ -685,6 +732,7 @@ pub fn cgroup_path(cgroups_path: Option<&str>, id: &str) -> Result<PathBuf, OciE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linux::oci::devshare;
     use crate::linux::oci::spec::{HugepageLimit, Pids, Rdma, ThrottleDevice, WeightDevice};
     use proptest::prelude::*;
 
@@ -1137,6 +1185,42 @@ mod tests {
                 Some(prog) => run(&prog, kind, access, major, minor),
             };
             prop_assert_eq!(got, want);
+        }
+
+        // Goal 5 extended, step 1, model-based: for any rule list, the program that decides for a box
+        // (its own, or the oci boxes' root's default where the box is given nothing: devshare::give)
+        // decides every request — each type, each access, majors and minors that the rules and the
+        // default devices name and some they don't — as the policy's oracle does; and so with no program
+        // at the root.
+        #[test]
+        fn the_program_that_decides_for_a_box_is_its_policys(
+            rules in proptest::collection::vec(arb_rule(), 0..12),
+        ) {
+            let st = device_state(&rules).unwrap();
+            let default = default_program().unwrap();
+            for root in [Some(default.as_slice()), None] {
+                let deciding = match devshare::give(devices(&rules).unwrap().as_deref(), root) {
+                    devshare::Give::Nothing => root.map(<[Insn]>::to_vec),
+                    devshare::Give::Program(p) => Some(p),
+                };
+                for kind in [DEV_BLOCK, DEV_CHAR] {
+                    for access in 1u32..8 {
+                        for major in [0u32, 1, 2, 3, 4, 5, 10, 136] {
+                            for minor in [0u32, 1, 2, 3, 5, 7, 8, 9, 200] {
+                                let got = deciding
+                                    .as_ref()
+                                    .is_none_or(|p| run(p, kind, access, major, minor));
+                                prop_assert_eq!(
+                                    got,
+                                    st.permits(kind, major, minor, access),
+                                    "root {}, type {} {}:{} access {}",
+                                    root.is_some(), kind, major, minor, access
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Hostile input (CLAUDE.md §6): any resources are a plan or a typed refusal, never a panic.

@@ -40,6 +40,7 @@ use hex_api::{
 use hex_client::Client;
 use hex_core::record::{BoxRecord, Phase};
 use hex_core::wire::{self, Answer, Call, Request, Streams};
+use hex_node::OCI_BOXES;
 
 const TEST: &str = "the_seam_holds_its_contract_over_the_node_agents_socket";
 
@@ -475,7 +476,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             class: ClassSpec::Process,
         })
         .unwrap();
-    let init = procs(&agent.box_root, &oci);
+    let init = procs(&agent.box_root.join(OCI_BOXES), &oci);
     assert_eq!(init.len(), 1, "the oci box holds its init alone: {init:?}");
     let caller = raw(&agent.socket);
     let mut pids = Vec::new();
@@ -506,7 +507,8 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         }
     }
     wait_for("each program to run in its box", || {
-        procs(&agent.box_root, &oci).len() == 2 && procs(&agent.box_root, &process).len() == 1
+        procs(&agent.box_root.join(OCI_BOXES), &oci).len() == 2
+            && procs(&agent.box_root, &process).len() == 1
     });
     drop(caller);
     for id in [&oci, &process] {
@@ -515,7 +517,8 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         });
     }
     wait_for("the programs to be ended", || {
-        procs(&agent.box_root, &oci) == init && procs(&agent.box_root, &process).is_empty()
+        procs(&agent.box_root.join(OCI_BOXES), &oci) == init
+            && procs(&agent.box_root, &process).is_empty()
     });
     for pid in &pids {
         wait_for(&format!("program {pid} to be reaped"), || {
@@ -602,7 +605,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     let state = dir.path().join("state");
     let record = state.join(format!("{id}.json"));
     let temp = state.join(format!(".{id}.tmp"));
-    let cgroup = own.join(&name).join(id.as_str());
+    let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
     let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
     let bundle = if at == At::Ready {
         // The create waits in its createRuntime hook, its container made, until this test makes `go`.
