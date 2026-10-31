@@ -421,3 +421,44 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
 - **The seed** costs 0.056 ms of request and wake-up on the critical path where the shim's spawn and exec cost 0.508
   in run 3; the namespaces the shim made by `unshare` are now made by the init's clone (0.174, against run 3's 0.115
   for the `unshare` and 0.088 for the clone).
+
+## Run 5 (2026-10-31, fedora): the device program held (goal 5 extended, step 1), against the binary before it
+
+- **Why:** goal 5 extended, step 1's second criterion: Hex's create p50 through the seam, against run 4's 2.020 ms,
+  falls by at least 10%. The node holds each policy's program, and the default policy's sits on the oci boxes' root,
+  so the bench's default-policy creates make no `bpf` call: parts 12 and 13 are empty, cut at the create's first pipe.
+- **Host and load:** as run 1's. Five runs of the probe from 2026-10-31T21:06:54Z to 21:33:50Z, each 3 rounds of 1,000
+  timed lifecycles after 100 untimed, step 1's binary and the one before it in turn. The 1-minute load at each run's
+  start was 21.18, 15.15, 22.38, 19.14 and 15.67, from kiln's CI and the long-lived containers each run's env.txt
+  names; `LOAD_GATE=0`, by Ada's rule. The host's clock before each: a burst took 0.104 to 0.110 ms at rest on a
+  P-core (run 4: 0.095 and 0.130).
+- **Binaries:** step 1's, of 4e518c0: `hex 0.1.0` sha256 2a475c14f822c00d, static-pie, built in the Fedora 44 pass
+  image, and `seam_oci` 8a83b136fdcb4b8c. The base, of 876136e, the commit before step 1 (run 4's code with two fixes
+  off the root node's path): `hex` 76d3e5d95ac0724f and `seam_oci` bd1cde4cf8b1b0f8, built the same way. libcrun
+  1.30.1 in process, driver sha256 5c356f2139adc232.
+- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on fedora, the harness at 7953067. The base's second run is
+  a rerun: the first try at it was killed with its launcher, when kiln's connection dropped, before it ran a create.
+
+### Create p50 (ms), pooled over each run's 3 rounds
+
+| run | binary | load at start | Hex through the seam | libcrun | Hex over libcrun | parts 12 and 13 |
+|---|---|---|---|---|---|---|
+| 20261031T210654Z | step 1 | 21.18 | 1.825 | 2.980 | 0.612 | 0.000 |
+| 20261031T211054Z | base | 15.15 | 2.217 | 3.073 | 0.721 | 0.304 |
+| 20261031T211237Z | step 1 | 22.38 | 1.955 | 3.046 | 0.642 | 0.000 |
+| 20261031T211410Z | step 1 | 19.14 | 1.787 | 3.084 | 0.579 | 0.000 |
+| 20261031T213222Z | base | 15.67 | 2.171 | 2.903 | 0.748 | 0.311 |
+
+- **Against run 4** (2.020 ms): step 1's best of three, 1.787 ms (20261031T211410Z), is 11.5% lower; its three runs are
+  9.7%, 3.2% and 11.5% lower.
+- **Against the base on this host:** step 1's create is 15.4% lower mean to mean (1.856 against 2.194 ms) and 17.7%
+  best to best (1.787 against 2.171), though the base's runs met the lighter loads (15.15 and 15.67 against 19.14 to
+  22.38). Over libcrun's in the same run, step 1's is 0.579 to 0.642 and the base's 0.721 and 0.748 (run 4: 0.735).
+- **What it took off:** the base's device program, loaded and attached, 0.304 and 0.311 ms (part 12, the load, 0.259
+  and 0.264; part 13, the hints and the attach, 0.045 and 0.047); step 1's, nothing. Its part 11, from the FIFO's
+  `mknod` to the create's first pipe, is 0.015 to 0.017 ms against the base's 0.013 and 0.014: the policy's
+  instructions compared with the root's, where the base loaded them.
+- **The host ran slower than run 4's:** the base's creates were 7.5% and 9.8% slower than run 4's 2.020 ms, and
+  libcrun's 5.6% to 12.1% slower than its 2.750, so step 1's figures against run 4 carry that.
+- Every run's parts sum to within 3% of its creates (97.0% to 100.3% of the creates between the traced ones), no trace
+  event lost, and each probe step's detailed creates held every positional cut to its file.

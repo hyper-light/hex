@@ -213,6 +213,44 @@ Waits for `cgroup_mutex` alone, per lifecycle (how many, each one's mean in us, 
 The seeds over Hex's sustained phases: 15 started and 15 waited for of 5,000 creates, 15 busy at once at most; without
 the network namespace 16 started, 23 waited, 15 at most.
 
+## Run 5 (2026-10-31, fedora): locks, the device program held (goal 5 extended, step 1), at 7953067
+
+- **Why:** goal 5 extended, step 1's third criterion: `cgroup_mutex` holds per default-policy lifecycle at most 16. The
+  node holds each policy's program and the default policy's sits on the oci boxes' root, attached by the node's start,
+  so a default-policy create attaches nothing.
+- **Host and load:** as run 1's. 2026-10-31T21:34:36Z; the 1-minute load 12.56 at the start and 62.29 at the end, a
+  burst of kiln CI during the concurrency-32 phases. Under the probe and that load Hex's sustained phase ran 532/s,
+  without a network namespace 986/s, and libcrun's 571/s, so the shares of the time below aren't run 4's to compare.
+- **Binaries:** `hex 0.1.0` of 4e518c0, sha256 2a475c14f822c00d, static-pie, built in the Fedora 44 pass image;
+  `seam_oci` of 4e518c0, sha256 8a83b136fdcb4b8c.
+- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261031T213436Z`, the harness at 7953067; read with
+  `create_serial.py` over 520 lifecycles at concurrency 1 (500 timed, 20 untimed) and 5,000 at 32.
+
+`cgroup_mutex`'s takers, each one's time in us, wait and hold together, and how many a lifecycle, concurrency 1 then
+32 (run 4's counts beside them):
+
+| Taker | Hex | run 4's counts |
+|---|---|---|
+| `cgroup_mkdir`, the runtime's | 160.0, 434.0 (1.00, 0.89) | 1 |
+| `cgroup_rmdir`, the runtime's | 86.5, 348.6 (1.00, 0.90) | 1 |
+| `cgroup_kill_write`, the runtime's | 50.5, 1462.8 (1.00, 0.90) | 1 |
+| `cgroup_bpf_prog_attach`, the runtime's | 5.3, none seen (0.00 at concurrency 1) | 1 |
+| a fork into the cgroup (`CLONE_INTO_CGROUP`) | 27.8, 1315.6 (1.00, 0.90) | 1 |
+| `css_killed_work_fn`, a kworker's | 107.0, 322.4 (5.03, 4.58) | 5.02, 5.00 |
+| `css_release_work_fn`, a kworker's | 34.8, 255.3 (6.02, 5.50) | 6.02, 6.00 |
+| `cgroup_bpf_release`, a kworker's | 54.3, 710.6 (1.01, 0.92) | 1.01, 1.00 |
+
+- **A lifecycle takes the lock 16 times, where run 4's took 17.** At concurrency 1 the takers sum to 16.06 a lifecycle
+  against run 4's 17.05: the device program's attach is gone, 0.00 a lifecycle where it was 1 (the one attach left is
+  the node's start's, at the oci boxes' root), and the rest are as they were. `cgroup_bpf_release` runs once for each
+  cgroup removed, and it ran 1.01 times a lifecycle: the 0.06 above 16 is the kworkers' work for the run's cgroups
+  besides its 520 boxes, as run 4's 0.05 above 17 was. At concurrency 32 no attach was seen at all. The counts there
+  sit under 1 a lifecycle: the trace saw 4,462 `cgroup_mkdir`s of the phase's 5,000 lifecycles, with no event
+  reported lost, so they're read against `cgroup_mkdir`'s, which each lifecycle takes once.
+- **The shares of the time** the lock was held: 19.8% at concurrency 1, 59.0% at 32 (handed off 9.9% more), 71.6%
+  without a network namespace (7.5%); libcrun's 7.6% and 51.9% (8.9%). Under this run's load the rates were well
+  under run 4's, so these shares don't measure the attach's absence; step 6's measure does, with its holds.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the

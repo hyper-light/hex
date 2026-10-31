@@ -259,6 +259,15 @@ container's /run unless it mounts a tmpfs there, as the bench and lab containers
 - **Delete.** The probe found Hex's delete slower with its state on a tmpfs (4.13 against 2.05 ms). The shim
   writes the stopped state while the delete runs, and the probe doesn't explain the difference; delete is
   measured again once the shim is gone.
+- **The program held by the node** (goal 5 extended, step 1, on fedora; decision 5 has its create figures):
+  - **No load or attach per create.** <!-- record: bench/competitive/probes/seed_path.md -->strace over 55 seam
+    creates and the node's start (run 4): `BPF_PROG_LOAD` 0 and `BPF_PROG_ATTACH` 0; the start's `BPF_PROG_QUERY` 1,
+    `BPF_PROG_GET_FD_BY_ID` 1 and `BPF_OBJ_GET_INFO_BY_FD` 2, keeping the root's program.<!-- /record -->
+  - **Each box decided by its policy** (`crates/hex-cli/tests/oci_devices.rs`, as root in the seam root lab): a
+    default box opens /dev/null and is refused /dev/kmsg; an allow-all box opens /dev/kmsg; a box whose policy also
+    allows writing /dev/kmsg opens it, its own program deciding in the root's place; a process box opens it. A
+    restart keeps the root's program, a policy is loaded once, the bound closes the program used longest ago while
+    its boxes keep their policy, and a planted hint is refused by its translation on the command line.
 
 **What would falsify it.**
 - **The shim's removal:** an OCI operation that needs a process per container. runtime-tools' 28 passing tests,
@@ -879,7 +888,11 @@ plan:
 - **The device program** (11.3%). It is loaded and verified with each create (0.491 ms), because the program a policy
   shares ends with the last cgroup it is attached to, and in the lifecycle phase no other container holds it. A node
   that kept its policies' programs loaded would only attach them: decision 2's sharing, with the agent as the holder
-  that outlives every container.
+  that outlives every container. Built in goal 5's extension, step 1 (decision 2): the node holds each policy's
+  program, and the default policy's sits on the oci boxes' root, so a default-policy create loads and attaches
+  nothing. <!-- record: bench/competitive/probes/create_breakdown.md -->Its parts fell from 0.304 and 0.311 ms in the
+  base binary's runs to nothing, and Hex's create p50 from 2.217 and 2.171 ms to 1.825, 1.955 and 1.787 on one host
+  state, libcrun's beside them 2.903 to 3.084 (run 5).<!-- /record -->
 - **The record's and the state's writes** (17.7%). They are files made, written and renamed on the overlay, and on the
   tmpfs step 2 moves them to they cost less.
 
@@ -985,7 +998,9 @@ concurrency 32 to be at least 8x the throughput at concurrency 1 in the same run
   made and removed for each would take the `mkdir`, the `rmdir` and the kworkers' 12 holds off it. Fewer controllers
   enabled for a box would each take an offline, a release and their interface files off; one device program attached
   at the box root for boxes that share a policy would take the attaches; a kill that doesn't go through `cgroup.kill`
-  would take that one.
+  would take that one. The attaches went in goal 5's extension, step 1 (the default policy's program on the oci boxes'
+  root): <!-- record: bench/competitive/probes/create_serial.md -->at concurrency 1 a default-policy lifecycle takes the
+  lock 16.06 times, against 17.05 in run 4, the attach 0.00 times a lifecycle (run 5).<!-- /record -->
 - **What wouldn't.** A pool that makes cgroups ahead and removes them after use takes the lock as often: under a
   sustained rate it moves no hold. Under a burst it can move up to 14 of the 17 out of the burst, if the making comes
   before it and the removal after. Spreading the boxes' cgroups over several parents would part their directories'

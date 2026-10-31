@@ -119,3 +119,32 @@ use shows in it only as their share of the cores it runs on.
 - **The execs** are runs 1 and 2's: 0 per create.
 - **The seeds' counts.** Under a lighter load than run 2's the sustained phase used 21 seeds, 20 busy at most: how
   many a run holds tracks how long its clones wait on `cgroup_mutex`, so it moves with the host's load.
+
+## Run 4 (2026-10-31, fedora): at 7953067, the device program held (goal 5 extended, step 1)
+
+- **Why:** goal 5 extended, step 1's first criterion: a default-policy seam create after the node's start makes no
+  `BPF_PROG_LOAD` and no `BPF_PROG_ATTACH`. The probe gains its `bpf` reading for it: `strace -f -y -e trace=bpf` over
+  the execs reading's 55 creates, the node's start with them.
+- **Host and load:** as run 1's. 2026-10-31T21:04:33Z to 21:05:13Z, beside kiln CI and the long-lived containers: the
+  1-minute load 35.77 at the start and 41.57 at the end. The host's clock: a burst took 0.124 ms at rest on a P-core
+  before, and 0.119 after.
+- **Binaries:** `hex 0.1.0` of 4e518c0, sha256 2a475c14f822c00d, static-pie, built in the Fedora 44 pass image;
+  `seam_oci` of 4e518c0, sha256 8a83b136fdcb4b8c.
+- **Run:** `~/.cache/hex-bench/out/seed-path-20261031T210433Z` on fedora, the harness at 7953067. N=300, WARMUP=20,
+  EXECS=50, MEMORY_N=400, SUSTAINED=10000.
+
+| Reading | Result |
+|---|---|
+| a seed's clone of an init, request to the init's birth (ms) | p50 0.266, p90 0.626, p99 1.381, max 1.888; n=319, all by one seed |
+| the same, request to the init's first run (ms) | p50 0.280, p90 0.700, p99 1.393, max 1.899; n=319 |
+| execs over 55 creates | 113 in all; the hex binary 2 (`__oci-seed` 2, `__oci-init` 0, `__oci-exec` 0); `/usr/bin/sleep` 55, `/usr/bin/true` 55 |
+| bpf calls over 55 creates and the node's start | `BPF_PROG_QUERY` 1, `BPF_PROG_GET_FD_BY_ID` 1, `BPF_OBJ_GET_INFO_BY_FD` 2; `BPF_PROG_LOAD` 0, `BPF_PROG_ATTACH` 0 |
+| a seed's memory, 59 samples of 2 seeds | `Pss` KiB min 700, median 1,292, max 1,698; `VmRSS` KiB min 1,580, median 2,440, max 2,440 |
+| the seeds over a sustained phase, 10,000 lifecycles at concurrency 32 (844/s) | asked 10,000, waited 39, refused 0; started 32, restarted 0, failed to start 0, died 0, hung 0; most busy at once 32 |
+
+- **The device program:** no create loaded or attached a program, so 0 of each per create. The node's start made the
+  four calls: it asked which program the oci boxes' root carries (`BPF_PROG_QUERY`), opened the one there by its id
+  and read its identity and its translated instructions (`BPF_PROG_GET_FD_BY_ID`, two `BPF_OBJ_GET_INFO_BY_FD`), found
+  the default's, attached by the node of the clone reading before it in the same container, and kept it.
+- **The execs** are the earlier runs': 0 per create.
+- **The load** was heavier than run 3's (35.77 against 25.53), and the clone's p90 and the sustained rate show it.
