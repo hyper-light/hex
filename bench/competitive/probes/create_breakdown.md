@@ -328,3 +328,89 @@ The shim's spawn and exec (parts 15 to 18), which the seed replaces, took 0.508 
   ms, more than the bar: pivot_root's 0.765 ms is its walk over the host's threads (3,669 at the start), as in run 1.
 - **The seed's serial work** (parts 19, 21 and 22, what a seed does per create up to the init's first run) is 0.306 ms
   at p50, against run 1's 0.527.
+
+## Run 4 (2026-10-31, fedora): the seed path, after plan step 4, not of record
+
+- **Why:** the lead's baseline for goal 5's added steps (Ada's call, 2026-10-31): the device program loaded once per
+  policy, the container's root without pivot_root's walk, and fewer `cgroup_mutex` holds per lifecycle. It is the
+  first run of the seed path's cuts (88556f8).
+- **Host and load:** as run 1's. 2026-10-31T06:18:41Z to about 06:20:05Z. The 1-minute load was 10.46 at the start and
+  10.62 at the end; some task was stalled on CPU 0.10% of the last 10 s at the start, on I/O 2.26%. The host's clock: a
+  burst took 0.095 and 0.130 ms at rest on a P-core, against 0.098 and 0.102 held awake.
+- **What else ran:** Focal's `s5-focal*` fleet test containers, up about a minute at the start, and the long-lived
+  ones of run 1. No other bench of Hex's ran: the run's check found no hexbench container up.
+- **Binaries:** `hex 0.1.0` of 4bc8c11, sha256 6ff8dcbfa41a3ab4, static-pie, built in the Fedora 44 pass image;
+  `seam_oci` of 4bc8c11, sha256 7f8f42dee4413ccd. libcrun 1.30.1 (079ff6a7) in process, driver sha256 5c356f2139adc232.
+- **Run:** `~/.cache/hex-bench/out/create-breakdown-20261031T061841Z` on fedora, the harness at 88556f8. 3 rounds of
+  1,000 timed lifecycles after 100 untimed; 1,500 traced creates cut into the seed path's 30 parts, no trace event
+  lost, no line unread; the probe's 10 detailed creates held every positional cut to its file.
+
+### Create p50 (ms)
+
+| | r1 | r2 | r3 | best | pooled p50 | pooled p99 |
+|---|---|---|---|---|---|---|
+| libcrun | 2.838 | 2.638 | 2.730 | 2.638 | 2.750 | 3.854 |
+| seam | 2.084 | 2.120 | 1.794 | 1.794 | 2.020 | 3.143 |
+| traced: recording | 2.257 | 2.259 | 1.967 | 1.967 | 2.189 | 3.299 |
+| traced: between | 2.195 | 2.166 | 1.896 | 1.896 | 2.110 | 3.394 |
+
+The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced ones (step 1's criterion met).
+
+### Create through the seam, in parts (1,500 traced creates)
+
+| # | part | group | pooled p50 | pooled p99 |
+|---|---|---|---|---|
+| 1 | the call reaches the node; the spec checked; the box's record looked for | own | 0.011 | 0.020 |
+| 2 | its cgroup looked for; a watch slot reserved; the record encoded, its temp file made | record | 0.047 | 0.080 |
+| 3 | the record written | record | 0.032 | 0.060 |
+| 4-6 | the record's fsync, its rename, the directory's fsync | record | 0.000 | 0.000 |
+| 7 | the box root listed, its boxes counted | cgroup | 0.009 | 0.019 |
+| 8 | the cgroup made (kernel) | cgroup | 0.130 | 0.732 |
+| 9 | its bounds written: memory.max, memory.swap.max, pids.max | cgroup | 0.045 | 0.091 |
+| 10 | the container's state directory made; config.json read and parsed; its device policy planned | own | 0.041 | 0.072 |
+| 11 | the exec FIFO made; the device program's instructions made | own | 0.012 | 0.021 |
+| 12 | the device program loaded (kernel: the verifier) | own | 0.235 | 0.333 |
+| 13 | its identity read; the hints read, the program they name looked for, the hints written; attached | own | 0.041 | 0.705 |
+| 14 | the pipes made; a namespace made ahead taken; the request sent to a seed, which wakes and opens the cgroup | seed | 0.053 | 0.163 |
+| 15 | the seed's clone prepared | seed | 0.003 | 0.009 |
+| 16 | the init's clone into its cgroup and new namespaces: pid, mount, ipc, uts (kernel), until it runs | init | 0.174 | 0.840 |
+| 17 | the init's first steps, to its join of the namespace made ahead | init | 0.024 | 0.080 |
+| 18 | the namespace made ahead joined (setns, kernel) | init | 0.005 | 0.014 |
+| 19 | the init's root mounted: the rootfs bound, /usr, /proc and /dev, its device nodes made | init | 0.359 | 1.012 |
+| 20 | pivot_root (kernel) | init | 0.535 | 0.672 |
+| 21 | the old root unmounted; the hostname set; the process become (capabilities, user); ready sent | init | 0.065 | 0.660 |
+| 22 | the agent wakes to the ready signal and reads it; the init's stat opened | handshake | 0.027 | 0.105 |
+| 23 | the init's start time read; the container's state written (state.json, renamed into place) | own | 0.051 | 0.087 |
+| 24 | the state read back (state.json); the init's stat opened | own | 0.027 | 0.040 |
+| 25 | the init checked; the record encoded, its temp file made | record | 0.066 | 0.102 |
+| 26 | the record written | record | 0.069 | 0.114 |
+| 27-29 | the record's fsync, its rename, the directory's fsync | record | 0.000 | 0.000 |
+| 30 | the init watched (its pidfd, its stat checked, the epoll set); the box's info made; the call returns | own | 0.073 | 0.113 |
+
+| group, its parts' p50s summed | pooled | share of the sum |
+|---|---|---|
+| the box's record | 0.214 | 10.0% |
+| the cgroup, made and bounded | 0.184 | 8.6% |
+| the seed: the request and its clone's preparing | 0.056 | 2.6% |
+| the init's set-up, to the exec FIFO | 1.162 | 54.5% |
+| the handshake | 0.027 | 1.3% |
+| the node's and the runtime's own work | 0.491 | 23.0% |
+
+### What goal 5's added steps take (pooled part p50s, against the creates between, p50 2.110 ms)
+
+| lever | its parts | ms | share of create |
+|---|---|---|---|
+| the device program once per policy | the program loaded and attached (12, 13) | 0.276 | 13.1% |
+| the container's root without pivot_root's walk | the root mounted, and pivot_root (19, 20) | 0.894 | 42.4% |
+| | of it, pivot_root (20) | 0.535 | 25.4% |
+| fewer `cgroup_mutex` holds | the cgroup, made and bounded (7-9) | 0.184 | 8.7% |
+| | of it, the making: the box root counted and the mkdir (7, 8) | 0.139 | 6.6% |
+
+- **Goal 5's bar:** a quarter of libcrun's pooled create p50 (2.750 ms) is 0.688 ms; the create's parts (2.134 ms) are
+  3.104x it. Take away the device program's load and attach, the root's mounts and pivot_root, and the cgroup's making,
+  each whole, and 0.825 ms is left: 1.200x the bar. The rest is the record's two writes (0.214), the init's clone into
+  its new namespaces (0.174), the state written and read back (0.078), the init watched (0.073), the bounds (0.045)
+  and the seed's request (0.056), so the bar needs a lever among those as well.
+- **The seed** costs 0.056 ms of request and wake-up on the critical path where the shim's spawn and exec cost 0.508
+  in run 3; the namespaces the shim made by `unshare` are now made by the init's clone (0.174, against run 3's 0.115
+  for the `unshare` and 0.088 for the clone).
