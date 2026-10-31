@@ -282,6 +282,59 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
     a_bundle_joining_a_namespace_by_path_runs_through_the_seam(&lab, own);
     a_box_root_counts_its_boxes_without_listing(&lab, own);
+    escapes_are_contained(&lab, own);
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4), the pruned-seed root's security criteria: a container on that path
+/// can't reach the host (the research probe's E0-E3, `goal5-root.md` §3-§4; f66-f80). As root — where a
+/// create takes the pruned seed — run each escape in its own box with full capabilities and a marker on
+/// the host, outside any rootfs; each must exit 0, the box held. E0 a nested user namespace is allowed
+/// (the root isn't a plain chroot); E1 the classic chroot escape stays in the rootfs; E2 unmounting the
+/// root and `setns`-ing into the box's own mount namespace reveals only the seed's empty read-only tmpfs,
+/// not the host; E3 a nested proc mount past a mask is refused. Skipped rootless, where the classic path
+/// runs (a pruned seed is a root node's).
+fn escapes_are_contained(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-escape"), state.path());
+    // A marker only root can read, a sibling of the rootfs and so outside any box's root: a box that
+    // opens it has reached the host.
+    let marker = lab.bundles.path().join("escape-marker");
+    std::fs::write(&marker, "hex-escape-marker").unwrap();
+    let marker = marker.to_string_lossy().into_owned();
+    for mode in ["e0", "e1", "e2", "e3"] {
+        let id = BoxId::new(&format!("esc-{mode}")).unwrap();
+        let spec = lab.running(
+            id.clone(),
+            &[
+                "/hex".to_owned(),
+                "selftest-box".to_owned(),
+                "escape".to_owned(),
+                mode.to_owned(),
+                marker.clone(),
+            ],
+        );
+        node.create(spec).expect("create the escape box");
+        node.start(&id).expect("start the escape box");
+        let info = wait_exit(&node, &id);
+        assert_eq!(
+            info.exit,
+            Some(Exit::Code(0)),
+            "escape {mode} is contained (the box held)"
+        );
+        node.delete(&id).expect("delete the escape box");
+    }
+    // The pruned path served every escape box: none fell back to the shim (all eligible).
+    assert_eq!(
+        node.creates_through_shim(),
+        0,
+        "the escape boxes take the pruned path"
+    );
+    eprintln!(
+        "escapes contained: e0 userns allowed, e1/e2 marker unreached, e3 nested proc refused"
+    );
 }
 
 /// Goal 5 plan step 4: the box bound's count is the root's link count, not a listing (a listing waits

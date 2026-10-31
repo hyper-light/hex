@@ -15,6 +15,7 @@
 
 pub mod caps;
 pub mod devshare;
+pub mod escape;
 pub mod exec;
 pub mod init;
 pub mod inroot;
