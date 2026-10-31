@@ -193,6 +193,70 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     recovery_removes_a_half_made_bundle(&lab, own);
 }
 
+/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace holds exactly two mounts,
+/// its root and a read-only tmpfs, and no proc, sysfs or cgroup2. The node runs in this process and its
+/// create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_PRUNE` set, so the seed is found among
+/// this process's children by that environment entry (an exec seed, unpruned, has none), and its mountinfo
+/// read. Run only as root, where the seeds prune.
+fn pruned_seed_holds_two_mounts() {
+    let me = std::process::id();
+    let mut seed = None;
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // proc_pid_stat(5): ppid is field 4, after the comm (field 2) in parens, which can hold spaces
+        // and parens — so read the fields after the last ')'.
+        let after = stat.rsplit_once(')').map(|(_, a)| a).unwrap_or("");
+        if after
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse::<u32>().ok())
+            != Some(me)
+        {
+            continue;
+        }
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        if environ
+            .split(|&b| b == 0)
+            .any(|e| e.starts_with(b"HEX_OCI_SEED_PRUNE="))
+        {
+            seed = Some(pid);
+            break;
+        }
+    }
+    let seed = seed.expect("a pruned create seed among this process's children");
+    let mountinfo =
+        std::fs::read_to_string(format!("/proc/{seed}/mountinfo")).expect("the seed's mountinfo");
+    let lines: Vec<&str> = mountinfo.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "a pruned create seed (pid {seed}) holds exactly two mounts, got {}:\n{mountinfo}",
+        lines.len()
+    );
+    for line in &lines {
+        // proc_pid_mountinfo(5): the filesystem type is the first field after " - ".
+        let fstype = line
+            .split(" - ")
+            .nth(1)
+            .and_then(|r| r.split_whitespace().next())
+            .unwrap_or("");
+        assert!(
+            !matches!(fstype, "proc" | "sysfs" | "cgroup2" | "cgroup"),
+            "a pruned seed's mount is not proc, sysfs or cgroup: {line}"
+        );
+    }
+    eprintln!("AC-f: the pruned create seed (pid {seed}) holds two mounts, no proc/sysfs/cgroup");
+}
+
 /// The plan step's example: layers [base, app], `sleep infinity`, one read-only bind, a private
 /// network (with a hostname and a hosts line).
 fn layered_box(lab: &Lab, own: &Path) {
@@ -246,6 +310,10 @@ fn layered_box(lab: &Lab, own: &Path) {
             "a root node makes an eligible box on the pruned root path, {} made",
             node.pruned_creates()
         );
+        // AC-f: a started pruned create seed's mount namespace holds exactly two mounts — its root and a
+        // read-only tmpfs — and no proc, sysfs or cgroup2. The seed is a child of this process (the node
+        // runs in-process and its create pool spawns `hex __oci-seed`), so find it and read its mountinfo.
+        pruned_seed_holds_two_mounts();
     }
     let layer = state.join("bundles/layered");
 
