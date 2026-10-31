@@ -34,8 +34,11 @@ use crate::wire::{Fault, Reader, Writer};
 
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXS";
-/// The version this side writes and reads.
-pub const VERSION: u16 = 1;
+/// The version this side writes and reads. Version 2 adds a create's pruned-root descriptors (goal 5
+/// plan step 2): a create's body gained a `pruned` flag and a `binds` count, so its bytes differ from
+/// version 1's, and a reader of either refuses the other's by type ([`read_header`]). A node spawns
+/// its seeds from the one `hex` binary it is given, so the two sides are always of this build.
+pub const VERSION: u16 = 2;
 /// The header's length: magic, version and kind.
 pub const HEADER_BYTES: usize = 8;
 /// Largest request. It sits under the kernel's bound on one `SOCK_SEQPACKET` record (212,960 bytes
@@ -49,12 +52,23 @@ pub const MAX_ANSWER: usize = 4 << 10;
 pub const MAX_WHY: usize = 2 << 10;
 /// Descriptors an exec request carries: stdin, stdout, stderr, the container init's pidfd.
 pub const REQUEST_FDS: usize = 4;
-/// Descriptors a create carries before the network namespace made ahead, when there is one: the write
-/// end of the init's sync pipe and the container's cgroup directory.
+/// Descriptors a create carries first, always: the write end of the init's sync pipe and the read end
+/// of its map pipe.
 pub const CREATE_FDS: usize = 2;
+/// Descriptors a pruned create carries after the network namespace, before the bind-source trees
+/// (goal 5 plan step 2): the bundle directory (to read `config.json`), the container's cgroup
+/// directory, the container's state directory (the exec FIFO's), and the rootfs as a detached tree.
+/// A pruned seed reaches no host path, so each comes as a descriptor.
+pub const PRUNED_FIXED_FDS: usize = 4;
+/// Most bind-source trees a pruned create carries, so its descriptors (the two pipes, a network
+/// namespace, the four fixed, and the bind trees) stay under `SCM_MAX_FD`, the kernel's bound on one
+/// `SCM_RIGHTS` message (253, `include/net/scm.h`). A spec with more bind mounts is refused by type
+/// and made through the shim (CLAUDE.md §2).
+pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS;
 /// Most descriptors any request carries: what a seed's read makes room for, so one carrying more is
-/// cut and refused.
-pub const MAX_REQUEST_FDS: usize = REQUEST_FDS;
+/// cut and refused. A pruned create is the largest (the two pipes, a network namespace, the four fixed
+/// and up to [`MAX_BINDS`] bind trees), which this holds under `SCM_MAX_FD`.
+pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS;
 /// Descriptors a started answer carries: the pidfd of the process the seed started.
 pub const STARTED_FDS: usize = 1;
 
@@ -91,10 +105,16 @@ pub struct Request {
 }
 
 /// A container for the seed to make (decision 5): its init cloned into its cgroup and the namespaces its
-/// spec asks for, set up to the exec FIFO. The seed reads the spec from the bundle's `config.json`, as
-/// the shim did, and opens the cgroup the create names, as `hex __oci-exec` opens its container's; the
-/// descriptors that ride with it ([`CREATE_FDS`]) are the init's sync pipe (the write end) and the map
-/// pipe (the read end), and, when `network` says so, the network namespace made ahead the init joins.
+/// spec asks for, set up to the exec FIFO. On the classic path the seed reads the spec from the bundle's
+/// `config.json` by path and opens the cgroup the create names, as `hex __oci-exec` does; the descriptors
+/// that ride with it ([`CREATE_FDS`]) are the init's sync pipe (the write end) and the map pipe (the read
+/// end), and, when `network` says so, the network namespace made ahead the init joins.
+///
+/// On the pruned path (goal 5 plan step 2, `pruned`), the seed's mount namespace holds nothing of the
+/// host, so what it read by path comes as descriptors instead: after the network namespace ride
+/// [`PRUNED_FIXED_FDS`] (the bundle directory, the cgroup directory, the state directory and the rootfs
+/// tree), then `binds` bind-source trees in the order the spec lists its bind mounts. The agent cloned
+/// each with `open_tree` in its own mount namespace and sends them here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Create {
     /// The container's bundle, whose `config.json` gives its namespaces and the init's set-up.
@@ -102,18 +122,34 @@ pub struct Create {
     /// The container's state directory, which holds the exec FIFO its init waits on.
     pub dir: String,
     /// The container's cgroup directory, which the seed opens and the init is born in; `None` for a
-    /// container with no cgroup of its own (the seam always gives one).
+    /// container with no cgroup of its own (the seam always gives one). On the pruned path the cgroup
+    /// rides as a descriptor instead, and this names it only for the seed's messages.
     pub cgroup: Option<String>,
-    /// Whether a network namespace made ahead rides with it, the last descriptor, for the init to join
+    /// Whether a network namespace made ahead rides with it, after the fixed pair, for the init to join
     /// in place of making its own (decision 4).
     pub network: bool,
+    /// Whether this create takes the pruned-seed root path (goal 5 plan step 2): its sources ride as
+    /// descriptors after the network namespace, since a pruned seed reaches no host path. A create to
+    /// a seed whose node isn't a root node, or whose spec needs the classic root, is made through the
+    /// shim and never reaches a seed as pruned.
+    pub pruned: bool,
+    /// How many bind-source trees ride last, when `pruned`: one per bind mount the spec lists, in that
+    /// order. Zero when not pruned. At most [`MAX_BINDS`].
+    pub binds: u32,
 }
 
 impl Create {
-    /// How many descriptors this create carries: the sync pipe's write end and the map pipe's read end,
-    /// then a network namespace made ahead when there is one.
+    /// How many descriptors this create carries: the two pipes always, then a network namespace made
+    /// ahead when there is one, then on the pruned path the four fixed descriptors and one tree per
+    /// bind mount.
     pub fn fds(&self) -> usize {
-        CREATE_FDS.saturating_add(usize::from(self.network))
+        let mut n = CREATE_FDS.saturating_add(usize::from(self.network));
+        if self.pruned {
+            n = n
+                .saturating_add(PRUNED_FIXED_FDS)
+                .saturating_add(self.binds as usize);
+        }
+        n
     }
 }
 
@@ -244,6 +280,8 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.string(&create.dir)?;
     w.option_with(create.cgroup.as_deref(), |w, c| w.string(c))?;
     w.bool(create.network);
+    w.bool(create.pruned);
+    w.u32(create.binds);
     w.done()
 }
 
@@ -269,12 +307,28 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         dir: r.string("dir")?,
         cgroup: r.option(|r| r.string("cgroup"))?,
         network: r.bool("network")?,
+        pruned: r.bool("pruned")?,
+        binds: r.u32()?,
     };
     r.end(kind::CREATE, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
         return Err(Fault::value(
             "create",
             "a create names its bundle and its state directory",
+        ));
+    }
+    // A create's bind-source trees are bounded, so its descriptors stay under `SCM_MAX_FD`; a `binds`
+    // past the bound, or set when the create isn't pruned, is refused by type (CLAUDE.md §2, §3).
+    if create.binds as usize > MAX_BINDS {
+        return Err(Fault::value(
+            "binds",
+            format!("a create carries at most {MAX_BINDS} bind-source trees"),
+        ));
+    }
+    if !create.pruned && create.binds != 0 {
+        return Err(Fault::value(
+            "binds",
+            "only a pruned create carries bind-source trees",
         ));
     }
     Ok(create)
