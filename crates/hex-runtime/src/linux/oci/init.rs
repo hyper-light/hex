@@ -756,6 +756,12 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
 
     let mut binds = sources.binds.iter();
     for op in crate::linux::oci::mount::plan(&spec.mounts)? {
+        // The mount at `/` is the rootfs itself (a layered root's overlay, with host-path layers the
+        // agent built as the rootfs tree; a directory root has none). It is already attached above, so
+        // it is skipped here, as the agent skipped it when it cloned the bind sources.
+        if op.destination == "/" {
+            continue;
+        }
         do_mount_pruned(rootfs, &op, &mut binds)?;
     }
     if binds.next().is_some() {
@@ -884,8 +890,10 @@ fn do_mount_pruned<'a>(
 /// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its data options the
 /// spec's and its read-only, `nosuid`, `nodev` and `noexec` set at `fsmount`: a detached mount
 /// descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
-/// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`.
-fn make_fs(fstype: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
+/// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`; the agent
+/// ([`super::run`]) makes a layered root's overlay this way too, where it can reach the layers' host
+/// paths that the pruned seed can't, and hands the init the result as the rootfs.
+pub(crate) fn make_fs(fstype: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
     let fs = rustix::mount::fsopen(fstype, FsOpenFlags::empty())
         .map_err(|e| OciError::os("fsopen", e))?;
     for opt in data.split(',').filter(|s| !s.is_empty()) {

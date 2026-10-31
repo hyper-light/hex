@@ -184,9 +184,10 @@ pub enum ClassicReason {
     /// Create-time hooks: they may expect the container's root reachable by host path, as crun gates its
     /// own fd-based path on hooks.
     Hooks,
-    /// A mount namespace joined by path: the init would `setns` into an existing namespace, not build
-    /// the pruned one.
-    MountNamespaceByPath,
+    /// The container joins a network, ipc, uts, cgroup or mount namespace by path: the pruned init can't
+    /// open the host path to `setns` it (its namespace holds nothing of the host). A pid or user
+    /// namespace by path is [`ClassicReason::NamespaceByPath`] instead, refused earlier by the clone.
+    JoinsByPath,
     /// The spec makes no mount namespace of its own: there is no root to build on the pruned path.
     NoMountNamespace,
     /// A bind source the agent couldn't clone with `open_tree`, or more bind mounts than fit one
@@ -204,7 +205,7 @@ impl ClassicReason {
             Self::NamespaceByPath => 0,
             Self::UserNamespace => 1,
             Self::Hooks => 2,
-            Self::MountNamespaceByPath => 3,
+            Self::JoinsByPath => 3,
             Self::NoMountNamespace => 4,
             Self::Source => 5,
         }
@@ -582,13 +583,10 @@ impl Runtime {
         if spec.makes_namespace("user") {
             return Err(ClassicReason::UserNamespace);
         }
-        if spec
-            .linux
-            .namespaces
-            .iter()
-            .any(|n| n.kind == "mount" && n.path.is_some())
-        {
-            return Err(ClassicReason::MountNamespaceByPath);
+        // Any namespace joined by path: the pruned init can't open the host path to `setns` it. A pid or
+        // user namespace by path went to the shim already (`needs_shim`); the rest are refused here.
+        if spec.linux.namespaces.iter().any(|n| n.path.is_some()) {
+            return Err(ClassicReason::JoinsByPath);
         }
         if !spec.hooks.prestart.is_empty()
             || !spec.hooks.create_runtime.is_empty()
@@ -596,17 +594,37 @@ impl Runtime {
         {
             return Err(ClassicReason::Hooks);
         }
-        let rootfs_path = {
-            let p = Path::new(&spec.root.path);
-            if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                making.bundle.join(p)
+        let plan =
+            crate::linux::oci::mount::plan(&spec.mounts).map_err(|_| ClassicReason::Source)?;
+        // The rootfs: the mount at `/` built as a detached mount where there is one (a layered root's
+        // overlay, whose layers are host paths reachable here but not in the pruned seed), else the
+        // root directory cloned (a directory root). The init attaches it and skips the `/` mount.
+        let rootfs = match plan.iter().find(|op| op.destination == "/") {
+            Some(op) if !op.is_bind => {
+                init::make_fs(&op.fstype, &op.data, op.flags).map_err(|_| ClassicReason::Source)?
+            }
+            Some(op) => {
+                clone_tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?
+            }
+            None => {
+                let p = Path::new(&spec.root.path);
+                let rootfs_path = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    making.bundle.join(p)
+                };
+                clone_tree(&rootfs_path).map_err(|_| ClassicReason::Source)?
             }
         };
-        let rootfs = clone_tree(&rootfs_path).map_err(|_| ClassicReason::Source)?;
         let mut binds = Vec::new();
-        for op in crate::linux::oci::mount::plan(&spec.mounts).map_err(|_| ClassicReason::Source)? {
+        for op in &plan {
+            if op.destination == "/" {
+                continue;
+            }
+            // A non-root overlay's layers are host paths the pruned init can't reach; the shim makes it.
+            if op.fstype == "overlay" {
+                return Err(ClassicReason::Source);
+            }
             if op.is_bind {
                 if binds.len() >= hex_core::seed::MAX_BINDS {
                     return Err(ClassicReason::Source);
