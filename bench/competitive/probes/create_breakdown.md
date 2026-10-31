@@ -525,3 +525,51 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
   program's parts 12 and 13 were 0.000.
 - **The second met the host as run 4 did:** libcrun's 2.701 ms against run 4's 2.750, and the base's 1.904 against
   run 4's 2.020. There step 1's create p50, 1.512 ms, is 25.1% under run 4's 2.020, as the plan's criterion reads it.
+
+## The root switch at concurrency (goal 5 plan step 2, AC-e)
+
+The pruned-seed root (decision 5's extension) ends not with `pivot_root` but with `MS_MOVE` and `chroot`, so the
+switch holds no host-wide lock: `pivot_root` calls `chroot_fs_refs`, which takes `tasklist_lock` and walks every
+task on the host (`fs/namespace.c`, `fs/fs_struct.c`, quoted under run 1), while `chroot` swaps only the caller's
+own `fs->root` under its `fs->lock`. AC-e asks that the switch not serialise under concurrency: its p99 at or below
+0.5 ms with eight creates in flight and at least 8,000 idle threads on the host, which a `pivot_root` would have to
+walk.
+
+`create_breakdown.py switch <trace> <stats> [seam json]` reads it. The harness runs it under `AC_E=<lifecycles>`:
+`seam_oci`'s throughput phase pinned to eight in flight (`HEXBENCH_THROUGHPUT_CONC=8`) with the switch events on
+(`sys_enter`/`sys_exit` of `chroot` and `pivot_root`, filtered to the runtime's `seam_oci` and `hex`), recording for
+the whole phase — no `HEXBENCH_TRACE`, so `seam_oci` never toggles `tracing_on`; the reader pairs each thread's
+`chroot` entry to its exit. The host holds `IDLE_THREADS` idle threads (`idlethreads.c`), outside the bench
+container, so they are in the kernel's global task list a `pivot_root` walks though not in the container's pid
+namespace. Two kinds of `pivot_root` can appear and are told apart by their caller: a pruned **seed** prunes its own
+mount namespace once at start with a `pivot_root`, by a pid that never `chroot`s; an **init** on this path `chroot`s
+and never `pivot_root`s. So an init `pivot_root` is a `pivot_root` by a pid that also `chroot`s (AC-a: none), and the
+reader checks every create switched via `chroot` (chroots == creates), a create that fell back to the classic path
+`pivot_root`ing in place of `chroot` and dropping the count.
+
+### Run 8 (2026-10-31, fedora): AC-e, not of record
+
+- **Host:** the fedora bench host (the `kiln-a094a12d` runner, named `fedora-2` when run 1 ran; `create_breakdown.md`
+  run 1), Intel Core i9-14900HX (32 CPUs, the container pinned to 4-15), 62 GiB, kernel 6.19.10-300.fc44.x86_64 — the
+  same machine and kernel as every run above.
+- **When and load:** 2026-10-31T23:38:02Z. `LOAD_GATE=0`, so not of record by CLAUDE.md §7, and the host was busy:
+  the 1-minute load was 50.82 at the start, from kiln CI and the OCI competitive pass (20261031T224432Z) running
+  beside it. AC-e is a per-call latency, not a rate: `chroot` neither sleeps nor takes a shared lock, so its duration
+  is insensitive to the host's load, and the result (p99 0.009 ms at load 50) bears that out.
+- **The host's idle threads:** `IDLE_THREADS=8000`; 8,001 came up, for 11,833 threads on the host — the threads a
+  `pivot_root` would walk.
+- **Binaries:** `hex` and `seam_oci` of a34657a (on cp/t7-ext-s2) built on the host, dynamically linked against its
+  `/usr` (the container bind-mounts it): `hex` sha256 4a0c0da58d5ac39f, `seam_oci` sha256 ef2583e8df9a1431.
+- **Run:** `~/.cache/hex-bench/out/create-breakdown-20261031T233802Z` on the fedora host, the harness at a34657a with
+  `AC_E=2000 HEXBENCH_THROUGHPUT_CONC=8 CPUSET=4-15`. 2,000 creates at eight in flight, each switching its root once;
+  no trace event lost, no `chroot` entry left unpaired.
+
+The root switch (`chroot`) over the 2,000 creates: **p50 0.003 ms, p99 0.009 ms, max 0.240 ms** — the p99 is ~55x
+under the 0.5 ms bar, at a host load of 50, so the switch does not serialise under concurrency. **AC-e met.**
+
+Every one of the 2,000 creates switched via `chroot` (chroots == creates == 2,000): none fell back to the classic
+`pivot_root` path. The only eight `pivot_root`s in the trace are by eight distinct pids that never `chroot` — the
+pruned seeds' one-time prune (the seam result's `seeds.started` is 8). The set of `pivot_root` pids and the set of
+`chroot` pids are disjoint, so no init called `pivot_root`: **AC-a's "no init pivot_root" evidenced directly over the
+raw trace**, beside the cutter's per-create assertion in the runs above (part 20, "the root moved onto / and chrooted
+into", traces one `chroot` and no init `pivot_root`).
