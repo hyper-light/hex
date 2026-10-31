@@ -91,6 +91,18 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   the user-namespace boundary, and the mapped host uid's DAC governs access (measured). An allow-by-default
   policy with denials is refused (§3). Without this the `oci` class could start no standard container
   rootless. crun/runc/podman do the same.
+- **A rootless box can't change another box's cgroup through the host `/sys` it binds** (goal 5's
+  extension, AC-T7.1.1; `crates/hex-cli/tests/oci_cgroupfs_box.rs`, fedora 6.19.10). A rootless box on
+  the host's network binds the host's `/sys` (it can't mount a sysfs in the host's network namespace),
+  which carried the host's cgroup filesystem **writable** beneath the box's own cgroup mounts: a box
+  holding `CAP_SYS_ADMIN` in its user namespace could unmount its own cgroup mounts off and write every
+  box's `cgroup.kill`, `memory.max` and `cgroup.procs` (nsdelegate doesn't guard an init-namespace mount
+  and the files are the node uid's). The runtime now remounts the carried cgroup filesystem read-only (a
+  recursive bind's read-only otherwise covers only its top; `hex_runtime`'s init `remount_cgroupfs_readonly`),
+  so such a box reaches only a read-only host tree — it can't kill, reconfigure or migrate. It can still
+  **read** that tree (an inherent residual of the host-network bind: the host cgroup submount is locked
+  and can't be removed, only made read-only; a box without `CAP_SYS_ADMIN` can't reach it at all);
+  refusing the rootless + host-network + `CAP_SYS_ADMIN` combination would close that too, an owner's call.
 
 ## Design decided, implementation under way (2026-10-24)
 

@@ -683,6 +683,16 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
             let top = inroot::fd_path(&top_fd);
             rustix::mount::mount_remount(&top, op.flags | MountFlags::BIND, op.data.as_str())
                 .map_err(|e| OciError::os("remounting bind", failed(e)))?;
+            // A recursive bind carries the source's submounts with the source's own flags, so the
+            // remount above, which changes only the bind's top, leaves them writable. For a rootless
+            // box on the host's network that means the host's cgroup filesystem stays writable
+            // beneath the box's own cgroup mounts over it (crates/hex-core/src/bundle.rs,
+            // `default_mounts`), where a box holding CAP_SYS_ADMIN in its user namespace could reach
+            // every box's cgroup files by unmounting its own cgroup mounts off (T-T7.1.4). So each
+            // cgroup filesystem the bind carries is remounted read-only too.
+            if op.recursive_bind {
+                remount_cgroupfs_readonly(rootfs, &op.destination, &top_fd, op.flags)?;
+            }
         }
     } else {
         let data = data_cstr(&op.data)?;
@@ -718,6 +728,81 @@ fn data_cstr(data: &str) -> Result<Option<std::ffi::CString>, OciError> {
             |_| OciError::Config("mount data has a NUL".to_owned()),
         )?))
     }
+}
+
+/// Most cgroup filesystems a recursive read-only bind is expected to carry: cgroup v2 has one
+/// (`/sys/fs/cgroup`), and a box is refused rather than left part-done past this (CLAUDE.md §2, §3).
+const MAX_CGROUP_SUBMOUNTS: usize = 256;
+
+/// Each cgroup filesystem a recursive read-only bind carries, remounted read-only. A `mount(2)`
+/// remount changes one mount, not the submounts a recursive bind brought with it, so remounting the
+/// bind's top leaves them with the source's flags. For a rootless box's `/sys` that is the host's
+/// cgroup filesystem, which stays writable beneath the box's own cgroup mounts over it; this makes it
+/// read-only, so a box holding `CAP_SYS_ADMIN` that unmounts its own cgroup mounts off reaches a
+/// read-only host tree, not a writable one. Flat: one bounded pass over the mount table (§11), at most
+/// [`MAX_CGROUP_SUBMOUNTS`] (§2).
+fn remount_cgroupfs_readonly(
+    rootfs: &Path,
+    destination: &str,
+    top_fd: &OwnedFd,
+    flags: MountFlags,
+) -> Result<(), OciError> {
+    let top_real = std::fs::read_link(inroot::fd_path(top_fd))
+        .map_err(|e| OciError::os("reading the bind's path", e))?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    let base = destination.trim_end_matches('/');
+    let mut seen = 0usize;
+    for line in mountinfo.lines() {
+        // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
+        // then the filesystem type.
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
+        if !matches!(right.split(' ').next(), Some("cgroup2") | Some("cgroup")) {
+            continue;
+        }
+        let Some(point) = left.split(' ').nth(4) else {
+            continue;
+        };
+        let point = unescape_mountpoint(point);
+        let Ok(under) = Path::new(&point).strip_prefix(&top_real) else {
+            continue;
+        };
+        let under = under.to_string_lossy();
+        if under.is_empty() {
+            continue; // the bind's own top, already remounted by the caller
+        }
+        seen = seen.saturating_add(1);
+        if seen > MAX_CGROUP_SUBMOUNTS {
+            return Err(OciError::Config(format!(
+                "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
+                 filesystems to make read-only"
+            )));
+        }
+        let dest = format!("{base}/{under}");
+        let sub = target(rootfs, &dest, Make::Nothing)?;
+        rustix::mount::mount_remount(inroot::fd_path(&sub), flags | MountFlags::BIND, "").map_err(
+            |e| {
+                OciError::os(
+                    "remounting a cgroup filesystem read-only",
+                    format!("{dest}: {e}"),
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// A `/proc/self/mountinfo` mount point with its escapes (space `\040`, tab `\011`, newline `\012`,
+/// backslash `\134`; proc_pid_mountinfo(5)) turned back into their characters, the backslash last so a
+/// decoded one isn't read as the start of another escape.
+fn unescape_mountpoint(field: &str) -> String {
+    field
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 fn make_default_devices(rootfs: &Path, in_userns: bool) -> Result<(), OciError> {

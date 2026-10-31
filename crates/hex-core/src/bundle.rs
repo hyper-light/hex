@@ -410,11 +410,15 @@ fn overlay(
 /// has no gid 5 to give its terminals, and can't mount a sysfs while it shares the host's network
 /// namespace, so it binds the host's instead, both as runc's rootless containers do
 /// (libcontainer/specconv, `ToRootless`). That bind must be recursive (a user namespace refuses a
-/// plain bind of a mount with locked mounts beneath it), so it carries the host's cgroup filesystem,
-/// writable under the read-only `/sys`, where a box's processes run as the node's uid, which owns
-/// every box's cgroup files. The container's own cgroup filesystem goes over it, so it sees its own
-/// box's cgroups and no other's, with a read-only tmpfs between: mount(2) refuses a filesystem over
-/// the same filesystem's root (fs/namespace.c, "Refuse the same filesystem on the same mount point").
+/// plain bind of a mount with locked mounts beneath it), so it carries the host's cgroup filesystem
+/// beneath the read-only `/sys`. A box's processes run as the node's uid, which owns every box's
+/// cgroup files, so the runtime remounts that carried cgroup filesystem read-only too (a recursive
+/// bind's read-only covers only its top; `hex_runtime`'s init `remount_cgroupfs_readonly`): else a box
+/// holding `CAP_SYS_ADMIN` in its user namespace could reach every box's cgroup files by unmounting
+/// its own cgroup mounts off it (T-T7.1.4). The container's own cgroup filesystem goes over it, so it
+/// sees its own box's cgroups and no other's, with a read-only tmpfs between: mount(2) refuses a
+/// filesystem over the same filesystem's root (fs/namespace.c, "Refuse the same filesystem on the
+/// same mount point").
 fn default_mounts(owner: Owner, network: Network) -> Vec<Mount> {
     let rootless = matches!(owner, Owner::Rootless { .. });
     let fs = |destination: &str, kind: &'static str, source: &str, options: &[&str]| Mount {
