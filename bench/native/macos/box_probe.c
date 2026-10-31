@@ -8,12 +8,16 @@
 //   HEX_PROBE_QOS=ui runs the watcher at QOS_CLASS_USER_INTERACTIVE; every run prints the QoS it ran at, since a
 //   timer's coalescing, and so a poll's real interval, follows it
 //   HEX_PROBE_BOX_QOS=utility runs the box's members at QOS_CLASS_UTILITY, below the watcher, as a node would
+//   HEX_PROBE_RT=1 makes the watcher a time-constraint (real-time) thread: 250 µs period, 50 µs computation
 //   HEX_PROBE_TIMER=kq waits on a kqueue timer marked NOTE_CRITICAL (minimal coalescing) instead of usleep
 //   check      whether proc_pid_rusage reads this process and a child, at each flavor
 //   escape     a member that forks, setsid()s and leaves its parent: which listing still finds it
 // Build: clang -O2 -Wall -Wextra -o box_probe box_probe.c
 #include <errno.h>
 #include <libproc.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <pthread.h>
 #include <pthread/qos.h>
 #include <signal.h>
@@ -376,6 +380,21 @@ static const char *qos_name(qos_class_t q) {
 }
 
 int main(int argc, char **argv) {
+    const char *rt = getenv("HEX_PROBE_RT");
+    if (rt && strcmp(rt, "1") == 0) {
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        double per_us = 1000.0 * tb.denom / tb.numer;  // mach time units per µs
+        thread_time_constraint_policy_data_t pol = {
+            .period = (uint32_t)(250 * per_us),
+            .computation = (uint32_t)(50 * per_us),
+            .constraint = (uint32_t)(250 * per_us),
+            .preemptible = 1,
+        };
+        kern_return_t kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
+                                             THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+        fprintf(stderr, "rt %s\n", kr == KERN_SUCCESS ? "on" : "refused");
+    }
     const char *want = getenv("HEX_PROBE_QOS");
     if (want && strcmp(want, "ui") == 0 && pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) != 0)
         fprintf(stderr, "could not set the QoS\n");
