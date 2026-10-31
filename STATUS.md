@@ -286,7 +286,23 @@ three different things (CLAUDE.md "Working here"):
     breakdown, /run a tmpfs (its run 3, create-breakdown-20261030T012433Z, not of record, fedora loaded by Focal's
     fleet test), puts a seam create's p50 at 3.290 ms pooled against libcrun's 4.004. Of the 2.983 ms left once the
     shim goes, the init's root is 1.250 (pivot_root 0.765), the device program 0.356 and the cgroup 0.282 (9.5%,
-    under step 5's tenth); what's left is 2.98x goal 5's bar. Step 4 (the seed) is under way; 5 and 6 follow.
+    under step 5's tenth); what's left is 2.98x goal 5's bar. **Plan step 4, the seed** (built, gate-clean on fedora
+    and adacachy, 2026-10-30, 72812eb to ed365e4): a seam create hands a `hex __oci-seed` the container's spec and
+    descriptors over its socket (`hex_core::seed`'s Create, append-only), and the seed clones the init with
+    `clone3(CLONE_PARENT | CLONE_INTO_CGROUP | CLONE_PIDFD | the spec's namespaces)`, so the init is the node agent's
+    own child in one clone, root or rootless. The shim's re-exec is gone from the seam's create but for a spec that
+    joins a pid or user namespace by path, which goes through the shim, counted. The node keeps at most 32 seeds
+    (`createpool.rs` over `hex_core::seeds`), started ahead of the creates with one spare; a seed is 1.5-2.4 MiB
+    resident. On fedora no create execs the hex binary (55 creates, the seeds' two starts aside), and a seed's clone of
+    an init takes 0.234 ms p50 to the init's first run against the 1.038 ms exec it replaces
+    (seed-path-20261030T060613Z); the labs pass rootless and as root, and the OCI validation suite passes the 26 of 32
+    its baseline does. A pass at ca45e1a (20261030T041910Z, load 21.81, not of record): create p50 1.50 ms in process
+    and 1.62 over the socket, against libcrun's 2.97; create+start of `true` 1.44 and 1.81 against 2.86, p99.9 2.58
+    and 3.18. Its fourth criterion, sustained at concurrency 32 at least 8x concurrency 1, isn't met (4.93x in
+    process, 6.31x over the socket): the ceiling is the kernel's `cgroup_mutex` (Open). On Ada's call (2026-10-31)
+    step 4 closes on its other criteria, and goal 5 keeps its 0.25x bar and gains steps for the next levers: the
+    device program loaded once per policy, the container's root set up without pivot_root's walk of the host's
+    threads, and fewer `cgroup_mutex` holds per lifecycle, which takes the 8x. Steps 5 and 6 follow them.
   - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
@@ -352,6 +368,27 @@ three different things (CLAUDE.md "Working here"):
   2's crash tests; older than goal 5). Closes with `start` judging an adopted init by its pid and start time, as
   `state` does, or the supervisor watching adopted inits, shown by a test that restarts the agent between create and
   start.
+- **Concurrency 32 is bound by the kernel's `cgroup_mutex`.** A box's lifecycle takes the host-wide lock 17 times:
+  the runtime's `mkdir` and `rmdir` of its cgroup, its `cgroup.kill`, its device program's attach and its clone into
+  the cgroup, and the kernel's release of the removed cgroup in kworkers. At concurrency 32 on fedora it was held 83.4%
+  of the time and handed off 6.8% more, so the seam sustained 1,942 and 1,994 lifecycles a second, 4.93x and 6.31x
+  its rate at concurrency 1 against goal 5 step 4's 8x, and libcrun, contending on the same lock, 1,593
+  (`probes/create_serial.md`). Hex's own waits are under a tenth of the box root's, and a pool that makes cgroups
+  ahead takes the lock as often. Closes with fewer holds per lifecycle (goal 5's added step, on Ada's call): a box's
+  cgroup reused for the next box of the same owner once it is clean (no process, its memory reclaimed, its counters'
+  starting values kept), else a fresh one; the default device program attached once at the box root; a box ended
+  through its init's pidfd rather than `cgroup.kill`.
+- **A create can wait for a seed to start.** At concurrency 32, 15-46 of each 5,000-10,000 creates waited for a
+  seed the pool was starting (`probes/seed_path.md`), in the tail goal 5's p99.9 (plan step 6) reads. Closes with
+  the pool keeping enough seeds started for the rate it serves, shown by a sustained phase with none waited.
+- **The create seeds' counts aren't on the socket.** `Node::create_seeds` reads them in process only. Closes with
+  an append-only wire call for them, as decision 4's counts got.
+- **A seed that dies after its clone but before it answers is untested.** Its cleanup is the shim path's. Closes
+  with a crash test at that point.
+- **oci_spec_box fails in Docker Desktop's VM.** Its kernel (6.12.65-linuxkit) puts fallback tunnel devices in
+  every new network namespace, so a box's own namespace holds more than `lo` (`oci_spec_box.rs:274`); the test
+  passes on fedora and fails alike at 1c5074e. Closes with the test reading the namespace as the box's own and `lo`
+  up, beside whatever devices the kernel itself puts in every new namespace.
 - **A layered box's delete once waited out its 60 s.** In the gates on fedora at e2bf959 (2026-10-30, 01:28-01:30Z,
   beside Focal's fleet test), oci_spec_box's `layered` box stayed populated 60 s after `cgroup.kill` with nothing in
   `cgroup.procs`, and delete refused by type. On Linux v6.19 that means threads of a process whose leader had ended
