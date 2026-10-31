@@ -1079,6 +1079,79 @@ clone(2), AFaaS, Firecracker and SOCK on seeds, unique state and cgroup pools, a
 `cgroup_css_set_fork`, `css_killed_work_fn`, `css_release_work_fn`), `fs/namei.c` (`__start_dirop`), `fs/kernfs/dir.c`
 (`kernfs_iop_mkdir`, `kernfs_dop_revalidate`) and `fs/kernfs/inode.c` (`kernfs_refresh_inode`).
 
+**The pruned seed's root, with no pivot_root** (goal 5's added step, 2026-10-31). Run 4 of the create breakdown
+(create-breakdown-20261031T061841Z) puts the container's root at 0.894 ms of a 2.020 ms create through the seam (44%),
+of it the init's mounts 0.359 ms and `pivot_root` 0.535. `pivot_root` walks every thread on the host under
+`namespace_sem`, to move each whose root was the old root (`chroot_fs_refs`, v6.19 `fs/fs_struct.c:60-61`; f6, f7), so
+it grows with a node's density (0.535 ms at about 3,870 threads here, 2.99 ms at 26,861 in the probe; f75) and under
+concurrency caps a host near one root per walk (about 930 a second at 11,000 threads however many creators ran; f80).
+This takes it off create's path on a root node, with no new kernel version (decision 6 needs 7.0+; fedora runs 6.19).
+
+- **The seed prunes its own mount namespace once, at start.** A create seed on a root node, before it serves,
+  `unshare(CLONE_NEWNS)`, makes `/` private, mounts a small `tmpfs` holding an empty `r` and a `proc` directory,
+  `pivot_root`s into it once (one walk per seed's life, off every create's path), detaches the old root and remounts the
+  tmpfs read-only. Its namespace then holds exactly two mounts, the namespace's root and that read-only tmpfs: no proc,
+  no sysfs, nothing of the host's (f78). Every init the seed clones copies that namespace (`CLONE_NEWNS` copies the
+  caller's mount table), so the copy is two mounts (10-15 us against 25-4,000 us for the host's; f76) and holds nothing
+  of the host beneath the container's root. A rootless seed can't own a mount namespace without a user namespace of its
+  own, so it doesn't prune and its node takes the classic path (below).
+- **What the seed read by path, it is given as descriptors.** A pruned seed can reach no host path, so the create
+  carries, over `SCM_RIGHTS` with its existing pipes (`hex_core::seed::Create`, extended append-only): an `O_PATH`
+  descriptor for the bundle directory (to read `config.json`), the container's cgroup directory, the container's state
+  directory (the exec FIFO's), the rootfs as a detached tree, and one detached tree per bind source. The node agent,
+  in its own (host) mount namespace, clones each source with `open_tree(OPEN_TREE_CLONE | AT_RECURSIVE)` while the host
+  filesystem is still reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73), sets a
+  read-only source read-only on its tree (`mount_setattr`) before sending, and closes its copies once the seed answers;
+  a tree never attached dissolves with its last descriptor. The descriptors a create carries are bounded by
+  `SCM_MAX_FD` (253, `include/net/scm.h`): a spec with more bind mounts than fit is refused by type and made through the
+  shim, counted (CLAUDE.md §2, §3).
+- **The init builds the root on descriptors, fd-based.** In the clone's child, with no `/proc/self/fd` to resolve
+  targets through (there is no proc in the pruned namespace), the init uses the new mount API throughout: it attaches
+  the rootfs tree at `/r` with `move_mount`, resolves each target inside the rootfs with `openat2(RESOLVE_IN_ROOT)`
+  (`inroot`, generalized to a root descriptor), attaches each bind's tree with `move_mount`, makes each filesystem
+  (`proc`, `tmpfs`, `sysfs`, `mqueue`, `devpts`, `cgroup2`) with `fsopen`/`fsconfig`/`fsmount` (its read-only and
+  `nosuid`/`nodev`/`noexec` set at `fsmount`), makes device nodes with `mknodat` (a root node, so `CAP_MKNOD` holds; a
+  user namespace takes the classic path), masks a file by binding the container's own `/dev/null` over it (not the
+  host's), and sets read-only paths and propagation with `mount_setattr` on a target descriptor. Then `chdir("/r")`,
+  `mount(".", "/", MS_MOVE)`, `chroot(".")`, `chdir("/")`: no `pivot_root`, no old-root detach, no expedited RCU grace
+  period (f11, f76). The exec FIFO is opened through the state-directory descriptor, not a path.
+- **Why MS_MOVE is safe here and not in a copy of the host's namespace.** runc's and crun's `--no-pivot` (MS_MOVE and
+  chroot in a copy of the host's mount namespace) is unsafe as a default, and the probe confirms three escapes the
+  kernel's rules predict (`goal5-root.md` §3, §4): the host's proc stays visible to `mnt_already_visible`, so a nested
+  proc mount past a mask is allowed (E3); the host's tree lies beneath the moved root, so a process that unmounts the
+  root reaches it (E2); and a container that is its own user namespace's root can unmount its root to reach the host
+  (move_userns). The pruned seed closes all three by construction: the only thing beneath the container's root is an
+  empty read-only tmpfs, and no proc or sysfs exists anywhere in the namespace. In the probe, a pruned-path container
+  with `CAP_SYS_ADMIN` and `CAP_SYS_CHROOT`: E1 (the classic chroot escape) stays in the rootfs, E2 reveals only the
+  empty tmpfs, E3 is refused `EPERM`, and a nested user namespace is still allowed (E0), as a chrooted process could
+  not make (f66-f69, f78). MS_MOVE onto `/` keeps the container able to make nested user namespaces (its root is the
+  namespace's topmost mount, so `current_chrooted` is false; f66), which sandboxes nested in containers need and a
+  plain chroot would refuse.
+- **The classic path stays, counted by reason.** A create takes the shim (the full host mount namespace, `unshare`,
+  bind and `pivot_root`, as the command line makes every container) when the pruned seed can't serve it: a rootless
+  node, a spec with a user namespace of its own (a tree the agent clones from its own user namespace isn't locked in
+  the container's; a follow-up, f10), create-time hooks (they run against host paths), a mount namespace joined by
+  path, and a source the agent can't clone ahead (`open_tree` refused) or too many to fit `SCM_MAX_FD`. Each reason is
+  a fixed label on a `hex_*` counter (no high-cardinality label, CLAUDE.md §10), so a run shows how often a create
+  still pivots and why. This joins the `needs_shim` reasons decision 5 already counts (a pid or user namespace by path).
+- **What would falsify it** (each on fedora 6.19, in the same run as libcrun): the root-escape test reaching the marker
+  or any host path from a pruned-path container; a nested proc mount succeeding past a mask in one; the pruned root's
+  switch growing more than 10% between 0 and 24,000 extra host threads; create p50 through the seam not dropping by at
+  least 0.45 ms against run 4's in the same harness (pivot_root's 0.535 less the agent's clones and noise); or a started
+  seed's namespace holding more than its two mounts, or a proc or sysfs, at any create.
+- **What stays for decision 6.** The goal-5 step builds what 7.x needs anyway — sources as detached trees, the init's
+  mounts on descriptors, nothing read by host path inside the namespace — so decision 6 swaps only how the namespace is
+  made: `open_tree(OPEN_TREE_NAMESPACE)` and `setns` on 7.0, `CLONE_EMPTY_MNTNS` on 7.1 (no seed pruning, no copy at
+  all), measured against the pruned seed on a 7.x host and made the default where the kernel has it (f83, f84).
+
+**Sources (the pruned seed's root).** `docs/research/runtime/goal5-root.md` (what `pivot_root` costs and why, what runc
+and crun do, what a root without it leaves open and what closes it, and the probe's numbers and escape runs). Kiln
+research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs/namespace.c` (`pivot_root`,
+`copy_mnt_ns`, `do_move_mount`, `mntns_install`, `may_copy_tree`), `fs/fs_struct.c` (`chroot_fs_refs`), `fs/open.c`
+(`chroot`), `fs/namei.c` (`follow_dotdot`), `kernel/user_namespace.c` (`create_user_ns`); v7.0 and v7.1 `fs/namespace.c`
+(`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
+(`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
+
 ### 6. Mount namespaces without copying, where the kernel has it
 
 **The choice.** On Linux 7.0 and later, `create` builds the container's mount namespace with
