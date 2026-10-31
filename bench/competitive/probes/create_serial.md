@@ -240,16 +240,48 @@ the network namespace 16 started, 23 waited, 15 at most.
 | `css_release_work_fn`, a kworker's | 34.8, 255.3 (6.02, 5.50) | 6.02, 6.00 |
 | `cgroup_bpf_release`, a kworker's | 54.3, 710.6 (1.01, 0.92) | 1.01, 1.00 |
 
-- **A lifecycle takes the lock 16 times, where run 4's took 17.** At concurrency 1 the takers sum to 16.06 a lifecycle
-  against run 4's 17.05: the device program's attach is gone, 0.00 a lifecycle where it was 1 (the one attach left is
-  the node's start's, at the oci boxes' root), and the rest are as they were. `cgroup_bpf_release` runs once for each
-  cgroup removed, and it ran 1.01 times a lifecycle: the 0.06 above 16 is the kworkers' work for the run's cgroups
-  besides its 520 boxes, as run 4's 0.05 above 17 was. At concurrency 32 no attach was seen at all. The counts there
+- **The attach is gone.** At concurrency 1 the takers sum to 16.06 a lifecycle against run 4's 17.05: the device
+  program's attach is 0.00 a lifecycle where it was 1 (the one attach left is the node's start's, at the oci boxes'
+  root), and the rest are as they were. These takers count every kworker's work on the host: `cgroup_bpf_release`,
+  which runs once for each cgroup removed, ran 1.01 times a lifecycle, so the 0.06 above 16, as run 4's 0.05 above
+  17, is the kernel's work for cgroups besides the run's 520 boxes. Run 6 counts the boxes' own holds alone. At
+  concurrency 32 no attach was seen at all. The counts there
   sit under 1 a lifecycle: the trace saw 4,462 `cgroup_mkdir`s of the phase's 5,000 lifecycles, with no event
   reported lost, so they're read against `cgroup_mkdir`'s, which each lifecycle takes once.
 - **The shares of the time** the lock was held: 19.8% at concurrency 1, 59.0% at 32 (handed off 9.9% more), 71.6%
   without a network namespace (7.5%); libcrun's 7.6% and 51.9% (8.9%). Under this run's load the rates were well
   under run 4's, so these shares don't measure the attach's absence; step 6's measure does, with its holds.
+
+## Run 6 (2026-10-31, fedora): locks, the holds for the boxes' own cgroups counted alone, at c84fb64
+
+- **Why:** run 5's takers count the kernel's work for every cgroup removed on the host, and the node's start's own,
+  as the lifecycles'. The probe now also counts each taker, the attach and the fork into a cgroup for the boxes' own
+  cgroups alone (`@box`: those directly under seam_oci's `/sys/fs/cgroup/hex-oci-seam/.oci`, found from the work's or
+  the call's cgroup), and `create_serial.py` reports them per box made.
+- **Host and load:** as run 1's. 2026-10-31T21:55:58Z; the 1-minute load 39.91 at the start and 23.62 at the end.
+  Hex's sustained phase ran 1,429/s, without a network namespace 1,520/s, and libcrun's 1,268/s.
+- **Binaries:** run 5's, of 4e518c0 (`hex` 2a475c14f822c00d, `seam_oci` 8a83b136fdcb4b8c).
+- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261031T215558Z`, the harness at c84fb64.
+
+| `cgroup_mutex` holds for the box's own cgroup, per box made | hex.c1 (520 boxes) | hex.c32 (5,000) | hex.c32nonet (5,000) |
+|---|---|---|---|
+| `cgroup_mkdir` | 1.000 | 1.000 | 1.000 |
+| `cgroup_rmdir` | 1.000 | 1.000 | 1.000 |
+| `cgroup_kill_write` | 1.000 | 1.000 | 1.000 |
+| `cgroup_bpf_prog_attach` | 0 | 0 | 0 |
+| a fork into the cgroup (`CLONE_INTO_CGROUP`) | 1.000 | 1.000 | 1.000 |
+| `css_killed_work_fn`, a kworker's | 5.000 | 5.000 | 5.000 |
+| `css_release_work_fn`, a kworker's | 5.996 | 5.999 | 5.999 |
+| `cgroup_bpf_release`, a kworker's | 1.000 | 1.000 | 1.000 |
+| in all | 15.996 | 15.999 | 15.999 |
+
+- **A default-policy box's lifecycle takes the lock 16 times, where run 4's took 17:** its cgroup's `mkdir`, `rmdir`
+  and `cgroup.kill`, its init's clone into it, and the kernel's work for it once removed (five csses offlined, six
+  released, its BPF state released), and no attach. Each count is a whole number a box but the six releases, of which
+  a box's last ones hadn't run when the trace ended (3,118 of 3,120 at concurrency 1, 29,994 of 30,000 at 32).
+- **Host-wide**, the run's takers sum to 16.00 a lifecycle at concurrency 1 (`css_killed_work_fn` 5.00,
+  `css_release_work_fn` 6.00, `cgroup_bpf_release` 1.00, and the runtime's four), the host making fewer other
+  cgroups than in run 5, and the node's start's one attach is 0.00 a lifecycle.
 
 ## What the runs find
 

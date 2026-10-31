@@ -265,7 +265,8 @@ container's /run unless it mounts a tmpfs there, as the bench and lab containers
     `BPF_PROG_GET_FD_BY_ID` 1 and `BPF_OBJ_GET_INFO_BY_FD` 2, keeping the root's program.<!-- /record -->
   - **Each box decided by its policy** (`crates/hex-cli/tests/oci_devices.rs`, as root in the seam root lab): a
     default box opens /dev/null and is refused /dev/kmsg; an allow-all box opens /dev/kmsg; a box whose policy also
-    allows writing /dev/kmsg opens it, its own program deciding in the root's place; a process box opens it. A
+    allows writing /dev/kmsg opens it, and one whose policy denies c 1:3 opens /dev/zero and is refused /dev/null,
+    each box's own program deciding in the root's place; a process box opens /dev/kmsg. A
     restart keeps the root's program, a policy is loaded once, the bound closes the program used longest ago while
     its boxes keep their policy, and a planted hint is refused by its translation on the command line.
 
@@ -999,8 +1000,9 @@ concurrency 32 to be at least 8x the throughput at concurrency 1 in the same run
   enabled for a box would each take an offline, a release and their interface files off; one device program attached
   at the box root for boxes that share a policy would take the attaches; a kill that doesn't go through `cgroup.kill`
   would take that one. The attaches went in goal 5's extension, step 1 (the default policy's program on the oci boxes'
-  root): <!-- record: bench/competitive/probes/create_serial.md -->at concurrency 1 a default-policy lifecycle takes the
-  lock 16.06 times, against 17.05 in run 4, the attach 0.00 times a lifecycle (run 5).<!-- /record -->
+  root): <!-- record: bench/competitive/probes/create_serial.md -->a default-policy box's lifecycle takes the lock
+  15.996 times for its own cgroup at concurrency 1 and 15.999 at 32, none an attach (run 6), where run 4's took 17;
+  host-wide, counting the kernel's work for every cgroup on the host, 16.06 against run 4's 17.05 (run 5).<!-- /record -->
 - **What wouldn't.** A pool that makes cgroups ahead and removes them after use takes the lock as often: under a
   sustained rate it moves no hold. Under a burst it can move up to 14 of the 17 out of the burst, if the making comes
   before it and the removal after. Spreading the boxes' cgroups over several parents would part their directories'
