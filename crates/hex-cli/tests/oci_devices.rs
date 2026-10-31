@@ -326,9 +326,24 @@ fn a_planted_hint_is_refused_by_its_translation(lab: &Lab, own: &Path) {
         );
         String::from_utf8(out.stdout).unwrap()
     };
+    // The command line's create passes its streams on to the container's init, as runc's does, so they are
+    // the null device and a file here: a pipe the waiting init held would never end.
     let create = |id: &str, policy: Option<&str>| {
         let bundle = lab.bundle(policy, Some(&rel.join(id)));
-        hex(&["create", "--bundle", bundle.to_str().unwrap(), id]);
+        let log = root.path().join(format!("{id}.create.log"));
+        let status = Command::new(&lab.exe)
+            .args(["oci", "create", "--bundle", bundle.to_str().unwrap(), id])
+            .env("HEX_OCI_ROOT", root.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "hex oci create {id}: {}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
         own.join(id)
     };
     let plain = create("cli-plain", None);
