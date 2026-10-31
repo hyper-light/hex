@@ -1323,3 +1323,83 @@ pub fn own_fd(fd: std::os::fd::RawFd) -> Result<std::os::fd::OwnedFd, OciError> 
     // cleared, having kept it out of every other use, so this process is its sole owner.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
+
+/// A mount attribute to set on a mount named by a descriptor (`include/uapi/linux/mount.h`), for
+/// [`mount_setattr`]. `RDONLY` makes the mount read-only; the rest match a spec mount's `nosuid`,
+/// `nodev` and `noexec` options. These are the values `mount_attr`'s `attr_set` and `attr_clr` take.
+pub const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
+pub const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
+pub const MOUNT_ATTR_NODEV: u64 = 0x0000_0004;
+pub const MOUNT_ATTR_NOEXEC: u64 = 0x0000_0008;
+
+/// A mount's propagation, the one value `mount_attr`'s `propagation` field takes
+/// (`include/uapi/linux/fs.h`): a mount is unbindable, private, a slave (downstream) or shared, and
+/// exactly one at a time. `0` leaves it unchanged.
+pub const MS_UNBINDABLE: u64 = 1 << 17;
+pub const MS_PRIVATE: u64 = 1 << 18;
+pub const MS_SLAVE: u64 = 1 << 19;
+pub const MS_SHARED: u64 = 1 << 20;
+
+/// What [`mount_setattr`] sets on a mount: the attributes to set and to clear, and the propagation to
+/// apply (`0` for none). The init on the pruned-seed path has no `/proc/self/fd` to name a mount by
+/// path (its namespace holds no proc), so it names each mount by a descriptor and changes it here,
+/// where the classic path remounts by path.
+pub struct MountAttrs {
+    pub set: u64,
+    pub clr: u64,
+    pub propagation: u64,
+}
+
+/// `mount_setattr(target, "", AT_EMPTY_PATH[|AT_RECURSIVE], &attr, sizeof attr)`: changes the mount
+/// the descriptor `target` names (a mount fd from `fsmount`/`open_tree`, or an `O_PATH` descriptor of
+/// a mount point), recursively over its submounts when `recursive`. rustix doesn't wrap this call
+/// (`not_implemented!(mount_setattr)`), and the pruned-seed init needs it to make a mount read-only or
+/// set its propagation without a path (CLAUDE.md §12 names this file and this call). A read-only bind
+/// made recursive covers the submounts a recursive bind carried, so a recursive read-only bind of a
+/// host tree is read-only to the leaves (unlike a `MS_REMOUNT` of the top alone).
+pub fn mount_setattr(
+    target: std::os::fd::BorrowedFd<'_>,
+    recursive: bool,
+    attrs: &MountAttrs,
+) -> Result<(), OciError> {
+    use std::os::fd::AsRawFd;
+    /// `struct mount_attr` (`include/uapi/linux/mount.h`, `MOUNT_ATTR_SIZE_VER0`, 32 bytes): four
+    /// `__u64`s, the attributes to set and clear, the propagation, and a user-namespace descriptor
+    /// (unused here).
+    #[repr(C)]
+    struct MountAttr {
+        attr_set: u64,
+        attr_clr: u64,
+        propagation: u64,
+        userns_fd: u64,
+    }
+    let attr = MountAttr {
+        attr_set: attrs.set,
+        attr_clr: attrs.clr,
+        propagation: attrs.propagation,
+        userns_fd: 0,
+    };
+    // AT_EMPTY_PATH: operate on the descriptor itself, so the empty path names the mount `target` is.
+    let mut flags: libc::c_int = libc::AT_EMPTY_PATH;
+    if recursive {
+        flags |= libc::AT_RECURSIVE;
+    }
+    // SAFETY: mount_setattr(2) with a descriptor the caller owns, an empty path (AT_EMPTY_PATH, so no
+    // path is read), the exact size of the fully initialized `MountAttr` the kernel only reads, and
+    // flags the kernel validates. The return value is checked; nothing of ours is written.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            target.as_raw_fd(),
+            c"".as_ptr(),
+            flags,
+            &raw const attr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(OciError::os("mount_setattr", std::io::Error::last_os_error()))
+    }
+}

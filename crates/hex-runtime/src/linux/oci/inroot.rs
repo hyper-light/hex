@@ -7,7 +7,7 @@
 //! runc mounts (libcontainer/rootfs_linux.go). A path that leads, through a link, to nothing inside
 //! the root is refused by name, never followed out (CLAUDE.md §3).
 
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
 use rustix::fs::{Mode, OFlags, ResolveFlags};
@@ -31,6 +31,13 @@ pub enum Make {
 /// [`Make::Nothing`].
 pub fn open(rootfs: &Path, dest: &str, make: Make) -> Result<Option<OwnedFd>, OciError> {
     let root = root(rootfs)?;
+    open_at(root.as_fd(), dest, make)
+}
+
+/// As [`open`], but the root is already an open directory descriptor, not a path. The pruned-seed
+/// init (goal 5's pruned root) holds the rootfs as a mount descriptor and resolves targets in it
+/// without a path, its namespace holding nothing of the host to name one by.
+pub fn open_at(root: BorrowedFd<'_>, dest: &str, make: Make) -> Result<Option<OwnedFd>, OciError> {
     let parts: Vec<&str> = dest
         .split('/')
         .filter(|p| !p.is_empty() && *p != ".")
@@ -47,7 +54,7 @@ pub fn open(rootfs: &Path, dest: &str, make: Make) -> Result<Option<OwnedFd>, Oc
         }
         done.push_str(part);
         let last = i.checked_add(1) == Some(parts.len());
-        match in_root(&root, &done) {
+        match in_root(root, &done) {
             Ok(fd) if last => return Ok(Some(fd)),
             Ok(_) => continue,
             Err(Errno::NOENT) => {}
@@ -56,7 +63,7 @@ pub fn open(rootfs: &Path, dest: &str, make: Make) -> Result<Option<OwnedFd>, Oc
         if make == Make::Nothing {
             return Ok(None);
         }
-        let dir = in_root(&root, &parent).map_err(|e| failed(dest, &parent, e))?;
+        let dir = in_root(root, &parent).map_err(|e| failed(dest, &parent, e))?;
         let made = match if last { make } else { Make::Dir } {
             Make::File => rustix::fs::openat(
                 &dir,
@@ -74,7 +81,7 @@ pub fn open(rootfs: &Path, dest: &str, make: Make) -> Result<Option<OwnedFd>, Oc
             Ok(()) | Err(Errno::EXIST) => {}
             Err(e) => return Err(failed(dest, &done, e)),
         }
-        match in_root(&root, &done) {
+        match in_root(root, &done) {
             Ok(fd) if last => return Ok(Some(fd)),
             Ok(_) => {}
             Err(Errno::NOENT) => {
@@ -86,7 +93,7 @@ pub fn open(rootfs: &Path, dest: &str, make: Make) -> Result<Option<OwnedFd>, Oc
         }
     }
     // No component: the root itself.
-    in_root(&root, ".")
+    in_root(root, ".")
         .map(Some)
         .map_err(|e| failed(dest, ".", e))
 }
@@ -94,12 +101,18 @@ pub fn open(rootfs: &Path, dest: &str, make: Make) -> Result<Option<OwnedFd>, Oc
 /// `dest`'s parent directory opened in the root (made when missing) and `dest`'s last component,
 /// for a call that makes that component itself, relative to the directory (`mknodat`, `symlinkat`).
 pub fn parent(rootfs: &Path, dest: &str) -> Result<(OwnedFd, String), OciError> {
+    let root = root(rootfs)?;
+    parent_at(root.as_fd(), dest)
+}
+
+/// As [`parent`], but the root is already an open directory descriptor (goal 5's pruned root).
+pub fn parent_at(root: BorrowedFd<'_>, dest: &str) -> Result<(OwnedFd, String), OciError> {
     let trimmed = dest.trim_end_matches('/');
     let (dir, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
     if name.is_empty() || name == "." || name == ".." {
         return Err(OciError::Config(format!("{dest:?} names no file")));
     }
-    let dir = open(rootfs, dir, Make::Dir)?
+    let dir = open_at(root, dir, Make::Dir)?
         .ok_or_else(|| OciError::Config(format!("{dest}: its directory can't be made")))?;
     Ok((dir, name.to_owned()))
 }
@@ -122,7 +135,7 @@ fn root(rootfs: &Path) -> Result<OwnedFd, OciError> {
 
 /// `path` opened in `root` as though `root` were `/`; magic links (`/proc/<pid>/root`) refused, as
 /// openat2(2) advises asking for explicitly.
-fn in_root(root: &OwnedFd, path: &str) -> Result<OwnedFd, Errno> {
+fn in_root(root: BorrowedFd<'_>, path: &str) -> Result<OwnedFd, Errno> {
     rustix::fs::openat2(
         root,
         path,
