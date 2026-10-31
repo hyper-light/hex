@@ -99,10 +99,24 @@ fn device_programs_are_held_per_policy_and_the_default_sits_at_the_oci_root() {
         }
     };
     let lab = Lab::new(&cache, &exe);
-    each_box_is_decided_by_its_policy(&lab, &own);
-    a_restarted_node_keeps_its_roots_program(&lab, &own);
-    a_policy_is_loaded_once_and_the_bound_closes_the_oldest(&lab, &own);
-    a_planted_hint_is_refused_by_its_translation(&lab, &own);
+    // Each case says what it saw, so a lab's record shows every one ran.
+    for (case, saw) in [
+        ("policies", each_box_is_decided_by_its_policy(&lab, &own)),
+        (
+            "restart",
+            a_restarted_node_keeps_its_roots_program(&lab, &own),
+        ),
+        (
+            "bound",
+            a_policy_is_loaded_once_and_the_bound_closes_the_oldest(&lab, &own),
+        ),
+        (
+            "command line",
+            a_planted_hint_is_refused_by_its_translation(&lab, &own),
+        ),
+    ] {
+        eprintln!("oci_devices {case}: {saw}");
+    }
 }
 
 /// Do: make a box with the default policy, then boxes whose policies allow every device and allow
@@ -112,7 +126,7 @@ fn device_programs_are_held_per_policy_and_the_default_sits_at_the_oci_root() {
 /// and is refused the block node; the process box opens /dev/kmsg. The default box's create loaded and
 /// attached nothing; the oci boxes' root carries one program, attached with OVERRIDE, and the default box
 /// none of its own; the box root, which the process boxes live under, carries none.
-fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) {
+fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
     let state = tempfile::tempdir_in(lab.dir.path()).unwrap();
     let box_root = own.join("hex-dev-policies");
     sweep(&box_root);
@@ -183,13 +197,18 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) {
     }
     drop(node);
     sweep(&box_root);
+    format!(
+        "the root's program {:?} (OVERRIDE) decides for the default box, which loaded and attached none; \
+         the allow-all and kmsg boxes their own; each open as its policy says; {after:?}",
+        root.ids
+    )
 }
 
 /// Do: make a default box and a kmsg box, drop the node and open another over the same box root and
 /// state, recover, and make one more of each. Expect: both boxes are taken back; the oci boxes' root
 /// carries the program the first start attached (the same id), and the restart attached none; the boxes
 /// made before and after get the same decisions (T-T7.1.2).
-fn a_restarted_node_keeps_its_roots_program(lab: &Lab, own: &Path) {
+fn a_restarted_node_keeps_its_roots_program(lab: &Lab, own: &Path) -> String {
     let state = tempfile::tempdir_in(lab.dir.path()).unwrap();
     let box_root = own.join("hex-dev-restart");
     sweep(&box_root);
@@ -234,6 +253,10 @@ fn a_restarted_node_keeps_its_roots_program(lab: &Lab, own: &Path) {
     }
     drop(second);
     sweep(&box_root);
+    format!(
+        "the root's program {:?} kept across the restart, none attached by it; boxes before and after alike",
+        program.ids
+    )
 }
 
 /// Do: on a node holding at most two programs, make four boxes with the kmsg policy, then one box each
@@ -241,7 +264,7 @@ fn a_restarted_node_keeps_its_roots_program(lab: &Lab, own: &Path) {
 /// it four times; the third policy closes the program used longest ago, the kmsg one, which no descriptor
 /// of this process holds after, while it stays attached to each kmsg box, which still opens /dev/kmsg and
 /// is refused the block node; the last kmsg box loads it again.
-fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path) {
+fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path) -> String {
     let state = tempfile::tempdir_in(lab.dir.path()).unwrap();
     let box_root = own.join("hex-dev-bound");
     sweep(&box_root);
@@ -299,8 +322,14 @@ fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path
     for id in kmsg.iter().chain([&fuse, &rw, &again]) {
         node.delete(id).unwrap();
     }
+    let counts = node.device_programs().unwrap();
     drop(node);
     sweep(&box_root);
+    format!(
+        "four creates loaded program {} once; the third policy closed it, still attached to its boxes, \
+         which kept their policy; loaded again after; {counts:?}",
+        program[0]
+    )
 }
 
 /// Do: through the command line (`hex oci`, its state root a directory of this test's), make a default
@@ -309,7 +338,7 @@ fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path
 /// translation) and the hints name it now; the container opens /dev/kmsg and is refused the block node
 /// (the default program would refuse /dev/kmsg); the second kmsg container's program is that same one,
 /// so it loaded none.
-fn a_planted_hint_is_refused_by_its_translation(lab: &Lab, own: &Path) {
+fn a_planted_hint_is_refused_by_its_translation(lab: &Lab, own: &Path) -> String {
     let root = tempfile::tempdir_in(lab.dir.path()).unwrap();
     let rel = own.strip_prefix("/sys/fs/cgroup").unwrap();
     let hex = |args: &[&str]| {
@@ -394,6 +423,10 @@ fn a_planted_hint_is_refused_by_its_translation(lab: &Lab, own: &Path) {
     for id in ["cli-plain", "cli-kmsg", "cli-kmsg2"] {
         hex(&["delete", "--force", id]);
     }
+    format!(
+        "the planted hint's program {theirs:?} refused by its translation, {ours:?} loaded; the next create \
+         attached {ours:?}, loading none"
+    )
 }
 
 /// Removes a box root this test left, with its oci boxes' root, so a run starts on a fresh one; one
