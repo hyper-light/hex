@@ -802,6 +802,12 @@ p50 (18.297 ms):
      crucial to identify the minimal necessary set" (Chai et al., OSDI 2025, §8, p.512).
    - **What would falsify it:** the cgroup, made and bounded, at a tenth or more of what's left of a create once steps 2
      and 4 are in.
+   - **Step 5's measure** (2026-10-31): <!-- record: bench/competitive/probes/create_breakdown.md -->with steps 2 and 4
+     in, the cgroup, made and bounded, is 0.184 ms of a create whose parts sum to 2.134 ms, 8.6%, and its making 0.139
+     (6.6%; run 4, create-breakdown-20261031T061841Z).<!-- /record --> That is under the tenth, so no pool is built and
+     goal 5 plan step 5 closes on this record. The cgroup's work goes instead to goal 5's added step for fewer
+     `cgroup_mutex` holds per lifecycle, which reuses a box's cgroup for the next box of the same owner once it's
+     clean (Ada's call, 2026-10-31).
    - **What step 4 adds.** At concurrency 32 the rate is what `cgroup_mutex` admits, and a cgroup made and removed per
      lifecycle is most of what holds it (below, "Concurrency 32"). A pool that makes cgroups ahead and removes them
      after use still takes the lock as often, so under a sustained rate it doesn't lift that ceiling (under a burst it
