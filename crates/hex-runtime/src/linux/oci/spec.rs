@@ -532,7 +532,42 @@ impl Spec {
                     .to_owned(),
             ));
         }
+        // A container in a user namespace that doesn't make a network namespace of its own can't mount a
+        // sysfs (the network namespace's owner must), so its /sys is a bind of one, the host's where it
+        // shares the host's network. Holding CAP_SYS_ADMIN, it could unmount the mounts over that bind
+        // and read every box's cgroup tree beneath it, which the bind's read-only remount leaves
+        // readable (docs/research/runtime/goal5-cgroupfs.md). Refused, the combination, on Ada's call
+        // (2026-10-31).
+        if self.in_user_namespace()
+            && !self.makes_namespace("network")
+            && self.holds_capability("CAP_SYS_ADMIN")
+        {
+            return Err(OciError::Config(
+                "a container in a user namespace that holds CAP_SYS_ADMIN without a network namespace \
+                 of its own could reach the host's cgroup tree through the /sys it must bind: give it \
+                 a network namespace of its own or drop CAP_SYS_ADMIN"
+                    .to_owned(),
+            ));
+        }
         Ok(())
+    }
+
+    /// Whether any of the process's capability sets names `cap`.
+    fn holds_capability(&self, cap: &str) -> bool {
+        self.process
+            .as_ref()
+            .and_then(|p| p.capabilities.as_ref())
+            .is_some_and(|c| {
+                [
+                    &c.bounding,
+                    &c.effective,
+                    &c.inheritable,
+                    &c.permitted,
+                    &c.ambient,
+                ]
+                .iter()
+                .any(|set| set.iter().any(|name| name == cap))
+            })
     }
 
     /// Whether the spec asks for a namespace of `kind` (made fresh, no `path`).
@@ -604,6 +639,51 @@ mod tests {
                 matches!(&r, Err(OciError::Config(why)) if why.contains(field)),
                 "{field} should be refused with a Config error naming it, got {r:?}"
             );
+        }
+    }
+
+    // T-T7.1.4: a container in a user namespace that doesn't make a network namespace of its own can't
+    // mount a sysfs, so its /sys is a bind of the host's, and holding CAP_SYS_ADMIN it could unmount
+    // the mounts over that bind and read every box's cgroup tree beneath it
+    // (docs/research/runtime/goal5-cgroupfs.md). Such a spec is refused by name, from any capability
+    // set; with a network namespace of its own, without CAP_SYS_ADMIN, or outside a user namespace, it
+    // parses.
+    #[test]
+    fn a_user_namespaced_container_on_a_borrowed_network_with_cap_sys_admin_is_refused() {
+        let spec = |namespaces: &str, set: &str, cap: &str| {
+            format!(
+                r#"{{"ociVersion":"1.0.0","root":{{"path":"rootfs"}},
+                    "process":{{"args":["/bin/sh"],"capabilities":{{"{set}":["{cap}"]}}}},
+                    "linux":{{"namespaces":[{namespaces}]}}}}"#
+            )
+        };
+        let host_network = r#"{"type":"user"},{"type":"pid"},{"type":"mount"}"#;
+        let joined_network =
+            r#"{"type":"user"},{"type":"mount"},{"type":"network","path":"/proc/1/ns/net"}"#;
+        for set in [
+            "bounding",
+            "effective",
+            "inheritable",
+            "permitted",
+            "ambient",
+        ] {
+            for namespaces in [host_network, joined_network] {
+                let r = Spec::parse(spec(namespaces, set, "CAP_SYS_ADMIN").as_bytes());
+                assert!(
+                    matches!(&r, Err(OciError::Config(why))
+                        if why.contains("CAP_SYS_ADMIN") && why.contains("network namespace")),
+                    "CAP_SYS_ADMIN in {set} with {namespaces} should be refused by name, got {r:?}"
+                );
+            }
+        }
+        let own_network = r#"{"type":"user"},{"type":"network"},{"type":"mount"}"#;
+        let no_user_namespace = r#"{"type":"pid"},{"type":"mount"}"#;
+        for ok in [
+            spec(own_network, "bounding", "CAP_SYS_ADMIN"),
+            spec(host_network, "bounding", "CAP_CHOWN"),
+            spec(no_user_namespace, "bounding", "CAP_SYS_ADMIN"),
+        ] {
+            assert!(Spec::parse(ok.as_bytes()).is_ok(), "{ok} should parse");
         }
     }
 

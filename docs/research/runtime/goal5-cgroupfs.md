@@ -84,9 +84,12 @@ The box can still READ the host cgroup tree it reaches. This is inherent to a ho
   sees only its own subtree through its own `cgroup2` in its own cgroup namespace (§1). The lab confirms
   reads still succeed with the fix on (`read:victim.memory.max=OK[max]`).
 
-Closing the read residual too would mean refusing the rootless + host-network + `CAP_SYS_ADMIN`
+Closing the read residual too means refusing the rootless + host-network + `CAP_SYS_ADMIN`
 combination with a typed error (CLAUDE.md §3), since Hex can't isolate such a box's view of the host
-cgroup tree. That is a policy choice left to the owner.
+cgroup tree. Ada chose that (2026-10-31): `Spec::check` refuses a container in a user namespace holding
+`CAP_SYS_ADMIN` without a network namespace of its own, from any capability set, so no box reaches the
+tree to read it; the read-only remount stays beneath that, so a box that ever reached it couldn't change
+it.
 
 ## 5. What would falsify this
 
