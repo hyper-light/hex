@@ -75,6 +75,9 @@ struct Shared {
     /// set, so no high-cardinality label): a pruned seed couldn't serve them, or they join a pid or user
     /// namespace by path. Each stops at `u64::MAX`, as the core's counts do.
     classic: [AtomicU64; ClassicReason::COUNT],
+    /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`.
+    /// Zero on a rootless node, whose seeds don't prune. Stops at `u64::MAX`.
+    pruned: AtomicU64,
 }
 
 struct Inner {
@@ -123,6 +126,7 @@ impl CreatePool {
             free: Condvar::new(),
             wake: Condvar::new(),
             classic: std::array::from_fn(|_| AtomicU64::new(0)),
+            pruned: AtomicU64::new(0),
         });
         let starting = Arc::clone(&shared);
         let starter = std::thread::Builder::new()
@@ -153,6 +157,12 @@ impl CreatePool {
             .map_or(0, |c| c.load(Ordering::Relaxed))
     }
 
+    /// How many creates a pruned seed made on the pruned root path since the pool opened (goal 5 plan
+    /// step 2): zero on a rootless node, positive on a root node once it has made a pruned-eligible box.
+    pub fn pruned_creates(&self) -> u64 {
+        self.shared.pruned.load(Ordering::Relaxed)
+    }
+
     /// What the pool has done, as the bench and the node's metrics read it.
     pub fn counts(&self) -> Result<Counts, Refusal> {
         Ok(self.shared.lock().map_err(Refusal::from)?.seeds.counts())
@@ -175,12 +185,13 @@ impl CloneInit for CreatePool {
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
         let shared = &self.shared;
         let (id, proc) = shared.acquire()?;
+        let pruned = req.pruned.is_some();
         let create = Create {
             bundle: req.bundle.to_string_lossy().into_owned(),
             dir: req.dir.to_string_lossy().into_owned(),
             cgroup: Some(req.cgroup.dir().to_string_lossy().into_owned()),
             network: req.network.is_some(),
-            pruned: req.pruned.is_some(),
+            pruned,
             binds: req
                 .pruned
                 .as_ref()
@@ -202,6 +213,13 @@ impl CloneInit for CreatePool {
         }
         match round_trip(proc.socket.as_fd(), &create, &fds) {
             Ok(started) => {
+                if pruned {
+                    let _ = shared
+                        .pruned
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                            Some(n.saturating_add(1))
+                        });
+                }
                 shared.done(id, proc);
                 Ok(started)
             }

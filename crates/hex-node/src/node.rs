@@ -820,6 +820,15 @@ impl Node {
             .get()
             .map_or(0, |pool| pool.creates_through_shim_for(reason))
     }
+
+    /// How many of the node's creates a pruned seed made on the pruned root path (goal 5 plan step 2):
+    /// zero on a rootless node, positive on a root node once it has made a pruned-eligible box. The bench
+    /// and the root lab read it to confirm the pruned path was taken, not a silent shim fallback.
+    pub fn pruned_creates(&self) -> u64 {
+        self.create_seeds
+            .get()
+            .map_or(0, CreatePool::pruned_creates)
+    }
 }
 
 impl Runtime for Node {

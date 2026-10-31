@@ -226,6 +226,27 @@ fn layered_box(lab: &Lab, own: &Path) {
     );
     node.start(&id).expect("start");
     assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
+    // Goal 5 plan step 2: an eligible box takes no shim fallback (no pid/user namespace by path, no
+    // user namespace of its own, no hooks). A root node makes it on the pruned root path (no
+    // `pivot_root`); a rootless node's seeds don't prune, so it takes the classic path in the init.
+    assert_eq!(
+        node.creates_through_shim(),
+        0,
+        "an eligible box falls back to no shim"
+    );
+    if lab.rootless {
+        assert_eq!(
+            node.pruned_creates(),
+            0,
+            "a rootless node's seeds don't prune their mount namespace"
+        );
+    } else {
+        assert!(
+            node.pruned_creates() >= 1,
+            "a root node makes an eligible box on the pruned root path, {} made",
+            node.pruned_creates()
+        );
+    }
     let layer = state.join("bundles/layered");
 
     // Its root is the overlay, over the box's own writable layer; /usr is the bind, read-only.
