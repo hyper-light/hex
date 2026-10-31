@@ -491,10 +491,43 @@ overlayfs.
 runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
 is a security posture for the person to choose.
 
+## Decision (proposed 2026-10-31, for Ada): each OS runs its own boxes natively; a Linux guest only for Linux images
+
+Ada's requirement (2026-10-31): "Why can't we run natively on Windows and MacOS? This is a requirement." The
+evidence is `docs/research/runtime/native-platforms.md` (§n below are its sections).
+
+- **Hex runs natively on all three OSes:** the node agent, its seam, its store and the scheduler are one code
+  path (CLAUDE.md §8). Only the boxes differ, behind the one `Runtime` trait, and every OS's classes pass its
+  conformance suite (`HEX-RT-1..9`).
+- **`process`:**
+  - Linux: cgroup v2, as today.
+  - Windows: a job object per box, nested under the node's. Memory is the job's memory limit; CPU a weight
+    or a hard cap; processes the active-process limit; delete is kill-on-close (§2). Limit events come from
+    the notification class Windows guarantees, or from the job's accounting, since other completion-port
+    messages may be lost (CLAUDE.md §3).
+  - macOS: a box is the tree Hex starts, under a QoS class, and background priority where its weight is low.
+    macOS has no public cap on a tree's memory, CPU or process count (§3), so memory and processes are
+    bounded by Hex's own rule: it reads each member's footprint (`proc_pid_rusage`) and the box's count on an
+    interval, and ends the box when it passes its bound (an eviction by a stated rule, CLAUDE.md §2). CPU is
+    bounded by priority alone. A box that asks for confinement gets App Sandbox's, which every child inherits
+    (§3). The class's own purpose is trusted code that must not starve the machine, and that purpose doesn't
+    need it.
+- **`oci`:**
+  - Linux: as today.
+  - Windows: Windows images run natively, process-isolated through HCS (the OCI spec's Windows section).
+    Devices come only by class grant, and mounts are read-only where the spec says (§2). Production is
+    Windows Server's; Windows 10 and 11 take it for development, with host and image versions matching.
+  - Linux images on macOS and Windows: Hex's Linux node runs in a Linux guest that Shards boots through the
+    OS's hypervisor (Hypervisor.framework, the Windows Hypervisor Platform), reached over vsock (§4). The
+    class runs unchanged inside, goal 5's device programs and `mount_setattr` included. Hex reaches Shards
+    through a Shards `-api` crate (CLAUDE.md §9), to be agreed with Shards' owner. Where Shards has no backend
+    yet (macOS on x86_64, Windows on arm64), Hex gives a typed refusal naming that backend until it lands.
+- **What would falsify it:** §6. **Measured before it is built on:** §7.
+
 ## Open (STATUS.md)
 
-- The `process` box on macOS (QoS and limits) and Windows (job objects); today a typed refusal
-  naming the platform (CLAUDE.md §12).
+- Each OS's own boxes, natively (the decision above, proposed): to build. Until then the `process` and `oci`
+  classes give a typed refusal naming the platform off Linux (CLAUDE.md §12).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
   legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a
