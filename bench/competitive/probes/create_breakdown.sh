@@ -50,7 +50,23 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "probe: /run a tmpfs (size 1g), where the runtimes keep their state, as host.sh's OCI pass has it"
 } > "$OUT/env.txt"
 NAME=hexbench-createbd-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+HELPER=""
+# IDLE_THREADS (goal 5 plan step 2, AC-c): hold that many idle threads on the host (outside the bench
+# container), so `pivot_root`'s walk of every host thread has them to visit. The pruned-seed root makes
+# no `pivot_root`, so its create p50 is flat in the host's thread count; the classic path grows with it.
+if [ "${IDLE_THREADS:-0}" -gt 0 ]; then
+  gcc -O2 -pthread -o "$OUT/bin/idlethreads" "$HERE/idlethreads.c"
+  "$OUT/bin/idlethreads" "$IDLE_THREADS" > "$OUT/idlethreads.out" 2>> "$OUT/idlethreads.out" &
+  HELPER=$!
+  for i in $(seq 1 150); do
+    up=$(ls "/proc/$HELPER/task" 2>/dev/null | wc -l)
+    [ "$up" -ge "$IDLE_THREADS" ] && break
+    [ "$i" = 150 ] && { echo "refusing: only $up of $IDLE_THREADS idle threads came up" >&2; kill "$HELPER" 2>/dev/null; exit 5; }
+    sleep 0.2
+  done
+  echo "idle threads: $(ls "/proc/$HELPER/task" 2>/dev/null | wc -l) up (asked $IDLE_THREADS), host threads now $(ls -d /proc/[0-9]*/task/[0-9]* 2>/dev/null | wc -l)" >> "$OUT/env.txt"
+fi
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$HELPER" 2>/dev/null || true' EXIT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
