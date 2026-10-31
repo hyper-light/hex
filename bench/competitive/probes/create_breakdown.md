@@ -69,6 +69,19 @@ start time read, the shim reaped), and **the node's and the runtime's own work**
 state directory, `config.json` and the device plan, the FIFO, the device program loaded and attached, the pipes, the
 namespace taken from the pool, `state.json` written and read back, the init watched).
 
+**The seed path** (goal 5 plan step 4, from 72812eb on): a seam create no longer spawns a shim. The node agent hands a
+seed (`hex __oci-seed`, `crates/hex-node/src/createpool.rs`) the request over its socket, and the seed clones the init
+straight into the box's cgroup and the namespaces the spec makes (`oci/seed.rs`'s `serve_create`). The init then joins
+the network namespace made ahead itself and sets up its root as before (`init.rs`'s `clone_child`). `create_cuts` takes
+that path when no create forks from the agent (`ops_for`), and cuts it into 30 parts: the shim path's first 13 (to the
+device program's attach) and its last 6 (from the state's read-back), and between them the request sent and the seed's
+open of the box's cgroup, the seed's `clone3`, the init's first run, its `setns` (held to `CLONE_NEWNET`), its root
+mounted, its `pivot_root`, its ready signal, the agent's read of it and the state written. The seed is told by its fork:
+the first after the device program's load by a process other than the agent whose child goes on to `pivot_root`. Its
+open of the box's cgroup is held to that cgroup's path by the detailed trace. With no shim there is no `wait4`, and the
+namespaces the shim made by `unshare` are made by the seed's clone, so they fall in the init's clone. The parts' groups
+are the shim path's, with **the seed: the request and its clone's preparing** in place of the shim's spawn and exec.
+
 Only events that cost a call little are traced: an open's entry fetches its path from user memory, about 4 µs an event
 (`exec_breakdown.md`), so the rounds trace the opens' exits and tell an open by its place. rustix opens with
 `open(2)` on x86_64, std with `openat(2)`, so both are traced. Percentiles are nearest-rank. tracefs prints the clock to

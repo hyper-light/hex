@@ -45,10 +45,10 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 # told by its place in the call; the detailed trace adds the entries (DETAIL), for the probe that holds those places
 # to their files. mkdir's entry fetches its path too, and a create makes two, so it stays: its path tells the
 # cgroup's from the state directory's in every round. Each event is kept only for the names this run's processes
-# have: seam_oci (the node agent, and the child it clones for the shim until that execs) and hex (the shim, and the
-# container's init it clones, until the init execs its workload at start); a write only for hex's, the shim's pid
-# line and the init's ready signal. open as well as openat: rustix opens with open(2) on x86_64. The clock is
-# CLOCK_MONOTONIC's.
+# have: seam_oci (the node agent, and the child it clones for the shim until that execs) and hex (the shim or a
+# seed, and the container's init either clones, until the init execs its workload at start); a write only for hex's,
+# the shim's pid line and the init's ready signal. open as well as openat: rustix opens with open(2) on x86_64. The
+# clock is CLOCK_MONOTONIC's.
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hexcb-$$"
