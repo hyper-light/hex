@@ -136,27 +136,32 @@ kretprobe:css_killed_work_fn, kretprobe:css_release_work_fn, kretprobe:cgroup_bp
 kprobe:cgroup_mkdir
 {
 	\$p = (struct kernfs_node *)arg0;
-	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["cgroup_mkdir"] = count(); }
 }
 kprobe:cgroup_rmdir
 {
 	\$p = ((struct kernfs_node *)arg0)->__parent;
-	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["cgroup_rmdir"] = count(); }
 }
 kprobe:cgroup_kill_write
 {
 	\$p = ((struct kernfs_open_file *)arg0)->kn->__parent->__parent;
-	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["cgroup_kill_write"] = count(); }
 }
-kprobe:css_killed_work_fn, kprobe:css_release_work_fn
+kprobe:css_killed_work_fn
 {
 	\$p = ((struct cgroup_subsys_state *)(arg0 - offsetof(struct cgroup_subsys_state, destroy_work)))->cgroup->kn->__parent;
-	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["css_killed_work_fn"] = count(); }
+}
+kprobe:css_release_work_fn
+{
+	\$p = ((struct cgroup_subsys_state *)(arg0 - offsetof(struct cgroup_subsys_state, destroy_work)))->cgroup->kn->__parent;
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["css_release_work_fn"] = count(); }
 }
 kprobe:cgroup_bpf_release
 {
 	\$p = ((struct cgroup *)(arg0 - offsetof(struct cgroup, bpf) - offsetof(struct cgroup_bpf, release_work)))->kn->__parent;
-	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["cgroup_bpf_release"] = count(); }
 }
 kprobe:cgroup_bpf_prog_attach { @ina[(uint64)curtask->pid] = 1; }
 kretprobe:cgroup_get_from_fd
