@@ -302,7 +302,13 @@ three different things (CLAUDE.md "Working here"):
     process, 6.31x over the socket): the ceiling is the kernel's `cgroup_mutex` (Open). On Ada's call (2026-10-31)
     step 4 closes on its other criteria, and goal 5 keeps its 0.25x bar and gains steps for the next levers: the
     device program loaded once per policy, the container's root set up without pivot_root's walk of the host's
-    threads, and fewer `cgroup_mutex` holds per lifecycle, which takes the 8x. Steps 5 and 6 follow them.
+    threads, and fewer `cgroup_mutex` holds per lifecycle, which takes the 8x. **Plan step 5, a pool of cgroups made
+    ahead** (closed on the record, 2026-10-31, 67b8e0a): the create breakdown now cuts the seed path (88556f8), and its
+    run 4 (create-breakdown-20261031T061841Z, not of record) puts the cgroup, made and bounded, at 0.184 ms of a 2.134
+    ms create, 8.6%: under the step's tenth, so no pool (decision 5). The same run has create p50 at 2.020 ms against
+    libcrun's 2.750; the container's root, its mounts and pivot_root, is 0.894 ms of it and the device program 0.276.
+    Without the root, the device program and the cgroup's making, 0.825 ms is left, 1.2x goal 5's bar, so the bar
+    needs a lever beyond the three added. Step 6 follows the added steps.
   - goal 6 (mount namespaces without copying) — open.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
