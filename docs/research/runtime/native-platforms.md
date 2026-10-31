@@ -107,8 +107,34 @@ A job object bounds a process tree as a cgroup does, with hard limits:
 - The SDK's public interfaces are priority, not rate (`usr/include/sys/resource.h:120`, `PRIO_DARWIN_BG`; `:528-529`,
   `IOPOL_THROTTLE`, `IOPOL_UTILITY`; QoS classes in `sys/qos.h`), and per-process usage (`libproc.h:111`,
   `proc_pid_rusage`). The jetsam limit call has no public header (only its number, in `sys/syscall.h`).
-- So a native macOS box bounds memory and processes by Hex's own rule: it reads each member's footprint and count, and
-  ends the box when it passes its bound (CLAUDE.md §2's eviction by a stated rule), and it bounds CPU by priority alone.
+- So a native macOS box bounds memory by Hex's own rule: it reads each member's footprint, and ends the box when it
+  passes its bound (CLAUDE.md §2's eviction by a stated rule). CPU is bounded by priority alone.
+- Measured on the Mac Studio (`bench/native/macos/RESULT.md`, commits 374bdbf and 9694770, 2026-10-31):
+  - A box reads in 49.3-49.7 µs p50 at 128 processes.
+  - A plain `usleep` ran about six times long. A kqueue timer marked `NOTE_CRITICAL` (XNU `bsd/sys/event.h:316`:
+    "system does minimal timer coalescing") ran as asked.
+  - Polled every (bound - footprint) / 256 GiB/s, at least 250 µs, from a Mach time-constraint thread, a box held a
+    256 MiB bound to within 42 MiB, with its members allocating up to 164 GiB/s, twice as many as the cores included.
+    A box at 95% of its bound cost at most 0.55% of a core.
+  - Without the time-constraint thread, a box that fills every core passed its bound by up to 1.46 GiB.
+  - So the bound holds to the box's rate times the floor, not exactly as Linux's `memory.max` does, and the rate is
+    a constant measured per machine.
+
+### Membership: only a user of its own keeps a box whole
+
+A box's rule reads its members, so Hex must know them all, including one that forks, calls `setsid()` and loses its
+parent, as build servers do (Gradle's, Bazel's, sccache's).
+
+- macOS can't follow forks (XNU `bsd/sys/event.h:364`): "* NOTE_TRACK, NOTE_TRACKERR, and NOTE_CHILD are no longer
+  supported as of 10.5". So such a member leaves its box's process group, session and parent.
+- A process can't change its audit session unprivileged (`bsd/security/audit/audit_syscalls.c:1126`, `suser`), but no
+  `proc_info` flavor reads another process's session, so a node can't list a box by it.
+- Processes can be listed by user (`bsd/sys/proc_info.h:54`): "#define PROC_UID_ONLY           4". A user ID is
+  inherited, can't be dropped unprivileged, and makes `RLIMIT_NPROC` a kernel-enforced cap on the box's processes
+  (`kern_fork.c:269-270`).
+- So a macOS box that can't be escaped runs as a user of its own, from a pool made at install, as Nix's build users
+  are. Starting a program as another user takes privilege, so the node needs a privileged helper there. A box
+  without one is tracked by its process group, and a member that daemonizes leaves it.
 
 ## 4. Linux images on macOS and Windows: a guest that Shards boots
 
@@ -134,7 +160,8 @@ Hex's node in such a guest runs the `oci` class unchanged, goal 5's device progr
 | its own OS's programs | cgroup box; `oci` | job object; Windows container | App Sandbox launcher |
 | memory bound | `memory.max` | job memory limit | Hex's footprint rule |
 | CPU | weight, cap | weight, hard cap | priority only |
-| processes | `pids.max` | active-process limit | Hex's count rule |
+| processes | `pids.max` | active-process limit | `RLIMIT_NPROC` of the box's own user |
+| membership | the cgroup | the job | the box's own user (a privileged helper starts it) |
 | devices | device program | device classes, by grant | entitlements, at signing |
 | Linux images | native | Shards guest | Shards guest |
 
@@ -149,7 +176,9 @@ Hex's node in such a guest runs the `oci` class unchanged, goal 5's device progr
 
 ## 7. Open, to measure
 
-- macOS: the footprint rule's interval and how far a box can pass its bound before it ends; App Sandbox per box (all
+- macOS: a member that daemonizes, against its box's process group and its user (`bench/native/macos/box_probe.c`
+  `escape`); the footprint rule's read cost and how far a box can pass its bound before it ends (`read`, `over`);
+  the privileged helper's start cost; App Sandbox per box (all
   launchers of one identity share one container, `macos-confinement.md:93-94`); launch cost on the Mac Studio.
 - Windows: HCS from Rust; a container's create and start against Docker's and containerd's (runhcs) on the same host;
   job-object box create against the Linux box; Windows on arm64.

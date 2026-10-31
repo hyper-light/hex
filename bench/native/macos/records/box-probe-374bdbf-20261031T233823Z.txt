@@ -1,0 +1,65 @@
+# kiln run r30 on adas-mac-studio-3 (background; its output read in two parts)
+ M docs/design/runtime.md
+ M docs/research/runtime/native-platforms.md
+commit 374bdbf
+ProductName:		macOS ProductVersion:		26.2 BuildVersion:		25C56 
+Apple M4 Max 14 38654705664 
+Apple clang version 21.0.0 (clang-2100.1.1.101)
+=== pass 1 2026-10-31T23:38:23Z load averages: 1.86 3.07 5.16
+check self pid=50163 flavor=4 ret=0 errno=0 (ok) phys_footprint_mib=0.9 resident_mib=1.2
+check child pid=50165 flavor=4 ret=0 errno=0 (ok) phys_footprint_mib=64.9 resident_mib=65.0
+escape pid=50169 ppid=1 in_box_pgrp=0 child_of_leader=0 same_uid_listed=1
+read k=1 reads=2000 p50_us=5.4 p99_us=5.7 max_us=27.2 per_pid_p50_us=5.38 (sum 0)
+read k=16 reads=2000 p50_us=10.3 p99_us=10.7 max_us=29.0 per_pid_p50_us=0.64 (sum 0)
+read k=128 reads=2000 p50_us=49.5 p99_us=53.8 max_us=116.4 per_pid_p50_us=0.39 (sum 0)
+timer=sleep over interval_us=1000 runs=20 overshoot_mib p50=181.1 p99=204.2 max=204.2 alloc_mib_per_s p50=25143 kill_to_reaped_us p50=2945 max=3258
+timer=kq over interval_us=1000 runs=20 overshoot_mib p50=9.7 p99=17.8 max=17.8 alloc_mib_per_s p50=25648 kill_to_reaped_us p50=1707 max=2048
+timer=sleep over interval_us=10000 runs=20 overshoot_mib p50=1137.4 p99=2006.9 max=2006.9 alloc_mib_per_s p50=0 kill_to_reaped_us p50=11176 max=17552
+timer=kq over interval_us=10000 runs=20 overshoot_mib p50=15.2 p99=225.9 max=225.9 alloc_mib_per_s p50=0 kill_to_reaped_us p50=1563 max=3494
+adapt floor_us=250 runs=20 overshoot_mib p50=5.4 p99=7.4 max=7.4 reads_per_run p50=23
+adaptk members=1 floor_us=250 runs=20 overshoot_mib p50=4.2 p99=7.5 max=7.5 reads_per_run p50=22 box_alloc_mib_per_s p50=26621
+adaptk members=4 floor_us=250 runs=20 overshoot_mib p50=18.5 p99=23.3 max=23.3 reads_per_run p50=7 box_alloc_mib_per_s p50=91735
+adaptk members=8 floor_us=250 runs=20 overshoot_mib p50=15.4 p99=50.3 max=50.3 reads_per_run p50=4 box_alloc_mib_per_s p50=154725
+adaptk members=14 floor_us=250 runs=20 overshoot_mib p50=129.2 p99=473.7 max=473.7 reads_per_run p50=3 box_alloc_mib_per_s p50=157803
+adaptk members=28 floor_us=250 runs=20 overshoot_mib p50=452.5 p99=1457.8 max=1457.8 reads_per_run p50=2 box_alloc_mib_per_s p50=0
+hold floor_us=250 seconds=2 reads_per_s=3606 read_cpu_us_per_s=4672.9
+hold floor_us=1000 seconds=2 reads_per_s=971 read_cpu_us_per_s=2249.2
+=== pass 2 2026-10-31T23:38:31Z load averages: 2.20 3.10 5.15
+check self pid=51873 flavor=4 ret=0 errno=0 (ok) phys_footprint_mib=0.9 resident_mib=1.2
+check child pid=51875 flavor=4 ret=0 errno=0 (ok) phys_footprint_mib=64.9 resident_mib=65.0
+escape pid=51879 ppid=1 in_box_pgrp=0 child_of_leader=0 same_uid_listed=1
+read k=1 reads=2000 p50_us=5.5 p99_us=5.7 max_us=23.0 per_pid_p50_us=5.46 (sum 0)
+read k=16 reads=2000 p50_us=10.3 p99_us=12.3 max_us=24.0 per_pid_p50_us=0.65 (sum 0)
+read k=128 reads=2000 p50_us=49.7 p99_us=54.3 max_us=123.5 per_pid_p50_us=0.39 (sum 0)
+timer=sleep over interval_us=1000 runs=20 overshoot_mib p50=185.7 p99=197.0 max=197.0 alloc_mib_per_s p50=24748 kill_to_reaped_us p50=3100 max=4031
+timer=kq over interval_us=1000 runs=20 overshoot_mib p50=18.3 p99=24.0 max=24.0 alloc_mib_per_s p50=24698 kill_to_reaped_us p50=1949 max=2340
+timer=sleep over interval_us=10000 runs=20 overshoot_mib p50=805.5 p99=1833.8 max=1833.8 alloc_mib_per_s p50=0 kill_to_reaped_us p50=8347 max=26647
+timer=kq over interval_us=10000 runs=20 overshoot_mib p50=243.9 p99=250.6 max=250.6 alloc_mib_per_s p50=24661 kill_to_reaped_us p50=3676 max=4182
+adapt floor_us=250 runs=20 overshoot_mib p50=4.1 p99=6.0 max=6.0 reads_per_run p50=24
+adaptk members=1 floor_us=250 runs=20 overshoot_mib p50=2.6 p99=6.5 max=6.5 reads_per_run p50=23 box_alloc_mib_per_s p50=24888
+adaptk members=4 floor_us=250 runs=20 overshoot_mib p50=10.7 p99=21.4 max=21.4 reads_per_run p50=7 box_alloc_mib_per_s p50=86727
+adaptk members=8 floor_us=250 runs=20 overshoot_mib p50=17.9 p99=36.2 max=36.2 reads_per_run p50=4 box_alloc_mib_per_s p50=154670
+adaptk members=14 floor_us=250 runs=20 overshoot_mib p50=122.5 p99=482.1 max=482.1 reads_per_run p50=3 box_alloc_mib_per_s p50=164359
+adaptk members=28 floor_us=250 runs=20 overshoot_mib p50=545.6 p99=1160.5 max=1160.5 reads_per_run p50=2 box_alloc_mib_per_s p50=0
+hold floor_us=250 seconds=2 reads_per_s=3608 read_cpu_us_per_s=4099.0
+hold floor_us=1000 seconds=2 reads_per_s=972 read_cpu_us_per_s=2059.2
+=== pass 3 2026-10-31T23:38:40Z load averages: 2.24 3.08 5.12
+check self pid=53359 flavor=4 ret=0 errno=0 (ok) phys_footprint_mib=0.9 resident_mib=1.2
+check child pid=53361 flavor=4 ret=0 errno=0 (ok) phys_footprint_mib=64.9 resident_mib=65.0
+escape pid=53365 ppid=1 in_box_pgrp=0 child_of_leader=0 same_uid_listed=1
+read k=1 reads=2000 p50_us=5.5 p99_us=5.7 max_us=11.2 per_pid_p50_us=5.46 (sum 0)
+read k=16 reads=2000 p50_us=10.4 p99_us=10.7 max_us=21.5 per_pid_p50_us=0.65 (sum 0)
+read k=128 reads=2000 p50_us=49.3 p99_us=54.0 max_us=151.8 per_pid_p50_us=0.39 (sum 0)
+timer=sleep over interval_us=1000 runs=20 overshoot_mib p50=163.9 p99=187.3 max=187.3 alloc_mib_per_s p50=24325 kill_to_reaped_us p50=3315 max=3953
+timer=kq over interval_us=1000 runs=20 overshoot_mib p50=22.5 p99=25.5 max=25.5 alloc_mib_per_s p50=24794 kill_to_reaped_us p50=2028 max=2253
+timer=sleep over interval_us=10000 runs=20 overshoot_mib p50=688.6 p99=1540.2 max=1540.2 alloc_mib_per_s p50=0 kill_to_reaped_us p50=7957 max=25066
+timer=kq over interval_us=10000 runs=20 overshoot_mib p50=233.0 p99=249.9 max=249.9 alloc_mib_per_s p50=24023 kill_to_reaped_us p50=3994 max=4525
+adapt floor_us=250 runs=20 overshoot_mib p50=3.8 p99=6.8 max=6.8 reads_per_run p50=24
+adaptk members=1 floor_us=250 runs=20 overshoot_mib p50=3.9 p99=6.6 max=6.6 reads_per_run p50=24 box_alloc_mib_per_s p50=24376
+adaptk members=4 floor_us=250 runs=20 overshoot_mib p50=10.3 p99=52.4 max=52.4 reads_per_run p50=7 box_alloc_mib_per_s p50=85024
+adaptk members=8 floor_us=250 runs=20 overshoot_mib p50=10.6 p99=40.3 max=40.3 reads_per_run p50=4 box_alloc_mib_per_s p50=149557
+adaptk members=14 floor_us=250 runs=20 overshoot_mib p50=121.7 p99=334.3 max=334.3 reads_per_run p50=3 box_alloc_mib_per_s p50=153361
+adaptk members=28 floor_us=250 runs=20 overshoot_mib p50=340.7 p99=845.6 max=845.6 reads_per_run p50=2 box_alloc_mib_per_s p50=0
+hold floor_us=250 seconds=2 reads_per_s=3619 read_cpu_us_per_s=5263.2
+hold floor_us=1000 seconds=2 reads_per_s=972 read_cpu_us_per_s=2164.1
+=== end 2026-10-31T23:38:49Z load averages: 2.46 3.11 5.12
