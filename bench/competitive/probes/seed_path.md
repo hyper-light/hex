@@ -120,7 +120,7 @@ use shows in it only as their share of the cores it runs on.
 - **The seeds' counts.** Under a lighter load than run 2's the sustained phase used 21 seeds, 20 busy at most: how
   many a run holds tracks how long its clones wait on `cgroup_mutex`, so it moves with the host's load.
 
-## Run 4 (2026-10-31, fedora): at 7953067, the device program held (goal 5 extended, step 1)
+## Run 4 (2026-10-31, fedora): at 9669133, the device program held (goal 5 extended, step 1)
 
 - **Why:** goal 5 extended, step 1's first criterion: a default-policy seam create after the node's start makes no
   `BPF_PROG_LOAD` and no `BPF_PROG_ATTACH`. The probe gains its `bpf` reading for it: `strace -f -y -e trace=bpf` over
@@ -129,9 +129,11 @@ use shows in it only as their share of the cores it runs on.
   1-minute load 35.77 at the start and 41.57 at the end. The host's clock: a burst took 0.124 ms at rest on a P-core
   before, and 0.119 after.
 - **Binaries:** `hex 0.1.0` of 4e518c0, sha256 2a475c14f822c00d, static-pie, built in the Fedora 44 pass image;
-  `seam_oci` of 4e518c0, sha256 8a83b136fdcb4b8c.
-- **Run:** `~/.cache/hex-bench/out/seed-path-20261031T210433Z` on fedora, the harness at 7953067. N=300, WARMUP=20,
-  EXECS=50, MEMORY_N=400, SUSTAINED=10000.
+  `seam_oci` of 4e518c0, sha256 8a83b136fdcb4b8c. 4e518c0 is 32db274's code with a CLAUDE.md line, a commit the
+  branch has since dropped, kept as cp/t7-g5x-s1-measured.
+- **Run:** `~/.cache/hex-bench/out/seed-path-20261031T210433Z` on fedora, the harness at 9669133 (its env.txt names
+  7953067: the same commit before the branch dropped a CLAUDE.md change, kept as cp/t7-g5x-s1-measured). N=300,
+  WARMUP=20, EXECS=50, MEMORY_N=400, SUSTAINED=10000.
 
 | Reading | Result |
 |---|---|

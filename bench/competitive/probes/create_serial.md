@@ -213,7 +213,7 @@ Waits for `cgroup_mutex` alone, per lifecycle (how many, each one's mean in us, 
 The seeds over Hex's sustained phases: 15 started and 15 waited for of 5,000 creates, 15 busy at once at most; without
 the network namespace 16 started, 23 waited, 15 at most.
 
-## Run 5 (2026-10-31, fedora): locks, the device program held (goal 5 extended, step 1), at 7953067
+## Run 5 (2026-10-31, fedora): locks, the device program held (goal 5 extended, step 1), at 9669133
 
 - **Why:** goal 5 extended, step 1's third criterion: `cgroup_mutex` holds per default-policy lifecycle at most 16. The
   node holds each policy's program and the default policy's sits on the oci boxes' root, attached by the node's start,
@@ -222,8 +222,10 @@ the network namespace 16 started, 23 waited, 15 at most.
   burst of kiln CI during the concurrency-32 phases. Under the probe and that load Hex's sustained phase ran 532/s,
   without a network namespace 986/s, and libcrun's 571/s, so the shares of the time below aren't run 4's to compare.
 - **Binaries:** `hex 0.1.0` of 4e518c0, sha256 2a475c14f822c00d, static-pie, built in the Fedora 44 pass image;
-  `seam_oci` of 4e518c0, sha256 8a83b136fdcb4b8c.
-- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261031T213436Z`, the harness at 7953067; read with
+  `seam_oci` of 4e518c0, sha256 8a83b136fdcb4b8c. 4e518c0 is 32db274's code with a CLAUDE.md line, a commit the
+  branch has since dropped, kept as cp/t7-g5x-s1-measured.
+- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261031T213436Z`, the harness at 9669133 (its env.txt names
+  7953067: the same commit before the branch dropped a CLAUDE.md change, kept as cp/t7-g5x-s1-measured); read with
   `create_serial.py` over 520 lifecycles at concurrency 1 (500 timed, 20 untimed) and 5,000 at 32.
 
 `cgroup_mutex`'s takers, each one's time in us, wait and hold together, and how many a lifecycle, concurrency 1 then
@@ -252,7 +254,7 @@ the network namespace 16 started, 23 waited, 15 at most.
   without a network namespace (7.5%); libcrun's 7.6% and 51.9% (8.9%). Under this run's load the rates were well
   under run 4's, so these shares don't measure the attach's absence; step 6's measure does, with its holds.
 
-## Run 6 (2026-10-31, fedora): locks, the holds for the boxes' own cgroups counted alone, at c84fb64
+## Run 6 (2026-10-31, fedora): locks, the holds for the boxes' own cgroups counted alone, at fb007d9
 
 - **Why:** run 5's takers count the kernel's work for every cgroup removed on the host, and the node's start's own,
   as the lifecycles'. The probe now also counts each taker, the attach and the fork into a cgroup for the boxes' own
@@ -261,7 +263,8 @@ the network namespace 16 started, 23 waited, 15 at most.
 - **Host and load:** as run 1's. 2026-10-31T21:55:58Z; the 1-minute load 39.91 at the start and 23.62 at the end.
   Hex's sustained phase ran 1,429/s, without a network namespace 1,520/s, and libcrun's 1,268/s.
 - **Binaries:** run 5's, of 4e518c0 (`hex` 2a475c14f822c00d, `seam_oci` 8a83b136fdcb4b8c).
-- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261031T215558Z`, the harness at c84fb64.
+- **Run:** `~/.cache/hex-bench/out/create-serial-locks-20261031T215558Z`, the harness at fb007d9 (its env.txt names
+  c84fb64: the same commit before the branch dropped a CLAUDE.md change, kept as cp/t7-g5x-s1-measured).
 
 | `cgroup_mutex` holds for the box's own cgroup, per box made | hex.c1 (520 boxes) | hex.c32 (5,000) | hex.c32nonet (5,000) |
 |---|---|---|---|

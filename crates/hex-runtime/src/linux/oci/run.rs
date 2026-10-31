@@ -116,11 +116,12 @@ pub struct Held<'a> {
     pub devices: Option<&'a Programs>,
 }
 
-/// How a create makes its container: where its cgroup comes from, what the node holds ready for it, and
-/// how its init is started.
+/// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
+/// may join one of, the device programs a node holds, and how its init is started.
 struct Route<'a> {
     cgroup: Cgroup,
-    held: Held<'a>,
+    networks: Option<&'a dyn Networks>,
+    devices: Option<&'a Programs>,
     start: Start<'a>,
 }
 
@@ -235,7 +236,8 @@ impl Runtime {
             pid_file,
             Route {
                 cgroup: Cgroup::FromSpec,
-                held: Held::default(),
+                networks: None,
+                devices: None,
                 start: Start::Shim,
             },
         )
@@ -264,7 +266,8 @@ impl Runtime {
             pid_file,
             Route {
                 cgroup: Cgroup::Provided(cgroup),
-                held,
+                networks: held.networks,
+                devices: held.devices,
                 start: Start::Shim,
             },
         )
@@ -293,7 +296,8 @@ impl Runtime {
             pid_file,
             Route {
                 cgroup: Cgroup::Provided(cgroup),
-                held,
+                networks: held.networks,
+                devices: held.devices,
                 start: Start::Seed(seeds),
             },
         )
@@ -325,7 +329,8 @@ impl Runtime {
     ) -> Result<(), OciError> {
         let Route {
             cgroup,
-            held: Held { networks, devices },
+            networks,
+            devices,
             start,
         } = route;
         let config = std::fs::read(bundle.join("config.json"))

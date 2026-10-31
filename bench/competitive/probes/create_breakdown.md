@@ -438,11 +438,14 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
   names; `LOAD_GATE=0`, by Ada's rule. The host's clock before each: a burst took 0.104 to 0.110 ms at rest on a
   P-core (run 4: 0.095 and 0.130).
 - **Binaries:** step 1's, of 4e518c0: `hex 0.1.0` sha256 2a475c14f822c00d, static-pie, built in the Fedora 44 pass
-  image, and `seam_oci` 8a83b136fdcb4b8c. The base, of 876136e, the commit before step 1 (run 4's code with two fixes
+  image, and `seam_oci` 8a83b136fdcb4b8c (4e518c0 is 32db274's code with a CLAUDE.md line, a commit the branch has
+  since dropped, kept as cp/t7-g5x-s1-measured). The base, of 876136e, the commit before step 1 (run 4's code with two fixes
   off the root node's path): `hex` 76d3e5d95ac0724f and `seam_oci` bd1cde4cf8b1b0f8, built the same way. libcrun
   1.30.1 in process, driver sha256 5c356f2139adc232.
-- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on fedora, the harness at 7953067. The base's second run is
-  a rerun: the first try at it was killed with its launcher, when kiln's connection dropped, before it ran a create.
+- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on fedora, the harness at 9669133 (its env.txt names
+  7953067: the same commit before the branch dropped a CLAUDE.md change, kept as cp/t7-g5x-s1-measured). The base's
+  second run is a rerun: the first try at it was killed with its launcher, when kiln's connection dropped, before it
+  ran a create.
 
 ### Create p50 (ms), pooled over each run's 3 rounds
 
@@ -482,7 +485,8 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
   to 0.119 ms at rest on a P-core.
 - **Binaries:** run 5's: step 1's of 4e518c0 (`hex` 2a475c14f822c00d, `seam_oci` 8a83b136fdcb4b8c) and the base's of
   876136e (`hex` 76d3e5d95ac0724f, `seam_oci` bd1cde4cf8b1b0f8).
-- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on fedora, the harness at e9c6115.
+- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on fedora, the harness at 67ba315 (its env.txt names
+  e9c6115: the same commit before the branch dropped a CLAUDE.md change, kept as cp/t7-g5x-s1-measured).
 
 | run | load at start | Hex through the seam | before | libcrun | seam over before, pooled | by round |
 |---|---|---|---|---|---|---|
@@ -496,3 +500,26 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
   moment; pooled over its rounds each run is under. The parts summed to 81.3% of the creates between the traced ones in
   the first run, short of the probe's 10% check under that noise, and 99.4% and 97.3% in the others. The device
   program's parts 12 and 13 were 0.000 in every run.
+
+## Run 7 (2026-10-31, fedora): three more of run 6's, step 1's binary and the one before it in the same rounds
+
+- **Why:** run 6's measure again, on the lead's word that "10% under" is judged by each run's own ratio, the base in
+  every round, the host as it is.
+- **Host and load:** as run 1's. From 2026-10-31T22:23:00Z, the 1-minute load 18.08, 17.97 and 18.02 at the three
+  runs' starts. The third run's launcher was killed in its second round, its load then 75.23 from other work on the
+  host, so it left no summary and gives no figure; its directory holds what it ran.
+- **Binaries:** run 5's (4e518c0's and 876136e's). **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on
+  fedora, the harness at 15e60aa's probes (its env.txt names 9fde51f: the same files before the branch dropped a
+  CLAUDE.md change, kept as cp/t7-g5x-s1-measured).
+
+| run | load at start | Hex through the seam | before | libcrun | seam over before, pooled | by round |
+|---|---|---|---|---|---|---|
+| 20261031T222300Z | 18.08 | 1.703 | 2.159 | 2.875 | 0.789 | 0.826, 0.727, 0.812 |
+| 20261031T222443Z | 17.97 | 1.512 | 1.904 | 2.701 | 0.794 | 0.751, 0.831, 0.825 |
+| 20261031T222621Z | 18.02 | killed in round 2 | | | | |
+
+- **Both runs' own ratios are under 0.9**, and every round's: step 1's create p50 is 21.1% and 20.6% under the base's
+  in the same rounds. The parts summed to 100.2% and 100.4% of the creates between the traced ones; the device
+  program's parts 12 and 13 were 0.000.
+- **The second met the host as run 4 did:** libcrun's 2.701 ms against run 4's 2.750, and the base's 1.904 against
+  run 4's 2.020. There step 1's create p50, 1.512 ms, is 25.1% under run 4's 2.020, as the plan's criterion reads it.
