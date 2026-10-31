@@ -118,6 +118,12 @@ HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun "$OUT/probe.l
   || { echo "refusing: libcrun's probe failed ($OUT/probe.log)" >&2; exit 5; }
 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam.json" 2 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true \
   >> "$OUT/probe.log" 2>&1 || { echo "refusing: seam_oci's probe failed ($OUT/probe.log)" >&2; exit 5; }
+KINDS="libcrun seam traced"
+if [ -x /opt/bin/before-hex ]; then
+  KINDS="$KINDS before"
+  HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/probe.before.json" 2 0 0 /opt/bin/before-hex /run/bundle-sleep \
+    /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the before binary's probe failed ($OUT/probe.log)" >&2; exit 5; }
+fi
 traced probe.traced 3 1 >> "$OUT/probe.log" 2>&1 || { echo "refusing: the traced probe failed ($OUT/probe.log)" >&2; exit 5; }
 traced probe.detail 20 1 detail >> "$OUT/probe.log" 2>&1 \
   || { echo "refusing: the detailed traced probe failed ($OUT/probe.log)" >&2; exit 5; }
@@ -133,7 +139,7 @@ host_now() {
     sed -n 's/^some avg10=\([0-9.]*\).*/\1/p' "/proc/pressure/$r"; done | paste -sd/)%"
 }
 for round in $(seq 1 "$ROUNDS"); do
-  for one in $(printf '%s\n' libcrun seam traced | shuf); do
+  for one in $(printf '%s\n' $KINDS | shuf); do
     echo "round $round: $one ($(host_now))"
     case $one in
       libcrun) HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun "$OUT/libcrun.r$round.json" "$N" \
@@ -141,6 +147,8 @@ for round in $(seq 1 "$ROUNDS"); do
       seam) HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
               /run/bundle-sleep /run/bundle-true >> "$OUT/seam.log" 2>&1 ;;
       traced) traced "traced.r$round" "$N" "$WARMUP" ;;
+      before) HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/before.r$round.json" "$N" "$WARMUP" 0 \
+                /opt/bin/before-hex /run/bundle-sleep /run/bundle-true >> "$OUT/before.log" 2>&1 ;;
     esac || echo "round $round: $one FAILED"
   done
 done

@@ -89,6 +89,11 @@ the node holds no program for, and a box whose policy is the default's attaches 
 what follows it, the load, the attach) are cut between the FIFO's `mknod` and that pipe, a part with no call empty,
 and the seed's fork is the first after them.
 
+**A binary from before a change beside it** (from the same step): with `BEFORE_HEX` and `BEFORE_SEAM` set,
+`create_breakdown.sh` stages them too, and every round runs their seam lifecycle (`before`) in its shuffle with the
+others, so the change's ratio, the seam's create p50 over the before binary's, is each run's own and its rounds meet
+the same host. `summarize` prints it by round and pooled.
+
 Only events that cost a call little are traced: an open's entry fetches its path from user memory, about 4 µs an event
 (`exec_breakdown.md`), so the rounds trace the opens' exits and tell an open by its place. rustix opens with
 `open(2)` on x86_64, std with `openat(2)`, so both are traced. Percentiles are nearest-rank. tracefs prints the clock to
@@ -451,6 +456,9 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
 
 - **Against run 4** (2.020 ms): step 1's best of three, 1.787 ms (20261031T211410Z), is 11.5% lower; its three runs are
   9.7%, 3.2% and 11.5% lower.
+- **Against run 4, each over libcrun's create in its own run** (run 4: 2.020 over 2.750, 0.735): the base's runs give
+  0.721 and 0.748, run 4's within 2%, so libcrun beside it carries the host's state; step 1's give 0.612, 0.642 and
+  0.579, 16.6%, 12.6% and 21.1% under run 4's.
 - **Against the base on this host:** step 1's create is 15.4% lower mean to mean (1.856 against 2.194 ms) and 17.7%
   best to best (1.787 against 2.171), though the base's runs met the lighter loads (15.15 and 15.67 against 19.14 to
   22.38). Over libcrun's in the same run, step 1's is 0.579 to 0.642 and the base's 0.721 and 0.748 (run 4: 0.735).

@@ -279,7 +279,8 @@ def ops_for(trace):
 
 def check(run, prefix):
     bad = []
-    for kind in ("libcrun", "seam", "traced", "detail"):
+    before = ("before",) if os.path.exists(os.path.join(run, f"{prefix}.before.json")) else ()
+    for kind in ("libcrun", "seam", "traced", "detail") + before:
         errs, ms = eb.lifecycle_ms(os.path.join(run, f"{prefix}.{kind}.json"), "create")
         if errs or not ms:
             bad.append(f"{kind}: errors {errs}, {len(ms)} creates")
@@ -324,7 +325,7 @@ def summarize(run):
     # Each round's create p50: libcrun's and the seam's untraced runs, and the traced run's creates with the
     # tracer recording (every other one) and between them.
     rows = {kind: {r: eb.lifecycle_ms(p, "create") for r, p in eb.rounds(run, kind).items()}
-            for kind in ("libcrun", "seam")}
+            for kind in ("libcrun", "seam", "before") if kind != "before" or eb.rounds(run, kind)}
     rows["traced: recording"], rows["traced: between"] = {}, {}
     for rnd, path in eb.rounds(run, "traced").items():
         errs = eb.lifecycle_ms(path, "create")[0]
@@ -349,6 +350,15 @@ def summarize(run):
         lines.append(f"| {kind} | " + " | ".join(row) + f" | {eb.ms3((v['best'] or {}).get('p50'))} | "
                      f"{eb.ms3(v['pooled']['p50'])} | {eb.ms3(v['pooled']['p99'])} |")
     lines.append("")
+    # With a binary from before a change beside it (`before`, its rounds shuffled in with the others), the change's
+    # ratio is this run's own: the seam's create p50 over the before binary's, by round and pooled.
+    if "before" in lat:
+        seam_r, before_r = lat["seam"]["rounds"], lat["before"]["rounds"]
+        per = {r: ratio(seam_r[r]["p50"], before_r[r]["p50"]) for r in nums if r in seam_r and r in before_r}
+        pooled = ratio(lat["seam"]["pooled"]["p50"], lat["before"]["pooled"]["p50"])
+        s["seam_over_before"] = {"rounds": per, "pooled": pooled}
+        lines += ["The seam's create p50 over the before binary's, in the same rounds: "
+                  + ", ".join(f"r{r} {eb.ms3(x)}" for r, x in per.items()) + f"; pooled {eb.ms3(pooled)}.", ""]
 
     # The parts, by traced round and pooled, each round's sum set against its own calls.
     by_round = {r: [c for c in traced[r]["calls"] if "parts" in c] for r in rnds}

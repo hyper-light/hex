@@ -1187,7 +1187,7 @@ mod tests {
             prop_assert_eq!(got, want);
         }
 
-        // Goal 5 extended, step 1, model-based: for any rule list, the program that decides for a box
+        // AC-T7.1.4 (goal 5 extended, step 1), model-based: for any rule list, the program that decides for a box
         // (its own, or the oci boxes' root's default where the box is given nothing: devshare::give)
         // decides every request — each type, each access, majors and minors that the rules and the
         // default devices name and some they don't — as the policy's oracle does; and so with no program

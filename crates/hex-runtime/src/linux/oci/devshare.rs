@@ -244,7 +244,7 @@ mod tests {
         .unwrap()
     }
 
-    // do X: take FNV-1a of known inputs, and Hex's digest of two policies; expect Y: the published
+    // AC-T7.1.5: do X: take FNV-1a of known inputs, and Hex's digest of two policies; expect Y: the published
     // vectors (draft-eastlake-fnv's test suite: "" and "a"), the same digest for the same instructions
     // whenever it's taken, and different ones for different policies (the hints and the held programs
     // are keyed by it).
@@ -269,7 +269,7 @@ mod tests {
         assert_ne!(digest(&policy(1)), digest(&policy(2)));
     }
 
-    // do X: remember programs for digests, then ask for each; expect Y: the latest id per digest,
+    // AC-T7.1.5: do X: remember programs for digests, then ask for each; expect Y: the latest id per digest,
     // newest first, one entry per digest (decision 2: one program per distinct device policy).
     #[test]
     fn a_digest_names_the_program_remembered_last_for_it() {
@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(h.programs[0].id, 11, "the last remembered comes first");
     }
 
-    // do X: remember one more program than the bound; expect Y: the bound holds and the one
+    // AC-T7.1.5: do X: remember one more program than the bound; expect Y: the bound holds and the one
     // remembered longest ago is the one dropped (CLAUDE.md §2).
     #[test]
     fn past_the_bound_the_oldest_hint_is_dropped() {
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(h.candidate(1), Some(1));
     }
 
-    // do X: parse what remember wrote, a file an older Hex wrote (keyed by the kernel's tag), and hostile
+    // AC-T7.1.5: do X: parse what remember wrote, a file an older Hex wrote (keyed by the kernel's tag), and hostile
     // bytes; expect Y: the same hints back, and no hints (never a panic) for anything else (CLAUDE.md §6:
     // hostile input to every parser). A file past the bound is cut to it.
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         );
     }
 
-    // do X: match loaded programs against a policy's instructions; expect Y: only a cgroup device
+    // AC-T7.1.4: do X: match loaded programs against a policy's instructions; expect Y: only a cgroup device
     // program whose translation is the instructions byte for byte is the policy's, never one of another
     // type, length or instruction, nor one whose dump the kernel withheld (goal 5 extended step 1's
     // planted hint: a candidate is refused by its translation).
@@ -374,7 +374,7 @@ mod tests {
         assert!(!is_policy(&identity(0), Some(&[]), &[]), "no instructions");
     }
 
-    // do X: hold programs past the bound, using some in between; expect Y: the bound holds, and the
+    // AC-T7.1.5: do X: hold programs past the bound, using some in between; expect Y: the bound holds, and the
     // program handed back to be closed is the one used longest ago, not the one held longest (a get makes
     // a program the most recently used) (CLAUDE.md §2).
     #[test]
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(p.get(&policy(3)), Some(&"three"));
     }
 
-    // do X: hold a program, then look up instructions with the same digest but other instructions, and
+    // AC-T7.1.4: do X: hold a program, then look up instructions with the same digest but other instructions, and
     // hold those; expect Y: the lookup finds nothing (a held program is proven by its instructions, not
     // its digest), and holding the second hands the first back to be closed.
     #[test]
@@ -407,7 +407,7 @@ mod tests {
         assert_eq!(p.len(), 1);
     }
 
-    // do X: give boxes their programs under the default at the root and under no root program; expect
+    // AC-T7.1.4: do X: give boxes their programs under the default at the root and under no root program; expect
     // Y: a box with the root's policy gets nothing; another policy gets its own program; an allow-all
     // policy gets the allow-all program under a root program and nothing under none (research f40-f43).
     #[test]
@@ -432,7 +432,7 @@ mod tests {
     }
 
     proptest! {
-        // CLAUDE.md §6, model-based: under any sequence of lookups and holds, the held programs are an
+        // AC-T7.1.5, CLAUDE.md §6, model-based: under any sequence of lookups and holds, the held programs are an
         // oracle's least-recently-used list of at most `bound` policies: a lookup finds exactly what the
         // oracle holds, and a hold hands back exactly what the oracle drops. (The deterministic test above
         // is the one that must hit and drop.)
