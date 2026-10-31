@@ -497,9 +497,11 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
 - **Each run's own ratio is under 0.9:** step 1's create p50 is 23.8%, 16.7% and 31.9% under the base's in the same
   rounds. Of the nine rounds, one is under by less than 10% (0.914).
 - **The noise:** the base's rounds ran 1.891 to 4.796 ms, so a round's ratio swings with which binary met a busy
-  moment; pooled over its rounds each run is under. The parts summed to 81.3% of the creates between the traced ones in
-  the first run, short of the probe's 10% check under that noise, and 99.4% and 97.3% in the others. The device
-  program's parts 12 and 13 were 0.000 in every run.
+  moment; pooled over its rounds each run is under. The device program's parts 12 and 13 were 0.000 in every run.
+- **The probe's own check failed in run 20261031T220737Z:** its parts summed to 81.3% of the creates between the
+  traced ones, outside the 10% the probe holds them to, because that run's base rounds were noisy (1.922, 4.796 and
+  2.553 ms). Its creates and their ratio stand; its parts don't account for its creates. The other two runs' parts
+  summed to 99.4% and 97.3%.
 
 ## Run 7 (2026-10-31, fedora): three more of run 6's, step 1's binary and the one before it in the same rounds
 

@@ -1272,6 +1272,10 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         );
     }
     assert!(node.list().unwrap().is_empty(), "a box is left");
+    eprintln!(
+        "oci_box upgrade: adopted {old_live} at the old place and {new_live} at .oci; removed {old_orphan}, \
+         {old_mid} and {new_orphan}; nothing left after the deletes"
+    );
 }
 
 /// Goal 5 plan step 4 (T-T7.1.4), the lab test as root and rootless: a container made through a seed has
