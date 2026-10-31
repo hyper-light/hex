@@ -527,6 +527,11 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     class runs unchanged inside, goal 5's device programs and `mount_setattr` included. Hex reaches Shards
     through a Shards `-api` crate (CLAUDE.md §9), to be agreed with Shards' owner. Where Shards has no backend
     yet (macOS on x86_64, Windows on arm64), Hex gives a typed refusal naming that backend until it lands.
+- **Setup is the installer's (Ada's call, 2026-10-31):** Hex's installer asks for admin rights once, as Docker
+  Desktop's does. On Windows it turns on the Containers and Windows Hypervisor Platform features (usually a reboot);
+  on macOS it makes the box users' pool and installs the privileged helper. After that, every class works with no
+  further step. A node whose machine lacks what its installer sets up refuses the class by name, saying what is
+  missing.
 - **What would falsify it:** §6. **Measured before it is built on:** §7.
 
 ## Open (STATUS.md)
