@@ -34,6 +34,19 @@ JSON
 bundle /run/bundle-sleep '["/usr/bin/sleep","infinity"]'
 bundle /run/bundle-true '["/usr/bin/true"]'
 
+# EXTRA_MOUNTS (goal 5 plan step 2, AC-d): that many tmpfs in the agent's own mount namespace, away from
+# the bundles' mount, so the classic init's clone (which copies the agent's table) would grow with them.
+# The pruned seed pruned its namespace once at start, so every init it clones copies its two mounts and
+# the init's clone (part 16) stays flat; the agent's open_tree of the rootfs, cloning a mount whose source
+# (the bundles' /run) these aren't under, stays small too.
+if [ "${EXTRA_MOUNTS:-0}" -gt 0 ]; then
+  mkdir -p /mnt/em
+  for i in $(seq 1 "${EXTRA_MOUNTS}"); do
+    mkdir -p "/mnt/em/$i" && mount -t tmpfs none "/mnt/em/$i" -o size=1k,nr_inodes=4 2>/dev/null || true
+  done
+  echo "extra agent mounts: $(grep -c ' /mnt/em/' /proc/self/mountinfo) up (asked ${EXTRA_MOUNTS}), agent mounts now $(grep -c '' /proc/self/mountinfo)"
+fi
+
 # cgroup v2's no-internal-process rule, as oci_inside.sh: everything to a leaf so the root parents containers.
 mkdir -p /sys/fs/cgroup/lab
 for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/cgroup.procs 2>/dev/null || true; done
@@ -61,6 +74,7 @@ EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_ex
   syscalls/sys_enter_clone3 syscalls/sys_exit_clone3 syscalls/sys_enter_clone syscalls/sys_exit_clone
   syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root
   syscalls/sys_enter_chroot syscalls/sys_exit_chroot
+  syscalls/sys_enter_open_tree syscalls/sys_exit_open_tree
   syscalls/sys_enter_write syscalls/sys_exit_poll syscalls/sys_exit_ppoll syscalls/sys_exit_wait4
   syscalls/sys_exit_waitid"
 DETAIL="syscalls/sys_enter_openat syscalls/sys_enter_open"

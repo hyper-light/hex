@@ -70,7 +70,7 @@ trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$H
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done
