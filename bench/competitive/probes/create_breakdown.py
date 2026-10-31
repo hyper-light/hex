@@ -96,6 +96,28 @@ SEED_PARTS = CREATE_PARTS[:13] + [
     ("the agent wakes to the ready signal and reads it; the init's stat opened", HANDSHAKE),
     ("the init's start time read; the container's state written (state.json, renamed into place)", OWN),
 ] + CREATE_PARTS[28:]
+# The parts of a create whose init a pruned seed clones (goal 5 plan step 2): the seed path's, but the init
+# builds its root from the descriptors the agent cloned and ends with `MS_MOVE` and `chroot`, with no
+# `pivot_root`. Its three root parts (seed parts 18-20) are renamed; the switch (part 20, 1-indexed) is the
+# `chroot`, measured in place of `pivot_root`. The mounts (move_mount/fsmount/mount_setattr) aren't traced, so
+# part 19 runs to the `chroot`; a pruned create traces one `chroot` and no init `pivot_root` (create_cuts).
+PRUNED_SEED_PARTS = (
+    SEED_PARTS[:13]
+    + [
+        # The pruned seed is handed the cgroup as a descriptor, so it opens none; it reads config.json
+        # through the bundle descriptor instead (goal 5 plan step 2).
+        ("the pipes made; a namespace made ahead taken; the request sent to a seed, which wakes and reads "
+         "config.json", SEED),
+    ]
+    + SEED_PARTS[14:18]
+    + [
+        ("the init's root attached and its mounts made: the rootfs and binds (move_mount), proc and /dev "
+         "(fsmount), its device nodes (mknod)", INIT),
+        ("the root moved onto / and chrooted into (MS_MOVE, chroot)", INIT),
+        ("the hostname set; the process become (capabilities, user); ready sent", INIT),
+    ]
+    + SEED_PARTS[21:]
+)
 
 
 def fsyncs_of(parts):
@@ -142,18 +164,22 @@ def state_dir(path, cid):
 
 def seed_fork(ev, start, bench):
     """A seed's fork of the init: the first fork after `start` by a process other than the agent whose child goes on
-    to pivot_root. A seed the pool's own thread starts forks a child that execs instead, so it isn't taken."""
+    to switch its root — `pivot_root` on the classic seed path, `chroot` on the pruned-seed path (goal 5 plan
+    step 2). A seed the pool's own thread starts forks a child that execs instead, so it isn't taken."""
     for i in range(start, len(ev)):
         e = ev[i]
         if e.kind == "sched" and e.name == "fork" and e.pid != bench:
             child = int(e.kv["child_pid"])
-            if any(enter(child, "pivot_root")(x) for x in ev[i + 1:]):
+            switches = enter(child, "pivot_root", "chroot")
+            if any(switches(x) for x in ev[i + 1:]):
                 return i, e.pid, child
     raise Missing("a seed's fork of the init")
 
 
-def create_cuts(ev, bench, cid, seeded=False):
-    """A create's cuts on the shim path, or with `seeded` on the seed path (goal 5 plan step 4)."""
+def create_cuts(ev, bench, cid, seeded=False, pruned=False):
+    """A create's cuts on the shim path, with `seeded` on the seed path (goal 5 plan step 4), or with
+    `pruned` on the pruned-seed path (goal 5 plan step 2): the init builds its root from descriptors and
+    ends with MS_MOVE and chroot, so the switch is the chroot and no init pivot_root appears."""
     c = eb.Cuts(ev)
     tmp = f".{cid}.tmp"
 
@@ -210,13 +236,23 @@ def create_cuts(ev, bench, cid, seeded=False):
     else:
         c.at.append(pipe)
     if seeded:
-        # A seed opens the box's cgroup and clones the init into it and the namespaces the spec makes; the init
-        # joins the network namespace made ahead itself.
+        # A seed clones the init into its cgroup and the namespaces the spec makes; the init joins the network
+        # namespace made ahead itself. On the classic seed path the seed opens the box's cgroup by path; on the
+        # pruned path the agent opened it (a descriptor the seed can't name by path) and the seed instead reads
+        # config.json through the bundle descriptor, so the cut anchors on that read (goal 5 plan step 2).
         born, seed, init = seed_fork(ev, c.at[-1], bench)
         clone = last_before(ev, c.at[-1] + 1, born, enter(seed, "clone3"), "the seed's clone of the init")
-        opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "open"), "the seed's open of the box's cgroup")
-        c.at += [opened, clone]
-        c.opens.append((opened, seed, "open", lambda p: named(p, cid), "the seed's open of the box's cgroup"))
+        if pruned:
+            opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "openat"),
+                                 "the seed's read of config.json")
+            c.at += [opened, clone]
+            c.opens.append((opened, seed, "openat", lambda p: named(p, "config.json"),
+                            "the seed's read of config.json"))
+        else:
+            opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "open"),
+                                 "the seed's open of the box's cgroup")
+            c.at += [opened, clone]
+            c.opens.append((opened, seed, "open", lambda p: named(p, cid), "the seed's open of the box's cgroup"))
         c.to(exited(init, "clone3"), "the init's first run")
         joins = c.to(enter(init, "setns"), "the init's join of the namespace made ahead")
         held(arg(ev[joins], "flags") == CLONE_NEWNET, "the init's setns joins a network namespace")
@@ -241,8 +277,18 @@ def create_cuts(ev, bench, cid, seeded=False):
         born = first(ev, c.at[-1], sched(shim, "fork"), "the init's fork")
         init = int(ev[born].kv["child_pid"])
         c.to(exited(init, "clone3"), "the init's first run")
-    c.to(enter(init, "pivot_root"), "the init's pivot_root")
-    c.to(exited(init, "pivot_root"), "pivot_root returning")
+    if pruned:
+        # No pivot_root: the init attaches the rootfs and mounts with the new mount API (move_mount,
+        # fsmount, mount_setattr, not traced), makes its device nodes (mknod, traced), then moves the root
+        # onto / (MS_MOVE, not traced) and chroots into it (traced). Part 19 runs to the chroot; part 20
+        # is the chroot itself. No init calls pivot_root on this path (AC-a).
+        is_pivot = enter(init, "pivot_root")
+        held(not any(is_pivot(e) for e in ev), "no init calls pivot_root on the pruned path (AC-a)")
+        c.to(enter(init, "chroot"), "the init's root attached and its mounts made, to the chroot")
+        c.to(exited(init, "chroot"), "the root moved onto / and chrooted into, returning")
+    else:
+        c.to(enter(init, "pivot_root"), "the init's pivot_root")
+        c.to(exited(init, "pivot_root"), "pivot_root returning")
     ready = c.to(enter(init, "write"), "the init's ready signal")
     held(arg(ev[ready], "count") == 2, "the init's first write is its ready signal (`R` and a newline)")
     c.opened(bench, "openat", 1, ready, lambda p: p.startswith("/proc/") and named(p, "stat"),
@@ -258,6 +304,9 @@ def create_cuts(ev, bench, cid, seeded=False):
 
 OPS = {"create": (CREATE_PARTS, create_cuts)}
 SEED_OPS = {"create": (SEED_PARTS, lambda ev, bench, cid: create_cuts(ev, bench, cid, seeded=True))}
+PRUNED_SEED_OPS = {
+    "create": (PRUNED_SEED_PARTS, lambda ev, bench, cid: create_cuts(ev, bench, cid, seeded=True, pruned=True))
+}
 
 
 def ops_for(trace):
@@ -271,6 +320,10 @@ def ops_for(trace):
     bench = ev[begin].pid
     for e in ev[begin + 1:]:
         if e.kind == "mark" and e.pid == bench and e.text.split()[:2] == ["hexbd", "E"]:
+            # Seeded. The pruned-seed path's init chroots and never pivot_roots (goal 5 plan step 2); the
+            # classic seed path pivot_roots. Tell them apart by whether any init chroots in the trace.
+            if any(x.kind == "enter" and x.name == "chroot" for x in ev):
+                return PRUNED_SEED_OPS
             return SEED_OPS
         if e.kind == "sched" and e.name == "fork" and e.pid == bench:
             return OPS
@@ -447,8 +500,13 @@ def summarize(run):
         made = sum(parts[k]["p50"] for k in cgroup_made_of(spec))
         cg, seed = groups[CGROUP]["p50"], groups[SEED]["p50"]
         device = sum(parts[k]["p50"] for k in named_parts(spec, CREATE_PARTS[11][0], CREATE_PARTS[12][0]))
-        root = sum(parts[k]["p50"] for k in named_parts(spec, SEED_PARTS[18][0], "pivot_root (kernel)"))
-        pivot = sum(parts[k]["p50"] for k in named_parts(spec, "pivot_root (kernel)"))
+        # On the pruned-seed path (goal 5 plan step 2) the switch is the chroot, not pivot_root, and the
+        # root-mounted part is renamed; `pivot` then holds the chroot switch's p50, which AC-a bounds.
+        pruned_path = any(n == PRUNED_SEED_PARTS[19][0] for n, _ in spec)
+        switch = PRUNED_SEED_PARTS[19][0] if pruned_path else "pivot_root (kernel)"
+        mounted = PRUNED_SEED_PARTS[18][0] if pruned_path else SEED_PARTS[18][0]
+        root = sum(parts[k]["p50"] for k in named_parts(spec, mounted, switch))
+        pivot = sum(parts[k]["p50"] for k in named_parts(spec, switch))
         left = sum_p50 - device - root - made
         target = libcrun["p50"] / 4
         share = lambda x: f"{100 * x / create:.1f}%"  # noqa: E731
@@ -469,7 +527,8 @@ def summarize(run):
                   f"{share(device)} |",
                   f"| the container's root without pivot_root's walk (goal 5) | the root mounted, and pivot_root | "
                   f"{root:.3f} | {share(root)} |",
-                  f"| | of it, pivot_root | {pivot:.3f} | {share(pivot)} |",
+                  f"| | of it, {'the switch (MS_MOVE, chroot)' if pruned_path else 'pivot_root'} | "
+                  f"{pivot:.3f} | {share(pivot)} |",
                   f"| fewer `cgroup_mutex` holds (goal 5) | the cgroup, made and bounded | {cg:.3f} | {share(cg)} |",
                   f"| | of it, the making: the box root counted and the mkdir | {made:.3f} | {share(made)} |", "",
                   f"The parts sum to {sum_p50:.3f} ms. Goal 5's target, a quarter of libcrun's create p50 "
