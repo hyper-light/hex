@@ -281,9 +281,27 @@ mod linux {
         )
     }
 
+    /// The concurrencies the throughput phase runs at: oci_bench.py's 1, 8 and 32 unless
+    /// `HEXBENCH_THROUGHPUT_CONC` names others (space-, tab- or comma-separated, each above zero).
+    /// Goal 5 plan step 2's AC-e sets it to `8` to trace the root switch at exactly eight creates in
+    /// flight; an empty or unparsable value falls back to the three.
+    fn throughput_concurrency() -> Vec<usize> {
+        std::env::var("HEXBENCH_THROUGHPUT_CONC")
+            .ok()
+            .map(|s| {
+                s.split([' ', '\t', ','])
+                    .filter_map(|t| t.trim().parse::<usize>().ok())
+                    .filter(|&c| c > 0)
+                    .collect::<Vec<usize>>()
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![1, 8, 32])
+    }
+
     /// create+start+delete of a `true` container, at each concurrency that many threads share the
     /// node, each its share of the lifecycles; the clock starts once every thread is at the barrier.
     /// `own` is the subtree the agent and its boxes share, whose cpu.stat the per-lifecycle CPU is.
+    /// The concurrencies are `throughput_concurrency`'s (1, 8 and 32 by default).
     fn throughput(
         node: &dyn Runtime,
         bundle: &Path,
@@ -291,7 +309,7 @@ mod linux {
         lifecycles: usize,
     ) -> Result<Value, String> {
         let mut out = Map::new();
-        for conc in [1usize, 8, 32] {
+        for conc in throughput_concurrency() {
             let per = (lifecycles / conc).max(1);
             let start = Barrier::new(conc + 1);
             let (wall, cpu_s, errs) = {

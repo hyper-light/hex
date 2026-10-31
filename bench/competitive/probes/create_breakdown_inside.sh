@@ -117,6 +117,35 @@ traced() {
   return $rc
 }
 
+# switch <out name> <lifecycles>: goal 5 plan step 2's AC-e. A throughput phase pinned to 8 creates in flight
+# (seam_oci's HEXBENCH_THROUGHPUT_CONC) with only the root switch events on — chroot, and pivot_root to prove the
+# path makes none — recording for the whole phase. It passes no HEXBENCH_TRACE, so seam_oci never toggles
+# tracing_on; this turns it on once and leaves it, so every init's chroot is caught however they interleave.
+# create_breakdown.py switch reads <out name>.txt against <out name>.stats (its per-CPU counts).
+switch() {
+  local name=$1 lc=$2 rc=0
+  local SW="syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root"
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 8192 > "$I/buffer_size_kb" \
+    || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
+  for ev in $SW; do
+    { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
+      || { echo "event $ev couldn't be filtered and enabled" >&2; untrace; return 1; }
+  done
+  rm -f /run/hexcb.stop
+  python3 -I /opt/lab/probes/create_breakdown.py drain "$I/trace_pipe" "$OUT/$name.txt" /run/hexcb.stop &
+  local drain=$!
+  echo 1 > "$I/tracing_on"
+  HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=8 /opt/bin/seam_oci "$OUT/$name.json" 0 0 "$lc" \
+    /opt/bin/hex /run/bundle-sleep /run/bundle-true 2>&1 | tee -a "$OUT/switch.log" || rc=1
+  echo 0 > "$I/tracing_on"
+  touch /run/hexcb.stop
+  wait "$drain" || rc=1
+  for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
+  for ev in $SW; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
+  untrace
+  return $rc
+}
+
 # Where the node's records and the containers' state go (seam_oci keeps them under $HOME/.cache/hex-t7/ociseam, as
 # in the OCI pass): their filesystem decides what an fsync costs.
 mkdir -p "$HOME/.cache/hex-t7/ociseam"
@@ -125,8 +154,26 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
   echo "inside: the node's state under $HOME/.cache/hex-t7/ociseam, on $(stat -f -c %T "$HOME/.cache/hex-t7/ociseam")" \
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0}"
 } >> "$OUT/env.txt"
+
+# AC_E (goal 5 plan step 2, AC-e): a focused run of its own, not the rounds. The root switch (chroot) p99 at
+# 8 creates in flight, while the host holds AC-e's idle threads (create_breakdown.sh's IDLE_THREADS). A small
+# seam probe that the binaries work at concurrency 8, then one traced throughput phase pinned to 8, read by
+# create_breakdown.py switch (pass when p99 <= 0.5 ms and no init pivot_root). No libcrun, no rounds.
+if [ "${AC_E:-0}" -gt 0 ]; then
+  echo "AC-e: switch trace, 8 creates in flight, $AC_E lifecycles, load $(cut -d' ' -f1-3 /proc/loadavg)"
+  HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=8 /opt/bin/seam_oci "$OUT/switch.probe.json" 0 0 16 \
+    /opt/bin/hex /run/bundle-sleep /run/bundle-true > "$OUT/switch.log" 2>&1 \
+    || { echo "refusing: the concurrency-8 seam probe failed ($OUT/switch.log)" >&2; echo done > "$OUT/inside.done"; exit 5; }
+  switch switch "$AC_E" \
+    || { echo "refusing: the switch trace failed ($OUT/switch.log)" >&2; echo done > "$OUT/inside.done"; exit 6; }
+  python3 -I /opt/lab/probes/create_breakdown.py switch "$OUT/switch.txt" "$OUT/switch.stats" "$OUT/switch.json" | tee "$OUT/switch.result"
+  rc=${PIPESTATUS[0]}
+  echo "AC-e done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"
+  echo done > "$OUT/inside.done"
+  exit "$rc"
+fi
 
 # Each once, small, before any round: a broken one ends the run here rather than costing the rounds.
 HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun "$OUT/probe.libcrun.json" 2 0 0 0 64 > "$OUT/probe.log" 2>&1 \

@@ -4,6 +4,7 @@
   create_breakdown.py drain <trace_pipe> <out file> <stop file>
   create_breakdown.py check <run dir> <prefix>
   create_breakdown.py summarize <run dir>
+  create_breakdown.py switch <trace file> <trace stats> [seam result json]
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
 (exec_breakdown.py's).
@@ -580,6 +581,83 @@ def summarize(run):
     return 0
 
 
+def switch(trace, stats, seam_json=None):
+    """Goal 5 plan step 2's AC-e, read off a trace of a throughput phase run at eight creates in flight
+    (`HEXBENCH_THROUGHPUT_CONC=8`) with the switch events on: the pruned root's switch is a `chroot` (not
+    `pivot_root`), so this pairs each thread's `chroot` entry to its exit and reports the duration's p50,
+    p99 and max in ms. AC-e holds when p99 <= 0.5 ms, which it does because `chroot` is O(1) and takes no
+    host-wide lock, where `pivot_root` walks every task under `namespace_sem`.
+
+    It also evidences AC-a (no init pivot_root) directly over the raw trace, not by the cutter's internal
+    assertion. Two kinds of `pivot_root` can appear, told apart by their caller: a pruned *seed* prunes its
+    own mount namespace once at start with a `pivot_root` (decision 5), and that caller never `chroot`s; an
+    *init* on the pruned path `chroot`s and never `pivot_root`s. So a `pivot_root` by a pid that also
+    `chroot`s would be an init switching both ways (off the path) and fails; `pivot_root`s by pids that
+    never `chroot` are the seeds' prunes, reported as such. With the seam result given, every create must
+    have switched via `chroot` (chroots == creates): a create that fell back to the classic path would
+    `pivot_root` in place of `chroot`, dropping the count. A lost or unpaired event is refused."""
+    ev, _unread = eb.parse(trace)
+    n_lost = eb.lost(stats)
+    # Each init is single-threaded when it chroots (it hasn't exec'd its workload), so a thread's chroot
+    # entry is answered by its own next exit; eight inits in flight interleave as eight distinct pids.
+    pending, durs_us, dangling = {}, [], 0
+    chroot_pids, pivot_by_pid = set(), {}
+    for e in ev:
+        if e.name == "chroot":
+            if e.kind == "enter":
+                dangling += e.pid in pending  # a second entry before the first's exit: unexpected
+                pending[e.pid] = e.ts
+                chroot_pids.add(e.pid)
+            elif e.kind == "exit":
+                t0 = pending.pop(e.pid, None)
+                if t0 is None:
+                    dangling += 1
+                else:
+                    durs_us.append(e.ts - t0)
+        elif e.name == "pivot_root" and e.kind == "enter":
+            pivot_by_pid[e.pid] = pivot_by_pid.get(e.pid, 0) + 1
+    dangling += len(pending)  # entries with no exit
+    init_pivots = sum(c for pid, c in pivot_by_pid.items() if pid in chroot_pids)
+    seed_prune_pivots = sum(c for pid, c in pivot_by_pid.items() if pid not in chroot_pids)
+    creates = None
+    if seam_json:
+        try:
+            with open(seam_json) as f:
+                tp = json.load(f).get("phases", {}).get("throughput", {})
+            creates = sum(v["lifecycles"] for k, v in tp.items() if k.isdigit()) or None
+        except (OSError, ValueError, KeyError, TypeError):
+            creates = None
+    p50, p99 = eb.pct(durs_us, 0.5), eb.pct(durs_us, 0.99)
+    mx = max(durs_us) if durs_us else None
+    ms = lambda us: None if us is None else us / 1e3
+    all_switched = creates is None or creates == len(durs_us)
+    ok = (n_lost == 0 and dangling == 0 and bool(durs_us) and init_pivots == 0
+          and all_switched and p99 is not None and p99 <= 500)
+    print(json.dumps({"ac": "AC-T7.1.4 e", "concurrency": 8, "creates": creates, "chroots": len(durs_us),
+                      "switch_p50_ms": ms(p50), "switch_p99_ms": ms(p99), "switch_max_ms": ms(mx),
+                      "init_pivot_roots": init_pivots, "seed_prune_pivot_roots": seed_prune_pivots,
+                      "lost_events": n_lost, "unpaired_chroots": dangling, "bar_ms": 0.5, "pass": ok}))
+    if durs_us:
+        print(f"AC-e: the root switch (chroot) over {len(durs_us)} creates at 8 in flight: p50 "
+              f"{eb.ms3(ms(p50))} ms, p99 {eb.ms3(ms(p99))} ms, max {eb.ms3(ms(mx))} ms (bar p99 <= 0.5 ms). "
+              f"AC-a: {init_pivots} init pivot_roots (the {seed_prune_pivots} pivot_roots in the trace are the "
+              f"pruned seeds' one-time prune, by pids that never chroot).")
+    if n_lost:
+        print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
+    if dangling:
+        print(f"refusing: {dangling} chroot entries or exits didn't pair", file=sys.stderr)
+    if not durs_us:
+        print("refusing: no chroot traced (did the pruned path run? HEXBENCH_THROUGHPUT_CONC set?)",
+              file=sys.stderr)
+    if init_pivots:
+        print(f"off the pruned path: {init_pivots} init pivot_roots (a chrooting pid also pivot_rooted)",
+              file=sys.stderr)
+    if not all_switched:
+        print(f"off the pruned path: {len(durs_us)} chroots != {creates} creates (some fell back to "
+              f"the classic pivot_root path)", file=sys.stderr)
+    return 0 if ok else 1
+
+
 def main():
     a = sys.argv[1:]
     if len(a) == 4 and a[0] == "drain":
@@ -589,6 +667,8 @@ def main():
         return check(a[1], a[2])
     if len(a) == 2 and a[0] == "summarize":
         return summarize(a[1])
+    if a[0] == "switch" and len(a) in (3, 4):
+        return switch(a[1], a[2], a[3] if len(a) == 4 else None)
     print(__doc__, file=sys.stderr)
     return 2
 

@@ -16,11 +16,16 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
-for f in crun libcrun-driver; do
-  [ -x "$BASE/bin/$f" ] || { echo "refusing: no $BASE/bin/$f (host.sh fetches crun and builds the libcrun driver)" >&2; exit 4; }
-done
+# AC-e (goal 5 plan step 2) compares nothing against libcrun — it reads only the pruned root's switch — so it
+# needs only hex and seam_oci; every other run needs host.sh's crun and its libcrun driver.
+if [ "${AC_E:-0}" = 0 ]; then
+  for f in crun libcrun-driver; do
+    [ -x "$BASE/bin/$f" ] || { echo "refusing: no $BASE/bin/$f (host.sh fetches crun and builds the libcrun driver)" >&2; exit 4; }
+  done
+fi
 OUT="$BASE/out/create-breakdown-$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$OUT/bin"
-cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/crun" "$BASE/bin/libcrun-driver" "$OUT/bin/"
+cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"
+if [ "${AC_E:-0}" = 0 ]; then cp "$BASE/bin/crun" "$BASE/bin/libcrun-driver" "$OUT/bin/"; fi
 if [ -n "${BEFORE_HEX:-}" ]; then
   cp "$(realpath "$BEFORE_HEX")" "$OUT/bin/before-hex"; cp "$(realpath "${BEFORE_SEAM:?BEFORE_SEAM, with BEFORE_HEX}")" "$OUT/bin/before-seam_oci"
 fi
@@ -44,8 +49,10 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "seam_oci: sha256 $(sha256sum "$OUT/bin/seam_oci" | cut -c1-16)"
   [ -x "$OUT/bin/before-hex" ] && echo "before: hex sha256 $(sha256sum "$OUT/bin/before-hex" | cut -c1-16)," \
     "seam_oci sha256 $(sha256sum "$OUT/bin/before-seam_oci" | cut -c1-16)"
-  echo "crun: $("$OUT/bin/crun" --version | head -1) (sha256 $(sha256sum "$OUT/bin/crun" | cut -c1-16))"
-  echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
+  if [ "${AC_E:-0}" = 0 ]; then
+    echo "crun: $("$OUT/bin/crun" --version | head -1) (sha256 $(sha256sum "$OUT/bin/crun" | cut -c1-16))"
+    echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
+  fi
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
   echo "probe: /run a tmpfs (size 1g), where the runtimes keep their state, as host.sh's OCI pass has it"
 } > "$OUT/env.txt"
@@ -70,7 +77,7 @@ trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$H
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done
