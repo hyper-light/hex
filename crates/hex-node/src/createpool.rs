@@ -196,6 +196,10 @@ impl CloneInit for CreatePool {
                 .pruned
                 .as_ref()
                 .map_or(0, |p| u32::try_from(p.binds.len()).unwrap_or(u32::MAX)),
+            path_joins: req
+                .pruned
+                .as_ref()
+                .map_or(0, |p| u32::try_from(p.path_joins.len()).unwrap_or(u32::MAX)),
         };
         // The descriptors ride in the order the seed reads them (`serve_create`): the two pipes, a
         // network namespace, then on the pruned path the four fixed descriptors and the bind trees, in
@@ -210,6 +214,7 @@ impl CloneInit for CreatePool {
             fds.push(pruned.container_dir.as_fd());
             fds.push(pruned.rootfs.as_fd());
             fds.extend(pruned.binds.iter().map(AsFd::as_fd));
+            fds.extend(pruned.path_joins.iter().map(AsFd::as_fd));
         }
         match round_trip(proc.socket.as_fd(), &create, &fds) {
             Ok(started) => {

@@ -51,6 +51,7 @@ fn creates() -> Vec<Create> {
             network: true,
             pruned: false,
             binds: 0,
+            path_joins: 0,
         },
         Create {
             bundle: "/b".to_owned(),
@@ -59,8 +60,10 @@ fn creates() -> Vec<Create> {
             network: false,
             pruned: false,
             binds: 0,
+            path_joins: 0,
         },
-        // A pruned create (goal 5 plan step 2): no network, four fixed descriptors and two bind trees.
+        // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
+        // one namespace joined by path.
         Create {
             bundle: "/srv/bundles/box-2".to_owned(),
             dir: "/run/hex-node/fedcba9876543210-box-2".to_owned(),
@@ -68,6 +71,7 @@ fn creates() -> Vec<Create> {
             network: false,
             pruned: true,
             binds: 2,
+            path_joins: 1,
         },
     ]
 }
@@ -135,8 +139,8 @@ fn a_create_reads_back_as_written_and_its_bytes_are_recorded() {
     assert_eq!(creates()[1].fds(), CREATE_FDS);
     assert_eq!(
         creates()[2].fds(),
-        CREATE_FDS + PRUNED_FIXED_FDS + 2,
-        "pruned: the four fixed descriptors and two bind trees, no network"
+        CREATE_FDS + PRUNED_FIXED_FDS + 2 + 1,
+        "pruned: the four fixed descriptors, two bind trees and one path-joined namespace, no network"
     );
     let unable = answer(&Answer::Refused {
         failed: Failed::Unable,
@@ -193,10 +197,11 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
             Err(Fault::Value { what: "create", .. })
         ));
     }
-    // A create ends with the network bool, the pruned bool and the binds u32 (six bytes), so the
-    // network byte is the sixth from the end and the pruned byte the fifth, whatever the names' lengths.
+    // A create ends with the network bool, the pruned bool, the binds u32 and the path_joins u32 (ten
+    // bytes), so the network byte is the tenth from the end and the pruned byte the ninth, whatever the
+    // names' lengths.
     let mut flag = create(&creates()[1]).unwrap();
-    let network_at = flag.len() - 6;
+    let network_at = flag.len() - 10;
     flag[network_at] = 2;
     assert!(matches!(
         read_create(&flag, flag.len()),
@@ -206,13 +211,14 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
         })
     ));
     let mut flag = create(&creates()[1]).unwrap();
-    let pruned_at = flag.len() - 5;
+    let pruned_at = flag.len() - 9;
     flag[pruned_at] = 2;
     assert!(matches!(
         read_create(&flag, flag.len()),
         Err(Fault::Value { what: "pruned", .. })
     ));
-    // Bind trees past the bound, and a non-pruned create that claims any, are refused by type.
+    // Bind trees and path-joined namespaces past their bounds, and a non-pruned create that claims any,
+    // are refused by type.
     let too_many = create(&Create {
         binds: u32::try_from(MAX_BINDS + 1).expect("MAX_BINDS + 1 fits in u32"),
         ..creates()[2].clone()
@@ -221,6 +227,18 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
     assert!(matches!(
         read_create(&too_many, too_many.len()),
         Err(Fault::Value { what: "binds", .. })
+    ));
+    let too_many_joins = create(&Create {
+        path_joins: u32::try_from(MAX_PATH_JOINS + 1).expect("MAX_PATH_JOINS + 1 fits in u32"),
+        ..creates()[2].clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&too_many_joins, too_many_joins.len()),
+        Err(Fault::Value {
+            what: "path_joins",
+            ..
+        })
     ));
     let not_pruned_with_binds = create(&Create {
         pruned: false,
@@ -258,8 +276,8 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
     }
 }
 
-const GOLDEN_CREATE: &str = "4845585302000200120000002f7372762f62756e646c65732f626f782d31240000002f72756e2f6865782d6e6f64652f303132333435363738396162636465662d626f782d3101290000002f7379732f66732f6367726f75702f6865782f303132333435363738396162636465662d626f782d31010000000000";
-const GOLDEN_CREATE_PRUNED: &str = "4845585302000200120000002f7372762f62756e646c65732f626f782d32240000002f72756e2f6865782d6e6f64652f666564636261393837363534333231302d626f782d3201290000002f7379732f66732f6367726f75702f6865782f666564636261393837363534333231302d626f782d32000102000000";
+const GOLDEN_CREATE: &str = "4845585302000200120000002f7372762f62756e646c65732f626f782d31240000002f72756e2f6865782d6e6f64652f303132333435363738396162636465662d626f782d3101290000002f7379732f66732f6367726f75702f6865782f303132333435363738396162636465662d626f782d3101000000000000000000";
+const GOLDEN_CREATE_PRUNED: &str = "4845585302000200120000002f7372762f62756e646c65732f626f782d32240000002f72756e2f6865782d6e6f64652f666564636261393837363534333231302d626f782d3201290000002f7379732f66732f6367726f75702f6865782f666564636261393837363534333231302d626f782d3200010200000001000000";
 
 const GOLDEN_FULL: &str = "484558530200010092100000120000002f72756e2f6865782f6f63692f626f782d3101180000002f7379732f66732f6367726f75702f6865782f626f782d31020000000c0000002f7573722f62696e2f656e760300000078207901050000002f776f726b020000000d000000504154483d2f7573722f62696e0a000000484f4d453d2f726f6f7401e80300000164000000";
 const GOLDEN_MINIMAL: &str =

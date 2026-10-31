@@ -60,15 +60,20 @@ pub const CREATE_FDS: usize = 2;
 /// directory, the container's state directory (the exec FIFO's), and the rootfs as a detached tree.
 /// A pruned seed reaches no host path, so each comes as a descriptor.
 pub const PRUNED_FIXED_FDS: usize = 4;
+/// Most namespaces a pruned create joins by path, each a descriptor the agent opened (its host path
+/// out of the pruned seed's reach): the network, ipc, uts and cgroup kinds — a pid or user namespace by
+/// path is made through the shim instead, a mount namespace by path too (goal 5 plan step 2).
+pub const MAX_PATH_JOINS: usize = 4;
 /// Most bind-source trees a pruned create carries, so its descriptors (the two pipes, a network
-/// namespace, the four fixed, and the bind trees) stay under `SCM_MAX_FD`, the kernel's bound on one
-/// `SCM_RIGHTS` message (253, `include/net/scm.h`). A spec with more bind mounts is refused by type
-/// and made through the shim (CLAUDE.md §2).
-pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS;
+/// namespace, the four fixed, the bind trees and the path-joined namespaces) stay under `SCM_MAX_FD`,
+/// the kernel's bound on one `SCM_RIGHTS` message (253, `include/net/scm.h`). A spec with more bind
+/// mounts is refused by type and made through the shim (CLAUDE.md §2).
+pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS - MAX_PATH_JOINS;
 /// Most descriptors any request carries: what a seed's read makes room for, so one carrying more is
-/// cut and refused. A pruned create is the largest (the two pipes, a network namespace, the four fixed
-/// and up to [`MAX_BINDS`] bind trees), which this holds under `SCM_MAX_FD`.
-pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS;
+/// cut and refused. A pruned create is the largest (the two pipes, a network namespace, the four fixed,
+/// up to [`MAX_BINDS`] bind trees and up to [`MAX_PATH_JOINS`] path-joined namespaces), which this holds
+/// under `SCM_MAX_FD` (253).
+pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS + MAX_PATH_JOINS;
 /// Descriptors a started answer carries: the pidfd of the process the seed started.
 pub const STARTED_FDS: usize = 1;
 
@@ -133,21 +138,26 @@ pub struct Create {
     /// a seed whose node isn't a root node, or whose spec needs the classic root, is made through the
     /// shim and never reaches a seed as pruned.
     pub pruned: bool,
-    /// How many bind-source trees ride last, when `pruned`: one per bind mount the spec lists, in that
-    /// order. Zero when not pruned. At most [`MAX_BINDS`].
+    /// How many bind-source trees ride, when `pruned`: one per bind mount the spec lists, in that
+    /// order, after the fixed descriptors. Zero when not pruned. At most [`MAX_BINDS`].
     pub binds: u32,
+    /// How many namespaces the container joins by path ride last, when `pruned`: one descriptor per
+    /// network, ipc, uts or cgroup namespace the spec joins by path, which the agent opened (the pruned
+    /// seed can't reach the host path). Zero when not pruned. At most [`MAX_PATH_JOINS`].
+    pub path_joins: u32,
 }
 
 impl Create {
     /// How many descriptors this create carries: the two pipes always, then a network namespace made
-    /// ahead when there is one, then on the pruned path the four fixed descriptors and one tree per
-    /// bind mount.
+    /// ahead when there is one, then on the pruned path the four fixed descriptors, one tree per bind
+    /// mount, and one descriptor per namespace joined by path.
     pub fn fds(&self) -> usize {
         let mut n = CREATE_FDS.saturating_add(usize::from(self.network));
         if self.pruned {
             n = n
                 .saturating_add(PRUNED_FIXED_FDS)
-                .saturating_add(self.binds as usize);
+                .saturating_add(self.binds as usize)
+                .saturating_add(self.path_joins as usize);
         }
         n
     }
@@ -282,6 +292,7 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.bool(create.network);
     w.bool(create.pruned);
     w.u32(create.binds);
+    w.u32(create.path_joins);
     w.done()
 }
 
@@ -309,6 +320,7 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         network: r.bool("network")?,
         pruned: r.bool("pruned")?,
         binds: r.u32()?,
+        path_joins: r.u32()?,
     };
     r.end(kind::CREATE, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
@@ -317,18 +329,24 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             "a create names its bundle and its state directory",
         ));
     }
-    // A create's bind-source trees are bounded, so its descriptors stay under `SCM_MAX_FD`; a `binds`
-    // past the bound, or set when the create isn't pruned, is refused by type (CLAUDE.md §2, §3).
+    // A create's trees and path-joined namespaces are bounded, so its descriptors stay under
+    // `SCM_MAX_FD`; a count past its bound, or set when the create isn't pruned, is refused (§2, §3).
     if create.binds as usize > MAX_BINDS {
         return Err(Fault::value(
             "binds",
             format!("a create carries at most {MAX_BINDS} bind-source trees"),
         ));
     }
-    if !create.pruned && create.binds != 0 {
+    if create.path_joins as usize > MAX_PATH_JOINS {
+        return Err(Fault::value(
+            "path_joins",
+            format!("a create joins at most {MAX_PATH_JOINS} namespaces by path"),
+        ));
+    }
+    if !create.pruned && (create.binds != 0 || create.path_joins != 0) {
         return Err(Fault::value(
             "binds",
-            "only a pruned create carries bind-source trees",
+            "only a pruned create carries bind-source trees or path-joined namespaces",
         ));
     }
     Ok(create)

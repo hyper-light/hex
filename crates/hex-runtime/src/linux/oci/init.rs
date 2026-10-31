@@ -236,7 +236,8 @@ pub(crate) fn clone_child(
 /// `sources` the agent cloned (the rootfs and one tree per bind mount) rather than from host paths, and
 /// opens the exec FIFO through the state-directory descriptor `fifo_dir` the agent handed it. The pruned
 /// path is only taken on a root node for a container that makes its own mount namespace and joins no user
-/// or mount namespace by path (the runtime's routing), so no user-namespace map handshake runs here.
+/// or mount namespace by path (the runtime's routing), so no user-namespace map handshake runs here, and
+/// a network, ipc, uts or cgroup namespace joined by path is joined by the descriptor the agent opened.
 pub(crate) fn clone_child_pruned(
     spec: &Spec,
     bundle: &str,
@@ -245,7 +246,23 @@ pub(crate) fn clone_child_pruned(
     sync: BorrowedFd<'_>,
     network: Option<OwnedFd>,
 ) -> Result<(), OciError> {
-    join_namespace_paths(spec)?;
+    // Join each network, ipc, uts or cgroup namespace the spec names by path, by the descriptor the
+    // agent opened, in the spec's namespace order (the order the agent opened them). The pruned init
+    // can't open the host path itself; a pid, user or mount namespace by path never reaches here.
+    let mut joined = sources.path_joins.iter();
+    for ns in &spec.linux.namespaces {
+        let flag = match (ns.path.as_ref(), ns.kind.as_str()) {
+            (Some(_), "network") => libc::CLONE_NEWNET,
+            (Some(_), "ipc") => libc::CLONE_NEWIPC,
+            (Some(_), "uts") => libc::CLONE_NEWUTS,
+            (Some(_), "cgroup") => libc::CLONE_NEWCGROUP,
+            _ => continue,
+        };
+        let fd = joined.next().ok_or_else(|| {
+            OciError::Broken("a path-joined namespace has no descriptor from the agent".to_owned())
+        })?;
+        sys::setns(fd.as_fd(), flag)?;
+    }
     let made_ahead = match network {
         Some(network) => {
             sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
@@ -726,6 +743,10 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
 pub(crate) struct PrunedSources {
     pub rootfs: OwnedFd,
     pub binds: Vec<OwnedFd>,
+    /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
+    /// namespace order: the agent opened them (the pruned init can't reach the host path), and the init
+    /// joins each by `setns`, deriving its kind from the spec in the same order.
+    pub path_joins: Vec<OwnedFd>,
 }
 
 /// `move_mount` from one descriptor to another, each named by the descriptor itself (empty paths).

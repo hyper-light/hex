@@ -239,6 +239,10 @@ pub struct PrunedCreate {
     pub container_dir: OwnedFd,
     pub rootfs: OwnedFd,
     pub binds: Vec<OwnedFd>,
+    /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
+    /// namespace order, which the init joins by `setns` (the pruned seed can't open the host path). A
+    /// pid or user namespace by path takes the shim, a mount namespace by path the classic path.
+    pub path_joins: Vec<OwnedFd>,
 }
 
 /// Where a container's cgroup comes from.
@@ -583,9 +587,15 @@ impl Runtime {
         if spec.makes_namespace("user") {
             return Err(ClassicReason::UserNamespace);
         }
-        // Any namespace joined by path: the pruned init can't open the host path to `setns` it. A pid or
-        // user namespace by path went to the shim already (`needs_shim`); the rest are refused here.
-        if spec.linux.namespaces.iter().any(|n| n.path.is_some()) {
+        // A mount namespace joined by path: the pruned init would `setns` into an existing namespace,
+        // not build the pruned one. (A pid or user namespace by path went to the shim already,
+        // `needs_shim`; a network, ipc, uts or cgroup namespace by path the agent opens below.)
+        if spec
+            .linux
+            .namespaces
+            .iter()
+            .any(|n| n.kind == "mount" && n.path.is_some())
+        {
             return Err(ClassicReason::JoinsByPath);
         }
         if !spec.hooks.prestart.is_empty()
@@ -634,6 +644,28 @@ impl Runtime {
                 );
             }
         }
+        // Each network, ipc, uts or cgroup namespace the spec joins by path, opened here (the pruned
+        // seed can't reach the host path), in the spec's namespace order, which the init joins by
+        // `setns`. The init derives each one's kind from the spec in the same order.
+        let mut path_joins = Vec::new();
+        for ns in &spec.linux.namespaces {
+            if ns.path.is_none()
+                || !matches!(ns.kind.as_str(), "network" | "ipc" | "uts" | "cgroup")
+            {
+                continue;
+            }
+            if path_joins.len() >= hex_core::seed::MAX_PATH_JOINS {
+                return Err(ClassicReason::JoinsByPath);
+            }
+            let Some(path) = &ns.path else { continue };
+            let fd = rustix::fs::open(
+                path.as_str(),
+                OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| ClassicReason::JoinsByPath)?;
+            path_joins.push(fd);
+        }
         let bundle_dir = open_dir(making.bundle).map_err(|_| ClassicReason::Source)?;
         let cgroup_dir = open_cgroup_dir(cgroup.dir()).map_err(|_| ClassicReason::Source)?;
         let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
@@ -643,6 +675,7 @@ impl Runtime {
             container_dir,
             rootfs,
             binds,
+            path_joins,
         })
     }
 

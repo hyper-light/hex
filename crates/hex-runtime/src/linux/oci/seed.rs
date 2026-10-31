@@ -722,7 +722,7 @@ fn serve_create_pruned(
             ),
         );
     };
-    let binds: Vec<OwnedFd> = fds.collect();
+    let binds: Vec<OwnedFd> = fds.by_ref().take(create.binds as usize).collect();
     if binds.len() != create.binds as usize {
         return refused(
             Failed::Request,
@@ -733,19 +733,36 @@ fn serve_create_pruned(
             ),
         );
     }
+    let path_joins: Vec<OwnedFd> = fds.collect();
+    if path_joins.len() != create.path_joins as usize {
+        return refused(
+            Failed::Request,
+            format!(
+                "a pruned create said {} path-joined namespaces but carried {}",
+                create.path_joins,
+                path_joins.len()
+            ),
+        );
+    }
     let spec = match read_config_at(bundle_dir.as_fd()) {
         Ok(spec) => spec,
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
     drop(bundle_dir);
-    // The runtime routes a container with a user namespace of its own, or one that joins a namespace by
-    // path, through the shim (the classic root path), never to a pruned seed; one that came anyway is
-    // refused by type, never built in the wrong namespace (CLAUDE.md §3).
-    if spec.makes_namespace("user") || init::needs_shim(&spec) {
+    // The runtime routes a container with a user namespace of its own, or one that joins a pid, user or
+    // mount namespace by path, through the shim (the classic root path), never to a pruned seed; one
+    // that came anyway is refused by type, never built in the wrong namespace (CLAUDE.md §3). A network,
+    // ipc, uts or cgroup namespace by path is joined by the `path_joins` descriptors, not here.
+    let joins_mount_by_path = spec
+        .linux
+        .namespaces
+        .iter()
+        .any(|n| n.kind == "mount" && n.path.is_some());
+    if spec.makes_namespace("user") || init::needs_shim(&spec) || joins_mount_by_path {
         return refused(
             Failed::Start,
-            "a pruned create makes no user namespace and joins none by path; such a container is made \
-             through the shim, not a pruned seed"
+            "a pruned create makes no user namespace and joins no pid, user or mount namespace by path; \
+             such a container is made through the shim, not a pruned seed"
                 .to_owned(),
         );
     }
@@ -763,7 +780,11 @@ fn serve_create_pruned(
             // The init, born in the cgroup and the fresh namespaces, the agent's own child. It builds
             // the root from the trees the agent cloned and returns here only on a failure before the
             // exec FIFO, whose error goes to the agent on the sync pipe.
-            let sources = init::PrunedSources { rootfs, binds };
+            let sources = init::PrunedSources {
+                rootfs,
+                binds,
+                path_joins,
+            };
             let r = init::clone_child_pruned(
                 &spec,
                 &create.bundle,
@@ -780,6 +801,7 @@ fn serve_create_pruned(
         }
         Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
             drop((sync_w, cgroup_dir, container_dir, rootfs, binds, network));
+            drop(path_joins);
             match u32::try_from(pid) {
                 Ok(pid) => (Answer::Started { pid }, Some(pidfd)),
                 Err(_) => {
