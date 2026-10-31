@@ -1400,6 +1400,9 @@ pub fn mount_setattr(
     if r == 0 {
         Ok(())
     } else {
-        Err(OciError::os("mount_setattr", std::io::Error::last_os_error()))
+        Err(OciError::os(
+            "mount_setattr",
+            std::io::Error::last_os_error(),
+        ))
     }
 }

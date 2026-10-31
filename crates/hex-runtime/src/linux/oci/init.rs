@@ -729,8 +729,8 @@ pub(crate) struct PrunedSources {
 }
 
 /// `move_mount` from one descriptor to another, each named by the descriptor itself (empty paths).
-const FD_TO_FD: MoveMountFlags = MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH
-    .union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
+const FD_TO_FD: MoveMountFlags =
+    MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH.union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
 
 /// Builds the container's root on the pruned-seed path (goal 5 plan step 2), fd-based. The init's
 /// namespace is a copy of the seed's two mounts — its root tmpfs and an empty `/r` — so it attaches the

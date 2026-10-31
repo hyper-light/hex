@@ -19,6 +19,7 @@ use hex_api::Refusal;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::FdFlags;
+use rustix::mount::OpenTreeFlags;
 use rustix::pipe::PipeFlags;
 use rustix::process::PidfdFlags;
 
@@ -159,15 +160,60 @@ pub trait CloneInit {
     /// own.
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
 
-    /// A container a seed can't make in one clone ([`init::needs_shim`]: it joins a pid or user namespace
-    /// by path) is made through the shim instead: counted here, so a run shows how often a create still
-    /// re-execs the hex binary.
-    fn through_shim(&self);
+    /// Whether this node's create seeds prune their mount namespace (goal 5 plan step 2): true on a root
+    /// node, so a pruned-eligible container takes the pruned root path (no `pivot_root`) and the rest go
+    /// through the shim, counted; false on a rootless node, whose seeds keep the agent's mount namespace
+    /// and build the root the classic way in the init.
+    fn prunes_root(&self) -> bool;
+
+    /// A container made through the shim instead of a seed, by its reason (a fixed set, so no
+    /// high-cardinality label; CLAUDE.md §10): counted, so a run shows how often a create still re-execs
+    /// the hex binary and pivots, and why.
+    fn classic(&self, reason: ClassicReason);
+}
+
+/// Why a create is made through the shim (the classic root path) rather than handed to a pruned seed
+/// (goal 5 plan step 2). A fixed set: each is a label on a counter, none derived from the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassicReason {
+    /// A pid or user namespace joined by path: a seed's one clone can't make it ([`init::needs_shim`]).
+    NamespaceByPath,
+    /// A user namespace of the container's own: a tree the agent clones from its own user namespace
+    /// isn't locked in the container's, so the pruned path isn't taken for it (a follow-up).
+    UserNamespace,
+    /// Create-time hooks: they may expect the container's root reachable by host path, as crun gates its
+    /// own fd-based path on hooks.
+    Hooks,
+    /// A mount namespace joined by path: the init would `setns` into an existing namespace, not build
+    /// the pruned one.
+    MountNamespaceByPath,
+    /// The spec makes no mount namespace of its own: there is no root to build on the pruned path.
+    NoMountNamespace,
+    /// A bind source the agent couldn't clone with `open_tree`, or more bind mounts than fit one
+    /// `SCM_RIGHTS` message ([`hex_core::seed::MAX_BINDS`]).
+    Source,
+}
+
+impl ClassicReason {
+    /// The fixed count of reasons, for a per-reason counter.
+    pub const COUNT: usize = 6;
+
+    /// This reason's index, for a per-reason counter.
+    pub fn index(self) -> usize {
+        match self {
+            Self::NamespaceByPath => 0,
+            Self::UserNamespace => 1,
+            Self::Hooks => 2,
+            Self::MountNamespaceByPath => 3,
+            Self::NoMountNamespace => 4,
+            Self::Source => 5,
+        }
+    }
 }
 
 /// What [`CloneInit::clone_init`] is given: the container to make, its cgroup and a network namespace
-/// made ahead (if any), and the two pipe ends the init talks to the runtime over — the sync pipe it
-/// writes and the map pipe it reads the runtime's answer on.
+/// made ahead (if any), the two pipe ends the init talks to the runtime over (the sync pipe it writes
+/// and the map pipe it reads the runtime's answer on), and, on the pruned path, the root descriptors.
 pub struct CloneReq<'a> {
     pub bundle: &'a Path,
     pub dir: &'a Path,
@@ -175,6 +221,23 @@ pub struct CloneReq<'a> {
     pub network: Option<OwnedFd>,
     pub sync_w: OwnedFd,
     pub map_r: OwnedFd,
+    /// On the pruned root path (goal 5 plan step 2): the bundle, cgroup and state directories as
+    /// descriptors and the rootfs and bind-source trees the runtime cloned in its own mount namespace,
+    /// which the seed hands the init to build the root from. `None` on the classic seed path (a rootless
+    /// node), where the seed reads them by path.
+    pub pruned: Option<PrunedCreate>,
+}
+
+/// The root descriptors the runtime cloned for a pruned create (goal 5 plan step 2), handed to the seed
+/// over `SCM_RIGHTS` with the create. The runtime opens them in its own (host) mount namespace, where
+/// the host filesystem is reachable, and closes them once the seed has answered; a tree never attached
+/// dissolves with its last descriptor.
+pub struct PrunedCreate {
+    pub bundle_dir: OwnedFd,
+    pub cgroup_dir: OwnedFd,
+    pub container_dir: OwnedFd,
+    pub rootfs: OwnedFd,
+    pub binds: Vec<OwnedFd>,
 }
 
 /// Where a container's cgroup comes from.
@@ -371,11 +434,7 @@ impl Runtime {
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
             Start::Shim => self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Inherited),
-            Start::Seed(seeds) if init::needs_shim(&spec) => {
-                seeds.through_shim();
-                self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Null)
-            }
-            Start::Seed(seeds) => self.start_via_seed(&making, &spec, &cgroup, network, seeds),
+            Start::Seed(seeds) => self.start_seeded(&making, &spec, &cgroup, network, seeds),
         });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
@@ -471,13 +530,112 @@ impl Runtime {
         }
     }
 
+    /// Routes a seam create to a seed: through the shim (counted) for a container a seed can't make in
+    /// one clone or a pruned seed can't serve, else to the seed, on the pruned root path on a root node
+    /// (goal 5 plan step 2) and the classic path on a rootless one. The pruned path clones the rootfs and
+    /// each bind source here, in the agent's own mount namespace, and hands them to the seed; a container
+    /// not eligible for it (a user namespace of its own, create-time hooks, a mount namespace joined by
+    /// path, none of its own, or a source that can't be cloned) is made through the shim, by reason.
+    fn start_seeded(
+        &self,
+        making: &Making<'_>,
+        spec: &Spec,
+        cgroup: &BoxCgroup,
+        network: Option<OwnedFd>,
+        seeds: &dyn CloneInit,
+    ) -> Result<(), OciError> {
+        if init::needs_shim(spec) {
+            seeds.classic(ClassicReason::NamespaceByPath);
+            return self.start_shim(making, spec, cgroup, network, ShimStdio::Null);
+        }
+        if seeds.prunes_root() {
+            match self.pruned_create(making, spec, cgroup) {
+                Ok(pruned) => {
+                    self.start_via_seed(making, spec, cgroup, network, seeds, Some(pruned))
+                }
+                Err(reason) => {
+                    seeds.classic(reason);
+                    self.start_shim(making, spec, cgroup, network, ShimStdio::Null)
+                }
+            }
+        } else {
+            self.start_via_seed(making, spec, cgroup, network, seeds, None)
+        }
+    }
+
+    /// The root descriptors for a pruned create (goal 5 plan step 2), or the reason it can't take the
+    /// pruned path. The rootfs and each bind source are cloned as detached trees (`open_tree` with
+    /// `OPEN_TREE_CLONE | AT_RECURSIVE`) in the agent's own mount namespace, where the host filesystem is
+    /// reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73); the
+    /// binds are cloned in [`crate::linux::oci::mount::plan`]'s order, which the seed's init follows when
+    /// it attaches them. The bundle, cgroup and state directories are opened as descriptors too, so a
+    /// pruned seed, which reaches no host path, builds the whole root from descriptors.
+    fn pruned_create(
+        &self,
+        making: &Making<'_>,
+        spec: &Spec,
+        cgroup: &BoxCgroup,
+    ) -> Result<PrunedCreate, ClassicReason> {
+        if !spec.makes_namespace("mount") {
+            return Err(ClassicReason::NoMountNamespace);
+        }
+        if spec.makes_namespace("user") {
+            return Err(ClassicReason::UserNamespace);
+        }
+        if spec
+            .linux
+            .namespaces
+            .iter()
+            .any(|n| n.kind == "mount" && n.path.is_some())
+        {
+            return Err(ClassicReason::MountNamespaceByPath);
+        }
+        if !spec.hooks.prestart.is_empty()
+            || !spec.hooks.create_runtime.is_empty()
+            || !spec.hooks.create_container.is_empty()
+        {
+            return Err(ClassicReason::Hooks);
+        }
+        let rootfs_path = {
+            let p = Path::new(&spec.root.path);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                making.bundle.join(p)
+            }
+        };
+        let rootfs = clone_tree(&rootfs_path).map_err(|_| ClassicReason::Source)?;
+        let mut binds = Vec::new();
+        for op in crate::linux::oci::mount::plan(&spec.mounts).map_err(|_| ClassicReason::Source)? {
+            if op.is_bind {
+                if binds.len() >= hex_core::seed::MAX_BINDS {
+                    return Err(ClassicReason::Source);
+                }
+                binds.push(
+                    clone_tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?,
+                );
+            }
+        }
+        let bundle_dir = open_dir(making.bundle).map_err(|_| ClassicReason::Source)?;
+        let cgroup_dir = open_cgroup_dir(cgroup.dir()).map_err(|_| ClassicReason::Source)?;
+        let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
+        Ok(PrunedCreate {
+            bundle_dir,
+            cgroup_dir,
+            container_dir,
+            rootfs,
+            binds,
+        })
+    }
+
     /// Starts the container's init by handing it to a seed to clone (decision 5, goal 5 plan step 4), in
     /// place of the shim's re-exec. The seed clones the init into the cgroup and the fresh namespaces its
     /// spec asks for, as the agent's own child, and hands back its pid and a pidfd. The runtime then runs
     /// the same sync handshake as the shim path ([`handshake_seed`]: a user namespace's maps, the ready
     /// signal), reads the init's start time and writes the `created` state. The pidfd is held only to end
     /// the init cleanly if the handshake fails; the node agent opens its own for the init it watches, as
-    /// it does for a shim-forked init.
+    /// it does for a shim-forked init. `pruned`, when given, carries the root descriptors for the pruned
+    /// path (goal 5 plan step 2); the runtime holds them until the seed answers, then drops them.
     fn start_via_seed(
         &self,
         making: &Making<'_>,
@@ -485,6 +643,7 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         seeds: &dyn CloneInit,
+        pruned: Option<PrunedCreate>,
     ) -> Result<(), OciError> {
         // Two pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
         // seed hands the init's ends over `SCM_RIGHTS`, so they never need their close-on-exec cleared;
@@ -500,6 +659,7 @@ impl Runtime {
             network,
             sync_w,
             map_r,
+            pruned,
         })?;
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
         // the init's ends once it had cloned, so the init alone holds them now.
@@ -1301,6 +1461,43 @@ fn wait_timeout(
 /// Makes the exec FIFO, world-writable so a container that has dropped to a non-root user (or a
 /// user namespace's mapped id) can still open it to wait for `start`; `mknod`'s mode is masked by
 /// the umask, so the mode is set explicitly after.
+/// A detached clone of the mount tree at `path` (`open_tree` with `OPEN_TREE_CLONE | AT_RECURSIVE`),
+/// made in the agent's own mount namespace for a pruned create (goal 5 plan step 2): the rootfs or a
+/// bind source, handed to the seed over `SCM_RIGHTS`. Needs `CAP_SYS_ADMIN` in the agent's user
+/// namespace (a root node has it); where it is refused, the create takes the classic path.
+fn clone_tree(path: &Path) -> Result<OwnedFd, OciError> {
+    rustix::mount::open_tree(
+        rustix::fs::CWD,
+        path,
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::AT_RECURSIVE
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+    )
+    .map_err(|e| OciError::os("cloning a mount source", e))
+}
+
+/// A directory opened `O_PATH` for a pruned create's seed to resolve a file in by descriptor (the
+/// bundle's `config.json`, the state directory's exec FIFO).
+fn open_dir(path: &Path) -> Result<OwnedFd, OciError> {
+    rustix::fs::open(
+        path,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening a directory for a pruned create", e))
+}
+
+/// The container's cgroup directory opened for a pruned create, as [`crate::linux::oci::seed::open_cgroup`]
+/// opens it: the seed's `clone3` is born into it (`CLONE_INTO_CGROUP`).
+fn open_cgroup_dir(path: &Path) -> Result<OwnedFd, OciError> {
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening the cgroup for a pruned create", e))
+}
+
 fn make_fifo(path: &Path) -> Result<(), OciError> {
     rustix::fs::mknodat(
         rustix::fs::CWD,

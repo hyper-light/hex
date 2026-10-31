@@ -117,8 +117,11 @@ fn serve() -> Result<(), OciError> {
 /// This is the one `pivot_root` on the pruned path, off every create's path and once per seed's life.
 fn prune(mountpoint: &Path) -> Result<(), OciError> {
     sys::unshare(rustix::thread::UnshareFlags::NEWNS)?;
-    rustix::mount::mount_change("/", MountPropagationFlags::PRIVATE | MountPropagationFlags::REC)
-        .map_err(|e| OciError::os("making the seed's mounts private", e))?;
+    rustix::mount::mount_change(
+        "/",
+        MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
+    )
+    .map_err(|e| OciError::os("making the seed's mounts private", e))?;
     // A fresh small tmpfs over the mountpoint (made first if the agent didn't), holding only `r`.
     let _ = rustix::fs::mkdir(mountpoint, Mode::from_bits_truncate(0o755));
     rustix::mount::mount(
@@ -132,7 +135,8 @@ fn prune(mountpoint: &Path) -> Result<(), OciError> {
     rustix::fs::mkdir(mountpoint.join("r"), Mode::from_bits_truncate(0o755))
         .map_err(|e| OciError::os("the seed's empty root", e))?;
     rustix::process::chdir(mountpoint).map_err(|e| OciError::os("chdir the seed's root", e))?;
-    rustix::process::pivot_root(c".", c".").map_err(|e| OciError::os("the seed's pivot_root", e))?;
+    rustix::process::pivot_root(c".", c".")
+        .map_err(|e| OciError::os("the seed's pivot_root", e))?;
     rustix::mount::unmount(".", UnmountFlags::DETACH)
         .map_err(|e| OciError::os("detaching the seed's old root", e))?;
     rustix::process::chdir("/").map_err(|e| OciError::os("chdir /", e))?;
@@ -781,7 +785,10 @@ fn serve_create_pruned(
                 Err(_) => {
                     let _ =
                         rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
-                    refused(Failed::Start, "clone3 returned a pid out of range".to_owned())
+                    refused(
+                        Failed::Start,
+                        "clone3 returned a pid out of range".to_owned(),
+                    )
                 }
             }
         }

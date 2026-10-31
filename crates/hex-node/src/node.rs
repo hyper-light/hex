@@ -32,7 +32,7 @@ use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
-use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
 use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
@@ -215,11 +215,23 @@ impl Node {
         // The create seeds are built now, from this binary, so their first spare is up before the first
         // create (decision 5): no create waits on a seed's exec. A pool that can't be built now is built
         // at the first create, which reports why.
-        if let Ok(pool) = CreatePool::new(hex_binary.clone()) {
+        if let Ok(pool) = CreatePool::new(hex_binary.clone(), self.seed_prune()) {
             let _ = self.create_seeds.set(pool);
         }
         self.oci_helper = Some(hex_binary);
         self
+    }
+
+    /// The mountpoint a root node's create seeds prune their mount namespace at (goal 5 plan step 2), or
+    /// `None` on a rootless node, whose seeds keep the agent's mount namespace and build the root the
+    /// classic way. A dedicated directory under the oci root, which the seed mounts a fresh tmpfs over
+    /// and pivots away from in its own namespace: the agent's view of it stays an empty directory, and
+    /// nothing scans the oci root (recovery reaches containers by the paths their records name).
+    fn seed_prune(&self) -> Option<PathBuf> {
+        match self.owner {
+            Owner::Root => Some(self.oci_root.join(".seed-root")),
+            Owner::Rootless { .. } => None,
+        }
     }
 
     /// Sets the most network namespaces a root node makes ahead, [`netns::BOUND`] unless set, in place
@@ -773,7 +785,9 @@ impl Node {
                 std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
             }
         };
-        let _ = self.create_seeds.set(CreatePool::new(exe)?);
+        let _ = self
+            .create_seeds
+            .set(CreatePool::new(exe, self.seed_prune())?);
         self.create_seeds
             .get()
             .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))
@@ -789,12 +803,22 @@ impl Node {
         }
     }
 
-    /// How many of the node's creates were made through the shim since its seed pool opened: those whose
-    /// container joins a pid or user namespace by path, which no seed's one clone can make (decision 5).
+    /// How many of the node's creates were made through the shim since its seed pool opened, over all
+    /// reasons: those a pruned seed couldn't serve, and those that join a pid or user namespace by path
+    /// (decision 5, goal 5 plan step 2).
     pub fn creates_through_shim(&self) -> u64 {
         self.create_seeds
             .get()
             .map_or(0, CreatePool::creates_through_shim)
+    }
+
+    /// How many of the node's creates were made through the shim for `reason` since its seed pool
+    /// opened: the classic root path's reasons, counted for the bench and the node's metrics (goal 5
+    /// plan step 2, AC-T7.1.4).
+    pub fn creates_through_shim_for(&self, reason: ClassicReason) -> u64 {
+        self.create_seeds
+            .get()
+            .map_or(0, |pool| pool.creates_through_shim_for(reason))
     }
 }
 
