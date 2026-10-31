@@ -147,6 +147,15 @@ def report_locks(label, n, txt, named):
         what = "into a cgroup (CLONE_INTO_CGROUP: cgroup_mutex held)" if into == '1' else "not into a cgroup"
         print(f"  {cnt / n:6.2f} x {tot / max(cnt, 1) / 1e3:8.1f} us = {tot / n / 1e6:7.3f} ms  fork {what}, "
               f"cgroup_can_fork to cgroup_post_fork's return")
+    # The holds taken for the boxes' own cgroups alone, those under the bench's oci boxes' root (@box, since goal 5
+    # extended step 1): the takers above count every kworker's on the host, and the node's start's cgroups. Per box
+    # the bench made, which is per lifecycle.
+    box = {m.group(1): int(m.group(2)) for m in re.finditer(r'@box\[([^\]]+)\]: (\d+)', txt)}
+    if box:
+        made = box.get('cgroup_mkdir', 0)
+        each = ', '.join(f"{k} {v / max(made, 1):.3f}" for k, v in sorted(box.items()))
+        print(f"{label}: cgroup_mutex's holds for the boxes' own cgroups, per box made ({made} made): {each}; "
+              f"in all {sum(box.values()) / max(made, 1):.3f}")
     busy = {int(m.group(1)): int(m.group(2)) for m in re.finditer(r'@busy\[(\d+)\]: (\d+)', txt)}
     if busy:
         counts = sorted(busy.values())

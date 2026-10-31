@@ -3,9 +3,9 @@
 //! default policy's is attached once, at the node's start, to the root its `oci` boxes alone live under
 //! (with `BPF_F_ALLOW_OVERRIDE`). As root, "do X, expect Y" (CLAUDE.md §6):
 //! - a box with the default policy, one whose policy allows every device, one whose policy also allows
-//!   writing `/dev/kmsg` (char 1:11), and a `process` box open devices: each open is allowed, or refused
-//!   (EPERM), exactly as its box's policy says; the default box's create loaded and attached nothing, and
-//!   only the oci boxes' root carries the default;
+//!   writing `/dev/kmsg` (char 1:11), a box whose policy denies c 1:3, and a `process` box open devices:
+//!   each open is allowed, or refused (EPERM), exactly as its box's policy says; the default box's create
+//!   loaded and attached nothing, and only the oci boxes' root carries the default;
 //! - a node restarted over boxes made before it: the oci boxes' root carries the same program (its id),
 //!   which the restart didn't attach again, and boxes made before and after the restart get the same
 //!   decisions;
@@ -16,14 +16,16 @@
 //!   by its translation and a copy loaded; the next create with that policy attaches that copy, loading
 //!   none.
 //!
-//! The plan's third box, "a box whose policy denies c 1:3", can't be made: a runtime's own devices are
-//! always allowed. The runtime spec makes a runtime supply /dev/null (c 1:3) and the rest whatever a spec
-//! lists (config-linux.md, "Default Devices"), and Hex allows them after any list (`resources.rs`,
+//! The box whose policy denies c 1:3 can't come from a spec: a runtime's own devices are always allowed.
+//! The runtime spec makes a runtime supply /dev/null (c 1:3) and the rest whatever a spec lists
+//! (config-linux.md, "Default Devices"), and Hex allows them after any list (`resources.rs`,
 //! `DEFAULT_DEVICES`), as runc does ("Append the default allowed devices to the end of the list",
 //! libcontainer/specconv/spec_linux.go:984 on main) and crun does (src/libcrun/cgroup-resources.c,
-//! `default_devices`), so no policy denies them. The box whose policy allows writing /dev/kmsg stands in
-//! its place, as the lead accepted (2026-10-31): another policy than the default, which its own program
-//! decides alone, since the root's default would refuse it /dev/kmsg.
+//! `default_devices`). So that policy is built as the runtime builds any, a device state compiled to its
+//! program (every device but c 1:3), and given to a cgroup under the node's oci boxes' root by a holder of
+//! the node's kind (`Programs::attach`); a program run in that cgroup opens /dev/zero and is refused
+//! /dev/null, its own program deciding in the root's place. The box whose policy allows writing /dev/kmsg
+//! shows the same from a spec: the root's default would refuse it /dev/kmsg.
 //!
 //! Root only: loading a device program needs CAP_BPF and CAP_SYS_ADMIN, which a rootless run lacks, so it
 //! prints SKIP there; the seam root lab (bench/oci-validation/seam_root.sh) runs it as root.
@@ -44,11 +46,16 @@ use std::process::Command;
 
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Stdio};
 use hex_node::{Node, OCI_BOXES};
+use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::oci::devshare::{self, HINTS_FILE, Hints};
-use hex_runtime::linux::oci::resources;
+use hex_runtime::linux::oci::programs::Programs;
+use hex_runtime::linux::oci::resources::{
+    self, ACC_MKNOD, ACC_READ, ACC_WRITE, DEV_CHAR, DeviceState, Exception, Plan,
+};
 use hex_runtime::linux::oci::run::Runtime as OciRuntime;
 use hex_runtime::linux::oci::spec::DeviceRule;
 use hex_runtime::linux::oci::sys::{self, BPF_F_ALLOW_OVERRIDE};
+use hex_runtime::linux::{disks, process};
 
 /// A policy that allows every device.
 const ALLOW_ALL: &str = r#"[{"allow": true, "access": "rwm"}]"#;
@@ -120,12 +127,13 @@ fn device_programs_are_held_per_policy_and_the_default_sits_at_the_oci_root() {
 }
 
 /// Do: make a box with the default policy, then boxes whose policies allow every device and allow
-/// writing /dev/kmsg, and a `process` box; open the devices in each. Expect: the default box opens
-/// /dev/null and /dev/zero and is refused /dev/kmsg and the block node; the allow-all box opens them all
-/// (the block node has no device); the kmsg box opens /dev/kmsg, which the root's default would refuse,
-/// and is refused the block node; the process box opens /dev/kmsg. The default box's create loaded and
-/// attached nothing; the oci boxes' root carries one program, attached with OVERRIDE, and the default box
-/// none of its own; the box root, which the process boxes live under, carries none.
+/// writing /dev/kmsg, a `process` box, and a box whose policy denies c 1:3; open the devices in each.
+/// Expect: the default box opens /dev/null and /dev/zero and is refused /dev/kmsg and the block node; the
+/// allow-all box opens them all (the block node has no device); the kmsg box opens /dev/kmsg, which the
+/// root's default would refuse, and is refused the block node; the process box opens /dev/kmsg; the c 1:3
+/// box opens /dev/zero and is refused /dev/null, which the root's default allows. The default box's create
+/// loaded and attached nothing; the oci boxes' root carries one program, attached with OVERRIDE, and the
+/// default box none of its own; the box root, which the process boxes live under, carries none.
 fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
     let state = tempfile::tempdir_in(lab.dir.path()).unwrap();
     let box_root = own.join("hex-dev-policies");
@@ -174,6 +182,44 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
         "the process box"
     );
 
+    // The box whose policy denies c 1:3 (the module's head says why no spec can ask it): a cgroup under the
+    // node's oci boxes' root, given that policy's program by a holder of the node's kind, which finds the
+    // root's default there and keeps it.
+    let oci_boxes = BoxRoot::open(node.oci_boxes(), disks::under(state.path()).unwrap()).unwrap();
+    let no_null = oci_boxes
+        .create(&BoxId::new("dev-no-null").unwrap(), &Bounds::default())
+        .unwrap();
+    let denies_null = Plan {
+        devices: Some(resources::compile(&DeviceState {
+            allow_by_default: true,
+            exceptions: vec![Exception {
+                kind: DEV_CHAR,
+                major: 1,
+                minor: 3,
+                access: ACC_MKNOD | ACC_READ | ACC_WRITE,
+            }],
+        })),
+        devices_allow_by_default: true,
+        ..Plan::default()
+    };
+    let held = Programs::at_root(node.oci_boxes(), 1).unwrap();
+    assert!(
+        !held.counts().unwrap().root_attached,
+        "the holder found the node's default on the root and kept it"
+    );
+    held.attach(&no_null, &denies_null, false).unwrap();
+    assert_eq!(
+        opens_in_cgroup(&no_null, lab, &["r:/dev/zero", "w:/dev/null"]),
+        [Opened, Refused],
+        "the box whose policy denies c 1:3"
+    );
+    assert_eq!(
+        attached(no_null.dir()).count,
+        1,
+        "the c 1:3 box's own program"
+    );
+    no_null.remove().unwrap();
+
     let oci = box_root.join(OCI_BOXES);
     let root = attached(&oci);
     assert_eq!(
@@ -199,7 +245,8 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
     sweep(&box_root);
     format!(
         "the root's program {:?} (OVERRIDE) decides for the default box, which loaded and attached none; \
-         the allow-all and kmsg boxes their own; each open as its policy says; {after:?}",
+         the allow-all, kmsg and c 1:3 boxes their own; each open as its policy says (the c 1:3 box opens \
+         /dev/zero, is refused /dev/null); {after:?}",
         root.ids
     )
 }
@@ -495,6 +542,32 @@ fn process_opens(node: &Node, lab: &Lab, id: &BoxId, paths: &[&str]) -> Vec<Open
             },
         )
         .unwrap();
+    let mut text = String::new();
+    out.read_to_string(&mut text).unwrap();
+    proc.wait_for(hex_api::conformance::PATIENCE).unwrap();
+    parse_opens(&text)
+}
+
+/// What a program started in cgroup `cg` opens of `paths`: `hex selftest-box open`, started there as a
+/// `process` box's programs are, on the host's /dev.
+fn opens_in_cgroup(
+    cg: &hex_runtime::linux::cgroup::BoxCgroup,
+    lab: &Lab,
+    paths: &[&str],
+) -> Vec<Open> {
+    use hex_api::Proc;
+    let (mut out, w) = std::io::pipe().unwrap();
+    let mut args = vec![lab.exe.as_str(), "selftest-box", "open"];
+    args.extend(paths);
+    let mut proc = process::exec(
+        cg,
+        &Program::of(&args),
+        Stdio {
+            stdout: Some(w),
+            ..Stdio::null()
+        },
+    )
+    .unwrap();
     let mut text = String::new();
     out.read_to_string(&mut text).unwrap();
     proc.wait_for(hex_api::conformance::PATIENCE).unwrap();

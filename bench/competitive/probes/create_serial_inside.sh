@@ -18,7 +18,10 @@
 # css_killed_work_fn, css_release_work_fn, cgroup_bpf_release), and a fork from cgroup_can_fork to cgroup_post_fork's
 # return, by whether it clones into a cgroup (CLONE_INTO_CGROUP holds cgroup_mutex across that span); each wait for
 # cgroup_mutex timed alone, from the lock's contention_begin tracepoint to its contention_end, by whether the waiter
-# is the runtime's. And how much of the time each lock is taken, sampled on every CPU at 999 Hz in 100 ms buckets:
+# is the runtime's. Those takers count every kworker's work on the host and the node's own start; so each taker,
+# the attach and the fork into a cgroup are also counted for the boxes' own cgroups alone (@box: those directly
+# under seam_oci's oci boxes' root, /sys/fs/cgroup/hex-oci-seam/.oci, found from the work's or the call's cgroup).
+# And how much of the time each lock is taken, sampled on every CPU at 999 Hz in 100 ms buckets:
 # cgroup_mutex (held: an owner in its owner word; handed off: only the waiter and hand-off flags, the lock free
 # until a woken waiter runs; free), and the i_rwsem of the cgroup directory the runtime last made a cgroup in
 # (write-held, read-held, handed off, free); a bucket in which the runtime made or removed a cgroup is a busy one.
@@ -130,6 +133,52 @@ kretprobe:css_killed_work_fn, kretprobe:css_release_work_fn, kretprobe:cgroup_bp
 		delete(@ft[(uint64)curtask->pid]);
 	}
 }
+kprobe:cgroup_mkdir
+{
+	\$p = (struct kernfs_node *)arg0;
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+}
+kprobe:cgroup_rmdir
+{
+	\$p = ((struct kernfs_node *)arg0)->__parent;
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+}
+kprobe:cgroup_kill_write
+{
+	\$p = ((struct kernfs_open_file *)arg0)->kn->__parent->__parent;
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+}
+kprobe:css_killed_work_fn, kprobe:css_release_work_fn
+{
+	\$p = ((struct cgroup_subsys_state *)(arg0 - offsetof(struct cgroup_subsys_state, destroy_work)))->cgroup->kn->__parent;
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+}
+kprobe:cgroup_bpf_release
+{
+	\$p = ((struct cgroup *)(arg0 - offsetof(struct cgroup, bpf) - offsetof(struct cgroup_bpf, release_work)))->kn->__parent;
+	if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box[func] = count(); }
+}
+kprobe:cgroup_bpf_prog_attach { @ina[(uint64)curtask->pid] = 1; }
+kretprobe:cgroup_get_from_fd
+{
+	if (@ina[(uint64)curtask->pid] == 1) {
+		delete(@ina[(uint64)curtask->pid]);
+		if (retval != 0 && (uint64)retval < 0xfffffffffffff000) {
+			\$p = ((struct cgroup *)retval)->kn->__parent;
+			if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") {
+				@box["cgroup_bpf_prog_attach"] = count();
+			}
+		}
+	}
+}
+kprobe:cgroup_post_fork
+{
+	\$a = (struct kernel_clone_args *)arg1;
+	if ((\$a->flags & 0x200000000) != 0) {
+		\$p = \$a->cgrp->kn->__parent;
+		if (str(\$p->name) == ".oci" && str(\$p->__parent->name) == "hex-oci-seam") { @box["fork into a cgroup"] = count(); }
+	}
+}
 kprobe:cgroup_can_fork
 {
 	\$c = comm;
@@ -173,7 +222,7 @@ profile:hz:999
 		@dir_state[nsecs / 100000000, (\$n & 1) != 0 ? 3 : (((\$n >> 8) & 0x7fffffffffffff) != 0 ? 2 : (\$n != 0 ? 1 : 0))] = count();
 	}
 }
-END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); }
+END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); clear(@ina); }
 BT
 }
 run(){ # run <label> <filter> <command...>: the mode's program over one workload, and the directories it made
