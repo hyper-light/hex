@@ -893,7 +893,8 @@ plan:
   program, and the default policy's sits on the oci boxes' root, so a default-policy create loads and attaches
   nothing. <!-- record: bench/competitive/probes/create_breakdown.md -->Its parts fell from 0.304 and 0.311 ms in the
   base binary's runs to nothing, and Hex's create p50 from 2.217 and 2.171 ms to 1.825, 1.955 and 1.787 on one host
-  state, libcrun's beside them 2.903 to 3.084 (run 5).<!-- /record -->
+  state, libcrun's beside them 2.903 to 3.084 (run 5). With both binaries in every round of a run, step 1's create p50
+  was 0.762, 0.833 and 0.681 of the base's (run 6).<!-- /record -->
 - **The record's and the state's writes** (17.7%). They are files made, written and renamed on the overlay, and on the
   tmpfs step 2 moves them to they cost less.
 

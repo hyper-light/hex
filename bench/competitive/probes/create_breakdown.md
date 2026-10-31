@@ -470,3 +470,29 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
   libcrun's 5.6% to 12.1% slower than its 2.750, so step 1's figures against run 4 carry that.
 - Every run's parts sum to within 3% of its creates (97.0% to 100.3% of the creates between the traced ones), no trace
   event lost, and each probe step's detailed creates held every positional cut to its file.
+
+## Run 6 (2026-10-31, fedora): step 1's binary and the one before it in the same rounds
+
+- **Why:** the lead's call for goal 5 extended step 1's second criterion, on Ada's rule that a loaded host is never a
+  block because the same run's A/B ratio cancels its noise: each run times step 1's binary (`seam`) and the one before
+  it (`before`, staged by `BEFORE_HEX` and `BEFORE_SEAM`) in every shuffled round, libcrun beside them, and "10% under"
+  is judged by each run's own ratio.
+- **Host and load:** as run 1's. Three runs from 2026-10-31T22:07:37Z to 22:13:40Z, the 1-minute load 26.97, 34.96 and
+  32.56 at their starts and 23.86 at the end, on the host as it was; the host's clock before each: a burst took 0.103
+  to 0.119 ms at rest on a P-core.
+- **Binaries:** run 5's: step 1's of 4e518c0 (`hex` 2a475c14f822c00d, `seam_oci` 8a83b136fdcb4b8c) and the base's of
+  876136e (`hex` 76d3e5d95ac0724f, `seam_oci` bd1cde4cf8b1b0f8).
+- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>` on fedora, the harness at e9c6115.
+
+| run | load at start | Hex through the seam | before | libcrun | seam over before, pooled | by round |
+|---|---|---|---|---|---|---|
+| 20261031T220737Z | 26.97 | 1.995 | 2.619 | 3.293 | 0.762 | 0.914, 0.471, 0.792 |
+| 20261031T220941Z | 34.96 | 2.263 | 2.715 | 3.358 | 0.833 | 0.882, 0.757, 0.834 |
+| 20261031T221154Z | 32.56 | 1.559 | 2.288 | 2.826 | 0.681 | 0.870, 0.752, 0.415 |
+
+- **Each run's own ratio is under 0.9:** step 1's create p50 is 23.8%, 16.7% and 31.9% under the base's in the same
+  rounds. Of the nine rounds, one is under by less than 10% (0.914).
+- **The noise:** the base's rounds ran 1.891 to 4.796 ms, so a round's ratio swings with which binary met a busy
+  moment; pooled over its rounds each run is under. The parts summed to 81.3% of the creates between the traced ones in
+  the first run, short of the probe's 10% check under that noise, and 99.4% and 97.3% in the others. The device
+  program's parts 12 and 13 were 0.000 in every run.
