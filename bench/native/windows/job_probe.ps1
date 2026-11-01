@@ -145,7 +145,7 @@ $box = New-Object 'System.Collections.Generic.List[double]'; $bare = New-Object 
 for ($i = 0; $i -lt $N; $i++) {
     $sw.Restart()
     $pi = [W]::Start('cmd.exe /c exit 0', 0)
-    [W]::WaitForSingleObject($pi.Process, 0xFFFFFFFF) | Out-Null
+    [W]::WaitForSingleObject($pi.Process, [uint32]::MaxValue) | Out-Null
     $sw.Stop(); $bare.Add($sw.Elapsed.TotalMilliseconds)
     [W]::CloseHandle($pi.Process) | Out-Null; [W]::CloseHandle($pi.Thread) | Out-Null
 
@@ -154,7 +154,7 @@ for ($i = 0; $i -lt $N; $i++) {
     $pi = [W]::Start('cmd.exe /c exit 0', [W]::SUSPENDED)
     if (-not [W]::AssignProcessToJobObject($j, $pi.Process)) { throw "assign refused" }
     [W]::ResumeThread($pi.Thread) | Out-Null
-    [W]::WaitForSingleObject($pi.Process, 0xFFFFFFFF) | Out-Null
+    [W]::WaitForSingleObject($pi.Process, [uint32]::MaxValue) | Out-Null
     [W]::CloseHandle($j) | Out-Null
     $sw.Stop(); $box.Add($sw.Elapsed.TotalMilliseconds)
     [W]::CloseHandle($pi.Process) | Out-Null; [W]::CloseHandle($pi.Thread) | Out-Null
