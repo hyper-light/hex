@@ -8,16 +8,18 @@
 //! its writable layer, which goes when the box does. The node agent is its containers' parent,
 //! holding each init's pidfd and recording how it ended ([`crate::supervise`], decision 2). Each
 //! container keeps its state on tmpfs, in the runtime directory, as runc's and crun's does: a host
-//! crash takes it with the container, so a box's record that names nothing else isn't fsynced
-//! (decision 1; [`crate::store`]).
+//! crash takes it with the container, so a box's record that names nothing else is kept beside it and
+//! never fsynced (decision 1; [`crate::store`]). A box's record is written once, when the box is
+//! whole; until then each part of it lies at a path its id fixes, where recovery finds what a crash
+//! left (goal 5 extended, step 5).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, OciSpec, Proc, Program, Refusal, Rootfs,
@@ -27,7 +29,7 @@ use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
-use hex_core::recovery::{self, Decision, Seen, Why};
+use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
@@ -58,6 +60,12 @@ pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
 /// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
+/// runtime directory is shared with every node of this user on the host, so its entries are theirs as
+/// well as this node's. A bound on a restart's wait, as [`REMOVE_PATIENCE`] is on a delete's, not a
+/// guess at a directory's size (CLAUDE.md §2, §4).
+pub const LIST_PATIENCE: Duration = Duration::from_secs(60);
 
 /// The cgroup under the box root that the `oci` boxes alone live under, so a root node's default device
 /// program can sit on it without reaching a `process` box (goal 5 extended, step 1; research f44). No
@@ -148,15 +156,10 @@ impl Node {
         Self::with_root(BoxRoot::beside_self(disks)?, state_dir)
     }
 
-    /// The node over `root`, records under `state_dir`; this process becomes a child subreaper, so
-    /// each `oci` box's init is its child once the shim exits.
+    /// The node over `root`, records under `state_dir` and its runtime directory ([`crate::store`]);
+    /// this process becomes a child subreaper, so each `oci` box's init is its child once the shim
+    /// exits.
     fn with_root(root: BoxRoot, state_dir: &Path) -> Result<Self, Refusal> {
-        let store = Store::open(state_dir)?;
-        // Readable by the node alone: a bundle's config.json holds its init's environment.
-        let bundles = state_dir.join("bundles");
-        fs::create_dir_all(&bundles)
-            .and_then(|()| fs::set_permissions(&bundles, fs::Permissions::from_mode(0o700)))
-            .map_err(|e| Refusal::os("making the bundles directory", e))?;
         let owner = match (
             rustix::process::geteuid().as_raw(),
             rustix::process::getegid().as_raw(),
@@ -166,6 +169,12 @@ impl Node {
         };
         let oci_root = oci_root(owner, state_dir)?;
         let key = node_key(state_dir)?;
+        let store = Store::open(state_dir, &records_dir(&oci_root, state_dir)?)?;
+        // Readable by the node alone: a bundle's config.json holds its init's environment.
+        let bundles = state_dir.join("bundles");
+        fs::create_dir_all(&bundles)
+            .and_then(|()| fs::set_permissions(&bundles, fs::Permissions::from_mode(0o700)))
+            .map_err(|e| Refusal::os("making the bundles directory", e))?;
         let supervisor = Supervisor::start(root.dir(), store.clone())?;
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
@@ -432,20 +441,18 @@ impl Node {
     }
 
     /// After a restart: take each box back or clean it up (T-T7.1.2). Safe to call again after a
-    /// crash during it, because removing a box tolerates each part being gone already.
+    /// crash during it, because removing a box tolerates each part being gone already. A box caught
+    /// mid-create has no record yet, so its parts are found where its id puts them: its cgroup under
+    /// either root, its container's state directory under the runtime directory and its rendered
+    /// bundle under the bundles directory (goal 5 extended, step 5).
     pub fn recover(&self) -> Result<RecoverySummary, Refusal> {
         // What a crash at a record write left: a temp file never renamed into place.
         self.store.remove_strays()?;
-        let mut seen: std::collections::BTreeMap<BoxId, Seen> = std::collections::BTreeMap::new();
+        // A node before goal 5 extended step 5 kept every record in its state directory.
+        self.store.settle()?;
+        let mut seen: BTreeMap<BoxId, Seen> = BTreeMap::new();
         for (id, record) in self.store.all()? {
-            seen.insert(
-                id,
-                Seen {
-                    record: Some(record),
-                    cgroup: false,
-                    init_alive: None,
-                },
-            );
+            seen.entry(id).or_default().record = Some(record);
         }
         // Both roots' cgroups; the oci boxes' root itself is no box (its name is no id).
         for name in self
@@ -455,15 +462,22 @@ impl Node {
             .chain(self.oci_boxes.boxes()?)
         {
             if let Ok(id) = BoxId::new(&name) {
-                seen.entry(id).or_insert_with(|| Seen {
-                    record: None,
-                    cgroup: false,
-                    init_alive: None,
-                });
+                seen.entry(id).or_default();
             }
         }
+        // This node's containers, `<key>-<id>` among every node's under the runtime directory, and its
+        // rendered bundles, `<id>` under its bundles directory.
+        let state_dirs = ids_in(&self.oci_root, &format!("{}-", self.key))?;
+        let bundles = ids_in(&self.bundles, "")?;
+        for id in state_dirs.iter().chain(&bundles) {
+            seen.entry(id.clone()).or_default();
+        }
         for (id, s) in &mut seen {
-            s.cgroup = self.cgroup(id).is_some();
+            s.parts = Parts {
+                cgroup: self.cgroup(id).is_some(),
+                state_dir: state_dirs.contains(id),
+                bundle: bundles.contains(id),
+            };
             // The `process` class has no init; an `oci` box's init is alive when the very process its
             // record named still runs (its pid with the start time create recorded), as crun tells a
             // live container from a recycled pid by `process-start-time`.
@@ -505,27 +519,29 @@ impl Node {
             }
             cg.remove()?;
         }
-        if let Some(Ok(r)) = self.store.get(id)? {
-            for dir in &r.dirs {
-                remove_tree(dir, REMOVE_PATIENCE)?;
-            }
+        // The directories the box owns: those its record names (a box made before its node kept
+        // container state under the runtime directory names `<state>/oci/<id>`), or, with no record to
+        // read, those at the paths its id fixes, which a box caught mid-create left.
+        let dirs = match self.store.get(id)? {
+            Some(Ok(r)) => r.dirs,
+            None | Some(Err(_)) => vec![self.container_dir(id), self.bundles.join(id.as_str())],
+        };
+        for dir in &dirs {
+            remove_tree(dir, REMOVE_PATIENCE)?;
         }
         self.store.remove(id)
     }
 
-    /// A `process` box: its cgroup with the bounds in force, empty until [`Runtime::exec`].
+    /// A `process` box: its cgroup with the bounds in force, empty until [`Runtime::exec`]. Its record
+    /// is written once the cgroup is: a crash before leaves a cgroup no record names, which recovery
+    /// removes (T-T7.1.2).
     fn create_process(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        // Record the box as being made before the machine changes, so recovery knows a half-made
-        // box is half-made (T-T7.1.2).
-        let mut record = BoxRecord::new(spec.clone(), Phase::Creating, Vec::new());
-        self.store.put(&record)?;
-        if let Err(e) = self.root.create(&spec.id, &spec.bounds) {
-            // The create failed; leave nothing behind.
-            let _ = self.store.remove(&spec.id);
+        self.root.create(&spec.id, &spec.bounds)?;
+        let record = BoxRecord::new(spec, Phase::Ready, Vec::new());
+        if let Err(e) = self.store.put(&record) {
+            let _ = self.scrub(&record.spec.id);
             return Err(e);
         }
-        record.phase = Phase::Ready;
-        self.store.put(&record)?;
         self.info(&record, false)
     }
 
@@ -533,12 +549,20 @@ impl Node {
     /// the container's init started in it from its bundle, blocked at the exec FIFO until
     /// [`Runtime::start`]. The container's state dir is the box's, removed with it by [`Node::scrub`],
     /// and so is a rendered bundle's directory, its writable layer with it. The box's record is
-    /// written with no lock held that another box's create takes, so a durable record's fsyncs hold
-    /// up no other box (goal 5 plan step 2).
+    /// written once, when the box is whole, with no lock held that another box's create takes, so a
+    /// durable record's fsyncs hold up no other box (goal 5 plan step 2). Until then each part a
+    /// crash leaves (the cgroup, the bundle, the container's state directory and the init in the
+    /// cgroup) lies at a path the box's id fixes, where recovery finds it (goal 5 extended, step 5).
+    /// The cgroup is made first and claims the id: a create of an id taken since the check fails at its
+    /// mkdir, as [`Refusal::Exists`], having made nothing, and so removes nothing.
     fn create_oci(&self, spec: BoxSpec, source: Source) -> Result<BoxInfo, Refusal> {
         // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
         // left unwatched.
         let slot = self.supervisor.reserve()?;
+        // A create hands an idle seed the container's spec and the seed clones the init as the agent's
+        // own child (decision 5), in place of the shim's re-exec of the hex binary. A pool that can't
+        // be built refuses the create before anything is made.
+        let seeds = self.create_pool()?;
         let id = spec.id.clone();
         // The container's own state directory, which the oci class makes; recorded as the box's, so
         // delete and recovery remove it with the box, as they remove a rendered bundle.
@@ -546,8 +570,7 @@ impl Node {
         if let Source::Rendered(dir, _) = &source {
             dirs.push(dir.clone());
         }
-        let mut record = BoxRecord::new(spec.clone(), Phase::Creating, dirs);
-        self.store.put(&record)?;
+        let cgroup = self.oci_boxes.create(&id, &spec.bounds)?;
         let bundle = match source {
             Source::Given(bundle) => bundle,
             Source::Rendered(dir, rendered) => match write_bundle(&dir, &rendered) {
@@ -558,17 +581,6 @@ impl Node {
                 }
             },
         };
-        let cgroup = match self.oci_boxes.create(&id, &spec.bounds) {
-            Ok(cgroup) => cgroup,
-            Err(e) => {
-                // No cgroup, so scrub removes the directories and the record alone.
-                let _ = self.scrub(&id);
-                return Err(e);
-            }
-        };
-        // A create hands an idle seed the container's spec and the seed clones the init as the agent's
-        // own child (decision 5), in place of the shim's re-exec of the hex binary.
-        let seeds = self.create_pool()?;
         let made = self.supervisor.spawning().and_then(|_spawning| {
             // A container that makes a network namespace of its own in the agent's user namespace
             // joins one the node made ahead, and the pool counts every container's (decision 4). Its
@@ -587,42 +599,51 @@ impl Node {
                 )
                 .map_err(Refusal::from)
         });
-        if let Err(e) = made {
-            // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
-            // the state dir and the record.
-            let _ = self.scrub(&id);
-            return Err(e);
-        }
-        // The init is blocked at the exec FIFO, alive, and the agent's child since the shim exited;
-        // record which process it is so a later restart can tell it from a recycled pid (recovery's
-        // init_alive), and watch it through its pidfd from now on. Recorded before it's watched, so
-        // the exit the supervisor records goes into a record that names it.
-        let watched = self
-            .oci()
-            .state(&self.container(&id))
-            .map_err(Refusal::from)
-            .and_then(|state| {
-                record.init = init_proc_id(state.pid, state.start_time);
-                record.phase = Phase::Ready;
-                self.store.put(&record)?;
-                let start_ticks = state.start_time.ok_or_else(|| {
-                    Refusal::Broken(format!("container {id}'s state has no start time"))
-                })?;
-                let container = supervise::Container {
-                    bundle: state.bundle,
-                    cgroup: state.cgroup,
-                };
-                // Watched under the spawning lock, so no sweep reaps the init before it's owned; until
-                // then a sweep passes it by, alive at the exec FIFO.
-                let _spawning = self.supervisor.spawning()?;
-                self.supervisor
-                    .watch(slot, &id, state.pid, start_ticks, container)
-            });
+        let state = match made {
+            Ok(state) => state,
+            Err(e) => {
+                // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
+                // the state dir and the bundle.
+                let _ = self.scrub(&id);
+                return Err(e);
+            }
+        };
+        // The init is blocked at the exec FIFO, alive, and the agent's child; the state is the one the
+        // runtime wrote, so nothing is read back. Record which process the init is so a later restart
+        // can tell it from a recycled pid (recovery's init_alive), and watch it through its pidfd from
+        // now on. Recorded before it's watched, so the exit the supervisor records goes into a record
+        // that names it.
+        let mut record = BoxRecord::new(spec, Phase::Ready, dirs);
+        record.init = init_proc_id(state.pid, state.start_time);
+        let watched = self.store.put(&record).and_then(|()| {
+            let start_ticks = state.start_time.ok_or_else(|| {
+                Refusal::Broken(format!("container {id}'s state has no start time"))
+            })?;
+            let container = supervise::Container {
+                bundle: state.bundle,
+                cgroup: state.cgroup,
+            };
+            // Watched under the spawning lock, so no sweep reaps the init before it's owned; until
+            // then a sweep passes it by, alive at the exec FIFO.
+            let _spawning = self.supervisor.spawning()?;
+            self.supervisor
+                .watch(slot, &id, state.pid, start_ticks, container)
+        });
         if let Err(e) = watched {
             let _ = self.scrub(&id);
             return Err(e);
         }
-        self.info(&record, false)
+        // The box as create made it: its container created, its init at the exec FIFO, nothing exec'd
+        // in it yet, as the state create wrote says without reading it back.
+        Ok(BoxInfo {
+            id,
+            class: Class::Oci,
+            state: BoxState::Created,
+            bounds: record.spec.bounds,
+            adopted: false,
+            exit: None,
+            abandoned: 0,
+        })
     }
 
     /// A box's [`OciSpec`] as a bundle in a directory of its own, rendered ([`bundle::render`]) and
@@ -1064,9 +1085,61 @@ fn why_text(why: &Why) -> String {
         Why::MidDelete => "the node agent stopped while it was being removed".to_owned(),
         Why::InitGone => "its container's init had ended".to_owned(),
         Why::NoCgroup => "its record had no cgroup".to_owned(),
-        Why::NoRecord => "its cgroup had no record".to_owned(),
+        Why::NoRecord(parts) => {
+            let left: Vec<&str> = [
+                (parts.cgroup, "its cgroup"),
+                (parts.state_dir, "its container's state"),
+                (parts.bundle, "its bundle"),
+            ]
+            .into_iter()
+            .filter(|(found, _)| *found)
+            .map(|(_, what)| what)
+            .collect();
+            format!(
+                "no record named it, made only in part: {} left",
+                left.join(", ")
+            )
+        }
         Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
     }
+}
+
+/// The box ids named by the directories in `dir` whose names start with `prefix`, the rest of each name
+/// the id, or none when `dir` isn't there: a box's parts there are directories, so any other entry is no
+/// box's. The listing ends at [`LIST_PATIENCE`], refused past it by type.
+fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
+    let listing = |e| Refusal::os("listing a directory for boxes' parts", e);
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(listing(e)),
+    };
+    let deadline = Instant::now().checked_add(LIST_PATIENCE);
+    let mut ids = BTreeSet::new();
+    for entry in entries {
+        if deadline.is_none_or(|d| Instant::now() >= d) {
+            return Err(Refusal::Os {
+                op: "listing a directory for boxes' parts",
+                why: format!(
+                    "{} was still being listed after {LIST_PATIENCE:?}",
+                    dir.display()
+                ),
+            });
+        }
+        let entry = entry.map_err(listing)?;
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        if let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.strip_prefix(prefix))
+            .and_then(|n| BoxId::new(n).ok())
+        {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
 }
 
 /// Refuses, by the spec's field, a path that isn't a directory on this host.
@@ -1192,6 +1265,13 @@ fn oci_root(owner: Owner, state_dir: &Path) -> Result<PathBuf, Refusal> {
         .and_then(|()| fs::set_permissions(&root, fs::Permissions::from_mode(0o700)))
         .map_err(|e| Refusal::os("making the containers' state directory", e))?;
     Ok(root)
+}
+
+/// Where the node whose state directory is `state_dir`, and whose runtime directory is `oci_root`, keeps
+/// the records of its boxes that needn't outlive the host ([`crate::store`]): a directory of its own
+/// among its containers' state, `<key>.records`, a name no container's takes (theirs are `<key>-<id>`).
+pub fn records_dir(oci_root: &Path, state_dir: &Path) -> Result<PathBuf, Refusal> {
+    Ok(oci_root.join(format!("{}.records", node_key(state_dir)?)))
 }
 
 /// A box's container's name under an oci root other nodes share: the node's key, then the box's id,

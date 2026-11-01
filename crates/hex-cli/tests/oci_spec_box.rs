@@ -13,7 +13,9 @@
 //! - the hex-api conformance suite (HEX-RT-1 to 13) on boxes made from OciSpecs;
 //! - a spec this node can't render (a root or a mount source that isn't there, a user a rootless
 //!   node can't map) is refused by the field's name, and nothing is made;
-//! - a crash mid-create leaves a rendered bundle that recovery removes, however its layer was left.
+//! - a crash mid-create leaves a rendered bundle that recovery removes, however its layer was left:
+//!   alone or with the box's cgroup, as today's node leaves it with no record yet, or with a record
+//!   saying the box was being made, as a node before goal 5 extended step 5 left it (T-T7.1.2).
 //!
 //! Rootless where the caller isn't root (overlayfs mounts unprivileged since Linux 5.11), as root in a
 //! privileged container otherwise (bench/oci-validation's setting); in a delegated cgroup v2 subtree,
@@ -40,8 +42,7 @@ use hex_api::{
     Rootfs, Runtime, Stdio, User,
 };
 use hex_core::record::{BoxRecord, Phase};
-use hex_node::store::Store;
-use hex_node::{Node, OCI_BOXES};
+use hex_node::{Node, OCI_BOXES, records_dir};
 
 const TEST: &str = "oci_spec_boxes_run_from_the_bundles_the_node_renders";
 
@@ -488,48 +489,101 @@ fn refusals(lab: &Lab, own: &Path) {
     }
 }
 
-/// T-T7.1.2: the node stopped mid-create, after the record and the rendered bundle and before the
-/// cgroup; its layer already holds a directory of mode 0 and a deep tree, as a container can leave
-/// one, and its container's state directory is made. Recovery removes the box, its bundle and its
-/// container's state with it.
+/// T-T7.1.2 (goal 5 extended step 5): what a crash leaves of a box with a rendered bundle, the layer
+/// already holding a directory of mode 0 and a deep tree, as a container can leave one. Do: as today's
+/// node leaves a box with no record yet, leave a bundle with its cgroup (a create killed after
+/// rendering it, before the container's state directory); a bundle alone and a container's state
+/// directory alone (removals killed after the box's cgroup went, the cgroup removed first); as a node
+/// before step 5 left one, a bundle with its container's state directory and a record saying the box
+/// was being made; and a file among the bundles, which no box's part is. Expect: recovery removes each
+/// box, naming what it found of those with no record, nothing of any is left, and the file is.
 fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
     let (node, box_root, state) = lab.node(own, "recovery");
-    let id = BoxId::new("half-made").unwrap();
-    let container = node.container_dir(&id);
+    let id = |n: &str| BoxId::new(n).unwrap();
+    let (alone, with_cgroup, older) = (id("half-alone"), id("half-cgroup"), id("half-older"));
+    let state_only = id("half-state");
+    let container = node.container_dir(&older);
+    std::fs::create_dir_all(node.container_dir(&state_only)).unwrap();
     drop(node);
-    std::fs::create_dir_all(&container).unwrap();
-    let bundle = state.join("bundles/half-made");
-    let mut deep = bundle.join("upper");
-    for _ in 0..200 {
-        deep.push("d");
+    let half_made = |id: &BoxId| {
+        let bundle = state.join("bundles").join(id.as_str());
+        let mut deep = bundle.join("upper");
+        for _ in 0..200 {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(bundle.join("work/work")).unwrap();
+        std::fs::set_permissions(
+            bundle.join("work/work"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        bundle
+    };
+    for id in [&alone, &with_cgroup] {
+        half_made(id);
     }
-    std::fs::create_dir_all(&deep).unwrap();
-    std::fs::create_dir_all(bundle.join("work/work")).unwrap();
-    std::fs::set_permissions(
-        bundle.join("work/work"),
-        std::fs::Permissions::from_mode(0o000),
-    )
-    .unwrap();
+    std::fs::create_dir(box_root.join(OCI_BOXES).join(with_cgroup.as_str())).unwrap();
+    std::fs::create_dir_all(&container).unwrap();
     let spec = BoxSpec {
-        id: id.clone(),
+        id: older.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(lab.conformance_spec(&Lab::act(&Act::Wait)))),
     };
     let record = BoxRecord::new(
         spec,
         Phase::Creating,
-        vec![container.clone(), bundle.clone()],
+        vec![container.clone(), half_made(&older)],
     );
-    Store::open(&state).unwrap().put(&record).unwrap();
+    // Where that node kept every record: its state directory.
+    std::fs::write(
+        state.join(format!("{older}.json")),
+        record.encode().unwrap(),
+    )
+    .unwrap();
+    let stray = state.join("bundles/not-a-box");
+    std::fs::write(&stray, b"").unwrap();
     let (restarted, _, _) = lab.node(own, "recovery");
     let summary = restarted.recover().expect("recover");
+    let why = |id: &BoxId| {
+        summary
+            .removed
+            .iter()
+            .find(|(r, _)| r == id)
+            .map(|(_, why)| why.clone())
+            .unwrap_or_else(|| panic!("{id} not removed: {summary:?}"))
+    };
     assert!(
-        summary.removed.iter().any(|(r, _)| *r == id),
-        "not removed: {summary:?}"
+        why(&alone).ends_with(": its bundle left"),
+        "{}",
+        why(&alone)
     );
-    assert!(!bundle.exists(), "the half-made bundle is left");
+    assert!(
+        why(&with_cgroup).ends_with(": its cgroup, its bundle left"),
+        "{}",
+        why(&with_cgroup)
+    );
+    assert!(
+        why(&state_only).ends_with(": its container's state left"),
+        "{}",
+        why(&state_only)
+    );
+    assert!(why(&older).contains("being made"), "{}", why(&older));
     assert!(!container.exists(), "the half-made container state is left");
-    nothing_left(&restarted, &id, &box_root, &state);
+    for id in [&alone, &with_cgroup, &state_only, &older] {
+        nothing_left(&restarted, id, &box_root, &state);
+    }
+    assert!(
+        !summary
+            .removed
+            .iter()
+            .any(|(id, _)| id.as_str() == "not-a-box"),
+        "{summary:?}"
+    );
+    assert!(
+        stray.exists(),
+        "a file that's no box's part is left as it was"
+    );
 }
 
 /// Deletes its box when dropped, so a check that fails leaves no container running.
@@ -541,8 +595,8 @@ impl Drop for Deleting<'_> {
     }
 }
 
-/// Nothing of box `id` is left on the node: no bundle, no container state, no cgroup, no record, and
-/// no mount anywhere naming its bundle.
+/// Nothing of box `id` is left on the node: no bundle, no container state, no cgroup, no record in
+/// either place a node keeps them, and no mount anywhere naming its bundle.
 fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
     let bundle = state.join("bundles").join(id.as_str());
     assert!(!bundle.exists(), "{id}'s bundle is left");
@@ -554,10 +608,14 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
         !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
         "{id}'s cgroup is left"
     );
-    assert!(
-        !state.join(format!("{id}.json")).exists(),
-        "{id}'s record is left"
-    );
+    let runtime = node.container_dir(id).parent().unwrap().to_owned();
+    for records in [state.to_owned(), records_dir(&runtime, state).unwrap()] {
+        assert!(
+            !records.join(format!("{id}.json")).exists(),
+            "{id}'s record is left in {}",
+            records.display()
+        );
+    }
     assert_eq!(node.inspect(id), Err(Refusal::NoSuchBox(id.clone())));
     let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
     assert!(

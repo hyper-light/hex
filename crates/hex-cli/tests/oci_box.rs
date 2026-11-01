@@ -19,7 +19,12 @@
 //!   open, none waiting on it, and none of their records synced with their container state on tmpfs;
 //!   two nodes with state directories of their own each make and start a box of the same id, two
 //!   containers, and deleting one leaves the other running; a box made before the container state
-//!   moved, its record naming `<state>/oci/<id>`, is taken back, inspected and deleted by today's node.
+//!   moved, its record naming `<state>/oci/<id>`, is taken back, inspected and deleted by today's node;
+//! - goal 5 extended step 5 (T-T7.1.2): a node restarted over records in both its places finds each
+//!   box's where it belongs, the boxes whose directories all lie on tmpfs among its runtime directory's
+//!   records and one with its rendered bundle's writable layer on disk in its state directory,
+//!   fsynced; it takes back the live ones and removes the one whose init ended, and leaves nothing once
+//!   they're deleted;
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
 //! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
@@ -48,8 +53,7 @@ use hex_api::{
     Runtime,
 };
 use hex_core::record::{BoxRecord, Phase, ProcId};
-use hex_node::store::Store;
-use hex_node::{Node, OCI_BOXES};
+use hex_node::{Node, OCI_BOXES, records_dir};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
 use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
@@ -277,6 +281,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     two_nodes_one_box_id(&lab, own);
     a_box_made_before_the_move_is_adopted(&lab, own);
     a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
+    records_in_both_places_are_found_after_a_restart(&lab, own);
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
     each_seed_cloned_container_is_randomized_afresh(&lab, own);
     a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
@@ -933,8 +938,9 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
 
 /// Goal 5 plan step 2: no create waits on another box's record write, its fsyncs included. 32 boxes
 /// are created at once from 32 threads; then 31 more while a box with a durable record (an `OciSpec`
-/// box, its rendered bundle on disk) is held inside its first record write: its temp file is a FIFO no
-/// one has opened, so the write can't go on until this test reads it. All 31 are made while it's held,
+/// box, its rendered bundle on disk) is held inside its record write, made once its container is (goal
+/// 5 extended step 5): its temp file is a FIFO no one has opened, so the write can't go on until this
+/// test reads it. All 31 are made while it's held,
 /// and with the node's container state on tmpfs none of their records is synced. Let go, the held
 /// write fails at its fsync (a FIFO can't be synced), which shows it was a durable one. Both runs'
 /// latencies are printed: the 31 beside the held write against the 32 with none.
@@ -1115,6 +1121,132 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
     assert!(!in_b.exists(), "b's container state is left");
 }
 
+/// T-T7.1.2 (goal 5 extended step 5): a node restarted over records in both its places. Do: make two
+/// boxes whose directories all lie on tmpfs (from bundles, their container state under the runtime
+/// directory) and one from an `OciSpec` of layers (its rendered bundle's writable layer on disk, in the
+/// state directory); end one
+/// tmpfs box's init; then open the node again on the same directories and recover. Expect: each record
+/// where it belongs, before the restart and after it (the tmpfs boxes' among the runtime directory's
+/// records, unsynced; the disk box's in the state directory, fsynced, file and directory); the live
+/// boxes taken back and the one whose init ended removed; and, once the two are deleted (the disk
+/// box's record synced again as it's marked going), nothing of any box left in either place.
+fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-places");
+    let id = |n: &str| BoxId::new(n).unwrap();
+    let (on_tmpfs_live, on_tmpfs_ended, on_disk) =
+        (id("on-tmpfs-live"), id("on-tmpfs-ended"), id("on-disk"));
+    let node = lab.node(&box_root, state.path());
+    let runtime = node.container_dir(&on_disk).parent().unwrap().to_owned();
+    if !on_tmpfs(&runtime) {
+        eprintln!(
+            "SKIP records_in_both_places_are_found_after_a_restart: the runtime directory {} isn't tmpfs here",
+            runtime.display()
+        );
+        return;
+    }
+    let records = records_dir(&runtime, state.path()).unwrap();
+    // The records in a place, by file name.
+    let kept = |dir: &Path| -> BTreeSet<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".json"))
+            .collect()
+    };
+    let names = |ids: &[&BoxId]| -> BTreeSet<String> {
+        ids.iter().map(|id| format!("{id}.json")).collect()
+    };
+    let wait = Lab::act(&Act::Wait);
+    for id in [&on_tmpfs_live, &on_tmpfs_ended] {
+        node.create(lab.running(id.clone(), &wait))
+            .expect("create a box on tmpfs");
+    }
+    assert_eq!(
+        node.record_syncs(),
+        hex_node::store::Syncs::default(),
+        "the tmpfs boxes' records aren't synced"
+    );
+    node.create(BoxSpec {
+        id: on_disk.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: Rootfs::Layers(vec![lab.rootfs.clone()]),
+            init: hex_api::Program::of(&["/hex", "selftest-box", "wait"]),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Host,
+            hosts: Vec::new(),
+        })),
+    })
+    .expect("create a box with its bundle's writable layer on disk");
+    assert_eq!(
+        node.record_syncs(),
+        hex_node::store::Syncs { files: 1, dirs: 1 },
+        "the disk box's record is synced, file and directory"
+    );
+    let placed = || (kept(&records), kept(state.path()));
+    assert_eq!(
+        placed(),
+        (
+            names(&[&on_tmpfs_live, &on_tmpfs_ended]),
+            names(&[&on_disk])
+        ),
+        "each record in its place"
+    );
+    node.signal(&on_tmpfs_ended, hex_api::Signal::KILL).unwrap();
+    wait_exit(&node, &on_tmpfs_ended);
+    drop(node);
+
+    let node = lab.node(&box_root, state.path());
+    let summary = node.recover().expect("recover");
+    let adopted: BTreeSet<BoxId> = summary.adopted.iter().cloned().collect();
+    let removed: BTreeSet<BoxId> = summary.removed.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(
+        (adopted, removed),
+        (
+            [on_tmpfs_live.clone(), on_disk.clone()]
+                .into_iter()
+                .collect(),
+            [on_tmpfs_ended.clone()].into_iter().collect()
+        ),
+        "{summary:?}"
+    );
+    assert_eq!(
+        placed(),
+        (names(&[&on_tmpfs_live]), names(&[&on_disk])),
+        "each box taken back found where it belongs, the removed one in neither place"
+    );
+    for id in [&on_tmpfs_live, &on_disk] {
+        assert_eq!(node.inspect(id).unwrap().state, BoxState::Created, "{id}");
+        node.delete(id).unwrap();
+    }
+    assert_eq!(
+        node.record_syncs(),
+        hex_node::store::Syncs { files: 1, dirs: 1 },
+        "the disk box's record, marked going, is synced again"
+    );
+    assert_eq!(
+        placed(),
+        (BTreeSet::new(), BTreeSet::new()),
+        "a record is left"
+    );
+    for id in [&on_tmpfs_live, &on_tmpfs_ended, &on_disk] {
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
+            "{id}'s cgroup is left"
+        );
+        assert!(
+            !node.container_dir(id).exists(),
+            "{id}'s container state is left"
+        );
+    }
+    assert!(
+        !state.path().join("bundles").join(on_disk.as_str()).exists(),
+        "the disk box's bundle is left"
+    );
+}
+
 /// T-T7.1.2 across goal 5 plan step 2's upgrade: a node before defda14 kept a box's container state in
 /// its state directory, `<state>/oci/<id>`, and the box's record names that directory. A box made so,
 /// its init waiting, is taken back by a node of today restarted on the same state directory, which reads
@@ -1148,7 +1280,7 @@ fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
         pid: u32::try_from(made.pid).unwrap(),
         start_ticks: made.start_time.unwrap(),
     });
-    Store::open(state.path()).unwrap().put(&record).unwrap();
+    as_an_older_node_wrote(state.path(), &record);
 
     let node = lab.node(&box_root, state.path());
     assert_ne!(
@@ -1214,7 +1346,6 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         .create_in_cgroup(name, &bundle, None, cgroup, Held::default())
         .unwrap();
     let made = runtime.state(name).unwrap();
-    let store = Store::open(state.path()).unwrap();
     let spec = |id: &BoxId| BoxSpec {
         id: id.clone(),
         bounds: Bounds::default(),
@@ -1225,12 +1356,13 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         pid: u32::try_from(made.pid).unwrap(),
         start_ticks: made.start_time.unwrap(),
     });
-    store.put(&live).unwrap();
+    as_an_older_node_wrote(state.path(), &live);
     root.create(&old_orphan, &Bounds::default()).unwrap();
     root.create(&old_mid, &Bounds::default()).unwrap();
-    store
-        .put(&BoxRecord::new(spec(&old_mid), Phase::Creating, Vec::new()))
-        .unwrap();
+    as_an_older_node_wrote(
+        state.path(),
+        &BoxRecord::new(spec(&old_mid), Phase::Creating, Vec::new()),
+    );
 
     let node = lab.node(&box_root, state.path());
     let summary = node.recover().expect("recover");
@@ -1522,6 +1654,15 @@ fn sorted_ms(latencies: &[Duration]) -> Vec<Duration> {
     let mut sorted = latencies.to_vec();
     sorted.sort_unstable();
     sorted
+}
+
+/// Writes `record` where a node before goal 5 extended step 5 kept every record: its state directory.
+fn as_an_older_node_wrote(state: &Path, record: &BoxRecord) {
+    std::fs::write(
+        state.join(format!("{}.json", record.spec.id)),
+        record.encode().unwrap(),
+    )
+    .unwrap();
 }
 
 /// Whether a thread of this process is blocked opening a FIFO no one has opened the other end of: the

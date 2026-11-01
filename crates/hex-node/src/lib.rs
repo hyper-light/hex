@@ -34,4 +34,4 @@ pub mod serve;
 pub mod supervise;
 
 #[cfg(target_os = "linux")]
-pub use node::{Node, OCI_BOXES, RecoverySummary};
+pub use node::{Node, OCI_BOXES, RecoverySummary, records_dir};

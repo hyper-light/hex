@@ -82,6 +82,20 @@ holds the supervisor's spawning lock twice, across the shim's spawn and across t
 Ready record between them: an init that dies in that gap, and is reaped there by a sweep, refuses its create by
 type and the box is scrubbed, where before the box was made showing the init's exit.
 
+A box's record is written once, when the box is whole, and kept where it belongs (goal 5 extended, step 5): one
+that must outlive the host in the node's state directory, fsynced; every other record beside the containers'
+state, in a directory of the node's own under its runtime directory (`<node key>.records`), never synced. Until the
+record is written, each part a create makes lies at a path the box's id fixes: its cgroup (`<box root>/.oci/<id>`,
+or `<box root>/<id>` for a process box), its rendered bundle (`<state>/bundles/<id>`) and its container's state
+directory (`<node key>-<id>` under the runtime directory), the init inside the cgroup. So recovery
+finds a box caught mid-create by listing those places, and removes what it left, naming the parts it found; it
+still removes a box whose record says it was being made, as nodes before the step marked one before making it, and
+moves a record such a node left in the state directory to its place. The oci runtime hands the node the state it
+wrote, so create reads none back, and the box's info is what create made. The record was what claimed a box's id
+while it was made; now its cgroup does, made first (mkdir is atomic): a create of an id another create has taken
+since its check fails at that mkdir, having made nothing, and is refused as `Exists` without removing anything,
+where before such a create's failure scrubbed the other's box.
+
 **Sources.**
 - rename(2), DESCRIPTION: the target is "atomically replaced, so that there is no point at which another
   process attempting to access newpath will find it missing".
@@ -93,6 +107,14 @@ type and the box is scrubbed, where before the box was made showing the init's e
 - crun(1), STATE: state under `/run/crun` as root, `$XDG_RUNTIME_DIR/crun` rootless.
 
 Neither competitor fsyncs (f3, f4).
+
+For the record written once (kiln research `01a190c51f137042a9697949c8fe2c7a`, f1-f5, f92 and f93):
+- `crates/hex-node/src/node.rs` at 9db80fe, `create_oci`: the record written as Creating before anything was made,
+  then as Ready once the init waited at its exec FIFO, and the container's state read back between (f1).
+- `crates/hex-core/src/recovery.rs` at 9db80fe: a cgroup with no record removed, a record mid-create removed, a box's
+  directories removed as its record named them (f2). The container's state directory and the rendered bundle lie
+  at paths fixed by the box's id (f3), so recovery can find them by listing (f4).
+- `bench/competitive/probes/levers.md` at 876136e: a record-sized write timed by filesystem (f92, f93).
 
 **Evidence.**
 - **The cost.** Hex fsyncs twice per state write (`crates/hex-runtime/src/linux/oci/state.rs:120-137`), at create,
@@ -111,11 +133,27 @@ Neither competitor fsyncs (f3, f4).
   overlayfs (`probes/record_syncs.md`, record-syncs-20261030T002934Z). With the store's lock off the fsyncs too, a
   seam create's p50 is 0.77x libcrun's and the seam sustains 2,108 lifecycles a second at concurrency 32 against
   libcrun's 1,765 (`RESULT.md`, 20261030T004533Z).
+- **The bookkeeping left on create's path** (run 4, create-breakdown-20261031T061841Z, before goal 5 extended step
+  5): <!-- record: bench/competitive/probes/create_breakdown.md -->the record written as Creating (its temp file
+  0.047 ms p50, its write 0.032), the container's state written (0.051) and read back (0.027), and the record
+  written as Ready (0.066 and 0.069), of parts that sum to 2.134 ms<!-- /record -->: 0.292 ms in all, with the
+  node's state on the bench container's overlay.
+- **A record write by filesystem** (`levers.c`'s loop, a <!-- record: bench/competitive/probes/levers.md -->400-byte
+  temp file written, closed and renamed: 6.7 us p50 on tmpfs, 49.6 on the overlay and 52.4 on btrfs<!-- /record -->),
+  so a record kept beside the containers' state on tmpfs takes about 43 us of filesystem work off each write.
+- **Nothing leaked at any point of a create** (T-T7.1.2): the agent killed with the box's cgroup and container
+  state made, with its init cloned, inside its record write, and after it, its records kept on tmpfs and on disk,
+  then restarted: the box killed mid-create is removed by what it left and the one made is taken back, nothing left
+  of either (`crates/hex-cli/tests/node_socket.rs`, rootless on adacachy, Linux 7.2.9);
+  recovery's plan crashed after every step of generated histories against a model (`recovery.rs`).
 
 **What would falsify it.** A record that must outlive the host, such as one for a persistent volume; that record
 keeps its fsync. The probe's measured cost already rules out the other falsifier, a cost under a tenth of start. A
 host whose runtime directory isn't tmpfs gets durable records: correct, but at the fsyncs' cost. That includes a
-container's /run unless it mounts a tmpfs there, as the bench and lab containers now do.
+container's /run unless it mounts a tmpfs there, as the bench and lab containers now do. For the record written
+once: a part a create makes at a path its id doesn't fix, which a crash before the record would leak (T-T7.1.2's
+crash test kills the agent at each point of a create and finds nothing left); and a record write beside the
+containers' state costing more than 0.015 ms of filesystem work in the create breakdown, the step's bar.
 
 ### 2. No shim per container: one supervisor per node
 

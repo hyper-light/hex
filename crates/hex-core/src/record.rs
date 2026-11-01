@@ -1,10 +1,13 @@
-//! The node agent's durable record of each box, and the steps that make and remove a box in the
-//! order the records make safe: a record says what a box is about to become before the machine
-//! changes, so after a crash at any step recovery knows what every leftover is (T-T7.1.2).
+//! The node agent's durable record of each box, and the steps that make and remove a box in an
+//! order a crash at any step leaves nothing unknown after (T-T7.1.2). A box's parts lie at paths its
+//! id fixes (its cgroup, made first, its rendered bundle, its container's state directory), so
+//! recovery finds what a box caught mid-create left by looking there, and its record is written once,
+//! when the box is whole (goal 5 extended, step 5). A delete marks the record before the machine
+//! changes, so a box caught mid-delete is known to be going.
 
 use std::path::PathBuf;
 
-use hex_api::{BoxSpec, Class, Exit, Refusal};
+use hex_api::{BoxSpec, ClassSpec, Exit, Refusal};
 use serde::{Deserialize, Serialize};
 
 /// The record format's version; a record of another is refused, never guessed at.
@@ -42,7 +45,9 @@ fn is_zero(n: &u64) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
-    /// Being made: its cgroup, directories and init may each exist or not.
+    /// Being made: its cgroup, directories and init may each exist or not. Written by node agents
+    /// before goal 5 extended step 5, which write no record until the box is made; recovery removes a
+    /// box whose record still says it.
     Creating,
     /// Made: what it holds runs, or may.
     Ready,
@@ -108,15 +113,15 @@ impl BoxRecord {
 /// One step that changes the machine or the records; the shell does them in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// Write the record, phase `Creating`.
-    MarkCreating,
+    /// Write the bundle rendered from the box's [`hex_api::OciSpec`] into a directory of its own.
+    RenderBundle,
     /// Make the box's cgroup and write its bounds.
     MakeCgroup,
-    /// Make the directories the box owns.
-    MakeDirs,
+    /// Make the container's state directory (`oci`).
+    MakeStateDir,
     /// Start the container's init in the box (`oci`).
     StartInit,
-    /// Write the record, phase `Ready`, with the init it started.
+    /// Write the record, phase `Ready`, with the init it started: the box's first record.
     MarkReady,
     /// Write the record, phase `Deleting`.
     MarkDeleting,
@@ -130,14 +135,21 @@ pub enum Step {
     DropRecord,
 }
 
-/// The steps that make a box of `class`.
-pub fn create_steps(class: Class) -> &'static [Step] {
+/// The steps that make a box of `class`: no record before the last, each part made before it at a path
+/// the box's id fixes, the cgroup first, whose mkdir claims the id.
+pub fn create_steps(class: &ClassSpec) -> &'static [Step] {
     match class {
-        Class::Process => &[Step::MarkCreating, Step::MakeCgroup, Step::MarkReady],
-        Class::Oci => &[
-            Step::MarkCreating,
+        ClassSpec::Process => &[Step::MakeCgroup, Step::MarkReady],
+        ClassSpec::Bundle(_) => &[
             Step::MakeCgroup,
-            Step::MakeDirs,
+            Step::MakeStateDir,
+            Step::StartInit,
+            Step::MarkReady,
+        ],
+        ClassSpec::Oci(_) => &[
+            Step::MakeCgroup,
+            Step::RenderBundle,
+            Step::MakeStateDir,
             Step::StartInit,
             Step::MarkReady,
         ],

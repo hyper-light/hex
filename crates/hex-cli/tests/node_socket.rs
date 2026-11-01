@@ -12,9 +12,11 @@
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running;
-//! - T-T7.1.2 (goal 5 plan step 2): kill the agent at each record write of a create, its boxes'
-//!   records durable and not, and restart it: the box killed mid-create is cleaned up, the one made is
-//!   taken back and deletes, and nothing of either is left.
+//! - T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the agent at each point of a create
+//!   (its cgroup and its container's state directory made, its init cloned, inside its one record
+//!   write, after it), its boxes' records durable and not, and restart it: the box killed mid-create
+//!   is cleaned up by what it left, the one made is taken back and deletes, and nothing of either is
+//!   left.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -335,7 +337,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         "process boxes over the socket: {failures:#?}"
     );
     disconnect(&lab, &agent, &client);
-    crash_at_each_record_write(&lab, own, exe);
+    crash_at_each_point_of_a_create(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
 }
 
@@ -538,36 +540,43 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
 }
 
 /// Where a crash case keeps the agent's containers' state, and so whether its boxes' records are
-/// durable: on tmpfs, as the node keeps it in its runtime directory, the records not fsynced; or on
-/// disk (an `XDG_RUNTIME_DIR` on disk, as a rootless node with none keeps it in its state directory),
-/// every record fsynced.
+/// durable: on tmpfs, as the node keeps it in its runtime directory, the records beside it and not
+/// fsynced; or on disk (an `XDG_RUNTIME_DIR` on disk, as a rootless node with none keeps it in its
+/// state directory), every record in the state directory and fsynced.
 #[derive(Clone, Copy, Debug)]
 enum Kept {
     Tmpfs,
     Disk,
 }
 
-/// Where in a create a crash case kills the agent.
+/// Where in a create a crash case kills the agent. The box's record is written once, last (goal 5
+/// extended step 5), so before it the agent leaves only parts at the paths the box's id fixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum At {
-    /// In the record write that marks the box creating, before anything of it is made.
-    Creating,
-    /// In the record write that marks it ready, its cgroup, container and init made.
+    /// Its cgroup and its container's state directory made: the create held reading its bundle's
+    /// config.json, a FIFO no one has opened.
+    StateDir,
+    /// Its init cloned, waiting at the exec FIFO, and its container's state written: the create held in
+    /// its createRuntime hook.
+    Init,
+    /// In the record write that marks it ready, the box made: the write held opening its temp file, a
+    /// FIFO no one has opened.
     Ready,
-    /// After both: the create done.
+    /// After it: the create done.
     Made,
 }
 
-/// T-T7.1.2 (goal 5 plan step 2): kill the node agent at each record write of a create, then restart
-/// it, with its boxes' records durable and not. The agent is held in a record write by its temp file, a
-/// FIFO no one has opened, and killed once the kernel shows it waiting there: in the write that marks
-/// the box creating, and in the one that marks it ready (the FIFO made while the box's createRuntime
-/// hook holds the create, its container made); and after both. Restarted, the agent cleans up the box
-/// killed mid-create and takes back the one made, which then deletes, so at every point nothing of the
-/// box is left: no record, temp file, cgroup or container state.
-fn crash_at_each_record_write(lab: &Lab, own: &Path, exe: &str) {
+/// T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the node agent at each point of a
+/// create, with its boxes' records kept on tmpfs and on disk, then restart it. The agent is held at a
+/// point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the kernel
+/// shows it waiting there: with the cgroup and the container's state directory made; with the init
+/// cloned and the container's state written; inside the record write; and after it. Restarted, the
+/// agent removes the box killed mid-create by what it finds of it, and takes back the one made, which
+/// then deletes, so at every point nothing of the box is left: no record in either place, no temp
+/// file, no cgroup, no container state.
+fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
     for kept in [Kept::Tmpfs, Kept::Disk] {
-        for at in [At::Creating, At::Ready, At::Made] {
+        for at in [At::StateDir, At::Init, At::Ready, At::Made] {
             crash_at(lab, own, exe, kept, at);
         }
     }
@@ -603,24 +612,30 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     };
     let id = BoxId::new(&name).unwrap();
     let state = dir.path().join("state");
-    let record = state.join(format!("{id}.json"));
-    let temp = state.join(format!(".{id}.tmp"));
     let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
     let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
-    let bundle = if at == At::Ready {
-        // The create waits in its createRuntime hook, its container made, until this test makes `go`.
-        let script = format!(
-            "touch {} && until [ -e {} ]; do sleep 0.01; done",
-            hooked.display(),
-            go.display()
-        );
-        let hooks = format!(
-            r#",
+    let bundle = match at {
+        At::StateDir => {
+            let bundle = dir.path().join("bundle");
+            std::fs::create_dir(&bundle).unwrap();
+            mkfifo(&bundle.join("config.json"));
+            bundle
+        }
+        At::Init | At::Ready => {
+            // The create waits in its createRuntime hook, its container made, until this test makes
+            // `go`.
+            let script = format!(
+                "touch {} && until [ -e {} ]; do sleep 0.01; done",
+                hooked.display(),
+                go.display()
+            );
+            let hooks = format!(
+                r#",
   "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
-        );
-        lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks)
-    } else {
-        lab.bundle(&Lab::act(&Act::Wait))
+            );
+            lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks)
+        }
+        At::Made => lab.bundle(&Lab::act(&Act::Wait)),
     };
     let spec = BoxSpec {
         id: id.clone(),
@@ -632,49 +647,63 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
         return;
     }
-    // Made once the agent has recovered, which removes a temp file it finds.
-    if at == At::Creating {
-        mkfifo(&temp);
-    }
+    // The record's place, now the agent has made its state directory: the state directory for a
+    // durable one, else the node's own beside its containers' state.
+    let records = match kept {
+        Kept::Tmpfs => hex_node::records_dir(&oci_root, &state).unwrap(),
+        Kept::Disk => state.clone(),
+    };
+    let record = records.join(format!("{id}.json"));
+    let temp = records.join(format!(".{id}.tmp"));
     let socket = agent.socket.clone();
     let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
     match at {
-        At::Creating => {}
+        At::StateDir => {}
+        At::Init => wait_for("the create's hook to hold it", || hooked.exists()),
         At::Ready => {
             wait_for("the create's hook to hold it", || hooked.exists());
             mkfifo(&temp);
             std::fs::write(&go, b"").unwrap();
         }
-        At::Made => {
-            wait_for("the create", || create.is_finished());
-        }
+        At::Made => wait_for("the create", || create.is_finished()),
     }
-    if at != At::Made {
-        wait_for("the agent to wait in its record write", || {
+    if matches!(at, At::StateDir | At::Ready) {
+        wait_for("the agent to wait opening a FIFO", || {
             waits_opening_a_fifo(agent.pid())
         });
     }
-    // What the kill leaves, as the point says.
-    let phase = || {
+    // What the kill leaves, as the point says: a record only once the box is made, its container's
+    // state written from its init's clone on.
+    let containers = || containers_of(&oci_root, &id);
+    let written = || {
         std::fs::read(&record)
             .ok()
             .map(|bytes| BoxRecord::decode(&bytes).unwrap().phase)
     };
-    let (written, made) = match at {
-        At::Creating => (None, 0),
-        At::Ready => (Some(Phase::Creating), 1),
-        At::Made => (Some(Phase::Ready), 1),
+    let made = if at == At::Made {
+        Some(Phase::Ready)
+    } else {
+        None
     };
-    assert_eq!(phase(), written, "{name}: the record at the kill");
+    assert_eq!(written(), made, "{name}: the record at the kill");
     assert_eq!(
-        (
-            containers_of(&oci_root, &id).len(),
-            usize::from(cgroup.exists())
-        ),
-        (made, made),
-        "{name}: (container states, cgroups) at the kill"
+        (containers().len(), cgroup.exists()),
+        (1, true),
+        "{name}: (container states, the cgroup) at the kill"
+    );
+    let state_written = containers()
+        .first()
+        .is_some_and(|c| c.join("state.json").exists());
+    assert_eq!(
+        state_written,
+        at != At::StateDir,
+        "{name}: the container's state at the kill"
     );
     drop(agent);
+    if at == At::Init {
+        // The hook outlives the agent it ran under; let it end.
+        std::fs::write(&go, b"").unwrap();
+    }
     let created = create.join().unwrap();
     assert_eq!(
         created.is_ok(),
@@ -696,15 +725,22 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         );
     }
     assert!(client.list().unwrap().is_empty(), "{name}: a box is left");
-    assert!(!record.exists(), "{name}: its record is left");
+    for place in [&state, &records] {
+        assert!(
+            !place.join(format!("{id}.json")).exists(),
+            "{name}: its record is left in {}",
+            place.display()
+        );
+    }
     assert!(!temp.exists(), "{name}: its record's temp file is left");
     assert!(
-        containers_of(&oci_root, &id).is_empty(),
+        containers().is_empty(),
         "{name}: its container's state is left"
     );
     assert!(!cgroup.exists(), "{name}: its cgroup is left");
     eprintln!(
-        "{name}: killed with the record {written:?} and {made} container made; after the restart {}, nothing left",
+        "{name}: killed with the record {made:?}, its cgroup and container state made, the state {}written; after the restart {}, nothing left",
+        if state_written { "" } else { "not " },
         if at == At::Made {
             "taken back, then deleted"
         } else {
