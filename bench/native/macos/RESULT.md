@@ -72,3 +72,44 @@ A box far from its bound is read every 100 ms (the ceiling), and costs next to n
 - The rate (256 GiB/s) is a tuning constant measured here. Another machine needs its own measurement (CLAUDE.md §5).
 - This isn't a kernel cap. A box can pass its bound by the overshoot before it ends. On Linux and Windows the kernel
   refuses the allocation itself.
+
+## The class's own path, measured (native plan step 1, 2026-11-01)
+
+The probe above measures the raw interfaces. The `process` class itself — `hex_runtime::macos::MacRuntime`, a box
+spawned with posix_spawn into its process group, its watcher a real thread on the rule's own code
+(`hex_core::watch`), its members real `hex selftest-box hog` processes — is measured by `bench/native/macos/macos_box`
+(`crates/hex-bench/benches/macos_box.rs`), and corrects two things the probe's figures above over-claimed.
+
+Record `records/macos-box-459ded2-20261101T015043Z.txt`, commit 459ded2, adas-mac-studio-3 (M4 Max, 14 cores,
+36 GiB, macOS 26.2 25C56), 2026-11-01, load 1.61-1.96, three passes, 256 MiB bound.
+
+**Overshoot past the bound, by member count (MiB):**
+
+| members | pass 1 | pass 2 | pass 3 |
+|---|---|---|---|
+| 1 | 0.8 | 7.3 | 1.6 |
+| 4 | 15.1 | 24.5 | 25.4 |
+| 8 | 30.5 | 32.9 | 6.7 |
+| 14 (every core) | 21.5 | 54.4 | 39.8 |
+| 28 (twice the cores) | 56.0 | 94.8 | 587.5 |
+
+- **Up to one member per core (≤14), a box holds its 256 MiB bound to ≤54.4 MiB** — within the 64 MiB bar.
+- **At twice the cores (28), it does not**: 56-587 MiB over, even on a quiet host. The footprint rule reads the box
+  every (bound − footprint) / rate; at an empty box that first wait is 256 MiB / 256 GiB/s ≈ 976 µs, and 28
+  allocators fill past 256 MiB within one such interval, so the watcher reads only a few times before the box is
+  hundreds of MiB over. The original probe's "within 42 MiB ... twice as many as the cores" (above) does **not**
+  reproduce: re-run today, `box_probe.c adaptk 28` gives ~1,050 MiB overshoot (reads_per_run 2). The figure was
+  optimistic; a box filling more than every core can't be bounded tightly by footprint-polling.
+
+**The watcher's CPU, a box held at 95% of its bound (2 s, main thread parked so only the watcher runs):**
+12.16, 14.55, 13.49 % of a core — **not** the probe's "≤ 0.55%". A box near its bound reads at the 250 µs floor
+(~4,000 reads/s), and each wake's one-shot `NOTE_CRITICAL` timer re-arm plus the read costs ~12-17 µs; the
+≤ 0.55% above counted only the `proc_pid_rusage` call, not the wake. A box far from its bound (read every 100 ms)
+still costs next to nothing.
+
+**Why the rule, and its limit.** macOS offers no rootless kernel cap on a process tree's memory: the private jetsam
+limit (`memorystatus_control(MEMORYSTATUS_CMD_SET_MEMLIMIT_PROPERTIES)`, `SYS_memorystatus_control` 440) returns
+`EPERM` for an unprivileged process, on self and on a child (measured 2026-11-01). So a rootless box's memory is an
+eviction by a stated rule (CLAUDE.md §2), not a hard cap, and the overshoot above is inherent to that: it bounds a
+box of up to one member per core, and a kernel-enforced cap (jetsam, with the privileged helper's entitlement) is a
+later step's. The rate (256 GiB/s) is a tuning constant measured here; another machine needs its own (CLAUDE.md §5).
