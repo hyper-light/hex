@@ -512,8 +512,11 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     member's footprint (`proc_pid_rusage`) and ends the box when it passes its bound (an eviction by a stated
     rule, CLAUDE.md §2). It reads from a Mach time-constraint thread on kqueue timers marked
     `NOTE_CRITICAL`, every (bound - footprint) / the machine's measured allocation rate, at least 250 µs.
-    Measured on the Mac Studio, a box held a 256 MiB bound to within 42 MiB at up to 164 GiB/s, for at most
-    0.55% of a core (`bench/native/macos/RESULT.md`). CPU is bounded by priority alone: a QoS class, and
+    Measured on the Mac Studio, a box held a 256 MiB bound to within 42 MiB at up to 164 GiB/s
+    (`bench/native/macos/RESULT.md`). The price is the watcher's wakes: 4-8% of a core while a box sits at
+    the floor, shared by every box near its bound, and next to nothing while every box is far from its
+    bound. A tight bound comes before that CPU; a growth-aware back-off would cost less and bound less, and
+    is Ada's to choose. CPU is bounded by priority alone: a QoS class, and
     background priority where the box's weight is low. A box that asks for confinement gets App Sandbox's, which every child inherits
     (§3). The class's own purpose is trusted code that must not starve the machine, and that purpose doesn't
     need it.

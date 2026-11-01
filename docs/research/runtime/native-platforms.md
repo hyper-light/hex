@@ -115,7 +115,11 @@ A job object bounds a process tree as a cgroup does, with hard limits:
     "system does minimal timer coalescing") ran as asked.
   - Polled every (bound - footprint) / 256 GiB/s, at least 250 µs, from a Mach time-constraint thread, a box held a
     256 MiB bound to within 42 MiB, with its members allocating up to 164 GiB/s, twice as many as the cores included.
-    A box at 95% of its bound cost at most 0.55% of a core.
+    The cost of that floor is the watcher's wakes, not its reads. The reads of a box held at 95% of its bound
+    took at most 0.55% of a core, but a wake costs 8-17 µs of the thread's own time whatever waits on it, so the
+    whole watcher costs 4-8% of a core while a box sits at the floor (native plan step 1's measurement,
+    2026-11-01; the record that timed only the reads is corrected on its branch). Overshoot and CPU trade
+    against each other through the floor: the rate times the floor, against a wake per floor.
   - Without the time-constraint thread, a box that fills every core passed its bound by up to 1.46 GiB.
   - So the bound holds to the box's rate times the floor, not exactly as Linux's `memory.max` does, and the rate is
     a constant measured per machine.
