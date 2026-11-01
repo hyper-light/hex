@@ -168,9 +168,10 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
 # by create_breakdown.sh). They are threads of the host's like any other, so pivot_root's walk of every thread
 # (chroot_fs_refs's for_each_process_thread) visits them though they sit in this container's pid namespace. The
 # helper is ended, its threads with it, before the command's status is returned; threads that don't all come up in
-# 30 s refuse the item.
+# 30 s refuse the item. Each item's threads go in idle_threads.txt, counted as it starts and as it ends: the helper's
+# own and the host's, /proc/loadavg's count of the kernel's threads (nr_threads, which no pid namespace narrows).
 with_idle() {
-  local pid up i rc=0
+  local pid up end host i rc=0
   /opt/bin/idlethreads "$IDLE_AB" > /run/idlethreads.out 2>&1 &
   pid=$!
   for i in $(seq 1 150); do
@@ -181,8 +182,13 @@ with_idle() {
     fi
     sleep 0.2
   done
+  host=$(cut -d' ' -f4 /proc/loadavg | cut -d/ -f2)
   "$@" || rc=1
+  end=$(ls "/proc/$pid/task" 2>/dev/null | wc -l)
+  echo "${one:-probe} r${round:-0}: $up idle threads up at its start, $end at its end (asked $IDLE_AB); the host's" \
+    "threads $host at its start, $(cut -d' ' -f4 /proc/loadavg | cut -d/ -f2) at its end" >> "$OUT/idle_threads.txt"
   kill "$pid"; wait "$pid" 2>/dev/null
+  [ "$end" -ge "$IDLE_AB" ] || { echo "refusing: only $end of $IDLE_AB idle threads were up at the item's end" >&2; rc=1; }
   return $rc
 }
 

@@ -428,6 +428,15 @@ def summarize(run):
                       + f"; pooled {eb.ms3(idle[base]['pooled'])}.", ""]
     if idle:
         s["idle_over_without"] = idle
+        # Each idle item's threads as create_breakdown_inside.sh's with_idle counted them, at its start and its end.
+        counts = os.path.join(run, "idle_threads.txt")
+        if os.path.exists(counts):
+            with open(counts) as f:
+                items = [line.rstrip("\n") for line in f if line.strip()]
+            ups = [int(n) for line in items for n in re.findall(r"(\d+) idle threads up at its start, (\d+)", line)[0]]
+            s["idle_threads"] = {"items": items, "fewest_up": min(ups) if ups else None}
+            lines += [f"Each idle item's threads, at its start and its end (the fewest up at either: "
+                      f"{min(ups) if ups else 'n/a'}):", ""] + [f"- {line}" for line in items] + [""]
 
     # The parts, by traced round and pooled, each round's sum set against its own calls.
     by_round = {r: [c for c in traced[r]["calls"] if "parts" in c] for r in rnds}
