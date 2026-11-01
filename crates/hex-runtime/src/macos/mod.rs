@@ -7,6 +7,7 @@
 
 pub mod helper_client;
 pub mod helper_daemon;
+pub mod helper_sys;
 pub mod proc;
 pub mod process;
 pub mod sys;
@@ -155,7 +156,6 @@ impl Runtime for MacRuntime {
 /// does it), its argv and environment, its working folder, and its three streams, each the null device
 /// where the caller gave none.
 fn build_spawn(program: &Program, stdio: Stdio) -> Result<sys::Spawn, Refusal> {
-    program.check()?;
     if program.user.is_some() {
         return Err(Refusal::Invalid {
             what: "program",
@@ -174,7 +174,30 @@ fn build_spawn(program: &Program, stdio: Stdio) -> Result<sys::Spawn, Refusal> {
             .stderr
             .map_or_else(|| null(OFlags::WRONLY), |p| Ok(OwnedFd::from(p)))?,
     ];
+    let parts = program_parts(program)?;
     Ok(sys::Spawn {
+        paths: parts.paths,
+        argv: parts.argv,
+        envp: parts.envp,
+        cwd: parts.cwd,
+        stdio,
+    })
+}
+
+/// A program's exec parts, apart from its stdio: the paths to try, its argv and environment, and its
+/// working folder, as C strings. Shared by the `process` class's [`build_spawn`] and the box helper
+/// daemon's privileged spawn ([`helper_sys`]), which supplies its own stdio and user.
+pub(crate) struct Parts {
+    pub paths: Vec<CString>,
+    pub argv: Vec<CString>,
+    pub envp: Vec<CString>,
+    pub cwd: Option<CString>,
+}
+
+/// Builds a program's [`Parts`]: its path search, argv, environment and working folder.
+pub(crate) fn program_parts(program: &Program) -> Result<Parts, Refusal> {
+    program.check()?;
+    Ok(Parts {
         paths: paths(program)?,
         argv: program
             .args
@@ -187,7 +210,6 @@ fn build_spawn(program: &Program, stdio: Stdio) -> Result<sys::Spawn, Refusal> {
             .map(|(k, v)| c_string(&format!("{k}={v}")))
             .collect::<Result<_, _>>()?,
         cwd: program.cwd.as_deref().map(c_string).transpose()?,
-        stdio,
     })
 }
 
