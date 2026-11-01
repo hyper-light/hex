@@ -12,9 +12,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
 use hex_api::{BoxId, Program, Refusal, Signal};
 use hex_core::boxuser::{self, Bound, Use};
@@ -250,6 +253,32 @@ impl<P: Privileged> Daemon<P> {
             pool: Mutex::new(pool),
             boxes: Mutex::new(BTreeMap::new()),
             nproc,
+        }
+    }
+
+    /// Binds a `SOCK_STREAM` socket at `path` and serves node connections one at a time, forever (a node
+    /// keeps a single connection; a later one waits, as the Linux node agent's socket serves its few local
+    /// callers). A stale socket file is removed first. The boxes a connection made persist across its
+    /// disconnect — the node ends them with [`Request::End`], and a reconnecting node finds them. Launchd
+    /// may instead hand the daemon its socket; this path is for the lab and a plain install.
+    pub fn listen(&self, path: &Path) -> Result<(), Refusal> {
+        let _ = rustix::fs::unlink(path);
+        let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
+            .map_err(|e| Refusal::os("making the helper socket", e))?;
+        let addr =
+            SocketAddrUnix::new(path).map_err(|e| Refusal::os("naming the helper socket", e))?;
+        rustix::net::bind(&fd, &addr).map_err(|e| Refusal::os("binding the helper socket", e))?;
+        rustix::net::listen(&fd, 16)
+            .map_err(|e| Refusal::os("listening on the helper socket", e))?;
+        loop {
+            let conn = match rustix::net::accept(&fd) {
+                Ok(conn) => conn,
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(e) => return Err(Refusal::os("accepting a helper connection", e)),
+            };
+            // macOS has no MSG_NOSIGNAL; SO_NOSIGPIPE keeps a dropped node from raising SIGPIPE on a send.
+            let _ = rustix::net::sockopt::set_socket_nosigpipe(&conn, true);
+            let _ = self.serve(conn.as_fd());
         }
     }
 
