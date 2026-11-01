@@ -108,6 +108,11 @@ pub struct Node {
     /// The pool of `hex __oci-seed` processes that make `oci` boxes: a create hands one the container's
     /// spec and it clones the init in place of the shim's re-exec (decision 5; [`Node::create_pool`]).
     create_seeds: OnceLock<CreatePool>,
+    /// A debug-only crash point a test arms on this node's create seeds ([`Node::with_inject`]), for the
+    /// crash-safety test of the pruned init's root build; `None` unless a test arms it, and absent from
+    /// release builds (CLAUDE.md §6).
+    #[cfg(debug_assertions)]
+    inject: Option<String>,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
@@ -191,6 +196,8 @@ impl Node {
             masked: thermal_throttle()?,
             seeds: OnceLock::new(),
             create_seeds: OnceLock::new(),
+            #[cfg(debug_assertions)]
+            inject: None,
             specs: Mutex::new(Specs::default()),
             netns,
             null: rustix::fs::open(
@@ -209,13 +216,28 @@ impl Node {
         Ok(self)
     }
 
+    /// Arms a debug-only crash point on this node's create seeds (goal 5 plan step 2): the pruned init
+    /// ends at the named point, as a kill would, so a test proves the agent cleans up a container whose
+    /// init dies mid-build (CLAUDE.md §6). Must come before [`Node::with_oci_helper`], which builds the
+    /// seed pool. Debug builds only; the point names are the runtime's (`seed::INJECT_DIE_BEFORE_MOVE`).
+    #[cfg(debug_assertions)]
+    pub fn with_inject(mut self, point: &str) -> Self {
+        self.inject = Some(point.to_owned());
+        self
+    }
+
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
     /// a node whose own binary isn't `hex` (the bench, a node linked into another program).
     pub fn with_oci_helper(mut self, hex_binary: PathBuf) -> Self {
         // The create seeds are built now, from this binary, so their first spare is up before the first
         // create (decision 5): no create waits on a seed's exec. A pool that can't be built now is built
         // at the first create, which reports why.
-        if let Ok(pool) = CreatePool::new(hex_binary.clone(), self.seed_prune()) {
+        if let Ok(pool) = CreatePool::new(
+            hex_binary.clone(),
+            self.seed_prune(),
+            #[cfg(debug_assertions)]
+            self.inject.clone(),
+        ) {
             let _ = self.create_seeds.set(pool);
         }
         self.oci_helper = Some(hex_binary);
@@ -785,9 +807,12 @@ impl Node {
                 std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
             }
         };
-        let _ = self
-            .create_seeds
-            .set(CreatePool::new(exe, self.seed_prune())?);
+        let _ = self.create_seeds.set(CreatePool::new(
+            exe,
+            self.seed_prune(),
+            #[cfg(debug_assertions)]
+            self.inject.clone(),
+        )?);
         self.create_seeds
             .get()
             .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))

@@ -819,6 +819,17 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
         .map_err(|e| OciError::os("remounting the rootfs read-only", e))?;
     }
 
+    // A debug-only test crash here, between the mounts' attach and the switch (`seed::ENV_INJECT`): the
+    // init ends as a kill would, its mounts still in its own namespace, so a test proves the agent leaves
+    // no container, clone or mount of it in its own (CLAUDE.md §6, crash injection at every write). Absent
+    // from release builds, where the init never looks for it.
+    #[cfg(debug_assertions)]
+    if std::env::var(crate::linux::oci::seed::ENV_INJECT).as_deref()
+        == Ok(crate::linux::oci::seed::INJECT_DIE_BEFORE_MOVE)
+    {
+        sys::exit_child(70);
+    }
+
     // The root switch, with no pivot_root. chdir into the rootfs, move it onto `/`, chroot into it.
     rustix::process::chdir(rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
     rustix::mount::mount_move(".", "/").map_err(|e| OciError::os("moving the root onto /", e))?;

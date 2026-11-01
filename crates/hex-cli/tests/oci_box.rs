@@ -300,6 +300,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     escapes_are_contained(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
+    an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
     rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
 }
 
@@ -493,6 +494,15 @@ fn mountinfo(text: &str) -> Vec<(String, String, String, String)> {
         .collect()
 }
 
+/// The mount points in this process's (the agent's) own mount namespace, as a set, so a failed create
+/// can be shown to have left none of a container's mounts behind (goal 5 plan step 2).
+fn agent_mount_points() -> std::collections::BTreeSet<String> {
+    mountinfo(&std::fs::read_to_string("/proc/self/mountinfo").expect("read the agent's mountinfo"))
+        .into_iter()
+        .map(|(point, ..)| point)
+        .collect()
+}
+
 /// Goal 5 plan step 2 (T-T7.1.4): on a root node, specs that can't take the pruned path fall to the
 /// classic path, each counted under its reason — a user namespace of its own (`UserNamespace`),
 /// createContainer hooks (`Hooks`), and a mount namespace joined by path (`JoinsByPath`). A rootless
@@ -514,13 +524,20 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
     let base = r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
     let userns = r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
     let mappings = r#","uidMappings":[{"containerID":0,"hostID":0,"size":1}],"gidMappings":[{"containerID":0,"hostID":0,"size":1}]"#;
-    let by_path =
-        format!(r#"{{"type":"pid"}},{{"type":"mount","path":"{host_mnt}"}},{{"type":"ipc"}},{{"type":"uts"}}"#);
+    let by_path = format!(
+        r#"{{"type":"pid"}},{{"type":"mount","path":"{host_mnt}"}},{{"type":"ipc"}},{{"type":"uts"}}"#
+    );
     let hooks = r#","hooks":{"createContainer":[{"path":"/usr/bin/true","args":["true"]}]}"#;
     let cases: [(&str, ClassicReason, &str, &str, &str); 3] = [
         ("userns", ClassicReason::UserNamespace, userns, mappings, ""),
         ("hooks", ClassicReason::Hooks, base, "", hooks),
-        ("mount-by-path", ClassicReason::JoinsByPath, &by_path, "", ""),
+        (
+            "mount-by-path",
+            ClassicReason::JoinsByPath,
+            &by_path,
+            "",
+            "",
+        ),
     ];
     for (name, reason, namespaces, mappings, hooks) in cases {
         let (shim_before, reason_before, pruned_before) = (
@@ -624,7 +641,10 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
         let agent_mi = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
         node.delete(&id).expect("delete");
 
-        assert!(pruned >= 1, "the {prop} box is on the pruned path, {pruned} pruned");
+        assert!(
+            pruned >= 1,
+            "the {prop} box is on the pruned path, {pruned} pruned"
+        );
         assert_eq!(exit, Exit::Code(0), "read the {prop} box's mountinfo: {mi}");
         let mounts = mountinfo(&mi);
         let root = mounts
@@ -651,6 +671,125 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
     }
     eprintln!(
         "rootfsPropagation shared/slave/private each shown on the box root, no box mount in the agent's namespace"
+    );
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4; CLAUDE.md §3, §6): the pruned init refusing or dying mid-build leaves
+/// nothing of the container in the agent's own namespace. Two ways in, both after the rootfs is attached
+/// and before the root switch: (1) a filesystem mount of a type the kernel doesn't have — the init
+/// refuses at `fsopen`, by type, naming the mount and why; (2) the init killed between its mounts' attach
+/// and the `MS_MOVE`/`chroot` (a debug-only crash point armed on the seed) — refused by type, its mounts
+/// dying with its own namespace. Each time: the box is gone, its directory gone, the agent's mounts
+/// unchanged. Root only: a pruned seed is a root node's, and the pruned path is what keeps the
+/// container's mounts out of the agent's namespace.
+fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+
+    // (1) An unattachable filesystem mount: the pruned init reaches it after attaching the rootfs and
+    // refuses at `fsopen`, by type, naming the mount and why; the agent then leaves nothing and serves on.
+    {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let box_root = own.join("hex-oci-attach-fail");
+        let node = lab.node(&box_root, state.path());
+        let bad =
+            ",\n    {\"destination\": \"/bad\", \"type\": \"nosuchfs\", \"source\": \"nosuchfs\"}";
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_with(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                bad,
+            ),
+        )
+        .unwrap();
+        let id = BoxId::new("attach-fail").unwrap();
+        let before = agent_mount_points();
+        let refused = node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.clone()),
+        });
+        assert!(
+            matches!(&refused, Err(Refusal::Os { why, .. }) if why.contains("nosuchfs") && why.contains("/bad")),
+            "the unattachable mount is refused by type, naming the mount and why: {refused:?}"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "the create took the pruned path, not a classic fallback"
+        );
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "the refused box is cleaned up"
+        );
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.to_string()).exists(),
+            "the refused box's directory is gone"
+        );
+        assert_eq!(
+            agent_mount_points(),
+            before,
+            "no mount of the refused container is in the agent's namespace"
+        );
+        // The node serves a clean create after the refusal: the pruned path isn't wedged.
+        let ok = BoxId::new("attach-fail-then-ok").unwrap();
+        node.create(lab.running(ok.clone(), &Lab::act(&Act::Wait)))
+            .expect("the next create succeeds");
+        node.start(&ok).expect("start the next box");
+        assert_eq!(node.inspect(&ok).unwrap().state, BoxState::Running);
+        node.delete(&ok).expect("delete");
+    }
+
+    // (2) The init killed between the mounts' attach and the root switch: debug builds only, where the
+    // crash point exists. Every seed of this node is armed, so it serves no clean create — the refusal
+    // path's recovery is shown in (1).
+    #[cfg(debug_assertions)]
+    {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let box_root = own.join("hex-oci-killed-build");
+        let node = Node::open(&box_root, state.path(), state.path())
+            .expect("open a node")
+            .with_inject(hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_MOVE)
+            .with_oci_helper(PathBuf::from(&lab.exe));
+        let id = BoxId::new("killed-build").unwrap();
+        let before = agent_mount_points();
+        let refused = node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)));
+        assert!(
+            matches!(&refused, Err(Refusal::Os { .. }) | Err(Refusal::Broken(_))),
+            "the init killed mid-build refuses the create by type: {refused:?}"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "the killed create took the pruned path, not a classic fallback"
+        );
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "the killed box is cleaned up"
+        );
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.to_string()).exists(),
+            "the killed box's directory is gone"
+        );
+        assert_eq!(
+            agent_mount_points(),
+            before,
+            "no mount of the killed container is in the agent's namespace"
+        );
+    }
+
+    eprintln!(
+        "mid-build: an unattachable mount is refused naming it, and a killed init refused; each leaves no box, directory or mount in the agent's namespace"
     );
 }
 

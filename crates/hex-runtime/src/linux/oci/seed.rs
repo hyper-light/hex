@@ -59,6 +59,21 @@ pub const ENV_SOCKET: &str = "HEX_OCI_SEED_SOCKET";
 /// which keep the agent's mount namespace and take the classic root path.
 pub const ENV_PRUNE: &str = "HEX_OCI_SEED_PRUNE";
 
+/// A debug-only crash point the node agent arms on a create seed (its `with_inject`, never a container's
+/// config, which reaches the init only at `execve`, after the root is built): its value names a point in
+/// the pruned init's root build at which the init ends abruptly, as a kill would, so a test proves the
+/// agent cleans up a container whose init dies mid-build (CLAUDE.md §6, crash injection at every write).
+/// The seed's cloned init inherits this entry and reads it ([`init`]). Absent from release builds, where
+/// the init never looks for it and the agent never sets it.
+#[cfg(debug_assertions)]
+pub const ENV_INJECT: &str = "HEX_OCI_SEED_INJECT";
+
+/// The one point [`ENV_INJECT`] names: the pruned init ends between attaching its mounts and the
+/// `MS_MOVE`/`chroot` that makes them the container's root, so the mounts exist, in the init's own
+/// namespace, when it dies.
+#[cfg(debug_assertions)]
+pub const INJECT_DIE_BEFORE_MOVE: &str = "die-before-move";
+
 /// A program that fails before it can start exits as a shell does for a program it can't run (126),
 /// and for one that doesn't exist (127), as [`super::exec`] reports the same.
 const CANNOT_RUN: u8 = 126;

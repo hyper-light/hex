@@ -63,6 +63,11 @@ struct Shared {
     /// seed as [`rt_seed::ENV_PRUNE`]; `None` on a rootless node, whose seeds don't prune and whose
     /// creates take the classic root path in the init.
     prune: Option<PathBuf>,
+    /// A debug-only crash point the node arms on each seed it spawns (its [`rt_seed::ENV_INJECT`]), for
+    /// the crash-safety test of the pruned init's root build; `None` unless a test arms it, and absent
+    /// from release builds (CLAUDE.md §6).
+    #[cfg(debug_assertions)]
+    inject: Option<String>,
     /// The monotonic point the core's durations are measured from.
     base: Instant,
     inner: Mutex<Inner>,
@@ -102,8 +107,18 @@ impl CreatePool {
     /// ([`hex_core::seeds::LIMITS`]), its starting thread up and starting the first spare. `prune`, when
     /// given, is the mountpoint each seed prunes its mount namespace at (a root node, goal 5 plan
     /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace.
-    pub fn new(exe: PathBuf, prune: Option<PathBuf>) -> Result<Self, Refusal> {
-        Self::with_limits(exe, hex_core::seeds::LIMITS, prune)
+    pub fn new(
+        exe: PathBuf,
+        prune: Option<PathBuf>,
+        #[cfg(debug_assertions)] inject: Option<String>,
+    ) -> Result<Self, Refusal> {
+        Self::with_limits(
+            exe,
+            hex_core::seeds::LIMITS,
+            prune,
+            #[cfg(debug_assertions)]
+            inject,
+        )
     }
 
     /// A pool with `limits`.
@@ -111,11 +126,14 @@ impl CreatePool {
         exe: PathBuf,
         limits: Limits,
         prune: Option<PathBuf>,
+        #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
             exe,
             prune,
+            #[cfg(debug_assertions)]
+            inject,
             base: Instant::now(),
             inner: Mutex::new(Inner {
                 seeds: Seeds::new(limits),
@@ -398,7 +416,12 @@ fn start_seeds(shared: &Shared) {
             continue;
         };
         drop(inner);
-        let spawned = spawn(&shared.exe, shared.prune.as_deref());
+        let spawned = spawn(
+            &shared.exe,
+            shared.prune.as_deref(),
+            #[cfg(debug_assertions)]
+            shared.inject.as_deref(),
+        );
         let Ok(mut inner) = shared.inner.lock() else {
             if let Ok(proc) = &spawned {
                 end(proc);
@@ -435,7 +458,11 @@ fn start_seeds(shared: &Shared) {
 /// Spawns a seed: a `hex __oci-seed` child of the agent, holding one end of a fresh socket; the agent
 /// keeps the other and the child's pidfd, by which it ends and reaps it. On a root node `prune` names
 /// the mountpoint the seed prunes its mount namespace at (goal 5 plan step 2).
-fn spawn(exe: &std::path::Path, prune: Option<&Path>) -> Result<Proc, OciError> {
+fn spawn(
+    exe: &std::path::Path,
+    prune: Option<&Path>,
+    #[cfg(debug_assertions)] inject: Option<&str>,
+) -> Result<Proc, OciError> {
     let (ours, theirs) = rt_seed::socketpair()?;
     rt_seed::clear_cloexec(&theirs)?;
     let mut cmd = Command::new(exe);
@@ -446,6 +473,17 @@ fn spawn(exe: &std::path::Path, prune: Option<&Path>) -> Result<Proc, OciError> 
         .stderr(std::process::Stdio::null());
     if let Some(mountpoint) = prune {
         cmd.env(rt_seed::ENV_PRUNE, mountpoint);
+    }
+    // The seed's init looks for a crash point only when a test arms one on the seed; otherwise it is
+    // cleared from the inherited environment, so nothing but this node arms it (CLAUDE.md §6). Debug only.
+    #[cfg(debug_assertions)]
+    match inject {
+        Some(point) => {
+            cmd.env(rt_seed::ENV_INJECT, point);
+        }
+        None => {
+            cmd.env_remove(rt_seed::ENV_INJECT);
+        }
     }
     let child = cmd
         .spawn()
@@ -589,7 +627,13 @@ mod tests {
     /// (non-vacuity, so a miscounted reason shows).
     #[test]
     fn classic_creates_are_counted_by_reason() {
-        let pool = CreatePool::new(PathBuf::from("/nonexistent/hex-for-the-test"), None).unwrap();
+        let pool = CreatePool::new(
+            PathBuf::from("/nonexistent/hex-for-the-test"),
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
         pool.classic(ClassicReason::UserNamespace);
         pool.classic(ClassicReason::UserNamespace);
         pool.classic(ClassicReason::Hooks);
@@ -612,9 +656,14 @@ mod tests {
             wait: Duration::from_millis(50),
             ..hex_core::seeds::LIMITS
         };
-        let pool =
-            CreatePool::with_limits(PathBuf::from("/nonexistent/hex-for-the-test"), limits, None)
-                .unwrap();
+        let pool = CreatePool::with_limits(
+            PathBuf::from("/nonexistent/hex-for-the-test"),
+            limits,
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while pool.counts().unwrap().start_failed == 0 {
             assert!(Instant::now() < deadline, "the pool never tried a start");
