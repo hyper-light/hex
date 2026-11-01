@@ -226,10 +226,16 @@ impl Runtime {
     }
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
-    /// FIFO, in the `created` state. `bundle` holds `config.json`; `pid_file`, if given, receives
-    /// the container init's pid. The container's cgroup is made from the spec's `cgroupsPath` under
-    /// the cgroup root, as the runtime-spec's command line does.
-    pub fn create(&self, id: &str, bundle: &Path, pid_file: Option<&Path>) -> Result<(), OciError> {
+    /// FIFO, in the `created` state, and returns that state as it wrote it. `bundle` holds
+    /// `config.json`; `pid_file`, if given, receives the container init's pid. The container's cgroup
+    /// is made from the spec's `cgroupsPath` under the cgroup root, as the runtime-spec's command line
+    /// does.
+    pub fn create(
+        &self,
+        id: &str,
+        bundle: &Path,
+        pid_file: Option<&Path>,
+    ) -> Result<State, OciError> {
         self.create_with(
             id,
             bundle,
@@ -251,7 +257,8 @@ impl Runtime {
     /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
     /// `held` is what the caller holds ready for it ([`Held`]): a container that makes a network
     /// namespace of its own in this process's user namespace joins one made ahead in place of making
-    /// its own, and its device program is one the caller holds.
+    /// its own, and its device program is one the caller holds. Returns the state it wrote, so the
+    /// caller needn't read it back (goal 5 extended, step 5).
     pub fn create_in_cgroup(
         &self,
         id: &str,
@@ -259,7 +266,7 @@ impl Runtime {
         pid_file: Option<&Path>,
         cgroup: BoxCgroup,
         held: Held<'_>,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         self.create_with(
             id,
             bundle,
@@ -280,7 +287,8 @@ impl Runtime {
     /// shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
     /// be made by a seed's one clone ([`init::needs_shim`]), so it is made through the shim, as the command
     /// line makes every container, and the seeds count it ([`CloneInit::through_shim`]): the one create
-    /// that still re-execs the hex binary.
+    /// that still re-execs the hex binary. Returns the state it wrote, as [`Runtime::create_in_cgroup`]
+    /// does.
     pub fn create_in_cgroup_seeded(
         &self,
         id: &str,
@@ -289,7 +297,7 @@ impl Runtime {
         cgroup: BoxCgroup,
         held: Held<'_>,
         seeds: &dyn CloneInit,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         self.create_with(
             id,
             bundle,
@@ -309,7 +317,7 @@ impl Runtime {
         bundle: &Path,
         pid_file: Option<&Path>,
         route: Route<'_>,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         let dir = self.dir(id)?;
         dir.create(id)?;
         let result = self.create_inner(id, bundle, &dir, pid_file, route);
@@ -326,7 +334,7 @@ impl Runtime {
         dir: &Dir,
         pid_file: Option<&Path>,
         route: Route<'_>,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         let Route {
             cgroup,
             networks,
@@ -391,7 +399,7 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         stdio: ShimStdio,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         // `pid_file` and the state write are the shared tail's ([`record_created`]).
         let Making {
             id,
@@ -485,7 +493,7 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         seeds: &dyn CloneInit,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         // Two pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
         // seed hands the init's ends over `SCM_RIGHTS`, so they never need their close-on-exec cleared;
         // they close in the init only when it execs the container's program.
@@ -526,7 +534,8 @@ impl Runtime {
     }
 
     /// Writes the `created` state for a container whose init is at the exec FIFO, its pid file (if asked)
-    /// and its create-time hooks: the tail both the shim and the seed paths share.
+    /// and its create-time hooks: the tail both the shim and the seed paths share. Returns the state as
+    /// written.
     fn record_created(
         &self,
         making: &Making<'_>,
@@ -534,7 +543,7 @@ impl Runtime {
         cgroup: &BoxCgroup,
         pid: i32,
         start_time: u64,
-    ) -> Result<(), OciError> {
+    ) -> Result<State, OciError> {
         let mut state = State::new(making.id, &making.bundle.to_string_lossy());
         state.status = Status::Created;
         state.pid = pid;
@@ -551,7 +560,7 @@ impl Runtime {
         // FIFO (OCI §Lifecycle): prestart (deprecated) then createRuntime.
         run_hooks(&spec.hooks.prestart, &state)?;
         run_hooks(&spec.hooks.create_runtime, &state)?;
-        Ok(())
+        Ok(state)
     }
 
     /// The sync handshake for a create through a seed: the init writes the sync pipe, as the shim's child
@@ -1404,7 +1413,7 @@ mod tests {
             &"x".repeat(256),
         ] {
             for result in [
-                rt.create(id, root.path(), None),
+                rt.create(id, root.path(), None).map(|_| ()),
                 rt.start(id),
                 rt.kill(id, 9, true),
                 rt.delete(id, true),
