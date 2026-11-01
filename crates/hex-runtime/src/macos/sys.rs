@@ -259,6 +259,72 @@ unsafe extern "C" {
     fn posix_spawnattr_set_qos_class_np(attr: *mut libc::posix_spawnattr_t, qos: u32) -> c_int;
 }
 
+// SAFETY: declared as `spawn_private.h` declares it ("All memory limits are in MiB."): it writes a
+// per-process jetsam memory limit into the spawn attribute and returns 0 or an errno. The symbol is
+// exported from libsystem_kernel.dylib (`_posix_spawnattr_setjetsam_ext`); the macOS 26 CommandLineTools
+// SDK ships neither its prototype nor the flags, so Hex declares them (the `_np` form is absent). Rust
+// can express neither the foreign call nor the raw attribute pointer safely.
+unsafe extern "C" {
+    fn posix_spawnattr_setjetsam_ext(
+        attr: *mut libc::posix_spawnattr_t,
+        flags: i16,
+        priority: c_int,
+        memlimit_active: c_int,
+        memlimit_inactive: c_int,
+    ) -> c_int;
+}
+
+/// Jetsam spawn-attribute flags (xnu `bsd/sys/spawn_internal.h`, `psa_jetsam_flags`): SET marks the
+/// attribute as carrying jetsam settings; ACTIVE_FATAL and INACTIVE_FATAL make the per-process footprint
+/// limit fatal whether the process is active or inactive, so the kernel SIGKILLs it the instant it
+/// crosses the limit — 0 overshoot, rootless (bench/native/macos/jetsam_probe.c, record
+/// jetsam-probe-20261101T2052Z.txt).
+const POSIX_SPAWN_JETSAM_SET: u16 = 0x8000;
+const POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL: u16 = 0x04;
+const POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL: u16 = 0x08;
+
+/// A middling jetsam band for a box member. A *fatal* per-process limit kills the process when it crosses
+/// the limit regardless of band; the band only orders kills under genuine system memory pressure. 40 is
+/// the band the fatal kill was confirmed with (bench/native/macos/jetsam_probe.c; step 2's
+/// boxuser_probe.c record boxuser-rootless-e532df3).
+const JETSAM_PRIORITY: c_int = 40;
+
+/// Arms `attr` with a fatal per-process memory cap of `mib` MiB, active and inactive, so the kernel
+/// SIGKILLs the spawned program if its physical footprint crosses the cap (native plan step 1's `_ext`
+/// backstop). `attr` is an initialized `posix_spawnattr_t`; `mib` is the box's whole bound in MiB.
+fn set_jetsam_cap(attr: *mut libc::posix_spawnattr_t, mib: c_int) -> io::Result<()> {
+    let flags = POSIX_SPAWN_JETSAM_SET
+        | POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL
+        | POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL;
+    // 0x800c has the sign bit set, past a positive i16, so it is built from its bytes, not a narrowing cast.
+    let flags = i16::from_ne_bytes(flags.to_ne_bytes());
+    // SAFETY: posix_spawnattr_setjetsam_ext reads the flags, priority and two memory limits given and
+    // writes them into the initialized attribute object `attr` points at, which outlives the call. Both
+    // limits are the same `mib`, so the cap is fatal whether the process is active or inactive.
+    errno(unsafe { posix_spawnattr_setjetsam_ext(attr, flags, JETSAM_PRIORITY, mib, mib) })
+}
+
+/// A mebibyte, the jetsam cap's unit.
+const MIB: u64 = 1 << 20;
+
+/// The per-process jetsam cap for a box bounded to `memory_max` bytes, in MiB: rounded DOWN, so the cap
+/// in bytes never exceeds the bound, and floored to 1 MiB — the SPI's unit is MiB, `Bounds::check`
+/// already refuses a bound under 1 MiB, and a 0 MiB cap would mean no limit. `None` when the MiB value is
+/// past what the SPI's `int` takes (~2 PiB), where the member is left uncapped and the watcher's own rule
+/// bounds the box (never a silent miscap, CLAUDE.md §3).
+pub fn jetsam_cap_mib(memory_max: u64) -> Option<c_int> {
+    let mib = memory_max.checked_div(MIB).unwrap_or(0).max(1);
+    c_int::try_from(mib).ok()
+}
+
+/// The cap in bytes the kernel enforces for a box bounded to `memory_max`: [`jetsam_cap_mib`] times a
+/// mebibyte. The watcher reads a dead member's peak footprint against this to tell a fatal-cap kill from
+/// an ordinary exit (native plan step 1's `_ext` backstop).
+pub fn jetsam_cap_bytes(memory_max: u64) -> Option<u64> {
+    let mib = jetsam_cap_mib(memory_max)?;
+    u64::try_from(mib).ok()?.checked_mul(MIB)
+}
+
 /// A program to spawn into a box: every string and descriptor its spawn uses.
 pub struct Spawn {
     /// The paths to execute, in order: the program as named when it holds a `/`, else its name in each
@@ -269,6 +335,10 @@ pub struct Spawn {
     pub cwd: Option<CString>,
     /// stdin, stdout and stderr: each is dup2'd onto 0, 1 and 2, and nothing else is inherited.
     pub stdio: [OwnedFd; 3],
+    /// The box's whole memory bound in MiB, when it has one: each spawned member is armed with a fatal
+    /// per-process cap at it (native plan step 1's `_ext` backstop), so the kernel bounds a single-member
+    /// box with no overshoot. `None` leaves the member uncapped (the watcher's rule bounds the box).
+    pub jetsam_mib: Option<c_int>,
 }
 
 /// An errno as posix_spawn returns it.
@@ -342,6 +412,11 @@ pub fn spawn(s: &Spawn, pgroup: i32, clamp: Clamp) -> io::Result<i32> {
         ))?;
         errno(posix_spawnattr_set_qos_class_np(&raw mut attr.0, qos))?;
     }
+    // Arm the box's whole memory bound as a fatal per-process cap, so the kernel bounds this member with
+    // no overshoot (native plan step 1's `_ext` backstop). The watcher tracks it as armed.
+    if let Some(mib) = s.jetsam_mib {
+        set_jetsam_cap(&raw mut attr.0, mib)?;
+    }
     let mut actions = Actions(std::ptr::null_mut());
     // SAFETY: initializes the file-actions object it is given; `actions` destroys it once.
     errno(unsafe { libc::posix_spawn_file_actions_init(&raw mut actions.0) })?;
@@ -409,9 +484,15 @@ pub enum Event {
     User,
     /// Process `pid`, watched with tag `tag`, forked.
     Fork { pid: i32, tag: u64 },
-    /// Process `pid`, watched with tag `tag`, ended.
-    Exit { pid: i32, tag: u64 },
+    /// Process `pid`, watched with tag `tag`, ended with wait `status` (`NOTE_EXITSTATUS`). The node is
+    /// the member's parent, so the kernel delivers the status in the event: the watcher reads a member's
+    /// death — a jetsam fatal-cap `SIGKILL` among them — without racing the member's own reaper.
+    Exit { pid: i32, tag: u64, status: i32 },
 }
+
+/// `NOTE_EXITSTATUS` (`sys/event.h`, macOS 26 SDK): a watched child's exit event carries its wait status
+/// in the event's `data`. Valid for a child process (the node spawned the box's members).
+const NOTE_EXITSTATUS: u32 = 0x0400_0000;
 
 /// The [`Kqueue`] timer's and user event's idents.
 const TIMER: usize = 1;
@@ -445,9 +526,11 @@ impl Kqueue {
         self.change(&[kevent(USER, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER, 0, 0)])
     }
 
-    /// Watches each of `pids` for its forks and its end (`EVFILT_PROC` with `NOTE_FORK | NOTE_EXIT`; XNU
-    /// attaches either to any process, its parent or not, `bsd/kern/kern_event.c:1099-1155`), tagged `tag`.
-    /// Returns those that have ended already (`ESRCH`), which can't be watched.
+    /// Watches each of `pids` for its forks and its end with the end's wait status (`EVFILT_PROC` with
+    /// `NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS`; XNU attaches either to any process, its parent or not,
+    /// `bsd/kern/kern_event.c:1099-1155`), tagged `tag`. The status is valid for a process the watcher's
+    /// own process is the parent of (the box's members). Returns those that have ended already (`ESRCH`),
+    /// which can't be watched.
     pub fn watch(&self, pids: &[i32], tag: u64) -> io::Result<Vec<i32>> {
         let mut gone = Vec::new();
         for chunk in pids.chunks(64) {
@@ -459,7 +542,7 @@ impl Kqueue {
                         pid,
                         libc::EVFILT_PROC,
                         libc::EV_ADD | libc::EV_RECEIPT,
-                        libc::NOTE_FORK | libc::NOTE_EXIT,
+                        libc::NOTE_FORK | libc::NOTE_EXIT | NOTE_EXITSTATUS,
                         0,
                         tag,
                     )
@@ -540,7 +623,13 @@ impl Kqueue {
                 libc::EVFILT_TIMER => Event::Timer,
                 libc::EVFILT_USER => Event::User,
                 libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork { pid, tag },
-                libc::EVFILT_PROC => Event::Exit { pid, tag },
+                // The wait status rides in `data` (NOTE_EXITSTATUS); the terminating signal is its low 7
+                // bits, so a jetsam fatal-cap SIGKILL is told apart here without reading the zombie.
+                libc::EVFILT_PROC => Event::Exit {
+                    pid,
+                    tag,
+                    status: i32::try_from(e.data).unwrap_or(0),
+                },
                 _ => continue,
             };
             out.push(event);

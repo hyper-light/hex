@@ -7,11 +7,31 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
-/// The page the memory act touches, so the kernel accounts the memory to the box.
-const PAGE: usize = 4096;
 /// Memory taken per chunk while growing, so a box's bound kills the act partway, not after a single
 /// huge allocation the allocator might refuse first.
 const CHUNK: usize = 1 << 20;
+
+/// Fills `buf` with an incompressible xorshift stream, so the memory the act takes shows in the box's
+/// footprint on every OS. Linux's cgroup counts the resident pages whatever they hold, but macOS's
+/// physical-footprint ledger — against which a jetsam per-process cap (the native `process` class's
+/// `_ext` backstop) and the watcher's rule both read — counts a page at its *compressed* size, so a box
+/// filled with zeros (or any compressible pattern) stays far under its bound and is never bounded. An
+/// incompressible fill can't be shrunk, so the footprint is the allocation's true size and the bound
+/// bites. Writing a word at a time (not byte) keeps it cheap; a trailing partial word is left as is.
+fn fill_incompressible(buf: &mut [u8], state: &mut u64) {
+    let mut x = *state;
+    let mut i = 0usize;
+    while i < buf.len() {
+        x ^= x.wrapping_shl(13);
+        x ^= x.wrapping_shr(7);
+        x ^= x.wrapping_shl(17);
+        if let Some(slot) = buf.get_mut(i..i.saturating_add(8)) {
+            slot.copy_from_slice(&x.to_ne_bytes());
+        }
+        i = i.saturating_add(8);
+    }
+    *state = x;
+}
 
 /// Runs act `argv` (`argv[0]` the act, the rest its arguments) and returns the exit status for the
 /// process. `None` means the act isn't one of these.
@@ -145,16 +165,11 @@ fn hog(bytes: u64) -> u8 {
     let target = usize::try_from(bytes).unwrap_or(usize::MAX);
     let mut held: Vec<Vec<u8>> = Vec::new();
     let mut taken = 0usize;
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
     while taken < target {
         let want = CHUNK.min(target.saturating_sub(taken));
         let mut chunk = vec![0u8; want];
-        let mut i = 0;
-        while i < chunk.len() {
-            if let Some(b) = chunk.get_mut(i) {
-                *b = 1;
-            }
-            i = i.saturating_add(PAGE);
-        }
+        fill_incompressible(&mut chunk, &mut rng);
         held.push(chunk);
         taken = taken.saturating_add(want);
     }
@@ -170,16 +185,11 @@ fn hold(bytes: u64, millis: u64) -> u8 {
     let target = usize::try_from(bytes).unwrap_or(usize::MAX);
     let mut held: Vec<Vec<u8>> = Vec::new();
     let mut taken = 0usize;
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
     while taken < target {
         let want = CHUNK.min(target.saturating_sub(taken));
         let mut chunk = vec![0u8; want];
-        let mut i = 0;
-        while i < chunk.len() {
-            if let Some(b) = chunk.get_mut(i) {
-                *b = 1;
-            }
-            i = i.saturating_add(PAGE);
-        }
+        fill_incompressible(&mut chunk, &mut rng);
         held.push(chunk);
         taken = taken.saturating_add(want);
     }

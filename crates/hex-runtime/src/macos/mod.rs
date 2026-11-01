@@ -115,9 +115,11 @@ impl Runtime for MacRuntime {
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
         let b = self.get(id)?;
-        let spawn = build_spawn(&program, stdio)?;
+        // The box's whole memory bound arms each member with a fatal per-process cap (native plan step 1's
+        // `_ext` backstop); the box tracks which members carry it.
+        let spawn = build_spawn(&program, stdio, b.bounds().memory_max)?;
         let pid = b.exec(spawn)?;
-        Ok(Box::new(proc::BoxProc::watch(pid)?))
+        Ok(Box::new(proc::BoxProc::watch(pid, b.members())?))
     }
 
     fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -150,9 +152,15 @@ impl Runtime for MacRuntime {
 }
 
 /// Builds the [`sys::Spawn`] for `program` with `stdio`: its exec path search (as the Linux process class
-/// does it), its argv and environment, its working folder, and its three streams, each the null device
-/// where the caller gave none.
-fn build_spawn(program: &Program, stdio: Stdio) -> Result<sys::Spawn, Refusal> {
+/// does it), its argv and environment, its working folder, its three streams (each the null device where
+/// the caller gave none), and, when the box has a memory bound (`memory_max`), the fatal per-process
+/// jetsam cap in MiB that arms each member at the box's whole bound (native plan step 1's `_ext`
+/// backstop). The cap rounds down to MiB, so it never exceeds the bound ([`sys::jetsam_cap_mib`]).
+fn build_spawn(
+    program: &Program,
+    stdio: Stdio,
+    memory_max: Option<u64>,
+) -> Result<sys::Spawn, Refusal> {
     program.check()?;
     if program.user.is_some() {
         return Err(Refusal::Invalid {
@@ -186,6 +194,7 @@ fn build_spawn(program: &Program, stdio: Stdio) -> Result<sys::Spawn, Refusal> {
             .collect::<Result<_, _>>()?,
         cwd: program.cwd.as_deref().map(c_string).transpose()?,
         stdio,
+        jetsam_mib: memory_max.and_then(sys::jetsam_cap_mib),
     })
 }
 

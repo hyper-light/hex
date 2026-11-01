@@ -65,6 +65,12 @@ pub struct Member {
     /// `bsd/kern/kern_exit.c:2079`).
     pub footprint: u64,
     pub life: Life,
+    /// Whether this member carries a fatal kernel memory cap at the box's whole bound, armed by the shell
+    /// when it spawned the member (macOS's `posix_spawnattr_setjetsam_ext`; native plan step 1's
+    /// `_ext` backstop). A member the box did not spawn (a fork) carries none. The kernel bounds an armed
+    /// member with no overshoot, so a box whose every running member is armed, and that holds at most one,
+    /// is paced at the [`CEILING`]; any fork or any unarmed member reverts it to headroom pacing.
+    pub armed: bool,
 }
 
 /// Why a box is ended.
@@ -141,6 +147,12 @@ impl Watch {
             .fold(0u64, |sum, m| sum.saturating_add(m.footprint));
         let processes = count(members, |m| m.life != Life::Held);
         let running = count(members, |m| m.life == Life::Running);
+        // Every running member carries its own fatal kernel cap at the whole bound. `.all` is true of no
+        // members, but running == 0 is the idle branch, so this is read only with a member running.
+        let all_running_armed = members
+            .iter()
+            .filter(|m| m.life == Life::Running)
+            .all(|m| m.armed);
         let taking_on = running > self.last_running;
         self.last_running = running;
         self.peak = self.peak.max(footprint);
@@ -152,6 +164,12 @@ impl Watch {
         } else if let Some(over) = self.over(footprint, processes) {
             self.ending = Some(over);
             Verdict::End(over)
+        } else if running <= 1 && all_running_armed {
+            // The one member carries a fatal kernel cap at the whole bound (native plan step 1's `_ext`
+            // backstop), so the kernel bounds it with no overshoot; the watcher need only read at the
+            // ceiling to keep its accounting current and to notice a fork. A second member, or any member
+            // the box didn't arm (a fork), drops this and the headroom rule below paces the reads.
+            Verdict::Wait(CEILING)
         } else if taking_on {
             // A member just joined and begins allocating at once; the headroom the formula would pace by
             // doesn't account for it, so read again at the floor until the membership settles.
@@ -288,6 +306,15 @@ mod tests {
             started: u64::from(pid) * 7,
             footprint,
             life,
+            armed: false,
+        }
+    }
+
+    /// A member carrying the fatal kernel cap (one the box spawned), for the ceiling-pacing cases.
+    fn armed(pid: u32, footprint: u64, life: Life) -> Member {
+        Member {
+            armed: true,
+            ..member(pid, footprint, life)
         }
     }
 
@@ -332,6 +359,98 @@ mod tests {
             ..rates()
         };
         assert_eq!(next(&limit, &fast_forks, MIB, 63), FLOOR);
+    }
+
+    /// HEX-MAC-4 (native plan step 1's `_ext` backstop): a box holding at most one running member, every
+    /// running member armed with the kernel's fatal cap, is read at the ceiling — the kernel bounds the
+    /// member with no overshoot, so the watcher needn't pace by headroom. Unarmed, the same read is paced
+    /// by its headroom, far under the ceiling.
+    #[test]
+    fn a_single_armed_member_is_read_at_the_ceiling() {
+        let limit = Limit {
+            memory: Some(256 * MIB),
+            processes: None,
+        };
+        let mut w = Watch::new(limit, rates());
+        // One armed member well under the bound: the ceiling, though 255 MiB of headroom lasts ~973 µs.
+        assert_eq!(
+            w.read(&[armed(1, MIB, Life::Running)]).verdict,
+            Verdict::Wait(CEILING)
+        );
+        // Held there: still the ceiling on the next read (not taking on, still one armed member).
+        assert_eq!(
+            w.read(&[armed(1, MIB, Life::Running)]).verdict,
+            Verdict::Wait(CEILING)
+        );
+        // The contrast: the same member unarmed is paced by its headroom, which is far under the ceiling.
+        let mut u = Watch::new(limit, rates());
+        let _ = u.read(&[member(1, MIB, Life::Running)]); // taking on -> floor
+        let unarmed = u.read(&[member(1, MIB, Life::Running)]).verdict;
+        assert_eq!(unarmed, Verdict::Wait(next(&limit, &rates(), MIB, 1)));
+        assert_ne!(unarmed, Verdict::Wait(CEILING));
+    }
+
+    /// HEX-MAC-4: a two-member box is paced by headroom, not the ceiling, even when both members are
+    /// armed — the kernel caps each at the whole bound, which doesn't bound their sum, so the watcher's
+    /// headroom rule holds the box.
+    #[test]
+    fn a_two_member_box_is_paced_by_headroom() {
+        let limit = Limit {
+            memory: Some(256 * MIB),
+            processes: None,
+        };
+        let mut w = Watch::new(limit, rates());
+        let two = [armed(1, MIB, Life::Running), armed(2, MIB, Life::Running)];
+        let _ = w.read(&two); // taking on 0 -> 2: floor
+        let steady = w.read(&two).verdict;
+        assert_eq!(steady, Verdict::Wait(next(&limit, &rates(), 2 * MIB, 2)));
+        assert_ne!(steady, Verdict::Wait(CEILING));
+    }
+
+    /// HEX-MAC-4: a fork (an unarmed member the box didn't spawn) reverts the box to headroom pacing,
+    /// whether it joins an armed member or is all that's left of one — any unarmed running member drops
+    /// the ceiling.
+    #[test]
+    fn a_fork_or_an_unarmed_member_reverts_to_headroom() {
+        let limit = Limit {
+            memory: Some(256 * MIB),
+            processes: None,
+        };
+        // An armed member and its forked (unarmed) child: two running members, so headroom.
+        let mut w = Watch::new(limit, rates());
+        let pair = [armed(1, MIB, Life::Running), member(2, MIB, Life::Running)];
+        let _ = w.read(&pair);
+        let with_fork = w.read(&pair).verdict;
+        assert_eq!(with_fork, Verdict::Wait(next(&limit, &rates(), 2 * MIB, 2)));
+        assert_ne!(with_fork, Verdict::Wait(CEILING));
+        // Only the unarmed fork remains (the armed member exited): one running member, unarmed -> headroom.
+        let mut u = Watch::new(limit, rates());
+        let _ = u.read(&[member(2, MIB, Life::Running)]);
+        let lone_fork = u.read(&[member(2, MIB, Life::Running)]).verdict;
+        assert_eq!(lone_fork, Verdict::Wait(next(&limit, &rates(), MIB, 1)));
+        assert_ne!(lone_fork, Verdict::Wait(CEILING));
+    }
+
+    /// HEX-MAC-4: an uncapped box is read as before — it has no memory bound, so no member is armed, and
+    /// the headroom rule returns the ceiling for want of a bound; the arming rule changes nothing here.
+    #[test]
+    fn an_uncapped_box_is_unchanged() {
+        let none = Limit::default();
+        let mut w = Watch::new(none, rates());
+        // First read takes on -> floor (unchanged); then steady -> ceiling, for want of any bound.
+        assert_eq!(
+            w.read(&[member(1, MIB, Life::Running)]).verdict,
+            Verdict::Wait(FLOOR)
+        );
+        assert_eq!(
+            w.read(&[member(1, MIB, Life::Running)]).verdict,
+            Verdict::Wait(CEILING)
+        );
+        // Two members, steady: still the ceiling, for want of a bound.
+        let mut t = Watch::new(none, rates());
+        let two = [member(1, MIB, Life::Running), member(2, MIB, Life::Running)];
+        let _ = t.read(&two);
+        assert_eq!(t.read(&two).verdict, Verdict::Wait(CEILING));
     }
 
     /// HEX-MAC-1: a read past the memory bound ends the box with the footprint it reached; a read while
@@ -483,11 +602,21 @@ mod tests {
         if let Some(over) = past(&series[i]) {
             return Verdict::End(over);
         }
-        // A read that finds more running members than the one before it (the box is still taking members
-        // on) paces at the floor, regardless of headroom.
         let running_n = |read: &[Member]| {
             u64::try_from(read.iter().filter(|m| m.life == Life::Running).count()).unwrap()
         };
+        // Every running member armed and at most one running: the kernel caps the member, so the box is
+        // read at the ceiling regardless of headroom or taking-on (native plan step 1's `_ext` backstop).
+        let all_armed = |read: &[Member]| {
+            read.iter()
+                .filter(|m| m.life == Life::Running)
+                .all(|m| m.armed)
+        };
+        if running_n(&series[i]) <= 1 && all_armed(&series[i]) {
+            return Verdict::Wait(CEILING);
+        }
+        // A read that finds more running members than the one before it (the box is still taking members
+        // on) paces at the floor, regardless of headroom.
         let prev_running = if i == 0 { 0 } else { running_n(&series[i - 1]) };
         if running_n(&series[i]) > prev_running {
             return Verdict::Wait(FLOOR);
@@ -507,12 +636,19 @@ mod tests {
     }
 
     fn arb_series() -> impl Strategy<Value = Vec<Vec<Member>>> {
-        let member =
-            (1u32..64, 0u64..(64 * GIB), arb_life()).prop_map(|(pid, footprint, life)| Member {
+        // `armed` weighted toward true so single-armed reads (the ceiling path) are met often.
+        let member = (
+            1u32..64,
+            0u64..(64 * GIB),
+            arb_life(),
+            proptest::bool::weighted(0.6),
+        )
+            .prop_map(|(pid, footprint, life, armed)| Member {
                 pid,
                 started: u64::from(pid),
                 footprint: if life == Life::Running { footprint } else { 0 },
                 life,
+                armed,
             });
         prop::collection::vec(prop::collection::vec(member, 0..8), 1..120)
     }
@@ -539,6 +675,8 @@ mod tests {
         floor: Cell<u64>,
         between: Cell<u64>,
         ceiling: Cell<u64>,
+        /// A ceiling wait the arming rule forced: one running member, armed (native plan step 1).
+        armed_ceiling: Cell<u64>,
         memory: Cell<u64>,
         processes: Cell<u64>,
         kill: Cell<u64>,
@@ -547,9 +685,10 @@ mod tests {
 
     /// HEX-MAC-4 (model-based, CLAUDE.md §6): for random series of reads, each of the core's verdicts is
     /// the oracle's, its peak is the series' highest footprint, and no wait is longer than the headroom
-    /// lasts at the stated rate, unless it is the floor. Every kind of verdict is met: a wait at the
-    /// floor, between it and the ceiling, and at the ceiling; an end for memory and for processes; a kill;
-    /// a box gone idle.
+    /// lasts at the stated rate, unless it is the floor or the arming rule paced it at the ceiling (the
+    /// kernel caps the one armed member, so the wait is the ceiling on purpose). Every kind of verdict is
+    /// met: a wait at the floor, between it and the ceiling, at the ceiling, and a ceiling the arming rule
+    /// forced; an end for memory and for processes; a kill; a box gone idle.
     #[test]
     fn the_core_decides_as_the_oracle() {
         let met = Met::default();
@@ -564,15 +703,28 @@ mod tests {
                     let read = w.read(&series[i]);
                     prop_assert_eq!(read.verdict, oracle(limit, rates, &series, i), "read {}", i);
                     peak = peak.max(read.footprint);
+                    // The arming rule paces a single armed running member at the ceiling, regardless of
+                    // its headroom (the kernel caps it).
+                    let armed_rule = read.running == 1
+                        && series[i]
+                            .iter()
+                            .filter(|m| m.life == Life::Running)
+                            .all(|m| m.armed);
                     match read.verdict {
                         Verdict::Wait(d) => {
                             prop_assert!((FLOOR..=CEILING).contains(&d));
+                            if armed_rule {
+                                prop_assert_eq!(d, CEILING);
+                                bump(&met.armed_ceiling);
+                            }
                             bump(match d {
                                 d if d == FLOOR => &met.floor,
                                 d if d == CEILING => &met.ceiling,
                                 _ => &met.between,
                             });
-                            if d > FLOOR {
+                            // The headroom bound holds for every paced wait but the floor and a ceiling the
+                            // arming rule set (longer than headroom on purpose, the kernel cap behind it).
+                            if d > FLOOR && !armed_rule {
                                 let ns = d.as_nanos();
                                 if let Some(b) = limit.memory {
                                     let room = u128::from(b - read.footprint);
@@ -604,6 +756,7 @@ mod tests {
             ("a wait at the floor", &met.floor),
             ("a wait between floor and ceiling", &met.between),
             ("a wait at the ceiling", &met.ceiling),
+            ("a ceiling the arming rule forced", &met.armed_ceiling),
             ("an end for memory", &met.memory),
             ("an end for processes", &met.processes),
             ("a kill", &met.kill),

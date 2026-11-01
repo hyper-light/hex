@@ -5,23 +5,27 @@
 
 use std::time::{Duration, Instant};
 
-use hex_api::{Exit, Proc, Refusal};
+use hex_api::{Exit, Proc, Refusal, Signal};
 use rustix::process::{Pid, WaitId, WaitIdOptions};
 
+use super::process::Members;
 use super::sys::{Event, Kqueue};
 
 /// A program the node spawned into a box, by pid.
 pub struct BoxProc {
     pid: i32,
     kq: Kqueue,
+    /// The box this program runs in, so reaping a kill at the fatal cap counts it on the box at once
+    /// (native plan step 1's `_ext` backstop) — before a caller that waited on this reads the box's usage.
+    members: Members,
     exit: Option<Exit>,
     events: Vec<Event>,
 }
 
 impl BoxProc {
-    /// Watches child `pid` for its end. It must be this process's child and not yet reaped, so its pid is
-    /// this program's until [`BoxProc`] reaps it.
-    pub fn watch(pid: i32) -> Result<Self, Refusal> {
+    /// Watches child `pid` for its end, in box `members`. It must be this process's child and not yet
+    /// reaped, so its pid is this program's until [`BoxProc`] reaps it.
+    pub fn watch(pid: i32, members: Members) -> Result<Self, Refusal> {
         let kq = Kqueue::new().map_err(|e| Refusal::os("making a program's kqueue", e))?;
         // Already gone (reaped by a box delete that beat this): its end is then read by `reap` below, or is
         // no longer knowable.
@@ -31,6 +35,7 @@ impl BoxProc {
         Ok(Self {
             pid,
             kq,
+            members,
             exit: None,
             events: Vec::with_capacity(1),
         })
@@ -57,7 +62,13 @@ impl BoxProc {
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
         ) {
             Ok(Some(status)) => {
-                self.exit = Some(exit_of(&status));
+                let exit = exit_of(&status);
+                // A SIGKILL of a box member is the kernel's fatal cap (or memory pressure on it): tell the
+                // box before this reap returns, so the count is there when a caller that waited reads
+                // usage. The box ignores it unless the member was armed and it wasn't the box's own kill.
+                let sigkill = matches!(exit, Exit::Signal(s) if s == Signal::KILL.number());
+                self.exit = Some(exit);
+                self.members.ended(self.pid, sigkill)?;
                 Ok(self.exit)
             }
             Ok(None) => Ok(None),
