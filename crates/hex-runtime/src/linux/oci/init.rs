@@ -754,7 +754,7 @@ const FD_TO_FD: MoveMountFlags =
     MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH.union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
 
 /// Builds the container's root on the pruned-seed path (goal 5 plan step 2), fd-based. The init's
-/// namespace is a copy of the seed's two mounts — its root tmpfs and an empty `/r` — so it attaches the
+/// namespace is a copy of the seed's two mounts — its root and a tmpfs holding `/r` — so it attaches the
 /// rootfs the agent cloned at `/r` (a path in its own namespace, not the host's), makes the spec's
 /// mounts beneath (each bind from the tree the agent cloned, by `move_mount`; each filesystem by
 /// `fsopen`/`fsmount`), its devices, symlinks, masks and read-only paths, and ends with `MS_MOVE` onto

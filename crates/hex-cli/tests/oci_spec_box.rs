@@ -193,12 +193,17 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     recovery_removes_a_half_made_bundle(&lab, own);
 }
 
-/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace holds exactly two mounts,
-/// its root and a read-only tmpfs, and no proc, sysfs or cgroup2. The node runs in this process and its
-/// create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_PRUNE` set, so the seed is found among
-/// this process's children by that environment entry (an exec seed, unpruned, has none), and its mountinfo
-/// read. Run only as root, where the seeds prune.
-fn pruned_seed_holds_two_mounts() {
+/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace is a read-only tmpfs,
+/// holding only an empty `r`, on the namespace's root, and nothing of the host: no proc, sysfs or
+/// cgroup2. Its mountinfo lists the tmpfs alone, by the kernel's design. The namespace's root, the
+/// tmpfs's parent, lies outside the seed's root, and the kernel lists no mount it can't reach from the
+/// task's root: v6.19 `show_mountinfo` (fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail
+/// will give SEQ_SKIP on this") skips what `seq_path_root` can't name (fs/seq_file.c:517-519), and
+/// `__d_path` names nothing unreachable from the root (fs/d_path.c:211-223). The node runs in this process
+/// and its create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_PRUNE` set, so the seed is
+/// found among this process's children by that environment entry (an exec seed, unpruned, has none), and
+/// its mountinfo and root read. Run only as root, where the seeds prune.
+fn pruned_seed_lists_its_read_only_root_tmpfs_alone() {
     let me = std::process::id();
     let mut seed = None;
     for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -235,26 +240,55 @@ fn pruned_seed_holds_two_mounts() {
     let seed = seed.expect("a pruned create seed among this process's children");
     let mountinfo =
         std::fs::read_to_string(format!("/proc/{seed}/mountinfo")).expect("the seed's mountinfo");
-    let lines: Vec<&str> = mountinfo.lines().collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "a pruned create seed (pid {seed}) holds exactly two mounts, got {}:\n{mountinfo}",
-        lines.len()
+    // proc_pid_mountinfo(5): mount ID, parent ID, major:minor, root, mount point, mount options; after
+    // " - ", the filesystem type.
+    let mounts: Vec<(Vec<&str>, &str)> = mountinfo
+        .lines()
+        .map(|line| {
+            let (fields, fs) = line.split_once(" - ").expect("a mountinfo line");
+            let fstype = fs.split_whitespace().next().unwrap_or("");
+            (fields.split_whitespace().collect(), fstype)
+        })
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .all(|(_, fstype)| !matches!(*fstype, "proc" | "sysfs" | "cgroup2" | "cgroup")),
+        "a pruned create seed (pid {seed}) holds no proc, sysfs or cgroup:\n{mountinfo}"
     );
-    for line in &lines {
-        // proc_pid_mountinfo(5): the filesystem type is the first field after " - ".
-        let fstype = line
-            .split(" - ")
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap_or("");
-        assert!(
-            !matches!(fstype, "proc" | "sysfs" | "cgroup2" | "cgroup"),
-            "a pruned seed's mount is not proc, sysfs or cgroup: {line}"
-        );
-    }
-    eprintln!("AC-f: the pruned create seed (pid {seed}) holds two mounts, no proc/sysfs/cgroup");
+    assert_eq!(
+        mounts.len(),
+        1,
+        "a pruned create seed (pid {seed}) lists its root tmpfs alone, got {}:\n{mountinfo}",
+        mounts.len()
+    );
+    let (fields, fstype) = &mounts[0];
+    assert_eq!(
+        *fstype, "tmpfs",
+        "the seed's one mount is its tmpfs:\n{mountinfo}"
+    );
+    assert_eq!(fields[4], "/", "the tmpfs is the seed's /:\n{mountinfo}");
+    assert!(
+        fields[5].split(',').any(|o| o == "ro"),
+        "the seed's root tmpfs is mounted read-only:\n{mountinfo}"
+    );
+    // Its parent, the namespace's root, lies outside the seed's root, so no line lists it.
+    assert!(
+        mounts.iter().all(|(m, _)| m[0] != fields[1]),
+        "the tmpfs's parent (mount {}) isn't listed:\n{mountinfo}",
+        fields[1]
+    );
+    let root: Vec<String> = std::fs::read_dir(format!("/proc/{seed}/root"))
+        .expect("the seed's root")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(root, ["r"], "the seed's root holds only r");
+    let r = std::fs::read_dir(format!("/proc/{seed}/root/r")).expect("the seed's r");
+    assert_eq!(r.count(), 0, "the seed's r is empty");
+    eprintln!(
+        "AC-f: the pruned create seed (pid {seed}) lists one mount, its read-only root tmpfs:"
+    );
+    eprint!("{mountinfo}");
 }
 
 /// The plan step's example: layers [base, app], `sleep infinity`, one read-only bind, a private
@@ -310,10 +344,11 @@ fn layered_box(lab: &Lab, own: &Path) {
             "a root node makes an eligible box on the pruned root path, {} made",
             node.pruned_creates()
         );
-        // AC-f: a started pruned create seed's mount namespace holds exactly two mounts — its root and a
-        // read-only tmpfs — and no proc, sysfs or cgroup2. The seed is a child of this process (the node
-        // runs in-process and its create pool spawns `hex __oci-seed`), so find it and read its mountinfo.
-        pruned_seed_holds_two_mounts();
+        // AC-f: a started pruned create seed's mount namespace is a read-only tmpfs on the namespace's
+        // root, which its mountinfo lists alone, and no proc, sysfs or cgroup2. The seed is a child of
+        // this process (the node runs in-process and its create pool spawns `hex __oci-seed`), so find
+        // it and read its mountinfo and root.
+        pruned_seed_lists_its_read_only_root_tmpfs_alone();
     }
     let layer = state.join("bundles/layered");
 

@@ -125,7 +125,7 @@ fn serve() -> Result<(), OciError> {
 /// Prunes the create seed's mount namespace once, at start (goal 5 plan step 2): unshare a mount
 /// namespace, make `/` private, mount a small read-only tmpfs over `mountpoint` holding only an empty
 /// `r`, pivot into it and detach the old root. The namespace then holds exactly two mounts — its root
-/// tmpfs and that tmpfs — and nothing of the host: no proc, no sysfs (f78). Every init the seed clones
+/// and that tmpfs on it — and nothing of the host: no proc, no sysfs (f78). Every init the seed clones
 /// (`clone3` with `CLONE_NEWNS`) copies this, so the init builds the container's root from the
 /// descriptors the agent hands it, with nothing of the host beneath it. `mountpoint` is a directory the
 /// agent ensured exists; after the pivot and detach the host path it was is gone from this namespace.
