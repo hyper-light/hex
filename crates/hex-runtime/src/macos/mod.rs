@@ -6,6 +6,7 @@
 //! in memory and is driven in process.
 
 pub mod helper_client;
+pub mod helper_daemon;
 pub mod proc;
 pub mod process;
 pub mod sys;

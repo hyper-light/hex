@@ -117,31 +117,39 @@ pub fn rusage(pid: i32) -> io::Result<Option<Rusage>> {
 
 /// `PROC_PGRP_ONLY` (`sys/proc_info.h:52`): `proc_listpids` lists one process group.
 const PROC_PGRP_ONLY: u32 = 2;
+/// `PROC_UID_ONLY` (`sys/proc_info.h:54`): `proc_listpids` lists one user's processes. A box's user,
+/// the only marker a member inherits and can't drop (native-platforms.md §3), so this finds every member
+/// — including one that daemonized (`setsid`) out of its process group (the box helper's listing, step 2).
+const PROC_UID_ONLY: u32 = 4;
 
 /// The members of process group `pgid`, written over `pids` up to its capacity, its zombies included
 /// (XNU walks `zombproc` after `allproc`, `bsd/kern/proc_info.c:470-473`). Returns whether the listing may
 /// have been cut short: it filled `pids`.
 pub fn group(pgid: i32, pids: &mut Vec<i32>) -> io::Result<bool> {
+    let group = u32::try_from(pgid)
+        .map_err(|_| io::Error::other(format!("{pgid} isn't a process group")))?;
+    list_pids(PROC_PGRP_ONLY, group, pids)
+}
+
+/// The processes of user `uid`, written over `pids` up to its capacity (the box helper's membership
+/// listing, step 2); returns whether the listing may have been cut short.
+pub fn user_pids(uid: u32, pids: &mut Vec<i32>) -> io::Result<bool> {
+    list_pids(PROC_UID_ONLY, uid, pids)
+}
+
+/// `proc_listpids` for one `flavor` and its `arg`, written over `pids` up to its capacity.
+fn list_pids(flavor: u32, arg: u32, pids: &mut Vec<i32>) -> io::Result<bool> {
     pids.clear();
     let room = pids.capacity();
     let bytes = room
         .checked_mul(size_of::<i32>())
         .and_then(|b| c_int::try_from(b).ok())
         .ok_or_else(|| {
-            io::Error::other("a group listing's buffer is past what proc_listpids takes")
+            io::Error::other("a pid listing's buffer is past what proc_listpids takes")
         })?;
-    let group = u32::try_from(pgid)
-        .map_err(|_| io::Error::other(format!("{pgid} isn't a process group")))?;
     // SAFETY: proc_listpids writes at most `bytes` bytes of pids into the buffer it is given, which has
     // room for `room` i32s: exactly `bytes`.
-    let n = unsafe {
-        libc::proc_listpids(
-            PROC_PGRP_ONLY,
-            group,
-            pids.as_mut_ptr().cast::<c_void>(),
-            bytes,
-        )
-    };
+    let n = unsafe { libc::proc_listpids(flavor, arg, pids.as_mut_ptr().cast::<c_void>(), bytes) };
     let written = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
     let count = written.checked_div(size_of::<i32>()).unwrap_or(0).min(room);
     // SAFETY: the kernel wrote the first `count` pids, and `count` is at most the capacity.
