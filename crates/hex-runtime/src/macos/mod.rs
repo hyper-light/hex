@@ -12,6 +12,9 @@ pub mod proc;
 pub mod process;
 pub mod sys;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::num::NonZeroU64;

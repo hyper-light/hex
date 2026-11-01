@@ -262,16 +262,15 @@ impl<P: Privileged> Daemon<P> {
     /// disconnect — the node ends them with [`Request::End`], and a reconnecting node finds them. Launchd
     /// may instead hand the daemon its socket; this path is for the lab and a plain install.
     pub fn listen(&self, path: &Path) -> Result<(), Refusal> {
-        let _ = rustix::fs::unlink(path);
-        let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
-            .map_err(|e| Refusal::os("making the helper socket", e))?;
-        let addr =
-            SocketAddrUnix::new(path).map_err(|e| Refusal::os("naming the helper socket", e))?;
-        rustix::net::bind(&fd, &addr).map_err(|e| Refusal::os("binding the helper socket", e))?;
-        rustix::net::listen(&fd, 16)
-            .map_err(|e| Refusal::os("listening on the helper socket", e))?;
+        let listener = bind(path)?;
+        self.serve_listener(listener.as_fd())
+    }
+
+    /// Serves node connections on an already-bound `listener`, one at a time, forever ([`Daemon::listen`]
+    /// binds it; launchd or a test may bind it first). Each connection is served to its close.
+    pub fn serve_listener(&self, listener: BorrowedFd<'_>) -> Result<(), Refusal> {
         loop {
-            let conn = match rustix::net::accept(&fd) {
+            let conn = match rustix::net::accept(listener) {
                 Ok(conn) => conn,
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(Refusal::os("accepting a helper connection", e)),
@@ -502,6 +501,19 @@ impl<P: Privileged> Daemon<P> {
             Err(e) => os("signalling a box", &e),
         }
     }
+}
+
+/// Binds a `SOCK_STREAM` helper socket at `path` (removing a stale one) and listens; the daemon serves on
+/// it with [`Daemon::serve_listener`]. Split from [`Daemon::listen`] so a caller can bind before it serves
+/// — launchd, or a test that connects a node to it once it is bound.
+pub fn bind(path: &Path) -> Result<OwnedFd, Refusal> {
+    let _ = rustix::fs::unlink(path);
+    let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)
+        .map_err(|e| Refusal::os("making the helper socket", e))?;
+    let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::os("naming the helper socket", e))?;
+    rustix::net::bind(&fd, &addr).map_err(|e| Refusal::os("binding the helper socket", e))?;
+    rustix::net::listen(&fd, 16).map_err(|e| Refusal::os("listening on the helper socket", e))?;
+    Ok(fd)
 }
 
 fn poisoned(what: &str) -> Answer {
