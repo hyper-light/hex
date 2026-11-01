@@ -39,9 +39,10 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Network, OciSpec, Program, Refusal,
-    Rootfs, Runtime, Stdio,
+    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
 };
+#[cfg(debug_assertions)]
+use hex_api::{Network, OciSpec, Rootfs};
 use hex_client::Client;
 use hex_core::record::{BoxRecord, Phase};
 use hex_core::wire::{self, Answer, Call, Request, Streams};
@@ -160,11 +161,13 @@ impl Agent {
     }
 
     /// Waits for the agent to end, and how it ended.
+    #[cfg(debug_assertions)]
     fn ended(&mut self) -> std::process::ExitStatus {
         self.child.wait().unwrap()
     }
 
     /// Whether the agent still runs.
+    #[cfg(debug_assertions)]
     fn runs(&mut self) -> bool {
         self.child.try_wait().unwrap().is_none()
     }
@@ -271,6 +274,7 @@ impl Lab {
 
     /// An `OciSpec` the node renders a bundle for: the lab's rootfs, the host's network, an init that
     /// waits.
+    #[cfg(debug_assertions)]
     fn spec(&self) -> OciSpec {
         OciSpec {
             rootfs: Rootfs::Dir(self.rootfs.clone()),
@@ -713,6 +717,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         bounds: Bounds::default(),
         class,
     };
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut agent = Agent::armed(
         exe,
         dir.path(),
