@@ -78,6 +78,18 @@ impl Helper {
         }
     }
 
+    /// A client over an already-connected socket at `version`, without the hello handshake: for a caller
+    /// that connected the socket itself (a test's socketpair to a daemon in the same process).
+    #[cfg(test)]
+    pub(crate) fn over(fd: OwnedFd, version: u16) -> Self {
+        Self {
+            fd,
+            version,
+            next_id: AtomicU64::new(1),
+            path: PathBuf::from("<connected>"),
+        }
+    }
+
     /// Takes a pool user for `box_id` with memory bound and reserve in bytes; returns the user's id.
     pub fn acquire(&self, box_id: &BoxId, bound: u64, reserve: u64) -> Result<u32, Refusal> {
         match self.rpc(
@@ -235,7 +247,11 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
 /// Sends `msg` framed with its `u32` length, `fds` riding with it by `SCM_RIGHTS` on the first write.
 /// Loops until every byte is sent (a `SOCK_STREAM` write may be partial), carrying the descriptors only
 /// on the first send, as `SCM_RIGHTS` attaches them to the bytes of one `sendmsg`.
-fn send_framed(fd: BorrowedFd<'_>, msg: &[u8], fds: &[BorrowedFd<'_>]) -> Result<(), Refusal> {
+pub(crate) fn send_framed(
+    fd: BorrowedFd<'_>,
+    msg: &[u8],
+    fds: &[BorrowedFd<'_>],
+) -> Result<(), Refusal> {
     let len = u32::try_from(msg.len()).map_err(|_| Refusal::Invalid {
         what: "helper request",
         why: format!("{} bytes is past a u32 length", msg.len()),
@@ -271,7 +287,7 @@ fn send_framed(fd: BorrowedFd<'_>, msg: &[u8], fds: &[BorrowedFd<'_>]) -> Result
 
 /// Reads one framed message: its `u32` length, then that many bytes, returning the bytes and any
 /// descriptors that rode with them. Refuses a length past [`MAX_MESSAGE`] before reading the body.
-fn recv_framed(fd: BorrowedFd<'_>) -> Result<(Vec<u8>, Vec<OwnedFd>), Refusal> {
+pub(crate) fn recv_framed(fd: BorrowedFd<'_>) -> Result<(Vec<u8>, Vec<OwnedFd>), Refusal> {
     let mut len_buf = [0u8; LEN_BYTES];
     let mut fds = recv_exact(fd, &mut len_buf)?;
     let len = usize::try_from(u32::from_le_bytes(len_buf)).unwrap_or(usize::MAX);
