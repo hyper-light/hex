@@ -131,6 +131,13 @@ memory bound is refused**, measured on adas-mac-studio-3 (`mem_bound_probe.c`, r
 | `setrlimit(RLIMIT_AS)` (address space) | `EINVAL`; not enforced (allocated 515 MB past a 192 MB limit) |
 | `setrlimit(RLIMIT_RSS)` (resident) | `EINVAL`; not enforced |
 | `EVFILT_MEMORYSTATUS` (kqueue memory event) | not in the public SDK |
+| `posix_spawnattr_setjetsam_np` (spawn-time jetsam limit) | symbol absent from libSystem (`dlsym` → NULL) |
+| `proc_rlimit_control` | exists, but no memory cap — only CPU/wakeups monitors and `RLIMIT_FOOTPRINT_INTERVAL`, which *tracks* footprint over an interval (a read), not an event or a cap |
+
+The investigation is exhaustive: every rootless entry point to a kernel-enforced or event-driven per-task
+memory bound on macOS is closed. In-process allocator interposition (`DYLD_INSERT_LIBRARIES`) is not a bound
+either — library validation rejects it for platform binaries (the common case, e.g. `/usr/bin` toolchains),
+and it would count mapped VM, not footprint.
 
 So **polling `proc_pid_rusage` is the only rootless mechanism** for a process tree's footprint on macOS — nothing
 kernel-enforced, nothing event-driven, is available unprivileged. The polling rule above is therefore step 1's
