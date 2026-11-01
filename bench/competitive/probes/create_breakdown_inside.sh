@@ -64,7 +64,10 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 # clock is CLOCK_MONOTONIC's.
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
-I="$T/instances/hexcb-$$"
+# A per-run instance name. `$$` is 1 in the bench container (bash is its init) and tracefs is the host's,
+# shared across containers, so `hexcb-$$` was `hexcb-1` for every run and collided when a prior run left
+# its instance behind under load (its untrace's rmdir raced); the epoch-nanosecond suffix makes it unique.
+I="$T/instances/hexcb-$$-$(date +%s%N)"
 EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit
   syscalls/sys_exit_openat syscalls/sys_exit_open syscalls/sys_enter_fsync syscalls/sys_exit_fsync
   syscalls/sys_exit_rename syscalls/sys_exit_renameat syscalls/sys_exit_renameat2
