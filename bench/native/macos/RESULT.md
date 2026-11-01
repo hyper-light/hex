@@ -140,9 +140,14 @@ either — library validation rejects it for platform binaries (the common case,
 and it would count mapped VM, not footprint.
 
 So **polling `proc_pid_rusage` is the only rootless mechanism** for a process tree's footprint on macOS — nothing
-kernel-enforced, nothing event-driven, is available unprivileged. The polling rule above is therefore step 1's
-(rootless) bound, with the limits this record shows (≤ one member per core, ~12-15% of a core held at its bound). The
-ledger + `EXC_RESOURCE` mechanism is **step 2's** (Ada's call, 2026-11-01): the installer's privileged helper arms a
-per-member footprint limit apportioned to the box's bound and catches the exception, giving a kernel-enforced,
-event-driven bound with near-zero overshoot and ~zero watcher CPU — better than the polling rule and better than
-Linux's own path, which has no such per-task notification.
+kernel-enforced, nothing event-driven, is available unprivileged.
+
+Ada's call (2026-11-01) is a **two-layer bound**. The **primary** layer is **step 2's**: the installer's privileged
+helper arms the per-task physical-footprint ledger limit (`task_set_phys_footprint_limit`), apportioned across the
+box's members so the limits sum to the bound, and catches the Mach `EXC_RESOURCE` the kernel fires the instant the
+tree crosses it — kernel-enforced, event-driven, near-zero overshoot, ~zero watcher CPU, bounding the whole tree,
+better than the polling rule and than Linux's own path (which has no per-task notification). The polling rule stays
+as the **defense-in-depth second layer** ("it's a good defense in depth mechanism") — the whole bound on a node with
+no helper, and a backstop beneath the ledger limit otherwise. Step 1 ships the polling layer (this record's limits:
+≤ one member per core, ~12-15% of a core held at its bound); step 2 adds the ledger layer, where the overshoot and
+watcher-CPU criteria are met.
