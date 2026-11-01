@@ -113,6 +113,10 @@ pub struct Watch {
     /// The highest footprint a read found.
     peak: u64,
     reads: u64,
+    /// The running-member count the last read found: while it rises, the box is still taking on members
+    /// (a node starts a box's processes one after another), each beginning to allocate before the next is
+    /// there, so the read paces at the floor rather than by a headroom the next new member would blow past.
+    last_running: u64,
 }
 
 impl Watch {
@@ -123,6 +127,7 @@ impl Watch {
             ending: None,
             peak: 0,
             reads: 0,
+            last_running: 0,
         }
     }
 
@@ -136,6 +141,8 @@ impl Watch {
             .fold(0u64, |sum, m| sum.saturating_add(m.footprint));
         let processes = count(members, |m| m.life != Life::Held);
         let running = count(members, |m| m.life == Life::Running);
+        let taking_on = running > self.last_running;
+        self.last_running = running;
         self.peak = self.peak.max(footprint);
         let verdict = if running == 0 {
             self.ending = None;
@@ -145,6 +152,10 @@ impl Watch {
         } else if let Some(over) = self.over(footprint, processes) {
             self.ending = Some(over);
             Verdict::End(over)
+        } else if taking_on {
+            // A member just joined and begins allocating at once; the headroom the formula would pace by
+            // doesn't account for it, so read again at the floor until the membership settles.
+            Verdict::Wait(FLOOR)
         } else {
             Verdict::Wait(next(&self.limit, &self.rates, footprint, processes))
         };
@@ -471,6 +482,15 @@ mod tests {
         }
         if let Some(over) = past(&series[i]) {
             return Verdict::End(over);
+        }
+        // A read that finds more running members than the one before it (the box is still taking members
+        // on) paces at the floor, regardless of headroom.
+        let running_n = |read: &[Member]| {
+            u64::try_from(read.iter().filter(|m| m.life == Life::Running).count()).unwrap()
+        };
+        let prev_running = if i == 0 { 0 } else { running_n(&series[i - 1]) };
+        if running_n(&series[i]) > prev_running {
+            return Verdict::Wait(FLOOR);
         }
         let footprint = u64::try_from(sum(&series[i]).min(u128::from(u64::MAX))).unwrap();
         let memory = limit.memory.map_or(CEILING, |b| {
