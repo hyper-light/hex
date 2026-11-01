@@ -349,8 +349,11 @@ namespace is made, not the rest.
   at most 0.05 ms p50.
 - **AC-e, under concurrency.** At 8 creates in flight with 8,000 extra idle threads, the root's parts p99 are at most
   0.5 ms (classic: 5.5-6.1 ms p50, f80).
-- **AC-f, the seed's namespace.** A started seed's mountinfo, read from the agent, lists exactly two mounts, the
-  namespace's root and a read-only tmpfs, and no proc, sysfs or cgroup2.
+- **AC-f, the seed's namespace.** A started seed's namespace holds exactly two mounts, the namespace's root and a
+  read-only tmpfs on it, and no proc, sysfs or cgroup2. Its mountinfo, read from the agent, lists the tmpfs alone: the
+  namespace's root lies outside the seed's root, and the kernel lists no mount it can't reach from the task's root
+  (v6.19 `show_mountinfo`, fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail will give SEQ_SKIP on
+  this"; `seq_path_root`'s SEQ_SKIP, fs/seq_file.c:517-519; `__d_path`, fs/d_path.c:211-223).
 - **AC-g, the classic path counted.** Every create that takes the classic path is counted by its reason (a fixed set,
   so no high-cardinality label; the name agreed with kiln's Observe owner per CLAUDE.md §10), and each still passes the
   OCI conformance it passes today.
