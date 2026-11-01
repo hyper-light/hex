@@ -64,11 +64,6 @@ pub struct Member {
     /// Its footprint in bytes, 0 once it has ended (XNU zeroes an ended process's,
     /// `bsd/kern/kern_exit.c:2079`).
     pub footprint: u64,
-    /// CPU it has used, user and system, in any unit the shell reads consistently (Mach ticks on macOS).
-    /// The watcher tells a box doing work from one sitting still by whether this advances, so it can read
-    /// a still box rarely without being fooled by `proc_pid_rusage`'s footprint lagging a fast allocator:
-    /// a box that faults pages burns CPU even when its footprint reads flat.
-    pub cpu: u64,
     pub life: Life,
 }
 
@@ -118,9 +113,6 @@ pub struct Watch {
     /// The highest footprint a read found.
     peak: u64,
     reads: u64,
-    /// The footprint, process count and summed CPU the last read found, to tell a box doing work from one
-    /// sitting still.
-    last: Option<(u64, u64, u64)>,
 }
 
 impl Watch {
@@ -131,7 +123,6 @@ impl Watch {
             ending: None,
             peak: 0,
             reads: 0,
-            last: None,
         }
     }
 
@@ -145,23 +136,7 @@ impl Watch {
             .fold(0u64, |sum, m| sum.saturating_add(m.footprint));
         let processes = count(members, |m| m.life != Life::Held);
         let running = count(members, |m| m.life == Life::Running);
-        let cpu = members
-            .iter()
-            .fold(0u64, |sum, m| sum.saturating_add(m.cpu));
         self.peak = self.peak.max(footprint);
-        // A box can only approach its bound by doing work — faulting pages in, forking — which burns CPU.
-        // A read that finds the box no bigger and no busier than the last (its footprint, process count and
-        // CPU all held steady: idle, or holding at its size) can't be nearer its bound than the last was,
-        // so the next read waits the ceiling: a box sitting still costs ~nothing to watch, and the first
-        // read that finds it working again paces by the headroom at once (the rule's "rate" is the box's
-        // own, ~0 when still; CLAUDE.md §2). CPU, not footprint alone, is what marks a box busy, because
-        // `proc_pid_rusage`'s footprint lags a fast allocator (two quick reads can show it unchanged while
-        // the box faults hard) — but such a box is burning CPU, so it is never mistaken for still and
-        // backed off. A box that bursts from true rest is caught one ceiling-wait late; the kernel ledger
-        // layer (the native plan's step 2) bounds that tightly, with this polling as defense-in-depth.
-        let busy = self
-            .last
-            .is_none_or(|(lf, lp, lc)| footprint > lf || processes > lp || cpu > lc);
         let verdict = if running == 0 {
             self.ending = None;
             Verdict::Idle
@@ -170,12 +145,9 @@ impl Watch {
         } else if let Some(over) = self.over(footprint, processes) {
             self.ending = Some(over);
             Verdict::End(over)
-        } else if busy {
-            Verdict::Wait(next(&self.limit, &self.rates, footprint, processes))
         } else {
-            Verdict::Wait(CEILING)
+            Verdict::Wait(next(&self.limit, &self.rates, footprint, processes))
         };
-        self.last = Some((footprint, processes, cpu));
         Read {
             verdict,
             footprint,
@@ -304,7 +276,6 @@ mod tests {
             pid,
             started: u64::from(pid) * 7,
             footprint,
-            cpu: 0,
             life,
         }
     }
@@ -502,20 +473,6 @@ mod tests {
             return Verdict::End(over);
         }
         let footprint = u64::try_from(sum(&series[i]).min(u128::from(u64::MAX))).unwrap();
-        let cpu = |read: &[Member]| read.iter().fold(0u64, |s, m| s.saturating_add(m.cpu));
-        // A read no busier than the one before it (and not the first) is a box holding still — its
-        // footprint, process count and CPU all held — so it waits the ceiling; it can't be nearer its
-        // bound than it already was.
-        let busy = i == 0 || {
-            let prev = &series[i - 1];
-            let prev_fp = u64::try_from(sum(prev).min(u128::from(u64::MAX))).unwrap();
-            footprint > prev_fp
-                || counted(&series[i]) > counted(prev)
-                || cpu(&series[i]) > cpu(prev)
-        };
-        if !busy {
-            return Verdict::Wait(CEILING);
-        }
         let memory = limit.memory.map_or(CEILING, |b| {
             oracle_wait(b.saturating_sub(footprint), rates.bytes.get())
         });
@@ -530,15 +487,13 @@ mod tests {
     }
 
     fn arb_series() -> impl Strategy<Value = Vec<Vec<Member>>> {
-        let member = (1u32..64, 0u64..(64 * GIB), 0u64..(1 << 30), arb_life()).prop_map(
-            |(pid, footprint, cpu, life)| Member {
+        let member =
+            (1u32..64, 0u64..(64 * GIB), arb_life()).prop_map(|(pid, footprint, life)| Member {
                 pid,
                 started: u64::from(pid),
                 footprint: if life == Life::Running { footprint } else { 0 },
-                cpu,
                 life,
-            },
-        );
+            });
         prop::collection::vec(prop::collection::vec(member, 0..8), 1..120)
     }
 
@@ -585,19 +540,10 @@ mod tests {
             .run(&cases, |(limit, rates, series)| {
                 let mut w = Watch::new(limit, rates);
                 let mut peak = 0u64;
-                let mut prev: Option<(u64, u64, u64)> = None;
                 for i in 0..series.len() {
                     let read = w.read(&series[i]);
                     prop_assert_eq!(read.verdict, oracle(limit, rates, &series, i), "read {}", i);
                     peak = peak.max(read.footprint);
-                    // The box was busy since the last read iff its footprint, process count or CPU rose; a
-                    // read that wasn't busy backs off to the ceiling regardless of its headroom (adaptive
-                    // backoff), so the headroom-bound invariant below applies only to reads that were busy.
-                    let cpu = series[i].iter().fold(0u64, |s, m| s.saturating_add(m.cpu));
-                    let busy = prev.is_none_or(|(f, p, c)| {
-                        read.footprint > f || read.processes > p || cpu > c
-                    });
-                    prev = Some((read.footprint, read.processes, cpu));
                     match read.verdict {
                         Verdict::Wait(d) => {
                             prop_assert!((FLOOR..=CEILING).contains(&d));
@@ -606,7 +552,7 @@ mod tests {
                                 d if d == CEILING => &met.ceiling,
                                 _ => &met.between,
                             });
-                            if d > FLOOR && busy {
+                            if d > FLOOR {
                                 let ns = d.as_nanos();
                                 if let Some(b) = limit.memory {
                                     let room = u128::from(b - read.footprint);

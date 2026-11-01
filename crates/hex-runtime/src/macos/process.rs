@@ -431,9 +431,6 @@ impl Watcher {
                 pid: u32::try_from(pid).unwrap_or(0),
                 started: r.started,
                 footprint: r.footprint,
-                // The watcher backs off only for a box using no CPU; a fast allocator burns CPU faulting
-                // pages even when rusage's footprint lags, so it is never mistaken for still.
-                cpu: r.cpu,
                 life,
             });
         }
