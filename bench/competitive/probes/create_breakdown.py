@@ -107,9 +107,11 @@ ONCE_PARTS = [
     ("the call reaches the node; the spec checked; its turn taken; the box's record looked for in both places", OWN),
     ("its cgroup looked for; a watch slot reserved; the box root counted", CGROUP),
 ] + CREATE_PARTS[7:13] + SEED_PARTS[13:23] + [RECORD_ENCODED, TEMP_MADE] + CREATE_PARTS[30:]
-# The node's bookkeeping, goal 5 extended step 5's first measure: the container's state written and its record's
-# write, as run 4 cut them (its parts 2-6 and 23-29: the record written twice, the state written and read back).
+# The node's bookkeeping, goal 5 extended step 5's first measure: the record's writes and the container's state
+# written, and read back where it is, as run 4 cut them (its parts 2-6 and 23-29: the record written twice, the state
+# written and read back), bookkeeping_of.
 STATE_WRITTEN = SEED_PARTS[22][0]
+READ_BACK = CREATE_PARTS[28][0]
 RECORD_FS = [TEMP_MADE[0]] + [n for n, _ in CREATE_PARTS[30:34]]
 # Run 4's bookkeeping (create-breakdown-20261031T061841Z, create_breakdown.md): its parts 2, 3, 23, 24, 25 and 26,
 # 0.047 + 0.032 + 0.051 + 0.027 + 0.066 + 0.069 ms, the record's fsyncs empty. Step 5's measures are against it.
@@ -127,6 +129,12 @@ def cgroup_made_of(parts):
     (plan step 5)."""
     return [k for k, (n, _) in enumerate(parts) if n in ("the box root listed, its boxes counted",
                                                          ONCE_PARTS[1][0], "the cgroup made (kernel)")]
+
+
+def bookkeeping_of(parts):
+    """The parts of a part list that are the node's bookkeeping: its record's writes (the record's group) and the
+    container's state written and read back."""
+    return [k for k, (n, g) in enumerate(parts) if g == RECORD or n in (STATE_WRITTEN, READ_BACK)]
 
 
 def named_parts(parts, *names):
@@ -318,12 +326,12 @@ def ops_for(trace):
 
 def check(run, prefix):
     bad = []
-    before = ("before",) if os.path.exists(os.path.join(run, f"{prefix}.before.json")) else ()
+    before = tuple(k for k in ("before", "traced-before") if os.path.exists(os.path.join(run, f"{prefix}.{k}.json")))
     for kind in ("libcrun", "seam", "traced", "detail") + before:
         errs, ms = eb.lifecycle_ms(os.path.join(run, f"{prefix}.{kind}.json"), "create")
         if errs or not ms:
             bad.append(f"{kind}: errors {errs}, {len(ms)} creates")
-        if kind in ("traced", "detail"):
+        if kind in ("traced", "detail", "traced-before"):
             stats = os.path.join(run, f"{prefix}.{kind}.stats")
             if eb.lost(stats):
                 bad.append(f"{kind}: the trace lost {eb.lost(stats)} events")
@@ -344,6 +352,20 @@ def check(run, prefix):
 
 def ratio(a, b):
     return a / b if a is not None and b else None
+
+
+def pooled_parts(run, kind):
+    """A traced kind's part list and each part's distribution over its rounds' creates cut whole, pooled; None
+    without one."""
+    spec, whole = None, []
+    for path in eb.rounds(run, kind).values():
+        trace = path[:-len(".json")] + ".txt"
+        ops = ops_for(trace)
+        spec = ops["create"][0]
+        whole += [c for c in eb.calls(trace, ops)[0] if "parts" in c]
+    if spec is None or not whole:
+        return None
+    return spec, [eb.dist([c["parts"][k] / 1000 for c in whole]) for k in range(len(spec))], len(whole)
 
 
 def summarize(run):
@@ -555,7 +577,7 @@ def summarize(run):
     # run 4's, and a record write's filesystem work, each create's own (its temp file made, written, closed, renamed
     # and, where it must outlive the host, synced).
     if whole and spec is ONCE_PARTS:
-        kept = named_parts(spec, STATE_WRITTEN, RECORD_ENCODED[0], *RECORD_FS)
+        kept = bookkeeping_of(spec)
         fs_parts = named_parts(spec, *RECORD_FS)
         bookkeeping = sum(parts[k]["p50"] for k in kept)
         fs = eb.dist([sum(c["parts"][k] for k in fs_parts) / 1000 for c in whole])
@@ -564,6 +586,15 @@ def summarize(run):
         s["bookkeeping"] = {"parts": [spec[k][0] for k in kept], "sum_of_part_p50s_ms": bookkeeping,
                             "run4_ms": RUN4_BOOKKEEPING_MS, "fall": fall, "record_fs_ms": fs,
                             "record_fs_rounds_ms": fs_r}
+        # The binary from before the change, traced in the same rounds: its bookkeeping as run 4's was cut.
+        traced_before = pooled_parts(run, "traced-before")
+        if traced_before:
+            bspec, bparts, bn = traced_before
+            bkept = bookkeeping_of(bspec)
+            before_ms = sum(bparts[k]["p50"] for k in bkept)
+            s["bookkeeping"]["before"] = {"creates": bn, "parts": [bspec[k][0] for k in bkept],
+                                          "parts_p50_ms": [bparts[k]["p50"] for k in bkept],
+                                          "sum_of_part_p50s_ms": before_ms, "fall": 1 - ratio(bookkeeping, before_ms)}
         lines += ["## The node's bookkeeping (goal 5 extended step 5)", "",
                   "| | " + " | ".join(f"r{r}" for r in rnds) + " | pooled p50 | pooled p99 |",
                   "|---|" + "---|" * (len(rnds) + 2),
@@ -573,6 +604,12 @@ def summarize(run):
                   + "; ".join(spec[k][0] for k in kept) + f"), their pooled p50s summed: {bookkeeping:.3f} ms, against "
                   f"run 4's {RUN4_BOOKKEEPING_MS:.3f} (its record written twice, the state written and read back): "
                   f"{100 * fall:.1f}% under.", ""]
+        if traced_before:
+            b = s["bookkeeping"]["before"]
+            lines += [f"The binary from before the change, traced in the same rounds ({b['creates']} creates cut "
+                      f"whole), its {len(b['parts'])} bookkeeping parts' pooled p50s ("
+                      + ", ".join(eb.ms3(x) for x in b["parts_p50_ms"]) + f") summed: {b['sum_of_part_p50s_ms']:.3f} "
+                      f"ms; the change's is {100 * b['fall']:.1f}% under it.", ""]
     s["create_parts"] = rec
     lines += ["Trace: " + ", ".join(f"r{r} {t['lost']} events lost and {t['unread']} lines not read as events"
                                     for r, t in sorted(traced.items())) + ".", ""]

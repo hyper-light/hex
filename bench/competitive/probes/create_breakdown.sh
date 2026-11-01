@@ -6,8 +6,10 @@
 # Every binary is copied into the run's directory, so what ran is kept beside what it measured. On fedora:
 #   create_breakdown.sh <hex release binary> <seam_oci release binary>
 # Env: N, WARMUP, ROUNDS, PROBE_ONLY (create_breakdown_inside.sh's), CPUSET (4-31); BEFORE_HEX and BEFORE_SEAM, a Hex
-# and seam_oci from before a change, whose seam rounds then run in every round beside the given ones (`before`), so a
-# change's ratio is each run's own and its rounds meet the same host; LOAD_GATE=0 skips the wait for
+# and seam_oci from before a change, whose seam rounds then run in every round beside the given ones, untimed by the
+# tracer (`before`) and traced (`traced-before`), so a change's ratio, and its parts', is each run's own and its
+# rounds meet the same host; they're staged as before/hex and before/seam_oci, the names the tracer keeps events of;
+# LOAD_GATE=0 skips the wait for
 # load under 2, as host.sh allows: this probe's comparisons are within one run (the parts against their creates,
 # Hex's create against libcrun's), which cancel other people's CPU load. BENCH_HOST_OK names another host, as
 # host.sh takes it.
@@ -22,7 +24,8 @@ done
 OUT="$BASE/out/create-breakdown-$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$OUT/bin"
 cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/crun" "$BASE/bin/libcrun-driver" "$OUT/bin/"
 if [ -n "${BEFORE_HEX:-}" ]; then
-  cp "$(realpath "$BEFORE_HEX")" "$OUT/bin/before-hex"; cp "$(realpath "${BEFORE_SEAM:?BEFORE_SEAM, with BEFORE_HEX}")" "$OUT/bin/before-seam_oci"
+  mkdir -p "$OUT/bin/before"
+  cp "$(realpath "$BEFORE_HEX")" "$OUT/bin/before/hex"; cp "$(realpath "${BEFORE_SEAM:?BEFORE_SEAM, with BEFORE_HEX}")" "$OUT/bin/before/seam_oci"
 fi
 [ "${LOAD_GATE:-1}" = 0 ] || for i in $(seq 1 90); do
   load=$(cut -d' ' -f1 /proc/loadavg)
@@ -42,8 +45,8 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "docker's root: $ROOT, on $(stat -f -c %T "$ROOT" 2>/dev/null || echo unknown) ($(findmnt -n -o SOURCE,FSTYPE,OPTIONS -T "$ROOT" 2>/dev/null | cut -c1-160))"
   echo "hex: $("$OUT/bin/hex" --version) (sha256 $(sha256sum "$OUT/bin/hex" | cut -c1-16)), $(file -b "$OUT/bin/hex" | cut -d, -f1-4)"
   echo "seam_oci: sha256 $(sha256sum "$OUT/bin/seam_oci" | cut -c1-16)"
-  [ -x "$OUT/bin/before-hex" ] && echo "before: hex sha256 $(sha256sum "$OUT/bin/before-hex" | cut -c1-16)," \
-    "seam_oci sha256 $(sha256sum "$OUT/bin/before-seam_oci" | cut -c1-16)"
+  [ -x "$OUT/bin/before/hex" ] && echo "before: hex sha256 $(sha256sum "$OUT/bin/before/hex" | cut -c1-16)," \
+    "seam_oci sha256 $(sha256sum "$OUT/bin/before/seam_oci" | cut -c1-16)"
   echo "crun: $("$OUT/bin/crun" --version | head -1) (sha256 $(sha256sum "$OUT/bin/crun" | cut -c1-16))"
   echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"

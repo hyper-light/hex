@@ -106,7 +106,11 @@ nothing but where it fired (`openat_in` and `open_in`, in a group of the run's o
 and removed at its end), so the temp file's open is cut from its entry, and the open's path is fetched only in the
 detailed trace, as before. `summarize` adds the step's measures: the node's bookkeeping, the state's write and the
 record's (their pooled p50s summed), against run 4's 0.292 ms (its parts 2, 3 and 23 to 26); and a record write's
-filesystem work, each create's temp file made, written, closed and renamed (and synced), p50 and p99.
+filesystem work, each create's temp file made, written, closed and renamed (and synced), p50 and p99. With a binary
+from before the change staged (`BEFORE_HEX`, `BEFORE_SEAM`, as before/hex and before/seam_oci, the names the tracer
+keeps events of), its seam rounds are traced too (`traced-before`), cut as their path is, so the bookkeeping is also
+set against the before binary's in the same rounds: its record's parts and the state written and read back, as run 4's
+were summed.
 
 Only events that cost a call little are traced: an open's entry fetches its path from user memory, about 4 µs an event
 (`exec_breakdown.md`), so the rounds trace the opens' exits and tell an open by its place. rustix opens with
