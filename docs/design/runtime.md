@@ -509,8 +509,9 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
     (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
     macOS's memory bound has two layers (Ada, 2026-11-01). The **primary** is a kernel-enforced, event-driven
-    cap the privileged helper arms (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`): a per-task physical-footprint ledger limit
-    (`task_set_phys_footprint_limit`) apportioned across the box's members so the limits sum to the bound, so
+    cap the privileged helper arms (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`): a per-task
+    physical-footprint ledger limit (`task_set_phys_footprint_limit`) apportioned across the box's members so
+    the limits sum to the bound, so
     the kernel fires a Mach `EXC_RESOURCE` the instant the tree crosses it (by pigeonhole some member crosses
     its share) — near-zero overshoot, ~zero watcher CPU, bounding the whole tree. The **defense-in-depth**
     second layer, which an unprivileged node has on its own, is Hex's own polling rule: a Mach time-constraint
