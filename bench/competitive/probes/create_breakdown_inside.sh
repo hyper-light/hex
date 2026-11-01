@@ -118,13 +118,14 @@ traced() {
 }
 
 # switch <out name> <lifecycles>: goal 5 plan step 2's AC-e. A throughput phase pinned to 8 creates in flight
-# (seam_oci's HEXBENCH_THROUGHPUT_CONC) with only the root switch events on — chroot, and pivot_root to prove the
-# path makes none — recording for the whole phase. It passes no HEXBENCH_TRACE, so seam_oci never toggles
-# tracing_on; this turns it on once and leaves it, so every init's chroot is caught however they interleave.
-# create_breakdown.py switch reads <out name>.txt against <out name>.stats (its per-CPU counts).
+# (seam_oci's HEXBENCH_THROUGHPUT_CONC) with the root's parts' events on — setns (the net-ns join that opens the
+# mounts, part 19), chroot (the switch, part 20), and pivot_root to prove the path makes none — recording for the
+# whole phase. It passes no HEXBENCH_TRACE, so seam_oci never toggles tracing_on; this turns it on once and leaves
+# it, so every init's events are caught however they interleave. create_breakdown.py switch reads <out name>.txt
+# against <out name>.stats (its per-CPU counts).
 switch() {
   local name=$1 lc=$2 rc=0
-  local SW="syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root"
+  local SW="syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 8192 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $SW; do
