@@ -13,10 +13,12 @@
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running;
 //! - T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the agent at each point of a create
-//!   (its cgroup and its container's state directory made, its init cloned, inside its one record
-//!   write, after it), its boxes' records durable and not, and restart it: the box killed mid-create
-//!   is cleaned up by what it left, the one made is taken back and deletes, and nothing of either is
-//!   left.
+//!   (in a debug build, at its cgroup made and at its bundle rendered, where the agent armed by
+//!   `hex node --crash-at` kills itself; its cgroup and its container's state directory made; its
+//!   init cloned; inside its one record write; after it), its boxes' records durable and not, and
+//!   restart it: the box killed mid-create is cleaned up by what it left, the one made is taken back
+//!   and deletes, and nothing of either is left; and a box whose own spec names the crash point, on an
+//!   agent that armed none, is made whole, the agent living on.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -37,7 +39,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
+    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Network, OciSpec, Program, Refusal,
+    Rootfs, Runtime, Stdio,
 };
 use hex_client::Client;
 use hex_core::record::{BoxRecord, Phase};
@@ -101,6 +104,17 @@ impl Agent {
     /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
     /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
     fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
+        Self::armed(exe, dir, box_root, runtime, None)
+    }
+
+    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given.
+    fn armed(
+        exe: &str,
+        dir: &Path,
+        box_root: PathBuf,
+        runtime: Option<&Path>,
+        crash_at: Option<&str>,
+    ) -> Self {
         let socket = dir.join("node.sock");
         let mut command = Command::new(exe);
         command
@@ -112,6 +126,9 @@ impl Agent {
             .arg("--box-root")
             .arg(&box_root)
             .stdout(Std::piped());
+        if let Some(point) = crash_at {
+            command.arg("--crash-at").arg(point);
+        }
         if let Some(runtime) = runtime {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
@@ -140,6 +157,16 @@ impl Agent {
 
     fn pid(&self) -> i32 {
         i32::try_from(self.child.id()).unwrap()
+    }
+
+    /// Waits for the agent to end, and how it ended.
+    fn ended(&mut self) -> std::process::ExitStatus {
+        self.child.wait().unwrap()
+    }
+
+    /// Whether the agent still runs.
+    fn runs(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
     }
 }
 
@@ -240,6 +267,19 @@ impl Lab {
         );
         std::fs::write(dir.join("config.json"), config).expect("config.json");
         dir
+    }
+
+    /// An `OciSpec` the node renders a bundle for: the lab's rootfs, the host's network, an init that
+    /// waits.
+    fn spec(&self) -> OciSpec {
+        OciSpec {
+            rootfs: Rootfs::Dir(self.rootfs.clone()),
+            init: program(&Self::act(&Act::Wait)),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Host,
+            hosts: Vec::new(),
+        }
     }
 
     /// The `hex selftest-box` program for `act`, as a container sees the binary (`/hex`).
@@ -553,6 +593,13 @@ enum Kept {
 /// extended step 5), so before it the agent leaves only parts at the paths the box's id fixes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum At {
+    /// Its cgroup made, nothing else of it: the agent armed to kill itself there (a debug build's crash
+    /// point), the box rendered from an `OciSpec`.
+    #[cfg(debug_assertions)]
+    CgroupMade,
+    /// Its bundle rendered after its cgroup, its container's state directory not made: likewise.
+    #[cfg(debug_assertions)]
+    BundleRendered,
     /// Its cgroup and its container's state directory made: the create held reading its bundle's
     /// config.json, a FIFO no one has opened.
     StateDir,
@@ -566,20 +613,41 @@ enum At {
     Made,
 }
 
-/// T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the node agent at each point of a
-/// create, with its boxes' records kept on tmpfs and on disk, then restart it. The agent is held at a
-/// point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the kernel
-/// shows it waiting there: with the cgroup and the container's state directory made; with the init
-/// cloned and the container's state written; inside the record write; and after it. Restarted, the
-/// agent removes the box killed mid-create by what it finds of it, and takes back the one made, which
-/// then deletes, so at every point nothing of the box is left: no record in either place, no temp
-/// file, no cgroup, no container state.
-fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
-    for kept in [Kept::Tmpfs, Kept::Disk] {
-        for at in [At::StateDir, At::Init, At::Ready, At::Made] {
-            crash_at(lab, own, exe, kept, at);
+impl At {
+    /// The crash point the agent is armed at to die at this point, as `hex node --crash-at` names it.
+    fn armed(self) -> Option<&'static str> {
+        match self {
+            #[cfg(debug_assertions)]
+            Self::CgroupMade => Some("cgroup-made"),
+            #[cfg(debug_assertions)]
+            Self::BundleRendered => Some("bundle-rendered"),
+            Self::StateDir | Self::Init | Self::Ready | Self::Made => None,
         }
     }
+}
+
+/// T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the node agent at each point of a
+/// create, with its boxes' records kept on tmpfs and on disk, then restart it. In a debug build the
+/// agent is armed to kill itself once the box's cgroup is made, and once its bundle is rendered: no
+/// file it opens can hold it there. Elsewhere it is held at a point by a FIFO no one has opened, or by
+/// the box's createRuntime hook, and killed once the kernel shows it waiting there: with the cgroup and
+/// the container's state directory made; with the init cloned and the container's state written;
+/// inside the record write; and after it. Restarted, the agent removes the box killed mid-create by
+/// what it finds of it, and takes back the one made, which then deletes, so at every point nothing of
+/// the box is left: no record in either place, no temp file, no cgroup, no container state, no
+/// bundle.
+fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
+    let mut points = Vec::new();
+    #[cfg(debug_assertions)]
+    points.extend([At::CgroupMade, At::BundleRendered]);
+    points.extend([At::StateDir, At::Init, At::Ready, At::Made]);
+    for kept in [Kept::Tmpfs, Kept::Disk] {
+        for at in &points {
+            crash_at(lab, own, exe, kept, *at);
+        }
+    }
+    #[cfg(debug_assertions)]
+    a_box_cannot_arm_the_agents_crash_point(lab, own, exe);
 }
 
 fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
@@ -613,13 +681,16 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     let id = BoxId::new(&name).unwrap();
     let state = dir.path().join("state");
     let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
+    let rendered = state.join("bundles").join(id.as_str());
     let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
-    let bundle = match at {
+    let class = match at {
+        #[cfg(debug_assertions)]
+        At::CgroupMade | At::BundleRendered => ClassSpec::Oci(Box::new(lab.spec())),
         At::StateDir => {
             let bundle = dir.path().join("bundle");
             std::fs::create_dir(&bundle).unwrap();
             mkfifo(&bundle.join("config.json"));
-            bundle
+            ClassSpec::Bundle(bundle)
         }
         At::Init | At::Ready => {
             // The create waits in its createRuntime hook, its container made, until this test makes
@@ -633,16 +704,22 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
                 r#",
   "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
             );
-            lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks)
+            ClassSpec::Bundle(lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks))
         }
-        At::Made => lab.bundle(&Lab::act(&Act::Wait)),
+        At::Made => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
     };
     let spec = BoxSpec {
         id: id.clone(),
         bounds: Bounds::default(),
-        class: ClassSpec::Bundle(bundle),
+        class,
     };
-    let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
+    let mut agent = Agent::armed(
+        exe,
+        dir.path(),
+        own.join(&name),
+        runtime.as_deref(),
+        at.armed(),
+    );
     if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
         return;
@@ -658,6 +735,16 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     let socket = agent.socket.clone();
     let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
     match at {
+        #[cfg(debug_assertions)]
+        At::CgroupMade | At::BundleRendered => {
+            use std::os::unix::process::ExitStatusExt;
+            let ended = agent.ended();
+            assert_eq!(
+                ended.signal(),
+                Some(9),
+                "{name}: the agent killed itself at its crash point: {ended:?}"
+            );
+        }
         At::StateDir => {}
         At::Init => wait_for("the create's hook to hold it", || hooked.exists()),
         At::Ready => {
@@ -673,7 +760,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         });
     }
     // What the kill leaves, as the point says: a record only once the box is made, its container's
-    // state written from its init's clone on.
+    // state directory from the runtime's create on, its state written from its init's clone on.
     let containers = || containers_of(&oci_root, &id);
     let written = || {
         std::fs::read(&record)
@@ -686,17 +773,24 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         None
     };
     assert_eq!(written(), made, "{name}: the record at the kill");
+    let state_dir_made = at.armed().is_none();
     assert_eq!(
         (containers().len(), cgroup.exists()),
-        (1, true),
+        (usize::from(state_dir_made), true),
         "{name}: (container states, the cgroup) at the kill"
+    );
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        rendered.exists(),
+        at == At::BundleRendered,
+        "{name}: the bundle at the kill"
     );
     let state_written = containers()
         .first()
         .is_some_and(|c| c.join("state.json").exists());
     assert_eq!(
         state_written,
-        at != At::StateDir,
+        state_dir_made && at != At::StateDir,
         "{name}: the container's state at the kill"
     );
     drop(agent);
@@ -738,14 +832,51 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         "{name}: its container's state is left"
     );
     assert!(!cgroup.exists(), "{name}: its cgroup is left");
+    assert!(!rendered.exists(), "{name}: its bundle is left");
     eprintln!(
-        "{name}: killed with the record {made:?}, its cgroup and container state made, the state {}written; after the restart {}, nothing left",
+        "{name}: killed with the record {made:?}, its cgroup made, its container's state directory {}made and its state {}written; after the restart {}, nothing left",
+        if state_dir_made { "" } else { "not " },
         if state_written { "" } else { "not " },
         if at == At::Made {
             "taken back, then deleted"
         } else {
             "cleaned up"
         }
+    );
+}
+
+/// T-T7.1.2's crash point is the agent's alone to arm (`hex node --crash-at`, from its own arguments):
+/// an agent started without it makes a box whose own spec names the point, in its init's environment as
+/// a variable might carry it, whole, and lives on. Debug builds only, where the point exists to be proven
+/// inert.
+#[cfg(debug_assertions)]
+fn a_box_cannot_arm_the_agents_crash_point(lab: &Lab, own: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("crash-unarmed-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let mut agent = Agent::over(exe, dir.path(), own.join("crash-unarmed"), None);
+    let client = agent.client();
+    let id = BoxId::new("names-the-crash-point").unwrap();
+    let mut spec = lab.spec();
+    for (name, point) in [
+        ("HEX_CRASH_AT", "cgroup-made"),
+        ("CRASH_AT", "bundle-rendered"),
+    ] {
+        spec.init.env.push((name.to_owned(), point.to_owned()));
+    }
+    let made = client
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Oci(Box::new(spec)),
+        })
+        .expect("a box naming the crash point is made");
+    assert_eq!(made.state, BoxState::Created);
+    assert!(agent.runs(), "the agent lives on");
+    client.delete(&id).unwrap();
+    eprintln!(
+        "a box naming the crash point in its own spec: made whole, the unarmed agent living on"
     );
 }
 

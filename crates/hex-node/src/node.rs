@@ -67,6 +67,31 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// guess at a directory's size (CLAUDE.md §2, §4).
 pub const LIST_PATIENCE: Duration = Duration::from_secs(60);
 
+/// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
+/// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
+/// of a create that no file it opens can hold it at (CLAUDE.md §6; goal 5 extended, step 5). Release
+/// builds have none, and an unarmed point does nothing.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashPoint {
+    /// The box's cgroup made and bounded, nothing else of it yet.
+    CgroupMade,
+    /// Its bundle rendered after its cgroup, its container's state directory not yet made.
+    BundleRendered,
+}
+
+#[cfg(debug_assertions)]
+impl CrashPoint {
+    /// The point `name` names, as `hex node --crash-at` takes it.
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "cgroup-made" => Some(Self::CgroupMade),
+            "bundle-rendered" => Some(Self::BundleRendered),
+            _ => None,
+        }
+    }
+}
+
 /// The cgroup under the box root that the `oci` boxes alone live under, so a root node's default device
 /// program can sit on it without reaching a `process` box (goal 5 extended, step 1; research f44). No
 /// box id starts with `.`, so it can't be a box's.
@@ -119,6 +144,9 @@ pub struct Node {
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
+    /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
+    #[cfg(debug_assertions)]
+    crash_at: Option<CrashPoint>,
 }
 
 /// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
@@ -208,7 +236,30 @@ impl Node {
                 rustix::fs::Mode::empty(),
             )
             .map_err(|e| Refusal::os("opening /dev/null", e))?,
+            #[cfg(debug_assertions)]
+            crash_at: None,
         })
+    }
+
+    /// Arms a debug-only crash point (T-T7.1.2): at `point` of each `oci` box's create from now on, the
+    /// node sends its own process SIGKILL, so a test kills the real agent where nothing it opens can hold
+    /// it. Only the node's caller arms it (`hex node --crash-at`, from the agent's own arguments): no
+    /// variable or file a container can set is read. Debug builds only.
+    #[cfg(debug_assertions)]
+    pub fn with_crash_point(mut self, point: CrashPoint) -> Self {
+        self.crash_at = Some(point);
+        self
+    }
+
+    /// Ends this process here as a kill would, when the caller armed `point`.
+    #[cfg(debug_assertions)]
+    fn crash_point(&self, point: CrashPoint) {
+        if self.crash_at == Some(point) {
+            let _ = rustix::process::kill_process(
+                rustix::process::getpid(),
+                rustix::process::Signal::KILL,
+            );
+        }
     }
 
     /// Sets how many `oci` boxes' inits the node watches at once, [`supervise::INIT_BUDGET`] unless
@@ -571,10 +622,16 @@ impl Node {
             dirs.push(dir.clone());
         }
         let cgroup = self.oci_boxes.create(&id, &spec.bounds)?;
+        #[cfg(debug_assertions)]
+        self.crash_point(CrashPoint::CgroupMade);
         let bundle = match source {
             Source::Given(bundle) => bundle,
             Source::Rendered(dir, rendered) => match write_bundle(&dir, &rendered) {
-                Ok(()) => dir,
+                Ok(()) => {
+                    #[cfg(debug_assertions)]
+                    self.crash_point(CrashPoint::BundleRendered);
+                    dir
+                }
                 Err(e) => {
                     let _ = self.scrub(&id);
                     return Err(e);

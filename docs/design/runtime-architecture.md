@@ -141,10 +141,12 @@ For the record written once (kiln research `01a190c51f137042a9697949c8fe2c7a`, f
 - **A record write by filesystem** (`levers.c`'s loop, a <!-- record: bench/competitive/probes/levers.md -->400-byte
   temp file written, closed and renamed: 6.7 us p50 on tmpfs, 49.6 on the overlay and 52.4 on btrfs<!-- /record -->),
   so a record kept beside the containers' state on tmpfs takes about 43 us of filesystem work off each write.
-- **Nothing leaked at any point of a create** (T-T7.1.2): the agent killed with the box's cgroup and container
-  state made, with its init cloned, inside its record write, and after it, its records kept on tmpfs and on disk,
-  then restarted: the box killed mid-create is removed by what it left and the one made is taken back, nothing left
-  of either (`crates/hex-cli/tests/node_socket.rs`, rootless on adacachy, Linux 7.2.9);
+- **Nothing leaked at any point of a create** (T-T7.1.2): the agent killed with the box's cgroup made, with its
+  bundle rendered (in a debug build, the agent armed by `hex node --crash-at` killing itself there, since nothing
+  it opens can hold it at those points; a box's own spec can't arm it), with its cgroup and container state made,
+  with its init cloned, inside its record write, and after it, its records kept on tmpfs and on disk, then
+  restarted: the box killed mid-create is removed by what it left and the one made is taken back, nothing left of
+  either (`crates/hex-cli/tests/node_socket.rs`);
   recovery's plan crashed after every step of generated histories against a model (`recovery.rs`).
 
 **What would falsify it.** A record that must outlive the host, such as one for a persistent volume; that record

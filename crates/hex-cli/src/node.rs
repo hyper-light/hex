@@ -10,13 +10,17 @@
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, binds the socket, says
 //! `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on stderr
 //! and exits 1. A socket an ended agent left at the path is replaced; one a live agent serves is
-//! refused.
+//! refused. A debug build also takes `--crash-at <cgroup-made|bundle-rendered>`, which arms the node's
+//! crash point there (`hex_node::CrashPoint`) for T-T7.1.2's crash test: from the agent's own
+//! arguments alone, so no container can arm it.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use hex_api::Refusal;
+#[cfg(debug_assertions)]
+use hex_node::CrashPoint;
 use hex_node::Node;
 use hex_node::serve::{LIMITS, Server, WORKERS};
 use rustix::process::Resource;
@@ -40,12 +44,28 @@ struct Args {
     socket: PathBuf,
     state: PathBuf,
     box_root: Option<PathBuf>,
+    #[cfg(debug_assertions)]
+    crash_at: Option<CrashPoint>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut socket, mut state, mut box_root) = (None, None, None);
+    #[cfg(debug_assertions)]
+    let mut crash_at = None;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
+        #[cfg(debug_assertions)]
+        if flag == "--crash-at" {
+            let name = rest
+                .next()
+                .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
+            let point = CrashPoint::named(name)
+                .ok_or_else(|| format!("{flag} names no crash point: {name:?}"))?;
+            if crash_at.replace(point).is_some() {
+                return Err(format!("{flag} is given twice\n{USAGE}"));
+            }
+            continue;
+        }
         let slot = match flag.as_str() {
             "--socket" => &mut socket,
             "--state" => &mut state,
@@ -63,6 +83,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
         socket: socket.ok_or_else(|| format!("--socket is needed\n{USAGE}"))?,
         state: state.ok_or_else(|| format!("--state is needed\n{USAGE}"))?,
         box_root,
+        #[cfg(debug_assertions)]
+        crash_at,
     })
 }
 
@@ -78,6 +100,11 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         None => Node::beside_self(&args.state, &args.state),
     }
     .map_err(failed)?;
+    #[cfg(debug_assertions)]
+    let node = match args.crash_at {
+        Some(point) => node.with_crash_point(point),
+        None => node,
+    };
     node.recover().map_err(failed)?;
     let mut server = Server::bind(&args.socket, Arc::new(node), LIMITS, WORKERS).map_err(failed)?;
     let mut out = std::io::stdout().lock();
