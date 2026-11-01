@@ -649,7 +649,8 @@ per-create assertion in the runs above (part 20, "the root moved onto / and chro
   every part of its creates grew, the init's clone (part 16) 0.176 against 0.116 and its mounts (part 19) 0.228
   against 0.169, while the switch, where a walk of the host's threads would show, stayed at 0.001. libcrun's create,
   whose `pivot_root` walks them, grew 2.0x, 2.6x and 1.9x with them (4.365 and 5.754 over 2.186, 5.257 over 2.728). A
-  comparison across runs carries whatever else ran beside each, so run 12 measures it within one run.
+  comparison across runs carries whatever else ran beside each, so these three are listed for the record and AC-c's
+  figure of record is run 12's, measured within one run.
 
 ## Run 11 (2026-11-01, fedora): 4,000 extra mounts in the agent's namespace, not of record
 
@@ -669,22 +670,34 @@ per-create assertion in the runs above (part 20, "the root moved onto / and chro
   bench container. Threads in the container are the host's like any other, so `pivot_root`'s walk
   (`chroot_fs_refs`'s `for_each_process_thread`) visits them. Each runtime's ratio to its own items without them in the
   same rounds is the run's own, as step 1's `BEFORE_HEX` A/B is. libcrun's ratio is the control that they are walked.
-- **Host and load:** run 10's, its second boot, `LOAD_GATE=0`; MemAvailable 33 GB at the start.
-- **Binaries:** run 9's (aed6da3's). **Harness:** 14f9d13.
+- **Host and load:** run 10's, its second boot, `LOAD_GATE=0`; MemAvailable 33,116, 44,243 and 45,072 MiB at the
+  runs' starts.
+- **Binaries:** run 9's (aed6da3's). **Harness:** 14f9d13 for the first two runs; 2823023 for the third, which records
+  each idle item's threads in `idle_threads.txt`: the helper's, counted at the item's start and at its end, and the
+  host's then (`/proc/loadavg`'s count of the kernel's threads, which no pid namespace narrows).
 
 | run | rounds | load at start | Hex: with / without, pooled p50 | its ratio, by round | its ratio, pooled | libcrun: with / without | its ratio, pooled |
 |---|---|---|---|---|---|---|---|
 | 20261101T230322Z | 3 | 21.08 | 1.010 / 1.043 | 1.041, 1.356, 0.770 | 0.969 | 5.898 / 2.975 | 1.982 |
 | 20261101T230639Z | 5 | 16.61 | 1.185 / 1.205 | 0.987, 0.696, 0.936, 1.071, 1.013 | 0.983 | 6.330 / 3.316 | 1.909 |
+| 20261101T232039Z | 5 | 12.41 | 0.806 / 0.806 | 0.920, 1.041, 0.893, 0.964, 1.128 | 0.999 | 4.669 / 2.389 | 1.954 |
 
-- **AC-c met:** with the 24,000 idle threads Hex's create p50 is 0.969 and 0.983 of its own without them in the same
-  rounds (pooled over 3,000 and 5,000 creates each), within 10%, while libcrun's grows 1.982x and 1.909x, in every
-  round 1.67x to 2.70x: the threads are walked by a `pivot_root`, and Hex's create makes none. Hex's round-by-round
-  ratios straddle 1 (0.696 to 1.356) as the host's load moved under them; libcrun's never fall under 1.6. The second
-  run ended at a 1-minute load of 218, from builds beside it.
-- The runs' other figures: Hex's create p50 0.350x and 0.363x libcrun's (1.043 over 2.975, 1.205 over 3.316; AC-b);
-  the switch's pooled p50 0.002 ms (AC-a); the parts summed to 99.8% and 101.9% of the creates between; no
-  `pivot_root` in their traces.
+- **AC-c met, and this is its figure of record:** with the 24,000 idle threads Hex's create p50 is 0.969, 0.983 and
+  0.999 of its own without them in the same rounds (pooled over 3,000, 5,000 and 5,000 creates each), within 10%,
+  while libcrun's grows 1.982x, 1.909x and 1.954x, in every round 1.40x to 2.70x: the threads are walked by a
+  `pivot_root`, and Hex's create makes none. It is the figure of record because its two sides meet the same host:
+  every round runs both kinds of item in a shuffled order, so what ran beside the run (kiln CI's builds, step 5's
+  units, the containers filling the host's memory) falls on both alike and the ratio cancels it, as Ada's rule for a
+  noisy host asks and as step 1's `BEFORE_HEX` A/B does. Run 10's pairs compare two runs that met different hosts.
+  Hex's round-by-round ratios straddle 1 (0.696 to 1.356) as the host's load moved under them; libcrun's never fall
+  under 1.4. The second run ended at a 1-minute load of 218, from builds beside it.
+- **The threads, item by item (20261101T232039Z):** every idle item, the probe's and each round's `seam_idle` and
+  `libcrun_idle`, had all 24,001 of the helper's tasks (its 24,000 threads and itself) up at its start and at its end;
+  the host's threads were 26,898 to 27,745 across them. The first two runs' harness refused an item whose threads
+  didn't all come up but didn't record the count; none was refused.
+- The runs' other figures: Hex's create p50 0.350x, 0.363x and 0.337x libcrun's (1.043 over 2.975, 1.205 over 3.316,
+  0.806 over 2.389; AC-b); the switch's pooled p50 0.001 to 0.002 ms (AC-a); the parts summed to 99.8%, 101.9% and
+  98.3% of the creates between; no `pivot_root` in their traces.
 
 ## The root lab beside these runs (AC-f, AC-g, the step's tests)
 
