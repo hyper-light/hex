@@ -7,11 +7,14 @@
 #   traced   the same with the breakdown's tracer on around create (seam_oci's HEXBENCH_TRACE and
 #            HEXBENCH_TRACE_OPS=create): an ftrace instance of this run's own records every other timed create and
 #            what it ran, cut into parts by create_breakdown.py; the creates between are its untraced twins.
+#   seam_idle, libcrun_idle  with IDLE_AB set: the seam's and libcrun's lifecycle phases with that many idle threads
+#            up in this container (with_idle), so the same rounds time each with and without them (goal 5 plan
+#            step 2's AC-c within one run); libcrun's pivot_root walks them, the control that they are walked.
 # Then create_breakdown.py writes summary.md and summary.json. A round's item that fails is logged and skipped (the
 # summary names what's missing); a probe that fails ends the run before any round. The probes include a detailed
 # trace, which adds each open's entry with its path, so create_breakdown.py can hold the rounds' cuts to the files
 # they stand for.
-# Env: N (1000), WARMUP (100), ROUNDS (3).
+# Env: N (1000), WARMUP (100), ROUNDS (3), IDLE_AB (0: no idle kinds).
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-3}
 OUT=/opt/out; mkdir -p /run/err
@@ -158,8 +161,30 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
   echo "inside: the node's state under $HOME/.cache/hex-t7/ociseam, on $(stat -f -c %T "$HOME/.cache/hex-t7/ociseam")" \
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0}"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0}"
 } >> "$OUT/env.txt"
+
+# with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
+# by create_breakdown.sh). They are threads of the host's like any other, so pivot_root's walk of every thread
+# (chroot_fs_refs's for_each_process_thread) visits them though they sit in this container's pid namespace. The
+# helper is ended, its threads with it, before the command's status is returned; threads that don't all come up in
+# 30 s refuse the item.
+with_idle() {
+  local pid up i rc=0
+  /opt/bin/idlethreads "$IDLE_AB" > /run/idlethreads.out 2>&1 &
+  pid=$!
+  for i in $(seq 1 150); do
+    up=$(ls "/proc/$pid/task" 2>/dev/null | wc -l)
+    [ "$up" -ge "$IDLE_AB" ] && break
+    if [ "$i" = 150 ]; then
+      echo "refusing: only $up of $IDLE_AB idle threads came up" >&2; kill "$pid"; wait "$pid" 2>/dev/null; return 1
+    fi
+    sleep 0.2
+  done
+  "$@" || rc=1
+  kill "$pid"; wait "$pid" 2>/dev/null
+  return $rc
+}
 
 # AC_E (goal 5 plan step 2, AC-e): a focused run of its own, not the rounds. The root switch (chroot) p99 at
 # 8 creates in flight, while the host holds AC-e's idle threads (create_breakdown.sh's IDLE_THREADS). A small
@@ -190,6 +215,11 @@ if [ -x /opt/bin/before-hex ]; then
   HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/probe.before.json" 2 0 0 /opt/bin/before-hex /run/bundle-sleep \
     /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the before binary's probe failed ($OUT/probe.log)" >&2; exit 5; }
 fi
+if [ "${IDLE_AB:-0}" -gt 0 ]; then
+  KINDS="$KINDS seam_idle libcrun_idle"
+  with_idle env HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam_idle.json" 2 0 0 /opt/bin/hex /run/bundle-sleep \
+    /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the probe with idle threads failed ($OUT/probe.log)" >&2; exit 5; }
+fi
 traced probe.traced 3 1 >> "$OUT/probe.log" 2>&1 || { echo "refusing: the traced probe failed ($OUT/probe.log)" >&2; exit 5; }
 traced probe.detail 20 1 detail >> "$OUT/probe.log" 2>&1 \
   || { echo "refusing: the detailed traced probe failed ($OUT/probe.log)" >&2; exit 5; }
@@ -215,6 +245,10 @@ for round in $(seq 1 "$ROUNDS"); do
       traced) traced "traced.r$round" "$N" "$WARMUP" ;;
       before) HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/before.r$round.json" "$N" "$WARMUP" 0 \
                 /opt/bin/before-hex /run/bundle-sleep /run/bundle-true >> "$OUT/before.log" 2>&1 ;;
+      seam_idle) with_idle env HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam_idle.r$round.json" "$N" "$WARMUP" 0 \
+                   /opt/bin/hex /run/bundle-sleep /run/bundle-true >> "$OUT/seam_idle.log" 2>&1 ;;
+      libcrun_idle) with_idle env HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun \
+                      "$OUT/libcrun_idle.r$round.json" "$N" "$WARMUP" 0 0 64 >> "$OUT/libcrun_idle.log" 2>&1 ;;
     esac || echo "round $round: $one FAILED"
   done
 done

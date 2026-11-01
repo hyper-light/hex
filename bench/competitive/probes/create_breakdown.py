@@ -379,7 +379,8 @@ def summarize(run):
     # Each round's create p50: libcrun's and the seam's untraced runs, and the traced run's creates with the
     # tracer recording (every other one) and between them.
     rows = {kind: {r: eb.lifecycle_ms(p, "create") for r, p in eb.rounds(run, kind).items()}
-            for kind in ("libcrun", "seam", "before") if kind != "before" or eb.rounds(run, kind)}
+            for kind in ("libcrun", "seam", "before", "seam_idle", "libcrun_idle")
+            if kind in ("libcrun", "seam") or eb.rounds(run, kind)}
     rows["traced: recording"], rows["traced: between"] = {}, {}
     for rnd, path in eb.rounds(run, "traced").items():
         errs = eb.lifecycle_ms(path, "create")[0]
@@ -413,6 +414,20 @@ def summarize(run):
         s["seam_over_before"] = {"rounds": per, "pooled": pooled}
         lines += ["The seam's create p50 over the before binary's, in the same rounds: "
                   + ", ".join(f"r{r} {eb.ms3(x)}" for r, x in per.items()) + f"; pooled {eb.ms3(pooled)}.", ""]
+    # With idle threads up around some items (IDLE_AB: `seam_idle`, `libcrun_idle`, shuffled in with the others; goal
+    # 5 plan step 2's AC-c), each runtime's create p50 with them over its own without them is this run's own, by round
+    # and pooled. libcrun's is the control: its pivot_root walks every thread on the host, so it grows with them.
+    idle = {}
+    for kind, base in (("seam_idle", "seam"), ("libcrun_idle", "libcrun")):
+        if kind in lat:
+            with_r, without_r = lat[kind]["rounds"], lat[base]["rounds"]
+            per = {r: ratio(with_r[r]["p50"], without_r[r]["p50"]) for r in nums if r in with_r and r in without_r}
+            idle[base] = {"rounds": per, "pooled": ratio(lat[kind]["pooled"]["p50"], lat[base]["pooled"]["p50"])}
+            lines += [f"{base}'s create p50 with the idle threads over its own without them, in the same rounds: "
+                      + ", ".join(f"r{r} {eb.ms3(x)}" for r, x in per.items())
+                      + f"; pooled {eb.ms3(idle[base]['pooled'])}.", ""]
+    if idle:
+        s["idle_over_without"] = idle
 
     # The parts, by traced round and pooled, each round's sum set against its own calls.
     by_round = {r: [c for c in traced[r]["calls"] if "parts" in c] for r in rnds}

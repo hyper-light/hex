@@ -7,7 +7,9 @@
 #   create_breakdown.sh <hex release binary> <seam_oci release binary>
 # Env: N, WARMUP, ROUNDS, PROBE_ONLY (create_breakdown_inside.sh's), CPUSET (4-31); BEFORE_HEX and BEFORE_SEAM, a Hex
 # and seam_oci from before a change, whose seam rounds then run in every round beside the given ones (`before`), so a
-# change's ratio is each run's own and its rounds meet the same host; LOAD_GATE=0 skips the wait for
+# change's ratio is each run's own and its rounds meet the same host; IDLE_AB, that many idle threads around a seam
+# and a libcrun item in every round (`seam_idle`, `libcrun_idle`), the threads' ratio the run's own the same way;
+# IDLE_THREADS, EXTRA_MOUNTS and AC_E, goal 5 plan step 2's (below); LOAD_GATE=0 skips the wait for
 # load under 2, as host.sh allows: this probe's comparisons are within one run (the parts against their creates,
 # Hex's create against libcrun's), which cancel other people's CPU load. BENCH_HOST_OK names another host, as
 # host.sh takes it.
@@ -73,11 +75,19 @@ if [ "${IDLE_THREADS:-0}" -gt 0 ]; then
   done
   echo "idle threads: $(ls "/proc/$HELPER/task" 2>/dev/null | wc -l) up (asked $IDLE_THREADS), host threads now $(ls -d /proc/[0-9]*/task/[0-9]* 2>/dev/null | wc -l)" >> "$OUT/env.txt"
 fi
+# IDLE_AB (goal 5 plan step 2, AC-c within one run): that many idle threads, started inside the bench container
+# around every round's seam_idle and libcrun_idle (create_breakdown_inside.sh's with_idle), so each round times Hex's
+# create, and libcrun's as the control whose pivot_root walks them, with and without them: the ratio is the run's own,
+# its rounds meeting the same host, where IDLE_THREADS's runs compare across runs.
+if [ "${IDLE_AB:-0}" -gt 0 ]; then
+  gcc -O2 -pthread -o "$OUT/bin/idlethreads" "$HERE/idlethreads.c"
+  echo "idle-thread A/B: $IDLE_AB idle threads up inside the container around each round's seam_idle and libcrun_idle; host threads before them $(ls -d /proc/[0-9]*/task/[0-9]* 2>/dev/null | wc -l)" >> "$OUT/env.txt"
+fi
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$HELPER" 2>/dev/null || true' EXIT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E -e IDLE_AB \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done
