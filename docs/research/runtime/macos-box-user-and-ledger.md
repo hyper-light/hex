@@ -15,6 +15,21 @@ XNU is read at `apple-oss-distributions/xnu` `xnu-12377.1.9` (`f6217f8`), the tr
 Studio (`bench/native/macos/boxuser_probe.c`); reading the source fixes the mechanism, not the timing or the
 kernel's exact release-build choices.
 
+**The headline finding (measured rootless, 2026-11-01, `records/boxuser-rootless-e532df3-20261101T071544Z.txt`).**
+Step 1's rootless map concluded "no rootless kernel cap on a process tree's memory", but it only tried to set
+a limit on an **already-running** task (root-gated). Setting the same physical-footprint ledger limit **at
+spawn**, through `posix_spawn`'s jetsam attribute (`posix_spawnattr_setjetsam_ext`, `MEMLIMIT_ACTIVE_FATAL`),
+is **not** privileged: on adas-mac-studio-3 an unprivileged process (euid 501) spawned a child with a fatal
+cap, and the kernel killed the child at exactly the cap with **0 MiB overshoot** at 16, 64 and 256 MiB (3/3
+passes each). So macOS **does** give a rootless, kernel-enforced hard cap on a process's footprint — but only
+on the process as spawned: a **fork resets it** (`bsd/kern/kern_fork.c:1199-1209`), and re-arming the running
+fork is root (§3). Measured: a child of a 64-MB-capped leader reached 256 MiB alive; of a 128-MB leader,
+513 MiB. So the rootless cap bounds a program and its non-forking subtree (N such caps summing to B bound a
+non-forking box's total at ~0 overshoot), and the privileged helper's memory job narrows to exactly what
+rootless can't do — **arm the forked members, and rebalance** (§3, §5). This refines, not overturns, Ada's
+step-2 call (the ledger approach): the ledger limit is the mechanism either way; the helper is what carries it
+across a fork.
+
 ## 1. Membership: a user of its own, which a member can't drop
 
 Step 1 and native-platforms.md §3 establish it: macOS cannot follow a fork (`NOTE_TRACK` was removed in 10.5,
@@ -64,7 +79,13 @@ new_limit_mb, …)` sets it (`osfmk/kern/task.c:7583`), and it is root-gated:
   …)`, which needs root or the `com.apple.private.memorystatus` entitlement, else `EPERM`
   (`bsd/kern/kern_memorystatus.c:9191-9193`). `posix_spawn` sets the same thing atomically at spawn through its
   jetsam attribute (`posix_spawnattr_setjetsam_ext`, applied at exec, `bsd/kern/kern_exec.c:4642-4678`), which
-  is how the helper arms a box's leader **before its first instruction** (§5).
+  is how a box's leader (and each program the class `exec`s) is armed **before its first instruction**.
+- **The spawn-time door is not privileged.** Setting the limit on a running task is root (above), but passing
+  it as a `posix_spawn` jetsam attribute is allowed to any caller for its own child: measured rootless, a
+  fatal cap holds a spawned process to the limit with 0 MiB overshoot (the headline finding). So the class
+  arms every program it spawns **rootless**, and needs the helper only to arm a member that a running member
+  **forks** — `fork` zeroes the child's limit (§5) and re-arming a running task is root. The helper is thus
+  required for the fork tree and for rebalancing, not for the first cap.
 
 The limit is per task. A box's bound is apportioned across its members so their limits sum to the bound less a
 reserve (`hex_core::boxuser::apportion`): by pigeonhole the armed members' footprints then sum to at most
@@ -169,18 +190,27 @@ is. Coalitions stay a possible optimisation for the read, noted, not the mechani
 
 ## 9. To measure, as root on the Mac Studio (`boxuser_probe.c`)
 
+### Measured rootless (no password), 2026-11-01, `records/boxuser-rootless-e532df3-20261101T071544Z.txt`
+
+- `cap fatal MB` (the headline): a fatal spawn cap holds a spawned process to the limit, killed at it, **0 MiB
+  overshoot** at 16/64/256 MiB, 3/3 passes. The rootless hard cap.
+- `fork CAP ALLOC`: a capped leader's **forked** grandchild escapes — 256 MiB alive under a 64-MB cap, 513 MiB
+  under 128 MB. The helper's gap.
+- `box B N steady`: N fatal caps summing to B bound a non-forking box's total at 256→256 MiB (N≤8) and
+  256→252 MiB (N=14,28; the −4 is integer share rounding, 256/28·28=252), ~0 overshoot.
+
+### Still to measure, as root on the Mac Studio
+
 Root needs Ada's admin password; ask when the lab is ready, and never store or print it (plan step 2). Three
 passes of each, recorded in `bench/native/macos/`:
 
-- `priv` — root arms `task_set_phys_footprint_limit` on a spawned child and reads it back; the rootless
-  `KERN_NO_ACCESS` becomes success.
-- `cap fatal|soft MB` — a child allocates at full speed under a fatal, then a high-watermark, per-task limit:
-  overshoot and the kill (fatal); the notification's latency, once-per-limit, and re-arm (soft).
-- `spawnarm fatal MB` — the leader armed at spawn (`posix_spawnattr_setjetsam_ext`): the cap holds from the
-  first instruction.
-- `forkwin MB` — a leader forks a hog; the window from fork to arm and the child's footprint at arm.
+- `priv` — root arms `task_set_phys_footprint_limit` on a **running** child (the rootless `KERN_NO_ACCESS`
+  becomes success): the path that arms a **forked** member.
+- `cap soft MB` — a high-watermark (non-fatal) limit, watched on an `EXC_MASK_RESOURCE` port: the
+  notification's latency, that it fires once per limit, and whether a root re-arm re-fires it — deciding
+  whether the box's rebalance is event-driven (§4 route (c)) or polled (route (b)).
 - `uid UID N` — N members under a pool uid, one daemonized: `proc_listpids(PROC_UID_ONLY)` finds all,
   `RLIMIT_NPROC` caps the forks, a kill-all empties the uid.
-- `box B N steady|burst` — per-task limits summing to B across N = 1,4,8,14,28 members allocating at full
-  speed: the box's total overshoot (target ≤ 8 MiB steady; ≤ 64 MiB for a 28-member fork burst) and the
-  helper's CPU (target ≤ 0.1% of a core at 95% of the bound).
+- `box B N burst` — the helper arms N members forked at once; the box's total overshoot (target ≤ 64 MiB) and
+  the arming window per member, plus the elastic steady case (one hungry member in a box of idle ones, target
+  ≤ 8 MiB overshoot) and the helper's CPU (target ≤ 0.1% of a core at 95% of the bound).

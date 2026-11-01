@@ -1,0 +1,21 @@
+# boxuser_probe, rootless (euid 501), adas-mac-studio-3, macOS 26.2 25C56, arm64, commit e532df3, 2026-11-01T07:15:44Z
+# load1 1.72, cores 14, clang Apple clang version 21.0.0 (clang-2100.1.1.101)
+## F1 fatal per-task cap at spawn (3 passes each)
+fatal limit 16 MB: killed by signal 9, peak footprint 16 MiB (overshoot 0 MiB)
+fatal limit 16 MB: killed by signal 9, peak footprint 16 MiB (overshoot 0 MiB)
+fatal limit 16 MB: killed by signal 9, peak footprint 16 MiB (overshoot 0 MiB)
+fatal limit 64 MB: killed by signal 9, peak footprint 64 MiB (overshoot 0 MiB)
+fatal limit 64 MB: killed by signal 9, peak footprint 64 MiB (overshoot 0 MiB)
+fatal limit 64 MB: killed by signal 9, peak footprint 64 MiB (overshoot 0 MiB)
+fatal limit 256 MB: killed by signal 9, peak footprint 256 MiB (overshoot 0 MiB)
+fatal limit 256 MB: killed by signal 9, peak footprint 256 MiB (overshoot 0 MiB)
+fatal limit 256 MB: killed by signal 9, peak footprint 256 MiB (overshoot 0 MiB)
+## F2 fork escapes the rootless cap
+fork: leader FATAL-capped at 64 MB; grandchild (forked) tried 256 MiB -> peak 256 MiB, alive=1 => the spawn cap does NOT bound (escaped, needs the helper) the fork
+fork: leader FATAL-capped at 128 MB; grandchild (forked) tried 512 MiB -> peak 513 MiB, alive=1 => the spawn cap does NOT bound (escaped, needs the helper) the fork
+## F3 box of N fatally-capped members, static, rootless
+box 256 MiB, 1 members (steady): peak total 256 MiB (overshoot 0 MiB), probe CPU 2.9% of a core over 11905 ms
+box 256 MiB, 4 members (steady): peak total 256 MiB (overshoot 0 MiB), probe CPU 3.4% of a core over 11834 ms
+box 256 MiB, 8 members (steady): peak total 256 MiB (overshoot 0 MiB), probe CPU 3.9% of a core over 11968 ms
+box 256 MiB, 14 members (steady): peak total 252 MiB (overshoot -4 MiB), probe CPU 4.5% of a core over 12056 ms
+box 256 MiB, 28 members (steady): peak total 252 MiB (overshoot -4 MiB), probe CPU 5.9% of a core over 12214 ms
