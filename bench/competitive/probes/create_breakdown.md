@@ -94,6 +94,20 @@ and the seed's fork is the first after them.
 others, so the change's ratio, the seam's create p50 over the before binary's, is each run's own and its rounds meet
 the same host. `summarize` prints it by round and pooled.
 
+**The record written once** (goal 5 extended, step 5, from cp/t7-ext-s5 on): a create writes the box's record once,
+when the box is whole, and the oci runtime hands the node the state it wrote, so the seed path loses its first record
+write and the state's read back. `ops_for` takes that path when the agent renames nothing into place before the box
+cgroup's `mkdir`, and cuts it into 25 parts: the box's record looked for in both of its places (the agent's first two
+`openat`s, each of `<id>.json`); the cgroup looked for, a watch slot reserved and the box root counted; the seed path's
+parts from the cgroup's `mkdir` to the state's rename; then the record's one write: encoded, up to its temp file's
+open; the temp file made; written, closed and renamed into place; and, for a record that must outlive the host, its
+fsyncs. Each open's entry is marked by a kprobe on the `openat` and `open` system calls' entry points that records
+nothing but where it fired (`openat_in` and `open_in`, in a group of the run's own, `hexcb_<pid>`, defined for the run
+and removed at its end), so the temp file's open is cut from its entry, and the open's path is fetched only in the
+detailed trace, as before. `summarize` adds the step's measures: the node's bookkeeping, the state's write and the
+record's (their pooled p50s summed), against run 4's 0.292 ms (its parts 2, 3 and 23 to 26); and a record write's
+filesystem work, each create's temp file made, written, closed and renamed (and synced), p50 and p99.
+
 Only events that cost a call little are traced: an open's entry fetches its path from user memory, about 4 µs an event
 (`exec_breakdown.md`), so the rounds trace the opens' exits and tell an open by its place. rustix opens with
 `open(2)` on x86_64, std with `openat(2)`, so both are traced. Percentiles are nearest-rank. tracefs prints the clock to

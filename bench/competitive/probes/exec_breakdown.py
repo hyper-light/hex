@@ -61,6 +61,9 @@ def drain(pipe, out, stop):
 LINE = re.compile(r"^\s*(?P<comm>.*?)-(?P<pid>\d+)\s+\[(?P<cpu>\d+)\]\s+\S+\s+(?P<s>\d+)\.(?P<us>\d{6}):\s+(?P<body>.*)$")
 SYS_ENTER = re.compile(r"^sys_(?P<name>\w+)\((?P<args>.*)\)\s*$")
 SYS_EXIT = re.compile(r"^sys_(?P<name>\w+) -> (?P<ret>0x[0-9a-f]+|-?\d+)\s*$")
+# A kprobe on a system call's entry point that records nothing but where it fired (create_breakdown_inside.sh's
+# `<call>_in`): the call's entry, marked without fetching its arguments.
+PROBE = re.compile(r"^(?P<name>\w+)_in: \(")
 KV = re.compile(r"(\w+)=(\S+)")
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -96,6 +99,8 @@ def parse(path):
                 events.append(Event(ts, pid, "exit", e["name"], e["ret"]))
             elif (e := SYS_ENTER.match(body)):
                 events.append(Event(ts, pid, "enter", e["name"], e["args"]))
+            elif (e := PROBE.match(body)):
+                events.append(Event(ts, pid, "probe", e["name"], body))
             else:
                 unread += 1
     return events, unread
@@ -125,6 +130,11 @@ def enter(pid, *names):
 
 def exited(pid, *names):
     return lambda e: e.pid == pid and e.kind == "exit" and e.name in names
+
+
+def probed(pid, *names):
+    """A call's entry as its kprobe marked it (PROBE)."""
+    return lambda e: e.pid == pid and e.kind == "probe" and e.name in names
 
 
 def sched(pid, name):

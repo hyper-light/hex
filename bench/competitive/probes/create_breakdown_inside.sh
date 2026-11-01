@@ -49,9 +49,20 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 # seed, and the container's init either clones, until the init execs its workload at start); a write only for hex's,
 # the shim's pid line and the init's ready signal. open as well as openat: rustix opens with open(2) on x86_64. The
 # clock is CLOCK_MONOTONIC's.
+#
+# Each open's entry is marked too, by a kprobe on the openat and open system calls' entry points that records
+# nothing but where it fired (goal 5 extended step 5): it fetches no path, so it costs a call little, and a record
+# write is cut from its temp file's open on, its filesystem work its own parts. The kprobes are defined for this run
+# alone (group hexcb_<pid>), enabled only in its instance, and removed when it ends.
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hexcb-$$"
+KG="hexcb_$$"
+case $(uname -m) in
+  x86_64) SYS=__x64_sys ;;
+  aarch64) SYS=__arm64_sys ;;
+  *) echo "refusing: no syscall entry points known for $(uname -m)" >&2; exit 4 ;;
+esac
 EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit
   syscalls/sys_exit_openat syscalls/sys_exit_open syscalls/sys_enter_fsync syscalls/sys_exit_fsync
   syscalls/sys_exit_rename syscalls/sys_exit_renameat syscalls/sys_exit_renameat2
@@ -63,6 +74,7 @@ EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_ex
   syscalls/sys_enter_write syscalls/sys_exit_poll syscalls/sys_exit_ppoll syscalls/sys_exit_wait4
   syscalls/sys_exit_waitid"
 DETAIL="syscalls/sys_enter_openat syscalls/sys_enter_open"
+PROBES="$KG/openat_in $KG/open_in"
 filter() { # filter <event>: the processes it's kept for
   case $1 in
     */sys_enter_write) echo 'comm == "hex"' ;;
@@ -72,10 +84,16 @@ filter() { # filter <event>: the processes it's kept for
 untrace() { # the instance's events off and the instance gone, whatever state it's in
   [ -d "$I" ] || return 0
   echo 0 > "$I/tracing_on" 2>/dev/null
-  for ev in $EVENTS $DETAIL; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
+  for ev in $EVENTS $DETAIL $PROBES; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
-trap untrace EXIT
+unprobe() { # this run's kprobes gone, once no instance has them on
+  untrace
+  for ev in $PROBES; do echo "-:$ev" >> "$T/kprobe_events" 2>/dev/null; done
+}
+trap unprobe EXIT
+{ echo "p:$KG/openat_in ${SYS}_openat" >> "$T/kprobe_events" && echo "p:$KG/open_in ${SYS}_open" >> "$T/kprobe_events"; } \
+  || { echo "refusing: the opens' entry kprobes couldn't be defined" >&2; exit 4; }
 
 # traced <out name> <n> <warmup> [detail]: seam_oci's lifecycle phase with the tracer on around create, its trace in
 # <out name>.txt and the instance's per-CPU counts in <out name>.stats (create_breakdown.py refuses a trace that lost
@@ -85,7 +103,7 @@ traced() {
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
-  for ev in $events; do
+  for ev in $events $PROBES; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
       || { echo "event $ev couldn't be filtered and enabled" >&2; untrace; return 1; }
   done
