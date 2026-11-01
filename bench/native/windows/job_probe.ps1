@@ -91,10 +91,8 @@ public static class W {
 '@
 
 # The member: commits memory until refused, tries to break away, or starts a grandchild and waits.
+# Its usings are $native's, which comes first when the two are compiled together.
 $member = @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
 public static class M {
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr VirtualAlloc(IntPtr a, UIntPtr s, uint t, uint p);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool VirtualFree(IntPtr a, UIntPtr s, uint t);
