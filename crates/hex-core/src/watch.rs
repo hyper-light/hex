@@ -113,6 +113,8 @@ pub struct Watch {
     /// The highest footprint a read found.
     peak: u64,
     reads: u64,
+    /// The footprint and process count the last read found, to tell a growing box from a still one.
+    last: Option<(u64, u64)>,
 }
 
 impl Watch {
@@ -123,6 +125,7 @@ impl Watch {
             ending: None,
             peak: 0,
             reads: 0,
+            last: None,
         }
     }
 
@@ -137,6 +140,16 @@ impl Watch {
         let processes = count(members, |m| m.life != Life::Held);
         let running = count(members, |m| m.life == Life::Running);
         self.peak = self.peak.max(footprint);
+        // A box bounded by a rule it can only pass by *growing*: a read that found it no bigger than the
+        // last (idle, or holding steady at its size) can't be closer to its bound than the last was, so
+        // the next read waits the ceiling — the box costs nothing to watch while it sits still, and the
+        // first read that finds it growing again paces by the headroom at once (the rule's "rate" is the
+        // box's own, ~0 when still; CLAUDE.md §2). This is what keeps a box held near its bound cheap. A
+        // box that bursts from rest is caught one ceiling-wait late; the kernel ledger layer (the native
+        // plan's step 2) is what bounds that tightly, with this polling as defense-in-depth.
+        let grew = self
+            .last
+            .is_none_or(|(lf, lp)| footprint > lf || processes > lp);
         let verdict = if running == 0 {
             self.ending = None;
             Verdict::Idle
@@ -145,9 +158,12 @@ impl Watch {
         } else if let Some(over) = self.over(footprint, processes) {
             self.ending = Some(over);
             Verdict::End(over)
-        } else {
+        } else if grew {
             Verdict::Wait(next(&self.limit, &self.rates, footprint, processes))
+        } else {
+            Verdict::Wait(CEILING)
         };
+        self.last = Some((footprint, processes));
         Read {
             verdict,
             footprint,
@@ -473,6 +489,16 @@ mod tests {
             return Verdict::End(over);
         }
         let footprint = u64::try_from(sum(&series[i]).min(u128::from(u64::MAX))).unwrap();
+        // A read no bigger than the one before it (and not the first) is a box holding still: it waits the
+        // ceiling, since it can't be nearer its bound than it already was.
+        let grew = i == 0 || {
+            let prev = &series[i - 1];
+            let prev_fp = u64::try_from(sum(prev).min(u128::from(u64::MAX))).unwrap();
+            footprint > prev_fp || counted(&series[i]) > counted(prev)
+        };
+        if !grew {
+            return Verdict::Wait(CEILING);
+        }
         let memory = limit.memory.map_or(CEILING, |b| {
             oracle_wait(b.saturating_sub(footprint), rates.bytes.get())
         });
@@ -540,10 +566,16 @@ mod tests {
             .run(&cases, |(limit, rates, series)| {
                 let mut w = Watch::new(limit, rates);
                 let mut peak = 0u64;
+                let mut prev: Option<(u64, u64)> = None;
                 for i in 0..series.len() {
                     let read = w.read(&series[i]);
                     prop_assert_eq!(read.verdict, oracle(limit, rates, &series, i), "read {}", i);
                     peak = peak.max(read.footprint);
+                    // The box grew since the last read iff its footprint or process count rose; a read that
+                    // didn't grow backs off to the ceiling regardless of its headroom (adaptive backoff), so
+                    // the headroom-bound invariant below applies only to reads that grew.
+                    let grew = prev.is_none_or(|(f, p)| read.footprint > f || read.processes > p);
+                    prev = Some((read.footprint, read.processes));
                     match read.verdict {
                         Verdict::Wait(d) => {
                             prop_assert!((FLOOR..=CEILING).contains(&d));
@@ -552,7 +584,7 @@ mod tests {
                                 d if d == CEILING => &met.ceiling,
                                 _ => &met.between,
                             });
-                            if d > FLOOR {
+                            if d > FLOOR && grew {
                                 let ns = d.as_nanos();
                                 if let Some(b) = limit.memory {
                                     let room = u128::from(b - read.footprint);
