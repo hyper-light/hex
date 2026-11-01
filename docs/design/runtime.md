@@ -541,10 +541,16 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is
   built** (`hex_runtime::macos`, native plan step 1): HEX-RT-1..9 pass on the Mac Studio, measured in
-  RESULT.md. Its box-user and privileged helper (membership a daemonizing member can't escape, a kernel
-  memory cap through jetsam) are the next step's; Windows' `process` and `oci`, and Linux images through a
-  Shards guest, follow. Off a platform whose class isn't built yet, `process`/`oci` give a typed refusal
-  naming it (CLAUDE.md §12).
+  RESULT.md. Rootless, memory is bounded by the polling rule, which holds a box of up to one member per
+  core; macOS gives an unprivileged process no kernel-enforced or event-driven per-task memory cap at all
+  (`task_set_phys_footprint_limit` → `KERN_NO_ACCESS`, jetsam → `EPERM`, `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL`
+  and unenforced, `EVFILT_MEMORYSTATUS` absent; `bench/native/macos/mem_bound_probe.c`). The **better,
+  kernel-enforced bound is step 2's** (Ada, 2026-11-01): the installer's privileged helper arms a per-task
+  physical-footprint ledger limit apportioned across the box's members (so the limits sum to the bound) and
+  catches the Mach `EXC_RESOURCE` it fires — event-driven, near-zero overshoot, ~zero watcher CPU, bounding
+  the whole tree. Its box-user (membership a daemonizing member can't escape), Windows' `process` and `oci`,
+  and Linux images through a Shards guest, follow. Off a platform whose class isn't built yet,
+  `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
   legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a

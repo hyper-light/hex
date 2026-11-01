@@ -113,3 +113,29 @@ limit (`memorystatus_control(MEMORYSTATUS_CMD_SET_MEMLIMIT_PROPERTIES)`, `SYS_me
 eviction by a stated rule (CLAUDE.md §2), not a hard cap, and the overshoot above is inherent to that: it bounds a
 box of up to one member per core, and a kernel-enforced cap (jetsam, with the privileged helper's entitlement) is a
 later step's. The rate (256 GiB/s) is a tuning constant measured here; another machine needs its own (CLAUDE.md §5).
+
+## Rootless memory bound: the full map, and the better mechanism for step 2 (2026-11-01)
+
+Ada asked whether there's a better mechanism than polling. There is — macOS has a per-task **physical-footprint
+ledger limit** (`task_set_phys_footprint_limit`, `mach/task.h`) that fires a Mach `EXC_RESOURCE` the instant a task
+crosses it: event-driven, near-overshoot-free, ~zero watcher CPU. Apportioning a box's bound across its members as
+per-task limits bounds the whole tree (the limits sum to the bound, so by pigeonhole the tree can't exceed it without
+some member crossing its share and firing). But **every rootless path to a kernel-enforced or event-driven per-task
+memory bound is refused**, measured on adas-mac-studio-3 (`mem_bound_probe.c`, record
+`records/mem-bound-18fd653-20261101T060308Z.txt`):
+
+| mechanism | rootless result |
+|---|---|
+| `task_set_phys_footprint_limit` (Mach ledger limit) | `KERN_NO_ACCESS` (kr 8) |
+| `memorystatus_control(SET_MEMLIMIT_PROPERTIES)` (jetsam) | `EPERM`, on self and a child |
+| `setrlimit(RLIMIT_AS)` (address space) | `EINVAL`; not enforced (allocated 515 MB past a 192 MB limit) |
+| `setrlimit(RLIMIT_RSS)` (resident) | `EINVAL`; not enforced |
+| `EVFILT_MEMORYSTATUS` (kqueue memory event) | not in the public SDK |
+
+So **polling `proc_pid_rusage` is the only rootless mechanism** for a process tree's footprint on macOS — nothing
+kernel-enforced, nothing event-driven, is available unprivileged. The polling rule above is therefore step 1's
+(rootless) bound, with the limits this record shows (≤ one member per core, ~12-15% of a core held at its bound). The
+ledger + `EXC_RESOURCE` mechanism is **step 2's** (Ada's call, 2026-11-01): the installer's privileged helper arms a
+per-member footprint limit apportioned to the box's bound and catches the exception, giving a kernel-enforced,
+event-driven bound with near-zero overshoot and ~zero watcher CPU — better than the polling rule and better than
+Linux's own path, which has no such per-task notification.
