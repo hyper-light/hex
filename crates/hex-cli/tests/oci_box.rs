@@ -52,7 +52,7 @@ use hex_node::store::Store;
 use hex_node::{Node, OCI_BOXES};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
-use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
@@ -169,6 +169,21 @@ impl Lab {
 
     /// A bundle's config.json with its `linux.namespaces` entries, id mappings and extra mounts as given.
     fn config_with(&self, args: &[String], namespaces: &str, mappings: &str, sys: &str) -> String {
+        self.config_ex(args, namespaces, mappings, sys, "", "")
+    }
+
+    /// `config_with` with, besides, a top-level `hooks` fragment and extra fields in the `linux` object
+    /// (`rootfsPropagation`), each a JSON fragment with its own leading comma or empty. Goal 5 plan step 2's
+    /// classic-path reasons (createContainer hooks) and rootfsPropagation tests use it.
+    fn config_ex(
+        &self,
+        args: &[String],
+        namespaces: &str,
+        mappings: &str,
+        sys: &str,
+        hooks: &str,
+        linux_extra: &str,
+    ) -> String {
         let args = json_args(args);
         format!(
             r#"{{
@@ -188,7 +203,7 @@ impl Lab {
     {{"destination": "/usr", "type": "bind", "source": "/usr", "options": ["rbind","ro"]}},
     {{"destination": "/hex", "type": "bind", "source": "{exe}", "options": ["bind","ro"]}}{sys}
   ],
-  "linux": {{"namespaces": [{namespaces}]{mappings}}}
+  "linux": {{"namespaces": [{namespaces}]{mappings}{linux_extra}}}{hooks}
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
@@ -284,6 +299,8 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_root_counts_its_boxes_without_listing(&lab, own);
     escapes_are_contained(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
+    classic_reasons_are_counted(&lab, own);
+    rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4), the pruned-seed root's security criteria: a container on that path
@@ -474,6 +491,167 @@ fn mountinfo(text: &str) -> Vec<(String, String, String, String)> {
             ))
         })
         .collect()
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4): on a root node, specs that can't take the pruned path fall to the
+/// classic path, each counted under its reason — a user namespace of its own (`UserNamespace`),
+/// createContainer hooks (`Hooks`), and a mount namespace joined by path (`JoinsByPath`). A rootless
+/// node prunes nothing (`pruned_creates` stays 0, as oci_spec_box's layered_box checks), so this runs as
+/// root. A create routes classic at create — the counter bumps there, before the box runs — so creating
+/// then deleting each is enough to count it.
+fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-reasons"), state.path());
+    // A mount namespace to join by path: a running box's init has one of its own.
+    let host = BoxId::new("reason-host").unwrap();
+    node.create(lab.running(host.clone(), &Lab::act(&Act::Wait)))
+        .expect("create the box whose mount namespace is joined");
+    node.start(&host).expect("start it");
+    let host_mnt = format!("/proc/{}/ns/mnt", init_pid(&node.container_dir(&host)));
+    let base = r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
+    let userns = r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
+    let mappings = r#","uidMappings":[{"containerID":0,"hostID":0,"size":1}],"gidMappings":[{"containerID":0,"hostID":0,"size":1}]"#;
+    let by_path =
+        format!(r#"{{"type":"pid"}},{{"type":"mount","path":"{host_mnt}"}},{{"type":"ipc"}},{{"type":"uts"}}"#);
+    let hooks = r#","hooks":{"createContainer":[{"path":"/usr/bin/true","args":["true"]}]}"#;
+    let cases: [(&str, ClassicReason, &str, &str, &str); 3] = [
+        ("userns", ClassicReason::UserNamespace, userns, mappings, ""),
+        ("hooks", ClassicReason::Hooks, base, "", hooks),
+        ("mount-by-path", ClassicReason::JoinsByPath, &by_path, "", ""),
+    ];
+    for (name, reason, namespaces, mappings, hooks) in cases {
+        let (shim_before, reason_before, pruned_before) = (
+            node.creates_through_shim(),
+            node.creates_through_shim_for(reason),
+            node.pruned_creates(),
+        );
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(&Lab::act(&Act::Wait), namespaces, mappings, "", hooks, ""),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("reason-{name}")).unwrap();
+        // The create routes classic at create (the counter bumps there) whether or not the classic path
+        // then completes; delete cleans it up if it did.
+        let _ = node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        });
+        let _ = node.delete(&id);
+        assert_eq!(
+            node.creates_through_shim_for(reason),
+            reason_before + 1,
+            "{name} is counted under {reason:?}"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            shim_before + 1,
+            "{name} took the classic path"
+        );
+        assert_eq!(
+            node.pruned_creates(),
+            pruned_before,
+            "{name} did not take the pruned path"
+        );
+    }
+    node.delete(&host).expect("delete the host box");
+    eprintln!(
+        "classic reasons: a user namespace (UserNamespace), createContainer hooks (Hooks) and a mount namespace by path (JoinsByPath) each counted, none pruned"
+    );
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4): rootfsPropagation shared, slave and private each show on the box's
+/// root in its own mountinfo, and no mount the pruned init makes reaches the agent's mount namespace.
+/// Each box binds a uniquely named volume; were the init's bind to propagate back to the agent (a shared
+/// root sharing a peer group with the agent's mounts), that volume's source would be a mount in the
+/// agent's mountinfo. Root only.
+fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-prop"), state.path());
+    // (propagation, the tag it must show on the root, the tags it must not show)
+    let cases: [(&str, &str, &[&str]); 3] = [
+        ("shared", "shared:", &[]),
+        ("slave", "master:", &["shared:"]),
+        ("private", "", &["shared:", "master:"]),
+    ];
+    for (prop, present, absent) in cases {
+        let vol = lab.bundles.path().join(format!("vol-{prop}"));
+        std::fs::create_dir_all(&vol).unwrap();
+        let vol = vol.to_string_lossy().into_owned();
+        let volume = format!(
+            ",\n    {{\"destination\": \"/vol\", \"type\": \"bind\", \"source\": \"{vol}\", \"options\": [\"rbind\",\"rw\"]}}"
+        );
+        let linux_extra = format!(r#","rootfsPropagation":"{prop}""#);
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                &volume,
+                "",
+                &linux_extra,
+            ),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("prop-{prop}")).unwrap();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        })
+        .unwrap_or_else(|e| panic!("create the {prop} box: {e:?}"));
+        node.start(&id).expect("start");
+        let pruned = node.pruned_creates();
+        let (exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let agent_mi = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+        node.delete(&id).expect("delete");
+
+        assert!(pruned >= 1, "the {prop} box is on the pruned path, {pruned} pruned");
+        assert_eq!(exit, Exit::Code(0), "read the {prop} box's mountinfo: {mi}");
+        let mounts = mountinfo(&mi);
+        let root = mounts
+            .iter()
+            .rev()
+            .find(|(point, ..)| point == "/")
+            .unwrap_or_else(|| panic!("the {prop} box's root mount in {mi}"));
+        if !present.is_empty() {
+            assert!(
+                root.2.split(' ').any(|f| f.starts_with(present)),
+                "rootfsPropagation {prop} shows {present} on the root: {root:?}"
+            );
+        }
+        for tag in absent {
+            assert!(
+                !root.2.split(' ').any(|f| f.starts_with(tag)),
+                "rootfsPropagation {prop} must not show {tag} on the root: {root:?}"
+            );
+        }
+        assert!(
+            !agent_mi.contains(&vol),
+            "the {prop} box's volume is no mount in the agent's namespace (no leak): {vol}"
+        );
+    }
+    eprintln!(
+        "rootfsPropagation shared/slave/private each shown on the box root, no box mount in the agent's namespace"
+    );
 }
 
 /// Goal 5 plan step 4: the box bound's count is the root's link count, not a listing (a listing waits
