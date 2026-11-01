@@ -13,7 +13,6 @@
 //! leader pid names the group, so a program that outlives the leader and whose leader pid is recycled to a
 //! new group leader could be mislisted; this step documents that gap, which the box-user also closes.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -313,8 +312,9 @@ struct Watcher {
     watch: Watch,
     /// The members seen at the last read, to find which went and which are new (escapes, [`watch::changes`]).
     last: Vec<Member>,
-    /// Members being watched for their forks and ends, so a read happens as soon as the box changes.
-    watched: BTreeSet<i32>,
+    /// A cheap signature of the last read's running members (summed pids and start times): the escape check
+    /// — which allocates — runs only when it changes, so a box's steady members cost nothing between reads.
+    last_sig: u64,
     pids: Vec<i32>,
     events: Vec<Event>,
 }
@@ -327,7 +327,7 @@ impl Watcher {
             shared,
             watch,
             last: Vec::new(),
-            watched: BTreeSet::new(),
+            last_sig: 0,
             pids: Vec::with_capacity(sys::max_processes().unwrap_or(4096)),
             events: Vec::with_capacity(sys::EVENTS),
         }
@@ -341,11 +341,17 @@ impl Watcher {
 
     fn run(&mut self) {
         // Best-effort: a real-time thread reads on time even when the box fills every core (RESULT.md).
-        // Without it the watcher still runs, only later under full load, so a failure isn't fatal.
+        // Without it the watcher still runs, only later under full load, so a failure isn't fatal. The
+        // computation budget is 150 µs, not the floor's 50 µs: a read of a 28-member box (one
+        // `proc_listpids` and a `proc_pid_rusage` each) runs slower under the members' memory-bandwidth
+        // contention, and a budget below the read's cost gets the thread demoted mid-period and then
+        // starved behind the members, overshooting the bound by hundreds of MiB. At 150 µs (per 250 µs) a
+        // 28-member box held to ≤42 MiB, measured by `bench/native/macos/rtbudget` on adas-mac-studio-3,
+        // 2026-11-01 (CLAUDE.md §5).
         let _ = sys::time_constraint(
             &self.shared.tb,
             watch::FLOOR,
-            Duration::from_micros(50),
+            Duration::from_micros(150),
             watch::FLOOR,
         );
         loop {
@@ -378,8 +384,14 @@ impl Watcher {
         else {
             return Ok(None);
         };
-        let (members, totals) = self.read_members(pgid)?;
-        self.count_escapes(&members)?;
+        let (members, totals, sig) = self.read_members(pgid)?;
+        // The escape check diffs the member lists and allocates; run it only when the running set changed,
+        // so a box allocating hard with a steady set of members keeps each read lean enough to finish
+        // within the watcher's real-time budget (else it is demoted and overshoots; see process.rs run()).
+        if sig != self.last_sig {
+            self.count_escapes(&members)?;
+            self.last_sig = sig;
+        }
         let read = self.watch.read(&members);
         self.record(&read, &totals)?;
         self.last = members;
@@ -396,11 +408,11 @@ impl Watcher {
     /// The box's members now and their summed CPU and I/O: each listed pid with its footprint, start time
     /// and life, read through its rusage, once per member. A pid the listing holds but rusage no longer
     /// has (ESRCH) was reaped since: left out.
-    fn read_members(&mut self, pgid: i32) -> Result<(Vec<Member>, Totals), Refusal> {
+    fn read_members(&mut self, pgid: i32) -> Result<(Vec<Member>, Totals, u64), Refusal> {
         sys::group(pgid, &mut self.pids).map_err(|e| Refusal::os("listing a box's group", e))?;
         let mut members = Vec::with_capacity(self.pids.len());
         let mut totals = Totals::default();
-        let mut fresh = Vec::new();
+        let mut sig = 0u64;
         for &pid in &self.pids {
             let Some(r) =
                 sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
@@ -418,8 +430,14 @@ impl Watcher {
             totals.cpu = totals.cpu.saturating_add(r.cpu);
             totals.read = totals.read.saturating_add(r.read_bytes);
             totals.written = totals.written.saturating_add(r.written_bytes);
-            if pid != pgid && life == Life::Running && self.watched.insert(pid) {
-                fresh.push(pid);
+            if life == Life::Running {
+                // Order-independent so the listing's order doesn't matter; a member and its start time, so a
+                // recycled pid shifts it.
+                sig = sig.wrapping_add(
+                    (u64::try_from(pid).unwrap_or(0))
+                        .wrapping_mul(0x9e37_79b9)
+                        .wrapping_add(r.started),
+                );
             }
             members.push(Member {
                 pid: u32::try_from(pid).unwrap_or(0),
@@ -428,10 +446,7 @@ impl Watcher {
                 life,
             });
         }
-        if !fresh.is_empty() {
-            let _ = self.state.kq.watch(&fresh, 0);
-        }
-        Ok((members, totals))
+        Ok((members, totals, sig))
     }
 
     /// Counts the members that left the group alive since the last read: each daemonized (setsid), which
@@ -442,8 +457,6 @@ impl Watcher {
         let mut escaped = 0u64;
         for m in gone {
             let pid = i32::try_from(m.pid).unwrap_or(-1);
-            self.watched.remove(&pid);
-            let _ = self.state.kq.unwatch(pid);
             match sys::rusage(pid).map_err(|e| Refusal::os("reading a gone member's rusage", e))? {
                 Some(r) if !r.ended => escaped = escaped.saturating_add(1),
                 _ => {}
