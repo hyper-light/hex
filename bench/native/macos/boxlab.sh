@@ -1,95 +1,140 @@
 #!/bin/bash
-# The macOS box-user root lab (native plan step 2). Run as root on the Mac Studio; it builds boxuser_probe,
-# then measures the privileged mechanisms the step's acceptance criteria need:
-#   - the box user's membership: a transient pool user is made (dscl), N members run as it with one that
-#     daemonizes (setsid), proc_listpids(PROC_UID_ONLY) must find all, RLIMIT_NPROC must cap the forks, and
-#     a kill-all must empty the user; then the user is removed (criterion 1);
+# The macOS box-user root lab (native plan step 2). Run as root on the Mac Studio; it measures the
+# privileged mechanisms step 2's acceptance criteria need and runs the box-user HEX-RT conformance against
+# a real helper daemon:
+#   - membership: a transient pool user is made (dscl), N members run as it with one that daemonizes
+#     (setsid), proc_listpids(PROC_UID_ONLY) must find all, RLIMIT_NPROC must cap the forks, a kill-all
+#     empties the user, then it is removed (criterion 1);
+#   - the box-user class end to end: a real `hex __box-helper` daemon + the box-user HEX-RT conformance;
 #   - the ledger bound: root arming a running task (priv), a fatal cap (cap fatal), the high-watermark
-#     EXC_RESOURCE notification (cap soft), and the elastic box total across 1..28 members and a fork burst
+#     EXC_RESOURCE notification (cap soft), and the box total across 1..28 members and a fork burst
 #     (box ... steady|burst) (criteria 3-5).
-# Root on the Mac Studio is Ada's to grant; this script never asks for or prints a password. It cleans up
-# the transient user even on failure. Output is teed to a record under ~/.cache/hex-t7/native-s2.
 #
-# Usage:  sudo bash bench/native/macos/boxlab.sh [N]       # N = members for the membership test (default 6)
+# Safety (reviewed by the lead): it never asks for or prints a password; it picks a FREE uid (no account,
+# no live process) so the kill-all can't hit a real user; it BUILDS as the invoking user (never cargo as
+# root) and runs only the built binaries as root; and on any exit it kills only the helper PID it started,
+# removes the user and socket, and gives the record back to the invoking user. A watchdog bounds the run.
+#
+# Usage:  sudo bash bench/native/macos/boxlab.sh [N]      # N = members for the membership test (default 6)
 set -u
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "boxlab: must run as root (sudo bash $0)" >&2
     exit 2
 fi
+BUILDUSER="${SUDO_USER:-}"
+if [ -z "$BUILDUSER" ] || [ "$BUILDUSER" = "root" ]; then
+    echo "boxlab: run via sudo as a normal user, so builds run as you and not root" >&2
+    exit 2
+fi
 
 N="${1:-6}"
-DIR="$HOME/.cache/hex-t7/native-s2"
-# $HOME under sudo is root's; put the record where the probe is, under the invoking user's cache if known.
-if [ -n "${SUDO_USER:-}" ]; then
-    DIR="$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory | awk '{print $2}')/.cache/hex-t7/native-s2"
-fi
-PROBE="$DIR/boxuser_probe"
-SRC="$(cd "$(dirname "$0")" && pwd)/boxuser_probe.c"
+HOMEDIR="$(dscl . -read "/Users/$BUILDUSER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+[ -z "$HOMEDIR" ] && { echo "boxlab: can't find $BUILDUSER's home" >&2; exit 2; }
+SRCDIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$SRCDIR/../../.." && pwd)"
+DIR="$HOMEDIR/.cache/hex-t7/native-s2"
+USERTARGET="$DIR/user-target"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 REC="$DIR/boxuser-root-$TS.txt"
-
-mkdir -p "$DIR"
-if ! cc -O2 -Wall -Wextra -o "$PROBE" "$SRC"; then
-    echo "boxlab: build failed" >&2
-    exit 1
-fi
-
-# A transient pool user for the membership test: a high uid unlikely to collide, no login, no home.
 LABUSER="_hexboxlab"
-LABUID=7000
-cleanup() {
-    dscl . -delete "/Users/$LABUSER" >/dev/null 2>&1 || true
+SOCK="$DIR/helper.sock"
+
+run_user() { sudo -u "$BUILDUSER" -H "$@"; }
+
+# Is uid $1 taken by an account or any live process?
+uid_taken() {
+    dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$1" && return 0
+    ps -axo uid= 2>/dev/null | tr -d ' ' | grep -qx "$1" && return 0
+    return 1
 }
-trap cleanup EXIT
+
+# Pick the first free uid in 7000-7099.
+LABUID=""
+for u in $(seq 7000 7099); do
+    if ! uid_taken "$u"; then LABUID="$u"; break; fi
+done
+[ -z "$LABUID" ] && { echo "boxlab: no free uid in 7000-7099" >&2; exit 1; }
+
+HELPER_PID=""
+WATCHDOG_PID=""
+cleanup() {
+    [ -n "$HELPER_PID" ] && kill "$HELPER_PID" 2>/dev/null
+    [ -n "$HELPER_PID" ] && wait "$HELPER_PID" 2>/dev/null
+    [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null
+    rm -f "$SOCK" 2>/dev/null
+    dscl . -delete "/Users/$LABUSER" >/dev/null 2>&1 || true
+    chown -R "$BUILDUSER" "$DIR" 2>/dev/null || true
+}
+trap cleanup EXIT TERM INT
+
+# Watchdog: terminate this script (its EXIT trap cleans up) if the whole run overruns.
+MAINPID=$$
+WATCHDOG_SECS=900
+( sleep "$WATCHDOG_SECS"; echo "boxlab: watchdog fired after ${WATCHDOG_SECS}s" >&2; kill -TERM "$MAINPID" 2>/dev/null ) &
+WATCHDOG_PID=$!
 
 make_user() {
-    cleanup
+    dscl . -delete "/Users/$LABUSER" >/dev/null 2>&1 || true
     dscl . -create "/Users/$LABUSER" || return 1
     dscl . -create "/Users/$LABUSER" UserShell /usr/bin/false
     dscl . -create "/Users/$LABUSER" UniqueID "$LABUID"
     dscl . -create "/Users/$LABUSER" PrimaryGroupID 20
     dscl . -create "/Users/$LABUSER" NFSHomeDirectory /var/empty
     dscl . -create "/Users/$LABUSER" RealName "Hex box lab (transient)"
+    # Re-check nothing else holds the uid now (before any kill-all runs against it).
+    if ps -axo uid= 2>/dev/null | tr -d ' ' | grep -qx "$LABUID"; then
+        echo "boxlab: a process already runs at uid $LABUID; aborting" >&2
+        return 1
+    fi
 }
 
-{
-    echo "# boxuser_probe, ROOT, adas-mac-studio-3, macOS $(sw_vers -productVersion) $(sw_vers -buildVersion), $(uname -m), $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "# load1 $(sysctl -n vm.loadavg | awk '{print $2}'), cores $(sysctl -n hw.ncpu)"
+echo "boxlab PLAN:"
+echo "  pool user $LABUSER at uid $LABUID (chosen free in 7000-7099)"
+echo "  build as $BUILDUSER (never root): boxuser_probe, hex, the box-user conformance test"
+echo "  run as root: membership probe; a real 'hex __box-helper' + box-user HEX-RT conformance; priv/cap/box measurements"
+echo "  record -> $REC ; cleans up user/socket/ownership on exit; watchdog ${WATCHDOG_SECS}s"
+echo
 
-    echo "## C1 membership: $N members as a transient pool user (uid $LABUID), one daemonized"
+run_user mkdir -p "$DIR" || { echo "boxlab: can't make $DIR" >&2; exit 1; }
+run_user cc -O2 -Wall -Wextra -o "$DIR/boxuser_probe" "$SRCDIR/boxuser_probe.c" \
+    || { echo "boxlab: probe build failed" >&2; exit 1; }
+PROBE="$DIR/boxuser_probe"
+run_user env CARGO_TARGET_DIR="$USERTARGET" cargo build -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --bin hex \
+    || { echo "boxlab: hex build failed" >&2; exit 1; }
+HEXBIN="$USERTARGET/debug/hex"
+run_user env CARGO_TARGET_DIR="$USERTARGET" cargo test -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --test macos_process_box --no-run \
+    || { echo "boxlab: conformance-test build failed" >&2; exit 1; }
+TESTBIN="$(find "$USERTARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*' -type f -perm +111 2>/dev/null | head -1)"
+
+{
+    echo "# boxlab, ROOT, adas-mac-studio-3, macOS $(sw_vers -productVersion) $(sw_vers -buildVersion), $(uname -m), $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# load1 $(sysctl -n vm.loadavg | awk '{print $2}'), cores $(sysctl -n hw.ncpu), pool uid $LABUID"
+
+    echo "## C1 membership: $N members as the pool user (uid $LABUID), one daemonized"
     if make_user; then
         "$PROBE" uid "$LABUID" "$N"
 
-        echo "## box-user class end to end: the real helper daemon + HEX-RT conformance"
-        # Build the hex binary (and the conformance test) into a root-owned target dir, so the lab needs
-        # nothing of the user's tree; start the daemon as root on a socket with the transient pool user,
-        # and run the box-user HEX-RT conformance (the node) against it.
-        export CARGO_TARGET_DIR="$DIR/root-target"
-        if cargo build -q -p hex-cli --bin hex; then
-            SOCK="$DIR/helper.sock"
-            "$CARGO_TARGET_DIR/debug/hex" __box-helper --socket "$SOCK" --users "$LABUID" --nproc 1024 &
-            HELPER_PID=$!
-            # Wait on the fact: the socket appears (a bounded poll, not a fixed sleep).
-            for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
-            if [ -S "$SOCK" ]; then
-                HEX_BOX_HELPER_SOCK="$SOCK" cargo test -q -p hex-cli --test macos_process_box \
-                    -- --ignored box_user_boxes_hold_the_contract \
-                    && echo "box-user HEX-RT conformance: PASS" \
-                    || echo "box-user HEX-RT conformance: FAIL"
+        echo "## box-user class end to end: a real 'hex __box-helper' + box-user HEX-RT conformance"
+        "$HEXBIN" __box-helper --socket "$SOCK" --users "$LABUID" --nproc 1024 &
+        HELPER_PID=$!
+        for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
+        if [ -S "$SOCK" ] && [ -n "$TESTBIN" ]; then
+            if HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored box_user_boxes_hold_the_contract --nocapture; then
+                echo "box-user HEX-RT conformance: PASS"
             else
-                echo "the helper socket never appeared; skipping box-user conformance"
+                echo "box-user HEX-RT conformance: FAIL"
             fi
-            kill "$HELPER_PID" 2>/dev/null || true
-            wait "$HELPER_PID" 2>/dev/null || true
         else
-            echo "building hex failed; skipping box-user conformance"
+            echo "the helper socket never appeared or the test binary is missing; skipping conformance"
         fi
-
-        cleanup
-        echo "(transient user $LABUSER removed)"
+        kill "$HELPER_PID" 2>/dev/null || true
+        wait "$HELPER_PID" 2>/dev/null || true
+        HELPER_PID=""
+        rm -f "$SOCK"
+        dscl . -delete "/Users/$LABUSER" >/dev/null 2>&1 || true
     else
-        echo "make_user failed; skipping membership test"
+        echo "make_user failed; skipping membership and box-user tests"
     fi
 
     echo "## priv: root arms task_set_phys_footprint_limit on a running task"
@@ -101,7 +146,7 @@ make_user() {
     echo "## C4/notify: high-watermark EXC_RESOURCE (latency, once-per-limit, re-arm)"
     "$PROBE" cap soft 64
 
-    echo "## C3/C5 elastic box total and fork burst, 1..28 members"
+    echo "## C3/C5 box total and fork burst, 1..28 members"
     for n in 1 4 8 14 28; do "$PROBE" box 256 "$n" steady; done
     for n in 14 28; do "$PROBE" box 256 "$n" burst; done
 } 2>&1 | tee "$REC"
