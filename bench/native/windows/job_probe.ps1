@@ -169,7 +169,7 @@ $pi = [W]::Start("cmd.exe /c `"`"$exe`" alloc > `"$out`"`"", [W]::SUSPENDED)
 [W]::ResumeThread($pi.Thread) | Out-Null
 [W]::WaitForSingleObject($pi.Process, 60000) | Out-Null
 $x = [W]::Query($j)
-"memory job_limit_mib=256 peak_job_mib={0:N1} peak_process_mib={1:N1} member: {2}" -f ($x.PeakJobMemoryUsed.ToUInt64() / 1MB), ($x.PeakProcessMemoryUsed.ToUInt64() / 1MB), ((Get-Content $out) -join ' ')
+"memory job_limit_bytes={0} peak_job_bytes={1} over_bytes={2} peak_process_bytes={3} member: {4}" -f 256MB, $x.PeakJobMemoryUsed.ToUInt64(), ([int64]$x.PeakJobMemoryUsed.ToUInt64() - 256MB), $x.PeakProcessMemoryUsed.ToUInt64(), ((Get-Content $out) -join ' ')
 [W]::CloseHandle($j) | Out-Null
 
 # tree: a grandchild, then the job's last handle closed
