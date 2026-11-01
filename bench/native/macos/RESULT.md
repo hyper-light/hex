@@ -48,7 +48,7 @@ QoS. The rate is above the 164 GiB/s a box's members together reached here.
 | 4 | 83-97 GiB/s | 21.4-52.4 MiB | 10.9-28.3 MiB |
 | 8 | 146-153 GiB/s | 36.2-50.3 MiB | 30.7-41.5 MiB |
 | 14 (every core) | 150-161 GiB/s | 334-482 MiB | 26.0-36.9 MiB |
-| 28 (twice the cores) | 162-164 GiB/s (real-time record) | 846-1,458 MiB | 34.1-41.5 MiB |
+| 28 (twice the cores) | 162-164 GiB/s (real-time record) | 846-1,458 MiB | 34.1-41.5 MiB, **did not reproduce**: see below |
 
 The real-time watcher is a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`: 250 µs period, 50 µs
 computation). Once a box's members fill every core, a watcher at user-interactive QoS reads late; a real-time one
@@ -60,15 +60,17 @@ A box held at 95% of its bound (`hold`, real-time watcher):
 
 | Floor | reads/s | the watcher's CPU |
 |---|---|---|
-| 250 µs | 3,618-3,639 | 4.7-5.5 ms/s (≤ 0.55% of a core) |
+| 250 µs | 3,618-3,639 | 4.7-5.5 ms/s of reads only (≤ 0.55% of a core); the whole watcher, wakes included, is 12-15%: see below |
 | 1 ms | 973-974 | 2.0-2.4 ms/s (≤ 0.24%) |
 
 A box far from its bound is read every 100 ms (the ceiling), and costs next to nothing.
 
 ## What this says
 
-- On this machine, a native macOS box holds a 256 MiB memory bound to within 42 MiB, against members allocating up to
-  164 GiB/s, twice as many as the cores included. The overshoot is the box's rate times the floor, plus a read.
+- Corrected by the class's own path (below): a rootless box holds a 256 MiB bound to within 54 MiB with up to one
+  member per core, not at twice the cores (56-587 MiB over; this probe's 34-42 MiB at 28 members did not reproduce),
+  and the watcher costs 12-15% of a core near the bound, not the 0.55% its reads alone took. The overshoot is the
+  box's rate times the floor, plus a read.
 - The rate (256 GiB/s) is a tuning constant measured here. Another machine needs its own measurement (CLAUDE.md §5).
 - This isn't a kernel cap. A box can pass its bound by the overshoot before it ends. On Linux and Windows the kernel
   refuses the allocation itself.
