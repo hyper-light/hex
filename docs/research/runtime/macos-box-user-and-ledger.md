@@ -150,15 +150,31 @@ what a member allocates in that window; it is sized against the measurement. **(
 member, and how much a child allocates in it, steady and under a 28-member fork burst; the reserve and the
 fork-burst overshoot ≤ 64 MiB follow.)**
 
-## 6. Coalitions: considered, set aside for the cap
+## 6. Coalitions: weighed for membership and the box total, kept as a measured optimisation
 
-A forked (non-corpse) task inherits all its parent's coalitions (`osfmk/kern/task.c:1936-1943`), and a
-resource coalition sums its members' instantaneous `phys_footprint` (`coalition_info_resource_usage`,
-`bsd/sys/coalition.h:49`; `osfmk/mach/coalition.h`). That is a cheap aggregate **read** of a whole tree's
-footprint in one call, which the helper could use in place of summing each member's rusage. But the only
-resource a coalition can be **limited** on is logical I/O writes, not footprint (`osfmk/kern/coalition.h`,
-`bsd/sys/coalition.h`), so a coalition cannot be the memory cap; the per-task ledger limit, apportioned (§3),
-is. Coalitions stay a possible optimisation for the read, noted, not the mechanism.
+The lead asked (2026-11-01) that coalitions be weighed for both membership and the box's total. A forked
+(non-corpse) task inherits all its parent's coalitions (`osfmk/kern/task.c:1936-1943`), and a resource
+coalition keeps a summed instantaneous `phys_footprint` over its members (`osfmk/mach/coalition.h:148`,
+`coalition_info_resource_usage`, `bsd/sys/coalition.h:49`). So a coalition offers two things the box could
+use:
+
+- **Membership.** A coalition is inherited across `fork` and can't be left (like the box user's uid), so a
+  daemonized member stays in it. It is a second fork-proof marker. But the step's chosen marker is the pool
+  **user** (`PROC_UID_ONLY`), which an *unprivileged* node can list and which `RLIMIT_NPROC` caps in the
+  kernel; a coalition is listed through privileged coalition calls only, so it adds nothing the uid doesn't
+  already give for membership and delete. **Decision: the uid is membership** (the step's mandate); a
+  coalition isn't needed for it.
+- **The box's total.** `coalition_info_resource_usage` reads the whole tree's summed footprint in **one**
+  privileged call, where the baseline sums each member's `proc_pid_rusage` (N calls, the step-1 watcher's
+  way). For a large box this is cheaper and races less (one atomic read vs N reads across a changing tree).
+  **Decision: keep per-member rusage in the baseline** (it needs no coalition plumbing and is what the
+  rootless watcher already does), and weigh the coalition read as an optimisation once the root lab measures
+  both — the per-member sum's cost at 28 members versus one `coalition_info_resource_usage`. It stays an
+  optimisation of the **read**, not a change to the bound.
+
+The cap itself is never a coalition: the only resource a coalition can be **limited** on is logical I/O
+writes, not footprint (`osfmk/kern/coalition.h`, `bsd/sys/coalition.h`), so the per-task ledger limit,
+apportioned (§3), is the bound.
 
 ## 7. Precedents
 
