@@ -109,6 +109,19 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   single-threaded (it re-exec'd) where that matters, but for the vfork-style clone's child, which runs in
   the multi-threaded agent's memory and so makes system calls alone on what was made before the clone,
   as posix_spawn's child does.
+- `crates/hex-runtime/src/macos/sys.rs`: the macOS `process` class, which has no cgroup, so a box is a
+  process group under a watcher that reads its members' footprints and ends it past a bound (decision
+  "each OS runs its own boxes natively"). `posix_spawn` starts each member in the box's process group
+  (`POSIX_SPAWN_SETPGROUP`, `SETSIGDEF`, `SETSIGMASK`, `POSIX_SPAWN_CLOEXEC_DEFAULT` so only its stdio is
+  inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, and `adddup2`/`addchdir` file actions);
+  `proc_listpids(PROC_PGRP_ONLY)` lists the group and `proc_pid_rusage` reads each member's footprint,
+  start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
+  time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
+  it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`) on members; `mach_timebase_info` converts Mach ticks;
+  `sysctlbyname("kern.maxproc")` bounds a listing; `getrusage` and `getloadavg` read the node's own cost
+  for the bench and observability. rustix wraps the `kqueue`, `kill`/`killpg` and `waitid` beside these,
+  which the class calls through it; libc binds only these, as `unsafe` foreign functions, and macOS offers
+  no safe wrapper.
 
 ## 13. Lean code
 
