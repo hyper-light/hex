@@ -2,17 +2,20 @@
 //! a pool an installer makes; starting a program as that user, arming a running member's physical-footprint
 //! ledger limit, and routing its Mach exceptions are all privileged, so a privileged launchd daemon — the
 //! helper — does them, and only them, for the node agent, which runs unprivileged. The node asks over this
-//! typed, bounded protocol on a `SOCK_SEQPACKET` socket; the helper does one of a fixed set of things and
+//! typed, bounded protocol on a Unix `SOCK_STREAM` socket; the helper does one of a fixed set of things and
 //! **refuses everything else by name** (CLAUDE.md §3).
 //!
 //! Pure (CLAUDE.md §9): the shell (`hex_runtime::macos`) moves the messages and the stdio descriptors a
 //! `Start` rides with (`SCM_RIGHTS`); this says what each message is, and refuses by type every one that
 //! says nothing valid — a hostile-input test drives the parser (CLAUDE.md §6).
 //!
-//! A message is one `SOCK_SEQPACKET` record: a 16-byte header (`HEXM`, a `u16` version, a `u16` kind, a
-//! `u64` id the answer carries back), then the body its kind defines. Integers are little-endian; a string
-//! is a `u32` length and its bytes; an enum a byte naming its variant. The format changes append-only, as
-//! [`crate::wire`]'s does. Requests sit below `0x8000`, answers from it.
+//! A message is a 16-byte header (`HEXM`, a `u16` version, a `u16` kind, a `u64` id the answer carries
+//! back), then the body its kind defines. Integers are little-endian; a string is a `u32` length and its
+//! bytes; an enum a byte naming its variant. The format changes append-only, as [`crate::wire`]'s does.
+//! Requests sit below `0x8000`, answers from it. macOS local sockets have no `SOCK_SEQPACKET`
+//! (`hex_client` refuses the node's own socket on macOS for the same reason), so the shell frames each
+//! message on the stream with a `u32` length before it ([`read_request`]/[`read_answer`] take one whole
+//! message's bytes); a descriptor rides out of band with its message (`SCM_RIGHTS`), never in the bytes.
 
 use hex_api::{BoxId, Program};
 
