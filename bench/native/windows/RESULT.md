@@ -31,7 +31,7 @@ about 1 start in 100 still took 21.5-23.2 s. A stall that near a fixed length lo
 Windows' process start (a security or reputation check, to be found). The Windows `process` class names its
 cause before it claims a tail.
 
-## The memory bound is the kernel's, to within ten pages
+## The memory bound is the kernel's, to within a dozen pages
 
 A member committing 1 MiB at a time into a job capped at 268,435,456 bytes (256 MiB):
 
