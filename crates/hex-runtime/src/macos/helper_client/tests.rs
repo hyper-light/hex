@@ -51,6 +51,7 @@ fn responder(fd: OwnedFd) {
             Request::Acquire { .. } => Answer::Acquired { uid: 7000 },
             Request::Start { .. } => Answer::Started { pid: 1234 },
             Request::End { .. } => Answer::Ended,
+            Request::Signal { .. } => Answer::Signalled,
             Request::Inspect { .. } => Answer::State(State {
                 members: u32::try_from(got_fds).unwrap_or(0),
                 footprint: 200 << 20,

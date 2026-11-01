@@ -42,6 +42,7 @@ mod kind {
     pub const START: u16 = 0x0003;
     pub const END: u16 = 0x0004;
     pub const INSPECT: u16 = 0x0005;
+    pub const SIGNAL: u16 = 0x0006;
 
     pub const ANSWER: u16 = 0x8000;
     pub const A_HELLO: u16 = ANSWER | HELLO;
@@ -49,6 +50,7 @@ mod kind {
     pub const A_START: u16 = ANSWER | START;
     pub const A_END: u16 = ANSWER | END;
     pub const A_INSPECT: u16 = ANSWER | INSPECT;
+    pub const A_SIGNAL: u16 = ANSWER | SIGNAL;
     pub const A_REFUSED: u16 = ANSWER | 0x00ff;
 }
 
@@ -79,6 +81,10 @@ pub enum Request {
     End { box_id: BoxId },
     /// What the box holds now, by its user's processes.
     Inspect { box_id: BoxId },
+    /// Send a signal to every member of the box (the node can't signal another user's processes itself).
+    /// `signal` is the Linux signal number, as the rest of Hex carries it; the helper maps it to macOS's
+    /// (`hex_core::darwin`), as the process class does.
+    Signal { box_id: BoxId, signal: i32 },
 }
 
 /// What the box holds now, as the helper reports it (`proc_listpids(PROC_UID_ONLY)` of the box's user, each
@@ -107,6 +113,7 @@ pub enum Answer {
     Started { pid: i32 },
     Ended,
     State(State),
+    Signalled,
     Refused(Refused),
 }
 
@@ -135,6 +142,7 @@ impl Request {
             Request::Start { .. } => kind::START,
             Request::End { .. } => kind::END,
             Request::Inspect { .. } => kind::INSPECT,
+            Request::Signal { .. } => kind::SIGNAL,
         }
     }
 
@@ -193,6 +201,10 @@ pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8
             w.bool(*leader);
         }
         Request::End { box_id } | Request::Inspect { box_id } => w.string(box_id.as_str())?,
+        Request::Signal { box_id, signal } => {
+            w.string(box_id.as_str())?;
+            w.i32(*signal);
+        }
     }
     w.done()
 }
@@ -206,6 +218,7 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
         Answer::Started { .. } => kind::A_START,
         Answer::Ended => kind::A_END,
         Answer::State(_) => kind::A_INSPECT,
+        Answer::Signalled => kind::A_SIGNAL,
         Answer::Refused(_) => kind::A_REFUSED,
     };
     put_header(&mut w, version, kind, id);
@@ -213,7 +226,7 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
         Answer::Hello { version } => w.u16(*version),
         Answer::Acquired { uid } => w.u32(*uid),
         Answer::Started { pid } => w.i32(*pid),
-        Answer::Ended => {}
+        Answer::Ended | Answer::Signalled => {}
         Answer::State(s) => {
             w.u32(s.members);
             w.u64(s.footprint);
@@ -287,6 +300,10 @@ pub fn read_request(bytes: &[u8], descriptors: usize) -> Result<(u16, u64, Reque
         kind::INSPECT => Request::Inspect {
             box_id: wire::box_id(&mut r)?,
         },
+        kind::SIGNAL => Request::Signal {
+            box_id: wire::box_id(&mut r)?,
+            signal: r.i32()?,
+        },
         other => {
             return Err(Fault::Kind {
                 kind: other,
@@ -329,6 +346,7 @@ pub fn read_answer(bytes: &[u8]) -> Result<(u16, u64, Answer), Fault> {
             crossings: r.u64()?,
             ended_over: r.bool("ended_over")?,
         }),
+        kind::A_SIGNAL => Answer::Signalled,
         kind::A_REFUSED => Answer::Refused(read_refused(&mut r)?),
         other => {
             return Err(Fault::Kind {

@@ -57,6 +57,10 @@ fn requests_round_trip() {
         Request::Inspect {
             box_id: box_id("b1"),
         },
+        Request::Signal {
+            box_id: box_id("b1"),
+            signal: 15,
+        },
     ];
     for req in &requests {
         let bytes = encode_request(VERSION, 7, req).expect("encode");
@@ -75,6 +79,7 @@ fn answers_round_trip() {
         Answer::Acquired { uid: 502 },
         Answer::Started { pid: 4242 },
         Answer::Ended,
+        Answer::Signalled,
         Answer::State(State {
             members: 3,
             footprint: 200 << 20,

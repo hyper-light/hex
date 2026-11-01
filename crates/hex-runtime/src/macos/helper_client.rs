@@ -132,6 +132,21 @@ impl Helper {
         }
     }
 
+    /// Sends `signal` (a Linux signal number) to every member of the box; the helper maps it to macOS's.
+    pub fn signal(&self, box_id: &BoxId, signal: i32) -> Result<(), Refusal> {
+        match self.rpc(
+            &Request::Signal {
+                box_id: box_id.clone(),
+                signal,
+            },
+            &[],
+        )? {
+            Answer::Signalled => Ok(()),
+            Answer::Refused(r) => Err(refusal(r)),
+            other => Err(unexpected("signal", &other)),
+        }
+    }
+
     /// What the box holds now.
     pub fn inspect(&self, box_id: &BoxId) -> Result<State, Refusal> {
         match self.rpc(
@@ -211,6 +226,7 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Started { .. } => "a started program",
         Answer::Ended => "an ended box",
         Answer::State(_) => "a box's state",
+        Answer::Signalled => "a signalled box",
         Answer::Refused(_) => "a refusal",
     };
     Refusal::Broken(format!("the helper answered a {call} with {kind}"))
