@@ -341,11 +341,17 @@ impl Watcher {
 
     fn run(&mut self) {
         // Best-effort: a real-time thread reads on time even when the box fills every core (RESULT.md).
-        // Without it the watcher still runs, only later under full load, so a failure isn't fatal.
+        // Without it the watcher still runs, only later under full load, so a failure isn't fatal. The
+        // computation budget is 150 µs, not the floor's 50 µs: a read of a 28-member box (one
+        // `proc_listpids` and a `proc_pid_rusage` each) runs slower under the members' memory-bandwidth
+        // contention, and a budget below the read's cost gets the thread demoted mid-period and then
+        // starved behind the members, overshooting the bound by hundreds of MiB. At 150 µs (per 250 µs) a
+        // 28-member box held to ≤42 MiB, measured by `bench/native/macos/rtbudget` on adas-mac-studio-3,
+        // 2026-11-01 (CLAUDE.md §5).
         let _ = sys::time_constraint(
             &self.shared.tb,
             watch::FLOOR,
-            Duration::from_micros(50),
+            Duration::from_micros(150),
             watch::FLOOR,
         );
         loop {
