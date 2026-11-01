@@ -508,15 +508,18 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   - macOS: a box runs as a user of its own, from a pool made at install, as Nix's build users are. A user
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
     (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
-    macOS has no public cap on a tree's memory or CPU, so memory is bounded by Hex's own rule: it reads each
-    member's footprint (`proc_pid_rusage`) and ends the box when it passes its bound (an eviction by a stated
-    rule, CLAUDE.md §2). It reads from a Mach time-constraint thread on kqueue timers marked
-    `NOTE_CRITICAL`, every (bound - footprint) / the machine's measured allocation rate, at least 250 µs.
-    Measured on the Mac Studio, a box held a 256 MiB bound to within 42 MiB at up to 164 GiB/s, for at most
-    0.55% of a core (`bench/native/macos/RESULT.md`). CPU is bounded by priority alone: a QoS class, and
-    background priority where the box's weight is low. A box that asks for confinement gets App Sandbox's, which every child inherits
-    (§3). The class's own purpose is trusted code that must not starve the machine, and that purpose doesn't
-    need it.
+    macOS has no rootless cap on a tree's memory or CPU (the private jetsam limit is `EPERM` unprivileged,
+    §3), so memory is bounded by Hex's own rule: it reads each member's footprint (`proc_pid_rusage`) and
+    ends the box when it passes its bound (an eviction by a stated rule, CLAUDE.md §2). It reads from a Mach
+    time-constraint thread on kqueue timers marked `NOTE_CRITICAL`, every (bound - footprint) / the machine's
+    measured allocation rate, at least 250 µs. Built and measured on the Mac Studio through the class's own
+    path (`bench/native/macos/RESULT.md`, commit 459ded2): a box holds a 256 MiB bound to ≤54 MiB with up to
+    one member per core, for ~12-15% of a core while held at its bound. Being an eviction by a rule, not a
+    kernel cap, it can't bound a box filling more than every core (28 members overshot 56-587 MiB); a hard cap
+    is a later step's, through the privileged helper's jetsam entitlement. CPU is bounded by priority alone: a
+    QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
+    Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
+    the machine, and that purpose doesn't need it.
 - **`oci`:**
   - Linux: as today.
   - Windows: Windows images run natively, process-isolated through HCS (the OCI spec's Windows section).
@@ -536,8 +539,12 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
 
 ## Open (STATUS.md)
 
-- Each OS's own boxes, natively (the decision above, proposed): to build. Until then the `process` and `oci`
-  classes give a typed refusal naming the platform off Linux (CLAUDE.md §12).
+- Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is
+  built** (`hex_runtime::macos`, native plan step 1): HEX-RT-1..9 pass on the Mac Studio, measured in
+  RESULT.md. Its box-user and privileged helper (membership a daemonizing member can't escape, a kernel
+  memory cap through jetsam) are the next step's; Windows' `process` and `oci`, and Linux images through a
+  Shards guest, follow. Off a platform whose class isn't built yet, `process`/`oci` give a typed refusal
+  naming it (CLAUDE.md §12).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
   legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a
