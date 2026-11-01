@@ -113,15 +113,22 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   process group under a watcher that reads its members' footprints and ends it past a bound (decision
   "each OS runs its own boxes natively"). `posix_spawn` starts each member in the box's process group
   (`POSIX_SPAWN_SETPGROUP`, `SETSIGDEF`, `SETSIGMASK`, `POSIX_SPAWN_CLOEXEC_DEFAULT` so only its stdio is
-  inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, and `adddup2`/`addchdir` file actions);
+  inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, `posix_spawnattr_setjetsam_ext` to arm a
+  fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
+  member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
   `proc_listpids(PROC_PGRP_ONLY)` lists the group and `proc_pid_rusage` reads each member's footprint,
   start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
   time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
-  it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`) on members; `mach_timebase_info` converts Mach ticks;
-  `sysctlbyname("kern.maxproc")` bounds a listing; `getrusage` and `getloadavg` read the node's own cost
-  for the bench and observability. rustix wraps the `kqueue`, `kill`/`killpg` and `waitid` beside these,
-  which the class calls through it; libc binds only these, as `unsafe` foreign functions, and macOS offers
-  no safe wrapper.
+  it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
+  event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members;
+  `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing; `getrusage`
+  and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
+  `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
+  `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
+  Hex declares itself (the macOS 26 SDK ships neither prototype, nor the jetsam flag values, which are
+  xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
+  foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
+  offers no safe wrapper.
 
 ## 13. Lean code
 
