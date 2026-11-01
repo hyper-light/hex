@@ -508,24 +508,34 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   - macOS: a box runs as a user of its own, from a pool made at install, as Nix's build users are. A user
     is the only marker macOS lists that a member inherits and can't drop, since macOS can't follow forks
     (§3). So a privileged helper starts each box, and `RLIMIT_NPROC` caps its processes in the kernel.
-    macOS's memory bound has two layers (Ada, 2026-11-01). The **primary** is a kernel-enforced, event-driven
-    cap the privileged helper arms (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`): a per-task
-    physical-footprint ledger limit (`task_set_phys_footprint_limit`) apportioned across the box's members so
-    the limits sum to the bound, so
-    the kernel fires a Mach `EXC_RESOURCE` the instant the tree crosses it (by pigeonhole some member crosses
-    its share) — near-zero overshoot, ~zero watcher CPU, bounding the whole tree. The **defense-in-depth**
-    second layer, which an unprivileged node has on its own, is Hex's own polling rule: a Mach time-constraint
-    thread reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue timers, every
-    (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 100 ms), and ends the
-    box past its bound (an eviction by a stated rule, CLAUDE.md §2). No rootless kernel or event path to a
-    per-task memory bound exists (`task_set_phys_footprint_limit` → `KERN_NO_ACCESS`, jetsam → `EPERM`,
-    `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL` and unenforced, `EVFILT_MEMORYSTATUS` absent, `proc_rlimit_control` has
-    no memory cap; `bench/native/macos/mem_bound_probe.c`), so the polling layer is the whole bound only until
-    the helper is installed. Built and measured on the Mac Studio through the class's own path
-    (`bench/native/macos/RESULT.md`, commit 459ded2): polling holds a 256 MiB bound to ≤54 MiB with up to one
-    member per core, for ~12-15% of a core while held at its bound; being an eviction by a rule, not a kernel
-    cap, it can't tightly bound a box filling more than every core (28 members overshot 56-587 MiB) — which is
-    exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
+    macOS's memory bound has **three layers** (Ada, 2026-11-01). Layer one is **rootless and
+    kernel-enforced** (step 1's `_ext` backstop): every member Hex spawns is armed at `posix_spawn` with a
+    *fatal* per-process physical-footprint cap at the box's **whole** bound (`posix_spawnattr_setjetsam_ext`,
+    the spawn SPI the macOS SDK ships no prototype for; flags from `bsd/sys/spawn_internal.h`), so the kernel
+    `SIGKILL`s a member the instant its footprint crosses the bound — 0 overshoot, no privilege. It bounds a
+    single-member box, and any one runaway member, exactly, and lets the watcher read a fully-armed box
+    holding at most one member only at the ceiling (~0.1% of a core). The cap is per process, doesn't survive
+    a fork, and caps each member at the whole bound, so it does not bound a multi-member tree's footprint
+    *sum* — layers two and three do. Layer two, the **primary** for a many-member box, is kernel-enforced and
+    event-driven, armed by the privileged helper (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`):
+    a per-task physical-footprint ledger limit (`task_set_phys_footprint_limit`) apportioned across the box's
+    members so the limits sum to the bound, so the kernel fires a Mach `EXC_RESOURCE` the instant the tree
+    crosses it (by pigeonhole some member crosses its share) — near-zero overshoot, ~zero watcher CPU,
+    bounding the whole tree, and re-arming a forked child, which layer one can't. Layer three is
+    **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a Mach
+    time-constraint thread that reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue
+    timers, every (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 100 ms),
+    and ends the box past its bound (an eviction by a stated rule, CLAUDE.md §2). A rootless, kernel-enforced
+    per-process cap thus **does** exist — at spawn, layer one — but re-arming a *running* task and apportioning
+    a bound across members need root (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →
+    `KERN_NO_ACCESS` unprivileged; `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL` and unenforced, `EVFILT_MEMORYSTATUS`
+    absent, `proc_rlimit_control` has no memory cap; `bench/native/macos/mem_bound_probe.c`,
+    `docs/research/runtime/macos-spawn-jetsam-cap.md`). Built and measured on the Mac Studio through the
+    class's own path: layer one holds a 256 MiB single-member box to **0 MiB** overshoot for ~0.1% of a core
+    held at its bound (`bench/native/macos/RESULT.md`, record `macos-box-ext-b285d07-20261101T223556Z.txt`);
+    layer three alone holds the bound to ≤48 MiB with up to one member per core (~12-15% of a core held) but,
+    being an eviction by a rule, can't tightly bound a box filling more than every core (28 members spike) —
+    which is exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
     QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
     Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it.
@@ -550,16 +560,22 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is
   built** (`hex_runtime::macos`, native plan step 1): HEX-RT-1..9 pass on the Mac Studio, measured in
-  RESULT.md. Rootless, memory is bounded by the polling rule, which holds a box of up to one member per
-  core; macOS gives an unprivileged process no kernel-enforced or event-driven per-task memory cap at all
-  (`task_set_phys_footprint_limit` → `KERN_NO_ACCESS`, jetsam → `EPERM`, `RLIMIT_AS`/`RLIMIT_RSS` → `EINVAL`
-  and unenforced, `EVFILT_MEMORYSTATUS` absent, `proc_rlimit_control` no memory cap;
-  `bench/native/macos/mem_bound_probe.c`). The **primary, kernel-enforced bound is step 2's** (Ada,
+  RESULT.md. Rootless, memory is bounded by two layers that need no privilege: the kernel caps each member
+  Hex spawns at the box's whole bound with a *fatal* per-process jetsam limit (`posix_spawnattr_setjetsam_ext`,
+  step 1's `_ext` backstop — 0 overshoot for a single-member box, the watcher ceiling-paced at ~0.1% of a
+  core; `bench/native/macos/RESULT.md`, record `macos-box-ext-b285d07-20261101T223556Z.txt`,
+  `docs/research/runtime/macos-spawn-jetsam-cap.md`), and beneath it the polling rule holds a box of up to one
+  member per core. That cap is per process (a fork escapes it) and doesn't bound a multi-member footprint
+  sum, and re-arming a running task or apportioning a bound across members needs root
+  (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` → `KERN_NO_ACCESS` unprivileged;
+  `bench/native/macos/mem_bound_probe.c`). So the **primary, whole-tree bound is step 2's** (Ada,
   2026-11-01): the installer's privileged helper arms a per-task physical-footprint ledger limit apportioned
   across the box's members (so the limits sum to the bound) and catches the Mach `EXC_RESOURCE` it fires —
-  event-driven, near-zero overshoot, ~zero watcher CPU, bounding the whole tree. The polling rule **stays as
-  the defense-in-depth second layer** beneath it (Ada: "it's a good defense in depth mechanism"), and is the
-  whole bound on a node with no helper. Step 1's overshoot and watcher-CPU criteria are met by step 2's layer.
+  event-driven, near-zero overshoot, ~zero watcher CPU, bounding the whole tree and a forked child. The
+  polling rule **stays as the defense-in-depth layer** beneath both (Ada: "it's a good defense in depth
+  mechanism"), and is the whole bound on a node with no helper. Step 1's single-member overshoot (0 MiB) and
+  held watcher CPU (~0.1%) are met rootless by the `_ext` cap; the multi-member-tree bound at overcommit is
+  step 2's.
   Its box-user (membership a daemonizing member can't escape), Windows' `process` and `oci`,
   and Linux images through a Shards guest, follow. Off a platform whose class isn't built yet,
   `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
