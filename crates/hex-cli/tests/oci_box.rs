@@ -283,6 +283,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_bundle_joining_a_namespace_by_path_runs_through_the_seam(&lab, own);
     a_box_root_counts_its_boxes_without_listing(&lab, own);
     escapes_are_contained(&lab, own);
+    a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4), the pruned-seed root's security criteria: a container on that path
@@ -335,6 +336,144 @@ fn escapes_are_contained(lab: &Lab, own: &Path) {
     eprintln!(
         "escapes contained: e0 userns allowed, e1/e2 marker unreached, e3 nested proc refused"
     );
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4): a spec binding `/usr` read-only and a volume. Both are in the
+/// container's mountinfo with the options asked, and the bundle's config.json and the node's state
+/// directory are unreachable from inside — the pruned root holds nothing of the host but what the spec
+/// mounts. Root only: a pruned seed is a root node's, and the pruned path is what keeps the host out.
+fn a_bind_and_a_volume_are_present_the_host_unreachable(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-vol"), state.path());
+    let vol = lab.bundles.path().join("volume");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("marker"), "from the volume\n").unwrap();
+    let volume = format!(
+        ",\n    {{\"destination\": \"/vol\", \"type\": \"bind\", \"source\": \"{}\", \"options\": [\"rbind\",\"rw\"]}}",
+        vol.display()
+    );
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(
+        dir.join("config.json"),
+        lab.config_with(
+            &Lab::act(&Act::Wait),
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            "",
+            &volume,
+        ),
+    )
+    .unwrap();
+    let id = BoxId::new("vol").unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir.clone()),
+    })
+    .expect("create a box with a read-only bind and a volume");
+    node.start(&id).expect("start");
+    let pruned = node.pruned_creates();
+    // Gather what the box sees before deleting, so a failed check leaves no box running.
+    let (mi_exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+    let (vol_exit, vol_out) = run_in(&node, &id, &["/usr/bin/cat", "/vol/marker"]);
+    let config = dir.join("config.json").to_string_lossy().into_owned();
+    let state_path = state.path().to_string_lossy().into_owned();
+    let config_reach = exit_in(&node, &id, &["/usr/bin/test", "-e", &config]);
+    let state_reach = exit_in(&node, &id, &["/usr/bin/test", "-e", &state_path]);
+    node.delete(&id).expect("delete");
+
+    assert!(
+        pruned >= 1,
+        "the bind-and-volume box is made on the pruned path, {pruned} pruned"
+    );
+    assert_eq!(mi_exit, Exit::Code(0), "read the box's mountinfo: {mi}");
+    let mounts = mountinfo(&mi);
+    let usr = mounts
+        .iter()
+        .rev()
+        .find(|(point, ..)| point == "/usr")
+        .expect("/usr in the box");
+    assert!(
+        usr.1.split(',').any(|o| o == "ro"),
+        "/usr is read-only: {usr:?}"
+    );
+    let vol_mount = mounts
+        .iter()
+        .rev()
+        .find(|(point, ..)| point == "/vol")
+        .expect("/vol in the box");
+    assert!(
+        vol_mount.1.split(',').any(|o| o == "rw"),
+        "/vol is read-write: {vol_mount:?}"
+    );
+    assert_eq!(
+        (vol_exit, vol_out.trim()),
+        (Exit::Code(0), "from the volume"),
+        "the volume's content is there"
+    );
+    assert_ne!(
+        config_reach,
+        Exit::Code(0),
+        "the bundle's config.json is unreachable from inside the box"
+    );
+    assert_ne!(
+        state_reach,
+        Exit::Code(0),
+        "the node's state directory is unreachable from inside the box"
+    );
+    eprintln!(
+        "bind+volume: /usr read-only and /vol read-write are in the box; config.json and the state dir are unreachable"
+    );
+}
+
+/// `argv` in box `id` through the seam, its exit and stdout once it ends.
+fn run_in(rt: &dyn Runtime, id: &BoxId, argv: &[&str]) -> (Exit, String) {
+    let (mut out, w) = std::io::pipe().unwrap();
+    let mut proc = rt
+        .exec(
+            id,
+            hex_api::Program::of(argv),
+            hex_api::Stdio {
+                stdout: Some(w),
+                ..hex_api::Stdio::null()
+            },
+        )
+        .expect("exec in the box");
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut out, &mut s).unwrap();
+    let exit = proc
+        .wait_for(conformance::PATIENCE)
+        .unwrap()
+        .expect("the program ends");
+    (exit, s)
+}
+
+/// `argv` in box `id`, its exit alone.
+fn exit_in(rt: &dyn Runtime, id: &BoxId, argv: &[&str]) -> Exit {
+    run_in(rt, id, argv).0
+}
+
+/// Each `/proc/<pid>/mountinfo` line as (mount point, per-mount options, optional/propagation fields,
+/// filesystem type) (proc_pid_mountinfo(5)); tuples, so an unread field is no dead-code warning.
+fn mountinfo(text: &str) -> Vec<(String, String, String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let left: Vec<&str> = left.split(' ').collect();
+            Some((
+                (*left.get(4)?).to_owned(),
+                (*left.get(5)?).to_owned(),
+                left.get(6..).map(|o| o.join(" ")).unwrap_or_default(),
+                right.split(' ').next().unwrap_or("").to_owned(),
+            ))
+        })
+        .collect()
 }
 
 /// Goal 5 plan step 4: the box bound's count is the root's link count, not a listing (a listing waits
