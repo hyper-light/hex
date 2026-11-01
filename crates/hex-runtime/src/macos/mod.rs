@@ -19,8 +19,8 @@ use std::os::fd::OwnedFd;
 use std::sync::{Arc, Mutex};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal,
-    Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Membership, Proc, Program, Refusal,
+    Runtime, Signal, Stdio, Usage,
 };
 use rustix::fs::{Mode, OFlags};
 
@@ -70,6 +70,8 @@ impl MacRuntime {
             },
             bounds: b.bounds(),
             adopted: false,
+            // No helper installed: this is the rootless process-group class (step 1), and inspect says so.
+            membership: Some(Membership::ProcessGroup),
             // A process box has no init, so no container exit to report (HEX-RT-11).
             exit: None,
             abandoned: 0,

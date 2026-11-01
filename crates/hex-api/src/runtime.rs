@@ -107,6 +107,18 @@ pub enum BoxState {
     Created,
 }
 
+/// How a macOS `process` box holds its members, which its node reports so a caller knows which (the
+/// native plan's step 2). `None` where it doesn't apply: Linux and Windows boxes, and the simulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Membership {
+    /// A process group, bounded by the node's polling watcher — the rootless class, with no helper
+    /// installed (step 1).
+    ProcessGroup,
+    /// A user of its own from the installer's pool, started and bounded by the privileged helper (step 2).
+    BoxUser,
+}
+
 /// A box as its runtime holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoxInfo {
@@ -116,6 +128,11 @@ pub struct BoxInfo {
     pub bounds: Bounds,
     /// Taken back after its node agent restarted, rather than made by this one.
     pub adopted: bool,
+    /// How a macOS `process` box holds its members (the helper's box user, or the rootless process
+    /// group), so its inspect says which; `None` off macOS. Added after the first release, so absent on
+    /// the wire means `None` (append-only, CLAUDE.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership: Option<Membership>,
     /// How an `oci` box's init ended, once it has: the container's own exit. `None` while it runs,
     /// and for a `process` box, which has no init. Added after the first release, so absent on the
     /// wire means `None` (append-only, CLAUDE.md).
@@ -208,6 +225,7 @@ mod tests {
         assert_eq!(info.exit, None);
         assert!(!serde_json::to_string(&info).unwrap().contains("exit"));
         let ended = BoxInfo {
+            membership: None,
             exit: Some(Exit::Signal(9)),
             ..info
         };
@@ -224,6 +242,7 @@ mod tests {
         assert_eq!(info.abandoned, 0);
         assert!(!serde_json::to_string(&info).unwrap().contains("abandoned"));
         let left = BoxInfo {
+            membership: None,
             abandoned: 2,
             ..info
         };

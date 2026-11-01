@@ -887,6 +887,7 @@ fn put_info(w: &mut Writer, info: &BoxInfo) -> Result<(), Fault> {
 
 fn info(r: &mut Reader<'_>) -> Result<BoxInfo, Fault> {
     Ok(BoxInfo {
+        membership: None,
         id: box_id(r)?,
         class: class(r)?,
         state: match r.u8()? {
