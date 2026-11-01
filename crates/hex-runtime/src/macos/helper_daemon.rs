@@ -282,20 +282,22 @@ impl<P: Privileged> Daemon<P> {
         }
     }
 
-    /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` crossing and, on one, re-apportions every
-    /// box: the crosser's box grows its share if headroom is free, else ends. This is the event-driven
-    /// rebalance (Ada's call, 2026-11-01) — no polling. The daemon runs it on a thread beside its socket;
-    /// a crossing isn't mapped to one box (a non-fatal crossing arrives via a corpse whose pid isn't the
-    /// member's), so every box is re-read, which is cheap at a node's box count and exact. A per-box
-    /// failure (a box ended since) is skipped, not fatal.
+    /// One turn of the daemon's two layers (Ada's call, 2026-11-01): it waits up to `timeout_ms` for a
+    /// member's `EXC_RESOURCE` crossing, then re-apportions **every** box (`rearm`: a box grows a member's
+    /// share where headroom is free, and ends where the footprints reach the bound). A crossing wakes it at
+    /// once — the kernel ledger is the **primary** bound, event-driven; the timeout paces it otherwise, so
+    /// the same sweep is the **defense-in-depth** polling layer beneath, catching a box the ledger didn't
+    /// hold (a member unarmed in the fork window, a missed exception). A crossing isn't mapped to one box —
+    /// a non-fatal crossing arrives via a corpse whose pid isn't the member's — so every box is re-read,
+    /// cheap at a node's box count (`rearm` re-arms only a member whose share changed). A per-box failure
+    /// (a box ended since) is skipped, not fatal. The daemon runs this on a thread beside its socket.
     pub fn pump(&self, timeout_ms: u32) -> Result<(), Refusal> {
-        let crossed = self
+        // Wakes early on a crossing (the event-driven primary); else the timeout is the poll floor (the
+        // defense-in-depth layer). Either way, the box sweep below runs.
+        let _ = self
             .ops
             .next_crossing(timeout_ms)
             .map_err(|e| Refusal::os("receiving a box crossing", e))?;
-        if !crossed {
-            return Ok(());
-        }
         let boxes: Vec<(BoxId, u32)> = {
             let map = self
                 .boxes
@@ -303,8 +305,6 @@ impl<P: Privileged> Daemon<P> {
                 .map_err(|_| Refusal::Broken("the daemon's boxes lock is poisoned".to_owned()))?;
             map.iter().map(|(id, t)| (id.clone(), t.uid())).collect()
         };
-        // Which box crossed isn't known from the message, so re-apportion each; rearm ends a box with no
-        // headroom left and grows a share where there is.
         for (id, uid) in boxes {
             let _ = self.rearm(&id, uid);
         }
