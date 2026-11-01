@@ -7,6 +7,45 @@ use std::process::{Child, Command};
 
 use super::*;
 
+const MIB: u64 = 1 << 20;
+
+fn m(pid: i32, footprint: u64) -> Member {
+    Member { pid, footprint }
+}
+
+/// HEX-MAC-14: a fresh box arms each member at its apportioned share; a read that changes nothing re-arms
+/// nothing; a member growing shifts shares; a member gone is forgotten; a tree at the bound ends the box.
+#[test]
+fn reapportion_arms_the_changed_and_ends_when_over() {
+    // 256 MiB bound, 16 MiB reserve → 240 MiB apportioned.
+    let mut t = Tracked::new(7000, 256 * MIB, 16 * MIB);
+
+    // Two idle members: both armed at 120 MiB (240 / 2).
+    let plan = t.reapportion(&[m(10, 0), m(11, 0)]);
+    assert_eq!(plan, Plan::Arm(vec![(10, 120 * MIB), (11, 120 * MIB)]));
+
+    // Same footprints again: nothing changed, so nothing to re-arm.
+    assert_eq!(t.reapportion(&[m(10, 0), m(11, 0)]), Plan::Arm(vec![]));
+
+    // One member now holds 100 MiB: headroom 140 MiB split as 70 each → 10's share 170, 11's 70. Both change.
+    let plan = t.reapportion(&[m(10, 100 * MIB), m(11, 0)]);
+    assert_eq!(plan, Plan::Arm(vec![(10, 170 * MIB), (11, 70 * MIB)]));
+
+    // Member 11 gone: 10 alone gets all 240 MiB; 11 is forgotten.
+    let plan = t.reapportion(&[m(10, 100 * MIB)]);
+    assert_eq!(plan, Plan::Arm(vec![(10, 240 * MIB)]));
+    assert!(!t.armed.contains_key(&11));
+
+    // The tree reaches the apportionable bound: end the box, reporting the real bound.
+    assert_eq!(
+        t.reapportion(&[m(10, 140 * MIB), m(11, 100 * MIB)]),
+        Plan::End {
+            footprint: 240 * MIB,
+            bound: 256 * MIB
+        }
+    );
+}
+
 /// A few sleeping children of this process, killed when dropped.
 struct Sleepers(Vec<Child>);
 

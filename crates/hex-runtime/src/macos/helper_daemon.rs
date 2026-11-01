@@ -10,9 +10,12 @@
 //! The privileged spawn and the ledger/exception arming are [`super::sys`]'s (`unsafe`, CLAUDE.md §12);
 //! the apportionment is [`hex_core::boxuser`].
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
+use hex_core::boxuser::{self, Bound, Use};
 use hex_core::darwin;
+use hex_core::helper::State;
 
 use super::sys;
 
@@ -73,6 +76,114 @@ pub fn kill_user(uid: u32, linux_signal: i32) -> io::Result<usize> {
         }
     }
     Ok(signalled)
+}
+
+/// What the daemon must do to a box's kernel limits after a read of its members: arm some at new ledger
+/// limits, or end the box because its tree reached the bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// (Re)arm each `(pid, limit)`: a member new since the last read, or one whose apportioned share
+    /// changed. A member whose share is unchanged keeps its current kernel limit and isn't re-armed.
+    Arm(Vec<(i32, u64)>),
+    /// The members' footprints reached what may be apportioned: end the box (its footprint and bound).
+    End { footprint: u64, bound: u64 },
+}
+
+/// One box the helper manages: its pool user, its bound and reserve, and the ledger limit each member is
+/// armed at now. The daemon apportions the bound across the box's members ([`hex_core::boxuser`]) and
+/// arms the kernel limits ([`super::sys`], privileged); this tracks what is armed so a read only re-arms
+/// what changed, and keeps the box's peak footprint and how often a member crossed its share.
+#[derive(Debug, Clone)]
+pub struct Tracked {
+    uid: u32,
+    bound: Bound,
+    /// Each live member's pid and the ledger limit it is armed at.
+    armed: BTreeMap<i32, u64>,
+    peak: u64,
+    crossings: u64,
+    ended_over: bool,
+}
+
+impl Tracked {
+    /// A box on pool user `uid`, bounded at `bound` bytes with `reserve` bytes held back for the fork
+    /// arming window (`hex_core::boxuser::Bound`).
+    pub fn new(uid: u32, bound: u64, reserve: u64) -> Self {
+        Self {
+            uid,
+            bound: Bound {
+                limit: bound,
+                reserve,
+            },
+            armed: BTreeMap::new(),
+            peak: 0,
+            crossings: 0,
+            ended_over: false,
+        }
+    }
+
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Apportions the bound across `members` (their footprints now) and returns what to arm: the members
+    /// new or whose share changed. Forgets members gone since the last read. Ends the box if the tree
+    /// reached the apportionable bound (HEX-MAC-14).
+    pub fn reapportion(&mut self, members: &[Member]) -> Plan {
+        let footprint = members
+            .iter()
+            .fold(0u64, |s, m| s.saturating_add(m.footprint));
+        self.peak = self.peak.max(footprint);
+        let uses: Vec<Use> = members
+            .iter()
+            .filter_map(|m| {
+                u32::try_from(m.pid).ok().map(|pid| Use {
+                    pid,
+                    footprint: m.footprint,
+                })
+            })
+            .collect();
+        match boxuser::apportion(self.bound, &uses) {
+            boxuser::Plan::End { footprint, bound } => {
+                self.ended_over = true;
+                Plan::End { footprint, bound }
+            }
+            boxuser::Plan::Arm(shares) => {
+                // Forget members gone since the last read, so `armed` tracks only the live ones.
+                let live: BTreeSet<i32> = members.iter().map(|m| m.pid).collect();
+                self.armed.retain(|pid, _| live.contains(pid));
+                let mut to_arm = Vec::new();
+                for s in shares {
+                    let pid = i32::try_from(s.pid).unwrap_or(-1);
+                    if self.armed.get(&pid) != Some(&s.limit) {
+                        self.armed.insert(pid, s.limit);
+                        to_arm.push((pid, s.limit));
+                    }
+                }
+                Plan::Arm(to_arm)
+            }
+        }
+    }
+
+    /// Records that a member crossed its ledger share (an `EXC_RESOURCE` the helper caught); the next
+    /// [`Tracked::reapportion`] decides whether to rebalance or end.
+    pub fn crossed(&mut self) {
+        self.crossings = self.crossings.saturating_add(1);
+    }
+
+    /// What the box holds now, for an inspect answer.
+    pub fn state(&self, members: &[Member]) -> State {
+        let footprint = members
+            .iter()
+            .fold(0u64, |s, m| s.saturating_add(m.footprint));
+        State {
+            members: u32::try_from(members.len()).unwrap_or(u32::MAX),
+            footprint,
+            peak: self.peak.max(footprint),
+            processes: u32::try_from(members.len()).unwrap_or(u32::MAX),
+            crossings: self.crossings,
+            ended_over: self.ended_over,
+        }
+    }
 }
 
 #[cfg(test)]
