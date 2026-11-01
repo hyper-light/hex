@@ -133,9 +133,12 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   multi-threaded process may touch no lock. It then arms each member: `task_for_pid` for the member's
   task, `task_set_phys_footprint_limit` for its ledger limit, and
   `task_set_exception_ports`(`EXC_MASK_RESOURCE`) to route a crossing to the daemon's port
-  (`mach_port_allocate`/`mach_port_insert_right`), so a crossing notifies rather than kills. `posix_spawn`
-  can't change uid, so this is a fork, not a spawn; libc binds the POSIX calls and the Mach routines are
-  declared as `unsafe` foreign functions, macOS offering no safe wrapper.
+  (`mach_port_allocate`/`mach_port_insert_right`), so a crossing notifies rather than kills. The daemon
+  receives those crossings with `mach_msg` on that port and replies, freeing the thread and task send
+  rights the message carried with `mach_port_deallocate`, and re-apportions the box (the event-driven
+  rebalance, no polling). `posix_spawn` can't change uid, so the start is a fork, not a spawn; libc binds
+  the POSIX calls and the Mach routines are declared as `unsafe` foreign functions, macOS offering no safe
+  wrapper.
 
 ## 13. Lean code
 
