@@ -67,7 +67,17 @@ pub fn main(args: &[String]) -> u8 {
             return 1;
         }
     };
-    match Daemon::new(ops, users, nproc).listen(Path::new(&socket)) {
+    let daemon = std::sync::Arc::new(Daemon::new(ops, users, nproc));
+    // Rebalance on EXC_RESOURCE crossings on a thread beside the socket (event-driven, no polling).
+    let pumper = std::sync::Arc::clone(&daemon);
+    std::thread::spawn(move || {
+        while let Ok(()) = pumper.pump(500) {}
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "hex __box-helper: the crossing pump stopped"
+        );
+    });
+    match daemon.listen(Path::new(&socket)) {
         Ok(()) => 0,
         Err(e) => {
             let _ = writeln!(std::io::stderr().lock(), "hex __box-helper: {e}");

@@ -29,6 +29,7 @@
 
 use std::ffi::{CString, c_char, c_int, c_uint};
 use std::io;
+use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use hex_api::Program;
@@ -66,6 +67,16 @@ unsafe extern "C" {
         poly: MachPort,
         poly_type: c_uint,
     ) -> KernReturn;
+    fn mach_msg(
+        msg: *mut MsgHeader,
+        option: c_int,
+        send_size: c_uint,
+        rcv_size: c_uint,
+        rcv_name: MachPort,
+        timeout: c_uint,
+        notify: MachPort,
+    ) -> KernReturn;
+    fn mach_port_deallocate(task: MachPort, name: MachPort) -> KernReturn;
 }
 
 const KERN_SUCCESS: KernReturn = 0;
@@ -80,6 +91,62 @@ const THREAD_STATE_NONE: c_int = 0;
 /// `MACH_PORT_RIGHT_RECEIVE` (`mach/port.h`) and `MACH_MSG_TYPE_MAKE_SEND` (`mach/message.h`).
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
 const MACH_MSG_TYPE_MAKE_SEND: c_uint = 20;
+/// `mach_msg` options (`mach/message.h`): receive a message, send one, and time the receive out.
+const MACH_RCV_MSG: c_int = 2;
+const MACH_SEND_MSG: c_int = 1;
+const MACH_RCV_TIMEOUT: c_int = 0x100;
+/// `MACH_RCV_TIMED_OUT` (`mach/message.h`): the receive's timeout elapsed with no message.
+const MACH_RCV_TIMED_OUT: KernReturn = 0x1000_4003;
+/// The remote-bits mask of `msgh_bits` (`MACH_MSGH_BITS_REMOTE_MASK`), carried back on the reply.
+const MACH_MSGH_BITS_REMOTE_MASK: u32 = 0x1f;
+
+/// A Mach message header (`mach/message.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MsgHeader {
+    bits: u32,
+    size: c_uint,
+    remote: MachPort,
+    local: MachPort,
+    voucher: MachPort,
+    id: c_int,
+}
+
+/// A `mach_msg_port_descriptor_t` (12 bytes on LP64): a port name, then the size and the
+/// pad/disposition/type bits, which the daemon reads only to deallocate the right it carries.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PortDescriptor {
+    name: MachPort,
+    pad_size: c_uint,
+    pad_bits: c_uint,
+}
+
+/// An `EXC_RESOURCE` message as delivered with `EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES`: the thread and
+/// task send rights, then the exception and its 64-bit codes, then room for the trailer. The daemon reads
+/// the header to reply and the descriptors to free the rights; the crossing itself is the signal (which
+/// box crossed is found by re-reading each box, not from the message — a non-fatal crossing arrives via a
+/// corpse task, whose pid isn't the member's).
+#[repr(C)]
+struct ExcMessage {
+    header: MsgHeader,
+    descriptor_count: c_uint,
+    thread: PortDescriptor,
+    task: PortDescriptor,
+    ndr: [u8; 8],
+    exception: c_int,
+    code_count: c_uint,
+    code: [i64; 2],
+    trailer: [u8; 68],
+}
+
+/// The reply to an exception message: `KERN_SUCCESS`, so the kernel's handler path completes.
+#[repr(C)]
+struct ExcReply {
+    header: MsgHeader,
+    ndr: [u8; 8],
+    ret_code: KernReturn,
+}
 
 /// The real privileged backend, run as root by the daemon. Holds the receive right that a member's
 /// `EXC_RESOURCE` is routed to; a send right to it is set as each member's exception port.
@@ -165,6 +232,70 @@ impl Privileged for RealPriv {
             )));
         }
         Ok(())
+    }
+
+    /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` on the daemon's port; `Ok(true)` when one
+    /// arrived (a crossing: the daemon re-apportions every box), `Ok(false)` on timeout. The message's
+    /// carried thread and task send rights are freed, and the kernel's handler is replied `KERN_SUCCESS`.
+    fn next_crossing(&self, timeout_ms: u32) -> io::Result<bool> {
+        let mut msg = MaybeUninit::<ExcMessage>::zeroed();
+        let size = u32::try_from(size_of::<ExcMessage>()).unwrap_or(u32::MAX);
+        // SAFETY: mach_msg receives at most `size` bytes into the ExcMessage buffer, which is that size and
+        // alive for the call, on the daemon's own receive port; it writes only the message.
+        let kr = unsafe {
+            mach_msg(
+                msg.as_mut_ptr().cast::<MsgHeader>(),
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                0,
+                size,
+                self.recv,
+                timeout_ms,
+                0,
+            )
+        };
+        if kr == MACH_RCV_TIMED_OUT {
+            return Ok(false);
+        }
+        if kr != KERN_SUCCESS {
+            return Err(io::Error::other(format!("mach_msg receive: {kr}")));
+        }
+        // SAFETY: the kernel filled the message on success; every field is plain data.
+        let msg = unsafe { msg.assume_init() };
+        // Free the thread and task send rights the message carried, so they don't leak.
+        for (i, desc) in [msg.thread, msg.task].into_iter().enumerate() {
+            if u32::try_from(i).unwrap_or(u32::MAX) < msg.descriptor_count && desc.name != 0 {
+                // SAFETY: deallocates a send right the message gave this task; a bad name is a no-op error.
+                unsafe {
+                    mach_port_deallocate(mach_task_self(), desc.name);
+                }
+            }
+        }
+        // Reply KERN_SUCCESS so the kernel's exception path completes (the id + 100 is the reply id).
+        let mut reply = ExcReply {
+            header: MsgHeader {
+                bits: msg.header.bits & MACH_MSGH_BITS_REMOTE_MASK,
+                size: u32::try_from(size_of::<ExcReply>()).unwrap_or(u32::MAX),
+                remote: msg.header.remote,
+                local: 0,
+                voucher: 0,
+                id: msg.header.id.saturating_add(100),
+            },
+            ndr: msg.ndr,
+            ret_code: KERN_SUCCESS,
+        };
+        // SAFETY: sends one ExcReply (its own size) to the remote port the request named; no receive.
+        let _ = unsafe {
+            mach_msg(
+                &raw mut reply.header,
+                MACH_SEND_MSG,
+                reply.header.size,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        Ok(true)
     }
 }
 

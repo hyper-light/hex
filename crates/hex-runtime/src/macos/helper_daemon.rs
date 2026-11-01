@@ -172,12 +172,6 @@ impl Tracked {
         }
     }
 
-    /// Records that a member crossed its ledger share (an `EXC_RESOURCE` the helper caught); the next
-    /// [`Tracked::reapportion`] decides whether to rebalance or end.
-    pub fn crossed(&mut self) {
-        self.crossings = self.crossings.saturating_add(1);
-    }
-
     /// The ledger cap, in whole MiB, to arm a just-started member at before the box is re-apportioned: the
     /// whole apportionable bound (a single member may use it all until others claim their shares). Rounded
     /// down, so a sum of such caps never passes the bound.
@@ -231,6 +225,13 @@ pub trait Privileged {
     fn kill(&self, uid: u32, signal: i32) -> io::Result<usize> {
         kill_user(uid, signal)
     }
+
+    /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` crossing on the daemon's port; `Ok(true)`
+    /// when one arrived, `Ok(false)` on timeout. The default never fires (no exception port): for a
+    /// backend with no kernel arming, the simulator and the poll-only fallback.
+    fn next_crossing(&self, _timeout_ms: u32) -> io::Result<bool> {
+        Ok(false)
+    }
 }
 
 /// The macOS box helper daemon over a [`Privileged`] backend: a pool of box users, the boxes it manages,
@@ -279,6 +280,35 @@ impl<P: Privileged> Daemon<P> {
             let _ = rustix::net::sockopt::set_socket_nosigpipe(&conn, true);
             let _ = self.serve(conn.as_fd());
         }
+    }
+
+    /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` crossing and, on one, re-apportions every
+    /// box: the crosser's box grows its share if headroom is free, else ends. This is the event-driven
+    /// rebalance (Ada's call, 2026-11-01) — no polling. The daemon runs it on a thread beside its socket;
+    /// a crossing isn't mapped to one box (a non-fatal crossing arrives via a corpse whose pid isn't the
+    /// member's), so every box is re-read, which is cheap at a node's box count and exact. A per-box
+    /// failure (a box ended since) is skipped, not fatal.
+    pub fn pump(&self, timeout_ms: u32) -> Result<(), Refusal> {
+        let crossed = self
+            .ops
+            .next_crossing(timeout_ms)
+            .map_err(|e| Refusal::os("receiving a box crossing", e))?;
+        if !crossed {
+            return Ok(());
+        }
+        let boxes: Vec<(BoxId, u32)> = {
+            let map = self
+                .boxes
+                .lock()
+                .map_err(|_| Refusal::Broken("the daemon's boxes lock is poisoned".to_owned()))?;
+            map.iter().map(|(id, t)| (id.clone(), t.uid())).collect()
+        };
+        // Which box crossed isn't known from the message, so re-apportion each; rearm ends a box with no
+        // headroom left and grows a share where there is.
+        for (id, uid) in boxes {
+            let _ = self.rearm(&id, uid);
+        }
+        Ok(())
     }
 
     /// Serves one node connection until it closes: reads each framed request and answers it. A request it
