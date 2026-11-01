@@ -134,12 +134,21 @@ memory bound is refused**, measured on adas-mac-studio-3 (`mem_bound_probe.c`, r
 | `setrlimit(RLIMIT_RSS)` (resident) | `EINVAL`; not enforced |
 | `EVFILT_MEMORYSTATUS` (kqueue memory event) | not in the public SDK |
 | `posix_spawnattr_setjetsam_np` (spawn-time jetsam limit) | symbol absent from libSystem (`dlsym` → NULL) |
+| `posix_spawnattr_setjetsam_ext` (spawn-time jetsam limit) | **present and works rootless** — see the correction below |
 | `proc_rlimit_control` | exists, but no memory cap — only CPU/wakeups monitors and `RLIMIT_FOOTPRINT_INTERVAL`, which *tracks* footprint over an interval (a read), not an event or a cap |
 
-The investigation is exhaustive: every rootless entry point to a kernel-enforced or event-driven per-task
-memory bound on macOS is closed. In-process allocator interposition (`DYLD_INSERT_LIBRARIES`) is not a bound
-either — library validation rejects it for platform binaries (the common case, e.g. `/usr/bin` toolchains),
-and it would count mapped VM, not footprint.
+**Correction (native plan step 2, 2026-11-01, `records/boxuser-rootless-e532df3-20261101T071544Z.txt`).** The
+row above tried the `_np` spawn symbol (absent). The `_ext` symbol — `posix_spawnattr_setjetsam_ext` with
+`POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL` — **is** present and sets a kernel-enforced hard
+physical-footprint cap at spawn, measured **rootless** on adas-mac-studio-3 with **0 MiB overshoot** at
+16/64/256 MiB. So macOS does give a rootless, kernel-enforced hard cap — on a process **as spawned**; a
+`fork` escapes it (`fork` zeroes the child's limit and re-arming a running task is root), so a forking tree
+still needs step 1's watcher or the privileged helper. The "no rootless kernel cap on a process tree's
+memory" above holds for the whole tree (a fork escapes), but not for a single spawned process; the
+conclusion that *every* rootless entry point is closed is corrected by `_ext`. The full picture is in
+`docs/research/runtime/macos-box-user-and-ledger.md`. In-process allocator interposition
+(`DYLD_INSERT_LIBRARIES`) is still not a bound — library validation rejects it for platform binaries, and it
+would count mapped VM, not footprint.
 
 So **polling `proc_pid_rusage` is the only rootless mechanism** for a process tree's footprint on macOS — nothing
 kernel-enforced, nothing event-driven, is available unprivileged.
