@@ -35,6 +35,14 @@ pub fn run(argv: &[String]) -> Option<u8> {
             .first()
             .and_then(|b| b.parse::<u64>().ok())
             .unwrap_or(0))),
+        // hold <bytes> <millis>: takes and touches `bytes`, then sits that long — a box held near its
+        // bound, for the macOS class bench to measure its watcher's cost (bench/native/macos).
+        "hold" => Some(hold(
+            args.first()
+                .and_then(|b| b.parse::<u64>().ok())
+                .unwrap_or(0),
+            args.get(1).and_then(|m| m.parse::<u64>().ok()).unwrap_or(0),
+        )),
         "spawn" => Some(spawn(
             args.first()
                 .and_then(|n| n.parse::<u32>().ok())
@@ -154,6 +162,29 @@ fn hog(bytes: u64) -> u8 {
     let keep = held.len();
     std::thread::park_timeout(std::time::Duration::from_millis(200));
     u8::from(keep == usize::MAX)
+}
+
+/// Takes and touches `bytes`, then sits for `millis`, holding the memory: a box kept near its bound for
+/// its watcher's cost to be measured. Exits 0 unless the allocation fails.
+fn hold(bytes: u64, millis: u64) -> u8 {
+    let target = usize::try_from(bytes).unwrap_or(usize::MAX);
+    let mut held: Vec<Vec<u8>> = Vec::new();
+    let mut taken = 0usize;
+    while taken < target {
+        let want = CHUNK.min(target.saturating_sub(taken));
+        let mut chunk = vec![0u8; want];
+        let mut i = 0;
+        while i < chunk.len() {
+            if let Some(b) = chunk.get_mut(i) {
+                *b = 1;
+            }
+            i = i.saturating_add(PAGE);
+        }
+        held.push(chunk);
+        taken = taken.saturating_add(want);
+    }
+    std::thread::park_timeout(std::time::Duration::from_millis(millis));
+    u8::from(held.len() == usize::MAX)
 }
 
 /// Starts `n` processes at once (each a `wait` act). Exits 0 when all start, 2 when one is refused

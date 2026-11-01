@@ -20,6 +20,12 @@ libc.workspace = true
 rustix.workspace = true
 seccompiler.workspace = true
 
+# The macOS `process` class: posix_spawn, proc_pid_rusage, kqueue, the Mach time-constraint watcher
+# (crates/hex-runtime/src/macos). rustix wraps kqueue, kill and waitid; libc binds the rest.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+rustix.workspace = true
+
 [dev-dependencies]
 proptest = "1.12.0"
 tempfile.workspace = true

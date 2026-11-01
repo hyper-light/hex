@@ -24,6 +24,12 @@ harness = false
 name = "seccomp_compile"
 harness = false
 
+# The macOS `process` class's own path: overshoot past the memory bound and the watcher's CPU
+# (bench/native/macos/RESULT.md), through hex-runtime's macOS runtime and real `hex selftest-box` members.
+[[bench]]
+name = "macos_box"
+harness = false
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hex-api.workspace = true
 hex-client.workspace = true
@@ -32,6 +38,10 @@ hex-node.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hex-api.workspace = true
+hex-runtime.workspace = true
 
 [lints]
 workspace = true
