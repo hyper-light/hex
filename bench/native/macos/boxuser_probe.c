@@ -20,6 +20,7 @@
 #include <mach/mach_time.h>
 #include <mach/task.h>
 #include <pthread.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,10 +34,11 @@
 
 extern char **environ;
 
-// task_set_phys_footprint_limit / task_get_phys_footprint_limit are public MIG routines (mach/task.h) but
-// forward-declared here so the probe builds against any SDK that ships the trap but not the prototype.
+// task_set_phys_footprint_limit is the public MIG routine (mach/task.h); forward-declared here so the probe
+// builds against any SDK that ships the trap but not the prototype. (task_get_phys_footprint_limit is not
+// exported in user space on macOS 26, so the limit is read back through the `old` out-parameter of a second
+// set, not a get.)
 extern kern_return_t task_set_phys_footprint_limit(task_t task, int new_limit_mb, int *old_limit_mb);
-extern kern_return_t task_get_phys_footprint_limit(task_t task, int *limit_mb);
 
 // posix_spawnattr_setjetsam_ext (spawn_private.h, private): arms a per-process memory limit, in MiB, at spawn,
 // so the leader is bounded from its first instruction. The FATAL flag makes the kernel kill the task at the
@@ -54,17 +56,6 @@ static char g_self[4096];
 static const char *getprogname_self(void) { return g_self; }
 
 static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
-
-static int cmp_u64(const void *a, const void *b) {
-    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-    return (x > y) - (x < y);
-}
-static uint64_t pct(uint64_t *v, int n, int p) {
-    if (n <= 0) return 0;
-    qsort(v, (size_t)n, sizeof *v, cmp_u64);
-    int i = (n * p) / 100;
-    return v[i >= n ? n - 1 : i];
-}
 
 // A process's physical footprint now, in bytes, 0 if it has no such pid (ESRCH) or has ended.
 static uint64_t footprint(pid_t pid) {
@@ -127,6 +118,65 @@ static int task_of(pid_t pid, task_t *out) {
     return 0;
 }
 
+// A forkhog child: forks a grandchild that allocates `alloc_mb` and sits, then waits. When this process was
+// spawned with a fatal cap, the grandchild shows whether the cap survives a fork — it should not (fork
+// resets the kernel's memory limit, kern_fork.c:1207-1209, and re-arming a running task needs root).
+static int do_forkhog(uint64_t alloc_mb) {
+    pid_t c = fork();
+    if (c == 0) return do_hog(alloc_mb);
+    for (;;) sleep(1);
+}
+
+// fork: spawn a leader with a FATAL cap of cap_mb that forks a grandchild allocating alloc_mb; report
+// whether the grandchild is bounded (killed near cap_mb) or escapes (allocates past it and lives). This is
+// the rootless gap the privileged helper closes: rootless a spawned process is capped, but its forks aren't.
+static int do_fork(uint64_t cap_mb, uint64_t alloc_mb) {
+    char ab[32];
+    snprintf(ab, sizeof ab, "%llu", (unsigned long long)alloc_mb);
+    char *argv[] = {(char *)getprogname_self(), (char *)"__forkhog", ab, NULL};
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setjetsam_ext(&attr,
+                                  (short)(POSIX_SPAWN_JETSAM_SET | POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL),
+                                  40, (int)cap_mb, (int)cap_mb);
+    pid_t leader = -1;
+    int r = posix_spawn(&leader, getprogname_self(), NULL, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
+    if (r != 0) {
+        fprintf(stderr, "posix_spawn: %s\n", strerror(r));
+        return 1;
+    }
+    usleep(200000);
+    pid_t kids[MAX_PIDS];
+    int bytes = proc_listpids(PROC_PPID_ONLY, (uint32_t)leader, kids, (int)sizeof kids);
+    int found = bytes > 0 ? bytes / (int)sizeof(pid_t) : 0;
+    pid_t gc = 0;
+    for (int i = 0; i < found; i++)
+        if (kids[i] != 0) gc = kids[i];
+    if (gc == 0) {
+        printf("fork: no grandchild found\n");
+        kill(leader, SIGKILL);
+        return 1;
+    }
+    uint64_t peak = 0;
+    int alive = 0;
+    for (int i = 0; i < 3000; i++) {
+        uint64_t f = footprint(gc);
+        if (f > peak) peak = f;
+        alive = (kill(gc, 0) == 0);
+        if (!alive) break;
+        usleep(1000);
+    }
+    printf("fork: leader FATAL-capped at %llu MB; grandchild (forked) tried %llu MiB -> peak %llu MiB, "
+           "alive=%d => the spawn cap %s the fork\n",
+           (unsigned long long)cap_mb, (unsigned long long)alloc_mb, (unsigned long long)(peak / MIB), alive,
+           (alive && peak / MIB > cap_mb) ? "does NOT bound (escaped, needs the helper)" : "bounds");
+    kill(gc, SIGKILL);
+    kill(leader, SIGKILL);
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    return 0;
+}
+
 // priv: root arms a ledger limit on a spawned sleeper and reads it back.
 static int do_priv(uint64_t mb) {
     pid_t pid = spawn_hog(getprogname_self(), 0, 0, 0);
@@ -138,9 +188,11 @@ static int do_priv(uint64_t mb) {
     kern_return_t kr = task_set_phys_footprint_limit(task, (int)mb, &old);
     printf("task_set_phys_footprint_limit(%llu MB) -> %s (old %d MB)\n", (unsigned long long)mb,
            mach_error_string(kr), old);
-    int cur = -2;
-    kern_return_t kr2 = task_get_phys_footprint_limit(task, &cur);
-    printf("task_get_phys_footprint_limit -> %s (now %d MB)\n", mach_error_string(kr2), cur);
+    // Read back by setting the same limit again: its returned `old` is what the first set wrote.
+    int readback = -2;
+    kern_return_t kr2 = task_set_phys_footprint_limit(task, (int)mb, &readback);
+    printf("read back -> %s (limit now %d MB, expected %llu)\n", mach_error_string(kr2), readback,
+           (unsigned long long)mb);
     kill(pid, SIGKILL);
     waitpid(pid, NULL, 0);
     return kr == KERN_SUCCESS ? 0 : 1;
@@ -274,7 +326,7 @@ static int do_uid(uid_t uid, int n) {
     int found = bytes > 0 ? bytes / (int)sizeof(pid_t) : 0;
     int alive = 0;
     for (int i = 0; i < found; i++)
-        if (pids[i] != 0 && footprint(pids[i]) >= 0 && kill(pids[i], 0) == 0) alive++;
+        if (pids[i] != 0 && kill(pids[i], 0) == 0) alive++;
     printf("uid %u: started %d members, proc_listpids(PROC_UID_ONLY) found %d\n", uid, n, alive);
     // Delete: kill every process of the uid, then confirm none is left.
     for (int i = 0; i < found; i++)
@@ -327,13 +379,15 @@ static int do_box(uint64_t b_mib, int n, const char *kind) {
             if (p > 0) pids[np++] = p;
         }
     }
-    // Watch the box total for 2 s; the members are fatally capped, so the total should settle near B.
+    // Watch the box total for 2 s; the members are fatally capped at their share, so the total should peak
+    // near B. Each member's lifetime peak footprint is summed (it survives on a zombie that dies at its
+    // cap), so the peak total holds even as fatally-capped members are killed.
     uint64_t peak_total = 0;
     struct rusage ru0, ru1;
     getrusage(RUSAGE_SELF, &ru0);
     for (int t = 0; t < 2000; t++) {
         uint64_t total = 0;
-        for (int i = 0; i < np; i++) total += footprint(pids[i]);
+        for (int i = 0; i < np; i++) total += peak_footprint(pids[i]);
         if (total > peak_total) peak_total = total;
         usleep(1000);
     }
@@ -358,7 +412,10 @@ int main(int argc, char **argv) {
     if (proc_pidpath(getpid(), g_self, sz) <= 0) snprintf(g_self, sz, "%s", argv[0]);
 
     if (argc >= 3 && strcmp(argv[1], "__hog") == 0) return do_hog(strtoull(argv[2], NULL, 10));
+    if (argc >= 3 && strcmp(argv[1], "__forkhog") == 0) return do_forkhog(strtoull(argv[2], NULL, 10));
     if (argc >= 3 && strcmp(argv[1], "priv") == 0) return do_priv(strtoull(argv[2], NULL, 10));
+    if (argc >= 4 && strcmp(argv[1], "fork") == 0)
+        return do_fork(strtoull(argv[2], NULL, 10), strtoull(argv[3], NULL, 10));
     if (argc >= 4 && strcmp(argv[1], "cap") == 0 && strcmp(argv[2], "fatal") == 0)
         return do_cap_fatal(strtoull(argv[3], NULL, 10));
     if (argc >= 4 && strcmp(argv[1], "cap") == 0 && strcmp(argv[2], "soft") == 0)
