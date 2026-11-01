@@ -788,8 +788,59 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
         );
     }
 
+    // (3) Only the node's side can arm the crash point, never a container: a box on a node that armed
+    // nothing, whose own spec sets the inject variable in its process env, builds its root and runs — the
+    // init never saw it (the env reaches the workload at execve, after the root is built, and the node
+    // clears it from the seed besides, so no box can kill its own init through it). Debug builds only,
+    // where the crash point exists to be proven inert.
+    #[cfg(debug_assertions)]
+    {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let box_root = own.join("hex-oci-spec-inject");
+        let node = lab.node(&box_root, state.path());
+        let inject = hex_runtime::linux::oci::seed::ENV_INJECT;
+        let point = hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_MOVE;
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = lab
+            .config_with(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                "",
+            )
+            .replace(
+                r#""env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]"#,
+                &format!(
+                    r#""env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "{inject}={point}"]"#
+                ),
+            );
+        assert!(
+            config.contains(&format!("{inject}={point}")),
+            "the box's spec carries the inject variable in its process env"
+        );
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        let id = BoxId::new("spec-inject").unwrap();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        })
+        .expect("the box whose spec sets the inject variable is created: the init never saw it");
+        node.start(&id).expect("start");
+        assert_eq!(
+            node.inspect(&id).unwrap().state,
+            BoxState::Running,
+            "the box runs: its own env did not arm the crash point, only the node's side can"
+        );
+        node.delete(&id).expect("delete");
+    }
+
     eprintln!(
-        "mid-build: an unattachable mount is refused naming it, and a killed init refused; each leaves no box, directory or mount in the agent's namespace"
+        "mid-build: an unattachable mount is refused naming it, a killed init refused, and a container's own env cannot arm the crash point; each leaves no box, directory or mount in the agent's namespace"
     );
 }
 
