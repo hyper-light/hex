@@ -581,14 +581,11 @@ impl Runtime {
         spec: &Spec,
         cgroup: &BoxCgroup,
     ) -> Result<PrunedCreate, ClassicReason> {
-        if !spec.makes_namespace("mount") {
-            return Err(ClassicReason::NoMountNamespace);
-        }
-        if spec.makes_namespace("user") {
-            return Err(ClassicReason::UserNamespace);
-        }
         // A mount namespace joined by path: the pruned init would `setns` into an existing namespace,
-        // not build the pruned one. (A pid or user namespace by path went to the shim already,
+        // not build the pruned one. The container names a mount namespace, by path, so this is
+        // `JoinsByPath`, not `NoMountNamespace`; it is checked first because `makes_namespace` counts
+        // only a namespace made (no path), so a mount namespace by path would otherwise fall to the
+        // `NoMountNamespace` check below. (A pid or user namespace by path went to the shim already,
         // `needs_shim`; a network, ipc, uts or cgroup namespace by path the agent opens below.)
         if spec
             .linux
@@ -597,6 +594,12 @@ impl Runtime {
             .any(|n| n.kind == "mount" && n.path.is_some())
         {
             return Err(ClassicReason::JoinsByPath);
+        }
+        if !spec.makes_namespace("mount") {
+            return Err(ClassicReason::NoMountNamespace);
+        }
+        if spec.makes_namespace("user") {
+            return Err(ClassicReason::UserNamespace);
         }
         if !spec.hooks.prestart.is_empty()
             || !spec.hooks.create_runtime.is_empty()
