@@ -60,6 +60,32 @@ make_user() {
     echo "## C1 membership: $N members as a transient pool user (uid $LABUID), one daemonized"
     if make_user; then
         "$PROBE" uid "$LABUID" "$N"
+
+        echo "## box-user class end to end: the real helper daemon + HEX-RT conformance"
+        # Build the hex binary (and the conformance test) into a root-owned target dir, so the lab needs
+        # nothing of the user's tree; start the daemon as root on a socket with the transient pool user,
+        # and run the box-user HEX-RT conformance (the node) against it.
+        export CARGO_TARGET_DIR="$DIR/root-target"
+        if cargo build -q -p hex-cli --bin hex; then
+            SOCK="$DIR/helper.sock"
+            "$CARGO_TARGET_DIR/debug/hex" __box-helper --socket "$SOCK" --users "$LABUID" --nproc 1024 &
+            HELPER_PID=$!
+            # Wait on the fact: the socket appears (a bounded poll, not a fixed sleep).
+            for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
+            if [ -S "$SOCK" ]; then
+                HEX_BOX_HELPER_SOCK="$SOCK" cargo test -q -p hex-cli --test macos_process_box \
+                    -- --ignored box_user_boxes_hold_the_contract \
+                    && echo "box-user HEX-RT conformance: PASS" \
+                    || echo "box-user HEX-RT conformance: FAIL"
+            else
+                echo "the helper socket never appeared; skipping box-user conformance"
+            fi
+            kill "$HELPER_PID" 2>/dev/null || true
+            wait "$HELPER_PID" 2>/dev/null || true
+        else
+            echo "building hex failed; skipping box-user conformance"
+        fi
+
         cleanup
         echo "(transient user $LABUSER removed)"
     else
