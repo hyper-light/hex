@@ -161,3 +161,35 @@ as the **defense-in-depth second layer** ("it's a good defense in depth mechanis
 no helper, and a backstop beneath the ledger limit otherwise. Step 1 ships the polling layer (this record's limits:
 ≤ one member per core, ~12-15% of a core held at its bound); step 2 adds the ledger layer, where the overshoot and
 watcher-CPU criteria are met.
+
+## The `_ext` backstop (step 1 extension, 2026-11-01)
+
+Measured after this section, and additive to it: the class now also arms each member it spawns with a fatal
+per-process footprint cap at the box's **whole bound** (`posix_spawnattr_setjetsam_ext`, the spawn-time jetsam
+limit), and paces the watcher at the ceiling while a box holds at most one member and every member is armed
+(`bench/native/macos/jetsam_probe.c`, record `records/jetsam-probe-20261101T2052Z.txt`;
+`docs/research/runtime/macos-spawn-jetsam-cap.md`). This is the *spawn-time* path; it is distinct from the
+*running-task* interfaces mapped above (which stay refused rootless), and bounds a single-member box rootlessly
+with no overshoot. It does not bound a multi-member box's footprint **sum** — each member is capped at the whole
+bound, not its share — which stays the polling rule's job and step 2's ledger apportioning. The full map's
+running-task wording is step 2's to reconcile with this spawn-time path.
+
+Record `records/macos-box-ext-b285d07-20261101T223556Z.txt`, commit b285d07, adas-mac-studio-3 (M4 Max, 14 cores,
+macOS 26.2 25C56), load ~8.2, 3 passes, 256 MiB bound:
+
+| members | overshoot p1/p2/p3 (MiB) |
+|---|---|
+| 1 | 0.0 / 0.0 / 0.0 |
+| 4 | 3.4 / 1.3 / 0.1 |
+| 8 | 1.8 / 4.9 / 2.6 |
+| 14 (every core) | 167.1 / 58.7 / 8.4 |
+| 28 (twice the cores) | 95.5 / 93.6 / 118.9 |
+
+- **One member, armed: overshoot 0.0 MiB every pass** — the kernel SIGKILLs it at the whole bound, so the box is
+  bounded with no overshoot and no hard polling, unlike the polling-only 0.2-4.1 MiB above.
+- **Watcher CPU held at 95% of the bound: 0.10, 0.09, 0.10 % of a core** — a fully-armed one-member box is read at
+  the 100 ms ceiling (the kernel bounds it), not the 250 µs floor, so it costs ~0.1% rather than the 12-15% above.
+  Well under criterion 3's 1%.
+- **More than one member per core (14, 28) still spikes** (8-167 MiB): the per-process cap is the *whole* bound,
+  so it doesn't bound the sum of many members; the polling watcher does, with the same descheduling limit recorded
+  above. Unchanged by this extension; step 2's ledger apportioning owns it.
