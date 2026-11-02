@@ -387,14 +387,6 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
     } else {
         &[("pruned", ""), ("classic", hooks)]
     };
-    let dev_of = |path: &Path| {
-        let st = rustix::fs::stat(path).unwrap();
-        format!(
-            "{}:{}",
-            rustix::fs::major(st.st_dev),
-            rustix::fs::minor(st.st_dev)
-        )
-    };
     for &(path, hooks) in paths {
         let dir = tempfile::Builder::new()
             .prefix("bundle-")
@@ -542,7 +534,7 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
             "/noatime in the {path} box: {noatime:?}"
         );
         has(noatime, &["rw", "noatime", "nodiratime"], &[]);
-        // Binds: the source's filesystem (its device), read-only or read-write as asked.
+        // Binds: the source's filesystem and the source within it, read-only or read-write as asked.
         for (point, source, opt) in [
             ("/usr", Path::new("/usr"), "ro"),
             ("/hex", Path::new(&lab.exe), "ro"),
@@ -552,8 +544,8 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
         ] {
             let m = at(point);
             assert_eq!(
-                m.dev,
-                dev_of(source),
+                (m.dev.clone(), m.root.clone()),
+                bind_source_of(source),
                 "{point} in the {path} box is a bind of {}: {m:?}",
                 source.display()
             );
@@ -606,6 +598,30 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
             .collect::<Vec<_>>()
             .join(" and ")
     );
+}
+
+/// What a bind of `path` lists in mountinfo as its filesystem and its root within it: the device of the
+/// agent's mount that holds `path` (the topmost at the longest mount point it lies under), and that mount's
+/// root joined to `path` below its mount point. A filesystem's own device, as mountinfo names it, can differ
+/// from a file's `st_dev` (a btrfs subvolume's is its own), so the bind is matched by the table's.
+fn bind_source_of(path: &Path) -> (String, String) {
+    let real = std::fs::canonicalize(path).unwrap();
+    let mounts = listed_mounts(&std::fs::read_to_string("/proc/self/mountinfo").unwrap());
+    let holder = mounts
+        .iter()
+        .filter(|m| real.starts_with(&m.point))
+        .max_by_key(|m| Path::new(&m.point).components().count())
+        .map(|deepest| {
+            mounts
+                .iter()
+                .rev()
+                .find(|m| m.point == deepest.point)
+                .unwrap()
+        })
+        .unwrap_or_else(|| panic!("no mount holds {}", real.display()));
+    let below = real.strip_prefix(&holder.point).unwrap();
+    let root = Path::new(&holder.root).join(below);
+    (holder.dev.clone(), root.to_string_lossy().into_owned())
 }
 
 /// One `/proc/<pid>/mountinfo` line (proc_pid_mountinfo(5)): the filesystem's device, the mount's root
