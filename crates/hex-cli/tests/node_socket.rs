@@ -35,6 +35,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
@@ -89,6 +90,9 @@ struct Agent {
     socket: PathBuf,
     box_root: PathBuf,
     _dir: Option<tempfile::TempDir>,
+    /// The agent's stderr, drained by a thread as it is written so the pipe never fills: what it says
+    /// about the boxes it recovered, which a crash case reads to see why one was removed.
+    errors: Arc<Mutex<String>>,
 }
 
 impl Agent {
@@ -126,7 +130,8 @@ impl Agent {
             .arg(dir.join("state"))
             .arg("--box-root")
             .arg(&box_root)
-            .stdout(Std::piped());
+            .stdout(Std::piped())
+            .stderr(Std::piped());
         if let Some(point) = crash_at {
             command.arg("--crash-at").arg(point);
         }
@@ -134,6 +139,19 @@ impl Agent {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
         let mut child = command.spawn().expect("start hex node");
+        // Drain stderr as it comes so the pipe never fills and blocks the agent, and keep what it says
+        // for a crash case to read (the boxes it recovered, and why each was removed).
+        let errors = Arc::new(Mutex::new(String::new()));
+        let stderr = child.stderr.take().unwrap();
+        let sink = Arc::clone(&errors);
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                sink.lock().unwrap().push_str(&line);
+                line.clear();
+            }
+        });
         // The fact a client needs: the agent says it's ready once its socket listens.
         let mut line = String::new();
         BufReader::new(child.stdout.take().unwrap())
@@ -149,7 +167,14 @@ impl Agent {
             socket,
             box_root,
             _dir: None,
+            errors,
         }
+    }
+
+    /// What the agent has said on stderr so far: the boxes recovery removed, and why each
+    /// ([`Agent::errors`]).
+    fn errors(&self) -> String {
+        self.errors.lock().unwrap().clone()
     }
 
     fn client(&self) -> Client {
@@ -610,9 +635,16 @@ enum At {
     /// Its init cloned, waiting at the exec FIFO, and its container's state written: the create held in
     /// its createRuntime hook.
     Init,
-    /// In the record write that marks it ready, the box made: the write held opening its temp file, a
-    /// FIFO no one has opened.
+    /// In the record write that marks it ready, a durable record's (so one written to a temp file and
+    /// renamed): the box made, the write held opening its temp file, a FIFO no one has opened. A
+    /// non-durable record's first write takes no temp ([`At::TornRecord`]).
     Ready,
+    /// In the record write that marks it ready, a non-durable record's: the box made, the agent armed
+    /// to kill itself between opening the record's file and writing it (a debug build's crash point),
+    /// leaving a torn record. The first write to a non-durable record goes straight to its file, so no
+    /// FIFO can hold it there; a release build can't arm the point, so it has no such case.
+    #[cfg(debug_assertions)]
+    TornRecord,
     /// After it: the create done.
     Made,
 }
@@ -625,6 +657,8 @@ impl At {
             Self::CgroupMade => Some("cgroup-made"),
             #[cfg(debug_assertions)]
             Self::BundleRendered => Some("bundle-rendered"),
+            #[cfg(debug_assertions)]
+            Self::TornRecord => Some("record-first-write"),
             Self::StateDir | Self::Init | Self::Ready | Self::Made => None,
         }
     }
@@ -632,20 +666,34 @@ impl At {
 
 /// T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the node agent at each point of a
 /// create, with its boxes' records kept on tmpfs and on disk, then restart it. In a debug build the
-/// agent is armed to kill itself once the box's cgroup is made, and once its bundle is rendered: no
-/// file it opens can hold it there. Elsewhere it is held at a point by a FIFO no one has opened, or by
-/// the box's createRuntime hook, and killed once the kernel shows it waiting there: with the cgroup and
-/// the container's state directory made; with the init cloned and the container's state written;
-/// inside the record write; and after it. Restarted, the agent removes the box killed mid-create by
-/// what it finds of it, and takes back the one made, which then deletes, so at every point nothing of
-/// the box is left: no record in either place, no temp file, no cgroup, no container state, no
-/// bundle.
+/// agent is armed to kill itself once the box's cgroup is made, once its bundle is rendered, and —
+/// where its record is non-durable, written once straight to its file — between that file's open and
+/// the write, leaving a torn record: no file it opens can hold it at any of these. Elsewhere it is held
+/// at a point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the
+/// kernel shows it waiting there: with the cgroup and the container's state directory made; with the
+/// init cloned and the container's state written; inside a durable record's write, opening the temp
+/// file it renames; and after the create. Restarted, the agent removes the box killed mid-create by
+/// what it finds of it — a torn record it reads as unreadable, and says so — and takes back the one
+/// made, which then deletes, so at every point nothing of the box is left: no record in either place,
+/// no temp file, no cgroup, no container state, no bundle.
 fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
-    let mut points = Vec::new();
-    #[cfg(debug_assertions)]
-    points.extend([At::CgroupMade, At::BundleRendered]);
-    points.extend([At::StateDir, At::Init, At::Ready, At::Made]);
     for kept in [Kept::Tmpfs, Kept::Disk] {
+        let mut points = Vec::new();
+        #[cfg(debug_assertions)]
+        points.extend([At::CgroupMade, At::BundleRendered]);
+        points.extend([At::StateDir, At::Init]);
+        // The record write that marks a box ready is held by where its record is kept: a durable
+        // record (on disk) is written to a temp file and renamed, so a FIFO holds the agent opening the
+        // temp ([`At::Ready`]); a non-durable record (on tmpfs) is written once, straight to its file,
+        // so only a debug build's crash point holds the agent there ([`At::TornRecord`]).
+        match kept {
+            Kept::Tmpfs => {
+                #[cfg(debug_assertions)]
+                points.push(At::TornRecord);
+            }
+            Kept::Disk => points.push(At::Ready),
+        }
+        points.push(At::Made);
         for at in &points {
             crash_at(lab, own, exe, kept, *at);
         }
@@ -718,6 +766,10 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             );
             ClassSpec::Bundle(lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks))
         }
+        // Armed to crash at the record write, so it creates fully, like a box made; a bundle box's
+        // record names only its container's state (on tmpfs here), so it is non-durable.
+        #[cfg(debug_assertions)]
+        At::TornRecord => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
         At::Made => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
     };
     let spec = BoxSpec {
@@ -749,7 +801,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
     match at {
         #[cfg(debug_assertions)]
-        At::CgroupMade | At::BundleRendered => {
+        At::CgroupMade | At::BundleRendered | At::TornRecord => {
             use std::os::unix::process::ExitStatusExt;
             let ended = agent.ended();
             assert_eq!(
@@ -775,10 +827,13 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     // What the kill leaves, as the point says: a record only once the box is made, its container's
     // state directory from the runtime's create on, its state written from its init's clone on.
     let containers = || containers_of(&oci_root, &id);
+    // A record counts as written only once it decodes whole: a crash between a non-durable record's
+    // open and its write leaves a torn file, which reads as no record (At::TornRecord).
     let written = || {
         std::fs::read(&record)
             .ok()
-            .map(|bytes| BoxRecord::decode(&bytes).unwrap().phase)
+            .and_then(|bytes| BoxRecord::decode(&bytes).ok())
+            .map(|record| record.phase)
     };
     let made = if at == At::Made {
         Some(Phase::Ready)
@@ -786,7 +841,13 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         None
     };
     assert_eq!(written(), made, "{name}: the record at the kill");
-    let state_dir_made = at.armed().is_none();
+    // The container's state directory is made by every point but the two before it (the cgroup made,
+    // the bundle rendered); the record write that marks the box ready comes after it is all made.
+    let state_dir_made = match at {
+        #[cfg(debug_assertions)]
+        At::CgroupMade | At::BundleRendered => false,
+        _ => true,
+    };
     assert_eq!(
         (containers().len(), cgroup.exists()),
         (usize::from(state_dir_made), true),
@@ -830,6 +891,17 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             Err(Refusal::NoSuchBox(id.clone())),
             "{name}: the box killed mid-create is cleaned up"
         );
+    }
+    // A torn first write leaves a record that can't be read; recovery removed its box and said so
+    // (hex_core::recovery's Why::Unreadable). The reason is the point of the case.
+    #[cfg(debug_assertions)]
+    if at == At::TornRecord {
+        wait_for("recovery to report the box removed as unreadable", || {
+            agent
+                .errors()
+                .lines()
+                .any(|l| l.contains(id.as_str()) && l.contains("couldn't be read"))
+        });
     }
     assert!(client.list().unwrap().is_empty(), "{name}: a box is left");
     for place in [&state, &records] {

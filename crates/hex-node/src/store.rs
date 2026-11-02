@@ -1,16 +1,25 @@
-//! The node agent's store of box records. Each box is one file, written whole to a temp file and
-//! renamed into place, so a crash of the node agent leaves either the old record or the new one,
-//! never a torn one (T-T7.1.2): the page cache outlives the process, and rename(2) replaces
-//! atomically. A record is kept in one of two places, by what it names. One naming a directory on a
-//! filesystem a host crash leaves behind must outlive the host, so it is kept in the node's state
-//! directory and fsynced, file and directory. Every other record names only directories on tmpfs (an
-//! `oci` box's container state, under the node's runtime directory) or none (a `process` box's), so a
-//! host crash leaves nothing it describes: it is kept beside that state, in a directory of the node's
-//! own under the runtime directory, and never synced, where a record-sized write measured about a
-//! seventh of one on the overlay or btrfs (bench/competitive/probes/levers.md; goal 5 extended step
-//! 5, research f92 and f93). After a host crash every
-//! box's cgroup is gone, and so is everything on tmpfs, so recovery scrubs each record it finds, torn
-//! or whole, and only a record naming a directory on disk points at anything left to remove
+//! The node agent's store of box records, one file each. A record is kept in one of two places, by
+//! what it names, and how it is written follows. One naming a directory on a filesystem a host crash
+//! leaves behind must outlive the host, so it is kept in the node's state directory, fsynced file and
+//! directory, and written whole to a temp file and renamed into place: a crash of the node agent
+//! leaves either the old record or the new one, never a torn one (T-T7.1.2), because the page cache
+//! outlives the process and rename(2) replaces atomically. Every other record names only directories
+//! on tmpfs (an `oci` box's container state, under the node's runtime directory) or none (a `process`
+//! box's), so a host crash leaves nothing it describes; it is kept beside that state, in a directory of
+//! the node's own under the runtime directory, and never synced, where a record-sized write measured
+//! about a seventh of one on the overlay or btrfs (bench/competitive/probes/levers.md; goal 5 extended
+//! step 5, research f92 and f93).
+//!
+//! A box's record is written once over its create (goal 5 extended step 5), so that one write to a
+//! non-durable record goes straight to its file with `O_EXCL` — no temp, no rename (criterion 3) — and
+//! only a later write of the same record, an update, takes the temp-and-rename path every durable
+//! record takes. Writing in place opens a window a durable record never has: a node crash between the
+//! file's open and the write leaves a torn record, short of the trailing newline its encoding ends on,
+//! that never decodes. Recovery covers it. A torn record names only tmpfs directories, so a host crash
+//! takes it with everything it described; a node-only crash leaves it on tmpfs, where recovery reads
+//! it, fails to decode it, and removes its box as unreadable (recovery's `Why::Unreadable`). So
+//! recovery scrubs each record it finds, torn or whole, and only a record naming a directory on disk —
+//! always written whole — points at anything a host crash leaves behind to remove
 //! (docs/design/runtime-architecture.md, decision 1).
 //!
 //! Changes of one box's record are made one at a time; changes of different boxes never wait on each
@@ -20,6 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(all(debug_assertions, target_os = "linux"))]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -61,6 +72,11 @@ pub struct Store {
     busy: Arc<Busy>,
     /// The fsyncs the store has made since it opened.
     synced: Arc<Synced>,
+    /// A debug build's one crash point in the store: once armed, the node ends its own process after
+    /// it opens a non-durable record's file and before it writes, so T-T7.1.2's crash test leaves a
+    /// torn record ([`crate::Node::with_crash_point`]). Shared by clones, as every field is.
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    crash_before_write: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Default)]
@@ -131,7 +147,17 @@ impl Store {
             run_fd: Arc::new(open_directory(run)?),
             busy: Arc::default(),
             synced: Arc::default(),
+            #[cfg(all(debug_assertions, target_os = "linux"))]
+            crash_before_write: Arc::default(),
         })
+    }
+
+    /// Arms this store's one crash point ([`Store::crash_before_write`]): a debug build's node ends its
+    /// own process the next time it opens a non-durable record's file, before it writes, so T-T7.1.2's
+    /// crash test leaves a torn record for recovery. Debug builds only.
+    #[cfg(all(debug_assertions, target_os = "linux"))]
+    pub fn crash_before_first_write(&self) {
+        self.crash_before_write.store(true, Ordering::Relaxed);
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
@@ -241,6 +267,44 @@ impl Store {
         let final_path = record_file(dir, &record.spec.id);
         #[cfg(not(target_os = "linux"))]
         let tmp = temp_file(dir, &record.spec.id);
+        // A record that need not outlive the host (its box's directories all on tmpfs) is written once
+        // per create (goal 5 extended step 5), so its first write goes straight to its file with O_EXCL:
+        // no temp, no rename (criterion 3). A crash mid-write leaves a torn file that never decodes, which
+        // recovery discards (T-T7.1.2) — the record is whole only once encode's trailing newline lands. A
+        // later write of the same record (an update) finds it present (EEXIST) and falls through to the
+        // atomic temp-and-rename path, as every durable record takes.
+        #[cfg(target_os = "linux")]
+        if !durable {
+            match rustix::fs::openat(
+                dir_fd.as_ref(),
+                final_path.as_str(),
+                rustix::fs::OFlags::WRONLY
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::EXCL
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::from_raw_mode(0o666),
+            ) {
+                Ok(fd) => {
+                    let mut file = File::from(fd);
+                    // T-T7.1.2's crash test kills the node here, after the record's file is open and
+                    // before it is written, to leave a torn (empty) record recovery must discard (goal
+                    // 5 extended step 5, criterion 3). Debug builds only, and only once the node's
+                    // caller armed it ([`crate::Node::with_crash_point`]); release builds never test it.
+                    #[cfg(debug_assertions)]
+                    if self.crash_before_write.load(Ordering::Relaxed) {
+                        let _ = rustix::process::kill_process(
+                            rustix::process::getpid(),
+                            rustix::process::Signal::KILL,
+                        );
+                    }
+                    return file
+                        .write_all(&bytes)
+                        .map_err(|e| Refusal::os("writing a record", e));
+                }
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(e) => return Err(Refusal::os("making a record file", e)),
+            }
+        }
         {
             #[cfg(target_os = "linux")]
             let mut f = File::from(

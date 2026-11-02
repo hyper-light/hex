@@ -6,13 +6,13 @@
 //! It opens the node, its boxes in cgroups under `--box-root` (else in a subtree beside its own
 //! cgroup), their records under `--state` and their containers' state on tmpfs under the runtime
 //! directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless; decision 1), takes back
-//! or cleans up what an agent before it left
+//! or cleans up what an agent before it left, saying on stderr each box it removed and why
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, binds the socket, says
 //! `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on stderr
 //! and exits 1. A socket an ended agent left at the path is replaced; one a live agent serves is
-//! refused. A debug build also takes `--crash-at <cgroup-made|bundle-rendered>`, which arms the node's
-//! crash point there (`hex_node::CrashPoint`) for T-T7.1.2's crash test: from the agent's own
-//! arguments alone, so no container can arm it.
+//! refused. A debug build also takes `--crash-at <cgroup-made|bundle-rendered|record-first-write>`,
+//! which arms the node's crash point there (`hex_node::CrashPoint`) for T-T7.1.2's crash test: from
+//! the agent's own arguments alone, so no container can arm it.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -105,7 +105,15 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         Some(point) => node.with_crash_point(point),
         None => node,
     };
-    node.recover().map_err(failed)?;
+    // Recovery removes a box it can't take back; say which and why, so nothing is dropped unseen
+    // (CLAUDE.md §3), before the socket opens.
+    let recovered = node.recover().map_err(failed)?;
+    {
+        let mut err = std::io::stderr().lock();
+        for (id, why) in &recovered.removed {
+            let _ = writeln!(err, "hex node: recovered: removed {id}: {why}");
+        }
+    }
     let mut server = Server::bind(&args.socket, Arc::new(node), LIMITS, WORKERS).map_err(failed)?;
     let mut out = std::io::stdout().lock();
     out.write_all(format!("ready {}\n", args.socket.display()).as_bytes())

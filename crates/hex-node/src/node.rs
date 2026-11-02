@@ -78,6 +78,9 @@ pub enum CrashPoint {
     CgroupMade,
     /// Its bundle rendered after its cgroup, its container's state directory not yet made.
     BundleRendered,
+    /// In the record write that marks the box made, between opening a non-durable record's file and
+    /// writing it: the box made, its record torn ([`crate::store::Store::crash_before_first_write`]).
+    RecordFirstWrite,
 }
 
 #[cfg(debug_assertions)]
@@ -87,6 +90,7 @@ impl CrashPoint {
         match name {
             "cgroup-made" => Some(Self::CgroupMade),
             "bundle-rendered" => Some(Self::BundleRendered),
+            "record-first-write" => Some(Self::RecordFirstWrite),
             _ => None,
         }
     }
@@ -248,6 +252,12 @@ impl Node {
     #[cfg(debug_assertions)]
     pub fn with_crash_point(mut self, point: CrashPoint) -> Self {
         self.crash_at = Some(point);
+        // The record write's crash point lies inside the store, so it is armed there; the rest the
+        // node reaches itself ([`Node::crash_point`]).
+        #[cfg(target_os = "linux")]
+        if point == CrashPoint::RecordFirstWrite {
+            self.store.crash_before_first_write();
+        }
         self
     }
 
