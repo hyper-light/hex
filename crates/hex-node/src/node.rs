@@ -30,7 +30,7 @@ use hex_core::cgroup::Dev;
 use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
-use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
+use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
@@ -46,6 +46,7 @@ use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
 use crate::supervise::{self, Live, Supervisor};
+use crate::turns::Turns;
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -60,6 +61,12 @@ pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
 /// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long a create or delete of a box waits for the one under way for the same box before it refuses:
+/// a create or delete takes milliseconds, and one that ends a box waits at most [`EMPTY_PATIENCE`] for it
+/// to empty and [`REMOVE_PATIENCE`] for its directories to go, so past their sum is a fault to report,
+/// not a limit to raise (CLAUDE.md §4).
+pub const TURN_PATIENCE: Duration = EMPTY_PATIENCE.saturating_add(REMOVE_PATIENCE);
 
 /// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
 /// runtime directory is shared with every node of this user on the host, so its entries are theirs as
@@ -144,6 +151,13 @@ pub struct Node {
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
+    /// Each box's turn to be made or removed. A box has no record until it's whole (goal 5 extended,
+    /// step 5), so this is what tells a box being made: a second create of its id, or a delete, waits
+    /// for the create under way and then finds the box made or not, rather than make or remove parts at
+    /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
+    /// at once, the node's box budget, a wait at most [`TURN_PATIENCE`]; past either the call is refused
+    /// by type.
+    turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
@@ -236,6 +250,12 @@ impl Node {
                 rustix::fs::Mode::empty(),
             )
             .map_err(|e| Refusal::os("opening /dev/null", e))?,
+            turns: Turns::new(
+                "making or removing a box",
+                "creates and deletes under way",
+                TURN_PATIENCE,
+                MAX_BOXES,
+            ),
             #[cfg(debug_assertions)]
             crash_at: None,
         })
@@ -379,6 +399,11 @@ impl Node {
     /// ([`crate::serve::Host::netns`]).
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         self.netns.counts()
+    }
+
+    /// How many creates and deletes have waited for one of the same box under way ([`Node::turns`]).
+    pub fn waited_for_a_box(&self) -> u64 {
+        self.turns.waited()
     }
 
     fn record(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {

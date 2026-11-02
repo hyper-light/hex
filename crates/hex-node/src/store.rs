@@ -16,16 +16,18 @@
 //! Changes of one box's record are made one at a time; changes of different boxes never wait on each
 //! other, so one box's fsync never holds up another box's create (goal 5 plan step 2).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::record::BoxRecord;
+
+use crate::turns::{Turn, Turns};
 
 /// How long a change to a box's record waits for the change of the same box before it to finish:
 /// that one's write and its fsyncs, which take milliseconds. A minute is far past any real delay, so
@@ -52,18 +54,9 @@ pub struct Store {
     /// update's read and write of a record are one change and two users changing one record at once
     /// (the supervisor recording an init's exit, the socket counting an abandoned program) never lose
     /// either's change. A change of another box never waits. At most [`TURNS`] of them.
-    busy: Arc<Busy>,
+    turns: Arc<Turns>,
     /// The fsyncs the store has made since it opened.
     synced: Arc<Synced>,
-}
-
-#[derive(Debug, Default)]
-struct Busy {
-    boxes: Mutex<BTreeSet<BoxId>>,
-    /// Told whenever a box is let go.
-    free: Condvar,
-    /// Changes that waited for a change of the same box to finish.
-    waited: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -81,31 +74,6 @@ pub struct Syncs {
     pub dirs: u64,
 }
 
-/// Box `id`'s turn to change its record, given up when dropped.
-struct Claim<'a> {
-    busy: &'a Busy,
-    id: BoxId,
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        // The set stays whole whoever held its lock (nothing panics holding it: CLAUDE.md §1), so a
-        // poisoned lock still lets the box go.
-        let mut boxes = self
-            .busy
-            .boxes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        boxes.remove(&self.id);
-        drop(boxes);
-        self.busy.free.notify_all();
-    }
-}
-
-fn poisoned<T>(_: PoisonError<T>) -> Refusal {
-    Refusal::Broken("the record store's lock was poisoned".to_owned())
-}
-
 impl Store {
     /// Opens the store over the node's state directory `disk`, for the records that must outlive the
     /// host, and `run`, a directory of the node's own under its runtime directory for the rest, making
@@ -119,54 +87,25 @@ impl Store {
         Ok(Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
-            busy: Arc::default(),
+            turns: Arc::new(Turns::new(
+                "changing a box's record",
+                "record changes under way",
+                WRITE_PATIENCE,
+                TURNS,
+            )),
             synced: Arc::default(),
         })
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
     /// another box's, and refuses past [`WRITE_PATIENCE`], or past [`TURNS`] boxes changed at once.
-    fn claim(&self, id: &BoxId) -> Result<Claim<'_>, Refusal> {
-        let deadline = Instant::now().checked_add(WRITE_PATIENCE);
-        let mut boxes = self.busy.boxes.lock().map_err(poisoned)?;
-        if boxes.contains(id) {
-            self.busy.waited.fetch_add(1, Ordering::Relaxed);
-        }
-        while boxes.contains(id) {
-            let left = deadline.map_or(Duration::ZERO, |d| {
-                d.saturating_duration_since(Instant::now())
-            });
-            if left.is_zero() {
-                return Err(Refusal::Os {
-                    op: "changing a box's record",
-                    why: format!(
-                        "box {id}'s record was still being written after {WRITE_PATIENCE:?}"
-                    ),
-                });
-            }
-            boxes = self
-                .busy
-                .free
-                .wait_timeout(boxes, left)
-                .map_err(poisoned)?
-                .0;
-        }
-        if boxes.len() >= TURNS {
-            return Err(Refusal::Exhausted {
-                what: "record changes under way",
-                bound: TURNS,
-            });
-        }
-        boxes.insert(id.clone());
-        Ok(Claim {
-            busy: &self.busy,
-            id: id.clone(),
-        })
+    fn claim(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
+        self.turns.take(id)
     }
 
     /// How many changes of a box's record have waited for a change of the same box to finish.
     pub fn waited(&self) -> u64 {
-        self.busy.waited.load(Ordering::Relaxed)
+        self.turns.waited()
     }
 
     /// Where `record` is kept, and whether it's fsynced there: the state directory for a record that
@@ -444,6 +383,8 @@ fn on_tmpfs(_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
     use hex_api::{Bounds, BoxSpec, ClassSpec};
     use hex_core::record::Phase;
@@ -701,7 +642,7 @@ mod tests {
         let ids: Vec<BoxId> = (0..TURNS)
             .map(|n| BoxId::new(&format!("b{n}")).unwrap())
             .collect();
-        let turns: Vec<Claim<'_>> = ids.iter().map(|id| store.claim(id).unwrap()).collect();
+        let turns: Vec<Turn<'_>> = ids.iter().map(|id| store.claim(id).unwrap()).collect();
         let past = record("past");
         assert_eq!(
             store.put(&past),
