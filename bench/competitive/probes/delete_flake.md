@@ -116,11 +116,22 @@ The leaderless-group diagnostic above is retained for that work.
 Delegate=yes` so it owns a cgroup v2 subtree. Not of record (a mechanism probe, not a timing figure);
 the kernel and load are printed with each run. Two runs on adacachy 7.2.9 on 2026-11-02 agreed.
 
-## The fail→pass run of record
+## The fail→pass run of record (both supported kernels)
 
-Recorded in the following `docs(probes)` commit, on both supported kernels (adacachy 7.2.9 and fedora
-6.19): `cargo test -p hex-cli --test delete_flake` under good-citizen caps, the test's own
-leaderless-thread reproducer (it waits on the leader becoming a zombie, so the leaderless state is a
-fact, not a timing; a 10 s `wait_empty` bound stands in for the 60 s wedge). It **FAILS** at the test
-commit — the leaderless worker survives `cgroup.kill` and `wait_empty` times out — and **PASSES** at
-the fix commit.
+`cargo test -p hex-cli --test delete_flake` under good-citizen caps (`nice -n 10`, `-j 4`), the test's
+own leaderless-thread reproducer — it waits on the leader becoming a zombie, so the leaderless state is
+a fact, not a timing; a 10 s `wait_empty` bound stands in for the 60 s wedge — at the test commit
+(`cb9375a`, the base kill) then the fix (`10bc30a`).
+
+adacachy 7.2.9-2-cachyos, load 35.69:
+- `cb9375a` **FAILS** — `the box must empty after cgroup.kill, but a leaderless thread held it: [tid 2020616: S …]`, 10.13 s.
+- `10bc30a` **PASSES** — 0.12 s.
+
+fedora 6.19.10-300.fc44, load 8.18:
+- `cb9375a` **FAILS** — the same leaderless-worker wedge (`[tid 212928: S …]`), 10.11 s.
+- `10bc30a` **PASSES** — 0.14 s.
+
+At `10bc30a` on fedora the full `scripts/gates.sh` passes (exit 0), `oci_box`'s
+`oci_boxes_report_their_inits_exit_through_the_seam` included: an earlier freeze-based fix wedged it 5 s
+(an OCI box's init becomes a zombie after `cgroup.kill`, and a cgroup holding a zombie never reaches
+`frozen 1`), which is why the fix signals through a pidfd with a membership re-read and takes no freeze.
