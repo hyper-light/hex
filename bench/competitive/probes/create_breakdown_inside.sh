@@ -169,10 +169,14 @@ switch() {
 # the CPU, their page faults in user mode and their forks. It records for the whole phase, as switch does. create_breakdown.py
 # mounts cuts part 19 of each create out of it, from the init's join of the network namespace made ahead to its
 # chroot (or pivot_root), call by call and mount by mount; the calls' numbers are named from the host's
-# asm/unistd_64.h, which the container sees under /usr.
+# asm/unistd_64.h, which the container sees under /usr. The softirqs ksoftirqd runs and the work items kworkers run
+# are traced too, so an init preempted while either ran on its CPU has its wait charged to the softirq or the work
+# function (the fedora traces of goal 5 step 3 found ksoftirqd and the kworkers first to the CPU in the tail), and so
+# are the softirqs run on a hex process as an interrupt returns, which take its CPU without a switch.
 mounts_trace() {
   local name=$1 lc=$2 conc=$3 rc=0 ev f
-  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork"
+  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork
+    irq/softirq_entry irq/softirq_exit workqueue/workqueue_execute_start workqueue/workqueue_execute_end"
   [ -d "$T/events/exceptions/page_fault_user" ] && MT="$MT exceptions/page_fault_user"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
@@ -180,6 +184,8 @@ mounts_trace() {
     case $ev in
       sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
       sched/sched_process_fork) f='parent_comm == "hex"' ;;
+      irq/*) f='comm ~ "ksoftirqd*" || comm == "hex"' ;;
+      workqueue/*) f='comm ~ "kworker*"' ;;
       *) f='comm == "hex"' ;;
     esac
     { echo "$f" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \

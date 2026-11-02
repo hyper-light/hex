@@ -735,7 +735,7 @@ def switch(trace, stats, seam_json=None):
 RAW_ENTER = re.compile(r"^sys_enter: NR (?P<nr>-?\d+) \((?P<args>[0-9a-f, ]*)\)\s*$")
 RAW_EXIT = re.compile(r"^sys_exit: NR (?P<nr>-?\d+) = (?P<ret>-?\d+)\s*$")
 SWITCH = re.compile(r"^sched_switch: prev_comm=.*? prev_pid=(?P<prev>\d+) prev_prio=-?\d+ prev_state=(?P<state>\S+)"
-                    r" ==> next_comm=.*? next_pid=(?P<next>\d+) next_prio=-?\d+\s*$")
+                    r" ==> next_comm=(?P<next_comm>.*?) next_pid=(?P<next>\d+) next_prio=-?\d+\s*$")
 # The calls part 19 opens and ends on, and the two it attaches a mount with (x86_64's numbers,
 # arch/x86/entry/syscalls/syscall_64.tbl), so the cut needs no header; the header names the rest.
 NR_SETNS, NR_CHROOT, NR_PIVOT_ROOT, NR_MOUNT, NR_MOVE_MOUNT, NR_FSCONFIG = 308, 161, 155, 165, 429, 431
@@ -753,6 +753,10 @@ MS_REMOUNT, MS_BIND, MS_MOVE, MS_PROPAGATION = 0x20, 0x1000, 0x2000, 0x10000 | 0
 # seed, the node agent's child, never is.
 MS_REC_PRIVATE = 0x4000 | 0x40000
 FORK = re.compile(r"^sched_process_fork: comm=.*? pid=(?P<parent>\d+) child_comm=.*? child_pid=(?P<child>\d+)\s*$")
+# What took an init's CPU: a softirq (ksoftirqd's, or one run on the init as an interrupt returned) by its action,
+# and a kworker's work item by its function.
+SOFTIRQ = re.compile(r"^softirq_(?P<edge>entry|exit): vec=\d+ \[action=(?P<action>\w+)\]\s*$")
+WORK = re.compile(r"^workqueue_execute_(?P<edge>start|end): work struct (?P<work>\w+): function (?P<function>\S+)\s*$")
 
 
 def kind_of(nr, args):
@@ -797,6 +801,12 @@ def mounts(trace, stats, header, path="pruned"):
     name = lambda call: (names.get(call[0], f"nr {call[0]}") + (f" ({call[1]})" if call[1] else ""))
     read, unread = 0, 0
     cur, window, off, creates, born = {}, {}, {}, [], set()
+    # pre: the init preempted off each CPU; begun: a softirq's or a work item's start on each CPU.
+    pre, begun = {}, {}
+
+    def charge(table, label, d):
+        table[label] = table.get(label, 0) + d
+
     with open(trace, errors="replace") as f:
         for line in f:
             m = eb.LINE.match(line)
@@ -805,6 +815,18 @@ def mounts(trace, stats, header, path="pruned"):
                 continue
             read += 1
             ts, pid, body = int(m["s"]) * 1_000_000 + int(m["us"]), int(m["pid"]), m["body"]
+            cpu = int(m["cpu"])
+            if (e := SOFTIRQ.match(body)) or (e := WORK.match(body)):
+                kind = "softirq" if "action" in e.re.groupindex else "work"
+                label = f"softirq {e['action']}" if kind == "softirq" else f"work {e['function']}"
+                if e["edge"] in ("entry", "start"):
+                    begun[cpu, kind] = (ts, label)
+                elif (b := begun.pop((cpu, kind), None)) is not None and b[1] == label:
+                    if pid in window:
+                        charge(window[pid]["on"], label, ts - b[0])
+                    elif (p := pre.get(cpu)) in window:
+                        charge(window[p]["what"], label, ts - b[0])
+                continue
             if (e := RAW_ENTER.match(body)):
                 nr = int(e["nr"])
                 w = window.get(pid)
@@ -816,7 +838,7 @@ def mounts(trace, stats, header, path="pruned"):
                 if (path == "classic" and nr == NR_MOUNT and pid in born and pid not in window
                         and len(args) > 3 and args[3] == MS_REC_PRIVATE):
                     window[pid] = {"start": ts, "opens": "mount (private)", "calls": [], "attaches": [],
-                                   "user_run": 0, "user_blocked": 0, "faults": 0}
+                                   "user_run": 0, "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {}}
                 cur[pid] = {"nr": nr, "t": ts, "args": args, "run": 0, "blocked": 0}
             elif (e := RAW_EXIT.match(body)):
                 nr, c = int(e["nr"]), cur.pop(pid, None)
@@ -829,18 +851,26 @@ def mounts(trace, stats, header, path="pruned"):
                         w["attaches"].append(len(w["calls"]))
                 if nr == NR_SETNS and int(e["ret"]) == 0 and len(c["args"]) > 1 and c["args"][1] & CLONE_NEWNET:
                     window[pid] = {"start": ts, "opens": "setns", "calls": [], "attaches": [], "user_run": 0,
-                                   "user_blocked": 0, "faults": 0}
+                                   "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {}}
             elif (e := SWITCH.match(body)):
-                # Off the CPU runnable (prev_state R, preempted) or not (blocked: waiting on a lock or I/O).
+                # Off the CPU runnable (prev_state R, preempted) or not (blocked: waiting on a lock or I/O). A
+                # preemption is charged to the process the CPU went to first, by its name without a kernel
+                # thread's per-CPU suffix (kworker/u64:3 is a kworker), so a tail shows whose work it waited on.
                 prev, nxt = int(e["prev"]), int(e["next"])
                 if prev in window:
-                    off[prev] = (ts, "run" if e["state"].startswith("R") else "blocked")
+                    off[prev] = (ts, "run" if e["state"].startswith("R") else "blocked", e["next_comm"].split("/")[0])
+                    if e["state"].startswith("R"):
+                        pre[cpu] = prev
                 if nxt in off:
-                    t0, how = off.pop(nxt)
+                    for c in [c for c, p in pre.items() if p == nxt]:
+                        del pre[c]
+                    t0, how, who = off.pop(nxt)
                     if nxt in cur:
                         cur[nxt][how] += ts - t0
                     elif nxt in window:
                         window[nxt]["user_" + how] += ts - t0
+                    if how == "run" and nxt in window:
+                        charge(window[nxt]["by"], who, ts - t0)
             elif (e := FORK.match(body)):
                 born.add(int(e["child"]))
             elif body.startswith("page_fault_user:"):
@@ -878,6 +908,12 @@ def mounts(trace, stats, header, path="pruned"):
                 p[2] += run
                 p[3] += blocked
         mean = lambda key: sum(w[key] for w in ws) / n
+        def top(key, k=8):
+            tot = {}
+            for w in ws:
+                for label, d in w[key].items():
+                    tot[label] = tot.get(label, 0) + d
+            return ", ".join(f"{label} {d / n:.1f}" for label, d in sorted(tot.items(), key=lambda kv: -kv[1])[:k])
         out = ["| call | calls per create | us per create | us per call | off the CPU in it, us per create: "
                "preempted / blocked |", "|---|---|---|---|---|"]
         for call, (k, d, run, blocked) in sorted(per.items(), key=lambda kv: -kv[1][1]):
@@ -888,7 +924,11 @@ def mounts(trace, stats, header, path="pruned"):
                           f"code between them {mean('user'):.1f} (off the CPU there {mean('user_run'):.1f} "
                           f"preempted, {mean('user_blocked'):.1f} blocked); "
                           f"{sum(len(w['calls']) for w in ws) / n:.1f} calls and {mean('faults'):.1f} page "
-                          f"faults in user mode per create."]
+                          f"faults in user mode per create.",
+                     f"- Preempted, the CPU went first to (us per create): {top('by') or 'none'}; while it waited, "
+                     f"its CPU ran (us per create): {top('what') or 'nothing traced'}.",
+                     f"- Softirqs run on the init itself as an interrupt returned (us per create): "
+                     f"{top('on') or 'none'}."]
 
     def shares(ws):
         most = max(len(w["shares"]) for w in ws)
