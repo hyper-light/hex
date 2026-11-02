@@ -933,8 +933,9 @@ each fsync's p99 was 5.719 to 6.333 ms.
     itself, after its user namespace's maps, in the shim's order (`init::join_namespace_paths`). A pid or user namespace
     by path can't be joined that way: a pid namespace's `setns` moves only the caller's later children, and the clone
     has already made the fresh namespaces, owned by the seed's user namespace. So a given bundle that joins either is
-    made through the shim, as the command line makes every container, and counted (`Node::creates_through_shim`): the
-    one kind of seam create that still re-execs the hex binary. The rendered bundles never join by path; a pod's
+    made through the shim, as the command line makes every container, and counted (`Node::creates_through_shim`): on a
+    rootless node the one kind of seam create that still re-execs the hex binary, joined on a root node by those the
+    pruned seed can't serve (the pruned seed's root, below). The rendered bundles never join by path; a pod's
     containers sharing a network namespace (`ClassSpec::Bundle`) go through the seed as root, and rootless, where joining
     a namespace another container's user namespace owns needs that user namespace joined too, through the shim.
 - **The child.** It does what the shim's child does today (`init::clone_child`), up to the exec FIFO, then execs the
@@ -949,7 +950,8 @@ each fsync's p99 was 5.719 to 6.333 ms.
   creates on fedora, in each of the probe's three runs: the hex binary is exec'd twice, both `__oci-seed` (the node's
   first seed and its spare, started ahead of the creates), and `__oci-init` (the shim) and `__oci-exec` not at all;
   each create's init execs only its own program (`/usr/bin/sleep`, `/usr/bin/true`), never hex: 0 per
-  create.<!-- /record --> The exception is the pid or user namespace by path above, made through the shim and counted.
+  create.<!-- /record --> The exceptions, made through the shim and counted, are the pid or user namespace by path above
+  and, on a root node, the creates the pruned seed can't serve (below).
 - **The box count.** A create counts the node's boxes by the box root's link count, its subdirectories plus two on
   cgroup2 (`kernfs_refresh_inode`, Linux v6.19 `fs/kernfs/inode.c`), where it listed the root before:
   <!-- record: bench/competitive/probes/create_serial.md -->at concurrency 32 that listing, under the root's
@@ -1127,13 +1129,20 @@ This takes it off create's path on a root node, with no new kernel version (deci
   not make (f66-f69, f78). MS_MOVE onto `/` keeps the container able to make nested user namespaces (its root is the
   namespace's topmost mount, so `current_chrooted` is false; f66), which sandboxes nested in containers need and a
   plain chroot would refuse.
-- **The classic path stays, counted by reason.** A create takes the shim (the full host mount namespace, `unshare`,
-  bind and `pivot_root`, as the command line makes every container) when the pruned seed can't serve it: a rootless
-  node, a spec with a user namespace of its own (a tree the agent clones from its own user namespace isn't locked in
-  the container's; a follow-up, f10), create-time hooks (they run against host paths), a mount namespace joined by
-  path, and a source the agent can't clone ahead (`open_tree` refused) or too many to fit `SCM_MAX_FD`. Each reason is
-  a fixed label on a `hex_*` counter (no high-cardinality label, CLAUDE.md §10), so a run shows how often a create
-  still pivots and why. This joins the `needs_shim` reasons decision 5 already counts (a pid or user namespace by path).
+- **The classic path stays, counted by reason.** A rootless node's seeds don't prune (above), so a create there that a
+  seed can make takes the classic root in the seed, not the shim: the init the seed clones copies the agent's mount
+  namespace and binds and `pivot_root`s there, as the shim's child does. On a root node a create takes the shim (the
+  full host mount namespace, `unshare`, bind and `pivot_root`, as the command line makes every container) when the
+  pruned seed can't serve it: a spec with a user namespace of its own (a tree the agent clones from its own user
+  namespace isn't locked in the container's; a follow-up, f10), create-time hooks (they run against host paths), a
+  mount namespace joined by path (or another namespace by path the agent can't open for the init), no mount namespace
+  of its own, and a source the agent can't clone ahead (`open_tree` refused) or too many to fit `SCM_MAX_FD`. Each such
+  create is counted under its reason, one of a fixed set (`ClassicReason`, `Rootless` for a rootless node's; no
+  high-cardinality label, CLAUDE.md §10). The counts are kept in the node's memory and read through it, by reason
+  (`Node::classic_creates_for`) and for the shim's alone (`Node::creates_through_shim`), as the `oci_box` and
+  `createpool` tests read them; they become `hex_*` metrics once kiln's Observe owner agrees their names. This joins
+  the `needs_shim` reasons decision 5 already counts (a pid or user namespace by path, made through the shim on either
+  node).
 - **What would falsify it** (each on fedora 6.19, in the same run as libcrun): the root-escape test reaching the marker
   or any host path from a pruned-path container; a nested proc mount succeeding past a mask in one; the pruned root's
   switch growing more than 10% between 0 and 24,000 extra host threads; create p50 through the seam not dropping by at
