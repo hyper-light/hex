@@ -54,8 +54,8 @@ pub const ENV_SOCKET: &str = "HEX_OCI_SEED_SOCKET";
 
 /// The environment entry by which the node agent tells a create seed to prune its mount namespace at
 /// start (goal 5 plan step 2): its value is a directory the agent ensured exists, which the seed
-/// mounts a fresh tmpfs over and pivots into, so its namespace then holds only that read-only tmpfs and
-/// an empty `/r`. Set only for a root node's create seeds; absent for an exec seed and a rootless node,
+/// mounts a fresh tmpfs over and pivots into, so its namespace then holds only that read-only tmpfs,
+/// holding nothing. Set only for a root node's create seeds; absent for an exec seed and a rootless node,
 /// which keep the agent's mount namespace and take the classic root path.
 pub const ENV_PRUNE: &str = "HEX_OCI_SEED_PRUNE";
 
@@ -123,11 +123,12 @@ fn serve() -> Result<(), OciError> {
 }
 
 /// Prunes the create seed's mount namespace once, at start (goal 5 plan step 2): unshare a mount
-/// namespace, make `/` private, mount a small read-only tmpfs over `mountpoint` holding only an empty
-/// `r`, pivot into it and detach the old root. The namespace then holds exactly two mounts — its root
-/// and that tmpfs on it — and nothing of the host: no proc, no sysfs (f78). Every init the seed clones
-/// (`clone3` with `CLONE_NEWNS`) copies this, so the init builds the container's root from the
-/// descriptors the agent hands it, with nothing of the host beneath it. `mountpoint` is a directory the
+/// namespace, make `/` private, mount a small tmpfs over `mountpoint`, pivot into it, detach the old
+/// root and make the tmpfs read-only. The namespace then holds exactly two mounts — its root and that
+/// tmpfs on it, holding nothing — and nothing of the host: no proc, no sysfs (f78). The init attaches
+/// the container's root on the tmpfs's own root (plan step 3), so the tmpfs needs no place in it.
+/// Every init the seed clones (`clone3` with `CLONE_NEWNS`) copies this, so the init builds the
+/// container's root from the descriptors the agent hands it, with nothing of the host beneath it. `mountpoint` is a directory the
 /// agent ensured exists; after the pivot and detach the host path it was is gone from this namespace.
 /// This is the one `pivot_root` on the pruned path, off every create's path and once per seed's life.
 fn prune(mountpoint: &Path) -> Result<(), OciError> {
@@ -137,7 +138,7 @@ fn prune(mountpoint: &Path) -> Result<(), OciError> {
         MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
     )
     .map_err(|e| OciError::os("making the seed's mounts private", e))?;
-    // A fresh small tmpfs over the mountpoint (made first if the agent didn't), holding only `r`.
+    // A fresh small tmpfs over the mountpoint (made first if the agent didn't), left empty.
     let _ = rustix::fs::mkdir(mountpoint, Mode::from_bits_truncate(0o755));
     rustix::mount::mount(
         "tmpfs",
@@ -147,8 +148,6 @@ fn prune(mountpoint: &Path) -> Result<(), OciError> {
         Some(c"size=64k,mode=755"),
     )
     .map_err(|e| OciError::os("the seed's root tmpfs", e))?;
-    rustix::fs::mkdir(mountpoint.join("r"), Mode::from_bits_truncate(0o755))
-        .map_err(|e| OciError::os("the seed's empty root", e))?;
     rustix::process::chdir(mountpoint).map_err(|e| OciError::os("chdir the seed's root", e))?;
     rustix::process::pivot_root(c".", c".")
         .map_err(|e| OciError::os("the seed's pivot_root", e))?;

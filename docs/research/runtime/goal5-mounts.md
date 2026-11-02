@@ -136,7 +136,8 @@ faults in user mode per create. By mount: to the rootfs's attach 53.4 us of call
    climbs only where it isn't mounted on its parent's own root (`fs/namei.c:1433-1446`), and the rootfs and the tmpfs
    beneath it are each mounted on their parent's root, so E1 climbs nowhere; the rootfs is the namespace's topmost
    mount over its root, so nested user namespaces stay allowed (E0; `fs/namespace.c:6095-6097`,
-   `kernel/user_namespace.c:106`). The seed's empty `r` is unused by the init now; step 2's AC-f still asserts it.
+   `kernel/user_namespace.c:106`). The seed's tmpfs held an empty `r` for step 2's attach; with nothing attached
+   there it holds nothing now (the lead's call, CLAUDE.md §13), and step 2's AC-f and E2 hold it to that.
 5. **Masked files share one descriptor** of the container's `/dev/null`.
 6. **`setsid` stays where it is.** OCI runtimes make the container's init a session leader (crun, runc above), and its
    cost is the kernel's, in part 19 because the init's set-up calls it there; the trace reports it among the calls.
