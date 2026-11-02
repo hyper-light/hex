@@ -47,6 +47,12 @@ pub struct Store {
     /// Where every other record is kept, none synced: a directory of the node's own under its runtime
     /// directory.
     run: PathBuf,
+    /// Two descriptors per store, shared by clones. Relative names keep the runtime directory's
+    /// prefix out of each record's open and rename (decision 1, goal 5 extended step 5).
+    #[cfg(target_os = "linux")]
+    disk_fd: Arc<File>,
+    #[cfg(target_os = "linux")]
+    run_fd: Arc<File>,
     /// The boxes whose records are being changed now, one change each: [`Store::put`],
     /// [`Store::update`] and [`Store::remove`] of a box wait for the change of it under way, so an
     /// update's read and write of a record are one change and two users changing one record at once
@@ -119,6 +125,10 @@ impl Store {
         Ok(Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
+            #[cfg(target_os = "linux")]
+            disk_fd: Arc::new(open_directory(disk)?),
+            #[cfg(target_os = "linux")]
+            run_fd: Arc::new(open_directory(run)?),
             busy: Arc::default(),
             synced: Arc::default(),
         })
@@ -220,9 +230,32 @@ impl Store {
     fn write(&self, record: &BoxRecord) -> Result<(), Refusal> {
         let bytes = record.encode()?;
         let (dir, durable) = self.place(record);
+        #[cfg(target_os = "linux")]
+        let dir_fd = if durable { &self.disk_fd } else { &self.run_fd };
+        #[cfg(target_os = "linux")]
+        let (tmp, final_path) = (
+            format!(".{}.tmp", record.spec.id),
+            format!("{}.json", record.spec.id),
+        );
+        #[cfg(not(target_os = "linux"))]
         let final_path = record_file(dir, &record.spec.id);
+        #[cfg(not(target_os = "linux"))]
         let tmp = temp_file(dir, &record.spec.id);
         {
+            #[cfg(target_os = "linux")]
+            let mut f = File::from(
+                rustix::fs::openat(
+                    dir_fd.as_ref(),
+                    tmp.as_str(),
+                    rustix::fs::OFlags::WRONLY
+                        | rustix::fs::OFlags::CREATE
+                        | rustix::fs::OFlags::TRUNC
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::from_raw_mode(0o666),
+                )
+                .map_err(|e| Refusal::os("making a record temp file", e))?,
+            );
+            #[cfg(not(target_os = "linux"))]
             let mut f =
                 File::create(&tmp).map_err(|e| Refusal::os("making a record temp file", e))?;
             f.write_all(&bytes)
@@ -233,6 +266,15 @@ impl Store {
                 self.synced.files.fetch_add(1, Ordering::Relaxed);
             }
         }
+        #[cfg(target_os = "linux")]
+        rustix::fs::renameat(
+            dir_fd.as_ref(),
+            tmp.as_str(),
+            dir_fd.as_ref(),
+            final_path.as_str(),
+        )
+        .map_err(|e| Refusal::os("renaming a record into place", e))?;
+        #[cfg(not(target_os = "linux"))]
         fs::rename(&tmp, &final_path)
             .map_err(|e| Refusal::os("renaming a record into place", e))?;
         if durable {
@@ -344,12 +386,33 @@ impl Store {
 
     /// fsync directory `dir`, so a rename in it is durable.
     fn sync_dir(&self, dir: &Path) -> Result<(), Refusal> {
+        #[cfg(target_os = "linux")]
+        {
+            // Only durable records reach this call, and their directory is always disk.
+            let _ = dir;
+            self.disk_fd
+                .sync_all()
+                .map_err(|e| Refusal::os("flushing the record directory", e))?;
+        }
+        #[cfg(not(target_os = "linux"))]
         File::open(dir)
             .and_then(|d| d.sync_all())
             .map_err(|e| Refusal::os("flushing the record directory", e))?;
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// Retain a close-on-exec directory descriptor for relative record writes and durable renames.
+#[cfg(target_os = "linux")]
+fn open_directory(dir: &Path) -> Result<File, Refusal> {
+    rustix::fs::open(
+        dir,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|e| Refusal::os("opening a record directory", e))
 }
 
 /// Makes `dir` readable by its owner alone, by its mode where the platform has one (unix); elsewhere

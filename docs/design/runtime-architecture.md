@@ -96,6 +96,19 @@ while it was made; now its cgroup does, made first (mkdir is atomic): a create o
 since its check fails at that mkdir, having made nothing, and is refused as `Exists` without removing anything,
 where before such a create's failure scrubbed the other's box.
 
+The Linux record store opens its two directories once, retaining two close-on-exec descriptors
+shared by its clones. Each write opens only `.<id>.tmp` relative to its directory and renames that
+file to `<id>.json` relative to the same descriptor: it does not walk the runtime-directory prefix
+three times. A durable write also fsyncs the retained directory, without opening it again. The
+operations remain open, write, close and atomic rename (plus the two fsyncs where required), with
+the same JSON and recovery rules; other platforms keep the path-based write. The descriptor budget
+is two per store, not one per box. See open(2), "Rationale for openat() and other directory file
+descriptor APIs" ([Linux man-pages](https://man7.org/linux/man-pages/man2/open.2.html)), and
+[renameat(2)](https://man7.org/linux/man-pages/man2/rename.2.html), whose directory-relative names
+keep rename's atomic replacement. Goal 5 extended step 5 measures this through the same create
+breakdown's record parts, including open, write, close and rename; it changes neither the measure
+nor the 0.015 ms bar.
+
 **Sources.**
 - rename(2), DESCRIPTION: the target is "atomically replaced, so that there is no point at which another
   process attempting to access newpath will find it missing".
