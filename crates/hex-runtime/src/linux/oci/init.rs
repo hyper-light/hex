@@ -1292,8 +1292,13 @@ const STATMOUNT_MASK_AT: usize = 8;
 const STATMOUNT_FS_TYPE_AT: usize = 36;
 const STATMOUNT_MNT_POINT_AT: usize = 108;
 const STATMOUNT_FIXED: usize = 512;
-/// `statmount`'s buffer: the fixed part, then a filesystem type and a mount point, each at most
-/// `PATH_MAX` (4096) with its NUL. A longer one is refused (`EOVERFLOW`), not cut.
+/// `statmount`'s buffer to begin with: the fixed part and 1.5 KiB of strings, a filesystem type and a
+/// mount point of any usual length. Each page of a larger one the init zeroes is a page fault in its
+/// set-up (goal5-mounts.md §5: 4.2 per create at 8.5 KiB), so it grows only when the kernel says the
+/// strings don't fit (`EOVERFLOW`).
+const STATMOUNT_FIRST: usize = STATMOUNT_FIXED + 1536;
+/// The most `statmount`'s buffer grows to: the fixed part, then a filesystem type and a mount point,
+/// each at most `PATH_MAX` (4096) with its NUL. A longer one is refused (`EOVERFLOW`), not cut.
 const STATMOUNT_BUF: usize = STATMOUNT_FIXED + 2 * 4096;
 
 /// The cgroup filesystems beneath the bind open as `top_fd`, each as its path under the bind's top,
@@ -1309,7 +1314,7 @@ fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<Str
     if !rustix::fs::StatxFlags::from_bits_retain(stx.stx_mask).contains(unique) {
         return Ok(None);
     }
-    let mut buf = vec![0u8; STATMOUNT_BUF];
+    let mut buf = vec![0u8; STATMOUNT_FIRST];
     let Some((_, top)) = mount_info(stx.stx_mnt_id, STATMOUNT_MNT_POINT, &mut buf)? else {
         return Ok(None);
     };
@@ -1357,15 +1362,21 @@ fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<Str
 }
 
 /// Mount `id`'s filesystem type and mount point, as many of them as `mask` asks (the other is empty),
-/// read through `statmount` into `buf`. `None` from a kernel without it.
-fn mount_info(id: u64, mask: u64, buf: &mut [u8]) -> Result<Option<(String, String)>, OciError> {
+/// read through `statmount` into `buf`, which grows once to [`STATMOUNT_BUF`] when they don't fit.
+/// `None` from a kernel without it.
+fn mount_info(id: u64, mask: u64, buf: &mut Vec<u8>) -> Result<Option<(String, String)>, OciError> {
     const WHAT: &str = "reading a mount's type and point";
-    match sys::statmount(id, mask, buf) {
+    let mut asked = sys::statmount(id, mask, buf);
+    if asked == Err(rustix::io::Errno::OVERFLOW) && buf.len() < STATMOUNT_BUF {
+        buf.resize(STATMOUNT_BUF, 0);
+        asked = sys::statmount(id, mask, buf);
+    }
+    match asked {
         Ok(()) => {}
         Err(rustix::io::Errno::NOSYS) => return Ok(None),
         Err(e) => return Err(OciError::os(WHAT, e)),
     }
-    let buf = &*buf;
+    let buf = &**buf;
     let short = || OciError::os(WHAT, "a short answer");
     let used = field_u32(buf, STATMOUNT_SIZE_AT).ok_or_else(short)?;
     if field_u64(buf, STATMOUNT_MASK_AT).ok_or_else(short)? & mask != mask {
@@ -1909,6 +1920,27 @@ mod tests {
         if cgroup2 {
             assert!(listed.iter().any(|p| p == "fs/cgroup"), "{listed:?}");
         }
+    }
+
+    /// Do: read the host's `/sys` mount point through `statmount` into a buffer that holds the fixed part
+    /// alone, which the kernel answers `EOVERFLOW` (fs/namespace.c:5682-5683) (goal 5 plan step 3,
+    /// T-T7.1.4). Expect: the buffer grown to its bound and the point read whole, `/sys`, not refused.
+    #[test]
+    fn a_mount_point_past_the_first_buffer_is_read_whole() {
+        let sys = rustix::fs::open(
+            "/sys",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let unique = rustix::fs::StatxFlags::from_bits_retain(libc::STATX_MNT_ID_UNIQUE);
+        let stx = rustix::fs::statx(&sys, "", rustix::fs::AtFlags::EMPTY_PATH, unique).unwrap();
+        let mut buf = vec![0u8; STATMOUNT_FIXED];
+        let got = mount_info(stx.stx_mnt_id, STATMOUNT_MNT_POINT, &mut buf)
+            .unwrap()
+            .expect("this host's kernel has statmount (Linux 6.8)");
+        assert_eq!(got, (String::new(), "/sys".to_owned()));
+        assert_eq!(buf.len(), STATMOUNT_BUF);
     }
 
     /// Do: a mount's target is a link to a host directory, or a path through a file. Expect: a target
