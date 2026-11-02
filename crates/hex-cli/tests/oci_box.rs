@@ -302,6 +302,311 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     classic_reasons_are_counted(&lab, own);
     an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
     rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
+    every_mount_kind_is_in_the_box_as_its_spec_asks(&lab, own);
+}
+
+/// Goal 5 plan step 3 (T-T7.1.4; CLAUDE.md §6): every mount kind a spec can ask for is in the box's own
+/// mountinfo with the source, target and options its spec asked, on each root path. One spec asks for
+/// them all: proc, tmpfs (`/dev`, `/tmp`, `/dev/shm`), devpts, mqueue and sysfs, a recursive bind
+/// read-only (`/usr`) and read-write (a volume), a plain bind of a directory and of a file read-only
+/// (the file's target missing from the image, so it is made), masked paths (files and a directory) and
+/// read-only paths (a directory and a file). As root the pruned path makes one box and the classic path
+/// another, a createRuntime hook routing it through the shim; rootless the classic path makes it, in the
+/// box's own user namespace. Each box is checked the same way, so a change to how the init mounts that
+/// alters what a mount is fails here on the path it changed.
+fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-mount-kinds"), state.path());
+    let vol = lab.bundles.path().join("kinds-vol");
+    let ro_dir = lab.bundles.path().join("kinds-ro");
+    let file = lab.bundles.path().join("kinds-file");
+    for dir in [&vol, &ro_dir] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("marker"), "from the host\n").unwrap();
+    }
+    std::fs::write(&file, "a bound file\n").unwrap();
+    // A rootless box's user namespace has no group 5 to give its terminals (bundle.rs, default_mounts).
+    let pts = if lab.rootless {
+        r#"["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620"]"#
+    } else {
+        r#"["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620","gid=5"]"#
+    };
+    let mounts = format!(
+        r#",
+    {{"destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": {pts}}},
+    {{"destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid","noexec","nodev","mode=1777","size=65536k"]}},
+    {{"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue", "options": ["nosuid","noexec","nodev"]}},
+    {{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}},
+    {{"destination": "/vol", "type": "bind", "source": "{vol}", "options": ["rbind","rw"]}},
+    {{"destination": "/ro-dir", "type": "bind", "source": "{ro_dir}", "options": ["bind","ro"]}},
+    {{"destination": "/etc/kinds-file", "type": "bind", "source": "{file}", "options": ["bind","ro"]}}"#,
+        vol = vol.display(),
+        ro_dir = ro_dir.display(),
+        file = file.display(),
+    );
+    // Masks the kernel may lack are looked for in the agent's own /proc and /sys (one kernel), and the box
+    // is held to a mask only where the path is there to mask.
+    let masked = [
+        "/proc/kcore",
+        "/proc/timer_list",
+        "/proc/scsi",
+        "/sys/firmware",
+    ];
+    let readonly = ["/proc/sys", "/proc/sysrq-trigger"];
+    let linux_extra = format!(
+        r#","maskedPaths":{},"readonlyPaths":{}"#,
+        json_args(&masked.map(str::to_owned)),
+        json_args(&readonly.map(str::to_owned))
+    );
+    let (namespaces, mappings) = if lab.rootless {
+        (
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}"#
+                .to_owned(),
+            format!(
+                r#","uidMappings":[{{"containerID":0,"hostID":{},"size":1}}],"gidMappings":[{{"containerID":0,"hostID":{},"size":1}}]"#,
+                lab.uid, lab.gid
+            ),
+        )
+    } else {
+        (
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}"#
+                .to_owned(),
+            String::new(),
+        )
+    };
+    let hooks = r#","hooks":{"createRuntime":[{"path":"/usr/bin/true","args":["true"]}]}"#;
+    // (the path, its hooks): rootless the classic path alone; as root the pruned path, and the classic one,
+    // which a create-time hook takes through the shim.
+    let paths: &[(&str, &str)] = if lab.rootless {
+        &[("classic", "")]
+    } else {
+        &[("pruned", ""), ("classic", hooks)]
+    };
+    let dev_of = |path: &Path| {
+        let st = rustix::fs::stat(path).unwrap();
+        format!(
+            "{}:{}",
+            rustix::fs::major(st.st_dev),
+            rustix::fs::minor(st.st_dev)
+        )
+    };
+    for &(path, hooks) in paths {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(
+                &Lab::act(&Act::Wait),
+                &namespaces,
+                &mappings,
+                &mounts,
+                hooks,
+                &linux_extra,
+            ),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("kinds-{path}")).unwrap();
+        let (pruned, shim) = (node.pruned_creates(), node.creates_through_shim());
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        })
+        .unwrap_or_else(|e| panic!("create the {path} box: {e:?}"));
+        node.start(&id).expect("start");
+        let took = (
+            node.pruned_creates() - pruned,
+            node.creates_through_shim() - shim,
+        );
+        let (exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let (vol_exit, vol_out) = run_in(&node, &id, &["/usr/bin/cat", "/vol/marker"]);
+        let ro_write = exit_in(&node, &id, &["/usr/bin/touch", "/ro-dir/written"]);
+        node.delete(&id).expect("delete");
+
+        let want_took = match (lab.rootless, path) {
+            (true, _) => (0, 0),
+            (false, "pruned") => (1, 0),
+            _ => (0, 1),
+        };
+        assert_eq!(
+            took, want_took,
+            "the {path} box was made on the {path} path (pruned, through the shim)"
+        );
+        assert_eq!(exit, Exit::Code(0), "read the {path} box's mountinfo: {mi}");
+        let listed = listed_mounts(&mi);
+        let at = |point: &str| {
+            listed
+                .iter()
+                .rev()
+                .find(|m| m.point == point)
+                .unwrap_or_else(|| panic!("no mount at {point} in the {path} box:\n{mi}"))
+        };
+        let has = |m: &ListedMount, opts: &[&str], sb: &[&str]| {
+            for o in opts {
+                assert!(
+                    m.opts.iter().any(|x| x == o),
+                    "{} in the {path} box has {o}: {m:?}",
+                    m.point
+                );
+            }
+            for o in sb {
+                assert!(
+                    m.sb_opts.iter().any(|x| x == o),
+                    "{}'s filesystem in the {path} box has {o}: {m:?}",
+                    m.point
+                );
+            }
+        };
+        // Filesystems: the type and source the spec named, its per-mount and filesystem options.
+        let proc = at("/proc");
+        assert_eq!(
+            (proc.fstype.as_str(), proc.source.as_str()),
+            ("proc", "proc")
+        );
+        has(proc, &["rw"], &[]);
+        let dev = at("/dev");
+        assert_eq!(
+            (dev.fstype.as_str(), dev.source.as_str()),
+            ("tmpfs", "tmpfs")
+        );
+        has(dev, &["rw", "nosuid"], &["mode=755", "size=65536k"]);
+        let tmp = at("/tmp");
+        assert_eq!(
+            (tmp.fstype.as_str(), tmp.source.as_str()),
+            ("tmpfs", "tmpfs")
+        );
+        has(tmp, &["rw", "nosuid", "nodev"], &[]);
+        let pts = at("/dev/pts");
+        assert_eq!(
+            (pts.fstype.as_str(), pts.source.as_str()),
+            ("devpts", "devpts")
+        );
+        let pts_sb: &[&str] = if lab.rootless {
+            &["mode=620", "ptmxmode=666"]
+        } else {
+            &["mode=620", "ptmxmode=666", "gid=5"]
+        };
+        has(pts, &["rw", "nosuid", "noexec"], pts_sb);
+        let shm = at("/dev/shm");
+        assert_eq!((shm.fstype.as_str(), shm.source.as_str()), ("tmpfs", "shm"));
+        has(
+            shm,
+            &["rw", "nosuid", "nodev", "noexec"],
+            &["mode=1777", "size=65536k"],
+        );
+        let mq = at("/dev/mqueue");
+        assert_eq!(
+            (mq.fstype.as_str(), mq.source.as_str()),
+            ("mqueue", "mqueue")
+        );
+        has(mq, &["rw", "nosuid", "nodev", "noexec"], &[]);
+        let sys = at("/sys");
+        assert_eq!(
+            (sys.fstype.as_str(), sys.source.as_str()),
+            ("sysfs", "sysfs")
+        );
+        has(sys, &["ro", "nosuid", "nodev", "noexec"], &[]);
+        // Binds: the source's filesystem (its device), read-only or read-write as asked.
+        for (point, source, opt) in [
+            ("/usr", Path::new("/usr"), "ro"),
+            ("/hex", Path::new(&lab.exe), "ro"),
+            ("/vol", vol.as_path(), "rw"),
+            ("/ro-dir", ro_dir.as_path(), "ro"),
+            ("/etc/kinds-file", file.as_path(), "ro"),
+        ] {
+            let m = at(point);
+            assert_eq!(
+                m.dev,
+                dev_of(source),
+                "{point} in the {path} box is a bind of {}: {m:?}",
+                source.display()
+            );
+            has(m, &[opt], &[]);
+        }
+        assert_eq!(
+            (vol_exit, vol_out.trim()),
+            (Exit::Code(0), "from the host"),
+            "the {path} box reads its volume"
+        );
+        assert_ne!(
+            ro_write,
+            Exit::Code(0),
+            "the {path} box can't write its read-only bind"
+        );
+        // Masks: a file under a bind of a /dev/null, a directory under an empty read-only tmpfs.
+        for point in masked {
+            let m = listed.iter().rev().find(|m| m.point == point);
+            match (Path::new(point).exists(), Path::new(point).is_dir(), m) {
+                (false, _, _) => {}
+                (true, true, Some(m)) => {
+                    assert_eq!(m.fstype, "tmpfs", "{point} masked in the {path} box: {m:?}");
+                    has(m, &["ro"], &[]);
+                }
+                (true, false, Some(m)) => assert!(
+                    m.root.ends_with("/null"),
+                    "{point} in the {path} box is masked by a /dev/null: {m:?}"
+                ),
+                (true, _, None) => panic!("{point} isn't masked in the {path} box:\n{mi}"),
+            }
+        }
+        // Read-only paths: each bound over itself, read-only, still the box's proc.
+        for point in readonly {
+            let m = at(point);
+            assert_eq!(m.fstype, "proc", "{point} in the {path} box: {m:?}");
+            assert_eq!(
+                m.root,
+                point.trim_start_matches("/proc"),
+                "{point} in the {path} box is its own proc entry: {m:?}"
+            );
+            has(m, &["ro"], &[]);
+        }
+    }
+    eprintln!(
+        "mount kinds: proc, tmpfs, devpts, mqueue, sysfs, binds (recursive, plain, a file, read-only and \
+         read-write), masks and read-only paths are each as their spec asks, on the {} path(s)",
+        paths
+            .iter()
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    );
+}
+
+/// One `/proc/<pid>/mountinfo` line (proc_pid_mountinfo(5)): the filesystem's device, the mount's root
+/// within it, the mount point, the per-mount options, the filesystem type, its source and the
+/// filesystem's own options.
+#[derive(Debug)]
+struct ListedMount {
+    dev: String,
+    root: String,
+    point: String,
+    opts: Vec<String>,
+    fstype: String,
+    source: String,
+    sb_opts: Vec<String>,
+}
+
+fn listed_mounts(text: &str) -> Vec<ListedMount> {
+    let split = |s: &str| s.split(',').map(str::to_owned).collect();
+    text.lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let left: Vec<&str> = left.split(' ').collect();
+            let right: Vec<&str> = right.split(' ').collect();
+            Some(ListedMount {
+                dev: (*left.get(2)?).to_owned(),
+                root: (*left.get(3)?).to_owned(),
+                point: (*left.get(4)?).to_owned(),
+                opts: split(left.get(5)?),
+                fstype: (*right.first()?).to_owned(),
+                source: (*right.get(1)?).to_owned(),
+                sb_opts: split(right.get(2)?),
+            })
+        })
+        .collect()
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4), the pruned-seed root's security criteria: a container on that path
