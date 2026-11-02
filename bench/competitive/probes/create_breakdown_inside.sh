@@ -54,8 +54,11 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 #
 # Each open's entry is marked too, by a kprobe on the openat and open system calls' entry points that records
 # nothing but where it fired (goal 5 extended step 5): it fetches no path, so it costs a call little, and a record
-# write is cut from its temp file's open on, its filesystem work its own parts. The kprobes are defined for this run
-# alone (group hexcb_<pid>), enabled only in its instance, and removed when it ends.
+# write is cut from its file's open on, its filesystem work its own parts: a durable record to the rename that puts
+# it in place, a non-durable one — written once straight to its file with O_EXCL, no temp and no rename (goal 5
+# extended step 5) — to that fd's close, so close is traced too (sys_enter_close names the fd sys_exit_openat
+# returned, sys_exit_close is the cut's end). The kprobes are defined for this run alone (group hexcb_<pid>),
+# enabled only in its instance, and removed when it ends.
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hexcb-$$"
@@ -74,7 +77,7 @@ EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_ex
   syscalls/sys_enter_clone3 syscalls/sys_exit_clone3 syscalls/sys_enter_clone syscalls/sys_exit_clone
   syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root
   syscalls/sys_enter_write syscalls/sys_exit_poll syscalls/sys_exit_ppoll syscalls/sys_exit_wait4
-  syscalls/sys_exit_waitid"
+  syscalls/sys_exit_waitid syscalls/sys_enter_close syscalls/sys_exit_close"
 DETAIL="syscalls/sys_enter_openat syscalls/sys_enter_open"
 PROBES="$KG/openat_in $KG/open_in"
 filter() { # filter <event>: the processes it's kept for

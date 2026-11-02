@@ -318,6 +318,7 @@ def calls(trace, ops=OPS):
                 if any(b < a for a, b in zip(at, at[1:])) or len(at) != len(spec) + 1:
                     raise Missing("its cuts in order")
                 call["parts"] = [window[b].ts - window[a].ts for a, b in zip(at, at[1:])]
+                call["record_kinds"] = getattr(cuts, "record_kinds", [])
             except Missing as m:
                 call["missing"] = str(m)
             out.append(call)

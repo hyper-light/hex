@@ -4,6 +4,7 @@
   create_breakdown.py drain <trace_pipe> <out file> <stop file>
   create_breakdown.py check <run dir> <prefix>
   create_breakdown.py summarize <run dir>
+  create_breakdown.py test   (selftest: the record-write cutter over synthetic traces)
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
 (exec_breakdown.py's).
@@ -154,6 +155,12 @@ def arg(e, name):
     return int(m[name], 0)
 
 
+def close_fd(e):
+    """The fd a close's entry names (its `fd:` argument), or None when its arguments don't carry one."""
+    m = dict(ARG.findall(e.text))
+    return int(m["fd"], 0) if "fd" in m else None
+
+
 def held(cond, what):
     if not cond:
         raise Missing(what)
@@ -178,10 +185,51 @@ def seed_fork(ev, start, bench):
     raise Missing("a seed's fork of the init")
 
 
+def record_write_cuts(c, ev, bench, cid, n, split=False):
+    """A record write's cuts, appended to `c`, its kind recorded on `c.record_kinds`. The write opens the
+    record's file; a durable record is written to a temp file and renamed into place, a non-durable one is
+    written once straight to its file with O_EXCL — no temp, no rename (goal 5 extended step 5). So "the record
+    written" runs from the file's open to the rename's return, or, with no rename, to that fd's close() return —
+    the fd sys_exit_openat returned — and the three parts after it are empty; a durable record's two fsyncs are
+    cut as their own parts instead. The kind ("rename" or "close") is chosen by what this create's window holds;
+    a write with neither a matching close nor a rename is refused. With `split`, the open is cut at its kprobe
+    entry too. The rounds trace a rename's and a close's exit alone (a rename's entry fetches two paths)."""
+    tmp = f".{cid}.tmp"
+    start = c.at[-1] + 1
+    opened = first(ev, start, exited(bench, "openat"), f"record write {n}'s open")
+    fd = int(ev[opened].text, 0)
+    renamed = next((i for i in range(opened + 1, len(ev)) if exited(bench, *RENAMES)(ev[i])), None)
+    if renamed is not None:
+        terminal, kind, what = renamed, "rename", f"record write {n}'s temp file"
+        test = lambda p: named(p, tmp)  # noqa: E731  (a durable record's temp file)
+        syncs = [i for i in range(start, renamed) if enter(bench, "fsync")(ev[i])]
+    else:
+        closed = next((j for j in range(opened + 1, len(ev))
+                       if enter(bench, "close")(ev[j]) and close_fd(ev[j]) == fd), None)
+        if closed is None:
+            raise Missing(f"record write {n}'s close or rename")
+        terminal = first(ev, closed, exited(bench, "close"), f"record write {n}'s fd {fd} close returning")
+        kind, what, syncs = "close", f"record write {n}'s file", []
+        test = lambda p: named(p, f"{cid}.json")  # noqa: E731  (a non-durable record, written in place)
+    c.record_kinds.append(kind)
+    if split:
+        c.at.append(last_before(ev, start, opened, probed(bench, "openat"), f"{what}'s open entry"))
+    c.at.append(opened)
+    c.opens.append((opened, bench, "openat", test, what))
+    if syncs:
+        c.at.append(syncs[0])
+        c.to(exited(bench, "fsync"), f"record write {n}'s fsync returning")
+        c.to(enter(bench, "fsync"), f"record write {n}'s directory fsync")
+        c.to(exited(bench, "fsync"), f"record write {n}'s directory fsync returning")
+    else:
+        c.at += [terminal] * 4
+
+
 def create_cuts(ev, bench, cid, seeded=False, once=False):
     """A create's cuts on the shim path, or with `seeded` on the seed path (goal 5 plan step 4), and with `once` as
     well where the record is written once, last (goal 5 extended step 5)."""
     c = eb.Cuts(ev)
+    c.record_kinds = []  # "rename" (a durable record) or "close" (O_EXCL, goal 5 extended step 5), per write
     tmp = f".{cid}.tmp"
 
     def opened_last_before(pid, call, before, test, what):
@@ -193,26 +241,7 @@ def create_cuts(ev, bench, cid, seeded=False, once=False):
         return i
 
     def record_write(n, split=False):
-        """A record write's cuts: its temp file made, its fsync's entry and exit, the directory's. A record whose
-        directories all lie on tmpfs isn't synced (decision 1, goal 5 plan step 2). The rounds trace a rename's
-        exit alone (its entry fetches two paths), so such a write's "the record written" runs from its temp file
-        to its rename's return, holding the close and the rename, and the three parts after it are empty. With
-        `split`, the temp file's open is cut at its entry too, as its kprobe marks it."""
-        renamed = first(ev, c.at[-1] + 1, exited(bench, *RENAMES), f"record write {n}'s rename")
-        syncs = [i for i in range(c.at[-1], renamed) if enter(bench, "fsync")(ev[i])]
-        what = f"record write {n}'s temp file"
-        opened = last_before(ev, c.at[-1] + 1, syncs[0] if syncs else renamed, exited(bench, "openat"), what)
-        if split:
-            c.at.append(last_before(ev, c.at[-1] + 1, opened, probed(bench, "openat"), f"{what}'s open entry"))
-        c.at.append(opened)
-        c.opens.append((opened, bench, "openat", lambda p: named(p, tmp), what))
-        if syncs:
-            c.at.append(syncs[0])
-            c.to(exited(bench, "fsync"), f"record write {n}'s fsync returning")
-            c.to(enter(bench, "fsync"), f"record write {n}'s directory fsync")
-            c.to(exited(bench, "fsync"), f"record write {n}'s directory fsync returning")
-        else:
-            c.at += [renamed] * 4
+        record_write_cuts(c, ev, bench, cid, n, split)
 
     looked = lambda p: named(p, f"{cid}.json")  # noqa: E731
     if once:
@@ -343,8 +372,12 @@ def check(run, prefix):
             # seam_oci traces every other timed lifecycle, the first of them included.
             if len(got) != (len(ms) + 1) // 2:
                 bad.append(f"{kind}: {len(got)} creates traced of {len(ms)} timed")
+            kinds = {}
+            for c in got:
+                for k in c.get("record_kinds", []):
+                    kinds[k] = kinds.get(k, 0) + 1
             print(f"check {prefix}.{kind}: {sum('parts' in c for c in got)} of {len(got)} traced creates cut whole, "
-                  f"{unread} trace lines not read as events")
+                  f"{unread} trace lines not read as events; record writes by kind {kinds}")
     for b in bad:
         print(f"check {prefix}: {b}")
     return 1 if bad else 0
@@ -619,6 +652,64 @@ def summarize(run):
     return 0
 
 
+def selftest():
+    """Synthetic in-memory traces for record_write_cuts (goal 5 extended step 5): a non-durable record's write
+    (its file opened with O_EXCL, written and closed, no rename) that the old rename-only cutter refused, a
+    durable record's write (temp file opened, written, closed, renamed), a write with neither — refused — and
+    the close matched by its fd. `python3 create_breakdown.py test`."""
+    bench, cid = 7, "b"
+
+    def e(kind, name, text):
+        return eb.Event(0, bench, kind, name, text)
+
+    def cuts(events):
+        c = eb.Cuts(events)
+        c.record_kinds = []
+        return c
+
+    # A non-durable record (O_EXCL): its open's kprobe entry and exit (fd 5), a write, the fd's close. No rename.
+    after = [e("mark", "", "the cut the write follows"),
+             e("probe", "openat", "openat_in: (args)"),
+             e("exit", "openat", "0x5"),
+             e("enter", "write", "fd: 0x5, count: 0x12"),
+             e("enter", "close", "fd: 0x5"),
+             e("exit", "close", "0x0")]
+    # The old cutter cut a write only to a rename; this trace has none, so it refused the create.
+    assert next((i for i in range(len(after)) if exited(bench, *RENAMES)(after[i])), None) is None
+    c = cuts(after)
+    record_write_cuts(c, after, bench, cid, 2, split=True)
+    assert c.record_kinds == ["close"], c.record_kinds
+    assert c.at == [0, 1, 2, 5, 5, 5, 5], c.at  # file made (1->2), written to the close (2->5), then empty
+
+    # A durable record: open (fd 5), write, close, then the rename that puts it in place.
+    before = after + [e("exit", "rename", "0x0")]
+    c = cuts(before)
+    record_write_cuts(c, before, bench, cid, 2, split=True)
+    assert c.record_kinds == ["rename"], c.record_kinds
+    assert c.at == [0, 1, 2, 6, 6, 6, 6], c.at  # written to the rename (2->6), then empty
+
+    # Neither a matching close nor a rename: refused.
+    neither = after[:3]
+    c = cuts(neither)
+    try:
+        record_write_cuts(c, neither, bench, cid, 2, split=True)
+    except Missing:
+        pass
+    else:
+        raise AssertionError("a write with neither a close nor a rename must be refused")
+
+    # The close is matched by its fd: a close of another fd before the record fd's is not the cut's end.
+    other = [after[0], after[1], after[2], after[3],
+             e("enter", "close", "fd: 0x9"), e("exit", "close", "0x0"),
+             e("enter", "close", "fd: 0x5"), e("exit", "close", "0x0")]
+    c = cuts(other)
+    record_write_cuts(c, other, bench, cid, 2, split=True)
+    assert c.at == [0, 1, 2, 7, 7, 7, 7], c.at  # the fd-5 close exit is at 7, not the fd-9 close at 5
+
+    print("create_breakdown selftest: ok (close-cut, rename-cut, fd match, and refusal)")
+    return 0
+
+
 def main():
     a = sys.argv[1:]
     if len(a) == 4 and a[0] == "drain":
@@ -628,6 +719,8 @@ def main():
         return check(a[1], a[2])
     if len(a) == 2 and a[0] == "summarize":
         return summarize(a[1])
+    if len(a) == 1 and a[0] == "test":
+        return selftest()
     print(__doc__, file=sys.stderr)
     return 2
 
