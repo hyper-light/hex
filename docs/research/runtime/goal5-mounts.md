@@ -253,7 +253,7 @@ with no load gate (CLAUDE.md's noisy-host rule): the host's own tenants (a kind 
 up throughout, at times another agent's create breakdown on CPUs 4-31 and other tenants' Rust builds, each run's
 `env.txt` naming them (`~/.cache/hex-bench/out/create-breakdown-<run>`), 2026-11-02T02:59Z to 05:15Z. Binaries:
 before, bf77298 (hex sha256 ad2ebdf3a7afe7cb); the change, f3c6c09 (a999609cf3ac28d5); the classic path's listing,
-d236217 (a0f704d9a2e3eb18). Part figures are the create breakdown's pooled p50 over its three rounds, in ms.
+d236217 (a0f704d9a2e3eb18), and its smaller buffer, 5cccb60. Part figures are the create breakdown's pooled p50 over its three rounds, in ms.
 
 - **Part 19 on the pruned path**, against the bar of 0.16 ms (run 4: 0.359): 0.241 at f3c6c09 (20261102T031219Z,
   rounds 0.262 / 0.256 / 0.132, the 1-minute load 56 at its start with another breakdown on the same CPUs), 0.131
@@ -272,9 +272,15 @@ d236217 (a0f704d9a2e3eb18). Part figures are the create breakdown's pooled p50 o
   | 20261102T050945Z | f3c6c09 | 21.8 | 0.053 | 0.050 | 0.212 (0.236 / 0.209 / 0.185) |
   | 20261102T051129Z | d236217 | 10.8 | 0.052 | 0.049 | 0.172 (0.171 / 0.158 / 0.185) |
   | 20261102T051330Z | f3c6c09 | 34.5 | 0.060 | 0.058 | 0.242 (0.403 / 0.228 / 0.195) |
+  | 20261102T052438Z | 5cccb60 | 28.0 | 0.076 | 0.068 | 0.234 (0.231 / 0.227 / 0.254) |
+  | 20261102T052820Z | d236217 | 73.3 | 0.043 | 0.043 | 0.156 (0.160 / 0.159 / 0.150) |
 
-  In the rounds at the same pace (part 21 at 0.045 to 0.050 ms) f3c6c09's part 23 is 0.185 to 0.209 and d236217's
-  0.158 to 0.171: the listing takes about 35 us, and the classic path sits at the bar, not under it. The traced
+  In the rounds at the same pace (part 21 at 0.043 to 0.050 ms) f3c6c09's part 23 is 0.185 to 0.209 and d236217's
+  0.150 to 0.171, under the bar in 20261102T052820Z; over each run's own part 21, f3c6c09's is 4.0 to 4.2 times it
+  and the listing's 3.0 to 3.6. The listing takes about 35 us, a fifth, and the classic path is at the bar: under it
+  at the host's full pace, over it where the host runs short bursts slowly (an idle fedora clocks short
+  bursts down: `bench/competitive/RESULT.md`, `probes/host_clock.sh`). 5cccb60's smaller `statmount` buffer took 2 of the init's page faults per create (27.1 against 29.1, and
+  4.3 us against 9.3 before its `statmount`, 20261102T052422Z against 052432Z, traced). The traced
   spans, interleaved at one in flight (20261102T050528Z, 050538Z, 050546Z, 050555Z: f3c6c09, d236217, f3c6c09,
   d236217), say where: the table's `read`s, `openat` and `readlink` (51 to 55 us) became a `statx`, a `statmount`
   and a `listmount` (8 to 10 us), the span's p50 281 and 322 us to 233 and 205. What's left beside the probe's own
