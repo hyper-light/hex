@@ -219,7 +219,7 @@ impl Node {
     /// Arms a debug-only crash point on this node's create seeds (goal 5 plan step 2): the pruned init
     /// ends at the named point, as a kill would, so a test proves the agent cleans up a container whose
     /// init dies mid-build (CLAUDE.md §6). Must come before [`Node::with_oci_helper`], which builds the
-    /// seed pool. Debug builds only; the point names are the runtime's (`seed::INJECT_DIE_BEFORE_MOVE`).
+    /// seed pool. Debug builds only; the point names are the runtime's (`seed::INJECT_DIE_BEFORE_SWITCH`).
     #[cfg(debug_assertions)]
     pub fn with_inject(mut self, point: &str) -> Self {
         self.inject = Some(point.to_owned());

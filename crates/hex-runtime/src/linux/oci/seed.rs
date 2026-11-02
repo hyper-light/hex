@@ -69,10 +69,10 @@ pub const ENV_PRUNE: &str = "HEX_OCI_SEED_PRUNE";
 pub const ENV_INJECT: &str = "HEX_OCI_SEED_INJECT";
 
 /// The one point [`ENV_INJECT`] names: the pruned init ends between attaching its mounts and the
-/// `MS_MOVE`/`chroot` that makes them the container's root, so the mounts exist, in the init's own
-/// namespace, when it dies.
+/// `chroot` that makes them the container's root, so the mounts exist, in the init's own namespace,
+/// when it dies.
 #[cfg(debug_assertions)]
-pub const INJECT_DIE_BEFORE_MOVE: &str = "die-before-move";
+pub const INJECT_DIE_BEFORE_SWITCH: &str = "die-before-switch";
 
 /// A program that fails before it can start exits as a shell does for a program it can't run (126),
 /// and for one that doesn't exist (127), as [`super::exec`] reports the same.

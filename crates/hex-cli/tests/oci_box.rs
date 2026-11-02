@@ -1012,7 +1012,7 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
 /// nothing of the container in the agent's own namespace. Two ways in, both after the rootfs is attached
 /// and before the root switch: (1) a filesystem mount of a type the kernel doesn't have — the init
 /// refuses at `fsopen`, by type, naming the mount and why; (2) the init killed between its mounts' attach
-/// and the `MS_MOVE`/`chroot` (a debug-only crash point armed on the seed) — refused by type, its mounts
+/// and the `chroot` (a debug-only crash point armed on the seed) — refused by type, its mounts
 /// dying with its own namespace. Each time: the box is gone, its directory gone, the agent's mounts
 /// unchanged. Root only: a pruned seed is a root node's, and the pruned path is what keeps the
 /// container's mounts out of the agent's namespace.
@@ -1092,7 +1092,7 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
         let box_root = own.join("hex-oci-killed-build");
         let node = Node::open(&box_root, state.path(), state.path())
             .expect("open a node")
-            .with_inject(hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_MOVE)
+            .with_inject(hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_SWITCH)
             .with_oci_helper(PathBuf::from(&lab.exe));
         let id = BoxId::new("killed-build").unwrap();
         let before = agent_mount_points();
@@ -1133,7 +1133,7 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
         let box_root = own.join("hex-oci-spec-inject");
         let node = lab.node(&box_root, state.path());
         let inject = hex_runtime::linux::oci::seed::ENV_INJECT;
-        let point = hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_MOVE;
+        let point = hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_SWITCH;
         let dir = tempfile::Builder::new()
             .prefix("bundle-")
             .tempdir_in(lab.bundles.path())

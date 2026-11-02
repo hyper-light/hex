@@ -40,14 +40,25 @@ pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
 pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
-/// (path, major, minor, mode); all character devices.
+/// (name in `/dev`, major, minor, mode); all character devices.
 const DEFAULT_DEVICES: [(&str, u32, u32, u32); 6] = [
-    ("/dev/null", 1, 3, 0o666),
-    ("/dev/zero", 1, 5, 0o666),
-    ("/dev/full", 1, 7, 0o666),
-    ("/dev/random", 1, 8, 0o666),
-    ("/dev/urandom", 1, 9, 0o666),
-    ("/dev/tty", 5, 0, 0o666),
+    ("null", 1, 3, 0o666),
+    ("zero", 1, 5, 0o666),
+    ("full", 1, 7, 0o666),
+    ("random", 1, 8, 0o666),
+    ("urandom", 1, 9, 0o666),
+    ("tty", 5, 0, 0o666),
+];
+
+/// The links a runtime makes in `/dev` (OCI spec §Dev symbolic links), as (target, name in `/dev`):
+/// the descriptors and the three streams through the container's own `/proc`, and, for a devpts
+/// mounted at `/dev/pts`, its multiplexer.
+const DEFAULT_LINKS: [(&str, &str); 5] = [
+    ("/proc/self/fd", "fd"),
+    ("/proc/self/fd/0", "stdin"),
+    ("/proc/self/fd/1", "stdout"),
+    ("/proc/self/fd/2", "stderr"),
+    ("pts/ptmx", "ptmx"),
 ];
 
 /// The `hex __oci-init` entry. Returns the process exit code; a setup failure is reported to the
@@ -306,7 +317,7 @@ impl FifoDir<'_> {
 /// How the container's root is built. The classic path binds the rootfs in a copy of the agent's full
 /// mount namespace and `pivot_root`s into it; the pruned path (goal 5 plan step 2) attaches the rootfs
 /// and bind sources the agent cloned (here) in a copy of the seed's two-mount namespace and ends with
-/// `MS_MOVE` and `chroot`, with no `pivot_root` walk of the host's threads.
+/// `chroot`, with no `pivot_root` walk of the host's threads.
 pub(crate) enum Root<'a> {
     Classic,
     Pruned(&'a PrunedSources),
@@ -679,7 +690,8 @@ fn namespace_flags(spec: &Spec) -> UnshareFlags {
 
 /// Prepares the container's root: private propagation, the spec mounts, default devices and
 /// symlinks, masked and readonly paths, then `pivot_root` into it. Every path in the root is resolved
-/// inside it ([`inroot`]): until the pivot `/` is the host's, and an image's links may point there.
+/// inside it ([`inroot`]), from one descriptor of the bound rootfs: until the pivot `/` is the host's,
+/// and an image's links may point there.
 fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     let rootfs = {
         let p = Path::new(&spec.root.path);
@@ -696,30 +708,34 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     .map_err(|e| OciError::os("making mounts private", e))?;
     rustix::mount::mount_bind(&rootfs, &rootfs)
         .map_err(|e| OciError::os("binding the rootfs", e))?;
+    // Opened after the bind, so it is the bind's root, which the pivot makes `/`. A spec mount at `/`
+    // itself (a layered root's overlay) goes over the bind, and what follows resolves in it, so the
+    // root is opened again after one, at its top then, as a lookup of the rootfs's path would land.
+    let mut root_fd = inroot::open_root(&rootfs)?;
+    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
+        do_mount(&inroot::Root::new(root_fd.as_fd()), &op)?;
+        if inroot::is_root(&op.destination) {
+            root_fd = inroot::open_root(&rootfs)?;
+        }
+    }
+    let root = inroot::Root::new(root_fd.as_fd());
 
     // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
     // devices are bind-mounted from the host instead of created.
     let in_userns = spec.in_user_namespace();
-    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
-        do_mount(&rootfs, &op)?;
-    }
-    make_default_devices(&rootfs, in_userns)?;
-    for dev in &spec.linux.devices {
-        make_device(&rootfs, dev, in_userns)?;
-    }
-    make_default_symlinks(&rootfs)?;
+    make_dev(&root, spec, in_userns)?;
     for path in &spec.linux.masked_paths {
-        mask_path(&rootfs, path)?;
+        mask_path(&root, path)?;
     }
     for path in &spec.linux.readonly_paths {
-        readonly_path(&rootfs, path)?;
+        readonly_path(&root, path)?;
     }
     if spec.root.readonly {
         rustix::mount::mount_remount(&rootfs, MountFlags::RDONLY | MountFlags::BIND, "")
             .map_err(|e| OciError::os("remounting rootfs ro", e))?;
     }
 
-    rustix::process::chdir(&rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
+    rustix::process::fchdir(&root_fd).map_err(|e| OciError::os("chdir rootfs", e))?;
     rustix::process::pivot_root(c".", c".").map_err(|e| OciError::os("pivot_root", e))?;
     rustix::mount::unmount(".", UnmountFlags::DETACH)
         .map_err(|e| OciError::os("detaching the old root", e))?;
@@ -754,26 +770,29 @@ const FD_TO_FD: MoveMountFlags =
     MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH.union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
 
 /// Builds the container's root on the pruned-seed path (goal 5 plan step 2), fd-based. The init's
-/// namespace is a copy of the seed's two mounts — its root and a tmpfs holding `/r` — so it attaches the
-/// rootfs the agent cloned at `/r` (a path in its own namespace, not the host's), makes the spec's
-/// mounts beneath (each bind from the tree the agent cloned, by `move_mount`; each filesystem by
-/// `fsopen`/`fsmount`), its devices, symlinks, masks and read-only paths, and ends with `MS_MOVE` onto
-/// `/` and `chroot`, not `pivot_root`: no walk of the host's threads (f6, f75, f80) and a copied table
-/// of two mounts (f9, f76). Every target is resolved inside the rootfs with `openat2(RESOLVE_IN_ROOT)`
-/// ([`inroot`]), as the classic path resolves inside the bound rootfs, and the mount is attached to that
-/// descriptor, there being no `/proc/self/fd` to name it by path in this namespace. MS_MOVE is safe
-/// here, where it is not in a copy of the host's namespace, because nothing of the host lies beneath the
-/// root (`goal5-root.md` §3): the escapes it opens there (E2, E3, a user-namespaced root) are closed.
+/// namespace is a copy of the seed's two mounts — its root and a read-only tmpfs on it — so it attaches
+/// the rootfs the agent cloned on `/`, over that tmpfs, makes the spec's mounts in it (each bind from
+/// the tree the agent cloned, by `move_mount`; each filesystem by `fsopen`/`fsmount`), its devices,
+/// symlinks, masks and read-only paths, and ends with `chroot` into it, not `pivot_root`: no walk of the
+/// host's threads (f6, f75, f80) and a copied table of two mounts (f9, f76). Every target is resolved
+/// inside the rootfs with `openat2(RESOLVE_IN_ROOT)` from the rootfs tree's own descriptor ([`inroot`]),
+/// as the classic path resolves inside the bound rootfs, and the mount is attached to that descriptor,
+/// there being no `/proc/self/fd` to name it by path in this namespace. Attached on `/` it lies where
+/// step 2's `MS_MOVE` from `/r` put it, the same tree, with one attach and one hold of the kernel's
+/// `namespace_sem` fewer (goal 5 plan step 3, `goal5-mounts.md`); until the `chroot` the init's own root
+/// is still the tmpfs's, and it walks no path by name. This is safe here, where it is not in a copy of
+/// the host's namespace, because nothing of the host lies beneath the root (`goal5-root.md` §3): the
+/// escapes it opens there (E2, E3, a user-namespaced root) are closed.
 fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciError> {
-    let rootfs = Path::new("/r");
     rustix::mount::move_mount(
         sources.rootfs.as_fd(),
         "",
         rustix::fs::CWD,
-        "/r",
+        "/",
         MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
     )
     .map_err(|e| OciError::os("attaching the rootfs", e))?;
+    let root = inroot::Root::new(sources.rootfs.as_fd());
 
     let mut binds = sources.binds.iter();
     for op in crate::linux::oci::mount::plan(&spec.mounts)? {
@@ -783,7 +802,7 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
         if op.destination == "/" {
             continue;
         }
-        do_mount_pruned(rootfs, &op, &mut binds)?;
+        do_mount_pruned(&root, &op, &mut binds)?;
     }
     if binds.next().is_some() {
         return Err(OciError::Broken(
@@ -792,23 +811,19 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
     }
     // A pruned create is a root node's, never a user namespace's (the runtime routes those classic), so
     // devices are made with `mknod`, as the classic path makes them outside a user namespace.
-    make_default_devices(rootfs, false)?;
-    for dev in &spec.linux.devices {
-        make_device(rootfs, dev, false)?;
-    }
-    make_default_symlinks(rootfs)?;
+    make_dev(&root, spec, false)?;
+    let mut null = None;
     for path in &spec.linux.masked_paths {
-        mask_path_pruned(rootfs, path)?;
+        mask_path_pruned(&root, path, &mut null)?;
     }
     for path in &spec.linux.readonly_paths {
-        readonly_path_pruned(rootfs, path)?;
+        readonly_path_pruned(&root, path)?;
     }
     if spec.root.readonly {
         // The rootfs mount alone read-only (not its submounts): not recursive, as the classic path's
         // remount changes only the bind's top.
-        let top = target(rootfs, "/", Make::Nothing)?;
         sys::mount_setattr(
-            top.as_fd(),
+            sources.rootfs.as_fd(),
             false,
             &sys::MountAttrs {
                 set: sys::MOUNT_ATTR_RDONLY,
@@ -825,14 +840,13 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
     // from release builds, where the init never looks for it.
     #[cfg(debug_assertions)]
     if std::env::var(crate::linux::oci::seed::ENV_INJECT).as_deref()
-        == Ok(crate::linux::oci::seed::INJECT_DIE_BEFORE_MOVE)
+        == Ok(crate::linux::oci::seed::INJECT_DIE_BEFORE_SWITCH)
     {
         sys::exit_child(70);
     }
 
-    // The root switch, with no pivot_root. chdir into the rootfs, move it onto `/`, chroot into it.
-    rustix::process::chdir(rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
-    rustix::mount::mount_move(".", "/").map_err(|e| OciError::os("moving the root onto /", e))?;
+    // The root switch, with no pivot_root: into the rootfs, then chroot there.
+    rustix::process::fchdir(&sources.rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
     rustix::process::chroot(".").map_err(|e| OciError::os("chroot into the root", e))?;
     rustix::process::chdir("/").map_err(|e| OciError::os("chdir /", e))?;
     if let Some(prop) = spec
@@ -850,23 +864,26 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
 /// One of the spec's mounts on the pruned path: a bind from the next tree the agent cloned (its flags
 /// set on the tree, then attached by `move_mount`), or a filesystem made with `fsopen`/`fsmount` and
 /// attached the same way. The destination is resolved inside the rootfs ([`target`]), as the classic
-/// [`do_mount`] resolves it, and the mount attached to that descriptor (no `/proc/self/fd` here).
+/// [`do_mount`] resolves it, and the mount attached to that descriptor (no `/proc/self/fd` here). A
+/// propagation the spec asks for is set on the attached mount through its own descriptor, which names
+/// the mount now on top of the destination.
 fn do_mount_pruned<'a>(
-    rootfs: &Path,
+    root: &inroot::Root<'_>,
     op: &crate::linux::oci::mount::Op,
     binds: &mut impl Iterator<Item = &'a OwnedFd>,
 ) -> Result<(), OciError> {
     let at = || format!("{} at {}", op.kind_source, op.destination);
-    if op.is_bind {
+    let fs;
+    let attached = if op.is_bind {
         let tree = binds.next().ok_or_else(|| {
             OciError::Broken(format!("the bind at {} has no source tree", op.destination))
         })?;
-        let make = if is_regular_file(tree.as_fd())? {
-            Make::File
-        } else {
-            Make::Dir
+        // A missing destination is made as what the source is: a file for a file's bind.
+        let target_fd = match root.open(&op.destination, Make::Nothing)? {
+            Some(fd) => fd,
+            None if is_regular_file(tree.as_fd())? => target(root, &op.destination, Make::File)?,
+            None => target(root, &op.destination, Make::Dir)?,
         };
-        let target_fd = target(rootfs, &op.destination, make)?;
         // The source's flags set on the tree before it is attached, recursively for a recursive bind,
         // so the submounts a recursive bind carries take them too (the classic path remounts each one,
         // `remount_cgroupfs_readonly`). crun sets a tree's attributes the same way.
@@ -885,15 +902,16 @@ fn do_mount_pruned<'a>(
         }
         rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
             .map_err(|e| OciError::os("attaching a bind", format!("{}: {e}", at())))?;
+        tree.as_fd()
     } else {
-        let target_fd = target(rootfs, &op.destination, Make::Dir)?;
-        let mount = make_fs(&op.fstype, &op.data, op.flags).map_err(|e| {
+        let target_fd = target(root, &op.destination, Make::Dir)?;
+        fs = make_fs(&op.fstype, &op.data, op.flags).map_err(|e| {
             OciError::os(
                 "making a filesystem",
                 format!("{} at {}: {e}", op.fstype, op.destination),
             )
         })?;
-        rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD).map_err(
+        rustix::mount::move_mount(fs.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD).map_err(
             |e| {
                 OciError::os(
                     "attaching a filesystem",
@@ -901,12 +919,12 @@ fn do_mount_pruned<'a>(
                 )
             },
         )?;
-    }
+        fs.as_fd()
+    };
     if let Some(prop) = op.propagation {
         let (ms, rec) = propagation_ms(prop);
-        let top = target(rootfs, &op.destination, Make::Nothing)?;
         sys::mount_setattr(
-            top.as_fd(),
+            attached,
             rec,
             &sys::MountAttrs {
                 set: 0,
@@ -944,8 +962,13 @@ pub(crate) fn make_fs(fstype: &str, data: &str, flags: MountFlags) -> Result<Own
 /// Masks a path on the pruned path (goal 5 plan step 2): a directory with a read-only empty tmpfs, a
 /// file by binding the container's own `/dev/null` over it. The classic [`mask_path`] binds the host's
 /// `/dev/null`; this namespace holds none, so the container's own is used, as the research prescribes.
-fn mask_path_pruned(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let Some(target_fd) = inroot::open(rootfs, path, Make::Nothing)? else {
+/// `null` keeps it once the first file's mask has opened it, for the masks after.
+fn mask_path_pruned(
+    root: &inroot::Root<'_>,
+    path: &str,
+    null: &mut Option<OwnedFd>,
+) -> Result<(), OciError> {
+    let Some(target_fd) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
     let is_dir = rustix::fs::fstat(&target_fd)
@@ -957,10 +980,13 @@ fn mask_path_pruned(rootfs: &Path, path: &str) -> Result<(), OciError> {
         rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
             .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
     } else {
-        let Some(null) = inroot::open(rootfs, "/dev/null", Make::Nothing)? else {
-            return Err(OciError::Config(format!(
-                "masking {path} needs the container's /dev/null, which isn't there"
-            )));
+        let null = match null {
+            Some(fd) => fd,
+            None => null.insert(root.open("/dev/null", Make::Nothing)?.ok_or_else(|| {
+                OciError::Config(format!(
+                    "masking {path} needs the container's /dev/null, which isn't there"
+                ))
+            })?),
         };
         let tree = rustix::mount::open_tree(
             null.as_fd(),
@@ -979,8 +1005,8 @@ fn mask_path_pruned(rootfs: &Path, path: &str) -> Result<(), OciError> {
 /// A read-only path on the pruned path: the target cloned as a detached tree, set read-only on the
 /// tree (recursively), and moved back over itself. The classic [`readonly_path`] binds and remounts
 /// through `/proc/self/fd`, which this namespace has not.
-fn readonly_path_pruned(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let Some(target_fd) = inroot::open(rootfs, path, Make::Nothing)? else {
+fn readonly_path_pruned(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+    let Some(target_fd) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
     let tree = rustix::mount::open_tree(
@@ -1079,7 +1105,7 @@ fn propagation(name: &str) -> Option<MountPropagationFlags> {
     Some(f)
 }
 
-fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
+fn do_mount(root: &inroot::Root<'_>, op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
     // Which mount failed, and of what, with why.
     let failed = |e: rustix::io::Errno| {
         format!(
@@ -1092,12 +1118,14 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
             op.destination
         )
     };
-    let make = if op.is_bind && Path::new(&op.kind_source).is_file() {
-        Make::File
-    } else {
-        Make::Dir
+    // A missing destination is made as what the mount needs: a file for a file's bind.
+    let target_fd = match root.open(&op.destination, Make::Nothing)? {
+        Some(fd) => fd,
+        None if op.is_bind && Path::new(&op.kind_source).is_file() => {
+            target(root, &op.destination, Make::File)?
+        }
+        None => target(root, &op.destination, Make::Dir)?,
     };
-    let target_fd = target(rootfs, &op.destination, make)?;
     let at = inroot::fd_path(&target_fd);
     if op.is_bind {
         if op.recursive_bind {
@@ -1109,7 +1137,7 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
         }
         if op.flags.intersects(MountFlags::RDONLY) {
             // Opened again, the destination is the bind just made on top of the target.
-            let top_fd = target(rootfs, &op.destination, Make::Nothing)?;
+            let top_fd = target(root, &op.destination, Make::Nothing)?;
             let top = inroot::fd_path(&top_fd);
             rustix::mount::mount_remount(&top, op.flags | MountFlags::BIND, op.data.as_str())
                 .map_err(|e| OciError::os("remounting bind", failed(e)))?;
@@ -1121,7 +1149,7 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
             // every box's cgroup files by unmounting its own cgroup mounts off (T-T7.1.4). So each
             // cgroup filesystem the bind carries is remounted read-only too.
             if op.recursive_bind {
-                remount_cgroupfs_readonly(rootfs, &op.destination, &top_fd, op.flags)?;
+                remount_cgroupfs_readonly(root, &op.destination, &top_fd, op.flags)?;
             }
         }
     } else {
@@ -1136,7 +1164,7 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
         .map_err(|e| OciError::os("mount", failed(e)))?;
     }
     if let Some(prop) = op.propagation {
-        let top_fd = target(rootfs, &op.destination, Make::Nothing)?;
+        let top_fd = target(root, &op.destination, Make::Nothing)?;
         rustix::mount::mount_change(inroot::fd_path(&top_fd), prop)
             .map_err(|e| OciError::os("mount propagation", failed(e)))?;
     }
@@ -1144,8 +1172,8 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
 }
 
 /// `dest` opened in the container's root, made as `make` says when it's missing.
-fn target(rootfs: &Path, dest: &str, make: Make) -> Result<OwnedFd, OciError> {
-    inroot::open(rootfs, dest, make)?
+fn target(root: &inroot::Root<'_>, dest: &str, make: Make) -> Result<OwnedFd, OciError> {
+    root.open(dest, make)?
         .ok_or_else(|| OciError::Config(format!("{dest} isn't in the container's root")))
 }
 
@@ -1172,7 +1200,7 @@ const MAX_CGROUP_SUBMOUNTS: usize = 256;
 /// read-only host tree, not a writable one. Flat: one bounded pass over the mount table (§11), at most
 /// [`MAX_CGROUP_SUBMOUNTS`] (§2).
 fn remount_cgroupfs_readonly(
-    rootfs: &Path,
+    root: &inroot::Root<'_>,
     destination: &str,
     top_fd: &OwnedFd,
     flags: MountFlags,
@@ -1211,7 +1239,7 @@ fn remount_cgroupfs_readonly(
             )));
         }
         let dest = format!("{base}/{under}");
-        let sub = target(rootfs, &dest, Make::Nothing)?;
+        let sub = target(root, &dest, Make::Nothing)?;
         rustix::mount::mount_remount(inroot::fd_path(&sub), flags | MountFlags::BIND, "").map_err(
             |e| {
                 OciError::os(
@@ -1235,33 +1263,79 @@ fn unescape_mountpoint(field: &str) -> String {
         .replace("\\134", "\\")
 }
 
-fn make_default_devices(rootfs: &Path, in_userns: bool) -> Result<(), OciError> {
-    for (path, major, minor, mode) in DEFAULT_DEVICES {
-        if inroot::open(rootfs, path, Make::Nothing)?.is_some() {
-            continue;
-        }
-        if in_userns {
-            bind_host_device(rootfs, path, path)?;
-        } else {
-            make_node(
-                rootfs,
-                path,
-                rustix::fs::FileType::CharacterDevice,
-                mode,
-                major,
-                minor,
-            )?;
+/// The container's `/dev`: the default devices (OCI spec §Default Devices), the spec's own, then the
+/// default links (§Dev symbolic links). `/dev` is opened once, made when missing, for the defaults,
+/// which go directly in it. Each default is made first and looked for only when the kernel refuses it
+/// as there (`EEXIST`), not looked for before each: those looks and their walks were most of the
+/// init's calls in goal 5 plan step 3's trace (`docs/research/runtime/goal5-mounts.md`).
+fn make_dev(root: &inroot::Root<'_>, spec: &Spec, in_userns: bool) -> Result<(), OciError> {
+    if in_userns {
+        // mknod is refused in a user namespace, so the host's nodes are bound in, each where none is.
+        for (name, ..) in DEFAULT_DEVICES {
+            let path = format!("/dev/{name}");
+            if root.open(&path, Make::Nothing)?.is_none() {
+                bind_host_device(root, &path, &path)?;
+            }
         }
     }
-    Ok(())
+    let dev = target(root, "/dev", Make::Dir)?;
+    if !in_userns {
+        make_default_devices(root, &dev)?;
+    }
+    for device in &spec.linux.devices {
+        make_device(root, device, in_userns)?;
+    }
+    make_default_links(root, &dev)
 }
 
-fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciError> {
-    if inroot::open(rootfs, &dev.path, Make::Nothing)?.is_some() {
+/// The default devices made in `/dev` (`dev`) with `mknodat`, each with its mode exactly: the umask is
+/// cleared for their making and put back after, in place of a `chmod` each.
+fn make_default_devices(root: &inroot::Root<'_>, dev: &OwnedFd) -> Result<(), OciError> {
+    let umask = rustix::process::umask(Mode::empty());
+    let made = DEFAULT_DEVICES
+        .iter()
+        .try_for_each(|&(name, major, minor, mode)| {
+            default_device(root, dev, name, major, minor, mode)
+        });
+    rustix::process::umask(umask);
+    made
+}
+
+/// One default device, `name` in `/dev` (`dev`). One the kernel refuses to make is then looked for, as
+/// each was looked for before it was made, so the outcome is the look's: a name that leads to something
+/// in the root is left as it is, whatever it is; one whose look is refused (a magic link, a file taken
+/// for a directory) is refused as the look refuses it; and one that leads to nothing (a link to nothing
+/// inside the root), or a node the kernel won't make, is refused, naming it.
+fn default_device(
+    root: &inroot::Root<'_>,
+    dev: &OwnedFd,
+    name: &str,
+    major: u32,
+    minor: u32,
+    mode: u32,
+) -> Result<(), OciError> {
+    let made = rustix::fs::mknodat(
+        dev,
+        name,
+        rustix::fs::FileType::CharacterDevice,
+        Mode::from_bits_truncate(mode),
+        rustix::fs::makedev(major, minor),
+    );
+    match made {
+        Ok(()) => Ok(()),
+        Err(e) => match root.open(&format!("/dev/{name}"), Make::Nothing)? {
+            Some(_) => Ok(()),
+            None => Err(OciError::os("making a device", format!("/dev/{name}: {e}"))),
+        },
+    }
+}
+
+fn make_device(root: &inroot::Root<'_>, dev: &Device, in_userns: bool) -> Result<(), OciError> {
+    if root.open(&dev.path, Make::Nothing)?.is_some() {
         return Ok(());
     }
     if in_userns {
-        return bind_host_device(rootfs, &dev.path, &dev.path);
+        return bind_host_device(root, &dev.path, &dev.path);
     }
     let kind = match dev.kind.as_str() {
         "c" | "u" => rustix::fs::FileType::CharacterDevice,
@@ -1277,16 +1351,16 @@ fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciEr
         .map_err(|_| OciError::Config("device major out of range".to_owned()))?;
     let minor = u32::try_from(dev.minor.unwrap_or(0))
         .map_err(|_| OciError::Config("device minor out of range".to_owned()))?;
+    let (dir, name) = root.parent(&dev.path)?;
     make_node(
-        rootfs,
-        &dev.path,
+        &dir,
+        &name,
         kind,
         dev.file_mode.unwrap_or(0o666),
         major,
         minor,
     )?;
     if let (Some(uid), Some(gid)) = (dev.uid, dev.gid) {
-        let (dir, name) = inroot::parent(rootfs, &dev.path)?;
         rustix::fs::chownat(
             &dir,
             name.as_str(),
@@ -1299,28 +1373,27 @@ fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciEr
     Ok(())
 }
 
-/// Makes a device node at `dest` in the root, then sets its mode exactly (mknod's mode is masked by
-/// the umask).
+/// Makes a device node `name` in the directory `dir`, then sets its mode exactly (mknod's mode is
+/// masked by the umask).
 fn make_node(
-    rootfs: &Path,
-    dest: &str,
+    dir: &OwnedFd,
+    name: &str,
     kind: rustix::fs::FileType,
     mode: u32,
     major: u32,
     minor: u32,
 ) -> Result<(), OciError> {
-    let (dir, name) = inroot::parent(rootfs, dest)?;
     rustix::fs::mknodat(
-        &dir,
-        name.as_str(),
+        dir,
+        name,
         kind,
         Mode::from_bits_truncate(mode),
         rustix::fs::makedev(major, minor),
     )
     .map_err(|e| OciError::os("making a device", e))?;
     rustix::fs::chmodat(
-        &dir,
-        name.as_str(),
+        dir,
+        name,
         Mode::from_bits_truncate(mode),
         rustix::fs::AtFlags::empty(),
     )
@@ -1330,41 +1403,38 @@ fn make_node(
 
 /// Binds the host's device file `host_path` at `dest` in the container (the user-namespace path,
 /// where mknod is refused).
-fn bind_host_device(rootfs: &Path, host_path: &str, dest: &str) -> Result<(), OciError> {
+fn bind_host_device(root: &inroot::Root<'_>, host_path: &str, dest: &str) -> Result<(), OciError> {
     if !Path::new(host_path).exists() {
         return Ok(());
     }
-    let target_fd = target(rootfs, dest, Make::File)?;
+    let target_fd = target(root, dest, Make::File)?;
     rustix::mount::mount_bind(host_path, inroot::fd_path(&target_fd))
         .map_err(|e| OciError::os("binding a host device", e))
 }
 
-fn make_default_symlinks(rootfs: &Path) -> Result<(), OciError> {
-    let links = [
-        ("/proc/self/fd", "/dev/fd"),
-        ("/proc/self/fd/0", "/dev/stdin"),
-        ("/proc/self/fd/1", "/dev/stdout"),
-        ("/proc/self/fd/2", "/dev/stderr"),
-        // When a devpts is mounted at /dev/pts, /dev/ptmx is its multiplexer (OCI §Default Devices).
-        ("pts/ptmx", "/dev/ptmx"),
-    ];
-    for (target, link) in links {
-        if inroot::open(rootfs, link, Make::Nothing)?.is_some() {
-            continue;
-        }
-        let (dir, name) = inroot::parent(rootfs, link)?;
-        match rustix::fs::symlinkat(target, &dir, name.as_str()) {
-            // A link there already, to what isn't mounted yet.
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-            Err(e) => return Err(OciError::os("making a /dev link", format!("{link}: {e}"))),
+/// The default links made in `/dev` (`dev`). One the kernel refuses to make is then looked for, as each
+/// was looked for before it was made, so the outcome is the look's: a name there is left as it is,
+/// whatever it leads to or a link to what isn't mounted yet; one whose look is refused (a magic link, a
+/// file taken for a directory) is refused as the look refuses it; and a link the kernel won't make where
+/// nothing is, is refused, naming it.
+fn make_default_links(root: &inroot::Root<'_>, dev: &OwnedFd) -> Result<(), OciError> {
+    for (target, name) in DEFAULT_LINKS {
+        if let Err(e) = rustix::fs::symlinkat(target, dev, name) {
+            let there = root.open(&format!("/dev/{name}"), Make::Nothing)?.is_some();
+            if !there && e != rustix::io::Errno::EXIST {
+                return Err(OciError::os(
+                    "making a /dev link",
+                    format!("/dev/{name}: {e}"),
+                ));
+            }
         }
     }
     Ok(())
 }
 
 /// A masked path is hidden: a directory gets a read-only empty tmpfs, a file a bind of /dev/null.
-fn mask_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let Some(target) = inroot::open(rootfs, path, Make::Nothing)? else {
+fn mask_path(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+    let Some(target) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
     let dir = rustix::fs::fstat(&target)
@@ -1382,15 +1452,15 @@ fn mask_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
 }
 
 /// A readonly path is bound onto itself and remounted read-only.
-fn readonly_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let Some(target) = inroot::open(rootfs, path, Make::Nothing)? else {
+fn readonly_path(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+    let Some(target) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
     let at = inroot::fd_path(&target);
     rustix::mount::mount_bind(&at, &at)
         .map_err(|e| OciError::os("binding a readonly path", format!("{path}: {e}")))?;
     // Opened again, the path is the bind just made on top of it.
-    let top_fd = self::target(rootfs, path, Make::Nothing)?;
+    let top_fd = self::target(root, path, Make::Nothing)?;
     rustix::mount::mount_remount(
         inroot::fd_path(&top_fd),
         MountFlags::RDONLY | MountFlags::BIND,
@@ -1430,4 +1500,189 @@ fn inherited_fd(name: &str) -> Result<OwnedFd, OciError> {
 pub(crate) fn msg(sync: BorrowedFd<'_>, text: &str) {
     let line = format!("{text}\n");
     let _ = rustix::io::write(sync, line.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    //! Hostile images' `/dev` against the init's making of it (goal 5 plan step 3, T-T7.1.4; CLAUDE.md
+    //! §6): each default node and link is made first and looked for only when the kernel refuses its
+    //! name as there, and every outcome is the one the look before each gave: what's there is left as
+    //! it is, a name that leads out of the root or whose look is refused is refused, naming it. Run
+    //! unprivileged: with every name there, `mknodat` refuses on `EEXIST` before it asks for
+    //! `CAP_MKNOD`, so no node is ever made here.
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// A root holding `/dev`, and the default nodes' names as plain files, so `mknodat` meets each.
+    fn dev_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("dev")).unwrap();
+        for (name, ..) in DEFAULT_DEVICES {
+            std::fs::write(root.path().join("dev").join(name), name).unwrap();
+        }
+        root
+    }
+
+    fn with_dev<T>(root: &Path, f: impl FnOnce(&inroot::Root<'_>, &OwnedFd) -> T) -> T {
+        let fd = inroot::open_root(root).unwrap();
+        let in_root = inroot::Root::new(fd.as_fd());
+        let dev = target(&in_root, "/dev", Make::Dir).unwrap();
+        f(&in_root, &dev)
+    }
+
+    /// Do: an image's `/dev/null` is a link to a host directory, which inside the root leads nowhere.
+    /// Expect: refused naming `/dev/null`, and nothing made on the host.
+    #[test]
+    fn a_device_name_leading_out_of_the_root_is_refused_by_name() {
+        let host = tempfile::tempdir().unwrap();
+        let root = dev_root();
+        std::fs::remove_file(root.path().join("dev/null")).unwrap();
+        symlink(host.path().join("null"), root.path().join("dev/null")).unwrap();
+        let got = with_dev(root.path(), make_default_devices);
+        assert!(
+            matches!(&got, Err(OciError::Os { op, why }) if *op == "making a device" && why.starts_with("/dev/null: ")),
+            "{got:?}"
+        );
+        assert_eq!(std::fs::read_dir(host.path()).unwrap().count(), 0);
+    }
+
+    /// Do: an image's `/dev` already holds each default node's name, as a file, a directory, a link to a
+    /// file inside the root. Expect: each is left as it is, whatever it is, as the look before each left it.
+    #[test]
+    fn a_device_name_already_there_is_left_as_it_is() {
+        let root = dev_root();
+        std::fs::remove_file(root.path().join("dev/zero")).unwrap();
+        std::fs::create_dir(root.path().join("dev/zero")).unwrap();
+        std::fs::write(root.path().join("real-full"), "inside").unwrap();
+        std::fs::remove_file(root.path().join("dev/full")).unwrap();
+        symlink("/real-full", root.path().join("dev/full")).unwrap();
+        with_dev(root.path(), make_default_devices).unwrap();
+        let dev = root.path().join("dev");
+        assert_eq!(std::fs::read_to_string(dev.join("null")).unwrap(), "null");
+        assert!(dev.join("zero").is_dir());
+        assert_eq!(
+            std::fs::read_link(dev.join("full")).unwrap(),
+            Path::new("/real-full")
+        );
+        assert_eq!(std::fs::read_to_string(dev.join("tty")).unwrap(), "tty");
+    }
+
+    /// Do: an image's `/dev/null` is a link through a file, as though it were a directory. Expect: its
+    /// look is refused, naming `/dev/null` and the component the walk was refused at.
+    #[test]
+    fn a_device_name_whose_look_is_refused_is_refused_by_name() {
+        let root = dev_root();
+        std::fs::remove_file(root.path().join("dev/null")).unwrap();
+        symlink("zero/x", root.path().join("dev/null")).unwrap();
+        let got = with_dev(root.path(), make_default_devices);
+        assert!(
+            matches!(&got, Err(OciError::Os { why, .. }) if why.starts_with("/dev/null (dev/null): ")),
+            "{got:?}"
+        );
+    }
+
+    /// Do: an image's `/dev` is a file. Expect: the first default node is refused as the look before it
+    /// refused it, naming `/dev/null` and the component the walk was refused at.
+    #[test]
+    fn a_dev_that_is_a_file_is_refused_as_the_look_refused_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("dev"), "a file").unwrap();
+        let got = with_dev(root.path(), make_default_devices);
+        assert!(
+            matches!(&got, Err(OciError::Os { op, why }) if *op == "resolving a path in the container's root" && why.starts_with("/dev/null (dev/null): ")),
+            "{got:?}"
+        );
+        let links = with_dev(root.path(), make_default_links);
+        assert!(
+            matches!(&links, Err(OciError::Os { why, .. }) if why.starts_with("/dev/fd (dev/fd): ")),
+            "{links:?}"
+        );
+    }
+
+    /// Do: make the default links in an empty `/dev`. Expect: each points where the OCI spec says.
+    #[test]
+    fn the_default_links_are_made_as_the_spec_names_them() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("dev")).unwrap();
+        with_dev(root.path(), make_default_links).unwrap();
+        for (target, name) in DEFAULT_LINKS {
+            assert_eq!(
+                std::fs::read_link(root.path().join("dev").join(name)).unwrap(),
+                Path::new(target),
+                "/dev/{name}"
+            );
+        }
+    }
+
+    /// Do: an image's `/dev` already holds each link's name: a directory, a file, a link to nothing yet,
+    /// a link to a file inside the root. Expect: each is left as it is.
+    #[test]
+    fn a_link_name_already_there_is_left_as_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = root.path().join("dev");
+        std::fs::create_dir(&dev).unwrap();
+        std::fs::create_dir(dev.join("fd")).unwrap();
+        std::fs::write(dev.join("stdin"), "a file").unwrap();
+        symlink("/proc/self/fd/1", dev.join("stdout")).unwrap();
+        std::fs::write(root.path().join("real-err"), "").unwrap();
+        symlink("/real-err", dev.join("stderr")).unwrap();
+        with_dev(root.path(), make_default_links).unwrap();
+        assert!(dev.join("fd").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(dev.join("stdin")).unwrap(),
+            "a file"
+        );
+        assert_eq!(
+            std::fs::read_link(dev.join("stdout")).unwrap(),
+            Path::new("/proc/self/fd/1")
+        );
+        assert_eq!(
+            std::fs::read_link(dev.join("stderr")).unwrap(),
+            Path::new("/real-err")
+        );
+        assert_eq!(
+            std::fs::read_link(dev.join("ptmx")).unwrap(),
+            Path::new("pts/ptmx")
+        );
+    }
+
+    /// Do: an image's `/dev/stdin` is a link through a file. Expect: its look is refused, naming it.
+    #[test]
+    fn a_link_name_whose_look_is_refused_is_refused_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = root.path().join("dev");
+        std::fs::create_dir(&dev).unwrap();
+        std::fs::write(dev.join("file"), "").unwrap();
+        symlink("file/x", dev.join("stdin")).unwrap();
+        let got = with_dev(root.path(), make_default_links);
+        assert!(
+            matches!(&got, Err(OciError::Os { why, .. }) if why.starts_with("/dev/stdin (dev/stdin): ")),
+            "{got:?}"
+        );
+    }
+
+    /// Do: a mount's target is a link to a host directory, or a path through a file. Expect: a target
+    /// the mount needs made is refused naming the link that leads nowhere inside the root, and nothing is
+    /// made on the host; a target through a file is refused naming the component it was refused at, as
+    /// the walk named it before one call resolved a target that's there.
+    #[test]
+    fn a_mount_target_out_of_the_root_or_through_a_file_is_refused_by_name() {
+        let host = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        symlink(host.path(), root.path().join("mnt")).unwrap();
+        std::fs::write(root.path().join("file"), "").unwrap();
+        let fd = inroot::open_root(root.path()).unwrap();
+        let in_root = inroot::Root::new(fd.as_fd());
+        let out = target(&in_root, "/mnt/data", Make::Dir);
+        assert!(
+            matches!(&out, Err(OciError::Config(why)) if why.starts_with("/mnt/data: mnt ")),
+            "{out:?}"
+        );
+        assert_eq!(std::fs::read_dir(host.path()).unwrap().count(), 0);
+        let through = target(&in_root, "/file/data", Make::Dir);
+        assert!(
+            matches!(&through, Err(OciError::Os { why, .. }) if why.starts_with("/file/data (file/data): ")),
+            "{through:?}"
+        );
+    }
 }
