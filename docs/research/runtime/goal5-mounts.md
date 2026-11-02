@@ -146,10 +146,62 @@ For the bench's spec this makes part 19 about 41 calls, against 150, holding the
 ## 3. What would falsify it
 
 - Part 19's pooled p50 on fedora above 0.16 ms after the change, or its calls per create not under 50 in the trace.
-- `oci_box`'s `every_mount_kind_is_in_the_box_as_its_spec_asks` failing on either path after the change, having
-  passed before it; or `escapes_are_contained` (E0-E3) failing on the root attached on `/`.
+- `oci_box`'s `every_mount_kind_is_in_the_box_as_its_spec_asks` failing on either path after the change; or
+  `escapes_are_contained` (E0-E3) failing on the root attached on `/`.
 - A hostile `/dev` or mount target meeting another outcome than the look before each gave (`init.rs`'s tests: a name
   that leads out of the root, one whose look is refused, one there already of whatever type).
 - Part 19's p99 at eight in flight with 8,000 idle host threads above 0.5 ms: then the tail is the mount lock's, not
   the calls', and the next lever is fewer `namespace_sem` holds per lifecycle: the agent's two `open_tree` clones, the
   init's clone's copy of the namespace, the attaches, the namespace's teardown at exit.
+
+## 4. The change in the lab (adacachy, not of record)
+
+The change's binaries (937f54f: hex sha256 0f5a842324e22c7c, seam_oci 2374d0748a4013a0) beside the base's
+(bf77298, above), each traced as in §1, 500 lifecycles at one and at eight in flight, the two interleaved twice on
+adacachy, 2026-11-02T01:35:10Z to 01:38:17Z, the 1-minute load 182 at the first round's start and 66 at the second's
+(`~/.cache/hex-t7/g5x-s3/bench/out/create-breakdown-<run>`). Part 19's span, traced, in microseconds:
+
+| run | binary | one in flight: p50 / p99 | eight in flight: p50 / p99 | calls per create | page faults per create |
+|---|---|---|---|---|---|
+| 20261102T013510Z | base | 371 / 2,569 | 207 / 2,384 | 150 | 16.0 / 16.5 |
+| 20261102T013605Z | change | 231 / 1,885 | 196 / 1,770 | 41 | 12.0 / 13.3 |
+| 20261102T013648Z | base | 234 / 727 | 221 / 1,275 | 150 | 17.0 / 16.3 |
+| 20261102T013737Z | change | 130 / 359 | 133 / 1,193 | 41 | 13.0 / 12.9 |
+
+- **The calls.** 41 per create, against 150: the 4 attaches, one `openat2` per target and one for `/dev`, the 6
+  nodes under one umask's change and back, the 5 links, the filesystems' `fsopen`/`fsconfig`/`fsmount`, `setsid` and
+  the 9 closes of what they opened; the rootfs attached on `/` and no `MS_MOVE`. What's left at one in flight is the
+  work the probe does too, and `setsid` (88.7 us of the first change round's 331.5 mean, 61.3 of it preempted at load
+  182).
+- **The tail.** At eight in flight the slowest 1% are still lock waits, in both binaries: `move_mount` blocked on
+  `namespace_sem` (2,201 us of a 5,418 us mean span in the first change round), `setsid` spinning (1,326), and the
+  superblocks' making (`fsconfig` create, 342 us blocked), whose allocations take global locks. The change takes the
+  calls out, not those holds; on adacachy every container on the host shares them.
+- **The classic path** (`MOUNTS_PATH=classic`, its creates through the shim, 300 at one in flight,
+  20261102T014207Z and 20261102T014315Z): 154.5 calls per create to 44.7, the span's p50 426 us to 273 (traced). Of
+  what's left, `remount_cgroupfs_readonly`'s read of the whole `/proc/self/mountinfo` for a recursive read-only bind
+  (`/usr`), to find the cgroup filesystems it carries: an `openat`, 9 `read`s and a `readlink`, 72.8 us of the 233.1
+  in calls. The read had no bound, and its buffer started small and grew; read into 64 KiB from the start and
+  bounded at 16 MiB (ac153c5) it takes 2 reads, the classic path 36 calls per create (20261102T020049Z), but the
+  reads' time stayed, 58.6 us: it is the kernel's making of the whole table's text, not the calls. The probe's
+  classic sequence reads no table; listing the bind's own submounts (`listmount`/`statmount`, Linux 6.8) would
+  take it, and rustix wraps neither, so it means new `unsafe` in `sys.rs` (CLAUDE.md §12): the lead's and Ada's
+  call.
+- **What the mount kinds' test found on the pruned path, before the change as after it.** A filesystem made with
+  `fsopen`/`fsmount` was given no source, so the box's mountinfo read `none` where its spec named `proc`, `tmpfs` or
+  `shm` (`oci_box.rs:465` at f674357 and 937f54f: `("proc", "none")` against `("proc", "proc")`), and `fsmount` took
+  only read-only, `nosuid`, `nodev` and `noexec`, so `strictatime` (Docker's `/dev`, which OciSpec renders) became
+  relatime and `noatime`, `nodiratime`, `nosymfollow`, `sync` and `dirsync` were lost. `mount(2)` on the classic path
+  passes the source as the context's `source` parameter (v6.19 `fs/namespace.c:3706`, which every filesystem takes,
+  `fs/fs_context.c:151-156`) and keeps the flags (`fs/namespace.c:3972-3992`; `sync` and `dirsync` are the context's
+  flags, `fs/fs_context.c:41-46`). `make_fs` now does both (2733a0c, 5d24dae), two `fsconfig` calls more per create
+  for the bench's spec.
+- **Validation and the root lab.** runtime-tools bd3b0bd on adacachy against the base's `hex` and the change's: 26
+  pass, 32 fail, 0 skip each, the same test by test. As root (`docker_lab.sh`): at 937f54f E0-E3 contained on the
+  root attached on `/`, AC-f's seed listing its one mount, the classic reasons counted with none under `Rootless`;
+  at c423bb4 (the fixes in) `oci_box`, `oci_spec_box` and `node_socket` all pass, the mount kinds as their spec asks
+  on the pruned and the classic path; at the same tree with 5d24dae reverted (10ccbe7, branch
+  `cp/t7-ext-s3-noflags-demo`) the test stops at the pruned box's `/strict`, listed `rw,nosuid,relatime` where its
+  spec asks `strictatime`. Rootless, the 7 gates pass at c423bb4 on adacachy, `oci_box` among them with the mount
+  kinds on the classic path.
+
