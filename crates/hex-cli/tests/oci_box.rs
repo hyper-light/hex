@@ -307,10 +307,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
 
 /// Goal 5 plan step 3 (T-T7.1.4; CLAUDE.md §6): every mount kind a spec can ask for is in the box's own
 /// mountinfo with the source, target and options its spec asked, on each root path. One spec asks for
-/// them all: proc, tmpfs (`/dev`, `/tmp`, `/dev/shm`), devpts, mqueue and sysfs, a recursive bind
-/// read-only (`/usr`) and read-write (a volume), a plain bind of a directory and of a file read-only
-/// (the file's target missing from the image, so it is made), masked paths (files and a directory) and
-/// read-only paths (a directory and a file). As root the pruned path makes one box and the classic path
+/// them all: proc, tmpfs (`/dev`, `/tmp`, `/dev/shm`, and two whose access times the spec sets:
+/// `strictatime`, as Docker's `/dev` asks, and `noatime,nodiratime`), devpts, mqueue, sysfs and a
+/// read-only cgroup2 in the box's own cgroup namespace, a recursive bind read-only (`/usr`) and
+/// read-write (a volume), a plain bind of a directory and of a file read-only (the file's target missing
+/// from the image, so it is made), masked paths (files and a directory) and read-only paths (a directory
+/// and a file). As root the pruned path makes one box and the classic path
 /// another, a createRuntime hook routing it through the shim; rootless the classic path makes it, in the
 /// box's own user namespace. Each box is checked the same way, so a change to how the init mounts that
 /// alters what a mount is fails here on the path it changed.
@@ -337,6 +339,9 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
     {{"destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid","noexec","nodev","mode=1777","size=65536k"]}},
     {{"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue", "options": ["nosuid","noexec","nodev"]}},
     {{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}},
+    {{"destination": "/sys/fs/cgroup", "type": "cgroup2", "source": "cgroup", "options": ["nosuid","noexec","nodev","ro"]}},
+    {{"destination": "/strict", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","strictatime","mode=755"]}},
+    {{"destination": "/noatime", "type": "tmpfs", "source": "tmpfs", "options": ["noatime","nodiratime"]}},
     {{"destination": "/vol", "type": "bind", "source": "{vol}", "options": ["rbind","rw"]}},
     {{"destination": "/ro-dir", "type": "bind", "source": "{ro_dir}", "options": ["bind","ro"]}},
     {{"destination": "/etc/kinds-file", "type": "bind", "source": "{file}", "options": ["bind","ro"]}}"#,
@@ -360,7 +365,7 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
     );
     let (namespaces, mappings) = if lab.rootless {
         (
-            r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}"#
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"},{"type":"cgroup"}"#
                 .to_owned(),
             format!(
                 r#","uidMappings":[{{"containerID":0,"hostID":{},"size":1}}],"gidMappings":[{{"containerID":0,"hostID":{},"size":1}}]"#,
@@ -369,7 +374,7 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
         )
     } else {
         (
-            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}"#
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"},{"type":"cgroup"}"#
                 .to_owned(),
             String::new(),
         )
@@ -509,6 +514,32 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
             ("sysfs", "sysfs")
         );
         has(sys, &["ro", "nosuid", "nodev", "noexec"], &[]);
+        let cgroup = at("/sys/fs/cgroup");
+        assert_eq!(
+            (cgroup.fstype.as_str(), cgroup.source.as_str()),
+            ("cgroup2", "cgroup")
+        );
+        has(cgroup, &["ro", "nosuid", "nodev", "noexec"], &[]);
+        // Access times: strictatime shows as neither relatime nor noatime (proc_pid_mountinfo(5)).
+        let strict = at("/strict");
+        assert_eq!(
+            (strict.fstype.as_str(), strict.source.as_str()),
+            ("tmpfs", "tmpfs")
+        );
+        has(strict, &["rw", "nosuid"], &["mode=755"]);
+        assert!(
+            !strict
+                .opts
+                .iter()
+                .any(|o| o == "relatime" || o == "noatime"),
+            "/strict in the {path} box keeps every access time, as strictatime asks: {strict:?}"
+        );
+        let noatime = at("/noatime");
+        assert_eq!(
+            noatime.fstype, "tmpfs",
+            "/noatime in the {path} box: {noatime:?}"
+        );
+        has(noatime, &["rw", "noatime", "nodiratime"], &[]);
         // Binds: the source's filesystem (its device), read-only or read-write as asked.
         for (point, source, opt) in [
             ("/usr", Path::new("/usr"), "ro"),
