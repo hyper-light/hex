@@ -497,10 +497,12 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
         has(pts, &["rw", "nosuid", "noexec"], pts_sb);
         let shm = at("/dev/shm");
         assert_eq!((shm.fstype.as_str(), shm.source.as_str()), ("tmpfs", "shm"));
-        has(
-            shm,
-            &["rw", "nosuid", "nodev", "noexec"],
-            &["mode=1777", "size=65536k"],
+        has(shm, &["rw", "nosuid", "nodev", "noexec"], &["size=65536k"]);
+        // Its mode=1777 is tmpfs's own default, which tmpfs lists by naming no mode (v6.19
+        // mm/shmem.c:4930-4931), where /dev's mode=755 is named.
+        assert!(
+            !shm.sb_opts.iter().any(|o| o.starts_with("mode=")),
+            "/dev/shm in the {path} box has tmpfs's default mode, 1777, as asked: {shm:?}"
         );
         let mq = at("/dev/mqueue");
         assert_eq!(
