@@ -905,7 +905,7 @@ fn do_mount_pruned<'a>(
         tree.as_fd()
     } else {
         let target_fd = target(root, &op.destination, Make::Dir)?;
-        fs = make_fs(&op.fstype, &op.data, op.flags).map_err(|e| {
+        fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
             OciError::os(
                 "making a filesystem",
                 format!("{} at {}: {e}", op.fstype, op.destination),
@@ -937,15 +937,25 @@ fn do_mount_pruned<'a>(
     Ok(())
 }
 
-/// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its data options the
-/// spec's and its read-only, `nosuid`, `nodev` and `noexec` set at `fsmount`: a detached mount
+/// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its source and data options
+/// the spec's and its read-only, `nosuid`, `nodev` and `noexec` set at `fsmount`: a detached mount
 /// descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
 /// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`; the agent
 /// ([`super::run`]) makes a layered root's overlay this way too, where it can reach the layers' host
-/// paths that the pruned seed can't, and hands the init the result as the rootfs.
-pub(crate) fn make_fs(fstype: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
+/// paths that the pruned seed can't, and hands the init the result as the rootfs. The source is set as
+/// `mount(2)` sets it, the context's `source` parameter (v6.19 `fs/namespace.c:3706`), which every
+/// filesystem takes (`fs/fs_context.c:151-156`): else the mount's source reads `none` where the spec
+/// named one.
+pub(crate) fn make_fs(
+    source: &str,
+    fstype: &str,
+    data: &str,
+    flags: MountFlags,
+) -> Result<OwnedFd, OciError> {
     let fs = rustix::mount::fsopen(fstype, FsOpenFlags::empty())
         .map_err(|e| OciError::os("fsopen", e))?;
+    rustix::mount::fsconfig_set_string(fs.as_fd(), "source", source)
+        .map_err(|e| OciError::os("a filesystem's source", format!("{source}: {e}")))?;
     for opt in data.split(',').filter(|s| !s.is_empty()) {
         match opt.split_once('=') {
             Some((key, value)) => rustix::mount::fsconfig_set_string(fs.as_fd(), key, value)
@@ -975,7 +985,7 @@ fn mask_path_pruned(
         .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
         .map_err(|e| OciError::os("masking a path", format!("{path}: {e}")))?;
     if is_dir {
-        let mount = make_fs("tmpfs", "size=0k", MountFlags::RDONLY)
+        let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
             .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
         rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
             .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;

@@ -626,7 +626,8 @@ impl Runtime {
         // root directory cloned (a directory root). The init attaches it and skips the `/` mount.
         let rootfs = match plan.iter().find(|op| op.destination == "/") {
             Some(op) if !op.is_bind => {
-                init::make_fs(&op.fstype, &op.data, op.flags).map_err(|_| ClassicReason::Source)?
+                init::make_fs(&op.kind_source, &op.fstype, &op.data, op.flags)
+                    .map_err(|_| ClassicReason::Source)?
             }
             Some(op) => {
                 clone_tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?
