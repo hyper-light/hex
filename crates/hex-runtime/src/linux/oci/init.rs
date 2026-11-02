@@ -1245,7 +1245,8 @@ const MAX_MOUNTINFO: u64 = 16 * 1024 * 1024;
 /// bind's top leaves them with the source's flags. For a rootless box's `/sys` that is the host's
 /// cgroup filesystem, which stays writable beneath the box's own cgroup mounts over it; this makes it
 /// read-only, so a box holding `CAP_SYS_ADMIN` that unmounts its own cgroup mounts off reaches a
-/// read-only host tree, not a writable one. Flat: one bounded pass over the mount table (§11), at most
+/// read-only host tree, not a writable one. They are asked of the kernel ([`cgroupfs_listed`]), or
+/// found in the mount table where the kernel can't answer ([`cgroupfs_in_table`]); at most
 /// [`MAX_CGROUP_SUBMOUNTS`] (§2).
 fn remount_cgroupfs_readonly(
     root: &inroot::Root<'_>,
@@ -1253,38 +1254,12 @@ fn remount_cgroupfs_readonly(
     top_fd: &OwnedFd,
     flags: MountFlags,
 ) -> Result<(), OciError> {
-    let top_real = std::fs::read_link(inroot::fd_path(top_fd))
-        .map_err(|e| OciError::os("reading the bind's path", e))?;
-    let mountinfo = read_mountinfo(destination)?;
+    let beneath = match cgroupfs_listed(top_fd, destination)? {
+        Some(beneath) => beneath,
+        None => cgroupfs_in_table(top_fd, destination)?,
+    };
     let base = destination.trim_end_matches('/');
-    let mut seen = 0usize;
-    for line in mountinfo.lines() {
-        // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
-        // then the filesystem type.
-        let Some((left, right)) = line.split_once(" - ") else {
-            continue;
-        };
-        if !matches!(right.split(' ').next(), Some("cgroup2") | Some("cgroup")) {
-            continue;
-        }
-        let Some(point) = left.split(' ').nth(4) else {
-            continue;
-        };
-        let point = unescape_mountpoint(point);
-        let Ok(under) = Path::new(&point).strip_prefix(&top_real) else {
-            continue;
-        };
-        let under = under.to_string_lossy();
-        if under.is_empty() {
-            continue; // the bind's own top, already remounted by the caller
-        }
-        seen = seen.saturating_add(1);
-        if seen > MAX_CGROUP_SUBMOUNTS {
-            return Err(OciError::Config(format!(
-                "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
-                 filesystems to make read-only"
-            )));
-        }
+    for under in beneath {
         let dest = format!("{base}/{under}");
         let sub = target(root, &dest, Make::Nothing)?;
         rustix::mount::mount_remount(inroot::fd_path(&sub), flags | MountFlags::BIND, "").map_err(
@@ -1297,6 +1272,186 @@ fn remount_cgroupfs_readonly(
         )?;
     }
     Ok(())
+}
+
+/// Most mounts beneath a recursive read-only bind looked at for its cgroup filesystems: past it the bind
+/// is refused, by name, rather than its cgroup filesystems left unchecked (CLAUDE.md §2, §3). As many as
+/// the mount table's bound, [`MAX_MOUNTINFO`], holds lines.
+const MAX_SUBMOUNTS_LISTED: usize = 100_000;
+
+/// Mount ids `listmount` writes per call.
+const LISTMOUNT_BATCH: usize = 64;
+
+// `statmount(2)`'s fields this reads and the bits that ask for its strings (v6.19
+// include/uapi/linux/mount.h:155-189, :217-218): the kernel writes its fixed 512 bytes, then each string
+// asked at the offset its field gives past them (fs/namespace.c:5472).
+const STATMOUNT_MNT_POINT: u64 = 0x10;
+const STATMOUNT_FS_TYPE: u64 = 0x20;
+const STATMOUNT_SIZE_AT: usize = 0;
+const STATMOUNT_MASK_AT: usize = 8;
+const STATMOUNT_FS_TYPE_AT: usize = 36;
+const STATMOUNT_MNT_POINT_AT: usize = 108;
+const STATMOUNT_FIXED: usize = 512;
+/// `statmount`'s buffer: the fixed part, then a filesystem type and a mount point, each at most
+/// `PATH_MAX` (4096) with its NUL. A longer one is refused (`EOVERFLOW`), not cut.
+const STATMOUNT_BUF: usize = STATMOUNT_FIXED + 2 * 4096;
+
+/// The cgroup filesystems beneath the bind open as `top_fd`, each as its path under the bind's top,
+/// asked of the kernel (Linux 6.8, `docs/research/runtime/goal5-mounts.md` §2): the bind's unique mount
+/// id (`statx`'s `STATX_MNT_ID_UNIQUE`) and its mount point (`statmount`), the ids of every mount
+/// beneath it (`listmount`), and each one's type and point. Flat: listed in batches, at most
+/// [`MAX_SUBMOUNTS_LISTED`] looked at (§2, §11). `None` where the kernel has no answer (before 6.8: no
+/// unique id, `ENOSYS`), for the table to give instead.
+fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<String>>, OciError> {
+    let unique = rustix::fs::StatxFlags::from_bits_retain(libc::STATX_MNT_ID_UNIQUE);
+    let stx = rustix::fs::statx(top_fd, "", rustix::fs::AtFlags::EMPTY_PATH, unique)
+        .map_err(|e| OciError::os("reading the bind's mount id", e))?;
+    if !rustix::fs::StatxFlags::from_bits_retain(stx.stx_mask).contains(unique) {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; STATMOUNT_BUF];
+    let Some((_, top)) = mount_info(stx.stx_mnt_id, STATMOUNT_MNT_POINT, &mut buf)? else {
+        return Ok(None);
+    };
+    let top = Path::new(&top);
+    let mut found = Vec::new();
+    let mut ids = [0u64; LISTMOUNT_BATCH];
+    let (mut last, mut budget) = (0u64, MAX_SUBMOUNTS_LISTED);
+    loop {
+        let n = match sys::listmount(stx.stx_mnt_id, last, &mut ids) {
+            Ok(n) => n,
+            Err(rustix::io::Errno::NOSYS) => return Ok(None),
+            Err(e) => return Err(OciError::os("listing the bind's submounts", e)),
+        };
+        let listed = ids.get(..n).ok_or_else(|| {
+            OciError::os(
+                "listing the bind's submounts",
+                format!("{n} ids, past the {LISTMOUNT_BATCH} asked"),
+            )
+        })?;
+        for &id in listed {
+            budget = budget.checked_sub(1).ok_or_else(|| {
+                OciError::Config(format!(
+                    "the recursive bind at {destination} carries over {MAX_SUBMOUNTS_LISTED} mounts \
+                     to look at for cgroup filesystems"
+                ))
+            })?;
+            let Some((fstype, point)) =
+                mount_info(id, STATMOUNT_FS_TYPE | STATMOUNT_MNT_POINT, &mut buf)?
+            else {
+                return Ok(None);
+            };
+            if !matches!(fstype.as_str(), "cgroup2" | "cgroup") {
+                continue;
+            }
+            if let Some(under) = beneath_top(&point, top) {
+                found_one(&mut found, under, destination)?;
+            }
+        }
+        match listed.last() {
+            Some(&id) if n == ids.len() => last = id,
+            _ => break,
+        }
+    }
+    Ok(Some(found))
+}
+
+/// Mount `id`'s filesystem type and mount point, as many of them as `mask` asks (the other is empty),
+/// read through `statmount` into `buf`. `None` from a kernel without it.
+fn mount_info(id: u64, mask: u64, buf: &mut [u8]) -> Result<Option<(String, String)>, OciError> {
+    const WHAT: &str = "reading a mount's type and point";
+    match sys::statmount(id, mask, buf) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::NOSYS) => return Ok(None),
+        Err(e) => return Err(OciError::os(WHAT, e)),
+    }
+    let buf = &*buf;
+    let short = || OciError::os(WHAT, "a short answer");
+    let used = field_u32(buf, STATMOUNT_SIZE_AT).ok_or_else(short)?;
+    if field_u64(buf, STATMOUNT_MASK_AT).ok_or_else(short)? & mask != mask {
+        return Err(OciError::os(
+            WHAT,
+            "the kernel gave not all the fields asked",
+        ));
+    }
+    let end = usize::try_from(used).map_or(buf.len(), |used| used.min(buf.len()));
+    let text = |field: usize, bit: u64| -> Result<String, OciError> {
+        if mask & bit == 0 {
+            return Ok(String::new());
+        }
+        let off = field_u32(buf, field).ok_or_else(short)?;
+        let rest = usize::try_from(off)
+            .ok()
+            .and_then(|off| STATMOUNT_FIXED.checked_add(off))
+            .and_then(|start| buf.get(start..end))
+            .ok_or_else(|| OciError::os(WHAT, "a string outside the answer"))?;
+        let s = rest.split(|&b| b == 0).next().unwrap_or_default();
+        Ok(String::from_utf8_lossy(s).into_owned())
+    };
+    Ok(Some((
+        text(STATMOUNT_FS_TYPE_AT, STATMOUNT_FS_TYPE)?,
+        text(STATMOUNT_MNT_POINT_AT, STATMOUNT_MNT_POINT)?,
+    )))
+}
+
+/// The `u32` the kernel wrote at byte `at` of `buf`, in its own byte order.
+fn field_u32(buf: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_ne_bytes(
+        buf.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// The `u64` the kernel wrote at byte `at` of `buf`, in its own byte order.
+fn field_u64(buf: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_ne_bytes(
+        buf.get(at..at.checked_add(8)?)?.try_into().ok()?,
+    ))
+}
+
+/// `point`'s path under the bind's top `top`, or `None` when it isn't beneath it or is the top itself
+/// (the bind's own top, which the caller remounted).
+fn beneath_top(point: &str, top: &Path) -> Option<String> {
+    let under = Path::new(point).strip_prefix(top).ok()?.to_string_lossy();
+    (!under.is_empty()).then(|| under.into_owned())
+}
+
+/// One more cgroup filesystem found beneath the bind at `destination`, refused past
+/// [`MAX_CGROUP_SUBMOUNTS`].
+fn found_one(found: &mut Vec<String>, under: String, destination: &str) -> Result<(), OciError> {
+    if found.len() >= MAX_CGROUP_SUBMOUNTS {
+        return Err(OciError::Config(format!(
+            "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
+             filesystems to make read-only"
+        )));
+    }
+    found.push(under);
+    Ok(())
+}
+
+/// The cgroup filesystems beneath the bind open as `top_fd`, found in this process's mount table, where
+/// the kernel has no `listmount` (before 6.8). Flat: one bounded pass over the table (§11).
+fn cgroupfs_in_table(top_fd: &OwnedFd, destination: &str) -> Result<Vec<String>, OciError> {
+    let top_real = std::fs::read_link(inroot::fd_path(top_fd))
+        .map_err(|e| OciError::os("reading the bind's path", e))?;
+    let mountinfo = read_mountinfo(destination)?;
+    let mut found = Vec::new();
+    for line in mountinfo.lines() {
+        // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
+        // then the filesystem type.
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
+        if !matches!(right.split(' ').next(), Some("cgroup2") | Some("cgroup")) {
+            continue;
+        }
+        let Some(point) = left.split(' ').nth(4) else {
+            continue;
+        };
+        if let Some(under) = beneath_top(&unescape_mountpoint(point), &top_real) {
+            found_one(&mut found, under, destination)?;
+        }
+    }
+    Ok(found)
 }
 
 /// This process's mount table, `/proc/self/mountinfo`, read whole and bounded ([`MOUNTINFO_FIRST_READ`],
@@ -1726,6 +1881,34 @@ mod tests {
             matches!(&got, Err(OciError::Os { why, .. }) if why.starts_with("/dev/stdin (dev/stdin): ")),
             "{got:?}"
         );
+    }
+
+    /// Do: list the cgroup filesystems beneath the host's `/sys` both ways, from the kernel (`listmount`
+    /// and `statmount`, Linux 6.8) and from the mount table, as a recursive read-only bind of it has them
+    /// remounted (goal 5 plan step 3, T-T7.1.4). Expect: the same paths under `/sys`, `fs/cgroup` among
+    /// them where `/sys/fs/cgroup` is a cgroup filesystem, and the kernel's listing made (this host's
+    /// kernel has the calls), so the two can't agree by both finding nothing.
+    #[test]
+    fn the_kernel_lists_the_cgroup_filesystems_beneath_a_bind_as_the_table_does() {
+        let sys = rustix::fs::open(
+            "/sys",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let mut listed = cgroupfs_listed(&sys, "/sys")
+            .unwrap()
+            .expect("this host's kernel has listmount and statmount (Linux 6.8)");
+        let mut table = cgroupfs_in_table(&sys, "/sys").unwrap();
+        listed.sort();
+        table.sort();
+        assert_eq!(listed, table);
+        // CGROUP2_SUPER_MAGIC (include/uapi/linux/magic.h).
+        let cgroup2 = rustix::fs::statfs("/sys/fs/cgroup")
+            .is_ok_and(|st| u64::try_from(st.f_type).ok() == Some(0x6367_7270));
+        if cgroup2 {
+            assert!(listed.iter().any(|p| p == "fs/cgroup"), "{listed:?}");
+        }
     }
 
     /// Do: a mount's target is a link to a host directory, or a path through a file. Expect: a target

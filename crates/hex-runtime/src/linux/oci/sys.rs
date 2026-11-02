@@ -1406,3 +1406,102 @@ pub fn mount_setattr(
         ))
     }
 }
+
+// statmount(2) and listmount(2), Linux 6.8. On x86_64 and aarch64 they are the common table's 457 and 458 (v6.19
+// arch/x86/entry/syscalls/syscall_64.tbl:384-385; scripts/syscall.tbl:400-401, which arm64's table is made from);
+// the libc crate at 0.2.191 numbers them for m68k alone.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const SYS_STATMOUNT: libc::c_long = 457;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const SYS_LISTMOUNT: libc::c_long = 458;
+
+/// `struct mnt_id_req` as Linux 6.8 published it (`MNT_ID_REQ_SIZE_VER0`, 24 bytes, v6.19
+/// include/uapi/linux/mount.h:198-207), which every later kernel still takes: a mount by its unique id
+/// (`statx`'s `STATX_MNT_ID_UNIQUE`), and for `statmount` the fields asked, for `listmount` the last id
+/// listed. No namespace descriptor: the caller's own namespace.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[repr(C)]
+struct MntIdReq {
+    size: u32,
+    mnt_ns_fd: u32,
+    mnt_id: u64,
+    param: u64,
+}
+
+/// The size `MntIdReq` is, for its `size` field.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const MNT_ID_REQ_SIZE: u32 = 24;
+
+/// `listmount`'s and `statmount`'s `flags`: none (`LISTMOUNT_REVERSE` lists the other way).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const NO_FLAGS: libc::c_uint = 0;
+
+/// The unique ids of the mounts beneath mount `parent` in this process's mount namespace, its own
+/// excluded, after the id `last` (0 for the first), written into `ids` (listmount(2): every mount
+/// reachable from `parent`, not only its children, in id order). How many it wrote: fewer than
+/// `ids.len()` when none is left. `ENOSYS` from a kernel before 6.8.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn listmount(parent: u64, last: u64, ids: &mut [u64]) -> Result<usize, rustix::io::Errno> {
+    let req = MntIdReq {
+        size: MNT_ID_REQ_SIZE,
+        mnt_ns_fd: 0,
+        mnt_id: parent,
+        param: last,
+    };
+    // SAFETY: listmount(2) reads `req`, a live, fully initialized repr(C) struct of the size its `size`
+    // field gives, and writes at most `ids.len()` u64s into `ids`, a live buffer of exactly that many
+    // that outlives the call; no flags. The return value is checked.
+    let r = unsafe {
+        libc::syscall(
+            SYS_LISTMOUNT,
+            &raw const req,
+            ids.as_mut_ptr(),
+            ids.len(),
+            NO_FLAGS,
+        )
+    };
+    if r < 0 {
+        Err(last_errno())
+    } else {
+        usize::try_from(r).map_err(|_| rustix::io::Errno::RANGE)
+    }
+}
+
+/// Mount `id`'s fields that `mask` asks for (statmount(2)), written into `buf`: the kernel's fixed
+/// `struct statmount`, then the strings asked, each at the offset its field gives past the fixed part.
+/// `ENOSYS` from a kernel before 6.8; `EOVERFLOW` when the strings don't fit.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub fn statmount(id: u64, mask: u64, buf: &mut [u8]) -> Result<(), rustix::io::Errno> {
+    let req = MntIdReq {
+        size: MNT_ID_REQ_SIZE,
+        mnt_ns_fd: 0,
+        mnt_id: id,
+        param: mask,
+    };
+    // SAFETY: statmount(2) reads `req`, a live, fully initialized repr(C) struct of the size its `size`
+    // field gives, and writes at most `buf.len()` bytes into `buf`, a live buffer of exactly that many
+    // that outlives the call (the kernel copies bytes, so it needs no alignment); no flags. The return
+    // value is checked.
+    let r = unsafe {
+        libc::syscall(
+            SYS_STATMOUNT,
+            &raw const req,
+            buf.as_mut_ptr(),
+            buf.len(),
+            NO_FLAGS,
+        )
+    };
+    if r < 0 { Err(last_errno()) } else { Ok(()) }
+}
+
+/// Where the kernel numbers no `listmount`, it is missing, as on a kernel before 6.8.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn listmount(_parent: u64, _last: u64, _ids: &mut [u64]) -> Result<usize, rustix::io::Errno> {
+    Err(rustix::io::Errno::NOSYS)
+}
+
+/// Where the kernel numbers no `statmount`, it is missing, as on a kernel before 6.8.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn statmount(_id: u64, _mask: u64, _buf: &mut [u8]) -> Result<(), rustix::io::Errno> {
+    Err(rustix::io::Errno::NOSYS)
+}
