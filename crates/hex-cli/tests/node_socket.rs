@@ -32,7 +32,7 @@
     clippy::disallowed_macros
 )]
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
 use std::time::{Duration, Instant};
@@ -687,6 +687,10 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
     let rendered = state.join("bundles").join(id.as_str());
     let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
+    // Keep a writer open until the case ends, including unwinding: an orphaned hook reads EOF
+    // after an assertion failure. A polled release file can disappear with the TempDir before
+    // the hook observes it, leaving the hook and this test's output pipe alive forever.
+    let mut hook_release = None;
     let class = match at {
         #[cfg(debug_assertions)]
         At::CgroupMade | At::BundleRendered => ClassSpec::Oci(Box::new(lab.spec())),
@@ -697,13 +701,17 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             ClassSpec::Bundle(bundle)
         }
         At::Init | At::Ready => {
-            // The create waits in its createRuntime hook, its container made, until this test makes
-            // `go`.
-            let script = format!(
-                "touch {} && until [ -e {} ]; do sleep 0.01; done",
-                hooked.display(),
-                go.display()
+            mkfifo(&go);
+            hook_release = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&go)
+                    .unwrap(),
             );
+            // The create waits in its createRuntime hook, its container made, until this test
+            // writes a line, or closes the writer on an assertion failure.
+            let script = crash_hook_script(&hooked, &go);
             let hooks = format!(
                 r#",
   "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
@@ -755,7 +763,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         At::Ready => {
             wait_for("the create's hook to hold it", || hooked.exists());
             mkfifo(&temp);
-            std::fs::write(&go, b"").unwrap();
+            hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
         }
         At::Made => wait_for("the create", || create.is_finished()),
     }
@@ -801,7 +809,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     drop(agent);
     if at == At::Init {
         // The hook outlives the agent it ran under; let it end.
-        std::fs::write(&go, b"").unwrap();
+        hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
     }
     let created = create.join().unwrap();
     assert_eq!(
@@ -848,6 +856,71 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             "cleaned up"
         }
     );
+}
+
+fn crash_hook_script(hooked: &Path, go: &Path) -> String {
+    format!(
+        "touch {} && read -r release < {}",
+        hooked.display(),
+        go.display()
+    )
+}
+
+/// T-T7.1.2's fixture: a killed node's hook still waits for release, and ends even when its test
+/// unwinds without releasing it. No release filename can disappear before a polling hook sees it.
+#[test]
+fn a_crash_hook_waits_for_a_line_and_ends_when_its_writer_closes() {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    struct Hook(Child);
+    impl Drop for Hook {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for release in [true, false] {
+        let dir = tempfile::tempdir_in(cache_dir()).unwrap();
+        let go = dir.path().join("go");
+        let ready = dir.path().join("ready");
+        mkfifo(&go);
+        let mut hook = Hook(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(crash_hook_script(&ready, &go))
+                .stdout(Std::null())
+                .stderr(Std::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut writer = None;
+        wait_for("the hook to open its release pipe", || {
+            assert!(
+                hook.0.try_wait().unwrap().is_none(),
+                "the crash hook ended before its pipe was released"
+            );
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap())
+                .open(&go)
+            {
+                Ok(f) => {
+                    writer = Some(f);
+                    true
+                }
+                // Opening a FIFO's writer without blocking succeeds only once a reader opened it.
+                Err(e) if e.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) => false,
+                Err(e) => panic!("opening the release pipe: {e}"),
+            }
+        });
+        if release {
+            writer.as_mut().unwrap().write_all(b"\n").unwrap();
+        }
+        drop(writer);
+        wait_for("the hook to end after release or writer close", || {
+            hook.0.try_wait().unwrap().is_some()
+        });
+    }
 }
 
 /// T-T7.1.2's crash point is the agent's alone to arm (`hex node --crash-at`, from its own arguments):
