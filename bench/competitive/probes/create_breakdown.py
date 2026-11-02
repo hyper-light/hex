@@ -99,10 +99,11 @@ SEED_PARTS = CREATE_PARTS[:13] + [
     ("the init's start time read; the container's state written (state.json, renamed into place)", OWN),
 ] + CREATE_PARTS[28:]
 # The parts of a create whose init a pruned seed clones (goal 5 plan step 2): the seed path's, but the init
-# builds its root from the descriptors the agent cloned and ends with `MS_MOVE` and `chroot`, with no
-# `pivot_root`. Its three root parts (seed parts 18-20) are renamed; the switch (part 20, 1-indexed) is the
-# `chroot`, measured in place of `pivot_root`. The mounts (move_mount/fsmount/mount_setattr) aren't traced, so
-# part 19 runs to the `chroot`; a pruned create traces one `chroot` and no init `pivot_root` (create_cuts).
+# builds its root from the descriptors the agent cloned and ends with `chroot`, with no `pivot_root`. Its three
+# root parts (seed parts 18-20) are renamed; the switch (part 20, 1-indexed) is the `chroot`, measured in place
+# of `pivot_root`. The mounts (move_mount/fsmount/mount_setattr) aren't traced, so part 19 runs to the `chroot`,
+# the `MS_MOVE` onto / among them where an init made one (step 2's; from step 3 the rootfs is attached on /
+# itself); a pruned create traces one `chroot` and no init `pivot_root` (create_cuts).
 PRUNED_SEED_PARTS = (
     SEED_PARTS[:13]
     + [
@@ -115,7 +116,7 @@ PRUNED_SEED_PARTS = (
     + [
         ("the init's root attached and its mounts made: the rootfs and binds (move_mount), proc and /dev "
          "(fsmount), its device nodes (mknod)", INIT),
-        ("the root moved onto / and chrooted into (MS_MOVE, chroot)", INIT),
+        ("the root chrooted into (chroot)", INIT),
         ("the hostname set; the process become (capabilities, user); ready sent", INIT),
     ]
     + SEED_PARTS[21:]
@@ -181,7 +182,7 @@ def seed_fork(ev, start, bench):
 def create_cuts(ev, bench, cid, seeded=False, pruned=False):
     """A create's cuts on the shim path, with `seeded` on the seed path (goal 5 plan step 4), or with
     `pruned` on the pruned-seed path (goal 5 plan step 2): the init builds its root from descriptors and
-    ends with MS_MOVE and chroot, so the switch is the chroot and no init pivot_root appears."""
+    ends with chroot, so the switch is the chroot and no init pivot_root appears."""
     c = eb.Cuts(ev)
     tmp = f".{cid}.tmp"
 
@@ -281,13 +282,13 @@ def create_cuts(ev, bench, cid, seeded=False, pruned=False):
         c.to(exited(init, "clone3"), "the init's first run")
     if pruned:
         # No pivot_root: the init attaches the rootfs and mounts with the new mount API (move_mount,
-        # fsmount, mount_setattr, not traced), makes its device nodes (mknod, traced), then moves the root
-        # onto / (MS_MOVE, not traced) and chroots into it (traced). Part 19 runs to the chroot; part 20
-        # is the chroot itself. No init calls pivot_root on this path (AC-a).
+        # fsmount, mount_setattr, not traced), makes its device nodes (mknod, traced), then chroots into
+        # the root (traced), on / already (step 2's init moved it there by MS_MOVE, not traced). Part 19
+        # runs to the chroot; part 20 is the chroot itself. No init calls pivot_root on this path (AC-a).
         is_pivot = enter(init, "pivot_root")
         held(not any(is_pivot(e) for e in ev), "no init calls pivot_root on the pruned path (AC-a)")
         c.to(enter(init, "chroot"), "the init's root attached and its mounts made, to the chroot")
-        c.to(exited(init, "chroot"), "the root moved onto / and chrooted into, returning")
+        c.to(exited(init, "chroot"), "the root chrooted into, returning")
     else:
         c.to(enter(init, "pivot_root"), "the init's pivot_root")
         c.to(exited(init, "pivot_root"), "pivot_root returning")
@@ -553,7 +554,7 @@ def summarize(run):
                   f"{share(device)} |",
                   f"| the container's root without pivot_root's walk (goal 5) | the root mounted, and pivot_root | "
                   f"{root:.3f} | {share(root)} |",
-                  f"| | of it, {'the switch (MS_MOVE, chroot)' if pruned_path else 'pivot_root'} | "
+                  f"| | of it, {'the switch (chroot)' if pruned_path else 'pivot_root'} | "
                   f"{pivot:.3f} | {share(pivot)} |",
                   f"| fewer `cgroup_mutex` holds (goal 5) | the cgroup, made and bounded | {cg:.3f} | {share(cg)} |",
                   f"| | of it, the making: the box root counted and the mkdir | {made:.3f} | {share(made)} |", "",
@@ -615,7 +616,8 @@ def switch(trace, stats, seam_json=None):
         its `chroot` — where it attaches the rootfs and binds (`move_mount`), mounts proc and /dev
         (`fsmount`), sets a mount read-only (`mount_setattr`) and makes device nodes; move_mount/fsmount
         aren't traced, so the span runs from the net-ns join to the chroot;
-      - the switch (part 20): the `chroot` itself (`MS_MOVE` then `chroot`), paired entry to exit.
+      - the switch (part 20): the `chroot` itself, paired entry to exit (step 2's init moved its root onto /
+        by `MS_MOVE` in part 19, before it).
     Both hold at or below 0.5 ms because neither walks the host: `chroot` is O(1), and the fd-based mounts
     touch only this container's tree, where `pivot_root` would walk every task under `namespace_sem`.
 
