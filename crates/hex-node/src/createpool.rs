@@ -76,9 +76,10 @@ struct Shared {
     /// The starting thread waits on it; a create taking or waiting for a seed, a seed's death or hang,
     /// and shutdown wake it.
     wake: Condvar,
-    /// Creates made through the shim instead of a seed, counted by reason ([`ClassicReason`], a fixed
-    /// set, so no high-cardinality label): a pruned seed couldn't serve them, or they join a pid or user
-    /// namespace by path. Each stops at `u64::MAX`, as the core's counts do.
+    /// Creates on the classic root path, counted by reason ([`ClassicReason`], a fixed set, so no
+    /// high-cardinality label): through the shim when a pruned seed couldn't serve them or they join a
+    /// pid or user namespace by path, and by a seed with the classic root on a rootless node. Each stops
+    /// at `u64::MAX`, as the core's counts do.
     classic: [AtomicU64; ClassicReason::COUNT],
     /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`.
     /// Zero on a rootless node, whose seeds don't prune. Stops at `u64::MAX`.
@@ -157,18 +158,21 @@ impl CreatePool {
         })
     }
 
-    /// How many creates were made through the shim since the pool opened, over all reasons: those a
-    /// pruned seed couldn't serve, and those that join a pid or user namespace by path.
+    /// How many creates were made through the shim since the pool opened: those a pruned seed couldn't
+    /// serve, and those that join a pid or user namespace by path. Every reason but
+    /// [`ClassicReason::Rootless`], whose creates a seed makes with the classic root.
     pub fn creates_through_shim(&self) -> u64 {
         self.shared
             .classic
             .iter()
-            .map(|c| c.load(Ordering::Relaxed))
+            .enumerate()
+            .filter(|&(i, _)| i != ClassicReason::Rootless.index())
+            .map(|(_, c)| c.load(Ordering::Relaxed))
             .fold(0u64, u64::saturating_add)
     }
 
-    /// How many creates were made through the shim for `reason` since the pool opened.
-    pub fn creates_through_shim_for(&self, reason: ClassicReason) -> u64 {
+    /// How many creates took the classic root path for `reason` since the pool opened.
+    pub fn classic_creates_for(&self, reason: ClassicReason) -> u64 {
         self.shared
             .classic
             .get(reason.index())
@@ -622,9 +626,10 @@ mod tests {
     use super::*;
 
     /// Goal 5 plan step 2 (AC-T7.1.4; CLAUDE.md §10): classic-path creates are counted by a fixed set
-    /// of reasons. Do: tell a pool a create went through the shim for each of two reasons, one twice.
-    /// Expect: each reason's count is its own, the total is their sum, and a reason never told stays 0
-    /// (non-vacuity, so a miscounted reason shows).
+    /// of reasons. Do: tell a pool a create went through the shim for each of two reasons, one twice,
+    /// and that a rootless node's seed made one with the classic root. Expect: each reason's count is its
+    /// own, the shim's total is the two shim reasons' sum without the rootless create, and a reason never
+    /// told stays 0 (non-vacuity, so a miscounted reason shows).
     #[test]
     fn classic_creates_are_counted_by_reason() {
         let pool = CreatePool::new(
@@ -637,12 +642,11 @@ mod tests {
         pool.classic(ClassicReason::UserNamespace);
         pool.classic(ClassicReason::UserNamespace);
         pool.classic(ClassicReason::Hooks);
-        assert_eq!(
-            pool.creates_through_shim_for(ClassicReason::UserNamespace),
-            2
-        );
-        assert_eq!(pool.creates_through_shim_for(ClassicReason::Hooks), 1);
-        assert_eq!(pool.creates_through_shim_for(ClassicReason::Source), 0);
+        pool.classic(ClassicReason::Rootless);
+        assert_eq!(pool.classic_creates_for(ClassicReason::UserNamespace), 2);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Hooks), 1);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Rootless), 1);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Source), 0);
         assert_eq!(pool.creates_through_shim(), 3);
     }
 

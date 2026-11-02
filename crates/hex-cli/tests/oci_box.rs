@@ -503,18 +503,42 @@ fn agent_mount_points() -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// Goal 5 plan step 2 (T-T7.1.4): on a root node, specs that can't take the pruned path fall to the
-/// classic path, each counted under its reason — a user namespace of its own (`UserNamespace`),
-/// createContainer hooks (`Hooks`), and a mount namespace joined by path (`JoinsByPath`). A rootless
-/// node prunes nothing (`pruned_creates` stays 0, as oci_spec_box's layered_box checks), so this runs as
-/// root. A create routes classic at create — the counter bumps there, before the box runs — so creating
-/// then deleting each is enough to count it.
+/// Goal 5 plan step 2 (T-T7.1.4): creates that can't take the pruned path take the classic path, each
+/// counted under its reason. Rootless, where the node's seeds don't prune: a create is counted under
+/// `Rootless`, made by a seed (not through the shim) and not pruned. As root, specs a pruned seed can't
+/// serve: a user namespace of its own (`UserNamespace`), createContainer hooks (`Hooks`) and a mount
+/// namespace joined by path (`JoinsByPath`), each through the shim, and none counted under `Rootless`.
+/// A create routes classic at create — the counter bumps there, before the box runs — so creating then
+/// deleting each is enough to count it.
 fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
-    if lab.rootless {
-        return;
-    }
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-reasons"), state.path());
+    if lab.rootless {
+        let id = BoxId::new("reason-rootless").unwrap();
+        let before = node.classic_creates_for(ClassicReason::Rootless);
+        node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)))
+            .expect("create a box on the rootless node");
+        assert_eq!(
+            node.classic_creates_for(ClassicReason::Rootless),
+            before + 1,
+            "a rootless node's create is counted under Rootless"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "a rootless node's create is made by a seed, not through the shim"
+        );
+        assert_eq!(
+            node.pruned_creates(),
+            0,
+            "a rootless node's seeds don't prune"
+        );
+        node.delete(&id).expect("delete the rootless box");
+        eprintln!(
+            "classic reasons: a rootless node's create counted under Rootless, made by a seed, none pruned"
+        );
+        return;
+    }
     // A mount namespace to join by path: a running box's init has one of its own.
     let host = BoxId::new("reason-host").unwrap();
     node.create(lab.running(host.clone(), &Lab::act(&Act::Wait)))
@@ -542,7 +566,7 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
     for (name, reason, namespaces, mappings, hooks) in cases {
         let (shim_before, reason_before, pruned_before) = (
             node.creates_through_shim(),
-            node.creates_through_shim_for(reason),
+            node.classic_creates_for(reason),
             node.pruned_creates(),
         );
         let dir = tempfile::Builder::new()
@@ -565,7 +589,7 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
         });
         let _ = node.delete(&id);
         assert_eq!(
-            node.creates_through_shim_for(reason),
+            node.classic_creates_for(reason),
             reason_before + 1,
             "{name} is counted under {reason:?}"
         );
@@ -580,9 +604,14 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
             "{name} did not take the pruned path"
         );
     }
+    assert_eq!(
+        node.classic_creates_for(ClassicReason::Rootless),
+        0,
+        "a root node counts no create under Rootless"
+    );
     node.delete(&host).expect("delete the host box");
     eprintln!(
-        "classic reasons: a user namespace (UserNamespace), createContainer hooks (Hooks) and a mount namespace by path (JoinsByPath) each counted, none pruned"
+        "classic reasons: a user namespace (UserNamespace), createContainer hooks (Hooks) and a mount namespace by path (JoinsByPath) each counted, none pruned, none under Rootless"
     );
 }
 

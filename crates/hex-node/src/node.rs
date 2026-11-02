@@ -828,27 +828,28 @@ impl Node {
         }
     }
 
-    /// How many of the node's creates were made through the shim since its seed pool opened, over all
-    /// reasons: those a pruned seed couldn't serve, and those that join a pid or user namespace by path
-    /// (decision 5, goal 5 plan step 2).
+    /// How many of the node's creates were made through the shim since its seed pool opened: those a
+    /// pruned seed couldn't serve, and those that join a pid or user namespace by path (decision 5, goal 5
+    /// plan step 2). A rootless node's other creates take the classic root in a seed, not the shim
+    /// ([`ClassicReason::Rootless`]).
     pub fn creates_through_shim(&self) -> u64 {
         self.create_seeds
             .get()
             .map_or(0, CreatePool::creates_through_shim)
     }
 
-    /// How many of the node's creates were made through the shim for `reason` since its seed pool
-    /// opened: the classic root path's reasons, counted for the bench and the node's metrics (goal 5
-    /// plan step 2, AC-T7.1.4).
-    pub fn creates_through_shim_for(&self, reason: ClassicReason) -> u64 {
+    /// How many of the node's creates took the classic root path for `reason` since its seed pool opened
+    /// (goal 5 plan step 2, AC-T7.1.4). Counted in the node's memory and read here, as the tests read
+    /// it; no `hex_*` metric carries it until kiln's Observe owner agrees the name (CLAUDE.md §10).
+    pub fn classic_creates_for(&self, reason: ClassicReason) -> u64 {
         self.create_seeds
             .get()
-            .map_or(0, |pool| pool.creates_through_shim_for(reason))
+            .map_or(0, |pool| pool.classic_creates_for(reason))
     }
 
     /// How many of the node's creates a pruned seed made on the pruned root path (goal 5 plan step 2):
-    /// zero on a rootless node, positive on a root node once it has made a pruned-eligible box. The bench
-    /// and the root lab read it to confirm the pruned path was taken, not a silent shim fallback.
+    /// zero on a rootless node, positive on a root node once it has made a pruned-eligible box. The root
+    /// lab's tests read it to confirm the pruned path was taken, not a silent shim fallback.
     pub fn pruned_creates(&self) -> u64 {
         self.create_seeds
             .get()

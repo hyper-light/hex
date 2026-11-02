@@ -163,17 +163,20 @@ pub trait CloneInit {
     /// Whether this node's create seeds prune their mount namespace (goal 5 plan step 2): true on a root
     /// node, so a pruned-eligible container takes the pruned root path (no `pivot_root`) and the rest go
     /// through the shim, counted; false on a rootless node, whose seeds keep the agent's mount namespace
-    /// and build the root the classic way in the init.
+    /// and build the root the classic way in the init, counted under [`ClassicReason::Rootless`].
     fn prunes_root(&self) -> bool;
 
-    /// A container made through the shim instead of a seed, by its reason (a fixed set, so no
-    /// high-cardinality label; CLAUDE.md §10): counted, so a run shows how often a create still re-execs
-    /// the hex binary and pivots, and why.
+    /// A container made on the classic root path rather than a pruned seed's, by its reason (a fixed set,
+    /// so no high-cardinality label; CLAUDE.md §10): counted, so the node can tell how often a create
+    /// still pivots, and why. For every reason but [`ClassicReason::Rootless`] the create went through
+    /// the shim, a re-exec of the hex binary.
     fn classic(&self, reason: ClassicReason);
 }
 
-/// Why a create is made through the shim (the classic root path) rather than handed to a pruned seed
-/// (goal 5 plan step 2). A fixed set: each is a label on a counter, none derived from the container.
+/// Why a create takes the classic root path (the init's `pivot_root`) rather than a pruned seed's (goal 5
+/// plan step 2): through the shim, or on a rootless node by a seed with the classic root
+/// ([`ClassicReason::Rootless`]). A fixed set: each is a label on a counter, none derived from the
+/// container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassicReason {
     /// A pid or user namespace joined by path: a seed's one clone can't make it ([`init::needs_shim`]).
@@ -184,20 +187,26 @@ pub enum ClassicReason {
     /// Create-time hooks: they may expect the container's root reachable by host path, as crun gates its
     /// own fd-based path on hooks.
     Hooks,
-    /// The container joins a network, ipc, uts, cgroup or mount namespace by path: the pruned init can't
-    /// open the host path to `setns` it (its namespace holds nothing of the host). A pid or user
-    /// namespace by path is [`ClassicReason::NamespaceByPath`] instead, refused earlier by the clone.
+    /// A mount namespace joined by path, which the pruned init would join rather than build; or a network,
+    /// ipc, uts or cgroup namespace by path the agent couldn't open for the init (its namespace holds
+    /// nothing of the host to open it by), or more of them than one create carries
+    /// ([`hex_core::seed::MAX_PATH_JOINS`]). A pid or user namespace by path is
+    /// [`ClassicReason::NamespaceByPath`] instead, refused earlier by the clone.
     JoinsByPath,
     /// The spec makes no mount namespace of its own: there is no root to build on the pruned path.
     NoMountNamespace,
     /// A bind source the agent couldn't clone with `open_tree`, or more bind mounts than fit one
     /// `SCM_RIGHTS` message ([`hex_core::seed::MAX_BINDS`]).
     Source,
+    /// A rootless node: its seeds can't own a mount namespace without a user namespace of their own, so
+    /// they don't prune, and the init a seed clones builds the root the classic way. The one reason whose
+    /// creates don't go through the shim.
+    Rootless,
 }
 
 impl ClassicReason {
     /// The fixed count of reasons, for a per-reason counter.
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
 
     /// This reason's index, for a per-reason counter.
     pub fn index(self) -> usize {
@@ -208,6 +217,7 @@ impl ClassicReason {
             Self::JoinsByPath => 3,
             Self::NoMountNamespace => 4,
             Self::Source => 5,
+            Self::Rootless => 6,
         }
     }
 }
@@ -537,10 +547,11 @@ impl Runtime {
 
     /// Routes a seam create to a seed: through the shim (counted) for a container a seed can't make in
     /// one clone or a pruned seed can't serve, else to the seed, on the pruned root path on a root node
-    /// (goal 5 plan step 2) and the classic path on a rootless one. The pruned path clones the rootfs and
-    /// each bind source here, in the agent's own mount namespace, and hands them to the seed; a container
-    /// not eligible for it (a user namespace of its own, create-time hooks, a mount namespace joined by
-    /// path, none of its own, or a source that can't be cloned) is made through the shim, by reason.
+    /// (goal 5 plan step 2) and the classic path on a rootless one, counted under
+    /// [`ClassicReason::Rootless`]. The pruned path clones the rootfs and each bind source here, in the
+    /// agent's own mount namespace, and hands them to the seed; a container not eligible for it (a user
+    /// namespace of its own, create-time hooks, a mount namespace joined by path, none of its own, or a
+    /// source that can't be cloned) is made through the shim, by reason.
     fn start_seeded(
         &self,
         making: &Making<'_>,
@@ -564,6 +575,7 @@ impl Runtime {
                 }
             }
         } else {
+            seeds.classic(ClassicReason::Rootless);
             self.start_via_seed(making, spec, cgroup, network, seeds, None)
         }
     }
