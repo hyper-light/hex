@@ -937,15 +937,16 @@ fn do_mount_pruned<'a>(
     Ok(())
 }
 
-/// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its source and data options
-/// the spec's and its read-only, `nosuid`, `nodev` and `noexec` set at `fsmount`: a detached mount
-/// descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
+/// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its source, data options and
+/// flags the spec's: a detached mount descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
 /// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`; the agent
 /// ([`super::run`]) makes a layered root's overlay this way too, where it can reach the layers' host
 /// paths that the pruned seed can't, and hands the init the result as the rootfs. The source is set as
 /// `mount(2)` sets it, the context's `source` parameter (v6.19 `fs/namespace.c:3706`), which every
 /// filesystem takes (`fs/fs_context.c:151-156`): else the mount's source reads `none` where the spec
-/// named one.
+/// named one. Its flags are taken as `mount(2)` takes them: the per-mount ones at `fsmount`
+/// ([`attr_flags`]), `sync` and `dirsync` by the context, where once only read-only, `nosuid`, `nodev` and
+/// `noexec` were, an access time the spec set lost.
 pub(crate) fn make_fs(
     source: &str,
     fstype: &str,
@@ -956,6 +957,17 @@ pub(crate) fn make_fs(
         .map_err(|e| OciError::os("fsopen", e))?;
     rustix::mount::fsconfig_set_string(fs.as_fd(), "source", source)
         .map_err(|e| OciError::os("a filesystem's source", format!("{source}: {e}")))?;
+    // The superblock's own flags, which a mount can't carry: as flags of the context
+    // (`fs/fs_context.c:41-46`), as `mount(2)` takes them from its flags.
+    for (flag, name) in [
+        (MountFlags::SYNCHRONOUS, "sync"),
+        (MountFlags::DIRSYNC, "dirsync"),
+    ] {
+        if flags.contains(flag) {
+            rustix::mount::fsconfig_set_flag(fs.as_fd(), name)
+                .map_err(|e| OciError::os("a filesystem flag", format!("{name}: {e}")))?;
+        }
+    }
     for opt in data.split(',').filter(|s| !s.is_empty()) {
         match opt.split_once('=') {
             Some((key, value)) => rustix::mount::fsconfig_set_string(fs.as_fd(), key, value)
@@ -1069,9 +1081,24 @@ fn attr_set(flags: MountFlags) -> u64 {
     set
 }
 
-/// The same flags as [`MountAttrFlags`], for a filesystem made read-only (and so on) at `fsmount`.
+/// A spec mount's per-mount flags as [`MountAttrFlags`], for a filesystem made at `fsmount`, each as
+/// `mount(2)` takes it (v6.19 `fs/namespace.c:3972-3992`): read-only, `nosuid`, `nodev`, `noexec`,
+/// `nodiratime` and `nosymfollow`, and the access-time mode, `strictatime` over `noatime` over the
+/// relatime the kernel defaults to.
 fn attr_flags(flags: MountFlags) -> MountAttrFlags {
-    let mut a = MountAttrFlags::empty();
+    let mut a = if flags.contains(MountFlags::STRICTATIME) {
+        MountAttrFlags::MOUNT_ATTR_STRICTATIME
+    } else if flags.contains(MountFlags::NOATIME) {
+        MountAttrFlags::MOUNT_ATTR_NOATIME
+    } else {
+        MountAttrFlags::MOUNT_ATTR_RELATIME
+    };
+    if flags.contains(MountFlags::NODIRATIME) {
+        a |= MountAttrFlags::MOUNT_ATTR_NODIRATIME;
+    }
+    if flags.contains(MountFlags::NOSYMFOLLOW) {
+        a |= MountAttrFlags::MOUNT_ATTR_NOSYMFOLLOW;
+    }
     if flags.contains(MountFlags::RDONLY) {
         a |= MountAttrFlags::MOUNT_ATTR_RDONLY;
     }
