@@ -113,22 +113,30 @@ faults in user mode per create. By mount: to the rootfs's attach 53.4 us of call
    the bound rootfs opened once, and again after a spec mount at `/` itself, which goes over the bind (a lookup of the
    rootfs's path lands on the top, and the build must too). A path that's there resolves in one `openat2` with
    `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS` of its normal form ("Treat the directory referred to by dirfd as the
-   root directory while resolving path. Absolute symbolic links are interpreted relative to dirfd.", openat2(2));
-   only a missing one is walked component by component to make what's missing, as before.
+   root directory while resolving path. Absolute symbolic links are interpreted relative to dirfd.", openat2(2)). Any
+   other is walked component by component as before: what's missing is made as before, and a path refused (a link
+   that leads nowhere inside the root, a component refused) is refused naming the component the walk was refused at,
+   as before. A missing path asked to make nothing is the one answer taken from the single call: the kernel resolves
+   components in order, so nothing before the missing one was refused.
 2. **`/dev` opened once** for its defaults. Each node made with `mknodat` under a zero umask, its mode exact, the umask
    put back after, in place of a `fchmodat` each; each link with `symlinkat`. A name the kernel refuses as there
-   (`EEXIST`, "linkpath already exists", symlink(2)) is then looked for: a node that leads to something in the root is
-   left as it is, one that leads to nothing refused, as before; a link is left whatever is there, as runc leaves it
-   (`libcontainer/rootfs_linux.go:919-923`). The one behaviour this changes: an image whose `/dev` already holds a
-   stream link into `/proc/self/fd` (with no tmpfs mounted over `/dev`) was refused before, the look before making the
-   link following the magic link (`RESOLVE_NO_MAGICLINKS` refuses it with `ELOOP`); it is left as it is now, as runc
-   and crun leave it.
+   (`EEXIST`, "linkpath already exists", symlink(2)) is then looked for, as it was looked for before each was made, so
+   every outcome is the one the look before gave: a name that leads to something in the root is left as it is,
+   whatever it is; a node's name that leads to nothing inside the root is refused, naming it; a name whose look is
+   refused (a magic link, `ELOOP` under `RESOLVE_NO_MAGICLINKS`; a file taken for a directory, `ENOTDIR`) is refused,
+   naming it. At bf77298 a default node whose name is there with another type is left as it is, not refused
+   (`init.rs:1240-1242`), as runc leaves it (`createDeviceNode` returns on `EEXIST`,
+   `libcontainer/rootfs_linux.go:1003-1004`); the change keeps that.
 3. **A bind's source is looked at only when its target is missing** (to make the target a file or a directory), and
    a mount's propagation is set on the mount's own descriptor, not on its target opened again.
 4. **The pruned path attaches the rootfs on `/` itself**, over the seed's read-only tmpfs, where step 2's `MS_MOVE`
    from `/r` put it: the same mount tree, one attach and one hold of `namespace_sem` fewer (four per create for the
    bench's spec), then `fchdir` and `chroot` (part 20). Until its `chroot` the init's own root is the tmpfs's, and it
-   walks no path by name. The seed's empty `r` is unused by the init now; step 2's AC-f still asserts it.
+   walks no path by name. The tree being the same, so is its containment (decision 5): `..` from a mount's root
+   climbs only where it isn't mounted on its parent's own root (`fs/namei.c:1433-1446`), and the rootfs and the tmpfs
+   beneath it are each mounted on their parent's root, so E1 climbs nowhere; the rootfs is the namespace's topmost
+   mount over its root, so nested user namespaces stay allowed (E0; `fs/namespace.c:6095-6097`,
+   `kernel/user_namespace.c:106`). The seed's empty `r` is unused by the init now; step 2's AC-f still asserts it.
 5. **Masked files share one descriptor** of the container's `/dev/null`.
 6. **`setsid` stays where it is.** OCI runtimes make the container's init a session leader (crun, runc above), and its
    cost is the kernel's, in part 19 because the init's set-up calls it there; the trace reports it among the calls.
@@ -139,7 +147,9 @@ For the bench's spec this makes part 19 about 41 calls, against 150, holding the
 
 - Part 19's pooled p50 on fedora above 0.16 ms after the change, or its calls per create not under 50 in the trace.
 - `oci_box`'s `every_mount_kind_is_in_the_box_as_its_spec_asks` failing on either path after the change, having
-  passed before it.
+  passed before it; or `escapes_are_contained` (E0-E3) failing on the root attached on `/`.
+- A hostile `/dev` or mount target meeting another outcome than the look before each gave (`init.rs`'s tests: a name
+  that leads out of the root, one whose look is refused, one there already of whatever type).
 - Part 19's p99 at eight in flight with 8,000 idle host threads above 0.5 ms: then the tail is the mount lock's, not
   the calls', and the next lever is fewer `namespace_sem` holds per lifecycle: the agent's two `open_tree` clones, the
   init's clone's copy of the namespace, the attaches, the namespace's teardown at exit.

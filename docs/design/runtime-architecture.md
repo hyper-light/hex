@@ -1109,26 +1109,37 @@ This takes it off create's path on a root node, with no new kernel version (deci
   shim, counted (CLAUDE.md §2, §3).
 - **The init builds the root on descriptors, fd-based.** In the clone's child, with no `/proc/self/fd` to resolve
   targets through (there is no proc in the pruned namespace), the init uses the new mount API throughout: it attaches
-  the rootfs tree at `/r` with `move_mount`, resolves each target inside the rootfs with `openat2(RESOLVE_IN_ROOT)`
-  (`inroot`, generalized to a root descriptor), attaches each bind's tree with `move_mount`, makes each filesystem
-  (`proc`, `tmpfs`, `sysfs`, `mqueue`, `devpts`, `cgroup2`) with `fsopen`/`fsconfig`/`fsmount` (its read-only and
-  `nosuid`/`nodev`/`noexec` set at `fsmount`), makes device nodes with `mknodat` (a root node, so `CAP_MKNOD` holds; a
-  user namespace takes the classic path), masks a file by binding the container's own `/dev/null` over it (not the
-  host's), and sets read-only paths and propagation with `mount_setattr` on a target descriptor. Then `chdir("/r")`,
-  `mount(".", "/", MS_MOVE)`, `chroot(".")`, `chdir("/")`: no `pivot_root`, no old-root detach, no expedited RCU grace
-  period (f11, f76). The exec FIFO is opened through the state-directory descriptor, not a path.
-- **Why MS_MOVE is safe here and not in a copy of the host's namespace.** runc's and crun's `--no-pivot` (MS_MOVE and
-  chroot in a copy of the host's mount namespace) is unsafe as a default, and the probe confirms three escapes the
-  kernel's rules predict (`goal5-root.md` §3, §4): the host's proc stays visible to `mnt_already_visible`, so a nested
-  proc mount past a mask is allowed (E3); the host's tree lies beneath the moved root, so a process that unmounts the
-  root reaches it (E2); and a container that is its own user namespace's root can unmount its root to reach the host
-  (move_userns). The pruned seed closes all three by construction: the only thing beneath the container's root is an
-  empty read-only tmpfs, and no proc or sysfs exists anywhere in the namespace. In the probe, a pruned-path container
-  with `CAP_SYS_ADMIN` and `CAP_SYS_CHROOT`: E1 (the classic chroot escape) stays in the rootfs, E2 reveals only the
-  empty tmpfs, E3 is refused `EPERM`, and a nested user namespace is still allowed (E0), as a chrooted process could
-  not make (f66-f69, f78). MS_MOVE onto `/` keeps the container able to make nested user namespaces (its root is the
-  namespace's topmost mount, so `current_chrooted` is false; f66), which sandboxes nested in containers need and a
-  plain chroot would refuse.
+  the rootfs tree on `/` itself with `move_mount`, over the seed's read-only tmpfs, resolves each target inside the
+  rootfs with `openat2(RESOLVE_IN_ROOT)` from the tree's own descriptor (`inroot::Root`), attaches each bind's tree with
+  `move_mount`, makes each filesystem (`proc`, `tmpfs`, `sysfs`, `mqueue`, `devpts`, `cgroup2`) with
+  `fsopen`/`fsconfig`/`fsmount` (its read-only and `nosuid`/`nodev`/`noexec` set at `fsmount`), makes device nodes with
+  `mknodat` (a root node, so `CAP_MKNOD` holds; a user namespace takes the classic path), masks a file by binding the
+  container's own `/dev/null` over it (not the host's), and sets read-only paths and propagation with `mount_setattr` on
+  the mount's own descriptor. Then `fchdir` into the rootfs, `chroot(".")`, `chdir("/")`: no `pivot_root`, no old-root
+  detach, no expedited RCU grace period (f11, f76). The exec FIFO is opened through the state-directory descriptor, not
+  a path. Until its `chroot` the init's own root is the tmpfs's, which a mount stacked on it doesn't change, and it
+  walks no path by name. Goal 5 plan step 3 took the build to the system calls' cost (`goal5-mounts.md`): one
+  resolution per target that's there (the component walk only to make what's missing), `/dev`'s nodes and links made
+  first and looked for only when the kernel refuses a name as there, each with the outcome the look before each gave,
+  and the rootfs attached on `/` directly, where step 2 attached it at `/r` and moved it with `MS_MOVE`: the same tree,
+  one attach and one hold of `namespace_sem` fewer.
+- **Why a root on `/` is contained here and MS_MOVE in a copy of the host's namespace is not.** runc's and crun's
+  `--no-pivot` (MS_MOVE and chroot in a copy of the host's mount namespace) is unsafe as a default, and the probe
+  confirms three escapes the kernel's rules predict (`goal5-root.md` §3, §4): the host's proc stays visible to
+  `mnt_already_visible`, so a nested proc mount past a mask is allowed (E3); the host's tree lies beneath the moved
+  root, so a process that unmounts the root reaches it (E2); and a container that is its own user namespace's root can
+  unmount its root to reach the host (move_userns). The pruned seed closes all three by construction: the only thing
+  beneath the container's root is an empty read-only tmpfs, and no proc or sysfs exists anywhere in the namespace. The
+  root is the same tree whether the rootfs reached `/` by `MS_MOVE` (step 2) or by its attach (step 3): the rootfs's
+  mount stacked on the tmpfs's root, the tmpfs's stacked on the namespace's own root mount. So the classic chroot
+  escape (E1) climbs nowhere: `..` from a mount's root climbs to where it is mounted only if that is not its parent's
+  own root, and stops at the namespace's top (v6.19 `fs/namei.c:1433-1446`), and every mount beneath the rootfs is
+  stacked on its parent's root. And the container can still make nested user namespaces (E0): its root is the
+  namespace's topmost mount over its root (`current_chrooted`, `fs/namespace.c:6095-6097`), which `create_user_ns`
+  requires (`kernel/user_namespace.c:106`), as sandboxes nested in containers need and a plain chroot would refuse. In
+  the probe, a pruned-path container with `CAP_SYS_ADMIN` and `CAP_SYS_CHROOT`: E1 stays in the rootfs, E2 reveals only
+  the empty tmpfs, E3 is refused `EPERM`, and a nested user namespace is still allowed (E0) (f66-f69, f78); `oci_box`'s
+  `escapes_are_contained` holds Hex's pruned root to the same, as root.
 - **The classic path stays, counted by reason.** A rootless node's seeds don't prune (above), so a create there that a
   seed can make takes the classic root in the seed, not the shim: the init the seed clones copies the agent's mount
   namespace and binds and `pivot_root`s there, as the shim's child does. On a root node a create takes the shim (the
@@ -1153,8 +1164,10 @@ This takes it off create's path on a root node, with no new kernel version (deci
   made: `open_tree(OPEN_TREE_NAMESPACE)` and `setns` on 7.0, `CLONE_EMPTY_MNTNS` on 7.1 (no seed pruning, no copy at
   all), measured against the pruned seed on a 7.x host and made the default where the kernel has it (f83, f84).
 
-**Sources (the pruned seed's root).** `docs/research/runtime/goal5-root.md` (what `pivot_root` costs and why, what runc
-and crun do, what a root without it leaves open and what closes it, and the probe's numbers and escape runs). Kiln
+**Sources (the pruned seed's root).** `docs/research/runtime/goal5-mounts.md` (where the init's mounts went, call by
+call, and what took them: goal 5 plan step 3). `docs/research/runtime/goal5-root.md` (what `pivot_root` costs and
+why, what runc and crun do, what a root without it leaves open and what closes it, and the probe's numbers and escape
+runs). Kiln
 research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs/namespace.c` (`pivot_root`,
 `copy_mnt_ns`, `do_move_mount`, `mntns_install`, `may_copy_tree`), `fs/fs_struct.c` (`chroot_fs_refs`), `fs/open.c`
 (`chroot`), `fs/namei.c` (`follow_dotdot`), `kernel/user_namespace.c` (`create_user_ns`); v7.0 and v7.1 `fs/namespace.c`
