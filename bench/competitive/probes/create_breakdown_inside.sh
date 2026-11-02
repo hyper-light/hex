@@ -36,14 +36,24 @@ JSON
 }
 bundle /run/bundle-sleep '["/usr/bin/sleep","infinity"]'
 bundle /run/bundle-true '["/usr/bin/true"]'
-# MOUNTS_PATH=classic (goal 5 plan step 3): the `true` bundle with a createRuntime hook, which routes each create
-# classic, through the shim (a create-time hook runs against host paths, decision 5), so the trace times the classic
-# path's mounts.
-if [ "${MOUNTS_PATH:-pruned}" = classic ]; then
-  bundle /run/bundle-true-classic '["/usr/bin/true"]'
+# A createRuntime hook routes a bundle's every create classic, through the shim (a create-time hook runs against host
+# paths, decision 5). The node runs it in its own namespace once the init waits at the exec FIFO (run.rs's
+# record_created), so it adds to the create's tail and nothing to the init's mounts.
+with_hook() { # with_hook <bundle>
   python3 -I -c 'import json, sys
 p = sys.argv[1]; c = json.load(open(p)); c["hooks"] = {"createRuntime": [{"path": "/usr/bin/true", "args": ["true"]}]}
-json.dump(c, open(p, "w"))' /run/bundle-true-classic/config.json
+json.dump(c, open(p, "w"))' "$1/config.json"
+}
+# MOUNTS_PATH=classic (goal 5 plan step 3): the mounts trace's `true` creates take the classic path.
+if [ "${MOUNTS_PATH:-pruned}" = classic ]; then
+  bundle /run/bundle-true-classic '["/usr/bin/true"]'
+  with_hook /run/bundle-true-classic
+fi
+# CLASSIC=1 (goal 5 plan step 3): both bundles take the classic path, so the rounds time the classic init's root
+# mounted (the shim path's part 23, its first run to its pivot_root) as they time the pruned path's part 19.
+if [ "${CLASSIC:-0}" = 1 ]; then
+  with_hook /run/bundle-sleep
+  with_hook /run/bundle-true
 fi
 
 # EXTRA_MOUNTS (goal 5 plan step 2, AC-d): that many tmpfs in the agent's own mount namespace, away from
@@ -217,7 +227,7 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
   echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
-    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned}"
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
