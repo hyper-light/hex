@@ -105,6 +105,21 @@ faults in user mode per create. By mount: to the rootfs's attach 53.4 us of call
 - **M6, page faults.** 17 per create in user mode (16 at eight in flight). The init is a fork-like clone of its seed
   (`sys.rs`'s `clone_sibling`, no `CLONE_VM`), so its first write to each page it still shares with the seed copies
   that page; fewer allocations and a shallower stack touch fewer.
+- **M7, the tail on fedora: the CPU, not the calls.** Fedora's traces (§5) charge each wait the init spends
+  runnable but off the CPU to the process the CPU went to first, and to the softirq or work item that ran there
+  meanwhile (1e7a2fa). At eight in flight the slowest 1% are mostly such waits: 2,405 of a 3,210 us mean span
+  (20261102T025959Z, load 25), the CPU going first to ksoftirqd, kworkers and other hex processes; with 8,001 idle
+  threads up and other tenants' builds on the same CPUs, 3,293 of 4,305 us (20261102T033211Z), the CPU going first
+  to their rustc threads (2,538 us per create), python3, the node's network-namespace pool and other hex processes,
+  the kernel's teardown of exited boxes (`css_killed_work_fn`, the RCU softirq) running there meanwhile. What is
+  blocked is the superblocks' making (`fsconfig` create, 505 us). `setsid` gives the CPU away by itself: at v6.19
+  `sched_autogroup_create_attach` moves every thread of the caller (`kernel/sched/autogroup.c:187-188`), and
+  `sched_move_task` asks for a reschedule of a task that is running (`kernel/sched/core.c:9123-9128`) whether its
+  group changed or not, so the init passes through the scheduler mid-mounts and waits behind whatever is runnable
+  (1,029 us of the tail in `setsid` at 20261102T025959Z, 1,002 of it preempted). crun calls `setsid` after its
+  pivot and mounts (`src/libcrun/container.c:1131`, after `:1055` and `:1060`); runc before them
+  (`libcontainer/nsenter/nsexec.c:1195`, its rootfs made in Go after). A shorter part 19 is open to fewer of these
+  waits; none of them is a call it makes more than the probe does, but `setsid`'s place.
 
 ## 2. What takes it
 
@@ -142,6 +157,27 @@ faults in user mode per create. By mount: to the rootfs's attach 53.4 us of call
 6. **`setsid` stays where it is.** OCI runtimes make the container's init a session leader (crun, runc above), and its
    cost is the kernel's, in part 19 because the init's set-up calls it there; the trace reports it among the calls.
 
+7. **The classic path lists a recursive read-only bind's cgroup filesystems from the kernel, not the table.** On
+   fedora the classic init's root mounted (the shim path's part 23, the classic part 19) took 0.201 ms pooled p50
+   (§5), over the bar, and its table read was 72 us of it per create in the trace: the mount table's text made for
+   `remount_cgroupfs_readonly` (two `read`s, 59.9 us), its open (7.3) and the bind's path read back through
+   `/proc/self/fd` (`readlink`, 4.6). Since Linux 6.8, `listmount(2)` returns the unique id of every mount beneath a
+   mount, not only its children: it walks the namespace's mounts in id order and keeps each one reachable from the
+   given mount (v6.8 `fs/namespace.c:5069-5077`, `listmnt_next` at `:5045-5048`; v6.19 `:5866-5874`), in batches
+   resumed from the last id, holding `namespace_sem` shared, not for write (v6.19 `:5951-5952`). `statmount(2)` gives
+   one mount's filesystem type and mount point, relative to the caller's root and unescaped, as offsets into the
+   strings after its fixed 512 bytes (v6.19 `include/uapi/linux/mount.h:155-189`, `STATMOUNT_MNT_POINT` and
+   `STATMOUNT_FS_TYPE` at `:217-218`); both take a mount by the unique id `statx(2)`'s `STATX_MNT_ID_UNIQUE` gives
+   (Linux 6.8), in the request 6.8 published (`MNT_ID_REQ_SIZE_VER0`, 24 bytes, `:207`), which every later kernel
+   still takes. So the bind's top is asked its id and mount point, its submounts listed, and each asked its type and
+   point: three calls for a bind that carries none, as the bench's `/usr` does, in place of five that make and read
+   the whole table. Their numbers are the common table's on x86_64 and aarch64, 457 and 458 (v6.19
+   `arch/x86/entry/syscalls/syscall_64.tbl:384-385`, `scripts/syscall.tbl:400-401`, which arm64's table is made
+   from, `include/uapi/asm-generic/unistd.h:828-832`); the libc crate at 0.2.191 carries them for m68k alone, so
+   `sys.rs` names them, and rustix wraps neither, so the two calls are new `unsafe` there (CLAUDE.md §12, its own
+   commit, held for Ada). A kernel without them, before 6.8, answers `ENOSYS`, or a `statx` without the unique id;
+   the init then reads the bounded table as before, the same paths found either way, as a test holds them.
+
 For the bench's spec this makes part 19 about 41 calls, against 150, holding the mount lock four times, against five.
 
 ## 3. What would falsify it
@@ -151,6 +187,9 @@ For the bench's spec this makes part 19 about 41 calls, against 150, holding the
   `escapes_are_contained` (E0-E3) failing on the root attached on `/`.
 - A hostile `/dev` or mount target meeting another outcome than the look before each gave (`init.rs`'s tests: a name
   that leads out of the root, one whose look is refused, one there already of whatever type).
+- The classic path's part 19 (the shim path's part 23) above 0.16 ms pooled p50 on fedora with the table read gone;
+  or `listmount` and `statmount` finding other cgroup filesystems beneath a bind than the table lists for it (the
+  test that runs both over the host's `/sys`), which would mean 6.8's walk isn't the table's.
 - Part 19's p99 at eight in flight with 8,000 idle host threads above 0.5 ms: then the tail is the mount lock's, not
   the calls', and the next lever is fewer `namespace_sem` holds per lifecycle: the agent's two `open_tree` clones, the
   init's clone's copy of the namespace, the attaches, the namespace's teardown at exit.
