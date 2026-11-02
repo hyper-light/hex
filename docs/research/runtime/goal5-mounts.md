@@ -1,0 +1,145 @@
+# The init's mounts at the system calls' cost: where part 19 goes, and what takes it
+
+Source notes for goal 5 extended plan step 3, the init's mounts at the system calls' cost (kiln plan
+`01a190c51f07757ab54b09f1aada633c` v6, research `01a190c51f137042a9697949c8fe2c7a`, f18 and f78). Run 4 of the
+create breakdown (`bench/competitive/probes/create_breakdown.md`, create-breakdown-20261031T061841Z) put part 19,
+the init's root mounted (the rootfs bound, `/usr`, `/proc` and `/dev`, its device nodes), at 0.359 ms p50 and
+1.012 ms p99 on the classic seed path. Step 2 moved a root node's creates to the pruned seed's path, where run 10
+measured part 19 at 0.169 ms p50 (0.228 with a build beside it) and run 9, at eight creates in flight with 8,000
+idle host threads, at 0.209 ms p50 and 1.553 ms p99. The pruned-seed probe (`goal5-root.md` §4, `rootprobe.c`)
+made the same mounts and nodes in about 0.104 ms (f78). The step's bars: part 19's pooled p50 at most 0.16 ms, and
+its p99 at eight in flight with 8,000 idle host threads at most 0.5 ms, on fedora.
+
+Sources were read at fixed revisions, downloaded on adacachy (2026-11-02) into `~/.cache/hex-t7/g5x-s3/src` and
+`~/.cache/hex-t7/goal5-root`: Linux v6.19 from `raw.githubusercontent.com/torvalds/linux/v6.19/`, crun 1.30.1
+(`raw.githubusercontent.com/containers/crun/1.30.1/`), runc v1.5.2
+(`raw.githubusercontent.com/opencontainers/runc/v1.5.2/`), man pages from man7.org. `path:line` is at that revision;
+Hex's own lines are at bf77298, the step's base.
+
+## 1. The trace
+
+### Method
+
+- **The probe.** `create_breakdown.sh` with `MOUNTS=<lifecycles>` (`MOUNTS_CONC`, default `1 8`) runs, in the
+  bench's privileged container, one `seam_oci` throughput phase per concurrency with every system call of the
+  `hex` processes traced (`create_breakdown_inside.sh`, `mounts_trace`), and `create_breakdown.py mounts` cuts each
+  create's part 19 out of it, the span the AC-e reader (`switch`) uses: from the exit of the init's join of the
+  network namespace made ahead (`setns` with `CLONE_NEWNET`) to the entry of its `chroot` (the pruned path) or
+  `pivot_root` (the classic one).
+- **The events.** `raw_syscalls/sys_enter` and `sys_exit`, which record a call's number and its arguments and fetch
+  no string: the `syscalls` subsystem's per-call events fetch each path from user memory, about 4 us a time
+  (`exec_breakdown.md`), which would charge the very calls this times. With them `sched/sched_switch`, so time off
+  the CPU is told apart, preempted (`prev_state` R) or blocked, and `exceptions/page_fault_user`. A call's time runs
+  from its entry to its exit; the rest of the span is the init's own code between calls, its page faults and the
+  trace's own two events per call among it.
+- **By mount.** Each mount's share is the calls from the one after the previous attach (`mount` or `move_mount`) to
+  its own attach.
+- **The lab run (not of record).** adacachy, AMD Ryzen 9 9950X3D2 (32 CPUs, the container pinned to 16-27), Linux
+  7.2.9-2-cachyos, the 1-minute load 50 to 63, fedora being offline; `MOUNTS=500`, 2026-11-02T00:44:38Z,
+  `~/.cache/hex-t7/g5x-s3/bench/out/create-breakdown-20261102T004438Z`, the binaries of bf77298 (hex sha256
+  2a94c58f01f7f6ab, seam_oci 863df01e72723582), no event lost. Its kernel is not fedora's and the trace adds two
+  events per call, so its figures place the time and count the calls; the step's bars are measured on fedora.
+
+### What part 19 is made of (bf77298, the pruned path, one create in flight, 500 creates)
+
+Span p50 337 us, p99 1,563 (traced). Per create, by call:
+
+| call | calls | us | us per call | off the CPU, us: preempted / blocked |
+|---|---|---|---|---|
+| fsconfig (create) | 2.0 | 58.3 | 29.16 | 3.4 / 1.4 |
+| openat2 | 36.0 | 45.6 | 1.27 | 7.5 / 0.0 |
+| setsid | 1.0 | 35.9 | 35.87 | 9.2 / 0.9 |
+| close | 55.0 | 27.7 | 0.50 | 1.5 / 0.0 |
+| move_mount | 4.0 | 26.5 | 6.62 | 8.5 / 6.7 |
+| open | 25.0 | 18.2 | 0.73 | 1.9 / 0.0 |
+| mknodat | 6.0 | 17.5 | 2.92 | 0.4 / 0.0 |
+| symlinkat | 5.0 | 14.5 | 2.90 | 1.0 / 0.0 |
+| fsmount | 2.0 | 8.7 | 4.37 | 0.5 / 0.0 |
+| fsopen | 2.0 | 6.7 | 3.37 | 0.4 / 0.0 |
+| mount (MS_MOVE) | 1.0 | 6.3 | 6.32 | 0.7 / 2.0 |
+| fchmodat | 6.0 | 4.4 | 0.74 | 0.0 / 0.0 |
+| fsconfig (string) | 2.0 | 3.3 | 1.66 | 0.0 / 0.0 |
+| mount_setattr | 1.0 | 2.0 | 1.98 | 0.0 / 0.0 |
+| fstat | 1.0 | 1.2 | 1.19 | 0.1 / 0.0 |
+| chdir | 1.0 | 0.7 | 0.73 | 0.0 / 0.0 |
+
+The mean span is 403.8 us: 277.6 in calls and 126.1 between them (17.5 of it preempted), 150 calls and 17 page
+faults in user mode per create. By mount: to the rootfs's attach 53.4 us of calls (`setsid` among them), `/usr`
+9.6, `/proc` 55.2, `/dev` 39.0, and the 6 nodes and 5 links to the `MS_MOVE` 120.4.
+
+### Findings
+
+- **M1, where the calls go.** The probe makes the same mounts in 17 calls (`rootprobe.c`'s `mounts_pruned`, its
+  rootfs attach and its switch). Hex makes 150. Its `inroot::open` opens the root by path again for every path it
+  resolves and resolves each prefix of that path in turn, an `openat2` and a `close` each (`inroot.rs:32-92`); and
+  the devices and links are each looked for first, then their directory opened again to make them in
+  (`init.rs:1238-1363`), and each node's mode set by `fchmodat` after `mknodat` (its mode is masked by the umask:
+  "The file mode is modified by the process's umask in the usual way: ... (mode & ~umask)", mknod(2)). `open`,
+  `openat2`, `close` and `fchmodat` are 122 of the 150 calls, 96 us of the 277.6 in calls, and most of the 126
+  between them; the mounts themselves need about a dozen of them (a target's resolution, its descriptors' closes).
+- **M2, the work itself.** The calls the probe makes too: the two superblocks made (`fsconfig` create, proc's and
+  `/dev`'s tmpfs, 29 us each here), the four attaches and the move (32.8 us), `fsopen` and `fsmount` (15.4), the six
+  `mknodat` (17.5). The five `symlinkat` (14.5) are the OCI spec's `/dev` links, which the probe doesn't make.
+- **M3, not a mount: `setsid`.** It lies in part 19 because `container()` calls it before the root is built
+  (`init.rs:349`): 35.9 us per create at one in flight, 62.1 at eight. v6.19's `ksys_setsid` takes `tasklist_lock`
+  for write (`kernel/sys.c:1276`), then makes the new session an autogroup (`kernel/sys.c:1298`):
+  `autogroup_create` calls `sched_create_group` (`kernel/sched/autogroup.c:95`), which allocates a `cfs_rq` and a
+  scheduling entity for every possible CPU (`kernel/sched/fair.c:13623-13624`), and `sched_online_group`
+  (`kernel/sched/autogroup.c:117`), which takes `task_group_lock` (`kernel/sched/core.c:9031`) and then every CPU's
+  runqueue lock in turn (`kernel/sched/fair.c:13654-13657`), on every `setsid`, whether autogroup scheduling is on
+  or not. crun's container init calls it (`src/libcrun/container.c:1131`), and so does runc's
+  (`libcontainer/nsenter/nsexec.c:1195`): every runtime's create pays it, and the probe's 0.104 ms holds none.
+- **M4, the kernel's mount lock.** At v6.19 a `move_mount` takes `namespace_sem` for write (`do_move_mount`,
+  `fs/namespace.c:3517`, through `do_lock_mount`'s `namespace_lock`, `:2747`), and so does a `mount(2)` that makes a
+  filesystem (`do_new_mount_fc`, `:3654`) or moves one (`MS_MOVE`: `do_move_mount_old`, `:3589`). `fsmount` doesn't:
+  its mount goes into an anonymous namespace of its own (`:4351`), and `mount_too_revealing` returns at once in the
+  initial user namespace (`:6167`). `mount_setattr` takes it only to change a propagation (`:4770-4773`), and closing
+  an attached tree's descriptor not at all (`dissolve_on_fput` leaves at `:2303`). So part 19 holds it five times
+  per create at bf77298 (the rootfs at `/r`, `/usr`, `/proc`, `/dev`, the `MS_MOVE`), as the probe does (the
+  rootfs, `/usr`, proc, tmpfs, the `MS_MOVE`).
+- **M5, the tail.** At eight in flight the slowest 1% (a span of 2,235 us or more) spent 2,294 us per create in
+  `move_mount`, 1,489 of it off the CPU, and 611 in `setsid`, all of it on the CPU (writers spinning:
+  `tasklist_lock` is a spinning lock, and so are the runqueue locks). At one in flight the slowest 1% (1,601 us or
+  more) spent 945 us in `move_mount` (918 off the CPU) and 614 in `openat2` (579 off the CPU, preempted). The tail is
+  waits for the mount lock and preemption, and a span of 150 calls lies open to both longer than one of 40.
+- **M6, page faults.** 17 per create in user mode (16 at eight in flight). The init is a fork-like clone of its seed
+  (`sys.rs`'s `clone_sibling`, no `CLONE_VM`), so its first write to each page it still shares with the seed copies
+  that page; fewer allocations and a shallower stack touch fewer.
+
+## 2. What takes it
+
+1. **One descriptor of the root per build** (`inroot::Root`). On the pruned path it is the rootfs tree the agent
+   cloned, an `O_PATH` descriptor of the tree's root mount, which still names it once attached; on the classic path
+   the bound rootfs opened once, and again after a spec mount at `/` itself, which goes over the bind (a lookup of the
+   rootfs's path lands on the top, and the build must too). A path that's there resolves in one `openat2` with
+   `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS` of its normal form ("Treat the directory referred to by dirfd as the
+   root directory while resolving path. Absolute symbolic links are interpreted relative to dirfd.", openat2(2));
+   only a missing one is walked component by component to make what's missing, as before.
+2. **`/dev` opened once** for its defaults. Each node made with `mknodat` under a zero umask, its mode exact, the umask
+   put back after, in place of a `fchmodat` each; each link with `symlinkat`. A name the kernel refuses as there
+   (`EEXIST`, "linkpath already exists", symlink(2)) is then looked for: a node that leads to something in the root is
+   left as it is, one that leads to nothing refused, as before; a link is left whatever is there, as runc leaves it
+   (`libcontainer/rootfs_linux.go:919-923`). The one behaviour this changes: an image whose `/dev` already holds a
+   stream link into `/proc/self/fd` (with no tmpfs mounted over `/dev`) was refused before, the look before making the
+   link following the magic link (`RESOLVE_NO_MAGICLINKS` refuses it with `ELOOP`); it is left as it is now, as runc
+   and crun leave it.
+3. **A bind's source is looked at only when its target is missing** (to make the target a file or a directory), and
+   a mount's propagation is set on the mount's own descriptor, not on its target opened again.
+4. **The pruned path attaches the rootfs on `/` itself**, over the seed's read-only tmpfs, where step 2's `MS_MOVE`
+   from `/r` put it: the same mount tree, one attach and one hold of `namespace_sem` fewer (four per create for the
+   bench's spec), then `fchdir` and `chroot` (part 20). Until its `chroot` the init's own root is the tmpfs's, and it
+   walks no path by name. The seed's empty `r` is unused by the init now; step 2's AC-f still asserts it.
+5. **Masked files share one descriptor** of the container's `/dev/null`.
+6. **`setsid` stays where it is.** OCI runtimes make the container's init a session leader (crun, runc above), and its
+   cost is the kernel's, in part 19 because the init's set-up calls it there; the trace reports it among the calls.
+
+For the bench's spec this makes part 19 about 41 calls, against 150, holding the mount lock four times, against five.
+
+## 3. What would falsify it
+
+- Part 19's pooled p50 on fedora above 0.16 ms after the change, or its calls per create not under 50 in the trace.
+- `oci_box`'s `every_mount_kind_is_in_the_box_as_its_spec_asks` failing on either path after the change, having
+  passed before it.
+- Part 19's p99 at eight in flight with 8,000 idle host threads above 0.5 ms: then the tail is the mount lock's, not
+  the calls', and the next lever is fewer `namespace_sem` holds per lifecycle: the agent's two `open_tree` clones, the
+  init's clone's copy of the namespace, the attaches, the namespace's teardown at exit.
