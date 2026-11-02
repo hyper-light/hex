@@ -54,7 +54,7 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
 } > "$OUT/env.txt"
 NAME=hexbench-createbd-$$
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e PROBE_ONLY \
