@@ -1229,6 +1229,17 @@ fn data_cstr(data: &str) -> Result<Option<std::ffi::CString>, OciError> {
 /// (`/sys/fs/cgroup`), and a box is refused rather than left part-done past this (CLAUDE.md §2, §3).
 const MAX_CGROUP_SUBMOUNTS: usize = 256;
 
+/// The init's mount table is read into a buffer this large to begin with, so a table that fits is read
+/// in one call and an end-of-file: the kernel makes the table's text anew for each read, so a buffer that
+/// starts small and grows, as `read_to_string`'s does, read a 14-mount table in 9 calls and 65 us in goal
+/// 5 plan step 3's trace (`goal5-mounts.md` §4). 64 KiB holds about 400 lines of about 150 bytes.
+const MOUNTINFO_FIRST_READ: usize = 64 * 1024;
+
+/// The most of the mount table read: past it a recursive read-only bind is refused, by name, rather
+/// than its cgroup filesystems left unchecked or the table read without end (CLAUDE.md §2, §3). 16 MiB
+/// holds about 100,000 lines.
+const MAX_MOUNTINFO: u64 = 16 * 1024 * 1024;
+
 /// Each cgroup filesystem a recursive read-only bind carries, remounted read-only. A `mount(2)`
 /// remount changes one mount, not the submounts a recursive bind brought with it, so remounting the
 /// bind's top leaves them with the source's flags. For a rootless box's `/sys` that is the host's
@@ -1244,8 +1255,7 @@ fn remount_cgroupfs_readonly(
 ) -> Result<(), OciError> {
     let top_real = std::fs::read_link(inroot::fd_path(top_fd))
         .map_err(|e| OciError::os("reading the bind's path", e))?;
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|e| OciError::os("reading the mount table", e))?;
+    let mountinfo = read_mountinfo(destination)?;
     let base = destination.trim_end_matches('/');
     let mut seen = 0usize;
     for line in mountinfo.lines() {
@@ -1287,6 +1297,26 @@ fn remount_cgroupfs_readonly(
         )?;
     }
     Ok(())
+}
+
+/// This process's mount table, `/proc/self/mountinfo`, read whole and bounded ([`MOUNTINFO_FIRST_READ`],
+/// [`MAX_MOUNTINFO`]), for the recursive bind at `destination`.
+fn read_mountinfo(destination: &str) -> Result<String, OciError> {
+    use std::io::Read;
+    let file = std::fs::File::open("/proc/self/mountinfo")
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    let mut bytes = Vec::with_capacity(MOUNTINFO_FIRST_READ);
+    file.take(MAX_MOUNTINFO)
+        .read_to_end(&mut bytes)
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    if !u64::try_from(bytes.len()).is_ok_and(|n| n < MAX_MOUNTINFO) {
+        return Err(OciError::Config(format!(
+            "the recursive bind at {destination} needs the mount table read, and it is over \
+             {MAX_MOUNTINFO} bytes"
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| OciError::os("reading the mount table", format!("not UTF-8: {e}")))
 }
 
 /// A `/proc/self/mountinfo` mount point with its escapes (space `\040`, tab `\011`, newline `\012`,
