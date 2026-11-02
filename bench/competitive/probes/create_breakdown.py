@@ -5,6 +5,7 @@
   create_breakdown.py check <run dir> <prefix>
   create_breakdown.py summarize <run dir>
   create_breakdown.py switch <trace file> <trace stats> [seam result json]
+  create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h>
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
 (exec_breakdown.py's).
@@ -726,6 +727,187 @@ def switch(trace, stats, seam_json=None):
     return 0 if ok else 1
 
 
+# Goal 5 plan step 3's per-call trace (create_breakdown_inside.sh's mounts_trace): raw_syscalls' entries and exits,
+# which carry a call's number and its arguments in hex, and each hex process's switches off and on the CPU and its
+# page faults in user mode.
+RAW_ENTER = re.compile(r"^sys_enter: NR (?P<nr>-?\d+) \((?P<args>[0-9a-f, ]*)\)\s*$")
+RAW_EXIT = re.compile(r"^sys_exit: NR (?P<nr>-?\d+) = (?P<ret>-?\d+)\s*$")
+SWITCH = re.compile(r"^sched_switch: prev_comm=.*? prev_pid=(?P<prev>\d+) prev_prio=-?\d+ prev_state=(?P<state>\S+)"
+                    r" ==> next_comm=.*? next_pid=(?P<next>\d+) next_prio=-?\d+\s*$")
+# The calls part 19 opens and ends on, and the two it attaches a mount with (x86_64's numbers,
+# arch/x86/entry/syscalls/syscall_64.tbl), so the cut needs no header; the header names the rest.
+NR_SETNS, NR_CHROOT, NR_PIVOT_ROOT, NR_MOUNT, NR_MOVE_MOUNT, NR_FSCONFIG = 308, 161, 155, 165, 429, 431
+ATTACHES = (NR_MOUNT, NR_MOVE_MOUNT)
+# fsconfig's commands (include/uapi/linux/mount.h) and mount(2)'s flags that tell its kinds apart
+# (include/uapi/linux/mount.h: MS_REMOUNT, MS_BIND, MS_MOVE, MS_REC and the propagation flags), so a call's
+# kind is named: fsconfig's option set from its create, a bind from a move or a remount.
+FSCONFIG_CMDS = {0: "flag", 1: "string", 2: "binary", 3: "path", 4: "path_empty", 5: "fd", 6: "create",
+                 7: "reconfigure", 8: "create_excl"}
+MS_REMOUNT, MS_BIND, MS_MOVE, MS_PROPAGATION = 0x20, 0x1000, 0x2000, 0x10000 | 0x20000 | 0x40000 | 0x80000
+
+
+def kind_of(nr, args):
+    """A call's kind where its number alone doesn't say what part 19 does with it."""
+    if nr == NR_FSCONFIG and len(args) > 1:
+        return FSCONFIG_CMDS.get(args[1], str(args[1]))
+    if nr == NR_MOUNT and len(args) > 3:
+        f = args[3]
+        return ("move" if f & MS_MOVE else "remount" if f & MS_REMOUNT else "bind" if f & MS_BIND
+                else "propagation" if f & MS_PROPAGATION else "new")
+    return None
+
+
+def syscall_names(header):
+    """Each x86_64 call's name by its number, from asm/unistd_64.h's `#define __NR_<name> <nr>` lines."""
+    names = {}
+    try:
+        with open(header) as f:
+            for line in f:
+                m = re.match(r"#define __NR_(\w+)\s+(\d+)\s*$", line)
+                if m:
+                    names[int(m[2])] = m[1]
+    except OSError:
+        pass
+    return names
+
+
+def mounts(trace, stats, header):
+    """Goal 5 plan step 3: part 19 of each create, call by call. The span is the switch reader's, from the
+    exit of the init's join of the network namespace made ahead (setns with CLONE_NEWNET) to the entry of its
+    chroot (the pruned path) or pivot_root (the classic one), per init pid. Within it each call's time runs from
+    its entry to its exit, its time off the CPU included; the rest is the init's own code between calls (its
+    page faults among it, which are no calls) and the time it spent off the CPU there. Each mount's share is
+    the calls from the one after the previous attach (mount or move_mount) to its own attach; what follows the
+    last attach (on the pruned path the devices, the links and the switch's chdir) is a share of its own. Every
+    figure is a mean per create but the span's, whose p50, p99 and max are its own, so the trace's microsecond
+    timestamps' rounding averages out over the creates; the slowest 1% are shown the same way beside them, so
+    what a tail is made of shows. A lost event is refused, as in switch."""
+    names = syscall_names(header)
+    name = lambda call: (names.get(call[0], f"nr {call[0]}") + (f" ({call[1]})" if call[1] else ""))
+    read, unread = 0, 0
+    cur, window, off, creates = {}, {}, {}, []
+    with open(trace, errors="replace") as f:
+        for line in f:
+            m = eb.LINE.match(line)
+            if not m:
+                unread += line.strip() != "" and not line.startswith("#")
+                continue
+            read += 1
+            ts, pid, body = int(m["s"]) * 1_000_000 + int(m["us"]), int(m["pid"]), m["body"]
+            if (e := RAW_ENTER.match(body)):
+                nr = int(e["nr"])
+                w = window.get(pid)
+                if w is not None and nr in (NR_CHROOT, NR_PIVOT_ROOT):
+                    w["end"], w["ends"] = ts, name((nr, None))
+                    creates.append(window.pop(pid))
+                    continue
+                args = [int(a, 16) for a in e["args"].replace(" ", "").split(",") if a]
+                cur[pid] = {"nr": nr, "t": ts, "args": args, "run": 0, "blocked": 0}
+            elif (e := RAW_EXIT.match(body)):
+                nr, c = int(e["nr"]), cur.pop(pid, None)
+                if c is None or c["nr"] != nr:
+                    continue
+                w = window.get(pid)
+                if w is not None:
+                    w["calls"].append(((nr, kind_of(nr, c["args"])), ts - c["t"], c["run"], c["blocked"]))
+                    if nr in ATTACHES:
+                        w["attaches"].append(len(w["calls"]))
+                if nr == NR_SETNS and int(e["ret"]) == 0 and len(c["args"]) > 1 and c["args"][1] & CLONE_NEWNET:
+                    window[pid] = {"start": ts, "calls": [], "attaches": [], "user_run": 0, "user_blocked": 0,
+                                   "faults": 0}
+            elif (e := SWITCH.match(body)):
+                # Off the CPU runnable (prev_state R, preempted) or not (blocked: waiting on a lock or I/O).
+                prev, nxt = int(e["prev"]), int(e["next"])
+                if prev in window:
+                    off[prev] = (ts, "run" if e["state"].startswith("R") else "blocked")
+                if nxt in off:
+                    t0, how = off.pop(nxt)
+                    if nxt in cur:
+                        cur[nxt][how] += ts - t0
+                    elif nxt in window:
+                        window[nxt]["user_" + how] += ts - t0
+            elif body.startswith("page_fault_user:"):
+                if pid in window:
+                    window[pid]["faults"] += 1
+            else:
+                unread += 1
+    n_lost = eb.lost(stats)
+    if not creates:
+        print("refusing: no part 19 found (no init joined a network namespace made ahead and then switched)",
+              file=sys.stderr)
+        return 1
+    for w in creates:
+        w["span"] = w["end"] - w["start"]
+        w["sys"] = sum(c[1] for c in w["calls"])
+        w["sys_run"] = sum(c[2] for c in w["calls"])
+        w["sys_blocked"] = sum(c[3] for c in w["calls"])
+        w["user"] = w["span"] - w["sys"]
+        w["shares"], last = [], 0
+        for b in w["attaches"] + [len(w["calls"])]:
+            seg = w["calls"][last:b]
+            w["shares"].append(([c[0] for c in seg], sum(c[1] for c in seg)))
+            last = b
+    spans = sorted(w["span"] for w in creates)
+    cut = spans[max(0, len(spans) - max(1, len(spans) // 100))]
+    tail = [w for w in creates if w["span"] >= cut]
+
+    def table(ws):
+        n, per = len(ws), {}
+        for w in ws:
+            for call, d, run, blocked in w["calls"]:
+                p = per.setdefault(call, [0, 0, 0, 0])
+                p[0] += 1
+                p[1] += d
+                p[2] += run
+                p[3] += blocked
+        mean = lambda key: sum(w[key] for w in ws) / n
+        out = ["| call | calls per create | us per create | us per call | off the CPU in it, us per create: "
+               "preempted / blocked |", "|---|---|---|---|---|"]
+        for call, (k, d, run, blocked) in sorted(per.items(), key=lambda kv: -kv[1][1]):
+            out.append(f"| {name(call)} | {k / n:.1f} | {d / n:.1f} | {d / k:.2f} | {run / n:.1f} / "
+                       f"{blocked / n:.1f} |")
+        return out + ["", f"- Mean span {mean('span'):.1f} us: in calls {mean('sys'):.1f} (off the CPU in them "
+                          f"{mean('sys_run'):.1f} preempted, {mean('sys_blocked'):.1f} blocked), the init's own "
+                          f"code between them {mean('user'):.1f} (off the CPU there {mean('user_run'):.1f} "
+                          f"preempted, {mean('user_blocked'):.1f} blocked); "
+                          f"{sum(len(w['calls']) for w in ws) / n:.1f} calls and {mean('faults'):.1f} page "
+                          f"faults in user mode per create."]
+
+    def shares(ws):
+        most = max(len(w["shares"]) for w in ws)
+        out = ["| share | creates | us in its calls per create | its calls, in order (the first create's) |",
+               "|---|---|---|---|"]
+        for k in range(most):
+            have = [w for w in ws if len(w["shares"]) > k]
+            label = f"to attach {k + 1}" if k < most - 1 else "after the last attach"
+            calls = have[0]["shares"][k][0]
+            listed = ", ".join(name(c) for c in calls[:48]) + (" ..." if len(calls) > 48 else "")
+            out.append(f"| {label} | {len(have)} | {sum(w['shares'][k][1] for w in have) / len(have):.1f} "
+                       f"| {listed} |")
+        return out
+
+    print("\n".join(
+        [f"# Part 19, call by call ({os.path.basename(trace)})", "",
+         f"{len(creates)} creates, each from its init's join of the network namespace made ahead to its "
+         f"{' or '.join(sorted({w['ends'] for w in creates}))}: span p50 {eb.pct(spans, 0.5)} us, "
+         f"p99 {eb.pct(spans, 0.99)}, max {spans[-1]}. {read} events read, {unread} lines not read as events, "
+         f"{n_lost} lost.", "", "## Every create", ""]
+        + table(creates) + ["", "## Each mount's share (every create)", ""] + shares(creates)
+        + ["", f"## The slowest 1% ({len(tail)} creates, span {cut} us or more)", ""] + table(tail)))
+    n = len(creates)
+    with open(os.path.splitext(trace)[0] + ".summary.json", "w") as f:
+        json.dump({"creates": n, "span_p50_us": eb.pct(spans, 0.5), "span_p99_us": eb.pct(spans, 0.99),
+                   "span_max_us": spans[-1], "lost": n_lost, "unread": unread,
+                   "calls_per_create": sum(len(w["calls"]) for w in creates) / n,
+                   "in_calls_us_per_create": sum(w["sys"] for w in creates) / n,
+                   "between_calls_us_per_create": sum(w["user"] for w in creates) / n,
+                   "faults_per_create": sum(w["faults"] for w in creates) / n}, f, indent=1)
+    if n_lost:
+        print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     a = sys.argv[1:]
     if len(a) == 4 and a[0] == "drain":
@@ -737,6 +919,8 @@ def main():
         return summarize(a[1])
     if a[0] == "switch" and len(a) in (3, 4):
         return switch(a[1], a[2], a[3] if len(a) == 4 else None)
+    if a[0] == "mounts" and len(a) == 4:
+        return mounts(a[1], a[2], a[3])
     print(__doc__, file=sys.stderr)
     return 2
 

@@ -153,6 +153,43 @@ switch() {
   return $rc
 }
 
+# mounts_trace <out name> <lifecycles> <concurrency>: goal 5 plan step 3's per-call trace of the init's mounts. A
+# throughput phase at <concurrency> creates in flight with every system call the hex processes make traced by
+# raw_syscalls, which records a call's number and arguments and fetches no string (the syscalls subsystem's events
+# fetch each path, about 4 us a time, which would charge the very calls this times), with their switches off and on
+# the CPU and their page faults in user mode. It records for the whole phase, as switch does. create_breakdown.py
+# mounts cuts part 19 of each create out of it, from the init's join of the network namespace made ahead to its
+# chroot (or pivot_root), call by call and mount by mount; the calls' numbers are named from the host's
+# asm/unistd_64.h, which the container sees under /usr.
+mounts_trace() {
+  local name=$1 lc=$2 conc=$3 rc=0 ev f
+  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch"
+  [ -d "$T/events/exceptions/page_fault_user" ] && MT="$MT exceptions/page_fault_user"
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
+    || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
+  for ev in $MT; do
+    case $ev in
+      sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
+      *) f='comm == "hex"' ;;
+    esac
+    { echo "$f" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
+      || { echo "event $ev couldn't be filtered and enabled" >&2; untrace; return 1; }
+  done
+  rm -f /run/hexcb.stop
+  python3 -I /opt/lab/probes/create_breakdown.py drain "$I/trace_pipe" "$OUT/$name.txt" /run/hexcb.stop &
+  local drain=$!
+  echo 1 > "$I/tracing_on"
+  HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/$name.json" 0 0 "$lc" \
+    /opt/bin/hex /run/bundle-sleep /run/bundle-true 2>&1 | tee -a "$OUT/mounts.log" || rc=1
+  echo 0 > "$I/tracing_on"
+  touch /run/hexcb.stop
+  wait "$drain" || rc=1
+  for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
+  for ev in $MT; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
+  untrace
+  return $rc
+}
+
 # Where the node's records and the containers' state go (seam_oci keeps them under $HOME/.cache/hex-t7/ociseam, as
 # in the OCI pass): their filesystem decides what an fsync costs.
 mkdir -p "$HOME/.cache/hex-t7/ociseam"
@@ -161,7 +198,8 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
   echo "inside: the node's state under $HOME/.cache/hex-t7/ociseam, on $(stat -f -c %T "$HOME/.cache/hex-t7/ociseam")" \
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
-  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0}"
+  echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
@@ -206,6 +244,25 @@ if [ "${AC_E:-0}" -gt 0 ]; then
   python3 -I /opt/lab/probes/create_breakdown.py switch "$OUT/switch.txt" "$OUT/switch.stats" "$OUT/switch.json" | tee "$OUT/switch.result"
   rc=${PIPESTATUS[0]}
   echo "AC-e done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"
+  echo done > "$OUT/inside.done"
+  exit "$rc"
+fi
+
+# MOUNTS (goal 5 plan step 3): a focused run of its own, not the rounds. For each concurrency in MOUNTS_CONC (1 and
+# 8), one throughput phase of MOUNTS lifecycles with every call of the hex processes traced (mounts_trace), cut by
+# create_breakdown.py mounts into part 19's calls, the time between them, the time off the CPU and the page faults,
+# by mount. No libcrun, no rounds.
+if [ "${MOUNTS:-0}" -gt 0 ]; then
+  rc=0
+  for conc in ${MOUNTS_CONC:-1 8}; do
+    echo "mounts: every call traced, $conc in flight, $MOUNTS lifecycles, load $(cut -d' ' -f1-3 /proc/loadavg)"
+    mounts_trace "mounts.c$conc" "$MOUNTS" "$conc" \
+      || { echo "refusing: the mounts trace at $conc failed ($OUT/mounts.log)" >&2; rc=6; continue; }
+    python3 -I /opt/lab/probes/create_breakdown.py mounts "$OUT/mounts.c$conc.txt" "$OUT/mounts.c$conc.stats" \
+      /usr/include/asm/unistd_64.h > "$OUT/mounts.c$conc.md" || rc=7
+    cat "$OUT/mounts.c$conc.md"
+  done
+  echo "mounts done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"
   echo done > "$OUT/inside.done"
   exit "$rc"
 fi
