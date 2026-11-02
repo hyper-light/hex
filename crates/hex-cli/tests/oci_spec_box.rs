@@ -193,9 +193,10 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     recovery_removes_a_half_made_bundle(&lab, own);
 }
 
-/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace is a read-only tmpfs,
-/// holding only an empty `r`, on the namespace's root, and nothing of the host: no proc, sysfs or
-/// cgroup2. Its mountinfo lists the tmpfs alone, by the kernel's design. The namespace's root, the
+/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace is a read-only tmpfs
+/// holding nothing, on the namespace's root, and nothing of the host: no proc, sysfs or cgroup2. Since
+/// plan step 3 the init attaches the container's root on the tmpfs's own root, so the tmpfs needs no
+/// directory to attach it at. Its mountinfo lists the tmpfs alone, by the kernel's design. The namespace's root, the
 /// tmpfs's parent, lies outside the seed's root, and the kernel lists no mount it can't reach from the
 /// task's root: v6.19 `show_mountinfo` (fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail
 /// will give SEQ_SKIP on this") skips what `seq_path_root` can't name (fs/seq_file.c:517-519), and
@@ -282,9 +283,7 @@ fn pruned_seed_lists_its_read_only_root_tmpfs_alone() {
         .expect("the seed's root")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(root, ["r"], "the seed's root holds only r");
-    let r = std::fs::read_dir(format!("/proc/{seed}/root/r")).expect("the seed's r");
-    assert_eq!(r.count(), 0, "the seed's r is empty");
+    assert!(root.is_empty(), "the seed's root holds nothing: {root:?}");
     eprintln!(
         "AC-f: the pruned create seed (pid {seed}) lists one mount, its read-only root tmpfs:"
     );

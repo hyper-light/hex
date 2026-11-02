@@ -10,8 +10,8 @@
 //! - `e1` the classic chroot escape (`mkdir x; chroot x; chdir ..` ×16; `chroot .`): expect the root stays
 //!   the rootfs, the marker unreachable (`..` can't climb a stack of root mounts, f67).
 //! - `e2` unmount the root, then `setns` into the box's own mount namespace, which roots the caller at the
-//!   namespace's topmost mount: expect only the seed's empty read-only tmpfs beneath, the marker
-//!   unreachable (f69, f78) — where a root in a copy of the host's namespace would reach the host.
+//!   namespace's topmost mount: expect only the seed's read-only tmpfs beneath, holding nothing, the
+//!   marker unreachable (f69, f78) — where a root in a copy of the host's namespace would reach the host.
 //! - `e3` mask `/proc/kcore`, then mount a fresh proc in a nested user/mount/pid namespace: expect it
 //!   refused, the container's proc not being fully visible and the pruned namespace holding no other
 //!   (`mnt_already_visible`, f68).
@@ -37,6 +37,18 @@ fn say(msg: &str) {
 /// Whether `marker` — a host path outside any rootfs — can be opened, meaning the box has reached the host.
 fn reachable(marker: &str) -> bool {
     rustix::fs::open(marker, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()).is_ok()
+}
+
+/// The most names of `/` that `e2` reports: one is enough to fail it, a few say what was there (§2).
+const BENEATH_NAMES: usize = 8;
+
+/// The names `/` holds, at most [`BENEATH_NAMES`] of them, for `e2` after it unmounted the root.
+fn beneath() -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir("/")?.take(BENEATH_NAMES) {
+        names.push(entry?.file_name().to_string_lossy().into_owned());
+    }
+    Ok(names)
 }
 
 /// Runs the escape `mode` against `marker`. Returns the process exit code: 0 when the box held (secure),
@@ -97,10 +109,25 @@ pub fn attempt(mode: &str, marker: &str) -> u8 {
             }
             if reachable(marker) {
                 say("E2 umount / then setns: marker REACHED (insecure)");
-                1
-            } else {
-                say("E2 umount / then setns: marker not reached (secure)");
-                0
+                return 1;
+            }
+            // Beneath the container's root lies only the seed's tmpfs, which holds nothing: a name there
+            // is something beneath the root that a box could reach.
+            match beneath() {
+                Ok(names) if names.is_empty() => {
+                    say("E2 umount / then setns: marker not reached, / holds nothing (secure)");
+                    0
+                }
+                Ok(names) => {
+                    say(&format!(
+                        "E2 umount / then setns: / holds {names:?} beneath the root (insecure)"
+                    ));
+                    1
+                }
+                Err(e) => {
+                    say(&format!("E2 umount / then setns: listing / failed ({e})"));
+                    2
+                }
             }
         }
         "e3" => {
