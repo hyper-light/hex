@@ -94,7 +94,14 @@ moves a record such a node left in the state directory to its place. The oci run
 wrote, so create reads none back, and the box's info is what create made. The record was what claimed a box's id
 while it was made; now its cgroup does, made first (mkdir is atomic): a create of an id another create has taken
 since its check fails at that mkdir, having made nothing, and is refused as `Exists` without removing anything,
-where before such a create's failure scrubbed the other's box.
+where before such a create's failure scrubbed the other's box. And a box's create or delete takes the box's turn in
+the node's memory (`crates/hex-node/src/turns.rs`, the record store's per-box turns, shared): a second create of its
+id, or a delete, waits for the create under way and then finds the box made or not. So a second create is refused
+as `Exists` only once a box was made, never while a create that will fail is under way, and a delete removes the box
+the create made rather than answer no such box while it's being made, which would leave a box its caller thinks gone.
+The wait ends at 120 s (`TURN_PATIENCE`, a delete's longest wait for a box to empty and its directories to go),
+refused past it by type, and at most `MAX_BOXES` turns are taken at once, `Exhausted` past that; other boxes'
+creates and deletes never wait.
 
 **Sources.**
 - rename(2), DESCRIPTION: the target is "atomically replaced, so that there is no point at which another

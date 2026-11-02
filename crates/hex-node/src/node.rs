@@ -46,7 +46,7 @@ use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
 use crate::supervise::{self, Live, Supervisor};
-use crate::turns::Turns;
+use crate::turns::{Turn, Turns};
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -913,6 +913,8 @@ impl Runtime for Node {
         if let ClassSpec::Oci(oci) = &spec.class {
             oci.check()?;
         }
+        // Held until the create is done, made or scrubbed: a box being made has no record yet.
+        let _turn: Turn<'_> = self.turns.take(&spec.id)?;
         // A cgroup under either root is a box's, recorded or not: a failed create's scrub would end it.
         if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
@@ -1041,6 +1043,9 @@ impl Runtime for Node {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        // After a create or delete of the box under way, so it removes what that one made, or finds it
+        // gone, and scrubs nothing it's doing.
+        let _turn: Turn<'_> = self.turns.take(id)?;
         let record = self.record(id)?;
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
