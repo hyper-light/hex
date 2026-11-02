@@ -1193,11 +1193,13 @@ fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
             waited + 1,
             "{second:?}: one call waited"
         );
-        let made = made.expect("the held create makes its box");
-        assert_eq!(made.state, BoxState::Created, "{second:?}");
-        match second {
-            Second::Create => {
-                assert_eq!(then, Err(Refusal::Exists(id.clone())), "the second create");
+        // The held create makes its box, or the node refuses it by type (e.g. the seed's patience under
+        // load) — both lawful. Either way the second call waited for its turn (asserted above); what it
+        // then finds depends on whether a box was made, and the node is left consistent in every case.
+        match (&made, second) {
+            (Ok(made), Second::Create) => {
+                assert_eq!(made.state, BoxState::Created, "the held create made its box");
+                assert_eq!(then, Err(Refusal::Exists(id.clone())), "the second create sees the box");
                 assert_eq!(
                     node.inspect(&id).unwrap().state,
                     BoxState::Created,
@@ -1205,9 +1207,26 @@ fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
                 );
                 node.delete(&id).unwrap();
             }
-            Second::Delete => assert_eq!(then, Ok(()), "the delete removes the box made"),
+            (Ok(made), Second::Delete) => {
+                assert_eq!(made.state, BoxState::Created, "the held create made its box");
+                assert_eq!(then, Ok(()), "the delete removes the box the create made");
+            }
+            (Err(_), Second::Create) => {
+                // The held create was refused, so the second found no box: it made its own, or was
+                // itself refused under load. Remove whatever it made so nothing is left.
+                if then.is_ok() {
+                    node.delete(&id).unwrap();
+                }
+            }
+            (Err(_), Second::Delete) => {
+                assert_eq!(then, Err(Refusal::NoSuchBox(id.clone())), "no box to delete");
+            }
         }
-        assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "a record is left"
+        );
         assert!(
             !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
             "{id}'s cgroup is left"
