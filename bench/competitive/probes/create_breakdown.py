@@ -5,7 +5,7 @@
   create_breakdown.py check <run dir> <prefix>
   create_breakdown.py summarize <run dir>
   create_breakdown.py switch <trace file> <trace stats> [seam result json]
-  create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h>
+  create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h> [pruned|classic]
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
 (exec_breakdown.py's).
@@ -744,6 +744,13 @@ ATTACHES = (NR_MOUNT, NR_MOVE_MOUNT)
 FSCONFIG_CMDS = {0: "flag", 1: "string", 2: "binary", 3: "path", 4: "path_empty", 5: "fd", 6: "create",
                  7: "reconfigure", 8: "create_excl"}
 MS_REMOUNT, MS_BIND, MS_MOVE, MS_PROPAGATION = 0x20, 0x1000, 0x2000, 0x10000 | 0x20000 | 0x40000 | 0x80000
+# The classic path's first call of its root, making every mount private (setup_rootfs's `mount_change("/",
+# PRIVATE | REC)`): where its mounts begin when no join of a network namespace made ahead opened the span (the
+# shim's child, whose shim joined it). A seed makes its mounts private too, pruning once at start, so a classic
+# span opens only in a process a traced hex process forked or cloned (the trace's sched_process_fork), which a
+# seed, the node agent's child, never is.
+MS_REC_PRIVATE = 0x4000 | 0x40000
+FORK = re.compile(r"^sched_process_fork: comm=.*? pid=(?P<parent>\d+) child_comm=.*? child_pid=(?P<child>\d+)\s*$")
 
 
 def kind_of(nr, args):
@@ -771,10 +778,12 @@ def syscall_names(header):
     return names
 
 
-def mounts(trace, stats, header):
+def mounts(trace, stats, header, path="pruned"):
     """Goal 5 plan step 3: part 19 of each create, call by call. The span is the switch reader's, from the
     exit of the init's join of the network namespace made ahead (setns with CLONE_NEWNET) to the entry of its
-    chroot (the pruned path) or pivot_root (the classic one), per init pid. Within it each call's time runs from
+    chroot (the pruned path) or pivot_root (the classic one), per init pid; a classic init whose shim joined the
+    namespace (`MOUNTS_PATH=classic`, `path` classic) has its span from the entry of its first mount, making its
+    mounts private. Within it each call's time runs from
     its entry to its exit, its time off the CPU included; the rest is the init's own code between calls (its
     page faults among it, which are no calls) and the time it spent off the CPU there. Each mount's share is
     the calls from the one after the previous attach (mount or move_mount) to its own attach; what follows the
@@ -785,7 +794,7 @@ def mounts(trace, stats, header):
     names = syscall_names(header)
     name = lambda call: (names.get(call[0], f"nr {call[0]}") + (f" ({call[1]})" if call[1] else ""))
     read, unread = 0, 0
-    cur, window, off, creates = {}, {}, {}, []
+    cur, window, off, creates, born = {}, {}, {}, [], set()
     with open(trace, errors="replace") as f:
         for line in f:
             m = eb.LINE.match(line)
@@ -802,6 +811,10 @@ def mounts(trace, stats, header):
                     creates.append(window.pop(pid))
                     continue
                 args = [int(a, 16) for a in e["args"].replace(" ", "").split(",") if a]
+                if (path == "classic" and nr == NR_MOUNT and pid in born and pid not in window
+                        and len(args) > 3 and args[3] == MS_REC_PRIVATE):
+                    window[pid] = {"start": ts, "opens": "mount (private)", "calls": [], "attaches": [],
+                                   "user_run": 0, "user_blocked": 0, "faults": 0}
                 cur[pid] = {"nr": nr, "t": ts, "args": args, "run": 0, "blocked": 0}
             elif (e := RAW_EXIT.match(body)):
                 nr, c = int(e["nr"]), cur.pop(pid, None)
@@ -813,8 +826,8 @@ def mounts(trace, stats, header):
                     if nr in ATTACHES:
                         w["attaches"].append(len(w["calls"]))
                 if nr == NR_SETNS and int(e["ret"]) == 0 and len(c["args"]) > 1 and c["args"][1] & CLONE_NEWNET:
-                    window[pid] = {"start": ts, "calls": [], "attaches": [], "user_run": 0, "user_blocked": 0,
-                                   "faults": 0}
+                    window[pid] = {"start": ts, "opens": "setns", "calls": [], "attaches": [], "user_run": 0,
+                                   "user_blocked": 0, "faults": 0}
             elif (e := SWITCH.match(body)):
                 # Off the CPU runnable (prev_state R, preempted) or not (blocked: waiting on a lock or I/O).
                 prev, nxt = int(e["prev"]), int(e["next"])
@@ -826,6 +839,8 @@ def mounts(trace, stats, header):
                         cur[nxt][how] += ts - t0
                     elif nxt in window:
                         window[nxt]["user_" + how] += ts - t0
+            elif (e := FORK.match(body)):
+                born.add(int(e["child"]))
             elif body.startswith("page_fault_user:"):
                 if pid in window:
                     window[pid]["faults"] += 1
@@ -888,8 +903,9 @@ def mounts(trace, stats, header):
 
     print("\n".join(
         [f"# Part 19, call by call ({os.path.basename(trace)})", "",
-         f"{len(creates)} creates, each from its init's join of the network namespace made ahead to its "
-         f"{' or '.join(sorted({w['ends'] for w in creates}))}: span p50 {eb.pct(spans, 0.5)} us, "
+         f"{len(creates)} creates, each from its init's "
+         f"{' or '.join(sorted({'join of the network namespace made ahead' if w['opens'] == 'setns' else 'first mount, making its mounts private' for w in creates}))}"
+         f" to its {' or '.join(sorted({w['ends'] for w in creates}))}: span p50 {eb.pct(spans, 0.5)} us, "
          f"p99 {eb.pct(spans, 0.99)}, max {spans[-1]}. {read} events read, {unread} lines not read as events, "
          f"{n_lost} lost.", "", "## Every create", ""]
         + table(creates) + ["", "## Each mount's share (every create)", ""] + shares(creates)
@@ -919,8 +935,8 @@ def main():
         return summarize(a[1])
     if a[0] == "switch" and len(a) in (3, 4):
         return switch(a[1], a[2], a[3] if len(a) == 4 else None)
-    if a[0] == "mounts" and len(a) == 4:
-        return mounts(a[1], a[2], a[3])
+    if a[0] == "mounts" and len(a) in (4, 5) and (len(a) == 4 or a[4] in ("pruned", "classic")):
+        return mounts(*a[1:])
     print(__doc__, file=sys.stderr)
     return 2
 

@@ -9,8 +9,8 @@
 # and seam_oci from before a change, whose seam rounds then run in every round beside the given ones (`before`), so a
 # change's ratio is each run's own and its rounds meet the same host; IDLE_AB, that many idle threads around a seam
 # and a libcrun item in every round (`seam_idle`, `libcrun_idle`), the threads' ratio the run's own the same way;
-# IDLE_THREADS, EXTRA_MOUNTS and AC_E, goal 5 plan step 2's (below); MOUNTS and MOUNTS_CONC, plan step 3's per-call
-# trace of the init's mounts (create_breakdown_inside.sh's mounts_trace); LOAD_GATE=0 skips the wait for
+# IDLE_THREADS, EXTRA_MOUNTS and AC_E, goal 5 plan step 2's (below); MOUNTS, MOUNTS_CONC and MOUNTS_PATH, plan step 3's
+# per-call trace of the init's mounts (create_breakdown_inside.sh's mounts_trace); LOAD_GATE=0 skips the wait for
 # load under 2, as host.sh allows: this probe's comparisons are within one run (the parts against their creates,
 # Hex's create against libcrun's), which cancel other people's CPU load. BENCH_HOST_OK names another host, as
 # host.sh takes it.
@@ -90,7 +90,7 @@ trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$H
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done
