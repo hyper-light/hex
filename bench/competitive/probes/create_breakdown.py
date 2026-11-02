@@ -739,6 +739,7 @@ SWITCH = re.compile(r"^sched_switch: prev_comm=.*? prev_pid=(?P<prev>\d+) prev_p
 # The calls part 19 opens and ends on, and the two it attaches a mount with (x86_64's numbers,
 # arch/x86/entry/syscalls/syscall_64.tbl), so the cut needs no header; the header names the rest.
 NR_SETNS, NR_CHROOT, NR_PIVOT_ROOT, NR_MOUNT, NR_MOVE_MOUNT, NR_FSCONFIG = 308, 161, 155, 165, 429, 431
+NR_CLONE, NR_CLONE3 = 56, 435
 ATTACHES = (NR_MOUNT, NR_MOVE_MOUNT)
 # fsconfig's commands (include/uapi/linux/mount.h) and mount(2)'s flags that tell its kinds apart
 # (include/uapi/linux/mount.h: MS_REMOUNT, MS_BIND, MS_MOVE, MS_REC and the propagation flags), so a call's
@@ -746,17 +747,23 @@ ATTACHES = (NR_MOUNT, NR_MOVE_MOUNT)
 FSCONFIG_CMDS = {0: "flag", 1: "string", 2: "binary", 3: "path", 4: "path_empty", 5: "fd", 6: "create",
                  7: "reconfigure", 8: "create_excl"}
 MS_REMOUNT, MS_BIND, MS_MOVE, MS_PROPAGATION = 0x20, 0x1000, 0x2000, 0x10000 | 0x20000 | 0x40000 | 0x80000
-# The classic path's first call of its root, making every mount private (setup_rootfs's `mount_change("/",
-# PRIVATE | REC)`): where its mounts begin when no join of a network namespace made ahead opened the span (the
-# shim's child, whose shim joined it). A seed makes its mounts private too, pruning once at start, so a classic
-# span opens only in a process a traced hex process forked or cloned (the trace's sched_process_fork), which a
-# seed, the node agent's child, never is.
+# The classic path's span opens where the create breakdown's part 23 does (the shim path's, its part 19): at the
+# init's first run, its return from the shim's clone, so the calls before its mounts (the exec FIFO's directory
+# opened, `setsid`) are among its calls as they are in that part. Failing that return, at the first call of its
+# root, making every mount private (setup_rootfs's `mount_change("/", PRIVATE | REC)`). A seed makes its mounts
+# private too, pruning once at start, so a classic span opens only in a process a traced hex process forked or
+# cloned (the trace's sched_process_fork), which a seed, the node agent's child, never is.
 MS_REC_PRIVATE = 0x4000 | 0x40000
 FORK = re.compile(r"^sched_process_fork: comm=.*? pid=(?P<parent>\d+) child_comm=.*? child_pid=(?P<child>\d+)\s*$")
 # What took an init's CPU: a softirq (ksoftirqd's, or one run on the init as an interrupt returned) by its action,
 # and a kworker's work item by its function.
 SOFTIRQ = re.compile(r"^softirq_(?P<edge>entry|exit): vec=\d+ \[action=(?P<action>\w+)\]\s*$")
 WORK = re.compile(r"^workqueue_execute_(?P<edge>start|end): work struct (?P<work>\w+): function (?P<function>\S+)\s*$")
+
+
+# How each span opened, for the report's first line.
+OPENS = {"setns": "join of the network namespace made ahead", "first run": "first run, its return from the clone",
+         "mount (private)": "first mount, making its mounts private"}
 
 
 def kind_of(nr, args):
@@ -842,6 +849,11 @@ def mounts(trace, stats, header, path="pruned"):
                 cur[pid] = {"nr": nr, "t": ts, "args": args, "run": 0, "blocked": 0}
             elif (e := RAW_EXIT.match(body)):
                 nr, c = int(e["nr"]), cur.pop(pid, None)
+                if (path == "classic" and c is None and nr in (NR_CLONE, NR_CLONE3) and int(e["ret"]) == 0
+                        and pid in born and pid not in window):
+                    window[pid] = {"start": ts, "opens": "first run", "calls": [], "attaches": [], "user_run": 0,
+                                   "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {}}
+                    continue
                 if c is None or c["nr"] != nr:
                     continue
                 w = window.get(pid)
@@ -946,7 +958,7 @@ def mounts(trace, stats, header, path="pruned"):
     print("\n".join(
         [f"# Part 19, call by call ({os.path.basename(trace)})", "",
          f"{len(creates)} creates, each from its init's "
-         f"{' or '.join(sorted({'join of the network namespace made ahead' if w['opens'] == 'setns' else 'first mount, making its mounts private' for w in creates}))}"
+         f"{' or '.join(sorted({OPENS[w['opens']] for w in creates}))}"
          f" to its {' or '.join(sorted({w['ends'] for w in creates}))}: span p50 {eb.pct(spans, 0.5)} us, "
          f"p99 {eb.pct(spans, 0.99)}, max {spans[-1]}. {read} events read, {unread} lines not read as events, "
          f"{n_lost} lost.", "", "## Every create", ""]
