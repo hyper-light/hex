@@ -190,9 +190,9 @@ For the bench's spec this makes part 19 about 41 calls, against 150, holding the
 - The classic path's part 19 (the shim path's part 23) above 0.16 ms pooled p50 on fedora with the table read gone;
   or `listmount` and `statmount` finding other cgroup filesystems beneath a bind than the table lists for it (the
   test that runs both over the host's `/sys`), which would mean 6.8's walk isn't the table's.
-- Part 19's p99 at eight in flight with 8,000 idle host threads above 0.5 ms: then the tail is the mount lock's, not
-  the calls', and the next lever is fewer `namespace_sem` holds per lifecycle: the agent's two `open_tree` clones, the
-  init's clone's copy of the namespace, the attaches, the namespace's teardown at exit.
+- Part 19's p99 at eight in flight with 8,000 idle host threads above 0.5 ms: fedora's is (§5), and its traces put
+  the tail on the CPU, not on the mount lock or the calls (M7): the init waits runnable behind the host's other work,
+  so the levers are a shorter part 19 and fewer points where it gives the CPU away (`setsid`'s place).
 
 ## 4. The change in the lab (adacachy, not of record)
 
@@ -245,3 +245,51 @@ adacachy, 2026-11-02T01:35:10Z to 01:38:17Z, the 1-minute load 182 at the first 
   spec asks `strictatime`. Rootless, the 7 gates pass at c423bb4 on adacachy, `oci_box` among them with the mount
   kinds on the classic path.
 
+
+## 5. Fedora, of record
+
+fedora (`kiln-a094a12d`: i9-14900HX, 32 CPUs, Linux 6.19.10-300.fc44), the bench container pinned to CPUs 4-15
+with no load gate (CLAUDE.md's noisy-host rule): the host's own tenants (a kind cluster, buildkit, a registry, minio)
+up throughout, at times another agent's create breakdown on CPUs 4-31 and other tenants' Rust builds, each run's
+`env.txt` naming them (`~/.cache/hex-bench/out/create-breakdown-<run>`), 2026-11-02T02:59Z to 05:15Z. Binaries:
+before, bf77298 (hex sha256 ad2ebdf3a7afe7cb); the change, f3c6c09 (a999609cf3ac28d5); the classic path's listing,
+d236217 (a0f704d9a2e3eb18). Part figures are the create breakdown's pooled p50 over its three rounds, in ms.
+
+- **Part 19 on the pruned path**, against the bar of 0.16 ms (run 4: 0.359): 0.241 at f3c6c09 (20261102T031219Z,
+  rounds 0.262 / 0.256 / 0.132, the 1-minute load 56 at its start with another breakdown on the same CPUs), 0.131
+  (20261102T031447Z, 0.128 / 0.141 / 0.127, load 37), and 0.125 at d236217 (20261102T050253Z, 0.127 / 0.163 / 0.105,
+  load 18, f3c6c09 in the same rounds: the create's p50 0.843 ms against its 0.940). Met in two runs of three; in
+  the third the host's other work took it, as M7 finds.
+- **Part 19 on the classic path**, the shim path's part 23 (its first run to its `pivot_root`, `CLASSIC=1`: every
+  create through the shim by a createRuntime hook). Each run times one binary, so each run's parts 21 and 22, the
+  same code in both, show the host's pace beside it:
+
+  | run | binary | load | part 21 | part 22 | part 23 (r1 / r2 / r3) |
+  |---|---|---|---|---|---|
+  | 20261102T044432Z | f3c6c09 | 58.8 | 0.048 | 0.046 | 0.201 (0.203 / 0.194 / 0.203) |
+  | 20261102T050008Z | d236217 | 12.6 | 0.078 | 0.078 | 0.243 (0.262 / 0.270 / 0.216) |
+  | 20261102T050738Z | d236217 | 28.2 | 0.083 | 0.077 | 0.251 (0.276 / 0.251 / 0.225) |
+  | 20261102T050945Z | f3c6c09 | 21.8 | 0.053 | 0.050 | 0.212 (0.236 / 0.209 / 0.185) |
+  | 20261102T051129Z | d236217 | 10.8 | 0.052 | 0.049 | 0.172 (0.171 / 0.158 / 0.185) |
+  | 20261102T051330Z | f3c6c09 | 34.5 | 0.060 | 0.058 | 0.242 (0.403 / 0.228 / 0.195) |
+
+  In the rounds at the same pace (part 21 at 0.045 to 0.050 ms) f3c6c09's part 23 is 0.185 to 0.209 and d236217's
+  0.158 to 0.171: the listing takes about 35 us, and the classic path sits at the bar, not under it. The traced
+  spans, interleaved at one in flight (20261102T050528Z, 050538Z, 050546Z, 050555Z: f3c6c09, d236217, f3c6c09,
+  d236217), say where: the table's `read`s, `openat` and `readlink` (51 to 55 us) became a `statx`, a `statmount`
+  and a `listmount` (8 to 10 us), the span's p50 281 and 322 us to 233 and 205. What's left beside the probe's own
+  work: the init's code between its calls, 86 to 115 us with 29 to 30 page faults per create (the init is a
+  fork-like clone of the shim, its first write to each page it shares a copy), and `setsid`, 19 to 33 us.
+- **Part 19's p99 at eight in flight with 8,001 idle host threads** (AC-e's harness), against the bar of 0.5 ms:
+  2.302 at f3c6c09 (20261102T031440Z; p50 0.172, max 5.106) and 2.051 (20261102T050726Z; p50 0.180, max 4.086),
+  2.433 at bf77298 (20261102T031444Z; p50 0.263). Not met, M7's cause. Three more runs refused themselves (04:42Z,
+  04:46Z and 05:05Z): the node's pool of network namespaces ran dry for 89, 67 and 85 of their 2,000 creates, over
+  the 1% the harness allows, the 5-minute load 166 at the first.
+- **The calls, traced** (`MOUNTS`, 1,000 lifecycles each; 20261102T025948Z before, 025959Z the change): 150 calls
+  per create to 43, the span's p50 251 to 173 us at one in flight and 299 to 206 at eight; the classic path's, from its
+  first mount, 36 to 34 at d236217.
+- **Validation**: runtime-tools bd3b0bd, 26 pass, 32 fail, 0 skip at bf77298 and at f3c6c09, the same test by test
+  (`~/.cache/hex-t7/g5x-s3/fjob/valid-before`, `valid-tip`).
+- **The root lab at d236217** (adacachy, as root, `docker_lab.sh`): `oci_box` (the mount kinds on both paths; E0-E3
+  contained; the classic reasons counted, none under `Rootless`), `oci_spec_box` (AC-f: the seed lists its one
+  read-only tmpfs) and `node_socket` pass; rootless, `oci_cgroupfs_box` and `oci_box`.
