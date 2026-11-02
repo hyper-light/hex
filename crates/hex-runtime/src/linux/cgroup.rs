@@ -3,7 +3,7 @@
 //! to every box; cgroup v2's no-internal-processes rule means neither may hold a process itself, so
 //! the node agent runs beside the root, never in it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::os::fd::{AsFd, OwnedFd};
@@ -24,6 +24,11 @@ pub const MAX_BOXES: usize = 65_536;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
 /// kernel delivers to the whole box at once through `cgroup.kill`).
 pub const MAX_SIGNALLED: usize = 1 << 20;
+/// Most cgroups the kill sweep walks in one box's subtree before it refuses. A box is its own cgroup
+/// and any the container nested under it — a handful; a tree with thousands is pathological, so this
+/// bounds the walk (its pending queue included) well above any real box (CLAUDE.md §2). Past it the
+/// sweep refuses ([`Refusal::Full`]) rather than stop silently (§3).
+pub const MAX_SWEEP_CGROUPS: usize = 4_096;
 
 /// The cgroup this process is in, as a path under [`CGROUP_ROOT`].
 pub fn own_cgroup() -> Result<PathBuf, Refusal> {
@@ -331,9 +336,24 @@ impl BoxCgroup {
         Ok(())
     }
 
-    /// Kills every process in the box at once (`cgroup.kill`, Linux 5.14).
+    /// Kills every process in the box. `cgroup.kill` (Linux 5.14) kills the whole subtree in one write,
+    /// but signals thread-group *leaders*, so a leaderless group — its leader thread exited while a
+    /// non-leader thread lives — survives it and holds the box populated (proven on Linux 7.2.9 and
+    /// 6.19, `bench/competitive/probes/delete_flake.md`). So if the box is still populated after it,
+    /// sweep its `cgroup.procs` under a bound ([`sweep_targets`]) and send each process a
+    /// *process-directed* SIGKILL through a process pidfd ([`sigkill_box_process`]): the kernel delivers
+    /// it to the whole thread group (`PIDTYPE_TGID`), reaching a leaderless group's live worker the
+    /// leader-directed `cgroup.kill` missed (probe `delete_flake_point4.c`). [`BoxCgroup::wait_empty`]
+    /// then sees it empty.
     pub fn kill(&self) -> Result<(), Refusal> {
-        write_file(&self.dir.join("cgroup.kill"), "1")
+        write_file(&self.dir.join("cgroup.kill"), "1")?;
+        if !self.populated()? {
+            return Ok(());
+        }
+        for (dir, pid) in sweep_targets(&self.dir, &FsTree, MAX_SWEEP_CGROUPS, MAX_SIGNALLED)? {
+            sigkill_box_process(&dir, pid)?;
+        }
+        Ok(())
     }
 
     /// Waits until no process is left in the box, at most `timeout`; whether none is.
@@ -436,4 +456,247 @@ pub(crate) fn read_set(path: &Path) -> Result<BTreeSet<String>, Refusal> {
     let text =
         fs::read_to_string(path).map_err(|e| os_err("reading cgroup controllers", path, e))?;
     Ok(text.split_ascii_whitespace().map(str::to_owned).collect())
+}
+
+/// Sends process `raw`, found in the box's cgroup `dir`, a process-directed SIGKILL — but only through
+/// a process pidfd that pins it, and only once `dir`'s `cgroup.procs` is re-read and still lists it, so
+/// an id that named one of the box's processes when the sweep read it but has since exited (and may now
+/// name an unrelated process) is not signalled. The pidfd pins the identity after acquisition; the
+/// re-read is the membership-and-lifetime check that closes the exit/reuse race ([`BoxCgroup::kill`]).
+/// A process gone since the sweep (`ESRCH`, or no longer listed) is already as dead as the signal would
+/// make it. No freeze is taken, so a post-kill zombie (an exited init awaiting reap) is handled, not
+/// waited on.
+fn sigkill_box_process(dir: &Path, raw: u32) -> Result<(), Refusal> {
+    let Some(pid) = i32::try_from(raw)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return Ok(());
+    };
+    // A process pidfd (no PIDFD_THREAD), so pidfd_send_signal is process-directed (PIDTYPE_TGID) and
+    // reaches a leaderless group's live worker the leader-directed cgroup.kill missed (point4 probe).
+    let pidfd = match rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::SRCH) => return Ok(()),
+        Err(e) => {
+            return Err(Refusal::Os {
+                op: "opening a box process's pidfd",
+                why: format!("pid {raw}: {e}"),
+            });
+        }
+    };
+    if !cgroup_lists_pid(dir, raw)? {
+        return Ok(());
+    }
+    match rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(e) => Err(Refusal::Os {
+            op: "SIGKILL a box process",
+            why: format!("pid {raw}: {e}"),
+        }),
+    }
+}
+
+/// Whether `dir`'s `cgroup.procs` still lists process `raw`; a cgroup gone reads as not listing it.
+fn cgroup_lists_pid(dir: &Path, raw: u32) -> Result<bool, Refusal> {
+    let path = dir.join("cgroup.procs");
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .any(|p| p == raw)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(os_err("re-reading cgroup.procs", &path, e)),
+    }
+}
+
+/// A box's cgroup subtree as [`sweep_targets`] reads it, behind a seam so the sweep's bounds and typed
+/// refusals are provable without a cgroupfs (CLAUDE.md §9). A cgroup gone since the walk began is a
+/// benign race — `Ok(None)`, not an error; a real read failure is returned.
+trait CgroupTree {
+    /// The child cgroup directories of `dir`; `None` if `dir` has vanished.
+    fn children(&self, dir: &Path) -> Result<Option<Vec<PathBuf>>, Refusal>;
+    /// The process ids in `dir`'s `cgroup.procs`; `None` if the cgroup has vanished.
+    fn procs(&self, dir: &Path) -> Result<Option<Vec<u32>>, Refusal>;
+}
+
+/// Every process in the box's cgroup subtree rooted at `root`, each with the cgroup it sits in, so
+/// [`BoxCgroup::kill`] can signal it. Breadth-first over `tree`, bounded: at most `max_cgroups` cgroups
+/// visited — the pending queue never holds more than that either — and at most `max_procs` processes
+/// collected; past either it refuses ([`Refusal::Full`]) rather than silently stop (CLAUDE.md §2, §3). A
+/// cgroup gone mid-walk is skipped (a benign race); any other read failure is returned. Pure over
+/// `tree`, so a mock proves its bounds and its typed refusals.
+fn sweep_targets(
+    root: &Path,
+    tree: &impl CgroupTree,
+    max_cgroups: usize,
+    max_procs: usize,
+) -> Result<Vec<(PathBuf, u32)>, Refusal> {
+    let mut pending: VecDeque<PathBuf> = VecDeque::new();
+    pending.push_back(root.to_path_buf());
+    let mut visited = 0usize;
+    let mut targets: Vec<(PathBuf, u32)> = Vec::new();
+    while let Some(dir) = pending.pop_front() {
+        visited = visited.checked_add(1).ok_or(Refusal::Full(max_cgroups))?;
+        if visited > max_cgroups {
+            return Err(Refusal::Full(max_cgroups));
+        }
+        if let Some(children) = tree.children(&dir)? {
+            for child in children {
+                if pending.len() >= max_cgroups {
+                    return Err(Refusal::Full(max_cgroups));
+                }
+                pending.push_back(child);
+            }
+        }
+        if let Some(procs) = tree.procs(&dir)? {
+            for pid in procs {
+                if targets.len() >= max_procs {
+                    return Err(Refusal::Full(max_procs));
+                }
+                targets.push((dir.clone(), pid));
+            }
+        }
+    }
+    Ok(targets)
+}
+
+/// The real cgroupfs for [`sweep_targets`].
+struct FsTree;
+
+impl CgroupTree for FsTree {
+    fn children(&self, dir: &Path) -> Result<Option<Vec<PathBuf>>, Refusal> {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(os_err("listing a box's cgroups", dir, e)),
+        };
+        let mut dirs = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(os_err("listing a box's cgroups", dir, e)),
+            };
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => dirs.push(entry.path()),
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(os_err("a box cgroup entry's type", &entry.path(), e)),
+            }
+        }
+        Ok(Some(dirs))
+    }
+
+    fn procs(&self, dir: &Path) -> Result<Option<Vec<u32>>, Refusal> {
+        let path = dir.join("cgroup.procs");
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(
+                text.lines().filter_map(|l| l.trim().parse().ok()).collect(),
+            )),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(os_err("reading cgroup.procs", &path, e)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// A cgroup tree from in-memory maps: a dir absent from both maps has vanished (its reads return
+    /// `None`); a dir in `io_error_at` fails with a non-vanishing read error.
+    struct Mock {
+        children: BTreeMap<PathBuf, Vec<PathBuf>>,
+        procs: BTreeMap<PathBuf, Vec<u32>>,
+        io_error_at: Option<PathBuf>,
+    }
+    impl CgroupTree for Mock {
+        fn children(&self, dir: &Path) -> Result<Option<Vec<PathBuf>>, Refusal> {
+            if self.io_error_at.as_deref() == Some(dir) {
+                return Err(Refusal::Os {
+                    op: "listing a box's cgroups",
+                    why: "a non-vanishing read failure".to_owned(),
+                });
+            }
+            Ok(self.children.get(dir).cloned())
+        }
+        fn procs(&self, dir: &Path) -> Result<Option<Vec<u32>>, Refusal> {
+            Ok(self.procs.get(dir).cloned())
+        }
+    }
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn sweep_collects_every_process_in_the_subtree() {
+        let tree = Mock {
+            children: BTreeMap::from([(p("/b"), vec![p("/b/a"), p("/b/c")])]),
+            procs: BTreeMap::from([(p("/b"), vec![10]), (p("/b/a"), vec![20, 21])]),
+            io_error_at: None,
+        };
+        let got = sweep_targets(&p("/b"), &tree, 16, 16).unwrap();
+        let pids: BTreeSet<u32> = got.iter().map(|(_, pid)| *pid).collect();
+        assert_eq!(pids, BTreeSet::from([10, 20, 21]));
+        assert!(
+            got.contains(&(p("/b/a"), 20)),
+            "a child's process carries its cgroup"
+        );
+    }
+
+    #[test]
+    fn sweep_refuses_past_the_cgroup_budget() {
+        let tree = Mock {
+            children: BTreeMap::from([(p("/b"), vec![p("/b/1"), p("/b/2"), p("/b/3"), p("/b/4")])]),
+            procs: BTreeMap::new(),
+            io_error_at: None,
+        };
+        assert_eq!(sweep_targets(&p("/b"), &tree, 3, 16), Err(Refusal::Full(3)));
+    }
+
+    #[test]
+    fn sweep_refuses_past_the_process_budget() {
+        let tree = Mock {
+            children: BTreeMap::new(),
+            procs: BTreeMap::from([(p("/b"), vec![1, 2, 3, 4])]),
+            io_error_at: None,
+        };
+        assert_eq!(sweep_targets(&p("/b"), &tree, 16, 2), Err(Refusal::Full(2)));
+    }
+
+    #[test]
+    fn sweep_returns_a_non_vanishing_io_failure() {
+        let tree = Mock {
+            children: BTreeMap::new(),
+            procs: BTreeMap::new(),
+            io_error_at: Some(p("/b")),
+        };
+        let err = sweep_targets(&p("/b"), &tree, 16, 16).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Refusal::Os {
+                    op: "listing a box's cgroups",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn sweep_skips_a_vanished_cgroup() {
+        // /b names a child /b/gone that is absent from the maps (vanished): it is skipped, not an error.
+        let tree = Mock {
+            children: BTreeMap::from([(p("/b"), vec![p("/b/gone")])]),
+            procs: BTreeMap::from([(p("/b"), vec![7])]),
+            io_error_at: None,
+        };
+        let got = sweep_targets(&p("/b"), &tree, 16, 16).unwrap();
+        assert_eq!(got, vec![(p("/b"), 7)]);
+    }
 }
