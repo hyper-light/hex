@@ -528,7 +528,8 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
 
 ## The root switch at concurrency (goal 5 plan step 2, AC-e)
 
-The pruned-seed root (decision 5's extension) ends not with `pivot_root` but with `MS_MOVE` and `chroot`, so the
+The pruned-seed root (decision 5's extension) ends not with `pivot_root` but with `chroot` (step 2's init moved the
+root onto `/` by `MS_MOVE` before it; from step 3 the rootfs is attached on `/` directly), so the
 switch holds no host-wide lock: `pivot_root` calls `chroot_fs_refs`, which takes `tasklist_lock` and walks every
 task on the host (`fs/namespace.c`, `fs/fs_struct.c`, quoted under run 1), while `chroot` swaps only the caller's
 own `fs->root` under its `fs->lock`. AC-e covers the root's parts under concurrency — eight creates in flight with
@@ -713,3 +714,22 @@ and kernel (6.19.10-300.fc44), test binaries built in its Fedora 44 image:
 - **At f387457** (the AC-f test as the kernel lists the namespace, 1c6436b; run chain-20261101T224533Z): 2 of 2
   passed. AC-f's line: "the pruned create seed (pid 18) lists one mount, its read-only root tmpfs: 4346 4297 0:1373 /
   / ro,relatime - tmpfs tmpfs rw,seclabel,size=64k,mode=755,inode64".
+
+## The init's mounts, call by call (goal 5 plan step 3)
+
+`MOUNTS=<lifecycles>` (with `MOUNTS_CONC`, `1 8` by default, and `MOUNTS_PATH`, `pruned` by default or `classic`)
+runs, in place of the rounds, one `seam_oci` throughput phase at each concurrency with every system call of the `hex`
+processes traced, and `create_breakdown.py mounts` cuts part 19 of each create out of the trace, call by call
+(`docs/research/runtime/goal5-mounts.md` §1 says why and what it found). The events are `raw_syscalls`' entries and
+exits, which record a call's number and arguments and fetch no path (the `syscalls` subsystem's events fetch each
+one, about 4 us a time, which would charge the very calls this times); `sched_switch`, so the time off the CPU is
+told preempted or blocked; `page_fault_user`; and `sched_process_fork`, so a classic span opens only in a process a
+traced `hex` process forked or cloned (a seed, which makes its mounts private when it prunes, is the node agent's
+child). A span runs from the init's join of the network namespace made ahead (`setns` with `CLONE_NEWNET`) to its
+`chroot` or `pivot_root`, as `switch` cuts part 19; with `MOUNTS_PATH=classic` the throughput phase's bundle has a
+createRuntime hook, so each create takes the classic path through the shim, and a span opens at the init's first
+mount, making its mounts private. The report gives, per create, each call's count, time and time off the CPU, the
+time between calls and the page faults; each mount's share (the calls up to its attach); and the slowest 1% the same
+way. The trace adds two events to every call, so its spans are longer than the rounds' part 19: they place the time
+and count the calls, and part 19's figures of record are the rounds'.
+
