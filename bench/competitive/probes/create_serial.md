@@ -546,6 +546,36 @@ Off-CPU ms per lifecycle:
   by the box's id under the box root and under the oci boxes' root. Create looks for one there before it makes a box,
   and for a box handed a slot it is never there.
 
+## Run 14 (2026-11-03, fedora): offcpu, run 12's on the four checkers
+
+- **Binaries:** `reuse_pass.md`'s run 8's merge (`hex` 63fd1465f9f87837). 2026-11-03T08:14:44Z, CPUs 4-15, the unit
+  `hex-g5x-s6-verify7-20261103T071725Z`. Under the probe Hex's sustained phase ran 8,254/s and libcrun's 1,566/s.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-offcpu-20261103T081444Z`.
+
+Off-CPU ms per lifecycle:
+
+| What the lifecycle waits on | hex.c1 | hex.c32 | crun.c32 |
+|---|---|---|---|
+| a directory's `i_rwsem` | 0.000 | 0.626 | 3.916 |
+| `cgroup_mutex` | 0.017 | 0.158 | 0.652 |
+| the mount namespace's lock | 0.000 | 0.116 | 0.734 |
+| an RCU grace period (umount) | 0.005 | 0.100 | 1.609 |
+| a futex (the runtime's own locks) | 0.000 | 0.538 | 0.000 |
+| work: a socket | 0.878 | 2.546 | 6.778 |
+| work: a pipe or FIFO | 0.136 | 0.915 | 0.351 |
+| work: a poll | 0.179 | 1.452 | 0.000 |
+| work: a child | 0.000 | 0.002 | 0.004 |
+| a sleep (the runtime's own polling) | 0.000 | 0.000 | 6.431 |
+| other | 0.014 | 1.054 | 4.713 |
+
+- **The kernfs root's lock is gone from the top:** other is 1.054 ms, against run 12's 4.055, nearly all of whose was
+  that lock (`create_serial.md` run 12's 2.649).
+- **The largest lock wait is a directory's, the node's own:** 0.626 ms a lifecycle at concurrency 32, a create's
+  `open(O_CREAT)` (0.255) and an `unlink` (0.160) in one directory waiting on its `i_rwsem`, every box's at once.
+- **Then the node's own locks:** 0.538 ms a lifecycle on futexes.
+- **On-CPU, lock spinning is 0.035 ms a lifecycle at concurrency 32,** against run 12's 0.064: the namespaces still
+  made took RTNL less.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the

@@ -257,3 +257,33 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   0.036 to 0.069, process teardown 0.016 to 0.049, fork 0.022 to 0.038, syscall entry 0.056 to 0.080. Two threads
   share each core on these CPUs.
 - No start failed in either pass, over 90,000 lifecycles each.
+
+## Run 8 (2026-11-03, fedora): the four checkers, and the cores' shared threads
+
+- **The merge:** `cp/t7-ext-s6-x-s3` at e9fb28f with step 6's tip through fcc002d merged on it, uncommitted (of record
+  for no branch): run 7's, and the four checkers each reading through its own held `/proc/thread-self/net` (893ea05).
+  `hex` 63fd1465f9f87837, built on fedora. The unit `hex-g5x-s6-verify7-20261103T071725Z`, 2 rounds of 10 pairs.
+
+| run | CPUs | what | load | in process: c1, c32 | ratio (SE) | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket: ratio (SE) |
+|---|---|---|---|---|---|---|---|---|
+| 20261103T075855Z | 4-15 | reuse on | 6.9 to 19.4 | 1,832, 8,914 | 4.87x (0.10) | 0.71, 1.15 ms | 1.35, 10.32 | 5.11x (0.12) |
+| 20261103T075932Z | 4-15 | reuse off | 19.4 to 34.6 | 1,178, 2,593 | 2.20x (0.04) | 1.16, 1.72 ms | 1.41, 4.48 | 2.51x (0.05) |
+| 20261103T080056Z | 4,6,8,10,12,14 | no network namespace | 34.6 to 32.6 | 1,771, 7,057 | 3.98x (0.08) | 0.61, 0.72 ms | 1.10, 5.18 | 4.25x (0.13) |
+| 20261103T080138Z | 4,6,8,10,12,14 | reuse on | 32.6 to 30.1 | 1,417, 6,003 | 4.24x (0.14) | 0.81, 0.86 ms | 1.19, 5.13 | 4.29x (0.14) |
+| 20261103T080227Z | 4-31 | reuse on | 30.1 to 30.9 | 1,005, 12,334 | 12.32x (0.21) | 1.25, 1.43 ms | 1.28, 18.01 | 11.46x (0.25) |
+
+- **The checkers keep up:** with four, 1.5% and 1.7% of each round's boxes were given a fresh namespace on 4-15, against
+  run 7's 12%, and concurrency 32 ran 8,914 a second against 8,364. Each check's wall time rose to 208.2 and 212.9 us
+  from run 7's 127.2 and 130.8: four checkers among 32 lifecycles on 12 CPUs.
+- **The ratio fell from run 7's 5.76x though concurrency 32 rose,** because concurrency 1 rose more on a quieter host:
+  1,832 a second against 1,453.
+- **The cores' shared threads double the CPU a lifecycle costs at concurrency 32:** on one thread of each of the same 6
+  cores, with no network namespace, it costs 1.18 times its CPU alone (0.72 against 0.61 ms), where on both threads of
+  each it cost 1.93 times (run 6's 20261103T064414Z: 1.04 against 0.54). So on CPUs 4-15 a lifecycle held by CPU runs
+  32 at once at most about 12 CPUs over 1.9 times its CPU alone: with concurrency 1's CPU a lifecycle on its critical
+  path about 0.52 ms (a lifecycle's 0.55 ms wall), about 12,100 a second, 6.6 times concurrency 1, even with all of
+  concurrency 1's work off its critical path gone.
+- **On 4-31 the ratio is 12.32x, but concurrency 1 is slower there:** a lone lifecycle runs on the E-cores too, at 1.25
+  ms of CPU against 0.71 on the P-cores, so 1,005 a second against 1,832. Concurrency 32 ran 12,334 a second there.
+- **No start failed** in these passes, nor in 1,200,000 lifecycles at concurrency 32 sustained (3 rounds of 100,000 a
+  driver on each of this merge and the 148d12e one with the FIFO diagnostics: `20261103T080305Z`, `20261103T080909Z`).
