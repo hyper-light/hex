@@ -10,7 +10,7 @@
 //! pipe the runtime writes its acknowledgement on.
 
 use std::fs;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -292,6 +292,9 @@ pub(crate) fn clone_child_pruned(
     }
     if let Some(pair) = ipc_uts {
         pair.join()?;
+        // Left for the exec to close, as the pipes are (close-on-exec): closed here, the init's copies are the
+        // last, and the last close frees each namespace's file, dentry and inode on create's path.
+        let _ = (pair.ipc.into_raw_fd(), pair.uts.into_raw_fd());
     }
     let made_ahead = match network {
         Some(network) => {

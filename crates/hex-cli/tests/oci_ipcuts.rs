@@ -40,6 +40,30 @@ fn a_root_nodes_boxes_join_ipc_and_uts_namespaces_made_ahead() {
     let cache = cache_dir();
     let own = match prepare_cgroup(&cache) {
         Ok(own) => own,
+        // A shared cgroup can't hand its controllers down: the test runs itself again in a scope of its own, as
+        // oci_box.rs does, so it doesn't pass by skipping.
+        Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
+            let has_systemd = Command::new("systemd-run")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !has_systemd {
+                eprintln!(
+                    "SKIP {TEST}: own cgroup isn't ours to subdivide ({direct}) and no systemd --user"
+                );
+                return;
+            }
+            let status = Command::new("systemd-run")
+                .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes"])
+                .arg(std::env::current_exe().expect("test binary path"))
+                .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+                .env("HEX_DELEGATED", "1")
+                .status()
+                .expect("run the test in a delegated scope");
+            assert!(status.success(), "the delegated re-run failed");
+            return;
+        }
         Err(why) => {
             eprintln!("SKIP {TEST}: no cgroup v2 subtree of this process's own ({why})");
             return;

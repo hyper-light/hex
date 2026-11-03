@@ -506,6 +506,13 @@ def summarize(run):
             ab[name] = {"rounds": {r: ratio(of(by_round[r], *ks)["p50"], of(drained[r], *ks)["p50"]) for r in common},
                         "on": on, "drained": off, "p50_ratio": ratio(on["p50"], off["p50"]),
                         "p99_ratio": ratio(on["p99"], off["p99"])}
+        # The interleaved lifecycles (seam_oci's ipc_uts_pairs): each round's on and drained p50, the median of its
+        # pairs' differences and how many pairs the pool won, for each op, so work moved to another shows there.
+        pairs = {}
+        for rnd, path in eb.rounds(run, "pairs").items():
+            with open(path) as f:
+                pairs[rnd] = json.load(f)["phases"]["ipc_uts_pairs"]
+        ab["pairs"] = pairs
         s["ipcuts_ab"] = ab
         lines += ["## The ipc and uts pool on against drained, in the same rounds", "",
                   f"Counts (taken, made on the path): {ab['counts']}", "",
@@ -517,6 +524,15 @@ def summarize(run):
                          f"{eb.ms3(v['on']['p99'])} | {eb.ms3(v['drained']['p99'])} | {v['p99_ratio']:.3f} | "
                          + " ".join(f"{x:.3f}" for x in v["rounds"].values()) + " |")
         lines.append("")
+        if pairs:
+            lines += ["Interleaved lifecycle by lifecycle, by round: median difference in ms, on minus drained (the share of "
+                      "pairs the pool won); then its op's on and drained p50 (ms):", "",
+                      "| round | create | start | exec | delete |", "|---|---|---|---|---|"]
+            def cell(p):
+                return (f"{p['median_difference']:+.4f} ({p['on_faster']:.2f}); {p['on_p50']:.3f} v {p['drained_p50']:.3f}")
+            for rnd, p in sorted(pairs.items()):
+                lines.append(f"| r{rnd} | " + " | ".join(cell(p[op]) for op in ("create", "start", "exec", "delete")) + " |")
+            lines.append("")
     sum_p50 = sum(p["p50"] for p in parts) if whole else None
     per_round = {}
     for r in rnds:

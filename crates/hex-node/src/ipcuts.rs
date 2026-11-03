@@ -1,6 +1,6 @@
 //! The node agent's ipc and uts namespaces made ahead (goal 5 extended, step 4): the shell around
 //! [`hex_core::netns::Pool`], as [`crate::netns`] is for network namespaces. One thread of the agent makes each
-//! pair off the create path whenever the pool asks for more ([`ipcuts::make_ahead`]). A create routed to a pruned
+//! pair off the create path once the pool is half full, up to its bound ([`ipcuts::make_ahead`]). A create routed to a pruned
 //! seed takes one ([`IpcUtsAhead`]), which its init joins in place of its clone making them, and the pool counts
 //! every other container that makes either namespace as made on the path. A pair taken is the container's alone,
 //! so it ends with the container.
@@ -23,9 +23,13 @@ pub struct IpcUtsPool {
 
 struct Shared {
     pool: Mutex<Pool<Pair>>,
-    /// The refill thread waits on it while the pool wants nothing. A take, which may leave the pool wanting one,
-    /// and shutdown wake it; nothing else changes what it waits for.
+    /// The refill thread waits on it while the pool wants nothing. A take that leaves the pool at [`Shared::low`] or
+    /// under, and shutdown, wake it.
     wake: Condvar,
+    /// Half the bound: a wake is a system call on create's path (Rust's futex `Condvar` makes one with or without a
+    /// waiter), and the thread makes pairs far faster than creates come (`bench/competitive/probes/netns_pool.md`),
+    /// so most takes need none, and half the bound stands ready when one does.
+    low: usize,
 }
 
 impl Shared {
@@ -47,6 +51,7 @@ impl IpcUtsPool {
         let shared = Arc::new(Shared {
             pool: Mutex::new(Pool::new(bound)),
             wake: Condvar::new(),
+            low: bound / 2,
         });
         if bound == 0 {
             return Ok(Self {
@@ -74,8 +79,13 @@ impl IpcUtsPool {
 
 impl IpcUtsAhead for IpcUtsPool {
     fn take(&self) -> Result<Option<Pair>, OciError> {
-        let taken = self.shared.pool()?.take().map_err(|_| shut_down())?;
-        self.shared.wake.notify_one();
+        let mut pool = self.shared.pool()?;
+        let taken = pool.take().map_err(|_| shut_down())?;
+        let wake = self.refill.is_some() && pool.held() <= self.shared.low;
+        drop(pool);
+        if wake {
+            self.shared.wake.notify_one();
+        }
         Ok(match taken {
             Take::Pooled(pair) => Some(pair),
             Take::MakeOnPath => None,

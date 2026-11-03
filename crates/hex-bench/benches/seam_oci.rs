@@ -35,7 +35,11 @@
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
 //! In process it reads the node's ipc and uts namespace counts the same way (`Node::ipc_uts`, goal 5 extended
-//! step 4), and HEXBENCH_IPCUTS=0 drains that pool (bound 0), so a run can time creates with it and without it.
+//! step 4), and HEXBENCH_IPCUTS=0 drains that pool (bound 0), so a run can time creates with it and without it. The
+//! `ipc_uts_pairs` phase, run only when named, in process: the lifecycle on a node with the pool and one with it
+//! drained, interleaved one by one, the first of each pair alternating, so a pair meets one host and a difference
+//! of a percent or two shows under other tenants' load; create, start, exec and delete each, so work that moved
+//! from one to another shows too.
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 #![allow(
@@ -255,6 +259,59 @@ mod linux {
         start: Vec<f64>,
         exec: Vec<f64>,
         delete: Vec<f64>,
+    }
+
+    /// The p50, the p99 and, against `other`'s lifecycles in the same pairs, the median difference of one operation.
+    fn paired(on: &[f64], drained: &[f64]) -> Value {
+        let at = |sorted: &[f64], pct: usize| sorted[(sorted.len() - 1) * pct / 100];
+        let sorted = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            v
+        };
+        let (a, b) = (sorted(on), sorted(drained));
+        let diffs: Vec<f64> = on.iter().zip(drained).map(|(x, y)| x - y).collect();
+        let faster = diffs.iter().filter(|d| **d < 0.0).count();
+        json!({"on_p50": at(&a, 50), "drained_p50": at(&b, 50), "on_p99": at(&a, 99), "drained_p99": at(&b, 99),
+               "median_difference": at(&sorted(&diffs), 50), "on_faster": faster as f64 / diffs.len() as f64})
+    }
+
+    /// The `ipc_uts_pairs` phase (goal 5 extended, step 4): the module's header says what it times. `on` is the node
+    /// under test, with the pool; the drained node is made here beside it, with its own box root and state.
+    fn ipc_uts_pairs(
+        on: &dyn Runtime,
+        parent: &Path,
+        hex: &str,
+        bundle: &Path,
+        n: usize,
+        warmup: usize,
+    ) -> Result<Value, String> {
+        let state = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let drained = Node::open(
+            &parent.join("hex-oci-seam-drained"),
+            state.path(),
+            state.path(),
+        )
+        .map_err(|e| e.to_string())?
+        .with_oci_helper(PathBuf::from(hex))
+        .with_ipc_uts_bound(0)
+        .map_err(|e| e.to_string())?;
+        let (mut a, mut b) = (Ops::default(), Ops::default());
+        for i in 0..n + warmup {
+            let timed = i >= warmup;
+            let first_on = i % 2 == 0;
+            for with_pool in [first_on, !first_on] {
+                if with_pool {
+                    lifecycle_once(on, bundle, &format!("pa{i}"), &mut a, timed, None)?;
+                } else {
+                    lifecycle_once(&drained, bundle, &format!("pd{i}"), &mut b, timed, None)?;
+                }
+            }
+        }
+        Ok(
+            json!({"pairs": n, "create": paired(&a.create, &b.create), "start": paired(&a.start, &b.start),
+                  "exec": paired(&a.exec, &b.exec), "delete": paired(&a.delete, &b.delete)}),
+        )
     }
 
     /// n timed lifecycles after `warmup` untimed ones, each operation timed alone, its boxes named
@@ -735,6 +792,7 @@ mod linux {
             "throughput",
             "sustained",
             "rtt",
+            "ipc_uts_pairs",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
@@ -756,6 +814,7 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
+                    "ipc_uts_pairs" => ipc_uts_pairs(node, &parent, hex, &sleep_bundle, n, warmup),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);

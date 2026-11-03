@@ -10,9 +10,10 @@
 #   seam_idle, libcrun_idle  with IDLE_AB set: the seam's and libcrun's lifecycle phases with that many idle threads
 #            up in this container (with_idle), so the same rounds time each with and without them (goal 5 plan
 #            step 2's AC-c within one run); libcrun's pivot_root walks them, the control that they are walked.
-#   seam_drained, traced_drained  with IPCUTS_AB=1: seam and traced with the node's ipc and uts pool drained
+#   seam_drained, traced_drained, pairs  with IPCUTS_AB=1: seam and traced with the node's ipc and uts pool drained
 #            (seam_oci's HEXBENCH_IPCUTS=0), so the same rounds read the pool on against drained (goal 5 extended
-#            step 4), the whole create and the init's clone with what follows it.
+#            step 4), the whole create and the init's clone with what follows it; and seam_oci's ipc_uts_pairs phase,
+#            the two interleaved lifecycle by lifecycle, which reads a whole create's difference under load.
 # Then create_breakdown.py writes summary.md and summary.json. A round's item that fails is logged and skipped (the
 # summary names what's missing); a probe that fails ends the run before any round. The probes include a detailed
 # trace, which adds each open's entry with its path, so create_breakdown.py can hold the rounds' cuts to the files
@@ -317,7 +318,7 @@ if [ "${IDLE_AB:-0}" -gt 0 ]; then
     /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the probe with idle threads failed ($OUT/probe.log)" >&2; exit 5; }
 fi
 if [ "${IPCUTS_AB:-0}" = 1 ]; then
-  KINDS="$KINDS seam_drained traced_drained"
+  KINDS="$KINDS seam_drained traced_drained pairs"
   HEXBENCH_IPCUTS=0 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam_drained.json" 2 0 0 /opt/bin/hex /run/bundle-sleep \
     /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the drained pool's probe failed ($OUT/probe.log)" >&2; exit 5; }
 fi
@@ -347,6 +348,8 @@ for round in $(seq 1 "$ROUNDS"); do
       seam_drained) HEXBENCH_IPCUTS=0 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam_drained.r$round.json" "$N" "$WARMUP" 0 \
                       /opt/bin/hex /run/bundle-sleep /run/bundle-true >> "$OUT/seam_drained.log" 2>&1 ;;
       traced_drained) HEXBENCH_IPCUTS=0 traced "traced_drained.r$round" "$N" "$WARMUP" ;;
+      pairs) HEXBENCH_PHASES=ipc_uts_pairs /opt/bin/seam_oci "$OUT/pairs.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
+               /run/bundle-sleep /run/bundle-true >> "$OUT/pairs.log" 2>&1 ;;
       before) HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/before.r$round.json" "$N" "$WARMUP" 0 \
                 /opt/bin/before-hex /run/bundle-sleep /run/bundle-true >> "$OUT/before.log" 2>&1 ;;
       seam_idle) with_idle env HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam_idle.r$round.json" "$N" "$WARMUP" 0 \
