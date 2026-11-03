@@ -46,6 +46,7 @@ use rustix::net::{
 use rustix::pipe::PipeFlags;
 use rustix::thread::ThreadNameSpaceType as Ns;
 
+use crate::linux::oci::ipcuts::Pair;
 use crate::linux::oci::spec::{Namespace, Process, Spec};
 use crate::linux::oci::{Failure, OciError, exec, init, sys};
 
@@ -667,7 +668,7 @@ fn serve_create(
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
     let made_ahead = network.is_some();
-    let flags = init::fresh_clone_flags(spec, made_ahead);
+    let flags = init::fresh_clone_flags(spec, made_ahead, false);
     match sys::clone_sibling(cgroup.as_ref().map(AsFd::as_fd), flags) {
         Ok(None) => refused(
             Failed::Unable,
@@ -770,6 +771,21 @@ fn serve_create_pruned(
         },
         None => None,
     };
+    // The pair rides last, when the create says so: `read_message` held the descriptor count to the create's.
+    let ipc_uts = if create.ipc_uts {
+        match (fds.next(), fds.next()) {
+            (Some(ipc), Some(uts)) => Some(Pair { ipc, uts }),
+            _ => {
+                return refused(
+                    Failed::Request,
+                    "a create that says it carries an ipc and a uts namespace carried none"
+                        .to_owned(),
+                );
+            }
+        }
+    } else {
+        None
+    };
     let spec = match read_config_at(bundle_dir.as_fd()) {
         Ok(spec) => spec,
         Err(e) => return refused(Failed::Start, e.to_string()),
@@ -792,8 +808,17 @@ fn serve_create_pruned(
                 .to_owned(),
         );
     }
+    // The agent gives a pair only to a container that makes both namespaces, so one that doesn't is refused by
+    // type, never given namespaces its spec didn't ask for (CLAUDE.md §3).
+    if ipc_uts.is_some() && !(spec.makes_namespace("ipc") && spec.makes_namespace("uts")) {
+        return refused(
+            Failed::Start,
+            "a create carried an ipc and a uts namespace for a container that doesn't make both"
+                .to_owned(),
+        );
+    }
     let made_ahead = network.is_some();
-    let flags = init::fresh_clone_flags(&spec, made_ahead);
+    let flags = init::fresh_clone_flags(&spec, made_ahead, ipc_uts.is_some());
     // The map pipe carries only a user namespace's map ack, which the pruned path never asks for: the
     // seed's copy is dropped before the clone, so the init doesn't inherit it.
     drop(map_r);
@@ -819,6 +844,7 @@ fn serve_create_pruned(
                 sources,
                 sync_w.as_fd(),
                 network,
+                ipc_uts,
             );
             if let Err(e) = r {
                 init::msg(sync_w.as_fd(), &format!("E{e}"));
@@ -828,7 +854,7 @@ fn serve_create_pruned(
         }
         Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
             drop((sync_w, cgroup_dir, container_dir, rootfs, binds, network));
-            drop((path_joins, dev_mount));
+            drop((path_joins, dev_mount, ipc_uts));
             match u32::try_from(pid) {
                 Ok(pid) => (Answer::Started { pid }, Some(pidfd)),
                 Err(_) => {

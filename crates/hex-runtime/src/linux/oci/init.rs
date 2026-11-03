@@ -23,6 +23,7 @@ use rustix::mount::{
 use rustix::thread::UnshareFlags;
 
 use crate::linux::oci::inroot::{self, Make};
+use crate::linux::oci::ipcuts::Pair;
 use crate::linux::oci::spec::{Device, Process, Seccomp, Spec};
 use crate::linux::oci::{Failure, OciError, caps, net, seccomp, sys};
 
@@ -260,6 +261,8 @@ pub(crate) fn clone_child(
 /// path is only taken on a root node for a container that makes its own mount namespace and joins no user
 /// or mount namespace by path (the runtime's routing), so no user-namespace map handshake runs here, and
 /// a network, ipc, uts or cgroup namespace joined by path is joined by the descriptor the agent opened.
+/// An ipc and uts pair made ahead (`ipc_uts`, goal 5 extended, step 4) is joined before all that lives in it: the
+/// mqueue mount, the hostname and the sysctls [`container`] makes.
 pub(crate) fn clone_child_pruned(
     spec: &Spec,
     bundle: &str,
@@ -267,6 +270,7 @@ pub(crate) fn clone_child_pruned(
     sources: PrunedSources,
     sync: BorrowedFd<'_>,
     network: Option<OwnedFd>,
+    ipc_uts: Option<Pair>,
 ) -> Result<(), OciError> {
     lead_session()?;
     // Join each network, ipc, uts or cgroup namespace the spec names by path, by the descriptor the
@@ -285,6 +289,9 @@ pub(crate) fn clone_child_pruned(
             OciError::Broken("a path-joined namespace has no descriptor from the agent".to_owned())
         })?;
         sys::setns(fd.as_fd(), flag)?;
+    }
+    if let Some(pair) = ipc_uts {
+        pair.join()?;
     }
     let made_ahead = match network {
         Some(network) => {
@@ -705,17 +712,18 @@ pub fn needs_shim(spec: &Spec) -> bool {
 /// namespace the spec makes (not one joined by `path`, which [`clone_child`] joins), as `clone3` flags,
 /// but the cgroup namespace, which [`container`] unshares once the child is in its cgroup, and the
 /// network namespace when one is made ahead (`made_ahead`), which [`clone_child`] joins by `setns` in
-/// its place.
-pub(crate) fn fresh_clone_flags(spec: &Spec, made_ahead: bool) -> u64 {
+/// its place, and the ipc and uts namespaces when a pair is made ahead (`ipc_uts_ahead`), which
+/// [`clone_child_pruned`] joins in theirs.
+pub(crate) fn fresh_clone_flags(spec: &Spec, made_ahead: bool, ipc_uts_ahead: bool) -> u64 {
     let mut flags: u64 = 0;
-    for (kind, flag) in [
-        ("mount", libc::CLONE_NEWNS),
-        ("uts", libc::CLONE_NEWUTS),
-        ("ipc", libc::CLONE_NEWIPC),
-        ("pid", libc::CLONE_NEWPID),
-        ("user", libc::CLONE_NEWUSER),
+    for (kind, flag, ahead) in [
+        ("mount", libc::CLONE_NEWNS, false),
+        ("uts", libc::CLONE_NEWUTS, ipc_uts_ahead),
+        ("ipc", libc::CLONE_NEWIPC, ipc_uts_ahead),
+        ("pid", libc::CLONE_NEWPID, false),
+        ("user", libc::CLONE_NEWUSER, false),
     ] {
-        if spec.makes_namespace(kind) {
+        if spec.makes_namespace(kind) && !ahead {
             flags |= u64::try_from(flag).unwrap_or(0);
         }
     }
@@ -1973,6 +1981,24 @@ mod tests {
     //! `CAP_MKNOD`, so no node is ever made here.
     use super::*;
     use std::os::unix::fs::symlink;
+
+    /// HEX-IPCUTS-9 (goal 5 extended, step 4): do ask for a container's clone flags with each kind made ahead and
+    /// without; expect each made ahead left out, and only those.
+    #[test]
+    fn the_clone_leaves_out_what_is_made_ahead() {
+        let spec = Spec::parse(
+            br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"},"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]}}"#,
+        )
+        .unwrap();
+        let flag = |f: i32| u64::try_from(f).unwrap();
+        let rest = flag(libc::CLONE_NEWPID) | flag(libc::CLONE_NEWNS);
+        let pair = flag(libc::CLONE_NEWIPC) | flag(libc::CLONE_NEWUTS);
+        let net = flag(libc::CLONE_NEWNET);
+        assert_eq!(fresh_clone_flags(&spec, false, false), rest | pair | net);
+        assert_eq!(fresh_clone_flags(&spec, true, false), rest | pair);
+        assert_eq!(fresh_clone_flags(&spec, false, true), rest | net);
+        assert_eq!(fresh_clone_flags(&spec, true, true), rest);
+    }
 
     /// A root holding `/dev`, and the default nodes' names as plain files, so `mknodat` meets each.
     fn dev_root() -> tempfile::TempDir {
