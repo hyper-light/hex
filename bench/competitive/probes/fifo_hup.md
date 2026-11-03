@@ -47,6 +47,14 @@ after it can get EAGAIN with the writer there; so the start no longer opens its 
 lifecycle the race needs the start's open to come before the init's, which a loaded host makes rare: 3,600,000 interleaved lifecycles of the
 stress unit (`20261103T081843Z`, `20261103T082650Z`, E-cores 16-31) and 1,200,000 sustained ones before met none.
 
+**Seen again, with goal 5 extended step 6's diagnostics (25ae3d7), in a lifecycle at concurrency 32.** A binary
+built without the fix, a merge of steps 2, 3 and 6, refused a start after 3,325 of 20,000 lifecycles on fedora's
+E-cores, 2026-11-03T10:03Z (`create-serial-checker-20261103T100249Z`): "start s003304: reading the exec fifo failed:
+Resource temporarily unavailable (os error 11), after the poll's PollFlags(HUP); the fifo held Ok((1048807, 41631)),
+the one at /run/hex-node/6a63ac065461cc09-s003304/exec.fifo Ok((1048807, 41631))". The poll's hang-up alone, the
+FIFO the start held the one at its path, and a writer there with no byte: this race, not another reader, another
+writer or another FIFO.
+
 **What would falsify it.** A kernel whose `pipe_poll` judges the hang-up under the pipe's lock, or whose open raises
 the writers before the counter, would show no hang-up alone here.
 
