@@ -486,6 +486,28 @@ FIFO there or not, the init live with its start time, live with another, a zombi
 `stopped` as the runtime-spec defines them (`state::tests`, AC-T7.1.4). runtime-tools and the cgroups lab hold start
 and state to the runtime-spec on the command line.
 
+#### Descriptors reach a program only on purpose (found under goal 5 extended, 2026-11-03)
+
+**The choice.** The agent is multi-threaded, so a descriptor whose close-on-exec it cleared for one spawn reaches
+whatever another thread starts in that window: another create's shim, an exec'd program, a hook. Such a process could
+hold a create's handshake from its end-of-file, write a forged pid line into it, take its map acknowledgement, or read
+and answer on a seed's socket. That is the class of CVE-2024-21626, where a descriptor runc leaked into its init let a
+container reach the host. So the agent never clears the flag. The shim opens its pipes by the path of the agent's
+descriptors for them (`/proc/<pid>/fd/<n>`), as it opens a network namespace made ahead, and the agent keeps its ends
+until the shim's first word, watching the shim's pidfd until then. A seed's socket rides in as its stdin, which the
+spawn duplicates into the child alone, and the seed moves it off fd 0 and puts `/dev/null` there.
+
+**Evidence.** runc v1.5.2 has the Go runtime dup2 the files it passes in the child, so its parent never clears the flag
+(`libcontainer/container_linux.go:341-349`). Here, a test's `sleep` started in the window held a shim's sync pipe, and
+the create's handshake with it, for the sleep's 30 s (fedora, unit `hex-g5x-s6-fdh1-20261103T211513Z`).
+
+**Tests.** A bystander started inside the shim's spawn, as another thread's would be, holds no pipe past its stdio
+(`run::tests`, AC-T7.1.4). With the flag cleared before the spawn, it held both of the create's (unit
+`hex-g5x-s6-fdh2-20261103T211928Z`).
+
+**What would falsify it.** A bystander holding one of a create's descriptors with the flag never cleared: a descriptor
+the agent opens without close-on-exec.
+
 ### 4. Network-namespace work off the critical path (restated on goal 4's measurements, 2026-10-29)
 
 **What the probe showed first.** The plan behind this document expected pooled network namespaces and cgroups to

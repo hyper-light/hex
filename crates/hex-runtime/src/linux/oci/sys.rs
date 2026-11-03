@@ -1209,13 +1209,13 @@ pub fn program_by_id(id: u32) -> Result<Option<std::os::fd::OwnedFd>, OciError> 
     }
 }
 
-/// Owns an inherited file-descriptor number the runtime passed through the environment.
+/// Owns a descriptor the spawn of this process put at `fd` for it: a seed's stdin, the agent's socket.
 pub fn own_fd(fd: std::os::fd::RawFd) -> Result<std::os::fd::OwnedFd, OciError> {
     use std::os::fd::FromRawFd;
     if fd < 0 {
         return Err(OciError::os("fd", "a negative file descriptor number"));
     }
-    // SAFETY: the `create` runtime opened this pipe end and passed its number here with CLOEXEC
-    // cleared, having kept it out of every other use, so this process is its sole owner.
+    // SAFETY: the agent's spawn duplicated the seed's socket onto this number in this process alone, and
+    // nothing else in the seed uses it, so this process is its sole owner.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
