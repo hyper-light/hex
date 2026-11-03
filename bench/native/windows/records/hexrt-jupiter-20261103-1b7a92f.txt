@@ -7,6 +7,12 @@ extracted and byte-verified: 1721956 == 1721956). Then `cargo test -p hex-cli --
 windows_process_box --locked`, kiln run r1126. The 7 workspace gates pass on the same tip on
 kiln-a094a12d (fc44), kiln run r904, exit 0.
 
+Re-confirmed by a plain sync-based run after jupiter's kiln agent was restarted on 2026-11-03 (the stale
+kiln.exe processes that had been holding syncs were stopped by PID; a synced run now completes in ~13.5
+s): kiln run r1128 — the same 7/7 on the same final tip, no workaround — and the 7 gates re-run on the
+final tip (kiln run r1127, exit 0). This plain r1128 is the definitive run; r903/r1126 were the earlier
+chunked-transfer runs taken while jupiter's sync was down.
+
 running 7 tests
 test a_box_takes_a_named_signal ... ok
 test a_node_started_process_past_the_bound_is_refused_and_counted ... ok
