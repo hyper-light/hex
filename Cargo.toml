@@ -35,7 +35,10 @@ tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 ureq = "3"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+# The Windows `process` class: job objects, suspended process creation with a job and handle list, and
+# the job's accounting and guaranteed memory-limit violation (crates/hex-runtime/src/windows). Security
+# is for the SECURITY_ATTRIBUTES the process- and job-creation signatures name (Hex passes null).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # The no-panic rule and the rest of CLAUDE.md as lints. Production code is checked again by
 # scripts/check-production.sh, without the test allowances.

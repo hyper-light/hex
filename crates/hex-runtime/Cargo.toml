@@ -26,6 +26,11 @@ seccompiler.workspace = true
 libc.workspace = true
 rustix.workspace = true
 
+# The Windows `process` class: job objects and suspended, job-listed process creation
+# (crates/hex-runtime/src/windows). windows-sys binds these as unsafe foreign functions.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 proptest = "1.12.0"
 tempfile.workspace = true

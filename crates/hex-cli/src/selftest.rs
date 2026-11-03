@@ -81,7 +81,76 @@ pub fn run(argv: &[String]) -> Option<u8> {
             args.first().map(String::as_str).unwrap_or(""),
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(10),
         )),
+        // win-breakaway: tries to start a child outside the box's job (CREATE_BREAKAWAY_FROM_JOB).
+        // Prints whether Windows refused it and exits 0 when refused, 1 when the child escaped — the
+        // Windows process class forbids breakaway, so a member asking for it is refused.
+        #[cfg(windows)]
+        "win-breakaway" => Some(win_breakaway()),
+        // win-grandchild: starts a grandchild (a child that outlives this member's own start) and
+        // prints its process id, then waits — so a box delete can be shown to end the grandchild too.
+        #[cfg(windows)]
+        "win-grandchild" => Some(win_grandchild()),
         _ => None,
+    }
+}
+
+/// Windows: a child started with `CREATE_BREAKAWAY_FROM_JOB` from inside a job that forbids breakaway.
+/// `CreateProcess` fails (access denied), so the spawn is refused; the box's member reports it and
+/// exits 0. If the child ever started, it escaped the box: end it and exit 1.
+#[cfg(windows)]
+fn win_breakaway() -> u8 {
+    use std::os::windows::process::CommandExt;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return 1,
+    };
+    match Command::new(exe)
+        .arg("selftest-box")
+        .arg("wait")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+        .spawn()
+    {
+        Ok(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writeln!(std::io::stdout(), "breakaway=escaped");
+            1
+        }
+        Err(_) => {
+            let _ = writeln!(std::io::stdout(), "breakaway=refused");
+            0
+        }
+    }
+}
+
+/// Windows: starts a grandchild (a `wait` member) in the box, prints its process id, and waits. The
+/// grandchild keeps running until the box's job ends it, so a delete can be shown to reach it.
+#[cfg(windows)]
+fn win_grandchild() -> u8 {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return 1,
+    };
+    match Command::new(exe)
+        .arg("selftest-box")
+        .arg("wait")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            let _ = writeln!(std::io::stdout(), "grandchild={}", child.id());
+            let _ = std::io::stdout().flush();
+            loop {
+                std::thread::park();
+            }
+        }
+        Err(_) => 1,
     }
 }
 

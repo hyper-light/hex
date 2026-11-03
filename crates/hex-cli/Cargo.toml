@@ -38,5 +38,12 @@ hex-node.workspace = true
 hex-core.workspace = true
 hex-runtime.workspace = true
 
+# The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
+# Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+hex-core.workspace = true
+hex-runtime.workspace = true
+windows-sys.workspace = true
+
 [lints]
 workspace = true

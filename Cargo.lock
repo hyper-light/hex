@@ -180,6 +180,7 @@ dependencies = [
  "hex-runtime",
  "rustix",
  "tempfile",
+ "windows-sys",
 ]
 
 [[package]]
@@ -231,6 +232,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]

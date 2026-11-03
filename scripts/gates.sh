@@ -10,6 +10,7 @@ gate cargo clippy --workspace --all-targets --locked -- -D warnings
 # no linker or SDK while the code is pure Rust).
 gate cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
 gate cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+gate cargo clippy --workspace --all-targets --locked --target aarch64-pc-windows-msvc -- -D warnings
 gate bash scripts/check-production.sh
 gate cargo test --workspace --locked
 gate python3 scripts/vendor.py check
