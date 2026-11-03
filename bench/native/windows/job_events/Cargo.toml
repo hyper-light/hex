@@ -1,0 +1,21 @@
+# What a Windows job object enforces and tells, for the `process` class (native plan step 3): its own
+# workspace, outside Hex's (a probe, as bench/native/macos's C probes are). Built and run on jupiter:
+#   cargo run --release -- all
+[package]
+name = "job_events"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Memory",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
