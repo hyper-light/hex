@@ -623,3 +623,49 @@ rejected).
     first. `statmount` reads it under the lock, shared.
   - The structural fix is goal 6's: a mount namespace made from a detached tree in one call (`OPEN_TREE_NAMESPACE`,
     Linux 7.0; `CLONE_EMPTY_MNTNS`, 7.1; `goal5-root.md` f83, f84). Fedora runs 6.19.
+
+## 11. What's left of part 19 under load, hold by hold and superblock by superblock (2026-11-03)
+
+For the bench's owner spec (Docker's capabilities, `/proc/sys` read-only) on the merged tree, with step 6's reuse
+on. The trace with the namespace_sem probes (create-breakdown-20261103T200508Z, unit hex-s3try2-final-20261103T195758Z,
+1,000 creates at 8 in flight, A = x-s3 d3189f7) gives the init's part 19 per create, every create: 27 calls, a mean
+span of 110 us, of which 66 is in calls and 44 between them.
+
+**The mount lock, write holds per create.** The init takes 7:
+
+| # | call | what it does | can 6.19 avoid it? |
+|---|---|---|---|
+| 1 | `move_mount` | the rootfs's tree attached on `/` | No. A mount namespace's root is attached by one move; making a namespace from a tree in one call is `OPEN_TREE_NAMESPACE` (Linux 7.0) or `CLONE_EMPTY_MNTNS` (7.1), goal 6's. |
+| 2 | `mount_setattr`, a propagation | `/usr`'s clone made private before anything can mount beneath it (e2dd76c's leak) | Only where the source is already private, which only `statmount` can tell, under the same lock (shared), at a create. |
+| 3 | `move_mount` | `/usr` attached | No: it is the spec's mount. |
+| 4 | `move_mount` | `/proc` attached | No. |
+| 5 | `move_mount` | `/dev` attached, the pool's (§6) | No. Attaching it in the agent would only move the hold, and step 6's `/dev` handed on within one owner (§9 on its branch) was rejected because its clone adds one. |
+| 6 | `open_tree`, a clone | `/proc/sys`'s clone, the read-only path | Only by `mount(2)` binding it through the box's own proc, one hold for clone and graft: L1, falsified (§10), since each `self/fd/N` walk costs more than the hold it saves. |
+| 7 | `move_mount` | `/proc/sys`'s clone attached | As 6. |
+
+Around the init's span the same lifecycle takes the lock 5 more times for write, by the code (the trace's probes count
+the init's span alone). They lie outside part 19 but contend with it at 8 in flight:
+- the agent's `open_tree` of the rootfs and of `/usr`, and the rootfs's propagation change (`run.rs`,
+  `pruned_create`; `fs/namespace.c:3017`, `:4770-4773`);
+- the seed's `clone3` copying its namespace (`copy_mnt_ns`, its guard at `:4117`);
+- the box's namespace torn down at delete (`put_mnt_ns`, `:6031-6039`).
+
+That is 12 a lifecycle. L2 and the hand-on only move them, and none of the 12 is a check or a read that could be
+dropped.
+
+**Superblocks made per create on the path.** One: the box's proc (`fsconfig` create, 18.1 us per create in 200508Z,
+the largest single call). It is made for the init's own pid namespace: `proc_init_fs_context` takes the caller's active
+pid namespace (v6.19 `fs/proc/root.c:338`), and `proc_get_tree` makes a superblock per mount (`get_tree_nodev`,
+`:310-312`).
+  - It can't be made ahead: the namespace it serves is born in the init's clone.
+  - At v6.19 proc takes a `pidns` parameter (`:48`, checked at `:114-162`: `CAP_SYS_ADMIN` over the target's user
+    namespace, and a descendant pid namespace). So the seed could make it beside the init once its clone returns.
+    That overlaps the work, which a loaded host's CPUs don't give; it doesn't remove it. `/dev`'s tmpfs is the pool's, made ahead (§6). The init's `CLONE_NEWIPC` makes the
+box's mqueue superblock in the seed's clone, before part 19 (plan step 4's ipc/uts pool takes it off the path).
+
+**What the tail waits on under load.** At 12 busy loops the slowest 1% spent 790 us in `move_mount` blocked on the
+lock, behind a holder the loops preempted (hex-lead-s3-loadtrace-s1-20261103T174130Z). With reuse on, the inits' CPU
+went first to the node's own threads, the network-namespace checker most (127 us per create, 200508Z's slowest 1%),
+then the kworkers and the RCU softirq. On 6.19 the levers left are the node's own CPU per create (step 6's checker
+work) and, for specs with masks, the masked directories' tmpfs made ahead (§10). The structural fix for the lock is
+goal 6's namespace from a tree.
