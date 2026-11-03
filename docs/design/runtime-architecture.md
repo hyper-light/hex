@@ -1173,14 +1173,19 @@ lifecycle without changing what a box may do.
   - *Kept.* The node holds each such box's namespace from its create to its delete: one from decision 4's pool, or,
     with the pool dry, one the node makes on the path as the pool would, so that it holds it.
   - *The check* (`netcheck::check`) runs when the box and its record are gone, on the node's checker thread, which
-    enters the namespace with `setns` and goes back after. It requires, each read before the check opens a socket
-    there:
-    - each protocol's sockets in use (`/proc/net/protocols`) at most a fresh namespace's. A unix, netlink or packet
-      socket counts from its making, a UDP one once bound, a TCP one once listening or connected and until its
-      connection has ended. Not `sockstat`'s "sockets: used": a closed netlink socket stays in it until an RCU
-      grace period has passed (Linux v6.19 net/netlink/af_netlink.c:794-796), so the check's own reads and a box's
-      last ones would read as sockets left, the more so under load. The first root lab's TIME_WAIT case found it
-      (`hex-g5x-s6-netlab-20261103T054433Z`);
+    enters the namespace with `setns` and goes back after. It keeps one netlink socket of its own in the namespace,
+    made at its first check and closed with it, for its dumps. It requires:
+    - no socket but its own: `sockstat`'s "sockets: used", every socket from its making to its freeing (Linux v6.19
+      net/core/sock.c:2316-2319, :2417-2418), at 1, the check's own alone; and past 1 each protocol's sockets in use
+      (`/proc/net/protocols`) at most a fresh namespace's but for the check's own. A unix, netlink or packet socket
+      counts there from its making, a UDP one once bound, a TCP one once listening or connected and until its
+      connection has ended. The count alone can't decide past 1: a closed netlink socket stays in it until an RCU
+      grace period has passed (net/netlink/af_netlink.c:794-796), so a box's last reads would read as sockets left,
+      the more so under load (the first root lab's TIME_WAIT case found it, `hex-g5x-s6-netlab-20261103T054433Z`),
+      and for the same reason the check's own socket is kept, never closed between checks. A box that may share its
+      namespace can't write to that socket: NETLINK_ROUTE takes a message to another socket only from one with
+      CAP_NET_ADMIN over the namespace's owner (net/core/rtnetlink.c:7038; net/netlink/af_netlink.c:1842-1847,
+      :904-908);
     - no TCP connection in TIME_WAIT, IPv4's or IPv6's (`sockstat`'s "tw");
     - loopback the only link (`/proc/net/dev`);
     - no iptables table;
@@ -1207,7 +1212,9 @@ lifecycle without changing what a box may do.
   - *A socket never hashed crosses within the owner, unseen* (the lead's approval, 2026-11-03T06:40Z). An inet socket
     enters its protocol's count only once hashed: a UDP one at its bind (Linux v6.19 net/ipv4/udp.c:333), a TCP one
     at its listen or connect (net/ipv4/inet_hashtables.c:747, :811). So a TCP or UDP socket never bound, or a TCP one
-    bound but neither listening nor connected, counts in no protocol, and the check doesn't see it. The box's own
+    bound but neither listening nor connected, counts in no protocol: `sockstat`'s count has it, which sends the
+    check to the protocols, and there it isn't, so the check passes it. Refusing every count past the check's own
+    would refuse each box whose last netlink reads are still waiting out their grace period too. The box's own
     processes are gone when it's checked, so only a process outside the box can still hold one, and through it bind
     or connect in the namespace once the owner's next box has it. That stays within one owner because no namespace is
     handed to another owner's box: the core's model test checks it after every step, and the root lab gives three

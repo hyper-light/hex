@@ -7,18 +7,23 @@
 //! what it could still have left, and what nothing but a process outside it could have changed, from a thread
 //! of the node's that enters the namespace with `setns` and goes back after:
 //!
-//! - **sockets**: `/proc/net/protocols`, read before this opens any socket there, gives each protocol's sockets
-//!   in use in the namespace (`sock_prot_inuse_get`, net/core/sock.c:4320, a file of each namespace's, :4373),
-//!   which must be a fresh namespace's. A unix, netlink or packet socket counts from its making to its release
-//!   (net/unix/af_unix.c:1128, :653; net/netlink/af_netlink.c:688, :794; net/packet/af_packet.c:3395, :3134), a
-//!   UDP socket once bound (net/ipv4/udp.c:333, :2244), and a TCP one once listening or connected, until it's
-//!   unhashed, so a connection still ending counts (net/ipv4/inet_hashtables.c:747, :811, :839). The box's
-//!   processes are gone, so a socket still counted was handed to a process outside it, which would still
-//!   reach the next box. Not `sockstat`'s "sockets: used": a netlink socket closed stays in it until an RCU
-//!   grace period has passed (net/netlink/af_netlink.c:794-796, :703-715; net/core/sock.c:2418), so it would
-//!   count this check's own reads, loopback's bringing up and a box's last netlink reads as sockets left. A TCP
-//!   or UDP socket never bound, or a TCP one bound but neither listening nor connected, counts in no protocol,
-//!   and this doesn't see one;
+//! - **sockets**: `/proc/net/sockstat`'s "sockets: used" first, every socket of the namespace's from its making to
+//!   its freeing (net/core/sock.c:2316-2319, :2417-2418). The check's own netlink socket is made in the namespace the
+//!   first time it's checked and kept with it ([`check`]'s `socket`), never closed between checks, since a closed
+//!   one would stay counted until an RCU grace period had passed (net/netlink/af_netlink.c:794-796, :703-715). So a
+//!   count of 1 is that socket alone: no socket of any kind is left, bound or not. Any other count reads
+//!   `/proc/net/protocols`, each protocol's sockets in use (`sock_prot_inuse_get`, net/core/sock.c:4320, a file of
+//!   each namespace's, :4373), which must be a fresh namespace's but for the check's own, so a box's netlink sockets
+//!   waiting out their grace period aren't taken for sockets left. A unix, netlink or packet socket counts there from
+//!   its making to its release (net/unix/af_unix.c:1128, :653; net/netlink/af_netlink.c:688, :794;
+//!   net/packet/af_packet.c:3395, :3134), a UDP socket once bound (net/ipv4/udp.c:333, :2244), and a TCP one once
+//!   listening or connected, until it's unhashed, so a connection still ending counts
+//!   (net/ipv4/inet_hashtables.c:747, :811, :839). The box's processes are gone, so a socket still counted was
+//!   handed to a process outside it, which would still reach the next box. A TCP or UDP socket never bound, or a
+//!   TCP one bound but neither listening nor connected, counts in no protocol, and past a count of 1 this doesn't
+//!   see one. A box that may share its namespace can't write to the check's socket: NETLINK_ROUTE takes a message
+//!   to another socket only from one with CAP_NET_ADMIN over the namespace's owner (net/core/rtnetlink.c:7038;
+//!   net/netlink/af_netlink.c:1842-1847, :904-908);
 //! - **TIME_WAIT**: `/proc/net/sockstat`'s "tw" counts the namespace's TCP connections in TIME_WAIT, IPv4's and
 //!   IPv6's (net/ipv4/proc.c:60-63; IPv6's share the namespace's death row, net/ipv6/tcp_ipv6.c:287, :314). One
 //!   would meet the next box's own on its port, and none can be ended without CAP_NET_ADMIN, so it's refused;
@@ -75,6 +80,10 @@ const SETTLE_WAIT: Duration = Duration::from_millis(125);
 const IFA_F_TENTATIVE: u8 = 0x40;
 /// `RTMGRP_IPV6_IFADDR` (include/uapi/linux/rtnetlink.h): the group of `RTNLGRP_IPV6_IFADDR`'s notices.
 const RTMGRP_IPV6_IFADDR: u32 = 0x100;
+
+/// The protocol of the socket the check keeps in each namespace it checks, one, as `/proc/net/protocols` names it
+/// (net/netlink/af_netlink.c:613).
+const OWN_PROTOCOL: &str = "NETLINK";
 
 /// `AF_INET`, `AF_INET6` and `AF_UNSPEC` (include/linux/socket.h).
 const AF_INET: u8 = 2;
@@ -229,8 +238,10 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     )
     .map_err(|e| OciError::os(WAITING, e))?;
     let mut notice = vec![0u8; READ_BYTES];
+    let socket = dump_socket()
+        .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))?;
     for _ in 0..SETTLE_TRIES {
-        let seen = dumps(scratch).map_err(|why| {
+        let seen = dumps(&socket, scratch).map_err(|why| {
             OciError::os("reading a fresh network namespace", why.name().to_owned())
         })?;
         if !tentative(&seen) {
@@ -270,13 +281,16 @@ pub struct Checked {
 }
 
 /// Checks the namespace `ns` from the calling thread, whose own namespace is `home`, whose
-/// `/proc/thread-self/net` is `proc_net` and whose buffers are `scratch`: entered, read and left.
+/// `/proc/thread-self/net` is `proc_net` and whose buffers are `scratch`: entered, read and left. `socket` is the
+/// netlink socket the check keeps in `ns`, made here the first time and kept by the caller with the namespace,
+/// closed with it.
 pub fn check(
     ns: BorrowedFd<'_>,
     home: BorrowedFd<'_>,
     proc_net: &ProcNet,
     fresh: &Fresh,
     scratch: &mut Scratch,
+    socket: &mut Option<OwnedFd>,
 ) -> Checked {
     if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
         return Checked {
@@ -284,25 +298,25 @@ pub fn check(
             home: true,
         };
     }
-    let verdict = look(proc_net, fresh, scratch);
+    let verdict = look(proc_net, fresh, scratch, socket);
     let home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
     Checked { verdict, home }
 }
 
 /// The checks, in the namespace the thread is in: sockets first, before this opens one of its own there.
-fn look(proc_net: &ProcNet, fresh: &Fresh, scratch: &mut Scratch) -> Result<(), Refused> {
+fn look(
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    scratch: &mut Scratch,
+    socket: &mut Option<OwnedFd>,
+) -> Result<(), Refused> {
+    // Made before the count is read, so the count has it.
+    if socket.is_none() {
+        *socket = Some(dump_socket()?);
+    }
+    let socket = socket.as_ref().ok_or(Refused::Unreadable)?;
+    sockets_left(proc_net, fresh, &mut scratch.text)?;
     let text = &mut scratch.text;
-    sockets(
-        proc_net
-            .file("protocols", text)?
-            .ok_or(Refused::Unreadable)?,
-        &fresh.protocols,
-    )?;
-    time_wait(
-        proc_net
-            .file("sockstat", text)?
-            .ok_or(Refused::Unreadable)?,
-    )?;
     links(proc_net.file("dev", text)?.ok_or(Refused::Unreadable)?)?;
     for tables in ["ip_tables_names", "ip6_tables_names"] {
         if proc_net
@@ -312,13 +326,32 @@ fn look(proc_net: &ProcNet, fresh: &Fresh, scratch: &mut Scratch) -> Result<(), 
             return Err(Refused::Firewall);
         }
     }
-    let seen = dumps(scratch)?;
+    let seen = dumps(socket, scratch)?;
     for ((d, have), want) in DUMPS.iter().zip(&seen).zip(&fresh.dumps) {
         if have != want {
             return Err(d.refused);
         }
     }
     Ok(())
+}
+
+/// Whether a socket or a TCP connection in TIME_WAIT is left in the namespace the calling thread is in, whose
+/// `/proc/net` is `proc_net`, the check's own socket made there already: `sockstat` first, its TIME_WAIT and every
+/// socket's count, and the protocols' counts only when that count isn't the check's own socket alone.
+fn sockets_left(proc_net: &ProcNet, fresh: &Fresh, text: &mut [u8]) -> Result<(), Refused> {
+    let sockstat = proc_net
+        .file("sockstat", text)?
+        .ok_or(Refused::Unreadable)?;
+    time_wait(sockstat)?;
+    if used(sockstat)? == 1 {
+        return Ok(());
+    }
+    sockets(
+        proc_net
+            .file("protocols", text)?
+            .ok_or(Refused::Unreadable)?,
+        &fresh.protocols,
+    )
 }
 
 /// A thread's `/proc/thread-self/net`, held open by the thread that opened it, so each check opens a file of
@@ -415,13 +448,25 @@ fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
     Ok(out)
 }
 
-/// Whether a socket is left: a protocol in `protocols` with more sockets in use than in a fresh namespace.
+/// Whether a socket is left: a protocol in `protocols` with more sockets in use than in a fresh namespace, the
+/// check's own netlink socket aside.
 fn sockets(protocols: &str, fresh: &BTreeMap<String, u64>) -> Result<(), Refused> {
     let mut left = false;
     each_in_use(protocols, |name, n| {
-        left |= n > fresh.get(name).copied().unwrap_or(0);
+        let own = u64::from(name == OWN_PROTOCOL);
+        left |= n > fresh.get(name).copied().unwrap_or(0).saturating_add(own);
     })?;
     if left { Err(Refused::Sockets) } else { Ok(()) }
+}
+
+/// `sockstat`'s count of the namespace's sockets: its "sockets: used" (`sock_inuse_get`, net/socket.c:3321, from
+/// net/ipv4/proc.c:60).
+fn used(sockstat: &str) -> Result<u64, Refused> {
+    sockstat
+        .lines()
+        .find_map(|line| line.strip_prefix("sockets: used "))
+        .and_then(|n| n.trim().parse().ok())
+        .ok_or(Refused::Unreadable)
 }
 
 /// `sockstat`'s word on TIME_WAIT: its TCP line's "tw" (net/ipv4/proc.c:60-63).
@@ -455,9 +500,21 @@ fn links(dev: &str) -> Result<(), Refused> {
     if lo { Ok(()) } else { Err(Refused::Links) }
 }
 
-/// The five dumps of the namespace the calling thread is in, each normalized and sorted, read through
+/// The five dumps of `socket`'s namespace, the one it was made in, each normalized and sorted, read through
 /// `scratch`.
-fn dumps(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+fn dumps(socket: &OwnedFd, scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+    let mut out = Vec::with_capacity(DUMPS.len());
+    for (seq, d) in (1u32..).zip(DUMPS.iter()) {
+        ask(socket, &request(d.kind, d.family, d.header, seq), scratch)?;
+        let mut msgs = normalized(&scratch.answer, d, seq)?;
+        msgs.sort_unstable();
+        out.push(msgs);
+    }
+    Ok(out)
+}
+
+/// A netlink socket for the dumps, in the namespace the calling thread is in, each read bounded by [`READ_WAIT`].
+fn dump_socket() -> Result<OwnedFd, Refused> {
     let fd = rustix::net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
@@ -471,14 +528,7 @@ fn dumps(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
         Some(READ_WAIT),
     )
     .map_err(|_| Refused::Unreadable)?;
-    let mut out = Vec::with_capacity(DUMPS.len());
-    for (seq, d) in (1u32..).zip(DUMPS.iter()) {
-        ask(&fd, &request(d.kind, d.family, d.header, seq), scratch)?;
-        let mut msgs = normalized(&scratch.answer, d, seq)?;
-        msgs.sort_unstable();
-        out.push(msgs);
-    }
-    Ok(out)
+    Ok(fd)
 }
 
 /// A dump request: a `struct nlmsghdr` and the family header, zero but for its family.

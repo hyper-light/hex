@@ -15,8 +15,8 @@ fn sockstat_says_whether_a_time_wait_connection_is_left() {
     assert_eq!(time_wait(CLEAN_SOCKSTAT), Ok(()));
     let tw = CLEAN_SOCKSTAT.replace("tw 0", "tw 2");
     assert_eq!(time_wait(&tw), Err(Refused::TimeWait));
-    // "sockets: used" keeps a closed netlink socket until an RCU grace period has passed, so it isn't read;
-    // nor are the host-wide orphan and allocation counts, which aren't the namespace's.
+    // TIME_WAIT alone: the sockets' count is `used`'s, and the host-wide orphan and allocation counts aren't the
+    // namespace's.
     assert_eq!(
         time_wait(&CLEAN_SOCKSTAT.replace("used 0", "used 3")),
         Ok(())
@@ -46,6 +46,22 @@ UDP       1344      0       0   NI       0   yes  kernel      y  y  y  n  y  y  
 TCP       2496      0     881   no     320   yes  kernel      y  y  y  y  y  y  y  y  y  y  y  y  y  n  y  y  y  y\n\
 NETLINK   1112      0      -1   NI       0   no   kernel      n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n\n";
 
+/// `sockstat`'s count of every socket in the namespace, read before the protocols' (`sockets_left`).
+#[test]
+fn sockstat_counts_the_namespaces_sockets() {
+    assert_eq!(used(CLEAN_SOCKSTAT), Ok(0));
+    assert_eq!(used(&CLEAN_SOCKSTAT.replace("used 0", "used 1")), Ok(1));
+    for broken in [
+        "",
+        "sockets: used\n",
+        "sockets: used x\n",
+        "sockets: used -1\n",
+        "TCP: inuse 0 orphan 0 tw 0\n",
+    ] {
+        assert_eq!(used(broken), Err(Refused::Unreadable), "{broken:?}");
+    }
+}
+
 #[test]
 fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
     let fresh = in_use(PROTOCOLS).unwrap();
@@ -60,6 +76,11 @@ fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
     );
     let unix = PROTOCOLS.replace("UNIX      1152      0", "UNIX      1152      2");
     assert_eq!(sockets(&unix, &fresh), Err(Refused::Sockets));
+    // The check's own netlink socket, kept in the namespace, is no socket left; a second is.
+    let netlink =
+        |n: u32| PROTOCOLS.replace("NETLINK   1112      0", &format!("NETLINK   1112      {n}"));
+    assert_eq!(sockets(&netlink(1), &fresh), Ok(()));
+    assert_eq!(sockets(&netlink(2), &fresh), Err(Refused::Sockets));
     // A protocol a module brought after the fresh namespace was read: none of its sockets, or one.
     let sctp = |n: u32| {
         format!(
@@ -152,6 +173,68 @@ fn a_proc_net_file_is_read_whole_into_the_held_room_and_one_past_the_bound_is_re
         proc_net.file("binary", &mut scratch.text),
         Err(Refused::Unreadable),
         "not text"
+    );
+}
+
+/// The sockets' check reads `sockstat` first, and the protocols only past a count of the check's own socket: a count
+/// of 1 needs no protocols file, and any other count reads it, which tells a box's netlink socket waiting out its
+/// grace period from a socket held outside; TIME_WAIT refuses whatever the count (CLAUDE.md §6).
+#[test]
+fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_net = ProcNet(
+        rustix::fs::open(
+            dir.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let fresh = Fresh {
+        protocols: in_use(PROTOCOLS).unwrap(),
+        dumps: Vec::new(),
+    };
+    let mut text = Scratch::default().text;
+    let write = |name: &str, body: &str| std::fs::write(dir.path().join(name), body).unwrap();
+    write("sockstat", &CLEAN_SOCKSTAT.replace("used 0", "used 1"));
+    assert_eq!(
+        sockets_left(&proc_net, &fresh, &mut text),
+        Ok(()),
+        "the check's own socket alone"
+    );
+    write("sockstat", &CLEAN_SOCKSTAT.replace("used 0", "used 2"));
+    assert_eq!(
+        sockets_left(&proc_net, &fresh, &mut text),
+        Err(Refused::Unreadable),
+        "past it the protocols are read, and there are none here"
+    );
+    write(
+        "protocols",
+        &PROTOCOLS.replace("NETLINK   1112      0", "NETLINK   1112      1"),
+    );
+    assert_eq!(
+        sockets_left(&proc_net, &fresh, &mut text),
+        Ok(()),
+        "a box's netlink socket still counted in sockstat, gone from the protocols"
+    );
+    write(
+        "protocols",
+        &PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1"),
+    );
+    assert_eq!(
+        sockets_left(&proc_net, &fresh, &mut text),
+        Err(Refused::Sockets),
+        "a bound UDP socket held outside"
+    );
+    write(
+        "sockstat",
+        &CLEAN_SOCKSTAT
+            .replace("used 0", "used 1")
+            .replace("tw 0", "tw 1"),
+    );
+    assert_eq!(
+        sockets_left(&proc_net, &fresh, &mut text),
+        Err(Refused::TimeWait)
     );
 }
 
@@ -257,6 +340,7 @@ proptest! {
         }
         let _ = ends(&bytes);
         let _ = time_wait(&text);
+        let _ = used(&text);
         let _ = in_use(&text);
         let _ = sockets(&text, &BTreeMap::new());
         let _ = links(&text);

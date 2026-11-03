@@ -52,14 +52,21 @@ const CHECKERS: usize = 4;
 /// theirs in user namespaces of their own), so its creates take as before.
 struct Keeping {
     state: Arc<KeptState>,
-    returns: Option<SyncSender<(String, OwnedFd)>>,
+    returns: Option<SyncSender<(String, KeptNet)>>,
     checkers: Vec<JoinHandle<()>>,
 }
 
+/// A namespace kept for an owner, and the netlink socket the checks keep in it from its first check on
+/// ([`netcheck::check`]), so they never close one of their own there: closed together.
+pub struct KeptNet {
+    ns: OwnedFd,
+    socket: Option<OwnedFd>,
+}
+
 struct KeptState {
-    idle: Mutex<Idle<OwnedFd>>,
+    idle: Mutex<Idle<KeptNet>>,
     /// Each live box's namespace, kept from its create to its delete, with its owner: at most one a box.
-    held: Mutex<BTreeMap<BoxId, (String, OwnedFd)>>,
+    held: Mutex<BTreeMap<BoxId, (String, KeptNet)>>,
     /// Namespaces given back as their boxes went, each then checked or closed unchecked.
     given_back: AtomicU64,
     /// Namespaces the checker ruled on, kept idle or closed.
@@ -166,7 +173,7 @@ impl Netns {
     }
 
     /// Keeps box `id`'s namespace, `ns`, for its owner, from its create on.
-    pub fn hold(&self, id: &BoxId, owner: &str, ns: OwnedFd) -> Result<(), Refusal> {
+    pub fn hold(&self, id: &BoxId, owner: &str, ns: KeptNet) -> Result<(), Refusal> {
         let Some(kept) = &self.kept else {
             return Ok(());
         };
@@ -310,12 +317,12 @@ impl Drop for Netns {
 pub struct NetChoice<'a> {
     netns: &'a Netns,
     owner: Option<&'a BoxOwner>,
-    kept: Mutex<Option<OwnedFd>>,
+    kept: Mutex<Option<KeptNet>>,
 }
 
 impl NetChoice<'_> {
     /// The namespace this create was given and the node keeps for its owner, if it was.
-    pub fn kept(self) -> Option<OwnedFd> {
+    pub fn kept(self) -> Option<KeptNet> {
         self.kept.into_inner().ok().flatten()
     }
 
@@ -327,7 +334,7 @@ impl NetChoice<'_> {
         }
     }
 
-    fn idle(&self) -> Result<Option<MutexGuard<'_, Idle<OwnedFd>>>, OciError> {
+    fn idle(&self) -> Result<Option<MutexGuard<'_, Idle<KeptNet>>>, OciError> {
         match &self.netns.kept {
             None => Ok(None),
             Some(kept) => {
@@ -364,17 +371,20 @@ impl Networks for NetChoice<'_> {
                 taken
             }
         };
-        let ns = match taken {
+        let (ns, socket) = match taken {
             Kept::Own(_) => return self.netns.take(),
-            Kept::Idle(ns) => ns,
+            Kept::Idle(kept) => (kept.ns, kept.socket),
             Kept::Fresh => match self.netns.take()? {
-                Some(ns) => ns,
-                None => self.netns.make_on_path()?,
+                Some(ns) => (ns, None),
+                None => (self.netns.make_on_path()?, None),
             },
         };
-        let keep = ns
-            .try_clone()
-            .map_err(|e| OciError::os("keeping a box's network namespace", e))?;
+        let keep = KeptNet {
+            ns: ns
+                .try_clone()
+                .map_err(|e| OciError::os("keeping a box's network namespace", e))?,
+            socket,
+        };
         *self.kept.lock().map_err(|_| {
             OciError::Broken("a create's kept namespace's lock was poisoned".to_owned())
         })? = Some(keep);
@@ -389,7 +399,7 @@ impl Networks for NetChoice<'_> {
 /// so in its counts. A check after which it couldn't go back to its own namespace refuses the namespace and
 /// ends that checker, counted, so no namespace is checked from another's; once every checker has ended, those
 /// given back are closed unchecked, counted ([`Netns::give_back`]).
-fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
+fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
     let home = net::thread_network().ok();
     let proc_net = ProcNet::of_this_thread().ok();
     let mut fresh = None;
@@ -400,7 +410,7 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
             Ok(line) => line.recv(),
             Err(_) => return,
         };
-        let Ok((owner, ns)) = next else {
+        let Ok((owner, mut kept)) = next else {
             return;
         };
         if fresh.is_none()
@@ -411,8 +421,14 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
         let (verdict, lost) = match (&home, &proc_net, &fresh) {
             (Some(home), Some(proc_net), Some(fresh)) => {
                 let started = std::time::Instant::now();
-                let checked =
-                    netcheck::check(ns.as_fd(), home.as_fd(), proc_net, fresh, &mut scratch);
+                let checked = netcheck::check(
+                    kept.ns.as_fd(),
+                    home.as_fd(),
+                    proc_net,
+                    fresh,
+                    &mut scratch,
+                    &mut kept.socket,
+                );
                 let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 state.check_ns.fetch_add(took, Ordering::AcqRel);
                 (checked.verdict, !checked.home)
@@ -430,10 +446,10 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
             return;
         };
         let closed = match verdict {
-            Ok(()) => idle.give(&owner, ns),
+            Ok(()) => idle.give(&owner, kept),
             Err(why) => {
                 idle.refuse(why);
-                vec![ns]
+                vec![kept]
             }
         };
         // Closed with the lock let go.
