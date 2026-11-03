@@ -51,8 +51,15 @@ const MAX_PROC_FILE: usize = 64 << 10;
 const MAX_DUMP_BYTES: usize = 256 << 10;
 /// Most reads one dump may take before it ends.
 const MAX_DUMP_READS: usize = 64;
-/// Room for one read of a dump's answer.
-const READ_BYTES: usize = 32 << 10;
+/// Room for one read of a dump's answer: what the kernel allocates each of the dump's answers at, so the less the
+/// better, but more than `NLMSG_GOODSIZE`, or an answer could be cut. A socket's dumps are answered in buffers of
+/// its largest read so far, capped at 32 KiB (Linux v6.19 net/netlink/af_netlink.c:1940-1943, :2279-2290), each
+/// filled no further than that (:2302-2312), where none was read larger than `NLMSG_GOODSIZE`, just under a page
+/// or 8 KiB, whichever is less (include/linux/netlink.h:273-275); no dump this asks for sets a larger least
+/// (net/core/rtnetlink.c:6905-6906, links' alone). At 32 KiB, fedora spent 5 to 7% of a check allocating and
+/// clearing them (`bench/competitive/probes/create_serial.md`, run 15). 8 KiB is over `NLMSG_GOODSIZE` at any page
+/// size, and a fresh namespace's answers are under 2 KiB.
+const READ_BYTES: usize = 8 << 10;
 /// Most one read of a dump's answer waits. A bound, not a tuning: the kernel builds a dump's answer as it's
 /// read, so a read waits on nothing but the reading.
 const READ_WAIT: Duration = Duration::from_secs(1);
@@ -147,10 +154,10 @@ const DUMPS: [Dump; 5] = [
 ];
 
 /// The buffers a checking thread reads a namespace's files and dumps into, kept from one check to the next, so
-/// a check allocates and faults in none of them: on fedora a fifth of the checks' CPU was their own code, the C
-/// library's most of it, and 6% faulting in fresh pages (`bench/competitive/probes/create_serial.md`, run 15).
-/// One file's room is [`MAX_PROC_FILE`] and a byte (one past it is a file too long), one read of a dump's
-/// [`READ_BYTES`], and a dump's answer grows to the longest one read, at most [`MAX_DUMP_BYTES`].
+/// a check allocates and clears none of them: with a buffer each per check, a fifth of a check's CPU on fedora
+/// was its own code, the C library's most of it (`bench/competitive/probes/create_serial.md`, run 15). One file's
+/// room is [`MAX_PROC_FILE`] and a byte (one past it is a file too long), one read of a dump's [`READ_BYTES`],
+/// and a dump's answer grows to the longest one read, at most [`MAX_DUMP_BYTES`].
 pub struct Scratch {
     text: Vec<u8>,
     answer: Vec<u8>,
