@@ -1,0 +1,27 @@
+HEX-RT on the Windows `process` class: jupiter, the final merge tree
+
+cp/t7-native-s3 tip 1b7a92f (native plan step 3). jupiter (Jupiter, windows/x86_64, AMD Ryzen
+AI MAX+ 395, 32 CPUs, Windows 11), 2026-11-03. kiln sync to jupiter was down, so the committed
+tree was carried over by a chunked code_run (git archive 1b7a92f, base64, <8 KiB command chunks,
+extracted and byte-verified: 1721956 == 1721956). Then `cargo test -p hex-cli --test
+windows_process_box --locked`, kiln run r1126. The 7 workspace gates pass on the same tip on
+kiln-a094a12d (fc44), kiln run r904, exit 0.
+
+running 7 tests
+test a_box_takes_a_named_signal ... ok
+test a_node_started_process_past_the_bound_is_refused_and_counted ... ok
+test a_member_asking_to_break_away_is_refused ... ok
+test a_box_under_its_bound_runs_and_reports_its_exit ... ok
+test delete_ends_a_boxs_grandchildren ... ok
+test windows_process_boxes_hold_the_contract ... ok
+test a_box_past_its_bound_is_refused_at_the_bound ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+WINTEST_EXIT=0
+
+`windows_process_boxes_hold_the_contract` runs the HEX-RT-1..9 conformance suite
+(crates/hex-api/src/conformance.rs); HEX-RT-6 on Windows checks the process bound's deterministic
+effect (`Fixture::refused_forks_counted` = false on Windows). The other six are the step's
+scenarios: memory bound refused at the bound, a node-started process past the bound refused
+(`Exhausted`) and counted, an under-bound member runs and reports its exit, breakaway refused,
+delete ends a box's grandchildren, and a TERM read back as `Signal(15)`.

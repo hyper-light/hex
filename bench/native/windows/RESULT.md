@@ -108,7 +108,9 @@ notification at the hard cap never trips; 4 MiB under it trips every pass, so `N
 
 ### HEX-RT on jupiter
 
-HEX-RT-1..9 pass, and the step's scenarios pass: a member past its 256 MiB bound is refused at the bound
+On the final merge tree (cp/t7-native-s3 1b7a92f), HEX-RT-1..9 pass and the step's scenarios pass (record
+`records/hexrt-jupiter-20261103-1b7a92f.txt`, kiln run r1126; the 7 workspace gates pass on the same tip,
+kiln-a094a12d run r904, exit 0): a member past its 256 MiB bound is refused at the bound
 with the job's peak at or below it (oom counted), a member asking to break away is refused, delete ends a
 box's grandchildren, an under-bound member runs and reports its exit, a node-started process past the
 process bound is refused (`Exhausted`) and counted, and TERM ends the box reading as `Signal(15)`.
