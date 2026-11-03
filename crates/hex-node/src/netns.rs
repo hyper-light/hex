@@ -61,6 +61,8 @@ struct KeptState {
     unchecked: AtomicU64,
     /// Checks after which the checker couldn't go back to its own namespace.
     lost_home: AtomicU64,
+    /// The time the checks took, all together, in nanoseconds: each check's wall time on the checker.
+    check_ns: AtomicU64,
 }
 
 /// What the kept namespaces have done, as the bench and the tests read it. Every namespace given back is
@@ -73,6 +75,8 @@ pub struct ReuseCounts {
     pub checked: u64,
     pub unchecked: u64,
     pub lost_home: u64,
+    /// The checks' time, all together, in nanoseconds.
+    pub check_ns: u64,
 }
 
 struct Shared {
@@ -118,6 +122,7 @@ impl Netns {
             checked: AtomicU64::new(0),
             unchecked: AtomicU64::new(0),
             lost_home: AtomicU64::new(0),
+            check_ns: AtomicU64::new(0),
         });
         let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
         let checking = Arc::clone(&state);
@@ -208,6 +213,7 @@ impl Netns {
             checked,
             unchecked,
             lost_home: kept.state.lost_home.load(Ordering::Acquire),
+            check_ns: kept.state.check_ns.load(Ordering::Acquire),
         }))
     }
 
@@ -378,7 +384,10 @@ fn check_returns(state: &KeptState, line: &Receiver<(String, OwnedFd)>) {
         }
         let (verdict, lost) = match (&home, &fresh) {
             (Some(home), Some(fresh)) => {
+                let started = std::time::Instant::now();
                 let checked = netcheck::check(ns.as_fd(), home.as_fd(), fresh);
+                let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                state.check_ns.fetch_add(took, Ordering::AcqRel);
                 (checked.verdict, !checked.home)
             }
             _ => (Err(Why::Unreadable), false),

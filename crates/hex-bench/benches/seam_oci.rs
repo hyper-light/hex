@@ -770,7 +770,9 @@ mod linux {
                "given_back": after.given_back - before.given_back,
                "checked": after.checked - before.checked,
                "unchecked": after.unchecked - before.unchecked,
-               "lost_home": after.lost_home - before.lost_home})
+               "lost_home": after.lost_home - before.lost_home,
+               "check_us_mean": (after.check_ns - before.check_ns) as f64
+                   / 1e3 / ((after.checked - before.checked).max(1)) as f64})
     }
 
     /// What the node's idle cgroups and its deletes did from `before` to `after`.
