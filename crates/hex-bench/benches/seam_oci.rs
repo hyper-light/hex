@@ -46,7 +46,8 @@
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
 //! reads, around every phase as it reads the seeds', what the node's idle cgroups did (handed on, fresh,
 //! missed, refused by reason, evicted) and how its deletes ended their boxes (through the init's pidfd,
-//! that falling back to `cgroup.kill`, or `cgroup.kill`).
+//! that falling back to `cgroup.kill`, or `cgroup.kill`). HEXBENCH_REUSE=0 has that owner opt out of reuse,
+//! its cgroups' and network namespaces' alike, its bundles as they are with reuse on.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -832,12 +833,16 @@ mod linux {
                     .unwrap_or_else(|e| panic!("HEXBENCH_INTERLEAVED={v:?}: {e}"))
             });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
+        // HEXBENCH_REUSE=0: the owner opts out of reuse, its boxes and bundles otherwise as with reuse on, so
+        // a pass with it off differs from one with it on in that alone.
+        let reuse = std::env::var("HEXBENCH_REUSE").map_or(true, |v| v.trim() != "0");
         let owner = std::env::var("HEXBENCH_OWNER")
             .ok()
             .filter(|o| !o.trim().is_empty())
             .map(|o| {
                 BoxOwner::named(o.trim()).unwrap_or_else(|e| panic!("HEXBENCH_OWNER={o:?}: {e}"))
-            });
+            })
+            .map(|o| BoxOwner { reuse, ..o });
         OWNER.set(owner.clone()).expect("the owner is set once");
         // The box root beside the runtimes' container cgroups, under the vacated, delegated cgroup
         // root; the node agent itself stays where it is, and the parent's cpu.stat is the CPU a
