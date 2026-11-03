@@ -9,13 +9,15 @@
 # lifecycles, 10000, read by both), STANDIN (1: the driver's own ceiling each round), HEXBENCH_OWNER (one owner
 # for every box seam_oci makes, so a box's cgroup is handed to the owner's next box: goal 5 extended, step 6; the
 # bundles' processes then hold Docker's default capabilities, no CAP_SYS_ADMIN, every runtime's alike, since a box
-# that keeps all of root's never shares a cgroup).
+# that keeps all of root's never shares a cgroup), NETNS (1; 0 gives every bundle no network namespace of its own,
+# every runtime's alike: what the rates are with no network namespace made per container).
 set -uo pipefail
 RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
 
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
+[ "${NETNS:-1}" = 0 ] && ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]'
 # Docker's default capabilities (moby's oci/caps/defaults.go), given every set when HEXBENCH_OWNER names an owner.
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
 PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"

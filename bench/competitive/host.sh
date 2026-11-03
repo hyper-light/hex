@@ -8,7 +8,9 @@
 # "boxseam" for the process class through the Runtime seam, with SEAM_BIN naming seam_box's release binary).
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
 # ones there, HEXBENCH_PHASES picks the drivers' phases (all), HEXBENCH_SUSTAINED sets the sustained phase's
-# lifecycles (10000), and FETCH=0 keeps the competitors' binaries
+# lifecycles (10000), HEXBENCH_OWNER names one owner for every box seam_oci makes and NETNS=0 gives the OCI pass's
+# bundles no network namespace of their own (oci_inside.sh says how), BENCH_MEMORY and BENCH_OOM set each container's
+# --memory (40g) and --oom-score-adj (none) on a shared host, as create_breakdown.sh's, and FETCH=0 keeps the competitors' binaries
 # already in $BASE/bin (their sha256 is recorded) rather than resolving each project's latest release again.
 # Another host only by name (BENCH_HOST_OK=<its hostname>): Ada's call for E2B's same-hardware rounds on adacachy
 # (2026-10-24). LOAD_GATE=0 skips the wait for load under 2: for those rounds, and for a density-only pass
@@ -52,7 +54,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
-  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none}"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} NETNS=${NETNS:-1} BENCH_MEMORY=${BENCH_MEMORY:-40g} BENCH_OOM=${BENCH_OOM:-none}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
@@ -110,11 +112,11 @@ if [[ " $PHASES " == *" oci "* ]]; then
   # it compares unlike setups; a ratio within one pass compares like ones.
   SEAM_OCI_ENV=(); [ -x "$BASE/bin/seam_oci" ] && SEAM_OCI_ENV=(-e "SEAM_OCI=/opt/bin/seam_oci")
   echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state" >> "$OUT/env.txt"
-  timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory=40g \
+  timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
     --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
-    -e HEXBENCH_SUSTAINED -e HEXBENCH_OWNER -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e HEXBENCH_SUSTAINED -e HEXBENCH_OWNER -e NETNS -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag
@@ -138,7 +140,7 @@ lab() {
   local pass=$1; shift
   NAMES+=("hexbench-$pass-$$")
   timeout 36000 docker run --rm --name "hexbench-$pass-$$" --label hex.bench=competitive --cpuset-cpus="$CPUSET" \
-    --memory=40g --privileged --security-opt label=disable --cgroupns=private --network=none \
+    --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} --privileged --security-opt label=disable --cgroupns=private --network=none \
     -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" "$@" \
     -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e LIFECYCLES -e CAP -e BUDGET_MIB="$BOX_BUDGET_MIB" -e METHODS \
     -e HEXBENCH_PHASES hexbench/sandboxes:1 bash /opt/lab/lab_inside.sh "$pass" 2>&1 | tee "$OUT/$pass.log"

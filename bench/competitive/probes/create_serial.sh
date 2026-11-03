@@ -8,6 +8,7 @@
 # (create_serial_inside.sh says which processes are each one's). create_serial.py reads them. On fedora:
 #   [MODE=locks] create_serial.sh <hex release binary> <seam_oci release binary>
 # Not a timed pass: the load is recorded, not gated; what it reads is where the threads wait, not how fast.
+# BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
@@ -19,6 +20,7 @@ cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/libcrun-
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to ${CPUSET:-4-31}"
   echo "load at start: $(cat /proc/loadavg)"
   echo "owner: ${HEXBENCH_OWNER:-none} (one owner's boxes, their bundles holding Docker's default capabilities, when set)"
+  echo "container: --memory ${BENCH_MEMORY:-40g}, --oom-score-adj ${BENCH_OOM:-none}"
   echo "containers at start: $(docker ps --format '{{.Names}}' | paste -sd ' ' - | cut -c1-400)"
   echo "hex: $("$OUT/bin/hex" --version) (sha256 $(sha256sum "$OUT/bin/hex" | cut -c1-16))"
   echo "seam_oci: sha256 $(sha256sum "$OUT/bin/seam_oci" | cut -c1-16)"
@@ -27,7 +29,7 @@ cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/libcrun-
 } > "$OUT/env.txt"
 NAME=hexbench-serial-$$
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 2400 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+timeout 2400 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --tmpfs /run:rw,exec,nosuid,size=4g \
   -e SUSTAINED -e MODE -e HEXBENCH_OWNER -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   registry.fedoraproject.org/fedora:44 \
