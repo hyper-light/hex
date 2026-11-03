@@ -787,6 +787,9 @@ FORK = re.compile(r"^sched_process_fork: comm=.*? pid=(?P<parent>\d+) child_comm
 # and a kworker's work item by its function.
 SOFTIRQ = re.compile(r"^softirq_(?P<edge>entry|exit): vec=\d+ \[action=(?P<action>\w+)\]\s*$")
 WORK = re.compile(r"^workqueue_execute_(?P<edge>start|end): work struct (?P<work>\w+): function (?P<function>\S+)\s*$")
+# A hold of the kernel's one mount lock (namespace_sem), for write (nsw, down_write) or shared (nsr, down_read): the
+# kprobes create_breakdown_inside.sh's mounts_trace sets on the lock's address (goal 5 extended step 3).
+NSSEM = re.compile(r"^(?P<kind>nsw|nsr): \(")
 
 
 # How each span opened, for the report's first line.
@@ -838,6 +841,7 @@ def mounts(trace, stats, header, path="pruned"):
     cur, window, off, creates, born = {}, {}, {}, [], set()
     # pre: the init preempted off each CPU; begun: a softirq's or a work item's start on each CPU.
     pre, begun = {}, {}
+    probed = False
 
     def charge(table, label, d):
         table[label] = table.get(label, 0) + d
@@ -932,6 +936,13 @@ def mounts(trace, stats, header, path="pruned"):
                 if pid in window:
                     window[pid]["faults"] += 1
                     window[pid]["pending"] += 1
+            elif (e := NSSEM.match(body)):
+                probed = True
+                if (w := window.get(pid)) is not None:
+                    c = cur.get(pid)
+                    at = name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "between calls"
+                    held = w.setdefault("holds", {}).setdefault(e["kind"], {})
+                    held[at] = held.get(at, 0) + 1
             else:
                 unread += 1
     n_lost = eb.lost(stats)
@@ -953,6 +964,15 @@ def mounts(trace, stats, header, path="pruned"):
     spans = sorted(w["span"] for w in creates)
     cut = spans[max(0, len(spans) - max(1, len(spans) // 100))]
     tail = [w for w in creates if w["span"] >= cut]
+
+    def holds(ws, kind):
+        """The mount lock's holds per create of `kind` (nsw for write, nsr shared), and by the call each was in."""
+        tot = {}
+        for w in ws:
+            for at, k in w.get("holds", {}).get(kind, {}).items():
+                tot[at] = tot.get(at, 0) + k
+        by = ", ".join(f"{at} {k / len(ws):.1f}" for at, k in sorted(tot.items(), key=lambda kv: -kv[1]))
+        return sum(tot.values()) / len(ws), by
 
     def table(ws):
         n, per = len(ws), {}
@@ -984,7 +1004,11 @@ def mounts(trace, stats, header, path="pruned"):
                      f"- Preempted, the CPU went first to (us per create): {top('by') or 'none'}; while it waited, "
                      f"its CPU ran (us per create): {top('what') or 'nothing traced'}.",
                      f"- Softirqs run on the init itself as an interrupt returned (us per create): "
-                     f"{top('on') or 'none'}."]
+                     f"{top('on') or 'none'}.",
+                     (f"- The mount lock (namespace_sem) per create: {holds(ws, 'nsw')[0]:.1f} held for write "
+                      f"(by call: {holds(ws, 'nsw')[1] or 'none'}), {holds(ws, 'nsr')[0]:.1f} shared "
+                      f"(by call: {holds(ws, 'nsr')[1] or 'none'})." if probed
+                      else "- The mount lock's holds weren't traced (no namespace_sem probe).")]
 
     def gaps(ws):
         n, per = len(ws), {}
@@ -1028,7 +1052,10 @@ def mounts(trace, stats, header, path="pruned"):
                    "calls_per_create": sum(len(w["calls"]) for w in creates) / n,
                    "in_calls_us_per_create": sum(w["sys"] for w in creates) / n,
                    "between_calls_us_per_create": sum(w["user"] for w in creates) / n,
-                   "faults_per_create": sum(w["faults"] for w in creates) / n}, f, indent=1)
+                   "faults_per_create": sum(w["faults"] for w in creates) / n,
+                   "nssem_write_per_create": holds(creates, "nsw")[0] if probed else None,
+                   "nssem_write_by_call": holds(creates, "nsw")[1] if probed else None,
+                   "nssem_read_per_create": holds(creates, "nsr")[0] if probed else None}, f, indent=1)
     if n_lost:
         print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
         return 1

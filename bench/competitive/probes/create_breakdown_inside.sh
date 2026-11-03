@@ -196,14 +196,28 @@ switch() {
 # function (the fedora traces of goal 5 step 3 found ksoftirqd and the kworkers first to the CPU in the tail), and so
 # are the softirqs run on a hex process as an interrupt returns, which take its CPU without a switch.
 mounts_trace() {
-  local name=$1 lc=$2 conc=$3 rc=0 ev f
+  local name=$1 lc=$2 conc=$3 rc=0 ev f nssem
   local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork
     irq/softirq_entry irq/softirq_exit workqueue/workqueue_execute_start workqueue/workqueue_execute_end"
   [ -d "$T/events/exceptions/page_fault_user" ] && MT="$MT exceptions/page_fault_user"
+  # The kernel's one mount lock, each hold of it counted (goal 5 extended step 3): a kprobe on down_write and one on
+  # down_read, filtered to namespace_sem's address and to hex's processes, so each init's span counts its own holds
+  # and the call it took each in. Every write hold is namespace_lock's down_write, every shared one down_read
+  # (v6.19 fs/namespace.c:1723-1726, the namespace_shared guard at :97, the mount table's iterator at :1541).
+  nssem=$(awk '$3 == "namespace_sem" {print "0x" $1; exit}' /proc/kallsyms)
+  case $nssem in
+    ""|0x0000000000000000) echo "namespace_sem's address isn't readable here: its holds go uncounted" >&2 ;;
+    *) for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+       { echo "p:hexcb/nsw down_write sem=%di:x64" >> "$T/kprobe_events" \
+           && echo "p:hexcb/nsr down_read sem=%di:x64" >> "$T/kprobe_events"; } \
+         || { echo "the namespace_sem probes couldn't be made" >&2; return 1; }
+       MT="$MT hexcb/nsw hexcb/nsr" ;;
+  esac
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $MT; do
     case $ev in
+      hexcb/*) f="sem == $nssem && comm == \"hex\"" ;;
       sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
       sched/sched_process_fork) f='parent_comm == "hex"' ;;
       irq/*) f='comm ~ "ksoftirqd*" || comm == "hex"' ;;
@@ -227,6 +241,7 @@ mounts_trace() {
   for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
   for ev in $MT; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   untrace
+  for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
 

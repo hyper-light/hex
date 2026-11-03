@@ -778,6 +778,13 @@ time between calls and the page faults; each mount's share (the calls up to its 
 way. The trace adds two events to every call, so its spans are longer than the rounds' part 19: they place the time
 and count the calls, and part 19's figures of record are the rounds'.
 
+Each init's holds of the kernel's one mount lock are counted too (goal 5 extended step 3). Two kprobes, on `down_write`
+and `down_read`, are filtered to `namespace_sem`'s address in `/proc/kallsyms` and to the `hex` processes. Every write
+hold is `namespace_lock`'s `down_write`, every shared one a `down_read` (v6.19 `fs/namespace.c:1723-1726`, `:97`,
+`:1541`). The report gives the holds per create for write and shared, each by the call the init was in.
+`create_breakdown_mounts_test.py` holds the count to a synthetic trace; the reader before it fails that test (no
+count).
+
 ## Run 13 (2026-11-03, fedora): step 6's binary on boxes of no owner, and the one before it, in the same rounds
 
 Runs 8 to 12 are goal 5 extended steps 2 and 3's, on their branches. This run's container was pinned to CPUs 4-31, P-
