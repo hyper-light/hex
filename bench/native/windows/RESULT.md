@@ -121,10 +121,9 @@ decision (2026-11-03), in that order: she directed "check blocking happened + ke
 "implement the counter ourselves"; asked for research first; then, with the fix validated 7/7 on jupiter,
 confirmed "we already solved this."
 
-### Both architectures
+### Architectures
 
-The class is architecture-neutral (no intrinsics). It builds and lints clean on both
-`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc` (`cargo clippy --all-targets -- -D warnings`, both
-in `scripts/gates.sh`). The remaining gap on arm64 is runtime only: HEX-RT and the `job_events`
-measurements ran on jupiter (amd64); no arm64-Windows runner is available to run them, so arm64 is built
-and linted but not yet exercised.
+The class is architecture-neutral (no intrinsics). It builds and lints clean on `x86_64-pc-windows-msvc`
+(`cargo clippy --all-targets -- -D warnings`, in `scripts/gates.sh`), and HEX-RT and the `job_events`
+measurements ran on jupiter (amd64). **Windows arm64 (`aarch64-pc-windows-msvc`) is skipped for now**
+(Ada's call, 2026-11-03): it is not in the gates and not built or run here.
