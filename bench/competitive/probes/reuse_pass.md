@@ -431,3 +431,26 @@ Pooled over 40 pairs each:
   to 3.8 ms a lifecycle at concurrency 1 and 6.4 to 6.6 at 32, where run 10's tip8 cost 0.78 and 1.61 on 4-15.
   `create_serial.md` run 22 profiles both: a third of a lone lifecycle's CPU is pivot_root's walk of the host's threads.
 
+
+## Run 14 (2026-11-03, fedora): the `/dev` pool's low mark, interleaved A B B A on 4-15
+
+- **Binaries:** mr12h (`hex` ff5cef383a844f85), and mr13 (`hex` 252eea5c30632778), which is mr12h with the pool's thread
+  woken only at a key's low mark and filling the key in one pass (`3260249`, on step 3's branch).
+- **Method:** the unit `hex-g5x-s6-v23-20261103T220545Z`, 22:14Z to 22:17Z. Interleaved pairs on 4-15, 2 rounds of 10
+  pairs a run, one owner's boxes, reuse on, one-minute load 19 to 39 with kiln's pool of about 65 containers beside it.
+
+| run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 |
+|---|---|---|---|---|---|
+| `20261103T221421Z` | mr12h | 6.27x (0.19) | 7,721/s over 1,234/s | 1.01, 1.27 ms | 1.27, 9.96 |
+| `20261103T221508Z` | mr13 | 6.12x (0.14) | 8,305/s over 1,354/s | 0.90, 1.23 ms | 1.26, 10.25 |
+| `20261103T221550Z` | mr13 | 5.83x (0.13) | 8,146/s over 1,399/s | 0.88, 1.24 ms | 1.25, 10.27 |
+| `20261103T221634Z` | mr12h | 4.74x (0.09) | 8,431/s over 1,776/s | 0.69, 1.20 ms | 1.27, 10.34 |
+
+Pooled over 40 pairs each: mr12h 5.51x (SE 0.16), 8,060/s over 1,457/s; mr13 5.98x (SE 0.10), 8,225/s over 1,376/s. Over
+the socket, 5.22x (SE 0.17) and 5.58x (SE 0.09).
+
+**What it says: nothing for the low mark, and neither reaches 8x.** mr12h alone reads 6.27x and then 4.74x minutes apart,
+as its concurrency 1 moves from 1.01 ms of CPU a lifecycle to 0.69, and mr13's two runs lie inside that. Concurrency 32's
+pooled rate moves 2%, within its runs' spread. The low mark's own effect is on its thread (`devfs_clone.md`). What the
+ratio swings with here is concurrency 1's CPU a lifecycle, 46% on one binary within three minutes, which is the host's
+state and not this change. Its cause isn't named yet.
