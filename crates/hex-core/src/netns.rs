@@ -34,7 +34,9 @@ use std::collections::VecDeque;
 pub const BOUND: usize = 32;
 
 /// The most ipc and uts namespace pairs a node's pool holds (goal 5 extended, step 4): as [`BOUND`], the most creates
-/// the bench's busiest phase has in flight at once, so a burst of its whole width finds a pair each.
+/// the bench's busiest phase has in flight at once, so a burst of its whole width finds a pair each. It holds at most
+/// 451 KiB of kernel memory (14.1 KiB a pair, the most the host's Slab rose) and 64 descriptors, and one thread makes
+/// about 43,000 pairs a second, measured on fedora (`bench/competitive/probes/netns_pool.md`, goal 5 extended step 4).
 pub const IPC_UTS_BOUND: usize = 32;
 
 /// What a take is answered with.

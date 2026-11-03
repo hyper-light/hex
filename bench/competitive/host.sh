@@ -110,7 +110,7 @@ if [[ " $PHASES " == *" oci "* ]]; then
   # it compares unlike setups; a ratio within one pass compares like ones.
   SEAM_OCI_ENV=(); [ -x "$BASE/bin/seam_oci" ] && SEAM_OCI_ENV=(-e "SEAM_OCI=/opt/bin/seam_oci")
   echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state" >> "$OUT/env.txt"
-  timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory=40g \
+  timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
     --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
