@@ -34,6 +34,8 @@
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
+//! In process it reads the node's ipc and uts namespace counts the same way (`Node::ipc_uts`, goal 5 extended
+//! step 4), and HEXBENCH_IPCUTS=0 drains that pool (bound 0), so a run can time creates with it and without it.
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 #![allow(
@@ -584,6 +586,14 @@ mod linux {
             }
         }
 
+        /// The node's ipc and uts namespace counts, read in process, as its create seeds' are.
+        fn ipc_uts(&self) -> Result<Option<netns::Counts>, String> {
+            match self {
+                Self::InProcess(node) => node.ipc_uts().map(Some).map_err(|e| e.to_string()),
+                Self::Socket { .. } => Ok(None),
+            }
+        }
+
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -701,6 +711,12 @@ mod linux {
             let node = node
                 .with_prepared_dev_mounts(std::env::var("HEXBENCH_DEVFS").as_deref() != Ok("0"))
                 .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"));
+            let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
+                Ok("0") => node
+                    .with_ipc_uts_bound(0)
+                    .unwrap_or_else(|e| panic!("draining the ipc and uts pool: {e}")),
+                _ => node,
+            };
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();
@@ -728,6 +744,7 @@ mod linux {
             let r = driver.netns().and_then(|before| {
                 let seeds_before = driver.seeds()?;
                 let dev_before = driver.dev_mounts()?;
+                let ipc_uts_before = driver.ipc_uts()?;
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -748,6 +765,9 @@ mod linux {
                 };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
+                    if let (Some(before), Some(after)) = (ipc_uts_before, driver.ipc_uts()?) {
+                        fields.insert("ipc_uts".to_owned(), rise(before, after));
+                    }
                     if let (Some(before), Some(after)) = (dev_before, driver.dev_mounts()?) {
                         fields.insert("dev_mounts".to_owned(), json!({
                             "made":after.made-before.made, "taken":after.taken-before.taken,

@@ -114,6 +114,19 @@ pub trait DevMounts {
     fn unpooled(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError>;
 }
 
+/// The ipc and uts namespaces a node agent makes ahead (goal 5 extended, step 4), which a create routed to a
+/// pruned seed asks for.
+pub trait IpcUtsAhead {
+    /// A pair made ahead, now the container's: the caller keeps no copy. `None` when there is none to give, and
+    /// the init's clone makes them.
+    fn take(&self) -> Result<Option<super::ipcuts::Pair>, OciError>;
+
+    /// A container that makes either namespace but can't take a pair: its user namespace isn't this process's
+    /// and a namespace belongs to its maker's (user_namespaces(7)), or it makes one of the two alone, or its
+    /// create has no room for the descriptors. Its clone, or its shim, makes them on the path.
+    fn on_path(&self) -> Result<(), OciError>;
+}
+
 /// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
 /// pool), asked once the spec is read, and the device programs it keeps loaded, one per policy
 /// ([`Programs::attach`]; goal 5 extended, step 1). A create given neither makes its container's
@@ -123,6 +136,7 @@ pub struct Held<'a> {
     pub networks: Option<&'a dyn Networks>,
     pub devices: Option<&'a Programs>,
     pub dev_mounts: Option<&'a dyn DevMounts>,
+    pub ipc_uts: Option<&'a dyn IpcUtsAhead>,
 }
 
 /// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it

@@ -40,6 +40,7 @@ use hex_runtime::linux::{disks, process};
 
 use crate::createpool::CreatePool;
 use crate::devfs::Devfs;
+use crate::ipcuts::IpcUtsPool;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
@@ -117,6 +118,8 @@ pub struct Node {
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
+    /// The ipc and uts namespaces it makes ahead (goal 5 extended, step 4; [`Node::ipc_uts`]).
+    ipc_uts: IpcUtsPool,
     devfs: Devfs,
 }
 
@@ -181,6 +184,10 @@ impl Node {
             Owner::Root => netns::BOUND,
             Owner::Rootless { .. } => 0,
         })?;
+        let ipc_uts = IpcUtsPool::start(match owner {
+            Owner::Root => netns::IPC_UTS_BOUND,
+            Owner::Rootless { .. } => 0,
+        })?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         Ok(Self {
@@ -202,6 +209,7 @@ impl Node {
             inject: None,
             specs: Mutex::new(Specs::default()),
             netns,
+            ipc_uts,
             devfs: Devfs::start(owner == Owner::Root)?,
             null: rustix::fs::open(
                 "/dev/null",
@@ -290,6 +298,22 @@ impl Node {
         Ok(self)
     }
 
+    /// Sets the most ipc and uts namespace pairs a root node makes ahead, [`netns::IPC_UTS_BOUND`] unless set,
+    /// in place of the pool it opened with, which closes what it held. With 0 it makes none, and every
+    /// container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
+    pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
+        if bound > 0 && self.owner != Owner::Root {
+            return Err(Refusal::Invalid {
+                what: "ipc and uts namespace bound",
+                why: format!(
+                    "a rootless node makes no ipc or uts namespaces ahead, so it can't hold {bound}"
+                ),
+            });
+        }
+        self.ipc_uts = IpcUtsPool::start(bound)?;
+        Ok(self)
+    }
+
     /// Sets the most device programs the node holds open, one per policy, [`MAX_PROGRAMS`] unless set,
     /// in place of those it opened with, which it closes (each lives on in the cgroups it's attached to).
     /// A root node's oci boxes' root keeps its program.
@@ -369,6 +393,14 @@ impl Node {
     /// ([`crate::serve::Host::netns`]).
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         self.netns.counts()
+    }
+
+    /// What the node has counted of its containers' ipc and uts namespaces since its pool opened (goal 5
+    /// extended, step 4): pairs made ahead, taken by a create, made on a create's path (the pool dry, or a
+    /// container the pool can't serve), discarded at shutdown, and makes that failed. Read in process, as the
+    /// seeds' counts are.
+    pub fn ipc_uts(&self) -> Result<netns::Counts, Refusal> {
+        self.ipc_uts.counts()
     }
 
     fn record(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
@@ -633,6 +665,7 @@ impl Node {
                         networks: Some(&self.netns),
                         devices: Some(&self.devices),
                         dev_mounts: Some(&self.devfs),
+                        ipc_uts: Some(&self.ipc_uts),
                     },
                     seeds,
                 )

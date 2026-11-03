@@ -20,6 +20,7 @@ pub mod escape;
 pub mod exec;
 pub mod init;
 pub mod inroot;
+pub mod ipcuts;
 pub mod mount;
 pub mod net;
 pub mod programs;

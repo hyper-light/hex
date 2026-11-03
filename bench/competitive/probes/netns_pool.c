@@ -30,6 +30,10 @@ enum { MAX_HELD = 4096 };
 static int held_fd[MAX_HELD];
 static int held;
 
+/* With the argument `ipcuts`, each make is what the node's ipc and uts pool's thread does (goal 5 extended step 4,
+ * hex-runtime's oci/ipcuts.rs), going back to these after each. */
+static int ipcuts, home_ipc, home_uts;
+
 static void die(const char *what) {
   fprintf(stderr, "netns_pool: %s: %s\n", what, strerror(errno));
   exit(1);
@@ -58,13 +62,30 @@ static void make_one(void) {
   held_fd[held++] = fd;
 }
 
-int main(void) {
+/* One fresh ipc and uts pair: this thread moves into them, their descriptors are kept, and it goes back home. */
+static void make_pair(void) {
+  if (unshare(CLONE_NEWIPC | CLONE_NEWUTS) < 0) die("unshare(CLONE_NEWIPC | CLONE_NEWUTS)");
+  int ipc = open("/proc/thread-self/ns/ipc", O_RDONLY | O_CLOEXEC);
+  int uts = open("/proc/thread-self/ns/uts", O_RDONLY | O_CLOEXEC);
+  if (ipc < 0 || uts < 0) die("opening /proc/thread-self/ns/ipc and uts");
+  if (setns(home_ipc, CLONE_NEWIPC) < 0 || setns(home_uts, CLONE_NEWUTS) < 0) die("setns back home");
+  held_fd[held++] = ipc;
+  held_fd[held++] = uts;
+}
+
+int main(int argc, char **argv) {
   char line[64];
+  ipcuts = argc > 1 && strcmp(argv[1], "ipcuts") == 0;
+  if (ipcuts) {
+    home_ipc = open("/proc/thread-self/ns/ipc", O_RDONLY | O_CLOEXEC);
+    home_uts = open("/proc/thread-self/ns/uts", O_RDONLY | O_CLOEXEC);
+    if (home_ipc < 0 || home_uts < 0) die("opening this thread's ipc and uts namespaces");
+  }
   setvbuf(stdout, NULL, _IOLBF, 0);
   while (fgets(line, sizeof line, stdin)) {
     if (strncmp(line, "exit", 4) == 0) break;
     long n;
-    if (sscanf(line, "make %ld", &n) != 1 || n < 1 || n > MAX_HELD - held) {
+    if (sscanf(line, "make %ld", &n) != 1 || n < 1 || n > (MAX_HELD - held) / (ipcuts ? 2 : 1)) {
       fprintf(stderr, "netns_pool: a command is `make <n>` (1 to %d more) or `exit`, not %s", MAX_HELD - held, line);
       return 1;
     }
@@ -72,7 +93,7 @@ int main(void) {
     if (!ns) die("allocating the timings");
     for (long i = 0; i < n; i++) {
       uint64_t t0 = now_ns();
-      make_one();
+      if (ipcuts) make_pair(); else make_one();
       ns[i] = now_ns() - t0;
     }
     printf("{\"made\":%ld,\"held\":%d,\"ns\":[", n, held);
