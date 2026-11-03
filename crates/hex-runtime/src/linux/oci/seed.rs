@@ -103,6 +103,8 @@ fn serve() -> Result<(), OciError> {
         rustix::fs::Mode::empty(),
     )
     .map_err(|e| OciError::os("opening /dev/null", e))?;
+    crate::linux::sys::mark_cloexec_from_3()
+        .map_err(|e| OciError::os("marking descriptors close-on-exec", e))?;
     rustix::io::dup2(&null, &mut stdin)
         .map_err(|e| OciError::os("putting /dev/null on fd 0", e))?;
     // The seed's own pid namespace is opened before any prune: once pruned there is no `/proc` to open

@@ -502,6 +502,10 @@ impl Becoming {
 
     /// Becomes the process: system calls alone, in the order the type's docs give.
     pub(crate) fn apply(&self) -> Result<(), Failure> {
+        // Before anything else, so before the seccomp filter a strict profile would refuse it under, as
+        // crun marks them before its own (src/libcrun/container.c:1096).
+        crate::linux::sys::mark_cloexec_from_3()
+            .map_err(Failure::of("marking descriptors close-on-exec"))?;
         // oom_score_adj is set while still privileged (lowering it needs CAP_SYS_RESOURCE).
         if let Some(text) = &self.oom {
             let fd = rustix::fs::open(
