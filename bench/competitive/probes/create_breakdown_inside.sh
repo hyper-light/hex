@@ -28,6 +28,12 @@ ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
 PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
+# With HEXBENCH_DOCKER_PATHS=1, the masks and read-only paths of Docker's default spec instead (moby docker-v29.9.2
+# daemon/pkg/oci/defaults.go:110-116 and :194-207; its per-CPU thermal_throttle masks lie under /sys, which these
+# bundles don't mount): goal 5 extended step 3's measure of the init binding them through its own proc.
+if [ "${HEXBENCH_DOCKER_PATHS:-0}" = 1 ]; then
+  RO_PATHS=',"maskedPaths":["/proc/acpi","/proc/asound","/proc/interrupts","/proc/kcore","/proc/keys","/proc/latency_stats","/proc/sched_debug","/proc/scsi","/proc/timer_list","/proc/timer_stats","/sys/devices/virtual/powercap","/sys/firmware"],"readonlyPaths":["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"]'
+fi
 bundle() { # bundle <dir> <args json>
   local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
   ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin )
