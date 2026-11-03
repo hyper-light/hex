@@ -1541,6 +1541,25 @@ echo "named $(readlink "$HEX_OCI_NETWORK")" >> "$HEX_OCI_DIR/report"
 sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/#/fdinfo/#')" >> "$HEX_OCI_DIR/report"
 "#;
 
+    /// A stand-in shim at `path`, written by a child process. Written from here, a descriptor open to write
+    /// it could reach a process another test forks in that moment, and until that process's exec closed it
+    /// Linux would refuse to run the file (ETXTBSY, execve(2)), as unit hex-g5x-s6-fdh9-20261103T215230Z saw.
+    fn stand_in_at(path: &Path, text: &str) {
+        let mut writer = Command::new("sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success());
+    }
+
     /// HEX-NETNS-6 (decision 4, goal 4 plan step 4): a create hands its shim a network namespace made
     /// ahead by the path of the agent's descriptor for it, which stays close-on-exec, so neither the
     /// shim nor any process the multi-threaded agent starts meanwhile (another create's shim, an exec'd
@@ -1550,12 +1569,9 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// close-on-exec while the stand-in runs.
     #[test]
     fn a_namespace_made_ahead_reaches_the_shim_by_path_and_no_process_inherits_it() {
-        use std::os::unix::fs::PermissionsExt;
-
         let lab = tempfile::tempdir().unwrap();
         let stand_in = lab.path().join("shim");
-        std::fs::write(&stand_in, STAND_IN).unwrap();
-        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        stand_in_at(&stand_in, STAND_IN);
         let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
         let dir = rt.dir("c1").unwrap();
         dir.create("c1").unwrap();
