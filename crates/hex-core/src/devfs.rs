@@ -31,6 +31,7 @@ pub struct Counts {
     pub unpooled_inodes: u64,
     pub unpooled_key_bytes: u64,
     pub unpooled_capacity: u64,
+    pub unpooled_user_namespace: u64,
     /// Fixed preparation stages; their sum is `failed`.
     pub failed_filesystem: u64,
     pub failed_device: u64,
@@ -65,6 +66,9 @@ pub enum Unpooled {
     Inodes,
     KeyBytes,
     Capacity,
+    /// A container with a user namespace of its own, made through the shim: the node's default nodes
+    /// can't serve it, so it binds the host's in (goal 5 extended, step 3).
+    UserNamespace,
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +204,7 @@ impl<K: Clone + Eq, T> Pool<K, T> {
             Unpooled::Inodes => &mut self.counts.unpooled_inodes,
             Unpooled::KeyBytes => &mut self.counts.unpooled_key_bytes,
             Unpooled::Capacity => &mut self.counts.unpooled_capacity,
+            Unpooled::UserNamespace => &mut self.counts.unpooled_user_namespace,
         };
         *count = count.saturating_add(1);
         Ok(())
@@ -432,6 +437,7 @@ mod tests {
             Unpooled::Inodes,
             Unpooled::KeyBytes,
             Unpooled::Capacity,
+            Unpooled::UserNamespace,
         ] {
             p.unpooled(reason).unwrap();
         }
@@ -445,9 +451,10 @@ mod tests {
                 c.unpooled_readonly,
                 c.unpooled_inodes,
                 c.unpooled_key_bytes,
-                c.unpooled_capacity
+                c.unpooled_capacity,
+                c.unpooled_user_namespace
             ],
-            [1; 8]
+            [1; 9]
         );
         assert_eq!(
             c.on_path,
@@ -463,6 +470,7 @@ mod tests {
                 + c.unpooled_inodes
                 + c.unpooled_key_bytes
                 + c.unpooled_capacity
+                + c.unpooled_user_namespace
         );
         assert!(p.entries.is_empty());
         assert_eq!(p.held(), 0);

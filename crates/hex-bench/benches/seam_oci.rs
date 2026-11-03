@@ -763,6 +763,7 @@ mod linux {
                             "unpooled_inodes":after.unpooled_inodes-before.unpooled_inodes,
                             "unpooled_key_bytes":after.unpooled_key_bytes-before.unpooled_key_bytes,
                             "unpooled_capacity":after.unpooled_capacity-before.unpooled_capacity,
+                            "unpooled_user_namespace":after.unpooled_user_namespace-before.unpooled_user_namespace,
                             "failed_filesystem":after.failed_filesystem-before.failed_filesystem,
                             "failed_device":after.failed_device-before.failed_device,
                             "failed_link":after.failed_link-before.failed_link,

@@ -38,6 +38,11 @@ pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
 /// descriptor for it (`/proc/<pid>/fd/<n>`), which stays close-on-exec: the shim opens it, and joins
 /// it in place of making the container's.
 pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
+/// A `/dev` made ahead (the node's pool, goal 5 extended step 3), by the path of the runtime's descriptor for
+/// the detached tmpfs (`/proc/<pid>/fd/<n>`), which the shim opens as it opens the network namespace, and its
+/// mount's index in the spec's mounts: the container attaches it in place of making its own.
+pub const ENV_DEV: &str = "HEX_OCI_DEV";
+pub const ENV_DEV_MOUNT: &str = "HEX_OCI_DEV_MOUNT";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
 /// (name in `/dev`, major, minor, mode); all character devices.
@@ -131,6 +136,9 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
         }
         None => None,
     };
+    // A `/dev` made ahead, opened by its path while this process's /proc is the runtime's, as the network
+    // namespace is.
+    let dev = prepared_dev()?;
 
     // The map pipe's end is read only for a user namespace's maps, and is the shim's to close either
     // way, before the container is forked.
@@ -178,7 +186,7 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
                     sync,
                     procs,
                     made_ahead,
-                    Root::Classic,
+                    Root::Classic(dev.as_ref()),
                 )
             }) {
                 Ok(()) => 0,
@@ -241,7 +249,7 @@ pub(crate) fn clone_child(
         sync,
         None,
         made_ahead,
-        Root::Classic,
+        Root::Classic(None),
     )
 }
 
@@ -319,12 +327,41 @@ impl FifoDir<'_> {
 }
 
 /// How the container's root is built. The classic path binds the rootfs in a copy of the agent's full
-/// mount namespace and `pivot_root`s into it; the pruned path (goal 5 plan step 2) attaches the rootfs
-/// and bind sources the agent cloned (here) in a copy of the seed's two-mount namespace and ends with
-/// `chroot`, with no `pivot_root` walk of the host's threads.
+/// mount namespace and `pivot_root`s into it, with the `/dev` the node made ahead if the shim was handed
+/// one; the pruned path (goal 5 plan step 2) attaches the rootfs and bind sources the agent cloned (here)
+/// in a copy of the seed's two-mount namespace and ends with `chroot`, with no `pivot_root` walk of the
+/// host's threads.
 pub(crate) enum Root<'a> {
-    Classic,
+    Classic(Option<&'a super::run::PreparedDev>),
     Pruned(&'a PrunedSources),
+}
+
+/// The `/dev` made ahead the runtime named to the shim ([`ENV_DEV`], [`ENV_DEV_MOUNT`]), opened by its
+/// descriptor's path, or `None` where it named none. A name without its index, or one the shim can't open,
+/// is refused: the create would otherwise make its own `/dev` and leave the runtime's unused.
+fn prepared_dev() -> Result<Option<super::run::PreparedDev>, OciError> {
+    let (path, index) = match (std::env::var_os(ENV_DEV), std::env::var_os(ENV_DEV_MOUNT)) {
+        (None, None) => return Ok(None),
+        (Some(path), Some(index)) => (path, index),
+        _ => {
+            return Err(OciError::Broken(
+                "a /dev made ahead needs both its descriptor's path and its mount's index"
+                    .to_owned(),
+            ));
+        }
+    };
+    let mount = index.to_str().and_then(|i| i.parse().ok()).ok_or_else(|| {
+        OciError::Broken(format!(
+            "the /dev made ahead's mount index {index:?} isn't one"
+        ))
+    })?;
+    let tree = rustix::fs::open(
+        Path::new(&path),
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening the /dev made ahead", e))?;
+    Ok(Some(super::run::PreparedDev { mount, tree }))
 }
 
 /// Makes the init the leader of a session of its own (and of its process group), as runc's and crun's inits do, so
@@ -383,7 +420,7 @@ pub(crate) fn container(
     }
     if spec.makes_namespace("mount") {
         match root {
-            Root::Classic => setup_rootfs(spec, bundle)?,
+            Root::Classic(dev) => setup_rootfs(spec, bundle, dev)?,
             Root::Pruned(sources) => setup_rootfs_pruned(spec, sources)?,
         }
     }
@@ -709,8 +746,15 @@ fn namespace_flags(spec: &Spec) -> UnshareFlags {
 /// Prepares the container's root: private propagation, the spec mounts, default devices and
 /// symlinks, masked and readonly paths, then `pivot_root` into it. Every path in the root is resolved
 /// inside it ([`inroot`]), from one descriptor of the bound rootfs: until the pivot `/` is the host's,
-/// and an image's links may point there.
-fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
+/// and an image's links may point there. A `/dev` the node made ahead (`dev`, goal 5 extended step 3) is
+/// attached in place of the spec's, under the pruned path's guards ([`setup_rootfs_pruned`]): only where
+/// `/dev` is reached without a link, its defaults taken out again before a later mount that could reach
+/// them, so every mount and refusal is what making `/dev` here gives.
+fn setup_rootfs(
+    spec: &Spec,
+    bundle: &str,
+    dev: Option<&super::run::PreparedDev>,
+) -> Result<(), OciError> {
     let rootfs = {
         let p = Path::new(&spec.root.path);
         if p.is_absolute() {
@@ -719,6 +763,18 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
             Path::new(bundle).join(p)
         }
     };
+    // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
+    // devices are bind-mounted from the host instead of created, and a `/dev` made in the node's own
+    // namespace can't stand in: the runtime never hands one there ([`super::run`], `shim_dev`).
+    let in_userns = spec.in_user_namespace();
+    let plan = crate::linux::oci::mount::plan(&spec.mounts)?;
+    if let Some(dev) = dev
+        && (in_userns || !super::devmount::eligible(spec, &plan).is_ok_and(|(i, _)| i == dev.mount))
+    {
+        return Err(OciError::Broken(
+            "the prepared /dev does not match the mount plan".to_owned(),
+        ));
+    }
     rustix::mount::mount_change(
         "/",
         MountPropagationFlags::PRIVATE | MountPropagationFlags::REC,
@@ -730,18 +786,34 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     // itself (a layered root's overlay) goes over the bind, and what follows resolves in it, so the
     // root is opened again after one, at its top then, as a lookup of the rootfs's path would land.
     let mut root_fd = inroot::open_root(&rootfs)?;
-    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
-        do_mount(&inroot::Root::new(root_fd.as_fd()), &op)?;
+    let mut ready = false;
+    for (index, op) in plan.iter().enumerate() {
+        let root = inroot::Root::new(root_fd.as_fd());
+        if ready
+            && (!super::devmount::target_unaffected(&op.destination)
+                || !root.without_symlinks(&op.destination))
+        {
+            if let Some(dev) = dev {
+                clear_prepared_dev(&dev.tree)?;
+            }
+            ready = false;
+        }
+        let prepared = dev
+            .filter(|d| usize::try_from(d.mount).ok() == Some(index))
+            .filter(|_| root.without_symlinks(&op.destination));
+        match prepared {
+            Some(d) => attach_prepared_dev(&root, op, &d.tree)?,
+            None => do_mount(&root, op)?,
+        }
+        ready |= prepared.is_some();
         if inroot::is_root(&op.destination) {
             root_fd = inroot::open_root(&rootfs)?;
         }
     }
     let root = inroot::Root::new(root_fd.as_fd());
-
-    // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
-    // devices are bind-mounted from the host instead of created.
-    let in_userns = spec.in_user_namespace();
-    make_dev(&root, spec, in_userns)?;
+    if !ready {
+        make_dev(&root, spec, in_userns)?;
+    }
     for path in &spec.linux.masked_paths {
         mask_path(&root, path)?;
     }
@@ -1282,6 +1354,35 @@ fn do_mount(root: &inroot::Root<'_>, op: &crate::linux::oci::mount::Op) -> Resul
         let top_fd = target(root, &op.destination, Make::Nothing)?;
         rustix::mount::mount_change(inroot::fd_path(&top_fd), prop)
             .map_err(|e| OciError::os("mount propagation", failed(e)))?;
+    }
+    Ok(())
+}
+
+/// The `/dev` the node made ahead, attached where the spec's goes (goal 5 extended, step 3): on its target
+/// resolved in the root and made when missing, as [`do_mount`] makes it, by `move_mount` from the detached
+/// tree, with the propagation the spec asks for set on the mount through its own descriptor. Its making
+/// (the tmpfs's superblock, its nodes and links) was the pool's, off the create's path.
+fn attach_prepared_dev(
+    root: &inroot::Root<'_>,
+    op: &crate::linux::oci::mount::Op,
+    tree: &OwnedFd,
+) -> Result<(), OciError> {
+    let at = || format!("{} at {}", op.fstype, op.destination);
+    let target_fd = target(root, &op.destination, Make::Dir)?;
+    rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+        .map_err(|e| OciError::os("attaching the prepared /dev", format!("{}: {e}", at())))?;
+    if let Some(prop) = op.propagation {
+        let (ms, rec) = propagation_ms(prop);
+        sys::mount_setattr(
+            tree.as_fd(),
+            rec,
+            &sys::MountAttrs {
+                set: 0,
+                clr: 0,
+                propagation: ms,
+            },
+        )
+        .map_err(|e| OciError::os("setting a mount's propagation", format!("{}: {e}", at())))?;
     }
     Ok(())
 }
