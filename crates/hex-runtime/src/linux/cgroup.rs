@@ -223,9 +223,10 @@ impl BoxRoot {
     /// have is skipped: no earlier box could have set it either. `cpu.max` alone is read first and
     /// written only where its values differ ([`cpu_max_holds`]): its write takes the host-wide
     /// `cfs_constraints_mutex` and walks every task group on the host (Linux v6.19 `tg_set_cfs_bandwidth`,
-    /// kernel/sched/core.c:9461-9462, `__cfs_schedulable` :9624; research f26), 68.5 us p50 against 1.5 us
-    /// for `pids.max` on adacachy's 3,348 cgroups (2026-11-03, 2,000 writes each), where its read takes
-    /// no lock (`cpu_max_show`, :10104), so the bound is in force either way.
+    /// kernel/sched/core.c:9461-9462, `__cfs_schedulable` :9624; research f26). On fedora's 279 cgroups it
+    /// took 6.6 us p50 against 2.5 for `pids.max`, a cost that grows with the host's task groups, while its
+    /// read takes no lock (`cpu_max_show`, :10104) and took 2.8 (bench/competitive/probes/cpu_max_write.md,
+    /// run 1). So the bound is in force either way.
     pub fn rebound(&self, cg: &BoxCgroup, bounds: &Bounds) -> Result<(), Refusal> {
         self.controllers_for(bounds)?;
         for w in core::writes_all(bounds, &self.disks)? {

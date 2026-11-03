@@ -22,12 +22,16 @@ use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::resources::Insn;
 use hex_runtime::linux::oci::run::{Choose, Chosen, Wants};
 
-/// Most memory an idle cgroup may still have charged to be handed on (research f27-f30). A box whose
-/// processes have all ended leaves the charge the kernel caches per CPU and some kernel memory: 3.5 to
-/// 7.1 MiB on adacachy, none of it the box's own (anon, shmem and dirty file pages 0). A box that left
-/// files in memory (its tmpfs, `/dev/shm`, page cache of what it wrote) leaves tens of megabytes (64 MiB
-/// in oci_reuse's test 3, 85 MB in f27), which the next box would be charged for, so its cgroup goes.
-/// Measured: bench/competitive/probes/reuse_residual.md.
+/// Most memory an idle cgroup may still have charged to be handed on (research f27-f30), measured
+/// (bench/competitive/probes/reuse_residual.md). A box whose processes have all ended leaves the charge
+/// the kernel caches per CPU and some kernel memory, none of it the box's own (anon, shmem and dirty file
+/// pages 0): the bench's lifecycle at most 1,748,992 bytes, 1.7 MiB (256 idle cgroups of fedora's OCI
+/// pass 20261103T044133Z), and oci_reuse's test 2, a box that burned CPU, held 64 MiB and had a program
+/// OOM-killed, 3,719,168 to 7,471,104 bytes (3.5 to 7.1 MiB) over six runs on adacachy and 5,054,464 in
+/// fedora's root lab (unit hex-g5x-s6-fedora-20261103T011609Z). A box that left files in memory (its
+/// tmpfs, `/dev/shm`, page cache of what it wrote) leaves tens of megabytes (64 MiB in test 3, 85 MB in
+/// f27), which the next box would be charged for, so its cgroup goes. 16 MiB sits above the first two
+/// and under the third (the lead, 2026-11-03T04:50Z).
 pub const RESIDUAL: u64 = 16 << 20;
 
 /// How many cgroups may wait for the remover at once: every idle cgroup the pool can put out at one time

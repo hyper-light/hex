@@ -1106,10 +1106,14 @@ lifecycle without changing what a box may do.
     - `memory.current` at most `RESIDUAL`, which is under the next box's `memory.max`.
   - *Every bound written again.* Bounds the next box doesn't set are written at the kernel's defaults
     (`hex_core::cgroup::writes_all`), and none of those writes takes the lock (f25). `cpu.max` alone is read first
-    and written only where it holds another value. Its write takes the host-wide `cfs_constraints_mutex` and walks
-    every task group on the host (`kernel/sched/core.c:9461-9462`, `:9624`; f26): 68.5 us p50 against 1.5 us for
-    `pids.max` on adacachy's 3,348 cgroups (2,000 writes each, 2026-11-03), against `mkdir`'s 0.130 ms that reuse
-    saves. Its read takes no lock (`cpu_max_show`, `:10104`), so the bound is in force either way.
+    and written only where its values differ, compared as values, never text (`hex_core::cgroup::CpuMax`); a read
+    or a parse that fails writes it (the lead's ruling, 2026-11-03T01:19Z, which departs from the plan's "every
+    bound is written again" while keeping its effect). Its write takes the host-wide `cfs_constraints_mutex` and
+    walks every task group on the host (`kernel/sched/core.c:9461-9462`, `:9624`; f26), so its cost grows with them.
+    <!-- record: bench/competitive/probes/cpu_max_write.md -->On fedora's 279 cgroups it took 6.6 us p50 against 2.5
+    for `pids.max`, and the read 2.8 (run 1, 2,000 each); an earlier reading on adacachy's 3,348 took 68.5 us
+    against 1.5.<!-- /record --> Its read takes no lock (`cpu_max_show`, `:10104`), so the bound is in force either
+    way.
   - *Usage.* It is reported as deltas from a baseline read when the box is given the cgroup, and the peak through a
     `memory.peak` descriptor written then (Linux 6.12 on, f31). No per-box `pids.peak` is reported (f32), and
     `memory.reclaim` never runs (f29). The agent holds that descriptor for each box given a cgroup another box left,
@@ -1200,16 +1204,18 @@ lifecycle without changing what a box may do.
     - the check's own cost at concurrency 32 rivalling the making's;
     - eligible boxes being rare, because specs grant CAP_NET_ADMIN or keep `/proc/sys` writable.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
-  kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->Over six runs of test 2 on adacachy
-  (Linux 7.2.9) a box left 3,719,168 to 7,471,104 bytes charged, 3.5 to 7.1 MiB, anon, shmem and dirty file pages 0
-  in each; on fedora (Linux 6.19.10, as root) 5,054,464.<!-- /record --> A box that leaves files in memory leaves tens
-  of megabytes (f27: 85 MB, and test 3's 64 MiB file), which the next box would be charged for. The threshold sits
-  above the first case and under the second.
-- **Test 3's other-owner case: open, Ada's call** (the lead, 2026-11-02T18:23Z). A box of another owner never gets the
-  idle cgroup: it gets a fresh one, counted (`Refused::Owner`). The plan's test then reads "A's is removed". The node
-  keeps it as its owner's, to hand to that owner's next box, which is the narrower reading: removing a clean idle
-  cgroup because another owner's box can't have it adds the very holds this lever takes off. Until Ada answers, no
-  test asserts either reading, and `hex_core::reuse`'s model follows what the node does.
+  kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->The bench's lifecycle left at most
+  1,748,992 bytes in 256 idle cgroups of fedora's OCI pass 20261103T044133Z. Over six runs of test 2 on adacachy
+  (Linux 7.2.9), a box that burned CPU, held 64 MiB and had a program OOM-killed left 3,719,168 to 7,471,104 bytes
+  charged, 3.5 to 7.1 MiB, anon, shmem and dirty file pages 0 in each; on fedora (Linux 6.19.10, as root)
+  5,054,464.<!-- /record --> A box that leaves files in memory leaves tens of megabytes (f27: 85 MB, and test 3's 64
+  MiB file), which the next box would be charged for. The threshold sits above both clean cases, 2.2 times test 2's
+  most, and under the third.
+- **Test 3's other-owner case: kept, Ada's call (2026-11-03).** A box of another owner never gets the idle cgroup: it
+  gets a fresh one, counted (`Refused::Owner`). The idle cgroup stays its owner's, waiting for that owner's next box,
+  and leaves only under the per-owner and per-node bounds. The plan's test read "A's is removed". Removing a clean idle
+  cgroup because another owner's box can't have it would add the very holds this lever takes off. Test 3 asserts the
+  keeping and the hand-on, and `hex_core::reuse`'s model test's oracle encodes it.
 - **Tests.** `hex_core::reuse`'s model test against an oracle covers:
   - random creates, deletes, owners, policies, privileges and failing checks;
   - the bounds, and a cgroup handed only to its owner under its policy when clean;
@@ -1233,23 +1239,29 @@ lifecycle without changing what a box may do.
     without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
     box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
     holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
-  - *The rate* (the second, at least 8x: not met). <!-- record: bench/competitive/probes/reuse_pass.md -->Sustained at
-    concurrency 32 over throughput at concurrency 1 in one OCI pass, one owner's boxes: 4.32x and 4.21x in process,
-    4.41x and 4.81x over the socket (run 1). With steps 2 and 3 merged in, an experiment of record for no branch,
-    4.05x to 4.83x, against 4.62x to 5.41x for this step alone beside it (run 2).<!-- /record --> Each lever raised
-    both rates, the rate at concurrency 1 as much as the other.
+  - *The rate* (the second, at least 8x, a minimum: not met yet). <!-- record: bench/competitive/probes/reuse_pass.md
+    -->Sustained at concurrency 32 over throughput at concurrency 1 in one OCI pass, one owner's boxes: 4.32x and
+    4.21x in process, 4.41x and 4.81x over the socket (run 1, 4-31, as host.sh runs it). With steps 2 and 3 merged in,
+    an experiment of record for no branch, 4.05x to 4.83x, against 4.62x to 5.41x for this step alone beside it (run
+    2, 4-31). On CPUs 4-15, the P-core threads: 2.89x to 3.32x at f7c4065 (run 3) and 2.47x to 2.86x at 610bba9
+    (run 4). The merge on 4-15 sustained 4,407 to 4,784 a second without network namespaces and 902 to 1,136 with
+    them, 85.9 to 87.5% of whose creates made theirs on the path (run 5).<!-- /record --> Each lever raised both rates,
+    the rate at concurrency 1 as much as the other, and that rate moves most with the host's load (run 5's was a
+    fifth to a half of run 4's), so the ratio is now measured with the two interleaved in each round (the lead, from
+    Ada, 2026-11-03T06:01Z).
     <!-- record: bench/competitive/probes/create_serial.md -->Once the cgroup lock is free, what holds concurrency 32 is
     the mount namespace's lock, one for the whole host, 5.349 ms a lifecycle (run 9); with steps 2 and 3 in too, RTNL
     in making each box's network namespace, 6.670 ms, and sysctl's lock, 12.58% of the samples spinning (run
     10).<!-- /record --> So the second falsifier below tripped: the holds fell and 8x didn't follow. The next
     host-wide locks are taken in making a network namespace a box, which a pool that makes them ahead moves off the
-    create but not off the host.
-  - *Reuse off* (the third, within 0.02 ms of 0 ms: not met as written).
+    create but not off the host: hence the namespace handed from box to box of one owner, below.
+  - *Reuse off* (the third: met, Ada's call, 2026-11-03T06:01Z: faster than before passes).
     <!-- record: bench/competitive/probes/create_breakdown.md -->On boxes of no owner, this step's create p50 against
-    the binary before it in the same rounds is 0.064 and 0.074 ms under in two runs and 0.028 over in one (run 13).
-    The rounds' own spread is wider than the window: the third run's pooled difference carries a standard error of
-    about 0.041 ms, and the traced parts differ only in the init's `pivot_root`, which this step doesn't
-    change.<!-- /record -->
+    the binary before it in the same rounds: over 100 rounds in five runs on 4-15, a mean paired difference of
+    -0.083 ms, standard error 0.028 by a bootstrap over the rounds, 74 rounds under, 10 within 0.02 ms and 16 over
+    (run 14). The window's precision, a standard error of 0.01 ms, would take about 800 rounds; at the precision
+    reached the step is faster, not slower. Run 13's three runs on 4-31 read the same: 0.064 and 0.074 ms under, 0.028
+    over.<!-- /record -->
   - *The bounds* (the fourth). The model test checks after every step that the pool keeps both bounds and hands a
     cgroup only to its owner, and test 3 gives another owner's box a fresh cgroup, counted. Every phase of the bench
     ended with 32 idle cgroups, `PER_OWNER`, removed when the bench ended.

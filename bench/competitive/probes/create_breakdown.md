@@ -580,3 +580,44 @@ from run 4 on. Run 14 repeats it on 4-15, with enough rounds for the window.
   that differed by 0.008 ms or more in any run is the init's `pivot_root`, which this step doesn't change: 0.017 and
   0.018 ms quicker in step 6's (0.298 against 0.315 in the first run, 0.283 against 0.301 in the third). The parts
   summed to 102.5%, 100.3% and 99.4% of the creates between the traced ones.
+
+## Run 14 (2026-11-03, fedora): run 13 on CPUs 4-15, five chunks of 20 rounds pooled
+
+- **Why:** run 13's three runs left step 6's third criterion unresolved: their rounds spread wider than its window.
+  This repeats it on CPUs 4-15, the P-core threads, with the rounds the window needs: every round's paired difference
+  pooled across runs, its mean's standard error by a bootstrap over the rounds, until that is at most 0.01 ms (the
+  lead, 2026-11-03T02:36Z). In chunks of 20 rounds, each a whole A/B run with its own run id, so a host reset costs one
+  chunk (the lead, 03:14Z). `create_breakdown_pool.py` pools them.
+- **Binaries:** step 6's at 610bba9, the step with the lead's `cpu.max` ruling, built on fedora: `hex`
+  765e809d32ae1a07, `seam_oci` 93bd371b2e2b5499 (`reuse_pass.md`'s run 4's). The before, ea891c7: the step's base, on
+  the delete flake's fix, built the same way: `hex` 2bd6a0fb78b3229e, `seam_oci` e84746c9fccee592. libcrun 1.30.1 in
+  process, driver sha256 5c356f2139adc232.
+- **Host and load:** kiln-a094a12d (fedora, renamed by its reset at 02:59Z), Linux 6.19.10-300.fc44.x86_64, the
+  probe's container pinned to 4-15 and capped (`--memory 8g`, `--oom-score-adj 1000`), `LOAD_GATE=0`; other tenants'
+  builds and kiln CI jobs beside it. The fedora units `hex-g5x-s6-verify3b-20261103T030643Z` (the first chunk),
+  `hex-g5x-s6-verify3c-20261103T044132Z` (three) and `hex-g5x-s6-verify3d-20261103T052454Z` (the last).
+- **Runs:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-breakdown-<run>`, 1,000 timed lifecycles a round after 100
+  untimed, the harness's scripts as at 610bba9. The second chunk's first try, at 04:43:35Z, refused: its trace instance
+  was there already, left by a chunk of a stopped unit. The harness names it `hexcb-$$`, and `$$` is 1 in every probe
+  container, so a killed run's instance blocks the next. The refused run's own exit removed it, the next three chunks
+  ran, and the second was run again last.
+
+| run | rounds | load at start | Hex through the seam | before | libcrun | seam less before, pooled (ms) | rounds' mean |
+|---|---|---|---|---|---|---|---|
+| 20261103T033346Z | 20 | 169.52 | 1.366 | 1.684 | 3.671 | -0.318 | -0.289 |
+| 20261103T044336Z | 20 | 23.65 | 0.882 | 0.940 | 1.993 | -0.058 | -0.055 |
+| 20261103T045220Z | 20 | 8.42 | 0.795 | 0.871 | 1.730 | -0.077 | -0.083 |
+| 20261103T050032Z | 20 | 8.15 | 1.134 | 1.131 | 2.454 | +0.003 | +0.004 |
+| 20261103T052455Z | 20 | 21.93 | 0.908 | 0.967 | 2.210 | -0.059 | +0.008 |
+
+- **Pooled, the 100 rounds:** step 6's create p50 less the before's in the same round has a mean of -0.083 ms, its
+  bootstrap standard error 0.028 ms (2,000 resamples), median -0.060, standard deviation 0.289. 10 rounds are within
+  0.02 ms, 74 under and 16 over.
+- **The criterion isn't resolved at its precision:** the standard error is 0.028 ms, not 0.01. At this spread 0.01 takes
+  about 800 rounds. At the precision reached, step 6 is faster, not slower: the mean's 95% interval, about -0.139 to
+  -0.027 ms, lies under the window. It goes to Ada as measured (the lead, 03:14Z).
+- **Without the first chunk:** at load 114 to 195 it set the spread. The other 80 rounds pool to -0.031 ms, standard
+  error 0.018, median -0.048, standard deviation 0.165.
+- **An earlier try:** `create-breakdown-20261103T023845Z`, of 100 rounds at f7c4065 (`hex` 729934ce2c45a292, `seam_oci`
+  92b8a36ae1c6c74e) against the same before, lost 69 to the host's reset at 02:59Z. Its 31 whole rounds pool to -0.157
+  ms, standard error 0.143, at load 32.6. It is kept apart: another binary.

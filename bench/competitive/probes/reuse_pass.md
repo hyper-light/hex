@@ -116,3 +116,66 @@ so each stands as measured (the lead, 2026-11-03T00:48Z). Their absolute rates a
   finds on these CPUs, and the network namespaces made on the path (1,613 and 228 of the in-process sustained phases'
   10,000 here, 2,007 and 734 over the socket).
 
+
+## Run 4 (2026-11-03, fedora): on CPUs 4-15, at 610bba9, the idle cgroups' residual read at each phase's end
+
+- **Host and load:** kiln-a094a12d, the host fedora was named after its reset at 02:59Z, Linux
+  6.19.10-300.fc44.x86_64, 2026-11-03T04:41:33Z, the pass's container pinned to 4-15 and capped (`--memory 8g`,
+  `--oom-score-adj 1000`). The 1-minute load was 14.05 at the start and 23.65 at the end, after an hour near 170 from
+  other tenants' builds.
+- **Binaries:** built on fedora at 610bba9, the step with the lead's `cpu.max` ruling: `hex` 765e809d32ae1a07,
+  `seam_oci` 93bd371b2e2b5499. The `seam_oci` of 25dd262 on records each phase's `idle_residual_bytes`
+  (`reuse_residual.md`).
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/20261103T044133Z`, run 1's parameters; the fedora unit
+  `hex-g5x-s6-verify3c-20261103T044132Z`.
+- **What the node did** (in process): every one of each sustained phase's 10,000 boxes was handed an idle cgroup
+  and ended through its init's pidfd, none by `cgroup.kill`.
+
+| lifecycles a second | throughput, concurrency 1 | concurrency 8 | concurrency 32 | sustained, concurrency 32 | sustained over concurrency 1 |
+|---|---|---|---|---|---|
+| Hex's seam in process, round 1 | 832 | 2,463 | 2,362 | 2,278 | 2.74x |
+| Hex's seam in process, round 2 | 843 | 2,108 | 2,443 | 2,238 | 2.66x |
+| Hex's seam over its socket, round 1 | 953 | 2,485 | 2,339 | 2,351 | 2.47x |
+| Hex's seam over its socket, round 2 | 896 | 2,796 | 2,576 | 2,563 | 2.86x |
+| libcrun in process, round 1 | 77 | 601 | 1,260 | 1,364 | 17.65x |
+| libcrun in process, round 2 | 77 | 640 | 1,381 | 1,364 | 17.78x |
+
+- **The criterion is not met:** 2.47x to 2.86x against 8x, as run 3's 2.89x to 3.32x on these CPUs. The rate at
+  concurrency 1 is higher than run 3's (832 to 953 against 593 to 724) on a quieter host, and at concurrency 32 about
+  the same (2,238 to 2,563 against 1,850 to 2,250).
+- **Network namespaces made on the path:** 2,277 and 2,938 of the in-process sustained phases' 10,000, 2,978 and
+  2,985 over the socket.
+
+## Run 5 (2026-11-03, fedora): an experiment, steps 2, 3 and 6 merged, with network namespaces and without
+
+- **Why:** Ada asked how close taking the network namespace's making off the lifecycle gets to 8x, before deciding on
+  reusing it (2026-11-03). Of record for no branch: the merge is no commit.
+- **The merge:** run 2's, on step 6 at f7c4065: `cp/t7-ext-s6` at f7c4065 with `cp/t7-ext-s3` at 148d12e merged in the
+  working tree, built on fedora as run 1's binaries were: `hex` 622aae3633815203, `seam_oci` 62b728b537684184.
+- **Host and load:** kiln-a094a12d, Linux 6.19.10-300.fc44.x86_64, the pass's container pinned to 4-15 and capped
+  (`--memory 8g`, `--oom-score-adj 1000`), `LOAD_GATE=0`. `NETNS=0` from 2026-11-03T05:13:01Z, the 1-minute load
+  26.81 at its start and 35.13 at its end; `NETNS=1` from 05:17:31Z, 29.63 and 40.90, with kiln CI jobs beside it.
+- **Runs:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/20261103T051301Z` (`NETNS=0`: every bundle without a network
+  namespace) and `20261103T051731Z` (`NETNS=1`), run 1's parameters, every box `bench-owner`'s; the fedora unit
+  `hex-g5x-s6-verify3c-20261103T044132Z`. The bundles had `/proc/sys` read-only (`readonlyPaths`): the
+  oci_inside.sh of this step's network-namespace reuse, synced uncommitted into the tree the pass ran from. A
+  read-only path is a bind mount more in each create, in both passes alike.
+
+| lifecycles a second | throughput, concurrency 1 | concurrency 8 | concurrency 32 | sustained, concurrency 32 | sustained over concurrency 1 |
+|---|---|---|---|---|---|
+| Hex's seam in process, no network namespace, round 1 | 468 | 2,439 | 3,609 | 4,784 | 10.23x |
+| Hex's seam in process, no network namespace, round 2 | 215 | 1,479 | 3,744 | 4,407 | 20.54x |
+| Hex's seam over its socket, no network namespace, round 1 | 122 | 969 | 2,427 | 2,579 | 21.23x |
+| Hex's seam over its socket, no network namespace, round 2 | 166 | 1,446 | 3,062 | 3,182 | 19.16x |
+| Hex's seam in process, network namespaces, round 1 | 181 | 665 | 865 | 902 | 5.00x |
+| Hex's seam in process, network namespaces, round 2 | 388 | 1,279 | 1,215 | 1,136 | 2.93x |
+| Hex's seam over its socket, network namespaces, round 1 | 256 | 1,106 | 1,057 | 929 | 3.63x |
+| Hex's seam over its socket, network namespaces, round 2 | 244 | 1,089 | 1,306 | 1,334 | 5.46x |
+
+- **The making caps concurrency 32:** in the same binary, minutes apart, Hex sustained 4,407 to 4,784 a second in
+  process without network namespaces and 902 to 1,136 with them, 85.9 to 87.5% of whose creates made theirs on the
+  path, the pool dry.
+- **Whether that reaches 8x isn't shown:** the rate at concurrency 1 was a fifth to a half of what run 2's merge
+  (step 6 at a6f32f1) ran (819 to 1,028) and step 6 alone in run 4 (832 to 953), on a host at load 26 to 41. With run 4's 832,
+  the 4,784 would be 5.75x. A lifecycle alone is what the host's load slows most, so the ratio here rises with the
+  load; it needs concurrency 1 measured on a quieter host, or beside concurrency 32 in each round.

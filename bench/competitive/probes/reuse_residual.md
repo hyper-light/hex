@@ -35,13 +35,33 @@ gone.
   6.19.10, `create_serial.md`'s run 7, `seam_oci`'s counts) 519 of 520 boxes at concurrency 1 and 4,968 of 5,000 at
   concurrency 32 were handed an idle cgroup, the rest given fresh ones; in the OCI pass (`reuse_pass.md`, run 1) 9,999
   and 10,000 of each sustained phase's 10,000. No idle cgroup was refused for what it had charged.
+- **What the bench's idle cgroups held** (the lead, 2026-11-02T18:23Z: measure the bench's real lifecycle residual
+  on fedora). In the OCI pass `~/.cache/hex-t7/g5x-s6/hex-bench/out/20261103T044133Z` (`reuse_pass.md`'s run 4,
+  CPUs 4-15, at 610bba9), `seam_oci` read `memory.current` of every idle slot at the end of each phase (its
+  `idle_residual_bytes`): 32 per phase, the throughput and sustained phases, each driver, both rounds.
+
+  | driver, round | throughput: min, p50, max | sustained: min, p50, max |
+  |---|---|---|
+  | in process, 1 | 0, 86,016, 864,256 | 53,248, 337,920, 864,256 |
+  | in process, 2 | 0, 219,136, 864,256 | 45,056, 294,912, 1,073,152 |
+  | over the socket, 1 | 0, 139,264, 1,314,816 | 73,728, 311,296, 1,089,536 |
+  | over the socket, 2 | 0, 75,776, 1,748,992 | 53,248, 370,688, 1,171,456 |
+
+  Over all 256: 0 at least, 167,936 bytes at the median, 716,800 at the 90th percentile and 1,748,992 (1.7 MiB) at
+  most.
 
 ## The threshold
 
-16 MiB: above every reading of a box whose processes all ended (7,471,104 bytes at most, 7.1 MiB, and 3,719,168 at
-least, 3.5 MiB, none of it the box's own memory), and under what a box that left files in memory leaves (64 MiB in test
-3; 85 MB in research f27's probe). The check also requires the threshold under the next box's `memory.max`, so a box
-bounded at 16 MiB or less always gets a fresh cgroup.
+16 MiB, above every clean reading and under every box that left files:
+- the bench's lifecycle leaves at most 1,748,992 bytes, 1.7 MiB, so the threshold is 9.6 times that (run
+  20261103T044133Z, above);
+- test 2's heavier box, which burned CPU, held 64 MiB and had a program OOM-killed, leaves at most 7,471,104 bytes,
+  7.1 MiB, and at least 3,719,168, 3.5 MiB, none of it the box's own memory, so the threshold is 2.2 times its most;
+- a box that left files in memory leaves 64 MiB in test 3 and 85 MB in research f27's probe, four times the threshold.
+
+A threshold set from the bench's readings alone, twice its most say, would refuse test 2's clean box. The check also
+requires the threshold under the next box's `memory.max`, so a box bounded at 16 MiB or less always gets a fresh
+cgroup.
 
 What would show it wrong: boxes whose processes all ended refused as `Charged` (the reuse rate falling for nothing the
 box held), or a box handed a cgroup whose charge it then can't fit under its bound.
