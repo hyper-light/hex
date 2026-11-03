@@ -1221,10 +1221,27 @@ lifecycle without changing what a box may do.
     or connect in the namespace once the owner's next box has it. That stays within one owner because no namespace is
     handed to another owner's box: the core's model test checks it after every step, and the root lab gives three
     boxes of another owner, beside an idle namespace of the first's, fresh ones.
+  - *The check's own socket stays with its namespace, within the owner* (the lead's go, with its conditions,
+    2026-11-03T17:36Z). The check keeps one NETLINK_ROUTE socket in each namespace it checks, made at its first check
+    and kept with the namespace, idle, handed on and held for the owner's next box, and closed with it, put out by the
+    bounds, refused by a check or let go with the node. So a box given a checked namespace sees one more socket in its
+    `/proc/net/netlink` than a fresh namespace has, a route socket with a portid, the node's (Linux v6.19
+    net/netlink/af_netlink.c:2703), and one more in `sockstat`'s count. It can't send to it: NETLINK_ROUTE lets any
+    socket receive but none send to another socket (`NL_CFG_F_NONROOT_RECV` without `NL_CFG_F_NONROOT_SEND`,
+    net/core/rtnetlink.c:7038) unless it holds CAP_NET_ADMIN over the namespace's owner
+    (net/netlink/af_netlink.c:1844-1846, :904-908; a connect to it likewise, :1083), and a box that may share holds
+    none. Nor can it read it: a socket's queue is read through its descriptor, which the node alone holds. `sockstat`
+    counts it from its making to its freeing (net/core/sock.c:2316-2319, :2417-2418), which is why it's kept rather than
+    made and closed at each check, and it stays within one owner, as its namespace does. Each kept namespace holds at
+    most one, so the sockets are within the namespaces' bounds: `PER_NODE` idle, `PER_NODE` on the checkers' line and
+    one for each live box. Tested: a box's send to it refused with EPERM, its send to the kernel gone, the socket's
+    queue and drops unchanged and the namespace kept again at its next check (root lab); one the bound puts out closed
+    with its namespace. *What would falsify it*: a box that may share reaching the socket, so that a check could read
+    its message as a dump's answer; or the socket outliving its namespace.
   - *Another owner's box* gets a fresh namespace, counted `Owner`, and the idle one stays its owner's, as the cgroup's
     does (Ada's call). The counts the node keeps (`ReuseCounts`: the core's, and how many namespaces were given back,
-    checked and closed unchecked) are internal; no `hex_*` metric names them until Observe agrees the names (CLAUDE.md
-    §10).
+    checked and closed unchecked, and how many checks read the protocols) are internal; no `hex_*` metric names them
+    until Observe agrees the names (CLAUDE.md §10).
   - *What would falsify it*:
     - concurrency 32 not rising once the namespace's making is off the lifecycle;
     - a namespace passing the check while it holds what the check reads;
