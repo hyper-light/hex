@@ -626,6 +626,45 @@ mod tests {
         assert_eq!(spec.linux.masked_paths, ["/proc/kcore"]);
     }
 
+    /// Goal 5 extended, step 6 (decision 5, "Who never shares"): a box that could change its own cgroup
+    /// never shares one. Given no capability sets, it keeps its creator's, all of them; or it holds
+    /// CAP_SYS_ADMIN in any set; or CAP_BPF with CAP_NET_ADMIN (kernel/bpf/syscall.c:2930-2941, v6.19).
+    #[test]
+    fn a_box_that_could_change_its_cgroup_is_known_by_its_capability_sets() {
+        let with = |process: &str| {
+            let json = format!(
+                r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},
+                    "process":{{"args":["/bin/sh"],"cwd":"/"{process}}},"linux":{{}}}}"#
+            );
+            Spec::parse(json.as_bytes())
+                .unwrap()
+                .could_change_its_cgroup()
+        };
+        let sets = |set: &str, names: &str| format!(r#","capabilities":{{"{set}":[{names}]}}"#);
+        assert!(with(""), "no capability sets: the creator's, all of them");
+        assert!(
+            !with(&sets("bounding", r#""CAP_CHOWN","CAP_NET_RAW","CAP_KILL""#)),
+            "sets that name neither"
+        );
+        assert!(
+            with(&sets("bounding", r#""CAP_SYS_ADMIN""#)),
+            "CAP_SYS_ADMIN, bounding"
+        );
+        assert!(
+            with(&sets("ambient", r#""CAP_SYS_ADMIN""#)),
+            "CAP_SYS_ADMIN, ambient"
+        );
+        assert!(
+            with(&sets("effective", r#""CAP_BPF","CAP_NET_ADMIN""#)),
+            "CAP_BPF with CAP_NET_ADMIN"
+        );
+        assert!(!with(&sets("effective", r#""CAP_BPF""#)), "CAP_BPF alone");
+        assert!(
+            !with(&sets("effective", r#""CAP_NET_ADMIN""#)),
+            "CAP_NET_ADMIN alone"
+        );
+    }
+
     #[test]
     fn a_security_control_hex_cannot_yet_apply_is_refused_not_dropped() {
         // CLAUDE.md §3: a security control Hex can't honour is refused by name, never run without

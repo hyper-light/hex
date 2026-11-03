@@ -1145,9 +1145,11 @@ lifecycle without changing what a box may do.
   in each; on fedora (Linux 6.19.10, as root) 5,054,464.<!-- /record --> A box that leaves files in memory leaves tens
   of megabytes (f27: 85 MB, and test 3's 64 MiB file), which the next box would be charged for. The threshold sits
   above the first case and under the second.
-- **Test 3's other-owner case.** A box of another owner gets a fresh cgroup, counted (`Refused::Owner`), and the idle
-  cgroup stays its owner's, handed to that owner's next box. Removing a clean idle cgroup because another owner's box
-  can't have it would add the very holds this lever takes off.
+- **Test 3's other-owner case: open, Ada's call** (the lead, 2026-11-02T18:23Z). A box of another owner never gets the
+  idle cgroup: it gets a fresh one, counted (`Refused::Owner`). The plan's test then reads "A's is removed". The node
+  keeps it as its owner's, to hand to that owner's next box, which is the narrower reading: removing a clean idle
+  cgroup because another owner's box can't have it adds the very holds this lever takes off. Until Ada answers, no
+  test asserts either reading, and `hex_core::reuse`'s model follows what the node does.
 - **Tests.** `hex_core::reuse`'s model test against an oracle covers:
   - random creates, deletes, owners, policies, privileges and failing checks;
   - the bounds, and a cgroup handed only to its owner under its policy when clean;

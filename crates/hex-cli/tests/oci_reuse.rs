@@ -17,10 +17,12 @@
 //!   cgroup, A's removed and the refusal counted by its reason. A killed through `cgroup.kill` (a signal
 //!   KILL to the box) and deleted: expect its cgroup removed, not kept, counted, and B of O a fresh one
 //!   that runs: Linux 6.19 kills every task later cloned into a cgroup `cgroup.kill` was written to
-//!   (its `kill_seq`, kernel/cgroup/cgroup.c:6702-6705 and :6941). B of another owner: a fresh cgroup,
-//!   counted, and A's handed to O's next box alone. A of no owner, or holding CAP_SYS_ADMIN: a cgroup of
-//!   its own, removed with it, counted, and B a fresh one; B holding CAP_SYS_ADMIN beside A's idle
-//!   cgroup: a cgroup of its own, counted, A's left idle.
+//!   (its `kill_seq`, kernel/cgroup/cgroup.c:6702-6705 and :6941). B of another owner: never A's
+//!   cgroup, a fresh one, counted; whether A's is then removed or kept for O is Ada's call (the lead,
+//!   2026-11-02T18:23Z), so this asserts neither. A of no owner, holding CAP_SYS_ADMIN, or whose spec
+//!   gives no capability sets (it keeps its creator's, all of them): a cgroup of its own, removed with
+//!   it, counted; B holding CAP_SYS_ADMIN beside its owner's idle cgroup: a cgroup of its own, counted,
+//!   the idle one left.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -95,6 +97,8 @@ enum Caps {
     Docker,
     /// Docker's defaults and CAP_SYS_ADMIN.
     SysAdmin,
+    /// No capability sets given, so the process keeps its creator's: all of them.
+    Unset,
 }
 
 /// Where one run keeps its bundles and box roots.
@@ -153,14 +157,22 @@ impl Lab {
                 String::new(),
             )
         };
-        let set = match caps {
-            Caps::Docker => DOCKER_CAPS.to_owned(),
-            Caps::SysAdmin => DOCKER_CAPS.replace(']', r#","CAP_SYS_ADMIN"]"#),
-        };
+        let capabilities = match caps {
+            Caps::Docker => Some(DOCKER_CAPS.to_owned()),
+            Caps::SysAdmin => Some(DOCKER_CAPS.replace(']', r#","CAP_SYS_ADMIN"]"#)),
+            Caps::Unset => None,
+        }
+        .map(|set| {
+            format!(
+                r#""capabilities": {{"bounding": {set}, "effective": {set}, "permitted": {set}}},
+    "#
+            )
+        })
+        .unwrap_or_default();
         // A container in a user namespace holding CAP_SYS_ADMIN needs a network namespace of its own,
-        // or its create is refused (beda8a9).
+        // or its create is refused (beda8a9); one given no capability sets holds it too.
         let namespaces = match caps {
-            Caps::SysAdmin => format!(r#"{namespaces},{{"type":"network"}}"#),
+            Caps::SysAdmin | Caps::Unset => format!(r#"{namespaces},{{"type":"network"}}"#),
             Caps::Docker => namespaces,
         };
         let config = format!(
@@ -172,8 +184,7 @@ impl Lab {
     "args": {args:?},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
-    "capabilities": {{"bounding": {set}, "effective": {set}, "permitted": {set}}},
-    "noNewPrivileges": true
+    {capabilities}"noNewPrivileges": true
   }},
   "mounts": [
     {{"destination": "/proc", "type": "proc", "source": "proc"}},
@@ -783,7 +794,9 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
     node.delete(&b).unwrap();
     eprintln!("test 3, killed: A's cgroup removed, not kept, counted; B fresh, and runs");
 
-    // B of another owner: never A's.
+    // B of another owner: never A's, a fresh cgroup, counted. What becomes of A's idle cgroup then is
+    // Ada's call (the plan's "A's is removed" against keeping it for O; the lead, 2026-11-02T18:23Z), so
+    // nothing here asserts either.
     let o = BoxOwner::named("owner-o").unwrap();
     let p = BoxOwner::named("owner-p").unwrap();
     node.create(lab.oci("other-a", Some(&o), Caps::Docker, Bounds::default()))
@@ -803,22 +816,20 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
         after.pool.refused(Refused::Owner),
         before.pool.refused(Refused::Owner) + 1
     );
+    eprintln!("test 3, another owner: B fresh, counted");
+    // O's next box, so O has an idle cgroup for the CAP_SYS_ADMIN case below once it's deleted.
     node.create(lab.oci("other-c", Some(&o), Caps::Docker, Bounds::default()))
         .unwrap();
-    assert_eq!(
-        node.cgroup_dir(&BoxId::new("other-c").unwrap()).as_deref(),
-        Some(slot.as_path()),
-        "A's cgroup goes to its own owner's next box"
-    );
-    eprintln!("test 3, another owner: B fresh, counted, A's handed to O's next box alone");
     for id in ["other-b", "other-c"] {
         node.delete(&BoxId::new(id).unwrap()).unwrap();
     }
 
-    // A of no owner, and A holding CAP_SYS_ADMIN: a cgroup of its own, gone with it.
+    // A of no owner, A holding CAP_SYS_ADMIN, and A whose spec gives no capability sets: a cgroup of
+    // its own, gone with it.
     for (case, owner, caps, reason) in [
         ("noowner", None, Caps::Docker, Refused::NoOwner),
         ("sysadmin", Some(&o), Caps::SysAdmin, Refused::Privileged),
+        ("unset", Some(&o), Caps::Unset, Refused::Privileged),
     ] {
         let a = BoxId::new(&format!("{case}-a")).unwrap();
         let before = node.cgroup_reuse().unwrap();
