@@ -808,6 +808,42 @@ On-CPU samples, the largest shares:
   the merge has, makes the container's root with no pivot_root (`reuse_pass.md` run 12: the merge 4.78x on 4-15 in the
   hour step 6 alone read 1.84x).
 
+## Run 23 (2026-11-03, fedora): offcpu and threads on 4-31, mr13 under load: what leaves concurrency 32's CPUs to others
+
+- **Binary:** mr13 (`hex` 252eea5c30632778), one owner's boxes, reuse on, on 4-31 (28 logical CPUs), the unit
+  `hex-g5x-s6-fdh13-20261103T225919Z`, 23:00:29Z to 23:03:15Z, one-minute load 37 to 52, run noisy on the lead's order
+  with kiln's pool beside it, and each CPU's state read every second (`cpustat.sh`).
+- **Runs:** `create-serial-offcpu-20261103T230030Z`, `create-serial-threads-20261103T230232Z` (sustained 9,247/s at 32).
+
+Off-CPU time a lifecycle by what the thread waited on, ms:
+
+| wait | c1 | c32 | at c32 |
+|---|---|---|---|
+| `cgroup_mutex` | 0.514 | 3.871 | 3.857 in `cgroup_css_set_fork` < `copy_process`: the clone into the box's cgroup |
+| poll | 0.12 | 5.61 | not split by caller in this run |
+| the namespace lock | 0.015 | 0.393 | |
+| RCU | 0.013 | 0.265 | |
+| a directory's `i_rwsem` | 0 | 0.130 | |
+| pipe | 1.27 | 1.47 | |
+| other | 0.56 | 2.71 | 1.116 in `kernfs_dop_revalidate`'s rwsem, in `seam_oci` (the runtime in process) |
+| futex | 22.4 | 10.9 | `seam_oci`'s threads waiting for work |
+| socket | 10.2 | 9.4 | idle seeds in `recvmsg` |
+
+On-CPU time a lifecycle in the runtime's threads: 1,333.1 us at 1 (`hex` 587.6, `seam_oci` 479.9, `true` 103.9,
+`hex-netns-check` 90.1, `hex-devfs` 68.7) and 1,601.6 us at 32 (`hex` 695.3, `seam_oci` 621.6, `true` 132.7,
+`hex-netns-check` 86.7). Beside it, over the same lifecycles at 1: `rustc` 3,096 us, `postgres` 1,070 us.
+
+- **The CPUs concurrency 32 doesn't keep busy on 4-31 went to the host's other work, not idle.** In the busiest tenth of
+  the seconds 24.4 of 4-31's 28 CPUs were busy and 3.1 idle (4-15: 10.0 and 1.8; 16-31: 14.5 and 1.3), while Hex's
+  threads used about 14.8 (9,247/s at 1.60 ms). One-second samples can't part the interleaved phase's quarter-second
+  halves, so this reads the sustained phase.
+- **The one wait on the lifecycle's path that grows with concurrency is `cgroup_mutex` in the clone,** 3.86 ms a
+  lifecycle at 32 against 0.51 at 1: `CLONE_INTO_CGROUP` takes it in `cgroup_css_set_fork`, a hold every lifecycle
+  keeps. Then the cgroup filesystem's lookups waiting on `kernfs_rwsem` (1.1 ms), which a cgroup's `mkdir` and `rmdir`
+  hold to write (run 2).
+- **The futex and socket waits are threads with nothing to do,** not the path: they fall a lifecycle as the same idle
+  time spreads over more lifecycles. The polls' 5.6 ms at 32 are still to be named by caller.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
