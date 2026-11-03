@@ -5,8 +5,10 @@
 # each copied into the run's directory. MODE=offcpu (the default): off-CPU time by kernel stack, an on-CPU profile and
 # directory operations by filesystem, for Hex's seam at concurrency 1 and 32 and libcrun in process at 32. MODE=locks:
 # what holds those locks and which directory each wait is for, for both at concurrency 1 and 32
-# (create_serial_inside.sh says which processes are each one's). create_serial.py reads them. On fedora:
-#   [MODE=locks] create_serial.sh <hex release binary> <seam_oci release binary>
+# (create_serial_inside.sh says which processes are each one's). create_serial.py reads them. MODE=checker: where the
+# time of the threads that check a given-back network namespace goes, by system call and on-CPU stack (one owner's
+# boxes: HEXBENCH_OWNER). On fedora:
+#   [MODE=locks|checker] create_serial.sh <hex release binary> <seam_oci release binary>
 # Not a timed pass: the load is recorded, not gated; what it reads is where the threads wait, not how fast.
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail

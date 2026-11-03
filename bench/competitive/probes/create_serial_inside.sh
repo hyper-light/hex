@@ -29,6 +29,10 @@
 # sustained phase on a `true` bundle without a network namespace of its own. Each run lists the directories under
 # /run and /sys/fs/cgroup (each its own filesystem) with their inode numbers (dirs.<label>.txt), so create_serial.py
 # names the directory each inode is.
+# MODE=checker: where the time of the threads that check a given-back network namespace before its owner's next box
+# has it goes (hex-netns-check, crates/hex-node/src/netns.rs; goal 5 extended, step 6): each system call they make
+# timed, by its number, and an on-CPU profile of them at 4999 Hz by kernel and user stack. Two runs, hex.c1 over 5000
+# lifecycles and hex.c32; HEXBENCH_OWNER must be set, for the namespaces are kept only for an owner's boxes.
 # Env: MODE (offcpu), SUSTAINED (5000), HEXBENCH_OWNER (one owner for every box seam_oci makes, so a box's cgroup
 # is handed to the owner's next box: goal 5 extended, step 6; the bundles' processes then hold Docker's default
 # capabilities, libcrun's alike, since a box that keeps all of root's never shares a cgroup).
@@ -77,6 +81,33 @@ kprobe:vfs_mkdir, kprobe:vfs_rmdir, kprobe:vfs_unlink, kprobe:vfs_mknod
 }
 profile:hz:999 { \$c = comm; if ($f) { @cpu[kstack(10)] = count(); } }
 END { clear(@start); }
+BT
+}
+checker(){ # checker <filter on a comm value $c>: the checker program for the threads the filter names
+  local f=$1
+  cat <<BT
+config = { max_map_keys = 262144 }
+tracepoint:raw_syscalls:sys_enter
+{
+	\$c = comm;
+	if ($f) { @s[tid] = nsecs; @n[tid] = args.id; }
+}
+tracepoint:raw_syscalls:sys_exit
+{
+	\$t = @s[tid];
+	if (\$t != 0) {
+		@sys[@n[tid]] = stats(nsecs - \$t);
+		@sys_ns = sum(nsecs - \$t);
+		delete(@s[tid]);
+		delete(@n[tid]);
+	}
+}
+profile:hz:4999
+{
+	\$c = comm;
+	if ($f) { @cpu[kstack(10), ustack(8)] = count(); @samples = count(); }
+}
+END { clear(@s); clear(@n); }
 BT
 }
 locks(){ # locks <filter on a comm value $c>: the locks program for one runtime's processes
@@ -255,8 +286,9 @@ run(){ # run <label> <filter> <command...>: the mode's program over one workload
   kill -INT $bt; wait $bt 2>/dev/null
   echo "$label: $(wc -l < /run/bt.$label.txt) lines"
 }
-HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'
+HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'; CHECK='$c == "hex-netns-check"'
 hex_c1(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 500 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
+hex_c1k(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 5000 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c32nonet(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32nonet.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true-nonet; }
 crun_c1(){ env HEXBENCH_PHASES=start_true HEXBENCH_BIN=/opt/bin python3 -I /opt/lab/oci_bench.py libcrun "/run/out.$MODE.crun.c1.json" 500 20 0 0 64; }
@@ -265,7 +297,9 @@ case $MODE in
   offcpu) run offcpu.hex.c1 "$HEX" hex_c1; run offcpu.hex.c32 "$HEX" hex_c32; run offcpu.crun.c32 "$CRUN" crun_c32 ;;
   locks) run locks.hex.c1 "$HEX" hex_c1; run locks.crun.c1 "$CRUN" crun_c1; run locks.hex.c32 "$HEX" hex_c32; run locks.crun.c32 "$CRUN" crun_c32
     run locks.hex.c32nonet "$HEX" hex_c32nonet ;;
-  *) echo "refusing: MODE is offcpu or locks, not $MODE"; exit 2 ;;
+  checker) [ -n "${HEXBENCH_OWNER:-}" ] || { echo "refusing: MODE=checker needs HEXBENCH_OWNER"; exit 2; }
+    run checker.hex.c1 "$CHECK" hex_c1k; run checker.hex.c32 "$CHECK" hex_c32 ;;
+  *) echo "refusing: MODE is offcpu, locks or checker, not $MODE"; exit 2 ;;
 esac
 for f in /run/out.*.json; do python3 -I -c "
 import json,sys; d=json.load(open('$f')); ph=d.get('phases',{})
