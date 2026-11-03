@@ -44,6 +44,23 @@ E-core), 20,000 iterations each way: load 4.7, CPU pressure 0.15%, 63 other cont
 - **The six nodes' modes are a cheaper cut on the fresh path:** each node's `fchmodat` is there because the agent's umask
   can't change for one thread without its own `fs_struct`.
 
+**The pool's thread in a lifecycle** (2026-11-03T19:31Z, the unit `hex-g5x-s6-verify19-20261103T193123Z`): step 6's
+`create_serial.sh` MODE=devfs (58720c4) on the merge of steps 2, 3 and 6 (mr12h, `hex` ff5cef383a844f85), one owner's
+boxes, on the E-cores 16-31, load 2.6 to 6.7; run `create-serial-devfs-20261103T193124Z`. Per `/dev` the thread made:
+
+| | concurrency 1 (5,027 made) | concurrency 32 (14,492 made) |
+|---|---|---|
+| on-CPU | 124.6 us | 77.0 us |
+| futex calls (its waits and wakes) | 1.00 | 0.04 |
+| `mknodat` x6, on-CPU | 36.8 us | 23.7 us |
+| `symlinkat` x5 | 25.1 us | 17.4 us |
+| `fsconfig` x4 (the superblock made at `FSCONFIG_CMD_CREATE`) | 22.1 us | 16.0 us |
+| `fchmodat` x6 | 9.5 us | 6.4 us |
+| `fsmount`, `fsopen` | 5.4, 4.9 us | 3.2, 1.8 us |
+
+At concurrency 1 the pool's thread is woken by every take and makes one `/dev` cold, then waits again; at 32 it is
+never idle and makes them back to back. The 48 us between the two is the cost of a wake and a cold make a take.
+
 **What would falsify it.** The steps' order of size changing on another kernel or at another load: a check that costs
 more than the nodes and links it replaces, or a clone whose hold of `namespace_sem` costs concurrency 32 more than the
 CPU it saves beside concurrency 1.
