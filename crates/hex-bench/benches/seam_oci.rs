@@ -432,14 +432,15 @@ mod linux {
 
     /// `lifecycles` of the throughput lifecycle at concurrency `conc`, each thread taking the next until
     /// none are left or one has failed, the clock started once every thread is at the barrier: its wall
-    /// time.
+    /// time, and the CPU the subtree `own` (the agent and its boxes) used in it, in seconds.
     fn at_concurrency(
         node: &dyn Runtime,
         bundle: &Path,
+        own: &Path,
         conc: usize,
         lifecycles: usize,
         tag: &str,
-    ) -> Result<Duration, String> {
+    ) -> Result<(Duration, f64), String> {
         let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
         let start = Barrier::new(conc + 1);
         std::thread::scope(|s| {
@@ -464,7 +465,7 @@ mod linux {
                 })
                 .collect();
             start.wait();
-            let t0 = Instant::now();
+            let (c0, t0) = (cpu_usec(own), Instant::now());
             let errs: Vec<String> = threads
                 .into_iter()
                 .filter_map(|t| {
@@ -473,8 +474,8 @@ mod linux {
                         .err()
                 })
                 .collect();
-            let wall = t0.elapsed();
-            errs.into_iter().next().map_or(Ok(wall), Err)
+            let (wall, cpu_s) = (t0.elapsed(), (cpu_usec(own) - c0) as f64 / 1e6);
+            errs.into_iter().next().map_or(Ok((wall, cpu_s)), Err)
         })
     }
 
@@ -499,17 +500,26 @@ mod linux {
 
     /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, `pairs` times: [`INTERLEAVED_C1`] lifecycles at
     /// 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it is
-    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end,
-    /// and the ratio of the pooled rates, each concurrency's lifecycles over its time.
-    fn interleaved(node: &dyn Runtime, bundle: &Path, pairs: usize) -> Result<Value, String> {
+    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
+    /// and each half's CPU, per lifecycle and as the CPUs it kept busy on average (the agent and its boxes,
+    /// `own`'s cpu.stat): whether concurrency 32 is held by the CPUs it has or by waiting. And the ratio of
+    /// the pooled rates, each concurrency's lifecycles over its time.
+    fn interleaved(
+        node: &dyn Runtime,
+        bundle: &Path,
+        own: &Path,
+        pairs: usize,
+    ) -> Result<Value, String> {
         let (mut rows, mut ratios) = (Vec::new(), Vec::new());
         let (mut one_s, mut many_s) = (0.0, 0.0);
         for p in 0..pairs {
             let at_start = host_load();
-            let one = at_concurrency(node, bundle, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
-            let many = at_concurrency(
+            let (one, one_cpu) =
+                at_concurrency(node, bundle, own, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
+            let (many, many_cpu) = at_concurrency(
                 node,
                 bundle,
+                own,
                 SUSTAINED_CONCURRENCY,
                 INTERLEAVED_C32,
                 &format!("i{p:03}b"),
@@ -522,6 +532,10 @@ mod linux {
             many_s += many.as_secs_f64();
             ratios.push(r32 / r1);
             rows.push(json!({"c1_per_s": r1, "c32_per_s": r32, "ratio": r32 / r1,
+                             "c1_cpu_ms_per_lifecycle": one_cpu * 1e3 / INTERLEAVED_C1 as f64,
+                             "c32_cpu_ms_per_lifecycle": many_cpu * 1e3 / INTERLEAVED_C32 as f64,
+                             "c1_cpus_busy": one_cpu / one.as_secs_f64(),
+                             "c32_cpus_busy": many_cpu / many.as_secs_f64(),
                              "at_start": at_start, "at_end": host_load()}));
         }
         ratios.sort_by(f64::total_cmp);
@@ -924,7 +938,7 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
-                    "interleaved" => interleaved(node, &true_bundle, interleaved_pairs),
+                    "interleaved" => interleaved(node, &true_bundle, &parent, interleaved_pairs),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
