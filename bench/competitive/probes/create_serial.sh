@@ -35,7 +35,7 @@ timeout 2400 docker run --rm --name "$NAME" --label hex.bench=competitive --cpus
   --privileged --security-opt label=disable --cgroupns=private --tmpfs /run:rw,exec,nosuid,size=4g \
   -e SUSTAINED -e MODE -e HEXBENCH_OWNER -e CPUSET="${CPUSET:-4-31}" -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   registry.fedoraproject.org/fedora:44 \
-  bash -c 'bash /opt/lab/probes/create_serial_inside.sh; cp /run/bt.*.txt /run/bt.*.err /run/dirs.*.txt /run/*.log /run/out.*.json /opt/out/ 2>/dev/null' \
+  bash -c 'bash /opt/lab/probes/create_serial_inside.sh; cp /run/bt.*.txt /run/bt.*.err /run/dirs.*.txt /run/maps.*.txt /run/syms.*.txt /run/*.log /run/out.*.json /opt/out/ 2>/dev/null' \
   2>&1 | tee "$OUT/probe.out"
 echo "load at end: $(cat /proc/loadavg)" >> "$OUT/env.txt"
 echo "results: $OUT"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bench/competitive/probes: where creates wait under concurrency, inside the probe container (create_serial.sh).
-# MODE=offcpu (the default): off-CPU time by kernel stack (bpftrace on finish_task_switch) and an on-CPU profile for
-# a runtime's own processes, and each one's directory operations (vfs_mkdir, vfs_rmdir, vfs_unlink, vfs_mknod)
+# MODE=offcpu (the default): off-CPU time by kernel stack (bpftrace on finish_task_switch), each futex call's time by
+# the user stack that made it (so the runtime's own locks are named), and an on-CPU profile for a runtime's own
+# processes, and each one's directory operations (vfs_mkdir, vfs_rmdir, vfs_unlink, vfs_mknod)
 # counted by the filesystem of the directory they change: cgroup2 (a cgroup parent), tmpfs (a state root) or overlay
 # (the container's own disk). Three runs, back to back on the same host state:
 #   hex.c1    seam_oci's start_true (create, start and delete of `true`, one at a time): the node agent in process
@@ -44,7 +45,7 @@
 # capabilities, libcrun's alike, since a box that keeps all of root's never shares a cgroup).
 set -uo pipefail
 SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
-dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c >/run/dnf.log 2>&1 \
+dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c binutils >/run/dnf.log 2>&1 \
   || { echo "dnf failed"; tail -5 /run/dnf.log; exit 3; }
 echo "tools: $(perf --version 2>&1 | head -1); $(bpftrace --version 2>&1 | head -1)"
 mountpoint -q /sys/kernel/tracing || mount -t tracefs nodev /sys/kernel/tracing
@@ -86,7 +87,20 @@ kprobe:vfs_mkdir, kprobe:vfs_rmdir, kprobe:vfs_unlink, kprobe:vfs_mknod
 	if ($f) { @dirops[func, str(((struct inode *)arg1)->i_sb->s_type->name)] = count(); }
 }
 profile:hz:999 { \$c = comm; if ($f) { @cpu[kstack(10)] = count(); } }
-END { clear(@start); }
+tracepoint:syscalls:sys_enter_futex
+{
+	\$c = comm;
+	if ($f) { @fx[(uint64)curtask->pid] = nsecs; }
+}
+tracepoint:syscalls:sys_exit_futex
+{
+	\$t = @fx[(uint64)curtask->pid];
+	if (\$t != 0) {
+		@futex[ustack(12)] = sum(nsecs - \$t);
+		delete(@fx[(uint64)curtask->pid]);
+	}
+}
+END { clear(@start); clear(@fx); }
 BT
 }
 checker(){ # checker <filter on a comm value $c>: the checker program for the threads the filter names
@@ -307,8 +321,13 @@ run(){ # run <label> <filter> <command...>: the mode's program over one workload
   ( for i in 1 2 3 4 5 6; do sleep 0.5; find /run /sys/fs/cgroup -xdev -maxdepth 4 -type d -printf '%i %p\n' 2>/dev/null; done \
       | sort -u > "/run/dirs.$label.txt" ) &
   local dirs=$!
+  # The bench process's mappings once it's up: bpftrace prints a user stack only after the process is gone, as
+  # addresses, which create_serial.py names by these and syms.*.txt.
+  ( for i in $(seq 1 600); do p=$(pgrep -x seam_oci | head -1); [ -n "$p" ] && { sleep 1; cat "/proc/$p/maps" > "/run/maps.$label.txt" 2>/dev/null; break; }
+      sleep 0.1; done ) &
+  local maps=$!
   "$@" > "/run/$label.log" 2>&1 || echo "$label: the workload failed (/run/$label.log)"
-  wait $dirs
+  wait $dirs $maps
   kill -INT $bt; wait $bt 2>/dev/null
   echo "$label: $(wc -l < /run/bt.$label.txt) lines"
 }
@@ -329,6 +348,8 @@ case $MODE in
     run threads.hex.c1 "$THREADS" hex_c1k; run threads.hex.c32 "$THREADS" hex_c32 ;;
   *) echo "refusing: MODE is offcpu, locks, checker or threads, not $MODE"; exit 2 ;;
 esac
+nm -C -n --defined-only /opt/bin/seam_oci > /run/syms.seam_oci.txt 2>/dev/null
+nm -D -C -n --defined-only "$(readlink -f /usr/lib64/libc.so.6)" > /run/syms.libc.txt 2>/dev/null
 for f in /run/out.*.json; do python3 -I -c "
 import json,sys; d=json.load(open('$f')); ph=d.get('phases',{})
 for k,v in ph.items():

@@ -6,6 +6,10 @@ its directory operations (@dirops[func, fs]: count). The off-CPU time is grouped
 (a directory's i_rwsem, cgroup_mutex, the mount namespace's lock, a futex of the runtime's own) and the waits for work
 (a socket, a pipe, a poll, a child), then come the top blocking sites, the directory operations and the profile.
 
+A MODE=offcpu run also times each futex call by the user stack that made it (@futex[ustack]: ns), named after the
+run from the bench process's mappings (maps.<label>.txt) and the binaries' symbols (syms.*.txt): each stack by the
+first of its frames that isn't the standard library's own locking, the code that took or waited on the lock.
+
 A MODE=locks run: each directory's exclusive holds (@hold[vfs_mkdir or vfs_rmdir, fs, ino]: stats) beside the waits
 on its i_rwsem (@rw[slow path, fs, ino]: stats), each directory named from the run's dirs.<label>.txt; cgroup_mutex's
 takers, each timed whole, wait and hold (@fn[function, 1 if the runtime's own]: stats), the forks (@fork[1 if into a
@@ -26,6 +30,7 @@ count), and the other tasks on the probe's CPUs by name (@beside[comm]: count).
 
   create_serial.py <label>=<bt file>:<lifecycles> ...
 """
+import bisect
 import json
 import os
 import re
@@ -237,6 +242,69 @@ def report_locks(label, n, txt, named):
         print(f"  {v / n:6.2f}  {fs:8} {d[:40]:40} {name[:60]}")
 
 
+def symbolizer(run_dir, label):
+    """A function naming an address of the bench process's, from the run's maps and symbol files; None without them."""
+    maps_path = os.path.join(run_dir, f"maps.{label}.txt")
+    if not os.path.exists(maps_path):
+        return None
+    maps, bases = [], {}
+    for line in open(maps_path, errors="replace"):
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        lo, hi = (int(x, 16) for x in parts[0].split("-"))
+        maps.append((lo, hi, parts[5]))
+        if int(parts[2], 16) == 0:
+            bases.setdefault(parts[5], lo)
+    syms = {}
+    for module, name in (("seam_oci", "syms.seam_oci.txt"), ("libc", "syms.libc.txt")):
+        path = os.path.join(run_dir, name)
+        if os.path.exists(path):
+            table = []
+            for line in open(path, errors="replace"):
+                bits = line.rstrip("\n").split(" ", 2)
+                if len(bits) == 3 and bits[1] in "tTwW":
+                    table.append((int(bits[0], 16), bits[2]))
+            table.sort()
+            syms[module] = table
+
+    def name(frame):
+        if not frame.startswith("0x"):
+            return frame
+        addr = int(frame, 16)
+        for lo, hi, path in maps:
+            if lo <= addr < hi:
+                module = "seam_oci" if path.endswith("/seam_oci") else ("libc" if "libc.so" in path else None)
+                table = syms.get(module)
+                if not table or path not in bases:
+                    return f"{os.path.basename(path)}+{addr - lo:#x}"
+                vaddr = addr - bases[path]
+                i = bisect.bisect_right(table, (vaddr, chr(0x10FFFF))) - 1
+                return table[i][1] if i >= 0 else f"{module}+{vaddr:#x}"
+        return frame
+    return name
+
+
+# The standard library's and the kernel interface's own locking frames: a futex stack is named by its first frame
+# past them.
+LOCKING = re.compile(r'^(syscall|__GI_|futex|std::sys::|std::sync::|core::|<std::sync::|alloc::|std::thread::|'
+                     r'__lll_|pthread_|__pthread|std::panicking|<core::)')
+
+
+def report_futex(label, n, path, txt):
+    """A MODE=offcpu run's futex calls, by the code that made them, per lifecycle."""
+    name = symbolizer(os.path.dirname(path), label) or (lambda f: f)
+    by_site, total = defaultdict(int), 0
+    for m in re.finditer(r'@futex\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        frames = [name(re.sub(r'\+\d+$', '', line.strip())) for line in m.group(1).splitlines() if line.strip()]
+        site = next((f for f in frames if not LOCKING.match(f)), frames[-1] if frames else "?")
+        by_site[site] += int(m.group(2))
+        total += int(m.group(2))
+    print(f"\n{label}: futex calls, {total / n / 1e6:.3f} ms a lifecycle in all, by the code that made them")
+    for site, v in sorted(by_site.items(), key=lambda kv: -kv[1])[:14]:
+        print(f"  {v / n / 1e6:8.3f}  {site[:150]}")
+
+
 def counts(txt, name):
     return {int(m.group(1)): int(m.group(2)) for m in re.finditer(rf'@{name}\[(\d+)\]: (\d+)', txt)}
 
@@ -307,6 +375,9 @@ if not runs:
 off_runs = [(label, n, offcpu(txt)) for label, n, _p, txt in runs if '@off[' in txt]
 if off_runs:
     report_offcpu(off_runs)
+for label, n, path, txt in runs:
+    if '@futex[' in txt:
+        report_futex(label, n, path, txt)
 for label, n, path, txt in runs:
     if '@samples:' in txt and '@sys[' in txt:
         report_checker(label, path, txt)
