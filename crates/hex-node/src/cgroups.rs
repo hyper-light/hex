@@ -23,8 +23,8 @@ use hex_runtime::linux::oci::resources::Insn;
 use hex_runtime::linux::oci::run::{Choose, Chosen, Wants};
 
 /// Most memory an idle cgroup may still have charged to be handed on (research f27-f30). A box whose
-/// processes have all ended leaves the charge the kernel caches per CPU and some kernel memory: 3.7 to
-/// 7.5 MiB on adacachy, none of it the box's own (anon, shmem and dirty file pages 0). A box that left
+/// processes have all ended leaves the charge the kernel caches per CPU and some kernel memory: 3.5 to
+/// 7.1 MiB on adacachy, none of it the box's own (anon, shmem and dirty file pages 0). A box that left
 /// files in memory (its tmpfs, `/dev/shm`, page cache of what it wrote) leaves tens of megabytes (64 MiB
 /// in oci_reuse's test 3, 85 MB in f27), which the next box would be charged for, so its cgroup goes.
 /// Measured: bench/competitive/probes/reuse_residual.md.

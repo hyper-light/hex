@@ -543,3 +543,37 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
   program's parts 12 and 13 were 0.000.
 - **The second met the host as run 4 did:** libcrun's 2.701 ms against run 4's 2.750, and the base's 1.904 against
   run 4's 2.020. There step 1's create p50, 1.512 ms, is 25.1% under run 4's 2.020, as the plan's criterion reads it.
+
+## Run 13 (2026-11-03, fedora): step 6's binary on boxes of no owner, and the one before it, in the same rounds
+
+Runs 8 to 12 are goal 5 extended steps 2 and 3's, on their branches.
+
+- **Why:** goal 5 extended, step 6's third criterion: Hex's create p50 with reuse off, against the binary before this
+  step in the same A/B run, within 0.02 ms of 0 ms. The probe's boxes name no owner, so none is handed a cgroup: each
+  is given a fresh one, made and bounded on create's path as before the step, and its delete ends it through its
+  init's pidfd.
+- **Host and load:** as run 1's. Three runs from 2026-11-03T01:21:49Z to 01:32Z, the 1-minute load 21.85, 13.85 and
+  9.82 at their starts and 11.50 at the end; `LOAD_GATE=0`.
+- **Binaries:** step 6's, built on fedora from the step's tree (the code of `a6f32f1`, but for a doc comment): `hex`
+  1404d8835bb80926, `seam_oci` 833f7025d1d9b056 (`create_serial.md`'s run 7's). The before, of 50bd7a2 (goal 5
+  extended step 5's tip, the step's base), built the same way: `hex` abff48746032d99b, `seam_oci` 4d1f37f19887a0ee.
+  libcrun 1.30.1 in process, driver sha256 5c356f2139adc232.
+- **Runs:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-breakdown-<run>` on fedora, the harness at a6f32f1 (the third
+  run's env.txt's uncommitted changes are records, no script), 1,000 timed lifecycles a round after 100 untimed.
+
+| run | rounds | load at start | Hex through the seam | before | libcrun | seam less before, pooled (ms) | by round |
+|---|---|---|---|---|---|---|---|
+| 20261103T012149Z | 3 | 21.85 | 1.331 | 1.396 | 2.733 | -0.064 | -0.060, -0.114, -0.025 |
+| 20261103T012324Z | 3 | 13.85 | 1.402 | 1.374 | 2.738 | +0.028 | -0.016, +0.050, +0.033 |
+| 20261103T012712Z | 10 | 9.82 | 1.365 | 1.439 | 2.853 | -0.074 | -0.054, -0.114, -0.137, +0.217, -0.093, -0.058, -0.053, -0.055, -0.314, -0.042 |
+
+- **No run is within 0.02 ms of 0:** pooled, step 6's create p50 is 0.064 and 0.074 ms under the before's in two runs
+  and 0.028 over it in one. Of the 16 rounds, one is within 0.02 ms (-0.016); 12 are under by more and 3 over.
+- **The rounds spread wider than the window:** the before's own round p50s ran 1.310 to 1.621 ms across the runs. In
+  the third run the seam's less the before's has a standard deviation of 0.129 ms over its 10 rounds, so its pooled
+  difference carries a standard error of about 0.041 ms, twice the window's half-width.
+- **The traced parts are the same but for `pivot_root`:** their p50s summed 1.436 against 1.476 ms, 1.432 against 1.445
+  and 1.435 against 1.465 (step 6's against the before's, over 1,500, 1,500 and 5,000 traced creates). The one part
+  that differed by 0.008 ms or more in any run is the init's `pivot_root`, which this step doesn't change: 0.017 and
+  0.018 ms quicker in step 6's (0.298 against 0.315 in the first run, 0.283 against 0.301 in the third). The parts
+  summed to 102.5%, 100.3% and 99.4% of the creates between the traced ones.

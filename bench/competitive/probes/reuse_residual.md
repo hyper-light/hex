@@ -20,6 +20,10 @@ gone.
   | 5 | 6,262,784 | 0 | 0 | 3,031,040 | 435,280 | 544 | 0 | 0 |
   | 6 | 5,087,232 | 0 | 270,336 | 2,580,480 | 422,104 | 1,088 | 0 | 0 |
 
+  The same test on fedora, Linux 6.19.10-300.fc44, as root in the step's root lab (the fedora job of
+  2026-11-03T01:16:09Z, its `rootlab.log`): 5,054,464 charged, anon 0, file 0, kernel 3,047,424, slab 503,008,
+  percpu 3,264, shmem 0, file_dirty 0.
+
   Nothing the box held is left: anon, shmem and dirty file pages are 0. What `memory.stat` doesn't name, about half of
   `memory.current`, is most likely charge the kernel caches per CPU and drains lazily (inferred from research f30: a
   `memory.max` write, which drains those caches first, took an emptied box from 544,768 bytes to 49,152); the rest is
@@ -28,15 +32,16 @@ gone.
   its idle cgroup read 60 MiB or more charged, the file's page cache, which the next box would be charged for. The
   check refuses it (`Refused::Charged`) and the cgroup is removed.
 - **The bench's lifecycle** (create, start and delete of a `true` container, one owner's boxes): on fedora (Linux
-  6.19.10, run `create-serial-locks-20261103T005157Z`, `seam_oci`'s counts) 519 of 520 boxes at concurrency 1 and 4,968
-  of 5,000 at concurrency 32 were handed an idle cgroup, the rest given fresh ones, and no idle cgroup was refused for
-  what it had charged.
+  6.19.10, `create_serial.md`'s run 7, `seam_oci`'s counts) 519 of 520 boxes at concurrency 1 and 4,968 of 5,000 at
+  concurrency 32 were handed an idle cgroup, the rest given fresh ones; in the OCI pass (`reuse_pass.md`, run 1) 9,999
+  and 10,000 of each sustained phase's 10,000. No idle cgroup was refused for what it had charged.
 
 ## The threshold
 
-16 MiB: above every reading of a box whose processes all ended (7.5 MiB at most, of which none is the box's own memory),
-and under what a box that left files in memory leaves (64 MiB in test 3; 85 MB in research f27's probe). The check also
-requires the threshold under the next box's `memory.max`, so a box bounded at 16 MiB or less always gets a fresh cgroup.
+16 MiB: above every reading of a box whose processes all ended (7,471,104 bytes at most, 7.1 MiB, and 3,719,168 at
+least, 3.5 MiB, none of it the box's own memory), and under what a box that left files in memory leaves (64 MiB in test
+3; 85 MB in research f27's probe). The check also requires the threshold under the next box's `memory.max`, so a box
+bounded at 16 MiB or less always gets a fresh cgroup.
 
 What would show it wrong: boxes whose processes all ended refused as `Charged` (the reuse rate falling for nothing the
 box held), or a box handed a cgroup whose charge it then can't fit under its bound.

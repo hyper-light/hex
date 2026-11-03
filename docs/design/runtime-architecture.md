@@ -1064,6 +1064,136 @@ concurrency 32 to be at least 8x the throughput at concurrency 1 in the same run
 - **So no lever of this step reaches 8x.** The faster a lifecycle runs alone, the further 8x of it sits above what the
   lock admits. The criterion is put to Ada with this measurement; no cgroup change is made for it here.
 
+**The cgroup lock, fewer holds per lifecycle (goal 5 extended, step 6; research `01a190c51f137042a9697949c8fe2c7a`,
+f19-f50, f61-f65, f81, f82; `docs/research/runtime/goal5-cgroup-lock.md`).** Two levers take `cgroup_mutex` holds off a
+lifecycle without changing what a box may do.
+- **A box ended through its init's pidfd** (f45-f50). An `oci` box whose init is the first process of a pid namespace
+  its create made (the state's `pid_namespace`, recorded at create) is deleted by `pidfd_send_signal(SIGKILL)` to the
+  init, which takes no `cgroup_mutex` (`kernel/signal.c`) and ends the namespace with it (`zap_pid_ns_processes`).
+  - The agent reaps the box's exec'd programs, since the init's end waits for them, and then waits for the init's
+    pidfd to read as ended.
+  - By then every process of the namespace is released (`kernel/pid_namespace.c:263-265`). The init leaves its cgroup
+    at its last switch (`kernel/sched/core.c:5156`, `cgroup_task_dead`), so a cgroup that holds nothing else empties
+    with no write.
+  - A thread still listed in the cgroup's subtree whose process lives and isn't the init's is outside the namespace
+    (f47): the delete falls back to `cgroup.kill` at once, on that fact rather than a timeout, counted.
+  - `process` boxes, inits without a pid namespace of their own, and boxes taken back after a restart (whose init the
+    agent no longer holds) keep `cgroup.kill` (f49).
+- **A cgroup handed from box to box of one owner** (f20, f23, f27-f39, f61-f65, f81, f82). A box whose spec names an
+  owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 3 carries it) is given the owner's
+  idle cgroup when one reads clean. That takes off its `mkdir`, its `rmdir` and the kworkers' 12 holds (f62). The
+  owner's boxes reuse by default; an owner opts out by `reuse: false` (Ada's call, 2026-10-31). The pool is a pure core,
+  `hex_core::reuse`, with the node's shell in `crates/hex-node/src/cgroups.rs`.
+  - *Naming.* Such a cgroup is named by its slot, `.oci/.<n>`, since a cgroup can't be renamed (f35), and the box's
+    record names the slot, with the counters the cgroup had when the box was given it (f64).
+  - *Numbering.* Slots are numbered once each, from past every slot already under the root, so a slot being removed is
+    never made again under its name.
+  - *Choosing.* The runtime asks for the cgroup once it has read the spec (`run::Choose`): the owner's idle cgroups are
+    keyed by the device policy whose program they carry, so one handed on under the same policy has its program
+    attached already and the create attaches nothing.
+  - *The check.* A cgroup is handed on only after reads that take no lock (f61; Linux v6.19 `cgroup_events_show`,
+    `cgroup_stat_show` under RCU, `cgroup_subtree_control_show`, `cgroup_type_show`, `cgroup_freeze_show`,
+    `memory_oom_group_show`, `memory_current_read`). They must show:
+    - `populated 0` and not frozen;
+    - no live or dying sub-cgroup;
+    - an empty `subtree_control`, and `cgroup.type` `domain`;
+    - `cgroup.freeze` 0, and `memory.oom.group` 0, as Hex leaves it;
+    - `memory.current` at most `RESIDUAL`, which is under the next box's `memory.max`.
+  - *Every bound written again.* Bounds the next box doesn't set are written at the kernel's defaults
+    (`hex_core::cgroup::writes_all`), and none of those writes takes the lock (f25). `cpu.max` alone is read first
+    and written only where it holds another value. Its write takes the host-wide `cfs_constraints_mutex` and walks
+    every task group on the host (`kernel/sched/core.c:9461-9462`, `:9624`; f26): 68.5 us p50 against 1.5 us for
+    `pids.max` on adacachy's 3,348 cgroups (2,000 writes each, 2026-11-03), against `mkdir`'s 0.130 ms that reuse
+    saves. Its read takes no lock (`cpu_max_show`, `:10104`), so the bound is in force either way.
+  - *Usage.* It is reported as deltas from a baseline read when the box is given the cgroup, and the peak through a
+    `memory.peak` descriptor written then (Linux 6.12 on, f31). No per-box `pids.peak` is reported (f32), and
+    `memory.reclaim` never runs (f29). The agent holds that descriptor for each box given a cgroup another box left,
+    one each for the box's life, and every descriptor the agent holds rides along each exec's copy of its descriptor
+    table (decision 3): a cost that grows with those boxes, which a fresh slot's box doesn't add, since its peak is
+    its cgroup's own.
+  - *Who never shares.* A box with no owner, an owner that opts out, or a box that could change its own cgroup gets a
+    cgroup of its own, named by its id and removed with it, as every box did before. Such a box holds CAP_SYS_ADMIN in
+    any set, or its spec gives no capability sets (it keeps its creator's, all of root's), or it holds CAP_BPF with
+    CAP_NET_ADMIN, which load a cgroup device program (`kernel/bpf/syscall.c:2930-2941`, v6.19) and attach it to the
+    cgroup it can open. The plan named CAP_SYS_ADMIN; the other two reach the same files.
+  - *Bounds.* Idle cgroups are bounded at `PER_OWNER` 32 for an owner and `PER_NODE` 256 for the node; past either the
+    oldest is evicted. The bench's busiest phase runs 32 boxes at once, and RunD measured the load-tracking walk over
+    cgroups at 7.6% of a node's cycles past 10,000 (f65).
+  - *Removal.* A thread of the node's removes what the bounds, a failed check or a failed create put out, off create's
+    path. It ends anything left in the cgroup, then takes its sub-cgroups apart deepest first; with its queue full, the
+    caller removes the cgroup itself.
+  - *Ordering and recovery.* A delete gives the slot back only once the box's record is gone, so a crash never leaves a
+    slot to two boxes. Recovery removes every slot no readable record names, and takes live boxes back by their
+    recorded slot (T-T7.1.2).
+  - *Fallback.* Any failed check removes the idle cgroup and makes a fresh one, so the worst case is the path every box
+    took before.
+  - *Never a cgroup `cgroup.kill` was written to.* Linux kills every task later cloned into such a cgroup with
+    `CLONE_INTO_CGROUP`. The clone's kill count is sampled from the forking task's own cgroup, and the child is killed
+    when the target's differs (`kernel/cgroup/cgroup.c:6702-6705`, `:6768`, `:6902`, `:6941`, v6.19). Measured on
+    adacachy's 7.2.9 and fedora's 6.19.10 (`bench/competitive/probes/kill_seq.md`), and seen as inits dying before
+    their ready signal in fedora's first OCI pass with an owner. No file a check can read shows the count, so the
+    node keeps it: a box sent KILL, or whose delete fell back to `cgroup.kill`, has its slot removed with it,
+    counted (`discarded_killed`).
+- **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
+  kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->Over six runs of test 2 on adacachy
+  (Linux 7.2.9) a box left 3,719,168 to 7,471,104 bytes charged, 3.5 to 7.1 MiB, anon, shmem and dirty file pages 0
+  in each; on fedora (Linux 6.19.10, as root) 5,054,464.<!-- /record --> A box that leaves files in memory leaves tens
+  of megabytes (f27: 85 MB, and test 3's 64 MiB file), which the next box would be charged for. The threshold sits
+  above the first case and under the second.
+- **Test 3's other-owner case.** A box of another owner gets a fresh cgroup, counted (`Refused::Owner`), and the idle
+  cgroup stays its owner's, handed to that owner's next box. Removing a clean idle cgroup because another owner's box
+  can't have it would add the very holds this lever takes off.
+- **Tests.** `hex_core::reuse`'s model test against an oracle covers:
+  - random creates, deletes, owners, policies, privileges and failing checks;
+  - the bounds, and a cgroup handed only to its owner under its policy when clean;
+  - never a fresh slot while a usable one is idle, and no slot made twice;
+  - a 20,000-step run that counts every path: handed on, fresh, missed, each refusal and each eviction.
+
+  `crates/hex-cli/tests/oci_reuse.rs` runs the plan's first three tests on a node:
+  - the pidfd end with an inotify watch on the cgroup's directory, which sees no `cgroup.kill` write, and the same for
+    a box whose init ended before its delete;
+  - the outsider's fallback, and the `process` box's `cgroup.kill`;
+  - B given A's slot, its CPU, peak and event deltas its own, while the cgroup's files still hold A's;
+  - each guard, counted by its reason, and a box sent KILL, whose cgroup is removed rather than kept.
+
+  `crates/hex-cli/tests/node_socket.rs` crashes a real agent with an idle slot and live boxes, and its restart removes
+  the slot and takes the boxes back. `crates/hex-cli/tests/oci_cgroupfs_box.rs` probes a rootless box holding
+  CAP_SYS_ADMIN with namespaces of its own: unmounting its cgroup filesystem and mounting a fresh one, it reaches no
+  other box's cgroup.
+- **Measured** (fedora, 2026-11-03, a loaded host: each figure a count or a ratio within its own run):
+  - *The holds* (the first criterion, at most 3: met). <!-- record: bench/competitive/probes/create_serial.md -->One
+    owner's box takes `cgroup_mutex` 1.087 times a lifecycle at concurrency 32, 1.023 at concurrency 1 and 1.092
+    without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
+    box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
+    holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
+  - *The rate* (the second, at least 8x: not met). <!-- record: bench/competitive/probes/reuse_pass.md -->Sustained at
+    concurrency 32 over throughput at concurrency 1 in one OCI pass, one owner's boxes: 4.32x and 4.21x in process,
+    4.41x and 4.81x over the socket (run 1). With steps 2 and 3 merged in, an experiment of record for no branch,
+    4.05x to 4.83x, against 4.62x to 5.41x for this step alone beside it (run 2).<!-- /record --> Each lever raised
+    both rates, the rate at concurrency 1 as much as the other.
+    <!-- record: bench/competitive/probes/create_serial.md -->Once the cgroup lock is free, what holds concurrency 32 is
+    the mount namespace's lock, one for the whole host, 5.349 ms a lifecycle (run 9); with steps 2 and 3 in too, RTNL
+    in making each box's network namespace, 6.670 ms, and sysctl's lock, 12.58% of the samples spinning (run
+    10).<!-- /record --> So the second falsifier below tripped: the holds fell and 8x didn't follow. The next
+    host-wide locks are taken in making a network namespace a box, which a pool that makes them ahead moves off the
+    create but not off the host.
+  - *Reuse off* (the third, within 0.02 ms of 0 ms: not met as written).
+    <!-- record: bench/competitive/probes/create_breakdown.md -->On boxes of no owner, this step's create p50 against
+    the binary before it in the same rounds is 0.064 and 0.074 ms under in two runs and 0.028 over in one (run 13).
+    The rounds' own spread is wider than the window: the third run's pooled difference carries a standard error of
+    about 0.041 ms, and the traced parts differ only in the init's `pivot_root`, which this step doesn't
+    change.<!-- /record -->
+  - *The bounds* (the fourth). The model test checks after every step that the pool keeps both bounds and hands a
+    cgroup only to its owner, and test 3 gives another owner's box a fresh cgroup, counted. Every phase of the bench
+    ended with 32 idle cgroups, `PER_OWNER`, removed when the bench ended.
+- **What would falsify it:**
+  - `create_serial.sh` locks mode counting more than 3 holds per lifecycle on one owner's boxes at concurrency 32 (the
+    plan's bar), or more than today's on unowned ones;
+  - the sustained rate at concurrency 32 not rising past 8x concurrency 1 once the holds fall;
+  - a box handed a cgroup the check called clean that wasn't;
+  - the reuse rate on one owner's boxes near 0 because what's left charged sits over `RESIDUAL`;
+  - a delete that ends with the cgroup populated, or a pidfd end that took the lock.
+
 **The seeds a node keeps (plan step 3).** The node's policy for its seeds is a pure core, `hex_core::seeds`
 (`crates/hex-core/src/seeds.rs`, 5f0b474), which step 4's shell drives (`crates/hex-node/src/createpool.rs`).
 - **The bound.** At most **32** seeds, up or starting, one to a slot. A seed serves one create at a time: "only one

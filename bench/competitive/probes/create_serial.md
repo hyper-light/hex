@@ -286,6 +286,171 @@ the network namespace 16 started, 23 waited, 15 at most.
   `css_release_work_fn` 6.00, `cgroup_bpf_release` 1.00, and the runtime's four), the host making fewer other
   cgroups than in run 5, and the node's start's one attach is 0.00 a lifecycle.
 
+## Run 7 (2026-11-03, fedora): locks, one owner's boxes, each handed the cgroup its owner's earlier box left
+
+- **Why:** goal 5 extended, step 6's first criterion: `cgroup_mutex` holds per lifecycle on the reuse path, one owner's
+  boxes, with step 1 in, at most 3 at concurrency 32. Every box seam_oci made named the owner `bench-owner`
+  (`HEXBENCH_OWNER`), its bundle's process holding Docker's default capabilities (a box that keeps all of root's never
+  shares a cgroup), and its delete ended it through its init's pidfd.
+- **Host and load:** fedora (Intel Core i9-14900HX, 32 threads, the container pinned to 4-31), Linux
+  6.19.10-300.fc44.x86_64, 2026-11-03T01:16:43Z; the 1-minute load 38.07 at the start and 23.67 at the end, two CI jobs
+  beside it. Hex's sustained phase ran 2,394/s, without a network namespace 2,334/s, under the probes.
+- **Binaries:** built on fedora from the step's tree (the code of `a6f32f1`, but for a doc comment): `hex`
+  1404d8835bb80926, `seam_oci` 833f7025d1d9b056.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261103T011643Z`. The workload started once
+  bpftrace said "Attached 38 probes" (the harness's wait since this step), so the probes saw every lifecycle: one
+  clone into a cgroup each.
+- **What the node did** (`seam_oci`'s counts): at concurrency 1, 519 of 520 boxes were handed an idle cgroup and 1 was
+  given a fresh one; at 32, 4,968 of 5,000 handed one and 32 fresh, one for each box in flight; none refused, every
+  box ended through its init's pidfd, 32 idle cgroups left at the end, removed then.
+
+| `cgroup_mutex` holds for the boxes' own cgroups, per lifecycle | hex.c1 (520) | hex.c32 (5,000) | hex.c32nonet (5,000) |
+|---|---|---|---|
+| a fork into the cgroup (`CLONE_INTO_CGROUP`) | 1.000 | 1.000 | 1.000 |
+| `cgroup_mkdir` | 0.002 | 0.006 | 0.007 |
+| `cgroup_rmdir` | 0.002 | 0.006 | 0.007 |
+| `cgroup_kill_write` | 0 | 0 | 0.000 |
+| `css_killed_work_fn`, a kworker's | 0.010 | 0.032 | 0.033 |
+| `css_release_work_fn`, a kworker's | 0.008 | 0.036 | 0.039 |
+| `cgroup_bpf_release`, a kworker's | 0.002 | 0.006 | 0.007 |
+| in all | 1.023 | 1.087 | 1.092 |
+
+- **One owner's box takes the lock about once a lifecycle,** the clone of its init into the cgroup it was handed, where
+  run 6's took it 16 times. The rest is the fresh cgroups' making and, at the end, their removal: 32 at concurrency 32,
+  each a `mkdir`, an `rmdir` and the kworkers' work, over 5,000 lifecycles. Without a network namespace one box of the
+  5,000 was ended by `cgroup.kill` (its init's exit was recorded between the delete's read of its record and its
+  unwatching), its cgroup removed rather than kept and a 33rd made: 0.000 a lifecycle.
+- **The lock is mostly free:** held 12.4% of the busiest buckets at concurrency 32 (24.2% without a network
+  namespace), where run 8's boxes of no owner, on the same host minutes later, held it 87.1% (89.3%).
+
+## Run 8 (2026-11-03, fedora): locks, boxes of no owner, ended through their init's pidfd
+
+- **Why:** what a box of no owner takes now: a fresh cgroup each, as before, and its delete through its init's pidfd
+  rather than `cgroup.kill`.
+- **Host, load and binaries:** run 7's, 2026-11-03T01:18:20Z; the 1-minute load 23.67 at the start and 21.93 at the
+  end. Hex's sustained phase ran 1,634/s, without a network namespace 2,010/s, under the probes.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261103T011820Z`, the workload started on
+  "Attached 38 probes".
+
+| `cgroup_mutex` holds for the boxes' own cgroups, per lifecycle | hex.c1 (520) | hex.c32 (5,000) | hex.c32nonet (5,000) |
+|---|---|---|---|
+| `cgroup_mkdir` | 1.000 | 1.000 | 1.000 |
+| `cgroup_rmdir` | 1.000 | 1.000 | 1.000 |
+| `cgroup_kill_write` | 0 | 0 | 0 |
+| a fork into the cgroup (`CLONE_INTO_CGROUP`) | 1.000 | 1.000 | 1.000 |
+| `css_killed_work_fn`, a kworker's | 5.000 | 5.000 | 5.000 |
+| `css_release_work_fn`, a kworker's | 5.996 | 6.000 | 6.000 |
+| `cgroup_bpf_release`, a kworker's | 1.000 | 1.000 | 1.000 |
+| in all | 14.996 | 15.000 | 15.000 |
+
+- **A box of no owner takes it 15 times, where run 6's took 16:** every box ended through its init's pidfd, none by
+  `cgroup.kill`.
+- **Not of record: the first runs of this step** (`create-serial-locks-20261103T005157Z` and `T005423Z`, under fedora's
+  load of 52 to 447) started their workloads 5 s after bpftrace, before it had attached every probe, and their traces
+  missed about the first half of each run's lifecycles: 0.57 clones into a cgroup a lifecycle where every lifecycle
+  makes one. The harness has waited for bpftrace's own "Attached N probes" notice since.
+
+## Run 9 (2026-11-03, fedora): offcpu, one owner's boxes, what holds concurrency 32 once the cgroup lock is free
+
+- **Why:** goal 5 extended, step 6's second criterion, 8x at concurrency 32, is unmet (`reuse_pass.md`) with
+  `cgroup_mutex` held 12.4% of the time (run 7). This run finds what one owner's lifecycles wait on now, every box
+  `bench-owner`'s and its bundle's process holding Docker's default capabilities, as in run 7.
+- **Host and load:** run 7's, 2026-11-03T01:33:07Z; the 1-minute load 10.16 at the start and 9.36 at the end. Under
+  the probe Hex's sustained phase ran 2,973/s and libcrun's 1,415/s.
+- **Binaries:** run 7's (`hex` 1404d8835bb80926, `seam_oci` 833f7025d1d9b056). **Run:**
+  `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-offcpu-20261103T013307Z`, the harness at a6f32f1 (its env.txt's
+  uncommitted changes are this file's runs 7 and 8), each workload started on bpftrace's "Attached 7 probes".
+
+Off-CPU ms per lifecycle, with run 1's concurrency 32 beside it (every box's cgroup made and removed; its classes are
+lower bounds, its map having filled):
+
+| What the lifecycle waits on | hex.c1 | hex.c32 | crun.c32 | run 1's hex.c32 |
+|---|---|---|---|---|
+| a directory's `i_rwsem` | 0.000 | 0.027 | 6.945 | 8.459 |
+| `cgroup_mutex` | 0.141 | 0.043 | 1.442 | 1.332 |
+| the mount namespace's lock | 0.001 | 4.153 | 0.649 | 1.345 |
+| an RCU grace period (umount) | 0.037 | 0.137 | 0.890 | 0.175 |
+| a futex (the runtime's own locks) | 0.001 | 0.369 | 0.000 | 0.601 |
+| work: a socket | 3.127 | 7.858 | 6.116 | 7.248 |
+| work: a pipe or FIFO | 0.844 | 6.899 | 0.316 | 3.110 |
+| work: a poll | 0.500 | 3.252 | 0.000 | 2.084 |
+| work: a child | 0.000 | 0.002 | 0.003 | 0.013 |
+| a sleep (the runtime's own polling) | 0.000 | 0.000 | 3.568 | 0.000 |
+| other | 0.028 | 3.414 | 5.097 | 0.398 |
+
+- **`cgroup_mutex` is off the path:** 0.043 ms a lifecycle at concurrency 32, against run 1's 1.332, and no cgroup
+  directory is waited on (0.027 ms of all directories' `i_rwsem`s, against 8.459).
+- **The mount namespace's lock is the wait now.** It is one `rw_semaphore` for the whole host, `namespace_sem` (Linux
+  v6.19 `fs/namespace.c:89`). Every mount, bind, unmount and `pivot_root` takes it to write through `do_lock_mount`
+  (`:2747`, `namespace_lock` at `:1723-1725`), held to the end of the caller (`:2799-2801`); a mount namespace's copy
+  takes it to write too (`copy_mnt_ns`, `:4117`), and every read of a mount table takes it to read (`m_start`,
+  `:1541`). The inits waited for it 5.349 ms a lifecycle at concurrency 32:
+  - 4.153 to write, the class above: a bind mount 1.829 (`do_loopback`), `pivot_root` 1.279, a new mount 0.610, an
+    unmount 0.148, the namespace's copy at the init's clone 0.146, and 0.141 in `path_mount` (a remount or a
+    propagation change; for a bind's remount that `rw_semaphore` can be its superblock's `s_umount`, which the stack
+    doesn't tell apart);
+  - 1.196 to read, counted under other: the init's read of `/proc/self/mountinfo`, which the runtime makes for each
+    recursive read-only bind to remount the cgroup filesystems it carries (`remount_cgroupfs_readonly`, 0cefe6c), the
+    bench's `/usr` among them.
+- **`pivot_root` walks every thread on the host inside that hold:** `chroot_fs_refs` (`fs/namespace.c:4606`, under
+  the lock taken at `:4554`) takes each thread's lock in turn (`fs/fs_struct.c:54-77`). It is 6.64% of Hex's on-CPU
+  samples at concurrency 32 and 15.40% at concurrency 1, where nothing waits on it. At concurrency 32 another 16.44% is
+  spinning to take an `rw_semaphore` to write (`rwsem_spin_on_owner` 8.64%, `osq_lock` 7.80%).
+- **RTNL is the next wait,** counted under other: 2.089 ms a lifecycle at concurrency 32. A network namespace the
+  create makes on its path (`netns.made_on_path`: 3,751 and 4,034 of the OCI pass's two sustained phases' 10,000)
+  registers its loopback device under the host's one `rtnl_mutex` (`drivers/net/loopback.c:218`, `net/core/dev.c:11519`,
+  `net/core/rtnetlink.c:229-231`, `:89-91`, `:76`): 1.862 ms, and 0.227 more in `rtnl_newlink`. Another 2.86% of the
+  on-CPU samples spin for it.
+- **libcrun meets the same locks at its lower rate:** directories' `i_rwsem`s 6.945 ms (its cgroups' `mkdir`, `rmdir`
+  and slow lookups among its top sites), the mount namespace's lock 0.649, RTNL for the loopback 2.553.
+- **Where the levers are:** goal 5 extended's steps 2 and 3, on their own branches and not in this one, take the
+  holds the inits wait for. On a root node the init attaches the rootfs and bind sources the agent cloned into a copy
+  of the seed's two-mount namespace and ends with `chroot`, "with no `pivot_root` walk of the host's threads"
+  (`cp/t7-ext-s3`'s `crates/hex-runtime/src/linux/oci/init.rs:316-320`, `:848`; the seed's one `pivot_root` is once
+  in its life, `seed.rs:133`), and sets a recursive bind's flags on its whole tree with `mount_setattr` before
+  attaching it, with no read of the mount table (`init.rs:887-892`). No lever of this step reaches them.
+
+## Run 10 (2026-11-03, fedora): offcpu, one owner's boxes, an experiment with steps 2, 3 and 6 merged
+
+- **Why:** what holds concurrency 32 with step 2's and step 3's levers in as well as this step's. Of record for no
+  branch: the binaries are of the merge `reuse_pass.md`'s run 2 builds (`hex` 8268582ba6f124ea, `seam_oci`
+  58e1325a8a636b42), which is no commit.
+- **Host and load:** run 7's, 2026-11-03T01:44:03Z; the 1-minute load 20.72 at the start and 14.46 at the end. Under
+  the probe Hex's sustained phase ran 3,524/s and libcrun's 1,523/s.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-offcpu-20261103T014403Z`, run 9's harness in the merge
+  (its env.txt's uncommitted changes are the merge), each workload started on "Attached 7 probes".
+
+Off-CPU ms per lifecycle:
+
+| What the lifecycle waits on | hex.c1 | hex.c32 | crun.c32 |
+|---|---|---|---|
+| a directory's `i_rwsem` | 0.000 | 0.026 | 6.783 |
+| `cgroup_mutex` | 0.000 | 0.037 | 1.548 |
+| the mount namespace's lock | 0.000 | 0.007 | 0.702 |
+| an RCU grace period (umount) | 0.012 | 0.028 | 0.857 |
+| a futex (the runtime's own locks) | 0.000 | 0.328 | 0.000 |
+| work: a socket | 2.205 | 3.893 | 6.014 |
+| work: a pipe or FIFO | 0.351 | 3.610 | 0.324 |
+| work: a poll | 0.408 | 4.892 | 0.000 |
+| work: a child | 0.001 | 0.001 | 0.004 |
+| a sleep (the runtime's own polling) | 0.000 | 0.000 | 3.362 |
+| other | 0.023 | 6.815 | 3.767 |
+
+- **Neither lock of runs 7 and 9 is waited on:** `cgroup_mutex` 0.037 ms a lifecycle at concurrency 32, the mount
+  namespace's lock 0.007, against run 9's 0.043 and 5.349. `pivot_root`'s walk is 0.16% and 0.09% of Hex's on-CPU
+  samples at concurrency 1 and 32 (the seeds', once in each one's life), against run 9's 15.40% and 6.64%.
+- **RTNL is:** 6.670 ms a lifecycle at concurrency 32, nearly all of other. Each box's network namespace registers its
+  loopback device under it (`register_netdev`, 3.560 ms; run 9's sources) and the init brings that loopback up by
+  rtnetlink (`rtnl_newlink`, 3.110: `crates/hex-runtime/src/linux/oci/net.rs`), each under the host's one
+  `rtnl_mutex`. 11.44% of Hex's on-CPU samples spin for it (`mutex_spin_on_owner` and `osq_lock` under
+  `register_netdev`, 3.33% and 2.94%, and under `rtnl_newlink`, 3.23% and 1.94%).
+- **And sysctl's lock:** 12.58% of the samples spin on the one spinlock the kernel's sysctl tables share (Linux v6.19
+  `fs/proc/proc_sysctl.c:88`), taken as each namespace registers its tables (`__register_sysctl_table`, `:1370`,
+  taking it at `:1389` and `:1398`: 6.74%; `sysctl_mkdir_p`, `:1299`: 5.84%).
+- **So what holds concurrency 32 next is the making of a network namespace a box,** on the create's path or ahead of
+  it: making it ahead moves its holds of those two locks off the create but not off the host, as a pool of cgroups made
+  ahead would move none of `cgroup_mutex`'s.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
@@ -330,3 +495,9 @@ the network namespace 16 started, 23 waited, 15 at most.
   before it and the removal after. Spreading the boxes' cgroups over several parent directories would part their
   `i_rwsem`s but not `cgroup_mutex`: with the lock free under a tenth of the time (run 4) it would add about a tenth at
   most, short of 8x.
+- **Since goal 5 extended, step 6: the lock is off one owner's path, and the next locks hold 8x off.** One owner's box
+  takes `cgroup_mutex` about once a lifecycle, its init's clone into the cgroup it was handed (1.087 at concurrency 32,
+  run 7), and waits for it 0.043 ms (run 9). What holds concurrency 32 then is the mount namespace's lock, one for the
+  whole host (5.349 ms a lifecycle, run 9); with steps 2 and 3 merged in as well, RTNL and sysctl's lock in making each
+  box's network namespace (6.670 ms, and 12.58% of the samples spinning, run 10). The ratio stayed 4.05x to 5.41x
+  (`reuse_pass.md`), because a lifecycle alone got faster with each lever too.
