@@ -552,6 +552,15 @@ mod linux {
             }
         }
 
+        /// What the network namespaces the node keeps for owners have done, in process; the socket
+        /// carries none.
+        fn netns_reuse(&self) -> Option<hex_node::netns::ReuseCounts> {
+            match self {
+                Self::InProcess(node) => node.netns_reuse().ok().flatten(),
+                Self::Socket { .. } => None,
+            }
+        }
+
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -607,6 +616,31 @@ mod linux {
             .collect();
         out.sort_unstable();
         out
+    }
+
+    /// What the network namespaces kept for owners did from `before` to `after`.
+    fn netns_reuse_rise(
+        before: &hex_node::netns::ReuseCounts,
+        after: &hex_node::netns::ReuseCounts,
+    ) -> Value {
+        let (b, a) = (&before.pool, &after.pool);
+        let refused: Map<String, Value> = hex_core::netns_reuse::Refused::ALL
+            .iter()
+            .filter_map(|r| {
+                let n = a.refused(*r) - b.refused(*r);
+                (n > 0).then(|| (r.name().to_owned(), json!(n)))
+            })
+            .collect();
+        json!({"handed_on": a.handed_on - b.handed_on,
+               "fresh": a.fresh - b.fresh,
+               "refused": refused,
+               "evicted": (a.evicted_owner_bound + a.evicted_node_bound)
+                   - (b.evicted_owner_bound + b.evicted_node_bound),
+               "idle": a.idle,
+               "given_back": after.given_back - before.given_back,
+               "checked": after.checked - before.checked,
+               "unchecked": after.unchecked - before.unchecked,
+               "lost_home": after.lost_home - before.lost_home})
     }
 
     /// What the node's idle cgroups and its deletes did from `before` to `after`.
@@ -749,6 +783,7 @@ mod linux {
             let r = driver.netns().and_then(|before| {
                 let seeds_before = driver.seeds()?;
                 let reuse_before = driver.reuse();
+                let netns_reuse_before = driver.netns_reuse();
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -771,6 +806,10 @@ mod linux {
                     (Some(before), Some(after)) => Some(reuse_rise(&before, &after)),
                     _ => None,
                 };
+                let netns_reuse_rose = match (netns_reuse_before, driver.netns_reuse()) {
+                    (Some(before), Some(after)) => Some(netns_reuse_rise(&before, &after)),
+                    _ => None,
+                };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
                     if let Some(seeds_rose) = seeds_rose {
@@ -778,6 +817,9 @@ mod linux {
                     }
                     if let Some(reuse_rose) = reuse_rose {
                         fields.insert("cgroups".to_owned(), reuse_rose);
+                    }
+                    if let Some(netns_reuse_rose) = netns_reuse_rose {
+                        fields.insert("netns_reuse".to_owned(), netns_reuse_rose);
                     }
                     if owner.is_some() {
                         fields.insert(

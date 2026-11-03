@@ -188,7 +188,9 @@ def dry(sustained):
 def netns_counts(data):
     """What the node counted of its containers' network namespaces in each phase of each round that reports it
     (seam_oci): made on a create's path (the pool dry, or none kept), taken from its pool, made ahead for it, and
-    makes that failed, against the phase's creates."""
+    makes that failed, against the phase's creates; and, where the node keeps its owners' namespaces (goal 5
+    extended, step 6), those handed from box to box of one owner, the boxes given a fresh one to keep, and each
+    refusal by its reason."""
     lines = []
     for n, rs in data.items():
         for rnd, r in sorted(rs.items()):
@@ -199,8 +201,14 @@ def netns_counts(data):
                 if c is None:
                     continue
                 creates = p["lifecycles"] if phase == "sustained" else r["n"] + r["warmup"]
-                bits.append(f"{phase}: {c['made_on_path']:,} made on the path, {c['taken']:,} taken from the pool, "
-                            f"{c['made_ahead']:,} made ahead, {c['failed']:,} failed makes, of {creates:,} creates")
+                bit = (f"{phase}: {c['made_on_path']:,} made on the path, {c['taken']:,} taken from the pool, "
+                       f"{c['made_ahead']:,} made ahead, {c['failed']:,} failed makes, of {creates:,} creates")
+                k = p.get("netns_reuse")
+                if k is not None:
+                    refused = ", ".join(f"{why} {count:,}" for why, count in sorted(k["refused"].items())) or "none"
+                    bit += (f"; kept for owners: {k['handed_on']:,} handed on, {k['fresh']:,} fresh, refused: "
+                            f"{refused}; {k['evicted']:,} evicted, {k['unchecked']:,} unchecked, {k['idle']:,} idle")
+                bits.append(bit)
             if bits:
                 lines.append(f"- {n}, round {rnd}: " + "; ".join(bits))
     if not lines:

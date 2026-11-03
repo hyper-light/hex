@@ -24,7 +24,14 @@
 //!   the plan's "A's is removed"). A of no owner, holding CAP_SYS_ADMIN, or whose spec
 //!   gives no capability sets (it keeps its creator's, all of them): a cgroup of its own, removed with
 //!   it, counted; B holding CAP_SYS_ADMIN beside its owner's idle cgroup: a cgroup of its own, counted,
-//!   the idle one left.
+//!   the idle one left;
+//! - the network namespace, reused within one owner (Ada's call, 2026-11-03; decision 5), root only: A of
+//!   O, which could change nothing of its namespace, deleted; B of O: expect A's namespace, counted, its
+//!   loopback up and A's counters still in it. A's namespace left holding a TIME_WAIT connection, an open
+//!   socket, an address or a route: expect B fresh and the refusal counted by its reason. A holding
+//!   CAP_NET_ADMIN, with `/proc/sys` writable, or of no owner: never kept, counted. Boxes of another owner P
+//!   beside O's idle namespace: each fresh, counted, never O's; then O's next box gets O's and P's next box
+//!   P's oldest.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -47,6 +54,7 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{Act, PATIENCE};
 use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
+use hex_core::netns_reuse::Refused as NetRefused;
 use hex_core::reuse::Refused;
 use hex_node::Node;
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -101,6 +109,8 @@ enum Caps {
     SysAdmin,
     /// No capability sets given, so the process keeps its creator's: all of them.
     Unset,
+    /// Docker's defaults and CAP_NET_ADMIN.
+    NetAdmin,
 }
 
 /// Where one run keeps its bundles and box roots.
@@ -139,6 +149,12 @@ impl Lab {
 
     /// A bundle whose init runs `args`, its process holding `caps`.
     fn bundle_running(&self, caps: Caps, args: &[&str]) -> PathBuf {
+        self.bundle_with(caps, args, false, false)
+    }
+
+    /// A bundle whose init runs `args`, its process holding `caps`, with a network namespace of its own
+    /// when `network` and `/proc/sys` read-only when `readonly_sys`.
+    fn bundle_with(&self, caps: Caps, args: &[&str], network: bool, readonly_sys: bool) -> PathBuf {
         let dir = tempfile::Builder::new()
             .prefix("bundle-")
             .tempdir_in(self.bundles.path())
@@ -162,6 +178,7 @@ impl Lab {
         let capabilities = match caps {
             Caps::Docker => Some(DOCKER_CAPS.to_owned()),
             Caps::SysAdmin => Some(DOCKER_CAPS.replace(']', r#","CAP_SYS_ADMIN"]"#)),
+            Caps::NetAdmin => Some(DOCKER_CAPS.replace(']', r#","CAP_NET_ADMIN"]"#)),
             Caps::Unset => None,
         }
         .map(|set| {
@@ -175,7 +192,15 @@ impl Lab {
         // or its create is refused (beda8a9); one given no capability sets holds it too.
         let namespaces = match caps {
             Caps::SysAdmin | Caps::Unset => format!(r#"{namespaces},{{"type":"network"}}"#),
-            Caps::Docker => namespaces,
+            Caps::Docker | Caps::NetAdmin if network => {
+                format!(r#"{namespaces},{{"type":"network"}}"#)
+            }
+            Caps::Docker | Caps::NetAdmin => namespaces,
+        };
+        let readonly = if readonly_sys {
+            r#","readonlyPaths": ["/proc/sys"]"#
+        } else {
+            ""
         };
         let config = format!(
             r#"{{
@@ -195,7 +220,7 @@ impl Lab {
     {{"destination": "/usr", "type": "bind", "source": "/usr", "options": ["rbind","ro"]}},
     {{"destination": "/hex", "type": "bind", "source": "{exe}", "options": ["bind","ro"]}}
   ],
-  "linux": {{"namespaces": [{namespaces}]{mappings}}}
+  "linux": {{"namespaces": [{namespaces}]{mappings}{readonly}}}
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
@@ -287,6 +312,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
+    a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -675,6 +701,348 @@ fn a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(lab: &Lab, ow
     }
     eprintln!("cpu.max: written for B (a half to a quarter), left for C (a quarter to a quarter)");
     node.release_idle().unwrap();
+}
+
+/// Goal 5 extended, step 6 (Ada's call of 2026-11-03): a box's network namespace handed to its owner's next
+/// box when the box couldn't have changed it and the check finds nothing of it left. Root only: only a root
+/// node keeps namespaces (a rootless node's containers make theirs in user namespaces of their own). What a
+/// box could leave in its namespace is done here from outside, by this process (root) on a thread that joins
+/// it, while the box is alive: it is the namespace's state at the delete that the check reads, whoever made
+/// it. Do, expect:
+/// - A of O, eligible (Docker's capabilities, `/proc/sys` read-only), deleted; B of O: B is given A's
+///   namespace (the same inode), counted handed on, and its loopback is up;
+/// - the facts a namespace can't be reset of, handed on: a UDP datagram A's namespace sent is still in its
+///   counters for B, and B can tell it was A's (the same inode);
+/// - each guard, B fresh (another inode) and the reason counted once more: a TCP connection in TIME_WAIT,
+///   a socket still open (held from outside), an address added, a route added;
+/// - A holding CAP_NET_ADMIN, A with `/proc/sys` writable, A of no owner: never kept, each counted;
+/// - B of another owner: fresh, counted Owner, A's kept for O and handed to O's next box.
+fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        eprintln!("SKIP netns reuse: a rootless node keeps no network namespaces");
+        return;
+    }
+    let (node, _state) = lab.node(&own.join("hex-reuse-netns"));
+    let o = BoxOwner::named("owner-net").unwrap();
+    let wait = ["/hex", "selftest-box", "wait"];
+    let make = |id: &str, owner: Option<&BoxOwner>, caps: Caps, readonly_sys: bool| BoxSpec {
+        id: BoxId::new(id).unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(lab.bundle_with(caps, &wait, true, readonly_sys)),
+        owner: owner.cloned(),
+    };
+    let counts = || {
+        node.netns_reuse()
+            .unwrap()
+            .expect("a root node keeps namespaces")
+    };
+    let netns_of = |id: &str| -> PathBuf {
+        let cg = node.cgroup_dir(&BoxId::new(id).unwrap()).unwrap();
+        let procs = std::fs::read_to_string(cg.join("cgroup.procs")).unwrap();
+        let pid = procs.lines().next().expect("the box's init").to_owned();
+        std::fs::read_link(format!("/proc/{pid}/ns/net")).unwrap()
+    };
+    let init_of = |id: &str| -> String {
+        let cg = node.cgroup_dir(&BoxId::new(id).unwrap()).unwrap();
+        let procs = std::fs::read_to_string(cg.join("cgroup.procs")).unwrap();
+        procs.lines().next().expect("the box's init").to_owned()
+    };
+    // A namespace's inode is its identity only while it lives: one freed may have its number given to the next
+    // one made. So each comparison holds the earlier box's namespace open until it's made.
+    let hold = |id: &str| std::fs::File::open(format!("/proc/{}/ns/net", init_of(id))).unwrap();
+    // The node's checker thread rules on each namespace given back, in turn: the fact to wait on is its
+    // ruling on every one given back so far, the one just given back among them.
+    let ruled = || {
+        wait_for(
+            || {
+                let c = counts();
+                c.checked + c.unchecked == c.given_back
+            },
+            "the checker's ruling on every namespace given back",
+        );
+        counts()
+    };
+
+    // Handed on: B gets A's namespace, and its loopback is up.
+    node.create(make("net-a", Some(&o), Caps::Docker, true))
+        .unwrap();
+    let a_ns = netns_of("net-a");
+    let a_held = hold("net-a");
+    in_netns(&init_of("net-a"), || {
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.send_to(b"x", s.local_addr().unwrap()).unwrap();
+    });
+    let before = ruled();
+    node.delete(&BoxId::new("net-a").unwrap()).unwrap();
+    let after = ruled();
+    assert_eq!(after.given_back, before.given_back + 1, "{after:?}");
+    assert_eq!(
+        after.pool.idle,
+        before.pool.idle + 1,
+        "A's namespace is kept for O: {after:?}"
+    );
+    let before = counts();
+    node.create(make("net-b", Some(&o), Caps::Docker, true))
+        .unwrap();
+    assert_eq!(
+        netns_of("net-b"),
+        a_ns,
+        "B is given A's namespace, and can tell"
+    );
+    assert_eq!(counts().pool.handed_on, before.pool.handed_on + 1);
+    let snmp = std::fs::read_to_string(format!("/proc/{}/net/snmp", init_of("net-b"))).unwrap();
+    assert!(
+        udp_out(&snmp) >= 1,
+        "A's datagram is still in the namespace's counters for B: {snmp}"
+    );
+    in_netns(&init_of("net-b"), || {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("B's loopback is up");
+    });
+    drop(a_held);
+    eprintln!("netns: B given A's namespace, counted, its loopback up, A's counters still in it");
+    node.delete(&BoxId::new("net-b").unwrap()).unwrap();
+    ruled();
+    node.release_idle().unwrap();
+
+    // Each guard: what A's namespace holds at its delete refuses it, by why, and B gets a fresh one.
+    let mut held: Vec<std::net::UdpSocket> = Vec::new();
+    for (case, reason) in [
+        ("timewait", NetRefused::TimeWait),
+        ("socket", NetRefused::Sockets),
+        ("address", NetRefused::Addresses),
+        ("route", NetRefused::Routes),
+    ] {
+        let a = format!("net-{case}-a");
+        node.create(make(&a, Some(&o), Caps::Docker, true)).unwrap();
+        let a_ns = netns_of(&a);
+        let a_held = hold(&a);
+        let pid = init_of(&a);
+        match case {
+            "timewait" => in_netns(&pid, time_wait),
+            "socket" => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                in_netns(&pid, || {
+                    tx.send(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+                        .unwrap()
+                });
+                held.push(rx.recv().unwrap());
+            }
+            "address" => in_netns(&pid, || rtnetlink(new_address())),
+            _ => in_netns(&pid, || rtnetlink(new_route())),
+        }
+        let before = ruled();
+        node.delete(&BoxId::new(&a).unwrap()).unwrap();
+        let after = ruled();
+        assert_eq!(
+            after.pool.refused(reason),
+            before.pool.refused(reason) + 1,
+            "{case}: counted as {}: {after:?}",
+            reason.name()
+        );
+        assert_eq!(after.pool.idle, before.pool.idle, "{case}: not kept");
+        let b = format!("net-{case}-b");
+        node.create(make(&b, Some(&o), Caps::Docker, true)).unwrap();
+        assert_ne!(netns_of(&b), a_ns, "{case}: B is given a fresh namespace");
+        drop(a_held);
+        node.delete(&BoxId::new(&b).unwrap()).unwrap();
+        ruled();
+        node.release_idle().unwrap();
+        eprintln!("netns, {case}: A's refused, counted, B fresh");
+    }
+    drop(held);
+
+    // Never kept: a box that could have changed its namespace, or that names no owner.
+    for (case, owner, caps, readonly_sys, reason) in [
+        (
+            "netadmin",
+            Some(&o),
+            Caps::NetAdmin,
+            true,
+            NetRefused::NetAdmin,
+        ),
+        (
+            "procsys",
+            Some(&o),
+            Caps::Docker,
+            false,
+            NetRefused::ProcSysWritable,
+        ),
+        ("noowner", None, Caps::Docker, true, NetRefused::NoOwner),
+    ] {
+        let before = ruled();
+        let a = format!("net-{case}");
+        node.create(make(&a, owner, caps, readonly_sys)).unwrap();
+        assert_eq!(
+            counts().pool.refused(reason),
+            before.pool.refused(reason) + 1,
+            "{case}: counted as {}",
+            reason.name()
+        );
+        node.delete(&BoxId::new(&a).unwrap()).unwrap();
+        let after = counts();
+        assert_eq!(after.given_back, before.given_back, "{case}: never kept");
+        assert_eq!(after.pool.idle, before.pool.idle, "{case}: never kept");
+        eprintln!("netns, {case}: a namespace of its own, never kept, counted");
+    }
+
+    // Another owner's boxes: each fresh, counted, never O's; and each owner's idle namespaces go to that
+    // owner's next box alone, oldest first (Ada's call; the lead, 2026-11-03T06:12Z: a namespace never
+    // reaches another owner's box). Every namespace compared is alive, kept idle or a live box's.
+    let p = BoxOwner::named("owner-net-p").unwrap();
+    node.create(make("net-o-a", Some(&o), Caps::Docker, true))
+        .unwrap();
+    let a_ns = netns_of("net-o-a");
+    node.delete(&BoxId::new("net-o-a").unwrap()).unwrap();
+    let before = ruled();
+    assert_eq!(
+        before.pool.idle, 1,
+        "A's namespace is kept for O: {before:?}"
+    );
+    let mut p_ns = Vec::new();
+    for i in 0..3 {
+        let id = format!("net-p-{i}");
+        node.create(make(&id, Some(&p), Caps::Docker, true))
+            .unwrap();
+        let ns = netns_of(&id);
+        assert_ne!(ns, a_ns, "P's box {i} never gets O's");
+        p_ns.push(ns);
+    }
+    assert_eq!(
+        counts().pool.refused(NetRefused::Owner),
+        before.pool.refused(NetRefused::Owner) + 3,
+        "each of P's boxes counted beside O's idle one"
+    );
+    for i in 0..3 {
+        node.delete(&BoxId::new(&format!("net-p-{i}")).unwrap())
+            .unwrap();
+    }
+    let after = ruled();
+    assert_eq!(
+        after.pool.idle, 4,
+        "O's one and P's three, each kept for its owner: {after:?}"
+    );
+    node.create(make("net-o-c", Some(&o), Caps::Docker, true))
+        .unwrap();
+    assert_eq!(
+        netns_of("net-o-c"),
+        a_ns,
+        "O's next box gets O's, never one of P's"
+    );
+    node.create(make("net-p-3", Some(&p), Caps::Docker, true))
+        .unwrap();
+    assert_eq!(netns_of("net-p-3"), p_ns[0], "P's next box gets P's oldest");
+    eprintln!(
+        "netns, another owner: P's boxes fresh, counted, never O's; each owner's next box given its own owner's"
+    );
+    for id in ["net-o-c", "net-p-3"] {
+        node.delete(&BoxId::new(id).unwrap()).unwrap();
+    }
+    ruled();
+    node.release_idle().unwrap();
+}
+
+/// Runs `f` on a thread of its own in process `pid`'s network namespace, and waits for it.
+fn in_netns(pid: &str, f: impl FnOnce() + Send) {
+    let ns = std::fs::File::open(format!("/proc/{pid}/ns/net")).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                rustix::thread::move_into_link_name_space(
+                    std::os::fd::AsFd::as_fd(&ns),
+                    Some(rustix::thread::LinkNameSpaceType::Network),
+                )
+                .unwrap();
+                f();
+            })
+            .join()
+            .unwrap();
+    });
+}
+
+/// A TCP connection on loopback whose client closes first, so it lingers in TIME_WAIT
+/// (include/net/tcp.h:141, 60 s).
+fn time_wait() {
+    use std::io::Read as _;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    client.shutdown(std::net::Shutdown::Both).unwrap();
+    drop(client);
+    // The server reads the client's end, then closes its own: the client's side is left in TIME_WAIT.
+    let mut sink = Vec::new();
+    let _ = server.read_to_end(&mut sink);
+    drop(server);
+}
+
+/// Udp's OutDatagrams in a `/proc/net/snmp`: its "Udp:" lines, names then values.
+fn udp_out(snmp: &str) -> u64 {
+    let mut udp = snmp.lines().filter(|l| l.starts_with("Udp:"));
+    let (names, values) = (udp.next().unwrap(), udp.next().unwrap());
+    let at = names
+        .split_whitespace()
+        .position(|n| n == "OutDatagrams")
+        .unwrap();
+    values.split_whitespace().nth(at).unwrap().parse().unwrap()
+}
+
+/// Sends one rtnetlink request on a socket of the calling thread's namespace and wants its ack.
+fn rtnetlink(request: Vec<u8>) {
+    use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
+    let fd = rustix::net::socket_with(
+        AddressFamily::NETLINK,
+        SocketType::RAW,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    rustix::net::send(&fd, &request, SendFlags::empty()).unwrap();
+    let mut answer = [0u8; 1024];
+    let (got, _) = rustix::net::recv(&fd, &mut answer, RecvFlags::empty()).unwrap();
+    let error = i32::from_ne_bytes(answer[16..20].try_into().unwrap());
+    assert!(got >= 20 && error == 0, "the kernel refused it: {error}");
+}
+
+/// A netlink request of `kind` (`NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL`) with `body`.
+fn nl_request(kind: u16, body: &[u8]) -> Vec<u8> {
+    let mut m = Vec::new();
+    m.extend_from_slice(&u32::try_from(16 + body.len()).unwrap().to_ne_bytes());
+    m.extend_from_slice(&kind.to_ne_bytes());
+    m.extend_from_slice(&(0x1u16 | 0x4 | 0x400 | 0x200).to_ne_bytes());
+    m.extend_from_slice(&1u32.to_ne_bytes());
+    m.extend_from_slice(&0u32.to_ne_bytes());
+    m.extend_from_slice(body);
+    m
+}
+
+fn nl_attr(kind: u16, value: &[u8]) -> Vec<u8> {
+    let mut a = Vec::new();
+    a.extend_from_slice(&u16::try_from(4 + value.len()).unwrap().to_ne_bytes());
+    a.extend_from_slice(&kind.to_ne_bytes());
+    a.extend_from_slice(value);
+    while a.len() % 4 != 0 {
+        a.push(0);
+    }
+    a
+}
+
+/// `RTM_NEWADDR` (20): 10.11.12.13/32 on loopback (interface 1), `IFA_LOCAL` (2) and `IFA_ADDRESS` (1).
+fn new_address() -> Vec<u8> {
+    let mut body = vec![2u8, 32, 0, 0];
+    body.extend_from_slice(&1u32.to_ne_bytes());
+    body.extend(nl_attr(2, &[10, 11, 12, 13]));
+    body.extend(nl_attr(1, &[10, 11, 12, 13]));
+    nl_request(20, &body)
+}
+
+/// `RTM_NEWROUTE` (24): 10.20.0.0/16 out of loopback in the main table (254), unicast, link scope.
+fn new_route() -> Vec<u8> {
+    // struct rtmsg: family, dst_len, src_len, tos, table, protocol (static, 4), scope (link, 253),
+    // type (unicast, 1), flags.
+    let mut body = vec![2u8, 16, 0, 0, 254, 4, 253, 1];
+    body.extend_from_slice(&0u32.to_ne_bytes());
+    body.extend(nl_attr(1, &[10, 20, 0, 0]));
+    body.extend(nl_attr(4, &1u32.to_ne_bytes()));
+    nl_request(24, &body)
 }
 
 /// Waits for `cond`, a fact, at most [`PATIENCE`].

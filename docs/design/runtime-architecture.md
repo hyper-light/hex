@@ -1141,6 +1141,64 @@ lifecycle without changing what a box may do.
     counted (`discarded_killed`). Upstream fixed it in 8e3599202166 (7.3-rc1, `Cc: stable`; in linux-7.2.y by
     7.2.15, not in linux-6.19.y by 6.19.14), and the guard stays on every kernel, since Hex runs on kernels with
     and without it.
+- **A network namespace handed from box to box of one owner** (Ada's call, 2026-11-03; research
+  `docs/research/runtime/goal5-netns-reuse.md`). Once the cgroup and mount locks are off a lifecycle, what holds
+  concurrency 32 is the making of each box's network namespace. Its loopback is registered under the host's one RTNL,
+  its sysctl tables under the host's one `sysctl_lock` inside that hold, and the loopback is brought up under RTNL
+  again (`bench/competitive/probes/create_serial.md`, run 10). Decision 4's pool makes them ahead, which moves that
+  off the create but not off the host. So a box that may share its owner's namespaces is given one its owner's earlier
+  box left, and that making, bringing up and teardown leave its lifecycle. The pure core is `hex_core::netns_reuse`,
+  with the node's shell in `crates/hex-node/src/netns.rs` and the check in `crates/hex-runtime/src/linux/oci/netcheck.rs`.
+  - *Who may share* (`Spec::may_share_its_network`):
+    - its spec gives capability sets naming neither CAP_NET_ADMIN nor CAP_SYS_ADMIN, without which it can change
+      none of its namespace's links, addresses, routes, rules or firewall tables;
+    - `/proc/sys` is read-only, or no proc is mounted, so it can write none of the namespace's sysctls;
+    - it has no user namespace of its own;
+    - its owner keeps reuse on.
+    Any other box's namespace is its own, never kept, counted by why.
+  - *Kept.* The node holds each such box's namespace from its create to its delete: one from decision 4's pool, or,
+    with the pool dry, one the node makes on the path as the pool would, so that it holds it.
+  - *The check* (`netcheck::check`) runs when the box and its record are gone, on the node's checker thread, which
+    enters the namespace with `setns` and goes back after. It requires, each read before the check opens a socket
+    there:
+    - each protocol's sockets in use (`/proc/net/protocols`) at most a fresh namespace's. A unix, netlink or packet
+      socket counts from its making, a UDP one once bound, a TCP one once listening or connected and until its
+      connection has ended. Not `sockstat`'s "sockets: used": a closed netlink socket stays in it until an RCU
+      grace period has passed (Linux v6.19 net/netlink/af_netlink.c:794-796), so the check's own reads and a box's
+      last ones would read as sockets left, the more so under load. The first root lab's TIME_WAIT case found it
+      (`hex-g5x-s6-netlab-20261103T054433Z`);
+    - no TCP connection in TIME_WAIT, IPv4's or IPv6's (`sockstat`'s "tw");
+    - loopback the only link (`/proc/net/dev`);
+    - no iptables table;
+    - addresses, routes and rules equal to a fresh namespace's, routes' exceptions with them, each family's dump
+      read by itself, since none of those takes RTNL where an `AF_UNSPEC` one does. The fresh one's are read once
+      its `::1` is no longer tentative, which its DAD work clears once it gets RTNL.
+    Nothing runs in an idle namespace, so what the check saw holds until it's handed on. A namespace that fails is
+    closed, counted by why; one given back with the checker's line full is closed unchecked, counted. What the
+    check doesn't see: a TCP or UDP socket never bound, or a TCP one bound but neither listening nor connected,
+    held by a process outside the box, counts in no protocol.
+  - *Bounds.* At most `PER_OWNER` 32 idle for one owner and `PER_NODE` 256 for the node, as the cgroups', the oldest
+    closed past either. An owner's oldest is handed on first, so a connection a box left in TIME_WAIT has had the
+    longest to end.
+  - *What can't be reset stays within the owner.* The namespace's counters run on, its identity and its hash seed stay
+    the same, so the next box can read its predecessor's datagram counts and tell it was given its namespace (both
+    tested). A connection in TIME_WAIT can't be reset, so it refuses the namespace (tested).
+  - *The TCP metrics cache crosses within the owner, no guard* (the lead's approval, 2026-11-03T06:12Z). Each
+    destination's last round-trip time and window are saved per namespace as a connection ends (Linux v6.19
+    `tcp_update_metrics`, net/ipv4/tcp_metrics.c:340-352; entries keyed by namespace, `:54`, `:242`, `:284`), read
+    by the next connection to it (`tcp_init_metrics`, `:464`), and kept an hour (`:143`). Flushing them needs
+    CAP_NET_ADMIN over the host, not just the namespace (`TCP_METRICS_CMD_DEL` is `GENL_ADMIN_PERM`, `:979-984`).
+    In a namespace with loopback alone, a box's connections are to itself, so what its owner's next box can read is
+    the round-trip times of the predecessor's loopback connections whose TIME_WAIT had ended before it did; one
+    still in TIME_WAIT refuses the namespace. The namespace's own `net.ipv4.tcp_no_metrics_save` (`:352`) would stop
+    the saving; no box that may share can set it, `/proc/sys` being read-only.
+  - *Another owner's box* gets a fresh namespace, counted `Owner`, and the idle one stays its owner's, as the cgroup's
+    does (Ada's call).
+  - *What would falsify it*:
+    - concurrency 32 not rising once the namespace's making is off the lifecycle;
+    - a namespace passing the check while it holds what the check reads;
+    - the check's own cost at concurrency 32 rivalling the making's;
+    - eligible boxes being rare, because specs grant CAP_NET_ADMIN or keep `/proc/sys` writable.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->Over six runs of test 2 on adacachy
   (Linux 7.2.9) a box left 3,719,168 to 7,471,104 bytes charged, 3.5 to 7.1 MiB, anon, shmem and dirty file pages 0

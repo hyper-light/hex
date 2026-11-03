@@ -46,9 +46,10 @@ mkdir -p "$CG/w"; echo "$BASHPID" > "$CG/w/cgroup.procs"; mkdir -p /run/err
 # The OCI pass's bundles (oci_inside.sh's shape): a `sleep` init and a `true` one, with every namespace of their own.
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
 PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 B=/run/b; mkdir -p "$B/rootfs"; ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin && mkdir -p usr proc dev tmp )
 mk(){ mkdir -p "$1/rootfs"; cp -r "$B/rootfs/." "$1/rootfs/"; cat > "$1/config.json" <<JSON
-{ "ociVersion":"1.0.2","root":{"path":"rootfs"},"hostname":"b","process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}$PROC_CAPS},"mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]} }
+{ "ociVersion":"1.0.2","root":{"path":"rootfs"},"hostname":"b","process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}$PROC_CAPS},"mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]$RO_PATHS} }
 JSON
 }
 mk /run/bundle-sleep '["/usr/bin/sleep","infinity"]'; mk /run/bundle-true '["/usr/bin/true"]'

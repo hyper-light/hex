@@ -368,10 +368,18 @@ impl Node {
         self.cgroups.kills()
     }
 
-    /// Removes every idle cgroup now, before it returns: for a caller that wants none left waiting (a
-    /// test's end, a shutdown). Recovery removes those a crash leaves.
+    /// Removes every idle cgroup now, before it returns, and closes every idle kept network namespace: for
+    /// a caller that wants none left waiting (a test's end, a shutdown). Recovery removes the cgroups a
+    /// crash leaves; a crash closes the namespaces with the node's descriptors.
     pub fn release_idle(&self) -> Result<(), Refusal> {
+        self.netns.release_idle()?;
         self.cgroups.drain(&self.oci_boxes)
+    }
+
+    /// What the network namespaces kept for owners have done (goal 5 extended, step 6); `None` on a node
+    /// that keeps none (a rootless node, whose containers make theirs in user namespaces of their own).
+    pub fn netns_reuse(&self) -> Result<Option<crate::netns::ReuseCounts>, Refusal> {
+        self.netns.reuse_counts()
     }
 
     /// Box `id`'s cgroup: a slot's for a live box given one, else an `oci` box's under the oci boxes'
@@ -724,6 +732,9 @@ impl Node {
                 None => cg.remove()?,
             }
         }
+        // Its network namespace, if the node kept it, goes to be checked for its owner's next box, once
+        // its record is gone, as its cgroup does (goal 5 extended, step 6).
+        self.netns.give_back(id)?;
         Ok(())
     }
 
@@ -854,12 +865,16 @@ impl Node {
             .owner
             .as_ref()
             .map(|owner| Choice::new(&self.cgroups, &self.oci_boxes, &id, owner, &spec.bounds));
+        // A container that makes a network namespace of its own in the agent's user namespace joins one
+        // the node made ahead, and the pool counts every container's (decision 4); a box that may share
+        // its owner's is given one its owner's earlier box left, or one the node keeps for the owner
+        // (goal 5 extended, step 6).
+        let networks = self.netns.choice(spec.owner.as_ref());
         let made = self.supervisor.spawning().and_then(|_spawning| {
-            // A container that makes a network namespace of its own in the agent's user namespace
-            // joins one the node made ahead, and the pool counts every container's (decision 4). Its
-            // device program is one the node holds, or the oci boxes' root's (goal 5 extended, step 1).
+            // Its device program is one the node holds, or the oci boxes' root's (goal 5 extended,
+            // step 1).
             let held = Held {
-                networks: Some(&self.netns),
+                networks: Some(&networks),
                 devices: Some(&self.devices),
             };
             let name = self.container(&id);
@@ -877,6 +892,9 @@ impl Node {
             .map_err(Refusal::from)
         });
         let (chose, refused) = choice.map(Choice::made).unwrap_or((None, None));
+        // The namespace the node keeps for the box's owner; closed here if the create failed, never
+        // handed on, since a half made box may have left anything in it.
+        let network = networks.kept();
         let state = match made {
             Ok(state) => state,
             Err(e) => {
@@ -918,6 +936,12 @@ impl Node {
             (Ok(()), Some(Made::Slot(held))) => self.cgroups.hold(&id, held).map_err(|e| (e, None)),
             (Ok(()), _) => Ok(()),
             (Err(e), chose) => Err((e, chose)),
+        };
+        let watched = match (watched, network, &record.spec.owner) {
+            (Ok(()), Some(ns), Some(owner)) => {
+                self.netns.hold(&id, &owner.name, ns).map_err(|e| (e, None))
+            }
+            (watched, _, _) => watched,
         };
         if let Err((e, chose)) = watched {
             self.unmade(&id, chose);

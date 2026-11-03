@@ -21,6 +21,9 @@ ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"
 # Docker's default capabilities (moby's oci/caps/defaults.go), given every set when HEXBENCH_OWNER names an owner.
 CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
 PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+# With an owner, /proc/sys is read-only too, as Docker's default readonlyPaths make it, so a box may share its
+# owner's network namespaces (goal 5 extended, step 6: it could then change none of its namespace's sysctls).
+RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 bundle() { # bundle <dir> <args json> [namespaces json, all five by default]
   local B=$1 NS=${3:-$ALL_NS}; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
   ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin )
@@ -30,7 +33,7 @@ bundle() { # bundle <dir> <args json> [namespaces json, all five by default]
   "mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},
             {"destination":"/proc","type":"proc","source":"proc"},
             {"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],
-  "linux":{"namespaces":$NS} }
+  "linux":{"namespaces":$NS$RO_PATHS} }
 JSON
 }
 bundle /run/bundle-sleep '["/usr/bin/sleep","infinity"]'
