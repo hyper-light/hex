@@ -30,6 +30,7 @@ hex-client.workspace = true
 hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
+rustix.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 
