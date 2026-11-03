@@ -590,14 +590,24 @@ longer lives (by its pid and recorded start time). A state that a start from bef
 reads `config.json` only when it does. The node agent tries an oci box's start first, reading none of the box's
 record on that path, and judges the init's liveness by the pidfd its supervisor holds, a `poll`.
 
+**The read decides, not the poll** (found under goal 5 extended's load). <!-- record: bench/competitive/probes/fifo_hup.md -->A
+poll on the FIFO can report a hang-up as the init opens its end, before its byte: Linux's `pipe_poll` judges the
+hang-up without the pipe's lock (v6.19 `fs/pipe.c:670`, `:691-692`), and an open for writing raises the writers'
+counter before the writers (`:1192-1193`). The read after that poll finds the init's end open and returns EAGAIN
+(`:374-376`). `probes/fifo_hup.c` saw 22 such polls in 18,000,000, and 7 of their reads got EAGAIN; the competitive
+bench saw one start refused so (`20261103T064217Z`).<!-- /record --> End-of-file is the init's death, refused as
+stopped; EAGAIN is the init's end open and its byte to come, so start polls again within its patience
+(`run::take_byte`).
+
 **Evidence.** Step 1 cut start into its parts: half of it (0.12-0.13 ms) was the rewrite of `state.json` as
 running, with a second read of the state and a read of `config.json` for hooks the bundle didn't have. Without them,
 in the breakdown run `exec-breakdown-20261028T224731Z`, start was 0.084-0.090 ms against libcrun's 0.083-0.089.
 
 **Tests.** The derivation as a pure function, against an oracle table of every combination (recorded status, the
 FIFO there or not, the init live with its start time, live with another, a zombie or gone): `created`, `running` or
-`stopped` as the runtime-spec defines them (`state::tests`, AC-T7.1.4). runtime-tools and the cgroups lab hold start
-and state to the runtime-spec on the command line.
+`stopped` as the runtime-spec defines them (`state::tests`, AC-T7.1.4). A poll's hang-up as the init opens, before
+its byte, waits for the byte; an init that opened the FIFO and died without it is end-of-file at once (`run::tests`,
+AC-T7.1.4). runtime-tools and the cgroups lab hold start and state to the runtime-spec on the command line.
 
 ### 4. Network-namespace work off the critical path (restated on goal 4's measurements, 2026-10-29)
 
