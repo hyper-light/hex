@@ -20,6 +20,7 @@ pub mod init;
 pub mod inroot;
 pub mod mount;
 pub mod net;
+pub mod netcheck;
 pub mod programs;
 pub mod resources;
 pub mod run;

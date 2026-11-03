@@ -63,8 +63,8 @@ impl BoxSpec {
 pub struct BoxOwner {
     /// 1 to [`BoxOwner::MAX_NAME`] ASCII letters, digits and `_`, `+`, `-` or `.`, as a box id's.
     pub name: String,
-    /// Whether the owner's boxes may be given a cgroup its earlier boxes left: on unless the owner opts
-    /// out (Ada's call, 2026-10-31).
+    /// Whether the owner's boxes may be given a cgroup its earlier boxes left, or a network namespace: on
+    /// unless the owner opts out (Ada's calls, 2026-10-31 and 2026-11-03).
     #[serde(default = "on", skip_serializing_if = "is_on")]
     pub reuse: bool,
 }

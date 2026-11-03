@@ -568,6 +568,48 @@ impl Spec {
             || (self.holds_capability("CAP_BPF") && self.holds_capability("CAP_NET_ADMIN"))
     }
 
+    /// Whether the container may be given its owner's earlier box's network namespace, and hand its own on
+    /// to its owner's next box: only if it couldn't change it (goal 5 extended, step 6; Ada's call of
+    /// 2026-11-03; docs/research/runtime/goal5-netns-reuse.md). Refused, by why:
+    /// - [`Refused::NetAdmin`]: its spec gives no capability sets, so it keeps its creator's, all of them for
+    ///   a root node's container, or names CAP_NET_ADMIN or CAP_SYS_ADMIN in one. Every rtnetlink change, every
+    ///   interface ioctl, a tun device and a firewall table need CAP_NET_ADMIN (Linux v6.19
+    ///   net/core/rtnetlink.c:6885; net/ipv4/devinet.c:1099-1111; drivers/net/tun.c:2757;
+    ///   net/netfilter/nfnetlink.c:661), and CAP_SYS_ADMIN mounts a proc it can write;
+    /// - [`Refused::ProcSysWritable`]: it mounts a proc whose `/proc/sys` isn't read-only, through which a
+    ///   process running as the namespace's root writes its net sysctls without CAP_NET_ADMIN
+    ///   (net/sysctl_net.c:42-54, fs/proc/proc_sysctl.c:425-434);
+    /// - [`Refused::OwnUserNamespace`]: its network namespace would belong to a user namespace of its own,
+    ///   where the node's belong to the node's.
+    pub fn may_share_its_network(&self) -> Result<(), hex_core::netns_reuse::Refused> {
+        use hex_core::netns_reuse::Refused;
+        if self.in_user_namespace() {
+            return Err(Refused::OwnUserNamespace);
+        }
+        let given = self
+            .process
+            .as_ref()
+            .is_some_and(|p| p.capabilities.is_some());
+        if !given
+            || self.holds_capability("CAP_NET_ADMIN")
+            || self.holds_capability("CAP_SYS_ADMIN")
+        {
+            return Err(Refused::NetAdmin);
+        }
+        let proc_mounted = self
+            .mounts
+            .iter()
+            .any(|m| m.kind.as_deref() == Some("proc"));
+        let sys_read_only = self.linux.readonly_paths.iter().any(|p| {
+            let p = p.trim_end_matches('/');
+            p == "/proc/sys" || p == "/proc"
+        });
+        if proc_mounted && !sys_read_only {
+            return Err(Refused::ProcSysWritable);
+        }
+        Ok(())
+    }
+
     /// Whether any of the process's capability sets names `cap`.
     fn holds_capability(&self, cap: &str) -> bool {
         self.process
@@ -662,6 +704,72 @@ mod tests {
         assert!(
             !with(&sets("effective", r#""CAP_NET_ADMIN""#)),
             "CAP_NET_ADMIN alone"
+        );
+    }
+
+    /// Goal 5 extended, step 6 (Ada's call of 2026-11-03): a box may share its owner's network namespaces
+    /// only if it couldn't have changed its own: capability sets given and naming neither CAP_NET_ADMIN nor
+    /// CAP_SYS_ADMIN, `/proc/sys` read-only (or no proc mounted), and no user namespace of its own.
+    #[test]
+    fn a_box_may_share_its_network_only_if_it_could_change_nothing_of_it() {
+        use hex_core::netns_reuse::Refused;
+        let docker = r#""capabilities":{"bounding":["CAP_CHOWN","CAP_NET_RAW","CAP_KILL"],"effective":["CAP_CHOWN","CAP_NET_RAW","CAP_KILL"]}"#;
+        let spec = |caps: &str, readonly: &str, proc_mounted: bool, user: bool| {
+            let mounts = if proc_mounted {
+                r#"[{"destination":"/proc","type":"proc","source":"proc"}]"#
+            } else {
+                "[]"
+            };
+            let user = if user { r#",{"type":"user"}"# } else { "" };
+            let json = format!(
+                r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},
+                    "process":{{"args":["/bin/sh"],"cwd":"/"{caps}}},"mounts":{mounts},
+                    "linux":{{"namespaces":[{{"type":"pid"}},{{"type":"network"}}{user}],
+                              "readonlyPaths":{readonly}}}}}"#
+            );
+            Spec::parse(json.as_bytes()).unwrap()
+        };
+        let sys = r#"["/proc/sys"]"#;
+        let caps = format!(",{docker}");
+        assert_eq!(
+            spec(&caps, sys, true, false).may_share_its_network(),
+            Ok(())
+        );
+        assert_eq!(
+            spec("", sys, true, false).may_share_its_network(),
+            Err(Refused::NetAdmin),
+            "no capability sets: the creator's, all of them"
+        );
+        for held in ["CAP_NET_ADMIN", "CAP_SYS_ADMIN"] {
+            let c = format!(r#","capabilities":{{"ambient":["{held}"]}}"#);
+            assert_eq!(
+                spec(&c, sys, true, false).may_share_its_network(),
+                Err(Refused::NetAdmin),
+                "{held}"
+            );
+        }
+        assert_eq!(
+            spec(&caps, "[]", true, false).may_share_its_network(),
+            Err(Refused::ProcSysWritable)
+        );
+        assert_eq!(
+            spec(&caps, r#"["/proc/sys/"]"#, true, false).may_share_its_network(),
+            Ok(()),
+            "a trailing slash is the same path"
+        );
+        assert_eq!(
+            spec(&caps, r#"["/proc"]"#, true, false).may_share_its_network(),
+            Ok(()),
+            "all of /proc read-only"
+        );
+        assert_eq!(
+            spec(&caps, "[]", false, false).may_share_its_network(),
+            Ok(()),
+            "no proc mounted, and none it could mount"
+        );
+        assert_eq!(
+            spec(&caps, sys, true, true).may_share_its_network(),
+            Err(Refused::OwnUserNamespace)
         );
     }
 

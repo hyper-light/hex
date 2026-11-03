@@ -104,6 +104,17 @@ pub trait Networks {
     /// isn't this process's and a namespace belongs to its maker's (user_namespaces(7)): its shim makes
     /// it on the create's path.
     fn on_path(&self) -> Result<(), OciError>;
+
+    /// A namespace for a container whose spec says whether it may share its owner's
+    /// ([`Spec::may_share_its_network`]): a node that keeps its owners' namespaces answers with one of
+    /// them, or one it keeps for the owner (goal 5 extended, step 6). By default, as [`take`](Self::take).
+    fn take_for(
+        &self,
+        may_share: Result<(), hex_core::netns_reuse::Refused>,
+    ) -> Result<Option<OwnedFd>, OciError> {
+        let _ = may_share;
+        self.take()
+    }
 }
 
 /// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
@@ -1420,7 +1431,7 @@ fn network_for(spec: &Spec, networks: Option<&dyn Networks>) -> Result<Option<Ow
         networks.on_path()?;
         return Ok(None);
     }
-    networks.take()
+    networks.take_for(spec.may_share_its_network())
 }
 
 /// Clears an fd's close-on-exec, so the re-exec'd init inherits it.

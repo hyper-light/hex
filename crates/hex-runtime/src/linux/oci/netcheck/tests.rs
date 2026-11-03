@@ -1,0 +1,210 @@
+//! The check's readers on the kernel's texts and bytes, and on hostile ones (CLAUDE.md §6: hostile input to
+//! every parser; goal 5 extended, step 6). The check against real namespaces runs in
+//! `crates/hex-cli/tests/oci_reuse.rs`, as root.
+
+use proptest::prelude::*;
+
+use super::*;
+
+/// A clean namespace's `/proc/net/sockstat`, as Linux 6.19 writes it (net/ipv4/proc.c:52-76).
+const CLEAN_SOCKSTAT: &str = "sockets: used 0\nTCP: inuse 0 orphan 3 tw 0 alloc 9 mem 1\nUDP: inuse 0 mem 0\n\
+UDPLITE: inuse 0\nRAW: inuse 0\nFRAG: inuse 0 memory 0\n";
+
+#[test]
+fn sockstat_says_whether_a_time_wait_connection_is_left() {
+    assert_eq!(time_wait(CLEAN_SOCKSTAT), Ok(()));
+    let tw = CLEAN_SOCKSTAT.replace("tw 0", "tw 2");
+    assert_eq!(time_wait(&tw), Err(Refused::TimeWait));
+    // "sockets: used" keeps a closed netlink socket until an RCU grace period has passed, so it isn't read;
+    // nor are the host-wide orphan and allocation counts, which aren't the namespace's.
+    assert_eq!(
+        time_wait(&CLEAN_SOCKSTAT.replace("used 0", "used 3")),
+        Ok(())
+    );
+    assert_eq!(
+        time_wait(&CLEAN_SOCKSTAT.replace("orphan 3", "orphan 900")),
+        Ok(())
+    );
+    for broken in [
+        "",
+        "TCP: inuse 0 tw x\n",
+        "TCP: inuse 0\n",
+        "sockets: used 0\n",
+        "UDP: tw 0\n",
+    ] {
+        assert_eq!(time_wait(broken), Err(Refused::Unreadable), "{broken:?}");
+    }
+}
+
+/// `/proc/net/protocols` as Linux 6.19 writes it (net/core/sock.c:4313-4359), cut to a few protocols.
+const PROTOCOLS: &str = "protocol  size sockets  memory press maxhdr  slab module     cl co di ac io in de sh ss gs se re bi br ha uh gp em\n\
+PACKET    1664      0      -1   NI       0   no   kernel      n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n\n\
+UDPv6     1472      0       0   NI       0   yes  kernel      y  y  y  n  y  y  y  n  y  y  y  y  y  n  n  y  y  n\n\
+TCPv6     2624      0     881   no     320   yes  kernel      y  y  y  y  y  y  y  y  y  y  y  y  y  n  y  y  y  y\n\
+UNIX      1152      0      -1   NI       0   yes  kernel      n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n\n\
+UDP       1344      0       0   NI       0   yes  kernel      y  y  y  n  y  y  y  n  y  y  y  y  y  n  n  y  y  n\n\
+TCP       2496      0     881   no     320   yes  kernel      y  y  y  y  y  y  y  y  y  y  y  y  y  n  y  y  y  y\n\
+NETLINK   1112      0      -1   NI       0   no   kernel      n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n\n";
+
+#[test]
+fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
+    let fresh = in_use(PROTOCOLS).unwrap();
+    assert_eq!(fresh.len(), 7);
+    assert_eq!(fresh.get("UDP"), Some(&0));
+    assert_eq!(sockets(&fresh, &fresh), Ok(()));
+    let udp = in_use(&PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1")).unwrap();
+    assert_eq!(
+        sockets(&udp, &fresh),
+        Err(Refused::Sockets),
+        "a bound UDP socket held outside"
+    );
+    let unix =
+        in_use(&PROTOCOLS.replace("UNIX      1152      0", "UNIX      1152      2")).unwrap();
+    assert_eq!(sockets(&unix, &fresh), Err(Refused::Sockets));
+    // A protocol a module brought after the fresh namespace was read: none of its sockets, or one.
+    let sctp = |n: u32| {
+        format!(
+            "{PROTOCOLS}SCTP      1600      {n}       0   no       0   yes  sctp        y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y\n"
+        )
+    };
+    assert_eq!(sockets(&in_use(&sctp(0)).unwrap(), &fresh), Ok(()));
+    assert_eq!(
+        sockets(&in_use(&sctp(1)).unwrap(), &fresh),
+        Err(Refused::Sockets)
+    );
+    // Fewer than a fresh namespace's is no socket left.
+    let mut more = fresh.clone();
+    more.insert("NETLINK".to_owned(), 1);
+    assert_eq!(sockets(&fresh, &more), Ok(()));
+    for broken in [
+        "",
+        "protocol  size\n",
+        "proto  size sockets\nTCP 2496 0\n",
+        "protocol  size sockets  memory\n",
+        "protocol  size sockets  memory\nTCP 2496\n",
+        "protocol  size sockets  memory\nTCP 2496 -1\n",
+    ] {
+        assert_eq!(in_use(broken), Err(Refused::Unreadable), "{broken:?}");
+    }
+}
+
+/// `/proc/net/dev` as a fresh namespace has it.
+const LO_ONLY: &str = "Inter-|   Receive                                                |  Transmit\n \
+face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    \
+lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n";
+
+#[test]
+fn net_dev_says_whether_a_link_besides_loopback_is_there() {
+    assert_eq!(links(LO_ONLY), Ok(()));
+    let more = format!("{LO_ONLY}  eth0: 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16\n");
+    assert_eq!(links(&more), Err(Refused::Links));
+    let none = LO_ONLY.lines().take(2).collect::<Vec<_>>().join("\n");
+    assert_eq!(links(&none), Err(Refused::Links), "no loopback");
+}
+
+#[test]
+fn a_dump_request_is_a_header_and_its_family_header() {
+    let m = request(RTM_GETROUTE, AF_INET6, RTMSG, 7);
+    assert_eq!(m.len(), NLMSG_HDR + RTMSG);
+    assert_eq!(u32_at(&m, 0), Ok(28), "nlmsg_len");
+    assert_eq!(u16_at(&m, 4), Ok(RTM_GETROUTE));
+    assert_eq!(u16_at(&m, 6), Ok(DUMP), "NLM_F_REQUEST | NLM_F_DUMP");
+    assert_eq!(u32_at(&m, 8), Ok(7), "seq");
+    assert_eq!(m[16], AF_INET6, "rtm_family");
+    assert!(m[17..].iter().all(|b| *b == 0));
+}
+
+/// A netlink message of `kind` and `seq` with `payload`, padded to 4.
+fn msg(kind: u16, seq: u32, payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(NLMSG_HDR + payload.len()).unwrap();
+    let mut m = Vec::new();
+    m.extend_from_slice(&len.to_ne_bytes());
+    m.extend_from_slice(&kind.to_ne_bytes());
+    m.extend_from_slice(&2u16.to_ne_bytes());
+    m.extend_from_slice(&seq.to_ne_bytes());
+    m.extend_from_slice(&0u32.to_ne_bytes());
+    m.extend_from_slice(payload);
+    while m.len() % 4 != 0 {
+        m.push(0);
+    }
+    m
+}
+
+fn attr(kind: u16, value: &[u8]) -> Vec<u8> {
+    let mut a = Vec::new();
+    a.extend_from_slice(&u16::try_from(4 + value.len()).unwrap().to_ne_bytes());
+    a.extend_from_slice(&kind.to_ne_bytes());
+    a.extend_from_slice(value);
+    while a.len() % 4 != 0 {
+        a.push(0);
+    }
+    a
+}
+
+/// An `RTM_NEWADDR` (20) for 127.0.0.1/8 on interface 1, its cache info `cache`.
+fn lo_address(seq: u32, cache: u8) -> Vec<u8> {
+    let mut p = vec![AF_INET, 8, 0x80, 254, 1, 0, 0, 0];
+    p.extend(attr(1, &[127, 0, 0, 1]));
+    p.extend(attr(IFA_CACHEINFO, &[cache; 16]));
+    msg(20, seq, &p)
+}
+
+#[test]
+fn a_dump_is_compared_without_what_changes_with_time() {
+    let d = &DUMPS[0];
+    let done = msg(NLMSG_DONE, 3, &[0, 0, 0, 0]);
+    let one = [lo_address(3, 1), done.clone()].concat();
+    let later = [lo_address(3, 9), done.clone()].concat();
+    let a = normalized(&one, d, 3).unwrap();
+    let b = normalized(&later, d, 3).unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a, b, "the cache info is dropped");
+    let mut other = vec![AF_INET, 8, 0x80, 254, 1, 0, 0, 0];
+    other.extend(attr(1, &[10, 0, 0, 1]));
+    let other = [msg(20, 3, &other), done.clone()].concat();
+    assert_ne!(
+        normalized(&other, d, 3).unwrap(),
+        a,
+        "another address differs"
+    );
+    assert!(ends(&done).unwrap());
+    assert!(!ends(&lo_address(3, 1)).unwrap());
+}
+
+#[test]
+fn an_error_another_requests_answer_or_a_torn_message_is_unreadable() {
+    let d = &DUMPS[0];
+    let error = msg(NLMSG_ERROR, 3, &(-95i32).to_ne_bytes());
+    assert_eq!(normalized(&error, d, 3), Err(Refused::Unreadable));
+    assert_eq!(
+        normalized(&lo_address(4, 1), d, 3),
+        Err(Refused::Unreadable),
+        "another request's"
+    );
+    let whole = lo_address(3, 1);
+    for cut in [1, NLMSG_HDR - 1, NLMSG_HDR + 3, whole.len() - 1] {
+        assert_eq!(
+            normalized(&whole[..cut], d, 3),
+            Err(Refused::Unreadable),
+            "cut at {cut}"
+        );
+    }
+}
+
+proptest! {
+    /// Any bytes give a verdict or a refusal, never a panic.
+    #[test]
+    fn any_answer_or_text_is_read_without_a_panic(
+        bytes in proptest::collection::vec(any::<u8>(), 0..512),
+        text in "\\PC*",
+        seq in any::<u32>(),
+    ) {
+        for d in &DUMPS {
+            let _ = normalized(&bytes, d, seq);
+        }
+        let _ = ends(&bytes);
+        let _ = time_wait(&text);
+        let _ = in_use(&text);
+        let _ = links(&text);
+    }
+}
