@@ -21,7 +21,17 @@ BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
 for f in crun libcrun-driver; do
   [ -x "$BASE/bin/$f" ] || { echo "refusing: no $BASE/bin/$f (host.sh fetches crun and builds the libcrun driver)" >&2; exit 4; }
 done
-OUT="$BASE/out/create-breakdown-$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$OUT/bin"
+# One breakdown at a time: each run's tracer keeps the events of every process named as the runtimes are, host-wide,
+# so two at once would each trace the other's creates (their checks then refuse them), and their stamps can be one.
+up=$(docker ps --format '{{.Names}}' | grep -E '^hexbench-(createbd|execbd)-' | paste -sd' ' - || true)
+[ -z "$up" ] || { echo "refusing: another breakdown probe is up ($up); its tracer and this one's would see each other's processes" >&2; exit 3; }
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT="$BASE/out/create-breakdown-$STAMP"
+mkdir -p "$BASE/out"; mkdir "$OUT" || { echo "refusing: $OUT is there already, another run's of this second" >&2; exit 3; }
+mkdir "$OUT/bin"
+# The run's tracer is named by its stamp and this script's pid, which no other run up on the host shares
+# (create_breakdown_inside.sh's TRACE_TAG).
+export TRACE_TAG="${STAMP}_$$"
 cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/crun" "$BASE/bin/libcrun-driver" "$OUT/bin/"
 if [ -n "${BEFORE_HEX:-}" ]; then
   mkdir -p "$OUT/bin/before"
@@ -51,13 +61,25 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
   echo "probe: /run a tmpfs (size 1g), where the runtimes keep their state, as host.sh's OCI pass has it"
+  echo "trace tag: $TRACE_TAG (its instance hexcb-$TRACE_TAG, its kprobes' group hexcb_$TRACE_TAG)"
 } > "$OUT/env.txt"
 NAME=hexbench-createbd-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+# On any end of this script, a stopped unit's TERM among them: the container gone, then the run's tracer state taken
+# down by the inside script's own teardown in a short container of its own, for a container killed before its trap
+# ran. It touches this run's tag alone, never another run's.
+untag() {
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run --rm --label hex.bench=competitive --privileged --security-opt label=disable --network=none \
+    -v /usr:/usr:ro -v "$LAB:/opt/lab:ro" -e TRACE_TAG -e UNTRACE_ONLY=1 \
+    registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh >/dev/null 2>&1 \
+    || echo "the run's tracer state (tag $TRACE_TAG) couldn't be checked gone" >&2
+}
+trap untag EXIT
+trap 'exit 143' TERM INT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e TRACE_TAG \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done

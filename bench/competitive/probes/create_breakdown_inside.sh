@@ -57,12 +57,18 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 # write is cut from its file's open on, its filesystem work its own parts: a durable record to the rename that puts
 # it in place, a non-durable one — written once straight to its file with O_EXCL, no temp and no rename (goal 5
 # extended step 5) — to that fd's close, so close is traced too (sys_enter_close names the fd sys_exit_openat
-# returned, sys_exit_close is the cut's end). The kprobes are defined for this run alone (group hexcb_<pid>),
-# enabled only in its instance, and removed when it ends.
+# returned, sys_exit_close is the cut's end). The kprobes are defined for this run alone (group hexcb_<tag>),
+# enabled only in its instance, and removed when it ends. The instance and the group are named by the tag
+# create_breakdown.sh gives the run (TRACE_TAG, its UTC stamp and its pid on the host): this shell's own pid is 1 in
+# every probe container, so a name of it would be every run's, and a killed run's instance would refuse the next
+# (create_breakdown.md, the 100 rounds' second chunk). UNTRACE_ONLY=1 takes the tag's instance and kprobes down and
+# ends: create_breakdown.sh runs it once its container is gone, for a run killed before its own trap ran.
+TAG=${TRACE_TAG:?create_breakdown.sh gives the run its TRACE_TAG}
+case $TAG in *[!A-Za-z0-9_]*|"") echo "refusing: TRACE_TAG $TAG names no trace instance" >&2; exit 2 ;; esac
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
-I="$T/instances/hexcb-$$"
-KG="hexcb_$$"
+I="$T/instances/hexcb-$TAG"
+KG="hexcb_$TAG"
 case $(uname -m) in
   x86_64) SYS=__x64_sys ;;
   aarch64) SYS=__arm64_sys ;;
@@ -97,6 +103,7 @@ unprobe() { # this run's kprobes gone, once no instance has them on
   for ev in $PROBES; do echo "-:$ev" >> "$T/kprobe_events" 2>/dev/null; done
 }
 trap unprobe EXIT
+[ "${UNTRACE_ONLY:-0}" = 1 ] && exit 0
 { echo "p:$KG/openat_in ${SYS}_openat" >> "$T/kprobe_events" && echo "p:$KG/open_in ${SYS}_open" >> "$T/kprobe_events"; } \
   || { echo "refusing: the opens' entry kprobes couldn't be defined" >&2; exit 4; }
 
