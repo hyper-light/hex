@@ -59,6 +59,9 @@ const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// process so it cannot become a subreaper before the full suite's agent-crash check.
 const PREPARED_DEV_ENV: &str = "HEX_OCI_BOX_PREPARED_DEV";
 const PREPARED_DEV_PASS: &str = "prepared /dev oracle completed with actual pooled takes";
+const PROPAGATION_ENV: &str = "HEX_OCI_BOX_SHARED_SOURCES";
+const PROPAGATION_PASS: &str =
+    "shared-source propagation oracle completed with four pruned creates";
 /// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
 /// recover the test-only lock after a failed full suite so the independent oracle still runs.
 static LAB_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -143,6 +146,48 @@ fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
     );
     assert!(
         log.lines().any(|line| line == PREPARED_DEV_PASS),
+        "the root oracle did not run; a skipped delegation is not evidence"
+    );
+}
+
+/// AC-T7.1.4: rootfs and bind sources are deliberately shared; every mount stays in the box.
+#[test]
+fn pruned_shared_sources_do_not_leak_mounts_to_the_agent() {
+    if host_id("-u") != 0 {
+        eprintln!("SKIP: the shared-source propagation oracle requires the privileged root lab");
+        return;
+    }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let parent = prepare_cgroup(&cache_dir()).expect("a delegated parent for the root oracle");
+    let own = parent.join(format!("hex-propagation-oracle-{}", std::process::id()));
+    std::fs::create_dir(&own).expect("a fresh cgroup for the independent oracle");
+    // The full suite already moved our parent process into hex-agent. Move only this fresh child
+    // into its own empty cgroup before exec, so its fixture can delegate controllers to its boxes.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-e",
+            "-c",
+            r#"printf '%s' "$$" > "$1/cgroup.procs"; shift; exec "$@""#,
+            "hex-propagation-oracle",
+        ])
+        .arg(&own)
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(PROPAGATION_ENV, "1")
+        .output()
+        .expect("run the shared-source propagation oracle through the root fixture");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the independent shared-source propagation oracle failed"
+    );
+    assert!(
+        log.lines().any(|line| line == PROPAGATION_PASS),
         "the root oracle did not run; a skipped delegation is not evidence"
     );
 }
@@ -327,6 +372,15 @@ impl Fixture for Lab {
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
     let lab = Lab::new(cache, exe);
+    if std::env::var_os(PROPAGATION_ENV).is_some() {
+        assert!(
+            !lab.rootless,
+            "the shared-source propagation oracle needs root"
+        );
+        rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
+        eprintln!("{PROPAGATION_PASS}");
+        return;
+    }
     if std::env::var_os(PREPARED_DEV_ENV).is_some() {
         assert!(!lab.rootless, "the prepared /dev oracle needs root");
         prepared_devs_preserve_order_and_are_never_shared(&lab, own);
@@ -1230,82 +1284,216 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
     if lab.rootless {
         return;
     }
-    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let node = lab.node(&own.join("hex-oci-prop"), state.path());
-    // (propagation, the tag it must show on the root, the tags it must not show)
-    let cases: [(&str, &str, &[&str]); 3] = [
-        ("shared", "shared:", &[]),
-        ("slave", "master:", &["shared:"]),
-        ("private", "", &["shared:", "master:"]),
-    ];
-    for (prop, present, absent) in cases {
-        let vol = lab.bundles.path().join(format!("vol-{prop}"));
-        std::fs::create_dir_all(&vol).unwrap();
-        let vol = vol.to_string_lossy().into_owned();
-        let volume = format!(
-            ",\n    {{\"destination\": \"/vol\", \"type\": \"bind\", \"source\": \"{vol}\", \"options\": [\"rbind\",\"rw\"]}}"
-        );
-        let linux_extra = format!(r#","rootfsPropagation":"{prop}""#);
-        let dir = tempfile::Builder::new()
-            .prefix("bundle-")
-            .tempdir_in(lab.bundles.path())
+    // v6.19 fs/namespace.c:1259-1288: clone_mnt keeps the source's peer/master unless asked to
+    // change it. open_tree's detached copy calls __do_loopback (:3032, :2963-2966). A private
+    // source cannot acquire a master by MS_SLAVE: fs/pnode.c:93-117 and mount_namespaces(7),
+    // "Propagation type transitions". The lab must establish its own shared inputs.
+    struct SharedSource(PathBuf);
+    impl SharedSource {
+        fn make(path: &Path) -> Self {
+            rustix::mount::mount_bind(path, path).unwrap_or_else(|e| {
+                panic!("binding a propagation-test source {}: {e}", path.display())
+            });
+            let source = Self(path.to_owned());
+            rustix::mount::mount_change(path, rustix::mount::MountPropagationFlags::PRIVATE)
+                .unwrap_or_else(|e| panic!("isolating a propagation-test source: {e}"));
+            rustix::mount::mount_change(path, rustix::mount::MountPropagationFlags::SHARED)
+                .unwrap_or_else(|e| panic!("sharing a propagation-test source: {e}"));
+            source
+        }
+        fn peer(&self) -> String {
+            let text = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+            let mounts = mountinfo(&text);
+            let source = mounts
+                .iter()
+                .rev()
+                .find(|(point, ..)| Path::new(point) == self.0)
+                .unwrap_or_else(|| panic!("source is not a mount: {}", self.0.display()));
+            source
+                .2
+                .split_whitespace()
+                .find_map(|tag| tag.strip_prefix("shared:"))
+                .unwrap_or_else(|| panic!("source must be shared before create: {source:?}"))
+                .to_owned()
+        }
+    }
+    impl Drop for SharedSource {
+        fn drop(&mut self) {
+            let private = rustix::mount::mount_change(
+                &self.0,
+                rustix::mount::MountPropagationFlags::PRIVATE
+                    | rustix::mount::MountPropagationFlags::REC,
+            );
+            let detached = rustix::mount::unmount(&self.0, rustix::mount::UnmountFlags::DETACH);
+            if private.is_err() || detached.is_err() {
+                if std::thread::panicking() {
+                    eprintln!("shared-source cleanup: private={private:?}, detach={detached:?}");
+                } else {
+                    panic!("shared-source cleanup: private={private:?}, detach={detached:?}");
+                }
+            }
+        }
+    }
+    struct Created<'a> {
+        node: &'a Node,
+        id: BoxId,
+        live: bool,
+    }
+    impl Created<'_> {
+        fn delete(&mut self) {
+            self.node
+                .delete(&self.id)
+                .expect("delete the propagation-test box");
+            self.live = false;
+        }
+    }
+    impl Drop for Created<'_> {
+        fn drop(&mut self) {
+            if self.live
+                && let Err(e) = self.node.delete(&self.id)
+            {
+                if std::thread::panicking() {
+                    eprintln!("propagation-test box cleanup: {e}");
+                } else {
+                    panic!("propagation-test box cleanup: {e}");
+                }
+            }
+        }
+    }
+    let table = || {
+        std::fs::read_to_string("/proc/self/mountinfo")
             .unwrap()
-            .keep();
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab
+        .node(&own.join("hex-oci-prop"), state.path())
+        .with_prepared_dev_mounts(false)
+        .unwrap();
+    for prop in ["plain", "shared", "slave", "private"] {
+        let case = tempfile::Builder::new()
+            .prefix("shared-sources-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap();
+        let rootfs = case.path().join("rootfs");
+        build_rootfs(&rootfs);
+        let bound = case.path().join("bind-source");
+        std::fs::create_dir_all(bound.join("child")).unwrap();
+        std::fs::write(bound.join("masked"), "source file").unwrap();
+        std::fs::write(bound.join("readonly"), "source file").unwrap();
+        let root_source = SharedSource::make(&rootfs);
+        let bind_source = SharedSource::make(&bound);
+        let root_peer = root_source.peer();
+        let bind_peer = bind_source.peer();
+        eprintln!("{prop}: root source shared:{root_peer}, bind source shared:{bind_peer}");
+        let before = table();
+        let mut config: serde_json::Value =
+            serde_json::from_str(&lab.config(&Lab::act(&Act::Wait), false)).unwrap();
+        config["root"]["path"] = serde_json::json!(rootfs);
+        if prop != "plain" {
+            config["linux"]["rootfsPropagation"] = serde_json::json!(prop);
+        }
+        config["linux"]["maskedPaths"] = serde_json::json!(["/proc/kcore", "/shared-bind/masked"]);
+        config["linux"]["readonlyPaths"] =
+            serde_json::json!(["/proc/sys", "/shared-bind/readonly"]);
+        config["mounts"].as_array_mut().unwrap().extend([
+            serde_json::json!({"destination":"/dev/pts", "type":"devpts", "source":"devpts",
+                "options":["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620"]}),
+            serde_json::json!({"destination":"/dev/shm", "type":"tmpfs", "source":"shm",
+                "options":["nosuid","nodev","mode=1777","size=64k"]}),
+            serde_json::json!({"destination":"/dev/mqueue", "type":"mqueue", "source":"mqueue"}),
+            serde_json::json!({"destination":"/shared-bind", "type":"bind", "source":bound,
+                "options":["rbind","rw"]}),
+            serde_json::json!({"destination":"/shared-bind/child", "type":"tmpfs", "source":"bind-child",
+                "options":["mode=700","size=64k"]}),
+        ]);
         std::fs::write(
-            dir.join("config.json"),
-            lab.config_ex(
-                &Lab::act(&Act::Wait),
-                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
-                "",
-                &volume,
-                "",
-                &linux_extra,
-            ),
+            case.path().join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
         )
         .unwrap();
         let id = BoxId::new(&format!("prop-{prop}")).unwrap();
+        let pruned = node.pruned_creates();
         node.create(BoxSpec {
             id: id.clone(),
             bounds: Bounds::default(),
-            class: ClassSpec::Bundle(dir),
+            class: ClassSpec::Bundle(case.path().to_owned()),
         })
-        .unwrap_or_else(|e| panic!("create the {prop} box: {e:?}"));
-        node.start(&id).expect("start");
-        let pruned = node.pruned_creates();
-        let (exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
-        let agent_mi = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
-        node.delete(&id).expect("delete");
-
-        assert!(
-            pruned >= 1,
-            "the {prop} box is on the pruned path, {pruned} pruned"
+        .unwrap_or_else(|e| panic!("create the {prop} shared-source box: {e:?}"));
+        let mut made = Created {
+            node: &node,
+            id: id.clone(),
+            live: true,
+        };
+        assert_eq!(node.pruned_creates(), pruned + 1, "{prop} must run pruned");
+        let during = table();
+        let gained: Vec<_> = during.difference(&before).collect();
+        assert_eq!(
+            during, before,
+            "{prop}: agent gained mounts during create: {gained:?}"
         );
+        node.start(&id).expect("start the propagation-test box");
+        let (exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
         assert_eq!(exit, Exit::Code(0), "read the {prop} box's mountinfo: {mi}");
         let mounts = mountinfo(&mi);
         let root = mounts
             .iter()
             .rev()
             .find(|(point, ..)| point == "/")
-            .unwrap_or_else(|| panic!("the {prop} box's root mount in {mi}"));
-        if !present.is_empty() {
-            assert!(
-                root.2.split(' ').any(|f| f.starts_with(present)),
-                "rootfsPropagation {prop} shows {present} on the root: {root:?}"
-            );
+            .unwrap_or_else(|| panic!("{prop}: box has no root mount: {mi}"));
+        let tags: Vec<_> = root.2.split_whitespace().collect();
+        match prop {
+            "slave" => {
+                assert!(
+                    tags.contains(&format!("master:{root_peer}").as_str()),
+                    "{prop}: exact root master:{root_peer} required: {root:?}"
+                );
+                assert!(
+                    !tags.iter().any(|tag| tag.starts_with("shared:")),
+                    "{root:?}"
+                );
+            }
+            "shared" => {
+                let peer = tags
+                    .iter()
+                    .find_map(|tag| tag.strip_prefix("shared:"))
+                    .unwrap_or_else(|| panic!("shared root has no peer group: {root:?}"));
+                assert_ne!(
+                    peer, root_peer,
+                    "box must not share its source's peer group"
+                );
+            }
+            _ => assert!(
+                !tags
+                    .iter()
+                    .any(|tag| tag.starts_with("shared:") || tag.starts_with("master:")),
+                "{prop}: root must be private: {root:?}"
+            ),
         }
-        for tag in absent {
-            assert!(
-                !root.2.split(' ').any(|f| f.starts_with(tag)),
-                "rootfsPropagation {prop} must not show {tag} on the root: {root:?}"
-            );
-        }
+        let bound_mount = mounts
+            .iter()
+            .find(|(point, ..)| point == "/shared-bind")
+            .unwrap();
         assert!(
-            !agent_mi.contains(&vol),
-            "the {prop} box's volume is no mount in the agent's namespace (no leak): {vol}"
+            !bound_mount
+                .2
+                .split_whitespace()
+                .any(|tag| tag.starts_with("shared:") || tag.starts_with("master:")),
+            "the default bind must be private: {bound_mount:?}"
+        );
+        assert_eq!(table(), before, "{prop}: agent changed while box ran");
+        made.delete();
+        let after = table();
+        let gained: Vec<_> = after.difference(&before).collect();
+        assert_eq!(
+            after, before,
+            "{prop}: agent gained mounts after delete: {gained:?}"
         );
     }
     eprintln!(
-        "rootfsPropagation shared/slave/private each shown on the box root, no box mount in the agent's namespace"
+        "rootfsPropagation plain/shared/slave/private: shared root and bind inputs checked; agent table unchanged before/during/after each pruned box"
     );
 }
 
