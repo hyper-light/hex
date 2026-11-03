@@ -1256,11 +1256,12 @@ lifecycle without changing what a box may do.
     five times.
   - The check's CPU runs beside concurrency 1's lifecycle but competes with concurrency 32's: the work off concurrency
     1's critical path that caps concurrency 32 (the lead, 2026-11-03).
-- **The checks' CPU** (8753abe, 4c54e58). <!-- record: bench/competitive/probes/create_serial.md -->On the E-cores a
-  check cost 151.2 and 157.1 us of CPU at concurrency 1; with the buffers each checker holds from one check to the next
-  and reads straight into, 138.7 and 129.5 (run 15). The dumps' answers then took 13.7 and 14.5 us a check to allocate,
-  the kernel sizing each by the socket's largest read, 32 KiB; read 8 KiB at a time, 7.2 and 7.0 (run 16).<!-- /record -->
-  A check's reads and dumps are those above: what it decides is unchanged.
+- **The checks' CPU** (8753abe, 4c54e58, ad6f333). <!-- record: bench/competitive/probes/create_serial.md -->On the
+  E-cores a check cost 151.2 and 157.1 us of CPU at concurrency 1; with the buffers each checker holds from one check
+  to the next and reads straight into, 138.7 and 129.5 (run 15). The dumps' answers then took 13.7 and 14.5 us a check
+  to allocate, the kernel sizing each by the socket's largest read, 32 KiB; read 8 KiB at a time, 7.2 and 7.0 (run
+  16). With the namespace's own socket kept and sockstat's count read first, 141.4 and 141.2 us fell to 94.2 and 97.0,
+  the protocols never opened (run 18).<!-- /record --> What the check decides is unchanged.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->The bench's lifecycle left at most
   1,748,992 bytes in 256 idle cgroups of fedora's OCI pass 20261103T044133Z. Over six runs of test 2 on adacachy
@@ -1319,7 +1320,9 @@ lifecycle without changing what a box may do.
     7's was 8,364, but concurrency 1 at 1,832 on a quieter host where run 7's was 1,453 (run 8). A lifecycle held by
     CPU costs 1.93 times its CPU alone at concurrency 32 there, where on one thread of each of the same 6 cores it
     costs 1.18 times: two threads share each core of 4-15. So 32 at once on its 12 CPUs run at most about 12,100 a
-    second, 6.6 times concurrency 1, with all of concurrency 1's work off its own path gone (run 8).<!-- /record -->
+    second, 6.6 times concurrency 1, with all of concurrency 1's work off its own path gone (run 8). With the checks'
+    three changes (the checks' CPU, above), 6.17x in process against 5.53x without them in the same A B B A, and
+    concurrency 32 at 10,531 a second against 9,808; over the socket 7.19x against 7.14x (run 9).<!-- /record -->
     <!-- record: bench/competitive/probes/create_serial.md -->That work is 272 to 299 us a lifecycle on the E-cores, 17%
     of concurrency 1's CPU: the checkers 162 to 191, step 3's pool of each box's `/dev` 97 to 101, the seeds' starter
     and the namespace refill 9 to 11 (run 17).<!-- /record --> The bar on 4-15 is Ada's call.

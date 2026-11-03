@@ -288,3 +288,29 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   ms of CPU against 0.71 on the P-cores, so 1,005 a second against 1,832. Concurrency 32 ran 12,334 a second there.
 - **No start failed** in these passes, nor in 1,200,000 lifecycles at concurrency 32 sustained (3 rounds of 100,000 a
   driver on each of this merge and the 148d12e one with the FIFO diagnostics: `20261103T080305Z`, `20261103T080909Z`).
+
+## Run 9 (2026-11-03, fedora): the checks' three changes, interleaved on 4-15
+
+- **The binaries:** run 8's merge (four checkers) as mr4f, against the same tree with step 6's three changes to the
+  checks, 8753abe (held buffers), 4c54e58 (8 KiB dump reads) and ad6f333 (the namespace's own netlink socket kept,
+  sockstat's count first; on `cp/t7-ext-s6-kept-socket`), as mr9; each with the exec FIFO's fix (756072f's run.rs),
+  as one of `create_serial.md` run 18's passes ended at that race without it. Uncommitted, of record for no branch.
+  `hex` dca1aaf3bb8d527d and 2245470c0ac31f07, `seam_oci` 250bcce2ff44e489 and da929fde2f21a1ee.
+- **Host:** CPUs 4-15, the unit `hex-g5x-s6-verify11-20261103T101353Z`, A B B A, each pass 2 rounds of 10 pairs,
+  one owner's boxes, reuse on, a network namespace each; other tenants' load beside it, CPU pressure 24 to 26% at
+  the passes' ends.
+
+| run | what | load | in process: c1, c32 | ratio (SE) | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket: ratio (SE) |
+|---|---|---|---|---|---|---|---|
+| 20261103T101506Z | mr4f | 5.6 to 14.1 | 1,774, 9,600 | 5.41x (0.08) | 0.75, 1.07 ms | 1.36, 10.33 | 6.79x (0.35) |
+| 20261103T101543Z | mr9 | 14.1 to 23.1 | 1,850, 10,774 | 5.82x (0.15) | 0.69, 0.94 ms | 1.28, 10.30 | 8.08x (0.39) |
+| 20261103T101618Z | mr9 | 23.1 to 19.5 | 1,581, 10,299 | 6.52x (0.31) | 0.69, 0.97 ms | 1.22, 10.14 | 6.30x (0.31) |
+| 20261103T101652Z | mr4f | 19.5 to 17.4 | 1,779, 10,026 | 5.64x (0.20) | 0.71, 1.02 ms | 1.36, 10.37 | 7.48x (0.44) |
+
+- **Pooled over each binary's 40 pairs, in process:** mr4f 5.53x (SE 0.11), concurrency 32 at 9,808 a second;
+  mr9 6.17x (SE 0.19), at 10,531. Over the socket 7.14x (SE 0.30) and 7.19x (SE 0.29).
+- **The checks' changes take 8% off a lifecycle's CPU at both concurrencies,** 0.75 to 0.69 ms at 1 and 1.04 to 0.96
+  at 32 (the pairs' medians), and concurrency 1 keeps fewer CPUs busy beside its own path, 1.36 to 1.27: the work
+  they took off was beside it. Concurrency 32 rose 7%, the ratio 12%.
+- **Over the socket one pass passed 8x, 8.08x, and its twin read 6.30x:** that driver's concurrency 1 waits on the
+  agent's socket as well, so its ratio swings with the host more than the in-process one.
