@@ -221,6 +221,7 @@ impl Lab {
     "args": {args:?},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {capabilities},
     "noNewPrivileges": true
   }},
   "mounts": [
@@ -234,6 +235,7 @@ impl Lab {
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
+            capabilities = capabilities(),
         );
         std::fs::write(dir.join("config.json"), config).expect("config.json");
         dir
@@ -832,6 +834,14 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
         std::thread::park_timeout(Duration::from_millis(10));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec
+/// naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the host's
+/// network may not hold (spec.rs refuses it).
+fn capabilities() -> String {
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
+    format!(r#"{{"bounding": {set}, "effective": {set}, "permitted": {set}}}"#)
 }
 
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it.

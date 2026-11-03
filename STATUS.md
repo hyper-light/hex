@@ -102,7 +102,8 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   so a box that reached it would find a read-only host tree. Reads of that tree stayed open to such a box
   (the host cgroup submount is locked and can't be removed, only made read-only), so on Ada's call
   (2026-10-31) the spec's check now refuses the combination by name: a container in a user namespace
-  holding `CAP_SYS_ADMIN` without a network namespace of its own (`Spec::check`). The lab test
+  holding `CAP_SYS_ADMIN` without a network namespace of its own (`Spec::check`), named in a capability
+  set or kept from its creator where the spec names no capabilities (found 2026-11-03). The lab test
   (`a_rootless_host_network_box_cannot_change_another_boxs_cgroup`) expects that refusal, and a plain
   host-network box's carried host cgroup filesystem read-only. Built on cp/t7-seed, not merged: it
   reaches main with goal 5's merge, on Ada's call.
