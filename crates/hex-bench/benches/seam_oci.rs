@@ -10,6 +10,11 @@
 //! - `throughput`: create+start+delete of a `true` container at concurrency 1, 8 and 32;
 //! - `sustained`: the throughput lifecycle at concurrency 32 for `HEXBENCH_SUSTAINED` of them
 //!   (10,000), its rate in each window of 1,000 and the last window's against the first's;
+//! - `interleaved`, run only when `HEXBENCH_PHASES` names it: concurrency 1 and 32 in turn,
+//!   `HEXBENCH_INTERLEAVED` pairs of turns (10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
+//!   meet the host as it is at that moment, its load included: each pair's rates and their ratio, and the
+//!   ratio of the pooled rates (the lead, 2026-11-03T06:01Z, for goal 5 extended step 6's second
+//!   criterion);
 //! - `rtt`: inspect of a running box, timed alone, whose work is the same either way, so the socket's
 //!   cost per call is the two drivers' difference in one run.
 //!
@@ -87,6 +92,11 @@ mod linux {
     const SUSTAINED_WINDOW: usize = 1_000;
     /// The sustained phase's lifecycles unless `HEXBENCH_SUSTAINED` says, as oci_bench.py's.
     const SUSTAINED_DEFAULT: usize = 10_000;
+    /// The interleaved phase's pairs unless `HEXBENCH_INTERLEAVED` says, and each pair's lifecycles at
+    /// concurrency 1 and at 32: about a second of each at the rates of runs 1 to 5 of reuse_pass.md.
+    const INTERLEAVED_DEFAULT: usize = 10;
+    const INTERLEAVED_C1: usize = 500;
+    const INTERLEAVED_C32: usize = 4_000;
 
     /// oci_bench.py's bundles bound every container to nothing of their own; the node bounds each box
     /// the way the competitive pass's do, so the comparison is like for like: the kernel's floor plus
@@ -419,6 +429,111 @@ mod linux {
         )
     }
 
+    /// `lifecycles` of the throughput lifecycle at concurrency `conc`, each thread taking the next until
+    /// none are left or one has failed, the clock started once every thread is at the barrier: its wall
+    /// time.
+    fn at_concurrency(
+        node: &dyn Runtime,
+        bundle: &Path,
+        conc: usize,
+        lifecycles: usize,
+        tag: &str,
+    ) -> Result<Duration, String> {
+        let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
+        let start = Barrier::new(conc + 1);
+        std::thread::scope(|s| {
+            let threads: Vec<_> = (0..conc)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        while !failed.load(Ordering::Relaxed) {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            if i >= lifecycles {
+                                break;
+                            }
+                            if let Err(e) =
+                                run_true_container(node, bundle, &format!("{tag}{i:06}"))
+                            {
+                                failed.store(true, Ordering::Relaxed);
+                                return Err(e);
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            start.wait();
+            let t0 = Instant::now();
+            let errs: Vec<String> = threads
+                .into_iter()
+                .filter_map(|t| {
+                    t.join()
+                        .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
+                        .err()
+                })
+                .collect();
+            let wall = t0.elapsed();
+            errs.into_iter().next().map_or(Ok(wall), Err)
+        })
+    }
+
+    /// The host's 1-minute load average and its CPU pressure, the share of the last 10 s some task waited
+    /// for a CPU (`/proc/pressure/cpu`'s `some avg10`), as the breakdown probes note them beside each round.
+    fn host_load() -> Value {
+        let load1 = std::fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|l| l.split_whitespace().next()?.parse::<f64>().ok());
+        let cpu_some_avg10 = std::fs::read_to_string("/proc/pressure/cpu")
+            .ok()
+            .and_then(|p| {
+                p.lines()
+                    .next()?
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix("avg10="))?
+                    .parse::<f64>()
+                    .ok()
+            });
+        json!({"load1": load1, "cpu_some_avg10": cpu_some_avg10})
+    }
+
+    /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, `pairs` times: [`INTERLEAVED_C1`] lifecycles at
+    /// 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it is
+    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end,
+    /// and the ratio of the pooled rates, each concurrency's lifecycles over its time.
+    fn interleaved(node: &dyn Runtime, bundle: &Path, pairs: usize) -> Result<Value, String> {
+        let (mut rows, mut ratios) = (Vec::new(), Vec::new());
+        let (mut one_s, mut many_s) = (0.0, 0.0);
+        for p in 0..pairs {
+            let at_start = host_load();
+            let one = at_concurrency(node, bundle, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
+            let many = at_concurrency(
+                node,
+                bundle,
+                SUSTAINED_CONCURRENCY,
+                INTERLEAVED_C32,
+                &format!("i{p:03}b"),
+            )?;
+            let (r1, r32) = (
+                INTERLEAVED_C1 as f64 / one.as_secs_f64(),
+                INTERLEAVED_C32 as f64 / many.as_secs_f64(),
+            );
+            one_s += one.as_secs_f64();
+            many_s += many.as_secs_f64();
+            ratios.push(r32 / r1);
+            rows.push(json!({"c1_per_s": r1, "c32_per_s": r32, "ratio": r32 / r1,
+                             "at_start": at_start, "at_end": host_load()}));
+        }
+        ratios.sort_by(f64::total_cmp);
+        let c1 = (pairs * INTERLEAVED_C1) as f64 / one_s;
+        let c32 = (pairs * INTERLEAVED_C32) as f64 / many_s;
+        Ok(
+            json!({"pairs": rows, "concurrency": SUSTAINED_CONCURRENCY, "c1_lifecycles": INTERLEAVED_C1,
+                  "c32_lifecycles": INTERLEAVED_C32, "c1_per_s": c1, "c32_per_s": c32, "ratio": c32 / c1,
+                  "ratio_median": ratios.get(ratios.len() / 2), "ratio_min": ratios.first(),
+                  "ratio_max": ratios.last()}),
+        )
+    }
+
     /// n sequential create+start of a `true` container after `warmup` untimed ones, the two calls'
     /// times summed and the box deleted untimed, as oci_bench.py's `start_true` times libcrun's
     /// (AC-T7.1.3's measure): delete runs whether or not start did, so no box is left behind.
@@ -708,6 +823,14 @@ mod linux {
                     .parse()
                     .unwrap_or_else(|e| panic!("HEXBENCH_SUSTAINED={v:?}: {e}"))
             });
+        let interleaved_pairs = std::env::var("HEXBENCH_INTERLEAVED")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map_or(INTERLEAVED_DEFAULT, |v| {
+                v.trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("HEXBENCH_INTERLEAVED={v:?}: {e}"))
+            });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
         let owner = std::env::var("HEXBENCH_OWNER")
             .ok()
@@ -773,6 +896,7 @@ mod linux {
             "start_true",
             "throughput",
             "sustained",
+            "interleaved",
             "rtt",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
@@ -795,6 +919,7 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
+                    "interleaved" => interleaved(node, &true_bundle, interleaved_pairs),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);

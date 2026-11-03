@@ -255,6 +255,26 @@ def standin_ceiling(run):
             f"concurrency 1 / 8 / 32: {best[0]:.0f} / {best[1]:.0f} / {best[2]:.0f}\n")
 
 
+def interleaved_pairs(data):
+    """Each round's interleaved phase (seam_oci): concurrency 1 and 32 in turn, so both meet the host as it was;
+    the ratio of the pooled rates and each pair's (goal 5 extended step 6's second criterion, the lead,
+    2026-11-03T06:01Z). No best of N: each round stands as it was measured."""
+    lines = []
+    for n, rs in data.items():
+        for rnd, r in sorted(rs.items()):
+            i = r["phases"].get("interleaved")
+            if not i:
+                continue
+            pairs = ", ".join(f"{p['ratio']:.2f}x" for p in i["pairs"])
+            lines.append(f"- {n}, round {rnd}: concurrency 1 at {i['c1_per_s']:,.0f}/s, 32 at {i['c32_per_s']:,.0f}/s "
+                         f"pooled, {i['ratio']:.2f}x; by pair (median {i['ratio_median']:.2f}x, "
+                         f"{i['ratio_min']:.2f}x to {i['ratio_max']:.2f}x): {pairs}")
+    if not lines:
+        return ""
+    return ("Concurrency 1 and 32 interleaved, 32 over 1 (seam_oci's interleaved phase, "
+            f"{len(lines)} rounds):\n" + "\n".join(lines) + "\n")
+
+
 def sustained_windows(data):
     """Each runtime's sustained rate in every window, from the round its table row takes (the best rate)."""
     lines = []
@@ -470,6 +490,8 @@ def main():
             parts.append("Phase errors: " + json.dumps(errs) + "\n")
         if sustained_windows(data):
             parts.append(sustained_windows(data))
+        if interleaved_pairs(data):
+            parts.append(interleaved_pairs(data))
         if netns_counts(data):
             parts.append(netns_counts(data))
         if socket_cost(data):
