@@ -15,8 +15,14 @@ time cgroup_mutex and the runtime's cgroup directory's i_rwsem were in each stat
 handed off, 0 free] and @dir_state[bucket, 3 write-held, 2 read-held, 1 handed off, 0 free]: samples), over the 100
 ms buckets in which the runtime made or removed at least half the median bucket's cgroups (@busy[bucket]: count).
 
+A MODE=checker run, each figure per namespace checked (its out.<label>.json's netns_reuse.checked, which stands in
+for <lifecycles>): the checker threads' system calls (@sys[number]: stats), their futex waits for the next namespace
+left out of the sum, and their on-CPU profile at 4999 Hz (@samples), by the system call each sample fell in or user
+mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count).
+
   create_serial.py <label>=<bt file>:<lifecycles> ...
 """
+import json
 import os
 import re
 import sys
@@ -45,6 +51,33 @@ FILESYSTEMS = {"cgroup2", "tmpfs", "overlay", "btrfs", "proc", "sysfs", "devtmpf
                "debugfs", "tracefs", "mqueue", "devpts", "cgroup"}
 # A stats() value as bpftrace 0.24 prints it, `{ .count = N, .average = N, .total = N }`, or as earlier ones did.
 STATS = r'\{? ?\.?count:? =? ?(\d+), \.?average:? =? ?(\d+), \.?total:? =? ?(\d+) ?\}?'
+
+
+# x86_64's numbers for the calls a checker makes (arch/x86/entry/syscalls/syscall_64.tbl).
+SYSCALLS = {0: "read", 1: "write", 2: "open", 3: "close", 9: "mmap", 10: "mprotect", 11: "munmap",
+            14: "rt_sigprocmask", 28: "madvise", 41: "socket", 44: "sendto", 45: "recvfrom", 49: "bind",
+            54: "setsockopt", 131: "sigaltstack", 186: "gettid", 202: "futex", 204: "sched_getaffinity",
+            257: "openat", 272: "unshare", 308: "setns"}
+PROFILE_HZ = 4999
+# A checker's kernel stack's work, by the first rule any of whose frames match, innermost first.
+CHECKER_WORK = [
+    ("reading /proc/net/protocols", r'proto_seq_'),
+    ("reading /proc/net/dev", r'dev_seq_|dev_get_stats|loopback_get_stats'),
+    ("reading /proc/net/sockstat", r'sockstat_seq_show|sockstat6_seq_show'),
+    ("reading a seq_file, the rest", r'seq_read'),
+    ("opening a /proc/net file", r'do_sys_openat|path_openat|proc_lookup|proc_tgid_net_lookup|seq_open|do_filp_open'),
+    ("dumping routes", r'inet_dump_fib|inet6_dump_fib|fib6_dump|rt6_dump|fib_table_dump'),
+    ("dumping addresses", r'inet_dump_ifaddr|inet6_dump_addr|in6_dump|inet_fill_ifaddr|inet6_fill_ifaddr'),
+    ("dumping rules", r'fib_nl_dumprule|dump_rules|fib_nl_fill_rule'),
+    ("netlink, the rest", r'netlink_|rtnl_dump|rtnetlink_rcv|__sys_sendto|__sys_recvfrom|sock_recvmsg|skb_'),
+    ("making a socket", r'__sys_socket|sk_alloc'),
+    ("closing (releases)", r'__fput|fput|seq_release|sock_close|task_work_run'),
+    ("setns", r'setns|switch_task_namespaces|commit_nsset'),
+    ("faulting in or allocating pages", r'clear_page|handle_mm_fault|exc_page_fault|__alloc_pages|get_page_from_freelist'),
+    ("a futex (the next namespace's wait)", r'futex'),
+    ("mapping memory", r'vm_mmap|do_mmap|__vm_munmap|do_vmi_munmap|madvise'),
+    ("entering and leaving the kernel", r'entry_SYSCALL|syscall_exit|do_syscall_64|exit_to_user'),
+]
 
 
 def offcpu(txt):
@@ -200,6 +233,47 @@ def report_locks(label, n, txt, named):
         print(f"  {v / n:6.2f}  {fs:8} {d[:40]:40} {name[:60]}")
 
 
+def counts(txt, name):
+    return {int(m.group(1)): int(m.group(2)) for m in re.finditer(rf'@{name}\[(\d+)\]: (\d+)', txt)}
+
+
+def report_checker(label, path, txt):
+    """A MODE=checker run, per namespace checked."""
+    out = json.load(open(os.path.join(os.path.dirname(path), f"out.{label}.json")))
+    checked = sum(ph.get("netns_reuse", {}).get("checked", 0) for ph in out["phases"].values())
+    if not checked:
+        print(f"{label}: no namespace was checked")
+        return
+    samples = int(re.search(r'@samples: (\d+)', txt).group(1))
+    us = 1e6 / PROFILE_HZ / checked
+    work_of, user = defaultdict(int), 0
+    for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        lines = m.group(1).split('\n')
+        cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
+        frames = [re.sub(r'\+\d+$', '', line.strip()) for line in lines[:cut] if line.strip()]
+        if not frames:
+            user += int(m.group(2))
+            continue
+        name = next((n for n, pat in CHECKER_WORK if any(re.search(pat, f) for f in frames)),
+                    'other: ' + ' < '.join(frames[:3]))
+        work_of[name] += int(m.group(2))
+    mean = [ph["netns_reuse"]["check_us_mean"] for ph in out["phases"].values() if "netns_reuse" in ph]
+    print(f"{label}: {checked} namespaces checked, {', '.join(f'{m:.1f}' for m in mean)} us each by the checker's "
+          f"own clock; on-CPU {samples * us:.1f} us a check ({samples} samples), user mode {user * us:.1f} us")
+    calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
+    work = {k: v for k, v in calls.items() if SYSCALLS.get(k) != "futex"}
+    print(f"  system calls a check, the futex waits left out: {sum(c for c, _ in work.values()) / checked:.1f} calls, "
+          f"{sum(t for _, t in work.values()) / 1e3 / checked:.1f} us")
+    for k, (c, t) in sorted(work.items(), key=lambda kv: -kv[1][1])[:10]:
+        print(f"  {c / checked:7.2f} calls {t / 1e3 / checked:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a check by the system call each sample fell in:")
+    for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a check in the kernel, by its work:")
+    for name, v in sorted(work_of.items(), key=lambda kv: -kv[1])[:16]:
+        print(f"  {v * us:7.1f} us  {name[:110]}")
+
+
 runs = []
 for arg in sys.argv[1:]:
     label, rest = arg.split('=', 1)
@@ -211,6 +285,9 @@ if not runs:
 off_runs = [(label, n, offcpu(txt)) for label, n, _p, txt in runs if '@off[' in txt]
 if off_runs:
     report_offcpu(off_runs)
+for label, n, path, txt in runs:
+    if '@samples:' in txt and '@sys[' in txt:
+        report_checker(label, path, txt)
 for label, n, path, txt in runs:
     if '@hold[' in txt or '@fn[' in txt:
         report_locks(label, n, txt, dirs(os.path.join(os.path.dirname(path), f"dirs.{label}.txt")))
