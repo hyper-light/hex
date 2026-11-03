@@ -352,3 +352,95 @@ part 19 at eight in flight with 8,000 idle host threads. Record every result, in
 refill failures, and rerun mount kinds, cgroupfs, escape, root-side Rootless=0, validation, HEX-RT and
 the seven gates at the final tree. No p99 success is claimed from a harness whose pass bit only checks
 the root switch.
+
+
+## 7. Complete coverage and the setup scheduling experiment (2026-11-02)
+
+The first pool on/off/before sequence (`hex-lead-s3-devfs-measure-20261102T0726Z`, fedora,
+`lead-devfs-20261102T0719Z`, eight creates in flight, 2,000 creates, 8,000 idle threads, CPUs 4-15)
+refused all three runs: the setns-only reader missed 50/103/46 network-pool misses respectively.
+Raw observations, **incomplete coverage, not acceptance evidence**:
+
+Run identifiers are `create-breakdown-20261102T072230Z` (off), `072235Z` (on), `072238Z`
+(before). The draft release hashes (first 16 SHA256 digits) are hex `6256a152352b145b`, seam
+`7b2a3c5cbbc1111a`; before hex `dd2016abe247a439`, seam `5ccc3c8a3792813d`. The before runtime
+is bf77298, with only patch 11's throughput timing backported to its bench. Focal's `s5-focal*`
+campaign was a concurrent host tenant; CPU affinity remained 4-15.
+
+| configuration | part 19 p50 / p99, ms | whole create p50 / p99, ms |
+|---|---|---|
+| draft, pool off | 0.148 / 1.842 | 1.627 / 8.175 |
+| same draft, pool on | 0.098 / 1.173 | 1.773 / 8.596 |
+| bf77298, timing-only bench backport | 0.226 / 1.906 | 1.770 / 7.726 |
+
+Pool on took 1,997 prepared mounts, made three on path, and had zero preparation failures. It reduced
+the reported part but did not improve whole-create p99. No latency criterion is met by these records.
+The corrected light reader adds each child's `clone3` return zero as the dry-network boundary, with
+successful network setns preferred. It includes every create and on-path loopback setup, requires
+whole samples and exact agreement with the network miss counter, and keeps the 0.5 ms bar.
+
+### Complete-coverage records, before propagation repair
+
+With reader 13 and fixed reasons 14, the tracked source diff SHA256 was `cdfbefaca0371ab3`;
+release hex `413a34ee2e5be497`, seam `fbb6d7d00e4d6884` (first 16 SHA256 digits). Before binaries
+are as above. Same fedora 6.19.10, concurrency eight, 2,000 creates and 8,000 idle host threads,
+CPUs 4-15; Focal's campaign remained beside each run. Run names below all start
+`create-breakdown-20261102T` and end `Z`.
+
+| run | configuration | part 19 p50 / p99, ms | whole create p50 / p99, ms | setns / clone / expected dry |
+|---|---|---|---|---|
+| 075838 | off 1 | 0.155 / 1.546 | 1.886 / 14.237 | 1995 / 5 / 5 |
+| 075842 | on 1 | 0.108 / 1.269 | 2.133 / 15.152 | 1999 / 1 / 1 |
+| 075847 | before 1 | 0.244 / 2.425 | 2.504 / 8.753 | 1998 / 2 / 2 |
+| 075851 | off 2 | 0.168 / 1.883 | 2.324 / 9.552 | 1998 / 2 / 2 |
+| 075855 | on 2 | 0.096 / 1.369 | 1.797 / 7.443 | 1974 / 26 / 26 |
+| 075900 | before 2 | 0.236 / 1.769 | 2.124 / 8.048 | 1982 / 18 / 18 |
+| 075915 | off 3 | 0.148 / 1.380 | 1.817 / 6.431 | 1983 / 17 / 17 |
+| 075940 | on 3 | 0.089 / 1.166 | 1.576 / 6.236 | 1970 / 30 / 30 |
+| 080003 | before 3 | 0.204 / 1.496 | 1.634 / 6.375 | 1975 / 25 / 25 |
+
+Each has 2,000/2,000 mount spans and whole-create samples, exact fallback-counter agreement,
+zero lost events and zero failed switches. On took 1,996 / 1,996 / 1,993 prepared mounts, with
+4 / 4 / 7 on-path constructions. Mount p99 exceeds 0.5 ms in all nine runs. Whole p99 is worse
+with pooling in round 1 and better in rounds 2 and 3; no consistent whole-create tail gain or
+acceptance is established. Percentiles above are each run's, not averages or a pooled percentile.
+The propagation repair adds required kernel work; these runs do not validate its final performance.
+
+The independent shared-source regression then failed the same production draft as required:
+`hex-lead-s3-propred-20261102T080845Z`, `lead-propred-20261102T080845Z/lab.log`, fedora root lab,
+build exit 0, test exit 101. Both preconditions held (root source shared:3072, bind source shared:3073).
+The plain pruned create added 17 mounts in the agent's namespace, including proc, devices,
+submounts, file masks and readonly binds, and mounts at the bind source's own path. The oracle
+failed on `plain: agent gained mounts during create`. This is a correctness failure, explained
+and repaired before further scheduling experiments (`goal5-root.md` §9).
+
+**Candidate C: a shorter fair-class setup slice.** Linux v6.19 `__setparam_fair` accepts a nonzero
+`sched_attr.sched_runtime`, clamps it to 100 us through 100 ms, and marks it custom. A zero request
+clears that mark and restores `sysctl_sched_base_slice`
+([fair.c](https://github.com/torvalds/linux/blob/v6.19/kernel/sched/fair.c), `__setparam_fair`).
+The candidate is the kernel's minimum 100 us for init setup, retaining policy, nice and affinity;
+that constant is a cited API bound, not a measured optimum. The kernel's
+[EEVDF description](https://docs.kernel.org/scheduler/sched-eevdf.html) explains earlier virtual
+deadlines for shorter requests. `check_preempt_wakeup_fair` can override slice protection for an
+eligible shorter-slice task; cgroup scheduling and eligibility still apply. This supports an experiment,
+not a wall-time guarantee. Preserve all scheduling attributes, avoid `SCHED_FLAG_KEEP_PARAMS` when
+changing runtime (it replaces supplied values), and clear the custom runtime before capabilities,
+seccomp, the user change and workload exec. `sched_getattr` returns the effective fair slice
+([syscalls.c](https://github.com/torvalds/linux/blob/v6.19/kernel/sched/syscalls.c), `get_params`,
+`sys_sched_setattr`). Detect unsupported behavior by the API, not a version string. Any raw wrapper
+belongs in sys.rs with SAFETY comments and its own §12 review commit held for Ada.
+
+Before enabling a setup hint, tests must show a custom setup slice and a default slice in the
+workload, including an exec inside a box; unsupported or refused hints retain ordinary scheduling
+and are counted by a fixed reason. Compare whole-create and part-19 p50/p99 with the same complete
+coverage and host load. A worse whole p99, user-visible scheduling change, or unchanged runnable
+wait falsifies the candidate. No scheduling hint has been implemented or measured in this note.
+
+The root propagation oracle also needs a stated input: MS_SLAVE on a private mount leaves it private;
+a singleton shared peer group also becomes private. A master requires another shared peer
+([mount(2)](https://man7.org/linux/man-pages/man2/mount.2.html), propagation types;
+[kernel Shared Subtrees §5a](https://docs.kernel.org/filesystems/sharedsubtree.html)). The failed
+root run reported a private btrfs input and no master, before the pool oracle. Establish its baseline
+and a controlled shared/private source before changing an assertion. Detached open_tree clones resume
+propagation when attached ([open_tree(2), Notes](https://man7.org/linux/man-pages/man2/open_tree.2.html));
+a shared fixture must also verify that filling the container root cannot propagate into its source.
