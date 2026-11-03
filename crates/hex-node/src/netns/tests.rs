@@ -80,3 +80,51 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     let c = pool.counts().unwrap();
     assert_eq!((c.taken, c.made_on_path, c.failed), (1, 0, 0), "{c:?}");
 }
+
+/// Goal 5 extended step 6, the lead's conditions for the check's own socket (2026-11-03T17:36Z; CLAUDE.md §2): the
+/// netlink socket a check keeps in a namespace is held with it inside the idle namespaces' bound, and closed with
+/// it when the bound puts it out. Do: give one owner `PER_OWNER` + 1 kept namespaces, each with a stand-in for its
+/// socket, the write end of a pipe whose read end the test keeps, and drop what the bound puts out, as the checker
+/// does. Expect: one put out, the first given, its pipe at end-of-file; each kept one's still open. A process another
+/// test spawns holds a copy of every descriptor from its fork to its exec, so the end-of-file is waited for, the fact
+/// itself, as each such copy closes.
+#[test]
+fn a_kept_namespaces_socket_is_held_in_its_bound_and_closed_when_the_bound_puts_it_out() {
+    let mut idle = Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE);
+    let mut ends = Vec::new();
+    let mut out = Vec::new();
+    for _ in 0..=netns_reuse::PER_OWNER {
+        let (read, write) = rustix::pipe::pipe_with(
+            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+        )
+        .unwrap();
+        let ns = rustix::fs::open(
+            "/dev/null",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        out.extend(idle.give(
+            "o",
+            KeptNet {
+                ns,
+                socket: Some(write),
+            },
+        ));
+        ends.push(read);
+    }
+    assert_eq!(out.len(), 1, "one past the owner's bound is put out");
+    drop(out);
+    let mut byte = [0u8; 1];
+    wait_for(
+        "the end-of-file of the socket of the first given, put out",
+        || rustix::io::read(&ends[0], &mut byte) == Ok(0),
+    );
+    for end in &ends[1..] {
+        assert_eq!(
+            rustix::io::read(end, &mut byte),
+            Err(rustix::io::Errno::AGAIN),
+            "each kept namespace holds its socket open"
+        );
+    }
+}

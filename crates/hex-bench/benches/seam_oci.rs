@@ -771,6 +771,7 @@ mod linux {
                "checked": after.checked - before.checked,
                "unchecked": after.unchecked - before.unchecked,
                "lost_home": after.lost_home - before.lost_home,
+               "protocols": after.protocols - before.protocols,
                "check_us_mean": (after.check_ns - before.check_ns) as f64
                    / 1e3 / ((after.checked - before.checked).max(1)) as f64})
     }

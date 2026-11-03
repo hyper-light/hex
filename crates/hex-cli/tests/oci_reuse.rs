@@ -28,10 +28,14 @@
 //! - the network namespace, reused within one owner (Ada's call, 2026-11-03; decision 5), root only: A of
 //!   O, which could change nothing of its namespace, deleted; B of O: expect A's namespace, counted, its
 //!   loopback up and A's counters still in it. A's namespace left holding a TIME_WAIT connection, an open
-//!   socket, an address or a route: expect B fresh and the refusal counted by its reason. A holding
+//!   socket, an address or a route: expect B fresh and the refusal counted by its reason, the open socket's
+//!   check counted as reading the protocols; one holding a socket never hashed: expect the protocols read,
+//!   counted, and the namespace kept. A holding
 //!   CAP_NET_ADMIN, with `/proc/sys` writable, or of no owner: never kept, counted. Boxes of another owner P
 //!   beside O's idle namespace: each fresh, counted, never O's; then O's next box gets O's and P's next box
-//!   P's oldest.
+//!   P's oldest. B of O given a namespace the node checked: expect B to see the node's netlink socket in it and
+//!   its send to that socket refused, its send to the kernel gone, the socket's queue and drops unchanged, and
+//!   the namespace kept again at its next check.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -313,6 +317,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
+    a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -839,6 +844,13 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
             "{case}: counted as {}: {after:?}",
             reason.name()
         );
+        if case == "socket" {
+            assert_eq!(
+                after.protocols,
+                before.protocols + 1,
+                "{case}: a socket past the check's own reads the protocols, counted: {after:?}"
+            );
+        }
         assert_eq!(after.pool.idle, before.pool.idle, "{case}: not kept");
         let b = format!("net-{case}-b");
         node.create(make(&b, Some(&o), Caps::Docker, true)).unwrap();
@@ -850,6 +862,41 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
         eprintln!("netns, {case}: A's refused, counted, B fresh");
     }
     drop(held);
+
+    // A socket never hashed (a UDP socket never bound, held outside) is counted by sockstat and by no protocol:
+    // the check reads the protocols, counted, and keeps the namespace, as decision 5 says it crosses within the
+    // owner (the lead's conditions for the check's own socket, 2026-11-03T17:36Z).
+    node.create(make("net-unhashed-a", Some(&o), Caps::Docker, true))
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    in_netns(&init_of("net-unhashed-a"), || {
+        tx.send(
+            rustix::net::socket(
+                rustix::net::AddressFamily::INET,
+                rustix::net::SocketType::DGRAM,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    });
+    let unbound = rx.recv().unwrap();
+    let before = ruled();
+    node.delete(&BoxId::new("net-unhashed-a").unwrap()).unwrap();
+    let after = ruled();
+    assert_eq!(
+        after.protocols,
+        before.protocols + 1,
+        "unhashed: the protocols read, counted: {after:?}"
+    );
+    assert_eq!(
+        after.pool.idle,
+        before.pool.idle + 1,
+        "unhashed: in no protocol's count, so kept for O: {after:?}"
+    );
+    drop(unbound);
+    node.release_idle().unwrap();
+    eprintln!("netns, a socket never hashed: the protocols read, counted, the namespace kept");
 
     // Never kept: a box that could have changed its namespace, or that names no owner.
     for (case, owner, caps, readonly_sys, reason) in [
@@ -939,6 +986,148 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
     }
     ruled();
     node.release_idle().unwrap();
+}
+
+/// Goal 5 extended, step 6 (the check's own socket, kept in each namespace it checks; the lead's conditions,
+/// 2026-11-03T17:36Z): a box given a namespace the node checked sees the node's netlink socket in it and can't
+/// send to it. Root only, as the namespace's reuse. Do: A of O deleted, its namespace checked and kept; B of O
+/// given it; from B, an rtnetlink request to the route socket with a portid in B's namespace, then one to the
+/// kernel; B deleted. Expect: B's `/proc/net/netlink` lists one route socket with a portid, this process's (the
+/// node agent's) by its inode; B's send to it refused with EPERM, since NETLINK_ROUTE takes a message to another
+/// socket only from one with CAP_NET_ADMIN over the namespace's owner (Linux v6.19 net/core/rtnetlink.c:7038;
+/// net/netlink/af_netlink.c:1844-1846, :904-908), and B's send to the kernel gone (non-vacuity); the socket's
+/// queue and drops 0 before and after; and the namespace kept again at its next check.
+fn a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        eprintln!("SKIP netns kept socket: a rootless node keeps no network namespaces");
+        return;
+    }
+    let (node, _state) = lab.node(&own.join("hex-reuse-netsock"));
+    let o = BoxOwner::named("owner-netsock").unwrap();
+    let wait = ["/hex", "selftest-box", "wait"];
+    let make = |id: &str| BoxSpec {
+        id: BoxId::new(id).unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),
+        owner: Some(o.clone()),
+    };
+    let counts = || {
+        node.netns_reuse()
+            .unwrap()
+            .expect("a root node keeps namespaces")
+    };
+    let ruled = || {
+        wait_for(
+            || {
+                let c = counts();
+                c.checked + c.unchecked == c.given_back
+            },
+            "the checker's ruling on every namespace given back",
+        );
+        counts()
+    };
+    node.create(make("sock-a")).unwrap();
+    node.delete(&BoxId::new("sock-a").unwrap()).unwrap();
+    let kept = ruled();
+    assert_eq!(
+        kept.pool.idle, 1,
+        "A's namespace is checked and kept for O: {kept:?}"
+    );
+    node.create(make("sock-b")).unwrap();
+    assert_eq!(
+        counts().pool.handed_on,
+        kept.pool.handed_on + 1,
+        "B is given A's namespace"
+    );
+    let b = BoxId::new("sock-b").unwrap();
+    let procs = std::fs::read_to_string(node.cgroup_dir(&b).unwrap().join("cgroup.procs")).unwrap();
+    let init = procs.lines().next().expect("B's init").to_owned();
+    let route_sockets = || -> Vec<NetlinkSocket> {
+        netlink_sockets(&init)
+            .into_iter()
+            .filter(|s| s.protocol == 0 && s.portid != 0)
+            .collect()
+    };
+    let before = route_sockets();
+    assert_eq!(
+        before.len(),
+        1,
+        "B's namespace holds one route socket with a portid: {before:?}"
+    );
+    let socket = before[0];
+    let theirs = format!("socket:[{}]", socket.inode);
+    assert!(
+        std::fs::read_dir("/proc/self/fd").unwrap().any(|fd| {
+            std::fs::read_link(fd.unwrap().path()).is_ok_and(|to| to.as_os_str() == theirs.as_str())
+        }),
+        "the socket at portid {} is this process's, the node agent's",
+        socket.portid
+    );
+    assert_eq!((socket.rmem, socket.drops), (0, 0), "{socket:?}");
+    let portid = socket.portid.to_string();
+    assert_eq!(
+        run(
+            &node,
+            &b,
+            Program::of(&["/hex", "selftest-box", "netlink-to", &portid])
+        ),
+        Exit::Code(1),
+        "B's send to the node's socket is refused, EPERM"
+    );
+    assert_eq!(
+        run(
+            &node,
+            &b,
+            Program::of(&["/hex", "selftest-box", "netlink-to", "0"])
+        ),
+        Exit::Code(0),
+        "B's send to the kernel goes"
+    );
+    assert_eq!(
+        route_sockets(),
+        before,
+        "the node's socket as it was: nothing queued, nothing dropped"
+    );
+    node.delete(&b).unwrap();
+    let after = ruled();
+    assert_eq!(
+        after.pool.idle, 1,
+        "the namespace passes its next check, kept for O: {after:?}"
+    );
+    eprintln!(
+        "netns, kept socket: B sees the node's at portid {portid}, its send to it refused (EPERM), its send to the kernel gone, the socket unchanged, the namespace kept again"
+    );
+    node.release_idle().unwrap();
+}
+
+/// A netlink socket as `/proc/<pid>/net/netlink` lists it, in that process's network namespace (Linux v6.19
+/// net/netlink/af_netlink.c:2703, `netlink_native_seq_show`: sk, Eth, Pid, Groups, Rmem, Wmem, Dump, Locks, Drops,
+/// Inode): its protocol, its portid, the bytes queued for it to read, its drops and its inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NetlinkSocket {
+    protocol: u32,
+    portid: u32,
+    rmem: u64,
+    drops: u64,
+    inode: u64,
+}
+
+fn netlink_sockets(pid: &str) -> Vec<NetlinkSocket> {
+    std::fs::read_to_string(format!("/proc/{pid}/net/netlink"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            NetlinkSocket {
+                protocol: f[1].parse().unwrap(),
+                portid: f[2].parse().unwrap(),
+                rmem: f[4].parse().unwrap(),
+                drops: f[8].parse().unwrap(),
+                inode: f[9].parse().unwrap(),
+            }
+        })
+        .collect()
 }
 
 /// Runs `f` on a thread of its own in process `pid`'s network namespace, and waits for it.

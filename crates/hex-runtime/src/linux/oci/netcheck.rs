@@ -278,6 +278,9 @@ pub struct Checked {
     /// Whether the thread is back in `home`. A thread that isn't is still in the namespace it checked, so
     /// the shell checks nothing more on it.
     pub home: bool,
+    /// Whether the sockets' check read `/proc/net/protocols`: `sockstat`'s count wasn't the check's own socket
+    /// alone.
+    pub protocols: bool,
 }
 
 /// Checks the namespace `ns` from the calling thread, whose own namespace is `home`, whose
@@ -292,30 +295,38 @@ pub fn check(
     scratch: &mut Scratch,
     socket: &mut Option<OwnedFd>,
 ) -> Checked {
+    let mut protocols = false;
     if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
         return Checked {
             verdict: Err(Refused::Unreadable),
             home: true,
+            protocols,
         };
     }
-    let verdict = look(proc_net, fresh, scratch, socket);
+    let verdict = look(proc_net, fresh, scratch, socket, &mut protocols);
     let home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
-    Checked { verdict, home }
+    Checked {
+        verdict,
+        home,
+        protocols,
+    }
 }
 
 /// The checks, in the namespace the thread is in: sockets first, before this opens one of its own there.
+/// `protocols` is set if the sockets' check read the protocols.
 fn look(
     proc_net: &ProcNet,
     fresh: &Fresh,
     scratch: &mut Scratch,
     socket: &mut Option<OwnedFd>,
+    protocols: &mut bool,
 ) -> Result<(), Refused> {
     // Made before the count is read, so the count has it.
     if socket.is_none() {
         *socket = Some(dump_socket()?);
     }
     let socket = socket.as_ref().ok_or(Refused::Unreadable)?;
-    sockets_left(proc_net, fresh, &mut scratch.text)?;
+    sockets_left(proc_net, fresh, &mut scratch.text, protocols)?;
     let text = &mut scratch.text;
     links(proc_net.file("dev", text)?.ok_or(Refused::Unreadable)?)?;
     for tables in ["ip_tables_names", "ip6_tables_names"] {
@@ -337,8 +348,14 @@ fn look(
 
 /// Whether a socket or a TCP connection in TIME_WAIT is left in the namespace the calling thread is in, whose
 /// `/proc/net` is `proc_net`, the check's own socket made there already: `sockstat` first, its TIME_WAIT and every
-/// socket's count, and the protocols' counts only when that count isn't the check's own socket alone.
-fn sockets_left(proc_net: &ProcNet, fresh: &Fresh, text: &mut [u8]) -> Result<(), Refused> {
+/// socket's count, and the protocols' counts only when that count isn't the check's own socket alone, which sets
+/// `protocols`.
+fn sockets_left(
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    text: &mut [u8],
+    protocols: &mut bool,
+) -> Result<(), Refused> {
     let sockstat = proc_net
         .file("sockstat", text)?
         .ok_or(Refused::Unreadable)?;
@@ -346,6 +363,7 @@ fn sockets_left(proc_net: &ProcNet, fresh: &Fresh, text: &mut [u8]) -> Result<()
     if used(sockstat)? == 1 {
         return Ok(());
     }
+    *protocols = true;
     sockets(
         proc_net
             .file("protocols", text)?

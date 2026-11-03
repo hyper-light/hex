@@ -57,6 +57,10 @@ pub fn run(argv: &[String]) -> Option<u8> {
             args.first().map(String::as_str).unwrap_or(""),
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(10),
         )),
+        // netlink-to <portid>: sends one rtnetlink request from a socket of the box's to the netlink socket
+        // <portid> names (0, the kernel), and exits 0 if it went, else the send's errno: whether a box reaches
+        // the socket the node keeps in its network namespace (goal 5 extended, step 6).
+        "netlink-to" => Some(netlink_to(args.first().map(String::as_str).unwrap_or(""))),
         _ => None,
     }
 }
@@ -212,6 +216,52 @@ fn open_each(args: &[String]) -> u8 {
         }
     }
     u8::from(write_all(&mut std::io::stdout(), out.as_bytes()).is_err())
+}
+
+/// `netlink-to`: an `RTM_GETLINK` request (`struct nlmsghdr` and a zeroed `struct ifinfomsg`,
+/// include/uapi/linux/rtnetlink.h) sent to `portid`. Exits 0 if it went, the send's errno if it was
+/// refused, and 255 for an argument that isn't a portid or a socket that couldn't be made.
+#[cfg(target_os = "linux")]
+fn netlink_to(portid: &str) -> u8 {
+    use rustix::net::{
+        AddressFamily, SendFlags, SocketFlags, SocketType, netlink::SocketAddrNetlink,
+    };
+    const RTM_GETLINK: u16 = 18;
+    const NLM_F_REQUEST: u16 = 1;
+    const LEN: usize = 32;
+    let Ok(pid) = portid.parse::<u32>() else {
+        return 255;
+    };
+    let Ok(fd) = rustix::net::socket_with(
+        AddressFamily::NETLINK,
+        SocketType::RAW,
+        SocketFlags::CLOEXEC,
+        None,
+    ) else {
+        return 255;
+    };
+    let mut request = Vec::with_capacity(LEN);
+    request.extend_from_slice(&u32::try_from(LEN).unwrap_or(u32::MAX).to_ne_bytes());
+    request.extend_from_slice(&RTM_GETLINK.to_ne_bytes());
+    request.extend_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+    request.extend_from_slice(&1u32.to_ne_bytes());
+    request.extend_from_slice(&0u32.to_ne_bytes());
+    request.resize(LEN, 0);
+    match rustix::net::sendto(
+        &fd,
+        &request,
+        SendFlags::empty(),
+        &SocketAddrNetlink::new(pid, 0),
+    ) {
+        Ok(_) => 0,
+        Err(e) => u8::try_from(e.raw_os_error()).unwrap_or(255),
+    }
+}
+
+/// `netlink-to` on a platform with no netlink: refused, 255.
+#[cfg(not(target_os = "linux"))]
+fn netlink_to(_portid: &str) -> u8 {
+    255
 }
 
 /// Copies stdin to stdout until stdin ends.

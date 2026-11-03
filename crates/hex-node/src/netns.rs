@@ -77,6 +77,8 @@ struct KeptState {
     unchecked: AtomicU64,
     /// Checks after which the checker couldn't go back to its own namespace.
     lost_home: AtomicU64,
+    /// Checks whose sockets' count wasn't the check's own socket alone, which read the protocols.
+    protocols: AtomicU64,
     /// The time the checks took, all together, in nanoseconds: each check's wall time on the checker.
     check_ns: AtomicU64,
 }
@@ -91,6 +93,8 @@ pub struct ReuseCounts {
     pub checked: u64,
     pub unchecked: u64,
     pub lost_home: u64,
+    /// Checks that read the protocols, `sockstat`'s count past the check's own socket.
+    pub protocols: u64,
     /// The checks' time, all together, in nanoseconds.
     pub check_ns: u64,
 }
@@ -138,6 +142,7 @@ impl Netns {
             checked: AtomicU64::new(0),
             unchecked: AtomicU64::new(0),
             lost_home: AtomicU64::new(0),
+            protocols: AtomicU64::new(0),
             check_ns: AtomicU64::new(0),
         });
         let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
@@ -234,6 +239,7 @@ impl Netns {
             checked,
             unchecked,
             lost_home: kept.state.lost_home.load(Ordering::Acquire),
+            protocols: kept.state.protocols.load(Ordering::Acquire),
             check_ns: kept.state.check_ns.load(Ordering::Acquire),
         }))
     }
@@ -431,6 +437,9 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
                 );
                 let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 state.check_ns.fetch_add(took, Ordering::AcqRel);
+                if checked.protocols {
+                    state.protocols.fetch_add(1, Ordering::AcqRel);
+                }
                 (checked.verdict, !checked.home)
             }
             _ => (Err(Why::Unreadable), false),

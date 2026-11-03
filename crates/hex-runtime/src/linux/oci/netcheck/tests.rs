@@ -177,8 +177,11 @@ fn a_proc_net_file_is_read_whole_into_the_held_room_and_one_past_the_bound_is_re
 }
 
 /// The sockets' check reads `sockstat` first, and the protocols only past a count of the check's own socket: a count
-/// of 1 needs no protocols file, and any other count reads it, which tells a box's netlink socket waiting out its
-/// grace period from a socket held outside; TIME_WAIT refuses whatever the count (CLAUDE.md §6).
+/// of 1 needs no protocols file, and any other count reads it, said in `protocols` for the node to count, which tells
+/// a box's netlink socket waiting out its grace period from a socket held outside; TIME_WAIT refuses whatever the
+/// count (CLAUDE.md §6). Goal 5 extended step 6, the lead's conditions for the kept socket (2026-11-03T17:36Z): a
+/// count past 1 from the RCU lag (a closed netlink socket counted until its grace period has passed, Linux v6.19
+/// net/netlink/af_netlink.c:794-796, :703-715) reads the protocols, counted, and is never refused for it.
 #[test]
 fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
     let dir = tempfile::tempdir().unwrap();
@@ -195,17 +198,18 @@ fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
         dumps: Vec::new(),
     };
     let mut text = Scratch::default().text;
+    let mut left = || {
+        let mut protocols = false;
+        let verdict = sockets_left(&proc_net, &fresh, &mut text, &mut protocols);
+        (verdict, protocols)
+    };
     let write = |name: &str, body: &str| std::fs::write(dir.path().join(name), body).unwrap();
     write("sockstat", &CLEAN_SOCKSTAT.replace("used 0", "used 1"));
-    assert_eq!(
-        sockets_left(&proc_net, &fresh, &mut text),
-        Ok(()),
-        "the check's own socket alone"
-    );
+    assert_eq!(left(), (Ok(()), false), "the check's own socket alone");
     write("sockstat", &CLEAN_SOCKSTAT.replace("used 0", "used 2"));
     assert_eq!(
-        sockets_left(&proc_net, &fresh, &mut text),
-        Err(Refused::Unreadable),
+        left(),
+        (Err(Refused::Unreadable), true),
         "past it the protocols are read, and there are none here"
     );
     write(
@@ -213,8 +217,8 @@ fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
         &PROTOCOLS.replace("NETLINK   1112      0", "NETLINK   1112      1"),
     );
     assert_eq!(
-        sockets_left(&proc_net, &fresh, &mut text),
-        Ok(()),
+        left(),
+        (Ok(()), true),
         "a box's netlink socket still counted in sockstat, gone from the protocols"
     );
     write(
@@ -222,8 +226,8 @@ fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
         &PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1"),
     );
     assert_eq!(
-        sockets_left(&proc_net, &fresh, &mut text),
-        Err(Refused::Sockets),
+        left(),
+        (Err(Refused::Sockets), true),
         "a bound UDP socket held outside"
     );
     write(
@@ -232,10 +236,7 @@ fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
             .replace("used 0", "used 1")
             .replace("tw 0", "tw 1"),
     );
-    assert_eq!(
-        sockets_left(&proc_net, &fresh, &mut text),
-        Err(Refused::TimeWait)
-    );
+    assert_eq!(left(), (Err(Refused::TimeWait), false));
 }
 
 #[test]
