@@ -1068,24 +1068,22 @@ impl Runtime {
             }
             Err(e) => return Err(OciError::os("opening the exec fifo", e)),
         };
-        if !wait_readable(&fifo, START_PATIENCE)? {
-            return Err(if init_alive(&state) {
-                OciError::Broken(format!(
-                    "container {id} did not take the start within {START_PATIENCE:?}"
-                ))
-            } else {
-                OciError::WrongState(id.to_owned(), "stopped", "created")
-            });
-        }
-        // The init writes one byte as it takes the start. A zero-byte read is end-of-file: the init
-        // opened the FIFO and then died (killed, or OOM'd) without writing, so the FIFO's write end
-        // closed and `poll` returned a hang-up. The container is stopped, not running; refused, never
-        // reported running (CLAUDE.md §3): the FIFO stays, and the init's death says stopped.
-        let mut byte = [0u8; 1];
-        let n = rustix::io::read(&fifo, &mut byte)
-            .map_err(|e| OciError::os("reading the exec fifo", e))?;
-        if n == 0 {
-            return Err(OciError::WrongState(id.to_owned(), "stopped", "created"));
+        // The init writes one byte as it takes the start. End-of-file is an init that opened the FIFO
+        // and then died (killed, or OOM'd) without writing: the container is stopped, not running;
+        // refused, never reported running (CLAUDE.md §3): the FIFO stays, and the init's death says
+        // stopped.
+        match take_byte(&fifo, START_PATIENCE, wait_readable)? {
+            Took::Byte => {}
+            Took::End => return Err(OciError::WrongState(id.to_owned(), "stopped", "created")),
+            Took::Nothing => {
+                return Err(if init_alive(&state) {
+                    OciError::Broken(format!(
+                        "container {id} did not take the start within {START_PATIENCE:?}"
+                    ))
+                } else {
+                    OciError::WrongState(id.to_owned(), "stopped", "created")
+                });
+            }
         }
         // From here the FIFO's absence is what says the container runs.
         std::fs::remove_file(dir.fifo()).map_err(|e| OciError::os("removing the exec fifo", e))?;
@@ -1261,6 +1259,50 @@ fn end_shim(shim: &mut std::process::Child) -> Result<(), OciError> {
 /// Waits up to `patience` for `fd` to turn readable. Returns whether it did.
 fn wait_readable(fd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
     wait_for(fd, patience, "poll on the exec fifo")
+}
+
+/// What a start's wait on the exec FIFO came to.
+#[derive(Debug)]
+enum Took {
+    /// The init's byte: it has taken the start.
+    Byte,
+    /// End-of-file: the init opened the FIFO and died without writing.
+    End,
+    /// Neither, within the start's patience.
+    Nothing,
+}
+
+/// Waits up to `patience` in all for the init's byte on the exec FIFO, `wait` polling for it
+/// ([`wait_readable`]), and takes it. The read says what the FIFO holds, not the poll: Linux's
+/// `pipe_poll` reads a FIFO's writers without the pipe's lock (v6.19 `fs/pipe.c:670`, `:691-692`) and
+/// an open for writing raises the writers' counter before the writers (`:1192-1193`), so a poll that
+/// crosses the init's open reports a hang-up with the init there and no byte yet, and the read after it
+/// finds the init's end open and returns EAGAIN (`:374-376`). The competitive bench met it once under
+/// load (its run `20261103T064217Z`), and `bench/competitive/probes/fifo_hup.c` reproduces it
+/// (`fifo_hup.md`). So EAGAIN waits again, within the same patience.
+fn take_byte(
+    fifo: &OwnedFd,
+    patience: Duration,
+    mut wait: impl FnMut(&OwnedFd, Duration) -> Result<bool, OciError>,
+) -> Result<Took, OciError> {
+    let deadline = Instant::now().checked_add(patience);
+    loop {
+        let left = match deadline {
+            Some(d) => d.saturating_duration_since(Instant::now()),
+            None => patience,
+        };
+        if !wait(fifo, left)? {
+            return Ok(Took::Nothing);
+        }
+        let mut byte = [0u8; 1];
+        match rustix::io::read(fifo, &mut byte) {
+            Ok(0) => return Ok(Took::End),
+            Ok(_) => return Ok(Took::Byte),
+            Err(rustix::io::Errno::AGAIN) if left.is_zero() => return Ok(Took::Nothing),
+            Err(rustix::io::Errno::AGAIN) => {}
+            Err(e) => return Err(OciError::os("reading the exec fifo", e)),
+        }
+    }
 }
 
 /// Waits up to `patience` for the process behind `pidfd` to exit; a pidfd turns readable then, whether
@@ -1941,6 +1983,64 @@ mod tests {
         assert!(!wait_exited(&pidfd, Duration::from_millis(50)).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    /// An exec FIFO and the start's end of it, opened as `start_with` opens it, with no writer yet.
+    fn exec_fifo() -> (tempfile::TempDir, PathBuf, OwnedFd) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.fifo");
+        make_fifo(&path).unwrap();
+        let start = rustix::fs::open(
+            &path,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        (dir, path, start)
+    }
+
+    fn open_to_write(path: &Path) -> OwnedFd {
+        rustix::fs::open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty()).unwrap()
+    }
+
+    /// A start whose poll reports a hang-up as the init opens its end of the exec FIFO, before the
+    /// init's byte, waits for the byte and takes it; the competitive bench saw such a start refused
+    /// under load, "reading the exec fifo failed: Resource temporarily unavailable" (AC-T7.1.4: a
+    /// conforming `start`). The race is the kernel's (`probes/fifo_hup.md`); the test orders the FIFO's
+    /// opens around a real poll as the race does: a writer that came and went without a byte makes the
+    /// poll report a hang-up, and the init's end opens after the poll and before the read.
+    #[test]
+    fn a_start_whose_poll_reports_a_hang_up_as_the_init_opens_waits_for_its_byte() {
+        let (_dir, path, start) = exec_fifo();
+        drop(open_to_write(&path));
+        let (mut init, mut polls) = (None, 0);
+        let took = take_byte(&start, Duration::from_secs(10), |fd, patience| {
+            polls += 1;
+            // The init writes its byte once its end is open.
+            if let Some(end) = &init {
+                assert_eq!(rustix::io::write(end, b"0").unwrap(), 1);
+            }
+            let ready = wait_readable(fd, patience);
+            if init.is_none() {
+                init = Some(open_to_write(&path));
+            }
+            ready
+        });
+        assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
+        assert_eq!(
+            polls, 2,
+            "the read after the hang-up found the init's end open and no byte, and the start polled again"
+        );
+    }
+
+    /// An init that opened the exec FIFO and died without its byte ends the start's wait at once,
+    /// end-of-file, not at the patience: the start is refused as stopped (AC-T7.1.4).
+    #[test]
+    fn an_init_that_opened_the_fifo_and_died_without_its_byte_is_the_fifos_end() {
+        let (_dir, path, start) = exec_fifo();
+        drop(open_to_write(&path));
+        let took = take_byte(&start, Duration::from_secs(10), wait_readable);
+        assert!(matches!(took, Ok(Took::End)), "{took:?}");
     }
 
     #[test]
