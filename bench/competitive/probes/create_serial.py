@@ -20,6 +20,9 @@ for <lifecycles>): the checker threads' system calls (@sys[number]: stats), thei
 left out of the sum, and their on-CPU profile at 4999 Hz (@samples), by the system call each sample fell in or user
 mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count).
 
+A MODE=threads run, each figure per lifecycle: the runtime's threads' CPU by name, sampled at 999 Hz (@thread[comm]:
+count), and the other tasks on the probe's CPUs by name (@beside[comm]: count).
+
   create_serial.py <label>=<bt file>:<lifecycles> ...
 """
 import json
@@ -274,6 +277,19 @@ def report_checker(label, path, txt):
         print(f"  {v * us:7.1f} us  {name[:110]}")
 
 
+def report_threads(label, n, txt):
+    """A MODE=threads run, per lifecycle."""
+    us = 1e6 / 999 / n
+    thread = {m.group(1): int(m.group(2)) for m in re.finditer(r'@thread\[(.*?)\]: (\d+)', txt)}
+    beside = {m.group(1): int(m.group(2)) for m in re.finditer(r'@beside\[(.*?)\]: (\d+)', txt)}
+    print(f"{label}: {sum(thread.values()) * us:.1f} us of CPU a lifecycle in the runtime's threads ({n} lifecycles)")
+    for name, v in sorted(thread.items(), key=lambda kv: -kv[1]):
+        print(f"  {v * us:7.1f} us  {name}")
+    print(f"  beside them on the probe's CPUs, {sum(beside.values()) * us:.1f} us a lifecycle in all:")
+    for name, v in sorted(beside.items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {v * us:7.1f} us  {name}")
+
+
 runs = []
 for arg in sys.argv[1:]:
     label, rest = arg.split('=', 1)
@@ -288,6 +304,8 @@ if off_runs:
 for label, n, path, txt in runs:
     if '@samples:' in txt and '@sys[' in txt:
         report_checker(label, path, txt)
+    elif '@thread[' in txt:
+        report_threads(label, n, txt)
 for label, n, path, txt in runs:
     if '@hold[' in txt or '@fn[' in txt:
         report_locks(label, n, txt, dirs(os.path.join(os.path.dirname(path), f"dirs.{label}.txt")))

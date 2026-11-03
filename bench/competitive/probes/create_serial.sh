@@ -7,8 +7,8 @@
 # what holds those locks and which directory each wait is for, for both at concurrency 1 and 32
 # (create_serial_inside.sh says which processes are each one's). create_serial.py reads them. MODE=checker: where the
 # time of the threads that check a given-back network namespace goes, by system call and on-CPU stack (one owner's
-# boxes: HEXBENCH_OWNER). On fedora:
-#   [MODE=locks|checker] create_serial.sh <hex release binary> <seam_oci release binary>
+# boxes: HEXBENCH_OWNER). MODE=threads: each of Hex's threads' CPU, by name. On fedora:
+#   [MODE=locks|checker|threads] create_serial.sh <hex release binary> <seam_oci release binary>
 # Not a timed pass: the load is recorded, not gated; what it reads is where the threads wait, not how fast.
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
@@ -33,7 +33,7 @@ NAME=hexbench-serial-$$
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 timeout 2400 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --tmpfs /run:rw,exec,nosuid,size=4g \
-  -e SUSTAINED -e MODE -e HEXBENCH_OWNER -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
+  -e SUSTAINED -e MODE -e HEXBENCH_OWNER -e CPUSET="${CPUSET:-4-31}" -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   registry.fedoraproject.org/fedora:44 \
   bash -c 'bash /opt/lab/probes/create_serial_inside.sh; cp /run/bt.*.txt /run/bt.*.err /run/dirs.*.txt /run/*.log /run/out.*.json /opt/out/ 2>/dev/null' \
   2>&1 | tee "$OUT/probe.out"
