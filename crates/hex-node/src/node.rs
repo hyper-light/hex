@@ -37,7 +37,7 @@ use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
 use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
-use hex_runtime::linux::oci::state::{State, Status, start_time};
+use hex_runtime::linux::oci::state::{Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
@@ -1172,10 +1172,10 @@ impl Runtime for Node {
         // An oci box's start is tried first, so the hot path reads only the container's state: a box with
         // no container under the oci root is a process box, no box, or one made before its node kept
         // container state there, which the record then says (goal 3 plan step 3: start costs one FIFO
-        // operation and the state read beside it). The init's liveness is judged by the pidfd the
-        // supervisor holds for it, a poll.
-        let alive = |_: &State| matches!(self.supervisor.runs(id), Ok(true));
-        let mut started = self.oci().start_with(&self.container(id), &alive);
+        // operation and the state read beside it). The init's end is watched through the pidfd the
+        // supervisor holds for it; one not watched is found from its state.
+        let init = self.supervisor.live(id)?.map(|live| live.pidfd);
+        let mut started = self.oci().start_with(&self.container(id), init);
         let mut record = None;
         if matches!(started, Err(OciError::NoSuchContainer(_))) {
             record = self.record(id)?;
@@ -1185,7 +1185,8 @@ impl Runtime for Node {
                 .filter(|r| r.dirs.first() != Some(&self.container_dir(id)))
                 .and_then(|r| self.container_of(r));
             if let Some((oci, name)) = elsewhere {
-                started = oci.start_with(&name, &alive);
+                let init = self.supervisor.live(id)?.map(|live| live.pidfd);
+                started = oci.start_with(&name, init);
             }
         }
         match started {

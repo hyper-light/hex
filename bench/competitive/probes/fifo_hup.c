@@ -11,9 +11,11 @@
 // writer to go, waits a random 0 to 2047 spins, polls and reads; the writer waits a random 0 to 2047 spins after
 // the go, opens, writes its byte and closes. Every poll that reports a hang-up without input is the race: the
 // writer always writes before it closes. Counted by what the read after it got; a read that got EAGAIN then polls
-// and reads again until it has the byte, so every iteration ends with its byte. Usage (bench/competitive/probes/
-// fifo_hup.md):
-//   fifo_hup <dir to make the FIFO in> <iterations> <reader cpu> <writer cpu>
+// and reads again until it has the byte, so every iteration ends with its byte. With `rdwr` the reader opens the
+// FIFO to read and to write, as a start does since the race was designed out (run.rs, open_start_end): Linux never
+// blocks that open and counts it a writer too (fs/pipe.c:1202-1216), so the FIFO always has a writer and no poll can
+// report a hang-up (:691-692). Usage (bench/competitive/probes/fifo_hup.md):
+//   fifo_hup <dir to make the FIFO in> <iterations> <reader cpu> <writer cpu> [rdwr]
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -66,10 +68,11 @@ static void *writer(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 5) {
-        fprintf(stderr, "usage: fifo_hup <dir> <iterations> <reader cpu> <writer cpu>\n");
+    if (argc != 5 && !(argc == 6 && strcmp(argv[5], "rdwr") == 0)) {
+        fprintf(stderr, "usage: fifo_hup <dir> <iterations> <reader cpu> <writer cpu> [rdwr]\n");
         return 2;
     }
+    int reader_flags = argc == 6 ? O_RDWR : O_RDONLY;
     snprintf(path, sizeof path, "%s/fifo_hup.%d", argv[1], (int)getpid());
     iterations = atol(argv[2]);
     int reader_cpu = atoi(argv[3]), writer_cpu = atoi(argv[4]);
@@ -83,7 +86,7 @@ int main(int argc, char **argv) {
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (long i = 1; i <= iterations; i++) {
-        int r = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        int r = open(path, reader_flags | O_NONBLOCK | O_CLOEXEC);
         if (r < 0) { perror("reader: open"); return 3; }
         atomic_store_explicit(&go, i, memory_order_release);
         spin(next(&seed) % 2048);
@@ -122,9 +125,9 @@ int main(int argc, char **argv) {
     pthread_join(w, NULL);
     unlink(path);
     double s = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-    printf("iterations %ld in %.2f s (reader cpu %d, writer cpu %d): poll IN %ld, IN|HUP %ld; HUP alone %ld: then "
+    printf("iterations %ld in %.2f s (reader %s, cpu %d, writer cpu %d): poll IN %ld, IN|HUP %ld; HUP alone %ld: then "
            "EAGAIN %ld, the byte %ld, end-of-file %ld; other %ld, timeouts %ld; polls again after EAGAIN %ld\n",
-           iterations, s, reader_cpu, writer_cpu, in, in_hup, hup_eagain + hup_byte + hup_eof, hup_eagain, hup_byte,
-           hup_eof, other, timeouts, repolls);
+           iterations, s, reader_flags == O_RDWR ? "O_RDWR" : "O_RDONLY", reader_cpu, writer_cpu, in, in_hup,
+           hup_eagain + hup_byte + hup_eof, hup_eagain, hup_byte, hup_eof, other, timeouts, repolls);
     return 0;
 }
