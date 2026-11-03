@@ -913,14 +913,33 @@ fn do_mount_pruned<'a>(
             None if is_regular_file(tree.as_fd())? => target(root, &op.destination, Make::File)?,
             None => target(root, &op.destination, Make::Dir)?,
         };
-        // The source's flags set on the tree before it is attached, recursively for a recursive bind,
-        // so the submounts a recursive bind carries take them too (the classic path remounts each one,
-        // `remount_cgroupfs_readonly`). crun sets a tree's attributes the same way.
+        // A cloned bind must leave every host peer group before anything can be mounted beneath
+        // it. Slave first preserves incoming propagation for explicit shared/slave; shared is made
+        // a new peer group below. Other binds are recursively private, as the classic root's are.
+        let propagation = if op.propagation.is_some_and(|p| {
+            p.intersects(MountPropagationFlags::SHARED | MountPropagationFlags::DOWNSTREAM)
+        }) {
+            sys::MS_SLAVE
+        } else {
+            sys::MS_PRIVATE
+        };
         let set = attr_set(op.flags);
-        if set != 0 {
+        sys::mount_setattr(
+            tree.as_fd(),
+            true,
+            &sys::MountAttrs {
+                set: if op.recursive_bind { set } else { 0 },
+                clr: 0,
+                propagation,
+            },
+        )
+        .map_err(|e| OciError::os("setting a bind's attributes", format!("{}: {e}", at())))?;
+        // Privacy is always recursive; a nonrecursive bind's attribute request is not. Keep that
+        // scope even when the cloned source carries submounts, rather than widening its flags.
+        if !op.recursive_bind && set != 0 {
             sys::mount_setattr(
                 tree.as_fd(),
-                op.recursive_bind,
+                false,
                 &sys::MountAttrs {
                     set,
                     clr: 0,
@@ -957,6 +976,11 @@ fn do_mount_pruned<'a>(
     };
     if let Some(prop) = op.propagation {
         let (ms, rec) = propagation_ms(prop);
+        // Bind privacy/slavery was applied recursively before attachment, with its attributes.
+        // A requested shared group or unbindable state still needs the final transition.
+        if op.is_bind && matches!(ms, sys::MS_PRIVATE | sys::MS_SLAVE) {
+            return Ok(());
+        }
         sys::mount_setattr(
             attached,
             rec,

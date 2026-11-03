@@ -1136,6 +1136,19 @@ This takes it off create's path on a root node, with no new kernel version (deci
   Device/link metadata and mount source/options are compared with ordinary setup, hostile refusals
   match byte for byte, and two live pooled containers must have distinct superblocks and isolated
   mutations. Whole-create p99 is recorded beside part 19; reducing a part alone does not prove a gain.
+- **The cloned sources leave their host peer groups before the root is populated.** An open_tree
+  clone of a shared source is still its peer. The seed's private mount namespace does not change
+  that imported relationship: a mount beneath the attached clone can propagate into the agent.
+  The agent sets the detached rootfs recursively slave for requested rootfsPropagation slave/shared,
+  recursively private otherwise; the init applies the requested final propagation after construction.
+  Each bind is recursively private before use unless explicit shared/slave needs an incoming master;
+  those become slave first, with shared made a new peer group afterward. Attributes and initial
+  propagation share the init's bind-attribute call where their recursive scope is the same; a
+  nonrecursive attribute request keeps its scope. Root isolation adds one namespace_sem writer hold
+  to whole create, outside part 19; it is not free work. The prepared `/dev` pool is unchanged.
+  This repairs the shared-source leak shown on fedora 6.19.10 (`goal5-root.md` §9): earlier lab HOME
+  mounts were private or slave and concealed it. The regression establishes shared root and bind
+  sources itself and requires an unchanged complete agent mount table during and after every box.
 - **Why a root on `/` is contained here and MS_MOVE in a copy of the host's namespace is not.** runc's and crun's
   `--no-pivot` (MS_MOVE and chroot in a copy of the host's mount namespace) is unsafe as a default, and the probe
   confirms three escapes the kernel's rules predict (`goal5-root.md` §3, §4): the host's proc stays visible to

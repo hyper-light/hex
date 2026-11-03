@@ -694,6 +694,23 @@ impl Runtime {
                 clone_tree(&rootfs_path).map_err(|_| ClassicReason::Source)?
             }
         };
+        // open_tree clones retain a source's shared peer group. Isolate the detached root before
+        // the init attaches it or mounts beneath it (goal5-root.md §9). A slave keeps incoming host
+        // events; a final shared root gets a new peer group instead of sharing the host's.
+        let propagation = match spec.linux.rootfs_propagation.as_deref() {
+            Some("slave" | "shared") => sys::MS_SLAVE,
+            _ => sys::MS_PRIVATE,
+        };
+        sys::mount_setattr(
+            rootfs.as_fd(),
+            true,
+            &sys::MountAttrs {
+                set: 0,
+                clr: 0,
+                propagation,
+            },
+        )
+        .map_err(|_| ClassicReason::Source)?;
         let mut binds = Vec::new();
         for op in &plan {
             if op.destination == "/" {
