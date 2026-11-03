@@ -479,6 +479,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir.to_owned()),
+            owner: None,
         })
     };
     let prime = bundle("prime", None);
@@ -720,6 +721,7 @@ fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
+            owner: None,
         })
         .unwrap_or_else(|e| panic!("create the {path} box: {e:?}"));
         node.start(&id).expect("start");
@@ -1062,6 +1064,7 @@ fn a_bind_and_a_volume_are_present_the_host_unreachable(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(dir.clone()),
+        owner: None,
     })
     .expect("create a box with a read-only bind and a volume");
     node.start(&id).expect("start");
@@ -1255,6 +1258,7 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
+            owner: None,
         });
         let _ = node.delete(&id);
         assert_eq!(
@@ -1429,6 +1433,7 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(case.path().to_owned()),
+            owner: None,
         })
         .unwrap_or_else(|e| panic!("create the {prop} shared-source box: {e:?}"));
         let mut made = Created {
@@ -1548,6 +1553,7 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir.clone()),
+            owner: None,
         });
         assert!(
             matches!(&refused, Err(Refusal::Os { why, .. }) if why.contains("nosuchfs") && why.contains("/bad")),
@@ -1660,6 +1666,7 @@ fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) 
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(dir),
+            owner: None,
         })
         .expect("the box whose spec sets the inject variable is created: the init never saw it");
         node.start(&id).expect("start");
