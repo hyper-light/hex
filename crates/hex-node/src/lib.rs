@@ -23,6 +23,8 @@ pub mod cgroups;
 #[cfg(target_os = "linux")]
 mod createpool;
 #[cfg(target_os = "linux")]
+mod devfs;
+#[cfg(target_os = "linux")]
 pub mod netns;
 #[cfg(target_os = "linux")]
 mod node;

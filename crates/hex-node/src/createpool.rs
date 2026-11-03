@@ -24,7 +24,7 @@
 //! create by type and leaves its slot, which the thread starts again, counted.
 
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -35,7 +35,7 @@ use hex_api::Refusal;
 use hex_core::seed::{Answer, Create, Failed};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
 use hex_runtime::linux::oci::OciError;
-use hex_runtime::linux::oci::run::{CloneInit, CloneReq};
+use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq};
 use hex_runtime::linux::oci::seed as rt_seed;
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
@@ -59,6 +59,15 @@ pub struct CreatePool {
 struct Shared {
     /// The `hex` binary re-exec'd as `hex __oci-seed`.
     exe: PathBuf,
+    /// The mountpoint a create seed prunes its mount namespace at (goal 5 plan step 2), passed to each
+    /// seed as [`rt_seed::ENV_PRUNE`]; `None` on a rootless node, whose seeds don't prune and whose
+    /// creates take the classic root path in the init.
+    prune: Option<PathBuf>,
+    /// A debug-only crash point the node arms on each seed it spawns (its [`rt_seed::ENV_INJECT`]), for
+    /// the crash-safety test of the pruned init's root build; `None` unless a test arms it, and absent
+    /// from release builds (CLAUDE.md §6).
+    #[cfg(debug_assertions)]
+    inject: Option<String>,
     /// The monotonic point the core's durations are measured from.
     base: Instant,
     inner: Mutex<Inner>,
@@ -67,9 +76,14 @@ struct Shared {
     /// The starting thread waits on it; a create taking or waiting for a seed, a seed's death or hang,
     /// and shutdown wake it.
     wake: Condvar,
-    /// Creates made through the shim because no seed's one clone can make them
-    /// ([`CloneInit::through_shim`]); stops at `u64::MAX`, as the core's counts do.
-    through_shim: AtomicU64,
+    /// Creates on the classic root path, counted by reason ([`ClassicReason`], a fixed set, so no
+    /// high-cardinality label): through the shim when a pruned seed couldn't serve them or they join a
+    /// pid or user namespace by path, and by a seed with the classic root on a rootless node. Each stops
+    /// at `u64::MAX`, as the core's counts do.
+    classic: [AtomicU64; ClassicReason::COUNT],
+    /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`.
+    /// Zero on a rootless node, whose seeds don't prune. Stops at `u64::MAX`.
+    pruned: AtomicU64,
 }
 
 struct Inner {
@@ -91,16 +105,36 @@ struct Proc {
 
 impl CreatePool {
     /// A pool that re-execs `exe` as `hex __oci-seed`, with the node's default bounds
-    /// ([`hex_core::seeds::LIMITS`]), its starting thread up and starting the first spare.
-    pub fn new(exe: PathBuf) -> Result<Self, Refusal> {
-        Self::with_limits(exe, hex_core::seeds::LIMITS)
+    /// ([`hex_core::seeds::LIMITS`]), its starting thread up and starting the first spare. `prune`, when
+    /// given, is the mountpoint each seed prunes its mount namespace at (a root node, goal 5 plan
+    /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace.
+    pub fn new(
+        exe: PathBuf,
+        prune: Option<PathBuf>,
+        #[cfg(debug_assertions)] inject: Option<String>,
+    ) -> Result<Self, Refusal> {
+        Self::with_limits(
+            exe,
+            hex_core::seeds::LIMITS,
+            prune,
+            #[cfg(debug_assertions)]
+            inject,
+        )
     }
 
     /// A pool with `limits`.
-    pub fn with_limits(exe: PathBuf, limits: Limits) -> Result<Self, Refusal> {
+    pub fn with_limits(
+        exe: PathBuf,
+        limits: Limits,
+        prune: Option<PathBuf>,
+        #[cfg(debug_assertions)] inject: Option<String>,
+    ) -> Result<Self, Refusal> {
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
             exe,
+            prune,
+            #[cfg(debug_assertions)]
+            inject,
             base: Instant::now(),
             inner: Mutex::new(Inner {
                 seeds: Seeds::new(limits),
@@ -110,7 +144,8 @@ impl CreatePool {
             }),
             free: Condvar::new(),
             wake: Condvar::new(),
-            through_shim: AtomicU64::new(0),
+            classic: std::array::from_fn(|_| AtomicU64::new(0)),
+            pruned: AtomicU64::new(0),
         });
         let starting = Arc::clone(&shared);
         let starter = std::thread::Builder::new()
@@ -123,10 +158,31 @@ impl CreatePool {
         })
     }
 
-    /// How many creates were made through the shim since the pool opened: those whose container joins a
-    /// pid or user namespace by path, which no seed's one clone can make.
+    /// How many creates were made through the shim since the pool opened: those a pruned seed couldn't
+    /// serve, and those that join a pid or user namespace by path. Every reason but
+    /// [`ClassicReason::Rootless`], whose creates a seed makes with the classic root.
     pub fn creates_through_shim(&self) -> u64 {
-        self.shared.through_shim.load(Ordering::Relaxed)
+        self.shared
+            .classic
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != ClassicReason::Rootless.index())
+            .map(|(_, c)| c.load(Ordering::Relaxed))
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// How many creates took the classic root path for `reason` since the pool opened.
+    pub fn classic_creates_for(&self, reason: ClassicReason) -> u64 {
+        self.shared
+            .classic
+            .get(reason.index())
+            .map_or(0, |c| c.load(Ordering::Relaxed))
+    }
+
+    /// How many creates a pruned seed made on the pruned root path since the pool opened (goal 5 plan
+    /// step 2): zero on a rootless node, positive on a root node once it has made a pruned-eligible box.
+    pub fn pruned_creates(&self) -> u64 {
+        self.shared.pruned.load(Ordering::Relaxed)
     }
 
     /// What the pool has done, as the bench and the node's metrics read it.
@@ -136,30 +192,68 @@ impl CreatePool {
 }
 
 impl CloneInit for CreatePool {
-    fn through_shim(&self) {
-        let _ = self
-            .shared
-            .through_shim
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+    fn prunes_root(&self) -> bool {
+        self.shared.prune.is_some()
+    }
+
+    fn classic(&self, reason: ClassicReason) {
+        if let Some(count) = self.shared.classic.get(reason.index()) {
+            let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_add(1))
             });
+        }
     }
 
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
         let shared = &self.shared;
         let (id, proc) = shared.acquire()?;
+        let pruned = req.pruned.is_some();
         let create = Create {
             bundle: req.bundle.to_string_lossy().into_owned(),
             dir: req.dir.to_string_lossy().into_owned(),
             cgroup: Some(req.cgroup.dir().to_string_lossy().into_owned()),
             network: req.network.is_some(),
+            pruned,
+            binds: req
+                .pruned
+                .as_ref()
+                .map_or(0, |p| u32::try_from(p.binds.len()).unwrap_or(u32::MAX)),
+            dev_mount: req
+                .pruned
+                .as_ref()
+                .and_then(|p| p.dev_mount.as_ref().map(|d| d.mount)),
+            path_joins: req
+                .pruned
+                .as_ref()
+                .map_or(0, |p| u32::try_from(p.path_joins.len()).unwrap_or(u32::MAX)),
         };
+        // The descriptors ride in the order the seed reads them (`serve_create`): the two pipes, a
+        // network namespace, then on the pruned path the four fixed descriptors and the bind trees, in
+        // `mount::plan`'s order (the order the init attaches them).
         let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd(), req.map_r.as_fd()];
         if let Some(network) = &req.network {
             fds.push(network.as_fd());
         }
+        if let Some(pruned) = &req.pruned {
+            fds.push(pruned.bundle_dir.as_fd());
+            fds.push(pruned.cgroup_dir.as_fd());
+            fds.push(pruned.container_dir.as_fd());
+            fds.push(pruned.rootfs.as_fd());
+            fds.extend(pruned.binds.iter().map(AsFd::as_fd));
+            fds.extend(pruned.path_joins.iter().map(AsFd::as_fd));
+            if let Some(dev) = &pruned.dev_mount {
+                fds.push(dev.tree.as_fd());
+            }
+        }
         match round_trip(proc.socket.as_fd(), &create, &fds) {
             Ok(started) => {
+                if pruned {
+                    let _ = shared
+                        .pruned
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                            Some(n.saturating_add(1))
+                        });
+                }
                 shared.done(id, proc);
                 Ok(started)
             }
@@ -333,7 +427,12 @@ fn start_seeds(shared: &Shared) {
             continue;
         };
         drop(inner);
-        let spawned = spawn(&shared.exe);
+        let spawned = spawn(
+            &shared.exe,
+            shared.prune.as_deref(),
+            #[cfg(debug_assertions)]
+            shared.inject.as_deref(),
+        );
         let Ok(mut inner) = shared.inner.lock() else {
             if let Ok(proc) = &spawned {
                 end(proc);
@@ -368,8 +467,13 @@ fn start_seeds(shared: &Shared) {
 }
 
 /// Spawns a seed: a `hex __oci-seed` child of the agent, holding one end of a fresh socket; the agent
-/// keeps the other and the child's pidfd, by which it ends and reaps it.
-fn spawn(exe: &std::path::Path) -> Result<Proc, OciError> {
+/// keeps the other and the child's pidfd, by which it ends and reaps it. On a root node `prune` names
+/// the mountpoint the seed prunes its mount namespace at (goal 5 plan step 2).
+fn spawn(
+    exe: &std::path::Path,
+    prune: Option<&Path>,
+    #[cfg(debug_assertions)] inject: Option<&str>,
+) -> Result<Proc, OciError> {
     let (ours, theirs) = rt_seed::socketpair()?;
     rt_seed::clear_cloexec(&theirs)?;
     let mut cmd = Command::new(exe);
@@ -378,6 +482,20 @@ fn spawn(exe: &std::path::Path) -> Result<Proc, OciError> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if let Some(mountpoint) = prune {
+        cmd.env(rt_seed::ENV_PRUNE, mountpoint);
+    }
+    // The seed's init looks for a crash point only when a test arms one on the seed; otherwise it is
+    // cleared from the inherited environment, so nothing but this node arms it (CLAUDE.md §6). Debug only.
+    #[cfg(debug_assertions)]
+    match inject {
+        Some(point) => {
+            cmd.env(rt_seed::ENV_INJECT, point);
+        }
+        None => {
+            cmd.env_remove(rt_seed::ENV_INJECT);
+        }
+    }
     let child = cmd
         .spawn()
         .map_err(|e| OciError::os("starting a create seed", e))?;
@@ -514,6 +632,31 @@ fn stale(s: Stale) -> OciError {
 mod tests {
     use super::*;
 
+    /// Goal 5 plan step 2 (AC-T7.1.4; CLAUDE.md §10): classic-path creates are counted by a fixed set
+    /// of reasons. Do: tell a pool a create went through the shim for each of two reasons, one twice,
+    /// and that a rootless node's seed made one with the classic root. Expect: each reason's count is its
+    /// own, the shim's total is the two shim reasons' sum without the rootless create, and a reason never
+    /// told stays 0 (non-vacuity, so a miscounted reason shows).
+    #[test]
+    fn classic_creates_are_counted_by_reason() {
+        let pool = CreatePool::new(
+            PathBuf::from("/nonexistent/hex-for-the-test"),
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
+        pool.classic(ClassicReason::UserNamespace);
+        pool.classic(ClassicReason::UserNamespace);
+        pool.classic(ClassicReason::Hooks);
+        pool.classic(ClassicReason::Rootless);
+        assert_eq!(pool.classic_creates_for(ClassicReason::UserNamespace), 2);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Hooks), 1);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Rootless), 1);
+        assert_eq!(pool.classic_creates_for(ClassicReason::Source), 0);
+        assert_eq!(pool.creates_through_shim(), 3);
+    }
+
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
     /// seed with a wait bound of 50 ms. Expect: the create is refused by type after the wait, naming the
@@ -524,8 +667,14 @@ mod tests {
             wait: Duration::from_millis(50),
             ..hex_core::seeds::LIMITS
         };
-        let pool = CreatePool::with_limits(PathBuf::from("/nonexistent/hex-for-the-test"), limits)
-            .unwrap();
+        let pool = CreatePool::with_limits(
+            PathBuf::from("/nonexistent/hex-for-the-test"),
+            limits,
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while pool.counts().unwrap().start_failed == 0 {
             assert!(Instant::now() < deadline, "the pool never tried a start");

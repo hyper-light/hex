@@ -6,10 +6,12 @@
 # Every binary is copied into the run's directory, so what ran is kept beside what it measured. On fedora:
 #   create_breakdown.sh <hex release binary> <seam_oci release binary>
 # Env: N, WARMUP, ROUNDS, PROBE_ONLY (create_breakdown_inside.sh's), CPUSET (4-31); BEFORE_HEX and BEFORE_SEAM, a Hex
-# and seam_oci from before a change, whose seam rounds then run in every round beside the given ones, untimed by the
-# tracer (`before`) and traced (`traced-before`), so a change's ratio, and its parts', is each run's own and its
-# rounds meet the same host; they're staged as before/hex and before/seam_oci, the names the tracer keeps events of;
-# LOAD_GATE=0 skips the wait for
+# and seam_oci from before a change, whose seam rounds then run in every round beside the given ones (`before`), so a
+# change's ratio is each run's own and its rounds meet the same host; IDLE_AB, that many idle threads around a seam
+# and a libcrun item in every round (`seam_idle`, `libcrun_idle`), the threads' ratio the run's own the same way;
+# IDLE_THREADS, EXTRA_MOUNTS and AC_E, goal 5 plan step 2's (below); MOUNTS, MOUNTS_CONC and MOUNTS_PATH, plan step 3's
+# per-call trace of the init's mounts (create_breakdown_inside.sh's mounts_trace), and CLASSIC=1, its rounds on the
+# classic path (every create through the shim, by a createRuntime hook); LOAD_GATE=0 skips the wait for
 # load under 2, as host.sh allows: this probe's comparisons are within one run (the parts against their creates,
 # Hex's create against libcrun's), which cancel other people's CPU load. BENCH_HOST_OK names another host, as
 # host.sh takes it.
@@ -18,14 +20,20 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
-for f in crun libcrun-driver; do
-  [ -x "$BASE/bin/$f" ] || { echo "refusing: no $BASE/bin/$f (host.sh fetches crun and builds the libcrun driver)" >&2; exit 4; }
-done
+# AC-e (goal 5 plan step 2) compares nothing against libcrun — it reads only the pruned root's switch — and nor does
+# the mounts trace (plan step 3), so each needs only hex and seam_oci; every other run needs host.sh's crun and its
+# libcrun driver.
+ALONE=0; [ "${AC_E:-0}" = 0 ] && [ "${MOUNTS:-0}" = 0 ] || ALONE=1
+if [ "$ALONE" = 0 ]; then
+  for f in crun libcrun-driver; do
+    [ -x "$BASE/bin/$f" ] || { echo "refusing: no $BASE/bin/$f (host.sh fetches crun and builds the libcrun driver)" >&2; exit 4; }
+  done
+fi
 OUT="$BASE/out/create-breakdown-$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$OUT/bin"
-cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/crun" "$BASE/bin/libcrun-driver" "$OUT/bin/"
+cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"
+if [ "$ALONE" = 0 ]; then cp "$BASE/bin/crun" "$BASE/bin/libcrun-driver" "$OUT/bin/"; fi
 if [ -n "${BEFORE_HEX:-}" ]; then
-  mkdir -p "$OUT/bin/before"
-  cp "$(realpath "$BEFORE_HEX")" "$OUT/bin/before/hex"; cp "$(realpath "${BEFORE_SEAM:?BEFORE_SEAM, with BEFORE_HEX}")" "$OUT/bin/before/seam_oci"
+  cp "$(realpath "$BEFORE_HEX")" "$OUT/bin/before-hex"; cp "$(realpath "${BEFORE_SEAM:?BEFORE_SEAM, with BEFORE_HEX}")" "$OUT/bin/before-seam_oci"
 fi
 [ "${LOAD_GATE:-1}" = 0 ] || for i in $(seq 1 90); do
   load=$(cut -d' ' -f1 /proc/loadavg)
@@ -45,19 +53,45 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "docker's root: $ROOT, on $(stat -f -c %T "$ROOT" 2>/dev/null || echo unknown) ($(findmnt -n -o SOURCE,FSTYPE,OPTIONS -T "$ROOT" 2>/dev/null | cut -c1-160))"
   echo "hex: $("$OUT/bin/hex" --version) (sha256 $(sha256sum "$OUT/bin/hex" | cut -c1-16)), $(file -b "$OUT/bin/hex" | cut -d, -f1-4)"
   echo "seam_oci: sha256 $(sha256sum "$OUT/bin/seam_oci" | cut -c1-16)"
-  [ -x "$OUT/bin/before/hex" ] && echo "before: hex sha256 $(sha256sum "$OUT/bin/before/hex" | cut -c1-16)," \
-    "seam_oci sha256 $(sha256sum "$OUT/bin/before/seam_oci" | cut -c1-16)"
-  echo "crun: $("$OUT/bin/crun" --version | head -1) (sha256 $(sha256sum "$OUT/bin/crun" | cut -c1-16))"
-  echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
+  [ -x "$OUT/bin/before-hex" ] && echo "before: hex sha256 $(sha256sum "$OUT/bin/before-hex" | cut -c1-16)," \
+    "seam_oci sha256 $(sha256sum "$OUT/bin/before-seam_oci" | cut -c1-16)"
+  if [ "$ALONE" = 0 ]; then
+    echo "crun: $("$OUT/bin/crun" --version | head -1) (sha256 $(sha256sum "$OUT/bin/crun" | cut -c1-16))"
+    echo "libcrun: $("$OUT/bin/libcrun-driver" --version 2>&1 | head -1) (driver sha256 $(sha256sum "$OUT/bin/libcrun-driver" | cut -c1-16))"
+  fi
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
   echo "probe: /run a tmpfs (size 1g), where the runtimes keep their state, as host.sh's OCI pass has it"
 } > "$OUT/env.txt"
 NAME=hexbench-createbd-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+HELPER=""
+# IDLE_THREADS (goal 5 plan step 2, AC-c): hold that many idle threads on the host (outside the bench
+# container), so `pivot_root`'s walk of every host thread has them to visit. The pruned-seed root makes
+# no `pivot_root`, so its create p50 is flat in the host's thread count; the classic path grows with it.
+if [ "${IDLE_THREADS:-0}" -gt 0 ]; then
+  gcc -O2 -pthread -o "$OUT/bin/idlethreads" "$HERE/idlethreads.c"
+  "$OUT/bin/idlethreads" "$IDLE_THREADS" > "$OUT/idlethreads.out" 2>> "$OUT/idlethreads.out" &
+  HELPER=$!
+  for i in $(seq 1 150); do
+    up=$(ls "/proc/$HELPER/task" 2>/dev/null | wc -l)
+    [ "$up" -ge "$IDLE_THREADS" ] && break
+    [ "$i" = 150 ] && { echo "refusing: only $up of $IDLE_THREADS idle threads came up" >&2; kill "$HELPER" 2>/dev/null; exit 5; }
+    sleep 0.2
+  done
+  echo "idle threads: $(ls "/proc/$HELPER/task" 2>/dev/null | wc -l) up (asked $IDLE_THREADS), host threads now $(ls -d /proc/[0-9]*/task/[0-9]* 2>/dev/null | wc -l)" >> "$OUT/env.txt"
+fi
+# IDLE_AB (goal 5 plan step 2, AC-c within one run): that many idle threads, started inside the bench container
+# around every round's seam_idle and libcrun_idle (create_breakdown_inside.sh's with_idle), so each round times Hex's
+# create, and libcrun's as the control whose pivot_root walks them, with and without them: the ratio is the run's own,
+# its rounds meeting the same host, where IDLE_THREADS's runs compare across runs.
+if [ "${IDLE_AB:-0}" -gt 0 ]; then
+  gcc -O2 -pthread -o "$OUT/bin/idlethreads" "$HERE/idlethreads.c"
+  echo "idle-thread A/B: $IDLE_AB idle threads up inside the container around each round's seam_idle and libcrun_idle; host threads before them $(ls -d /proc/[0-9]*/task/[0-9]* 2>/dev/null | wc -l)" >> "$OUT/env.txt"
+fi
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$HELPER" 2>/dev/null || true' EXIT
 timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH -e CLASSIC -e HEXBENCH_DEVFS -e AC_E_MOUNTS \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done

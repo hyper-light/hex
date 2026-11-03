@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rustix::fs::{Mode, OFlags};
-use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
+use rustix::mount::{
+    FsMountFlags, FsOpenFlags, MountAttrFlags, MountFlags, MountPropagationFlags, MoveMountFlags,
+    OpenTreeFlags, UnmountFlags,
+};
 use rustix::thread::UnshareFlags;
 
 use crate::linux::oci::inroot::{self, Make};
@@ -37,14 +40,25 @@ pub const ENV_CGROUP: &str = "HEX_OCI_CGROUP";
 pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
-/// (path, major, minor, mode); all character devices.
+/// (name in `/dev`, major, minor, mode); all character devices.
 const DEFAULT_DEVICES: [(&str, u32, u32, u32); 6] = [
-    ("/dev/null", 1, 3, 0o666),
-    ("/dev/zero", 1, 5, 0o666),
-    ("/dev/full", 1, 7, 0o666),
-    ("/dev/random", 1, 8, 0o666),
-    ("/dev/urandom", 1, 9, 0o666),
-    ("/dev/tty", 5, 0, 0o666),
+    ("null", 1, 3, 0o666),
+    ("zero", 1, 5, 0o666),
+    ("full", 1, 7, 0o666),
+    ("random", 1, 8, 0o666),
+    ("urandom", 1, 9, 0o666),
+    ("tty", 5, 0, 0o666),
+];
+
+/// The links a runtime makes in `/dev` (OCI spec §Dev symbolic links), as (target, name in `/dev`):
+/// the descriptors and the three streams through the container's own `/proc`, and, for a devpts
+/// mounted at `/dev/pts`, its multiplexer.
+const DEFAULT_LINKS: [(&str, &str); 5] = [
+    ("/proc/self/fd", "fd"),
+    ("/proc/self/fd/0", "stdin"),
+    ("/proc/self/fd/1", "stdout"),
+    ("/proc/self/fd/2", "stderr"),
+    ("pts/ptmx", "ptmx"),
 ];
 
 /// The `hex __oci-init` entry. Returns the process exit code; a setup failure is reported to the
@@ -156,7 +170,15 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     };
     match forked {
         sys::Fork::Child => Ok(
-            match container(&spec, &bundle, &container_dir, sync, procs, made_ahead) {
+            match container(
+                &spec,
+                &bundle,
+                FifoDir::Path(&container_dir),
+                sync,
+                procs,
+                made_ahead,
+                Root::Classic,
+            ) {
                 Ok(()) => 0,
                 Err(e) => {
                     msg(sync, &format!("E{e}"));
@@ -209,19 +231,110 @@ pub(crate) fn clone_child(
         }
         None => false,
     };
-    container(spec, bundle, container_dir, sync, None, made_ahead)
+    container(
+        spec,
+        bundle,
+        FifoDir::Path(container_dir),
+        sync,
+        None,
+        made_ahead,
+        Root::Classic,
+    )
+}
+
+/// A create's clone child on the pruned-seed root path (goal 5 plan step 2): what [`clone_child`] does,
+/// but its namespace is a copy of the seed's two-mount pruned namespace, so it builds the root from the
+/// `sources` the agent cloned (the rootfs and one tree per bind mount) rather than from host paths, and
+/// opens the exec FIFO through the state-directory descriptor `fifo_dir` the agent handed it. The pruned
+/// path is only taken on a root node for a container that makes its own mount namespace and joins no user
+/// or mount namespace by path (the runtime's routing), so no user-namespace map handshake runs here, and
+/// a network, ipc, uts or cgroup namespace joined by path is joined by the descriptor the agent opened.
+pub(crate) fn clone_child_pruned(
+    spec: &Spec,
+    bundle: &str,
+    fifo_dir: OwnedFd,
+    sources: PrunedSources,
+    sync: BorrowedFd<'_>,
+    network: Option<OwnedFd>,
+) -> Result<(), OciError> {
+    // Join each network, ipc, uts or cgroup namespace the spec names by path, by the descriptor the
+    // agent opened, in the spec's namespace order (the order the agent opened them). The pruned init
+    // can't open the host path itself; a pid, user or mount namespace by path never reaches here.
+    let mut joined = sources.path_joins.iter();
+    for ns in &spec.linux.namespaces {
+        let flag = match (ns.path.as_ref(), ns.kind.as_str()) {
+            (Some(_), "network") => libc::CLONE_NEWNET,
+            (Some(_), "ipc") => libc::CLONE_NEWIPC,
+            (Some(_), "uts") => libc::CLONE_NEWUTS,
+            (Some(_), "cgroup") => libc::CLONE_NEWCGROUP,
+            _ => continue,
+        };
+        let fd = joined.next().ok_or_else(|| {
+            OciError::Broken("a path-joined namespace has no descriptor from the agent".to_owned())
+        })?;
+        sys::setns(fd.as_fd(), flag)?;
+    }
+    let made_ahead = match network {
+        Some(network) => {
+            sys::setns(network.as_fd(), libc::CLONE_NEWNET)?;
+            true
+        }
+        None => false,
+    };
+    container(
+        spec,
+        bundle,
+        FifoDir::Fd(fifo_dir),
+        sync,
+        None,
+        made_ahead,
+        Root::Pruned(&sources),
+    )
+}
+
+/// Where the container's exec FIFO directory (its state directory) comes from. The shim and the
+/// classic clone child open it by path, as they can; the pruned clone child can't (its namespace holds
+/// no host path), so the agent hands it as a descriptor with the create (goal 5 plan step 2).
+pub(crate) enum FifoDir<'a> {
+    Path(&'a Path),
+    Fd(OwnedFd),
+}
+
+impl FifoDir<'_> {
+    fn open(self) -> Result<OwnedFd, OciError> {
+        match self {
+            FifoDir::Path(p) => rustix::fs::open(
+                p,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| OciError::os("opening the container directory", e)),
+            FifoDir::Fd(fd) => Ok(fd),
+        }
+    }
+}
+
+/// How the container's root is built. The classic path binds the rootfs in a copy of the agent's full
+/// mount namespace and `pivot_root`s into it; the pruned path (goal 5 plan step 2) attaches the rootfs
+/// and bind sources the agent cloned (here) in a copy of the seed's two-mount namespace and ends with
+/// `chroot`, with no `pivot_root` walk of the host's threads.
+pub(crate) enum Root<'a> {
+    Classic,
+    Pruned(&'a PrunedSources),
 }
 
 /// The container (PID 1 of its namespaces): join its cgroup through `procs` (when it wasn't born there),
 /// set up the world, signal ready, wait for `start`, exec. `network_made_ahead`: its network namespace
-/// came from the node's pool, its loopback already up.
+/// came from the node's pool, its loopback already up. `root` chooses how the root filesystem is built
+/// (classic or the pruned seed's), `fifo` where the exec FIFO's directory comes from.
 pub(crate) fn container(
     spec: &Spec,
     bundle: &str,
-    container_dir: &Path,
+    fifo: FifoDir<'_>,
     sync: BorrowedFd<'_>,
     procs: Option<OwnedFd>,
     network_made_ahead: bool,
+    root: Root<'_>,
 ) -> Result<(), OciError> {
     // First of all, before it allocates or starts anything: into its cgroup, so its limits and
     // accounting cover all it does. Then a fresh cgroup namespace, so the namespace's root is the
@@ -240,14 +353,9 @@ pub(crate) fn container(
         sys::unshare(UnshareFlags::NEWCGROUP)?;
     }
 
-    // The exec FIFO lives in the runtime's state dir, outside the rootfs; open its directory now,
-    // before pivot_root removes that path from view, and open the FIFO through this fd later.
-    let fifo_dir = rustix::fs::open(
-        container_dir,
-        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| OciError::os("opening the container directory", e))?;
+    // The exec FIFO lives in the runtime's state dir, outside the rootfs; its directory is opened now,
+    // before the root switch removes that path from view, and the FIFO opened through this fd later.
+    let fifo_dir = fifo.open()?;
 
     let _ = rustix::process::setsid();
     // A network namespace of the container's own holds loopback, down until it's brought up, as
@@ -256,7 +364,10 @@ pub(crate) fn container(
         net::loopback_up()?;
     }
     if spec.makes_namespace("mount") {
-        setup_rootfs(spec, bundle)?;
+        match root {
+            Root::Classic => setup_rootfs(spec, bundle)?,
+            Root::Pruned(sources) => setup_rootfs_pruned(spec, sources)?,
+        }
     }
     if spec.makes_namespace("uts")
         && let Some(hostname) = &spec.hostname
@@ -579,7 +690,8 @@ fn namespace_flags(spec: &Spec) -> UnshareFlags {
 
 /// Prepares the container's root: private propagation, the spec mounts, default devices and
 /// symlinks, masked and readonly paths, then `pivot_root` into it. Every path in the root is resolved
-/// inside it ([`inroot`]): until the pivot `/` is the host's, and an image's links may point there.
+/// inside it ([`inroot`]), from one descriptor of the bound rootfs: until the pivot `/` is the host's,
+/// and an image's links may point there.
 fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     let rootfs = {
         let p = Path::new(&spec.root.path);
@@ -596,30 +708,34 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     .map_err(|e| OciError::os("making mounts private", e))?;
     rustix::mount::mount_bind(&rootfs, &rootfs)
         .map_err(|e| OciError::os("binding the rootfs", e))?;
+    // Opened after the bind, so it is the bind's root, which the pivot makes `/`. A spec mount at `/`
+    // itself (a layered root's overlay) goes over the bind, and what follows resolves in it, so the
+    // root is opened again after one, at its top then, as a lookup of the rootfs's path would land.
+    let mut root_fd = inroot::open_root(&rootfs)?;
+    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
+        do_mount(&inroot::Root::new(root_fd.as_fd()), &op)?;
+        if inroot::is_root(&op.destination) {
+            root_fd = inroot::open_root(&rootfs)?;
+        }
+    }
+    let root = inroot::Root::new(root_fd.as_fd());
 
     // In a user namespace mknod is refused (CAP_MKNOD has no effect across the userns boundary), so
     // devices are bind-mounted from the host instead of created.
     let in_userns = spec.in_user_namespace();
-    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
-        do_mount(&rootfs, &op)?;
-    }
-    make_default_devices(&rootfs, in_userns)?;
-    for dev in &spec.linux.devices {
-        make_device(&rootfs, dev, in_userns)?;
-    }
-    make_default_symlinks(&rootfs)?;
+    make_dev(&root, spec, in_userns)?;
     for path in &spec.linux.masked_paths {
-        mask_path(&rootfs, path)?;
+        mask_path(&root, path)?;
     }
     for path in &spec.linux.readonly_paths {
-        readonly_path(&rootfs, path)?;
+        readonly_path(&root, path)?;
     }
     if spec.root.readonly {
         rustix::mount::mount_remount(&rootfs, MountFlags::RDONLY | MountFlags::BIND, "")
             .map_err(|e| OciError::os("remounting rootfs ro", e))?;
     }
 
-    rustix::process::chdir(&rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
+    rustix::process::fchdir(&root_fd).map_err(|e| OciError::os("chdir rootfs", e))?;
     rustix::process::pivot_root(c".", c".").map_err(|e| OciError::os("pivot_root", e))?;
     rustix::mount::unmount(".", UnmountFlags::DETACH)
         .map_err(|e| OciError::os("detaching the old root", e))?;
@@ -637,6 +753,443 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
     Ok(())
 }
 
+/// The sources the agent cloned in its own mount namespace for a pruned create's root (goal 5 plan
+/// step 2): the rootfs and one detached tree per bind mount, in the order the spec lists its bind
+/// mounts. The clone child attaches them with `move_mount`, so nothing of the host is read by path.
+pub(crate) struct PrunedSources {
+    pub rootfs: OwnedFd,
+    pub dev_mount: Option<super::run::PreparedDev>,
+    pub binds: Vec<OwnedFd>,
+    /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
+    /// namespace order: the agent opened them (the pruned init can't reach the host path), and the init
+    /// joins each by `setns`, deriving its kind from the spec in the same order.
+    pub path_joins: Vec<OwnedFd>,
+}
+
+/// `move_mount` from one descriptor to another, each named by the descriptor itself (empty paths).
+const FD_TO_FD: MoveMountFlags =
+    MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH.union(MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH);
+
+/// Builds the container's root on the pruned-seed path (goal 5 plan step 2), fd-based. The init's
+/// namespace is a copy of the seed's two mounts — its root and a read-only tmpfs on it — so it attaches
+/// the rootfs the agent cloned on `/`, over that tmpfs, makes the spec's mounts in it (each bind from
+/// the tree the agent cloned, by `move_mount`; each filesystem by `fsopen`/`fsmount`), its devices,
+/// symlinks, masks and read-only paths, and ends with `chroot` into it, not `pivot_root`: no walk of the
+/// host's threads (f6, f75, f80) and a copied table of two mounts (f9, f76). Every target is resolved
+/// inside the rootfs with `openat2(RESOLVE_IN_ROOT)` from the rootfs tree's own descriptor ([`inroot`]),
+/// as the classic path resolves inside the bound rootfs, and the mount is attached to that descriptor,
+/// there being no `/proc/self/fd` to name it by path in this namespace. Attached on `/` it lies where
+/// step 2's `MS_MOVE` from `/r` put it, the same tree, with one attach and one hold of the kernel's
+/// `namespace_sem` fewer (goal 5 plan step 3, `goal5-mounts.md`); until the `chroot` the init's own root
+/// is still the tmpfs's, and it walks no path by name. This is safe here, where it is not in a copy of
+/// the host's namespace, because nothing of the host lies beneath the root (`goal5-root.md` §3): the
+/// escapes it opens there (E2, E3, a user-namespaced root) are closed.
+fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciError> {
+    rustix::mount::move_mount(
+        sources.rootfs.as_fd(),
+        "",
+        rustix::fs::CWD,
+        "/",
+        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+    )
+    .map_err(|e| OciError::os("attaching the rootfs", e))?;
+    let root = inroot::Root::new(sources.rootfs.as_fd());
+
+    let plan = crate::linux::oci::mount::plan(&spec.mounts)?;
+    if let Some(dev) = &sources.dev_mount
+        && !super::devmount::eligible(spec, &plan).is_ok_and(|(i, _)| i == dev.mount)
+    {
+        return Err(OciError::Broken(
+            "the prepared /dev does not match the mount plan".to_owned(),
+        ));
+    }
+    let mut binds = sources.binds.iter();
+    let mut ready = false;
+    for (index, op) in plan.iter().enumerate() {
+        // The mount at `/` is the rootfs itself (a layered root's overlay, with host-path layers the
+        // agent built as the rootfs tree; a directory root has none). It is already attached above, so
+        // it is skipped here, as the agent skipped it when it cloned the bind sources.
+        if op.destination == "/" {
+            continue;
+        }
+        if ready
+            && (!super::devmount::target_unaffected(&op.destination)
+                || !root.without_symlinks(&op.destination))
+        {
+            if let Some(dev) = &sources.dev_mount {
+                clear_prepared_dev(&dev.tree)?;
+            }
+            ready = false;
+        }
+        let prepared = sources
+            .dev_mount
+            .as_ref()
+            .filter(|d| usize::try_from(d.mount).ok() == Some(index))
+            .filter(|_| root.without_symlinks(&op.destination))
+            .map(|d| &d.tree);
+        do_mount_pruned(&root, op, &mut binds, prepared)?;
+        ready |= prepared.is_some();
+    }
+    if binds.next().is_some() {
+        return Err(OciError::Broken(
+            "the create carried more bind-source trees than the spec has bind mounts".to_owned(),
+        ));
+    }
+    // A pruned create is a root node's, never a user namespace's (the runtime routes those classic), so
+    // devices are made with `mknod`, as the classic path makes them outside a user namespace.
+    if !ready {
+        make_dev(&root, spec, false)?;
+    }
+    let mut null = None;
+    for path in &spec.linux.masked_paths {
+        mask_path_pruned(&root, path, &mut null)?;
+    }
+    for path in &spec.linux.readonly_paths {
+        readonly_path_pruned(&root, path)?;
+    }
+    if spec.root.readonly {
+        // The rootfs mount alone read-only (not its submounts): not recursive, as the classic path's
+        // remount changes only the bind's top.
+        sys::mount_setattr(
+            sources.rootfs.as_fd(),
+            false,
+            &sys::MountAttrs {
+                set: sys::MOUNT_ATTR_RDONLY,
+                clr: 0,
+                propagation: 0,
+            },
+        )
+        .map_err(|e| OciError::os("remounting the rootfs read-only", e))?;
+    }
+
+    // A debug-only test crash here, between the mounts' attach and the switch (`seed::ENV_INJECT`): the
+    // init ends as a kill would, its mounts still in its own namespace, so a test proves the agent leaves
+    // no container, clone or mount of it in its own (CLAUDE.md §6, crash injection at every write). Absent
+    // from release builds, where the init never looks for it.
+    #[cfg(debug_assertions)]
+    if std::env::var(crate::linux::oci::seed::ENV_INJECT).as_deref()
+        == Ok(crate::linux::oci::seed::INJECT_DIE_BEFORE_SWITCH)
+    {
+        sys::exit_child(70);
+    }
+
+    // The root switch, with no pivot_root: into the rootfs, then chroot there.
+    rustix::process::fchdir(&sources.rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
+    rustix::process::chroot(".").map_err(|e| OciError::os("chroot into the root", e))?;
+    rustix::process::chdir("/").map_err(|e| OciError::os("chdir /", e))?;
+    if let Some(prop) = spec
+        .linux
+        .rootfs_propagation
+        .as_deref()
+        .and_then(propagation)
+    {
+        rustix::mount::mount_change("/", prop)
+            .map_err(|e| OciError::os("setting rootfs propagation", e))?;
+    }
+    Ok(())
+}
+
+/// One of the spec's mounts on the pruned path: a bind from the next tree the agent cloned (its flags
+/// set on the tree, then attached by `move_mount`), or a filesystem made with `fsopen`/`fsmount` and
+/// attached the same way. The destination is resolved inside the rootfs ([`target`]), as the classic
+/// [`do_mount`] resolves it, and the mount attached to that descriptor (no `/proc/self/fd` here). A
+/// propagation the spec asks for is set on the attached mount through its own descriptor, which names
+/// the mount now on top of the destination.
+fn do_mount_pruned<'a>(
+    root: &inroot::Root<'_>,
+    op: &crate::linux::oci::mount::Op,
+    binds: &mut impl Iterator<Item = &'a OwnedFd>,
+    prepared: Option<&OwnedFd>,
+) -> Result<(), OciError> {
+    let at = || format!("{} at {}", op.kind_source, op.destination);
+    let fs;
+    let attached = if op.is_bind {
+        let tree = binds.next().ok_or_else(|| {
+            OciError::Broken(format!("the bind at {} has no source tree", op.destination))
+        })?;
+        // A missing destination is made as what the source is: a file for a file's bind.
+        let target_fd = match root.open(&op.destination, Make::Nothing)? {
+            Some(fd) => fd,
+            None if is_regular_file(tree.as_fd())? => target(root, &op.destination, Make::File)?,
+            None => target(root, &op.destination, Make::Dir)?,
+        };
+        // A cloned bind must leave every host peer group before anything can be mounted beneath
+        // it. Slave first preserves incoming propagation for explicit shared/slave; shared is made
+        // a new peer group below. Other binds are recursively private, as the classic root's are.
+        let propagation = if op.propagation.is_some_and(|p| {
+            p.intersects(MountPropagationFlags::SHARED | MountPropagationFlags::DOWNSTREAM)
+        }) {
+            sys::MS_SLAVE
+        } else {
+            sys::MS_PRIVATE
+        };
+        let set = attr_set(op.flags);
+        sys::mount_setattr(
+            tree.as_fd(),
+            true,
+            &sys::MountAttrs {
+                set: if op.recursive_bind { set } else { 0 },
+                clr: 0,
+                propagation,
+            },
+        )
+        .map_err(|e| OciError::os("setting a bind's attributes", format!("{}: {e}", at())))?;
+        // Privacy is always recursive; a nonrecursive bind's attribute request is not. Keep that
+        // scope even when the cloned source carries submounts, rather than widening its flags.
+        if !op.recursive_bind && set != 0 {
+            sys::mount_setattr(
+                tree.as_fd(),
+                false,
+                &sys::MountAttrs {
+                    set,
+                    clr: 0,
+                    propagation: 0,
+                },
+            )
+            .map_err(|e| OciError::os("setting a bind's attributes", format!("{}: {e}", at())))?;
+        }
+        rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("attaching a bind", format!("{}: {e}", at())))?;
+        tree.as_fd()
+    } else {
+        let target_fd = target(root, &op.destination, Make::Dir)?;
+        let filesystem = match prepared {
+            Some(tree) => tree,
+            None => {
+                fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
+                    OciError::os(
+                        "making a filesystem",
+                        format!("{} at {}: {e}", op.fstype, op.destination),
+                    )
+                })?;
+                &fs
+            }
+        };
+        rustix::mount::move_mount(filesystem.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| {
+                OciError::os(
+                    "attaching a filesystem",
+                    format!("{} at {}: {e}", op.fstype, op.destination),
+                )
+            })?;
+        filesystem.as_fd()
+    };
+    if let Some(prop) = op.propagation {
+        let (ms, rec) = propagation_ms(prop);
+        // Bind privacy/slavery was applied recursively before attachment, with its attributes.
+        // A requested shared group or unbindable state still needs the final transition.
+        if op.is_bind && matches!(ms, sys::MS_PRIVATE | sys::MS_SLAVE) {
+            return Ok(());
+        }
+        sys::mount_setattr(
+            attached,
+            rec,
+            &sys::MountAttrs {
+                set: 0,
+                clr: 0,
+                propagation: ms,
+            },
+        )
+        .map_err(|e| OciError::os("setting a mount's propagation", format!("{}: {e}", at())))?;
+    }
+    Ok(())
+}
+
+/// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its source, data options and
+/// flags the spec's: a detached mount descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
+/// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`; the agent
+/// ([`super::run`]) makes a layered root's overlay this way too, where it can reach the layers' host
+/// paths that the pruned seed can't, and hands the init the result as the rootfs. The source is set as
+/// `mount(2)` sets it, the context's `source` parameter (v6.19 `fs/namespace.c:3706`), which every
+/// filesystem takes (`fs/fs_context.c:151-156`): else the mount's source reads `none` where the spec
+/// named one. Its flags are taken as `mount(2)` takes them: the per-mount ones at `fsmount`
+/// ([`attr_flags`]), `sync` and `dirsync` by the context, where once only read-only, `nosuid`, `nodev` and
+/// `noexec` were, an access time the spec set lost.
+pub(crate) fn make_fs(
+    source: &str,
+    fstype: &str,
+    data: &str,
+    flags: MountFlags,
+) -> Result<OwnedFd, OciError> {
+    // The refill worker runs concurrently with helper execs: the context must not leak through
+    // a seed/shim exec while this function is between fsopen and fsmount.
+    let fs = rustix::mount::fsopen(fstype, FsOpenFlags::FSOPEN_CLOEXEC)
+        .map_err(|e| OciError::os("fsopen", e))?;
+    rustix::mount::fsconfig_set_string(fs.as_fd(), "source", source)
+        .map_err(|e| OciError::os("a filesystem's source", format!("{source}: {e}")))?;
+    // The superblock's own flags, which a mount can't carry: as flags of the context
+    // (`fs/fs_context.c:41-46`), as `mount(2)` takes them from its flags.
+    for (flag, name) in [
+        (MountFlags::SYNCHRONOUS, "sync"),
+        (MountFlags::DIRSYNC, "dirsync"),
+    ] {
+        if flags.contains(flag) {
+            rustix::mount::fsconfig_set_flag(fs.as_fd(), name)
+                .map_err(|e| OciError::os("a filesystem flag", format!("{name}: {e}")))?;
+        }
+    }
+    for opt in data.split(',').filter(|s| !s.is_empty()) {
+        match opt.split_once('=') {
+            Some((key, value)) => rustix::mount::fsconfig_set_string(fs.as_fd(), key, value)
+                .map_err(|e| OciError::os("a filesystem option", format!("{opt}: {e}")))?,
+            None => rustix::mount::fsconfig_set_flag(fs.as_fd(), opt)
+                .map_err(|e| OciError::os("a filesystem flag", format!("{opt}: {e}")))?,
+        }
+    }
+    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| OciError::os("fsconfig create", e))?;
+    rustix::mount::fsmount(fs.as_fd(), FsMountFlags::FSMOUNT_CLOEXEC, attr_flags(flags))
+        .map_err(|e| OciError::os("fsmount", e))
+}
+
+/// Masks a path on the pruned path (goal 5 plan step 2): a directory with a read-only empty tmpfs, a
+/// file by binding the container's own `/dev/null` over it. The classic [`mask_path`] binds the host's
+/// `/dev/null`; this namespace holds none, so the container's own is used, as the research prescribes.
+/// `null` keeps it once the first file's mask has opened it, for the masks after.
+fn mask_path_pruned(
+    root: &inroot::Root<'_>,
+    path: &str,
+    null: &mut Option<OwnedFd>,
+) -> Result<(), OciError> {
+    let Some(target_fd) = root.open(path, Make::Nothing)? else {
+        return Ok(());
+    };
+    let is_dir = rustix::fs::fstat(&target_fd)
+        .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
+        .map_err(|e| OciError::os("masking a path", format!("{path}: {e}")))?;
+    if is_dir {
+        let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
+            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+        rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+    } else {
+        let null = match null {
+            Some(fd) => fd,
+            None => null.insert(root.open("/dev/null", Make::Nothing)?.ok_or_else(|| {
+                OciError::Config(format!(
+                    "masking {path} needs the container's /dev/null, which isn't there"
+                ))
+            })?),
+        };
+        let tree = rustix::mount::open_tree(
+            null.as_fd(),
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::AT_EMPTY_PATH
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+        )
+        .map_err(|e| OciError::os("masking a file", format!("{path}: {e}")))?;
+        rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("masking a file", format!("{path}: {e}")))?;
+    }
+    Ok(())
+}
+
+/// A read-only path on the pruned path: the target cloned as a detached tree, set read-only on the
+/// tree (recursively), and moved back over itself. The classic [`readonly_path`] binds and remounts
+/// through `/proc/self/fd`, which this namespace has not.
+fn readonly_path_pruned(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+    let Some(target_fd) = root.open(path, Make::Nothing)? else {
+        return Ok(());
+    };
+    let tree = rustix::mount::open_tree(
+        target_fd.as_fd(),
+        "",
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::AT_EMPTY_PATH
+            | OpenTreeFlags::AT_RECURSIVE
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+    )
+    .map_err(|e| OciError::os("a read-only path", format!("{path}: {e}")))?;
+    sys::mount_setattr(
+        tree.as_fd(),
+        true,
+        &sys::MountAttrs {
+            set: sys::MOUNT_ATTR_RDONLY,
+            clr: 0,
+            propagation: 0,
+        },
+    )
+    .map_err(|e| OciError::os("a read-only path", format!("{path}: {e}")))?;
+    rustix::mount::move_mount(tree.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+        .map_err(|e| OciError::os("a read-only path", format!("{path}: {e}")))?;
+    Ok(())
+}
+
+/// Whether the mount a detached tree's descriptor roots is a regular file (a file-source bind), so its
+/// target is made as a file, not a directory.
+fn is_regular_file(fd: BorrowedFd<'_>) -> Result<bool, OciError> {
+    let st = rustix::fs::fstat(fd).map_err(|e| OciError::os("stat a bind source", e))?;
+    Ok(rustix::fs::FileType::from_raw_mode(st.st_mode) == rustix::fs::FileType::RegularFile)
+}
+
+/// A spec mount's read-only, `nosuid`, `nodev` and `noexec` as `mount_attr`'s `attr_set` bits, for a
+/// bind tree set with [`sys::mount_setattr`].
+fn attr_set(flags: MountFlags) -> u64 {
+    let mut set = 0u64;
+    if flags.contains(MountFlags::RDONLY) {
+        set |= sys::MOUNT_ATTR_RDONLY;
+    }
+    if flags.contains(MountFlags::NOSUID) {
+        set |= sys::MOUNT_ATTR_NOSUID;
+    }
+    if flags.contains(MountFlags::NODEV) {
+        set |= sys::MOUNT_ATTR_NODEV;
+    }
+    if flags.contains(MountFlags::NOEXEC) {
+        set |= sys::MOUNT_ATTR_NOEXEC;
+    }
+    set
+}
+
+/// A spec mount's per-mount flags as [`MountAttrFlags`], for a filesystem made at `fsmount`, each as
+/// `mount(2)` takes it (v6.19 `fs/namespace.c:3972-3992`): read-only, `nosuid`, `nodev`, `noexec`,
+/// `nodiratime` and `nosymfollow`, and the access-time mode, `strictatime` over `noatime` over the
+/// relatime the kernel defaults to.
+fn attr_flags(flags: MountFlags) -> MountAttrFlags {
+    let mut a = if flags.contains(MountFlags::STRICTATIME) {
+        MountAttrFlags::MOUNT_ATTR_STRICTATIME
+    } else if flags.contains(MountFlags::NOATIME) {
+        MountAttrFlags::MOUNT_ATTR_NOATIME
+    } else {
+        MountAttrFlags::MOUNT_ATTR_RELATIME
+    };
+    if flags.contains(MountFlags::NODIRATIME) {
+        a |= MountAttrFlags::MOUNT_ATTR_NODIRATIME;
+    }
+    if flags.contains(MountFlags::NOSYMFOLLOW) {
+        a |= MountAttrFlags::MOUNT_ATTR_NOSYMFOLLOW;
+    }
+    if flags.contains(MountFlags::RDONLY) {
+        a |= MountAttrFlags::MOUNT_ATTR_RDONLY;
+    }
+    if flags.contains(MountFlags::NOSUID) {
+        a |= MountAttrFlags::MOUNT_ATTR_NOSUID;
+    }
+    if flags.contains(MountFlags::NODEV) {
+        a |= MountAttrFlags::MOUNT_ATTR_NODEV;
+    }
+    if flags.contains(MountFlags::NOEXEC) {
+        a |= MountAttrFlags::MOUNT_ATTR_NOEXEC;
+    }
+    a
+}
+
+/// A mount's propagation as `mount_attr`'s `propagation` value and whether it applies recursively,
+/// for [`sys::mount_setattr`]. Exactly one of unbindable, private, slave (downstream) or shared.
+fn propagation_ms(flags: MountPropagationFlags) -> (u64, bool) {
+    let recursive = flags.contains(MountPropagationFlags::REC);
+    let ms = if flags.contains(MountPropagationFlags::SHARED) {
+        sys::MS_SHARED
+    } else if flags.contains(MountPropagationFlags::DOWNSTREAM) {
+        sys::MS_SLAVE
+    } else if flags.contains(MountPropagationFlags::UNBINDABLE) {
+        sys::MS_UNBINDABLE
+    } else {
+        sys::MS_PRIVATE
+    };
+    (ms, recursive)
+}
+
 /// A rootfs-propagation name (OCI `rootfsPropagation`) as a propagation flag.
 fn propagation(name: &str) -> Option<MountPropagationFlags> {
     let f = match name {
@@ -649,7 +1202,7 @@ fn propagation(name: &str) -> Option<MountPropagationFlags> {
     Some(f)
 }
 
-fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
+fn do_mount(root: &inroot::Root<'_>, op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
     // Which mount failed, and of what, with why.
     let failed = |e: rustix::io::Errno| {
         format!(
@@ -662,12 +1215,14 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
             op.destination
         )
     };
-    let make = if op.is_bind && Path::new(&op.kind_source).is_file() {
-        Make::File
-    } else {
-        Make::Dir
+    // A missing destination is made as what the mount needs: a file for a file's bind.
+    let target_fd = match root.open(&op.destination, Make::Nothing)? {
+        Some(fd) => fd,
+        None if op.is_bind && Path::new(&op.kind_source).is_file() => {
+            target(root, &op.destination, Make::File)?
+        }
+        None => target(root, &op.destination, Make::Dir)?,
     };
-    let target_fd = target(rootfs, &op.destination, make)?;
     let at = inroot::fd_path(&target_fd);
     if op.is_bind {
         if op.recursive_bind {
@@ -679,7 +1234,7 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
         }
         if op.flags.intersects(MountFlags::RDONLY) {
             // Opened again, the destination is the bind just made on top of the target.
-            let top_fd = target(rootfs, &op.destination, Make::Nothing)?;
+            let top_fd = target(root, &op.destination, Make::Nothing)?;
             let top = inroot::fd_path(&top_fd);
             rustix::mount::mount_remount(&top, op.flags | MountFlags::BIND, op.data.as_str())
                 .map_err(|e| OciError::os("remounting bind", failed(e)))?;
@@ -691,7 +1246,7 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
             // every box's cgroup files by unmounting its own cgroup mounts off (T-T7.1.4). So each
             // cgroup filesystem the bind carries is remounted read-only too.
             if op.recursive_bind {
-                remount_cgroupfs_readonly(rootfs, &op.destination, &top_fd, op.flags)?;
+                remount_cgroupfs_readonly(root, &op.destination, &top_fd, op.flags)?;
             }
         }
     } else {
@@ -706,7 +1261,7 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
         .map_err(|e| OciError::os("mount", failed(e)))?;
     }
     if let Some(prop) = op.propagation {
-        let top_fd = target(rootfs, &op.destination, Make::Nothing)?;
+        let top_fd = target(root, &op.destination, Make::Nothing)?;
         rustix::mount::mount_change(inroot::fd_path(&top_fd), prop)
             .map_err(|e| OciError::os("mount propagation", failed(e)))?;
     }
@@ -714,8 +1269,8 @@ fn do_mount(rootfs: &Path, op: &crate::linux::oci::mount::Op) -> Result<(), OciE
 }
 
 /// `dest` opened in the container's root, made as `make` says when it's missing.
-fn target(rootfs: &Path, dest: &str, make: Make) -> Result<OwnedFd, OciError> {
-    inroot::open(rootfs, dest, make)?
+fn target(root: &inroot::Root<'_>, dest: &str, make: Make) -> Result<OwnedFd, OciError> {
+    root.open(dest, make)?
         .ok_or_else(|| OciError::Config(format!("{dest} isn't in the container's root")))
 }
 
@@ -734,25 +1289,223 @@ fn data_cstr(data: &str) -> Result<Option<std::ffi::CString>, OciError> {
 /// (`/sys/fs/cgroup`), and a box is refused rather than left part-done past this (CLAUDE.md §2, §3).
 const MAX_CGROUP_SUBMOUNTS: usize = 256;
 
+/// The init's mount table is read into a buffer this large to begin with, so a table that fits is read
+/// in one call and an end-of-file: the kernel makes the table's text anew for each read, so a buffer that
+/// starts small and grows, as `read_to_string`'s does, read a 14-mount table in 9 calls and 65 us in goal
+/// 5 plan step 3's trace (`goal5-mounts.md` §4). 64 KiB holds about 400 lines of about 150 bytes.
+const MOUNTINFO_FIRST_READ: usize = 64 * 1024;
+
+/// The most of the mount table read: past it a recursive read-only bind is refused, by name, rather
+/// than its cgroup filesystems left unchecked or the table read without end (CLAUDE.md §2, §3). 16 MiB
+/// holds about 100,000 lines.
+const MAX_MOUNTINFO: u64 = 16 * 1024 * 1024;
+
 /// Each cgroup filesystem a recursive read-only bind carries, remounted read-only. A `mount(2)`
 /// remount changes one mount, not the submounts a recursive bind brought with it, so remounting the
 /// bind's top leaves them with the source's flags. For a rootless box's `/sys` that is the host's
 /// cgroup filesystem, which stays writable beneath the box's own cgroup mounts over it; this makes it
 /// read-only, so a box holding `CAP_SYS_ADMIN` that unmounts its own cgroup mounts off reaches a
-/// read-only host tree, not a writable one. Flat: one bounded pass over the mount table (§11), at most
+/// read-only host tree, not a writable one. They are asked of the kernel ([`cgroupfs_listed`]), or
+/// found in the mount table where the kernel can't answer ([`cgroupfs_in_table`]); at most
 /// [`MAX_CGROUP_SUBMOUNTS`] (§2).
 fn remount_cgroupfs_readonly(
-    rootfs: &Path,
+    root: &inroot::Root<'_>,
     destination: &str,
     top_fd: &OwnedFd,
     flags: MountFlags,
 ) -> Result<(), OciError> {
+    let beneath = match cgroupfs_listed(top_fd, destination)? {
+        Some(beneath) => beneath,
+        None => cgroupfs_in_table(top_fd, destination)?,
+    };
+    let base = destination.trim_end_matches('/');
+    for under in beneath {
+        let dest = format!("{base}/{under}");
+        let sub = target(root, &dest, Make::Nothing)?;
+        rustix::mount::mount_remount(inroot::fd_path(&sub), flags | MountFlags::BIND, "").map_err(
+            |e| {
+                OciError::os(
+                    "remounting a cgroup filesystem read-only",
+                    format!("{dest}: {e}"),
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Most mounts beneath a recursive read-only bind looked at for its cgroup filesystems: past it the bind
+/// is refused, by name, rather than its cgroup filesystems left unchecked (CLAUDE.md §2, §3). As many as
+/// the mount table's bound, [`MAX_MOUNTINFO`], holds lines.
+const MAX_SUBMOUNTS_LISTED: usize = 100_000;
+
+/// Mount ids `listmount` writes per call.
+const LISTMOUNT_BATCH: usize = 64;
+
+// `statmount(2)`'s fields this reads and the bits that ask for its strings (v6.19
+// include/uapi/linux/mount.h:155-189, :217-218): the kernel writes its fixed 512 bytes, then each string
+// asked at the offset its field gives past them (fs/namespace.c:5472).
+const STATMOUNT_MNT_POINT: u64 = 0x10;
+const STATMOUNT_FS_TYPE: u64 = 0x20;
+const STATMOUNT_SIZE_AT: usize = 0;
+const STATMOUNT_MASK_AT: usize = 8;
+const STATMOUNT_FS_TYPE_AT: usize = 36;
+const STATMOUNT_MNT_POINT_AT: usize = 108;
+const STATMOUNT_FIXED: usize = 512;
+/// `statmount`'s buffer to begin with: the fixed part and 1.5 KiB of strings, a filesystem type and a
+/// mount point of any usual length. Each page of a larger one the init zeroes is a page fault in its
+/// set-up (goal5-mounts.md §5: 4.2 per create at 8.5 KiB), so it grows only when the kernel says the
+/// strings don't fit (`EOVERFLOW`).
+const STATMOUNT_FIRST: usize = STATMOUNT_FIXED + 1536;
+/// The most `statmount`'s buffer grows to: the fixed part, then a filesystem type and a mount point,
+/// each at most `PATH_MAX` (4096) with its NUL. A longer one is refused (`EOVERFLOW`), not cut.
+const STATMOUNT_BUF: usize = STATMOUNT_FIXED + 2 * 4096;
+
+/// The cgroup filesystems beneath the bind open as `top_fd`, each as its path under the bind's top,
+/// asked of the kernel (Linux 6.8, `docs/research/runtime/goal5-mounts.md` §2): the bind's unique mount
+/// id (`statx`'s `STATX_MNT_ID_UNIQUE`) and its mount point (`statmount`), the ids of every mount
+/// beneath it (`listmount`), and each one's type and point. Flat: listed in batches, at most
+/// [`MAX_SUBMOUNTS_LISTED`] looked at (§2, §11). `None` where the kernel has no answer (before 6.8: no
+/// unique id, `ENOSYS`), for the table to give instead.
+fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<String>>, OciError> {
+    let unique = rustix::fs::StatxFlags::from_bits_retain(libc::STATX_MNT_ID_UNIQUE);
+    let stx = rustix::fs::statx(top_fd, "", rustix::fs::AtFlags::EMPTY_PATH, unique)
+        .map_err(|e| OciError::os("reading the bind's mount id", e))?;
+    if !rustix::fs::StatxFlags::from_bits_retain(stx.stx_mask).contains(unique) {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; STATMOUNT_FIRST];
+    let Some((_, top)) = mount_info(stx.stx_mnt_id, STATMOUNT_MNT_POINT, &mut buf)? else {
+        return Ok(None);
+    };
+    let top = Path::new(&top);
+    let mut found = Vec::new();
+    let mut ids = [0u64; LISTMOUNT_BATCH];
+    let (mut last, mut budget) = (0u64, MAX_SUBMOUNTS_LISTED);
+    loop {
+        let n = match sys::listmount(stx.stx_mnt_id, last, &mut ids) {
+            Ok(n) => n,
+            Err(rustix::io::Errno::NOSYS) => return Ok(None),
+            Err(e) => return Err(OciError::os("listing the bind's submounts", e)),
+        };
+        let listed = ids.get(..n).ok_or_else(|| {
+            OciError::os(
+                "listing the bind's submounts",
+                format!("{n} ids, past the {LISTMOUNT_BATCH} asked"),
+            )
+        })?;
+        for &id in listed {
+            budget = budget.checked_sub(1).ok_or_else(|| {
+                OciError::Config(format!(
+                    "the recursive bind at {destination} carries over {MAX_SUBMOUNTS_LISTED} mounts \
+                     to look at for cgroup filesystems"
+                ))
+            })?;
+            let Some((fstype, point)) =
+                mount_info(id, STATMOUNT_FS_TYPE | STATMOUNT_MNT_POINT, &mut buf)?
+            else {
+                return Ok(None);
+            };
+            if !matches!(fstype.as_str(), "cgroup2" | "cgroup") {
+                continue;
+            }
+            if let Some(under) = beneath_top(&point, top) {
+                found_one(&mut found, under, destination)?;
+            }
+        }
+        match listed.last() {
+            Some(&id) if n == ids.len() => last = id,
+            _ => break,
+        }
+    }
+    Ok(Some(found))
+}
+
+/// Mount `id`'s filesystem type and mount point, as many of them as `mask` asks (the other is empty),
+/// read through `statmount` into `buf`, which grows once to [`STATMOUNT_BUF`] when they don't fit.
+/// `None` from a kernel without it.
+fn mount_info(id: u64, mask: u64, buf: &mut Vec<u8>) -> Result<Option<(String, String)>, OciError> {
+    const WHAT: &str = "reading a mount's type and point";
+    let mut asked = sys::statmount(id, mask, buf);
+    if asked == Err(rustix::io::Errno::OVERFLOW) && buf.len() < STATMOUNT_BUF {
+        buf.resize(STATMOUNT_BUF, 0);
+        asked = sys::statmount(id, mask, buf);
+    }
+    match asked {
+        Ok(()) => {}
+        Err(rustix::io::Errno::NOSYS) => return Ok(None),
+        Err(e) => return Err(OciError::os(WHAT, e)),
+    }
+    let buf = &**buf;
+    let short = || OciError::os(WHAT, "a short answer");
+    let used = field_u32(buf, STATMOUNT_SIZE_AT).ok_or_else(short)?;
+    if field_u64(buf, STATMOUNT_MASK_AT).ok_or_else(short)? & mask != mask {
+        return Err(OciError::os(
+            WHAT,
+            "the kernel gave not all the fields asked",
+        ));
+    }
+    let end = usize::try_from(used).map_or(buf.len(), |used| used.min(buf.len()));
+    let text = |field: usize, bit: u64| -> Result<String, OciError> {
+        if mask & bit == 0 {
+            return Ok(String::new());
+        }
+        let off = field_u32(buf, field).ok_or_else(short)?;
+        let rest = usize::try_from(off)
+            .ok()
+            .and_then(|off| STATMOUNT_FIXED.checked_add(off))
+            .and_then(|start| buf.get(start..end))
+            .ok_or_else(|| OciError::os(WHAT, "a string outside the answer"))?;
+        let s = rest.split(|&b| b == 0).next().unwrap_or_default();
+        Ok(String::from_utf8_lossy(s).into_owned())
+    };
+    Ok(Some((
+        text(STATMOUNT_FS_TYPE_AT, STATMOUNT_FS_TYPE)?,
+        text(STATMOUNT_MNT_POINT_AT, STATMOUNT_MNT_POINT)?,
+    )))
+}
+
+/// The `u32` the kernel wrote at byte `at` of `buf`, in its own byte order.
+fn field_u32(buf: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_ne_bytes(
+        buf.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+/// The `u64` the kernel wrote at byte `at` of `buf`, in its own byte order.
+fn field_u64(buf: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_ne_bytes(
+        buf.get(at..at.checked_add(8)?)?.try_into().ok()?,
+    ))
+}
+
+/// `point`'s path under the bind's top `top`, or `None` when it isn't beneath it or is the top itself
+/// (the bind's own top, which the caller remounted).
+fn beneath_top(point: &str, top: &Path) -> Option<String> {
+    let under = Path::new(point).strip_prefix(top).ok()?.to_string_lossy();
+    (!under.is_empty()).then(|| under.into_owned())
+}
+
+/// One more cgroup filesystem found beneath the bind at `destination`, refused past
+/// [`MAX_CGROUP_SUBMOUNTS`].
+fn found_one(found: &mut Vec<String>, under: String, destination: &str) -> Result<(), OciError> {
+    if found.len() >= MAX_CGROUP_SUBMOUNTS {
+        return Err(OciError::Config(format!(
+            "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
+             filesystems to make read-only"
+        )));
+    }
+    found.push(under);
+    Ok(())
+}
+
+/// The cgroup filesystems beneath the bind open as `top_fd`, found in this process's mount table, where
+/// the kernel has no `listmount` (before 6.8). Flat: one bounded pass over the table (§11).
+fn cgroupfs_in_table(top_fd: &OwnedFd, destination: &str) -> Result<Vec<String>, OciError> {
     let top_real = std::fs::read_link(inroot::fd_path(top_fd))
         .map_err(|e| OciError::os("reading the bind's path", e))?;
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|e| OciError::os("reading the mount table", e))?;
-    let base = destination.trim_end_matches('/');
-    let mut seen = 0usize;
+    let mountinfo = read_mountinfo(destination)?;
+    let mut found = Vec::new();
     for line in mountinfo.lines() {
         // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
         // then the filesystem type.
@@ -765,33 +1518,31 @@ fn remount_cgroupfs_readonly(
         let Some(point) = left.split(' ').nth(4) else {
             continue;
         };
-        let point = unescape_mountpoint(point);
-        let Ok(under) = Path::new(&point).strip_prefix(&top_real) else {
-            continue;
-        };
-        let under = under.to_string_lossy();
-        if under.is_empty() {
-            continue; // the bind's own top, already remounted by the caller
+        if let Some(under) = beneath_top(&unescape_mountpoint(point), &top_real) {
+            found_one(&mut found, under, destination)?;
         }
-        seen = seen.saturating_add(1);
-        if seen > MAX_CGROUP_SUBMOUNTS {
-            return Err(OciError::Config(format!(
-                "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
-                 filesystems to make read-only"
-            )));
-        }
-        let dest = format!("{base}/{under}");
-        let sub = target(rootfs, &dest, Make::Nothing)?;
-        rustix::mount::mount_remount(inroot::fd_path(&sub), flags | MountFlags::BIND, "").map_err(
-            |e| {
-                OciError::os(
-                    "remounting a cgroup filesystem read-only",
-                    format!("{dest}: {e}"),
-                )
-            },
-        )?;
     }
-    Ok(())
+    Ok(found)
+}
+
+/// This process's mount table, `/proc/self/mountinfo`, read whole and bounded ([`MOUNTINFO_FIRST_READ`],
+/// [`MAX_MOUNTINFO`]), for the recursive bind at `destination`.
+fn read_mountinfo(destination: &str) -> Result<String, OciError> {
+    use std::io::Read;
+    let file = std::fs::File::open("/proc/self/mountinfo")
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    let mut bytes = Vec::with_capacity(MOUNTINFO_FIRST_READ);
+    file.take(MAX_MOUNTINFO)
+        .read_to_end(&mut bytes)
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    if !u64::try_from(bytes.len()).is_ok_and(|n| n < MAX_MOUNTINFO) {
+        return Err(OciError::Config(format!(
+            "the recursive bind at {destination} needs the mount table read, and it is over \
+             {MAX_MOUNTINFO} bytes"
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| OciError::os("reading the mount table", format!("not UTF-8: {e}")))
 }
 
 /// A `/proc/self/mountinfo` mount point with its escapes (space `\040`, tab `\011`, newline `\012`,
@@ -805,33 +1556,119 @@ fn unescape_mountpoint(field: &str) -> String {
         .replace("\\134", "\\")
 }
 
-fn make_default_devices(rootfs: &Path, in_userns: bool) -> Result<(), OciError> {
-    for (path, major, minor, mode) in DEFAULT_DEVICES {
-        if inroot::open(rootfs, path, Make::Nothing)?.is_some() {
-            continue;
-        }
-        if in_userns {
-            bind_host_device(rootfs, path, path)?;
-        } else {
-            make_node(
-                rootfs,
-                path,
-                rustix::fs::FileType::CharacterDevice,
-                mode,
-                major,
-                minor,
-            )?;
-        }
+/// Makes a fresh detached tmpfs `/dev` with defaults, before any create can see it. Each node gets
+/// its exact mode through chmod: the worker must never change the multi-threaded agent's umask.
+pub fn prepare_dev(source: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
+    let tree = make_fs(source, "tmpfs", data, flags)?;
+    for &(name, major, minor, mode) in &DEFAULT_DEVICES {
+        make_node(
+            &tree,
+            name,
+            rustix::fs::FileType::CharacterDevice,
+            mode,
+            major,
+            minor,
+        )?;
+    }
+    for &(source, name) in &DEFAULT_LINKS {
+        rustix::fs::symlinkat(source, &tree, name)
+            .map_err(|e| OciError::os("preparing a /dev link", e))?;
+    }
+    Ok(tree)
+}
+
+pub(crate) fn default_dev_name(name: &str) -> bool {
+    DEFAULT_DEVICES.iter().any(|&(n, ..)| n == name)
+        || DEFAULT_LINKS.iter().any(|&(_, n)| n == name)
+}
+
+/// A later mount might depend on defaults which ordinary setup has not made yet. Earlier guarded
+/// mounts have touched none of these names, so remove the pristine defaults, then run ordinary setup.
+fn clear_prepared_dev(tree: &OwnedFd) -> Result<(), OciError> {
+    for name in DEFAULT_DEVICES
+        .iter()
+        .map(|&(n, ..)| n)
+        .chain(DEFAULT_LINKS.iter().map(|&(_, n)| n))
+    {
+        rustix::fs::unlinkat(tree, name, rustix::fs::AtFlags::empty())
+            .map_err(|e| OciError::os("restoring /dev mount ordering", e))?;
     }
     Ok(())
 }
 
-fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciError> {
-    if inroot::open(rootfs, &dev.path, Make::Nothing)?.is_some() {
+/// The container's `/dev`: the default devices (OCI spec §Default Devices), the spec's own, then the
+/// default links (§Dev symbolic links). `/dev` is opened once, made when missing, for the defaults,
+/// which go directly in it. Each default is made first and looked for only when the kernel refuses it
+/// as there (`EEXIST`), not looked for before each: those looks and their walks were most of the
+/// init's calls in goal 5 plan step 3's trace (`docs/research/runtime/goal5-mounts.md`).
+fn make_dev(root: &inroot::Root<'_>, spec: &Spec, in_userns: bool) -> Result<(), OciError> {
+    if in_userns {
+        // mknod is refused in a user namespace, so the host's nodes are bound in, each where none is.
+        for (name, ..) in DEFAULT_DEVICES {
+            let path = format!("/dev/{name}");
+            if root.open(&path, Make::Nothing)?.is_none() {
+                bind_host_device(root, &path, &path)?;
+            }
+        }
+    }
+    let dev = target(root, "/dev", Make::Dir)?;
+    if !in_userns {
+        make_default_devices(root, &dev)?;
+    }
+    for device in &spec.linux.devices {
+        make_device(root, device, in_userns)?;
+    }
+    make_default_links(root, &dev)
+}
+
+/// The default devices made in `/dev` (`dev`) with `mknodat`, each with its mode exactly: the umask is
+/// cleared for their making and put back after, in place of a `chmod` each.
+fn make_default_devices(root: &inroot::Root<'_>, dev: &OwnedFd) -> Result<(), OciError> {
+    let umask = rustix::process::umask(Mode::empty());
+    let made = DEFAULT_DEVICES
+        .iter()
+        .try_for_each(|&(name, major, minor, mode)| {
+            default_device(root, dev, name, major, minor, mode)
+        });
+    rustix::process::umask(umask);
+    made
+}
+
+/// One default device, `name` in `/dev` (`dev`). One the kernel refuses to make is then looked for, as
+/// each was looked for before it was made, so the outcome is the look's: a name that leads to something
+/// in the root is left as it is, whatever it is; one whose look is refused (a magic link, a file taken
+/// for a directory) is refused as the look refuses it; and one that leads to nothing (a link to nothing
+/// inside the root), or a node the kernel won't make, is refused, naming it.
+fn default_device(
+    root: &inroot::Root<'_>,
+    dev: &OwnedFd,
+    name: &str,
+    major: u32,
+    minor: u32,
+    mode: u32,
+) -> Result<(), OciError> {
+    let made = rustix::fs::mknodat(
+        dev,
+        name,
+        rustix::fs::FileType::CharacterDevice,
+        Mode::from_bits_truncate(mode),
+        rustix::fs::makedev(major, minor),
+    );
+    match made {
+        Ok(()) => Ok(()),
+        Err(e) => match root.open(&format!("/dev/{name}"), Make::Nothing)? {
+            Some(_) => Ok(()),
+            None => Err(OciError::os("making a device", format!("/dev/{name}: {e}"))),
+        },
+    }
+}
+
+fn make_device(root: &inroot::Root<'_>, dev: &Device, in_userns: bool) -> Result<(), OciError> {
+    if root.open(&dev.path, Make::Nothing)?.is_some() {
         return Ok(());
     }
     if in_userns {
-        return bind_host_device(rootfs, &dev.path, &dev.path);
+        return bind_host_device(root, &dev.path, &dev.path);
     }
     let kind = match dev.kind.as_str() {
         "c" | "u" => rustix::fs::FileType::CharacterDevice,
@@ -847,16 +1684,16 @@ fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciEr
         .map_err(|_| OciError::Config("device major out of range".to_owned()))?;
     let minor = u32::try_from(dev.minor.unwrap_or(0))
         .map_err(|_| OciError::Config("device minor out of range".to_owned()))?;
+    let (dir, name) = root.parent(&dev.path)?;
     make_node(
-        rootfs,
-        &dev.path,
+        &dir,
+        &name,
         kind,
         dev.file_mode.unwrap_or(0o666),
         major,
         minor,
     )?;
     if let (Some(uid), Some(gid)) = (dev.uid, dev.gid) {
-        let (dir, name) = inroot::parent(rootfs, &dev.path)?;
         rustix::fs::chownat(
             &dir,
             name.as_str(),
@@ -869,28 +1706,27 @@ fn make_device(rootfs: &Path, dev: &Device, in_userns: bool) -> Result<(), OciEr
     Ok(())
 }
 
-/// Makes a device node at `dest` in the root, then sets its mode exactly (mknod's mode is masked by
-/// the umask).
+/// Makes a device node `name` in the directory `dir`, then sets its mode exactly (mknod's mode is
+/// masked by the umask).
 fn make_node(
-    rootfs: &Path,
-    dest: &str,
+    dir: &OwnedFd,
+    name: &str,
     kind: rustix::fs::FileType,
     mode: u32,
     major: u32,
     minor: u32,
 ) -> Result<(), OciError> {
-    let (dir, name) = inroot::parent(rootfs, dest)?;
     rustix::fs::mknodat(
-        &dir,
-        name.as_str(),
+        dir,
+        name,
         kind,
         Mode::from_bits_truncate(mode),
         rustix::fs::makedev(major, minor),
     )
     .map_err(|e| OciError::os("making a device", e))?;
     rustix::fs::chmodat(
-        &dir,
-        name.as_str(),
+        dir,
+        name,
         Mode::from_bits_truncate(mode),
         rustix::fs::AtFlags::empty(),
     )
@@ -900,41 +1736,38 @@ fn make_node(
 
 /// Binds the host's device file `host_path` at `dest` in the container (the user-namespace path,
 /// where mknod is refused).
-fn bind_host_device(rootfs: &Path, host_path: &str, dest: &str) -> Result<(), OciError> {
+fn bind_host_device(root: &inroot::Root<'_>, host_path: &str, dest: &str) -> Result<(), OciError> {
     if !Path::new(host_path).exists() {
         return Ok(());
     }
-    let target_fd = target(rootfs, dest, Make::File)?;
+    let target_fd = target(root, dest, Make::File)?;
     rustix::mount::mount_bind(host_path, inroot::fd_path(&target_fd))
         .map_err(|e| OciError::os("binding a host device", e))
 }
 
-fn make_default_symlinks(rootfs: &Path) -> Result<(), OciError> {
-    let links = [
-        ("/proc/self/fd", "/dev/fd"),
-        ("/proc/self/fd/0", "/dev/stdin"),
-        ("/proc/self/fd/1", "/dev/stdout"),
-        ("/proc/self/fd/2", "/dev/stderr"),
-        // When a devpts is mounted at /dev/pts, /dev/ptmx is its multiplexer (OCI §Default Devices).
-        ("pts/ptmx", "/dev/ptmx"),
-    ];
-    for (target, link) in links {
-        if inroot::open(rootfs, link, Make::Nothing)?.is_some() {
-            continue;
-        }
-        let (dir, name) = inroot::parent(rootfs, link)?;
-        match rustix::fs::symlinkat(target, &dir, name.as_str()) {
-            // A link there already, to what isn't mounted yet.
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-            Err(e) => return Err(OciError::os("making a /dev link", format!("{link}: {e}"))),
+/// The default links made in `/dev` (`dev`). One the kernel refuses to make is then looked for, as each
+/// was looked for before it was made, so the outcome is the look's: a name there is left as it is,
+/// whatever it leads to or a link to what isn't mounted yet; one whose look is refused (a magic link, a
+/// file taken for a directory) is refused as the look refuses it; and a link the kernel won't make where
+/// nothing is, is refused, naming it.
+fn make_default_links(root: &inroot::Root<'_>, dev: &OwnedFd) -> Result<(), OciError> {
+    for (target, name) in DEFAULT_LINKS {
+        if let Err(e) = rustix::fs::symlinkat(target, dev, name) {
+            let there = root.open(&format!("/dev/{name}"), Make::Nothing)?.is_some();
+            if !there && e != rustix::io::Errno::EXIST {
+                return Err(OciError::os(
+                    "making a /dev link",
+                    format!("/dev/{name}: {e}"),
+                ));
+            }
         }
     }
     Ok(())
 }
 
 /// A masked path is hidden: a directory gets a read-only empty tmpfs, a file a bind of /dev/null.
-fn mask_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let Some(target) = inroot::open(rootfs, path, Make::Nothing)? else {
+fn mask_path(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+    let Some(target) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
     let dir = rustix::fs::fstat(&target)
@@ -952,15 +1785,15 @@ fn mask_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
 }
 
 /// A readonly path is bound onto itself and remounted read-only.
-fn readonly_path(rootfs: &Path, path: &str) -> Result<(), OciError> {
-    let Some(target) = inroot::open(rootfs, path, Make::Nothing)? else {
+fn readonly_path(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+    let Some(target) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
     let at = inroot::fd_path(&target);
     rustix::mount::mount_bind(&at, &at)
         .map_err(|e| OciError::os("binding a readonly path", format!("{path}: {e}")))?;
     // Opened again, the path is the bind just made on top of it.
-    let top_fd = self::target(rootfs, path, Make::Nothing)?;
+    let top_fd = self::target(root, path, Make::Nothing)?;
     rustix::mount::mount_remount(
         inroot::fd_path(&top_fd),
         MountFlags::RDONLY | MountFlags::BIND,
@@ -1000,4 +1833,238 @@ fn inherited_fd(name: &str) -> Result<OwnedFd, OciError> {
 pub(crate) fn msg(sync: BorrowedFd<'_>, text: &str) {
     let line = format!("{text}\n");
     let _ = rustix::io::write(sync, line.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    //! Hostile images' `/dev` against the init's making of it (goal 5 plan step 3, T-T7.1.4; CLAUDE.md
+    //! §6): each default node and link is made first and looked for only when the kernel refuses its
+    //! name as there, and every outcome is the one the look before each gave: what's there is left as
+    //! it is, a name that leads out of the root or whose look is refused is refused, naming it. Run
+    //! unprivileged: with every name there, `mknodat` refuses on `EEXIST` before it asks for
+    //! `CAP_MKNOD`, so no node is ever made here.
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    /// A root holding `/dev`, and the default nodes' names as plain files, so `mknodat` meets each.
+    fn dev_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("dev")).unwrap();
+        for (name, ..) in DEFAULT_DEVICES {
+            std::fs::write(root.path().join("dev").join(name), name).unwrap();
+        }
+        root
+    }
+
+    fn with_dev<T>(root: &Path, f: impl FnOnce(&inroot::Root<'_>, &OwnedFd) -> T) -> T {
+        let fd = inroot::open_root(root).unwrap();
+        let in_root = inroot::Root::new(fd.as_fd());
+        let dev = target(&in_root, "/dev", Make::Dir).unwrap();
+        f(&in_root, &dev)
+    }
+
+    /// Do: an image's `/dev/null` is a link to a host directory, which inside the root leads nowhere.
+    /// Expect: refused naming `/dev/null`, and nothing made on the host.
+    #[test]
+    fn a_device_name_leading_out_of_the_root_is_refused_by_name() {
+        let host = tempfile::tempdir().unwrap();
+        let root = dev_root();
+        std::fs::remove_file(root.path().join("dev/null")).unwrap();
+        symlink(host.path().join("null"), root.path().join("dev/null")).unwrap();
+        let got = with_dev(root.path(), make_default_devices);
+        assert!(
+            matches!(&got, Err(OciError::Os { op, why }) if *op == "making a device" && why.starts_with("/dev/null: ")),
+            "{got:?}"
+        );
+        assert_eq!(std::fs::read_dir(host.path()).unwrap().count(), 0);
+    }
+
+    /// Do: an image's `/dev` already holds each default node's name, as a file, a directory, a link to a
+    /// file inside the root. Expect: each is left as it is, whatever it is, as the look before each left it.
+    #[test]
+    fn a_device_name_already_there_is_left_as_it_is() {
+        let root = dev_root();
+        std::fs::remove_file(root.path().join("dev/zero")).unwrap();
+        std::fs::create_dir(root.path().join("dev/zero")).unwrap();
+        std::fs::write(root.path().join("real-full"), "inside").unwrap();
+        std::fs::remove_file(root.path().join("dev/full")).unwrap();
+        symlink("/real-full", root.path().join("dev/full")).unwrap();
+        with_dev(root.path(), make_default_devices).unwrap();
+        let dev = root.path().join("dev");
+        assert_eq!(std::fs::read_to_string(dev.join("null")).unwrap(), "null");
+        assert!(dev.join("zero").is_dir());
+        assert_eq!(
+            std::fs::read_link(dev.join("full")).unwrap(),
+            Path::new("/real-full")
+        );
+        assert_eq!(std::fs::read_to_string(dev.join("tty")).unwrap(), "tty");
+    }
+
+    /// Do: an image's `/dev/null` is a link through a file, as though it were a directory. Expect: its
+    /// look is refused, naming `/dev/null` and the component the walk was refused at.
+    #[test]
+    fn a_device_name_whose_look_is_refused_is_refused_by_name() {
+        let root = dev_root();
+        std::fs::remove_file(root.path().join("dev/null")).unwrap();
+        symlink("zero/x", root.path().join("dev/null")).unwrap();
+        let got = with_dev(root.path(), make_default_devices);
+        assert!(
+            matches!(&got, Err(OciError::Os { why, .. }) if why.starts_with("/dev/null (dev/null): ")),
+            "{got:?}"
+        );
+    }
+
+    /// Do: an image's `/dev` is a file. Expect: the first default node is refused as the look before it
+    /// refused it, naming `/dev/null` and the component the walk was refused at.
+    #[test]
+    fn a_dev_that_is_a_file_is_refused_as_the_look_refused_it() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("dev"), "a file").unwrap();
+        let got = with_dev(root.path(), make_default_devices);
+        assert!(
+            matches!(&got, Err(OciError::Os { op, why }) if *op == "resolving a path in the container's root" && why.starts_with("/dev/null (dev/null): ")),
+            "{got:?}"
+        );
+        let links = with_dev(root.path(), make_default_links);
+        assert!(
+            matches!(&links, Err(OciError::Os { why, .. }) if why.starts_with("/dev/fd (dev/fd): ")),
+            "{links:?}"
+        );
+    }
+
+    /// Do: make the default links in an empty `/dev`. Expect: each points where the OCI spec says.
+    #[test]
+    fn the_default_links_are_made_as_the_spec_names_them() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("dev")).unwrap();
+        with_dev(root.path(), make_default_links).unwrap();
+        for (target, name) in DEFAULT_LINKS {
+            assert_eq!(
+                std::fs::read_link(root.path().join("dev").join(name)).unwrap(),
+                Path::new(target),
+                "/dev/{name}"
+            );
+        }
+    }
+
+    /// Do: an image's `/dev` already holds each link's name: a directory, a file, a link to nothing yet,
+    /// a link to a file inside the root. Expect: each is left as it is.
+    #[test]
+    fn a_link_name_already_there_is_left_as_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = root.path().join("dev");
+        std::fs::create_dir(&dev).unwrap();
+        std::fs::create_dir(dev.join("fd")).unwrap();
+        std::fs::write(dev.join("stdin"), "a file").unwrap();
+        symlink("/proc/self/fd/1", dev.join("stdout")).unwrap();
+        std::fs::write(root.path().join("real-err"), "").unwrap();
+        symlink("/real-err", dev.join("stderr")).unwrap();
+        with_dev(root.path(), make_default_links).unwrap();
+        assert!(dev.join("fd").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(dev.join("stdin")).unwrap(),
+            "a file"
+        );
+        assert_eq!(
+            std::fs::read_link(dev.join("stdout")).unwrap(),
+            Path::new("/proc/self/fd/1")
+        );
+        assert_eq!(
+            std::fs::read_link(dev.join("stderr")).unwrap(),
+            Path::new("/real-err")
+        );
+        assert_eq!(
+            std::fs::read_link(dev.join("ptmx")).unwrap(),
+            Path::new("pts/ptmx")
+        );
+    }
+
+    /// Do: an image's `/dev/stdin` is a link through a file. Expect: its look is refused, naming it.
+    #[test]
+    fn a_link_name_whose_look_is_refused_is_refused_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = root.path().join("dev");
+        std::fs::create_dir(&dev).unwrap();
+        std::fs::write(dev.join("file"), "").unwrap();
+        symlink("file/x", dev.join("stdin")).unwrap();
+        let got = with_dev(root.path(), make_default_links);
+        assert!(
+            matches!(&got, Err(OciError::Os { why, .. }) if why.starts_with("/dev/stdin (dev/stdin): ")),
+            "{got:?}"
+        );
+    }
+
+    /// Do: list the cgroup filesystems beneath the host's `/sys` both ways, from the kernel (`listmount`
+    /// and `statmount`, Linux 6.8) and from the mount table, as a recursive read-only bind of it has them
+    /// remounted (goal 5 plan step 3, T-T7.1.4). Expect: the same paths under `/sys`, `fs/cgroup` among
+    /// them where `/sys/fs/cgroup` is a cgroup filesystem, and the kernel's listing made (this host's
+    /// kernel has the calls), so the two can't agree by both finding nothing.
+    #[test]
+    fn the_kernel_lists_the_cgroup_filesystems_beneath_a_bind_as_the_table_does() {
+        let sys = rustix::fs::open(
+            "/sys",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let mut listed = cgroupfs_listed(&sys, "/sys")
+            .unwrap()
+            .expect("this host's kernel has listmount and statmount (Linux 6.8)");
+        let mut table = cgroupfs_in_table(&sys, "/sys").unwrap();
+        listed.sort();
+        table.sort();
+        assert_eq!(listed, table);
+        // CGROUP2_SUPER_MAGIC (include/uapi/linux/magic.h).
+        let cgroup2 = rustix::fs::statfs("/sys/fs/cgroup")
+            .is_ok_and(|st| u64::try_from(st.f_type).ok() == Some(0x6367_7270));
+        if cgroup2 {
+            assert!(listed.iter().any(|p| p == "fs/cgroup"), "{listed:?}");
+        }
+    }
+
+    /// Do: read the host's `/sys` mount point through `statmount` into a buffer that holds the fixed part
+    /// alone, which the kernel answers `EOVERFLOW` (fs/namespace.c:5682-5683) (goal 5 plan step 3,
+    /// T-T7.1.4). Expect: the buffer grown to its bound and the point read whole, `/sys`, not refused.
+    #[test]
+    fn a_mount_point_past_the_first_buffer_is_read_whole() {
+        let sys = rustix::fs::open(
+            "/sys",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let unique = rustix::fs::StatxFlags::from_bits_retain(libc::STATX_MNT_ID_UNIQUE);
+        let stx = rustix::fs::statx(&sys, "", rustix::fs::AtFlags::EMPTY_PATH, unique).unwrap();
+        let mut buf = vec![0u8; STATMOUNT_FIXED];
+        let got = mount_info(stx.stx_mnt_id, STATMOUNT_MNT_POINT, &mut buf)
+            .unwrap()
+            .expect("this host's kernel has statmount (Linux 6.8)");
+        assert_eq!(got, (String::new(), "/sys".to_owned()));
+        assert_eq!(buf.len(), STATMOUNT_BUF);
+    }
+
+    /// Do: a mount's target is a link to a host directory, or a path through a file. Expect: a target
+    /// the mount needs made is refused naming the link that leads nowhere inside the root, and nothing is
+    /// made on the host; a target through a file is refused naming the component it was refused at, as
+    /// the walk named it before one call resolved a target that's there.
+    #[test]
+    fn a_mount_target_out_of_the_root_or_through_a_file_is_refused_by_name() {
+        let host = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        symlink(host.path(), root.path().join("mnt")).unwrap();
+        std::fs::write(root.path().join("file"), "").unwrap();
+        let fd = inroot::open_root(root.path()).unwrap();
+        let in_root = inroot::Root::new(fd.as_fd());
+        let out = target(&in_root, "/mnt/data", Make::Dir);
+        assert!(
+            matches!(&out, Err(OciError::Config(why)) if why.starts_with("/mnt/data: mnt ")),
+            "{out:?}"
+        );
+        assert_eq!(std::fs::read_dir(host.path()).unwrap().count(), 0);
+        let through = target(&in_root, "/file/data", Make::Dir);
+        assert!(
+            matches!(&through, Err(OciError::Os { why, .. }) if why.starts_with("/file/data (file/data): ")),
+            "{through:?}"
+        );
+    }
 }

@@ -14,7 +14,9 @@
 //! held open one per policy, are [`programs`]; the system calls that need `unsafe` are in [`sys`].
 
 pub mod caps;
+pub mod devmount;
 pub mod devshare;
+pub mod escape;
 pub mod exec;
 pub mod init;
 pub mod inroot;

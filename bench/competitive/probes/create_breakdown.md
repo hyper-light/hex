@@ -544,6 +544,235 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
 - **The second met the host as run 4 did:** libcrun's 2.701 ms against run 4's 2.750, and the base's 1.904 against
   run 4's 2.020. There step 1's create p50, 1.512 ms, is 25.1% under run 4's 2.020, as the plan's criterion reads it.
 
+## The root switch at concurrency (goal 5 plan step 2, AC-e)
+
+The pruned-seed root (decision 5's extension) ends not with `pivot_root` but with `chroot` (step 2's init moved the
+root onto `/` by `MS_MOVE` before it; from step 3 the rootfs is attached on `/` directly), so the
+switch holds no host-wide lock: `pivot_root` calls `chroot_fs_refs`, which takes `tasklist_lock` and walks every
+task on the host (`fs/namespace.c`, `fs/fs_struct.c`, quoted under run 1), while `chroot` swaps only the caller's
+own `fs->root` under its `fs->lock`. AC-e covers the root's parts under concurrency — eight creates in flight with
+at least 8,000 idle threads on the host, which a `pivot_root` would walk: the **switch** (part 20) at or below a
+0.5 ms p99, and the init's **root mounts** beside it (part 19, run 4's). The mounts still take the mount namespace's
+lock, which the classic path takes too. Step 2 reports that cost; step 3 additionally requires the
+mounts' p99 at or below 0.5 ms, selected with `AC_E_MOUNTS=1`.
+
+`create_breakdown.py switch <trace> <stats> [seam json] [switch|mounts]` reads both parts. The harness runs it under
+`AC_E=<lifecycles>`: `seam_oci`'s throughput phase pinned to eight in flight (`HEXBENCH_THROUGHPUT_CONC=8`) with the
+root's events on (`sys_enter`/`sys_exit` of `setns`, `chroot` and `pivot_root`, plus `sys_exit_clone3`, filtered to the runtime's `seam_oci`
+and `hex`), recording for the whole phase — no `HEXBENCH_TRACE`, so `seam_oci` never toggles `tracing_on`. The
+**switch** (part 20) is each thread's `chroot` entry to its exit; the **mounts** (part 19) run from the net-namespace
+join (`setns` with `CLONE_NEWNET`) that opens them to the `chroot`, spanning the init's `move_mount`/`fsmount` of the
+rootfs and the spec's mounts under the kernel's mount lock. The host holds `IDLE_THREADS` idle threads
+(`idlethreads.c`), outside the bench container, in the kernel's global task list a `pivot_root` walks though not in
+the container's pid namespace. Two kinds of `pivot_root` can appear and are told apart by their caller: a pruned
+**seed** prunes its own mount namespace once at start with a `pivot_root`, by a pid that never `chroot`s; an
+**init** on this path `chroot`s and never `pivot_root`s. So an init `pivot_root` is one by a pid that also `chroot`s
+(AC-a: none), and the reader checks every create switched via `chroot` (chroots == creates), a create that fell back
+to the classic path `pivot_root`ing in place of `chroot` dropping the count.
+
+A network-pool miss has no network `setns`: the init is born with `CLONE_NEWNET`. Its part 19 starts
+on that init's `clone3` return zero, including initial setup and bringing loopback up. A successful
+network `setns` exit remains the preferred cut. The mounts criterion requires every create to have
+a mount span and whole-create sample, with the fallback count exactly matching `netns.made_on_path`
+and only concurrency eight in the seam JSON. Missing JSON, lost events, failed/unpaired switches,
+classic fallback and incomplete coverage refuse the run. No dry creates are omitted. Old switch-only
+records retain their original coverage rule for historical reading.
+
+For the prepared `/dev` comparison, `HEXBENCH_DEVFS=0` and `1` use the same release and concurrency;
+JSON records whole-create `create_ms` and fixed pool reasons outside each timed phase. The fixed
+before binary bf77298 uses a timing-only backport in an archived benchmark tree: only `seam_oci.rs`
+throughput sampling and its timed helper change, with production sources untouched. The instrumented
+bench source SHA256 is `c0e6e2e1352fb8c769f67f1fda5c6805a8f9b03b124cefe0fb3f0f549cc47c79`.
+Report every run's whole-create p50/p99 beside part 19, including failed coverage or latency results.
+
+`python3 -B -I bench/competitive/probes/create_breakdown_switch_test.py` exercises real parsers with
+in-memory ftrace and seam fixtures: pooled, dry and mixed boundaries; 499/500/501/600 us and CLI scope;
+missing/failed starts or switches; counter/sample/concurrency errors; lost events and init pivots.
+The fixtures fail the pre-fix reader (10 assertions and one new-field error) and pass all five tests
+with the complete-coverage reader. These are reader regressions, not performance measurements.
+
+### Run 8 (2026-11-01, fedora): AC-e, not of record
+
+- **Host:** the fedora bench host (the `kiln-a094a12d` runner, named `fedora-2` when run 1 ran; `create_breakdown.md`
+  run 1), Intel Core i9-14900HX (32 CPUs, the container pinned to 4-15), 62 GiB, kernel 6.19.10-300.fc44.x86_64 — the
+  same machine and kernel as every run above.
+- **When and load:** 2026-11-01T00:21:24Z. `LOAD_GATE=0`, so not of record by CLAUDE.md §7, and the host was busy:
+  the 1-minute load was 29.49 at the start, from kiln CI beside it. The switch is a per-call latency insensitive to
+  the host's load (`chroot` neither sleeps nor takes a shared lock); the mounts' p99 does rise with concurrency, the
+  mount lock being contended, which is the point of measuring them at eight in flight.
+- **The host's idle threads:** `IDLE_THREADS=8000`; 8,001 came up, for 11,485 threads on the host — the threads a
+  `pivot_root` would walk.
+- **Binaries:** `hex` and `seam_oci` of a34657a, built on the host, dynamically linked against its `/usr` (the
+  container bind-mounts it): `hex` sha256 4a0c0da58d5ac39f, `seam_oci` sha256 ef2583e8df9a1431. a34657a is
+  cp/t7-ext-s2 before its rebase onto step 1's tip; the switch and mount code is unchanged at the rebased tip, which
+  adds only a debug-only test seam and these records.
+- **Run:** `~/.cache/hex-bench/out/create-breakdown-20261101T002124Z` on the fedora host, read by
+  `create_breakdown.py switch` at the rebased tip, `AC_E=2000 HEXBENCH_THROUGHPUT_CONC=8 CPUSET=4-15`. 2,000 creates
+  at eight in flight; no trace event lost, no `chroot` entry left unpaired, 1,998 of the 2,000 with a net-namespace
+  join traced before the switch (the other two made their namespace on the create's own path, netns pool near dry).
+
+The root's parts over the 2,000 creates:
+
+- **The switch (`chroot`, part 20): p50 0.002 ms, p99 0.008 ms, max 0.162 ms** — the p99 is ~60x under the 0.5 ms
+  bar, at a host load of 29, so the switch does not serialise under concurrency. **AC-e's switch met.** (Run
+  20261031T233802Z, the earlier switch-only run at load 50, gave the same: p99 0.009 ms.)
+- **The mounts (part 19): p50 0.273 ms, p99 2.574 ms, max 6.411 ms** — above the 0.5 ms bar and reported, not held to
+  it: the init's `move_mount`/`fsmount` take the mount namespace's lock (`namespace_sem`), which the classic path
+  takes too, so this is that lock's contention at eight in flight, not the `pivot_root` walk the switch replaces. The
+  switch removed the walk; the mount lock is a separate, kernel-wide cost both paths pay.
+
+Every one of the 2,000 creates switched via `chroot` (chroots == creates == 2,000): none fell back to the classic
+`pivot_root` path. The only eight `pivot_root`s in the trace are by eight distinct pids that never `chroot` — the
+pruned seeds' one-time prune (the seam result's `seeds.started` is 8). The reader tells them apart by the caller: 0
+init `pivot_root`s (a `pivot_root` by a pid that also `chroot`s), 8 seed prunes (by pids that never `chroot`), the
+two sets disjoint. **AC-a's "no init pivot_root" evidenced directly over the raw trace**, beside the cutter's
+per-create assertion in the runs above (part 20, "the root moved onto / and chrooted into", one `chroot` and no init
+`pivot_root`).
+
+### Run 9 (2026-11-01, fedora): AC-e at step 2's tip
+
+- **Host:** run 8's, rebooted at 22:43:51Z after it ran out of memory (run 10 says what took it).
+- **When and load:** 2026-11-01T22:47:37Z, `LOAD_GATE=0` by Ada's rule. The 1-minute load was 15.09 at the start;
+  some task was stalled on memory 7.45% of the last 10 s and on I/O 16.49% (`/proc/pressure`). What else ran: run
+  10's.
+- **The host's idle threads:** `IDLE_THREADS=8000`; 8,001 came up, for 10,751 threads on the host.
+- **Binaries:** `hex` and `seam_oci` of aed6da3, step 2's code, built on the host and dynamically linked as run 8's:
+  `hex` sha256 951bab10dc326f0c, `seam_oci` 630e5987e4e15d99. The step's tip adds to aed6da3 only a test, comments,
+  docs and the probe's `IDLE_AB`.
+- **Run:** `~/.cache/hex-bench/out/create-breakdown-20261101T224737Z`, `AC_E=2000 CPUSET=4-15`, the harness at
+  aed6da3. 2,000 creates at eight in flight; no trace event lost, no `chroot` left unpaired, 1,985 of the 2,000 with a
+  net-namespace join traced before the switch.
+
+- **The switch (`chroot`, part 20): p50 0.002 ms, p99 0.006 ms, max 0.068 ms**, the p99 83x under the 0.5 ms bar.
+  **AC-e met.**
+- **The mounts (part 19): p50 0.209 ms, p99 1.553 ms, max 2.701 ms**, reported: the init's mounts at eight in flight
+  are step 3's criterion, which takes run 8's 2.574 ms p99 as its baseline.
+- chroots == creates == 2,000, and the trace's only `pivot_root`s are the 8 seeds' prunes, by pids that never
+  `chroot`: 0 init `pivot_root`s (AC-a).
+
+## Run 10 (2026-11-01, fedora): the pruned-seed root at step 2's tip, with and without 24,000 idle host threads
+
+- **Why:** goal 5 extended step 2's AC-a (the switch's pooled p50 at most 0.02 ms, and no init `pivot_root` in the
+  trace), AC-b (Hex's create p50 through the seam at most 0.58x libcrun's in the same run) and AC-c (Hex's create p50
+  with 24,000 extra idle host threads within 10% of it without them).
+- **Host and load:** run 8's, `LOAD_GATE=0` by Ada's rule. That evening the host ran out of memory twice and was
+  rebooted, at 22:15:59Z and 22:43:51Z. Each time the same four containers, none of them Hex's, had started minutes
+  before and came back with the boot: `issue556oss-control-plane` (kindest/node v1.35.0),
+  `buildx_buildkit_kagent-builder-v0.23.00`, `kind-registry` and `kiln-t10-minio`. They were up beside every run here,
+  with kiln CI's builds of the kiln crates (rustc at 1-6 GB each), each run's env.txt naming the containers and its
+  load. Goal 5 extended step 5's agent ran its own units on the host beside the last of them, side by side by the
+  lead's rule: `hex-g5x-s5-fedora-20261101T225558Z` from 22:55:58Z (beside 20261101T225526Z's later rounds) and
+  `hex-g5x-s5-fedora-v3-20261101T231100Z` from 23:11:00Z (the end of run 12's second). From 22:35Z a run started only
+  with MemAvailable at least 24 GB (the lead's rule). The first boot's runs after 20261101T221833Z met MemAvailable
+  falling to 10-11 GB as rustc ran beside them, and aren't used.
+- **Binaries:** run 9's. libcrun 1.30.1 in process (079ff6a7), driver sha256 5c356f2139adc232.
+- **Runs:** `~/.cache/hex-bench/out/create-breakdown-<run>`, each 3 rounds of 1,000 timed lifecycles after 100
+  untimed, `CPUSET=4-15`, the harness at aed6da3: the first in the first boot, the rest in the second, back to back
+  (runs 9 and 11 between them). 1,500 traced creates each, every one cut; no trace event lost.
+
+| run | idle host threads (threads on the host) | load at start | Hex through the seam | libcrun | Hex over libcrun | the switch (part 20), p50 / p99 | the parts over the creates between |
+|---|---|---|---|---|---|---|---|
+| 20261101T221833Z | 0 | 18.34 | 0.930 | 2.381 | 0.391 | 0.001 / 0.004 | 102.7% |
+| 20261101T224621Z | 24,001 (26,522) | 22.03 | 0.714 | 4.365 | 0.164 | 0.001 / 0.003 | 99.6% |
+| 20261101T224740Z | 0 | 15.09 | 0.789 | 2.186 | 0.361 | 0.001 / 0.003 | 99.0% |
+| 20261101T224849Z | 24,001 (26,792) | 12.86 | 1.201 | 5.754 | 0.209 | 0.001 / 0.004 | 98.1% |
+| 20261101T225414Z | 0 | 33.09 | 0.857 | 2.728 | 0.314 | 0.001 / 0.003 | 99.7% |
+| 20261101T225526Z | 24,001 (27,008) | 20.25 | 0.912 | 5.257 | 0.173 | 0.001 / 0.003 | 96.2% |
+
+- **AC-a met:** the switch's pooled p50 is 0.001 ms in every run, against run 4's `pivot_root` at 0.535 and the bar's
+  0.02. Each run's raw traces (`traced.r1.txt` to `traced.r3.txt`) hold no `pivot_root` event: the seeds pruned
+  before tracing began, and no init made one.
+- **AC-b met:** Hex's create p50 over libcrun's in the same run is 0.391 (20261101T221833Z), 0.361 (20261101T224740Z)
+  and 0.314 (20261101T225414Z) without the idle threads, against the 0.58 bar and run 4's 0.735.
+- **AC-c across runs:** each run with 24,000 idle threads against the run without them beside it in the same boot:
+  0.714 over 0.789 is 0.905, 0.912 over 0.857 is 1.064, both within 10%, and 1.201 over 0.789 is 1.522. That run
+  (20261101T224849Z) met a build beside it in its rounds 2 and 3 (the load from 12.79 to 19.69, rustc at 223%), and
+  every part of its creates grew, the init's clone (part 16) 0.176 against 0.116 and its mounts (part 19) 0.228
+  against 0.169, while the switch, where a walk of the host's threads would show, stayed at 0.001. libcrun's create,
+  whose `pivot_root` walks them, grew 2.0x, 2.6x and 1.9x with them (4.365 and 5.754 over 2.186, 5.257 over 2.728). A
+  comparison across runs carries whatever else ran beside each, so these three are listed for the record and AC-c's
+  figure of record is run 12's, measured within one run.
+
+## Run 11 (2026-11-01, fedora): 4,000 extra mounts in the agent's namespace, not of record
+
+- **Run:** `~/.cache/hex-bench/out/create-breakdown-20261101T225023Z`, run 10's binaries and harness, `EXTRA_MOUNTS=4000`
+  (4,016 mounts in the agent's namespace), 2026-11-01T22:50:23Z, load 20.48 at the start, between run 10's
+  20261101T224849Z and 20261101T225414Z, so in the same build's surge.
+- **Not a clean read:** its parts summed to 72.7% of the creates between, outside the 10% the probe holds them to, so
+  the parts don't account for its creates. Hex's create p50 was 1.719 ms (rounds 1.415, 2.520 and 1.591), the init's
+  clone (part 16) 0.261 and its mounts (part 19) 0.380; libcrun's 20.178 ms, its init copying the agent's 4,016-mount
+  table. AC-d (flat in the agent's mounts) is reported only, not a criterion of step 2's (records-plan R4); a clean read
+  needs a within-run A/B as run 12's.
+
+## Run 12 (2026-11-01, fedora): AC-c within one run, the idle threads beside their absence in every round
+
+- **Why:** AC-c's comparison within one run. `IDLE_AB=24000` (14f9d13) adds two items to every shuffled round:
+  `seam_idle` and `libcrun_idle`, the seam's and libcrun's lifecycle phases with 24,000 idle threads up inside the
+  bench container. Threads in the container are the host's like any other, so `pivot_root`'s walk
+  (`chroot_fs_refs`'s `for_each_process_thread`) visits them. Each runtime's ratio to its own items without them in the
+  same rounds is the run's own, as step 1's `BEFORE_HEX` A/B is. libcrun's ratio is the control that they are walked.
+- **Host and load:** run 10's, its second boot, `LOAD_GATE=0`; MemAvailable 33,116, 44,243 and 45,072 MiB at the
+  runs' starts.
+- **Binaries:** run 9's (aed6da3's). **Harness:** 14f9d13 for the first two runs; 2823023 for the third, which records
+  each idle item's threads in `idle_threads.txt`: the helper's, counted at the item's start and at its end, and the
+  host's then (`/proc/loadavg`'s count of the kernel's threads, which no pid namespace narrows).
+
+| run | rounds | load at start | Hex: with / without, pooled p50 | its ratio, by round | its ratio, pooled | libcrun: with / without | its ratio, pooled |
+|---|---|---|---|---|---|---|---|
+| 20261101T230322Z | 3 | 21.08 | 1.010 / 1.043 | 1.041, 1.356, 0.770 | 0.969 | 5.898 / 2.975 | 1.982 |
+| 20261101T230639Z | 5 | 16.61 | 1.185 / 1.205 | 0.987, 0.696, 0.936, 1.071, 1.013 | 0.983 | 6.330 / 3.316 | 1.909 |
+| 20261101T232039Z | 5 | 12.41 | 0.806 / 0.806 | 0.920, 1.041, 0.893, 0.964, 1.128 | 0.999 | 4.669 / 2.389 | 1.954 |
+
+- **AC-c met, and this is its figure of record:** with the 24,000 idle threads Hex's create p50 is 0.969, 0.983 and
+  0.999 of its own without them in the same rounds (pooled over 3,000, 5,000 and 5,000 creates each), within 10%,
+  while libcrun's grows 1.982x, 1.909x and 1.954x, in every round 1.40x to 2.70x: the threads are walked by a
+  `pivot_root`, and Hex's create makes none. It is the figure of record because its two sides meet the same host:
+  every round runs both kinds of item in a shuffled order, so what ran beside the run (kiln CI's builds, step 5's
+  units, the containers filling the host's memory) falls on both alike and the ratio cancels it, as Ada's rule for a
+  noisy host asks and as step 1's `BEFORE_HEX` A/B does. Run 10's pairs compare two runs that met different hosts.
+  Hex's round-by-round ratios straddle 1 (0.696 to 1.356) as the host's load moved under them; libcrun's never fall
+  under 1.4. The second run ended at a 1-minute load of 218, from builds beside it.
+- **The threads, item by item (20261101T232039Z):** every idle item, the probe's and each round's `seam_idle` and
+  `libcrun_idle`, had all 24,001 of the helper's tasks (its 24,000 threads and itself) up at its start and at its end;
+  the host's threads were 26,898 to 27,745 across them. The first two runs' harness refused an item whose threads
+  didn't all come up but didn't record the count; none was refused.
+- The runs' other figures: Hex's create p50 0.350x, 0.363x and 0.337x libcrun's (1.043 over 2.975, 1.205 over 3.316,
+  0.806 over 2.389; AC-b); the switch's pooled p50 0.001 to 0.002 ms (AC-a); the parts summed to 99.8%, 101.9% and
+  98.3% of the creates between; no `pivot_root` in their traces.
+
+## The root lab beside these runs (AC-f, AC-g, the step's tests)
+
+`bench/oci-validation/docker_lab.sh <commit> oci_spec_box oci_box`, as root in a privileged container on the same host
+and kernel (6.19.10-300.fc44), test binaries built in its Fedora 44 image:
+
+- **At 541fe3a** (aed6da3 with the AC-f test printing what it read; run chain-20261101T221818Z): oci_box passed, the
+  step's tests among it (root escapes E0-E3, a bind and a volume, the classic path's reasons, an init refusing or
+  dying mid-build, `rootfsPropagation`). oci_spec_box failed AC-f's "exactly two" mounts: the seed's mountinfo listed
+  one, `4324 4190 0:1371 / / ro,relatime - tmpfs tmpfs rw,seclabel,size=64k,mode=755,inode64`. The namespace's root,
+  mount 4190, lies outside the seed's root, and v6.19's `show_mountinfo` lists no mount it can't reach from the task's
+  root (fs/proc_namespace.c:150-151, fs/seq_file.c:517-519, fs/d_path.c:211-223).
+- **At f387457** (the AC-f test as the kernel lists the namespace, 1c6436b; run chain-20261101T224533Z): 2 of 2
+  passed. AC-f's line: "the pruned create seed (pid 18) lists one mount, its read-only root tmpfs: 4346 4297 0:1373 /
+  / ro,relatime - tmpfs tmpfs rw,seclabel,size=64k,mode=755,inode64".
+
+## The init's mounts, call by call (goal 5 plan step 3)
+
+`MOUNTS=<lifecycles>` (with `MOUNTS_CONC`, `1 8` by default, and `MOUNTS_PATH`, `pruned` by default or `classic`)
+runs, in place of the rounds, one `seam_oci` throughput phase at each concurrency with every system call of the `hex`
+processes traced, and `create_breakdown.py mounts` cuts part 19 of each create out of the trace, call by call
+(`docs/research/runtime/goal5-mounts.md` §1 says why and what it found). The events are `raw_syscalls`' entries and
+exits, which record a call's number and arguments and fetch no path (the `syscalls` subsystem's events fetch each
+one, about 4 us a time, which would charge the very calls this times); `sched_switch`, so the time off the CPU is
+told preempted or blocked; `page_fault_user`; and `sched_process_fork`, so a classic span opens only in a process a
+traced `hex` process forked or cloned (a seed, which makes its mounts private when it prunes, is the node agent's
+child). A span runs from the init's join of the network namespace made ahead (`setns` with `CLONE_NEWNET`) to its
+`chroot` or `pivot_root`, as `switch` cuts part 19; with `MOUNTS_PATH=classic` the throughput phase's bundle has a
+createRuntime hook, so each create takes the classic path through the shim, and a span opens at the init's first
+mount, making its mounts private. The report gives, per create, each call's count, time and time off the CPU, the
+time between calls and the page faults; each mount's share (the calls up to its attach); and the slowest 1% the same
+way. The trace adds two events to every call, so its spans are longer than the rounds' part 19: they place the time
+and count the calls, and part 19's figures of record are the rounds'.
+
 ## Run 13 (2026-11-03, fedora): step 6's binary on boxes of no owner, and the one before it, in the same rounds
 
 Runs 8 to 12 are goal 5 extended steps 2 and 3's, on their branches. This run's container was pinned to CPUs 4-31, P-

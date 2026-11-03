@@ -98,7 +98,12 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   inherited-fd adoption, the `bpf` calls that load and attach a container's cgroup device program
   and that open a loaded one by id and read its identity and translated instructions (so containers
   with one device policy share one program), the `seccomp(2)` call that loads a container's filter
-  without no_new_privs when its spec doesn't ask for it, the signal mask and `signalfd` through which
+  without no_new_privs when its spec doesn't ask for it, the `listmount` and `statmount` calls by
+  which the classic init finds the cgroup filesystems a recursive read-only bind carries (the libc
+  crate numbers them for m68k alone), the `mount_setattr(2)` call by which the
+  pruned-seed init makes a mount read-only or sets its propagation by descriptor, there being no
+  `/proc/self/fd` to name it by path in its namespace (goal 5's pruned root, decision 5), the signal
+  mask and `signalfd` through which
   `hex oci exec` passes signals on, the signal-disposition reset and `raise` by which
   `hex oci exec` ends the way its program did when the node agent drives it (seam mode), the
   `_exit` by which a seed's forked intermediate and program end without running the seed's `atexit`

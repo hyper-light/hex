@@ -34,8 +34,11 @@ use crate::wire::{Fault, Reader, Writer};
 
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXS";
-/// The version this side writes and reads.
-pub const VERSION: u16 = 1;
+/// The version this side writes and reads. Version 2 adds a create's pruned-root descriptors (goal 5
+/// plan step 2): a create's body gained a `pruned` flag and a `binds` count, so its bytes differ from
+/// version 1's, and a reader of either refuses the other's by type ([`read_header`]). A node spawns
+/// its seeds from the one `hex` binary it is given, so the two sides are always of this build.
+pub const VERSION: u16 = 2;
 /// The header's length: magic, version and kind.
 pub const HEADER_BYTES: usize = 8;
 /// Largest request. It sits under the kernel's bound on one `SOCK_SEQPACKET` record (212,960 bytes
@@ -49,12 +52,28 @@ pub const MAX_ANSWER: usize = 4 << 10;
 pub const MAX_WHY: usize = 2 << 10;
 /// Descriptors an exec request carries: stdin, stdout, stderr, the container init's pidfd.
 pub const REQUEST_FDS: usize = 4;
-/// Descriptors a create carries before the network namespace made ahead, when there is one: the write
-/// end of the init's sync pipe and the container's cgroup directory.
+/// Descriptors a create carries first, always: the write end of the init's sync pipe and the read end
+/// of its map pipe.
 pub const CREATE_FDS: usize = 2;
+/// Descriptors a pruned create carries after the network namespace, before the bind-source trees
+/// (goal 5 plan step 2): the bundle directory (to read `config.json`), the container's cgroup
+/// directory, the container's state directory (the exec FIFO's), and the rootfs as a detached tree.
+/// A pruned seed reaches no host path, so each comes as a descriptor.
+pub const PRUNED_FIXED_FDS: usize = 4;
+/// Most namespaces a pruned create joins by path, each a descriptor the agent opened (its host path
+/// out of the pruned seed's reach): the network, ipc, uts and cgroup kinds — a pid or user namespace by
+/// path is made through the shim instead, a mount namespace by path too (goal 5 plan step 2).
+pub const MAX_PATH_JOINS: usize = 4;
+/// Most bind-source trees a pruned create carries, so its descriptors (the two pipes, a network
+/// namespace, the four fixed, the bind trees and the path-joined namespaces) stay under `SCM_MAX_FD`,
+/// the kernel's bound on one `SCM_RIGHTS` message (253, `include/net/scm.h`). A spec with more bind
+/// mounts is refused by type and made through the shim (CLAUDE.md §2).
+pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS - MAX_PATH_JOINS;
 /// Most descriptors any request carries: what a seed's read makes room for, so one carrying more is
-/// cut and refused.
-pub const MAX_REQUEST_FDS: usize = REQUEST_FDS;
+/// cut and refused. A pruned create is the largest (the two pipes, a network namespace, the four fixed,
+/// up to [`MAX_BINDS`] bind trees and up to [`MAX_PATH_JOINS`] path-joined namespaces), which this holds
+/// under `SCM_MAX_FD` (253).
+pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS + MAX_PATH_JOINS;
 /// Descriptors a started answer carries: the pidfd of the process the seed started.
 pub const STARTED_FDS: usize = 1;
 
@@ -62,6 +81,7 @@ pub const STARTED_FDS: usize = 1;
 mod kind {
     pub const EXEC: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
+    pub const CREATE_PREPARED: u16 = 0x0003;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
 }
@@ -91,10 +111,16 @@ pub struct Request {
 }
 
 /// A container for the seed to make (decision 5): its init cloned into its cgroup and the namespaces its
-/// spec asks for, set up to the exec FIFO. The seed reads the spec from the bundle's `config.json`, as
-/// the shim did, and opens the cgroup the create names, as `hex __oci-exec` opens its container's; the
-/// descriptors that ride with it ([`CREATE_FDS`]) are the init's sync pipe (the write end) and the map
-/// pipe (the read end), and, when `network` says so, the network namespace made ahead the init joins.
+/// spec asks for, set up to the exec FIFO. On the classic path the seed reads the spec from the bundle's
+/// `config.json` by path and opens the cgroup the create names, as `hex __oci-exec` does; the descriptors
+/// that ride with it ([`CREATE_FDS`]) are the init's sync pipe (the write end) and the map pipe (the read
+/// end), and, when `network` says so, the network namespace made ahead the init joins.
+///
+/// On the pruned path (goal 5 plan step 2, `pruned`), the seed's mount namespace holds nothing of the
+/// host, so what it read by path comes as descriptors instead: after the network namespace ride
+/// [`PRUNED_FIXED_FDS`] (the bundle directory, the cgroup directory, the state directory and the rootfs
+/// tree), then `binds` bind-source trees in the order the spec lists its bind mounts. The agent cloned
+/// each with `open_tree` in its own mount namespace and sends them here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Create {
     /// The container's bundle, whose `config.json` gives its namespaces and the init's set-up.
@@ -102,18 +128,43 @@ pub struct Create {
     /// The container's state directory, which holds the exec FIFO its init waits on.
     pub dir: String,
     /// The container's cgroup directory, which the seed opens and the init is born in; `None` for a
-    /// container with no cgroup of its own (the seam always gives one).
+    /// container with no cgroup of its own (the seam always gives one). On the pruned path the cgroup
+    /// rides as a descriptor instead, and this names it only for the seed's messages.
     pub cgroup: Option<String>,
-    /// Whether a network namespace made ahead rides with it, the last descriptor, for the init to join
+    /// Whether a network namespace made ahead rides with it, after the fixed pair, for the init to join
     /// in place of making its own (decision 4).
     pub network: bool,
+    /// Whether this create takes the pruned-seed root path (goal 5 plan step 2): its sources ride as
+    /// descriptors after the network namespace, since a pruned seed reaches no host path. A create to
+    /// a seed whose node isn't a root node, or whose spec needs the classic root, is made through the
+    /// shim and never reaches a seed as pruned.
+    pub pruned: bool,
+    /// How many bind-source trees ride, when `pruned`: one per bind mount the spec lists, in that
+    /// order, after the fixed descriptors. Zero when not pruned. At most [`MAX_BINDS`].
+    pub binds: u32,
+    /// How many namespaces the container joins by path ride last, when `pruned`: one descriptor per
+    /// network, ipc, uts or cgroup namespace the spec joins by path, which the agent opened (the pruned
+    /// seed can't reach the host path). Zero when not pruned. At most [`MAX_PATH_JOINS`].
+    pub path_joins: u32,
+    /// New CREATE_PREPARED kind: mount-plan index of a prepared `/dev`; its fd rides last. Old
+    /// CREATE bytes stay unchanged and readers without this kind refuse it explicitly.
+    pub dev_mount: Option<u32>,
 }
 
 impl Create {
-    /// How many descriptors this create carries: the sync pipe's write end and the map pipe's read end,
-    /// then a network namespace made ahead when there is one.
+    /// How many descriptors this create carries: the two pipes always, then a network namespace made
+    /// ahead when there is one, then on the pruned path the four fixed descriptors, one tree per bind
+    /// mount, and one descriptor per namespace joined by path.
     pub fn fds(&self) -> usize {
-        CREATE_FDS.saturating_add(usize::from(self.network))
+        let mut n = CREATE_FDS.saturating_add(usize::from(self.network));
+        if self.pruned {
+            n = n
+                .saturating_add(PRUNED_FIXED_FDS)
+                .saturating_add(self.binds as usize)
+                .saturating_add(self.path_joins as usize)
+                .saturating_add(usize::from(self.dev_mount.is_some()));
+        }
+        n
     }
 }
 
@@ -239,11 +290,24 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
 /// A create as a message.
 pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
-    header(&mut w, kind::CREATE);
+    header(
+        &mut w,
+        if create.dev_mount.is_some() {
+            kind::CREATE_PREPARED
+        } else {
+            kind::CREATE
+        },
+    );
     w.string(&create.bundle)?;
     w.string(&create.dir)?;
     w.option_with(create.cgroup.as_deref(), |w, c| w.string(c))?;
     w.bool(create.network);
+    w.bool(create.pruned);
+    w.u32(create.binds);
+    w.u32(create.path_joins);
+    if let Some(mount) = create.dev_mount {
+        w.u32(mount);
+    }
     w.done()
 }
 
@@ -257,7 +321,7 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
     }
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
-    if kind != kind::CREATE {
+    if !matches!(kind, kind::CREATE | kind::CREATE_PREPARED) {
         return Err(Fault::Kind {
             kind,
             version,
@@ -269,12 +333,47 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         dir: r.string("dir")?,
         cgroup: r.option(|r| r.string("cgroup"))?,
         network: r.bool("network")?,
+        pruned: r.bool("pruned")?,
+        binds: r.u32()?,
+        path_joins: r.u32()?,
+        dev_mount: if kind == kind::CREATE_PREPARED {
+            Some(r.u32()?)
+        } else {
+            None
+        },
     };
-    r.end(kind::CREATE, version)?;
+    r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
         return Err(Fault::value(
             "create",
             "a create names its bundle and its state directory",
+        ));
+    }
+    // A create's trees and path-joined namespaces are bounded, so its descriptors stay under
+    // `SCM_MAX_FD`; a count past its bound, or set when the create isn't pruned, is refused (§2, §3).
+    if create.binds as usize > MAX_BINDS {
+        return Err(Fault::value(
+            "binds",
+            format!("a create carries at most {MAX_BINDS} bind-source trees"),
+        ));
+    }
+    if create.path_joins as usize > MAX_PATH_JOINS {
+        return Err(Fault::value(
+            "path_joins",
+            format!("a create joins at most {MAX_PATH_JOINS} namespaces by path"),
+        ));
+    }
+    if !create.pruned && (create.binds != 0 || create.path_joins != 0 || create.dev_mount.is_some())
+    {
+        return Err(Fault::value(
+            "binds",
+            "only a pruned create carries bind-source trees or path-joined namespaces",
+        ));
+    }
+    if create.fds() > MAX_REQUEST_FDS {
+        return Err(Fault::value(
+            "dev_mount",
+            "a prepared create exceeds SCM_MAX_FD",
         ));
     }
     Ok(create)
@@ -287,7 +386,7 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
         kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
-        kind::CREATE => {
+        kind::CREATE | kind::CREATE_PREPARED => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)

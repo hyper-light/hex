@@ -57,6 +57,14 @@ pub fn run(argv: &[String]) -> Option<u8> {
             args.first().map(String::as_str).unwrap_or(""),
             args.get(1).and_then(|n| n.parse().ok()).unwrap_or(10),
         )),
+        // escape <mode> <marker>: a root-escape attempt from inside a box, for goal 5 plan step 2's
+        // security criteria (the pruned-seed root). Exits 0 when the box held (secure). Linux only, as
+        // the runtime is (the whole `oci` class is behind `cfg(linux)`); elsewhere it isn't an act.
+        #[cfg(target_os = "linux")]
+        "escape" => Some(hex_runtime::linux::oci::escape::attempt(
+            args.first().map(String::as_str).unwrap_or(""),
+            args.get(1).map(String::as_str).unwrap_or(""),
+        )),
         _ => None,
     }
 }

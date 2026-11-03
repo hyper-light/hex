@@ -35,7 +35,7 @@ use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
-use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
 use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
@@ -43,6 +43,7 @@ use hex_runtime::linux::{disks, process};
 
 use crate::cgroups::{self, Cgroups, Choice, Made};
 use crate::createpool::CreatePool;
+use crate::devfs::Devfs;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
@@ -154,12 +155,18 @@ pub struct Node {
     /// The pool of `hex __oci-seed` processes that make `oci` boxes: a create hands one the container's
     /// spec and it clones the init in place of the shim's re-exec (decision 5; [`Node::create_pool`]).
     create_seeds: OnceLock<CreatePool>,
+    /// A debug-only crash point a test arms on this node's create seeds ([`Node::with_inject`]), for the
+    /// crash-safety test of the pruned init's root build; `None` unless a test arms it, and absent from
+    /// release builds (CLAUDE.md §6).
+    #[cfg(debug_assertions)]
+    inject: Option<String>,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
+    devfs: Devfs,
 }
 
 /// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
@@ -254,8 +261,11 @@ impl Node {
             masked: thermal_throttle()?,
             seeds: OnceLock::new(),
             create_seeds: OnceLock::new(),
+            #[cfg(debug_assertions)]
+            inject: None,
             specs: Mutex::new(Specs::default()),
             netns,
+            devfs: Devfs::start(owner == Owner::Root)?,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
@@ -294,11 +304,34 @@ impl Node {
         }
     }
 
+    /// Enables or disables fresh prepared `/dev` mounts; disabled creates use ordinary setup.
+    /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
+    pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
+        self.devfs = Devfs::start(enabled && self.owner == Owner::Root)?;
+        Ok(self)
+    }
+
+    /// Fresh `/dev` mounts made, taken, discarded or missed. Counts include failed creates and
+    /// every preparation failure, so a speed measurement cannot hide a dry or disabled pool.
+    pub fn dev_mounts(&self) -> Result<hex_core::devfs::Counts, Refusal> {
+        self.devfs.counts()
+    }
+
     /// Sets how many `oci` boxes' inits the node watches at once, [`supervise::INIT_BUDGET`] unless
     /// set: past it `create` of an `oci` box is refused with [`Refusal::Exhausted`].
     pub fn with_init_budget(self, budget: usize) -> Result<Self, Refusal> {
         self.supervisor.set_budget(budget)?;
         Ok(self)
+    }
+
+    /// Arms a debug-only crash point on this node's create seeds (goal 5 plan step 2): the pruned init
+    /// ends at the named point, as a kill would, so a test proves the agent cleans up a container whose
+    /// init dies mid-build (CLAUDE.md §6). Must come before [`Node::with_oci_helper`], which builds the
+    /// seed pool. Debug builds only; the point names are the runtime's (`seed::INJECT_DIE_BEFORE_SWITCH`).
+    #[cfg(debug_assertions)]
+    pub fn with_inject(mut self, point: &str) -> Self {
+        self.inject = Some(point.to_owned());
+        self
     }
 
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
@@ -307,11 +340,28 @@ impl Node {
         // The create seeds are built now, from this binary, so their first spare is up before the first
         // create (decision 5): no create waits on a seed's exec. A pool that can't be built now is built
         // at the first create, which reports why.
-        if let Ok(pool) = CreatePool::new(hex_binary.clone()) {
+        if let Ok(pool) = CreatePool::new(
+            hex_binary.clone(),
+            self.seed_prune(),
+            #[cfg(debug_assertions)]
+            self.inject.clone(),
+        ) {
             let _ = self.create_seeds.set(pool);
         }
         self.oci_helper = Some(hex_binary);
         self
+    }
+
+    /// The mountpoint a root node's create seeds prune their mount namespace at (goal 5 plan step 2), or
+    /// `None` on a rootless node, whose seeds keep the agent's mount namespace and build the root the
+    /// classic way. A dedicated directory under the oci root, which the seed mounts a fresh tmpfs over
+    /// and pivots away from in its own namespace: the agent's view of it stays an empty directory, and
+    /// nothing scans the oci root (recovery reaches containers by the paths their records name).
+    fn seed_prune(&self) -> Option<PathBuf> {
+        match self.owner {
+            Owner::Root => Some(self.oci_root.join(".seed-root")),
+            Owner::Rootless { .. } => None,
+        }
     }
 
     /// Sets the most network namespaces a root node makes ahead, [`netns::BOUND`] unless set, in place
@@ -876,6 +926,7 @@ impl Node {
             let held = Held {
                 networks: Some(&networks),
                 devices: Some(&self.devices),
+                dev_mounts: Some(&self.devfs),
             };
             let name = self.container(&id);
             match (cgroup, &choice) {
@@ -1120,7 +1171,12 @@ impl Node {
                 std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
             }
         };
-        let _ = self.create_seeds.set(CreatePool::new(exe)?);
+        let _ = self.create_seeds.set(CreatePool::new(
+            exe,
+            self.seed_prune(),
+            #[cfg(debug_assertions)]
+            self.inject.clone(),
+        )?);
         self.create_seeds
             .get()
             .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))
@@ -1136,12 +1192,32 @@ impl Node {
         }
     }
 
-    /// How many of the node's creates were made through the shim since its seed pool opened: those whose
-    /// container joins a pid or user namespace by path, which no seed's one clone can make (decision 5).
+    /// How many of the node's creates were made through the shim since its seed pool opened: those a
+    /// pruned seed couldn't serve, and those that join a pid or user namespace by path (decision 5, goal 5
+    /// plan step 2). A rootless node's other creates take the classic root in a seed, not the shim
+    /// ([`ClassicReason::Rootless`]).
     pub fn creates_through_shim(&self) -> u64 {
         self.create_seeds
             .get()
             .map_or(0, CreatePool::creates_through_shim)
+    }
+
+    /// How many of the node's creates took the classic root path for `reason` since its seed pool opened
+    /// (goal 5 plan step 2, AC-T7.1.4). Counted in the node's memory and read here, as the tests read
+    /// it; no `hex_*` metric carries it until kiln's Observe owner agrees the name (CLAUDE.md §10).
+    pub fn classic_creates_for(&self, reason: ClassicReason) -> u64 {
+        self.create_seeds
+            .get()
+            .map_or(0, |pool| pool.classic_creates_for(reason))
+    }
+
+    /// How many of the node's creates a pruned seed made on the pruned root path (goal 5 plan step 2):
+    /// zero on a rootless node, positive on a root node once it has made a pruned-eligible box. The root
+    /// lab's tests read it to confirm the pruned path was taken, not a silent shim fallback.
+    pub fn pruned_creates(&self) -> u64 {
+        self.create_seeds
+            .get()
+            .map_or(0, CreatePool::pruned_creates)
     }
 }
 

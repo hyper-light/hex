@@ -56,9 +56,21 @@ use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_node::{Node, OCI_BOXES, records_dir};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
-use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
+/// Runs just the prepared-device oracle through the existing root/delegation fixture, in a fresh
+/// process so it cannot become a subreaper before the full suite's agent-crash check.
+const PREPARED_DEV_ENV: &str = "HEX_OCI_BOX_PREPARED_DEV";
+const PREPARED_DEV_PASS: &str = "prepared /dev oracle completed with actual pooled takes";
+const PROPAGATION_ENV: &str = "HEX_OCI_BOX_SHARED_SOURCES";
+const PROPAGATION_PASS: &str =
+    "shared-source propagation oracle completed with four pruned creates";
+/// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
+/// recover the test-only lock after a failed full suite so the independent oracle still runs.
+static LAB_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Remember the delegated parent before the first fixture moves this process into its agent leaf.
+static LAB_PARENT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
 const AGENT_ENV: &str = "HEX_OCI_BOX_AGENT";
 
@@ -69,6 +81,7 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
     if let Some(dirs) = std::env::var_os(AGENT_ENV) {
         play_the_agent(Path::new(&dirs), &exe);
     }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     match prepare_cgroup(&cache) {
         Ok(own) => exercise(&own, &cache, &exe),
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
@@ -96,6 +109,91 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
             eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
         }
     }
+}
+
+/// AC-T7.1.4, goal 5 step 3: run the prepared-/dev ordering and isolation oracle independently of
+/// the earlier full-suite checks. A failure in either test remains visible to the test harness.
+#[test]
+fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
+    if host_id("-u") != 0 {
+        eprintln!("SKIP: the prepared /dev oracle requires the privileged root lab");
+        return;
+    }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let parent = prepare_cgroup(&cache_dir()).expect("a delegated parent for the root oracle");
+    let own = parent.join(format!("hex-devfs-oracle-{}", std::process::id()));
+    std::fs::create_dir(&own).expect("a fresh cgroup for the independent oracle");
+    // The full suite already moved our parent process into hex-agent. Move only this fresh child
+    // into its own empty cgroup before exec, so its fixture can delegate controllers to its boxes.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-e",
+            "-c",
+            r#"printf '%s' "$$" > "$1/cgroup.procs"; shift; exec "$@""#,
+            "hex-devfs-oracle",
+        ])
+        .arg(&own)
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(PREPARED_DEV_ENV, "1")
+        .output()
+        .expect("run the prepared /dev oracle through the root fixture");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the independent prepared /dev oracle failed"
+    );
+    assert!(
+        log.lines().any(|line| line == PREPARED_DEV_PASS),
+        "the root oracle did not run; a skipped delegation is not evidence"
+    );
+}
+
+/// AC-T7.1.4: rootfs and bind sources are deliberately shared; every mount stays in the box.
+#[test]
+fn pruned_shared_sources_do_not_leak_mounts_to_the_agent() {
+    if host_id("-u") != 0 {
+        eprintln!("SKIP: the shared-source propagation oracle requires the privileged root lab");
+        return;
+    }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let parent = prepare_cgroup(&cache_dir()).expect("a delegated parent for the root oracle");
+    let own = parent.join(format!("hex-propagation-oracle-{}", std::process::id()));
+    std::fs::create_dir(&own).expect("a fresh cgroup for the independent oracle");
+    // The full suite already moved our parent process into hex-agent. Move only this fresh child
+    // into its own empty cgroup before exec, so its fixture can delegate controllers to its boxes.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-e",
+            "-c",
+            r#"printf '%s' "$$" > "$1/cgroup.procs"; shift; exec "$@""#,
+            "hex-propagation-oracle",
+        ])
+        .arg(&own)
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(PROPAGATION_ENV, "1")
+        .output()
+        .expect("run the shared-source propagation oracle through the root fixture");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the independent shared-source propagation oracle failed"
+    );
+    assert!(
+        log.lines().any(|line| line == PROPAGATION_PASS),
+        "the root oracle did not run; a skipped delegation is not evidence"
+    );
 }
 
 /// Where one run keeps its bundles, records and box root.
@@ -173,6 +271,21 @@ impl Lab {
 
     /// A bundle's config.json with its `linux.namespaces` entries, id mappings and extra mounts as given.
     fn config_with(&self, args: &[String], namespaces: &str, mappings: &str, sys: &str) -> String {
+        self.config_ex(args, namespaces, mappings, sys, "", "")
+    }
+
+    /// `config_with` with, besides, a top-level `hooks` fragment and extra fields in the `linux` object
+    /// (`rootfsPropagation`), each a JSON fragment with its own leading comma or empty. Goal 5 plan step 2's
+    /// classic-path reasons (createContainer hooks) and rootfsPropagation tests use it.
+    fn config_ex(
+        &self,
+        args: &[String],
+        namespaces: &str,
+        mappings: &str,
+        sys: &str,
+        hooks: &str,
+        linux_extra: &str,
+    ) -> String {
         let args = json_args(args);
         format!(
             r#"{{
@@ -192,7 +305,7 @@ impl Lab {
     {{"destination": "/usr", "type": "bind", "source": "/usr", "options": ["rbind","ro"]}},
     {{"destination": "/hex", "type": "bind", "source": "{exe}", "options": ["bind","ro"]}}{sys}
   ],
-  "linux": {{"namespaces": [{namespaces}]{mappings}}}
+  "linux": {{"namespaces": [{namespaces}]{mappings}{linux_extra}}}{hooks}
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
@@ -267,6 +380,21 @@ impl Fixture for Lab {
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
     let lab = Lab::new(cache, exe);
+    if std::env::var_os(PROPAGATION_ENV).is_some() {
+        assert!(
+            !lab.rootless,
+            "the shared-source propagation oracle needs root"
+        );
+        rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
+        eprintln!("{PROPAGATION_PASS}");
+        return;
+    }
+    if std::env::var_os(PREPARED_DEV_ENV).is_some() {
+        assert!(!lab.rootless, "the prepared /dev oracle needs root");
+        prepared_devs_preserve_order_and_are_never_shared(&lab, own);
+        eprintln!("{PREPARED_DEV_PASS}");
+        return;
+    }
     // First, while this process is no node's and so no subreaper; it also finds out whether a
     // container runs here at all (rootless needs unprivileged user namespaces).
     if let Err(e) = crash_and_restart(&lab, own) {
@@ -291,6 +419,1261 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
     a_bundle_joining_a_namespace_by_path_runs_through_the_seam(&lab, own);
     a_box_root_counts_its_boxes_without_listing(&lab, own);
+    escapes_are_contained(&lab, own);
+    a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
+    classic_reasons_are_counted(&lab, own);
+    an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
+    rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
+    every_mount_kind_is_in_the_box_as_its_spec_asks(&lab, own);
+    prepared_devs_preserve_order_and_are_never_shared(&lab, own);
+}
+
+/// AC-T7.1.4, goal 5 step 3: compare ordinary and prepopulated /dev on hostile mount layouts.
+/// Expect byte-identical refusals, matching devices/links/options on success, two actual pooled
+/// takes for live containers, and no cross-container mutation or host-namespace attachment.
+fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let ordinary_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let pooled_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let ordinary = lab
+        .node(&own.join("devfs-ordinary"), ordinary_state.path())
+        .with_prepared_dev_mounts(false)
+        .unwrap();
+    let pooled = lab.node(&own.join("devfs-pooled"), pooled_state.path());
+    let before_mounts = agent_mount_points();
+
+    let bundle = |case: &str, dest: Option<&str>| {
+        let dir = tempfile::Builder::new()
+            .prefix("devfs-bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let root = dir.join("rootfs");
+        build_rootfs(&root);
+        if case == "alias" {
+            std::os::unix::fs::symlink("/dev/null", root.join("alias")).unwrap();
+        }
+        if case == "file-component" {
+            std::fs::write(root.join("blocked"), "file").unwrap();
+        }
+        if case == "dev-symlink" {
+            std::fs::rename(root.join("dev"), root.join("devices")).unwrap();
+            std::os::unix::fs::symlink("devices", root.join("dev")).unwrap();
+        }
+        let mut spec: serde_json::Value =
+            serde_json::from_str(&lab.config(&Lab::act(&Act::Wait), false)).unwrap();
+        spec["root"]["path"] = serde_json::json!(root);
+        if let Some(dest) = dest {
+            spec["mounts"].as_array_mut().unwrap().push(serde_json::json!({
+                "destination":dest, "type":"tmpfs", "source":"late", "options":["mode=701","size=64k"]
+            }));
+        }
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        dir
+    };
+    let create = |node: &Node, id: &BoxId, dir: &Path| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.to_owned()),
+        })
+    };
+    let prime = bundle("prime", None);
+    let id = BoxId::new("prime").unwrap();
+    create(&pooled, &id, &prime).unwrap();
+    pooled.delete(&id).unwrap();
+    wait_for(
+        || pooled.dev_mounts().unwrap().made >= hex_core::devfs::PER_KEY as u64,
+        "the prepared /dev pool to fill after its first key",
+    );
+    assert_eq!(pooled.dev_mounts().unwrap().failed, 0);
+    let root_of = |node: &Node, id: &BoxId| {
+        PathBuf::from(format!("/proc/{}/root", init_pid(&node.container_dir(id))))
+    };
+    let snapshot = |node: &Node, id: &BoxId| {
+        let root = root_of(node, id);
+        let mut out = Vec::new();
+        for name in [
+            "null", "zero", "full", "random", "urandom", "tty", "fd", "stdin", "stdout", "stderr",
+            "ptmx",
+        ] {
+            let path = root.join("dev").join(name);
+            let m = std::fs::symlink_metadata(&path).unwrap();
+            out.push(format!(
+                "{name} {:o} {} {} {} {:?}",
+                m.mode(),
+                m.uid(),
+                m.gid(),
+                m.rdev(),
+                std::fs::read_link(&path).ok()
+            ));
+        }
+        let pid = init_pid(&node.container_dir(id));
+        for m in listed_mounts(&std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).unwrap())
+        {
+            if m.point == "/dev" || m.source == "late" {
+                out.push(format!(
+                    "{} {} {} {:?} {:?}",
+                    m.point, m.fstype, m.source, m.opts, m.sb_opts
+                ));
+            }
+        }
+        out
+    };
+    for (case, target) in [
+        ("plain", None),
+        ("dev-symlink", None),
+        ("default-node", Some("/dev/null")),
+        ("through-node", Some("/dev/null/child")),
+        ("default-link", Some("/dev/fd/extra")),
+        ("alias", Some("/alias")),
+        ("file-component", Some("/blocked/child")),
+        ("parent", Some("/dev/shm/../null")),
+    ] {
+        let dir = bundle(case, target);
+        let id = BoxId::new(case).unwrap();
+        let run = |node: &Node| match create(node, &id, &dir) {
+            Err(e) => Err(e),
+            Ok(_) => {
+                let got = snapshot(node, &id);
+                node.delete(&id).unwrap();
+                Ok(got)
+            }
+        };
+        let a = run(&ordinary);
+        if case != "parent" {
+            wait_for(
+                || {
+                    let c = pooled.dev_mounts().unwrap();
+                    c.made > c.taken + c.discarded
+                },
+                "a prepared mount for the oracle case",
+            );
+        }
+        let taken = pooled.dev_mounts().unwrap().taken;
+        let b = run(&pooled);
+        assert_eq!(a, b, "prepared /dev changed {case}");
+        if case != "parent" {
+            assert_eq!(
+                pooled.dev_mounts().unwrap().taken,
+                taken + 1,
+                "{case} must consume a prepared mount (including guarded fallback)"
+            );
+        }
+    }
+
+    let first = BoxId::new("isolated-a").unwrap();
+    let second = BoxId::new("isolated-b").unwrap();
+    wait_for(
+        || {
+            let c = pooled.dev_mounts().unwrap();
+            c.made >= c.taken + c.discarded + 2
+        },
+        "two prepared mounts for isolation",
+    );
+    let taken = pooled.dev_mounts().unwrap().taken;
+    create(&pooled, &first, &prime).unwrap();
+    create(&pooled, &second, &prime).unwrap();
+    assert_eq!(pooled.dev_mounts().unwrap().taken, taken + 2);
+    let aroot = root_of(&pooled, &first);
+    let broot = root_of(&pooled, &second);
+    assert_ne!(
+        std::fs::metadata(aroot.join("dev")).unwrap().dev(),
+        std::fs::metadata(broot.join("dev")).unwrap().dev(),
+        "a fresh superblock per container"
+    );
+    std::fs::write(aroot.join("dev/private-marker"), "first only").unwrap();
+    std::fs::set_permissions(
+        aroot.join("dev/null"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert!(!broot.join("dev/private-marker").exists());
+    assert_eq!(
+        std::fs::metadata(broot.join("dev/null")).unwrap().mode() & 0o777,
+        0o666
+    );
+    pooled.delete(&first).unwrap();
+    assert!(
+        std::fs::metadata(broot.join("dev/zero"))
+            .unwrap()
+            .file_type()
+            .is_char_device()
+    );
+    pooled.delete(&second).unwrap();
+    assert_eq!(
+        agent_mount_points(),
+        before_mounts,
+        "prepared mounts never attach in the agent"
+    );
+    eprintln!(
+        "prepared /dev: fixed pool counters, hostile ordering/refusal oracle, exact devices/links/options, distinct superblocks and isolated mutation all pass"
+    );
+}
+
+/// Goal 5 plan step 3 (T-T7.1.4; CLAUDE.md §6): every mount kind a spec can ask for is in the box's own
+/// mountinfo with the source, target and options its spec asked, on each root path. One spec asks for
+/// them all: proc, tmpfs (`/dev`, `/tmp`, `/dev/shm`, and two whose access times the spec sets:
+/// `strictatime`, as Docker's `/dev` asks, and `noatime,nodiratime`), devpts, mqueue, sysfs and a
+/// read-only cgroup2 in the box's own cgroup namespace, a recursive bind read-only (`/usr`) and
+/// read-write (a volume), a plain bind of a directory and of a file read-only (the file's target missing
+/// from the image, so it is made), masked paths (files and a directory) and read-only paths (a directory
+/// and a file). As root the pruned path makes one box and the classic path
+/// another, a createRuntime hook routing it through the shim; rootless the classic path makes it, in the
+/// box's own user namespace. Each box is checked the same way, so a change to how the init mounts that
+/// alters what a mount is fails here on the path it changed.
+fn every_mount_kind_is_in_the_box_as_its_spec_asks(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-mount-kinds"), state.path());
+    let vol = lab.bundles.path().join("kinds-vol");
+    let ro_dir = lab.bundles.path().join("kinds-ro");
+    let file = lab.bundles.path().join("kinds-file");
+    for dir in [&vol, &ro_dir] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("marker"), "from the host\n").unwrap();
+    }
+    std::fs::write(&file, "a bound file\n").unwrap();
+    // A rootless box's user namespace has no group 5 to give its terminals (bundle.rs, default_mounts).
+    let pts = if lab.rootless {
+        r#"["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620"]"#
+    } else {
+        r#"["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620","gid=5"]"#
+    };
+    let mounts = format!(
+        r#",
+    {{"destination": "/dev/pts", "type": "devpts", "source": "devpts", "options": {pts}}},
+    {{"destination": "/dev/shm", "type": "tmpfs", "source": "shm", "options": ["nosuid","noexec","nodev","mode=1777","size=65536k"]}},
+    {{"destination": "/dev/mqueue", "type": "mqueue", "source": "mqueue", "options": ["nosuid","noexec","nodev"]}},
+    {{"destination": "/sys", "type": "sysfs", "source": "sysfs", "options": ["nosuid","noexec","nodev","ro"]}},
+    {{"destination": "/sys/fs/cgroup", "type": "cgroup2", "source": "cgroup", "options": ["nosuid","noexec","nodev","ro"]}},
+    {{"destination": "/strict", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","strictatime","mode=755"]}},
+    {{"destination": "/noatime", "type": "tmpfs", "source": "tmpfs", "options": ["noatime","nodiratime"]}},
+    {{"destination": "/vol", "type": "bind", "source": "{vol}", "options": ["rbind","rw"]}},
+    {{"destination": "/ro-dir", "type": "bind", "source": "{ro_dir}", "options": ["bind","ro"]}},
+    {{"destination": "/etc/kinds-file", "type": "bind", "source": "{file}", "options": ["bind","ro"]}}"#,
+        vol = vol.display(),
+        ro_dir = ro_dir.display(),
+        file = file.display(),
+    );
+    // Masks the kernel may lack are looked for in the agent's own /proc and /sys (one kernel), and the box
+    // is held to a mask only where the path is there to mask.
+    let masked = [
+        "/proc/kcore",
+        "/proc/timer_list",
+        "/proc/scsi",
+        "/sys/firmware",
+    ];
+    let readonly = ["/proc/sys", "/proc/sysrq-trigger"];
+    let linux_extra = format!(
+        r#","maskedPaths":{},"readonlyPaths":{}"#,
+        json_args(&masked.map(str::to_owned)),
+        json_args(&readonly.map(str::to_owned))
+    );
+    let (namespaces, mappings) = if lab.rootless {
+        (
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"},{"type":"cgroup"}"#
+                .to_owned(),
+            format!(
+                r#","uidMappings":[{{"containerID":0,"hostID":{},"size":1}}],"gidMappings":[{{"containerID":0,"hostID":{},"size":1}}]"#,
+                lab.uid, lab.gid
+            ),
+        )
+    } else {
+        (
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"},{"type":"cgroup"}"#
+                .to_owned(),
+            String::new(),
+        )
+    };
+    let hooks = r#","hooks":{"createRuntime":[{"path":"/usr/bin/true","args":["true"]}]}"#;
+    // (the path, its hooks): rootless the classic path alone; as root the pruned path, and the classic one,
+    // which a create-time hook takes through the shim.
+    let paths: &[(&str, &str)] = if lab.rootless {
+        &[("classic", "")]
+    } else {
+        &[("pruned", ""), ("classic", hooks)]
+    };
+    for &(path, hooks) in paths {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(
+                &Lab::act(&Act::Wait),
+                &namespaces,
+                &mappings,
+                &mounts,
+                hooks,
+                &linux_extra,
+            ),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("kinds-{path}")).unwrap();
+        let (pruned, shim) = (node.pruned_creates(), node.creates_through_shim());
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        })
+        .unwrap_or_else(|e| panic!("create the {path} box: {e:?}"));
+        node.start(&id).expect("start");
+        let took = (
+            node.pruned_creates() - pruned,
+            node.creates_through_shim() - shim,
+        );
+        let (exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let (vol_exit, vol_out) = run_in(&node, &id, &["/usr/bin/cat", "/vol/marker"]);
+        let ro_write = exit_in(&node, &id, &["/usr/bin/touch", "/ro-dir/written"]);
+        node.delete(&id).expect("delete");
+
+        let want_took = match (lab.rootless, path) {
+            (true, _) => (0, 0),
+            (false, "pruned") => (1, 0),
+            _ => (0, 1),
+        };
+        assert_eq!(
+            took, want_took,
+            "the {path} box was made on the {path} path (pruned, through the shim)"
+        );
+        assert_eq!(exit, Exit::Code(0), "read the {path} box's mountinfo: {mi}");
+        let listed = listed_mounts(&mi);
+        let at = |point: &str| {
+            listed
+                .iter()
+                .rev()
+                .find(|m| m.point == point)
+                .unwrap_or_else(|| panic!("no mount at {point} in the {path} box:\n{mi}"))
+        };
+        let has = |m: &ListedMount, opts: &[&str], sb: &[&str]| {
+            for o in opts {
+                assert!(
+                    m.opts.iter().any(|x| x == o),
+                    "{} in the {path} box has {o}: {m:?}",
+                    m.point
+                );
+            }
+            for o in sb {
+                assert!(
+                    m.sb_opts.iter().any(|x| x == o),
+                    "{}'s filesystem in the {path} box has {o}: {m:?}",
+                    m.point
+                );
+            }
+        };
+        // Filesystems: the type and source the spec named, its per-mount and filesystem options.
+        let proc = at("/proc");
+        assert_eq!(
+            (proc.fstype.as_str(), proc.source.as_str()),
+            ("proc", "proc")
+        );
+        has(proc, &["rw"], &[]);
+        let dev = at("/dev");
+        assert_eq!(
+            (dev.fstype.as_str(), dev.source.as_str()),
+            ("tmpfs", "tmpfs")
+        );
+        has(dev, &["rw", "nosuid"], &["mode=755", "size=65536k"]);
+        let tmp = at("/tmp");
+        assert_eq!(
+            (tmp.fstype.as_str(), tmp.source.as_str()),
+            ("tmpfs", "tmpfs")
+        );
+        has(tmp, &["rw", "nosuid", "nodev"], &[]);
+        let pts = at("/dev/pts");
+        assert_eq!(
+            (pts.fstype.as_str(), pts.source.as_str()),
+            ("devpts", "devpts")
+        );
+        let pts_sb: &[&str] = if lab.rootless {
+            &["mode=620", "ptmxmode=666"]
+        } else {
+            &["mode=620", "ptmxmode=666", "gid=5"]
+        };
+        has(pts, &["rw", "nosuid", "noexec"], pts_sb);
+        let shm = at("/dev/shm");
+        assert_eq!((shm.fstype.as_str(), shm.source.as_str()), ("tmpfs", "shm"));
+        has(shm, &["rw", "nosuid", "nodev", "noexec"], &["size=65536k"]);
+        // Its mode=1777 is tmpfs's own default, which tmpfs lists by naming no mode (v6.19
+        // mm/shmem.c:4930-4931), where /dev's mode=755 is named.
+        assert!(
+            !shm.sb_opts.iter().any(|o| o.starts_with("mode=")),
+            "/dev/shm in the {path} box has tmpfs's default mode, 1777, as asked: {shm:?}"
+        );
+        let mq = at("/dev/mqueue");
+        assert_eq!(
+            (mq.fstype.as_str(), mq.source.as_str()),
+            ("mqueue", "mqueue")
+        );
+        has(mq, &["rw", "nosuid", "nodev", "noexec"], &[]);
+        let sys = at("/sys");
+        assert_eq!(
+            (sys.fstype.as_str(), sys.source.as_str()),
+            ("sysfs", "sysfs")
+        );
+        has(sys, &["ro", "nosuid", "nodev", "noexec"], &[]);
+        let cgroup = at("/sys/fs/cgroup");
+        assert_eq!(
+            (cgroup.fstype.as_str(), cgroup.source.as_str()),
+            ("cgroup2", "cgroup")
+        );
+        has(cgroup, &["ro", "nosuid", "nodev", "noexec"], &[]);
+        // Access times: strictatime shows as neither relatime nor noatime (proc_pid_mountinfo(5)).
+        let strict = at("/strict");
+        assert_eq!(
+            (strict.fstype.as_str(), strict.source.as_str()),
+            ("tmpfs", "tmpfs")
+        );
+        has(strict, &["rw", "nosuid"], &["mode=755"]);
+        assert!(
+            !strict
+                .opts
+                .iter()
+                .any(|o| o == "relatime" || o == "noatime"),
+            "/strict in the {path} box keeps every access time, as strictatime asks: {strict:?}"
+        );
+        let noatime = at("/noatime");
+        assert_eq!(
+            noatime.fstype, "tmpfs",
+            "/noatime in the {path} box: {noatime:?}"
+        );
+        has(noatime, &["rw", "noatime", "nodiratime"], &[]);
+        // Binds: the source's filesystem and the source within it, read-only or read-write as asked.
+        for (point, source, opt) in [
+            ("/usr", Path::new("/usr"), "ro"),
+            ("/hex", Path::new(&lab.exe), "ro"),
+            ("/vol", vol.as_path(), "rw"),
+            ("/ro-dir", ro_dir.as_path(), "ro"),
+            ("/etc/kinds-file", file.as_path(), "ro"),
+        ] {
+            let m = at(point);
+            assert_eq!(
+                (m.dev.clone(), m.root.clone()),
+                bind_source_of(source),
+                "{point} in the {path} box is a bind of {}: {m:?}",
+                source.display()
+            );
+            has(m, &[opt], &[]);
+        }
+        assert_eq!(
+            (vol_exit, vol_out.trim()),
+            (Exit::Code(0), "from the host"),
+            "the {path} box reads its volume"
+        );
+        assert_ne!(
+            ro_write,
+            Exit::Code(0),
+            "the {path} box can't write its read-only bind"
+        );
+        // Masks: a file under a bind of a /dev/null, a directory under an empty read-only tmpfs.
+        for point in masked {
+            let m = listed.iter().rev().find(|m| m.point == point);
+            match (Path::new(point).exists(), Path::new(point).is_dir(), m) {
+                (false, _, _) => {}
+                (true, true, Some(m)) => {
+                    assert_eq!(m.fstype, "tmpfs", "{point} masked in the {path} box: {m:?}");
+                    has(m, &["ro"], &[]);
+                }
+                (true, false, Some(m)) => assert!(
+                    m.root.ends_with("/null"),
+                    "{point} in the {path} box is masked by a /dev/null: {m:?}"
+                ),
+                (true, _, None) => panic!("{point} isn't masked in the {path} box:\n{mi}"),
+            }
+        }
+        // Read-only paths: each bound over itself, read-only, still the box's proc.
+        for point in readonly {
+            let m = at(point);
+            assert_eq!(m.fstype, "proc", "{point} in the {path} box: {m:?}");
+            assert_eq!(
+                m.root,
+                point.trim_start_matches("/proc"),
+                "{point} in the {path} box is its own proc entry: {m:?}"
+            );
+            has(m, &["ro"], &[]);
+        }
+    }
+    eprintln!(
+        "mount kinds: proc, tmpfs, devpts, mqueue, sysfs, binds (recursive, plain, a file, read-only and \
+         read-write), masks and read-only paths are each as their spec asks, on the {} path(s)",
+        paths
+            .iter()
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    );
+}
+
+/// What a bind of `path` lists in mountinfo as its filesystem and its root within it: the device of the
+/// agent's mount that holds `path` (the topmost at the longest mount point it lies under), and that mount's
+/// root joined to `path` below its mount point. A filesystem's own device, as mountinfo names it, can differ
+/// from a file's `st_dev` (a btrfs subvolume's is its own), so the bind is matched by the table's.
+fn bind_source_of(path: &Path) -> (String, String) {
+    let real = std::fs::canonicalize(path).unwrap();
+    let mounts = listed_mounts(&std::fs::read_to_string("/proc/self/mountinfo").unwrap());
+    let holder = mounts
+        .iter()
+        .filter(|m| real.starts_with(&m.point))
+        .max_by_key(|m| Path::new(&m.point).components().count())
+        .map(|deepest| {
+            mounts
+                .iter()
+                .rev()
+                .find(|m| m.point == deepest.point)
+                .unwrap()
+        })
+        .unwrap_or_else(|| panic!("no mount holds {}", real.display()));
+    let below = real.strip_prefix(&holder.point).unwrap();
+    // `path` may be the mount point itself (a lab that binds the host's /usr in), and joining an
+    // empty path adds a trailing separator mountinfo never shows.
+    let root = if below.as_os_str().is_empty() {
+        PathBuf::from(&holder.root)
+    } else {
+        Path::new(&holder.root).join(below)
+    };
+    (holder.dev.clone(), root.to_string_lossy().into_owned())
+}
+
+/// One `/proc/<pid>/mountinfo` line (proc_pid_mountinfo(5)): the filesystem's device, the mount's root
+/// within it, the mount point, the per-mount options, the filesystem type, its source and the
+/// filesystem's own options.
+#[derive(Debug)]
+struct ListedMount {
+    dev: String,
+    root: String,
+    point: String,
+    opts: Vec<String>,
+    fstype: String,
+    source: String,
+    sb_opts: Vec<String>,
+}
+
+fn listed_mounts(text: &str) -> Vec<ListedMount> {
+    let split = |s: &str| s.split(',').map(str::to_owned).collect();
+    text.lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let left: Vec<&str> = left.split(' ').collect();
+            let right: Vec<&str> = right.split(' ').collect();
+            Some(ListedMount {
+                dev: (*left.get(2)?).to_owned(),
+                root: (*left.get(3)?).to_owned(),
+                point: (*left.get(4)?).to_owned(),
+                opts: split(left.get(5)?),
+                fstype: (*right.first()?).to_owned(),
+                source: (*right.get(1)?).to_owned(),
+                sb_opts: split(right.get(2)?),
+            })
+        })
+        .collect()
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4), the pruned-seed root's security criteria: a container on that path
+/// can't reach the host (the research probe's E0-E3, `goal5-root.md` §3-§4; f66-f80). As root — where a
+/// create takes the pruned seed — run each escape in its own box with full capabilities and a marker on
+/// the host, outside any rootfs; each must exit 0, the box held. E0 a nested user namespace is allowed
+/// (the root isn't a plain chroot); E1 the classic chroot escape stays in the rootfs; E2 unmounting the
+/// root and `setns`-ing into the box's own mount namespace reveals only the seed's empty read-only tmpfs,
+/// not the host; E3 a nested proc mount past a mask is refused. Skipped rootless, where the classic path
+/// runs (a pruned seed is a root node's).
+fn escapes_are_contained(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-escape"), state.path());
+    // A marker only root can read, a sibling of the rootfs and so outside any box's root: a box that
+    // opens it has reached the host.
+    let marker = lab.bundles.path().join("escape-marker");
+    std::fs::write(&marker, "hex-escape-marker").unwrap();
+    let marker = marker.to_string_lossy().into_owned();
+    for mode in ["e0", "e1", "e2", "e3"] {
+        let id = BoxId::new(&format!("esc-{mode}")).unwrap();
+        let spec = lab.running(
+            id.clone(),
+            &[
+                "/hex".to_owned(),
+                "selftest-box".to_owned(),
+                "escape".to_owned(),
+                mode.to_owned(),
+                marker.clone(),
+            ],
+        );
+        node.create(spec).expect("create the escape box");
+        node.start(&id).expect("start the escape box");
+        let info = wait_exit(&node, &id);
+        assert_eq!(
+            info.exit,
+            Some(Exit::Code(0)),
+            "escape {mode} is contained (the box held)"
+        );
+        node.delete(&id).expect("delete the escape box");
+    }
+    // The pruned path served every escape box: none fell back to the shim (all eligible).
+    assert_eq!(
+        node.creates_through_shim(),
+        0,
+        "the escape boxes take the pruned path"
+    );
+    eprintln!(
+        "escapes contained: e0 userns allowed, e1/e2 marker unreached, e3 nested proc refused"
+    );
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4): a spec binding `/usr` read-only and a volume. Both are in the
+/// container's mountinfo with the options asked, and the bundle's config.json and the node's state
+/// directory are unreachable from inside — the pruned root holds nothing of the host but what the spec
+/// mounts. Root only: a pruned seed is a root node's, and the pruned path is what keeps the host out.
+fn a_bind_and_a_volume_are_present_the_host_unreachable(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-vol"), state.path());
+    let vol = lab.bundles.path().join("volume");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("marker"), "from the volume\n").unwrap();
+    let volume = format!(
+        ",\n    {{\"destination\": \"/vol\", \"type\": \"bind\", \"source\": \"{}\", \"options\": [\"rbind\",\"rw\"]}}",
+        vol.display()
+    );
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(
+        dir.join("config.json"),
+        lab.config_with(
+            &Lab::act(&Act::Wait),
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            "",
+            &volume,
+        ),
+    )
+    .unwrap();
+    let id = BoxId::new("vol").unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir.clone()),
+    })
+    .expect("create a box with a read-only bind and a volume");
+    node.start(&id).expect("start");
+    let pruned = node.pruned_creates();
+    // Gather what the box sees before deleting, so a failed check leaves no box running.
+    let (mi_exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+    let (vol_exit, vol_out) = run_in(&node, &id, &["/usr/bin/cat", "/vol/marker"]);
+    let config = dir.join("config.json").to_string_lossy().into_owned();
+    let state_path = state.path().to_string_lossy().into_owned();
+    let config_reach = exit_in(&node, &id, &["/usr/bin/test", "-e", &config]);
+    let state_reach = exit_in(&node, &id, &["/usr/bin/test", "-e", &state_path]);
+    node.delete(&id).expect("delete");
+
+    assert!(
+        pruned >= 1,
+        "the bind-and-volume box is made on the pruned path, {pruned} pruned"
+    );
+    assert_eq!(mi_exit, Exit::Code(0), "read the box's mountinfo: {mi}");
+    let mounts = mountinfo(&mi);
+    let usr = mounts
+        .iter()
+        .rev()
+        .find(|(point, ..)| point == "/usr")
+        .expect("/usr in the box");
+    assert!(
+        usr.1.split(',').any(|o| o == "ro"),
+        "/usr is read-only: {usr:?}"
+    );
+    let vol_mount = mounts
+        .iter()
+        .rev()
+        .find(|(point, ..)| point == "/vol")
+        .expect("/vol in the box");
+    assert!(
+        vol_mount.1.split(',').any(|o| o == "rw"),
+        "/vol is read-write: {vol_mount:?}"
+    );
+    assert_eq!(
+        (vol_exit, vol_out.trim()),
+        (Exit::Code(0), "from the volume"),
+        "the volume's content is there"
+    );
+    assert_ne!(
+        config_reach,
+        Exit::Code(0),
+        "the bundle's config.json is unreachable from inside the box"
+    );
+    assert_ne!(
+        state_reach,
+        Exit::Code(0),
+        "the node's state directory is unreachable from inside the box"
+    );
+    eprintln!(
+        "bind+volume: /usr read-only and /vol read-write are in the box; config.json and the state dir are unreachable"
+    );
+}
+
+/// `argv` in box `id` through the seam, its exit and stdout once it ends.
+fn run_in(rt: &dyn Runtime, id: &BoxId, argv: &[&str]) -> (Exit, String) {
+    let (mut out, w) = std::io::pipe().unwrap();
+    let mut proc = rt
+        .exec(
+            id,
+            hex_api::Program::of(argv),
+            hex_api::Stdio {
+                stdout: Some(w),
+                ..hex_api::Stdio::null()
+            },
+        )
+        .expect("exec in the box");
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut out, &mut s).unwrap();
+    let exit = proc
+        .wait_for(conformance::PATIENCE)
+        .unwrap()
+        .expect("the program ends");
+    (exit, s)
+}
+
+/// `argv` in box `id`, its exit alone.
+fn exit_in(rt: &dyn Runtime, id: &BoxId, argv: &[&str]) -> Exit {
+    run_in(rt, id, argv).0
+}
+
+/// Each `/proc/<pid>/mountinfo` line as (mount point, per-mount options, optional/propagation fields,
+/// filesystem type) (proc_pid_mountinfo(5)); tuples, so an unread field is no dead-code warning.
+fn mountinfo(text: &str) -> Vec<(String, String, String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let left: Vec<&str> = left.split(' ').collect();
+            Some((
+                (*left.get(4)?).to_owned(),
+                (*left.get(5)?).to_owned(),
+                left.get(6..).map(|o| o.join(" ")).unwrap_or_default(),
+                right.split(' ').next().unwrap_or("").to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// The mount points in this process's (the agent's) own mount namespace, as a set, so a failed create
+/// can be shown to have left none of a container's mounts behind (goal 5 plan step 2).
+fn agent_mount_points() -> std::collections::BTreeSet<String> {
+    mountinfo(&std::fs::read_to_string("/proc/self/mountinfo").expect("read the agent's mountinfo"))
+        .into_iter()
+        .map(|(point, ..)| point)
+        .collect()
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4): creates that can't take the pruned path take the classic path, each
+/// counted under its reason. Rootless, where the node's seeds don't prune: a create is counted under
+/// `Rootless`, made by a seed (not through the shim) and not pruned. As root, specs a pruned seed can't
+/// serve: a user namespace of its own (`UserNamespace`), createContainer hooks (`Hooks`) and a mount
+/// namespace joined by path (`JoinsByPath`), each through the shim, and none counted under `Rootless`.
+/// A create routes classic at create — the counter bumps there, before the box runs — so creating then
+/// deleting each is enough to count it.
+fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-reasons"), state.path());
+    if lab.rootless {
+        let id = BoxId::new("reason-rootless").unwrap();
+        let before = node.classic_creates_for(ClassicReason::Rootless);
+        node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)))
+            .expect("create a box on the rootless node");
+        assert_eq!(
+            node.classic_creates_for(ClassicReason::Rootless),
+            before + 1,
+            "a rootless node's create is counted under Rootless"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "a rootless node's create is made by a seed, not through the shim"
+        );
+        assert_eq!(
+            node.pruned_creates(),
+            0,
+            "a rootless node's seeds don't prune"
+        );
+        node.delete(&id).expect("delete the rootless box");
+        eprintln!(
+            "classic reasons: a rootless node's create counted under Rootless, made by a seed, none pruned"
+        );
+        return;
+    }
+    // A mount namespace to join by path: a running box's init has one of its own.
+    let host = BoxId::new("reason-host").unwrap();
+    node.create(lab.running(host.clone(), &Lab::act(&Act::Wait)))
+        .expect("create the box whose mount namespace is joined");
+    node.start(&host).expect("start it");
+    let host_mnt = format!("/proc/{}/ns/mnt", init_pid(&node.container_dir(&host)));
+    let base = r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
+    let userns = r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#;
+    let mappings = r#","uidMappings":[{"containerID":0,"hostID":0,"size":1}],"gidMappings":[{"containerID":0,"hostID":0,"size":1}]"#;
+    let by_path = format!(
+        r#"{{"type":"pid"}},{{"type":"mount","path":"{host_mnt}"}},{{"type":"ipc"}},{{"type":"uts"}}"#
+    );
+    let hooks = r#","hooks":{"createContainer":[{"path":"/usr/bin/true","args":["true"]}]}"#;
+    let cases: [(&str, ClassicReason, &str, &str, &str); 3] = [
+        ("userns", ClassicReason::UserNamespace, userns, mappings, ""),
+        ("hooks", ClassicReason::Hooks, base, "", hooks),
+        (
+            "mount-by-path",
+            ClassicReason::JoinsByPath,
+            &by_path,
+            "",
+            "",
+        ),
+    ];
+    for (name, reason, namespaces, mappings, hooks) in cases {
+        let (shim_before, reason_before, pruned_before) = (
+            node.creates_through_shim(),
+            node.classic_creates_for(reason),
+            node.pruned_creates(),
+        );
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(&Lab::act(&Act::Wait), namespaces, mappings, "", hooks, ""),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("reason-{name}")).unwrap();
+        // The create routes classic at create (the counter bumps there) whether or not the classic path
+        // then completes; delete cleans it up if it did.
+        let _ = node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        });
+        let _ = node.delete(&id);
+        assert_eq!(
+            node.classic_creates_for(reason),
+            reason_before + 1,
+            "{name} is counted under {reason:?}"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            shim_before + 1,
+            "{name} took the classic path"
+        );
+        assert_eq!(
+            node.pruned_creates(),
+            pruned_before,
+            "{name} did not take the pruned path"
+        );
+    }
+    assert_eq!(
+        node.classic_creates_for(ClassicReason::Rootless),
+        0,
+        "a root node counts no create under Rootless"
+    );
+    node.delete(&host).expect("delete the host box");
+    eprintln!(
+        "classic reasons: a user namespace (UserNamespace), createContainer hooks (Hooks) and a mount namespace by path (JoinsByPath) each counted, none pruned, none under Rootless"
+    );
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4): rootfsPropagation shared, slave and private each show on the box's
+/// root in its own mountinfo, and no mount the pruned init makes reaches the agent's mount namespace.
+/// Each box binds a uniquely named volume; were the init's bind to propagate back to the agent (a shared
+/// root sharing a peer group with the agent's mounts), that volume's source would be a mount in the
+/// agent's mountinfo. Root only.
+fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    // v6.19 fs/namespace.c:1259-1288: clone_mnt keeps the source's peer/master unless asked to
+    // change it. open_tree's detached copy calls __do_loopback (:3032, :2963-2966). A private
+    // source cannot acquire a master by MS_SLAVE: fs/pnode.c:93-117 and mount_namespaces(7),
+    // "Propagation type transitions". The lab must establish its own shared inputs.
+    struct SharedSource(PathBuf);
+    impl SharedSource {
+        fn make(path: &Path) -> Self {
+            rustix::mount::mount_bind(path, path).unwrap_or_else(|e| {
+                panic!("binding a propagation-test source {}: {e}", path.display())
+            });
+            let source = Self(path.to_owned());
+            rustix::mount::mount_change(path, rustix::mount::MountPropagationFlags::PRIVATE)
+                .unwrap_or_else(|e| panic!("isolating a propagation-test source: {e}"));
+            rustix::mount::mount_change(path, rustix::mount::MountPropagationFlags::SHARED)
+                .unwrap_or_else(|e| panic!("sharing a propagation-test source: {e}"));
+            source
+        }
+        fn peer(&self) -> String {
+            let text = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+            let mounts = mountinfo(&text);
+            let source = mounts
+                .iter()
+                .rev()
+                .find(|(point, ..)| Path::new(point) == self.0)
+                .unwrap_or_else(|| panic!("source is not a mount: {}", self.0.display()));
+            source
+                .2
+                .split_whitespace()
+                .find_map(|tag| tag.strip_prefix("shared:"))
+                .unwrap_or_else(|| panic!("source must be shared before create: {source:?}"))
+                .to_owned()
+        }
+    }
+    impl Drop for SharedSource {
+        fn drop(&mut self) {
+            let private = rustix::mount::mount_change(
+                &self.0,
+                rustix::mount::MountPropagationFlags::PRIVATE
+                    | rustix::mount::MountPropagationFlags::REC,
+            );
+            let detached = rustix::mount::unmount(&self.0, rustix::mount::UnmountFlags::DETACH);
+            if private.is_err() || detached.is_err() {
+                if std::thread::panicking() {
+                    eprintln!("shared-source cleanup: private={private:?}, detach={detached:?}");
+                } else {
+                    panic!("shared-source cleanup: private={private:?}, detach={detached:?}");
+                }
+            }
+        }
+    }
+    struct Created<'a> {
+        node: &'a Node,
+        id: BoxId,
+        live: bool,
+    }
+    impl Created<'_> {
+        fn delete(&mut self) {
+            self.node
+                .delete(&self.id)
+                .expect("delete the propagation-test box");
+            self.live = false;
+        }
+    }
+    impl Drop for Created<'_> {
+        fn drop(&mut self) {
+            if self.live
+                && let Err(e) = self.node.delete(&self.id)
+            {
+                if std::thread::panicking() {
+                    eprintln!("propagation-test box cleanup: {e}");
+                } else {
+                    panic!("propagation-test box cleanup: {e}");
+                }
+            }
+        }
+    }
+    let table = || {
+        std::fs::read_to_string("/proc/self/mountinfo")
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    };
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab
+        .node(&own.join("hex-oci-prop"), state.path())
+        .with_prepared_dev_mounts(false)
+        .unwrap();
+    for prop in ["plain", "shared", "slave", "private"] {
+        let case = tempfile::Builder::new()
+            .prefix("shared-sources-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap();
+        let rootfs = case.path().join("rootfs");
+        build_rootfs(&rootfs);
+        let bound = case.path().join("bind-source");
+        std::fs::create_dir_all(bound.join("child")).unwrap();
+        std::fs::write(bound.join("masked"), "source file").unwrap();
+        std::fs::write(bound.join("readonly"), "source file").unwrap();
+        let root_source = SharedSource::make(&rootfs);
+        let bind_source = SharedSource::make(&bound);
+        let root_peer = root_source.peer();
+        let bind_peer = bind_source.peer();
+        eprintln!("{prop}: root source shared:{root_peer}, bind source shared:{bind_peer}");
+        let before = table();
+        let mut config: serde_json::Value =
+            serde_json::from_str(&lab.config(&Lab::act(&Act::Wait), false)).unwrap();
+        config["root"]["path"] = serde_json::json!(rootfs);
+        if prop != "plain" {
+            config["linux"]["rootfsPropagation"] = serde_json::json!(prop);
+        }
+        config["linux"]["maskedPaths"] = serde_json::json!(["/proc/kcore", "/shared-bind/masked"]);
+        config["linux"]["readonlyPaths"] =
+            serde_json::json!(["/proc/sys", "/shared-bind/readonly"]);
+        config["mounts"].as_array_mut().unwrap().extend([
+            serde_json::json!({"destination":"/dev/pts", "type":"devpts", "source":"devpts",
+                "options":["nosuid","noexec","newinstance","ptmxmode=0666","mode=0620"]}),
+            serde_json::json!({"destination":"/dev/shm", "type":"tmpfs", "source":"shm",
+                "options":["nosuid","nodev","mode=1777","size=64k"]}),
+            serde_json::json!({"destination":"/dev/mqueue", "type":"mqueue", "source":"mqueue"}),
+            serde_json::json!({"destination":"/shared-bind", "type":"bind", "source":bound,
+                "options":["rbind","rw"]}),
+            serde_json::json!({"destination":"/shared-bind/child", "type":"tmpfs", "source":"bind-child",
+                "options":["mode=700","size=64k"]}),
+        ]);
+        std::fs::write(
+            case.path().join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("prop-{prop}")).unwrap();
+        let pruned = node.pruned_creates();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(case.path().to_owned()),
+        })
+        .unwrap_or_else(|e| panic!("create the {prop} shared-source box: {e:?}"));
+        let mut made = Created {
+            node: &node,
+            id: id.clone(),
+            live: true,
+        };
+        assert_eq!(node.pruned_creates(), pruned + 1, "{prop} must run pruned");
+        let during = table();
+        let gained: Vec<_> = during.difference(&before).collect();
+        assert_eq!(
+            during, before,
+            "{prop}: agent gained mounts during create: {gained:?}"
+        );
+        node.start(&id).expect("start the propagation-test box");
+        let (exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        assert_eq!(exit, Exit::Code(0), "read the {prop} box's mountinfo: {mi}");
+        let mounts = mountinfo(&mi);
+        let root = mounts
+            .iter()
+            .rev()
+            .find(|(point, ..)| point == "/")
+            .unwrap_or_else(|| panic!("{prop}: box has no root mount: {mi}"));
+        let tags: Vec<_> = root.2.split_whitespace().collect();
+        match prop {
+            "slave" => {
+                assert!(
+                    tags.contains(&format!("master:{root_peer}").as_str()),
+                    "{prop}: exact root master:{root_peer} required: {root:?}"
+                );
+                assert!(
+                    !tags.iter().any(|tag| tag.starts_with("shared:")),
+                    "{root:?}"
+                );
+            }
+            "shared" => {
+                let peer = tags
+                    .iter()
+                    .find_map(|tag| tag.strip_prefix("shared:"))
+                    .unwrap_or_else(|| panic!("shared root has no peer group: {root:?}"));
+                assert_ne!(
+                    peer, root_peer,
+                    "box must not share its source's peer group"
+                );
+            }
+            _ => assert!(
+                !tags
+                    .iter()
+                    .any(|tag| tag.starts_with("shared:") || tag.starts_with("master:")),
+                "{prop}: root must be private: {root:?}"
+            ),
+        }
+        let bound_mount = mounts
+            .iter()
+            .find(|(point, ..)| point == "/shared-bind")
+            .unwrap();
+        assert!(
+            !bound_mount
+                .2
+                .split_whitespace()
+                .any(|tag| tag.starts_with("shared:") || tag.starts_with("master:")),
+            "the default bind must be private: {bound_mount:?}"
+        );
+        assert_eq!(table(), before, "{prop}: agent changed while box ran");
+        made.delete();
+        let after = table();
+        let gained: Vec<_> = after.difference(&before).collect();
+        assert_eq!(
+            after, before,
+            "{prop}: agent gained mounts after delete: {gained:?}"
+        );
+    }
+    eprintln!(
+        "rootfsPropagation plain/shared/slave/private: shared root and bind inputs checked; agent table unchanged before/during/after each pruned box"
+    );
+}
+
+/// Goal 5 plan step 2 (T-T7.1.4; CLAUDE.md §3, §6): the pruned init refusing or dying mid-build leaves
+/// nothing of the container in the agent's own namespace. Two ways in, both after the rootfs is attached
+/// and before the root switch: (1) a filesystem mount of a type the kernel doesn't have — the init
+/// refuses at `fsopen`, by type, naming the mount and why; (2) the init killed between its mounts' attach
+/// and the `chroot` (a debug-only crash point armed on the seed) — refused by type, its mounts
+/// dying with its own namespace. Each time: the box is gone, its directory gone, the agent's mounts
+/// unchanged. Root only: a pruned seed is a root node's, and the pruned path is what keeps the
+/// container's mounts out of the agent's namespace.
+fn an_init_that_refuses_or_dies_mid_build_leaves_nothing(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+
+    // (1) An unattachable filesystem mount: the pruned init reaches it after attaching the rootfs and
+    // refuses at `fsopen`, by type, naming the mount and why; the agent then leaves nothing and serves on.
+    {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let box_root = own.join("hex-oci-attach-fail");
+        let node = lab.node(&box_root, state.path());
+        let bad =
+            ",\n    {\"destination\": \"/bad\", \"type\": \"nosuchfs\", \"source\": \"nosuchfs\"}";
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_with(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                bad,
+            ),
+        )
+        .unwrap();
+        let id = BoxId::new("attach-fail").unwrap();
+        let before = agent_mount_points();
+        let refused = node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.clone()),
+        });
+        assert!(
+            matches!(&refused, Err(Refusal::Os { why, .. }) if why.contains("nosuchfs") && why.contains("/bad")),
+            "the unattachable mount is refused by type, naming the mount and why: {refused:?}"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "the create took the pruned path, not a classic fallback"
+        );
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "the refused box is cleaned up"
+        );
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.to_string()).exists(),
+            "the refused box's directory is gone"
+        );
+        assert_eq!(
+            agent_mount_points(),
+            before,
+            "no mount of the refused container is in the agent's namespace"
+        );
+        // The node serves a clean create after the refusal: the pruned path isn't wedged.
+        let ok = BoxId::new("attach-fail-then-ok").unwrap();
+        node.create(lab.running(ok.clone(), &Lab::act(&Act::Wait)))
+            .expect("the next create succeeds");
+        node.start(&ok).expect("start the next box");
+        assert_eq!(node.inspect(&ok).unwrap().state, BoxState::Running);
+        node.delete(&ok).expect("delete");
+    }
+
+    // (2) The init killed between the mounts' attach and the root switch: debug builds only, where the
+    // crash point exists. Every seed of this node is armed, so it serves no clean create — the refusal
+    // path's recovery is shown in (1).
+    #[cfg(debug_assertions)]
+    {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let box_root = own.join("hex-oci-killed-build");
+        let node = Node::open(&box_root, state.path(), state.path())
+            .expect("open a node")
+            .with_inject(hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_SWITCH)
+            .with_oci_helper(PathBuf::from(&lab.exe));
+        let id = BoxId::new("killed-build").unwrap();
+        let before = agent_mount_points();
+        let refused = node.create(lab.running(id.clone(), &Lab::act(&Act::Wait)));
+        assert!(
+            matches!(&refused, Err(Refusal::Os { .. }) | Err(Refusal::Broken(_))),
+            "the init killed mid-build refuses the create by type: {refused:?}"
+        );
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "the killed create took the pruned path, not a classic fallback"
+        );
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "the killed box is cleaned up"
+        );
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.to_string()).exists(),
+            "the killed box's directory is gone"
+        );
+        assert_eq!(
+            agent_mount_points(),
+            before,
+            "no mount of the killed container is in the agent's namespace"
+        );
+    }
+
+    // (3) Only the node's side can arm the crash point, never a container: a box on a node that armed
+    // nothing, whose own spec sets the inject variable in its process env, builds its root and runs — the
+    // init never saw it (the env reaches the workload at execve, after the root is built, and the node
+    // clears it from the seed besides, so no box can kill its own init through it). Debug builds only,
+    // where the crash point exists to be proven inert.
+    #[cfg(debug_assertions)]
+    {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let box_root = own.join("hex-oci-spec-inject");
+        let node = lab.node(&box_root, state.path());
+        let inject = hex_runtime::linux::oci::seed::ENV_INJECT;
+        let point = hex_runtime::linux::oci::seed::INJECT_DIE_BEFORE_SWITCH;
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = lab
+            .config_with(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                "",
+            )
+            .replace(
+                r#""env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]"#,
+                &format!(
+                    r#""env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "{inject}={point}"]"#
+                ),
+            );
+        assert!(
+            config.contains(&format!("{inject}={point}")),
+            "the box's spec carries the inject variable in its process env"
+        );
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        let id = BoxId::new("spec-inject").unwrap();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+        })
+        .expect("the box whose spec sets the inject variable is created: the init never saw it");
+        node.start(&id).expect("start");
+        assert_eq!(
+            node.inspect(&id).unwrap().state,
+            BoxState::Running,
+            "the box runs: its own env did not arm the crash point, only the node's side can"
+        );
+        node.delete(&id).expect("delete");
+    }
+
+    eprintln!(
+        "mid-build: an unattachable mount is refused naming it, a killed init refused, and a container's own env cannot arm the crash point; each leaves no box, directory or mount in the agent's namespace"
+    );
 }
 
 /// Goal 5 plan step 4: the box bound's count is the root's link count, not a listing (a listing waits
@@ -1798,7 +3181,7 @@ fn own_cgroup() -> PathBuf {
 /// Moves this process into a leaf of its own cgroup and confirms every controller is delegated, as
 /// oci_seccomp.rs does; returns the own cgroup dir, or why it isn't ours to subdivide.
 fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
-    let own = own_cgroup();
+    let own = LAB_PARENT.get_or_init(own_cgroup).clone();
     let leaf = own.join("hex-agent");
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))

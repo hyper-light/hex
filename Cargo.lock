@@ -179,6 +179,7 @@ dependencies = [
  "hex-node",
  "hex-runtime",
  "rustix",
+ "serde_json",
  "tempfile",
 ]
 

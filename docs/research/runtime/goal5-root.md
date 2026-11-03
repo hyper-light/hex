@@ -349,8 +349,11 @@ namespace is made, not the rest.
   at most 0.05 ms p50.
 - **AC-e, under concurrency.** At 8 creates in flight with 8,000 extra idle threads, the root's parts p99 are at most
   0.5 ms (classic: 5.5-6.1 ms p50, f80).
-- **AC-f, the seed's namespace.** A started seed's mountinfo, read from the agent, lists exactly two mounts, the
-  namespace's root and a read-only tmpfs, and no proc, sysfs or cgroup2.
+- **AC-f, the seed's namespace.** A started seed's namespace holds exactly two mounts, the namespace's root and a
+  read-only tmpfs on it, and no proc, sysfs or cgroup2. Its mountinfo, read from the agent, lists the tmpfs alone: the
+  namespace's root lies outside the seed's root, and the kernel lists no mount it can't reach from the task's root
+  (v6.19 `show_mountinfo`, fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail will give SEQ_SKIP on
+  this"; `seq_path_root`'s SEQ_SKIP, fs/seq_file.c:517-519; `__d_path`, fs/d_path.c:211-223).
 - **AC-g, the classic path counted.** Every create that takes the classic path is counted by its reason (a fixed set,
   so no high-cardinality label; the name agreed with kiln's Observe owner per CLAUDE.md §10), and each still passes the
   OCI conformance it passes today.
@@ -403,3 +406,56 @@ O(1); f72 setns's rules; f73 detached trees cross, paths don't; f74 MOVE_MOUNT_B
 thread; f76 the copy and detach per mount; f77 MS_MOVE's teardown at exit; f78 the pruned seed's root; f79 the agent's
 clones; f80 under concurrency (inferred); f83 OPEN_TREE_NAMESPACE (7.0); f84 CLONE_EMPTY_MNTNS and MOVE_MOUNT_BENEATH
 (7.1).
+
+
+## 9. Shared-source propagation regression (2026-11-02)
+
+The fedora 6.19.10 probe at `~/.cache/hex-t7/g5x-s3/leak-probe-20261102T0805Z`
+(`RESULT.md`, `leak_probe.c`) reproduces a pruned-path correctness bug: cloning a shared source,
+attaching the clone in a private child mount namespace, then mounting tmpfs beneath it creates a
+second mount in the agent's namespace. The agent mount survives the child's exit. Making the clone
+recursively private first prevents the leak. Private and slave sources also prevent it. The probe
+ran inside a disposable privileged lab, with its own tmpfs source.
+
+Why: v6.19 `fs/namespace.c:1259-1288` (`clone_mnt`) retains the original peer group/master unless
+CL_PRIVATE or CL_SLAVE changes it. The detached `open_tree` copy (`:3007-3040`, `get_detached_copy`)
+uses `__do_loopback` (`:2963-2966`), and `copy_tree` passes those flags to `clone_mnt` (`:2153-2166`).
+After attachment, `fs/pnode.c:311-365` (`propagate_mnt`) creates secondary mounts in peer groups and
+their slaves. Namespace membership alone does not break propagation
+([mount_namespaces(7)](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)).
+
+The labs hid the condition: `seam_root.sh` binds HOME rprivate; `docker_lab.sh` uses a named volume
+which the fedora Docker probe showed as `master:1` (a slave). A plain bind showed no tag, while
+`:rslave` showed `master:158`; fedora's host `/` and `/home` were shared. A slave root-source inherited
+by a clone could satisfy the old master-tag assertion without exercising any shared peer. On a
+private bind the same slave assertion fails on both bf77298 and the pool draft. Neither result
+proved that shared host inputs were contained.
+
+The correction isolates source propagation before population. On the agent's detached rootfs,
+apply MS_SLAVE recursively for requested rootfsPropagation shared/slave, MS_PRIVATE recursively
+otherwise. The init later applies the requested final root propagation as before. Slave retains
+source master:N; shared creates a new peer group, with N remaining an incoming master, never its
+own peer. Default/plain and private have neither tag. Each bind tree is also isolated recursively
+before attachment: private by default; slave initially for explicit shared/slave, followed by the
+requested shared/unbindable transition. This removes every host peer before a child mount can be
+made. The ordinary/classic path's upfront recursive-private operation remains in place.
+
+`mount_setattr` can target the detached tree by descriptor and combine attribute/propagation fields
+([mount_setattr(2)](https://man7.org/linux/man-pages/man2/mount_setattr.2.html)). At v6.19
+`fs/namespace.c:4756-4821`, `do_mount_setattr` accepts an anonymous namespace root but still takes
+namespace_sem for write when propagation is nonzero. Agent-side root isolation therefore costs
+one real writer hold per create; it is outside part 19, included in whole-create latency. Bind
+isolation remains in the init and folds attributes and propagation into one call for recursive
+binds. Nonrecursive attribute changes retain their original scope; recursively isolating a tree
+must not make those attributes recursive. Additional calls in that case are a correctness cost,
+not a reason to widen the spec's flags. The prepared `/dev` pool is unchanged.
+
+The regression makes both rootfs and bind sources shared in its own lab namespace, asserts
+shared:N preconditions, and checks plain/shared/slave/private on actual pruned creates. It compares
+complete agent mountinfo before, during and after each box, with proc, devices, devpts, mqueue,
+binds, a mount below the bind, masks and read-only paths present. Slave must show master:N exactly;
+shared must show a different peer group; default/private show neither; default binds are private.
+Source guards undo their temporary mounts on every outcome. The test must fail on the pre-fix
+code, with that output retained, then pass with the correction. A gained agent mount, wrong master,
+or altered mount option falsifies the correction. Re-run escape, mount kinds, rootless/cgroupfs,
+validation, conformance, gates and the complete-coverage performance measurements afterward.

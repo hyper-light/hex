@@ -986,8 +986,9 @@ each fsync's p99 was 5.719 to 6.333 ms.
     itself, after its user namespace's maps, in the shim's order (`init::join_namespace_paths`). A pid or user namespace
     by path can't be joined that way: a pid namespace's `setns` moves only the caller's later children, and the clone
     has already made the fresh namespaces, owned by the seed's user namespace. So a given bundle that joins either is
-    made through the shim, as the command line makes every container, and counted (`Node::creates_through_shim`): the
-    one kind of seam create that still re-execs the hex binary. The rendered bundles never join by path; a pod's
+    made through the shim, as the command line makes every container, and counted (`Node::creates_through_shim`): on a
+    rootless node the one kind of seam create that still re-execs the hex binary, joined on a root node by those the
+    pruned seed can't serve (the pruned seed's root, below). The rendered bundles never join by path; a pod's
     containers sharing a network namespace (`ClassSpec::Bundle`) go through the seed as root, and rootless, where joining
     a namespace another container's user namespace owns needs that user namespace joined too, through the shim.
 - **The child.** It does what the shim's child does today (`init::clone_child`), up to the exec FIFO, then execs the
@@ -1002,7 +1003,8 @@ each fsync's p99 was 5.719 to 6.333 ms.
   creates on fedora, in each of the probe's three runs: the hex binary is exec'd twice, both `__oci-seed` (the node's
   first seed and its spare, started ahead of the creates), and `__oci-init` (the shim) and `__oci-exec` not at all;
   each create's init execs only its own program (`/usr/bin/sleep`, `/usr/bin/true`), never hex: 0 per
-  create.<!-- /record --> The exception is the pid or user namespace by path above, made through the shim and counted.
+  create.<!-- /record --> The exceptions, made through the shim and counted, are the pid or user namespace by path above
+  and, on a root node, the creates the pruned seed can't serve (below).
 - **The box count.** A create counts the node's boxes by the box root's link count, its subdirectories plus two on
   cgroup2 (`kernfs_refresh_inode`, Linux v6.19 `fs/kernfs/inode.c`), where it listed the root before:
   <!-- record: bench/competitive/probes/create_serial.md -->at concurrency 32 that listing, under the root's
@@ -1340,6 +1342,125 @@ clone(2), AFaaS, Firecracker and SOCK on seeds, unique state and cgroup pools, a
 `clone3_args_valid`) and commit `1f7f4dde5c94`; Linux v6.19 `kernel/cgroup/cgroup.c` (`cgroup_kn_lock_live`,
 `cgroup_css_set_fork`, `css_killed_work_fn`, `css_release_work_fn`), `fs/namei.c` (`__start_dirop`), `fs/kernfs/dir.c`
 (`kernfs_iop_mkdir`, `kernfs_dop_revalidate`) and `fs/kernfs/inode.c` (`kernfs_refresh_inode`).
+
+**The pruned seed's root, with no pivot_root** (goal 5's added step, 2026-10-31). Run 4 of the create breakdown
+(create-breakdown-20261031T061841Z) puts the container's root at 0.894 ms of a 2.020 ms create through the seam (44%),
+of it the init's mounts 0.359 ms and `pivot_root` 0.535. `pivot_root` walks every thread on the host under
+`namespace_sem`, to move each whose root was the old root (`chroot_fs_refs`, v6.19 `fs/fs_struct.c:60-61`; f6, f7), so
+it grows with a node's density (0.535 ms at about 3,870 threads here, 2.99 ms at 26,861 in the probe; f75) and under
+concurrency caps a host near one root per walk (about 930 a second at 11,000 threads however many creators ran; f80).
+This takes it off create's path on a root node, with no new kernel version (decision 6 needs 7.0+; fedora runs 6.19).
+
+- **The seed prunes its own mount namespace once, at start.** A create seed on a root node, before it serves,
+  `unshare(CLONE_NEWNS)`, makes `/` private, mounts a small `tmpfs` holding nothing,
+  `pivot_root`s into it once (one walk per seed's life, off every create's path), detaches the old root and remounts the
+  tmpfs read-only. Its namespace then holds exactly two mounts, the namespace's root and that read-only tmpfs: no proc,
+  no sysfs, nothing of the host's (f78). Every init the seed clones copies that namespace (`CLONE_NEWNS` copies the
+  caller's mount table), so the copy is two mounts (10-15 us against 25-4,000 us for the host's; f76) and holds nothing
+  of the host beneath the container's root. A rootless seed can't own a mount namespace without a user namespace of its
+  own, so it doesn't prune and its node takes the classic path (below).
+- **What the seed read by path, it is given as descriptors.** A pruned seed can reach no host path, so the create
+  carries, over `SCM_RIGHTS` with its existing pipes (`hex_core::seed::Create`, extended append-only): an `O_PATH`
+  descriptor for the bundle directory (to read `config.json`), the container's cgroup directory, the container's state
+  directory (the exec FIFO's), the rootfs as a detached tree, and one detached tree per bind source. The node agent,
+  in its own (host) mount namespace, clones each source with `open_tree(OPEN_TREE_CLONE | AT_RECURSIVE)` while the host
+  filesystem is still reachable, as crun opens every mount ahead for its `OPEN_TREE_NAMESPACE` path (f17, f73), sets a
+  read-only source read-only on its tree (`mount_setattr`) before sending, and closes its copies once the seed answers;
+  a tree never attached dissolves with its last descriptor. The descriptors a create carries are bounded by
+  `SCM_MAX_FD` (253, `include/net/scm.h`): a spec with more bind mounts than fit is refused by type and made through the
+  shim, counted (CLAUDE.md §2, §3).
+- **The init builds the root on descriptors, fd-based.** In the clone's child, with no `/proc/self/fd` to resolve
+  targets through (there is no proc in the pruned namespace), the init uses the new mount API throughout: it attaches
+  the rootfs tree on `/` itself with `move_mount`, over the seed's read-only tmpfs, resolves each target inside the
+  rootfs with `openat2(RESOLVE_IN_ROOT)` from the tree's own descriptor (`inroot::Root`), attaches each bind's tree with
+  `move_mount`, makes each filesystem (`proc`, `tmpfs`, `sysfs`, `mqueue`, `devpts`, `cgroup2`) with
+  `fsopen`/`fsconfig`/`fsmount` (its read-only and `nosuid`/`nodev`/`noexec` set at `fsmount`), makes device nodes with
+  `mknodat` (a root node, so `CAP_MKNOD` holds; a user namespace takes the classic path), masks a file by binding the
+  container's own `/dev/null` over it (not the host's), and sets read-only paths and propagation with `mount_setattr` on
+  the mount's own descriptor. Then `fchdir` into the rootfs, `chroot(".")`, `chdir("/")`: no `pivot_root`, no old-root
+  detach, no expedited RCU grace period (f11, f76). The exec FIFO is opened through the state-directory descriptor, not
+  a path. Until its `chroot` the init's own root is the tmpfs's, which a mount stacked on it doesn't change, and it
+  walks no path by name. Goal 5 plan step 3 took the build to the system calls' cost (`goal5-mounts.md`): one
+  resolution per target that's there (the component walk only to make what's missing), `/dev`'s nodes and links made
+  first and looked for only when the kernel refuses a name as there, each with the outcome the look before each gave,
+  and the rootfs attached on `/` directly, where step 2 attached it at `/r` and moved it with `MS_MOVE`: the same tree,
+  one attach and one hold of `namespace_sem` fewer.
+- **Fresh `/dev` mounts are made ahead for eligible pruned creates.** One worker prepares a detached
+  tmpfs with the mount's exact source, flags and data, its six default device nodes and five links
+  (`goal5-mounts.md` §6). A take transfers a fresh filesystem to one container; no used mount is returned.
+  The pure core holds four LRU configurations with eight mounts each, at most 32 mounts, with one make
+  outstanding. Cold, dry, disabled, failed and ineligible cases use ordinary construction and are
+  counted by fixed reason. Explicit inode quotas, custom devices, duplicate/read-only/non-tmpfs `/dev`,
+  keys over 2 KiB and descriptor capacity keep ordinary setup. The init guards later mount targets
+  against observing early defaults; a sensitive target clears the pristine defaults before ordinary
+  mount resolution and device creation. Parent components are conservative fallback, and any symlink
+  in a target falls back. The worker never changes the agent's umask; descriptors are close-on-exec.
+  Device/link metadata and mount source/options are compared with ordinary setup, hostile refusals
+  match byte for byte, and two live pooled containers must have distinct superblocks and isolated
+  mutations. Whole-create p99 is recorded beside part 19; reducing a part alone does not prove a gain.
+- **The cloned sources leave their host peer groups before the root is populated.** An open_tree
+  clone of a shared source is still its peer. The seed's private mount namespace does not change
+  that imported relationship: a mount beneath the attached clone can propagate into the agent.
+  The agent sets the detached rootfs recursively slave for requested rootfsPropagation slave/shared,
+  recursively private otherwise; the init applies the requested final propagation after construction.
+  Each bind is recursively private before use unless explicit shared/slave needs an incoming master;
+  those become slave first, with shared made a new peer group afterward. Attributes and initial
+  propagation share the init's bind-attribute call where their recursive scope is the same; a
+  nonrecursive attribute request keeps its scope. Root isolation adds one namespace_sem writer hold
+  to whole create, outside part 19; it is not free work. The prepared `/dev` pool is unchanged.
+  This repairs the shared-source leak shown on fedora 6.19.10 (`goal5-root.md` §9): earlier lab HOME
+  mounts were private or slave and concealed it. The regression establishes shared root and bind
+  sources itself and requires an unchanged complete agent mount table during and after every box.
+- **Why a root on `/` is contained here and MS_MOVE in a copy of the host's namespace is not.** runc's and crun's
+  `--no-pivot` (MS_MOVE and chroot in a copy of the host's mount namespace) is unsafe as a default, and the probe
+  confirms three escapes the kernel's rules predict (`goal5-root.md` §3, §4): the host's proc stays visible to
+  `mnt_already_visible`, so a nested proc mount past a mask is allowed (E3); the host's tree lies beneath the moved
+  root, so a process that unmounts the root reaches it (E2); and a container that is its own user namespace's root can
+  unmount its root to reach the host (move_userns). The pruned seed closes all three by construction: the only thing
+  beneath the container's root is an empty read-only tmpfs, and no proc or sysfs exists anywhere in the namespace. The
+  root is the same tree whether the rootfs reached `/` by `MS_MOVE` (step 2) or by its attach (step 3): the rootfs's
+  mount stacked on the tmpfs's root, the tmpfs's stacked on the namespace's own root mount. So the classic chroot
+  escape (E1) climbs nowhere: `..` from a mount's root climbs to where it is mounted only if that is not its parent's
+  own root, and stops at the namespace's top (v6.19 `fs/namei.c:1433-1446`), and every mount beneath the rootfs is
+  stacked on its parent's root. And the container can still make nested user namespaces (E0): its root is the
+  namespace's topmost mount over its root (`current_chrooted`, `fs/namespace.c:6095-6097`), which `create_user_ns`
+  requires (`kernel/user_namespace.c:106`), as sandboxes nested in containers need and a plain chroot would refuse. In
+  the probe, a pruned-path container with `CAP_SYS_ADMIN` and `CAP_SYS_CHROOT`: E1 stays in the rootfs, E2 reveals only
+  the empty tmpfs, E3 is refused `EPERM`, and a nested user namespace is still allowed (E0) (f66-f69, f78); `oci_box`'s
+  `escapes_are_contained` holds Hex's pruned root to the same, as root.
+- **The classic path stays, counted by reason.** A rootless node's seeds don't prune (above), so a create there that a
+  seed can make takes the classic root in the seed, not the shim: the init the seed clones copies the agent's mount
+  namespace and binds and `pivot_root`s there, as the shim's child does. On a root node a create takes the shim (the
+  full host mount namespace, `unshare`, bind and `pivot_root`, as the command line makes every container) when the
+  pruned seed can't serve it: a spec with a user namespace of its own (a tree the agent clones from its own user
+  namespace isn't locked in the container's; a follow-up, f10), create-time hooks (they run against host paths), a
+  mount namespace joined by path (or another namespace by path the agent can't open for the init), no mount namespace
+  of its own, and a source the agent can't clone ahead (`open_tree` refused) or too many to fit `SCM_MAX_FD`. Each such
+  create is counted under its reason, one of a fixed set (`ClassicReason`, `Rootless` for a rootless node's; no
+  high-cardinality label, CLAUDE.md §10). The counts are kept in the node's memory and read through it, by reason
+  (`Node::classic_creates_for`) and for the shim's alone (`Node::creates_through_shim`), as the `oci_box` and
+  `createpool` tests read them; they become `hex_*` metrics once kiln's Observe owner agrees their names. This joins
+  the `needs_shim` reasons decision 5 already counts (a pid or user namespace by path, made through the shim on either
+  node).
+- **What would falsify it** (each on fedora 6.19, in the same run as libcrun): the root-escape test reaching the marker
+  or any host path from a pruned-path container; a nested proc mount succeeding past a mask in one; the pruned root's
+  switch growing more than 10% between 0 and 24,000 extra host threads; create p50 through the seam not dropping by at
+  least 0.45 ms against run 4's in the same harness (pivot_root's 0.535 less the agent's clones and noise); or a started
+  seed's namespace holding more than its two mounts, or a proc or sysfs, at any create.
+- **What stays for decision 6.** The goal-5 step builds what 7.x needs anyway — sources as detached trees, the init's
+  mounts on descriptors, nothing read by host path inside the namespace — so decision 6 swaps only how the namespace is
+  made: `open_tree(OPEN_TREE_NAMESPACE)` and `setns` on 7.0, `CLONE_EMPTY_MNTNS` on 7.1 (no seed pruning, no copy at
+  all), measured against the pruned seed on a 7.x host and made the default where the kernel has it (f83, f84).
+
+**Sources (the pruned seed's root).** `docs/research/runtime/goal5-mounts.md` (where the init's mounts went, call by
+call, and what took them: goal 5 plan step 3). `docs/research/runtime/goal5-root.md` (what `pivot_root` costs and
+why, what runc and crun do, what a root without it leaves open and what closes it, and the probe's numbers and escape
+runs). Kiln
+research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs/namespace.c` (`pivot_root`,
+`copy_mnt_ns`, `do_move_mount`, `mntns_install`, `may_copy_tree`), `fs/fs_struct.c` (`chroot_fs_refs`), `fs/open.c`
+(`chroot`), `fs/namei.c` (`follow_dotdot`), `kernel/user_namespace.c` (`create_user_ns`); v7.0 and v7.1 `fs/namespace.c`
+(`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
+(`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
 
 ### 6. Mount namespaces without copying, where the kernel has it
 

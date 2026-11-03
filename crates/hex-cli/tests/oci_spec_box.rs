@@ -196,6 +196,103 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     recovery_removes_a_half_made_bundle(&lab, own);
 }
 
+/// AC-f (goal 5 plan step 2): a started pruned create seed's mount namespace is a read-only tmpfs
+/// holding nothing, on the namespace's root, and nothing of the host: no proc, sysfs or cgroup2. Since
+/// plan step 3 the init attaches the container's root on the tmpfs's own root, so the tmpfs needs no
+/// directory to attach it at. Its mountinfo lists the tmpfs alone, by the kernel's design. The namespace's root, the
+/// tmpfs's parent, lies outside the seed's root, and the kernel lists no mount it can't reach from the
+/// task's root: v6.19 `show_mountinfo` (fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail
+/// will give SEQ_SKIP on this") skips what `seq_path_root` can't name (fs/seq_file.c:517-519), and
+/// `__d_path` names nothing unreachable from the root (fs/d_path.c:211-223). The node runs in this process
+/// and its create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_PRUNE` set, so the seed is
+/// found among this process's children by that environment entry (an exec seed, unpruned, has none), and
+/// its mountinfo and root read. Run only as root, where the seeds prune.
+fn pruned_seed_lists_its_read_only_root_tmpfs_alone() {
+    let me = std::process::id();
+    let mut seed = None;
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // proc_pid_stat(5): ppid is field 4, after the comm (field 2) in parens, which can hold spaces
+        // and parens — so read the fields after the last ')'.
+        let after = stat.rsplit_once(')').map(|(_, a)| a).unwrap_or("");
+        if after
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse::<u32>().ok())
+            != Some(me)
+        {
+            continue;
+        }
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        if environ
+            .split(|&b| b == 0)
+            .any(|e| e.starts_with(b"HEX_OCI_SEED_PRUNE="))
+        {
+            seed = Some(pid);
+            break;
+        }
+    }
+    let seed = seed.expect("a pruned create seed among this process's children");
+    let mountinfo =
+        std::fs::read_to_string(format!("/proc/{seed}/mountinfo")).expect("the seed's mountinfo");
+    // proc_pid_mountinfo(5): mount ID, parent ID, major:minor, root, mount point, mount options; after
+    // " - ", the filesystem type.
+    let mounts: Vec<(Vec<&str>, &str)> = mountinfo
+        .lines()
+        .map(|line| {
+            let (fields, fs) = line.split_once(" - ").expect("a mountinfo line");
+            let fstype = fs.split_whitespace().next().unwrap_or("");
+            (fields.split_whitespace().collect(), fstype)
+        })
+        .collect();
+    assert!(
+        mounts
+            .iter()
+            .all(|(_, fstype)| !matches!(*fstype, "proc" | "sysfs" | "cgroup2" | "cgroup")),
+        "a pruned create seed (pid {seed}) holds no proc, sysfs or cgroup:\n{mountinfo}"
+    );
+    assert_eq!(
+        mounts.len(),
+        1,
+        "a pruned create seed (pid {seed}) lists its root tmpfs alone, got {}:\n{mountinfo}",
+        mounts.len()
+    );
+    let (fields, fstype) = &mounts[0];
+    assert_eq!(
+        *fstype, "tmpfs",
+        "the seed's one mount is its tmpfs:\n{mountinfo}"
+    );
+    assert_eq!(fields[4], "/", "the tmpfs is the seed's /:\n{mountinfo}");
+    assert!(
+        fields[5].split(',').any(|o| o == "ro"),
+        "the seed's root tmpfs is mounted read-only:\n{mountinfo}"
+    );
+    // Its parent, the namespace's root, lies outside the seed's root, so no line lists it.
+    assert!(
+        mounts.iter().all(|(m, _)| m[0] != fields[1]),
+        "the tmpfs's parent (mount {}) isn't listed:\n{mountinfo}",
+        fields[1]
+    );
+    let root: Vec<String> = std::fs::read_dir(format!("/proc/{seed}/root"))
+        .expect("the seed's root")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(root.is_empty(), "the seed's root holds nothing: {root:?}");
+    eprintln!(
+        "AC-f: the pruned create seed (pid {seed}) lists one mount, its read-only root tmpfs:"
+    );
+    eprint!("{mountinfo}");
+}
+
 /// The plan step's example: layers [base, app], `sleep infinity`, one read-only bind, a private
 /// network (with a hostname and a hosts line).
 fn layered_box(lab: &Lab, own: &Path) {
@@ -230,6 +327,32 @@ fn layered_box(lab: &Lab, own: &Path) {
     );
     node.start(&id).expect("start");
     assert_eq!(node.inspect(&id).unwrap().state, BoxState::Running);
+    // Goal 5 plan step 2: an eligible box takes no shim fallback (no pid/user namespace by path, no
+    // user namespace of its own, no hooks). A root node makes it on the pruned root path (no
+    // `pivot_root`); a rootless node's seeds don't prune, so it takes the classic path in the init.
+    assert_eq!(
+        node.creates_through_shim(),
+        0,
+        "an eligible box falls back to no shim"
+    );
+    if lab.rootless {
+        assert_eq!(
+            node.pruned_creates(),
+            0,
+            "a rootless node's seeds don't prune their mount namespace"
+        );
+    } else {
+        assert!(
+            node.pruned_creates() >= 1,
+            "a root node makes an eligible box on the pruned root path, {} made",
+            node.pruned_creates()
+        );
+        // AC-f: a started pruned create seed's mount namespace is a read-only tmpfs on the namespace's
+        // root, which its mountinfo lists alone, and no proc, sysfs or cgroup2. The seed is a child of
+        // this process (the node runs in-process and its create pool spawns `hex __oci-seed`), so find
+        // it and read its mountinfo and root.
+        pruned_seed_lists_its_read_only_root_tmpfs_alone();
+    }
     let layer = state.join("bundles/layered");
 
     // Its root is the overlay, over the box's own writable layer; /usr is the bind, read-only.

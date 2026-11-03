@@ -49,12 +49,32 @@ fn creates() -> Vec<Create> {
             dir: "/run/hex-node/0123456789abcdef-box-1".to_owned(),
             cgroup: Some("/sys/fs/cgroup/hex/0123456789abcdef-box-1".to_owned()),
             network: true,
+            pruned: false,
+            binds: 0,
+            path_joins: 0,
+            dev_mount: None,
         },
         Create {
             bundle: "/b".to_owned(),
             dir: "/d".to_owned(),
             cgroup: None,
             network: false,
+            pruned: false,
+            binds: 0,
+            path_joins: 0,
+            dev_mount: None,
+        },
+        // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
+        // one namespace joined by path.
+        Create {
+            bundle: "/srv/bundles/box-2".to_owned(),
+            dir: "/run/hex-node/fedcba9876543210-box-2".to_owned(),
+            cgroup: Some("/sys/fs/cgroup/hex/fedcba9876543210-box-2".to_owned()),
+            network: false,
+            pruned: true,
+            binds: 2,
+            path_joins: 1,
+            dev_mount: None,
         },
     ]
 }
@@ -76,11 +96,13 @@ fn every_message_reads_back_as_written() {
     }
 }
 
-/// HEX-SEED-2, append-only: version 1's bytes for these messages are the ones recorded here. A seed
+/// HEX-SEED-2, append-only: version 2's bytes for these messages are the ones recorded here. A seed
 /// and an agent of different builds meet (a node spawns its seeds from the `hex` binary it is given),
-/// so a change that alters any of them is a new version, never an edit of this one.
+/// so a change that alters any of them is a new version, never an edit of this one. Version 2 added a
+/// create's pruned-root fields (goal 5 plan step 2), so the version byte and the create's body differ
+/// from version 1's; the exec request's fields are unchanged beneath the new version byte.
 #[test]
-fn version_1_messages_are_the_bytes_recorded() {
+fn version_2_messages_are_the_bytes_recorded() {
     let golden: [(&str, Vec<u8>); 4] = [
         (GOLDEN_FULL, request(&full()).unwrap()),
         (GOLDEN_MINIMAL, request(&minimal()).unwrap()),
@@ -111,12 +133,18 @@ fn a_create_reads_back_as_written_and_its_bytes_are_recorded() {
         Message::Exec(full())
     );
     assert_eq!(hex(&create(&creates()[0]).unwrap()), GOLDEN_CREATE);
+    assert_eq!(hex(&create(&creates()[2]).unwrap()), GOLDEN_CREATE_PRUNED);
     assert_eq!(
         creates()[0].fds(),
         CREATE_FDS + 1,
         "network adds the made-ahead netns"
     );
     assert_eq!(creates()[1].fds(), CREATE_FDS);
+    assert_eq!(
+        creates()[2].fds(),
+        CREATE_FDS + PRUNED_FIXED_FDS + 2 + 1,
+        "pruned: the four fixed descriptors, two bind trees and one path-joined namespace, no network"
+    );
     let unable = answer(&Answer::Refused {
         failed: Failed::Unable,
         why: "clone3: ENOSYS".to_owned(),
@@ -172,15 +200,58 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
             Err(Fault::Value { what: "create", .. })
         ));
     }
+    // A create ends with the network bool, the pruned bool, the binds u32 and the path_joins u32 (ten
+    // bytes), so the network byte is the tenth from the end and the pruned byte the ninth, whatever the
+    // names' lengths.
     let mut flag = create(&creates()[1]).unwrap();
-    let last = flag.len() - 1;
-    flag[last] = 2;
+    let network_at = flag.len() - 10;
+    flag[network_at] = 2;
     assert!(matches!(
         read_create(&flag, flag.len()),
         Err(Fault::Value {
             what: "network",
             ..
         })
+    ));
+    let mut flag = create(&creates()[1]).unwrap();
+    let pruned_at = flag.len() - 9;
+    flag[pruned_at] = 2;
+    assert!(matches!(
+        read_create(&flag, flag.len()),
+        Err(Fault::Value { what: "pruned", .. })
+    ));
+    // Bind trees and path-joined namespaces past their bounds, and a non-pruned create that claims any,
+    // are refused by type.
+    let too_many = create(&Create {
+        binds: u32::try_from(MAX_BINDS + 1).expect("MAX_BINDS + 1 fits in u32"),
+        ..creates()[2].clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&too_many, too_many.len()),
+        Err(Fault::Value { what: "binds", .. })
+    ));
+    let too_many_joins = create(&Create {
+        path_joins: u32::try_from(MAX_PATH_JOINS + 1).expect("MAX_PATH_JOINS + 1 fits in u32"),
+        ..creates()[2].clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&too_many_joins, too_many_joins.len()),
+        Err(Fault::Value {
+            what: "path_joins",
+            ..
+        })
+    ));
+    let not_pruned_with_binds = create(&Create {
+        pruned: false,
+        binds: 1,
+        ..creates()[1].clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&not_pruned_with_binds, not_pruned_with_binds.len()),
+        Err(Fault::Value { what: "binds", .. })
     ));
     let started = answer(&answers()[0]).unwrap();
     assert!(matches!(
@@ -208,13 +279,14 @@ fn a_malformed_create_is_refused_naming_what_is_wrong() {
     }
 }
 
-const GOLDEN_CREATE: &str = "4845585301000200120000002f7372762f62756e646c65732f626f782d31240000002f72756e2f6865782d6e6f64652f303132333435363738396162636465662d626f782d3101290000002f7379732f66732f6367726f75702f6865782f303132333435363738396162636465662d626f782d3101";
+const GOLDEN_CREATE: &str = "4845585302000200120000002f7372762f62756e646c65732f626f782d31240000002f72756e2f6865782d6e6f64652f303132333435363738396162636465662d626f782d3101290000002f7379732f66732f6367726f75702f6865782f303132333435363738396162636465662d626f782d3101000000000000000000";
+const GOLDEN_CREATE_PRUNED: &str = "4845585302000200120000002f7372762f62756e646c65732f626f782d32240000002f72756e2f6865782d6e6f64652f666564636261393837363534333231302d626f782d3201290000002f7379732f66732f6367726f75702f6865782f666564636261393837363534333231302d626f782d3200010200000001000000";
 
-const GOLDEN_FULL: &str = "484558530100010092100000120000002f72756e2f6865782f6f63692f626f782d3101180000002f7379732f66732f6367726f75702f6865782f626f782d31020000000c0000002f7573722f62696e2f656e760300000078207901050000002f776f726b020000000d000000504154483d2f7573722f62696e0a000000484f4d453d2f726f6f7401e80300000164000000";
+const GOLDEN_FULL: &str = "484558530200010092100000120000002f72756e2f6865782f6f63692f626f782d3101180000002f7379732f66732f6367726f75702f6865782f626f782d31020000000c0000002f7573722f62696e2f656e760300000078207901050000002f776f726b020000000d000000504154483d2f7573722f62696e0a000000484f4d453d2f726f6f7401e80300000164000000";
 const GOLDEN_MINIMAL: &str =
-    "484558530100010001000000020000002f6200010000000400000074727565000000000000";
-const GOLDEN_STARTED: &str = "484558530100018093100000";
-const GOLDEN_REFUSED: &str = "484558530100028002002200000045414741494e3a2074686520636f6e7461696e65722773207069647320626f756e64";
+    "484558530200010001000000020000002f6200010000000400000074727565000000000000";
+const GOLDEN_STARTED: &str = "484558530200018093100000";
+const GOLDEN_REFUSED: &str = "484558530200028002002200000045414741494e3a2074686520636f6e7461696e65722773207069647320626f756e64";
 
 /// HEX-SEED-1: every truncation of a valid message is refused by type, never a panic.
 #[test]
@@ -277,10 +349,10 @@ fn each_malformed_message_is_refused_naming_what_is_wrong() {
             ..
         })
     ));
-    let v2 = with(4, 2);
+    let v3 = with(4, 3);
     assert!(matches!(
-        read_request(&v2, v2.len()),
-        Err(Fault::Version { got: 2, .. })
+        read_request(&v3, v3.len()),
+        Err(Fault::Version { got: 3, .. })
     ));
     let started = with(7, 0x80);
     assert!(matches!(
@@ -362,4 +434,60 @@ proptest! {
         bytes.extend(body);
         let _ = read_request(&bytes, bytes.len());
     }
+}
+
+/// HEX-SEED-2/3, AC-T7.1.4: carry a prepared mount in a new kind without changing CREATE bytes.
+/// Expect old payload intact, exactly one appended index/fd, every truncation and excess refused.
+#[test]
+fn a_prepared_create_appends_only_in_its_new_kind() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    let prepared = Create {
+        dev_mount: Some(7),
+        ..ordinary.clone()
+    };
+    let bytes = create(&prepared).unwrap();
+    assert_eq!(&bytes[..6], &old[..6]);
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 3);
+    assert_eq!(&bytes[8..old.len()], &old[8..]);
+    assert_eq!(&bytes[old.len()..], &7u32.to_le_bytes());
+    assert_eq!(prepared.fds(), ordinary.fds() + 1);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), prepared.fds()).unwrap(),
+        Message::Create(prepared.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_create(&bytes[..len], len).is_err());
+    }
+    assert!(matches!(
+        read_message(&bytes, bytes.len(), ordinary.fds()),
+        Err(Fault::Descriptors { .. })
+    ));
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(read_create(&trailing, trailing.len()).is_err());
+    let over = create(&Create {
+        binds: u32::try_from(MAX_BINDS).unwrap(),
+        path_joins: u32::try_from(MAX_PATH_JOINS).unwrap(),
+        network: true,
+        dev_mount: Some(1),
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&over, over.len()),
+        Err(Fault::Value {
+            what: "dev_mount",
+            ..
+        })
+    ));
+    let wrong_path = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        dev_mount: Some(1),
+        ..ordinary
+    })
+    .unwrap();
+    assert!(read_create(&wrong_path, wrong_path.len()).is_err());
 }

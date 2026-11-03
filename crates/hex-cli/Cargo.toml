@@ -29,6 +29,7 @@ hex-api.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+serde_json.workspace = true
 hex-client.workspace = true
 hex-node.workspace = true
 
