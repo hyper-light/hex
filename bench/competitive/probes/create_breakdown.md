@@ -755,3 +755,53 @@ time between calls and the page faults; each mount's share (the calls up to its 
 way. The trace adds two events to every call, so its spans are longer than the rounds' part 19: they place the time
 and count the calls, and part 19's figures of record are the rounds'.
 
+
+## The init's mounts at eight in flight: part 19's p99 (goal 5 extended plan step 3)
+
+AC-e's harness (`AC_E=2000 AC_E_MOUNTS=1`): fedora (`kiln-a094a12d`, i9-14900HX, Linux 6.19.10), the bench
+container on CPUs 4-15, 8,000 idle host threads, 2,000 creates at eight in flight, `HEXBENCH_DEVFS=1`. Each figure
+is one run's part 19 p99 in ms, from its `switch.result` in `~/.cache/hex-bench/out/create-breakdown-<run>`; the
+whole create's p50/p99 is beside it, because a lever that only moves work across part 19's cut doesn't count. The
+bar is 0.5 ms. Each unit's directory is `~/.cache/hex-t7/g5x-s3/<unit's dir>` (its `body.sh`, `binaries.sha256`,
+`context.txt` with the load and the co-tenants). `docs/research/runtime/goal5-mounts.md` §8 says what each tree
+changed.
+
+**Step 3's tree alone, no reuse: not met.**
+
+| tree | unit | runs: part 19 p99 | whole create p50 / p99 |
+|---|---|---|---|
+| 16e52a9 | hex-lead-s3-trace2-20261103T064732Z, load 11 | 064741Z 1.099 | 1.355 / 6.670 |
+| 16e52a9 (s0) | hex-lead-s3-setsid-20261103T062234Z, load 9-10 | 062335Z 1.023, 062348Z 1.568, 062352Z 0.972 | 1.333-1.621 / 6.570-7.918 |
+| `setsid` first (s1, cbe5673's order) | the same unit, rounds interleaved | 062337Z 0.806, 062343Z 0.883, 062354Z 0.729 | 1.535-1.664 / 6.281-6.978 |
+| d6ea10b with `HEXBENCH_REUSE=0` | hex-lead-s3-reuseab2-20261103T163227Z, load 1-2 | 163249Z 1.420, 163251Z 1.246, 163257Z 1.224, 163300Z 1.250 | 1.179-1.252 / 7.880-11.149 |
+
+The tail is the init preempted while its CPU runs the kernel's teardown of earlier boxes' cgroups (§8 of the note).
+
+**The merged trees, step 6's reuse on: met with no other tenant's load.** `HEXBENCH_OWNER=bench-owner`, so the
+bundles are an owner's (Docker's default capabilities, `/proc/sys` read-only):
+
+| tree | unit | runs: part 19 p99 | whole create p50 / p99 |
+|---|---|---|---|
+| d6ea10b (step 6 e9f58a0 + step 3 16e52a9; hex f469b70f304691c9, seam_oci d70453f125b209c5) | hex-lead-s3-reuseab2-20261103T163227Z, load 1-2 | 163246Z 0.432, 163254Z 0.322, 163255Z 0.329, 163302Z 0.316 | 0.508-0.528 / 1.111-1.490 |
+| mr12: x-s3 ef1a7a7 with step 6's levers (hex ff5cef383a844f85, seam_oci a89ecea7de4053f4) | hex-lead-s3-mr12clean-20261103T184941Z, alone on fedora, load 5-6 | 184943Z 0.338, 185008Z 0.295, 185012Z 0.303 | 0.492-0.513 / 1.136-1.219 |
+
+Seven runs of seven are under the bar.
+
+**Under another tenant's load: not met.** L busy loops are pinned to 4-15 at nice 0, started and killed by the
+job's recorded PIDs; this is Ada's "this fast even under load", met by doing less, never by priority:
+
+| tree, unit | L = 0 | L = 6 | L = 12 | L = 24 |
+|---|---|---|---|---|
+| d6ea10b, hex-lead-s3-underload-20261103T163610Z | 163612Z 0.321, 163643Z 0.324 | 163616Z 0.769, 163639Z 0.705 | 163620Z 0.819, 163634Z 0.941 | 163625Z 1.182, 163629Z 1.620 |
+| d6ea10b (s0), hex-lead-s3-setsidload-20261103T164725Z | 164743Z 0.330, 164755Z 0.335 | 164759Z 0.934, 164812Z 0.975 | 164816Z 0.974, 164830Z 0.890 | |
+| `setsid` first (s1, hex d2c75d29b7b6aebd), the same unit | 164747Z 0.291, 164751Z 0.252 | 164804Z 0.547, 164808Z 0.539 | 164821Z 0.693, 164826Z 0.608 | |
+| mr12, hex-lead-s3-mr12clean-20261103T184941Z | (above) | 184948Z 0.498, 185003Z 0.580, 185016Z 0.454 | 184952Z 0.702, 184957Z 1.068, 185021Z 0.743 | |
+
+At L = 6 mr12's whole create was 0.806-0.916 / 2.726-13.691, and at L = 12 1.785-1.966 / 4.352-20.890. A run of
+mr12 beside step 6's gates, hex-lead-s3-mr12load-20261103T182625Z (182627Z to 182653Z), had an uncontrolled load;
+it isn't counted.
+
+**The pass bit.** Runs 184943Z, 185008Z and the reuse-on runs of hex-lead-s3-reuseab2 print `"pass": false` with
+part 19 under the bar. The fallback check expected 3-5 clone-started spans and found none: those were namespaces the
+node made on the path for an owner's box, which its init joins by `setns`. The reader on
+`cp/t7-ext-s3-xs3-reader`, for x-s3, subtracts the node's own count (`netns_reuse.made_on_path`).

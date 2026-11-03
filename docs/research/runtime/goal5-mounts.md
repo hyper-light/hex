@@ -510,3 +510,21 @@ records are `~/.cache/hex-bench/out/create-breakdown-<run>`.
     `created_through_a_seed_in_its_cgroup_and_namespaces`).
   - The AC-e reader's fallback check can false-fail on the merge: it reads a namespace the node made on path for an
     owner (joined by `setns`) as the clone's. The integration merge must read step 6's counters.
+- **The merged tree with step 6's levers, alone on fedora** (unit hex-lead-s3-mr12clean-20261103T184941Z, load 5-6,
+  reuse on, owner bundles). mr12 is x-s3 ef1a7a7 (step 6 + step 3 + the FIFO fix + `setsid` first) with step 6's later
+  levers (the checker's CPU, the kept socket, the record shards); its release binaries are hex ff5cef383a844f85 and
+  seam_oci a89ecea7de4053f4. Part 19's p99 in ms, three runs a level:
+
+  | L | 0 | 6 | 12 |
+  |---|---|---|---|
+  | p99, ms | 0.338, 0.295, 0.303 | 0.498, 0.580, 0.454 | 0.702, 1.068, 0.743 |
+
+  The create's p50/p99 was 0.49-0.51/1.14-1.22 ms at L = 0, 0.81-0.92/2.7-13.7 at 6 and 1.79-1.97/4.4-20.9 at 12.
+- **Where criterion 3 stands** (`bench/competitive/probes/create_breakdown.md`, the last section, has every run):
+  - As written (8 in flight, 8,000 idle threads, no other tenant's load), met on the merged trees: 7 runs of 7
+    under 0.5 ms, 0.295-0.432 (d6ea10b, mr12).
+  - Not met on step 3's tree alone: 11 runs of 11 over, 0.729-1.568 (16e52a9, `setsid` first, reuse off). Its tail is
+    the cgroup teardown that step 6's reuse removes, a cause outside this step's code.
+  - Under another tenant's load, not met: at 6 busy loops 2 runs of 3 under (0.454-0.580), at 12 none (0.702-1.068).
+    What's left is the mount lock's convoys and the proc superblock.
+
