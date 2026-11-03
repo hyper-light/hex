@@ -64,6 +64,14 @@ impl Fixture for BinFixture {
     fn program(&self, act: &Act) -> Program {
         self.act(act)
     }
+
+    /// Windows has no §3-clean count of a member's own refused fork (the job's accounting doesn't move,
+    /// and the only signal is a lossy completion message; docs/research/runtime/windows-pids-refused.md),
+    /// so HEX-RT-6 checks the bound's deterministic effect here (the blocked program exits non-zero)
+    /// while the class still counts the refusals it sees synchronously (Ada's call, 2026-11-03).
+    fn refused_forks_counted(&self) -> bool {
+        false
+    }
 }
 
 fn runtime() -> WinRuntime {

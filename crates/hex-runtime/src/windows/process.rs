@@ -14,8 +14,10 @@
 //! only the refusals it observes synchronously and reliably: the node's own `exec` into a full box,
 //! whose `CreateProcess` returns `ERROR_NOT_ENOUGH_QUOTA` ([`JobBox::exec`]). A member's own internal
 //! fork, refused by the kernel in that member, is enforced but not counted by the box (no §3-clean
-//! source exists; the research note recommends HEX-RT-6 on Windows check the bound's deterministic
-//! effect there — a plan decision for Ada and the lead, not taken in the shared conformance suite).
+//! source exists). HEX-RT-6 on Windows therefore checks the bound's deterministic effect — the member
+//! that can't start a child it needs exits non-zero — rather than the exact count, through
+//! `hex_api::conformance`'s `refused_forks_counted` capability (Ada's decision, 2026-11-03); the
+//! exact-count assertion stays where a kernel keeps it (Linux's `pids.events`).
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};

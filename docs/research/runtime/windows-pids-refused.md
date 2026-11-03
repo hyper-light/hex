@@ -141,14 +141,16 @@ So, for the `process` class:
    way an earlier draft did, and the way Chromium uses the message only as a throwaway accounting
    offset). A member's *own* internal fork, refused by the kernel in that member, is therefore enforced
    but not counted by the box — there is no §3-clean job-side source for it.
-4. **RECOMMENDED — HEX-RT-6 on Windows checks the refusal's deterministic effect** rather than the exact
+4. **HEX-RT-6 on Windows checks the refusal's deterministic effect** rather than the exact
    member-internal count: the blocked program exits non-zero (the bound stopped a fork it needed), which
    is deterministic on every platform, with the exact-count assertion kept where a kernel counts it
-   (Linux's `pids.events`). This keeps the contract — the bound blocks forks and is enforced — without a
-   count Windows can't give §3-cleanly. **This is a recommendation, not applied here**: changing a
-   plan test's evidence on a platform is a plan decision for Ada and the lead (who owns the shared
-   conformance suite). As the suite stands, HEX-RT-6 asserts the exact count unconditionally, so it does
-   not pass on Windows for a member's own internal spawn — the open item this note is written to settle.
+   (Linux's `pids.events`), through `Fixture::refused_forks_counted`. This keeps the contract — the bound
+   blocks forks and is enforced — without a count Windows can't give §3-cleanly. **This is Ada's
+   decision (2026-11-03), reached in that order:** she first directed "check blocking happened + keep the
+   tally" and "implement the counter ourselves"; then asked for research first ("This is a good time to
+   do research. What do competing or alternative implementations do?") — this note; and, once it was done
+   and the fix validated 7/7 on jupiter, confirmed "we already solved this." The exact-count assertion is
+   unchanged on every platform whose kernel keeps the count.
 
 **What would falsify this** (and move Hex to an exact Windows count):
 - A Windows release that adds the active-process limit to the guaranteed `JobObjectNotificationLimitInformation`

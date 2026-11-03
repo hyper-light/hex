@@ -37,6 +37,16 @@ pub trait Fixture {
     fn init(&self, id: BoxId, act: &Act) -> BoxSpec;
     /// A program that does `act`.
     fn program(&self, act: &Act) -> Program;
+    /// Whether this class reports a fork its process bound refused in [`crate::Usage::pids_refused`]
+    /// reliably. True for every class whose kernel keeps that count (Linux's cgroup `pids.events`, the
+    /// simulator). The Windows job object does not: a member's own refused fork has no §3-clean job-side
+    /// count (`docs/research/runtime/windows-pids-refused.md`), so its class returns false and HEX-RT-6
+    /// checks the bound's deterministic effect there (a program that can't start all its children exits
+    /// non-zero) rather than the count. The bound's enforcement is checked on every platform regardless.
+    /// (Ada's decision, 2026-11-03.)
+    fn refused_forks_counted(&self) -> bool {
+        true
+    }
 }
 
 /// One part of the contract.
@@ -276,12 +286,19 @@ fn pids_bound(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let exit = ended(&mut p)?;
     let usage = rt.usage(&id).map_err(|e| e.to_string())?;
     rt.delete(&id).map_err(|e| e.to_string())?;
+    // The bound blocked a fork the program needed, so it couldn't finish: it exits non-zero. This
+    // deterministic effect is checked on every platform (the process bound is kernel-enforced).
     ensure(exit != Exit::Code(0), || {
         "a program over the process bound exited 0".to_owned()
     })?;
-    ensure(usage.pids_refused >= 1, || {
-        format!("no refused fork counted: {usage:?}")
-    })
+    // Where the platform counts the refusal, the exact count is checked too; where it has no §3-clean
+    // count of a member's own refused fork (Windows), the effect above is the bar (Ada's call).
+    if fx.refused_forks_counted() {
+        ensure(usage.pids_refused >= 1, || {
+            format!("no refused fork counted: {usage:?}")
+        })?;
+    }
+    Ok(())
 }
 
 fn delete(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {

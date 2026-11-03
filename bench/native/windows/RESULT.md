@@ -108,17 +108,18 @@ notification at the hard cap never trips; 4 MiB under it trips every pass, so `N
 
 ### HEX-RT on jupiter
 
-HEX-RT-1..5, 7, 8, 9 pass, and the step's scenarios pass: a member past its 256 MiB bound is refused at
-the bound with the job's peak at or below it (oom counted), a member asking to break away is refused,
-delete ends a box's grandchildren, an under-bound member runs and reports its exit, a node-started
-process past the process bound is refused (`Exhausted`) and counted, and TERM ends the box reading as
-`Signal(15)`. **HEX-RT-6 (`pids_refused` ≥ 1 after a member spawns past the bound) is the one open
-case**: on Windows the refused fork is a *member's own* internal `CreateProcess`, and the research
-(`docs/research/runtime/windows-pids-refused.md`) shows no §3-clean way to count it for the job's owner —
-`pids_refused` here counts only the node-mediated refusals Hex sees synchronously, so a member's internal
-spawn leaves it 0. That note recommends HEX-RT-6 on Windows check the bound's deterministic effect (the
-blocked program exits non-zero, which it does); applying it is a plan decision for Ada and the lead, not
-taken here.
+HEX-RT-1..9 pass, and the step's scenarios pass: a member past its 256 MiB bound is refused at the bound
+with the job's peak at or below it (oom counted), a member asking to break away is refused, delete ends a
+box's grandchildren, an under-bound member runs and reports its exit, a node-started process past the
+process bound is refused (`Exhausted`) and counted, and TERM ends the box reading as `Signal(15)`.
+HEX-RT-6 on Windows checks the process bound's **deterministic effect** — the member that can't start all
+its children exits non-zero — rather than the exact `pids_refused` count, because a member's own internal
+fork-refusal has no §3-clean count on Windows (the research below). The exact
+count assertion stays where a kernel keeps it (Linux's `pids.events`), via `Fixture::refused_forks_counted`;
+`pids_refused` on Windows still carries the node-mediated refusals Hex sees synchronously. This is Ada's
+decision (2026-11-03), in that order: she directed "check blocking happened + keep the tally" and
+"implement the counter ourselves"; asked for research first; then, with the fix validated 7/7 on jupiter,
+confirmed "we already solved this."
 
 ### Both architectures
 
