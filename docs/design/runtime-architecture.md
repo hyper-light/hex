@@ -1178,9 +1178,7 @@ lifecycle without changing what a box may do.
       read by itself, since none of those takes RTNL where an `AF_UNSPEC` one does. The fresh one's are read once
       its `::1` is no longer tentative, which its DAD work clears once it gets RTNL.
     Nothing runs in an idle namespace, so what the check saw holds until it's handed on. A namespace that fails is
-    closed, counted by why; one given back with the checker's line full is closed unchecked, counted. What the
-    check doesn't see: a TCP or UDP socket never bound, or a TCP one bound but neither listening nor connected,
-    held by a process outside the box, counts in no protocol.
+    closed, counted by why; one given back with the checker's line full is closed unchecked, counted.
   - *Bounds.* At most `PER_OWNER` 32 idle for one owner and `PER_NODE` 256 for the node, as the cgroups', the oldest
     closed past either. An owner's oldest is handed on first, so a connection a box left in TIME_WAIT has had the
     longest to end.
@@ -1196,12 +1194,24 @@ lifecycle without changing what a box may do.
     the round-trip times of the predecessor's loopback connections whose TIME_WAIT had ended before it did; one
     still in TIME_WAIT refuses the namespace. The namespace's own `net.ipv4.tcp_no_metrics_save` (`:352`) would stop
     the saving; no box that may share can set it, `/proc/sys` being read-only.
+  - *A socket never hashed crosses within the owner, unseen* (the lead's approval, 2026-11-03T06:40Z). An inet socket
+    enters its protocol's count only once hashed: a UDP one at its bind (Linux v6.19 net/ipv4/udp.c:333), a TCP one
+    at its listen or connect (net/ipv4/inet_hashtables.c:747, :811). So a TCP or UDP socket never bound, or a TCP one
+    bound but neither listening nor connected, counts in no protocol, and the check doesn't see it. The box's own
+    processes are gone when it's checked, so only a process outside the box can still hold one, and through it bind
+    or connect in the namespace once the owner's next box has it. That stays within one owner because no namespace is
+    handed to another owner's box: the core's model test checks it after every step, and the root lab gives three
+    boxes of another owner, beside an idle namespace of the first's, fresh ones.
   - *Another owner's box* gets a fresh namespace, counted `Owner`, and the idle one stays its owner's, as the cgroup's
-    does (Ada's call).
+    does (Ada's call). The counts the node keeps (`ReuseCounts`: the core's, and how many namespaces were given back,
+    checked and closed unchecked) are internal; no `hex_*` metric names them until Observe agrees the names (CLAUDE.md
+    §10).
   - *What would falsify it*:
     - concurrency 32 not rising once the namespace's making is off the lifecycle;
     - a namespace passing the check while it holds what the check reads;
     - the check's own cost at concurrency 32 rivalling the making's;
+    - a namespace reaching another owner's box, which would carry what crosses within an owner, the TCP metrics and a
+      socket never hashed, to another;
     - eligible boxes being rare, because specs grant CAP_NET_ADMIN or keep `/proc/sys` writable.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->The bench's lifecycle left at most
