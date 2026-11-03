@@ -851,3 +851,41 @@ With Docker's paths, medians over 17 pairs, off → on:
   No gain.
 
 So it stays on `cp/t7-ext-s3-maskpool`. Every cell, the pairs, the trace and the reasons are in `docs/research/runtime/goal5-mounts.md` §13.
+
+## The ipc and uts namespaces made ahead: the pool on against drained (goal 5 extended plan step 4)
+
+`IPCUTS_AB=1` adds, to every round, the seam and traced items again on a node whose ipc and uts pool is drained
+(`seam_drained`, `traced_drained`: seam_oci's `HEXBENCH_IPCUTS=0`), and `pairs`, seam_oci's `ipc_uts_pairs` phase: the
+lifecycle on a node with the pool and one with it drained, interleaved one by one, the first of each pair alternating.
+All on fedora, Linux 6.19.10, `CPUSET=4-15`, N=1000, WARMUP=100, `LOAD_GATE=0` with Focal's and others' containers up
+beside it; every round's counts confirm which it was: each pooled create took a pair, each drained one made its own.
+
+**Run A**, create-breakdown-20261103T230157Z (unit hex-s4-job3-20261103T225951Z, tree 53330b0, 6 rounds, load 74.10 at
+the start, 38.45 at the end): before the two changes below. Part 16, the init's clone into its cgroup and namespaces,
+pooled p50 0.105 ms on against 0.123 drained, 0.854; part 17, which holds the pair's two joins, 0.053 against 0.036; the
+two together 0.981; the whole create 0.818 against 0.831, 0.985, its rounds 0.913 to 1.045. Short of the bar, and most
+of what the clone saved spent again after it: two `setns`, the init's close of both descriptors (the last, so each
+namespace's file was freed on the path), and a wake of the refill thread per take, whose make then ran beside the next
+create's clone.
+
+**Run B**, create-breakdown-20261103T231406Z (unit hex-s4-job4-20261103T231047Z, the tree of step 4's next commit, hex
+e924de4229967190, seam_oci 6b751ac622d96411, 8 rounds, load 77.67 at the start, 38.36 at the end), with the refill thread
+woken only once the pool is half empty and the pair left for the init's exec to close, as the pipes are:
+
+| | on p50 (ms) | drained p50 | on over drained, p50 | on p99 | drained p99 | on over drained, p99 |
+|---|---|---|---|---|---|---|
+| create | 0.816 | 0.978 | 0.834 | 2.763 | 3.561 | 0.776 |
+| part 16 | 0.104 | 0.143 | 0.727 | 1.171 | 1.345 | 0.871 |
+| part 17 | 0.052 | 0.041 | 1.268 | 0.204 | 0.168 | 1.214 |
+| parts 16+17 | 0.157 | 0.186 | 0.844 | 1.365 | 1.425 | 0.958 |
+
+Part 16 by round, on over drained: 0.708, 0.639, 0.561, 0.543, 0.777, 0.992, 0.844, 0.692. Interleaved, by round, the
+median of the pairs' create differences, on minus drained, and the share of pairs the pool won: -0.0293 ms (0.58),
+-0.0220 (0.57), -0.0275 (0.59), -0.0208 (0.57), -0.0343 (0.52), -0.0373 (0.63), -0.0171 (0.53), -0.0318 (0.55). Start's,
+exec's and delete's medians stayed within -0.0025 to +0.0095 ms of zero, so nothing moved to them. So the clone sheds
+about 39 us of the pair's making, the joins add about 11 back, and a create is 17 to 37 us faster in every round.
+
+The sustained phase at concurrency 32 through host.sh (`PHASES=oci RUNTIMES=libcrun HEXBENCH_PHASES=sustained`, 10,000
+lifecycles a round, in process, `CPUSET=4-15`): the pool was dry for 0, 0 and 30 creates in run A's tree
+(out/20261103T225951Z) and 0, 25 and 0 in run B's (out/20261103T231112Z), at most 0.30% of creates. The socket driver's
+node runs the same pool, whose counts the socket doesn't carry (as the prepared `/dev` pool's).
