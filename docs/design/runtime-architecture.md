@@ -1317,13 +1317,22 @@ lifecycle without changing what a box may do.
     without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
     box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
     holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
-  - *The rate* (the second, at least 8x, a minimum). <!-- record: bench/competitive/probes/reuse_pass.md -->As the
-    criterion reads it, on host.sh's own CPUs, 4-31: the merge of steps 2, 3 and 6 at 25.12x in process (its rounds
-    24.88x to 26.48x) and 23.55x over the socket; step 6 alone at 8.29x (7.93x to 9.32x) and 8.01x. Beside them on
-    4-15: the merge 7.74x and 7.80x, step 6 alone 6.44x and 5.95x. Interleaved, the cross-check: on 4-31 the merge
-    18.96x and step 6 alone 5.89x; on 4-15 5.11x and 3.09x (run 10). On 4-31 a lone lifecycle runs slower than one of
-    32, which lifts the ratio; on 4-15 two threads share each core (run 10).<!-- /record --> The criterion names no CPU
-    set, so host.sh's governs (the lead, 2026-11-03T16:50Z), 4-15 always beside it.
+  - *The rate* (the second, at least 8x, a minimum: not met). The bar is 8x on 4-15 with interleaved pairs the
+    method of record, since they control the load's drift that makes the criterion's own phases swing (the lead,
+    2026-11-03T17:47Z). Option 1, each pair's concurrency 1 on 4-15 and its 32 on all of 4-31, is measured beside it
+    for Ada's choice of the bar, and neither is called met until she makes it.
+    <!-- record: bench/competitive/probes/reuse_pass.md -->The merge of steps 2, 3 and 6 reads 4.78x in process and
+    4.92x over the socket on 4-15, and 7.55x and 7.16x as option 1, every task of each half on its CPUs as read back
+    (run 12). Step 6 alone read 1.84x and 1.59x in that hour, under about 7,500 host threads (runs 12,
+    13).<!-- /record --> <!-- record: bench/competitive/probes/create_serial.md -->A third of its lone lifecycle's CPU
+    was pivot_root's walk of the host's threads, under the host's mount lock (run 22).<!-- /record --> Step 6 alone
+    keeps the classic root, made with pivot_root, so its figures depend on the host's thread count; the merge's
+    pruned root, step 2's, makes none, and its figures don't.
+    <!-- record: bench/competitive/probes/reuse_pass.md -->As the criterion's text reads it,
+    on host.sh's own CPUs, 4-31, flattered there since a lone lifecycle runs on the E-cores too: the merge 25.12x in
+    process (its rounds 24.88x to 26.48x) and 23.55x over the socket, step 6 alone 8.29x (7.93x to 9.32x) and 8.01x;
+    on 4-15 the merge 7.74x and 7.80x, step 6 alone 6.44x and 5.95x. Interleaved, on 4-31 the merge 18.96x and step
+    6 alone 5.89x; on 4-15 5.11x and 3.09x (run 10).<!-- /record -->
     <!-- record: bench/competitive/probes/reuse_pass.md
     -->Sustained at concurrency 32 over throughput at concurrency 1 in one OCI pass, one owner's boxes: 4.32x and
     4.21x in process, 4.41x and 4.81x over the socket (run 1, 4-31, as host.sh runs it). With steps 2 and 3 merged in,
@@ -1352,7 +1361,7 @@ lifecycle without changing what a box may do.
     concurrency 1, and its CPUs kept busy as well, 10.2 of 12 now, at about 8.4 times (run 9).<!-- /record -->
     <!-- record: bench/competitive/probes/create_serial.md -->That work is 272 to 299 us a lifecycle on the E-cores, 17%
     of concurrency 1's CPU: the checkers 162 to 191, step 3's pool of each box's `/dev` 97 to 101, the seeds' starter
-    and the namespace refill 9 to 11 (run 17).<!-- /record --> The bar on 4-15 is Ada's call.
+    and the namespace refill 9 to 11 (run 17).<!-- /record --> The bar, 8x on 4-15 or option 1, is Ada's call.
   - *Reuse off* (the third: met, Ada's call, 2026-11-03T06:01Z: faster than before passes).
     <!-- record: bench/competitive/probes/create_breakdown.md -->On boxes of no owner, this step's create p50 against
     the binary before it in the same rounds: over 100 rounds in five runs on 4-15, a mean paired difference of

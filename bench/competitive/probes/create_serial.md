@@ -775,6 +775,39 @@ its entry to its exit, a wake's as a wait's):
   `get_detached_copy` takes it (Linux v6.19 `fs/namespace.c:3017`).
 - **The directory's wait stays gone:** 0.079 ms a lifecycle, against run 14's 0.626 before the records' shards.
 
+## Run 22 (2026-11-03, fedora): offcpu, step 6 alone under about 7,500 host threads: pivot_root's walk of them
+
+- **Binaries:** step 6 alone, tip9 (2ff615a, `hex` 72a5769b437bcfa4) and tip8 (9693bfc, `hex` bcc6cd4556b7a9e2), one
+  owner's boxes, on the E-cores 16-31, the unit `hex-g5x-s6-verify18-20261103T185412Z`; the host's threads 7,495 and
+  8,110 at each run's start, kiln's pool containers beside it. Under the probe Hex's sustained phase ran 993 and 876 a
+  second, libcrun's 430 and 634.
+- **Runs:** `create-serial-offcpu-20261103T191222Z` (tip9), `create-serial-offcpu-20261103T191434Z` (tip8).
+
+On-CPU samples, the largest shares:
+
+| kernel stack | tip9, c1 | tip8, c1 | tip9, c32 | tip8, c32 |
+|---|---|---|---|---|
+| `_raw_spin_lock < chroot_fs_refs < __do_sys_pivot_root` | 31.51% | 31.62% | 13.41% | 14.55% |
+| `chroot_fs_refs < __do_sys_pivot_root` | 4.11% | 8.47% | | |
+| `osq_lock < rwsem_down_write_slowpath` | | | 18.52% | 16.06% |
+| `rwsem_spin_on_owner < rwsem_down_write_slowpath` | | | 16.65% | 16.96% |
+| `_raw_write_unlock_irq < copy_process` | | | 5.15% | 5.15% |
+| `_raw_write_unlock_irq < ksys_setsid` | | | 4.84% | 4.62% |
+| user | 12.01% | 10.24% | 4.65% | 4.75% |
+
+- **About a third of a lone lifecycle's CPU is pivot_root's walk of the host's threads.** pivot_root calls
+  `chroot_fs_refs` (Linux v6.19 `fs/namespace.c:4606`), which takes `tasklist_lock` to read and walks every thread on
+  the host, each one's `fs` lock taken in turn (`fs/fs_struct.c:54`, `:60-62`, `:77`). At about 7,500 threads that is
+  36 to 40% of concurrency 1's samples, with and without the create pool's change.
+- **At concurrency 32 the walk holds the host's mount lock.** pivot_root takes `namespace_sem` to write with
+  `LOCK_MOUNT` (`fs/namespace.c:4554`), which lets it go only as the call returns (`:2799-2802`, `__cleanup`; `:2747`,
+  `:2784-2791`), after the walk: so the 33 to 35% spinning on an rwsem's write lock is the other lifecycles' mount
+  operations waiting out walks. Forks and `setsid`, which take `tasklist_lock` to write, wait out each walk's read hold
+  (10%).
+- **So step 6 alone costs more with every thread on the host, and the merge doesn't:** step 2's pruned root, which
+  the merge has, makes the container's root with no pivot_root (`reuse_pass.md` run 12: the merge 4.78x on 4-15 in the
+  hour step 6 alone read 1.84x).
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
