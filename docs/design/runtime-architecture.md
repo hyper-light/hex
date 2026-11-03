@@ -1079,6 +1079,11 @@ lifecycle without changing what a box may do.
     (f47): the delete falls back to `cgroup.kill` at once, on that fact rather than a timeout, counted.
   - `process` boxes, inits without a pid namespace of their own, and boxes taken back after a restart (whose init the
     agent no longer holds) keep `cgroup.kill` (f49).
+  - Every `cgroup.kill` here is the box's kill as the delete flake's fix (5013c4b, T-T7.1.2) left it, which this step
+    is built on: `cgroup.kill`, then, while the box is still populated, a bounded sweep of its subtree's processes,
+    each sent a process-directed SIGKILL through a process pidfd once a re-read shows it still in the box. That
+    reaches a thread group whose leader has exited, which `cgroup.kill` misses
+    (`bench/competitive/probes/delete_flake.md`).
 - **A cgroup handed from box to box of one owner** (f20, f23, f27-f39, f61-f65, f81, f82). A box whose spec names an
   owner (`BoxSpec::owner`, append-only on the record and on the wire, whose version 3 carries it) is given the owner's
   idle cgroup when one reads clean. That takes off its `mkdir`, its `rmdir` and the kworkers' 12 holds (f62). The
