@@ -634,6 +634,33 @@ Each figure per namespace checked (`create_serial.py`):
   run 15 gave 138.7 and 129.5 for the same binary, and mr7's 140.7 and 117.4. The allocation's own samples are read
   apart from that.
 
+## Run 17 (2026-11-03, fedora): threads, where each of Hex's threads spends its CPU, steps 2, 3 and 6 merged
+
+- **Binaries:** run 16's mr7 (`hex` ab9551ff82e3415e: `reuse_pass.md` run 8's merge with step 6's two checker
+  changes, 8753abe and 4c54e58), one owner's boxes, on the E-cores 16-31. seam_oci's start_true over 5,000
+  lifecycles, then its sustained phase over 20,000.
+- **Runs:** `create-serial-threads-20261103T094437Z` (ddc89c3's fix not yet in: it counted nothing beside Hex's
+  threads, whose figures stand) and `create-serial-threads-20261103T094613Z` (the unit
+  `hex-g5x-s6-threads-20261103T094613Z`); load 4.7 to 5.2. Concurrency 32 ran 9,731 and 9,851 a second.
+
+CPU a lifecycle, by thread (`create_serial.py`):
+
+| thread | concurrency 1 | concurrency 32 |
+|---|---|---|
+| `hex`: the seeds, and the inits before they exec | 654, 720 us | 527, 514 us |
+| `seam_oci`: the lifecycles' own calls into the node | 605, 630 us | 544, 545 us |
+| `true`: the program | 87, 90 us | 152, 155 us |
+| `hex-netns-check`: the checkers | 162, 191 us | 132, 130 us |
+| `hex-devfs`: step 3's pool of each box's `/dev` | 101, 97 us | 56, 59 us |
+| `hex-seeds` and `hex-netns`: the seeds' starter, the namespace refill | 9, 11 us | 8, 7 us |
+| beside them on the probe's CPUs, the second run | 488 us, other tenants' | 98 us, softirqs and kworkers |
+
+- **Beside concurrency 1's own path, Hex runs 272 to 299 us a lifecycle of its own,** 17% of its CPU: the
+  checkers most, then step 3's `/dev` pool, about 100 us a lifecycle; the seeds' starter and the refill a few.
+  Concurrency 32 pays them again, 196 us a lifecycle, beside its 1,214 to 1,223 us of the lifecycles' own.
+- **What the 8x on 4-15 can still take from here is that share:** with all of it gone, concurrency 32's CPU a
+  lifecycle falls about 14%, short of what the cores' shared threads cost it (`reuse_pass.md` run 8).
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
