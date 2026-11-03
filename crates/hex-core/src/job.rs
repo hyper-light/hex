@@ -1,0 +1,540 @@
+//! The rule a Windows box is bounded by (docs/design/runtime.md, decision "each OS runs its own boxes
+//! natively"): a box is a job object nested under the node's, and this says what its job holds for its
+//! [`Bounds`] (a commit limit, an active-process limit, a CPU weight or a hard cap), refusing by name each
+//! bound a job can't hold, and how a member's exit code reads once Hex has ended the job for a signal.
+//! Sans-IO (CLAUDE.md §9): `hex_runtime::windows` sets the job and reads it back. Names, flags and ranges
+//! are Windows' own (MicrosoftDocs/sdk-api 656e965; docs/research/runtime/windows-job-objects.md).
+
+use std::num::NonZeroU32;
+
+use hex_api::{Bounds, Exit, MIN_MEMORY, Refusal, Signal};
+
+/// The platform a refusal here names.
+pub const PLATFORM: &str = "windows";
+
+/// How far under the box's memory bound Hex sets the job's commit limit, so the job's peak stays at or
+/// below the bound. A job lets a commit that crosses its limit overshoot it by a bounded amount before
+/// it refuses the next: a sweep of commit steps from 64 KiB to 256 MiB on jupiter (AMD Ryzen AI MAX+
+/// 395, Windows 11 26200; `bench/native/windows/RESULT.md`, record `job-events-68e99688-*`) measured
+/// the peak at most 1,163,264 bytes (≈1.11 MiB) over the limit, the overshoot bounded (it did not grow
+/// with the step past ~1.1 MiB), so 2 MiB holds the peak under the bound with headroom (CLAUDE.md §5).
+pub const OVERSHOOT_MARGIN: u64 = 2 << 20;
+
+/// How far under the job's commit limit Hex sets its memory notification, so the box learns through the
+/// class Windows guarantees (`JobObjectNotificationLimitInformation`) that it reached its bound: a
+/// notification at the hard limit never fires (the commit is refused before the sum exceeds it), and one
+/// 4 MiB under fired in every pass (`bench/native/windows/RESULT.md`, record `job-events-68e99688-*`,
+/// experiment e17; CLAUDE.md §5).
+pub const NOTIFY_MARGIN: u64 = 4 << 20;
+
+/// The exit code Hex ends a box's job with for a signal (`TerminateJobObject`'s `uExitCode`), the
+/// signal's number in its low byte: NTSTATUS-shaped, severity error with the customer bit (bit 29) set
+/// and facility 0x048, so no status of Windows' own is one of these (MS-ERREF §2.3).
+pub const TERMINATED: u32 = 0xE048_0000;
+
+/// Windows' default CPU weight, the share a job gets when Hex's weight is cgroup's default 100
+/// (`jobobject_cpu_rate_control_information.md:147`: "The default is 5").
+pub const DEFAULT_WEIGHT: u32 = 5;
+/// The CPU rate control's denominator: a hard cap is cycles per 10,000 of the whole machine's
+/// (`jobobject_cpu_rate_control_information.md:132`).
+pub const RATE_SCALE: u32 = 10_000;
+
+/// What a box's job holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Limits {
+    /// The job's commit limit in bytes (`JobMemoryLimit` with `JOB_OBJECT_LIMIT_JOB_MEMORY`): the memory
+    /// every process in the box may commit together, which Windows refuses a commit past. Set
+    /// [`OVERSHOOT_MARGIN`] under the box's bound (floored at [`MIN_MEMORY`]) so the job's peak, which
+    /// overshoots the limit by a bounded amount, stays at or below the bound.
+    pub memory: Option<u64>,
+    /// The memory the job notifies at (`JobObjectNotificationLimitInformation`, the guaranteed class),
+    /// [`NOTIFY_MARGIN`] under [`Limits::memory`]: the box reads its violation from the job's accounting
+    /// to count reaching its bound (CLAUDE.md §3). `None` when the commit limit is too low to notify
+    /// below.
+    pub memory_notify: Option<u64>,
+    /// The job's active-process limit (`ActiveProcessLimit` with `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`).
+    /// Windows counts processes, not their threads, which `pids.max` counts too on Linux.
+    pub processes: Option<u32>,
+    /// The job's CPU rate control.
+    pub cpu: Option<Cpu>,
+}
+
+/// A job's CPU rate control (`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`): a weight or a hard cap, one at
+/// a time, as the structure's union holds one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cpu {
+    /// `JOB_OBJECT_CPU_RATE_CONTROL_WEIGHT_BASED`: 1 to 9, [`DEFAULT_WEIGHT`] the default share.
+    Weight(u32),
+    /// `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`: the cycles of the whole machine the job may use, per
+    /// [`RATE_SCALE`].
+    Cap(u32),
+}
+
+/// What a box's job holds for `bounds` on a machine of `processors` logical processors. A bound a job
+/// can't hold is refused by name, never dropped (CLAUDE.md §3).
+pub fn limits(bounds: &Bounds, processors: NonZeroU32) -> Result<Limits, Refusal> {
+    bounds.check()?;
+    let refuse = |what: &'static str, why: &str| {
+        Err(Refusal::Platform {
+            what,
+            platform: PLATFORM,
+            why: why.to_owned(),
+        })
+    };
+    if bounds.memory_high.is_some() {
+        return refuse(
+            "memory_high",
+            "a job object has a commit limit, which refuses past it, and no level to throttle at",
+        );
+    }
+    if bounds.io_weight.is_some() {
+        return refuse(
+            "io_weight",
+            "the process class holds no disk share on Windows",
+        );
+    }
+    if bounds.io_latency_us.is_some() {
+        return refuse(
+            "io_latency_us",
+            "the process class holds no disk latency target on Windows",
+        );
+    }
+    if bounds.io_max.is_some() {
+        return refuse(
+            "io_max",
+            "the process class holds no disk throughput cap on Windows",
+        );
+    }
+    let cpu = match (bounds.cpu_weight, bounds.cpu_max_milli) {
+        (Some(_), Some(_)) => {
+            return refuse(
+                "cpu_weight",
+                "a job holds a CPU weight or a hard cap, not both, and cpu_max_milli is set too",
+            );
+        }
+        (Some(w), None) => Some(Cpu::Weight(weight(w))),
+        (None, Some(milli)) => Some(Cpu::Cap(cap(milli, processors)?)),
+        (None, None) => None,
+    };
+    let (memory, memory_notify) = match bounds.memory_max {
+        Some(bound) => {
+            let limit = bound.saturating_sub(OVERSHOOT_MARGIN).max(MIN_MEMORY);
+            let notify = limit.checked_sub(NOTIFY_MARGIN).filter(|n| *n > 0);
+            (Some(limit), notify)
+        }
+        None => (None, None),
+    };
+    Ok(Limits {
+        memory,
+        memory_notify,
+        processes: bounds.pids_max,
+        cpu,
+    })
+}
+
+/// The hard cap for `milli` thousandths of a CPU on a machine of `processors`: cycles per
+/// [`RATE_SCALE`] of the whole machine, as Docker's Windows runtime maps `--cpus`
+/// (`moby/moby` daemon/oci_windows.go:438, `NanoCPUs / NumCPU / (1e9/10000)` = `cpus × 10000 / cpus`,
+/// over `GetActiveProcessorCount` of every group, not one). Rounded down, so the cap never exceeds what
+/// was asked (CLAUDE.md §3: Hex refuses a value it would have to round up, where Docker floors it to 1).
+/// A bound that maps below 1 (finer than the machine's least cap) or above [`RATE_SCALE`] (more CPU
+/// than the whole machine) is refused by name.
+fn cap(milli: u32, processors: NonZeroU32) -> Result<u32, Refusal> {
+    // milli / (1000 × processors) of the machine, per 10,000: milli × 10 / processors.
+    let rate = u64::from(milli)
+        .checked_mul(10)
+        .and_then(|r| r.checked_div(u64::from(processors.get())))
+        .unwrap_or(u64::MAX);
+    if (1..=u64::from(RATE_SCALE)).contains(&rate) {
+        // In 1..=RATE_SCALE, so it fits u32; the fallback is never reached.
+        return Ok(u32::try_from(rate).unwrap_or(RATE_SCALE));
+    }
+    Err(Refusal::Platform {
+        what: "cpu_max_milli",
+        platform: PLATFORM,
+        why: if rate < 1 {
+            format!(
+                "{milli} thousandths of a CPU is below the least hard cap of this machine's {} \
+                 processors (1 per {RATE_SCALE} of them)",
+                processors.get()
+            )
+        } else {
+            format!(
+                "{milli} thousandths of a CPU is more than this machine's {} processors, which a \
+                 hard cap can't express",
+                processors.get()
+            )
+        },
+    })
+}
+
+/// The job weight for Hex's `cpu_weight` (cgroup's `cpu.weight`, 1 to 10,000, 100 the default), mapped
+/// onto Windows' 1 to 9 ([`DEFAULT_WEIGHT`] 5 the default). The mapping is piecewise-linear and
+/// monotonic, pinning the two defaults together (100 ↦ 5): a weight under 100 maps into 1..=5, one over
+/// into 5..=9. The share each Windows weight gives is measured in bench/native/windows/RESULT.md.
+fn weight(w: u16) -> u32 {
+    let v = u64::from(w.clamp(1, 10_000));
+    let mapped = if v <= 100 {
+        // 1 ↦ 1, 100 ↦ 5: 1 + ⌊4 × (v − 1) / 99⌋.
+        v.saturating_sub(1)
+            .saturating_mul(4)
+            .checked_div(99)
+            .unwrap_or(0)
+            .saturating_add(1)
+    } else {
+        // 100 ↦ 5, 10000 ↦ 9: 5 + ⌊4 × (v − 100) / 9900⌋.
+        v.saturating_sub(100)
+            .saturating_mul(4)
+            .checked_div(9_900)
+            .unwrap_or(0)
+            .saturating_add(5)
+    };
+    u32::try_from(mapped.clamp(1, 9)).unwrap_or(DEFAULT_WEIGHT)
+}
+
+/// Whether Windows can send `signal` to a box: it has no signals, so a box takes KILL and TERM, which
+/// both end its job (`TerminateJobObject`); any other is refused by name.
+pub fn ends_job(signal: Signal) -> Result<(), Refusal> {
+    if signal == Signal::KILL || signal == Signal::TERM {
+        Ok(())
+    } else {
+        Err(Refusal::Invalid {
+            what: "signal",
+            why: format!(
+                "Windows has no signal {}: a box takes KILL and TERM, which both end its job",
+                signal.number()
+            ),
+        })
+    }
+}
+
+/// The exit code Hex ends a box's job with for `signal`: [`TERMINATED`] with the signal's number.
+pub fn terminated_code(signal: Signal) -> u32 {
+    TERMINATED | u32::try_from(signal.number()).unwrap_or(0)
+}
+
+/// The signals Hex has ended a box's job for: a set of their numbers, 1 to 64.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sent(u64);
+
+impl Sent {
+    /// Notes that Hex ended the box's job for `signal`.
+    pub fn add(&mut self, signal: Signal) {
+        if let Some(bit) = bit(signal.number()) {
+            self.0 |= bit;
+        }
+    }
+
+    /// Whether Hex ended the box's job for signal number `n`.
+    pub fn has(self, n: i32) -> bool {
+        bit(n).is_some_and(|b| self.0 & b != 0)
+    }
+}
+
+fn bit(n: i32) -> Option<u64> {
+    let n = u32::try_from(n).ok().filter(|n| (1..=64).contains(n))?;
+    1u64.checked_shl(n.checked_sub(1)?)
+}
+
+/// How a member's end reads from its exit code: the signal Hex ended its job for, when the code is that
+/// signal's [`terminated_code`] and Hex sent it; else the code itself, its 32 bits as an `i32` (a crash's
+/// NTSTATUS, `0xC0000005`, reads as its negative value).
+pub fn exit(code: u32, sent: Sent) -> Exit {
+    let n = i32::from(code.to_le_bytes()[0]);
+    if code & !0xFF == TERMINATED && sent.has(n) {
+        return Exit::Signal(n);
+    }
+    Exit::Code(i32::from_ne_bytes(code.to_ne_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use hex_api::IoRates;
+    use proptest::prelude::*;
+
+    use super::*;
+
+    const MIB: u64 = 1 << 20;
+
+    fn cpus(n: u32) -> NonZeroU32 {
+        NonZeroU32::new(n).unwrap()
+    }
+
+    /// HEX-WIN-1: each bound a job holds becomes its job's limit: memory_max the commit limit a margin
+    /// under the bound (with its notification under that), pids_max the active-process limit,
+    /// cpu_max_milli a hard cap of the whole machine.
+    #[test]
+    fn each_bound_a_job_holds_becomes_its_limit() {
+        let b = Bounds {
+            memory_max: Some(256 * MIB),
+            pids_max: Some(8),
+            cpu_max_milli: Some(1500),
+            ..Bounds::default()
+        };
+        assert_eq!(
+            limits(&b, cpus(32)),
+            Ok(Limits {
+                memory: Some(256 * MIB - OVERSHOOT_MARGIN),
+                memory_notify: Some(256 * MIB - OVERSHOOT_MARGIN - NOTIFY_MARGIN),
+                processes: Some(8),
+                // 1.5 CPUs of 32 is 4.6875% of the machine: 468 per 10,000, rounded down.
+                cpu: Some(Cpu::Cap(468)),
+            })
+        );
+        assert_eq!(limits(&Bounds::default(), cpus(32)), Ok(Limits::default()));
+    }
+
+    /// HEX-WIN-2: the job's commit limit sits [`OVERSHOOT_MARGIN`] under the bound (so the peak, which
+    /// overshoots the limit by a bounded amount, stays at or below the bound), its notification under
+    /// that; a bound too small to leave room floors at [`MIN_MEMORY`] with no notification.
+    #[test]
+    fn the_commit_limit_sits_a_margin_under_the_bound() {
+        let at = |bound| {
+            let l = limits(
+                &Bounds {
+                    memory_max: Some(bound),
+                    ..Bounds::default()
+                },
+                cpus(32),
+            )
+            .expect("limits");
+            (l.memory, l.memory_notify)
+        };
+        assert_eq!(
+            at(256 * MIB),
+            (
+                Some(256 * MIB - OVERSHOOT_MARGIN),
+                Some(256 * MIB - OVERSHOOT_MARGIN - NOTIFY_MARGIN)
+            )
+        );
+        // The commit limit is always under the bound, so a job's peak within the margin is under it.
+        for bound in [MIN_MEMORY, 2 * MIB, 8 * MIB, 64 * MIB, 1 << 30] {
+            let (limit, notify) = at(bound);
+            let limit = limit.expect("a bounded box has a commit limit");
+            assert!(limit <= bound, "limit {limit} over bound {bound}");
+            assert!(limit >= MIN_MEMORY, "limit {limit} under the floor");
+            if let Some(n) = notify {
+                assert!(n < limit, "notify {n} not under limit {limit}");
+            }
+        }
+        // A bound at the floor can't leave an overshoot margin, so the limit is the floor and there is
+        // no room to notify below it.
+        assert_eq!(at(MIN_MEMORY), (Some(MIN_MEMORY), None));
+    }
+
+    /// HEX-WIN-1: what a job can't hold is refused by name, never dropped (CLAUDE.md §3).
+    #[test]
+    fn what_a_job_cant_hold_is_refused_by_name() {
+        let cases = [
+            (
+                Bounds {
+                    memory_max: Some(256 * MIB),
+                    memory_high: Some(128 * MIB),
+                    ..Bounds::default()
+                },
+                "memory_high",
+            ),
+            (
+                Bounds {
+                    io_weight: Some(100),
+                    ..Bounds::default()
+                },
+                "io_weight",
+            ),
+            (
+                Bounds {
+                    io_latency_us: Some(1000),
+                    ..Bounds::default()
+                },
+                "io_latency_us",
+            ),
+            (
+                Bounds {
+                    io_max: Some(IoRates {
+                        read_bps: Some(1),
+                        ..IoRates::default()
+                    }),
+                    ..Bounds::default()
+                },
+                "io_max",
+            ),
+            (
+                Bounds {
+                    cpu_weight: Some(100),
+                    cpu_max_milli: Some(1000),
+                    ..Bounds::default()
+                },
+                "cpu_weight",
+            ),
+        ];
+        for (b, name) in cases {
+            match limits(&b, cpus(32)) {
+                Err(Refusal::Platform {
+                    what,
+                    platform: "windows",
+                    ..
+                }) => assert_eq!(what, name),
+                other => panic!("{b:?}: {other:?}"),
+            }
+        }
+        // A bound out of the kernel's own range is refused as it is everywhere.
+        let bad = Bounds {
+            cpu_weight: Some(0),
+            ..Bounds::default()
+        };
+        assert!(matches!(
+            limits(&bad, cpus(32)),
+            Err(Refusal::Invalid {
+                what: "cpu_weight",
+                ..
+            })
+        ));
+    }
+
+    /// HEX-WIN-1: a hard cap is never looser than asked (rounded down); the whole machine is the
+    /// loosest cap; a bound finer than the machine's least cap, or more than the whole machine, is
+    /// refused by name rather than rounded up or silently un-capped (CLAUDE.md §3).
+    #[test]
+    fn a_cap_is_never_looser_than_asked() {
+        let at = |milli, n| {
+            limits(
+                &Bounds {
+                    cpu_max_milli: Some(milli),
+                    ..Bounds::default()
+                },
+                cpus(n),
+            )
+            .map(|l| l.cpu)
+        };
+        // 1.5 of 32 CPUs is 468.75 per 10,000, rounded down.
+        assert_eq!(at(1_500, 32), Ok(Some(Cpu::Cap(468))));
+        // The whole machine is a cap at RATE_SCALE (the loosest legal hard cap); milli just over it
+        // still floors to the whole machine, not above it.
+        assert_eq!(at(32_000, 32), Ok(Some(Cpu::Cap(10_000))));
+        assert_eq!(at(32_003, 32), Ok(Some(Cpu::Cap(10_000))));
+        assert_eq!(at(31_999, 32), Ok(Some(Cpu::Cap(9_999))));
+        // More than the whole machine (the rate would exceed RATE_SCALE): refused, not un-capped.
+        for over in [33_000u32, 64_000, u32::MAX] {
+            assert!(
+                matches!(
+                    at(over, 32),
+                    Err(Refusal::Platform {
+                        what: "cpu_max_milli",
+                        ..
+                    })
+                ),
+                "{over} on 32 cpus"
+            );
+        }
+        // Finer than the least cap of a large machine: refused.
+        assert!(matches!(
+            at(10, 4096),
+            Err(Refusal::Platform {
+                what: "cpu_max_milli",
+                ..
+            })
+        ));
+    }
+
+    proptest! {
+        /// HEX-WIN-1 (model-based, CLAUDE.md §6): for any cap and machine, the rate held is at most the
+        /// share asked and within one rate step of it; below the least step, or above the whole machine,
+        /// is refused.
+        #[test]
+        fn the_cap_matches_its_oracle(milli in 1u32..=u32::MAX, processors in 1u32..=4096) {
+            let got = cap(milli, cpus(processors));
+            // The oracle in exact integers: the share asked, in units of 1/(10,000 × 1,000) of a CPU.
+            let asked = u128::from(milli) * 10_000;
+            let step = u128::from(processors) * 1_000;
+            let whole = u128::from(RATE_SCALE) * step;
+            match got {
+                Ok(rate) => {
+                    let held = u128::from(rate) * step;
+                    prop_assert!((1..=RATE_SCALE).contains(&rate));
+                    prop_assert!(held <= asked);
+                    prop_assert!(asked < held + step);
+                }
+                Err(_) => prop_assert!(asked < step || asked > whole),
+            }
+        }
+    }
+
+    /// HEX-WIN-1: the cgroup weight maps onto Windows' 1..=9, monotonic, with the defaults pinned
+    /// (100 ↦ 5) and the ends at the ends (1 ↦ 1, 10000 ↦ 9).
+    #[test]
+    fn the_weight_maps_onto_windows_nine() {
+        assert_eq!(weight(1), 1);
+        assert_eq!(weight(100), DEFAULT_WEIGHT);
+        assert_eq!(weight(10_000), 9);
+        let mut last = 0;
+        for v in 1u16..=10_000 {
+            let w = weight(v);
+            assert!((1..=9).contains(&w), "weight({v}) = {w}");
+            assert!(w >= last, "weight not monotonic at {v}: {w} < {last}");
+            last = w;
+        }
+    }
+
+    /// HEX-WIN-3: Windows takes KILL and TERM, which end the job; any other signal is refused by name.
+    #[test]
+    fn a_box_takes_kill_and_term_only() {
+        assert_eq!(ends_job(Signal::KILL), Ok(()));
+        assert_eq!(ends_job(Signal::TERM), Ok(()));
+        for s in [
+            Signal::HUP,
+            Signal::INT,
+            Signal::QUIT,
+            Signal::USR1,
+            Signal::USR2,
+        ] {
+            assert!(matches!(
+                ends_job(s),
+                Err(Refusal::Invalid { what: "signal", .. })
+            ));
+        }
+    }
+
+    /// HEX-WIN-3: a member ended by Hex's own signal reads as that signal; the same code without Hex
+    /// having sent it, and any other code, read as the code, bit for bit.
+    #[test]
+    fn a_member_ended_for_a_signal_reads_as_it() {
+        let mut sent = Sent::default();
+        assert_eq!(
+            exit(terminated_code(Signal::TERM), sent),
+            Exit::Code(i32::from_ne_bytes(0xE048_000Fu32.to_ne_bytes()))
+        );
+        sent.add(Signal::TERM);
+        assert_eq!(exit(terminated_code(Signal::TERM), sent), Exit::Signal(15));
+        assert_eq!(
+            exit(terminated_code(Signal::KILL), sent),
+            Exit::Code(i32::from_ne_bytes(0xE048_0009u32.to_ne_bytes()))
+        );
+        sent.add(Signal::KILL);
+        assert_eq!(exit(terminated_code(Signal::KILL), sent), Exit::Signal(9));
+        assert_eq!(exit(0, sent), Exit::Code(0));
+        assert_eq!(exit(3, sent), Exit::Code(3));
+        // An access violation's status reads as Windows' own tools print it, a negative i32.
+        assert_eq!(exit(0xC000_0005, sent), Exit::Code(-1_073_741_819));
+        // TERMINATED's own low byte, 0, is no signal.
+        assert_eq!(
+            exit(TERMINATED, sent),
+            Exit::Code(i32::from_ne_bytes(TERMINATED.to_ne_bytes()))
+        );
+    }
+
+    proptest! {
+        /// HEX-WIN-3 (oracle): every signal 1 to 64 round-trips through its code once sent, and no other
+        /// code reads as a signal.
+        #[test]
+        fn exit_codes_match_their_oracle(code in any::<u32>(), signals in proptest::collection::vec(1i64..=64, 0..8)) {
+            let mut sent = Sent::default();
+            for s in &signals {
+                sent.add(Signal::new(*s).unwrap());
+            }
+            let n = i32::try_from(code & 0xFF).unwrap();
+            let ours = code & 0xFFFF_FF00 == TERMINATED && signals.iter().any(|s| i64::from(n) == *s);
+            let want = if ours { Exit::Signal(n) } else { Exit::Code(i32::from_ne_bytes(code.to_ne_bytes())) };
+            prop_assert_eq!(exit(code, sent), want);
+        }
+    }
+}

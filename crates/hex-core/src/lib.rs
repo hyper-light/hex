@@ -21,6 +21,7 @@
 pub mod bundle;
 pub mod cgroup;
 pub mod darwin;
+pub mod job;
 pub mod ledger;
 pub mod netns;
 pub mod record;
