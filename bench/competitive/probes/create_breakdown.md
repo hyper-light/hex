@@ -835,3 +835,19 @@ Part 19 is the init's root mounted, its bar 0.16 ms pooled p50 (run 4: 0.359):
   - 4315e75's binaries alternated beside them: 0.191 (204327Z) and 0.168 (205038Z), both over.
   - The pruned path's part 19 at 933d56f is 0.044 pooled (205252Z). Validation: 26 pass, 32 fail, 0 differ from
     bf77298.
+
+## The masked directories' tmpfs made ahead, an A/B, not landed (goal 5 extended plan step 3)
+
+x-s3 with the stock, `cp/t7-ext-s3-xs3-masks` 3dad265 (hex 355cda675683302a, seam_oci f5423d9770841202), `HEXBENCH_MASKS` 0 against
+1 on that one binary, fedora (`kiln-a094a12d`, i9-14900HX, Linux 6.19.10), CPUs 4-15, 2026-11-03, load 12-31 with about 70 other
+containers up and step 6's gates on CPUs 16-31. AC-e, 8 in flight, 8,000 idle threads, owner bundles, reuse on, 2,000 creates a run,
+at 0, 6 and 12 busy loops, with and without Docker's paths, in interleaved pairs: units hex-s3try2-masks2-20261103T214604Z and
+hex-s3try2-masks3-20261103T215640Z. Each run's record is in its `ace-*.log` under `~/.cache/hex-t7/g5x-s3/try2-masks{2,3}-*`.
+
+With Docker's paths, medians over 17 pairs, off → on:
+- Part 19's p50: 0.240 → 0.204, 0.258 → 0.219 and 0.251 → 0.215 ms at 0, 6 and 12 loops, lower in all 17 pairs of each.
+- Part 19's p99: 0.828 → 0.716, 1.982 → 1.943 and 2.192 → 2.020, within the host's noise.
+- The whole create's p50: 0.871 → 0.845, 1.373 → 1.387 and 2.329 → 2.336; its p99: 2.079 → 2.317, 6.847 → 6.885 and 14.658 → 15.059.
+  No gain.
+
+So it stays on `cp/t7-ext-s3-maskpool`. Every cell, the pairs, the trace and the reasons are in `docs/research/runtime/goal5-mounts.md` §13.

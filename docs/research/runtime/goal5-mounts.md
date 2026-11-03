@@ -626,6 +626,19 @@ rejected).
 
 ## 11. What's left of part 19 under load, hold by hold and superblock by superblock (2026-11-03)
 
+**Ada's ruling (2026-11-03).** Step 3 closes on its written bars. Her under-load bar is now a written bar of runtime
+design goal 6, the mount tree built off the lock on Linux 7.x: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle
+threads, with 6 and 12 busy loops on the same cores and Docker's paths, the whole create's p99 improving with it, and no
+priority, nice, RT or slice change. Today's figures beside it, on x-s3 (owner bundles, reuse on), none of them under the bar:
+
+| part 19's p99, ms | 6 loops | 12 loops | run |
+|---|---|---|---|
+| Docker's paths, the bar's condition | 1.081-1.835 | 1.519-2.313 | §10's A column, unit hex-s3try2-timed-20261103T194825Z |
+| Docker's paths, a busier host | 1.233-3.822, median 1.982 | 1.226-10.383, median 2.192 | §13's stock-off arm |
+| The owner spec, no Docker's paths | 0.454-0.580 | 0.702-1.068 | §8, mr12 |
+
+What follows is why 6.19 leaves them there.
+
 For the bench's owner spec (Docker's capabilities, `/proc/sys` read-only) on the merged tree, with step 6's reuse
 on. The trace with the namespace_sem probes (create-breakdown-20261103T200508Z, unit hex-s3try2-final-20261103T195758Z,
 1,000 creates at 8 in flight, A = x-s3 d3189f7) gives the init's part 19 per create, every create: 27 calls, a mean
@@ -733,3 +746,68 @@ Run 4's part 19 was the classic init's, and the classic path measured beside the
   - Proc made by `make_fs` adds little beyond the prepared `/dev`: rounds against part 21 read 2.9-3.1 times it, as
     e1b85f4's did. It stands as the classic path's version of the pruned one's making, with no walk.
   - The pruned path's part 19 at 933d56f (205252Z) is 0.043 / 0.052 / 0.041, pooled 0.044.
+
+## 13. The masked directories' tmpfs made ahead: built, measured, not landed (2026-11-03)
+
+The lever §10 named, on the lead's order of 21:24Z: it lands if the A/B shows it helps, otherwise it stays on a side
+branch with its numbers here. It stays on the side branch: `cp/t7-ext-s3-maskpool` 2ecace9, off d01556c. The tree measured
+is x-s3 with it, `cp/t7-ext-s3-xs3-masks` 3dad265.
+
+**What was built.** Each pruning create seed keeps up to 8 empty read-only tmpfs mounts queued on a unix stream socket, one
+byte and one mount a message. It fills the queue between creates, one mount at a time and only while no request waits. Its
+inits take one per masked directory and make their own if it's empty.
+- A queue rather than a list handed over at the clone. The seed can't know how many directories a create masks (they lie in
+  a proc and sysfs mounted after the clone, and on the kernel's config), so a list leaves some unused. An unused detached
+  mount takes the lock to dissolve at its last close (v6.19 `dissolve_on_fput`, `fs/namespace.c:2288`, the lock at `:2307`),
+  and a used one doesn't. `fsmount` takes no lock (`:4269` on), so the fill adds no holds. Queued, each message goes to one
+  taker and what isn't taken waits for the next create.
+- Each cloned init closes the fill end first, or one container's init could queue a mount for the next container's.
+- The init's ready signal carries `taken,made`, so a dry or disabled stock shows, with no write of its own on the path.
+- Fail first: `masked_directories_come_from_the_seeds_stock` failed at d539fad with counts alone (no mask of 20 boxes came
+  from the seed's stock, 40 made; unit hex-s3try2-lab-20261103T213144Z), and passed at c76d445, which added the stock.
+
+**The A/B.** One binary, 3dad265's (hex 355cda675683302a, seam_oci f5423d9770841202), the stock off (`HEXBENCH_MASKS=0`) and on,
+one setting apart. Fedora (i9-14900HX, Linux 6.19.10), CPUs 4-15, AC-e's 8 in flight with 8,000 idle threads, owner bundles,
+reuse on, 2,000 creates a run. Each pair ran within seconds, each round's order the last's reversed: units
+hex-s3try2-masks2-20261103T214604Z and hex-s3try2-masks3-20261103T215640Z, whose last round didn't run (it was stopped at
+22:14Z, its guard waiting on another agent's lab). The host was busy, load 12-31: about 70 other containers up, and step
+6's gates on CPUs 16-31 beside most runs. So each cell gives medians off → on, then the median of on minus off over its
+pairs, with how many of them read lower:
+
+| spec, loops (pairs) | part 19 p50, ms | part 19 p99 | whole create p50 | whole create p99 |
+|---|---|---|---|---|
+| Owner's, 0 (22) | 0.085 → 0.082 (-0.003, 16) | 0.370 → 0.367 (-0.007, 11) | 0.692 → 0.707 (+0.015, 7) | 1.979 → 2.036 (+0.219, 9) |
+| Owner's, 6 (6) | 0.093 → 0.089 (-0.003, 6) | 0.595 → 0.764 (+0.084, 2) | 1.132 → 1.129 (+0.005, 2) | 4.195 → 4.717 (+0.740, 3) |
+| Owner's, 12 (6) | 0.095 → 0.091 (-0.005, 6) | 1.667 → 1.243 (-0.138, 4) | 2.246 → 2.228 (+0.039, 2) | 15.406 → 15.151 (-0.746, 3) |
+| Docker's, 0 (17) | 0.240 → 0.204 (-0.035, 17) | 0.828 → 0.716 (-0.035, 11) | 0.871 → 0.845 (-0.013, 10) | 2.079 → 2.317 (+0.137, 7) |
+| Docker's, 6 (17) | 0.258 → 0.219 (-0.040, 17) | 1.982 → 1.943 (+0.126, 6) | 1.373 → 1.387 (+0.032, 5) | 6.847 → 6.885 (+0.003, 8) |
+| Docker's, 12 (17) | 0.251 → 0.215 (-0.036, 17) | 2.192 → 2.020 (-0.165, 11) | 2.329 → 2.336 (-0.003, 9) | 14.658 → 15.059 (-0.682, 10) |
+
+With Docker's paths the stock served 99.9%, 99.5% and 99.1% of the masks at 0, 6 and 12 loops (101,928 taken and 72 made;
+101,528 and 472; 101,037 and 963; off, 102,000 made in each). The owner spec masks nothing, so its queue sits full, and those
+rows are the control.
+
+**The trace** (1,000 creates at 8 in flight with Docker's paths, no idle threads, none lost; create-breakdown-20261103T215231Z
+off, 215235Z on), every create's mean:
+
+| | superblocks made in the init (`fsconfig` create) | calls | span p50 / p99, us | mount lock write holds |
+|---|---|---|---|---|
+| Off | 4.0, 49.3 us | 119.1 | 270 / 1,283 | 28.0: `move_mount` 17, `open_tree` 10, `mount_setattr` 1 |
+| On | 1.0, 19.1 us | 104.1 | 232 / 945 | 28.0: the same |
+
+**Read: it doesn't help the create, so it isn't landed.**
+- Part 19's p50 falls about 15% with Docker's paths, lower in 17 pairs of 17 at every load. That is the 3 superblocks gone from
+  the init's span, as named.
+- Part 19's p99 doesn't fall past the host's noise: 11, 6 and 11 pairs of 17 read lower, the pair median changing sign. Its
+  ranges overlap whole. The holds are unchanged, and §11 has the tail waiting on them.
+- The whole create doesn't gain. Of the 0.035 ms saved at no load its p50 shows 0.013 in the pair median, at 6 loops it reads
+  0.032 higher (lower in 5 pairs of 17), and at 12 no change. Its p99 is on neither side. The superblocks are still made, by the
+  seed, on the same CPUs, so this is work moved across the cut, which §6's rule doesn't count.
+- The control's first rounds (try2-masks2) read 2-3x over with the stock on and no masked directory, which no code on that
+  path explains. With 22 pairs it's gone, 0.370 against 0.367, and no seed died or restarted in any run read. Part 19's p50
+  there is 3-5 us lower with the stock on, in an arm doing slightly more; that has no explanation here, and nothing rests on it.
+
+What would falsify this: a quiet host's A/B with the whole create's p50 and p99 lower by more than its pairs' noise. At no load
+the saving can't pass 0.035 ms, 4% of that create. A spec masking many more directories would save more per create: a node's
+bundles with `/sys` mounted mask 5 and one per CPU (`bundle::MASKED_PATHS`, `Place::masked`). That is unmeasured, and it would
+need a higher bound than 8.
