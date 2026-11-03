@@ -1249,6 +1249,11 @@ lifecycle without changing what a box may do.
     five times.
   - The check's CPU runs beside concurrency 1's lifecycle but competes with concurrency 32's: the work off concurrency
     1's critical path that caps concurrency 32 (the lead, 2026-11-03).
+- **The checks' CPU** (8753abe, 4c54e58). <!-- record: bench/competitive/probes/create_serial.md -->On the E-cores a
+  check cost 151.2 and 157.1 us of CPU at concurrency 1; with the buffers each checker holds from one check to the next
+  and reads straight into, 138.7 and 129.5 (run 15). The dumps' answers then took 13.7 and 14.5 us a check to allocate,
+  the kernel sizing each by the socket's largest read, 32 KiB; read 8 KiB at a time, 7.2 and 7.0 (run 16).<!-- /record -->
+  A check's reads and dumps are those above: what it decides is unchanged.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->The bench's lifecycle left at most
   1,748,992 bytes in 256 idle cgroups of fedora's OCI pass 20261103T044133Z. Over six runs of test 2 on adacachy
@@ -1301,6 +1306,16 @@ lifecycle without changing what a box may do.
     10).<!-- /record --> So the second falsifier below tripped: the holds fell and 8x didn't follow. The next
     host-wide locks are taken in making a network namespace a box, which a pool that makes them ahead moves off the
     create but not off the host: hence the namespace handed from box to box of one owner, below.
+    <!-- record: bench/competitive/probes/reuse_pass.md -->Interleaved on 4-15, the ratio pooled over adjacent pairs:
+    3.74x with the namespace handed on, on steps 2 and 3 at 148d12e (run 6); 5.76x with the cgroup files opened
+    through their directory, on 16e52a9 (run 7); 4.87x with four checkers, concurrency 32 at 8,914 a second where run
+    7's was 8,364, but concurrency 1 at 1,832 on a quieter host where run 7's was 1,453 (run 8). A lifecycle held by
+    CPU costs 1.93 times its CPU alone at concurrency 32 there, where on one thread of each of the same 6 cores it
+    costs 1.18 times: two threads share each core of 4-15. So 32 at once on its 12 CPUs run at most about 12,100 a
+    second, 6.6 times concurrency 1, with all of concurrency 1's work off its own path gone (run 8).<!-- /record -->
+    <!-- record: bench/competitive/probes/create_serial.md -->That work is 272 to 299 us a lifecycle on the E-cores, 17%
+    of concurrency 1's CPU: the checkers 162 to 191, step 3's pool of each box's `/dev` 97 to 101, the seeds' starter
+    and the namespace refill 9 to 11 (run 17).<!-- /record --> The bar on 4-15 is Ada's call.
   - *Reuse off* (the third: met, Ada's call, 2026-11-03T06:01Z: faster than before passes).
     <!-- record: bench/competitive/probes/create_breakdown.md -->On boxes of no owner, this step's create p50 against
     the binary before it in the same rounds: over 100 rounds in five runs on 4-15, a mean paired difference of
