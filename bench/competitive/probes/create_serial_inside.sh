@@ -123,13 +123,15 @@ END { clear(@s); clear(@n); }
 BT
 }
 threads(){ # threads <filter on a comm value $c>: each of the filter's threads' samples by name; the rest on the probe's CPUs
+  # The idle task told by the task's own pid, not bpftrace's pid: that is the pid namespace's, and fails for every task
+  # outside the probe container's (as checker()'s keys say).
   local f=$1 lo=${CPUSET%%-*} hi=${CPUSET##*-}
   cat <<BT
 profile:hz:999
 {
 	\$c = comm;
 	if ($f) { @thread[comm] = count(); @ours = count(); }
-	else if (cpu >= $lo && cpu <= $hi && pid != 0) { @beside[comm] = count(); }
+	else if (cpu >= $lo && cpu <= $hi && curtask->pid != 0) { @beside[comm] = count(); }
 	@samples = count();
 }
 BT
