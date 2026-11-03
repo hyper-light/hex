@@ -170,15 +170,17 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     };
     match forked {
         sys::Fork::Child => Ok(
-            match container(
-                &spec,
-                &bundle,
-                FifoDir::Path(&container_dir),
-                sync,
-                procs,
-                made_ahead,
-                Root::Classic,
-            ) {
+            match lead_session().and_then(|()| {
+                container(
+                    &spec,
+                    &bundle,
+                    FifoDir::Path(&container_dir),
+                    sync,
+                    procs,
+                    made_ahead,
+                    Root::Classic,
+                )
+            }) {
                 Ok(()) => 0,
                 Err(e) => {
                     msg(sync, &format!("E{e}"));
@@ -215,6 +217,7 @@ pub(crate) fn clone_child(
     map: Option<OwnedFd>,
     network: Option<OwnedFd>,
 ) -> Result<(), OciError> {
+    lead_session()?;
     if spec.makes_namespace("user") {
         let map =
             map.ok_or_else(|| OciError::Broken("a user namespace needs the map pipe".to_owned()))?;
@@ -257,6 +260,7 @@ pub(crate) fn clone_child_pruned(
     sync: BorrowedFd<'_>,
     network: Option<OwnedFd>,
 ) -> Result<(), OciError> {
+    lead_session()?;
     // Join each network, ipc, uts or cgroup namespace the spec names by path, by the descriptor the
     // agent opened, in the spec's namespace order (the order the agent opened them). The pruned init
     // can't open the host path itself; a pid, user or mount namespace by path never reaches here.
@@ -323,6 +327,21 @@ pub(crate) enum Root<'a> {
     Pruned(&'a PrunedSources),
 }
 
+/// Makes the init the leader of a session of its own (and of its process group), as runc's and crun's inits do, so
+/// nothing it or its program does reaches the agent's session or group. It is the init's first act: at Linux v6.19
+/// every `setsid` moves the caller to a new autogroup through `sched_move_task`, which reschedules a running task
+/// whether its group changed or not (kernel/sched/autogroup.c:177-188, kernel/sched/core.c:9123-9128). Taken
+/// first, that pass through the scheduler meets a task freshly placed by its clone; taken mid-build, it met one
+/// that had run its share, and under another tenant's load it waited about a millisecond for the CPU back
+/// (docs/research/runtime/goal5-mounts.md §8). Its allocations aren't charged to a memory cgroup (`GFP_KERNEL`
+/// without `__GFP_ACCOUNT`, autogroup.c:89, fair.c `alloc_fair_sched_group`), so it may come before the shim's
+/// child joins its cgroup.
+fn lead_session() -> Result<(), OciError> {
+    rustix::process::setsid()
+        .map(|_| ())
+        .map_err(|e| OciError::os("setsid", e))
+}
+
 /// The container (PID 1 of its namespaces): join its cgroup through `procs` (when it wasn't born there),
 /// set up the world, signal ready, wait for `start`, exec. `network_made_ahead`: its network namespace
 /// came from the node's pool, its loopback already up. `root` chooses how the root filesystem is built
@@ -357,7 +376,6 @@ pub(crate) fn container(
     // before the root switch removes that path from view, and the FIFO opened through this fd later.
     let fifo_dir = fifo.open()?;
 
-    let _ = rustix::process::setsid();
     // A network namespace of the container's own holds loopback, down until it's brought up, as
     // runc and crun bring it up; one made ahead had it brought up when it was made.
     if spec.makes_namespace("network") && !network_made_ahead {
