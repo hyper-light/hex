@@ -576,9 +576,26 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   mechanism"), and is the whole bound on a node with no helper. Step 1's single-member overshoot (0 MiB) and
   held watcher CPU (~0.1%) are met rootless by the `_ext` cap; the multi-member-tree bound at overcommit is
   step 2's.
-  Its box-user (membership a daemonizing member can't escape), Windows' `process` and `oci`,
-  and Linux images through a Shards guest, follow. Off a platform whose class isn't built yet,
-  `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
+  Its box-user (membership a daemonizing member can't escape) follows.
+- The **Windows `process` class is built** (`hex_runtime::windows`, native plan step 3): a box is a job
+  object, its limits the kernel's and hard (`hex_core::job`, `docs/research/runtime/windows-job-objects.md`,
+  `bench/native/windows/RESULT.md`). A member is created suspended inside the job
+  (`PROC_THREAD_ATTRIBUTE_JOB_LIST`, so nothing runs outside it) and resumed; breakaway is refused; delete
+  (kill-on-close / `TerminateJobObject`) ends the tree. The job lets a commit that crosses its limit
+  overshoot by a bounded ≈1.1 MiB, so Hex sets the commit limit a 2 MiB margin under the box's bound and
+  the job's peak stays at or below the bound; reaching the bound is the guaranteed
+  `JobObjectNotificationLimitInformation` violation, read from the job with no completion port (no message
+  queue to bound). CPU is a weight or a hard cap of the whole machine (`milli × 10 / processors`).
+  HEX-RT-1..5, 7, 8, 9 pass on jupiter. **`pids_refused` on Windows** counts only what Hex observes
+  synchronously — the node's own `exec` into a full box returns `ERROR_NOT_ENOUGH_QUOTA` (surfaced as
+  `Exhausted`) — since Windows gives no guaranteed count of a member's own refused forks: its accounting
+  doesn't move, and the completion-port message is lossy, which §3 forbids as a source (researched across
+  hcsshim, Docker, Kubernetes, Chromium, BuildXL and a process-notify driver — none counts it;
+  `docs/research/runtime/windows-pids-refused.md`). So **HEX-RT-6 (the exact refused-fork count for a
+  member's own spawn) is the one open case on Windows**; the research recommends it check the bound's
+  deterministic effect there (the blocked program exits non-zero), which is a plan decision for Ada and
+  the lead. Windows' `oci` (HCS) and Linux images through a Shards guest follow. Off a platform whose
+  class isn't built yet, `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
   legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a

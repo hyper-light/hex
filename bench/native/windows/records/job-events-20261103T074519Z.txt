@@ -1,0 +1,58 @@
+# The Windows process class's measurements: bench/native/windows/job_events on jupiter (AMD Ryzen AI
+# MAX+ 395, 32 logical processors, Windows 11 Pro 25H2 build 26200), 2026-11-03. Each block is one run
+# of the probe (its sha noted); the probe's final source is at the branch tip. The HEX-RT conformance
+# run of the class follows (build 75285f2).
+
+########## e1-e10, e13  (probe 6da87ebc, 20261103T064054Z, load 29%) ##########
+e1 assign limit_mib=64 step=1048576 rep=0 member[refused_after=66060288 err=1455] exit=Some(3) peak_job=67862528 over=753664
+e1 assign limit_mib=256 step=1048576 rep=0 member[refused_after=266338304 err=1455] exit=Some(3) peak_job=268537856 over=102400
+e1 assign limit_mib=256 step=65536 rep=0 member[refused_after=267255808 err=1455] exit=Some(3) peak_job=268480512 over=45056
+e1 assign limit_mib=256 step=4194304 rep=0 member[refused_after=264241152 err=1455] exit=Some(3) peak_job=269582336 over=1146880
+e1 joblist limit_mib=256 step=1048576 rep=0 member[refused_after=266338304 err=1455] exit=Some(3) peak_job=268546048 over=110592
+e1 join rep=0 assign=Ok(()) peak_at_assign=376832 peak_after_start=630784   (a member's commit before it joins is not charged)
+e2 rep=0 full peak=67866624 over=757760 assign_b=Ok(()) peak_after_assign=67866624 create_in_job_c=err 1455   (a process joining a full job is refused; a commit past the cap is refused)
+e3 rep=0 member[refused_after=66060288] [child=err 1455]   (a member's child creation is refused at the full job)
+e4 rep=0 member[refused_after=66060288] [threads_ok=9 first_err=1455]   (threads refused when the job's memory is full)
+e5 notify_at_hard   violated=0x0   (a notification at the hard cap never trips: the commit is refused before the sum exceeds it)
+e5 notify_hard_minus_64k  violated=0x0   (64 KiB under the cap did not trip)
+e5 notify_hard_minus_1m   violated=0x200 + NOTIFICATION_LIMIT message   (1 MiB under the cap trips every pass)
+e5 rearm q1=Ok(0) q2=Ok(0)   (querying the violation re-arms the notification)
+e6 plain member[spawned=7 first_err=1816] active=8 terminated=0 listed=8 assign_outside=Err(1816)   (active-process limit 8: the 8th fork refused ERROR_NOT_ENOUGH_QUOTA; assigning an outside process into the full job also refused)
+e7 [grandchild] terminate=Ok(()) member_exit=0xe048000f grandchild_gone_after_ms=1 listed=[] assign_after_terminate=Ok(())   (TerminateJobObject ends the grandchild in ~1 ms; the pid list empties)
+e8 one_job_no_breakaway [breakaway=refused error=5]   (CREATE_BREAKAWAY_FROM_JOB refused)
+e8 nested_inner_allows child in_outer=true in_inner=false   (with an inner job allowing breakaway under an outer that doesn't, the child leaves the inner job but not the outer)
+e9 inner_closed member_exit=Some(0) grandchild_alive=false sibling_alive=true   (closing a nested job's last handle, kill-on-close, ends its tree and leaves the parent's other members)
+e10 job_processes=[job_events.exe] / [+conhost.exe with a window] / [cmd.exe, job_events.exe through cmd]
+e13 node_self_assign=Ok(()) member_born_in_node=true assign_box=Ok(()) in_box=true member_ended=true   (a box's job nests under the node's; a member asking to break away is still refused)
+
+########## e14 (pids counting), e15 (JOB_LIST nesting)  (probe f9f581ca, 20261103T065420Z, load 23%) ##########
+e14 member[spawned=7 refused=25 first_err=1816] limit=8 during: total=8 active=8 terminated=0 after_5_assigns: total=8 active=8 terminated=0 assigns_ok=[false x5] terminated_seq=[0 x5]
+    -> 25 refused creations, and the job's accounting never moved: Windows exposes NO guaranteed per-job count of refused forks.
+e15 member_in_node=true member_in_box=true grandchild_in_node=true grandchild_in_box=true after_delete: member_alive=false grandchild_alive=false other_alive=true
+    -> a member born in the box via JOB_LIST is in both the node's and the box's job; its grandchild too; deleting the box ends both and leaves the node's other member.
+
+########## e11 (CPU weight), e12 (CPU hard cap)  (probe f9f581ca, 20261103T065958Z, load 68%) ##########
+e11 weights=5:5 ratio=1.094 | 9:5 1.081 | 9:1 1.172 | 1:9 0.826 | 2:1 1.635   (the job CPU weight biases a shared core, weakly and noisily)
+e12 asked_milli=1000 cpu_rate=312 used_cpus=0.922 | 2500 -> 781 -> 2.613 | 4000 -> 1250 -> 3.937   (the hard cap is precise: cpu_rate = milli*10/ncpus of the whole machine)
+
+########## e16 (memory overshoot sweep, JOB_LIST), e17 (violation portless)  (probe 68e99688, 20261103T071312Z) ##########
+e16 step=65536     over=28672..49152        (~one page to ~a dozen; <= step)
+e16 step=1048576   over=94208..106496       (~0.1 MiB; << step)
+e16 step=4194304   over=1150976..1159168    (~1.10-1.11 MiB)
+e16 step=16777216  over=1142784..1159168    (~1.10-1.11 MiB; does NOT grow with the step)
+e16 step=67108864  over=1146880..1163264    (~1.10-1.11 MiB)
+e16 step=268435456 over=1146880..1159168    (~1.10-1.11 MiB)
+    -> the peak's overshoot of the commit limit is BOUNDED at ~1.11 MiB (max 1,163,264 B), not scaling with the commit step. Hex sets the job limit OVERSHOOT_MARGIN=2 MiB under the bound so peak <= bound.
+e17 with_port=false violated=0x200   (the memory-limit violation is queryable from the job WITHOUT an associated completion port)
+e17 with_port=true  violated=0x200 + NOTIFICATION_LIMIT message
+
+########## HEX-RT conformance of the Windows process class (build 75285f2, 20261103T074519Z) ##########
+running 6 tests
+a_box_past_its_bound_is_refused_at_the_bound ... ok    (peak <= bound, oom counted)
+a_box_takes_a_named_signal ... ok                      (TERM -> Signal(15))
+a_box_under_its_bound_runs_and_reports_its_exit ... ok
+a_member_asking_to_break_away_is_refused ... ok
+delete_ends_a_boxs_grandchildren ... ok
+windows_process_boxes_hold_the_contract ... FAILED on HEX-RT-6 only
+    HEX-RT-6: pids_refused=0 — Windows has no guaranteed per-job count of refused forks (e14); the limit
+    is enforced (the 8th fork is refused ERROR_NOT_ENOUGH_QUOTA). A plan call for Ada; HEX-RT-1..5,7,8,9 pass.
