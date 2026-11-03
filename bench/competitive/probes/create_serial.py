@@ -18,7 +18,8 @@ ms buckets in which the runtime made or removed at least half the median bucket'
 A MODE=checker run, each figure per namespace checked (its out.<label>.json's netns_reuse.checked, which stands in
 for <lifecycles>): the checker threads' system calls (@sys[number]: stats), their futex waits for the next namespace
 left out of the sum, and their on-CPU profile at 4999 Hz (@samples), by the system call each sample fell in or user
-mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count).
+mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count), and
+the samples allocating netlink's answers.
 
 A MODE=threads run, each figure per lifecycle: the runtime's threads' CPU by name, sampled at 999 Hz (@thread[comm]:
 count), and the other tasks on the probe's CPUs by name (@beside[comm]: count).
@@ -249,7 +250,7 @@ def report_checker(label, path, txt):
         return
     samples = int(re.search(r'@samples: (\d+)', txt).group(1))
     us = 1e6 / PROFILE_HZ / checked
-    work_of, user = defaultdict(int), 0
+    work_of, user, skb, skb_clear = defaultdict(int), 0, 0, 0
     for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
         lines = m.group(1).split('\n')
         cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
@@ -257,6 +258,9 @@ def report_checker(label, path, txt):
         if not frames:
             user += int(m.group(2))
             continue
+        if '__alloc_skb' in frames:
+            skb += int(m.group(2))
+            skb_clear += int(m.group(2)) if any(f.startswith('clear_page') for f in frames) else 0
         name = next((n for n, pat in CHECKER_WORK if any(re.search(pat, f) for f in frames)),
                     'other: ' + ' < '.join(frames[:3]))
         work_of[name] += int(m.group(2))
@@ -272,6 +276,8 @@ def report_checker(label, path, txt):
     print("  on-CPU a check by the system call each sample fell in:")
     for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:10]:
         print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    print(f"  allocating netlink's answers (__alloc_skb anywhere in the stack): {skb * us:.1f} us a check, "
+          f"{skb_clear * us:.1f} of it clearing pages")
     print("  on-CPU a check in the kernel, by its work:")
     for name, v in sorted(work_of.items(), key=lambda kv: -kv[1])[:16]:
         print(f"  {v * us:7.1f} us  {name[:110]}")
