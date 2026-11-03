@@ -1055,13 +1055,18 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
             "the namespace's count down to the check's own socket",
         );
     };
-    // A file of `/proc/thread-self/net` opened links to its name under the thread's directory.
+    // A file of `/proc/thread-self/net` opened links to its name under the thread's directory, and reads
+    // " (deleted)" once the same thread opens that name again: a `/proc/net` name is never revalidated (Linux
+    // v6.19 fs/proc/generic.c:350-354), so the later lookup unhashes the dentry the held file stands on
+    // (fs/namei.c:1715-1718) and its path is told as deleted (fs/d_path.c:287-288). The file still reads its
+    // namespace, which it took as it opened, so it is counted either way.
     let held = || {
         std::fs::read_dir("/proc/self/fd")
             .unwrap()
             .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
             .filter(|link| {
                 let link = link.to_string_lossy();
+                let link = link.strip_suffix(" (deleted)").unwrap_or(&link);
                 ["sockstat", "dev", "ip_tables_names", "ip6_tables_names"]
                     .iter()
                     .any(|name| link.ends_with(&format!("/net/{name}")))
