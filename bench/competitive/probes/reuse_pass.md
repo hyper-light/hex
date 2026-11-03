@@ -228,8 +228,9 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   times the CPU it cost alone. Two threads share each core's units there, and 6 cores run at a lower clock than 1, so a
   lifecycle held by CPU can't be run 32 at once on these CPUs much past 6x what it runs alone.
 - **One start failed:** the socket driver's second round of `20261103T064217Z`, at its seventh pair, with "start
-  i006b003224: reading the exec fifo failed: Resource temporarily unavailable". So that row is over 10 pairs. Not yet
-  explained; that merge has the propagation leak e2dd76c fixes.
+  i006b003224: reading the exec fifo failed: Resource temporarily unavailable". So that row is over 10 pairs. Since
+  explained: the start's poll reported a hang-up as the init opened its end of the FIFO, before its byte, a race in
+  the kernel's FIFO poll (`fifo_hup.md`), and 756072f has the start poll again.
 
 ## Run 7 (2026-11-03, fedora): run 6's method on 16e52a9, with the cgroup files opened through their directory
 
