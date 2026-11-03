@@ -1155,11 +1155,11 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     for id in &many {
         delete(id);
     }
-    ruled();
+    let filled = ruled();
     assert_eq!(
         held(),
         files * hex_core::netns_reuse::PER_OWNER,
-        "the namespace the owner's bound put out closed its files"
+        "the namespace the owner's bound put out closed its files: {filled:?}"
     );
     node.release_idle().unwrap();
     wait_for(|| held() == 0, "the bound's namespaces released closing");
