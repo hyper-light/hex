@@ -172,6 +172,39 @@ pub fn is_default(write: &Write) -> bool {
     }
 }
 
+/// `cpu.max`'s two values as the kernel reads and writes them ("$MAX $PERIOD",
+/// Documentation/admin-guide/cgroup-v2.rst v6.19): the quota each period may use, `None` for `max`, and
+/// the period, in microseconds. A reused cgroup's `cpu.max` is written again only when these differ from
+/// the box's, since its write takes the host-wide `cfs_constraints_mutex` and walks every task group
+/// (Linux v6.19 kernel/sched/core.c:9461-9462, :9624).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuMax {
+    /// The quota each period may use; `None` for `max`.
+    pub quota_us: Option<u64>,
+    /// The period.
+    pub period_us: u64,
+}
+
+impl CpuMax {
+    /// The two values `text` holds, or `None` unless it is exactly a quota (`max` or a number) and a
+    /// period (a number), spaced however.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut fields = text.split_ascii_whitespace();
+        let (quota, period) = (fields.next()?, fields.next()?);
+        if fields.next().is_some() {
+            return None;
+        }
+        let quota_us = match quota {
+            "max" => None,
+            n => Some(n.parse().ok()?),
+        };
+        Some(Self {
+            quota_us,
+            period_us: period.parse().ok()?,
+        })
+    }
+}
+
 /// A cgroup's cumulative counters when a box was given it. A cgroup's counters run on from the boxes
 /// before it and none can be reset (research f32, f33), so a box given a cgroup another box left has its
 /// usage reported from these ([`since`]). Kept in the box's record, so a restarted node reports the same.
@@ -481,6 +514,54 @@ mod tests {
         assert_eq!(since(&Usage::default(), &base, 0).cpu_usec, 0);
     }
 
+    /// Goal 5 extended, step 6 (the lead's ruling on cpu.max, 2026-11-03T01:19Z): a reused cgroup's
+    /// cpu.max is written again unless its parsed values already equal the box's; read a value either side
+    /// can't parse as not equal, so the bound is written.
+    #[test]
+    fn cpu_max_is_compared_by_its_values_not_its_spelling() {
+        let parse = CpuMax::parse;
+        assert_eq!(
+            parse("max 100000"),
+            Some(CpuMax {
+                quota_us: None,
+                period_us: 100_000
+            })
+        );
+        assert_eq!(
+            parse("150000 100000\n"),
+            Some(CpuMax {
+                quota_us: Some(150_000),
+                period_us: 100_000
+            })
+        );
+        assert_eq!(
+            parse(" max\t100000 \n"),
+            parse("max 100000"),
+            "spaced otherwise, the same"
+        );
+        assert_ne!(parse("max 100000"), parse("max 50000"), "another period");
+        assert_ne!(
+            parse("150000 100000"),
+            parse("max 100000"),
+            "a quota against none"
+        );
+        for bad in [
+            "",
+            "max",
+            "100000",
+            "max 100000 7",
+            "x 100000",
+            "max y",
+            "-1 100000",
+            "max -1",
+        ] {
+            assert_eq!(parse(bad), None, "{bad:?} isn't cpu.max's two values");
+        }
+        let ws = writes_all(&Bounds::default(), &[]).unwrap();
+        let cpu = ws.iter().find(|w| w.file == "cpu.max").unwrap();
+        assert_eq!(parse(&cpu.value), parse("max 100000"), "the default parses");
+    }
+
     proptest! {
         // Hostile input (CLAUDE.md §6): whatever the files hold, reading them returns a value.
         #[test]
@@ -488,6 +569,11 @@ mod tests {
             let f = UsageFiles { memory_current: a.clone(), memory_peak: b, memory_events: c.clone(), pids_current: a, pids_events: c.clone(), cpu_stat: c, io_stat: d.clone() };
             let _ = usage(&f);
             let _ = populated(&d);
+        }
+
+        #[test]
+        fn cpu_max_of_any_text_is_a_value_not_a_panic(t in "\\PC*") {
+            let _ = CpuMax::parse(&t);
         }
 
         #[test]

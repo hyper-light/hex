@@ -221,8 +221,8 @@ impl BoxRoot {
     /// nothing of the earlier box's ([`core::writes_all`]; goal 5 extended, step 6). None of these files'
     /// writes takes the kernel's `cgroup_mutex` (research f25). A default for a file the kernel doesn't
     /// have is skipped: no earlier box could have set it either. `cpu.max` alone is read first and
-    /// written only where it holds another value: its write takes the host-wide `cfs_constraints_mutex`
-    /// and walks every task group on the host (Linux v6.19 `tg_set_cfs_bandwidth`,
+    /// written only where its values differ ([`cpu_max_holds`]): its write takes the host-wide
+    /// `cfs_constraints_mutex` and walks every task group on the host (Linux v6.19 `tg_set_cfs_bandwidth`,
     /// kernel/sched/core.c:9461-9462, `__cfs_schedulable` :9624; research f26), 68.5 us p50 against 1.5 us
     /// for `pids.max` on adacachy's 3,348 cgroups (2026-11-03, 2,000 writes each), where its read takes
     /// no lock (`cpu_max_show`, :10104), so the bound is in force either way.
@@ -233,7 +233,7 @@ impl BoxRoot {
             if core::is_default(&w) && !path.exists() {
                 continue;
             }
-            if w.file == "cpu.max" && read_text(&path).is_ok_and(|now| now.trim() == w.value) {
+            if w.file == "cpu.max" && cpu_max_holds(&path, &w.value) {
                 continue;
             }
             cg.write_bound(&w)?;
@@ -563,6 +563,20 @@ fn swap_active() -> Result<bool, Refusal> {
 /// Largest cgroup file Hex reads whole: `io.stat` and `cpu.stat` hold a few lines each; a file past
 /// this is damage, refused by type rather than read on.
 const MAX_CGROUP_FILE: usize = 64 << 10;
+
+/// Whether the `cpu.max` at `path` already holds `want`, its values compared ([`core::CpuMax`]), never its
+/// text. A read that fails, or a value either side that doesn't parse, counts as not holding it, so the
+/// bound is written: the write is skipped only on a read that shows the box's values in force.
+fn cpu_max_holds(path: &Path, want: &str) -> bool {
+    let now = read_text(path).ok();
+    match (
+        now.as_deref().and_then(core::CpuMax::parse),
+        core::CpuMax::parse(want),
+    ) {
+        (Some(now), Some(want)) => now == want,
+        _ => false,
+    }
+}
 
 /// A cgroup file's text, read with one open and as few reads as it takes, no stat (`fs::read_to_string`
 /// takes one per file to size its buffer): an idle cgroup's check and baseline read a dozen on create's

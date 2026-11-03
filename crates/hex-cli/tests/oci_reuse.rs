@@ -11,7 +11,9 @@
 //! - test 2, a cgroup reused within one owner: box A of owner O burns CPU, holds 64 MiB, has a program
 //!   OOM-killed and forks refused, and is deleted; box B of owner O is created: expect B in A's slot, B's
 //!   reported CPU under 1% of A's, its peak under A's and its event counts its own (0) while the cgroup's
-//!   own files still hold A's, and every bound B sets in force, every one it doesn't at its default;
+//!   own files still hold A's, and every bound B sets in force, every one it doesn't at its default.
+//!   With it, `cpu.max` (the lead's ruling, 2026-11-03T01:19Z): B of O bounded otherwise than A, then C of
+//!   O bounded as B: expect the file written for B and left for C, holding their values each time;
 //! - test 3, each guard: after A of owner O is deleted, a sub-cgroup made in its cgroup, its
 //!   `memory.oom.group` set, a live process moved in, or 64 MiB left charged by A: expect B of O a fresh
 //!   cgroup, A's removed and the refusal counted by its reason. A killed through `cgroup.kill` (a signal
@@ -283,40 +285,45 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     }
     a_delete_ends_a_box_through_its_inits_pidfd(&lab, own);
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
+    a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
 }
 
-/// A watch on a cgroup's directory for writes to its `cgroup.kill`: every write to a file in a watched
-/// directory is reported with the file's name (vfs_write's fsnotify_modify; inotify(7), IN_MODIFY), so
-/// the test knows whether a delete wrote it independently of the node's own counts. The directory is
-/// watched since `cgroup.kill` itself is write-only, and inotify_add_watch(2) needs read access to what
-/// it watches.
+/// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
+/// write to a file in a watched directory is reported with the file's name (vfs_write's
+/// fsnotify_modify; inotify(7), IN_MODIFY), so the test knows whether the node wrote it independently of
+/// the node's own counts. The directory is watched since `cgroup.kill` itself is write-only, and
+/// inotify_add_watch(2) needs read access to what it watches.
 /// Where this user has no inotify instance left (EMFILE: `fs.inotify.max_user_instances` is per user, and a
 /// root lab's root shares the host's root, whose services hold them), it says so on stderr and checks
-/// nothing: the node's own counts are then the case's evidence, and the rootless runs keep this check.
-struct KillWatch(Option<OwnedFd>);
+/// nothing: the node's own counts and the file's contents are then the case's evidence, and the rootless
+/// runs keep this check.
+struct WriteWatch {
+    fd: Option<OwnedFd>,
+    file: &'static str,
+}
 
-impl KillWatch {
-    fn on(cgroup: &Path) -> Self {
+impl WriteWatch {
+    fn on(cgroup: &Path, file: &'static str) -> Self {
         let fd = match inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)
         {
             Ok(fd) => fd,
             Err(rustix::io::Errno::MFILE) => {
                 eprintln!(
-                    "NOTE: no inotify instance left for this user here (EMFILE): cgroup.kill writes go unwatched, the node's counts stand alone"
+                    "NOTE: no inotify instance left for this user here (EMFILE): {file} writes go unwatched, the node's counts stand alone"
                 );
-                return Self(None);
+                return Self { fd: None, file };
             }
             Err(e) => panic!("inotify: {e}"),
         };
         inotify::add_watch(&fd, cgroup, inotify::WatchFlags::MODIFY)
             .expect("watch the cgroup's directory");
-        Self(Some(fd))
+        Self { fd: Some(fd), file }
     }
 
-    /// Whether `cgroup.kill` was written since the watch began; `None` where nothing watched it.
+    /// Whether the file was written since the watch began; `None` where nothing watched it.
     fn written(&self) -> Option<bool> {
-        let fd = self.0.as_ref()?;
+        let fd = self.fd.as_ref()?;
         let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
         let mut events = inotify::Reader::new(fd, &mut buf);
         loop {
@@ -324,7 +331,7 @@ impl KillWatch {
                 Ok(e)
                     if e.events().contains(inotify::ReadFlags::MODIFY)
                         && e.file_name()
-                            .is_some_and(|n| n.to_bytes() == b"cgroup.kill") =>
+                            .is_some_and(|n| n.to_bytes() == self.file.as_bytes()) =>
                 {
                     return Some(true);
                 }
@@ -351,7 +358,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     let mut program = node.exec(&id, selftest(&Act::Wait), Stdio::null()).unwrap();
     let pid = program.pid();
     let cg = node.cgroup_dir(&id).expect("the box's cgroup");
-    let watch = KillWatch::on(&cg);
+    let watch = WriteWatch::on(&cg, "cgroup.kill");
     let before = node.kills();
     node.delete(&id).unwrap();
     let after = node.kills();
@@ -391,7 +398,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     let outside_fd = pidfd(outside.id());
     std::fs::write(cg.join("cgroup.procs"), outside.id().to_string())
         .expect("move a process from outside into the box's cgroup");
-    let watch = KillWatch::on(&cg);
+    let watch = WriteWatch::on(&cg, "cgroup.kill");
     let before = node.kills();
     node.delete(&id).unwrap();
     let after = node.kills();
@@ -428,7 +435,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
         .exec(&id, Program::of(&["sleep", "600"]), Stdio::null())
         .unwrap();
     let cg = node.cgroup_dir(&id).expect("the box's cgroup");
-    let watch = KillWatch::on(&cg);
+    let watch = WriteWatch::on(&cg, "cgroup.kill");
     let before = node.kills();
     node.delete(&id).unwrap();
     let after = node.kills();
@@ -469,7 +476,7 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
         "the init's exit, read by inspect",
     );
     let cg = node.cgroup_dir(&id).expect("the box's cgroup");
-    let watch = KillWatch::on(&cg);
+    let watch = WriteWatch::on(&cg, "cgroup.kill");
     let before = node.kills();
     node.delete(&id).unwrap();
     let after = node.kills();
@@ -625,6 +632,49 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     assert!(!slot.exists(), "released, no idle cgroup is left");
+}
+
+/// With test 2, the lead's ruling on `cpu.max` (2026-11-03T01:19Z): a reused cgroup's `cpu.max` is
+/// written again when the next box's values differ from what it holds, and left when they're the same,
+/// compared as values (`hex_core::cgroup::CpuMax`). Do: A of owner O, bounded to half a CPU, is deleted;
+/// B of O, bounded to a quarter, is created; B is deleted, and C of O, bounded to a quarter too, is
+/// created. Expect: B and C each given A's slot, the file holding a quarter's values after each, and a
+/// write to it seen for B and none for C.
+fn a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-cpu"));
+    let o = BoxOwner::named("owner-cpu").unwrap();
+    let bounded = |milli| Bounds {
+        cpu_max_milli: Some(milli),
+        ..Bounds::default()
+    };
+    let a = BoxId::new("cpu-a").unwrap();
+    node.create(lab.oci("cpu-a", Some(&o), Caps::Docker, bounded(500)))
+        .unwrap();
+    let slot = node.cgroup_dir(&a).unwrap();
+    let held = || std::fs::read_to_string(slot.join("cpu.max")).unwrap();
+    assert_eq!(held().trim(), "50000 100000", "A's half a CPU");
+    node.delete(&a).unwrap();
+    for (id, written) in [("cpu-b", true), ("cpu-c", false)] {
+        let watch = WriteWatch::on(&slot, "cpu.max");
+        let next = BoxId::new(id).unwrap();
+        node.create(lab.oci(id, Some(&o), Caps::Docker, bounded(250)))
+            .unwrap();
+        assert_eq!(
+            node.cgroup_dir(&next).as_deref(),
+            Some(slot.as_path()),
+            "{id} is given A's slot"
+        );
+        assert_eq!(held().trim(), "25000 100000", "{id}'s quarter of a CPU");
+        if let Some(seen) = watch.written() {
+            assert_eq!(
+                seen, written,
+                "{id}: cpu.max is written only when its values differ"
+            );
+        }
+        node.delete(&next).unwrap();
+    }
+    eprintln!("cpu.max: written for B (a half to a quarter), left for C (a quarter to a quarter)");
+    node.release_idle().unwrap();
 }
 
 /// Waits for `cond`, a fact, at most [`PATIENCE`].
