@@ -195,12 +195,17 @@ def netns_counts(data):
     for n, rs in data.items():
         for rnd, r in sorted(rs.items()):
             bits = []
-            for phase in ("lifecycle", "lifecycle_nonet", "sustained"):
+            for phase in ("lifecycle", "lifecycle_nonet", "sustained", "interleaved"):
                 p = r["phases"].get(phase) or {}
                 c = p.get("netns")
                 if c is None:
                     continue
-                creates = p["lifecycles"] if phase == "sustained" else r["n"] + r["warmup"]
+                if phase == "sustained":
+                    creates = p["lifecycles"]
+                elif phase == "interleaved":
+                    creates = len(p["pairs"]) * (p["c1_lifecycles"] + p["c32_lifecycles"])
+                else:
+                    creates = r["n"] + r["warmup"]
                 bit = (f"{phase}: {c['made_on_path']:,} made on the path, {c['taken']:,} taken from the pool, "
                        f"{c['made_ahead']:,} made ahead, {c['failed']:,} failed makes, of {creates:,} creates")
                 k = p.get("netns_reuse")
