@@ -286,6 +286,11 @@ the network namespace 16 started, 23 waited, 15 at most.
   `css_release_work_fn` 6.00, `cgroup_bpf_release` 1.00, and the runtime's four), the host making fewer other
   cgroups than in run 5, and the node's start's one attach is 0.00 a lifecycle.
 
+Runs 7 to 10 ran on CPUs 4-31, P- and E-cores, as the harness runs by default. Their counts and shares are each
+within one run, so they stand as measured (the lead, 2026-11-03T00:48Z). Their absolute rates and times aren't
+comparable with the records on 4-15, the P-core threads, from create_breakdown.md's run 4 on. Run 11 repeats run 7 on
+4-15, at f7c4065.
+
 ## Run 7 (2026-11-03, fedora): locks, one owner's boxes, each handed the cgroup its owner's earlier box left
 
 - **Why:** goal 5 extended, step 6's first criterion: `cgroup_mutex` holds per lifecycle on the reuse path, one owner's
@@ -451,6 +456,41 @@ Off-CPU ms per lifecycle:
   it: making it ahead moves its holds of those two locks off the create but not off the host, as a pool of cgroups made
   ahead would move none of `cgroup_mutex`'s.
 
+## Run 11 (2026-11-03, fedora): locks, one owner's boxes, on CPUs 4-15, at f7c4065: of record for the first criterion
+
+- **Why:** runs 7 to 10 ran on CPUs 4-31, P- and E-cores. The records from create_breakdown.md's run 4 on, and goal
+  5 extended's steps 1, 2, 3 and 5, are on 4-15, the i9-14900HX's P-core threads (16-31 are its E-cores), so those
+  runs aren't comparable with them (the lead, 2026-11-02T17:49Z). This repeats run 7 on 4-15, at f7c4065, the step
+  built on the delete flake's fix (5013c4b), with the lead's caps on the container (`--memory 8g`,
+  `--oom-score-adj 1000`).
+- **Host and load:** fedora, Linux 6.19.10-300.fc44.x86_64, 2026-11-03T02:34:47Z, the container pinned to 4-15; the
+  1-minute load 17.03 at the start and 19.80 at the end. Under the probes Hex's sustained phase ran 1,949/s, without a
+  network namespace 2,140/s, and libcrun's 1,059/s.
+- **Binaries:** built on fedora at f7c4065 (cp/t7-ext-s6): `hex` 729934ce2c45a292, `seam_oci` 92b8a36ae1c6c74e.
+  **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261103T023447Z`, each workload started on
+  "Attached 38 probes"; the fedora unit `hex-g5x-s6-verify2b-20261103T023358Z`.
+- **What the node did:** at concurrency 1, 519 of 520 boxes were handed an idle cgroup and 1 a fresh one; at 32, and
+  without a network namespace, 4,968 of 5,000 and 32 fresh. None was refused, and every box ended through its init's
+  pidfd, none by `cgroup.kill`.
+
+| `cgroup_mutex` holds for the boxes' own cgroups, per lifecycle | hex.c1 (520) | hex.c32 (5,000) | hex.c32nonet (5,000) |
+|---|---|---|---|
+| a fork into the cgroup (`CLONE_INTO_CGROUP`) | 1.000 | 1.000 | 1.000 |
+| `cgroup_mkdir` | 0.002 | 0.006 | 0.006 |
+| `cgroup_rmdir` | 0.002 | 0.006 | 0.006 |
+| `cgroup_kill_write` | 0 | 0 | 0 |
+| `css_killed_work_fn`, a kworker's | 0.010 | 0.032 | 0.032 |
+| `css_release_work_fn`, a kworker's | 0.012 | 0.038 | 0.038 |
+| `cgroup_bpf_release`, a kworker's | 0.002 | 0.006 | 0.006 |
+| in all | 1.027 | 1.089 | 1.090 |
+
+- **The first criterion is met on 4-15:** 1.089 holds a lifecycle at concurrency 32, against a bar of 3. The rest
+  is the 32 fresh cgroups' making and, at the end, their removal, as in run 7.
+- **The lock is mostly free:** held 8.5% of the busiest buckets at concurrency 32, 16.8% without a network namespace.
+- **The waits at concurrency 32 are on other locks, as in run 9:** the runtime's waits on an `rw_semaphore` that isn't
+  a directory's (the mount namespace's lock among them, which run 9 names, or a process's `mmap_lock`) came to 2.663
+  ms a lifecycle to read and 2.065 to write, against 0.002 and 0.003 at concurrency 1.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
@@ -500,4 +540,5 @@ Off-CPU ms per lifecycle:
   run 7), and waits for it 0.043 ms (run 9). What holds concurrency 32 then is the mount namespace's lock, one for the
   whole host (5.349 ms a lifecycle, run 9); with steps 2 and 3 merged in as well, RTNL and sysctl's lock in making each
   box's network namespace (6.670 ms, and 12.58% of the samples spinning, run 10). The ratio stayed 4.05x to 5.41x
-  (`reuse_pass.md`), because a lifecycle alone got faster with each lever too.
+  (4-31, as host.sh runs it) and is 2.89x to 3.32x on 4-15 (`reuse_pass.md`, runs 1 to 3), because a lifecycle alone
+  got faster with each lever too.

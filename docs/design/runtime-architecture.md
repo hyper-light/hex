@@ -1138,7 +1138,9 @@ lifecycle without changing what a box may do.
     adacachy's 7.2.9 and fedora's 6.19.10 (`bench/competitive/probes/kill_seq.md`), and seen as inits dying before
     their ready signal in fedora's first OCI pass with an owner. No file a check can read shows the count, so the
     node keeps it: a box sent KILL, or whose delete fell back to `cgroup.kill`, has its slot removed with it,
-    counted (`discarded_killed`).
+    counted (`discarded_killed`). Upstream fixed it in 8e3599202166 (7.3-rc1, `Cc: stable`; in linux-7.2.y by
+    7.2.15, not in linux-6.19.y by 6.19.14), and the guard stays on every kernel, since Hex runs on kernels with
+    and without it.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->Over six runs of test 2 on adacachy
   (Linux 7.2.9) a box left 3,719,168 to 7,471,104 bytes charged, 3.5 to 7.1 MiB, anon, shmem and dirty file pages 0

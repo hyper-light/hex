@@ -546,7 +546,10 @@ The parts' p50s sum to 2.134 ms pooled: 101.1% of the creates between the traced
 
 ## Run 13 (2026-11-03, fedora): step 6's binary on boxes of no owner, and the one before it, in the same rounds
 
-Runs 8 to 12 are goal 5 extended steps 2 and 3's, on their branches.
+Runs 8 to 12 are goal 5 extended steps 2 and 3's, on their branches. This run's container was pinned to CPUs 4-31, P-
+and E-cores, as the harness runs by default. Its differences are within its own rounds, so they stand as measured
+(the lead, 2026-11-03T00:48Z). Its absolute times aren't comparable with the records on 4-15, the P-core threads,
+from run 4 on. Run 14 repeats it on 4-15, with enough rounds for the window.
 
 - **Why:** goal 5 extended, step 6's third criterion: Hex's create p50 with reuse off, against the binary before this
   step in the same A/B run, within 0.02 ms of 0 ms. The probe's boxes name no owner, so none is handed a cgroup: each

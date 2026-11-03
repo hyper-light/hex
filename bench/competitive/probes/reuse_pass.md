@@ -4,6 +4,10 @@ Goal 5 extended, step 6's second criterion: sustained lifecycles a second at con
 concurrency 1, in the same OCI pass, one owner's boxes, at least 8x (seam_oci's throughput and sustained phases through
 host.sh on fedora).
 
+Runs 1 and 2 ran on CPUs 4-31, P- and E-cores, as host.sh runs by default. The criterion is a ratio within one pass,
+so each stands as measured (the lead, 2026-11-03T00:48Z). Their absolute rates aren't comparable with the records on
+4-15, the P-core threads, from create_breakdown.md's run 4 on. Run 3 repeats run 1 on 4-15, at f7c4065.
+
 ## Run 1 (2026-11-03, fedora)
 
 - **Host and load:** fedora (Intel Core i9-14900HX, 32 threads, the pass's container pinned to 4-31), Linux
@@ -28,7 +32,7 @@ host.sh on fedora).
 | libcrun in process, round 1 | 73 | 627 | 1,670 | 1,653 | 22.60x |
 | libcrun in process, round 2 | 74 | 633 | 1,607 | 1,626 | 22.09x |
 
-- **The criterion is not met:** 4.21x to 4.81x against 8x.
+- **The criterion is not met:** 4.21x to 4.81x against 8x (4-31, as host.sh runs it).
 - **Both rates rose.** Hex's sustained rate at concurrency 32 is 2,535 to 2,932 a second. With every box's cgroup made
   and removed it was 2,108 and 2,095 in goal 5 step 2's pass of record (`RESULT.md`, "Goal 5, plan step 2", a load of
   4.18 to 15.09) and 1,429 under `create_serial.md`'s run 6 probes. `cgroup_mutex`, held 87.1% of the time at
@@ -75,12 +79,40 @@ host.sh on fedora).
 | libcrun in process, beside step 6 alone, round 2 | 73 | 634 | 1,676 | 1,700 | 23.33x |
 
 - **The three steps' levers don't reach 8x either:** 4.05x to 4.83x, against 4.62x to 5.41x for step 6 alone beside
-  them. Both rates rose with them: the merge sustained 3,754 to 4,293 a second at concurrency 32 against step 6's
-  3,110 to 3,205, and ran 819 to 1,028 at concurrency 1 against 575 to 694, a lifecycle alone taking 0.97 to 1.22 ms.
-  At concurrency 1 the rate rose the more, so the ratio fell.
+  them (4-31, as host.sh runs it). Both rates rose with them: the merge sustained 3,754 to 4,293 a second at
+  concurrency 32 against step 6's 3,110 to 3,205, and ran 819 to 1,028 at concurrency 1 against 575 to 694, a
+  lifecycle alone taking 0.97 to 1.22 ms. At concurrency 1 the rate rose the more, so the ratio fell.
 - **Every box was handed its owner's idle cgroup but one:** of the merge's sustained phases in process, 10,000 and
   9,999 of 10,000, and 10,000 and 9,999 ended through their init's pidfd.
 - **What holds concurrency 32 with all three in** (`create_serial.md`, run 10): neither `cgroup_mutex` nor the mount
   namespace's lock, but RTNL, the host's one network lock, in making each box's network namespace. The pool that makes
   them ahead (decision 4) ran dry: 9,561 to 9,608 of each sustained phase's 10,000 creates made theirs on the path in
   the merge, against 5,078 to 5,359 for step 6 alone.
+
+## Run 3 (2026-11-03, fedora): on CPUs 4-15, at f7c4065: of record for the second criterion
+
+- **Host and load:** fedora, Linux 6.19.10-300.fc44.x86_64, 2026-11-03T02:36:17Z, the pass's container pinned to
+  4-15 and capped (`--memory 8g`, `--oom-score-adj 1000`); the 1-minute load 19.80 at the start and 32.60 at the end,
+  from the host's other work beside it. `LOAD_GATE=0`.
+- **Binaries:** create_serial.md's run 11's, built at f7c4065, the step on the delete flake's fix: `hex`
+  729934ce2c45a292, `seam_oci` 92b8a36ae1c6c74e.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/20261103T023617Z`, run 1's parameters, every box `bench-owner`'s; the
+  fedora unit `hex-g5x-s6-verify2b-20261103T023358Z`.
+- **What the node did** (in process): of each sustained phase's 10,000 lifecycles, 10,000 and 9,999 boxes were handed
+  an idle cgroup, the other fresh; 10,000 and 9,999 ended through their init's pidfd, one by `cgroup.kill`.
+
+| lifecycles a second | throughput, concurrency 1 | concurrency 8 | concurrency 32 | sustained, concurrency 32 | sustained over concurrency 1 |
+|---|---|---|---|---|---|
+| Hex's seam in process, round 1 | 724 | 2,122 | 2,231 | 2,152 | 2.97x |
+| Hex's seam in process, round 2 | 593 | 1,924 | 1,787 | 1,850 | 3.12x |
+| Hex's seam over its socket, round 1 | 679 | 2,000 | 2,110 | 2,250 | 3.32x |
+| Hex's seam over its socket, round 2 | 675 | 1,936 | 1,915 | 1,948 | 2.89x |
+| libcrun in process, round 1 | 75 | 549 | 1,170 | 1,121 | 14.92x |
+| libcrun in process, round 2 | 74 | 558 | 1,100 | 1,065 | 14.44x |
+
+- **The criterion is not met:** 2.89x to 3.32x against 8x. On twelve CPUs Hex's rate at concurrency 32 is 1,850 to
+  2,250 a second, against 2,535 to 2,932 on run 1's 28; the rate at concurrency 1 is about the same, 593 to 724.
+- **What holds concurrency 32 is what run 1 met:** the mount namespace's lock, which create_serial.md's run 11 also
+  finds on these CPUs, and the network namespaces made on the path (1,613 and 228 of the in-process sustained phases'
+  10,000 here, 2,007 and 734 over the socket).
+

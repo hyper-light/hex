@@ -15,6 +15,11 @@ clones a child into each with `clone3(CLONE_INTO_CGROUP)` and reports whether th
 cgroup's own (`:6902`) and kills the child when they differ (`:6941`), and every `cgroup.kill` raises the target's
 (`cgrp->kill_seq++;`, `:4186`). A cgroup once killed so differs from a forker's that never was, for good.
 
+**Fixed upstream, not yet on these hosts.** Commit 8e359920216689b3b79e0fe8961a77fe312a511f, "cgroup: fix spurious
+SIGKILL of CLONE_INTO_CGROUP children" (committed 2026-08-31 for 7.3-rc1; `Fixes: b69bb476dee9`, `Cc: stable`),
+samples the target's `kill_seq` once `kargs->cgrp` is set. Read 2026-11-03 at github.com/gregkh/linux, linux-7.2.y
+(at 7.2.15) carries it and linux-6.19.y (at 6.19.14) doesn't; adacachy's 7.2.9 and fedora's 6.19.10 predate it.
+
 **What it means for Hex.** The seam's inits are cloned into their box's cgroup (decision 5's seeds), so a cgroup
 `cgroup.kill` was ever written to can't be handed to another box: its init would die before its ready signal, as
 fedora's OCI pass of 2026-11-03 01:0xZ saw before the guard (`the container init closed before its ready signal` at
