@@ -314,3 +314,9 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   they took off was beside it. Concurrency 32 rose 7%, the ratio 12%.
 - **Over the socket one pass passed 8x, 8.08x, and its twin read 6.30x:** that driver's concurrency 1 waits on the
   agent's socket as well, so its ratio swings with the host more than the in-process one.
+- **Run 8's ceiling was its load's:** a lifecycle's CPU at concurrency 32 is 1.36 to 1.44 times its CPU at 1 here
+  (each pass's medians), where run 8's pass without a network namespace, at load 34 to 39, gave 1.93. How much more
+  a lifecycle costs 32 at once moves with the host's load, so run 8's "about 6.6 times concurrency 1, with all of
+  its work off its own path gone" is withdrawn. On this run's figures, that work gone (17% of concurrency 1's CPU,
+  `create_serial.md` run 17) puts concurrency 32 at about 7.2 times concurrency 1, and its CPUs kept busy as well,
+  10.2 of 12 now, at about 8.4 times.

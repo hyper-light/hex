@@ -1319,12 +1319,13 @@ lifecycle without changing what a box may do.
     <!-- record: bench/competitive/probes/reuse_pass.md -->Interleaved on 4-15, the ratio pooled over adjacent pairs:
     3.74x with the namespace handed on, on steps 2 and 3 at 148d12e (run 6); 5.76x with the cgroup files opened
     through their directory, on 16e52a9 (run 7); 4.87x with four checkers, concurrency 32 at 8,914 a second where run
-    7's was 8,364, but concurrency 1 at 1,832 on a quieter host where run 7's was 1,453 (run 8). A lifecycle held by
-    CPU costs 1.93 times its CPU alone at concurrency 32 there, where on one thread of each of the same 6 cores it
-    costs 1.18 times: two threads share each core of 4-15. So 32 at once on its 12 CPUs run at most about 12,100 a
-    second, 6.6 times concurrency 1, with all of concurrency 1's work off its own path gone (run 8). With the checks'
+    7's was 8,364, but concurrency 1 at 1,832 on a quieter host where run 7's was 1,453 (run 8). With the checks'
     three changes (the checks' CPU, above), 6.17x in process against 5.53x without them in the same A B B A, and
-    concurrency 32 at 10,531 a second against 9,808; over the socket 7.19x against 7.14x (run 9).<!-- /record -->
+    concurrency 32 at 10,531 a second against 9,808; over the socket 7.19x against 7.14x (run 9). A lifecycle's CPU
+    at concurrency 32 is 1.36 to 1.44 times its CPU at 1 there, where run 8's pass without a network namespace, at
+    load 34 to 39, gave 1.93, so run 8's ceiling of about 6.6 times concurrency 1 was its load's and is withdrawn.
+    On run 9's figures, all of concurrency 1's work beside its own path gone puts concurrency 32 at about 7.2 times
+    concurrency 1, and its CPUs kept busy as well, 10.2 of 12 now, at about 8.4 times (run 9).<!-- /record -->
     <!-- record: bench/competitive/probes/create_serial.md -->That work is 272 to 299 us a lifecycle on the E-cores, 17%
     of concurrency 1's CPU: the checkers 162 to 191, step 3's pool of each box's `/dev` 97 to 101, the seeds' starter
     and the namespace refill 9 to 11 (run 17).<!-- /record --> The bar on 4-15 is Ada's call.
