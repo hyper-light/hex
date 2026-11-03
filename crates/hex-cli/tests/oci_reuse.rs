@@ -19,9 +19,9 @@
 //!   cgroup, A's removed and the refusal counted by its reason. A killed through `cgroup.kill` (a signal
 //!   KILL to the box) and deleted: expect its cgroup removed, not kept, counted, and B of O a fresh one
 //!   that runs: Linux 6.19 kills every task later cloned into a cgroup `cgroup.kill` was written to
-//!   (its `kill_seq`, kernel/cgroup/cgroup.c:6702-6705 and :6941). B of another owner: never A's
-//!   cgroup, a fresh one, counted; whether A's is then removed or kept for O is Ada's call (the lead,
-//!   2026-11-02T18:23Z), so this asserts neither. A of no owner, holding CAP_SYS_ADMIN, or whose spec
+//!   (its `kill_seq`, kernel/cgroup/cgroup.c:6702-6705 and :6941). B of another owner: a fresh cgroup,
+//!   counted, and A's kept in O's pool, then handed to O's next box (Ada's call, 2026-11-03: keep, not
+//!   the plan's "A's is removed"). A of no owner, holding CAP_SYS_ADMIN, or whose spec
 //!   gives no capability sets (it keeps its creator's, all of them): a cgroup of its own, removed with
 //!   it, counted; B holding CAP_SYS_ADMIN beside its owner's idle cgroup: a cgroup of its own, counted,
 //!   the idle one left.
@@ -844,9 +844,8 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
     node.delete(&b).unwrap();
     eprintln!("test 3, killed: A's cgroup removed, not kept, counted; B fresh, and runs");
 
-    // B of another owner: never A's, a fresh cgroup, counted. What becomes of A's idle cgroup then is
-    // Ada's call (the plan's "A's is removed" against keeping it for O; the lead, 2026-11-02T18:23Z), so
-    // nothing here asserts either.
+    // B of another owner: never A's, a fresh cgroup, counted, and A's kept in O's pool for O's next box
+    // (Ada's call, 2026-11-03: keep, not the plan's "A's is removed").
     let o = BoxOwner::named("owner-o").unwrap();
     let p = BoxOwner::named("owner-p").unwrap();
     node.create(lab.oci("other-a", Some(&o), Caps::Docker, Bounds::default()))
@@ -866,10 +865,19 @@ fn each_guard_gives_a_fresh_cgroup_and_counts_why(lab: &Lab, own: &Path) {
         after.pool.refused(Refused::Owner),
         before.pool.refused(Refused::Owner) + 1
     );
-    eprintln!("test 3, another owner: B fresh, counted");
-    // O's next box, so O has an idle cgroup for the CAP_SYS_ADMIN case below once it's deleted.
+    assert!(slot.exists(), "A's cgroup is kept, not removed");
+    assert_eq!(
+        after.pool.idle, before.pool.idle,
+        "A's stays idle in O's pool"
+    );
     node.create(lab.oci("other-c", Some(&o), Caps::Docker, Bounds::default()))
         .unwrap();
+    assert_eq!(
+        node.cgroup_dir(&BoxId::new("other-c").unwrap()).as_deref(),
+        Some(slot.as_path()),
+        "A's cgroup goes to its own owner's next box"
+    );
+    eprintln!("test 3, another owner: B fresh, counted, A's kept for O and handed to O's next box");
     for id in ["other-b", "other-c"] {
         node.delete(&BoxId::new(id).unwrap()).unwrap();
     }
