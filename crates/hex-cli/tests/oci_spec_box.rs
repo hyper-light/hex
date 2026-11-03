@@ -617,11 +617,14 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
         "{id}'s cgroup is left"
     );
     let runtime = node.container_dir(id).parent().unwrap().to_owned();
-    for records in [state.to_owned(), records_dir(&runtime, state).unwrap()] {
+    for record in [
+        state.join(format!("{id}.json")),
+        hex_node::store::runtime_record(&records_dir(&runtime, state).unwrap(), id),
+    ] {
         assert!(
-            !records.join(format!("{id}.json")).exists(),
-            "{id}'s record is left in {}",
-            records.display()
+            !record.exists(),
+            "{id}'s record is left at {}",
+            record.display()
         );
     }
     assert_eq!(node.inspect(id), Err(Refusal::NoSuchBox(id.clone())));

@@ -84,7 +84,9 @@ type and the box is scrubbed, where before the box was made showing the init's e
 
 A box's record is written once, when the box is whole, and kept where it belongs (goal 5 extended, step 5): one
 that must outlive the host in the node's state directory, fsynced; every other record beside the containers'
-state, in a directory of the node's own under its runtime directory (`<node key>.records`), never synced. Until the
+state, in a directory of the node's own under its runtime directory (`<node key>.records`), never synced, spread
+over 64 subdirectories by the box's id so the boxes made and deleted at once rarely wait on one directory's lock
+(goal 5 extended, step 6; recovery moves a record an older node left in the directory itself to its shard). Until the
 record is written, each part a create makes lies at a path the box's id fixes: its cgroup (`<box root>/.oci/<id>`,
 or `<box root>/<id>` for a process box), its rendered bundle (`<state>/bundles/<id>`) and its container's state
 directory (`<node key>-<id>` under the runtime directory), the init inside the cgroup. So recovery

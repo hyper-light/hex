@@ -1701,7 +1701,8 @@ fn oci_root(owner: Owner, state_dir: &Path) -> Result<PathBuf, Refusal> {
 
 /// Where the node whose state directory is `state_dir`, and whose runtime directory is `oci_root`, keeps
 /// the records of its boxes that needn't outlive the host ([`crate::store`]): a directory of its own
-/// among its containers' state, `<key>.records`, a name no container's takes (theirs are `<key>-<id>`).
+/// among its containers' state, `<key>.records`, a name no container's takes (theirs are `<key>-<id>`),
+/// each record in one of its shards ([`crate::store::runtime_record`]).
 pub fn records_dir(oci_root: &Path, state_dir: &Path) -> Result<PathBuf, Refusal> {
     Ok(oci_root.join(format!("{}.records", node_key(state_dir)?)))
 }
@@ -1723,14 +1724,10 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
     use std::os::unix::ffi::OsStrExt;
     let path = fs::canonicalize(state_dir)
         .map_err(|e| Refusal::os("finding the state directory's path", e))?;
-    Ok(format!("{:016x}", fnv1a(path.as_os_str().as_bytes())))
-}
-
-/// FNV-1a, 64-bit: its arithmetic is modulo 2^64 by definition, so the multiply wraps.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+    Ok(format!(
+        "{:016x}",
+        crate::store::fnv1a(path.as_os_str().as_bytes())
+    ))
 }
 
 #[cfg(test)]
@@ -1782,8 +1779,8 @@ mod tests {
     /// key, and two directories give two. FNV-1a's 64-bit test vectors for "" and "a" hold.
     #[test]
     fn a_nodes_key_is_its_state_directorys() {
-        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(crate::store::fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(crate::store::fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let key = node_key(a.path()).unwrap();
         assert_eq!(key.len(), 16, "{key}");
