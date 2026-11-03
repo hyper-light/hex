@@ -28,7 +28,7 @@ use hex_core::netns::{Counts, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
-use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet};
+use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet, Scratch};
 use hex_runtime::linux::oci::run::Networks;
 
 /// The pool and the thread that fills it, and the namespaces kept for their owners' next boxes (goal 5
@@ -393,6 +393,7 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
     let home = net::thread_network().ok();
     let proc_net = ProcNet::of_this_thread().ok();
     let mut fresh = None;
+    let mut scratch = Scratch::default();
     loop {
         // One checker waits on the line at a time, the others on its lock; each checks what it took apart.
         let next = match line.lock() {
@@ -410,7 +411,8 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
         let (verdict, lost) = match (&home, &proc_net, &fresh) {
             (Some(home), Some(proc_net), Some(fresh)) => {
                 let started = std::time::Instant::now();
-                let checked = netcheck::check(ns.as_fd(), home.as_fd(), proc_net, fresh);
+                let checked =
+                    netcheck::check(ns.as_fd(), home.as_fd(), proc_net, fresh, &mut scratch);
                 let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 state.check_ns.fetch_add(took, Ordering::AcqRel);
                 (checked.verdict, !checked.home)

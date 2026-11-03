@@ -51,15 +51,14 @@ fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
     let fresh = in_use(PROTOCOLS).unwrap();
     assert_eq!(fresh.len(), 7);
     assert_eq!(fresh.get("UDP"), Some(&0));
-    assert_eq!(sockets(&fresh, &fresh), Ok(()));
-    let udp = in_use(&PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1")).unwrap();
+    assert_eq!(sockets(PROTOCOLS, &fresh), Ok(()));
+    let udp = PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1");
     assert_eq!(
         sockets(&udp, &fresh),
         Err(Refused::Sockets),
         "a bound UDP socket held outside"
     );
-    let unix =
-        in_use(&PROTOCOLS.replace("UNIX      1152      0", "UNIX      1152      2")).unwrap();
+    let unix = PROTOCOLS.replace("UNIX      1152      0", "UNIX      1152      2");
     assert_eq!(sockets(&unix, &fresh), Err(Refused::Sockets));
     // A protocol a module brought after the fresh namespace was read: none of its sockets, or one.
     let sctp = |n: u32| {
@@ -67,15 +66,12 @@ fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
             "{PROTOCOLS}SCTP      1600      {n}       0   no       0   yes  sctp        y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y\n"
         )
     };
-    assert_eq!(sockets(&in_use(&sctp(0)).unwrap(), &fresh), Ok(()));
-    assert_eq!(
-        sockets(&in_use(&sctp(1)).unwrap(), &fresh),
-        Err(Refused::Sockets)
-    );
+    assert_eq!(sockets(&sctp(0), &fresh), Ok(()));
+    assert_eq!(sockets(&sctp(1), &fresh), Err(Refused::Sockets));
     // Fewer than a fresh namespace's is no socket left.
     let mut more = fresh.clone();
     more.insert("NETLINK".to_owned(), 1);
-    assert_eq!(sockets(&fresh, &more), Ok(()));
+    assert_eq!(sockets(PROTOCOLS, &more), Ok(()));
     for broken in [
         "",
         "protocol  size\n",
@@ -85,6 +81,11 @@ fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
         "protocol  size sockets  memory\nTCP 2496 -1\n",
     ] {
         assert_eq!(in_use(broken), Err(Refused::Unreadable), "{broken:?}");
+        assert_eq!(
+            sockets(broken, &fresh),
+            Err(Refused::Unreadable),
+            "{broken:?}"
+        );
     }
 }
 
@@ -100,6 +101,58 @@ fn net_dev_says_whether_a_link_besides_loopback_is_there() {
     assert_eq!(links(&more), Err(Refused::Links));
     let none = LO_ONLY.lines().take(2).collect::<Vec<_>>().join("\n");
     assert_eq!(links(&none), Err(Refused::Links), "no loopback");
+}
+
+/// A file of a namespace's `/proc/net` is read whole into the thread's held room, again and again into the same
+/// room; one too long for the bound is refused, and one the kernel hasn't is none (CLAUDE.md §6: hostile input).
+#[test]
+fn a_proc_net_file_is_read_whole_into_the_held_room_and_one_past_the_bound_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_net = ProcNet(
+        rustix::fs::open(
+            dir.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let mut scratch = Scratch::default();
+    std::fs::write(dir.path().join("protocols"), PROTOCOLS).unwrap();
+    std::fs::write(dir.path().join("sockstat"), CLEAN_SOCKSTAT).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            proc_net.file("protocols", &mut scratch.text),
+            Ok(Some(PROTOCOLS))
+        );
+        assert_eq!(
+            proc_net.file("sockstat", &mut scratch.text),
+            Ok(Some(CLEAN_SOCKSTAT)),
+            "a shorter file after a longer one is itself alone"
+        );
+    }
+    assert_eq!(
+        proc_net.file("ip6_tables_names", &mut scratch.text),
+        Ok(None)
+    );
+    std::fs::write(dir.path().join("empty"), "").unwrap();
+    assert_eq!(proc_net.file("empty", &mut scratch.text), Ok(Some("")));
+    let at_bound = "x".repeat(MAX_PROC_FILE);
+    std::fs::write(dir.path().join("at"), &at_bound).unwrap();
+    assert_eq!(
+        proc_net.file("at", &mut scratch.text),
+        Ok(Some(at_bound.as_str()))
+    );
+    std::fs::write(dir.path().join("past"), "x".repeat(MAX_PROC_FILE + 1)).unwrap();
+    assert_eq!(
+        proc_net.file("past", &mut scratch.text),
+        Err(Refused::Unreadable)
+    );
+    std::fs::write(dir.path().join("binary"), b"\xff\xfe\x00").unwrap();
+    assert_eq!(
+        proc_net.file("binary", &mut scratch.text),
+        Err(Refused::Unreadable),
+        "not text"
+    );
 }
 
 #[test]
@@ -205,6 +258,7 @@ proptest! {
         let _ = ends(&bytes);
         let _ = time_wait(&text);
         let _ = in_use(&text);
+        let _ = sockets(&text, &BTreeMap::new());
         let _ = links(&text);
     }
 }

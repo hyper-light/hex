@@ -44,7 +44,8 @@ use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
 use crate::linux::oci::{OciError, net, sys};
 
-/// Most bytes one of the namespace's `/proc/net` files may hold: a clean namespace's are a few hundred.
+/// Most bytes one of the namespace's `/proc/net` files may hold: a clean namespace's are a few hundred, its
+/// `protocols` about 5 KiB.
 const MAX_PROC_FILE: usize = 64 << 10;
 /// Most bytes one dump may answer with, all its messages together: a fresh namespace's are under 2 KiB.
 const MAX_DUMP_BYTES: usize = 256 << 10;
@@ -145,6 +146,27 @@ const DUMPS: [Dump; 5] = [
     },
 ];
 
+/// The buffers a checking thread reads a namespace's files and dumps into, kept from one check to the next, so
+/// a check allocates and faults in none of them: on fedora a fifth of the checks' CPU was their own code, the C
+/// library's most of it, and 6% faulting in fresh pages (`bench/competitive/probes/create_serial.md`, run 15).
+/// One file's room is [`MAX_PROC_FILE`] and a byte (one past it is a file too long), one read of a dump's
+/// [`READ_BYTES`], and a dump's answer grows to the longest one read, at most [`MAX_DUMP_BYTES`].
+pub struct Scratch {
+    text: Vec<u8>,
+    answer: Vec<u8>,
+    read: Vec<u8>,
+}
+
+impl Default for Scratch {
+    fn default() -> Self {
+        Self {
+            text: vec![0; MAX_PROC_FILE.saturating_add(1)],
+            answer: Vec::new(),
+            read: vec![0; READ_BYTES],
+        }
+    }
+}
+
 /// A fresh namespace's sockets in use by protocol and its five dumps, each dump's messages normalized and
 /// sorted: what an idle namespace's must equal. Read from a namespace made as the pool makes them
 /// ([`net::make_ahead`]), its loopback up, once its loopback's IPv6 address is no longer tentative, as an idle
@@ -162,11 +184,12 @@ impl Fresh {
     pub fn read(home: BorrowedFd<'_>, proc_net: &ProcNet) -> Result<Self, OciError> {
         let ns = net::make_ahead(home)?;
         sys::setns(ns.as_fd(), libc::CLONE_NEWNET)?;
+        let mut scratch = Scratch::default();
         let read = proc_net
-            .file("protocols")
-            .and_then(|text| in_use(&text.ok_or(Refused::Unreadable)?))
+            .file("protocols", &mut scratch.text)
+            .and_then(|text| in_use(text.ok_or(Refused::Unreadable)?))
             .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))
-            .and_then(|protocols| settled().map(|dumps| Self { protocols, dumps }));
+            .and_then(|protocols| settled(&mut scratch).map(|dumps| Self { protocols, dumps }));
         let back = sys::setns(home, libc::CLONE_NEWNET);
         match (read, back) {
             (Ok(fresh), Ok(())) => Ok(fresh),
@@ -178,7 +201,7 @@ impl Fresh {
 /// The dumps of the namespace the calling thread is in, once no IPv6 address in it is tentative: read at
 /// most [`SETTLE_TRIES`] times, each after the namespace's next IPv6 address notice or [`SETTLE_WAIT`],
 /// whichever comes first. The socket the notices come to is bound before the first read, so none is missed.
-fn settled() -> Result<Vec<Vec<Vec<u8>>>, OciError> {
+fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     const WAITING: &str = "waiting for a fresh network namespace's IPv6 address notices";
     let notices = rustix::net::socket_with(
         AddressFamily::NETLINK,
@@ -200,7 +223,7 @@ fn settled() -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     .map_err(|e| OciError::os(WAITING, e))?;
     let mut notice = vec![0u8; READ_BYTES];
     for _ in 0..SETTLE_TRIES {
-        let seen = dumps().map_err(|why| {
+        let seen = dumps(scratch).map_err(|why| {
             OciError::os("reading a fresh network namespace", why.name().to_owned())
         })?;
         if !tentative(&seen) {
@@ -239,13 +262,14 @@ pub struct Checked {
     pub home: bool,
 }
 
-/// Checks the namespace `ns` from the calling thread, whose own namespace is `home` and whose
-/// `/proc/thread-self/net` is `proc_net`: entered, read and left.
+/// Checks the namespace `ns` from the calling thread, whose own namespace is `home`, whose
+/// `/proc/thread-self/net` is `proc_net` and whose buffers are `scratch`: entered, read and left.
 pub fn check(
     ns: BorrowedFd<'_>,
     home: BorrowedFd<'_>,
     proc_net: &ProcNet,
     fresh: &Fresh,
+    scratch: &mut Scratch,
 ) -> Checked {
     if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
         return Checked {
@@ -253,23 +277,35 @@ pub fn check(
             home: true,
         };
     }
-    let verdict = look(proc_net, fresh);
+    let verdict = look(proc_net, fresh, scratch);
     let home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
     Checked { verdict, home }
 }
 
 /// The checks, in the namespace the thread is in: sockets first, before this opens one of its own there.
-fn look(proc_net: &ProcNet, fresh: &Fresh) -> Result<(), Refused> {
-    let protocols = in_use(&proc_net.file("protocols")?.ok_or(Refused::Unreadable)?)?;
-    sockets(&protocols, &fresh.protocols)?;
-    time_wait(&proc_net.file("sockstat")?.ok_or(Refused::Unreadable)?)?;
-    links(&proc_net.file("dev")?.ok_or(Refused::Unreadable)?)?;
+fn look(proc_net: &ProcNet, fresh: &Fresh, scratch: &mut Scratch) -> Result<(), Refused> {
+    let text = &mut scratch.text;
+    sockets(
+        proc_net
+            .file("protocols", text)?
+            .ok_or(Refused::Unreadable)?,
+        &fresh.protocols,
+    )?;
+    time_wait(
+        proc_net
+            .file("sockstat", text)?
+            .ok_or(Refused::Unreadable)?,
+    )?;
+    links(proc_net.file("dev", text)?.ok_or(Refused::Unreadable)?)?;
     for tables in ["ip_tables_names", "ip6_tables_names"] {
-        if proc_net.file(tables)?.is_some_and(|t| !t.trim().is_empty()) {
+        if proc_net
+            .file(tables, text)?
+            .is_some_and(|t| !t.trim().is_empty())
+        {
             return Err(Refused::Firewall);
         }
     }
-    let seen = dumps()?;
+    let seen = dumps(scratch)?;
     for ((d, have), want) in DUMPS.iter().zip(&seen).zip(&fresh.dumps) {
         if have != want {
             return Err(d.refused);
@@ -298,10 +334,10 @@ impl ProcNet {
         .map_err(|e| OciError::os("opening /proc/thread-self/net", e))
     }
 
-    /// Its file `name`, `None` where the kernel has no such file (a module not loaded), bounded at
-    /// [`MAX_PROC_FILE`].
-    fn file(&self, name: &str) -> Result<Option<String>, Refused> {
-        use std::io::Read;
+    /// Its file `name`, read whole into `room`, each read as large as the room left, `None` where the kernel has
+    /// no such file (a module not loaded). Bounded at [`MAX_PROC_FILE`]: a file that fills `room` to one byte
+    /// past it is refused.
+    fn file<'r>(&self, name: &str, room: &'r mut [u8]) -> Result<Option<&'r str>, Refused> {
         let fd = match rustix::fs::openat(
             &self.0,
             name,
@@ -312,24 +348,33 @@ impl ProcNet {
             Err(rustix::io::Errno::NOENT) => return Ok(None),
             Err(_) => return Err(Refused::Unreadable),
         };
-        let mut text = String::new();
-        let limit = u64::try_from(MAX_PROC_FILE)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1);
-        std::fs::File::from(fd)
-            .take(limit)
-            .read_to_string(&mut text)
-            .map_err(|_| Refused::Unreadable)?;
-        if text.len() > MAX_PROC_FILE {
+        let mut filled = 0;
+        // Each read fills at least a byte of `room` or ends the file, so this ends within `room`'s length.
+        loop {
+            let left = room.get_mut(filled..).ok_or(Refused::Unreadable)?;
+            if left.is_empty() {
+                break;
+            }
+            match rustix::io::read(&fd, left).map_err(|_| Refused::Unreadable)? {
+                0 => break,
+                n => filled = filled.checked_add(n).ok_or(Refused::Unreadable)?,
+            }
+        }
+        if filled > MAX_PROC_FILE {
             return Err(Refused::Unreadable);
         }
-        Ok(Some(text))
+        let room: &'r [u8] = room;
+        let text = room.get(..filled).ok_or(Refused::Unreadable)?;
+        std::str::from_utf8(text)
+            .map(Some)
+            .map_err(|_| Refused::Unreadable)
     }
 }
 
-/// `/proc/net/protocols`' sockets in use by protocol: under its header (net/core/sock.c:4346-4359), each line
-/// names a protocol first and gives its sockets third (:4313-4320).
-fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
+/// `/proc/net/protocols`' sockets in use by protocol, each handed to `each` as it's read: under its header
+/// (net/core/sock.c:4346-4359), each line names a protocol first and gives its sockets third (:4313-4320). A
+/// file that doesn't parse, or names no protocol, is unreadable.
+fn each_in_use(protocols: &str, mut each: impl FnMut(&str, u64)) -> Result<(), Refused> {
     let mut lines = protocols.lines();
     let mut header = lines
         .next()
@@ -338,30 +383,38 @@ fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
     if header.next() != Some("protocol") || header.nth(1) != Some("sockets") {
         return Err(Refused::Unreadable);
     }
-    let mut out = BTreeMap::new();
+    let mut named = false;
     for line in lines {
         let mut words = line.split_ascii_whitespace();
         let (Some(name), Some(sockets)) = (words.next(), words.nth(1)) else {
             return Err(Refused::Unreadable);
         };
-        let n = sockets.parse().map_err(|_| Refused::Unreadable)?;
+        each(name, sockets.parse().map_err(|_| Refused::Unreadable)?);
+        named = true;
+    }
+    if named {
+        Ok(())
+    } else {
+        Err(Refused::Unreadable)
+    }
+}
+
+/// A fresh namespace's sockets in use by protocol.
+fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
+    let mut out = BTreeMap::new();
+    each_in_use(protocols, |name, n| {
         out.insert(name.to_owned(), n);
-    }
-    if out.is_empty() {
-        return Err(Refused::Unreadable);
-    }
+    })?;
     Ok(out)
 }
 
-/// Whether a socket is left: a protocol with more sockets in use than in a fresh namespace.
-fn sockets(have: &BTreeMap<String, u64>, fresh: &BTreeMap<String, u64>) -> Result<(), Refused> {
-    if have
-        .iter()
-        .any(|(name, n)| *n > fresh.get(name).copied().unwrap_or(0))
-    {
-        return Err(Refused::Sockets);
-    }
-    Ok(())
+/// Whether a socket is left: a protocol in `protocols` with more sockets in use than in a fresh namespace.
+fn sockets(protocols: &str, fresh: &BTreeMap<String, u64>) -> Result<(), Refused> {
+    let mut left = false;
+    each_in_use(protocols, |name, n| {
+        left |= n > fresh.get(name).copied().unwrap_or(0);
+    })?;
+    if left { Err(Refused::Sockets) } else { Ok(()) }
 }
 
 /// `sockstat`'s word on TIME_WAIT: its TCP line's "tw" (net/ipv4/proc.c:60-63).
@@ -395,8 +448,9 @@ fn links(dev: &str) -> Result<(), Refused> {
     if lo { Ok(()) } else { Err(Refused::Links) }
 }
 
-/// The five dumps of the namespace the calling thread is in, each normalized and sorted.
-fn dumps() -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+/// The five dumps of the namespace the calling thread is in, each normalized and sorted, read through
+/// `scratch`.
+fn dumps(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
     let fd = rustix::net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
@@ -412,8 +466,8 @@ fn dumps() -> Result<Vec<Vec<Vec<u8>>>, Refused> {
     .map_err(|_| Refused::Unreadable)?;
     let mut out = Vec::with_capacity(DUMPS.len());
     for (seq, d) in (1u32..).zip(DUMPS.iter()) {
-        let answer = ask(&fd, &request(d.kind, d.family, d.header, seq))?;
-        let mut msgs = normalized(&answer, d, seq)?;
+        ask(&fd, &request(d.kind, d.family, d.header, seq), scratch)?;
+        let mut msgs = normalized(&scratch.answer, d, seq)?;
         msgs.sort_unstable();
         out.push(msgs);
     }
@@ -434,25 +488,24 @@ fn request(kind: u16, family: u8, header: usize, seq: u32) -> Vec<u8> {
     m
 }
 
-/// Sends `request` and reads the whole answer, until `NLMSG_DONE`, bounded.
-fn ask(fd: &OwnedFd, request: &[u8]) -> Result<Vec<u8>, Refused> {
+/// Sends `request` and reads the whole answer into `scratch`'s, until `NLMSG_DONE`, bounded.
+fn ask(fd: &OwnedFd, request: &[u8], scratch: &mut Scratch) -> Result<(), Refused> {
     let sent =
         rustix::net::send(fd, request, SendFlags::empty()).map_err(|_| Refused::Unreadable)?;
     if sent != request.len() {
         return Err(Refused::Unreadable);
     }
-    let mut answer = Vec::new();
-    let mut buf = vec![0u8; READ_BYTES];
+    scratch.answer.clear();
     for _ in 0..MAX_DUMP_READS {
-        let (got, _) =
-            rustix::net::recv(fd, &mut buf, RecvFlags::empty()).map_err(|_| Refused::Unreadable)?;
-        let chunk = buf.get(..got).ok_or(Refused::Unreadable)?;
-        if answer.len().saturating_add(chunk.len()) > MAX_DUMP_BYTES {
+        let (got, _) = rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty())
+            .map_err(|_| Refused::Unreadable)?;
+        let chunk = scratch.read.get(..got).ok_or(Refused::Unreadable)?;
+        if scratch.answer.len().saturating_add(chunk.len()) > MAX_DUMP_BYTES {
             return Err(Refused::Unreadable);
         }
-        answer.extend_from_slice(chunk);
+        scratch.answer.extend_from_slice(chunk);
         if ends(chunk)? {
-            return Ok(answer);
+            return Ok(());
         }
     }
     Err(Refused::Unreadable)
