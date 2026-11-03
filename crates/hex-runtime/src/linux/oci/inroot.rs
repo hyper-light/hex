@@ -196,16 +196,31 @@ fn normal(dest: &str) -> String {
     out
 }
 
+/// How many times [`in_root`] tries a path Linux refuses with EAGAIN: a rename or a mount anywhere on the
+/// host crossing a `..` in the walk, where it can't then say the `..` stayed in the root, and leaves the
+/// retry to the caller (openat2(2)). libpathrs's budget, as runc v1.5.2 cites it
+/// (`internal/pathrs/retry.go`), where the longest wait measured under heavy rename load was about 800 us.
+const IN_ROOT_TRIES: u32 = 128;
+
 /// `path` opened in `root` as though `root` were `/`; magic links (`/proc/<pid>/root`) refused, as
 /// openat2(2) advises asking for explicitly.
 fn in_root(root: BorrowedFd<'_>, path: &str) -> Result<OwnedFd, Errno> {
-    rustix::fs::openat2(
-        root,
-        path,
-        OFlags::PATH | OFlags::CLOEXEC,
-        Mode::empty(),
-        ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS,
-    )
+    let open = || {
+        rustix::fs::openat2(
+            root,
+            path,
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS,
+        )
+    };
+    for _ in 1..IN_ROOT_TRIES {
+        match open() {
+            Err(Errno::AGAIN) => {}
+            done => return done,
+        }
+    }
+    open()
 }
 
 fn failed(dest: &str, at: &str, e: Errno) -> OciError {
@@ -244,6 +259,35 @@ mod tests {
             "{got:?}"
         );
         assert_eq!(std::fs::read_dir(host.path()).unwrap().count(), 0);
+    }
+
+    /// A rename anywhere on the host crossing a path's `..` makes Linux refuse the path with EAGAIN
+    /// (openat2(2)); the resolver tries again within its budget, so a create isn't refused for what another
+    /// process did (AC-T7.1.4). Do: resolve a link climbing out 2,000 times while another thread renames a
+    /// file back and forth. Expect each to resolve.
+    #[test]
+    fn a_rename_elsewhere_doesnt_refuse_a_path_with_a_dotdot() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let host = tempfile::tempdir().unwrap();
+        let root = root_with_links(host.path());
+        let fd = open_root(root.path()).unwrap();
+        let (a, b) = (host.path().join("a"), host.path().join("b"));
+        std::fs::write(&a, b"").unwrap();
+        let done = AtomicBool::new(false);
+        let refused = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    std::fs::rename(&a, &b).unwrap();
+                    std::fs::rename(&b, &a).unwrap();
+                }
+            });
+            let refused = (0..2000)
+                .find_map(|_| Root::new(fd.as_fd()).open("/up/made/here", Make::Dir).err());
+            done.store(true, Ordering::Relaxed);
+            refused
+        });
+        assert!(refused.is_none(), "{refused:?}");
     }
 
     /// A relative link climbing out stops at the root, as `..` does at `/`: what's made lands inside.
