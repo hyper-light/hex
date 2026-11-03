@@ -1346,8 +1346,8 @@ lifecycle without changing what a box may do.
     7's was 8,364, but concurrency 1 at 1,832 on a quieter host where run 7's was 1,453 (run 8). With the checks'
     three changes (the checks' CPU, above), 6.17x in process against 5.53x without them in the same A B B A, and
     concurrency 32 at 10,531 a second against 9,808; over the socket 7.19x against 7.14x (run 9). A lifecycle's CPU
-    at concurrency 32 is 1.36 to 1.44 times its CPU at 1 there, where run 8's pass without a network namespace, at
-    load 34 to 39, gave 1.93, so run 8's ceiling of about 6.6 times concurrency 1 was its load's and is withdrawn.
+    at concurrency 32 is 1.36 to 1.44 times its CPU at 1 there, where run 6's pass without a network namespace, at
+    load 37.4 to 39.0, gave 1.93, so run 8's ceiling of about 6.6 times concurrency 1 was its load's and is withdrawn.
     On run 9's figures, all of concurrency 1's work beside its own path gone puts concurrency 32 at about 7.2 times
     concurrency 1, and its CPUs kept busy as well, 10.2 of 12 now, at about 8.4 times (run 9).<!-- /record -->
     <!-- record: bench/competitive/probes/create_serial.md -->That work is 272 to 299 us a lifecycle on the E-cores, 17%

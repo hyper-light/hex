@@ -278,12 +278,13 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   from run 7's 127.2 and 130.8: four checkers among 32 lifecycles on 12 CPUs.
 - **The ratio fell from run 7's 5.76x though concurrency 32 rose,** because concurrency 1 rose more on a quieter host:
   1,832 a second against 1,453.
-- **The cores' shared threads double the CPU a lifecycle costs at concurrency 32:** on one thread of each of the same 6
-  cores, with no network namespace, it costs 1.18 times its CPU alone (0.72 against 0.61 ms), where on both threads of
-  each it cost 1.93 times (run 6's 20261103T064414Z: 1.04 against 0.54). So on CPUs 4-15 a lifecycle held by CPU runs
-  32 at once at most about 12 CPUs over 1.9 times its CPU alone: with concurrency 1's CPU a lifecycle on its critical
-  path about 0.52 ms (a lifecycle's 0.55 ms wall), about 12,100 a second, 6.6 times concurrency 1, even with all of
-  concurrency 1's work off its critical path gone.
+- **The CPU a lifecycle cost at concurrency 32 doubled in this pass, and the ceiling drawn from it is withdrawn (run
+  9):** on one thread of each of the same 6 cores, with no network namespace, it cost 1.18 times its CPU alone (0.72
+  against 0.61 ms), where on both threads of each it cost 1.93 times (run 6's 20261103T064414Z: 1.04 against 0.54).
+  This run took that for the cores' shared threads and drew from it a ceiling on CPUs 4-15 of about 12 CPUs over 1.9
+  times a lifecycle's CPU alone, about 12,100 a second, 6.6 times concurrency 1. Run 9 measured 1.36 to 1.44 times on
+  both threads of each core at CPU pressure 25%: the 1.93 was run 6's load, 37.4 to 39.0, not the threads, and 6.6x
+  is no ceiling.
 - **On 4-31 the ratio is 12.32x, but concurrency 1 is slower there:** a lone lifecycle runs on the E-cores too, at 1.25
   ms of CPU against 0.71 on the P-cores, so 1,005 a second against 1,832. Concurrency 32 ran 12,334 a second there.
 - **No start failed** in these passes, nor in 1,200,000 lifecycles at concurrency 32 sustained (3 rounds of 100,000 a
@@ -314,12 +315,12 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   they took off was beside it. Concurrency 32 rose 7%, the ratio 12%.
 - **Over the socket one pass passed 8x, 8.08x, and its twin read 6.30x:** that driver's concurrency 1 waits on the
   agent's socket as well, so its ratio swings with the host more than the in-process one.
-- **Run 8's ceiling was its load's:** a lifecycle's CPU at concurrency 32 is 1.36 to 1.44 times its CPU at 1 here
-  (each pass's medians), where run 8's pass without a network namespace, at load 34 to 39, gave 1.93. How much more
-  a lifecycle costs 32 at once moves with the host's load, so run 8's "about 6.6 times concurrency 1, with all of
-  its work off its own path gone" is withdrawn. On this run's figures, that work gone (17% of concurrency 1's CPU,
-  `create_serial.md` run 17) puts concurrency 32 at about 7.2 times concurrency 1, and its CPUs kept busy as well,
-  10.2 of 12 now, at about 8.4 times.
+- **Run 8's ceiling was its load's:** a lifecycle's CPU at concurrency 32 is 1.36 to 1.44 times its CPU at 1 here (each
+  pass's medians), where run 6's pass without a network namespace (20261103T064414Z, which run 8 cites), at load 37.4 to
+  39.0, gave 1.93. How much more a lifecycle costs 32 at once moves with the host's load, so run 8's "about 6.6 times
+  concurrency 1, with all of its work off its own path gone" is withdrawn. On this run's figures, that work gone (17% of
+  concurrency 1's CPU, `create_serial.md` run 17) puts concurrency 32 at about 7.2 times concurrency 1, and its CPUs
+  kept busy as well, 10.2 of 12 now, at about 8.4 times.
 
 ## Run 10 (2026-11-03, fedora): criterion 2 as its text reads it, on host.sh's CPU set and on 4-15
 
