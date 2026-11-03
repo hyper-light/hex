@@ -785,7 +785,11 @@ bundles are an owner's (Docker's default capabilities, `/proc/sys` read-only):
 | d6ea10b (step 6 e9f58a0 + step 3 16e52a9; hex f469b70f304691c9, seam_oci d70453f125b209c5) | hex-lead-s3-reuseab2-20261103T163227Z, load 1-2 | 163246Z 0.432, 163254Z 0.322, 163255Z 0.329, 163302Z 0.316 | 0.508-0.528 / 1.111-1.490 |
 | mr12: x-s3 ef1a7a7 with step 6's levers (hex ff5cef383a844f85, seam_oci a89ecea7de4053f4) | hex-lead-s3-mr12clean-20261103T184941Z, alone on fedora, load 5-6 | 184943Z 0.338, 185008Z 0.295, 185012Z 0.303 | 0.492-0.513 / 1.136-1.219 |
 
-Seven runs of seven are under the bar.
+Seven runs of seven are under the bar. So are the three runs of x-s3 itself, without step 6's later levers, in step
+3's L1 A/B (hex-s3try2-timed-20261103T194825Z, load 3.5-8.2): d3189f7, x-s3 ef1a7a7 with the reader's fix (hex
+2e1647a89ae4a566, seam_oci 6cd995f3a10dbbbf), read 0.280, 0.331 and 0.381 (create-breakdown-20261103T194827Z, 194900Z,
+194923Z), whole create p99 1.527-2.307, each `"pass": true`, the reader's fallback count matched.
+`docs/research/runtime/goal5-mounts.md` §10 has the rest of that A/B (L1, falsified).
 
 **Under another tenant's load: not met.** L busy loops are pinned to 4-15 at nice 0, started and killed by the
 job's recorded PIDs; this is Ada's "this fast even under load", met by doing less, never by priority:
@@ -804,4 +808,22 @@ it isn't counted.
 **The pass bit.** Runs 184943Z, 185008Z and the reuse-on runs of hex-lead-s3-reuseab2 print `"pass": false` with
 part 19 under the bar. The fallback check expected 3-5 clone-started spans and found none: those were namespaces the
 node made on the path for an owner's box, which its init joins by `setns`. The reader on
-`cp/t7-ext-s3-xs3-reader`, for x-s3, subtracts the node's own count (`netns_reuse.made_on_path`).
+`cp/t7-ext-s3-xs3-reader` (ef04f50), for x-s3, subtracts the node's own count (`netns_reuse.made_on_path`); with it
+every one of the A/B's 36 runs matched its count.
+
+## Part 19 at step 3's final tree (goal 5 extended plan step 3, criterion 1)
+
+The create breakdown's rounds (`N=1000 WARMUP=100 ROUNDS=3`, no idle threads, one create at a time), fedora
+(`kiln-a094a12d`, Linux 6.19.10), CPUs 4-15, `HEXBENCH_DEVFS=1`, 2026-11-03, unit hex-s3try2-final-20261103T195758Z.
+The binaries are cp/t7-ext-s3 4315e75's (hex e45fb83f1c7da66e, seam_oci acec8e2e42fba4f3), whose code is cbe5673's.
+Part 19 is the init's root mounted, its bar 0.16 ms pooled p50 (run 4: 0.359):
+
+- **The pruned path** (create-breakdown-20261103T200203Z, load 2.77 at its start): part 19 0.053 / 0.053 / 0.053 ms by
+  round, pooled p50 0.053 (pooled p99 1.373). Met. The seam's create was 0.713 ms pooled p50 against libcrun's 2.381
+  in the same rounds.
+- **The classic path beside it** (`CLASSIC=1`, every create through the shim by a createRuntime hook;
+  create-breakdown-20261103T200313Z, load 4.54): its part 23, the classic init's root mounted, 0.181 / 0.172 / 0.177,
+  pooled p50 0.177. Its parts 21 and 22 were 0.051 and 0.049, the pace at which `goal5-mounts.md` §5's runs put
+  d236217's part 23 at 0.150-0.171. It is 13% over the 1.5x mark (0.156 ms). §5 names what's left in it beside the
+  probe's own calls: the init's code between its calls, with its copy-on-write page faults as a fork-like clone of
+  the shim, and `setsid`.

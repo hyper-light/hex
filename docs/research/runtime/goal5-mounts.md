@@ -521,10 +521,105 @@ records are `~/.cache/hex-bench/out/create-breakdown-<run>`.
 
   The create's p50/p99 was 0.49-0.51/1.14-1.22 ms at L = 0, 0.81-0.92/2.7-13.7 at 6 and 1.79-1.97/4.4-20.9 at 12.
 - **Where criterion 3 stands** (`bench/competitive/probes/create_breakdown.md`, the last section, has every run):
-  - As written (8 in flight, 8,000 idle threads, no other tenant's load), met on the merged trees: 7 runs of 7
-    under 0.5 ms, 0.295-0.432 (d6ea10b, mr12).
+  - As written (8 in flight, 8,000 idle threads, no other tenant's load), met on the merged trees: 10 runs of 10
+    under 0.5 ms, 0.280-0.432 (d6ea10b, mr12, and x-s3 with the reader's fix, d3189f7, in §10's A/B, whose runs
+    pass outright).
   - Not met on step 3's tree alone: 11 runs of 11 over, 0.729-1.568 (16e52a9, `setsid` first, reuse off). Its tail is
     the cgroup teardown that step 6's reuse removes, a cause outside this step's code.
   - Under another tenant's load, not met: at 6 busy loops 2 runs of 3 under (0.454-0.580), at 12 none (0.702-1.068).
     What's left is the mount lock's convoys and the proc superblock.
 
+
+## 10. Masks and read-only paths bound through the init's own proc: tried, and falsified (2026-11-03)
+
+§9 is step 6's, on its branch (`cp/t7-ext-s3-devfs-reuse`: a box's `/dev` handed on within one owner, measured and
+rejected).
+
+- **The lever, L1.** For the bench's owner spec the pruned init took `namespace_sem` for write 7 times a create:
+  - `move_mount` ×5: the rootfs on `/`, `/usr`, `/proc`, `/dev` and `/proc/sys`;
+  - `open_tree` ×1, `/proc/sys`'s clone;
+  - `/usr`'s propagation, a `mount_setattr` with a propagation (`fs/namespace.c:4770-4773`).
+
+  A `mount(2)` bind takes the lock once for its clone and its graft. In `do_loopback` (`:2972-3006`) `LOCK_MOUNT`
+  (`:2987`, `:2799-2802`) takes it in `do_lock_mount` (`:2747`) and holds it to the function's end, with the clone
+  (`:2994`) and the graft (`:2998`) under it. A detached clone takes it in `get_detached_copy` (`:3017`), and its
+  `move_mount` again (`:3517`).
+
+  The pruned namespace has no proc until the switch, but by its masks the init has made the spec's. L1 kept that
+  proc's `fsmount` descriptor and entered it. It then bound each read-only path and each file's mask with one
+  `mount(2)` through `self/fd/N`. A spec with no proc, or a `nosymfollow` one, kept the clone and the move.
+  - The bench's spec went from 7 holds to 6.
+  - Docker's default paths (moby docker-v29.9.2 `daemon/pkg/oci/defaults.go:110-116`, `:194-207`) went from 23 to 13
+    for the masks and read-only paths alone. On fedora 5 of those masks are files, 3 are directories and 2 are absent.
+  - Branch `cp/t7-ext-s3-l1-falsified` (bbf9870) holds it, and `cp/t7-ext-s3-xs3-l1` (072ecfc) on x-s3.
+- **The A/B** (unit hex-s3try2-timed-20261103T194825Z, fedora, the 1-minute load 3.5 to 12.6, other tenants'
+  containers beside it, every run's list in its `context.txt`).
+  - Binaries: A is x-s3 with the reader fix and Docker's paths, d3189f7 (hex 2e1647a89ae4a566, seam_oci
+    6cd995f3a10dbbbf). B is A with L1, 072ecfc (hex 16db168576b814df, seam_oci bec241455d7bfe44). Both come from unit
+    hex-s3try2-build-20261103T194300Z.
+  - Method: AC-e at 8 in flight with 8,000 idle threads on CPUs 4-15, owner bundles with reuse on, A and B
+    interleaved over 3 rounds, the order alternating, at 0, 6 and 12 busy loops; then the same with Docker's paths.
+  - Each cell gives part 19's p99 by round (its p50 range), then the whole create's p99 by round, in ms. The runs are
+    `create-breakdown-20261103T194827Z` to `195112Z`, in the unit's order (its `exits`).
+
+  | spec, L | A: part 19 p99 (p50) | B: part 19 p99 (p50) | A: create p99 | B: create p99 |
+  |---|---|---|---|---|
+  | owner, 0 | 0.280, 0.331, 0.381 (0.071-0.076) | 0.329, 0.316, 0.336 (0.081-0.085) | 1.527, 1.960, 2.307 | 1.708, 1.551, 2.146 |
+  | owner, 6 | 0.544, 0.477, 0.521 (0.075-0.082) | 0.503, 0.530, 0.681 (0.088-0.094) | 10.181, 3.381, 11.207 | 4.896, 4.777, 4.076 |
+  | owner, 12 | 1.737, 1.099, 1.233 (0.080-0.085) | 1.988, 0.744, 0.948 (0.094-0.095) | 12.223, 13.893, 18.716 | 21.259, 5.930, 21.864 |
+  | Docker's, 0 | 0.842, 0.669, 0.662 (0.213-0.221) | 0.787, 0.625, 0.747 (0.236-0.238) | 1.846, 1.582, 1.675 | 1.800, 1.869, 1.800 |
+  | Docker's, 6 | 1.253, 1.081, 1.835 (0.231-0.237) | 1.306, 2.107, 2.026 (0.271-0.272) | 11.349, 5.888, 4.670 | 7.774, 4.187, 4.261 |
+  | Docker's, 12 | 1.519, 2.313, 2.106 (0.228-0.234) | 2.072, 1.606, 1.766 (0.258-0.265) | 12.590, 20.978, 5.871 | 7.105, 26.071, 5.681 |
+
+  The reader matched its fallback count in all 36 runs (the node-made namespaces counted apart, ef04f50). The 6 runs
+  at 0 loops on the owner spec passed outright, the merged tree's criterion 3 as written.
+- **Read: falsified.**
+  - Part 19's p50 was higher with L1 in every round: 0.081-0.095 ms against 0.071-0.085 on the owner spec, and
+    0.236-0.272 against 0.213-0.237 with Docker's paths.
+  - Its p99 under load wasn't lower. At 6 loops B read 0.503-0.681 against A's 0.477-0.544, and with Docker's paths
+    1.306-2.107 against 1.081-1.835. At 12 loops the rounds cross.
+  - The whole create's p99 is ruled by multi-millisecond outliers in both, crossing too.
+  - That meets the falsifier L1's own note stated (bbf9870): part 19's p99 under load not lower in an interleaved
+    A/B. L1 isn't taken, and `cp/t7-ext-s3` goes on from 4315e75 without it.
+- **The holds, counted from the trace.** The mounts trace's `namespace_sem` probes (fe03840, on x-s3's reader branch)
+  ran in unit hex-s3try2-final-20261103T195758Z: 1,000 creates at 8 in flight, owner bundles, reuse on, A's and B's
+  binaries, none lost.
+
+  | spec | A: write holds per create, by call | B (L1) |
+  |---|---|---|
+  | owner (create-breakdown-20261103T200508Z, 200511Z) | 7.0: move_mount 5.0, mount_setattr 1.0, open_tree 1.0 | 6.0: move_mount 4.0, mount_setattr 1.0, mount (bind) 1.0 |
+  | Docker's (200513Z, 200517Z) | 28.0: move_mount 17.0, open_tree 10.0, mount_setattr 1.0 | 18.0: mount (bind) 10.0, move_mount 7.0, mount_setattr 1.0 |
+
+  These are the trace's means per create, to one decimal; no create held it shared. So the drops L1 claimed, 7 to 6
+  and, for Docker's masks and read-only paths, 23 to 13, are real, and still part 19 got no faster. Two causes:
+  - What each bind cost rose more than the hold it saved. Each `self/fd/N` resolves in the box's fresh proc, whose
+    `/proc/<pid>`, its `fd` directory and each `fd/N` entry are made on their first lookup, an inode each
+    (`proc_pid_lookup`, `fs/proc/base.c:3501`, `proc_pid_instantiate` `:3481`; `proc_lookupfd_common`,
+    `fs/proc/fd.c:226`, `proc_fd_instantiate` `:202`; both through `proc_pid_make_inode`, `base.c:1944`), and `self`
+    allocates its link's text each time (`fs/proc/self.c:11-25`).
+  - At these loads one hold more or less isn't what the tail waits on. In the owner spec's slowest 1% the init was
+    first preempted by the node's network-namespace checker thread (`hex-netns-check`, 127 us per create), the
+    kworkers and the RCU softirq (200508Z's report).
+- **Docker's default paths cost more than the rest of part 19.** In A's trace with them (200513Z, every create, mean)
+  part 19 made 119 calls, against 27 for the owner spec, and its traced span's p50 was 251 us against 85:
+  - 22 `openat2`, the targets' lookups in the fresh proc, 53.2 us;
+  - 4 superblocks made (`fsconfig` create), proc's and the 3 masked directories' empty tmpfs, 44.1 us;
+  - 17 `move_mount`, 42.6 us, and 10 `open_tree` clones, 36.0 us.
+
+  Their p99 with no other load, 0.662-0.842 ms in the A/B, is over AC-e's bar. A lever named for them, not built:
+  the masked directories' empty read-only tmpfs made ahead, as the `/dev` pool makes `/dev` (§6). That takes 3
+  superblocks per create off the path. Each target's lookup in the box's own proc, and a clone and an attach per mask
+  and read-only path, are per box.
+- **What's left of part 19's holds, and why each stays on 6.19.** Each of the 7 write holds per create is the attach of
+  a mount the spec asks for, or the propagation change that must precede anything mounted beneath a cloned bind (the
+  leak fixed in e2dd76c).
+  - L2, the agent attaching the binds onto the detached rootfs before handing it over (v6.19 `do_move_mount` takes an
+    anonymous namespace's mount as a target where `may_use_mount` lets it, `:3487-3501`, `:3549`), saves no hold. The
+    agent would have to make each bind's clone private before attaching anything beneath it, as the init does now,
+    so the holds would only move into the agent's part of the same create.
+  - `open_tree_attr` (Linux 6.15) clones and sets attributes in one call but takes the lock twice
+    (`vfs_open_tree` at `:5017`, then `do_mount_setattr` at `:5033`).
+  - Skipping `/usr`'s propagation change where its source is already private would need the source's propagation
+    first. `statmount` reads it under the lock, shared.
+  - The structural fix is goal 6's: a mount namespace made from a detached tree in one call (`OPEN_TREE_NAMESPACE`,
+    Linux 7.0; `CLONE_EMPTY_MNTNS`, 7.1; `goal5-root.md` f83, f84). Fedora runs 6.19.
