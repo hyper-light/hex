@@ -252,6 +252,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     conformance_on_oci(&lab, own);
     network_namespaces(&lab, own);
     program_alone(&lab, own);
+    programs_hold_their_stdio_alone(&lab, own);
     exec_reads_no_state(&lab, own);
     orphans_are_reaped(&lab, own);
 }
@@ -674,6 +675,53 @@ fn program_alone(lab: &Lab, own: &Path) {
             "delete ended the program by a signal: {exit:?}"
         );
     }
+}
+
+/// A program holds its stdio alone, whatever the agent above it holds (CVE-2024-21626's class; decision 3,
+/// "Descriptors reach a program only on purpose"; AC-T7.1.4). Do: leave a descriptor open in this process, the
+/// agent, without close-on-exec, as a window above a program would; start a box's program and exec a second into
+/// it. Expect: once each has exec'd, neither holds anything past 0, 1 and 2.
+fn programs_hold_their_stdio_alone(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-stdio"), state.path());
+    let id = BoxId::new("stdio").unwrap();
+    let stray = rustix::fs::open(
+        c"/dev/null",
+        rustix::fs::OFlags::RDONLY,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    node.create(lab.running(id.clone(), &["/usr/bin/sleep".to_owned(), "600".to_owned()]))
+        .expect("create");
+    node.start(&id).expect("start");
+    let mut exec = node
+        .exec(
+            &id,
+            hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+            hex_api::Stdio::null(),
+        )
+        .expect("exec a program");
+    for pid in [
+        u32::try_from(init_pid(state.path(), "stdio")).unwrap(),
+        exec.pid(),
+    ] {
+        let deadline = Instant::now() + conformance::PATIENCE;
+        while !cmdline_has(pid, "/usr/bin/sleep") {
+            assert!(Instant::now() < deadline, "{pid} never became its program");
+            std::thread::yield_now();
+        }
+        let held: Vec<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .map(|fd| fd.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|fd| !["0", "1", "2"].contains(&fd.as_str()))
+            .collect();
+        assert!(held.is_empty(), "program {pid} also holds {held:?}");
+    }
+    drop(stray);
+    node.delete(&id).expect("delete ends the programs");
+    exec.wait_for(Duration::from_secs(5))
+        .expect("wait for a deleted program")
+        .expect("the program ended with the box");
 }
 
 /// Goal 3 plan step 6: an exec into a running box reads nothing of the box's from disk; what it needs
