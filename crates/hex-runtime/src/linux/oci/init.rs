@@ -1340,15 +1340,35 @@ fn do_mount(root: &inroot::Root<'_>, op: &crate::linux::oci::mount::Op) -> Resul
             }
         }
     } else {
-        let data = data_cstr(&op.data)?;
-        rustix::mount::mount(
-            op.kind_source.as_str(),
-            &at,
-            op.fstype.as_str(),
-            op.flags,
-            data.as_deref(),
-        )
-        .map_err(|e| OciError::os("mount", failed(e)))?;
+        // A filesystem is made as the pruned path makes it ([`make_fs`]: its source, flags and data as
+        // `mount(2)` takes them) and attached to the target's descriptor, the one hold of the mount lock
+        // `mount(2)` takes too, without `mount(2)`'s walk of `/proc/self/fd` to name the target (goal 5
+        // extended step 3, `goal5-mounts.md` §12). Its propagation is set on it through its own
+        // descriptor, as on the pruned path.
+        let fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
+            OciError::os("mount", format!("{} at {}: {e}", op.fstype, op.destination))
+        })?;
+        rustix::mount::move_mount(fs.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("mount", failed(e)))?;
+        if let Some(prop) = op.propagation {
+            let (ms, rec) = propagation_ms(prop);
+            sys::mount_setattr(
+                fs.as_fd(),
+                rec,
+                &sys::MountAttrs {
+                    set: 0,
+                    clr: 0,
+                    propagation: ms,
+                },
+            )
+            .map_err(|e| {
+                OciError::os(
+                    "mount propagation",
+                    format!("{} at {}: {e}", op.fstype, op.destination),
+                )
+            })?;
+        }
+        return Ok(());
     }
     if let Some(prop) = op.propagation {
         let top_fd = target(root, &op.destination, Make::Nothing)?;
@@ -1391,17 +1411,6 @@ fn attach_prepared_dev(
 fn target(root: &inroot::Root<'_>, dest: &str, make: Make) -> Result<OwnedFd, OciError> {
     root.open(dest, make)?
         .ok_or_else(|| OciError::Config(format!("{dest} isn't in the container's root")))
-}
-
-/// A mount's data string as a C string, or `None` when empty.
-fn data_cstr(data: &str) -> Result<Option<std::ffi::CString>, OciError> {
-    if data.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(std::ffi::CString::new(data.as_bytes()).map_err(
-            |_| OciError::Config("mount data has a NUL".to_owned()),
-        )?))
-    }
 }
 
 /// Most cgroup filesystems a recursive read-only bind is expected to carry: cgroup v2 has one
