@@ -6,14 +6,15 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
 use hex_core::cgroup::{self as core, Baseline, CONTROLLERS, Dev, UsageFiles};
 use hex_core::reuse;
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, Mode, OFlags};
 
 use super::os_err;
 
@@ -47,10 +48,17 @@ pub fn own_cgroup() -> Result<PathBuf, Refusal> {
     Ok(Path::new(CGROUP_ROOT).join(rel.trim_start_matches('/')))
 }
 
-/// The directory that holds a node's boxes, each a cgroup below it.
+/// The directory that holds a node's boxes, each a cgroup below it, held open: a box's cgroup is looked
+/// up by its name alone, relative to it, and each of the box's files by its name relative to the box's.
+/// A path walk takes the read side of each kernfs directory's root lock it passes, the sysfs root's for
+/// `/sys` among them (`kernfs_dop_revalidate`, Linux v6.19 fs/kernfs/dir.c:1145-1146 and :1185), against
+/// every sysfs node made or removed on the host, a network device's among them (:796, :1554). At
+/// concurrency 32 those waits were 2.65 ms of each lifecycle (bench/competitive/probes/create_serial.md,
+/// run 12).
 #[derive(Debug, Clone)]
 pub struct BoxRoot {
     dir: PathBuf,
+    fd: Arc<OwnedFd>,
     controllers: BTreeSet<String>,
     disks: Vec<Dev>,
 }
@@ -100,8 +108,15 @@ impl BoxRoot {
             write_file(&dir.join("cgroup.subtree_control"), &enable)?;
         }
         let controllers = read_set(&dir.join("cgroup.subtree_control"))?;
+        let fd = rustix::fs::open(
+            dir,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| os_err("opening the box root", dir, e))?;
         Ok(Self {
             dir: dir.to_owned(),
+            fd: Arc::new(fd),
             controllers,
             disks,
         })
@@ -167,12 +182,21 @@ impl BoxRoot {
             return Err(Refusal::Full(MAX_BOXES));
         }
         let dir = self.dir.join(name);
-        match fs::create_dir(&dir) {
+        match rustix::fs::mkdirat(self.fd.as_fd(), name, Mode::from_raw_mode(0o777)) {
             Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(exists()),
+            Err(rustix::io::Errno::EXIST) => return Err(exists()),
             Err(e) => return Err(os_err("making a box's cgroup", &dir, e)),
         }
-        let cg = BoxCgroup { dir };
+        let cg = match self.child(name) {
+            Some(cg) => cg,
+            None => {
+                let _ = fs::remove_dir(&dir);
+                return Err(Refusal::Os {
+                    op: "opening a box's cgroup",
+                    why: format!("{} was made but couldn't be opened", dir.display()),
+                });
+            }
+        };
         for w in writes {
             if let Err(e) = cg.write_bound(&w) {
                 // A box is made whole or not at all; its empty cgroup goes with the refusal.
@@ -230,11 +254,10 @@ impl BoxRoot {
     pub fn rebound(&self, cg: &BoxCgroup, bounds: &Bounds) -> Result<(), Refusal> {
         self.controllers_for(bounds)?;
         for w in core::writes_all(bounds, &self.disks)? {
-            let path = cg.dir.join(w.file);
-            if core::is_default(&w) && !path.exists() {
+            if core::is_default(&w) && !cg.has(w.file) {
                 continue;
             }
-            if w.file == "cpu.max" && cpu_max_holds(&path, &w.value) {
+            if w.file == "cpu.max" && cpu_max_holds(cg, &w.value) {
                 continue;
             }
             cg.write_bound(&w)?;
@@ -244,22 +267,27 @@ impl BoxRoot {
 
     /// Slot `n`'s cgroup, when it exists.
     pub fn slot(&self, n: u64) -> Option<BoxCgroup> {
-        let dir = self.dir.join(reuse::name(n));
-        if dir.is_dir() {
-            Some(BoxCgroup { dir })
-        } else {
-            None
-        }
+        self.child(&reuse::name(n))
     }
 
     /// Box `id`'s cgroup, when it exists.
     pub fn get(&self, id: &BoxId) -> Option<BoxCgroup> {
-        let dir = self.dir.join(id.as_str());
-        if dir.is_dir() {
-            Some(BoxCgroup { dir })
-        } else {
-            None
-        }
+        self.child(id.as_str())
+    }
+
+    /// The cgroup `name` under the root, when it's there, opened relative to the root.
+    fn child(&self, name: &str) -> Option<BoxCgroup> {
+        let fd = rustix::fs::openat(
+            self.fd.as_fd(),
+            name,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+        Some(BoxCgroup {
+            dir: self.dir.join(name),
+            fd: Some(Arc::new(fd)),
+        })
     }
 
     /// How many cgroups are under the root, box or not: the count [`BoxRoot::boxes`] would list, read from
@@ -274,10 +302,9 @@ impl BoxRoot {
     /// A directory whose links don't count its children (fewer than two: btrfs, for one, gives every
     /// directory one) is listed instead, so the bound holds on any filesystem a root is opened on.
     pub fn count(&self) -> Result<usize, Refusal> {
-        use std::os::unix::fs::MetadataExt;
-        let links = fs::metadata(&self.dir)
+        let links = rustix::fs::fstat(self.fd.as_fd())
             .map_err(|e| os_err("counting boxes", &self.dir, e))?
-            .nlink();
+            .st_nlink;
         if links < 2 {
             return Ok(self.boxes()?.len());
         }
@@ -298,45 +325,91 @@ impl BoxRoot {
     }
 }
 
-/// One box's cgroup.
+/// One box's cgroup: its directory's path, and the directory held open where it was opened through its
+/// root ([`BoxRoot`]), so its files are opened by their names alone.
 #[derive(Debug, Clone)]
 pub struct BoxCgroup {
     dir: PathBuf,
+    fd: Option<Arc<OwnedFd>>,
 }
 
 impl BoxCgroup {
     /// The cgroup at `dir`, wherever it is: an `oci` container's cgroup goes where its spec puts it,
-    /// not under a box root, and is killed, waited out and removed as a box's is.
+    /// not under a box root, and is killed, waited out and removed as a box's is. Its files are opened
+    /// by their paths.
     pub fn at(dir: PathBuf) -> Self {
-        Self { dir }
+        Self { dir, fd: None }
     }
 
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// Its `cgroup.procs`, open for writing: a process that writes "0" to it joins the box.
-    pub fn procs_for_joining(&self) -> Result<OwnedFd, Refusal> {
-        let path = self.dir.join("cgroup.procs");
-        rustix::fs::open(&path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
-            .map_err(|e| os_err("opening a box's cgroup.procs", &path, e))
+    /// The cgroup's file `file`, opened with `flags` (close-on-exec): relative to its directory where it's
+    /// held open, else by its path.
+    fn open_file(&self, file: &str, flags: OFlags) -> rustix::io::Result<OwnedFd> {
+        match &self.fd {
+            Some(fd) => {
+                rustix::fs::openat(fd.as_fd(), file, flags | OFlags::CLOEXEC, Mode::empty())
+            }
+            None => rustix::fs::open(self.dir.join(file), flags | OFlags::CLOEXEC, Mode::empty()),
+        }
     }
 
-    /// The cgroup directory itself, open: what `clone3(CLONE_INTO_CGROUP)` takes.
+    /// Whether the cgroup has the file `file`: a controller not handed down has none of its files.
+    fn has(&self, file: &str) -> bool {
+        match &self.fd {
+            Some(fd) => rustix::fs::statat(fd.as_fd(), file, AtFlags::empty()).is_ok(),
+            None => self.dir.join(file).exists(),
+        }
+    }
+
+    /// The text of the cgroup's file `file` ([`read_fd`]).
+    fn read(&self, file: &str) -> Result<String, Refusal> {
+        let fd = self
+            .open_file(file, OFlags::RDONLY)
+            .map_err(|e| os_err("reading a cgroup file", &self.dir.join(file), e))?;
+        read_fd(fd.as_fd(), || self.dir.join(file))
+    }
+
+    /// Writes `value` to the cgroup's file `file` ([`write_fd`]).
+    fn write(&self, file: &str, value: &str) -> Result<(), Refusal> {
+        let fd = self
+            .open_file(file, OFlags::WRONLY)
+            .map_err(|e| os_err("opening a cgroup file", &self.dir.join(file), e))?;
+        write_fd(fd.as_fd(), value, || self.dir.join(file))
+    }
+
+    /// Its `cgroup.procs`, open for writing: a process that writes "0" to it joins the box.
+    pub fn procs_for_joining(&self) -> Result<OwnedFd, Refusal> {
+        self.open_file("cgroup.procs", OFlags::WRONLY).map_err(|e| {
+            os_err(
+                "opening a box's cgroup.procs",
+                &self.dir.join("cgroup.procs"),
+                e,
+            )
+        })
+    }
+
+    /// The cgroup directory itself, open: what `clone3(CLONE_INTO_CGROUP)` takes. A copy of the
+    /// descriptor it's held by, where it's held.
     pub fn open_dir(&self) -> Result<OwnedFd, Refusal> {
-        rustix::fs::open(
-            &self.dir,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|e| os_err("opening a box's cgroup", &self.dir, e))
+        match &self.fd {
+            Some(fd) => fd
+                .try_clone()
+                .map_err(|e| os_err("opening a box's cgroup", &self.dir, e)),
+            None => rustix::fs::open(
+                &self.dir,
+                OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| os_err("opening a box's cgroup", &self.dir, e)),
+        }
     }
 
     /// The processes in the box now.
     pub fn procs(&self) -> Result<Vec<u32>, Refusal> {
-        let path = self.dir.join("cgroup.procs");
-        let text =
-            fs::read_to_string(&path).map_err(|e| os_err("reading cgroup.procs", &path, e))?;
+        let text = self.read("cgroup.procs")?;
         Ok(text
             .lines()
             .filter_map(|l| l.trim().parse().ok())
@@ -346,12 +419,13 @@ impl BoxCgroup {
 
     /// Whether any process runs in the box.
     pub fn populated(&self) -> Result<bool, Refusal> {
-        let path = self.dir.join("cgroup.events");
-        let text =
-            fs::read_to_string(&path).map_err(|e| os_err("reading cgroup.events", &path, e))?;
+        let text = self.read("cgroup.events")?;
         core::populated(&text).ok_or_else(|| Refusal::Os {
             op: "reading cgroup.events",
-            why: format!("{}: no populated line", path.display()),
+            why: format!(
+                "{}: no populated line",
+                self.dir.join("cgroup.events").display()
+            ),
         })
     }
 
@@ -390,7 +464,7 @@ impl BoxCgroup {
     /// leader-directed `cgroup.kill` missed (probe `delete_flake_point4.c`). [`BoxCgroup::wait_empty`]
     /// then sees it empty.
     pub fn kill(&self) -> Result<(), Refusal> {
-        write_file(&self.dir.join("cgroup.kill"), "1")?;
+        self.write("cgroup.kill", "1")?;
         if !self.populated()? {
             return Ok(());
         }
@@ -403,7 +477,8 @@ impl BoxCgroup {
     /// Waits until no process is left in the box, at most `timeout`; whether none is.
     pub fn wait_empty(&self, timeout: Duration) -> Result<bool, Refusal> {
         let path = self.dir.join("cgroup.events");
-        let fd = rustix::fs::open(&path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+        let fd = self
+            .open_file("cgroup.events", OFlags::RDONLY)
             .map_err(|e| os_err("opening cgroup.events", &path, e))?;
         let deadline = Instant::now().checked_add(timeout);
         let mut buf = [0u8; 256];
@@ -457,7 +532,7 @@ impl BoxCgroup {
     /// Writes one bound. A kernel without swap accounting has no memory.swap.max: with no swap on, the
     /// memory bound holds without it; with swap on it cannot hold, so the box is refused by name.
     fn write_bound(&self, w: &core::Write) -> Result<(), Refusal> {
-        if w.file == "memory.swap.max" && !self.dir.join(w.file).exists() {
+        if w.file == "memory.swap.max" && !self.has(w.file) {
             return match swap_active()? {
                 false => Ok(()),
                 true => Err(Refusal::Platform {
@@ -467,17 +542,17 @@ impl BoxCgroup {
                 }),
             };
         }
-        write_file(&self.dir.join(w.file), &w.value)
+        self.write(w.file, &w.value)
     }
 
     /// What [`reuse::check`] reads of this cgroup before it is handed on: files whose reads take no
     /// lock (research f61). The memory files read as `None` where the memory controller isn't handed
     /// down, so the kernel has none.
     pub fn idle_files(&self) -> Result<reuse::Files, Refusal> {
-        let read = |file: &str| read_text(&self.dir.join(file));
-        let maybe = |file: &str| match read_text(&self.dir.join(file)) {
+        let read = |file: &str| self.read(file);
+        let maybe = |file: &str| match self.read(file) {
             Ok(text) => Ok(Some(text)),
-            Err(Refusal::Os { .. }) if !self.dir.join(file).exists() => Ok(None),
+            Err(Refusal::Os { .. }) if !self.has(file) => Ok(None),
             Err(e) => Err(e),
         };
         Ok(reuse::Files {
@@ -494,7 +569,7 @@ impl BoxCgroup {
     /// Its cumulative counters now, which a box given this cgroup has its usage reported from
     /// ([`core::since`]); a file the kernel doesn't have reads as 0, as [`BoxCgroup::usage`] reads it.
     pub fn baseline(&self) -> Baseline {
-        let read = |f: &str| read_text(&self.dir.join(f)).unwrap_or_default();
+        let read = |f: &str| self.read(f).unwrap_or_default();
         Baseline::of(&core::usage(&UsageFiles {
             memory_events: read("memory.events"),
             pids_events: read("pids.events"),
@@ -512,10 +587,11 @@ impl BoxCgroup {
     /// can't reset it, so the cgroup isn't handed on with its predecessors' peak.
     pub fn peak_from_now(&self) -> Result<Option<std::os::fd::OwnedFd>, Refusal> {
         let path = self.dir.join("memory.peak");
-        if !path.exists() {
+        if !self.has("memory.peak") {
             return Ok(None);
         }
-        let fd = rustix::fs::open(&path, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
+        let fd = self
+            .open_file("memory.peak", OFlags::RDWR)
             .map_err(|e| os_err("opening a cgroup's memory.peak to reset it", &path, e))?;
         rustix::io::write(&fd, b"reset")
             .map_err(|e| os_err("resetting a cgroup's memory.peak", &path, e))?;
@@ -539,7 +615,7 @@ impl BoxCgroup {
 
     /// What the box has used, from its cgroup files; a file the kernel doesn't have reads as 0.
     pub fn usage(&self) -> Usage {
-        let read = |f: &str| fs::read_to_string(self.dir.join(f)).unwrap_or_default();
+        let read = |f: &str| self.read(f).unwrap_or_default();
         core::usage(&UsageFiles {
             memory_current: read("memory.current"),
             memory_peak: read("memory.peak"),
@@ -552,7 +628,6 @@ impl BoxCgroup {
     }
 }
 
-/// Writes `value` to a cgroup file: one write(2), as the kernel takes a cgroup file's value.
 /// Whether any swap is on: `/proc/swaps` lists one device per line past its header.
 fn swap_active() -> Result<bool, Refusal> {
     let path = Path::new("/proc/swaps");
@@ -565,11 +640,11 @@ fn swap_active() -> Result<bool, Refusal> {
 /// this is damage, refused by type rather than read on.
 const MAX_CGROUP_FILE: usize = 64 << 10;
 
-/// Whether the `cpu.max` at `path` already holds `want`, its values compared ([`core::CpuMax`]), never its
+/// Whether `cg`'s `cpu.max` already holds `want`, its values compared ([`core::CpuMax`]), never its
 /// text. A read that fails, or a value either side that doesn't parse, counts as not holding it, so the
 /// bound is written: the write is skipped only on a read that shows the box's values in force.
-fn cpu_max_holds(path: &Path, want: &str) -> bool {
-    let now = read_text(path).ok();
+fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
+    let now = cg.read("cpu.max").ok();
     match (
         now.as_deref().and_then(core::CpuMax::parse),
         core::CpuMax::parse(want),
@@ -579,17 +654,15 @@ fn cpu_max_holds(path: &Path, want: &str) -> bool {
     }
 }
 
-/// A cgroup file's text, read with one open and as few reads as it takes, no stat (`fs::read_to_string`
-/// takes one per file to size its buffer): an idle cgroup's check and baseline read a dozen on create's
-/// path. Refused past [`MAX_CGROUP_FILE`].
-fn read_text(path: &Path) -> Result<String, Refusal> {
-    let fd = rustix::fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|e| os_err("reading a cgroup file", path, e))?;
+/// A cgroup file's text from its open descriptor `fd`, in as few reads as it takes, no stat
+/// (`fs::read_to_string` takes one per file to size its buffer): an idle cgroup's check and baseline read a
+/// dozen on create's path. Refused past [`MAX_CGROUP_FILE`]; `path` names the file in a refusal.
+fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
-        let n = rustix::io::read(&fd, &mut buf)
-            .map_err(|e| os_err("reading a cgroup file", path, e))?;
+        let n = rustix::io::read(fd, &mut buf)
+            .map_err(|e| os_err("reading a cgroup file", &path(), e))?;
         if n == 0 {
             break;
         }
@@ -597,31 +670,38 @@ fn read_text(path: &Path) -> Result<String, Refusal> {
         if out.len() > MAX_CGROUP_FILE {
             return Err(Refusal::Os {
                 op: "reading a cgroup file",
-                why: format!("{} is over {MAX_CGROUP_FILE} bytes", path.display()),
+                why: format!("{} is over {MAX_CGROUP_FILE} bytes", path().display()),
             });
         }
     }
     String::from_utf8(out).map_err(|e| Refusal::Os {
         op: "reading a cgroup file",
-        why: format!("{} isn't UTF-8: {e}", path.display()),
+        why: format!("{} isn't UTF-8: {e}", path().display()),
     })
 }
 
-pub fn write_file(path: &Path, value: &str) -> Result<(), Refusal> {
-    let fd = rustix::fs::open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|e| os_err("opening a cgroup file", path, e))?;
-    let n = rustix::io::write(&fd, value.as_bytes()).map_err(|e| Refusal::Os {
+/// Writes `value` to the cgroup file open at `fd`: one write(2), as the kernel takes a cgroup file's
+/// value. `path` names the file in a refusal.
+fn write_fd(fd: BorrowedFd<'_>, value: &str, path: impl Fn() -> PathBuf) -> Result<(), Refusal> {
+    let n = rustix::io::write(fd, value.as_bytes()).map_err(|e| Refusal::Os {
         op: "writing a cgroup file",
-        why: format!("{} = {value:?}: {e}", path.display()),
+        why: format!("{} = {value:?}: {e}", path().display()),
     })?;
     if n == value.len() {
         Ok(())
     } else {
         Err(Refusal::Os {
             op: "writing a cgroup file",
-            why: format!("{}: wrote {n} of {} bytes", path.display(), value.len()),
+            why: format!("{}: wrote {n} of {} bytes", path().display(), value.len()),
         })
     }
+}
+
+/// Writes `value` to the cgroup file at `path` ([`write_fd`]).
+pub fn write_file(path: &Path, value: &str) -> Result<(), Refusal> {
+    let fd = rustix::fs::open(path, OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|e| os_err("opening a cgroup file", path, e))?;
+    write_fd(fd.as_fd(), value, || path.to_owned())
 }
 
 /// The words of a cgroup file that lists controllers (`cgroup.controllers`, `cgroup.subtree_control`).
@@ -803,6 +883,48 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    /// Goal 5 extended, step 6 (bench/competitive/probes/create_serial.md, run 12): a box's cgroup opened
+    /// through its root is reached through the directory it holds, never by its path, so no file of it is a
+    /// walk through `/sys` and every kernfs directory above it. Do: open a root and a slot under it, then move
+    /// every directory above them away. Expect the slot's files read and written as before, its directory
+    /// still there for `clone3`, and the root finding its next slot by name. Plain files stand in for the
+    /// cgroup's.
+    #[test]
+    fn a_cgroup_opened_through_its_root_is_reached_by_its_directory_not_its_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(parent.join("root")).unwrap();
+        std::fs::write(parent.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        std::fs::write(parent.join("cgroup.subtree_control"), "").unwrap();
+        std::fs::write(parent.join("root/cgroup.subtree_control"), "").unwrap();
+        let root = BoxRoot::open(&parent.join("root"), Vec::new()).unwrap();
+        let slot = parent.join("root").join(reuse::name(7));
+        std::fs::create_dir(&slot).unwrap();
+        std::fs::write(slot.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        std::fs::write(slot.join("cgroup.procs"), "").unwrap();
+        std::fs::write(slot.join("cgroup.kill"), "").unwrap();
+        let cg = root.slot(7).expect("slot 7");
+
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        assert_eq!(
+            cg.populated(),
+            Ok(false),
+            "cgroup.events, read through the slot"
+        );
+        assert_eq!(cg.procs(), Ok(Vec::new()), "cgroup.procs");
+        assert_eq!(cg.kill(), Ok(()), "cgroup.kill, written");
+        let kill = moved.join("root").join(reuse::name(7)).join("cgroup.kill");
+        assert_eq!(std::fs::read_to_string(kill).unwrap(), "1");
+        assert!(cg.open_dir().is_ok(), "the slot's directory, for clone3");
+        std::fs::create_dir(moved.join("root").join(reuse::name(8))).unwrap();
+        assert!(
+            root.slot(8).is_some(),
+            "the next slot, found by its name under the root"
+        );
+        assert!(root.slot(9).is_none(), "and none that isn't there");
     }
 
     #[test]

@@ -491,6 +491,61 @@ Off-CPU ms per lifecycle:
   a directory's (the mount namespace's lock among them, which run 9 names, or a process's `mmap_lock`) came to 2.663
   ms a lifecycle to read and 2.065 to write, against 0.002 and 0.003 at concurrency 1.
 
+## Run 12 (2026-11-03, fedora): offcpu, one owner's boxes, steps 2, 3 and 6 merged with the network namespace reused
+
+- **Why:** what holds concurrency 32 once each box is handed the network namespace its owner's earlier box left
+  (decision 5, Ada's call of 2026-11-03), with steps 2's and 3's levers in. Of record for no branch: the binaries are
+  of `cp/t7-ext-s6` at 4e9ef6a with `cp/t7-ext-s3` at 148d12e merged, uncommitted (`reuse_pass.md`'s run 2's
+  resolution), built on fedora: `hex` 42bd32d4d8a88d65, `seam_oci` 9e5f8f386309aff0.
+- **Host and load:** kiln-a094a12d, Linux 6.19.10-300.fc44.x86_64, 2026-11-03T06:31:32Z, the probe's container pinned to
+  CPUs 4-15 and capped (`--memory 8g`, `--oom-score-adj 1000`); the 1-minute load 23.86 at the start and 19.96 at the
+  end. Under the probe Hex's sustained phase ran 5,992/s and libcrun's 1,402/s.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-offcpu-20261103T063132Z`; the fedora unit
+  `hex-g5x-s6-verify4-20261103T062500Z`.
+
+Off-CPU ms per lifecycle:
+
+| What the lifecycle waits on | hex.c1 | hex.c32 | crun.c32 |
+|---|---|---|---|
+| a directory's `i_rwsem` | 0.000 | 0.067 | 4.523 |
+| `cgroup_mutex` | 0.000 | 0.007 | 0.976 |
+| the mount namespace's lock | 0.000 | 0.017 | 0.819 |
+| an RCU grace period (umount) | 0.005 | 0.028 | 2.086 |
+| a futex (the runtime's own locks) | 0.000 | 0.225 | 0.000 |
+| work: a socket | 1.029 | 2.973 | 7.775 |
+| work: a pipe or FIFO | 0.168 | 0.422 | 0.393 |
+| work: a poll | 0.199 | 0.586 | 0.000 |
+| work: a child | 0.000 | 0.001 | 0.005 |
+| a sleep (the runtime's own polling) | 0.000 | 0.000 | 6.641 |
+| other | 0.009 | 4.055 | 5.355 |
+
+- **RTNL is mostly gone:** 0.878 ms a lifecycle at concurrency 32 (`register_netdev` 0.522, `rtnl_newlink` 0.356),
+  against run 10's 6.670. What's left is the namespaces still made: the boxes that found none of their owner's idle,
+  and those closed past the owner's bound, as the one checker thread fell behind (`reuse_pass.md`'s run 6).
+- **The largest wait is now a kernfs root's lock:** 2.649 ms a lifecycle, nearly all of other, the node's threads
+  waiting to read it in `kernfs_dop_revalidate` on a path walk. Every walk revalidates each kernfs dentry it passes
+  under its root's lock, with no RCU walk (Linux v6.19 fs/kernfs/dir.c:1145-1146, :1185); additions and removals take
+  it to write (:796, :1554). The node opened each cgroup file by its whole path, through `/sys`, sysfs's own root,
+  where every network device made or removed adds and removes its nodes. Run 13 finds the same wait at 3.082 ms, and
+  0.083 with no network namespace at all.
+- **The rest of concurrency 32's waits are the lifecycle's own:** the seeds waiting on their sockets for the next
+  create, the handshakes' pipes and polls. The on-CPU profile has no kernel hotspot: user code 17.41%, the scheduler's
+  switches 7.59%, then page faults, process teardown and exec's page-ins, each under 2%.
+
+## Run 13 (2026-11-03, fedora): locks, run 12's binaries
+
+- **Host and load:** run 12's, 2026-11-03T06:32:06Z; the 1-minute load 19.96 at the start and 15.79 at the end. Under
+  the probe Hex's sustained phase ran 5,774/s, 9,054/s without a network namespace, and libcrun's 1,386/s.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261103T063206Z`, the same unit.
+- **`cgroup_mutex`:** 1.110 holds a lifecycle at concurrency 32, 1.064 at concurrency 1 and 1.119 without a network
+  namespace, each nearly all the init's clone into the cgroup it was handed. The first criterion holds with the
+  namespaces reused (run 11: 1.089).
+- **The reads of an rwsem that isn't a directory's:** 3.082 ms a lifecycle at concurrency 32, 0.083 without a network
+  namespace: run 12's kernfs root lock, which the namespaces still made and removed write.
+- **Lookups that missed the dcache:** 6.08 a lifecycle at concurrency 32. Two of them are in cgroup2, of a cgroup named
+  by the box's id under the box root and under the oci boxes' root. Create looks for one there before it makes a box,
+  and for a box handed a slot it is never there.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
