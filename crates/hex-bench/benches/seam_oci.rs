@@ -586,6 +586,29 @@ mod linux {
                "most_busy": after.most_busy})
     }
 
+    /// What each idle cgroup an owner's boxes left still has charged (`memory.current`, bytes), read at a
+    /// phase's end, when no box is live, so every slot under the oci boxes' root (`.<n>`) is one the
+    /// node's check would read before handing it on. `hex_node::cgroups::RESIDUAL` is set from these
+    /// (bench/competitive/probes/reuse_residual.md). A slot the node removes while it's read is skipped.
+    fn idle_residuals(oci_boxes: &Path) -> Vec<u64> {
+        let Ok(entries) = std::fs::read_dir(oci_boxes) else {
+            return Vec::new();
+        };
+        let mut out: Vec<u64> = entries
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name().to_str().is_some_and(|n| {
+                    n.strip_prefix('.')
+                        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+                })
+            })
+            .filter_map(|e| std::fs::read_to_string(e.path().join("memory.current")).ok())
+            .filter_map(|t| t.trim().parse().ok())
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     /// What the node's idle cgroups and its deletes did from `before` to `after`.
     fn reuse_rise(
         before: &(hex_node::cgroups::Counts, hex_node::cgroups::Kills),
@@ -755,6 +778,12 @@ mod linux {
                     }
                     if let Some(reuse_rose) = reuse_rose {
                         fields.insert("cgroups".to_owned(), reuse_rose);
+                    }
+                    if owner.is_some() {
+                        fields.insert(
+                            "idle_residual_bytes".to_owned(),
+                            json!(idle_residuals(&root.join(hex_node::OCI_BOXES))),
+                        );
                     }
                 }
                 Ok(v)
