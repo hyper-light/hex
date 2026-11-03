@@ -320,3 +320,45 @@ The pairs' medians of each half's CPU (the second unit's, in process; over the s
   its work off its own path gone" is withdrawn. On this run's figures, that work gone (17% of concurrency 1's CPU,
   `create_serial.md` run 17) puts concurrency 32 at about 7.2 times concurrency 1, and its CPUs kept busy as well,
   10.2 of 12 now, at about 8.4 times.
+
+## Run 10 (2026-11-03, fedora): criterion 2 as its text reads it, on host.sh's CPU set and on 4-15
+
+- **What the criterion reads:** "sustained lifecycles a second at concurrency 32 against throughput at concurrency 1
+  in the same OCI pass, one owner's boxes, at least 8x, measured by seam_oci's throughput and sustained phases
+  through host.sh on fedora". It names no CPU set, so host.sh's own, 4-31, governs, with 4-15 beside it (the lead,
+  2026-11-03T16:50Z); latency parts stay on 4-15.
+- **The binaries:** step 6 alone at its tip, tip8 (`cp/t7-ext-s6-kept-socket` at 9693bfc, b82bf7f's code but for one
+  line's formatting; `hex` bcc6cd4556b7a9e2, `seam_oci` f103b11339f33b5e), and the merge, mr10 (`cp/t7-ext-s6-x-s3`'s
+  e9fb28f with step 6's checks' three changes, the exec FIFO's fix and the runtime records' shards, uncommitted, of
+  record for no branch; `hex` 59d490d19f583b50, `seam_oci` 83fd243409634180).
+- **Host:** the unit `hex-g5x-s6-verify13b-20261103T165417Z`, one owner's boxes, reuse on, a network namespace each;
+  host.sh with its throughput and sustained phases, 3 rounds, `LIFECYCLES` 2,000 and `HEXBENCH_SUSTAINED` 10,000;
+  then the interleaved phase, 2 rounds of 10 pairs; load 3.6 to 24.1 over the runs, other tenants beside them.
+
+As the criterion reads it, each round's sustained rate over its throughput phase's at concurrency 1 (each pass's 3
+rounds: the median, least to most):
+
+| run | tree | CPUs | in process | over the socket |
+|---|---|---|---|---|
+| 20261103T165526Z | merge | 4-31 | 25.12x (24.88 to 26.48) | 23.55x (20.87 to 23.62) |
+| 20261103T170058Z | step 6 alone | 4-31 | 8.29x (7.93 to 9.32) | 8.01x (7.87 to 9.10) |
+| 20261103T165826Z | merge | 4-15 | 7.74x (5.87 to 9.09) | 7.80x (6.79 to 8.42) |
+| 20261103T170431Z | step 6 alone | 4-15 | 6.44x (6.42 to 7.33) | 5.95x (3.35 to 6.23) |
+
+Interleaved, the cross-check, pooled over 20 pairs (mean ratio, bootstrap SE; each half's CPU, the pairs' medians):
+
+| run | tree | CPUs | in process | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket |
+|---|---|---|---|---|---|---|
+| 20261103T170721Z | merge | 4-31 | 18.96x (0.27) | 1.18, 1.22 ms | 1.10, 21.49 | 19.94x (1.09) |
+| 20261103T170834Z | step 6 alone | 4-31 | 5.89x (0.07) | 1.55, 2.36 ms | 0.98, 8.83 | 7.80x (0.41) |
+| 20261103T170802Z | merge | 4-15 | 5.11x (0.19) | 0.58, 1.02 ms | 1.28, 10.28 | 4.96x (0.15) |
+| 20261103T171011Z | step 6 alone | 4-15 | 3.09x (0.14) | 0.78, 1.61 ms | 1.09, 6.62 | 3.10x (0.07) |
+
+- **On host.sh's 4-31 the merge passes 8x by both measures,** 25.12x as the criterion reads it and 18.96x
+  interleaved; step 6 alone reads 8.29x as written, its least round 7.93x, and 5.89x interleaved.
+- **On 4-31 a lone lifecycle runs slower,** at more CPU than one of 32 at once (the merge's throughput phase: 1.57 to
+  1.74 ms a lifecycle at 1 against 1.20 to 1.24 at 32): there one runs on the E-cores too, or at their clocks, as
+  run 8 found, which lifts the ratio. On 4-15, two threads share each core: the ratio is the CPUs kept busy times the
+  CPU a lifecycle, (busy32/busy1) x (cpu1/cpu32), for the merge's interleaved pass (10.28/1.28) x (0.58/1.02),
+  about 4.6x, its CPU a lifecycle 1.76 times its CPU alone under that pass's load (run 9's: 1.36 to 1.44).
+- No start or create was refused in any of the eight passes.

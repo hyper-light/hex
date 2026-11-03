@@ -706,6 +706,27 @@ Each directory's i_rwsem at concurrency 32, ms a lifecycle (`create_serial.py`):
   and each create's look for an earlier record of its id reads it. Every box's in the one directory.
 - **`cgroup_mutex`** is 1.052 holds a lifecycle, the init's clone into the cgroup it was handed, waited for 0.065 ms.
 
+## Run 20 (2026-11-03, fedora): locks, the runtime directory's records in 64 shards
+
+- **Binaries:** run 19's mr9 with 8d97f70's code (the runtime directory's records spread over 64 shards), mr10,
+  `hex` 59d490d19f583b50, one owner's boxes, on the E-cores 16-31, the unit `hex-g5x-s6-verify13-20261103T164945Z`.
+  Under the probe Hex's sustained phase ran 9,599 a second (run 19: 9,376), 10,383 without a network namespace
+  (10,075), and libcrun's 1,298.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261103T165121Z`.
+
+| directory, at concurrency 32, ms a lifecycle | waited to write | waited to read |
+|---|---|---|
+| an overlay inode (the rootfs's) | 0.057 | 0.032 |
+| `/run/bundle-true/rootfs/proc` | 0.054 | 0.000 |
+| `/run/hex-node`, the containers' state | 0.041 | 0.000 |
+| `/sys/fs/cgroup/hex-oci-seam/.oci`, the oci boxes' root | 0.005 | 0.027 |
+| a shard of the node's records, `.../b58c8baf199997d0.records/1e` | 0.000 | 0.000 |
+
+- **The record directory's wait is gone:** run 19's 0.548 ms to write it and 0.189 to read it, the largest of any
+  directory, are none in any shard, and no directory now holds a lifecycle more than 0.057 ms.
+- **What waits next is an rwsem that isn't a directory's,** 0.308 ms a lifecycle to write (run 19: 0.210): the
+  mount namespace's lock or a process's mmap_lock. `cgroup_mutex` 1.073 holds a lifecycle, waited for 0.038 ms.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the

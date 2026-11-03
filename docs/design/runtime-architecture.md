@@ -1300,7 +1300,14 @@ lifecycle without changing what a box may do.
     without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
     box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
     holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
-  - *The rate* (the second, at least 8x, a minimum: not met yet). <!-- record: bench/competitive/probes/reuse_pass.md
+  - *The rate* (the second, at least 8x, a minimum). <!-- record: bench/competitive/probes/reuse_pass.md -->As the
+    criterion reads it, on host.sh's own CPUs, 4-31: the merge of steps 2, 3 and 6 at 25.12x in process (its rounds
+    24.88x to 26.48x) and 23.55x over the socket; step 6 alone at 8.29x (7.93x to 9.32x) and 8.01x. Beside them on
+    4-15: the merge 7.74x and 7.80x, step 6 alone 6.44x and 5.95x. Interleaved, the cross-check: on 4-31 the merge
+    18.96x and step 6 alone 5.89x; on 4-15 5.11x and 3.09x (run 10). On 4-31 a lone lifecycle runs slower than one of
+    32, which lifts the ratio; on 4-15 two threads share each core (run 10).<!-- /record --> The criterion names no CPU
+    set, so host.sh's governs (the lead, 2026-11-03T16:50Z), 4-15 always beside it.
+    <!-- record: bench/competitive/probes/reuse_pass.md
     -->Sustained at concurrency 32 over throughput at concurrency 1 in one OCI pass, one owner's boxes: 4.32x and
     4.21x in process, 4.41x and 4.81x over the socket (run 1, 4-31, as host.sh runs it). With steps 2 and 3 merged in,
     an experiment of record for no branch, 4.05x to 4.83x, against 4.62x to 5.41x for this step alone beside it (run
