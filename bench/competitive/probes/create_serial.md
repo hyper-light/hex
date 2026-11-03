@@ -611,6 +611,29 @@ Each figure per namespace checked (`create_serial.py`):
   with 32 KiB. The page faults the first run counted are those allocations', not the checker's buffers': a fault is
   in 4.2 to 5.7% of every run's stacks, mr6's as mr4's.
 
+## Run 16 (2026-11-03, fedora): checker, the dumps read 8 KiB at a time
+
+- **Binaries:** run 15's mr6 (`hex` 7e355959cde724a0) against the same tree with 4c54e58 (mr7, `hex`
+  ab9551ff82e3415e), A B B A on the E-cores 16-31, one owner's boxes, the unit
+  `hex-g5x-s6-verify8-20261103T092943Z`, run 15's method.
+- **Runs:** `create-serial-checker-20261103T093522Z` (mr6), `T093614Z` (mr7), `T093656Z` (mr7), `T093735Z` (mr6),
+  under another tenant's load: 31 falling to 11, every core busy a minute before the first.
+
+| per namespace checked | mr6 | mr7 |
+|---|---|---|
+| `__alloc_skb`, concurrency 1 | 13.7, 14.5 us | 7.2, 7.0 us |
+| of it clearing pages | 9.0, 9.3 us | 3.3, 3.3 us |
+| `__alloc_skb`, concurrency 32 | 13.2, 11.9 us | 7.2, 8.1 us |
+| of it clearing pages | 8.2, 8.2 us | 3.6, 3.9 us |
+| on-CPU, concurrency 32 | 155.1, 146.7 us | 144.3, 145.2 us |
+
+- **The dumps' answers cost half what they did to allocate,** 6 us a check less, at both concurrencies: the kernel
+  allocates each in 8 KiB, not 32 (its pages cleared as they come, 9 us to 3.5), as run 15's reading of
+  af_netlink.c says. At concurrency 32 a check's CPU falls about 6 us, 4%.
+- **Concurrency 1's on-CPU figure is the load's here, not the change's:** mr6's runs gave 166.3 and 172.2 us, where
+  run 15 gave 138.7 and 129.5 for the same binary, and mr7's 140.7 and 117.4. The allocation's own samples are read
+  apart from that.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the

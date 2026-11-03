@@ -601,6 +601,15 @@ from run 4 on. Run 14 repeats it on 4-15, with enough rounds for the window.
   was there already, left by a chunk of a stopped unit. The harness names it `hexcb-$$`, and `$$` is 1 in every probe
   container, so a killed run's instance blocks the next. The refused run's own exit removed it, the next three chunks
   ran, and the second was run again last.
+- **Since aa67b35 each run's tracer is its own:** the instance and the kprobe group are named by a tag the host
+  script gives the run, its UTC stamp and its pid on the host; on any end of the host script, a stopped unit's TERM
+  among them, the inside script's teardown runs again for that tag in a short container; and a breakdown started
+  while another is up is refused by type, since each tracer keeps every process named as the runtimes are. Tried on
+  fedora on step 6's tip at fea2f9c (unit `hex-g5x-s6-tracetag-20261103T094126Z`): a probe container's shell is pid
+  1, twice; a second breakdown started while `create-breakdown-20261103T094127Z` ran refused, exit 3, and that run
+  came through whole (its probes' 2 of 2 and 10 of 10 creates cut); `create-breakdown-20261103T094140Z`, killed by
+  SIGKILL with its instance and its kprobes both up, left neither. fea2f9c lets the cutter take a box's cgroup made
+  through the box root's held directory (step 6's 3ea3ffa), which the probes on the tip would otherwise refuse.
 
 | run | rounds | load at start | Hex through the seam | before | libcrun | seam less before, pooled (ms) | rounds' mean |
 |---|---|---|---|---|---|---|---|
