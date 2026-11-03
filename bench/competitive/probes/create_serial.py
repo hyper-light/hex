@@ -8,7 +8,8 @@ its directory operations (@dirops[func, fs]: count). The off-CPU time is grouped
 
 A MODE=offcpu run also times each futex call by the user stack that made it (@futex[ustack]: ns), named after the
 run from the bench process's mappings (maps.<label>.txt) and the binaries' symbols (syms.*.txt): each stack by the
-first of its frames that isn't the standard library's own locking, the code that took or waited on the lock.
+first of its frames past libc's and the standard library's own locking, the code that took or waited on the lock, with
+the libc call it waited in.
 
 A MODE=locks run: each directory's exclusive holds (@hold[vfs_mkdir or vfs_rmdir, fs, ino]: stats) beside the waits
 on its i_rwsem (@rw[slow path, fs, ino]: stats), each directory named from the run's dirs.<label>.txt; cgroup_mutex's
@@ -45,8 +46,11 @@ CLASSES = [
     ("a directory's i_rwsem", [r'rwsem_down_', r'(filename_create|do_rmdir|lookup_slow|open_last_lookups|'
                                               r'__start_renaming|do_unlinkat|iterate_dir|lock_rename)']),
     ("cgroup_mutex", [r'__mutex_lock', r'(cgroup_|cgroup_bpf)']),
+    # open_tree's clone and the dissolve at its file's last close take namespace_sem too (Linux v6.19
+    # fs/namespace.c:3017, :2307).
     ("the mount namespace's lock", [r'rwsem_down_', r'(do_lock_mount|copy_mnt_ns|path_mount|do_umount|do_loopback|'
-                                                   r'do_new_mount|__do_sys_pivot_root|lock_mount)']),
+                                                   r'do_new_mount|__do_sys_pivot_root|lock_mount|'
+                                                   r'open_detached_copy|get_detached_copy|dissolve_on_fput)']),
     ("an RCU grace period (umount)", [r'synchronize_rcu']),
     ("a futex (the runtime's own locks)", [r'futex_']),
     ("work: a socket", [r'(recvmsg|sock_)']),
@@ -285,10 +289,20 @@ def symbolizer(run_dir, label):
     return name
 
 
-# The standard library's and the kernel interface's own locking frames: a futex stack is named by its first frame
-# past them.
-LOCKING = re.compile(r'^(syscall|__GI_|futex|std::sys::|std::sync::|core::|<std::sync::|alloc::|std::thread::|'
-                     r'__lll_|pthread_|__pthread|std::panicking|<core::)')
+# The standard library's own locking frames, and libc's, which are named by the nearest exported symbol and so may be
+# another function's: a futex stack is named by its first frame past them, with the libc call it waited in.
+LOCKING = re.compile(r'^<?(std::sys::|std::sync::|std::thread::|std::panicking|core::|alloc::)')
+LIBC = re.compile(r'@GLIBC|^libc\.so')
+
+
+def futex_site(frames):
+    """A futex stack's site: its first frame past the locking frames, with the libc call it waited in, if not syscall."""
+    for i, f in enumerate(frames):
+        if LOCKING.match(f) or LIBC.search(f):
+            continue
+        called = next((g.split('@')[0] for g in reversed(frames[:i]) if '@GLIBC' in g), None)
+        return f if called in (None, 'syscall') else f"{f} (in {called})"
+    return frames[-1] if frames else "?"
 
 
 def report_futex(label, n, path, txt):
@@ -297,7 +311,7 @@ def report_futex(label, n, path, txt):
     by_site, total = defaultdict(int), 0
     for m in re.finditer(r'@futex\[\n(.*?)\n\]: (\d+)', txt, re.S):
         frames = [name(re.sub(r'\+\d+$', '', line.strip())) for line in m.group(1).splitlines() if line.strip()]
-        site = next((f for f in frames if not LOCKING.match(f)), frames[-1] if frames else "?")
+        site = futex_site(frames)
         by_site[site] += int(m.group(2))
         total += int(m.group(2))
     print(f"\n{label}: futex calls, {total / n / 1e6:.3f} ms a lifecycle in all, by the code that made them")
