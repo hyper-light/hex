@@ -9,8 +9,8 @@
 //!
 //! But for a box that may share its owner's (goal 5 extended, step 6; Ada's call of 2026-11-03): its
 //! namespace, taken from the pool or made by the node on the path, is kept by the node while the box lives
-//! ([`Netns::hold`]), and when the box and its record are gone it goes to a checker thread
-//! ([`netcheck::check`]), which keeps it idle for the owner's next box ([`hex_core::netns_reuse::Idle`]) if
+//! ([`Netns::hold`]), and when the box and its record are gone it goes to the node's checker threads
+//! ([`netcheck::check`]), one of which keeps it idle for the owner's next box ([`hex_core::netns_reuse::Idle`]) if
 //! nothing of the box is left in it, and closes it, counted by why, if something is. Nothing runs in an idle
 //! namespace, so what the check saw holds until it's handed on. That takes the making, the loopback's bringing
 //! up and the teardown, each under the host's one RTNL and one `sysctl_lock`, off the owner's next box's
@@ -28,24 +28,32 @@ use hex_core::netns::{Counts, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
-use hex_runtime::linux::oci::netcheck::{self, Fresh};
+use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet};
 use hex_runtime::linux::oci::run::Networks;
 
 /// The pool and the thread that fills it, and the namespaces kept for their owners' next boxes (goal 5
 /// extended, step 6) with the thread that checks each as its box goes. Dropped, it shuts the pool down,
-/// which closes what it held, closes every kept namespace, and waits for both threads.
+/// which closes what it held, closes every kept namespace, and waits for its threads.
 pub struct Netns {
     shared: Arc<Shared>,
     refill: Option<JoinHandle<()>>,
     kept: Option<Keeping>,
 }
 
+/// How many threads check the namespaces given back. With one, [`netcheck::check`] took 127 to 131 us a
+/// namespace at concurrency 32 on fedora, so it checked at most about 7,700 a second while that concurrency gave
+/// back 8,364, and 12% of its boxes found none of their owner's idle and were given a fresh one
+/// (bench/competitive/probes/reuse_pass.md, run 7). Four check about 30,000 a second, 3.6 times that, so a burst
+/// of 32 given back at once clears in about a millisecond; a namespace given back with the line full is closed
+/// unchecked, counted.
+const CHECKERS: usize = 4;
+
 /// The namespaces kept for owners: none on a node without a pool (a rootless node's containers make
 /// theirs in user namespaces of their own), so its creates take as before.
 struct Keeping {
     state: Arc<KeptState>,
     returns: Option<SyncSender<(String, OwnedFd)>>,
-    checker: Option<JoinHandle<()>>,
+    checkers: Vec<JoinHandle<()>>,
 }
 
 struct KeptState {
@@ -56,7 +64,8 @@ struct KeptState {
     given_back: AtomicU64,
     /// Namespaces the checker ruled on, kept idle or closed.
     checked: AtomicU64,
-    /// Namespaces given back with the checker's line full ([`netns_reuse::PER_NODE`]), or after it ended,
+    /// Namespaces given back with the checkers' line full ([`netns_reuse::PER_NODE`]), or after every checker
+    /// ended,
     /// closed unchecked.
     unchecked: AtomicU64,
     /// Checks after which the checker couldn't go back to its own namespace.
@@ -125,18 +134,23 @@ impl Netns {
             check_ns: AtomicU64::new(0),
         });
         let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
-        let checking = Arc::clone(&state);
-        let checker = std::thread::Builder::new()
-            .name("hex-netns-check".to_owned())
-            .spawn(move || check_returns(&checking, &line))
-            .map_err(|e| Refusal::os("starting the network-namespace checker", e))?;
+        let line = Arc::new(Mutex::new(line));
+        let mut checkers = Vec::with_capacity(CHECKERS);
+        for n in 0..CHECKERS {
+            let (checking, taking) = (Arc::clone(&state), Arc::clone(&line));
+            let checker = std::thread::Builder::new()
+                .name(format!("hex-netns-check-{n}"))
+                .spawn(move || check_returns(&checking, &taking))
+                .map_err(|e| Refusal::os("starting a network-namespace checker", e))?;
+            checkers.push(checker);
+        }
         Ok(Self {
             shared,
             refill: Some(refill),
             kept: Some(Keeping {
                 state,
                 returns: Some(returns),
-                checker: Some(checker),
+                checkers,
             }),
         })
     }
@@ -281,7 +295,7 @@ impl Drop for Netns {
         if let Some(mut kept) = self.kept.take() {
             // The checker ends once its line is closed and drained.
             drop(kept.returns.take());
-            if let Some(checker) = kept.checker.take() {
+            for checker in kept.checkers.drain(..) {
                 let _ = checker.join();
             }
             if let Ok(mut idle) = kept.state.idle.lock() {
@@ -368,24 +382,35 @@ impl Networks for NetChoice<'_> {
     }
 }
 
-/// The checker: checks each namespace given back as it comes against a fresh namespace's dumps
-/// ([`Fresh::read`]), keeping it idle for its owner if it passes and closing it, counted by why, if not. It
-/// ends once the line is closed. Until it has read a fresh namespace's dumps, which it tries again at each
-/// namespace given back, it refuses each as unreadable, so a node whose kernel it can't read keeps none and
-/// says so in its counts. A check after which it couldn't go back to its own namespace refuses the namespace
-/// and ends it, counted, so no namespace is checked from another's, and those given back after are closed
-/// unchecked, counted ([`Netns::give_back`]).
-fn check_returns(state: &KeptState, line: &Receiver<(String, OwnedFd)>) {
+/// A checker, one of [`CHECKERS`]: checks each namespace it takes off the line against a fresh namespace's
+/// dumps ([`Fresh::read`]), keeping it idle for its owner if it passes and closing it, counted by why, if not.
+/// It ends once the line is closed. Until it has read a fresh namespace's dumps, which it tries again at each
+/// namespace it takes, it refuses each as unreadable, so a node whose kernel it can't read keeps none and says
+/// so in its counts. A check after which it couldn't go back to its own namespace refuses the namespace and
+/// ends that checker, counted, so no namespace is checked from another's; once every checker has ended, those
+/// given back are closed unchecked, counted ([`Netns::give_back`]).
+fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, OwnedFd)>>) {
     let home = net::thread_network().ok();
+    let proc_net = ProcNet::of_this_thread().ok();
     let mut fresh = None;
-    for (owner, ns) in line {
-        if fresh.is_none() {
-            fresh = home.as_ref().and_then(|h| Fresh::read(h.as_fd()).ok());
+    loop {
+        // One checker waits on the line at a time, the others on its lock; each checks what it took apart.
+        let next = match line.lock() {
+            Ok(line) => line.recv(),
+            Err(_) => return,
+        };
+        let Ok((owner, ns)) = next else {
+            return;
+        };
+        if fresh.is_none()
+            && let (Some(home), Some(proc_net)) = (&home, &proc_net)
+        {
+            fresh = Fresh::read(home.as_fd(), proc_net).ok();
         }
-        let (verdict, lost) = match (&home, &fresh) {
-            (Some(home), Some(fresh)) => {
+        let (verdict, lost) = match (&home, &proc_net, &fresh) {
+            (Some(home), Some(proc_net), Some(fresh)) => {
                 let started = std::time::Instant::now();
-                let checked = netcheck::check(ns.as_fd(), home.as_fd(), fresh);
+                let checked = netcheck::check(ns.as_fd(), home.as_fd(), proc_net, fresh);
                 let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 state.check_ns.fetch_add(took, Ordering::AcqRel);
                 (checked.verdict, !checked.home)

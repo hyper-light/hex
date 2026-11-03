@@ -39,6 +39,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
 use hex_core::netns_reuse::Refused;
+use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
 use crate::linux::oci::{OciError, net, sys};
@@ -155,13 +156,14 @@ pub struct Fresh {
 }
 
 impl Fresh {
-    /// A fresh namespace's counts and dumps, read on the calling thread, which `home` is the namespace of: the
-    /// namespace is made, entered, read and closed, and the thread goes back home whether or not the reads
-    /// worked.
-    pub fn read(home: BorrowedFd<'_>) -> Result<Self, OciError> {
+    /// A fresh namespace's counts and dumps, read on the calling thread, which `home` is the namespace of and
+    /// `proc_net` its `/proc/thread-self/net` ([`ProcNet`]): the namespace is made, entered, read and closed, and
+    /// the thread goes back home whether or not the reads worked.
+    pub fn read(home: BorrowedFd<'_>, proc_net: &ProcNet) -> Result<Self, OciError> {
         let ns = net::make_ahead(home)?;
         sys::setns(ns.as_fd(), libc::CLONE_NEWNET)?;
-        let read = proc_file("protocols")
+        let read = proc_net
+            .file("protocols")
             .and_then(|text| in_use(&text.ok_or(Refused::Unreadable)?))
             .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))
             .and_then(|protocols| settled().map(|dumps| Self { protocols, dumps }));
@@ -237,27 +239,33 @@ pub struct Checked {
     pub home: bool,
 }
 
-/// Checks the namespace `ns` from the calling thread, whose own namespace is `home`: entered, read and left.
-pub fn check(ns: BorrowedFd<'_>, home: BorrowedFd<'_>, fresh: &Fresh) -> Checked {
+/// Checks the namespace `ns` from the calling thread, whose own namespace is `home` and whose
+/// `/proc/thread-self/net` is `proc_net`: entered, read and left.
+pub fn check(
+    ns: BorrowedFd<'_>,
+    home: BorrowedFd<'_>,
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+) -> Checked {
     if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
         return Checked {
             verdict: Err(Refused::Unreadable),
             home: true,
         };
     }
-    let verdict = look(fresh);
+    let verdict = look(proc_net, fresh);
     let home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
     Checked { verdict, home }
 }
 
 /// The checks, in the namespace the thread is in: sockets first, before this opens one of its own there.
-fn look(fresh: &Fresh) -> Result<(), Refused> {
-    let protocols = in_use(&proc_file("protocols")?.ok_or(Refused::Unreadable)?)?;
+fn look(proc_net: &ProcNet, fresh: &Fresh) -> Result<(), Refused> {
+    let protocols = in_use(&proc_net.file("protocols")?.ok_or(Refused::Unreadable)?)?;
     sockets(&protocols, &fresh.protocols)?;
-    time_wait(&proc_file("sockstat")?.ok_or(Refused::Unreadable)?)?;
-    links(&proc_file("dev")?.ok_or(Refused::Unreadable)?)?;
+    time_wait(&proc_net.file("sockstat")?.ok_or(Refused::Unreadable)?)?;
+    links(&proc_net.file("dev")?.ok_or(Refused::Unreadable)?)?;
     for tables in ["ip_tables_names", "ip6_tables_names"] {
-        if proc_file(tables)?.is_some_and(|t| !t.trim().is_empty()) {
+        if proc_net.file(tables)?.is_some_and(|t| !t.trim().is_empty()) {
             return Err(Refused::Firewall);
         }
     }
@@ -270,27 +278,53 @@ fn look(fresh: &Fresh) -> Result<(), Refused> {
     Ok(())
 }
 
-/// The calling thread's `/proc/thread-self/net/<name>`, `None` where the kernel has no such file (a module
-/// not loaded), bounded at [`MAX_PROC_FILE`].
-fn proc_file(name: &str) -> Result<Option<String>, Refused> {
-    use std::io::Read;
-    let path = format!("/proc/thread-self/net/{name}");
-    let file = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(Refused::Unreadable),
-    };
-    let mut text = String::new();
-    let limit = u64::try_from(MAX_PROC_FILE)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    file.take(limit)
-        .read_to_string(&mut text)
-        .map_err(|_| Refused::Unreadable)?;
-    if text.len() > MAX_PROC_FILE {
-        return Err(Refused::Unreadable);
+/// A thread's `/proc/thread-self/net`, held open by the thread that opened it, so each check opens a file of
+/// it by its name alone, not by a walk through `/proc`, `thread-self` and the thread's directory each time. A
+/// name looked up in it names the file of the namespace the thread is in at the lookup
+/// (`proc_tgid_net_lookup`, `get_proc_task_net`, Linux v6.19 fs/proc/proc_net.c:268-301), and each of those
+/// files is looked up again at each open, never taken from the dentry cache (`pde_force_lookup`, :123, :217;
+/// `proc_net_d_revalidate`, fs/proc/generic.c:350), so after a `setns` it opens the new namespace's.
+pub struct ProcNet(OwnedFd);
+
+impl ProcNet {
+    /// The calling thread's: the checks must run on that thread.
+    pub fn of_this_thread() -> Result<Self, OciError> {
+        rustix::fs::open(
+            "/proc/thread-self/net",
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(Self)
+        .map_err(|e| OciError::os("opening /proc/thread-self/net", e))
     }
-    Ok(Some(text))
+
+    /// Its file `name`, `None` where the kernel has no such file (a module not loaded), bounded at
+    /// [`MAX_PROC_FILE`].
+    fn file(&self, name: &str) -> Result<Option<String>, Refused> {
+        use std::io::Read;
+        let fd = match rustix::fs::openat(
+            &self.0,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(_) => return Err(Refused::Unreadable),
+        };
+        let mut text = String::new();
+        let limit = u64::try_from(MAX_PROC_FILE)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        std::fs::File::from(fd)
+            .take(limit)
+            .read_to_string(&mut text)
+            .map_err(|_| Refused::Unreadable)?;
+        if text.len() > MAX_PROC_FILE {
+            return Err(Refused::Unreadable);
+        }
+        Ok(Some(text))
+    }
 }
 
 /// `/proc/net/protocols`' sockets in use by protocol: under its header (net/core/sock.c:4346-4359), each line
