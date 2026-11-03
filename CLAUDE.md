@@ -129,6 +129,21 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
   foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
   offers no safe wrapper.
+- `crates/hex-runtime/src/windows/sys.rs`: the Windows `process` class, whose box is a job object nested
+  under the node's. It creates the job (`CreateJobObjectW`), sets its hard limits
+  (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, the CPU
+  weight or hard cap, and the memory notification the one class Windows guarantees), starts each member
+  suspended inside the job and nowhere else (`CreateProcessW` with `CREATE_SUSPENDED` and a
+  `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so it is a job member from creation, and a
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` so only its three standard handles are inherited —
+  `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`),
+  resumes it (`ResumeThread`), waits on it and reads its end (`WaitForSingleObject`,
+  `GetExitCodeProcess`), marks its standard handles inheritable (`SetHandleInformation`), reads the job's
+  accounting and its guaranteed memory-limit violation (`QueryInformationJobObject`), ends the job
+  (`TerminateJobObject`) and closes its handles (`CloseHandle`), and reads the machine's processor count
+  (`GetActiveProcessorCount`). `windows-sys` binds these as `unsafe` foreign functions, and std's own
+  job-object support and its `PROC_THREAD_ATTRIBUTE_JOB_LIST`/`_HANDLE_LIST` process creation are
+  unstable; Rust can express none of them safely.
 
 ## 13. Lean code
 
