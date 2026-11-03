@@ -251,8 +251,12 @@ def create_cuts(ev, bench, cid, seeded=False, once=False):
         c.opened(bench, "openat", 1, 0, looked, "the node's look for the box's record")
         record_write(1)
     made = c.to(enter(bench, "mkdir", "mkdirat"), "the cgroup's mkdir")
-    held(ev[made].path().startswith("/sys/fs/cgroup/") and named(ev[made].path(), cid),
-         f"the first mkdir is the box's cgroup (it made {ev[made].path()!r})")
+    # By its path, or, since the node makes a box's cgroup through the box root's directory it holds open
+    # (3ea3ffa), by its name alone under that directory: a mkdirat of the box's id.
+    cgroup = ev[made].path()
+    held((cgroup.startswith("/sys/fs/cgroup/") and named(cgroup, cid))
+         or (ev[made].name == "mkdirat" and cgroup == cid),
+         f"the first mkdir is the box's cgroup (it made {cgroup!r})")
     c.to(exited(bench, "mkdir", "mkdirat"), "the cgroup's mkdir returning")
     state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
     held(state_dir(ev[state].path(), cid),
