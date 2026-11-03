@@ -91,6 +91,17 @@ fn mark_cloexec_by_proc() -> rustix::io::Result<()> {
     Ok(())
 }
 
+/// Makes `cmd`'s child mark every descriptor from 3 up close-on-exec before it executes
+/// ([`mark_cloexec_from_3`]): a foreign program the agent starts itself, a hook.
+pub fn sweep_on_exec(cmd: &mut Command) {
+    // SAFETY: the closure runs in the forked child before exec, where only async-signal-safe calls are
+    // allowed. It makes the system calls of mark_cloexec_from_3, allocates nothing, and turns a failure
+    // into the errno std reports.
+    unsafe {
+        cmd.pre_exec(|| mark_cloexec_from_3().map_err(std::io::Error::from));
+    }
+}
+
 /// Makes `cmd`'s child join the cgroup whose `cgroup.procs` is open as `procs` before it executes,
 /// so the program and everything it starts are in the box from their first instruction, and mark every
 /// descriptor from 3 up close-on-exec ([`mark_cloexec_from_3`]).

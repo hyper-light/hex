@@ -90,8 +90,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   the kernel refuses that clone, joins it to the cgroup in the forked child before `execve` (`pre_exec`);
   Rust can express neither safely. And the `close_range` call, with the walk of `/proc/self/fd` by borrowed raw
   descriptors where the kernel refuses it, by which every descriptor from 3 up is marked close-on-exec before
-  foreign code runs (those two children, a container's init, an exec'd program's child, a seed: CVE-2024-21626's
-  class), which rustix doesn't wrap.
+  foreign code runs (those two children, a hook's, a container's init, an exec'd program's child, a seed:
+  CVE-2024-21626's class), which rustix doesn't wrap.
 - `crates/hex-runtime/src/linux/oci/sys.rs`: the `oci` class's `fork`, the `clone3` calls that start a
   container in its cgroup and that clone an exec'd program into it with a pidfd the node agent watches —
   as the agent's own child (`CLONE_PARENT`, `exit_signal` 0) where a privileged seed may, else through an
