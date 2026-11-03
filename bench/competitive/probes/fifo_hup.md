@@ -113,6 +113,9 @@ a new pipe, with no byte ever to come. The winner removes the FIFO before it clo
 FIFO's name after its open, and a FIFO with none says the container is running
 (`an_open_crossing_anothers_removal_and_close_finds_no_name`).
 
+The two-starts test alone on step 6's tree, in the unit `hex-g5x-s6-fdh12-20261103T221025Z`, 64 rounds a run, one-minute
+load about 29: without the check, 12 of 3,000 runs ended so; with it, none of 3,000.
+
 **What would falsify it.** A hang-up or an error polled from a FIFO held to read and to write: a kernel whose
 `pipe_poll` reported either with a writer and a reader there would show it in the rows above opened so.
 
