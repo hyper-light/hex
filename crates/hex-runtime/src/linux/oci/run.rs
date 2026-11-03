@@ -25,7 +25,7 @@ use rustix::process::PidfdFlags;
 use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
 use crate::linux::oci::init;
 use crate::linux::oci::programs::{self, Programs};
-use crate::linux::oci::resources::{self, Plan};
+use crate::linux::oci::resources::{self, Insn, Plan};
 use crate::linux::oci::spec::{IdMapping, Resources, Spec};
 use crate::linux::oci::state::{self, Dir, State, Status};
 use crate::linux::oci::{OciError, devshare, sys};
@@ -119,7 +119,7 @@ pub struct Held<'a> {
 /// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
 /// may join one of, the device programs a node holds, and how its init is started.
 struct Route<'a> {
-    cgroup: Cgroup,
+    cgroup: Cgroup<'a>,
     networks: Option<&'a dyn Networks>,
     devices: Option<&'a Programs>,
     start: Start<'a>,
@@ -178,11 +178,42 @@ pub struct CloneReq<'a> {
 }
 
 /// Where a container's cgroup comes from.
-enum Cgroup {
+enum Cgroup<'a> {
     /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
     FromSpec,
     /// Made and bounded already by the caller (the `Runtime` seam, the node agent's box root).
     Provided(BoxCgroup),
+    /// Chosen by the caller once the spec is read ([`Choose`]): the node agent's for a box whose owner
+    /// may hand it a cgroup its earlier box left (goal 5 extended, step 6).
+    Chosen(&'a dyn Choose),
+}
+
+/// What a create says of its container once its spec is read, for its caller to choose a cgroup by
+/// ([`Choose`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Wants<'a> {
+    /// The device program the container's own cgroup must carry ([`Programs::wants`]); `None` when it
+    /// carries none.
+    pub program: Option<&'a [Insn]>,
+    /// Whether its process could change its own cgroup or what is attached to it
+    /// ([`Spec::could_change_its_cgroup`]), so the cgroup it leaves can't be handed on.
+    pub privileged: bool,
+}
+
+/// A cgroup a caller chose for a container: made or handed on, its bounds in force either way, and
+/// whether the device program the container wants is attached to it already (a cgroup handed on from a
+/// box under the same device policy), so the create attaches nothing.
+#[derive(Debug)]
+pub struct Chosen {
+    pub cgroup: BoxCgroup,
+    pub attached: bool,
+}
+
+/// A caller that chooses a container's cgroup once its spec is read: the node agent, over the idle
+/// cgroups its owners' boxes left (goal 5 extended, step 6). The cgroup is the caller's to remove, as a
+/// provided one is.
+pub trait Choose {
+    fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError>;
 }
 
 impl Runtime {
@@ -311,6 +342,31 @@ impl Runtime {
         )
     }
 
+    /// Makes the container as [`Runtime::create_in_cgroup_seeded`] does, in a cgroup `chooser` chooses
+    /// once the spec is read, which it may hand on from an earlier box (goal 5 extended, step 6): the
+    /// container's device program is attached only when the chosen cgroup doesn't carry it already.
+    /// The chosen cgroup is the caller's to remove, as a provided one is.
+    pub fn create_chosen_seeded(
+        &self,
+        id: &str,
+        bundle: &Path,
+        chooser: &dyn Choose,
+        held: Held<'_>,
+        seeds: &dyn CloneInit,
+    ) -> Result<State, OciError> {
+        self.create_with(
+            id,
+            bundle,
+            None,
+            Route {
+                cgroup: Cgroup::Chosen(chooser),
+                networks: held.networks,
+                devices: held.devices,
+                start: Start::Seed(seeds),
+            },
+        )
+    }
+
     fn create_with(
         &self,
         id: &str,
@@ -368,6 +424,25 @@ impl Runtime {
                     }
                 }
                 (cg, true)
+            }
+            Cgroup::Chosen(chooser) => {
+                let held = devices.ok_or_else(|| {
+                    OciError::Broken(
+                        "a create whose caller chooses its cgroup was given no device programs"
+                            .to_owned(),
+                    )
+                })?;
+                let program = held.wants(&plan, spec.in_user_namespace())?;
+                let chosen = chooser.choose(&Wants {
+                    program: program.as_deref(),
+                    privileged: spec.could_change_its_cgroup(),
+                })?;
+                if let Some(insns) = program
+                    && !chosen.attached
+                {
+                    held.attach_program(&chosen.cgroup, insns)?;
+                }
+                (chosen.cgroup, true)
             }
         };
         let making = Making {
@@ -551,6 +626,7 @@ impl Runtime {
         state.annotations = spec.annotations.clone();
         state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
         state.poststart = Some(!spec.hooks.poststart.is_empty());
+        state.pid_namespace = Some(spec.makes_namespace("pid"));
         making.dir.put(&state)?;
         if let Some(path) = making.pid_file {
             std::fs::write(path, format!("{pid}\n"))

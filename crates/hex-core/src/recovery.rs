@@ -6,7 +6,7 @@
 //! fixes, so the agent finds a box caught mid-create by its parts alone ([`Parts`], goal 5 extended,
 //! step 5).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hex_api::{BoxId, Class};
 
@@ -83,6 +83,74 @@ pub fn plan(seen: &BTreeMap<BoxId, Seen>) -> Vec<(BoxId, Decision)> {
     seen.iter().map(|(id, s)| (id.clone(), decide(s))).collect()
 }
 
+/// The slots found (`slots`, each a cgroup [`crate::reuse::name`] names) that no readable record names:
+/// idle when the agent stopped, or a box's caught mid-create before its record was written (goal 5
+/// extended, step 6). Each is removed, whatever runs in it ended first: no idle cgroup outlives the agent
+/// that kept it, and a slot a record names goes with its box's own decision.
+pub fn strays(seen: &BTreeMap<BoxId, Seen>, slots: &BTreeSet<u64>) -> Vec<u64> {
+    let named: BTreeSet<u64> = seen
+        .values()
+        .filter_map(|s| match &s.record {
+            Some(Ok(r)) => r.slot.map(|slot| slot.n),
+            _ => None,
+        })
+        .collect();
+    slots.difference(&named).copied().collect()
+}
+
+#[cfg(test)]
+mod strays_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec};
+
+    use super::*;
+    use crate::cgroup::Baseline;
+    use crate::record::{BoxRecord, Slot};
+
+    /// Goal 5 extended, step 6 (T-T7.1.2): after a crash, a slot no readable record names (idle, or a
+    /// create's before its record) is removed; one a record names goes with that box, adopted or removed.
+    #[test]
+    fn a_slot_no_record_names_is_removed_and_a_named_one_goes_with_its_box() {
+        let id = |s: &str| BoxId::new(s).unwrap();
+        let mut seen = BTreeMap::new();
+        let mut held = BoxRecord::new(
+            BoxSpec {
+                id: id("b1"),
+                bounds: Bounds::default(),
+                class: ClassSpec::Process,
+                owner: None,
+            },
+            Phase::Ready,
+            Vec::new(),
+        );
+        held.slot = Some(Slot {
+            n: 4,
+            baseline: Baseline::default(),
+        });
+        seen.insert(
+            id("b1"),
+            Seen {
+                record: Some(Ok(held)),
+                ..Seen::default()
+            },
+        );
+        seen.insert(
+            id("torn"),
+            Seen {
+                record: Some(Err("EOF".to_owned())),
+                ..Seen::default()
+            },
+        );
+        let found: BTreeSet<u64> = [2, 4, 9].into_iter().collect();
+        assert_eq!(strays(&seen, &found), vec![2, 9]);
+        assert_eq!(
+            strays(&BTreeMap::new(), &BTreeSet::new()),
+            Vec::<u64>::new()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! A model of the machine (records, cgroups, containers' state directories, rendered bundles,
@@ -150,6 +218,7 @@ mod tests {
             id: id.clone(),
             bounds: Bounds::default(),
             class,
+            owner: None,
         }
     }
 

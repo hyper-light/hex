@@ -59,6 +59,7 @@ mod linux {
             id: id.clone(),
             bounds: bounds(),
             class: ClassSpec::Process,
+            owner: None,
         }
     }
 

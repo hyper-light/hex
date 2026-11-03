@@ -44,6 +44,7 @@ impl Fixture for BinFixture {
             id,
             bounds,
             class: ClassSpec::Process,
+            owner: None,
         }
     }
 

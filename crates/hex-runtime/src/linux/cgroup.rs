@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use hex_api::{Bounds, BoxId, Refusal, Signal, Usage};
-use hex_core::cgroup::{self as core, CONTROLLERS, Dev, UsageFiles};
+use hex_core::cgroup::{self as core, Baseline, CONTROLLERS, Dev, UsageFiles};
+use hex_core::reuse;
 use rustix::fs::{Mode, OFlags};
 
 use super::os_err;
@@ -137,6 +138,53 @@ impl BoxRoot {
     /// Makes box `id`'s cgroup with `bounds` in force. A bound whose controller the root doesn't
     /// have is refused by name, before anything is made.
     pub fn create(&self, id: &BoxId, bounds: &Bounds) -> Result<BoxCgroup, Refusal> {
+        self.make(id.as_str(), bounds, || Refusal::Exists(id.clone()))
+    }
+
+    /// Makes slot `n`'s cgroup ([`reuse::name`]) with `bounds` in force: a cgroup that may be handed
+    /// from box to box of one owner (goal 5 extended, step 6). Slots are numbered once each, so one that
+    /// is there already is a fault, refused as one.
+    pub fn create_slot(&self, n: u64, bounds: &Bounds) -> Result<BoxCgroup, Refusal> {
+        let name = reuse::name(n);
+        self.make(&name, bounds, || {
+            Refusal::Broken(format!(
+                "slot {name} is under {} already, but slots are numbered once each",
+                self.dir.display()
+            ))
+        })
+    }
+
+    /// Makes the cgroup `name` with `bounds` in force; `exists` is the refusal for one already there.
+    fn make(
+        &self,
+        name: &str,
+        bounds: &Bounds,
+        exists: impl FnOnce() -> Refusal,
+    ) -> Result<BoxCgroup, Refusal> {
+        self.controllers_for(bounds)?;
+        let writes = core::writes(bounds, &self.disks)?;
+        if self.count()? >= MAX_BOXES {
+            return Err(Refusal::Full(MAX_BOXES));
+        }
+        let dir = self.dir.join(name);
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(exists()),
+            Err(e) => return Err(os_err("making a box's cgroup", &dir, e)),
+        }
+        let cg = BoxCgroup { dir };
+        for w in writes {
+            if let Err(e) = cg.write_bound(&w) {
+                // A box is made whole or not at all; its empty cgroup goes with the refusal.
+                let _ = fs::remove_dir(&cg.dir);
+                return Err(e);
+            }
+        }
+        Ok(cg)
+    }
+
+    /// A bound whose controller the root doesn't have, refused by name.
+    fn controllers_for(&self, bounds: &Bounds) -> Result<(), Refusal> {
         for (needed, set) in [
             (
                 "cpu",
@@ -166,46 +214,41 @@ impl BoxRoot {
                 });
             }
         }
-        let writes = core::writes(bounds, &self.disks)?;
-        if self.count()? >= MAX_BOXES {
-            return Err(Refusal::Full(MAX_BOXES));
-        }
-        let dir = self.dir.join(id.as_str());
-        match fs::create_dir(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                return Err(Refusal::Exists(id.clone()));
+        Ok(())
+    }
+
+    /// Writes every bound again into `cg`, a cgroup an earlier box left, so it holds `bounds` and
+    /// nothing of the earlier box's ([`core::writes_all`]; goal 5 extended, step 6). None of these files'
+    /// writes takes the kernel's `cgroup_mutex` (research f25). A default for a file the kernel doesn't
+    /// have is skipped: no earlier box could have set it either. `cpu.max` alone is read first and
+    /// written only where it holds another value: its write takes the host-wide `cfs_constraints_mutex`
+    /// and walks every task group on the host (Linux v6.19 `tg_set_cfs_bandwidth`,
+    /// kernel/sched/core.c:9461-9462, `__cfs_schedulable` :9624; research f26), 68.5 us p50 against 1.5 us
+    /// for `pids.max` on adacachy's 3,348 cgroups (2026-11-03, 2,000 writes each), where its read takes
+    /// no lock (`cpu_max_show`, :10104), so the bound is in force either way.
+    pub fn rebound(&self, cg: &BoxCgroup, bounds: &Bounds) -> Result<(), Refusal> {
+        self.controllers_for(bounds)?;
+        for w in core::writes_all(bounds, &self.disks)? {
+            let path = cg.dir.join(w.file);
+            if core::is_default(&w) && !path.exists() {
+                continue;
             }
-            Err(e) => return Err(os_err("making a box's cgroup", &dir, e)),
-        }
-        let cg = BoxCgroup { dir };
-        for w in writes {
-            // A kernel without swap accounting has no memory.swap.max. With no swap on, the memory
-            // bound holds without it; with swap on it cannot hold, so the box is refused by name.
-            if w.file == "memory.swap.max" && !cg.dir.join(w.file).exists() {
-                match swap_active() {
-                    Ok(false) => continue,
-                    Ok(true) => {
-                        let _ = fs::remove_dir(&cg.dir);
-                        return Err(Refusal::Platform {
-                            what: "a memory bound",
-                            platform: "linux",
-                            why: "swap is on but this kernel has no swap accounting (no memory.swap.max), so a box could swap past its memory bound".to_owned(),
-                        });
-                    }
-                    Err(e) => {
-                        let _ = fs::remove_dir(&cg.dir);
-                        return Err(e);
-                    }
-                }
+            if w.file == "cpu.max" && read_text(&path).is_ok_and(|now| now.trim() == w.value) {
+                continue;
             }
-            if let Err(e) = write_file(&cg.dir.join(w.file), &w.value) {
-                // A box is made whole or not at all; its empty cgroup goes with the refusal.
-                let _ = fs::remove_dir(&cg.dir);
-                return Err(e);
-            }
+            cg.write_bound(&w)?;
         }
-        Ok(cg)
+        Ok(())
+    }
+
+    /// Slot `n`'s cgroup, when it exists.
+    pub fn slot(&self, n: u64) -> Option<BoxCgroup> {
+        let dir = self.dir.join(reuse::name(n));
+        if dir.is_dir() {
+            Some(BoxCgroup { dir })
+        } else {
+            None
+        }
     }
 
     /// Box `id`'s cgroup, when it exists.
@@ -410,6 +453,89 @@ impl BoxCgroup {
         }
     }
 
+    /// Writes one bound. A kernel without swap accounting has no memory.swap.max: with no swap on, the
+    /// memory bound holds without it; with swap on it cannot hold, so the box is refused by name.
+    fn write_bound(&self, w: &core::Write) -> Result<(), Refusal> {
+        if w.file == "memory.swap.max" && !self.dir.join(w.file).exists() {
+            return match swap_active()? {
+                false => Ok(()),
+                true => Err(Refusal::Platform {
+                    what: "a memory bound",
+                    platform: "linux",
+                    why: "swap is on but this kernel has no swap accounting (no memory.swap.max), so a box could swap past its memory bound".to_owned(),
+                }),
+            };
+        }
+        write_file(&self.dir.join(w.file), &w.value)
+    }
+
+    /// What [`reuse::check`] reads of this cgroup before it is handed on: files whose reads take no
+    /// lock (research f61). The memory files read as `None` where the memory controller isn't handed
+    /// down, so the kernel has none.
+    pub fn idle_files(&self) -> Result<reuse::Files, Refusal> {
+        let read = |file: &str| read_text(&self.dir.join(file));
+        let maybe = |file: &str| match read_text(&self.dir.join(file)) {
+            Ok(text) => Ok(Some(text)),
+            Err(Refusal::Os { .. }) if !self.dir.join(file).exists() => Ok(None),
+            Err(e) => Err(e),
+        };
+        Ok(reuse::Files {
+            events: read("cgroup.events")?,
+            stat: read("cgroup.stat")?,
+            subtree_control: read("cgroup.subtree_control")?,
+            kind: read("cgroup.type")?,
+            freeze: read("cgroup.freeze")?,
+            oom_group: maybe("memory.oom.group")?,
+            memory_current: maybe("memory.current")?,
+        })
+    }
+
+    /// Its cumulative counters now, which a box given this cgroup has its usage reported from
+    /// ([`core::since`]); a file the kernel doesn't have reads as 0, as [`BoxCgroup::usage`] reads it.
+    pub fn baseline(&self) -> Baseline {
+        let read = |f: &str| read_text(&self.dir.join(f)).unwrap_or_default();
+        Baseline::of(&core::usage(&UsageFiles {
+            memory_events: read("memory.events"),
+            pids_events: read("pids.events"),
+            cpu_stat: read("cpu.stat"),
+            io_stat: read("io.stat"),
+            ..UsageFiles::default()
+        }))
+    }
+
+    /// Its `memory.peak`, opened and written, so reads through the descriptor say the peak from now on
+    /// alone, never the cgroup's lifetime peak (Linux 6.12 on: "A write of any non-empty string to this
+    /// file resets it to the current memory usage for subsequent reads through the same file
+    /// descriptor", Documentation/admin-guide/cgroup-v2.rst; mm/memcontrol.c `peak_write`, v6.19 :4283;
+    /// research f31). `None` where the memory controller isn't handed down; refused where the kernel
+    /// can't reset it, so the cgroup isn't handed on with its predecessors' peak.
+    pub fn peak_from_now(&self) -> Result<Option<std::os::fd::OwnedFd>, Refusal> {
+        let path = self.dir.join("memory.peak");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let fd = rustix::fs::open(&path, OFlags::RDWR | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| os_err("opening a cgroup's memory.peak to reset it", &path, e))?;
+        rustix::io::write(&fd, b"reset")
+            .map_err(|e| os_err("resetting a cgroup's memory.peak", &path, e))?;
+        Ok(Some(fd))
+    }
+
+    /// What usage the box given this cgroup at `base` has had: [`core::since`] over its files now, its
+    /// peak read through `peak`, the descriptor [`BoxCgroup::peak_from_now`] wrote ([`BoxCgroup::usage`]'s
+    /// lifetime peak where there is none).
+    pub fn usage_since(&self, base: &Baseline, peak: Option<&std::os::fd::OwnedFd>) -> Usage {
+        let now = self.usage();
+        let peak = peak
+            .and_then(|fd| {
+                let mut buf = [0u8; 32];
+                let n = rustix::io::pread(fd, &mut buf, 0).ok()?;
+                std::str::from_utf8(buf.get(..n)?).ok()?.trim().parse().ok()
+            })
+            .unwrap_or(now.memory_peak_bytes);
+        core::since(&now, base, peak)
+    }
+
     /// What the box has used, from its cgroup files; a file the kernel doesn't have reads as 0.
     pub fn usage(&self) -> Usage {
         let read = |f: &str| fs::read_to_string(self.dir.join(f)).unwrap_or_default();
@@ -432,6 +558,38 @@ fn swap_active() -> Result<bool, Refusal> {
     let text =
         fs::read_to_string(path).map_err(|e| os_err("reading the active swap list", path, e))?;
     Ok(text.lines().skip(1).any(|l| !l.trim().is_empty()))
+}
+
+/// Largest cgroup file Hex reads whole: `io.stat` and `cpu.stat` hold a few lines each; a file past
+/// this is damage, refused by type rather than read on.
+const MAX_CGROUP_FILE: usize = 64 << 10;
+
+/// A cgroup file's text, read with one open and as few reads as it takes, no stat (`fs::read_to_string`
+/// takes one per file to size its buffer): an idle cgroup's check and baseline read a dozen on create's
+/// path. Refused past [`MAX_CGROUP_FILE`].
+fn read_text(path: &Path) -> Result<String, Refusal> {
+    let fd = rustix::fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|e| os_err("reading a cgroup file", path, e))?;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = rustix::io::read(&fd, &mut buf)
+            .map_err(|e| os_err("reading a cgroup file", path, e))?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(buf.get(..n).unwrap_or_default());
+        if out.len() > MAX_CGROUP_FILE {
+            return Err(Refusal::Os {
+                op: "reading a cgroup file",
+                why: format!("{} is over {MAX_CGROUP_FILE} bytes", path.display()),
+            });
+        }
+    }
+    String::from_utf8(out).map_err(|e| Refusal::Os {
+        op: "reading a cgroup file",
+        why: format!("{} isn't UTF-8: {e}", path.display()),
+    })
 }
 
 pub fn write_file(path: &Path, value: &str) -> Result<(), Refusal> {

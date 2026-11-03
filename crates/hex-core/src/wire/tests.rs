@@ -1,10 +1,11 @@
 //! The wire format's tests (decision 3, HEX-SOCK-1 and HEX-SOCK-2): every request and answer reads
-//! back as written; version 1's and version 2's bytes are the ones recorded here, so a change to them
-//! fails (append-only), and a kind version 2 added is refused in a version 1 message; and hostile
-//! bytes, at every truncation, every bit flip and at random, are refused by type and never panic.
+//! back as written; version 1's, version 2's and version 3's bytes are the ones recorded here, so a
+//! change to them fails (append-only), a kind version 2 added is refused in a version 1 message, and a
+//! create's owner, which version 3 added, is refused in an earlier one; and hostile bytes, at every
+//! truncation, every bit flip and at random, are refused by type and never panic.
 
 use super::*;
-use hex_api::{Bounds, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
+use hex_api::{Bounds, BoxOwner, BoxSpec, IoRates, Mount, Network, OciSpec, Program, Rootfs, User};
 use proptest::prelude::*;
 
 fn id(s: &str) -> BoxId {
@@ -58,6 +59,7 @@ fn oci_spec() -> BoxSpec {
             network: Network::Private,
             hosts: vec![("db".to_owned(), "10.0.0.2".to_owned())],
         })),
+        owner: None,
     }
 }
 
@@ -80,21 +82,23 @@ fn requests() -> Vec<(u64, Request, usize)> {
         (1, Request::Hello, 0),
         (
             2,
-            Request::Call(Call::Create(BoxSpec {
+            Request::Call(Call::Create(Box::new(BoxSpec {
                 id: b.clone(),
                 bounds: bounds(),
                 class: ClassSpec::Bundle(PathBuf::from("/run/bundle-sleep")),
-            })),
+                owner: None,
+            }))),
             0,
         ),
-        (3, Request::Call(Call::Create(oci_spec())), 0),
+        (3, Request::Call(Call::Create(Box::new(oci_spec()))), 0),
         (
             4,
-            Request::Call(Call::Create(BoxSpec {
+            Request::Call(Call::Create(Box::new(BoxSpec {
                 id: id("p"),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
-            })),
+                owner: None,
+            }))),
             0,
         ),
         (5, Request::Call(Call::Start(b.clone())), 0),
@@ -613,6 +617,69 @@ fn a_kind_a_later_version_added_is_refused_in_an_earlier_one() {
     );
 }
 
+/// HEX-SOCK-2, append-only (goal 5 extended, step 6): version 3 appends a create's owner to its body,
+/// as the bytes recorded here say: an option byte, then the name as a string and a byte for whether its
+/// boxes' cgroups may be handed on. Every other kind is written in version 3 as in version 2 but for the
+/// version in its header, and a create naming no owner as in version 2 with its option's none byte
+/// after. A create naming an owner can't be written in version 1 or 2: refused, never sent without it.
+#[test]
+fn version_3_messages_are_the_bytes_recorded() {
+    let as_v3 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+        bytes
+    };
+    for (n, req, _) in requests() {
+        let mut want = as_v3(request(2, n, &req, MAX_MESSAGE).unwrap());
+        if matches!(req, Request::Call(Call::Create(_))) {
+            want.push(0);
+        }
+        assert_eq!(request(3, n, &req, MAX_MESSAGE).unwrap(), want, "{req:?}");
+    }
+    for (n, ans) in answers() {
+        assert_eq!(
+            answer(3, n, &ans, MAX_MESSAGE).unwrap(),
+            as_v3(answer(2, n, &ans, MAX_MESSAGE).unwrap()),
+            "{ans:?}"
+        );
+    }
+    let owned = |reuse| {
+        Request::Call(Call::Create(Box::new(BoxSpec {
+            owner: Some(BoxOwner {
+                name: "o".to_owned(),
+                reuse,
+            }),
+            ..oci_spec()
+        })))
+    };
+    let unowned = Request::Call(Call::Create(Box::new(oci_spec())));
+    for (reuse, byte) in [(true, 1u8), (false, 0u8)] {
+        let mut want = as_v3(request(2, 4, &unowned, MAX_MESSAGE).unwrap());
+        want.extend_from_slice(&[1, 1, 0, 0, 0, b'o', byte]);
+        let bytes = request(3, 4, &owned(reuse), MAX_MESSAGE).unwrap();
+        assert_eq!(bytes, want);
+        let (_, back) = read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap();
+        assert_eq!(back, owned(reuse));
+        for older in [1u16, 2] {
+            assert!(
+                matches!(
+                    request(older, 4, &owned(reuse), MAX_MESSAGE),
+                    Err(Fault::Value {
+                        what: "a create's owner",
+                        ..
+                    })
+                ),
+                "version {older} wrote an owner"
+            );
+        }
+    }
+    // A version 2 create read by a version 3 agent names no owner.
+    let v2 = request(2, 4, &unowned, MAX_MESSAGE).unwrap();
+    assert_eq!(
+        read_request(&received(&v2, 0), MAX_MESSAGE).unwrap().1,
+        unowned
+    );
+}
+
 /// HEX-SOCK-1: descriptors travel only with an exec, one for each stream it names; any other count,
 /// or more than the three a message takes, is refused by type.
 #[test]
@@ -885,7 +952,13 @@ fn any_spec() -> impl Strategy<Value = BoxSpec> {
         any_path().prop_map(ClassSpec::Bundle),
         oci,
     ];
-    (any_id(), any_bounds(), class).prop_map(|(id, bounds, class)| BoxSpec { id, bounds, class })
+    let owner = proptest::option::of(("\\PC{0,16}", any::<bool>()));
+    (any_id(), any_bounds(), class, owner).prop_map(|(id, bounds, class, owner)| BoxSpec {
+        id,
+        bounds,
+        class,
+        owner: owner.map(|(name, reuse)| BoxOwner { name, reuse }),
+    })
 }
 
 fn any_exit() -> impl Strategy<Value = Exit> {
@@ -955,7 +1028,7 @@ proptest! {
     /// HEX-SOCK-2: any create, and any exec, reads back as written.
     #[test]
     fn any_create_or_exec_reads_back(spec in any_spec(), program in any_program(), id in any_id(), n in any::<u64>(), bits in 0u8..8) {
-        let req = Request::Call(Call::Create(spec));
+        let req = Request::Call(Call::Create(Box::new(spec)));
         let bytes = request(VERSION, n, &req, MAX_MESSAGE).unwrap();
         prop_assert_eq!(read_request(&received(&bytes, 0), MAX_MESSAGE).unwrap(), (Header { version: VERSION, kind: 0x0002, id: n }, req));
         let streams = Streams::of(bits).unwrap();

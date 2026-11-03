@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use hex_api::{BoxSpec, ClassSpec, Exit, Refusal};
 use serde::{Deserialize, Serialize};
 
+use crate::cgroup::Baseline;
+
 /// The record format's version; a record of another is refused, never guessed at.
 pub const RECORD_VERSION: u32 = 1;
 /// Largest record Hex reads: a spec with its mounts and program fits in a few kilobytes, so a
@@ -35,6 +37,21 @@ pub struct BoxRecord {
     /// record without it reads as 0 (append-only).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub abandoned: u64,
+    /// The slot its cgroup is named by, for a box given a cgroup that may be handed on to its owner's
+    /// next box (goal 5 extended, step 6; [`crate::reuse`]): a cgroup can't be renamed, so one that
+    /// outlives its box is named by its slot, never by a box's id (research f35, f64). Added within
+    /// version 1, so a record without it names a cgroup by its box's id (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<Slot>,
+}
+
+/// A cgroup that may be handed from box to box of one owner ([`crate::reuse`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Slot {
+    /// Its number, which names its cgroup ([`crate::reuse::name`]).
+    pub n: u64,
+    /// Its cumulative counters when this box was given it, which its usage is reported from.
+    pub baseline: Baseline,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -73,6 +90,7 @@ impl BoxRecord {
             dirs,
             exit: None,
             abandoned: 0,
+            slot: None,
         }
     }
 
@@ -185,6 +203,7 @@ mod tests {
             id: BoxId::new("r1").unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
+            owner: None,
         };
         BoxRecord::new(
             spec,
@@ -218,6 +237,31 @@ mod tests {
                 .unwrap()
                 .abandoned,
             3
+        );
+    }
+
+    /// Goal 5 extended, step 6, append-only: a record of a box whose cgroup is its own reads and writes
+    /// as before, with no slot; one whose cgroup is a slot keeps the slot and its baseline.
+    #[test]
+    fn a_records_slot_is_kept_and_a_record_without_one_reads_as_before() {
+        let r = record();
+        let text = String::from_utf8(r.encode().unwrap()).unwrap();
+        assert!(!text.contains("slot"), "{text}");
+        assert_eq!(BoxRecord::decode(text.as_bytes()).unwrap().slot, None);
+        let mut slotted = r;
+        slotted.slot = Some(Slot {
+            n: 7,
+            baseline: Baseline {
+                cpu_usec: 1,
+                io_read_bytes: 2,
+                io_write_bytes: 3,
+                oom_kills: 4,
+                pids_refused: 5,
+            },
+        });
+        assert_eq!(
+            BoxRecord::decode(&slotted.encode().unwrap()).unwrap(),
+            slotted
         );
     }
 

@@ -110,6 +110,13 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let recovered = node.recover().map_err(failed)?;
     {
         let mut err = std::io::stderr().lock();
+        for n in &recovered.slots_removed {
+            let _ = writeln!(
+                err,
+                "hex node: recovered: removed idle cgroup {}: no box's record named it",
+                hex_core::reuse::name(*n)
+            );
+        }
         for (id, why) in &recovered.removed {
             let _ = writeln!(err, "hex node: recovered: removed {id}: {why}");
         }

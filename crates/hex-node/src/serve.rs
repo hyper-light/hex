@@ -972,7 +972,7 @@ impl Shared {
                     Err(r) => self.answer(conn, header.version, header.id, &Answer::Refused(r)),
                 };
             }
-            Call::Create(spec) => host.create(spec).map(Answer::Info),
+            Call::Create(spec) => host.create(*spec).map(Answer::Info),
             Call::Start(id) => host.start(&id).map(|()| Answer::Done),
             Call::Signal { id, signal } => host.signal(&id, signal).map(|()| Answer::Done),
             Call::Inspect(id) => host.inspect(&id).map(Answer::Info),

@@ -28,8 +28,9 @@ use hex_api::{
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
-use hex_core::record::{BoxRecord, Phase, ProcId};
+use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
+use hex_core::reuse;
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
@@ -40,12 +41,13 @@ use hex_runtime::linux::oci::state::{State, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
+use crate::cgroups::{self, Cgroups, Choice, Made};
 use crate::createpool::CreatePool;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
-use crate::supervise::{self, Live, Supervisor};
+use crate::supervise::{self, Forgotten, Live, Supervisor};
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -111,6 +113,13 @@ pub struct Node {
     /// The `oci` boxes' device programs: one held open per policy, and on a root node the default
     /// policy's on [`Node::oci_boxes`]'s root.
     devices: Programs,
+    /// The `oci` boxes' cgroups that may be handed from box to box of one owner, and how the node's
+    /// deletes ended their boxes (goal 5 extended, step 6).
+    cgroups: Cgroups,
+    /// The ids of the creates under way: a second create of one is refused as [`Refusal::Exists`] before
+    /// it makes anything, whatever its cgroup is named, since an owned box's is named by its slot and its
+    /// `mkdir` claims no id. At most [`hex_runtime::linux::cgroup::MAX_BOXES`].
+    making: Mutex<BTreeSet<BoxId>>,
     store: Store,
     /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under
     /// ([`oci_root`]), shared with the other nodes on the host that run as this one's user.
@@ -171,6 +180,9 @@ pub struct RecoverySummary {
     pub adopted: Vec<BoxId>,
     /// Boxes removed, each with why.
     pub removed: Vec<(BoxId, String)>,
+    /// Slots removed that no box's record named: idle when the agent stopped, or a create's caught
+    /// before its record (goal 5 extended, step 6).
+    pub slots_removed: Vec<u64>,
 }
 
 impl Node {
@@ -217,10 +229,20 @@ impl Node {
         })?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
+        // Fresh slots are numbered past every slot already under the root, so none is made twice.
+        let first = slots_in(&oci_boxes)?
+            .last()
+            .map_or(Some(0), |n| n.checked_add(1))
+            .ok_or_else(|| {
+                Refusal::Broken("the oci boxes' root holds the last slot a u64 numbers".to_owned())
+            })?;
+        let cgroups = Cgroups::start(first)?;
         Ok(Self {
             root,
             oci_boxes,
             devices,
+            cgroups,
+            making: Mutex::new(BTreeSet::new()),
             store,
             oci_root,
             key,
@@ -330,10 +352,55 @@ impl Node {
         self.oci_boxes.dir()
     }
 
-    /// Box `id`'s cgroup: an `oci` box's under the oci boxes' root, else (a `process` box, or an `oci`
-    /// box made before its node kept them apart) under the box root.
+    /// Box `id`'s cgroup directory, while it has one: a slot's for a box given one, else its own.
+    pub fn cgroup_dir(&self, id: &BoxId) -> Option<PathBuf> {
+        self.cgroup(id).map(|cg| cg.dir().to_path_buf())
+    }
+
+    /// What the node's pool of idle cgroups has done since it opened (goal 5 extended, step 6).
+    pub fn cgroup_reuse(&self) -> Result<cgroups::Counts, Refusal> {
+        self.cgroups.counts()
+    }
+
+    /// How the node's deletes have ended their boxes since it opened: through an init's pidfd, that
+    /// falling back to `cgroup.kill`, or `cgroup.kill` (goal 5 extended, step 6).
+    pub fn kills(&self) -> cgroups::Kills {
+        self.cgroups.kills()
+    }
+
+    /// Removes every idle cgroup now, before it returns: for a caller that wants none left waiting (a
+    /// test's end, a shutdown). Recovery removes those a crash leaves.
+    pub fn release_idle(&self) -> Result<(), Refusal> {
+        self.cgroups.drain(&self.oci_boxes)
+    }
+
+    /// Box `id`'s cgroup: a slot's for a live box given one, else an `oci` box's under the oci boxes'
+    /// root, else (a `process` box, or an `oci` box made before its node kept them apart) under the box
+    /// root.
     fn cgroup(&self, id: &BoxId) -> Option<BoxCgroup> {
+        if let Ok(Some(n)) = self.cgroups.slot_of(id) {
+            return self.oci_boxes.slot(n);
+        }
         self.oci_boxes.get(id).or_else(|| self.root.get(id))
+    }
+
+    /// Takes `id` for a create under way, refused as [`Refusal::Exists`] while another holds it; released
+    /// when the claim drops.
+    fn claim(&self, id: &BoxId) -> Result<Claim<'_>, Refusal> {
+        let mut making = self
+            .making
+            .lock()
+            .map_err(|_| Refusal::Broken("the node's creates' lock was poisoned".to_owned()))?;
+        if making.len() >= hex_runtime::linux::cgroup::MAX_BOXES {
+            return Err(Refusal::Full(hex_runtime::linux::cgroup::MAX_BOXES));
+        }
+        if !making.insert(id.clone()) {
+            return Err(Refusal::Exists(id.clone()));
+        }
+        Ok(Claim {
+            making: &self.making,
+            id: id.clone(),
+        })
     }
 
     /// The `oci` runtime, over the node's state root and helper binary.
@@ -515,6 +582,7 @@ impl Node {
         for (id, record) in self.store.all()? {
             seen.entry(id).or_default().record = Some(record);
         }
+        let slots: BTreeSet<u64> = slots_in(&self.oci_boxes)?.into_iter().collect();
         // Both roots' cgroups; the oci boxes' root itself is no box (its name is no id).
         for name in self
             .root
@@ -534,8 +602,17 @@ impl Node {
             seen.entry(id.clone()).or_default();
         }
         for (id, s) in &mut seen {
+            // A box given a slot has its cgroup where its record names it, not at its id (goal 5
+            // extended, step 6).
+            let slot = match &s.record {
+                Some(Ok(r)) => r.slot.map(|slot| slot.n),
+                _ => None,
+            };
             s.parts = Parts {
-                cgroup: self.cgroup(id).is_some(),
+                cgroup: match slot {
+                    Some(n) => slots.contains(&n),
+                    None => self.cgroup(id).is_some(),
+                },
                 state_dir: state_dirs.contains(id),
                 bundle: bundles.contains(id),
             };
@@ -549,9 +626,40 @@ impl Node {
             }
         }
         let mut summary = RecoverySummary::default();
+        // The slots no readable record names, idle or a create's caught before its record: ended and
+        // removed first, so nothing of them is left (T-T7.1.2).
+        for n in recovery::strays(&seen, &slots) {
+            if let Some(cg) = self.oci_boxes.slot(n) {
+                cg.kill()?;
+                if !cg.wait_empty(EMPTY_PATIENCE)? {
+                    return Err(Refusal::Os {
+                        op: "removing an idle cgroup",
+                        why: format!(
+                            "slot {n} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
+                            survivors(&cg)
+                        ),
+                    });
+                }
+                cg.remove()?;
+            }
+            summary.slots_removed.push(n);
+        }
         for (id, decision) in recovery::plan(&seen) {
             match decision {
-                Decision::Adopt => summary.adopted.push(id),
+                Decision::Adopt => {
+                    // A box taken back keeps its slot, reported from the baseline its record holds.
+                    let slot = seen
+                        .get(&id)
+                        .and_then(|s| s.record.as_ref())
+                        .and_then(|r| r.as_ref().ok())
+                        .and_then(|r| r.slot);
+                    if let Some(slot) = slot
+                        && let Some(cg) = self.oci_boxes.slot(slot.n)
+                    {
+                        self.cgroups.adopt(&id, slot.n, slot.baseline, &cg)?;
+                    }
+                    summary.adopted.push(id);
+                }
                 Decision::Remove(why) => {
                     self.scrub(&id)?;
                     summary.removed.push((id, why_text(&why)));
@@ -563,34 +671,116 @@ impl Node {
 
     /// Ends what runs in a box and removes every trace of it, each part tolerant of being gone.
     fn scrub(&self, id: &BoxId) -> Result<(), Refusal> {
-        if let Some(cg) = self.cgroup(id) {
-            cg.kill()?;
-            // The kill reaches every process in the box; now reap the exec'd programs the agent watches
-            // for it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until
-            // the programs in that namespace are reaped — can finish exiting and the box empty.
-            self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
-            if !cg.wait_empty(EMPTY_PATIENCE)? {
-                return Err(Refusal::Os {
-                    op: "emptying a box",
-                    why: format!(
-                        "box {id} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
-                        survivors(&cg)
-                    ),
-                });
+        self.scrub_ending(id, &Ending::Kill, None)
+    }
+
+    /// Ends what runs in box `id` as `ending` says ([`Node::end`]) and removes every trace of it, each
+    /// part tolerant of being gone. A box given a slot has it named by its record or
+    /// `held`, its delete's; the slot goes back to its owner's idle cgroups last, once its box's record is
+    /// gone, so a crash before leaves it to recovery and never to two boxes (goal 5 extended, step 6).
+    fn scrub_ending(
+        &self,
+        id: &BoxId,
+        ending: &Ending<'_>,
+        mut held: Option<cgroups::Held>,
+    ) -> Result<(), Refusal> {
+        let record = match self.store.get(id)? {
+            Some(Ok(r)) => Some(r),
+            None | Some(Err(_)) => None,
+        };
+        let slot = record
+            .as_ref()
+            .and_then(|r| r.slot)
+            .map(|slot| slot.n)
+            .or_else(|| held.as_ref().map(|h| h.slot));
+        let cg = match slot {
+            Some(n) => self.oci_boxes.slot(n),
+            None => self.cgroup(id),
+        };
+        if let Some(cg) = &cg {
+            if self.end(id, cg, ending)?
+                && let Some(held) = held.as_mut()
+            {
+                held.mark_killed();
             }
-            cg.remove()?;
+            if slot.is_none() {
+                cg.remove()?;
+            }
         }
         // The directories the box owns: those its record names (a box made before its node kept
         // container state under the runtime directory names `<state>/oci/<id>`), or, with no record to
         // read, those at the paths its id fixes, which a box caught mid-create left.
-        let dirs = match self.store.get(id)? {
-            Some(Ok(r)) => r.dirs,
-            None | Some(Err(_)) => vec![self.container_dir(id), self.bundles.join(id.as_str())],
+        let dirs = match record {
+            Some(r) => r.dirs,
+            None => vec![self.container_dir(id), self.bundles.join(id.as_str())],
         };
         for dir in &dirs {
             remove_tree(dir, REMOVE_PATIENCE)?;
         }
-        self.store.remove(id)
+        self.store.remove(id)?;
+        if let (Some(cg), Some(_)) = (cg, slot) {
+            match held {
+                Some(held) => self.cgroups.give_back(cg, held, &self.oci_boxes)?,
+                None => cg.remove()?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends every process in box `id`'s cgroup `cg` and waits until none is left, bounded. An `oci` box
+    /// whose init made a pid namespace of its own is ended through the init's pidfd, which takes no
+    /// `cgroup_mutex` and kills the namespace (research f45, f46, f50). Its exec'd programs are reaped,
+    /// since the init's end waits for them (f48), and once the init has ended anything still in the cgroup
+    /// with a process of its own is outside the namespace (f47): then, and for every other box, ended
+    /// by `cgroup.kill` as before (f49). An `oci` box whose init ended and was reaped before its delete
+    /// needs no kill when its cgroup holds nothing: a pid namespace of its own ended with it. Each way is
+    /// counted ([`Node::kills`]). Says whether it wrote `cgroup.kill`, after which the cgroup can't be
+    /// handed on ([`cgroups::Held`]'s `killed`).
+    fn end(&self, id: &BoxId, cg: &BoxCgroup, ending: &Ending<'_>) -> Result<bool, Refusal> {
+        if let Ending::Ended = ending
+            && !cg.populated()?
+        {
+            self.cgroups.ended_through_init();
+            return Ok(false);
+        }
+        if let Ending::Init(init) = ending
+            && init.pid_namespace
+        {
+            init.kill()?;
+            self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
+            if !init.ended_within(EMPTY_PATIENCE)? {
+                return Err(Refusal::Os {
+                    op: "emptying a box",
+                    why: format!(
+                        "box {id}'s init still runs {EMPTY_PATIENCE:?} after SIGKILL through its pidfd"
+                    ),
+                });
+            }
+            // The init leaves its cgroup at its last switch, after its pidfd reads as ended (Linux v6.19,
+            // kernel/sched/core.c:5156), so a cgroup that holds nothing else empties without a kill.
+            if !cg.populated()? || (!outsiders(cg, init.pid()) && cg.wait_empty(EMPTY_PATIENCE)?) {
+                self.cgroups.ended_through_init();
+                return Ok(false);
+            }
+            self.cgroups.fell_back();
+        } else {
+            self.cgroups.killed();
+        }
+        cg.kill()?;
+        // The kill reaches every process in the box; now reap the exec'd programs the agent watches for
+        // it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until the
+        // programs in that namespace are reaped — can finish exiting and the box empty.
+        self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
+        if !cg.wait_empty(EMPTY_PATIENCE)? {
+            return Err(Refusal::Os {
+                op: "emptying a box",
+                why: format!(
+                    "box {id} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
+                    survivors(cg)
+                ),
+            });
+        }
+        Ok(true)
     }
 
     /// A `process` box: its cgroup with the bounds in force, empty until [`Runtime::exec`]. Its record
@@ -616,6 +806,11 @@ impl Node {
     /// cgroup) lies at a path the box's id fixes, where recovery finds it (goal 5 extended, step 5).
     /// The cgroup is made first and claims the id: a create of an id taken since the check fails at its
     /// mkdir, as [`Refusal::Exists`], having made nothing, and so removes nothing.
+    ///
+    /// A box whose spec names an owner has its cgroup chosen once the runtime has read its spec
+    /// ([`Choice`]): its owner's idle cgroup under the box's device policy when one reads clean, else a
+    /// fresh slot, else a cgroup of its own (goal 5 extended, step 6). Its bundle comes first, and the id is
+    /// the create's claim's ([`Node::claim`]).
     fn create_oci(&self, spec: BoxSpec, source: Source) -> Result<BoxInfo, Refusal> {
         // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
         // left unwatched.
@@ -631,9 +826,16 @@ impl Node {
         if let Source::Rendered(dir, _) = &source {
             dirs.push(dir.clone());
         }
-        let cgroup = self.oci_boxes.create(&id, &spec.bounds)?;
-        #[cfg(debug_assertions)]
-        self.crash_point(CrashPoint::CgroupMade);
+        let cgroup = match &spec.owner {
+            None => {
+                let cg = self.oci_boxes.create(&id, &spec.bounds)?;
+                self.cgroups.no_owner();
+                #[cfg(debug_assertions)]
+                self.crash_point(CrashPoint::CgroupMade);
+                Some(cg)
+            }
+            Some(_) => None,
+        };
         let bundle = match source {
             Source::Given(bundle) => bundle,
             Source::Rendered(dir, rendered) => match write_bundle(&dir, &rendered) {
@@ -648,31 +850,40 @@ impl Node {
                 }
             },
         };
+        let choice = spec
+            .owner
+            .as_ref()
+            .map(|owner| Choice::new(&self.cgroups, &self.oci_boxes, &id, owner, &spec.bounds));
         let made = self.supervisor.spawning().and_then(|_spawning| {
             // A container that makes a network namespace of its own in the agent's user namespace
             // joins one the node made ahead, and the pool counts every container's (decision 4). Its
             // device program is one the node holds, or the oci boxes' root's (goal 5 extended, step 1).
-            self.oci()
-                .create_in_cgroup_seeded(
-                    &self.container(&id),
-                    &bundle,
-                    None,
-                    cgroup,
-                    Held {
-                        networks: Some(&self.netns),
-                        devices: Some(&self.devices),
-                    },
-                    seeds,
-                )
-                .map_err(Refusal::from)
+            let held = Held {
+                networks: Some(&self.netns),
+                devices: Some(&self.devices),
+            };
+            let name = self.container(&id);
+            match (cgroup, &choice) {
+                (Some(cg), _) => self
+                    .oci()
+                    .create_in_cgroup_seeded(&name, &bundle, None, cg, held, seeds),
+                (None, Some(choice)) => self
+                    .oci()
+                    .create_chosen_seeded(&name, &bundle, choice, held, seeds),
+                (None, None) => Err(OciError::Broken(format!(
+                    "box {id}'s create has neither a cgroup nor an owner to choose one"
+                ))),
+            }
+            .map_err(Refusal::from)
         });
+        let (chose, refused) = choice.map(Choice::made).unwrap_or((None, None));
         let state = match made {
             Ok(state) => state,
             Err(e) => {
                 // The container, if it started, is in the cgroup; scrub ends it and removes the cgroup,
-                // the state dir and the bundle.
-                let _ = self.scrub(&id);
-                return Err(e);
+                // the state dir and the bundle, and a slot the create took is ended and removed with it.
+                self.unmade(&id, chose);
+                return Err(refused.unwrap_or(e));
             }
         };
         // The init is blocked at the exec FIFO, alive, and the agent's child; the state is the one the
@@ -682,6 +893,12 @@ impl Node {
         // that names it.
         let mut record = BoxRecord::new(spec, Phase::Ready, dirs);
         record.init = init_proc_id(state.pid, state.start_time);
+        if let Some(Made::Slot(held)) = &chose {
+            record.slot = Some(Slot {
+                n: held.slot,
+                baseline: held.baseline,
+            });
+        }
         let watched = self.store.put(&record).and_then(|()| {
             let start_ticks = state.start_time.ok_or_else(|| {
                 Refusal::Broken(format!("container {id}'s state has no start time"))
@@ -689,6 +906,7 @@ impl Node {
             let container = supervise::Container {
                 bundle: state.bundle,
                 cgroup: state.cgroup,
+                pid_namespace: state.pid_namespace == Some(true),
             };
             // Watched under the spawning lock, so no sweep reaps the init before it's owned; until
             // then a sweep passes it by, alive at the exec FIFO.
@@ -696,8 +914,13 @@ impl Node {
             self.supervisor
                 .watch(slot, &id, state.pid, start_ticks, container)
         });
-        if let Err(e) = watched {
-            let _ = self.scrub(&id);
+        let watched = match (watched, chose) {
+            (Ok(()), Some(Made::Slot(held))) => self.cgroups.hold(&id, held).map_err(|e| (e, None)),
+            (Ok(()), _) => Ok(()),
+            (Err(e), chose) => Err((e, chose)),
+        };
+        if let Err((e, chose)) = watched {
+            self.unmade(&id, chose);
             return Err(e);
         }
         // The box as create made it: its container created, its init at the exec FIFO, nothing exec'd
@@ -711,6 +934,18 @@ impl Node {
             exit: None,
             abandoned: 0,
         })
+    }
+
+    /// Takes apart what a failed create of box `id` made: its own cgroup, directories and record through
+    /// [`Node::scrub`], and the slot it took (`chose`), ended and removed, never handed on, since a half
+    /// made box may have left anything in it.
+    fn unmade(&self, id: &BoxId, chose: Option<Made>) {
+        let _ = self.scrub(id);
+        if let Some(Made::Slot(held)) = chose
+            && let Some(cg) = self.oci_boxes.slot(held.slot)
+        {
+            self.cgroups.remove_later(cg);
+        }
     }
 
     /// A box's [`OciSpec`] as a bundle in a directory of its own, rendered ([`bundle::render`]) and
@@ -892,12 +1127,11 @@ impl Runtime for Node {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.bounds.check()?;
-        // A structured spec is checked before anything else, as the simulator checks it: what can't
-        // be rendered is refused by name whether or not the id is taken (HEX-RT-13).
-        if let ClassSpec::Oci(oci) = &spec.class {
-            oci.check()?;
-        }
+        // A spec is checked before anything else, as the simulator checks it: what can't be rendered,
+        // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
+        // HEX-RT-14).
+        spec.check()?;
+        let _claim = self.claim(&spec.id)?;
         // A cgroup under either root is a box's, recorded or not: a failed create's scrub would end it.
         if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
@@ -985,6 +1219,10 @@ impl Runtime for Node {
         let cg = self
             .cgroup(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        // KILL goes to the whole box through `cgroup.kill`, after which its cgroup can't be handed on.
+        if signal == Signal::KILL {
+            self.cgroups.killed_in(id)?;
+        }
         cg.signal(id, signal)
     }
 
@@ -1000,7 +1238,12 @@ impl Runtime for Node {
         let cg = self
             .cgroup(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
-        Ok(cg.usage())
+        // A box given a slot is reported what it used since: its counters from the baseline read when it
+        // was given the slot, its peak through the descriptor written then (goal 5 extended, step 6).
+        match self.cgroups.usage(id, &cg)? {
+            Some(usage) => Ok(usage),
+            None => Ok(cg.usage()),
+        }
     }
 
     fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
@@ -1030,6 +1273,11 @@ impl Runtime for Node {
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
+        // An `oci` box whose init the supervisor reaped already, its exit in the record, has no init to
+        // forget: it ended on its own (`true` does).
+        let ended = record
+            .as_ref()
+            .is_some_and(|r| r.spec.class.class() == Class::Oci && r.exit.is_some());
         // Unwatched first, so the supervisor stops collecting the init; an exit it's recording as it's
         // unwatched goes into this box's record alone, which the scrub removes.
         let init = self.supervisor.forget(id)?;
@@ -1037,7 +1285,14 @@ impl Runtime for Node {
             record.phase = Phase::Deleting;
             self.store.put(&record)?;
         }
-        self.scrub(id)?;
+        // The box's slot, if it holds one, goes back to its owner once the box is gone.
+        let held = self.cgroups.release(id)?;
+        let ending = match &init {
+            Some(init) => Ending::Init(init),
+            None if ended => Ending::Ended,
+            None => Ending::Kill,
+        };
+        self.scrub_ending(id, &ending, held)?;
         if let Ok(mut pending) = self.abandoned.lock() {
             pending.remove(id);
         }
@@ -1144,6 +1399,92 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
                 .to_owned()
         }
     }
+}
+
+/// How a delete or a scrub ends a box's processes ([`Node::end`]).
+enum Ending<'a> {
+    /// Through the box's watched init, its pidfd's SIGKILL when the init made a pid namespace of its own;
+    /// `cgroup.kill` otherwise.
+    Init(&'a Forgotten),
+    /// The box's init ended and was reaped before the delete, its exit in the box's record: nothing to
+    /// kill when the cgroup holds nothing more, else `cgroup.kill`.
+    Ended,
+    /// `cgroup.kill`.
+    Kill,
+}
+
+/// A create's claim on its box's id ([`Node::claim`]), let go when it drops.
+struct Claim<'a> {
+    making: &'a Mutex<BTreeSet<BoxId>>,
+    id: BoxId,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut making) = self.making.lock() {
+            making.remove(&self.id);
+        }
+    }
+}
+
+/// The slots under the oci boxes' root, by number, lowest first ([`reuse::slot_of`]).
+fn slots_in(root: &BoxRoot) -> Result<Vec<u64>, Refusal> {
+    let mut slots: Vec<u64> = root
+        .boxes()?
+        .iter()
+        .filter_map(|name| reuse::slot_of(name))
+        .collect();
+    slots.sort_unstable();
+    Ok(slots)
+}
+
+/// Most cgroups and threads [`outsiders`] reads: past either, it says there are, so the box is ended by
+/// `cgroup.kill` as before.
+const OUTSIDERS_DIRS: usize = 256;
+const OUTSIDERS_THREADS: usize = 4096;
+
+/// Whether `cg`'s subtree holds a thread of a live process other than `init`, whose own threads may
+/// stay listed until each is gone: once a pid namespace's init has ended, the namespace's processes
+/// have all been released (Linux v6.19, kernel/pid_namespace.c:263-265), so such a thread is outside it
+/// (research f47). A listed thread whose process is gone from /proc is on its way out. A flat walk,
+/// bounded in cgroups and threads (CLAUDE.md §11, §2).
+fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
+    let mut queue = vec![cg.dir().to_path_buf()];
+    let (mut dirs, mut threads) = (0usize, 0usize);
+    while let Some(dir) = queue.pop() {
+        dirs = dirs.saturating_add(1);
+        if dirs > OUTSIDERS_DIRS {
+            return true;
+        }
+        let Ok(text) = fs::read_to_string(dir.join("cgroup.threads")) else {
+            continue;
+        };
+        for tid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            threads = threads.saturating_add(1);
+            if threads > OUTSIDERS_THREADS {
+                return true;
+            }
+            let tgid = fs::read_to_string(format!("/proc/{tid}/status"))
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Tgid:"))
+                        .and_then(|v| v.trim().parse::<i32>().ok())
+                });
+            if tgid.is_some_and(|tgid| tgid != init) {
+                return true;
+            }
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    queue.push(entry.path());
+                }
+            }
+        }
+    }
+    false
 }
 
 fn why_text(why: &Why) -> String {

@@ -147,10 +147,7 @@ impl Runtime for SimRuntime {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        spec.bounds.check()?;
-        if let ClassSpec::Oci(oci) = &spec.class {
-            oci.check()?;
-        }
+        spec.check()?;
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id));
@@ -421,6 +418,7 @@ mod tests {
                     Self::Bundle => ClassSpec::Bundle("/bundle".into()),
                     Self::Spec => self.oci(&Act::Wait),
                 },
+                owner: None,
             }
         }
         fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
@@ -431,6 +429,7 @@ mod tests {
                     Self::Process => ClassSpec::Process,
                     Self::Bundle | Self::Spec => self.oci(act),
                 },
+                owner: None,
             }
         }
         fn program(&self, act: &Act) -> Program {

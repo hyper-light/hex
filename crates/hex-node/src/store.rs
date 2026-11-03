@@ -580,6 +580,7 @@ mod tests {
             id: BoxId::new(id).unwrap(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
+            owner: None,
         };
         BoxRecord::new(spec, Phase::Ready, vec![])
     }

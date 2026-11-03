@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use crate::{
-    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Mount, Network, OciSpec, Program,
-    Refusal, Rootfs, Runtime, Signal, Stdio,
+    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, Mount, Network, OciSpec,
+    Program, Refusal, Rootfs, Runtime, Signal, Stdio,
 };
 
 /// What a fixture's program does.
@@ -125,6 +125,11 @@ pub const CASES: &[Case] = &[
         id: "HEX-RT-13",
         says: "create of an oci box whose spec names a value that can't be rendered is refused as Invalid naming the field, and makes nothing",
         run: unrenderable,
+    },
+    Case {
+        id: "HEX-RT-14",
+        says: "create of a box whose spec names a malformed owner is refused as Invalid naming the field, and makes nothing; boxes of one owner, made and deleted in turn, each run what any box runs",
+        run: owned,
     },
 ];
 
@@ -531,6 +536,7 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(spec)),
+            owner: None,
         });
         ensure(
             matches!(&got, Err(Refusal::Invalid { what: "oci spec", why }) if why.contains(field)),
@@ -539,6 +545,65 @@ fn unrenderable(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         let left = rt.inspect(&id);
         ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
             format!("a refused create (broken {field}) made {left:?}")
+        })?;
+    }
+    Ok(())
+}
+
+/// HEX-RT-14 (goal 5 extended, step 6): an owner whose name isn't well formed is refused before
+/// anything is made, by the field's name. Boxes of one well-formed owner, made and deleted in turn, are
+/// made as any box is and run what any box runs: a node hands the later box the cgroup the earlier one
+/// left, which the box sees only in its usage.
+fn owned(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let id = id("owned")?;
+    let _ = rt.delete(&id);
+    let long = "o".repeat(BoxOwner::MAX_NAME + 1);
+    for name in ["", "two words", long.as_str()] {
+        let mut spec = fx.spec(id.clone(), Bounds::default());
+        spec.owner = Some(BoxOwner {
+            name: name.to_owned(),
+            reuse: true,
+        });
+        let got = rt.create(spec);
+        ensure(
+            matches!(&got, Err(Refusal::Invalid { what: "box owner", why }) if why.contains("owner.name")),
+            || format!("create with owner {name:?}: {got:?}"),
+        )?;
+        let left = rt.inspect(&id);
+        ensure(left == Err(Refusal::NoSuchBox(id.clone())), || {
+            format!("a refused create (owner {name:?}) made {left:?}")
+        })?;
+    }
+    let owner = BoxOwner::named("hex-conformance-owner").map_err(|e| e.to_string())?;
+    for round in ["first", "second"] {
+        let mut spec = fx.spec(id.clone(), Bounds::default());
+        spec.owner = Some(owner.clone());
+        let class = spec.class.class();
+        rt.create(spec)
+            .map_err(|e| format!("create of the {round} owned box: {e}"))?;
+        if class == Class::Oci {
+            rt.start(&id)
+                .map_err(|e| format!("start of the {round} owned box: {e}"))?;
+        }
+        let (mut r, w) = piped()?;
+        let mut p = rt
+            .exec(
+                &id,
+                fx.program(&Act::Say("an owned box")),
+                Stdio {
+                    stdout: Some(w),
+                    ..Stdio::null()
+                },
+            )
+            .map_err(|e| format!("exec in the {round} owned box: {e}"))?;
+        let exit = ended(&mut p)?;
+        let mut out = String::new();
+        r.read_to_string(&mut out)
+            .map_err(|e| format!("read: {e}"))?;
+        rt.delete(&id)
+            .map_err(|e| format!("delete of the {round} owned box: {e}"))?;
+        ensure(exit == Exit::Code(0) && out == "an owned box\n", || {
+            format!("the {round} owned box's program: exit {exit:?}, stdout {out:?}")
         })?;
     }
     Ok(())

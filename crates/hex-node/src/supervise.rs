@@ -90,6 +90,9 @@ struct Init {
 pub struct Container {
     pub bundle: String,
     pub cgroup: Option<String>,
+    /// Whether the init is the first process of a pid namespace its create made, so ending it ends the
+    /// whole namespace ([`Forgotten::kill`]).
+    pub pid_namespace: bool,
 }
 
 /// A box's running init, for an exec into it: its pid, a duplicate of its pidfd (by which the program
@@ -315,9 +318,10 @@ impl Supervisor {
         self.collect(id)
     }
 
-    /// Stops watching box `id`'s init, which the box's delete is about to end; returns its pidfd, if
-    /// it hasn't been reaped, for the delete to reap it once the box is empty. An exit being recorded
-    /// as it's forgotten goes into this box's record alone, which the delete removes.
+    /// Stops watching box `id`'s init, which the box's delete is about to end; returns it, with its pidfd
+    /// if it hasn't been reaped, for the delete to end and reap once the box is empty. An exit being
+    /// recorded as it's forgotten goes into this box's record alone, which the delete removes. `None` for
+    /// a box whose init isn't watched: a `process` box, or one the node took back after a restart.
     pub fn forget(&self, id: &BoxId) -> Result<Option<Forgotten>, Refusal> {
         let mut inits = self.inits()?;
         inits.by_token.retain(|_, b| b != id);
@@ -333,10 +337,11 @@ impl Supervisor {
             epoll::delete(self.epoll.as_fd(), fd.as_fd())
                 .map_err(|e| Refusal::os("unwatching a deleted box's init", e))?;
         }
-        // Still owned: the delete reaps it ([`reap`]), which disowns it.
-        Ok(pidfd.map(|pidfd| Forgotten {
+        // Still owned while its pidfd is held: the delete reaps it ([`reap`]), which disowns it.
+        Ok(Some(Forgotten {
             pid: init.pid,
             pidfd,
+            pid_namespace: init.container.pid_namespace,
         }))
     }
 
@@ -793,16 +798,70 @@ fn exit_of(status: &WaitIdStatus) -> Exit {
     }
 }
 
-/// A deleted box's init, unwatched but still owned, for the delete to reap.
+/// A deleted box's init, unwatched but still owned until reaped, for the delete to end and reap.
 pub struct Forgotten {
     pid: i32,
-    pidfd: OwnedFd,
+    /// `None` once the supervisor reaped it.
+    pidfd: Option<OwnedFd>,
+    /// Whether ending it ends a pid namespace of its own ([`Container::pid_namespace`]).
+    pub pid_namespace: bool,
 }
 
-/// Reaps a deleted box's init, which has ended since its box is empty, and disowns it.
+impl Forgotten {
+    /// Its pid, in the node agent's pid namespace.
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    /// Sends the init SIGKILL through its pidfd, which ends its pid namespace with it: the kernel kills
+    /// every process in the namespace when its init ends (pid_namespaces(7); Linux v6.19
+    /// `zap_pid_ns_processes`, kernel/pid_namespace.c:231), and a SIGKILL from an ancestor namespace
+    /// reaches an init without a handler (kernel/signal.c:1190-1191). The signal takes no `cgroup_mutex`,
+    /// where `cgroup.kill`'s write does (research f45, f46, f50). An init that has ended already, or been
+    /// reaped, has nothing left to end.
+    pub fn kill(&self) -> Result<(), Refusal> {
+        let Some(pidfd) = &self.pidfd else {
+            return Ok(());
+        };
+        match rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL) {
+            Ok(()) | Err(Errno::SRCH) => Ok(()),
+            Err(e) => Err(Refusal::os(
+                "killing a deleted box's init through its pidfd",
+                e,
+            )),
+        }
+    }
+
+    /// Waits until the init has ended, at most `patience`: its pidfd turns readable then
+    /// (pidfd_open(2)). Its pid namespace's processes are all gone by then, since its end waits for them
+    /// (kernel/pid_namespace.c:263-265). One reaped already has ended.
+    pub fn ended_within(&self, patience: Duration) -> Result<bool, Refusal> {
+        let Some(pidfd) = &self.pidfd else {
+            return Ok(true);
+        };
+        let ts = Timespec {
+            tv_sec: i64::try_from(patience.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(patience.subsec_nanos()),
+        };
+        let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
+        loop {
+            match rustix::event::poll(&mut fds, Some(&ts)) {
+                Ok(n) => return Ok(n > 0),
+                Err(Errno::INTR) => continue,
+                Err(e) => return Err(Refusal::os("waiting on a deleted box's init", e)),
+            }
+        }
+    }
+}
+
+/// Reaps a deleted box's init, which has ended since its box is empty, and disowns it. One the
+/// supervisor reaped already was disowned then.
 pub fn reap(init: &Forgotten) -> Result<(), Refusal> {
+    let Some(pidfd) = &init.pidfd else {
+        return Ok(());
+    };
     let reaped = match rustix::process::waitid(
-        WaitId::PidFd(init.pidfd.as_fd()),
+        WaitId::PidFd(pidfd.as_fd()),
         WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
     ) {
         Ok(_) | Err(Errno::CHILD) => Ok(()),

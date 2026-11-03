@@ -552,6 +552,22 @@ impl Spec {
         Ok(())
     }
 
+    /// Whether the container's process could change its own cgroup or what is attached to it, so a
+    /// cgroup it leaves behind isn't handed to another box (goal 5 extended, step 6): it may hold
+    /// CAP_SYS_ADMIN, which mounts a cgroup filesystem it can write (a spec that gives no capability
+    /// sets keeps its creator's, all of them for a root node's container), or it holds CAP_BPF with
+    /// CAP_NET_ADMIN, which load a cgroup device program (Linux v6.19, kernel/bpf/syscall.c:2930-2941)
+    /// and attach it to the cgroup it can open.
+    pub fn could_change_its_cgroup(&self) -> bool {
+        let given = self
+            .process
+            .as_ref()
+            .is_some_and(|p| p.capabilities.is_some());
+        !given
+            || self.holds_capability("CAP_SYS_ADMIN")
+            || (self.holds_capability("CAP_BPF") && self.holds_capability("CAP_NET_ADMIN"))
+    }
+
     /// Whether any of the process's capability sets names `cap`.
     fn holds_capability(&self, cap: &str) -> bool {
         self.process

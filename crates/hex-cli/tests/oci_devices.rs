@@ -158,6 +158,7 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
         id: process.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
+        owner: None,
     })
     .unwrap();
 
@@ -490,6 +491,7 @@ fn make(node: &Node, id: &str, bundle: PathBuf) -> BoxId {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
+        owner: None,
     })
     .unwrap_or_else(|e| panic!("create {id}: {e}"));
     node.start(&id).unwrap();

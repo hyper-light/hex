@@ -98,6 +98,7 @@ mod linux {
             id: id.clone(),
             bounds: bounds(),
             class: ClassSpec::Bundle(bundle.to_path_buf()),
+            owner: None,
         }
     }
 

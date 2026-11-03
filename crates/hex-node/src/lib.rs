@@ -19,6 +19,8 @@
 pub mod store;
 
 #[cfg(target_os = "linux")]
+pub mod cgroups;
+#[cfg(target_os = "linux")]
 mod createpool;
 #[cfg(target_os = "linux")]
 mod netns;

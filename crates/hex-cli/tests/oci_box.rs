@@ -205,6 +205,7 @@ impl Lab {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle(args)),
+            owner: None,
         }
     }
 
@@ -214,6 +215,7 @@ impl Lab {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle_with(&Self::act(&Act::Wait), true)),
+            owner: None,
         }
     }
 
@@ -244,6 +246,7 @@ impl Fixture for Lab {
             id,
             bounds,
             class: ClassSpec::Bundle(self.bundle(&Self::act(&Act::Wait))),
+            owner: None,
         }
     }
 
@@ -252,6 +255,7 @@ impl Fixture for Lab {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.bundle(&Self::act(act))),
+            owner: None,
         }
     }
 
@@ -359,6 +363,7 @@ fn a_bundle_joining_a_namespace_by_path_runs_through_the_seam(lab: &Lab, own: &P
         id: joiner.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(dir),
+        owner: None,
     })
     .expect("a bundle joining a namespace by path is made through the seam");
     node.start(&joiner).expect("start the joiner");
@@ -414,6 +419,7 @@ fn play_the_agent(dirs: &Path, exe: &str) -> ! {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
+        owner: None,
     });
     match made {
         // Waits to be killed either way, as the harness ends it.
@@ -900,6 +906,7 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Process,
+        owner: None,
     })
     .unwrap();
     let (mut out, w) = std::io::pipe().unwrap();
@@ -1002,6 +1009,7 @@ fn held_record_write(lab: &Lab, own: &Path) {
             network: Network::Host,
             hosts: Vec::new(),
         })),
+        owner: None,
     };
     let busy = specs("busy", 31);
     let ids: Vec<BoxId> = busy.iter().map(|s| s.id.clone()).collect();
@@ -1178,6 +1186,7 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
             network: Network::Host,
             hosts: Vec::new(),
         })),
+        owner: None,
     })
     .expect("create a box with its bundle's writable layer on disk");
     assert_eq!(
@@ -1272,6 +1281,7 @@ fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(bundle),
+            owner: None,
         },
         Phase::Ready,
         vec![before.join(id.as_str())],
@@ -1350,6 +1360,7 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
+        owner: None,
     };
     let mut live = BoxRecord::new(spec(&old_live), Phase::Ready, vec![container.clone()]);
     live.init = Some(ProcId {
@@ -1431,6 +1442,7 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle),
+        owner: None,
     })
     .expect("create through a seed");
     let after = node.create_seeds().unwrap();

@@ -12,7 +12,13 @@
 //!   - in a plain rootless host-network box, read its mount table: expect the host cgroup filesystem
 //!     its `/sys` bind carries, beneath its own, mounted read-only (the bind's remount makes the
 //!     carried cgroup filesystems read-only, which a recursive bind's read-only otherwise leaves to
-//!     its top), so a box that ever reached it couldn't change it.
+//!     its top), so a box that ever reached it couldn't change it; and have it unmount its own cgroup
+//!     filesystem off that: expect the unmount refused, its `/sys/fs/cgroup` still its own;
+//!   - goal 5 extended step 6's probe: beside a victim box, a rootless box holding `CAP_SYS_ADMIN` in a
+//!     user namespace and a network namespace of its own (allowed) unmounts its cgroup filesystem and
+//!     mounts a fresh cgroup2 one: expect the unmount and the mount to leave it its own cgroup alone,
+//!     the victim's cgroup reachable from neither, so no box can change another's before a cgroup is
+//!     handed from box to box.
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where that
 //! isn't possible it prints SKIP and why rather than pass falsely. The refused box goes through the
@@ -126,6 +132,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         id: attacker.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle_dir),
+        owner: None,
     });
     let _attacker_cleanup = Deleting(&node, attacker.clone());
     let why = match made {
@@ -154,6 +161,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
             network: Network::Host,
             hosts: Vec::new(),
         })),
+        owner: None,
     })
     .expect("create the plain box");
     let _plain_cleanup = Deleting(&node, plain.clone());
@@ -199,18 +207,152 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         );
     }
 
+    // The plain box can't unmount its own cgroup filesystem off the host's: it holds no CAP_SYS_ADMIN.
+    let mut unmount = Program::of(&[
+        "/usr/bin/sh",
+        "-c",
+        "umount -l /sys/fs/cgroup 2>/out/umount.err; echo $? > /out/umount.rc; \
+         cat /proc/self/mountinfo > /out/after-umount",
+    ]);
+    unmount
+        .env
+        .push(("PATH".to_owned(), "/usr/bin:/bin".to_owned()));
+    let ended = node
+        .exec(&plain, unmount, Stdio::null())
+        .expect("exec the unmount")
+        .wait_for(PATIENCE)
+        .expect("wait for the unmount")
+        .expect("the unmount ended within its patience");
+    assert_eq!(ended, Exit::Code(0), "the unmount's script failed");
+    let rc = std::fs::read_to_string(out.join("umount.rc")).unwrap();
+    assert_ne!(
+        rc.trim(),
+        "0",
+        "a box without CAP_SYS_ADMIN unmounted its cgroup filesystem: {}",
+        std::fs::read_to_string(out.join("umount.err")).unwrap_or_default()
+    );
+    let after = std::fs::read_to_string(out.join("after-umount")).unwrap();
+    assert_eq!(
+        after
+            .lines()
+            .filter(|l| l.contains(" /sys/fs/cgroup ") && l.contains(" - cgroup2 "))
+            .count(),
+        cgroups.len(),
+        "the box's cgroup filesystems are as they were:\n{after}"
+    );
     node.delete(&plain).expect("delete the plain box");
+
+    // Goal 5 extended, step 6's probe: a victim box, and beside it a box holding CAP_SYS_ADMIN in a user
+    // namespace and a network namespace of its own, which unmounts its cgroup filesystem and mounts a
+    // fresh one. Neither view reaches the victim's cgroup.
+    let victim = BoxId::new("victim-cgfs").unwrap();
+    node.create(BoxSpec {
+        id: victim.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: Rootfs::Dir(plain_rootfs.clone()),
+            init: Program::of(&["/usr/bin/sleep", "600"]),
+            mounts: vec![bind("/usr", "/usr", true)],
+            hostname: None,
+            network: Network::Private,
+            hosts: Vec::new(),
+        })),
+        owner: None,
+    })
+    .expect("create the victim box");
+    let _victim_cleanup = Deleting(&node, victim.clone());
+    node.start(&victim).expect("start the victim box");
+    let prober_dir = work.path().join("prober-bundle");
+    std::fs::create_dir_all(&prober_dir).unwrap();
+    render_cap_sys_admin_bundle(
+        &prober_dir,
+        &attacker_rootfs,
+        Owner::Rootless { uid, gid },
+        Network::Private,
+        &[bind("/usr", "/usr", true), bind_path(&out, "/out", false)],
+    );
+    let prober = BoxId::new("prober-cgfs").unwrap();
+    node.create(BoxSpec {
+        id: prober.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(prober_dir),
+        owner: None,
+    })
+    .expect("a box holding CAP_SYS_ADMIN with a network namespace of its own is made");
+    let _prober_cleanup = Deleting(&node, prober.clone());
+    node.start(&prober).expect("start the prober");
+    let mut probe = Program::of(&[
+        "/usr/bin/sh",
+        "-c",
+        "umount -l /sys/fs/cgroup; echo $? > /out/probe-umount.rc; \
+         find /sys/fs/cgroup -maxdepth 4 > /out/probe-sys.ls 2>&1; \
+         mkdir -p /tmp/cg && mount -t cgroup2 none /tmp/cg; echo $? > /out/probe-mount.rc; \
+         find /tmp/cg -maxdepth 4 > /out/probe-cg.ls 2>&1; true",
+    ]);
+    probe
+        .env
+        .push(("PATH".to_owned(), "/usr/bin:/bin".to_owned()));
+    let ended = node
+        .exec(&prober, probe, Stdio::null())
+        .expect("exec the probe")
+        .wait_for(PATIENCE)
+        .expect("wait for the probe")
+        .expect("the probe ended within its patience");
+    assert_eq!(ended, Exit::Code(0), "the probe's script failed");
+    let seen = |file: &str| std::fs::read_to_string(out.join(file)).unwrap_or_default();
+    let (sys, cg) = (seen("probe-sys.ls"), seen("probe-cg.ls"));
+    for (view, listing) in [
+        ("/sys/fs/cgroup after the unmount", &sys),
+        ("a fresh cgroup2", &cg),
+    ] {
+        assert!(
+            !listing.contains(victim.as_str()) && !listing.contains("hex-oci-cgfs"),
+            "the prober reached another box's cgroup through {view}:\n{listing}"
+        );
+    }
+    // Its fresh cgroup2 mount, where the mount was let through, is rooted at its own cgroup: no
+    // sub-cgroup of any other box is under it.
+    let dirs: Vec<&str> = cg
+        .lines()
+        .filter(|l| !l.contains("/cgroup.") && !l.contains("/memory.") && !l.contains("/cpu"))
+        .filter(|l| !l.contains("/io.") && !l.contains("/pids.") && !l.contains("/misc."))
+        .collect();
+    eprintln!(
+        "step 6 probe: unmount rc {}, mount rc {}, reachable: {dirs:?}",
+        seen("probe-umount.rc").trim(),
+        seen("probe-mount.rc").trim()
+    );
+    node.delete(&prober).expect("delete the prober");
+    node.delete(&victim).expect("delete the victim");
 }
 
 /// Renders the rootless host-network bundle the node would render for the attacker's spec, adds
 /// CAP_SYS_ADMIN to its capability sets, and writes `config.json` and `hosts` into `bundle_dir`.
 fn render_attacker_bundle(bundle_dir: &Path, rootfs: &Path, owner: Owner) {
+    render_cap_sys_admin_bundle(
+        bundle_dir,
+        rootfs,
+        owner,
+        Network::Host,
+        &[bind("/usr", "/usr", true)],
+    );
+}
+
+/// Renders the bundle the node would render for a box on `network` with `mounts`, adds CAP_SYS_ADMIN to
+/// its capability sets, and writes `config.json` and `hosts` into `bundle_dir`.
+fn render_cap_sys_admin_bundle(
+    bundle_dir: &Path,
+    rootfs: &Path,
+    owner: Owner,
+    network: Network,
+    mounts: &[Mount],
+) {
     let spec = OciSpec {
         rootfs: Rootfs::Dir(rootfs.to_path_buf()),
         init: Program::of(&["/usr/bin/sleep", "600"]),
-        mounts: vec![bind("/usr", "/usr", true)],
+        mounts: mounts.to_vec(),
         hostname: None,
-        network: Network::Host,
+        network,
         hosts: Vec::new(),
     };
     let rendered = render(

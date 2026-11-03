@@ -89,6 +89,7 @@ mod linux {
                 ..Bounds::default()
             },
             class: ClassSpec::Process,
+            owner: None,
         })
         .expect("victim box");
         node.create(BoxSpec {
@@ -98,6 +99,7 @@ mod linux {
                 ..Bounds::default()
             },
             class: ClassSpec::Process,
+            owner: None,
         })
         .expect("builder box");
         let vfile = cache.join("victim.dat").to_string_lossy().into_owned();

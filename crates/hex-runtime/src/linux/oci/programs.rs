@@ -114,22 +114,37 @@ impl Programs {
         }
     }
 
-    /// Gives box cgroup `cg` the device program `plan` asks for, on a create through the seam
-    /// ([`devshare::give`]): nothing for the root's policy, else the program held for the policy, loaded
-    /// first only when none is. A container in a user namespace of its own is held to its device list by
-    /// construction and refused an allow-by-default list with denials, as before
-    /// ([`Plan::check_in_userns`]); under the root's program it carries the allow-all program, so the
-    /// root's default doesn't decide for it in construction's place.
-    pub fn attach(&self, cg: &BoxCgroup, plan: &Plan, in_userns: bool) -> Result<(), OciError> {
+    /// The program `plan` asks a box's own cgroup to carry on a create through the seam
+    /// ([`devshare::give`]): `None` for the root's policy (the root's program decides) or, with no root
+    /// program, for a policy that allows every device; else the policy's program. A container in a user
+    /// namespace of its own is held to its device list by construction and refused an allow-by-default
+    /// list with denials, as before ([`Plan::check_in_userns`]); under the root's program it carries the
+    /// allow-all program, so the root's default doesn't decide for it in construction's place. What a
+    /// cgroup handed on must carry already for a box to be given it (goal 5 extended, step 6).
+    pub fn wants(&self, plan: &Plan, in_userns: bool) -> Result<Option<Vec<Insn>>, OciError> {
         let policy = if in_userns {
             plan.check_in_userns()?;
             None
         } else {
             plan.devices.as_deref()
         };
-        let Give::Program(insns) = devshare::give(policy, self.root.as_deref()) else {
-            return Ok(());
-        };
+        Ok(match devshare::give(policy, self.root.as_deref()) {
+            Give::Nothing => None,
+            Give::Program(insns) => Some(insns),
+        })
+    }
+
+    /// Gives box cgroup `cg` the device program `plan` asks for ([`Programs::wants`]): the program held
+    /// for the policy, loaded first only when none is.
+    pub fn attach(&self, cg: &BoxCgroup, plan: &Plan, in_userns: bool) -> Result<(), OciError> {
+        match self.wants(plan, in_userns)? {
+            Some(insns) => self.attach_program(cg, insns),
+            None => Ok(()),
+        }
+    }
+
+    /// Attaches the program held for `insns` to box cgroup `cg`, loading it first only when none is.
+    pub fn attach_program(&self, cg: &BoxCgroup, insns: Vec<Insn>) -> Result<(), OciError> {
         let prog = self.program(insns)?;
         let dir = cg
             .open_dir()

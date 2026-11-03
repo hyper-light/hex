@@ -12,6 +12,10 @@
 //! - HEX-SOCK-6, the disconnect rule: a caller that goes away while its exec'd programs run (its
 //!   connection closes with no release, as when its process dies) has each program ended and reaped,
 //!   and counted in its box, which inspect reports; nothing it started is left running;
+//! - T-T7.1.2 (goal 5 extended step 6): kill the agent while a box of an owner holds a slot and another
+//!   box's slot is idle, with a box of no owner beside them, and restart it: the idle slot is removed,
+//!   said so on stderr, the live boxes are taken back, the owner's in its recorded slot, and once they're
+//!   deleted nothing is left under the oci boxes' root;
 //! - T-T7.1.2 (goal 5 plan step 2; goal 5 extended step 5): kill the agent at each point of a create
 //!   (in a debug build, at its cgroup made and at its bundle rendered, where the agent armed by
 //!   `hex node --crash-at` kills itself; its cgroup and its container's state directory made; its
@@ -40,7 +44,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Bounds, BoxId, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime, Stdio,
+    Bounds, BoxId, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, Program, Refusal, Runtime,
+    Stdio,
 };
 #[cfg(debug_assertions)]
 use hex_api::{Network, OciSpec, Rootfs};
@@ -297,6 +302,23 @@ impl Lab {
         dir
     }
 
+    /// A bundle whose container runs `args` holding Docker's default capabilities (no CAP_SYS_ADMIN), so
+    /// its box's cgroup may be handed to its owner's next box (goal 5 extended, step 6).
+    fn bundle_owned(&self, args: &[String]) -> PathBuf {
+        let dir = self.bundle(args);
+        let caps = r#"["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]"#;
+        let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
+        let config = config.replace(
+            r#""noNewPrivileges": true"#,
+            &format!(
+                r#""capabilities": {{"bounding": {caps}, "effective": {caps}, "permitted": {caps}}},
+    "noNewPrivileges": true"#
+            ),
+        );
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        dir
+    }
+
     /// An `OciSpec` the node renders a bundle for: the lab's rootfs, the host's network, an init that
     /// waits.
     #[cfg(debug_assertions)]
@@ -345,6 +367,7 @@ impl Fixture for OciBoxes<'_> {
             id,
             bounds,
             class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(&Act::Wait), self.1)),
+            owner: None,
         }
     }
 
@@ -353,6 +376,7 @@ impl Fixture for OciBoxes<'_> {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(self.0.bundle_with(&Lab::act(act), self.1)),
+            owner: None,
         }
     }
 
@@ -370,6 +394,7 @@ impl Fixture for ProcessBoxes<'_> {
             id,
             bounds,
             class: ClassSpec::Process,
+            owner: None,
         }
     }
 
@@ -406,6 +431,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         "process boxes over the socket: {failures:#?}"
     );
     disconnect(&lab, &agent, &client);
+    a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(&lab, own, exe);
     crash_at_each_point_of_a_create(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
 }
@@ -419,6 +445,7 @@ fn example(lab: &Lab, client: &Client) -> Result<(), String> {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        owner: None,
     });
     let info = made.map_err(|e| e.to_string())?;
     assert_eq!((info.class, info.state), (Class::Oci, BoxState::Created));
@@ -487,6 +514,7 @@ fn namespaces_counted(lab: &Lab, client: &Client) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(lab.bundle_with(&Lab::act(&Act::Wait), true)),
+            owner: None,
         })
         .unwrap();
     client.delete(&id).unwrap();
@@ -537,6 +565,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             id: oci.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+            owner: None,
         })
         .unwrap();
     client.start(&oci).unwrap();
@@ -545,6 +574,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             id: process.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Process,
+            owner: None,
         })
         .unwrap();
     let init = procs(&agent.box_root.join(OCI_BOXES), &oci);
@@ -776,6 +806,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         id: id.clone(),
         bounds: Bounds::default(),
         class,
+        owner: None,
     };
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut agent = Agent::armed(
@@ -1020,6 +1051,7 @@ fn a_box_cannot_arm_the_agents_crash_point(lab: &Lab, own: &Path, exe: &str) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(spec)),
+            owner: None,
         })
         .expect("a box naming the crash point is made");
     assert_eq!(made.state, BoxState::Created);
@@ -1032,6 +1064,114 @@ fn a_box_cannot_arm_the_agents_crash_point(lab: &Lab, own: &Path, exe: &str) {
 
 /// The state directories under `oci_root` of box `id`'s container, whatever node's: each is named
 /// `<node key>-<box id>`, the key 16 hex digits.
+/// The cgroups under the oci boxes' root `oci` that are slots ([`hex_core::reuse::slot_of`]).
+fn slots_under(oci: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(oci)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|name| hex_core::reuse::slot_of(name).is_some())
+        .collect()
+}
+
+/// Goal 5 extended, step 6 (T-T7.1.2). Do: over the socket, make and start boxes A and B of owner O and a
+/// box U of none, delete A (its slot goes idle), SIGKILL the agent, and start it again over the same
+/// state. Expect: the restarted agent removes A's idle slot and says so; takes B back in its recorded
+/// slot and U by its id, both running, B's usage read through its slot; and once both are deleted
+/// nothing is left under the oci boxes' root and no box is listed.
+fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("agent-reuse-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let box_root = own.join("hex-sock-reuse");
+    let mut agent = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = agent.client();
+    let o = BoxOwner::named("owner-crash").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let id = |name: &str| BoxId::new(name).unwrap();
+    for (name, owner) in [
+        ("crash-a", Some(&o)),
+        ("crash-b", Some(&o)),
+        ("crash-u", None),
+    ] {
+        client
+            .create(BoxSpec {
+                id: id(name),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle_owned(&wait)),
+                owner: owner.cloned(),
+            })
+            .unwrap();
+        client.start(&id(name)).unwrap();
+    }
+    let oci = box_root.join(OCI_BOXES);
+    let slots = slots_under(&oci);
+    assert_eq!(slots.len(), 2, "A and B each hold a slot: {slots:?}");
+    assert!(
+        oci.join("crash-u").is_dir(),
+        "U's cgroup is its own, named by its id"
+    );
+    client.delete(&id("crash-a")).unwrap();
+    assert_eq!(
+        slots_under(&oci),
+        slots,
+        "A's slot is kept idle for its owner"
+    );
+    drop(client);
+    agent.child.kill().unwrap();
+    let ended = agent.child.wait().unwrap();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&ended),
+        Some(9)
+    );
+    drop(agent);
+    let again = Agent::over(exe, dir.path(), box_root.clone(), None);
+    wait_for(
+        "the restarted agent to say it removed the idle slot",
+        || again.errors().contains("removed idle cgroup"),
+    );
+    let left = slots_under(&oci);
+    assert_eq!(
+        left.len(),
+        1,
+        "A's idle slot is removed, B's kept: {left:?}"
+    );
+    let client = again.client();
+    for name in ["crash-b", "crash-u"] {
+        let info = client.inspect(&id(name)).unwrap();
+        assert_eq!(
+            info.state,
+            BoxState::Running,
+            "{name} is taken back running"
+        );
+    }
+    client.usage(&id("crash-b")).unwrap();
+    for name in ["crash-b", "crash-u"] {
+        client.delete(&id(name)).unwrap();
+    }
+    let names: Vec<String> = std::fs::read_dir(&oci)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    assert!(
+        names.is_empty(),
+        "nothing is left under the oci boxes' root: {names:?}"
+    );
+    assert!(client.list().unwrap().is_empty(), "no box is listed");
+    eprintln!(
+        "T-T7.1.2, step 6: idle slot removed on restart ({}), B taken back in {left:?}, nothing left",
+        again
+            .errors()
+            .lines()
+            .filter(|l| l.contains("idle cgroup"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
 fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(oci_root) else {
         return Vec::new();

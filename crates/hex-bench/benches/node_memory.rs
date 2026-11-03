@@ -122,6 +122,7 @@ fn main() {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Process,
+            owner: None,
         })
         .unwrap();
     }
@@ -136,6 +137,7 @@ fn main() {
                 ..Bounds::default()
             },
             class: ClassSpec::Process,
+            owner: None,
         })
         .unwrap();
     }

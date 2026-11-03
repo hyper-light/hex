@@ -28,14 +28,19 @@
 //!
 //! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
 //! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
+//!
+//! Version 3 (goal 5 extended, step 6) appends a create's owner to its body ([`hex_api::BoxOwner`]): an
+//! option of the owner's name and a byte, 1 when its boxes' cgroups may be handed on and 0 when it opts
+//! out. A create of version 1 or 2 names no owner, and one that names an owner can't be written in
+//! either: it is refused before it is written, never sent without its owner (§3).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, IoRates, Mount, Network,
-    OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
+    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, Class, ClassSpec, Exit, IoRates, Mount,
+    Network, OciSpec, Program, Refusal, Rootfs, Signal, Usage, User,
 };
 
 use crate::netns;
@@ -43,7 +48,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -119,7 +124,7 @@ pub enum Request {
 /// A call of the node agent: the `Runtime` seam's, and from version 2 its network namespace counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
-    Create(BoxSpec),
+    Create(Box<BoxSpec>),
     Start(BoxId),
     /// `program` in box `id`, with the streams `streams` names as the message's descriptors, in order.
     Exec {
@@ -463,7 +468,9 @@ pub fn read_request(msg: &Received<'_>, bound: usize) -> Result<(Header, Request
     let request = match kind {
         kind::HELLO => Request::Hello,
         kind::RELEASE => Request::Release,
-        kind::CREATE => Request::Call(Call::Create(box_spec(&mut r).map_err(bad)?)),
+        kind::CREATE => Request::Call(Call::Create(Box::new(
+            box_spec(&mut r, version).map_err(bad)?,
+        ))),
         kind::START => Request::Call(Call::Start(box_id(&mut r).map_err(bad)?)),
         kind::EXEC => {
             let id = box_id(&mut r).map_err(bad)?;
@@ -640,7 +647,7 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
     match call {
         Call::Create(spec) => {
             w.header(version, kind::CREATE, id);
-            put_box_spec(w, spec)
+            put_box_spec(w, version, spec)
         }
         Call::Start(b) => {
             w.header(version, kind::START, id);
@@ -689,7 +696,7 @@ fn put_call(w: &mut Writer, version: u16, id: u64, call: &Call) -> Result<(), Fa
     }
 }
 
-fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
+fn put_box_spec(w: &mut Writer, version: u16, spec: &BoxSpec) -> Result<(), Fault> {
     w.string(spec.id.as_str())?;
     put_bounds(w, &spec.bounds);
     match &spec.class {
@@ -703,10 +710,25 @@ fn put_box_spec(w: &mut Writer, spec: &BoxSpec) -> Result<(), Fault> {
             w.path(path)?;
         }
     }
+    if version >= OWNERS {
+        w.option_with(spec.owner.as_ref(), |w, owner| {
+            w.string(&owner.name)?;
+            w.bool(owner.reuse);
+            Ok(())
+        })?;
+    } else if spec.owner.is_some() {
+        return Err(Fault::value(
+            "a create's owner",
+            format!("version {version} carries none; version {OWNERS} does"),
+        ));
+    }
     Ok(())
 }
 
-fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
+/// The version whose create carries the box's owner.
+const OWNERS: u16 = 3;
+
+fn box_spec(r: &mut Reader<'_>, version: u16) -> Result<BoxSpec, Fault> {
     let id = box_id(r)?;
     let bounds = bounds(r)?;
     let class = match r.u8()? {
@@ -715,7 +737,21 @@ fn box_spec(r: &mut Reader<'_>) -> Result<BoxSpec, Fault> {
         2 => ClassSpec::Bundle(r.path()?),
         t => return Err(Fault::value("class spec", format!("variant {t}"))),
     };
-    Ok(BoxSpec { id, bounds, class })
+    let owner = if version >= OWNERS {
+        r.option(|r| {
+            let name = r.string("owner.name")?;
+            let reuse = r.bool("owner.reuse")?;
+            Ok(BoxOwner { name, reuse })
+        })?
+    } else {
+        None
+    };
+    Ok(BoxSpec {
+        id,
+        bounds,
+        class,
+        owner,
+    })
 }
 
 fn put_bounds(w: &mut Writer, b: &Bounds) {

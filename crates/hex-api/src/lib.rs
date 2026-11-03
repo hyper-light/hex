@@ -28,4 +28,6 @@ mod spec;
 pub use bounds::{Bounds, IoRates};
 pub use id::BoxId;
 pub use runtime::{BoxInfo, BoxState, Exit, Proc, Refusal, Runtime, Signal, Usage};
-pub use spec::{BoxSpec, Class, ClassSpec, Mount, Network, OciSpec, Program, Rootfs, Stdio, User};
+pub use spec::{
+    BoxOwner, BoxSpec, Class, ClassSpec, Mount, Network, OciSpec, Program, Rootfs, Stdio, User,
+};

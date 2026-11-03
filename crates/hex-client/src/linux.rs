@@ -467,7 +467,7 @@ impl Runtime for Client {
     }
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
-        self.info(Call::Create(spec), "create")
+        self.info(Call::Create(Box::new(spec)), "create")
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {

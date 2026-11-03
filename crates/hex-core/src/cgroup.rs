@@ -1,7 +1,11 @@
 //! A box's bounds as cgroup v2 file writes, and its usage read back from cgroup v2 files. File names,
-//! formats and units are the kernel's (Documentation/admin-guide/cgroup-v2.rst).
+//! formats and units are the kernel's (Documentation/admin-guide/cgroup-v2.rst). A cgroup handed from
+//! one box to the next of its owner (goal 5 extended, step 6; [`crate::reuse`]) has every bound written
+//! again ([`writes_all`]) and its usage reported from what it had used when the box was given it
+//! ([`Baseline`], [`since`]).
 
 use hex_api::{Bounds, Refusal, Usage};
+use serde::{Deserialize, Serialize};
 
 /// `cpu.max`'s period, in microseconds: the kernel's default (100 ms).
 pub const CPU_PERIOD_US: u64 = 100_000;
@@ -87,6 +91,128 @@ pub fn writes(bounds: &Bounds, disks: &[Dev]) -> Result<Vec<Write>, Refusal> {
         out.push(w("pids.max", max.to_string()));
     }
     Ok(out)
+}
+
+/// What to write so a cgroup an earlier box left holds `bounds` and nothing of the earlier box's: every
+/// file [`writes`] can write, each bound `bounds` doesn't set at the kernel's default for its file
+/// (Documentation/admin-guide/cgroup-v2.rst v6.19: `cpu.weight` 100, `cpu.max` "max 100000",
+/// `memory.max`, `memory.swap.max`, `memory.high` and `pids.max` "max", `io.weight` "default 100",
+/// `io.max`'s rates "max"; `io.latency`'s "target=max" turns it off, block/blk-iolatency.c:873-874).
+/// In the order [`writes`] keeps. A file the kernel doesn't have (a controller not handed down, a kernel
+/// without swap accounting) holds no earlier box's value either, so the shell skips a default it can't
+/// open; a bound the box sets is refused, as [`writes`]'s is, before anything is made.
+pub fn writes_all(bounds: &Bounds, disks: &[Dev]) -> Result<Vec<Write>, Refusal> {
+    bounds.check()?;
+    let set = writes(bounds, disks)?;
+    let given = |file: &str, disk: Option<Dev>| {
+        set.iter()
+            .find(|w| {
+                w.file == file
+                    && disk
+                        .is_none_or(|d| w.value.starts_with(&format!("{}:{} ", d.major, d.minor)))
+            })
+            .map(|w| w.value.clone())
+    };
+    let mut out = vec![
+        w(
+            "cpu.weight",
+            given("cpu.weight", None).unwrap_or_else(|| "100".to_owned()),
+        ),
+        w(
+            "cpu.max",
+            given("cpu.max", None).unwrap_or_else(|| format!("max {CPU_PERIOD_US}")),
+        ),
+        w(
+            "memory.max",
+            given("memory.max", None).unwrap_or_else(|| "max".to_owned()),
+        ),
+        w(
+            "memory.swap.max",
+            given("memory.swap.max", None).unwrap_or_else(|| "max".to_owned()),
+        ),
+        w(
+            "memory.high",
+            given("memory.high", None).unwrap_or_else(|| "max".to_owned()),
+        ),
+        w(
+            "io.weight",
+            given("io.weight", None).unwrap_or_else(|| "default 100".to_owned()),
+        ),
+    ];
+    for d in disks {
+        let dev = format!("{}:{}", d.major, d.minor);
+        out.push(w(
+            "io.latency",
+            given("io.latency", Some(*d)).unwrap_or_else(|| format!("{dev} target=max")),
+        ));
+        out.push(w(
+            "io.max",
+            given("io.max", Some(*d))
+                .unwrap_or_else(|| format!("{dev} rbps=max wbps=max riops=max wiops=max")),
+        ));
+    }
+    out.push(w(
+        "pids.max",
+        given("pids.max", None).unwrap_or_else(|| "max".to_owned()),
+    ));
+    Ok(out)
+}
+
+/// Whether `write` sets a file to the kernel's default for it rather than to a bound a box asked for:
+/// such a write may be skipped where the file isn't there ([`writes_all`]).
+pub fn is_default(write: &Write) -> bool {
+    let v = write.value.as_str();
+    match write.file {
+        "cpu.weight" => v == "100",
+        "cpu.max" => v == format!("max {CPU_PERIOD_US}"),
+        "io.weight" => v == "default 100",
+        "io.latency" => v.ends_with(" target=max"),
+        "io.max" => v.ends_with(" rbps=max wbps=max riops=max wiops=max"),
+        _ => v == "max",
+    }
+}
+
+/// A cgroup's cumulative counters when a box was given it. A cgroup's counters run on from the boxes
+/// before it and none can be reset (research f32, f33), so a box given a cgroup another box left has its
+/// usage reported from these ([`since`]). Kept in the box's record, so a restarted node reports the same.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Baseline {
+    pub cpu_usec: u64,
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
+    pub oom_kills: u64,
+    pub pids_refused: u64,
+}
+
+impl Baseline {
+    /// The counters of `usage`, read from the cgroup as it's handed on.
+    pub fn of(usage: &Usage) -> Self {
+        Self {
+            cpu_usec: usage.cpu_usec,
+            io_read_bytes: usage.io_read_bytes,
+            io_write_bytes: usage.io_write_bytes,
+            oom_kills: usage.oom_kills,
+            pids_refused: usage.pids_refused,
+        }
+    }
+}
+
+/// What a box given a cgroup at `base` has used, from what the cgroup says now (`now`): each counter
+/// less the baseline's, its memory and processes as they are, and its peak as `peak` says, read through
+/// a `memory.peak` descriptor written when the box was given the cgroup, which reads the peak since that
+/// write alone (Linux 6.12 on; research f31), never the cgroup's lifetime peak. A counter under its
+/// baseline (it can't fall) reads 0. `pids.peak` never resets (f32), so a box's usage carries none.
+pub fn since(now: &Usage, base: &Baseline, peak: u64) -> Usage {
+    Usage {
+        memory_bytes: now.memory_bytes,
+        memory_peak_bytes: peak,
+        oom_kills: now.oom_kills.saturating_sub(base.oom_kills),
+        pids: now.pids,
+        pids_refused: now.pids_refused.saturating_sub(base.pids_refused),
+        cpu_usec: now.cpu_usec.saturating_sub(base.cpu_usec),
+        io_read_bytes: now.io_read_bytes.saturating_sub(base.io_read_bytes),
+        io_write_bytes: now.io_write_bytes.saturating_sub(base.io_write_bytes),
+    }
 }
 
 /// The cgroup files [`usage`] reads, by name; a file the kernel doesn't have reads as empty.
@@ -249,6 +375,110 @@ mod tests {
         assert_eq!(populated("populated 1\nfrozen 0\n"), Some(true));
         assert_eq!(populated("populated 0\nfrozen 0\n"), Some(false));
         assert_eq!(populated("garbage"), None);
+    }
+
+    /// Goal 5 extended, step 6: a cgroup handed on gets every bound again, those the next box doesn't
+    /// set at the kernel's defaults, so nothing of the last box's bounds stays in force.
+    #[test]
+    fn every_bound_is_written_again_with_the_kernels_default_for_those_unset() {
+        let disks = [Dev { major: 8, minor: 0 }];
+        let got: Vec<(&str, String)> = writes_all(&Bounds::default(), &disks)
+            .unwrap()
+            .into_iter()
+            .map(|w| (w.file, w.value))
+            .collect();
+        let want: Vec<(&str, String)> = vec![
+            ("cpu.weight", "100".into()),
+            ("cpu.max", "max 100000".into()),
+            ("memory.max", "max".into()),
+            ("memory.swap.max", "max".into()),
+            ("memory.high", "max".into()),
+            ("io.weight", "default 100".into()),
+            ("io.latency", "8:0 target=max".into()),
+            ("io.max", "8:0 rbps=max wbps=max riops=max wiops=max".into()),
+            ("pids.max", "max".into()),
+        ];
+        assert_eq!(got, want);
+        assert!(
+            writes_all(&Bounds::default(), &disks)
+                .unwrap()
+                .iter()
+                .all(is_default)
+        );
+        let b = Bounds {
+            memory_max: Some(64 << 20),
+            pids_max: Some(16),
+            io_latency_us: Some(5000),
+            ..Bounds::default()
+        };
+        let set: Vec<(&str, String)> = writes_all(&b, &disks)
+            .unwrap()
+            .into_iter()
+            .filter(|w| !is_default(w))
+            .map(|w| (w.file, w.value))
+            .collect();
+        assert_eq!(
+            set,
+            vec![
+                ("memory.max", "67108864".into()),
+                ("memory.swap.max", "0".into()),
+                ("io.latency", "8:0 target=5000".into()),
+                ("pids.max", "16".into()),
+            ]
+        );
+        assert!(
+            writes_all(
+                &Bounds {
+                    pids_max: Some(0),
+                    ..Bounds::default()
+                },
+                &disks
+            )
+            .is_err()
+        );
+    }
+
+    /// Goal 5 extended, step 6 (research f31-f33): a box given a cgroup another box left is reported
+    /// what it used since: the counters less the baseline read as it was given the cgroup, its peak as
+    /// the descriptor written then reads it.
+    #[test]
+    fn a_handed_on_cgroups_usage_is_reported_from_its_baseline() {
+        let before = Usage {
+            memory_bytes: 500,
+            memory_peak_bytes: 64 << 20,
+            oom_kills: 2,
+            pids: 0,
+            pids_refused: 7,
+            cpu_usec: 1_000_000,
+            io_read_bytes: 10,
+            io_write_bytes: 20,
+        };
+        let base = Baseline::of(&before);
+        let now = Usage {
+            memory_bytes: 4096,
+            memory_peak_bytes: 64 << 20,
+            oom_kills: 2,
+            pids: 1,
+            pids_refused: 7,
+            cpu_usec: 1_000_300,
+            io_read_bytes: 15,
+            io_write_bytes: 20,
+        };
+        assert_eq!(
+            since(&now, &base, 8192),
+            Usage {
+                memory_bytes: 4096,
+                memory_peak_bytes: 8192,
+                oom_kills: 0,
+                pids: 1,
+                pids_refused: 0,
+                cpu_usec: 300,
+                io_read_bytes: 5,
+                io_write_bytes: 0,
+            }
+        );
+        // A counter read under its baseline, as a wrong baseline would give, reads 0, not a wrap.
+        assert_eq!(since(&Usage::default(), &base, 0).cpu_usec, 0);
     }
 
     proptest! {

@@ -127,6 +127,7 @@ impl Lab {
                 id: BoxId::new("b").unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
+                owner: None,
             })
             .unwrap();
         let server = Server::bind(
@@ -287,6 +288,10 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
         },
     );
     let p = pipe_r.as_fd();
+    // The first version this side doesn't speak, and what a trailing byte past this version's body says.
+    let unspoken = wire::VERSION + 1;
+    let unspoken_says = format!("version {unspoken}");
+    let trailing_says = format!("follow what version {} defines", wire::VERSION);
     // Each: what it is, its bytes, the descriptors sent with it, the id its refusal goes to, and
     // what the refusal says.
     let cases: Vec<Hostile<'_>> = vec![
@@ -305,7 +310,13 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             0,
             "HEXW",
         ),
-        Hostile("version 3", with(4, [3, 0]), vec![], 9, "version 3"),
+        Hostile(
+            "a version this side doesn't speak",
+            with(4, unspoken.to_le_bytes()),
+            vec![],
+            9,
+            &unspoken_says,
+        ),
         Hostile("unknown kind", with(6, [0x0c, 0]), vec![], 9, "kind 0x000c"),
         Hostile(
             "a version 2 kind in version 1",
@@ -321,13 +332,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             9,
             "kind 0x8003",
         ),
-        Hostile(
-            "trailing bytes",
-            trailing,
-            vec![],
-            5,
-            "follow what version 2 defines",
-        ),
+        Hostile("trailing bytes", trailing, vec![], 5, &trailing_says),
         Hostile(
             "oversized",
             oversized,
@@ -682,6 +687,7 @@ fn a_list_longer_than_one_message_comes_whole() {
                 id: BoxId::new(&format!("many-{n:04}")).unwrap(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Process,
+                owner: None,
             })
             .unwrap();
     }

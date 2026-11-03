@@ -153,6 +153,7 @@ impl Fixture for Lab {
             id,
             bounds,
             class: ClassSpec::Oci(Box::new(self.conformance_spec(&Self::act(&Act::Wait)))),
+            owner: None,
         }
     }
 
@@ -161,6 +162,7 @@ impl Fixture for Lab {
             id,
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(self.conformance_spec(&Self::act(act)))),
+            owner: None,
         }
     }
 
@@ -215,6 +217,7 @@ fn layered_box(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(spec)),
+        owner: None,
     });
     assert_eq!(made.expect("create").state, BoxState::Created);
     let _cleanup = Deleting(&node, id.clone());
@@ -334,6 +337,7 @@ fn in_place_box(lab: &Lab, own: &Path) {
             network: Network::Host,
             hosts: Vec::new(),
         })),
+        owner: None,
     })
     .expect("create");
     let _cleanup = Deleting(&node, id.clone());
@@ -405,6 +409,7 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: spec(&out),
+        owner: None,
     });
     let _cleanup = Deleting(&node, id.clone());
     assert_eq!(
@@ -424,6 +429,7 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
         id: id.clone(),
         bounds: Bounds::default(),
         class: spec(&inside),
+        owner: None,
     })
     .expect("create");
     let _cleanup = Deleting(&node, id.clone());
@@ -480,6 +486,7 @@ fn refusals(lab: &Lab, own: &Path) {
             id: id.clone(),
             bounds: Bounds::default(),
             class: ClassSpec::Oci(Box::new(spec)),
+            owner: None,
         });
         assert!(
             matches!(&got, Err(Refusal::Invalid { what: "oci spec", why }) if why.contains(field)),
@@ -529,6 +536,7 @@ fn recovery_removes_a_half_made_bundle(lab: &Lab, own: &Path) {
         id: older.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Oci(Box::new(lab.conformance_spec(&Lab::act(&Act::Wait)))),
+        owner: None,
     };
     let record = BoxRecord::new(
         spec,

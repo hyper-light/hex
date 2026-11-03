@@ -62,6 +62,12 @@ pub struct State {
     /// reads as "maybe" and so reads the config, as it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poststart: Option<bool>,
+    /// Whether the init is the first process of a pid namespace its create made (the spec makes one, no
+    /// `path`), recorded at create: Hex's own field, so the node ends such a container through its init's
+    /// pidfd, which kills the namespace with it, rather than through `cgroup.kill` (goal 5 extended, step
+    /// 6). Absent in state written before, which reads as no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_namespace: Option<bool>,
 }
 
 impl State {
@@ -76,6 +82,7 @@ impl State {
             cgroup: None,
             start_time: None,
             poststart: None,
+            pid_namespace: None,
         }
     }
 
