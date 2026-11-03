@@ -6,19 +6,25 @@
 # Env: RUNTIMES ("hex runc crun youki runsc libcrun"), ROUNDS (3), ROUND_FIRST (1), N (10000), WARMUP (100),
 # N_OVERRIDE ("runsc:3000" lowers n for a slow runtime), LIFECYCLES (2000), CAP (1000), BUDGET_MIB (8192),
 # HEXBENCH_PHASES (oci_bench.py's and seam_oci's phases, all by default), HEXBENCH_SUSTAINED (the sustained phase's
-# lifecycles, 10000, read by both), STANDIN (1: the driver's own ceiling each round).
+# lifecycles, 10000, read by both), STANDIN (1: the driver's own ceiling each round), HEXBENCH_OWNER (one owner
+# for every box seam_oci makes, so a box's cgroup is handed to the owner's next box: goal 5 extended, step 6; the
+# bundles' processes then hold Docker's default capabilities, no CAP_SYS_ADMIN, every runtime's alike, since a box
+# that keeps all of root's never shares a cgroup).
 set -uo pipefail
 RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
 
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
+# Docker's default capabilities (moby's oci/caps/defaults.go), given every set when HEXBENCH_OWNER names an owner.
+CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 bundle() { # bundle <dir> <args json> [namespaces json, all five by default]
   local B=$1 NS=${3:-$ALL_NS}; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
   ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin )
   cat > "$B/config.json" <<JSON
 { "ociVersion":"1.0.2","root":{"path":"rootfs","readonly":false},"hostname":"b",
-  "process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}},
+  "process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}$PROC_CAPS},
   "mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},
             {"destination":"/proc","type":"proc","source":"proc"},
             {"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],

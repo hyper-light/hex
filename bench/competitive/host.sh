@@ -52,7 +52,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
-  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000}"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
@@ -114,7 +114,7 @@ if [[ " $PHASES " == *" oci "* ]]; then
     --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
-    -e HEXBENCH_SUSTAINED -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e HEXBENCH_SUSTAINED -e HEXBENCH_OWNER -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag

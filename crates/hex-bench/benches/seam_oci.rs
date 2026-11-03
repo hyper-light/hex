@@ -36,6 +36,12 @@
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
+//! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
+//! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
+//! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
+//! reads, around every phase as it reads the seeds', what the node's idle cgroups did (handed on, fresh,
+//! missed, refused by reason, evicted) and how its deletes ended their boxes (through the init's pidfd,
+//! that falling back to `cgroup.kill`, or `cgroup.kill`).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -67,7 +73,7 @@ mod linux {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
+    use hex_api::{Bounds, BoxId, BoxOwner, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
     use hex_client::Client;
     use hex_core::{netns, seeds};
     use hex_node::Node;
@@ -93,12 +99,15 @@ mod linux {
         }
     }
 
+    /// The owner HEXBENCH_OWNER names, every box's, or none.
+    static OWNER: std::sync::OnceLock<Option<BoxOwner>> = std::sync::OnceLock::new();
+
     fn spec(id: &BoxId, bundle: &Path) -> BoxSpec {
         BoxSpec {
             id: id.clone(),
             bounds: bounds(),
             class: ClassSpec::Bundle(bundle.to_path_buf()),
-            owner: None,
+            owner: OWNER.get().cloned().flatten(),
         }
     }
 
@@ -534,6 +543,15 @@ mod linux {
             }
         }
 
+        /// What the node's idle cgroups and its deletes have done, in process; the socket carries
+        /// neither.
+        fn reuse(&self) -> Option<(hex_node::cgroups::Counts, hex_node::cgroups::Kills)> {
+            match self {
+                Self::InProcess(node) => node.cgroup_reuse().ok().map(|c| (c, node.kills())),
+                Self::Socket { .. } => None,
+            }
+        }
+
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -566,6 +584,32 @@ mod linux {
                "died": after.died - before.died,
                "hung": after.hung - before.hung,
                "most_busy": after.most_busy})
+    }
+
+    /// What the node's idle cgroups and its deletes did from `before` to `after`.
+    fn reuse_rise(
+        before: &(hex_node::cgroups::Counts, hex_node::cgroups::Kills),
+        after: &(hex_node::cgroups::Counts, hex_node::cgroups::Kills),
+    ) -> Value {
+        let (b, a) = (&before.0.pool, &after.0.pool);
+        let refused: Map<String, Value> = hex_core::reuse::Refused::ALL
+            .iter()
+            .filter_map(|r| {
+                let n = a.refused(*r) - b.refused(*r);
+                (n > 0).then(|| (r.name().to_owned(), json!(n)))
+            })
+            .collect();
+        json!({"handed_on": a.handed_on - b.handed_on,
+               "fresh": a.fresh - b.fresh,
+               "missed": a.missed - b.missed,
+               "refused": refused,
+               "evicted": (a.evicted_owner_bound + a.evicted_node_bound + a.evicted_refused)
+                   - (b.evicted_owner_bound + b.evicted_node_bound + b.evicted_refused),
+               "idle": a.idle,
+               "removals_failed": after.0.removals_failed - before.0.removals_failed,
+               "ended_through_init": after.1.through_init - before.1.through_init,
+               "fell_back_to_cgroup_kill": after.1.fell_back - before.1.fell_back,
+               "cgroup_kill": after.1.cgroup_kill - before.1.cgroup_kill})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -608,6 +652,13 @@ mod linux {
                     .unwrap_or_else(|e| panic!("HEXBENCH_SUSTAINED={v:?}: {e}"))
             });
         let (sleep_bundle, true_bundle) = (PathBuf::from(sleep_bundle), PathBuf::from(true_bundle));
+        let owner = std::env::var("HEXBENCH_OWNER")
+            .ok()
+            .filter(|o| !o.trim().is_empty())
+            .map(|o| {
+                BoxOwner::named(o.trim()).unwrap_or_else(|e| panic!("HEXBENCH_OWNER={o:?}: {e}"))
+            });
+        OWNER.set(owner.clone()).expect("the owner is set once");
         // The box root beside the runtimes' container cgroups, under the vacated, delegated cgroup
         // root; the node agent itself stays where it is, and the parent's cpu.stat is the CPU a
         // throughput level used (it covers the agent and every container).
@@ -674,6 +725,7 @@ mod linux {
             // The node's counts before and after the phase, outside its timing: what it added.
             let r = driver.netns().and_then(|before| {
                 let seeds_before = driver.seeds()?;
+                let reuse_before = driver.reuse();
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -692,10 +744,17 @@ mod linux {
                     (Some(before), Some(after)) => Some(seeds_rise(before, after)),
                     _ => None,
                 };
+                let reuse_rose = match (reuse_before, driver.reuse()) {
+                    (Some(before), Some(after)) => Some(reuse_rise(&before, &after)),
+                    _ => None,
+                };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
                     if let Some(seeds_rose) = seeds_rose {
                         fields.insert("seeds".to_owned(), seeds_rose);
+                    }
+                    if let Some(reuse_rose) = reuse_rose {
+                        fields.insert("cgroups".to_owned(), reuse_rose);
                     }
                 }
                 Ok(v)
@@ -714,9 +773,18 @@ mod linux {
                 Err(e) => errors.insert(phase.to_owned(), Value::String(e)),
             };
         }
+        // The idle cgroups an owner's boxes left go before the box root does; a socket agent's are its
+        // next start's to remove (T-T7.1.2).
+        if let Driver::InProcess(node) = &driver
+            && let Err(e) = node.release_idle()
+        {
+            errors.insert("release_idle".to_owned(), Value::String(e.to_string()));
+        }
         drop(driver);
+        let _ = std::fs::remove_dir(root.join(hex_node::OCI_BOXES));
         let _ = std::fs::remove_dir(&root);
         let result = json!({"runtime": runtime, "n": n, "warmup": warmup,
+                            "owner": owner.map(|o| o.name),
                             "phases": phases, "errors": errors, "cgroup": parent});
         std::fs::write(out, result.to_string()).expect("writing the result");
         ExitCode::SUCCESS

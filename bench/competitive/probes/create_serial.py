@@ -149,13 +149,18 @@ def report_locks(label, n, txt, named):
               f"cgroup_can_fork to cgroup_post_fork's return")
     # The holds taken for the boxes' own cgroups alone, those under the bench's oci boxes' root (@box, since goal 5
     # extended step 1): the takers above count every kworker's on the host, and the node's start's cgroups. Per box
-    # the bench made, which is per lifecycle.
+    # the bench made a cgroup for, and per lifecycle: the same where every box makes one, and not where an owner's
+    # boxes are handed the cgroups their earlier boxes left (goal 5 extended step 6), whose criterion is per
+    # lifecycle.
     box = {m.group(1): int(m.group(2)) for m in re.finditer(r'@box\[([^\]]+)\]: (\d+)', txt)}
     if box:
         made = box.get('cgroup_mkdir', 0)
         each = ', '.join(f"{k} {v / max(made, 1):.3f}" for k, v in sorted(box.items()))
         print(f"{label}: cgroup_mutex's holds for the boxes' own cgroups, per box made ({made} made): {each}; "
               f"in all {sum(box.values()) / max(made, 1):.3f}")
+        each = ', '.join(f"{k} {v / n:.3f}" for k, v in sorted(box.items()))
+        print(f"{label}: cgroup_mutex's holds for the boxes' own cgroups, per lifecycle ({n} lifecycles): {each}; "
+              f"in all {sum(box.values()) / n:.3f}")
     busy = {int(m.group(1)): int(m.group(2)) for m in re.finditer(r'@busy\[(\d+)\]: (\d+)', txt)}
     if busy:
         counts = sorted(busy.values())

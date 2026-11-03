@@ -29,7 +29,9 @@
 # sustained phase on a `true` bundle without a network namespace of its own. Each run lists the directories under
 # /run and /sys/fs/cgroup (each its own filesystem) with their inode numbers (dirs.<label>.txt), so create_serial.py
 # names the directory each inode is.
-# Env: MODE (offcpu), SUSTAINED (5000).
+# Env: MODE (offcpu), SUSTAINED (5000), HEXBENCH_OWNER (one owner for every box seam_oci makes, so a box's cgroup
+# is handed to the owner's next box: goal 5 extended, step 6; the bundles' processes then hold Docker's default
+# capabilities, libcrun's alike, since a box that keeps all of root's never shares a cgroup).
 set -uo pipefail
 SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
 dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c >/run/dnf.log 2>&1 \
@@ -42,9 +44,11 @@ for p in $(cat "$CG/cgroup.procs"); do echo "$p" > "$CG/lab/cgroup.procs" 2>/dev
 echo "+cpu +io +memory +pids" > "$CG/cgroup.subtree_control" 2>/dev/null || true
 mkdir -p "$CG/w"; echo "$BASHPID" > "$CG/w/cgroup.procs"; mkdir -p /run/err
 # The OCI pass's bundles (oci_inside.sh's shape): a `sleep` init and a `true` one, with every namespace of their own.
+CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
 B=/run/b; mkdir -p "$B/rootfs"; ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin && mkdir -p usr proc dev tmp )
 mk(){ mkdir -p "$1/rootfs"; cp -r "$B/rootfs/." "$1/rootfs/"; cat > "$1/config.json" <<JSON
-{ "ociVersion":"1.0.2","root":{"path":"rootfs"},"hostname":"b","process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}},"mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]} }
+{ "ociVersion":"1.0.2","root":{"path":"rootfs"},"hostname":"b","process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}$PROC_CAPS},"mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},{"destination":"/proc","type":"proc","source":"proc"},{"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]} }
 JSON
 }
 mk /run/bundle-sleep '["/usr/bin/sleep","infinity"]'; mk /run/bundle-true '["/usr/bin/true"]'
@@ -233,8 +237,14 @@ BT
 run(){ # run <label> <filter> <command...>: the mode's program over one workload, and the directories it made
   local label=$1 filter=$2; shift 2
   "$MODE" "$filter" > "/run/$label.bt"
+  # The workload waits for the fact that every probe is attached: bpftrace says "Attached N probes" on stderr once
+  # both its attach passes are done (bpftrace v0.24.2 src/bpftrace.cpp:569-602, :637; src/output/text.cpp:580-586),
+  # not a time (a fixed 5 s let the first ~45% of a run's lifecycles go unprobed under fedora's load, run 7).
   bpftrace "/run/$label.bt" > "/run/bt.$label.txt" 2>"/run/bt.$label.err" &
-  local bt=$!; sleep 5
+  local bt=$! i
+  for i in $(seq 1 1200); do grep -q '^Attached [0-9]* probe' "/run/bt.$label.err" 2>/dev/null && break; kill -0 $bt 2>/dev/null || break; sleep 0.1; done
+  grep -q '^Attached [0-9]* probe' "/run/bt.$label.err" 2>/dev/null \
+    || { echo "$label: bpftrace never said its probes were attached (2 min): $(head -c 300 /run/bt.$label.err)"; kill -INT $bt 2>/dev/null; return 1; }
   kill -0 $bt 2>/dev/null || { echo "$label: bpftrace ended early: $(head -c 300 /run/bt.$label.err)"; return 1; }
   ( for i in 1 2 3 4 5 6; do sleep 0.5; find /run /sys/fs/cgroup -xdev -maxdepth 4 -type d -printf '%i %p\n' 2>/dev/null; done \
       | sort -u > "/run/dirs.$label.txt" ) &
