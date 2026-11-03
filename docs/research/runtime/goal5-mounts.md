@@ -444,3 +444,69 @@ root run reported a private btrfs input and no master, before the pool oracle. E
 and a controlled shared/private source before changing an assertion. Detached open_tree clones resume
 propagation when attached ([open_tree(2), Notes](https://man7.org/linux/man-pages/man2/open_tree.2.html));
 a shared fixture must also verify that filling the container root cannot propagate into its source.
+
+## 8. The tail's cause, reuse, and `setsid` first (2026-11-03)
+
+All runs: fedora (`kiln-a094a12d`, i9-14900HX, Linux 6.19.10), the AC-e harness at 8 in flight with 8,000 idle host
+threads, CPUs 4-15, 2,000 creates a run. Each run's directory is `~/.cache/hex-t7/g5x-s3/<unit's dir>`, and its
+records are `~/.cache/hex-bench/out/create-breakdown-<run>`.
+
+- **The cause.** A clean per-call trace at 16e52a9 (unit hex-lead-s3-trace2-20261103T064732Z, load 11, no other unit)
+  puts about half of the slowest 1% (a mean span of about 1,965 us) in the init runnable while its CPU ran the
+  kernel's teardown of earlier boxes. Per slow create that was `css_killed_work_fn` 389-532 us,
+  `css_release_work_fn` 348-437, `cgroup_bpf_release` 44 and the RCU softirq 45-64: cgroup destruction, the work a
+  box's delete queues on the CPUs its creates run on.
+- **Step 6's reuse takes it.** The test merge is `exp/s6-x-s3-acE` d6ea10b: step 6 e9f58a0 with 16e52a9. Its
+  release binaries are hex f469b70f304691c9, seam_oci d70453f125b209c5. AC-e's bundles name the owner bundles of
+  `oci_inside.sh`: Docker's default capabilities and a read-only `/proc/sys`. Run hex-lead-s3-reuseab2-20261103T163227Z
+  had HEXBENCH_OWNER set and interleaved reuse on and HEXBENCH_REUSE=0 over 4 rounds, at fedora load 1-2.
+  - Reuse on handed on 1,992 of 2,000 cgroups and 1,983-1,984 network namespaces. Part 19's p99 was
+    0.316/0.322/0.329/0.432 ms, and the create's p50/p99 0.51-0.53/1.11-1.49 ms.
+  - Reuse off: part 19 1.22-1.42 ms; create 1.18-1.25/7.9-11.1 ms.
+  - The reuse-on trace's slowest 1% holds no cgroup teardown.
+  - A first try, hex-lead-s3-reuseab-20261103T162841Z, measured no reuse. Its bundles named no capabilities, so the
+    node refused every box (`privileged`, `could change its namespace`).
+- **Under another tenant's load it rose again.** Run hex-lead-s3-underload-20261103T163610Z used the same binaries
+  with reuse on, beside L busy loops pinned to 4-15 at nice 0 and started and killed by PID. Part 19's p99:
+
+  | L | 0 | 6 | 12 | 24 |
+  |---|---|---|---|---|
+  | p99, ms | 0.321, 0.324 | 0.769, 0.705 | 0.819, 0.941 | 1.182, 1.620 |
+
+  Its trace (hex-lead-s3-loadtrace-20261103T164213Z) puts the slowest 1% in `setsid`. At 6 loops that was
+  1,183 us of a 2,003 us mean span, 1,099 of it preempted, the CPU going first to the busy loop (1,024 us). At 12
+  loops it was 896 us of 1,623, with `move_mount` blocked on the mount lock for 386.
+- **Why `setsid` gives the CPU away.** At v6.19 every `setsid` moves the caller to a new autogroup:
+  - `sched_autogroup_create_attach` calls `autogroup_move_group`, which calls `sched_move_task` for every thread
+    ("We can't avoid sched_move_task() after we changed signal->autogroup", `kernel/sched/autogroup.c:177-188`);
+  - `sched_move_task` reschedules a running task whatever its group (`kernel/sched/core.c:9123-9128`);
+  - `noautogroup` only clears the flag (`autogroup.c:225`) that `autogroup_task_group` alone reads
+    (`kernel/sched/autogroup.h:33-36`), so no setting avoids it.
+
+  Its allocations are `GFP_KERNEL` without `__GFP_ACCOUNT` (`autogroup.c:89`; `fair.c`'s `alloc_fair_sched_group`,
+  `core.c`'s `sched_create_group`), so none is charged to a box's memory cgroup.
+- **`setsid` first.** Run hex-lead-s3-setsidload-20261103T164725Z, reuse on, interleaved, compared s0 (d6ea10b)
+  against s1: d6ea10b with `setsid` at the start of the pruned clone child (runc's order). s1's binaries are hex
+  d2c75d29b7b6aebd and seam_oci 3e5e6977d9939582. Part 19's p99 and the create's p99, in ms, against L:
+
+  | L | part 19, s0 | part 19, s1 | create, s0 | create, s1 |
+  |---|---|---|---|---|
+  | 0 | 0.330, 0.335 | 0.291, 0.252 | 1.283, 1.332 | 1.491, 1.303 |
+  | 6 | 0.934, 0.975 | 0.547, 0.539 | 2.980, 3.561 | 2.912, 2.764 |
+  | 12 | 0.974, 0.890 | 0.693, 0.608 | 7.079, 4.776 | 4.320, 4.520 |
+
+  The create's p50 is unchanged (within 0.02 ms at each L).
+  - On a quiet host, moving `setsid` only moved work across part 19's cut: hex-lead-s3-setsid-20261103T062234Z,
+    without reuse, left the create's p50 and p99 unchanged, so it wasn't taken then.
+  - Under load the forced pass is cheaper taken first. The init has just been placed by its clone and has run
+    little of its share, so the scheduler gives it the CPU back. The create's p99 falls with part 19's.
+  - So the init leads its session first, on every path (`init.rs`, `lead_session`).
+- **What's left, and what would falsify it.**
+  - Under 6-12 loops part 19's p99 is still 0.54-0.69 ms, over the bar.
+  - The next levers are the remaining passes through the scheduler: `move_mount` and `mount_setattr` waiting on
+    `namespace_sem`, and the proc superblock's allocation locks.
+  - A repeat of the load runs in which `setsid` first doesn't lower part 19's p99, or raises the create's, falsifies
+    the change. So would a box whose init doesn't lead its own session and process group (`oci_box.rs`,
+    `created_through_a_seed_in_its_cgroup_and_namespaces`).
+  - The AC-e reader's fallback check can false-fail on the merge: it reads a namespace the node made on path for an
+    owner (joined by `setns`) as the clone's. The integration merge must read step 6's counters.

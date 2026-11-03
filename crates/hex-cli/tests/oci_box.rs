@@ -2244,14 +2244,18 @@ fn exec_reads_no_state(lab: &Lab, own: &Path) {
     node.delete(&id).expect("delete");
 }
 
-/// `/proc/<pid>/stat` field 4, the parent pid, read past the parenthesized command name (which may
-/// itself hold spaces and parentheses).
+/// `/proc/<pid>/stat` field 4, the parent pid.
 fn ppid(pid: u32) -> Option<u32> {
+    stat_field(pid, 4)
+}
+
+/// `/proc/<pid>/stat` field `n` (4 the parent pid, 5 the process group, 6 the session, proc(5)), counted
+/// from 1 and read past the parenthesized command name (field 2, which may itself hold spaces and
+/// parentheses), as a number.
+fn stat_field(pid: u32, n: usize) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, rest) = stat.rsplit_once(')')?;
-    let mut fields = rest.split_whitespace();
-    let _state = fields.next()?;
-    fields.next()?.parse().ok()
+    rest.split_whitespace().nth(n.checked_sub(3)?)?.parse().ok()
 }
 
 /// Whether any argument in `/proc/<pid>/cmdline` (NUL-separated) is exactly `needle`.
@@ -2880,6 +2884,13 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
         let ours = std::fs::read_link(format!("/proc/{agent}/ns/{ns}")).unwrap();
         assert_ne!(theirs, ours, "the init has its own {ns} namespace");
     }
+    // It leads a session and a process group of its own (its first act), so nothing it or its program
+    // does reaches the agent's: both ids are its own pid, kept across its exec.
+    assert_eq!(
+        (stat_field(init, 5), stat_field(init, 6)),
+        (Some(init), Some(init)),
+        "the init leads its own process group and session"
+    );
     // The seed cloned the init as the agent's own child (`CLONE_PARENT`), and the init's streams are the
     // seed's: the null device, never the agent's.
     assert_eq!(ppid(init), Some(agent), "the init is the agent's own child");
