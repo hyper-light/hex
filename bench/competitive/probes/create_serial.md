@@ -661,6 +661,29 @@ CPU a lifecycle, by thread (`create_serial.py`):
 - **What the 8x on 4-15 can still take from here is that share:** with all of it gone, concurrency 32's CPU a
   lifecycle falls about 14%, short of what the cores' shared threads cost it (`reuse_pass.md` run 8).
 
+## Run 18 (2026-11-03, fedora): checker, the namespace's own netlink socket kept, and sockstat's count first
+
+- **Binaries:** run 16's mr7 (`hex` ab9551ff82e3415e) against the same tree with ad6f333 (on the branch
+  `cp/t7-ext-s6-kept-socket`; mr8, `hex` 7451d1a206e259ba), A B B A on the E-cores 16-31, one owner's boxes, the
+  unit `hex-g5x-s6-verify10-20261103T100007Z`, run 15's method; load 7.2 to 10.7.
+- **Runs:** `create-serial-checker-20261103T100123Z` (mr7), `T100158Z` (mr8), `T100249Z` (mr8), `T100328Z` (mr7).
+  `T100249Z`'s concurrency 32 refused a start after 3,325 lifecycles, the exec FIFO's race (`fifo_hup.md`: mr7 and
+  mr8 were built before the fix), so its row at 32 is missing.
+
+| per namespace checked | mr7 | mr8 |
+|---|---|---|
+| on-CPU, concurrency 1 | 141.4, 141.2 us | 94.2, 97.0 us |
+| the checker's own clock, concurrency 1 | 159.1, 152.8 us | 93.5, 112.9 us |
+| system calls, concurrency 1 | 34.1 | 27.1 |
+| on-CPU, concurrency 32 | 139.3, 138.5 us | 82.5 us |
+| the checker's own clock, concurrency 32 | 260.4, 251.1 us | 143.9 us |
+
+- **Keeping the namespace's socket takes a third off a check:** 46 us of CPU at concurrency 1 and 56 at 32. Gone:
+  the protocols' read (one open, two reads, one close), the socket's making and closing, its timeout.
+- **No namespace was refused:** at concurrency 1, 5,018 of each run's boxes were handed a kept namespace, 2 given a
+  fresh one, as before. The checks of these boxes, which make no socket, took the count of 1: 4.00 opens a check
+  against mr7's 5.00, the protocols' none.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
