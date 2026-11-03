@@ -770,7 +770,7 @@ impl Runtime {
             }
             Err(e) => return Err(OciError::os("opening the exec fifo", e)),
         };
-        if !wait_readable(&fifo, START_PATIENCE)? {
+        let Some(events) = wait_readable(&fifo, START_PATIENCE)? else {
             return Err(if init_alive(&state) {
                 OciError::Broken(format!(
                     "container {id} did not take the start within {START_PATIENCE:?}"
@@ -778,14 +778,14 @@ impl Runtime {
             } else {
                 OciError::WrongState(id.to_owned(), "stopped", "created")
             });
-        }
+        };
         // The init writes one byte as it takes the start. A zero-byte read is end-of-file: the init
         // opened the FIFO and then died (killed, or OOM'd) without writing, so the FIFO's write end
         // closed and `poll` returned a hang-up. The container is stopped, not running; refused, never
         // reported running (CLAUDE.md §3): the FIFO stays, and the init's death says stopped.
         let mut byte = [0u8; 1];
         let n = rustix::io::read(&fifo, &mut byte)
-            .map_err(|e| OciError::os("reading the exec fifo", e))?;
+            .map_err(|e| fifo_unread(&fifo, &dir.fifo(), events, e))?;
         if n == 0 {
             return Err(OciError::WrongState(id.to_owned(), "stopped", "created"));
         }
@@ -961,8 +961,25 @@ fn end_shim(shim: &mut std::process::Child) -> Result<(), OciError> {
 }
 
 /// Waits up to `patience` for `fd` to turn readable. Returns whether it did.
-fn wait_readable(fd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
-    wait_for(fd, patience, "poll on the exec fifo")
+/// Waits up to `patience` for the exec FIFO to have input or a hang-up: the events the poll returned, or
+/// `None` if none came.
+fn wait_readable(fd: &OwnedFd, patience: Duration) -> Result<Option<PollFlags>, OciError> {
+    wait_events(fd, patience, "poll on the exec fifo")
+}
+
+/// A start's refusal when its read of the exec FIFO failed after the poll returned: with the poll's events,
+/// and the FIFO it holds against the one now at its path (device and inode), which say whether another
+/// reader or writer reached it, or the start a FIFO not its own.
+fn fifo_unread(fifo: &OwnedFd, path: &Path, events: PollFlags, e: rustix::io::Errno) -> OciError {
+    let held = rustix::fs::fstat(fifo).map(|s| (s.st_dev, s.st_ino));
+    let at_path = rustix::fs::stat(path).map(|s| (s.st_dev, s.st_ino));
+    OciError::os(
+        "reading the exec fifo",
+        format!(
+            "{e}, after the poll's {events:?}; the fifo held {held:?}, the one at {} {at_path:?}",
+            path.display()
+        ),
+    )
 }
 
 /// Waits up to `patience` for the process behind `pidfd` to exit; a pidfd turns readable then, whether
@@ -973,6 +990,16 @@ fn wait_exited(pidfd: &OwnedFd, patience: Duration) -> Result<bool, OciError> {
 
 /// Polls `fd` for input until it has some or `patience` passes; whether it had.
 fn wait_for(fd: &OwnedFd, patience: Duration, what: &'static str) -> Result<bool, OciError> {
+    wait_events(fd, patience, what).map(|events| events.is_some())
+}
+
+/// Polls `fd` for input until it has some or `patience` passes: the events the poll returned, `None` past
+/// `patience`.
+fn wait_events(
+    fd: &OwnedFd,
+    patience: Duration,
+    what: &'static str,
+) -> Result<Option<PollFlags>, OciError> {
     let deadline = Instant::now().checked_add(patience);
     loop {
         let left = match deadline {
@@ -985,8 +1012,12 @@ fn wait_for(fd: &OwnedFd, patience: Duration, what: &'static str) -> Result<bool
         };
         let mut fds = [PollFd::new(fd, PollFlags::IN)];
         match rustix::event::poll(&mut fds, Some(&ts)) {
-            Ok(n) if n > 0 => return Ok(true),
-            Ok(_) if left.is_zero() => return Ok(false),
+            Ok(n) if n > 0 => {
+                return Ok(Some(
+                    fds.first().map_or(PollFlags::empty(), PollFd::revents),
+                ));
+            }
+            Ok(_) if left.is_zero() => return Ok(None),
             Ok(_) | Err(rustix::io::Errno::INTR) => {}
             Err(e) => return Err(OciError::os(what, e)),
         }
