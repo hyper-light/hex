@@ -22,16 +22,22 @@ OUT=/opt/out; mkdir -p /run/err
 # The OCI pass's bundles (oci_inside.sh): the `sleep` container seam_oci's lifecycle creates, and the `true` one
 # its command line names.
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
+# With HEXBENCH_OWNER, the bundles are oci_inside.sh's for an owner (goal 5 extended, step 6): Docker's default
+# capabilities (moby's oci/caps/defaults.go), no CAP_SYS_ADMIN, and /proc/sys read-only as Docker's readonlyPaths
+# make it, so a box's cgroup and network namespace may be handed to the owner's next box.
+CAPS='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]'
+PROC_CAPS=""; [ -n "${HEXBENCH_OWNER:-}" ] && PROC_CAPS=",\"capabilities\":{\"bounding\":$CAPS,\"effective\":$CAPS,\"permitted\":$CAPS}"
+RO_PATHS=""; [ -n "${HEXBENCH_OWNER:-}" ] && RO_PATHS=',"readonlyPaths":["/proc/sys"]'
 bundle() { # bundle <dir> <args json>
   local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
   ( cd "$B/rootfs" && ln -sfn usr/bin bin && ln -sfn usr/lib lib && ln -sfn usr/lib64 lib64 && ln -sfn usr/sbin sbin )
   cat > "$B/config.json" <<JSON
 { "ociVersion":"1.0.2","root":{"path":"rootfs","readonly":false},"hostname":"b",
-  "process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}},
+  "process":{"cwd":"/","args":$2,"env":["PATH=/usr/bin:/usr/sbin"],"user":{"uid":0,"gid":0}$PROC_CAPS},
   "mounts":[{"destination":"/usr","type":"bind","source":"/usr","options":["rbind","ro"]},
             {"destination":"/proc","type":"proc","source":"proc"},
             {"destination":"/dev","type":"tmpfs","source":"tmpfs","options":["nosuid","mode=755","size=65536k"]}],
-  "linux":{"namespaces":$ALL_NS} }
+  "linux":{"namespaces":$ALL_NS$RO_PATHS} }
 JSON
 }
 bundle /run/bundle-sleep '["/usr/bin/sleep","infinity"]'
