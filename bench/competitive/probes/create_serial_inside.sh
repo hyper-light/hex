@@ -35,6 +35,9 @@
 # timed, by its number, and an on-CPU profile of them at 4999 Hz by kernel and user stack and by the system call each
 # sample fell in. Two runs, hex.c1 over 5000 lifecycles and hex.c32; HEXBENCH_OWNER must be set, for the namespaces
 # are kept only for an owner's boxes.
+# MODE=devfs: the same profile for the thread that makes each box's /dev ahead of its create (hex-devfs, step 3's pool,
+# crates/hex-node/src/devfs.rs): its system calls timed by number, the futex waits among them, and its on-CPU samples;
+# two runs, hex.c1 over 5000 lifecycles and hex.c32, read per /dev it made.
 # MODE=threads: where each of a runtime's threads spends its CPU, by name: Hex's lifecycles (seam_oci), the node's
 # threads (hex-netns-check, hex-netns, hex-seeds, hex-supervisor, hex-cgroup-remover, the socket's), its seeds and
 # inits before they exec (hex) and the program (true), sampled on every CPU at 999 Hz, and beside them the other
@@ -136,6 +139,7 @@ profile:hz:4999
 END { clear(@s); clear(@n); }
 BT
 }
+devfs(){ checker "$1"; } # devfs <filter on a comm value $c>: the checker's program, for the /dev pool's thread
 threads(){ # threads <filter on a comm value $c>: each of the filter's threads' samples by name; the rest on the probe's CPUs
   # The idle task told by the task's own pid, not bpftrace's pid: that is the pid namespace's, and fails for every task
   # outside the probe container's (as checker()'s keys say).
@@ -331,7 +335,7 @@ run(){ # run <label> <filter> <command...>: the mode's program over one workload
   kill -INT $bt; wait $bt 2>/dev/null
   echo "$label: $(wc -l < /run/bt.$label.txt) lines"
 }
-HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'; CHECK='$c == "hex-netns-check"'; THREADS='$c == "seam_oci" || $c == "hex" || $c == "true" || strncmp($c, "hex-", 4) == 0'
+HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'; CHECK='$c == "hex-netns-check"'; DEVFS='$c == "hex-devfs"'; THREADS='$c == "seam_oci" || $c == "hex" || $c == "true" || strncmp($c, "hex-", 4) == 0'
 hex_c1(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 500 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c1k(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 5000 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
@@ -344,9 +348,10 @@ case $MODE in
     run locks.hex.c32nonet "$HEX" hex_c32nonet ;;
   checker) [ -n "${HEXBENCH_OWNER:-}" ] || { echo "refusing: MODE=checker needs HEXBENCH_OWNER"; exit 2; }
     run checker.hex.c1 "$CHECK" hex_c1k; run checker.hex.c32 "$CHECK" hex_c32 ;;
+  devfs) run devfs.hex.c1 "$DEVFS" hex_c1k; run devfs.hex.c32 "$DEVFS" hex_c32 ;;
   threads) case ${CPUSET:-} in [0-9]*-[0-9]*) ;; *) echo "refusing: MODE=threads needs CPUSET as from-to, not ${CPUSET:-none}"; exit 2 ;; esac
     run threads.hex.c1 "$THREADS" hex_c1k; run threads.hex.c32 "$THREADS" hex_c32 ;;
-  *) echo "refusing: MODE is offcpu, locks, checker or threads, not $MODE"; exit 2 ;;
+  *) echo "refusing: MODE is offcpu, locks, checker, devfs or threads, not $MODE"; exit 2 ;;
 esac
 nm -C -n --defined-only /opt/bin/seam_oci > /run/syms.seam_oci.txt 2>/dev/null
 nm -D -C -n --defined-only "$(readlink -f /usr/lib64/libc.so.6)" > /run/syms.libc.txt 2>/dev/null

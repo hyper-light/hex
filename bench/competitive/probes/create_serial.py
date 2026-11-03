@@ -20,7 +20,7 @@ time cgroup_mutex and the runtime's cgroup directory's i_rwsem were in each stat
 handed off, 0 free] and @dir_state[bucket, 3 write-held, 2 read-held, 1 handed off, 0 free]: samples), over the 100
 ms buckets in which the runtime made or removed at least half the median bucket's cgroups (@busy[bucket]: count).
 
-A MODE=checker run, each figure per namespace checked (its out.<label>.json's netns_reuse.checked, which stands in
+A MODE=checker run (and MODE=devfs, the same for the /dev pool's thread, per /dev made), each figure per namespace checked (its out.<label>.json's netns_reuse.checked, which stands in
 for <lifecycles>): the checker threads' system calls (@sys[number]: stats), their futex waits for the next namespace
 left out of the sum, and their on-CPU profile at 4999 Hz (@samples), by the system call each sample fell in or user
 mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count), and
@@ -70,7 +70,9 @@ STATS = r'\{? ?\.?count:? =? ?(\d+), \.?average:? =? ?(\d+), \.?total:? =? ?(\d+
 SYSCALLS = {0: "read", 1: "write", 2: "open", 3: "close", 9: "mmap", 10: "mprotect", 11: "munmap",
             14: "rt_sigprocmask", 28: "madvise", 41: "socket", 44: "sendto", 45: "recvfrom", 49: "bind",
             54: "setsockopt", 131: "sigaltstack", 186: "gettid", 202: "futex", 204: "sched_getaffinity",
-            257: "openat", 272: "unshare", 308: "setns"}
+            257: "openat", 258: "mkdirat", 259: "mknodat", 263: "unlinkat", 266: "symlinkat", 268: "fchmodat",
+            272: "unshare", 308: "setns", 428: "open_tree", 429: "move_mount", 430: "fsopen", 431: "fsconfig",
+            432: "fsmount", 452: "fchmodat2"}
 PROFILE_HZ = 4999
 # A checker's kernel stack's work, by the first rule any of whose frames match, innermost first.
 CHECKER_WORK = [
@@ -324,8 +326,11 @@ def counts(txt, name):
 
 
 def report_checker(label, path, txt):
-    """A MODE=checker run, per namespace checked."""
+    """A MODE=checker run, per namespace checked; a MODE=devfs run, per /dev the pool's thread made."""
     out = json.load(open(os.path.join(os.path.dirname(path), f"out.{label}.json")))
+    if label.startswith("devfs."):
+        report_devfs(label, out, txt)
+        return
     checked = sum(ph.get("netns_reuse", {}).get("checked", 0) for ph in out["phases"].values())
     if not checked:
         print(f"{label}: no namespace was checked")
@@ -363,6 +368,38 @@ def report_checker(label, path, txt):
     print("  on-CPU a check in the kernel, by its work:")
     for name, v in sorted(work_of.items(), key=lambda kv: -kv[1])[:16]:
         print(f"  {v * us:7.1f} us  {name[:110]}")
+
+
+def report_devfs(label, out, txt):
+    """A MODE=devfs run, per /dev the pool's thread made (its phases' dev_mounts.made): its system calls, the futex
+    waits and wakes among them, its on-CPU samples by the system call each fell in, and by kernel stack."""
+    made = sum(ph.get("dev_mounts", {}).get("made", 0) for ph in out["phases"].values())
+    taken = sum(ph.get("dev_mounts", {}).get("taken", 0) for ph in out["phases"].values())
+    if not made:
+        print(f"{label}: the pool made no /dev")
+        return
+    samples = int(re.search(r'@samples: (\d+)', txt).group(1))
+    us = 1e6 / PROFILE_HZ / made
+    calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
+    futex = calls.get(next((k for k, v in SYSCALLS.items() if v == "futex"), -1), (0, 0))
+    print(f"{label}: {made} /dev made, {taken} taken; on-CPU {samples * us:.1f} us a /dev made ({samples} samples); "
+          f"futex {futex[0] / made:.2f} calls a /dev, {futex[1] / 1e3 / made:.1f} us")
+    print(f"  system calls a /dev: {sum(c for c, _ in calls.values()) / made:.1f} calls, "
+          f"{sum(t for _, t in calls.values()) / 1e3 / made:.1f} us")
+    for k, (c, t) in sorted(calls.items(), key=lambda kv: -kv[1][1])[:12]:
+        print(f"  {c / made:7.2f} calls {t / 1e3 / made:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a /dev by the system call each sample fell in:")
+    for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:10]:
+        print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    tops = defaultdict(int)
+    for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        lines = m.group(1).split('\n')
+        cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
+        frames = [re.sub(r'\+\d+$', '', line.strip()) for line in lines[:cut] if line.strip()]
+        tops[' < '.join(frames[:4]) or '(user)'] += int(m.group(2))
+    print("  on-CPU a /dev by kernel stack:")
+    for name, v in sorted(tops.items(), key=lambda kv: -kv[1])[:12]:
+        print(f"  {v * us:7.1f} us  {name[:120]}")
 
 
 def report_threads(label, n, txt):
