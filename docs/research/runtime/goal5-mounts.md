@@ -669,3 +669,67 @@ went first to the node's own threads, the network-namespace checker most (127 us
 then the kworkers and the RCU softirq. On 6.19 the levers left are the node's own CPU per create (step 6's checker
 work) and, for specs with masks, the masked directories' tmpfs made ahead (§10). The structural fix for the lock is
 goal 6's namespace from a tree.
+
+## 12. The classic init's root at the bar: the `/dev` made ahead through the shim, and its filesystems made as the pruned init makes them (2026-11-03)
+
+Run 4's part 19 was the classic init's, and the classic path measured beside the pruned one through the shim
+(`CLASSIC=1`, part 23) read 0.177 ms pooled p50 at 4315e75 (create-breakdown-20261103T200313Z), over the 0.16 bar.
+- **Where it went.** Its trace at 4315e75 (create-breakdown-20261103T202046Z, one create at a time, from the init's
+  first run to its `pivot_root`; 38 calls and 26.9 page faults per create, every create) put, per create:
+  - the two filesystems' `mount(2)`, 103.1 us: proc's and `/dev`'s superblocks, each named by its `/proc/self/fd` link;
+  - `setsid`, 31.8 us;
+  - the 6 default nodes and 5 links, 37.0 us;
+  - the 2 binds, 24.8 us, and the cgroupfs check of the read-only `/usr` bind (`statx`, `statmount`, `listmount`),
+    10.0 us;
+  - the init's own code between its calls, 115.8 us, its copy-on-write page faults as the shim's fork-like child among
+    it.
+
+  The mount lock: 5 write holds (the binds 2, the filesystems 2, the propagation 1) and 2 shared (`statmount`,
+  `listmount`).
+- **Two cuts.**
+  - e1b85f4: a create the node sends through the shim takes the pool's prepared `/dev` as the pruned path does (§6),
+    by the same eligibility, each miss counted by reason (a user namespace of its own under the new
+    `Unpooled::UserNamespace`). It is named to the shim by its descriptor's `/proc` path, and attached under the
+    pruned path's guards. That takes `/dev`'s superblock, its 11 nodes and links and its umask changes off the path.
+  - 933d56f: each filesystem the classic init makes is made by `make_fs` and attached to the target's descriptor by
+    `move_mount`: the one hold `mount(2)` takes, and no `/proc/self/fd` walk (§10's cost). Binds keep `mount(2)`.
+- **e1b85f4 measured** (unit hex-s3try2-shimdev-20261103T202418Z). `CLASSIC=1` breakdowns alternated 4315e75's binaries
+  (hex e45fb83f1c7da66e) and e1b85f4's (hex 2582690c74ead2a9), each with the other beside it as `BEFORE_*`, CPUs 4-15.
+  Parts 21 and 22, the same code in both, give each run's pace; fedora at rest runs short bursts slowly (memory notes,
+  `probes/host_clock.sh`).
+
+  | run | binary | part 21 pooled | part 23 by round | pooled |
+  |---|---|---|---|---|
+  | create-breakdown-20261103T202521Z | 4315e75 | 0.095 | 0.429 / 0.226 / 0.306 | 0.318 |
+  | 202804Z | e1b85f4 | 0.063 | 0.161 / 0.258 / 0.279 | 0.199 |
+  | 203045Z | e1b85f4 | 0.043 | 0.188 / 0.116 / 0.138 | 0.133 |
+  | 203307Z | 4315e75 | 0.043 | 0.148 / 0.169 / 0.165 | 0.162 |
+
+  At the host's full pace (part 21 at 0.043 in both) the classic root mounted fell from 0.162 to 0.133, 18%. Against
+  part 21 round by round it is 2.9-3.2 times it with the prepared `/dev`, and 3.4-3.8 times it without. In the slow
+  runs both binaries are over the bar.
+- **The trace after** (create-breakdown-20261103T203623Z's mounts, e1b85f4, one create at a time): span p50 147 us,
+  against 243. The calls fell from 237 to 90 us per create, and the init's code between them from 116 to 76.
+  - One filesystem is made (proc, 29.1 us); `/dev`'s attach is a `move_mount` (1.7).
+  - No node or link is made.
+  - The lock is held 5 times for write (the binds 2, proc 1, the propagation 1, `/dev`'s attach 1).
+- **The pruned path at e1b85f4** (create-breakdown-20261103T203517Z): part 19 0.058 / 0.061 / 0.044, pooled 0.055, as
+  before. Validation, bf77298 against e1b85f4: 26 pass, 32 fail, 0 differ. 7 gates (241 passed) and the root lab 6/6,
+  the prepared-`/dev` oracle among it on both paths.
+- **933d56f measured, the final code** (unit hex-s3try2-fs-20261103T203937Z, the same method, 933d56f's hex
+  2c47054d9da44a0f). Gates 7/7 (241 passed) and the root lab 6/6 at 4e4ca1b, whose code is 933d56f's. Validation,
+  bf77298 against 933d56f: 26 pass, 32 fail, 0 differ.
+
+  | run | binary | load | part 21 pooled | part 23 by round | pooled |
+  |---|---|---|---|---|---|
+  | create-breakdown-20261103T204327Z | 4315e75 | 44.1 | 0.059 | 0.186 / 0.199 / 0.193 | 0.191 |
+  | 204604Z | 933d56f | 13.0 | 0.042 | 0.314 / 0.112 / 0.126 | 0.133 |
+  | 204824Z | 933d56f | 6.8 | 0.042 | 0.135 / 0.145 / 0.120 | 0.132 |
+  | 205038Z | 4315e75 | 8.8 | 0.045 | 0.161 / 0.189 / 0.159 | 0.168 |
+
+  - Both of 933d56f's runs are under 0.16, and both of 4315e75's beside them are over it.
+  - Its trace (205353Z) puts the span's p50 at 142 us, with 31 calls. The lock is held 5 times for write (the binds 2,
+    proc's and `/dev`'s attaches 2, the propagation 1) and 2 shared.
+  - Proc made by `make_fs` adds little beyond the prepared `/dev`: rounds against part 21 read 2.9-3.1 times it, as
+    e1b85f4's did. It stands as the classic path's version of the pruned one's making, with no walk.
+  - The pruned path's part 19 at 933d56f (205252Z) is 0.043 / 0.052 / 0.041, pooled 0.044.

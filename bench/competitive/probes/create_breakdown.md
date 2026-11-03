@@ -826,4 +826,12 @@ Part 19 is the init's root mounted, its bar 0.16 ms pooled p50 (run 4: 0.359):
   pooled p50 0.177. Its parts 21 and 22 were 0.051 and 0.049, the pace at which `goal5-mounts.md` §5's runs put
   d236217's part 23 at 0.150-0.171. It is 13% over the 1.5x mark (0.156 ms). §5 names what's left in it beside the
   probe's own calls: the init's code between its calls, with its copy-on-write page faults as a fork-like clone of
-  the shim, and `setsid`.
+  the shim, and `setsid`. That is over the bar, and run 4's part 19 was the classic init's.
+- **The classic path at the final code, cp/t7-ext-s3 933d56f** (`CLASSIC=1`, unit hex-s3try2-fs-20261103T203937Z, hex
+  2c47054d9da44a0f; `goal5-mounts.md` §12): the prepared `/dev` handed through the shim (e1b85f4), and the classic
+  init's filesystems made by `make_fs` (933d56f).
+  - 933d56f's runs: part 23 0.314 / 0.112 / 0.126, pooled **0.133** (create-breakdown-20261103T204604Z), and 0.135 /
+    0.145 / 0.120, pooled **0.132** (204824Z). Met.
+  - 4315e75's binaries alternated beside them: 0.191 (204327Z) and 0.168 (205038Z), both over.
+  - The pruned path's part 19 at 933d56f is 0.044 pooled (205252Z). Validation: 26 pass, 32 fail, 0 differ from
+    bf77298.
