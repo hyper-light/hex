@@ -281,12 +281,18 @@ pub struct Checked {
     /// Whether the sockets' check read `/proc/net/protocols`: `sockstat`'s count wasn't the check's own socket
     /// alone.
     pub protocols: bool,
+    /// Whether the check came to its verdict through the files it holds ([`Files`]), with no entry.
+    pub through_files: bool,
+    /// Whether a read of the files it holds failed, or their open, so it looked by entering, as it does
+    /// without them, and holds none until a later clean check opens them.
+    pub files_failed: bool,
 }
 
 /// Checks the namespace `ns` from the calling thread, whose own namespace is `home`, whose
 /// `/proc/thread-self/net` is `proc_net` and whose buffers are `scratch`: entered, read and left. `socket` is the
 /// netlink socket the check keeps in `ns`, made here the first time and kept by the caller with the namespace,
-/// closed with it.
+/// closed with it, and `files` the namespace's files it holds likewise, once it has: then it reads through
+/// them and never enters, but for a socket past its own, whose protocols it enters to read.
 pub fn check(
     ns: BorrowedFd<'_>,
     home: BorrowedFd<'_>,
@@ -294,21 +300,128 @@ pub fn check(
     fresh: &Fresh,
     scratch: &mut Scratch,
     socket: &mut Option<OwnedFd>,
+    files: &mut Option<Files>,
 ) -> Checked {
-    let mut protocols = false;
-    if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
-        return Checked {
-            verdict: Err(Refused::Unreadable),
-            home: true,
-            protocols,
-        };
+    let mut checked = Checked {
+        verdict: Err(Refused::Unreadable),
+        home: true,
+        protocols: false,
+        through_files: false,
+        files_failed: false,
+    };
+    if let (Some(held), Some(kept)) = (files.as_ref(), socket.as_ref()) {
+        match look_held(held, kept, proc_net, fresh, scratch) {
+            HeldLook::Done(verdict) => {
+                checked.verdict = verdict;
+                checked.through_files = true;
+                return checked;
+            }
+            HeldLook::Past => {}
+            HeldLook::Failed => {
+                *files = None;
+                checked.files_failed = true;
+            }
+        }
     }
-    let verdict = look(proc_net, fresh, scratch, socket, &mut protocols);
-    let home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
-    Checked {
-        verdict,
-        home,
-        protocols,
+    if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
+        return checked;
+    }
+    checked.verdict = look(proc_net, fresh, scratch, socket, &mut checked.protocols);
+    if checked.verdict.is_ok() && files.is_none() {
+        match Files::open(proc_net) {
+            Ok(opened) => *files = opened,
+            Err(_) => checked.files_failed = true,
+        }
+    }
+    checked.home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
+    checked
+}
+
+/// What a look through the files it holds came to.
+enum HeldLook {
+    /// A verdict, as [`look`] gives it.
+    Done(Result<(), Refused>),
+    /// A socket past the check's own: its protocols are read by entering.
+    Past,
+    /// A read failed: no verdict.
+    Failed,
+}
+
+/// [`look`]'s checks, in its order, through what the check holds of the namespace, wherever the calling thread
+/// stands: the socket answers for its own namespace (`sock_net`), and each file for the namespace it was opened
+/// in ([`Files`]). `proc_net` is the calling thread's: it looks by name there for an iptables file not held.
+fn look_held(
+    files: &Files,
+    socket: &OwnedFd,
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    scratch: &mut Scratch,
+) -> HeldLook {
+    let text = &mut scratch.text;
+    let Ok(sockstat) = read_whole(&files.sockstat, text) else {
+        return HeldLook::Failed;
+    };
+    if let Err(why) = time_wait(sockstat) {
+        return HeldLook::Done(Err(why));
+    }
+    match used(sockstat) {
+        Ok(1) => {}
+        Ok(_) => return HeldLook::Past,
+        Err(why) => return HeldLook::Done(Err(why)),
+    }
+    let Ok(dev) = read_whole(&files.dev, text) else {
+        return HeldLook::Failed;
+    };
+    if let Err(why) = links(dev) {
+        return HeldLook::Done(Err(why));
+    }
+    for (name, table) in TABLES.iter().zip(&files.tables) {
+        let Some(table) = table else {
+            if matches!(proc_net.open(name), Ok(None)) {
+                continue;
+            }
+            return HeldLook::Failed;
+        };
+        let Ok(names) = read_whole(table, text) else {
+            return HeldLook::Failed;
+        };
+        if !names.trim().is_empty() {
+            return HeldLook::Done(Err(Refused::Firewall));
+        }
+    }
+    HeldLook::Done(same_dumps(socket, fresh, scratch))
+}
+
+/// A namespace's `/proc/net` files a clean check reads, open: held with the namespace from its first clean check
+/// on, closed with it, so a later check makes no `setns` and no `openat`. Such a file stays the namespace's
+/// wherever its holder stands, having taken the namespace as it opened (`seq_open_net`, `single_open_net`, Linux
+/// v6.19 fs/proc/proc_net.c:39-50, :183), and a read from its start reads it anew (`seq_read_iter`, fs/seq_file.c:185-188).
+///
+/// An iptables file is absent while its module isn't loaded, and comes to be in every namespace when it loads
+/// (`register_pernet_subsys`, net/ipv4/netfilter/ip_tables.c:1838-1857, net/ipv6/netfilter/ip6_tables.c:1845-1864),
+/// so one not held is looked for by name where the check stands, and one that has come to be sends it in.
+pub struct Files {
+    sockstat: OwnedFd,
+    dev: OwnedFd,
+    tables: [Option<OwnedFd>; 2],
+}
+
+/// The namespace's iptables files, in the order [`Files`] holds them.
+const TABLES: [&str; 2] = ["ip_tables_names", "ip6_tables_names"];
+
+impl Files {
+    /// The files of the namespace the calling thread is in, `None` if it has no `sockstat` or `dev`.
+    fn open(proc_net: &ProcNet) -> Result<Option<Self>, Refused> {
+        let (Some(sockstat), Some(dev)) = (proc_net.open("sockstat")?, proc_net.open("dev")?)
+        else {
+            return Ok(None);
+        };
+        let [v4, v6] = TABLES;
+        Ok(Some(Self {
+            sockstat,
+            dev,
+            tables: [proc_net.open(v4)?, proc_net.open(v6)?],
+        }))
     }
 }
 
@@ -329,7 +442,7 @@ fn look(
     sockets_left(proc_net, fresh, &mut scratch.text, protocols)?;
     let text = &mut scratch.text;
     links(proc_net.file("dev", text)?.ok_or(Refused::Unreadable)?)?;
-    for tables in ["ip_tables_names", "ip6_tables_names"] {
+    for tables in TABLES {
         if proc_net
             .file(tables, text)?
             .is_some_and(|t| !t.trim().is_empty())
@@ -337,6 +450,11 @@ fn look(
             return Err(Refused::Firewall);
         }
     }
+    same_dumps(socket, fresh, scratch)
+}
+
+/// Whether the namespace's dumps, through `socket`, are a fresh namespace's.
+fn same_dumps(socket: &OwnedFd, fresh: &Fresh, scratch: &mut Scratch) -> Result<(), Refused> {
     let seen = dumps(socket, scratch)?;
     for ((d, have), want) in DUMPS.iter().zip(&seen).zip(&fresh.dumps) {
         if have != want {
@@ -392,41 +510,51 @@ impl ProcNet {
         .map_err(|e| OciError::os("opening /proc/thread-self/net", e))
     }
 
-    /// Its file `name`, read whole into `room`, each read as large as the room left, `None` where the kernel has
-    /// no such file (a module not loaded). Bounded at [`MAX_PROC_FILE`]: a file that fills `room` to one byte
-    /// past it is refused.
-    fn file<'r>(&self, name: &str, room: &'r mut [u8]) -> Result<Option<&'r str>, Refused> {
-        let fd = match rustix::fs::openat(
+    /// Its file `name` open, `None` where the kernel has no such file (a module not loaded).
+    fn open(&self, name: &str) -> Result<Option<OwnedFd>, Refused> {
+        match rustix::fs::openat(
             &self.0,
             name,
             OFlags::RDONLY | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
-            Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(None),
-            Err(_) => return Err(Refused::Unreadable),
-        };
-        let mut filled = 0;
-        // Each read fills at least a byte of `room` or ends the file, so this ends within `room`'s length.
-        loop {
-            let left = room.get_mut(filled..).ok_or(Refused::Unreadable)?;
-            if left.is_empty() {
-                break;
-            }
-            match rustix::io::read(&fd, left).map_err(|_| Refused::Unreadable)? {
-                0 => break,
-                n => filled = filled.checked_add(n).ok_or(Refused::Unreadable)?,
-            }
+            Ok(fd) => Ok(Some(fd)),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(_) => Err(Refused::Unreadable),
         }
-        if filled > MAX_PROC_FILE {
-            return Err(Refused::Unreadable);
-        }
-        let room: &'r [u8] = room;
-        let text = room.get(..filled).ok_or(Refused::Unreadable)?;
-        std::str::from_utf8(text)
-            .map(Some)
-            .map_err(|_| Refused::Unreadable)
     }
+
+    /// Its file `name`, read whole into `room` ([`read_whole`]), `None` where the kernel has no such file.
+    fn file<'r>(&self, name: &str, room: &'r mut [u8]) -> Result<Option<&'r str>, Refused> {
+        match self.open(name)? {
+            Some(fd) => read_whole(&fd, room).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// `fd`'s file from its start, whole, into `room`, each read as large as the room left. Bounded at
+/// [`MAX_PROC_FILE`]: a file that fills `room` to one byte past it is refused.
+fn read_whole<'r>(fd: &OwnedFd, room: &'r mut [u8]) -> Result<&'r str, Refused> {
+    let mut filled = 0;
+    // Each read fills at least a byte of `room` or ends the file, so this ends within `room`'s length.
+    loop {
+        let left = room.get_mut(filled..).ok_or(Refused::Unreadable)?;
+        if left.is_empty() {
+            break;
+        }
+        let at = u64::try_from(filled).map_err(|_| Refused::Unreadable)?;
+        match rustix::io::pread(fd, left, at).map_err(|_| Refused::Unreadable)? {
+            0 => break,
+            n => filled = filled.checked_add(n).ok_or(Refused::Unreadable)?,
+        }
+    }
+    if filled > MAX_PROC_FILE {
+        return Err(Refused::Unreadable);
+    }
+    let room: &'r [u8] = room;
+    let text = room.get(..filled).ok_or(Refused::Unreadable)?;
+    std::str::from_utf8(text).map_err(|_| Refused::Unreadable)
 }
 
 /// `/proc/net/protocols`' sockets in use by protocol, each handed to `each` as it's read: under its header

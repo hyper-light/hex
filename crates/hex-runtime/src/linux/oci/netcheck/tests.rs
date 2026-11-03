@@ -124,6 +124,100 @@ fn net_dev_says_whether_a_link_besides_loopback_is_there() {
     assert_eq!(links(&none), Err(Refused::Links), "no loopback");
 }
 
+/// Goal 5 extended step 6, the lead's fourth condition for a kept namespace's files: a read of one that fails is
+/// no verdict: the check drops them and looks as it does without them, counted, and refuses nothing on its own. Do:
+/// hold ends of pipes for them, which can't be read at an offset (ESPIPE), and check. Expect: no verdict through
+/// them, and the check counted as having failed them, holding none after.
+#[test]
+fn a_held_file_whose_read_fails_is_no_verdict_and_the_check_falls_back_counted() {
+    let end = || {
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .unwrap()
+            .0
+    };
+    let mut files = Some(Files {
+        sockstat: end(),
+        dev: end(),
+        tables: [Some(end()), Some(end())],
+    });
+    let fresh = Fresh {
+        protocols: BTreeMap::new(),
+        dumps: Vec::new(),
+    };
+    let mut scratch = Scratch::default();
+    let socket = end();
+    let proc_net = ProcNet::of_this_thread().unwrap();
+    assert!(matches!(
+        look_held(
+            files.as_ref().unwrap(),
+            &socket,
+            &proc_net,
+            &fresh,
+            &mut scratch
+        ),
+        HeldLook::Failed
+    ));
+    let own = || {
+        rustix::fs::open(
+            "/proc/self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    };
+    let (ns, home) = (own(), own());
+    let checked = check(
+        ns.as_fd(),
+        home.as_fd(),
+        &proc_net,
+        &fresh,
+        &mut scratch,
+        &mut Some(socket),
+        &mut files,
+    );
+    assert!(checked.files_failed && !checked.through_files);
+    assert!(files.is_none());
+}
+
+/// An iptables file is absent while its module isn't loaded, and comes to be in every namespace when it loads, so a
+/// namespace holds those there are, and a check looks by name, where it stands, for one it doesn't hold: fedora's kernel
+/// has `ip_tables_names` and no `ip6_tables_names`. Do: hold a `/proc/net` with neither, look, then make one, and look.
+/// Expect: past them to the dumps, whose socket here refuses; then no verdict, and the check sent in.
+#[test]
+fn an_iptables_file_not_held_is_looked_for_and_one_come_to_be_sends_the_check_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let sockstat = CLEAN_SOCKSTAT.replace("sockets: used 0", "sockets: used 1");
+    std::fs::write(dir.path().join("sockstat"), sockstat).unwrap();
+    std::fs::write(dir.path().join("dev"), LO_ONLY).unwrap();
+    let proc_net = ProcNet(
+        rustix::fs::open(
+            dir.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let files = Files::open(&proc_net).unwrap().unwrap();
+    assert!(files.tables.iter().all(Option::is_none));
+    let fresh = Fresh {
+        protocols: BTreeMap::new(),
+        dumps: Vec::new(),
+    };
+    let mut scratch = Scratch::default();
+    let socket = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+        .unwrap()
+        .0;
+    assert!(matches!(
+        look_held(&files, &socket, &proc_net, &fresh, &mut scratch),
+        HeldLook::Done(Err(_))
+    ));
+    std::fs::write(dir.path().join("ip6_tables_names"), b"").unwrap();
+    assert!(matches!(
+        look_held(&files, &socket, &proc_net, &fresh, &mut scratch),
+        HeldLook::Failed
+    ));
+}
+
 /// A file of a namespace's `/proc/net` is read whole into the thread's held room, again and again into the same
 /// room; one too long for the bound is refused, and one the kernel hasn't is none (CLAUDE.md §6: hostile input).
 #[test]

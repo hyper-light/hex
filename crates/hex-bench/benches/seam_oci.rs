@@ -874,6 +874,8 @@ mod linux {
                "unchecked": after.unchecked - before.unchecked,
                "lost_home": after.lost_home - before.lost_home,
                "protocols": after.protocols - before.protocols,
+               "through_files": after.through_files - before.through_files,
+               "files_failed": after.files_failed - before.files_failed,
                "check_us_mean": (after.check_ns - before.check_ns) as f64
                    / 1e3 / ((after.checked - before.checked).max(1)) as f64})
     }

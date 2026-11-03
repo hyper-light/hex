@@ -1304,6 +1304,30 @@ lifecycle without changing what a box may do.
     queue and drops unchanged and the namespace kept again at its next check (root lab); one the bound puts out closed
     with its namespace. *What would falsify it*: a box that may share reaching the socket, so that a check could read
     its message as a dump's answer; or the socket outliving its namespace.
+  - *A kept namespace's `/proc/net` files stay open with it, so a later check needn't enter it* (the lead's go, with its
+    four conditions, 2026-11-03). From a namespace's first clean check on, its `sockstat`, `dev`, `ip_tables_names` and
+    `ip6_tables_names` are held with it, open. Such a file stays the namespace's wherever its holder stands, having taken
+    the namespace as it opened (`seq_open_net`, `single_open_net`, Linux v6.19 fs/proc/proc_net.c:39-50, :183), a read
+    from its start reads it anew (`seq_read_iter`, fs/seq_file.c:185-188), and the kept socket answers for its own
+    namespace, so a later check makes no `setns`, `openat` or `close`: those were 58 us of a check's 149 on-CPU at
+    concurrency 1 and 44 of its 83 at 32 (`create-serial-checker-20261103T193211Z`). A socket past the check's own
+    enters to read the protocols, as before. An iptables file is absent while its module isn't loaded (fedora's kernel has
+    `ip_tables_names` and no `ip6_tables_names`), and comes to be in every namespace when it loads
+    (`register_pernet_subsys`, net/ipv4/netfilter/ip_tables.c:1838-1857, net/ipv6/netfilter/ip6_tables.c:1845-1864), so a
+    namespace holds those there are, a check looks by name where it stands for one it doesn't hold, and one that has come
+    to be sends it in, which opens it. A box can't reach them: they are the agent's descriptors, close-on-exec, so no program inherits them;
+    its `/proc/<pid>/fd` shows them only to a process with ptrace access to it (kernel/ptrace.c:276), which a box
+    short of the agent's capabilities hasn't (security/commoncap.c:164-182), where a box sees the agent's pid at all; and
+    what they read is that one namespace's counts, its owner's.
+    The conditions: at most four such files a kept namespace, six descriptors with its own and the socket, inside the
+    namespaces' bounds. As the node starts, `RLIMIT_NOFILE` is checked against all the node may hold, those bounds with
+    each live box's, its connections' and the seeds', raised to that where it's short (a root node may, up to
+    `fs.nr_open`), and where it can't be the refusal names the shortfall, never a silent cap. They close with the
+    namespace on every path, tested by counting them by their links: refused by way of the files or of entering,
+    released, put out by the owner's bound, with the node's end while a box's namespace holds them; a node recovered
+    holds none; and all the process's descriptors are back where they began (root lab). A failed read drops them and
+    looks by entering, counted (`files_failed`, as `through_files` counts the checks they answered), and refuses nothing
+    on its own.
   - *Another owner's box* gets a fresh namespace, counted `Owner`, and the idle one stays its owner's, as the cgroup's
     does (Ada's call). The counts the node keeps (`ReuseCounts`: the core's, and how many namespaces were given back,
     checked and closed unchecked, and how many checks read the protocols) are internal; no `hex_*` metric names them

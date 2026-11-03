@@ -318,6 +318,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
     a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
+    a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -986,6 +987,208 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
     }
     ruled();
     node.release_idle().unwrap();
+}
+
+/// Goal 5 extended, step 6 (a kept namespace's `/proc/net` files, so a later check needn't enter it; the lead's
+/// conditions: closed on every path, counted; CLAUDE.md §2). Do: keep one owner's namespace, reuse it, leave an
+/// address in it, a socket in the next, release what's idle, give one past the owner's bound, then let the node go
+/// with a box's namespace held and recover over its state, counting the files open in this process by the names
+/// their links show, and all its descriptors at the end. Expect: the first clean check enters and opens the four;
+/// each later one comes to its verdict through them, a dirty one's too, but a socket past its own, which enters; a
+/// box's namespace keeps them; a namespace refused, released or put out by the bound closes them, and so does the
+/// node's end; a node recovered holds none; and every descriptor is back to the count before the first node.
+fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        eprintln!("SKIP held files: a rootless node keeps no network namespaces");
+        return;
+    }
+    // Its sockstat and dev, and each iptables file its host's modules make.
+    let files = 2 + ["ip_tables_names", "ip6_tables_names"]
+        .iter()
+        .filter(|table| Path::new("/proc/net").join(table).exists())
+        .count();
+    let open_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let box_root = own.join("hex-reuse-files");
+    let (first_node, _first_state) = lab.node(&box_root);
+    drop(first_node);
+    let before_all = open_fds();
+    let (node, state) = lab.node(&box_root);
+    let o = BoxOwner::named("owner-files").unwrap();
+    let wait = ["/hex", "selftest-box", "wait"];
+    let make = |id: &str| BoxSpec {
+        id: BoxId::new(id).unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),
+        owner: Some(o.clone()),
+    };
+    let counts = || {
+        node.netns_reuse()
+            .unwrap()
+            .expect("a root node keeps namespaces")
+    };
+    let ruled = || {
+        wait_for(
+            || {
+                let c = counts();
+                c.checked + c.unchecked == c.given_back
+            },
+            "the checker's ruling on every namespace given back",
+        );
+        counts()
+    };
+    let init_of = |id: &str| -> String {
+        let cg = node.cgroup_dir(&BoxId::new(id).unwrap()).unwrap();
+        let procs = std::fs::read_to_string(cg.join("cgroup.procs")).unwrap();
+        procs.lines().next().expect("the box's init").to_owned()
+    };
+    let delete = |id: &str| node.delete(&BoxId::new(id).unwrap()).unwrap();
+    // A socket counts until it's freed, after a grace period, so a namespace's count may stand past the check's
+    // own for a while, and a check then enters for the protocols. Waited out where a case asks for the files.
+    let settled = |id: &str| {
+        let sockstat = format!("/proc/{}/net/sockstat", init_of(id));
+        wait_for(
+            || {
+                std::fs::read_to_string(&sockstat)
+                    .unwrap()
+                    .starts_with("sockets: used 1\n")
+            },
+            "the namespace's count down to the check's own socket",
+        );
+    };
+    // A file of `/proc/thread-self/net` opened links to its name under the thread's directory.
+    let held = || {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .filter(|link| {
+                let link = link.to_string_lossy();
+                ["sockstat", "dev", "ip_tables_names", "ip6_tables_names"]
+                    .iter()
+                    .any(|name| link.ends_with(&format!("/net/{name}")))
+            })
+            .count()
+    };
+    assert_eq!(held(), 0, "no namespace kept yet");
+
+    node.create(make("files-a")).unwrap();
+    let start = ruled();
+    delete("files-a");
+    let first = ruled();
+    assert_eq!(first.pool.idle, start.pool.idle + 1, "{first:?}");
+    assert_eq!(
+        first.through_files, start.through_files,
+        "the first check enters: {first:?}"
+    );
+    assert_eq!(first.files_failed, 0, "{first:?}");
+    assert_eq!(held(), files, "the clean namespace holds its files");
+
+    node.create(make("files-b")).unwrap();
+    assert_eq!(held(), files, "a box's namespace keeps them while it lives");
+    settled("files-b");
+    delete("files-b");
+    let second = ruled();
+    assert_eq!(
+        second.through_files,
+        first.through_files + 1,
+        "through its files: {second:?}"
+    );
+    assert_eq!(second.pool.idle, first.pool.idle, "kept again: {second:?}");
+    assert_eq!(held(), files);
+
+    node.create(make("files-c")).unwrap();
+    in_netns(&init_of("files-c"), || rtnetlink(new_address()));
+    settled("files-c");
+    delete("files-c");
+    let third = ruled();
+    assert_eq!(
+        third.through_files,
+        second.through_files + 1,
+        "through its files: {third:?}"
+    );
+    assert_eq!(
+        third.pool.refused(NetRefused::Addresses),
+        second.pool.refused(NetRefused::Addresses) + 1,
+        "an address the files' path refuses: {third:?}"
+    );
+    assert_eq!(held(), 0, "a namespace refused closes them");
+
+    node.create(make("files-d")).unwrap();
+    delete("files-d");
+    ruled();
+    node.create(make("files-e")).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    in_netns(&init_of("files-e"), || {
+        tx.send(std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+            .unwrap()
+    });
+    let socket = rx.recv().unwrap();
+    let before = ruled();
+    delete("files-e");
+    let after = ruled();
+    assert_eq!(
+        after.through_files, before.through_files,
+        "a socket past its own enters: {after:?}"
+    );
+    assert_eq!(after.protocols, before.protocols + 1, "{after:?}");
+    assert_eq!(
+        after.pool.refused(NetRefused::Sockets),
+        before.pool.refused(NetRefused::Sockets) + 1,
+        "{after:?}"
+    );
+    drop(socket);
+    assert_eq!(held(), 0, "refused by way of entering, it closes them too");
+
+    node.create(make("files-f")).unwrap();
+    delete("files-f");
+    ruled();
+    assert_eq!(held(), files);
+    node.release_idle().unwrap();
+    wait_for(|| held() == 0, "the files of a namespace released closing");
+
+    // One past the owner's bound, each namespace with its files: the one put out closes its own.
+    let many: Vec<String> = (0..=hex_core::netns_reuse::PER_OWNER)
+        .map(|n| format!("files-many-{n}"))
+        .collect();
+    for id in &many {
+        node.create(make(id)).unwrap();
+    }
+    for id in &many {
+        delete(id);
+    }
+    ruled();
+    assert_eq!(
+        held(),
+        files * hex_core::netns_reuse::PER_OWNER,
+        "the namespace the owner's bound put out closed its files"
+    );
+    node.release_idle().unwrap();
+    wait_for(|| held() == 0, "the bound's namespaces released closing");
+    assert_eq!(counts().files_failed, 0);
+
+    // The node let go with a box's namespace held, its files among what it holds: they close with it, the box runs
+    // on, and a node recovered over the same state holds none of them again.
+    node.create(make("files-g")).unwrap();
+    delete("files-g");
+    ruled();
+    node.create(make("files-h")).unwrap();
+    assert_eq!(held(), files, "the box's namespace holds them");
+    drop(node);
+    wait_for(|| held() == 0, "the files closing with the node");
+    let restarted = Node::open(&box_root, state.path(), state.path())
+        .expect("reopen the node")
+        .with_oci_helper(PathBuf::from(&lab.exe));
+    restarted.recover().expect("recover");
+    assert_eq!(held(), 0, "a node recovered holds no namespace's files");
+    restarted.delete(&BoxId::new("files-h").unwrap()).unwrap();
+    assert_eq!(held(), 0);
+    drop(restarted);
+    wait_for(
+        || open_fds() <= before_all,
+        "every descriptor the nodes held closing",
+    );
+    eprintln!(
+        "netns: a kept namespace's files held across a reuse, closed when refused, released, put out or let go"
+    );
 }
 
 /// Goal 5 extended, step 6 (the check's own socket, kept in each namespace it checks; the lead's conditions,

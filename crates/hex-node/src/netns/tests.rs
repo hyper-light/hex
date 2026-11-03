@@ -81,6 +81,56 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     assert_eq!((c.taken, c.made_on_path, c.failed), (1, 0, 0), "{c:?}");
 }
 
+/// Goal 5 extended step 6, the lead's second condition for a kept namespace's files (CLAUDE.md §2, §3): the
+/// descriptor limit is checked at the node's start against all it may hold, raised to that, and where it can't be
+/// the refusal names the shortfall. Do: ask of limits that hold it, and of limits under it. Expect: nothing asked of
+/// the first; the soft limit raised, and a hard one under it too; the shortfall in the refusal's words.
+#[test]
+fn the_descriptor_limit_is_raised_to_all_a_node_may_hold_or_the_shortfall_refused() {
+    use rustix::process::Rlimit;
+
+    let needs = descriptors_a_node_may_hold();
+    assert!(
+        needs >= 65_536 * 8,
+        "each live box's kept namespace and its own are in it: {needs}"
+    );
+    for enough in [
+        Rlimit {
+            current: Some(needs),
+            maximum: Some(needs),
+        },
+        Rlimit {
+            current: None,
+            maximum: None,
+        },
+    ] {
+        assert!(raised_limit(needs, &enough).is_none());
+    }
+    let soft = raised_limit(
+        needs,
+        &Rlimit {
+            current: Some(1_024),
+            maximum: Some(needs + 1),
+        },
+    )
+    .unwrap();
+    assert_eq!((soft.current, soft.maximum), (Some(needs), Some(needs + 1)));
+    let low = Rlimit {
+        current: Some(1_024),
+        maximum: Some(4_096),
+    };
+    let both = raised_limit(needs, &low).unwrap();
+    assert_eq!((both.current, both.maximum), (Some(needs), Some(needs)));
+    let refused = short_of(needs, &low, "EPERM").to_string();
+    for word in [
+        needs.to_string(),
+        4_096.to_string(),
+        (needs - 4_096).to_string(),
+    ] {
+        assert!(refused.contains(&word), "{word} in {refused}");
+    }
+}
+
 /// Goal 5 extended step 6, the lead's conditions for the check's own socket (2026-11-03T17:36Z; CLAUDE.md §2): the
 /// netlink socket a check keeps in a namespace is held with it inside the idle namespaces' bound, and closed with
 /// it when the bound puts it out. Do: give one owner `PER_OWNER` + 1 kept namespaces, each with a stand-in for its
@@ -109,6 +159,7 @@ fn a_kept_namespaces_socket_is_held_in_its_bound_and_closed_when_the_bound_puts_
             KeptNet {
                 ns,
                 socket: Some(write),
+                files: None,
             },
         ));
         ends.push(read);
