@@ -576,6 +576,41 @@ Off-CPU ms per lifecycle:
 - **On-CPU, lock spinning is 0.035 ms a lifecycle at concurrency 32,** against run 12's 0.064: the namespaces still
   made took RTNL less.
 
+## Run 15 (2026-11-03, fedora): checker, where a given-back namespace's check spends its time, before and after its held buffers
+
+- **Binaries:** `reuse_pass.md`'s run 8's merge (mr4, `hex` 63fd1465f9f87837) against the same tree with 8753abe
+  alone (mr6, `hex` 7e355959cde724a0), A B B A, on the E-cores 16-31, leaving the lead's 4-15 alone. The unit
+  `hex-g5x-s6-checkerab-20261103T090821Z`, one owner's boxes. Each run is seam_oci's start_true over 5,000
+  lifecycles (5,019 namespaces checked), then its sustained phase over 20,000 (20,000 checked). Not timed passes: the
+  probe times every system call the checkers make, which costs each some.
+- **Runs:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-checker-20261103T091035Z` (mr4), `T091108Z` (mr6),
+  `T091141Z` (mr6), `T091407Z` (mr4); load 6.5 to 17.3, another tenant's build beside the last two. The mode's first
+  run, `20261103T085017Z` at 2228e54, keyed its maps by bpftrace's `tid`, which fails for every task outside the
+  probe container (4f05007 keys by the task's pid); it isn't used here.
+
+Each figure per namespace checked (`create_serial.py`):
+
+| | mr4 | mr6 |
+|---|---|---|
+| on-CPU, concurrency 1 | 151.2, 157.1 us | 138.7, 129.5 us |
+| of it in user mode | 32.4, 37.1 us | 19.9, 18.1 us |
+| the checker's own clock | 166.2, 174.5 us | 141.9, 144.0 us |
+| system calls, the reads among them | 48.1, 21.0 | 34.1, 7.0 |
+| on-CPU, concurrency 32 | 165.5, 174.1 us | 147.6, 151.8 us |
+| the checker's own clock, concurrency 32 | 291.6, 321.6 us | 270.4, 284.9 us |
+
+- **The held buffers take 20 us of CPU off a check, 13%, at both concurrencies:** user mode falls from 35 to 19 us
+  (no allocation, clearing or map of names per check) and the reads from 21 to 7 (straight into the held room, where
+  `read_to_string` began each file with small reads). In user mode a fifth of mr4's CPU, the C library's most of it.
+- **Where a check's kernel time goes, mr6 at concurrency 1:** reading `/proc/net/protocols`, 25 to 29 us, its lines'
+  formatting and `sock_prot_inuse_get` over every possible CPU; opening the five `/proc/net` files, 24 to 27 us, each
+  looked up afresh; netlink, 23 to 25 us; entering and leaving the kernel, 7 us; closing, 5 us.
+- **The dumps' answers cost 5 to 7% of a check to allocate:** `__alloc_skb` held 5.4% and 7.1% of the first two
+  runs' samples. A socket's dumps are answered in buffers of its largest read, capped at 32 KiB (Linux v6.19
+  net/netlink/af_netlink.c:1940-1943, :2279-2290), which this kernel clears as it allocates them, and the check read
+  with 32 KiB. The page faults the first run counted are those allocations', not the checker's buffers': a fault is
+  in 4.2 to 5.7% of every run's stacks, mr6's as mr4's.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
