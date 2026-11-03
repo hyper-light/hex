@@ -281,13 +281,17 @@ fn own_cgroup() -> PathBuf {
 }
 
 /// Moves this process into a leaf of its own cgroup so a sibling leaf can hold the box; `Err` with the
-/// reason when the cgroup isn't ours to subdivide. The box root needs no delegated controllers here
-/// (the box sets no bounds), so this only confirms the subtree is writable.
+/// reason when the cgroup isn't ours to subdivide. A probe box root proves it is, as the other cgroup
+/// tests' do: opening one hands the cgroup's controllers down, which cgroup v2 refuses while the cgroup
+/// still holds processes of its own (a delegated systemd unit's shell beside this test), and that
+/// refusal re-runs the test in a scope of its own rather than failing in `exercise`.
 fn prepare_cgroup() -> Result<PathBuf, String> {
     let own = own_cgroup();
     let leaf = own.join("hex-self");
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    Ok(own)
+    let probe = BoxRoot::open(&own.join("hex-probe"), Vec::new()).map_err(|e| e.to_string());
+    let _ = std::fs::remove_dir(own.join("hex-probe"));
+    probe.map(|_| own)
 }
