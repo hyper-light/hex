@@ -454,3 +454,29 @@ as its concurrency 1 moves from 1.01 ms of CPU a lifecycle to 0.69, and mr13's t
 pooled rate moves 2%, within its runs' spread. The low mark's own effect is on its thread (`devfs_clone.md`). What the
 ratio swings with here is concurrency 1's CPU a lifecycle, 46% on one binary within three minutes, which is the host's
 state and not this change. Its cause isn't named yet.
+
+## Run 15 (2026-11-03, fedora): the held files, the descriptor sweep and the FIFO's two ends, A B B A on 4-15
+
+- **Binaries:** mr13 (`hex` 252eea5c30632778), and mr17 (`hex` fc991e45d9cbb5ce, `seam_oci` 5c607a9069d096a2; `334aee5`,
+  merged for measurement only): x-s3's series and step 6's, so mr13's low mark with a kept namespace's `/proc/net` files
+  held (`f37032d`), every descriptor from 3 up marked close-on-exec before foreign code, a start holding both FIFO
+  ends, and the `/dev` pool's thread with a umask of 0 (held for Ada).
+- **Method:** the unit `hex-g5x-s6-v24-20261103T225919Z`, 23:03Z to 23:06:30Z, run noisy on the lead's order: interleaved
+  pairs on 4-15, 2 rounds of 10 pairs a run, one owner's boxes, reuse on, one-minute load 35 to 52, the host's threads
+  about 7,100 to 7,350, kiln's pool beside it, `create_serial.md` run 23 just before.
+
+| run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | over the socket (SE) |
+|---|---|---|---|---|---|---|
+| `20261103T230320Z` | mr13 | 4.82x (0.12) | 7,451/s over 1,546/s | 0.76, 1.26 ms | 1.21, 9.49 | 5.74x (0.11) |
+| `20261103T230409Z` | mr17 | 5.64x (0.35) | 6,512/s over 1,162/s | 0.96, 1.26 ms | 1.13, 9.10 | 5.44x (0.17) |
+| `20261103T230500Z` | mr17 | 5.29x (0.18) | 8,046/s over 1,527/s | 0.77, 1.22 ms | 1.19, 9.80 | 5.06x (0.11) |
+| `20261103T230545Z` | mr13 | 5.18x (0.13) | 8,299/s over 1,603/s | 0.75, 1.21 ms | 1.24, 10.33 | 5.21x (0.24) |
+
+Pooled over 40 pairs each: mr13 5.00x (SE 0.09), 7,852/s over 1,574/s; mr17 5.46x (SE 0.20), 7,198/s over 1,320/s. Over
+the socket, mr13 5.47x (SE 0.14) and mr17 5.25x (SE 0.11).
+
+**What it says: no gain to claim, and neither reaches 8x.** In process mr17 reads 0.46x higher, about two standard
+errors, and over the socket 0.22x lower. Its higher ratio comes from its first run's slower concurrency 1 (0.96 ms of CPU
+a lifecycle against 0.75 to 0.77 in the other three), the host's swing run 14 found; its second run lies beside mr13's.
+Concurrency 32's CPU a lifecycle is 1.21 to 1.26 ms in all four. The held files' own saving is on the checker's thread
+and is still to be measured apart.
