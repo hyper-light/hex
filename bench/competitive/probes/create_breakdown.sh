@@ -88,10 +88,10 @@ if [ "${IDLE_AB:-0}" -gt 0 ]; then
   echo "idle-thread A/B: $IDLE_AB idle threads up inside the container around each round's seam_idle and libcrun_idle; host threads before them $(ls -d /proc/[0-9]*/task/[0-9]* 2>/dev/null | wc -l)" >> "$OUT/env.txt"
 fi
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; [ -n "$HELPER" ] && kill "$HELPER" 2>/dev/null || true' EXIT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
-  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH -e CLASSIC \
+  -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH -e CLASSIC -e HEXBENCH_DEVFS -e AC_E_MOUNTS \
   registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh 2>&1 | tee "$OUT/probe.out"
 { echo "load at end: $(cat /proc/loadavg)"
   for r in cpu memory io; do echo "pressure at end, $r: $(head -1 "/proc/pressure/$r")"; done

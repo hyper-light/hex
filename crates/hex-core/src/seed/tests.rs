@@ -52,6 +52,7 @@ fn creates() -> Vec<Create> {
             pruned: false,
             binds: 0,
             path_joins: 0,
+            dev_mount: None,
         },
         Create {
             bundle: "/b".to_owned(),
@@ -61,6 +62,7 @@ fn creates() -> Vec<Create> {
             pruned: false,
             binds: 0,
             path_joins: 0,
+            dev_mount: None,
         },
         // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
         // one namespace joined by path.
@@ -72,6 +74,7 @@ fn creates() -> Vec<Create> {
             pruned: true,
             binds: 2,
             path_joins: 1,
+            dev_mount: None,
         },
     ]
 }
@@ -431,4 +434,60 @@ proptest! {
         bytes.extend(body);
         let _ = read_request(&bytes, bytes.len());
     }
+}
+
+/// HEX-SEED-2/3, AC-T7.1.4: carry a prepared mount in a new kind without changing CREATE bytes.
+/// Expect old payload intact, exactly one appended index/fd, every truncation and excess refused.
+#[test]
+fn a_prepared_create_appends_only_in_its_new_kind() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    let prepared = Create {
+        dev_mount: Some(7),
+        ..ordinary.clone()
+    };
+    let bytes = create(&prepared).unwrap();
+    assert_eq!(&bytes[..6], &old[..6]);
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 3);
+    assert_eq!(&bytes[8..old.len()], &old[8..]);
+    assert_eq!(&bytes[old.len()..], &7u32.to_le_bytes());
+    assert_eq!(prepared.fds(), ordinary.fds() + 1);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), prepared.fds()).unwrap(),
+        Message::Create(prepared.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_create(&bytes[..len], len).is_err());
+    }
+    assert!(matches!(
+        read_message(&bytes, bytes.len(), ordinary.fds()),
+        Err(Fault::Descriptors { .. })
+    ));
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(read_create(&trailing, trailing.len()).is_err());
+    let over = create(&Create {
+        binds: u32::try_from(MAX_BINDS).unwrap(),
+        path_joins: u32::try_from(MAX_PATH_JOINS).unwrap(),
+        network: true,
+        dev_mount: Some(1),
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&over, over.len()),
+        Err(Fault::Value {
+            what: "dev_mount",
+            ..
+        })
+    ));
+    let wrong_path = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        dev_mount: Some(1),
+        ..ordinary
+    })
+    .unwrap();
+    assert!(read_create(&wrong_path, wrong_path.len()).is_err());
 }

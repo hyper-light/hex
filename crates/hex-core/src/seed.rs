@@ -81,6 +81,7 @@ pub const STARTED_FDS: usize = 1;
 mod kind {
     pub const EXEC: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
+    pub const CREATE_PREPARED: u16 = 0x0003;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
 }
@@ -145,6 +146,9 @@ pub struct Create {
     /// network, ipc, uts or cgroup namespace the spec joins by path, which the agent opened (the pruned
     /// seed can't reach the host path). Zero when not pruned. At most [`MAX_PATH_JOINS`].
     pub path_joins: u32,
+    /// New CREATE_PREPARED kind: mount-plan index of a prepared `/dev`; its fd rides last. Old
+    /// CREATE bytes stay unchanged and readers without this kind refuse it explicitly.
+    pub dev_mount: Option<u32>,
 }
 
 impl Create {
@@ -157,7 +161,8 @@ impl Create {
             n = n
                 .saturating_add(PRUNED_FIXED_FDS)
                 .saturating_add(self.binds as usize)
-                .saturating_add(self.path_joins as usize);
+                .saturating_add(self.path_joins as usize)
+                .saturating_add(usize::from(self.dev_mount.is_some()));
         }
         n
     }
@@ -285,7 +290,14 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
 /// A create as a message.
 pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
-    header(&mut w, kind::CREATE);
+    header(
+        &mut w,
+        if create.dev_mount.is_some() {
+            kind::CREATE_PREPARED
+        } else {
+            kind::CREATE
+        },
+    );
     w.string(&create.bundle)?;
     w.string(&create.dir)?;
     w.option_with(create.cgroup.as_deref(), |w, c| w.string(c))?;
@@ -293,6 +305,9 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.bool(create.pruned);
     w.u32(create.binds);
     w.u32(create.path_joins);
+    if let Some(mount) = create.dev_mount {
+        w.u32(mount);
+    }
     w.done()
 }
 
@@ -306,7 +321,7 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
     }
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
-    if kind != kind::CREATE {
+    if !matches!(kind, kind::CREATE | kind::CREATE_PREPARED) {
         return Err(Fault::Kind {
             kind,
             version,
@@ -321,8 +336,13 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         pruned: r.bool("pruned")?,
         binds: r.u32()?,
         path_joins: r.u32()?,
+        dev_mount: if kind == kind::CREATE_PREPARED {
+            Some(r.u32()?)
+        } else {
+            None
+        },
     };
-    r.end(kind::CREATE, version)?;
+    r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
         return Err(Fault::value(
             "create",
@@ -343,10 +363,17 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             format!("a create joins at most {MAX_PATH_JOINS} namespaces by path"),
         ));
     }
-    if !create.pruned && (create.binds != 0 || create.path_joins != 0) {
+    if !create.pruned && (create.binds != 0 || create.path_joins != 0 || create.dev_mount.is_some())
+    {
         return Err(Fault::value(
             "binds",
             "only a pruned create carries bind-source trees or path-joined namespaces",
+        ));
+    }
+    if create.fds() > MAX_REQUEST_FDS {
+        return Err(Fault::value(
+            "dev_mount",
+            "a prepared create exceeds SCM_MAX_FD",
         ));
     }
     Ok(create)
@@ -359,7 +386,7 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
         kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
-        kind::CREATE => {
+        kind::CREATE | kind::CREATE_PREPARED => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)

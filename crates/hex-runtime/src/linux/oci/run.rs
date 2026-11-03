@@ -107,6 +107,13 @@ pub trait Networks {
     fn on_path(&self) -> Result<(), OciError>;
 }
 
+/// A pool of fresh tmpfs `/dev` mounts, with defaults made before a create takes one. A dry pool
+/// returns None; the init then uses ordinary setup. A taken mount is never returned or shared.
+pub trait DevMounts {
+    fn take(&self, key: super::devmount::Key) -> Result<Option<OwnedFd>, OciError>;
+    fn unpooled(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError>;
+}
+
 /// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
 /// pool), asked once the spec is read, and the device programs it keeps loaded, one per policy
 /// ([`Programs::attach`]; goal 5 extended, step 1). A create given neither makes its container's
@@ -115,6 +122,7 @@ pub trait Networks {
 pub struct Held<'a> {
     pub networks: Option<&'a dyn Networks>,
     pub devices: Option<&'a Programs>,
+    pub dev_mounts: Option<&'a dyn DevMounts>,
 }
 
 /// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
@@ -123,6 +131,7 @@ struct Route<'a> {
     cgroup: Cgroup,
     networks: Option<&'a dyn Networks>,
     devices: Option<&'a Programs>,
+    dev_mounts: Option<&'a dyn DevMounts>,
     start: Start<'a>,
 }
 
@@ -248,11 +257,18 @@ pub struct PrunedCreate {
     pub cgroup_dir: OwnedFd,
     pub container_dir: OwnedFd,
     pub rootfs: OwnedFd,
+    pub dev_mount: Option<PreparedDev>,
     pub binds: Vec<OwnedFd>,
     /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
     /// namespace order, which the init joins by `setns` (the pruned seed can't open the host path). A
     /// pid or user namespace by path takes the shim, a mount namespace by path the classic path.
     pub path_joins: Vec<OwnedFd>,
+}
+
+/// A fresh `/dev` mount made off the create path, for exactly this index in the mount plan.
+pub struct PreparedDev {
+    pub mount: u32,
+    pub tree: OwnedFd,
 }
 
 /// Where a container's cgroup comes from.
@@ -316,6 +332,7 @@ impl Runtime {
                 cgroup: Cgroup::FromSpec,
                 networks: None,
                 devices: None,
+                dev_mounts: None,
                 start: Start::Shim,
             },
         )
@@ -346,6 +363,7 @@ impl Runtime {
                 cgroup: Cgroup::Provided(cgroup),
                 networks: held.networks,
                 devices: held.devices,
+                dev_mounts: held.dev_mounts,
                 start: Start::Shim,
             },
         )
@@ -376,6 +394,7 @@ impl Runtime {
                 cgroup: Cgroup::Provided(cgroup),
                 networks: held.networks,
                 devices: held.devices,
+                dev_mounts: held.dev_mounts,
                 start: Start::Seed(seeds),
             },
         )
@@ -409,6 +428,7 @@ impl Runtime {
             cgroup,
             networks,
             devices,
+            dev_mounts,
             start,
         } = route;
         let config = std::fs::read(bundle.join("config.json"))
@@ -449,7 +469,9 @@ impl Runtime {
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
             Start::Shim => self.start_shim(&making, &spec, &cgroup, network, ShimStdio::Inherited),
-            Start::Seed(seeds) => self.start_seeded(&making, &spec, &cgroup, network, seeds),
+            Start::Seed(seeds) => {
+                self.start_seeded(&making, &spec, &cgroup, network, seeds, dev_mounts)
+            }
         });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
@@ -559,6 +581,7 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         seeds: &dyn CloneInit,
+        dev_mounts: Option<&dyn DevMounts>,
     ) -> Result<(), OciError> {
         if init::needs_shim(spec) {
             seeds.classic(ClassicReason::NamespaceByPath);
@@ -566,7 +589,36 @@ impl Runtime {
         }
         if seeds.prunes_root() {
             match self.pruned_create(making, spec, cgroup) {
-                Ok(pruned) => {
+                Ok(mut pruned) => {
+                    if let Some(pool) = dev_mounts {
+                        let plan = super::mount::plan(&spec.mounts)?;
+                        // Keep the optional descriptor within SCM_MAX_FD without changing old limits.
+                        let spare = pruned
+                            .binds
+                            .len()
+                            .checked_add(pruned.path_joins.len())
+                            .and_then(|n| {
+                                n.checked_add(
+                                    hex_core::seed::CREATE_FDS
+                                        + 1
+                                        + hex_core::seed::PRUNED_FIXED_FDS
+                                        + 1,
+                                )
+                            })
+                            .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
+                        if !spare {
+                            pool.unpooled(hex_core::devfs::Unpooled::Capacity)?;
+                        } else {
+                            match super::devmount::eligible(spec, &plan) {
+                                Ok((mount, key)) => {
+                                    if let Some(tree) = pool.take(key)? {
+                                        pruned.dev_mount = Some(PreparedDev { mount, tree });
+                                    }
+                                }
+                                Err(reason) => pool.unpooled(reason)?,
+                            }
+                        }
+                    }
                     self.start_via_seed(making, spec, cgroup, network, seeds, Some(pruned))
                 }
                 Err(reason) => {
@@ -690,6 +742,7 @@ impl Runtime {
             cgroup_dir,
             container_dir,
             rootfs,
+            dev_mount: None,
             binds,
             path_joins,
         })

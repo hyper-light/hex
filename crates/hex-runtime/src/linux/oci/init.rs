@@ -758,6 +758,7 @@ fn setup_rootfs(spec: &Spec, bundle: &str) -> Result<(), OciError> {
 /// mounts. The clone child attaches them with `move_mount`, so nothing of the host is read by path.
 pub(crate) struct PrunedSources {
     pub rootfs: OwnedFd,
+    pub dev_mount: Option<super::run::PreparedDev>,
     pub binds: Vec<OwnedFd>,
     /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
     /// namespace order: the agent opened them (the pruned init can't reach the host path), and the init
@@ -794,15 +795,40 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
     .map_err(|e| OciError::os("attaching the rootfs", e))?;
     let root = inroot::Root::new(sources.rootfs.as_fd());
 
+    let plan = crate::linux::oci::mount::plan(&spec.mounts)?;
+    if let Some(dev) = &sources.dev_mount
+        && !super::devmount::eligible(spec, &plan).is_ok_and(|(i, _)| i == dev.mount)
+    {
+        return Err(OciError::Broken(
+            "the prepared /dev does not match the mount plan".to_owned(),
+        ));
+    }
     let mut binds = sources.binds.iter();
-    for op in crate::linux::oci::mount::plan(&spec.mounts)? {
+    let mut ready = false;
+    for (index, op) in plan.iter().enumerate() {
         // The mount at `/` is the rootfs itself (a layered root's overlay, with host-path layers the
         // agent built as the rootfs tree; a directory root has none). It is already attached above, so
         // it is skipped here, as the agent skipped it when it cloned the bind sources.
         if op.destination == "/" {
             continue;
         }
-        do_mount_pruned(&root, &op, &mut binds)?;
+        if ready
+            && (!super::devmount::target_unaffected(&op.destination)
+                || !root.without_symlinks(&op.destination))
+        {
+            if let Some(dev) = &sources.dev_mount {
+                clear_prepared_dev(&dev.tree)?;
+            }
+            ready = false;
+        }
+        let prepared = sources
+            .dev_mount
+            .as_ref()
+            .filter(|d| usize::try_from(d.mount).ok() == Some(index))
+            .filter(|_| root.without_symlinks(&op.destination))
+            .map(|d| &d.tree);
+        do_mount_pruned(&root, op, &mut binds, prepared)?;
+        ready |= prepared.is_some();
     }
     if binds.next().is_some() {
         return Err(OciError::Broken(
@@ -811,7 +837,9 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
     }
     // A pruned create is a root node's, never a user namespace's (the runtime routes those classic), so
     // devices are made with `mknod`, as the classic path makes them outside a user namespace.
-    make_dev(&root, spec, false)?;
+    if !ready {
+        make_dev(&root, spec, false)?;
+    }
     let mut null = None;
     for path in &spec.linux.masked_paths {
         mask_path_pruned(&root, path, &mut null)?;
@@ -871,6 +899,7 @@ fn do_mount_pruned<'a>(
     root: &inroot::Root<'_>,
     op: &crate::linux::oci::mount::Op,
     binds: &mut impl Iterator<Item = &'a OwnedFd>,
+    prepared: Option<&OwnedFd>,
 ) -> Result<(), OciError> {
     let at = || format!("{} at {}", op.kind_source, op.destination);
     let fs;
@@ -905,21 +934,26 @@ fn do_mount_pruned<'a>(
         tree.as_fd()
     } else {
         let target_fd = target(root, &op.destination, Make::Dir)?;
-        fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
-            OciError::os(
-                "making a filesystem",
-                format!("{} at {}: {e}", op.fstype, op.destination),
-            )
-        })?;
-        rustix::mount::move_mount(fs.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD).map_err(
-            |e| {
+        let filesystem = match prepared {
+            Some(tree) => tree,
+            None => {
+                fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
+                    OciError::os(
+                        "making a filesystem",
+                        format!("{} at {}: {e}", op.fstype, op.destination),
+                    )
+                })?;
+                &fs
+            }
+        };
+        rustix::mount::move_mount(filesystem.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+            .map_err(|e| {
                 OciError::os(
                     "attaching a filesystem",
                     format!("{} at {}: {e}", op.fstype, op.destination),
                 )
-            },
-        )?;
-        fs.as_fd()
+            })?;
+        filesystem.as_fd()
     };
     if let Some(prop) = op.propagation {
         let (ms, rec) = propagation_ms(prop);
@@ -953,7 +987,9 @@ pub(crate) fn make_fs(
     data: &str,
     flags: MountFlags,
 ) -> Result<OwnedFd, OciError> {
-    let fs = rustix::mount::fsopen(fstype, FsOpenFlags::empty())
+    // The refill worker runs concurrently with helper execs: the context must not leak through
+    // a seed/shim exec while this function is between fsopen and fsmount.
+    let fs = rustix::mount::fsopen(fstype, FsOpenFlags::FSOPEN_CLOEXEC)
         .map_err(|e| OciError::os("fsopen", e))?;
     rustix::mount::fsconfig_set_string(fs.as_fd(), "source", source)
         .map_err(|e| OciError::os("a filesystem's source", format!("{source}: {e}")))?;
@@ -1494,6 +1530,46 @@ fn unescape_mountpoint(field: &str) -> String {
         .replace("\\011", "\t")
         .replace("\\012", "\n")
         .replace("\\134", "\\")
+}
+
+/// Makes a fresh detached tmpfs `/dev` with defaults, before any create can see it. Each node gets
+/// its exact mode through chmod: the worker must never change the multi-threaded agent's umask.
+pub fn prepare_dev(source: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
+    let tree = make_fs(source, "tmpfs", data, flags)?;
+    for &(name, major, minor, mode) in &DEFAULT_DEVICES {
+        make_node(
+            &tree,
+            name,
+            rustix::fs::FileType::CharacterDevice,
+            mode,
+            major,
+            minor,
+        )?;
+    }
+    for &(source, name) in &DEFAULT_LINKS {
+        rustix::fs::symlinkat(source, &tree, name)
+            .map_err(|e| OciError::os("preparing a /dev link", e))?;
+    }
+    Ok(tree)
+}
+
+pub(crate) fn default_dev_name(name: &str) -> bool {
+    DEFAULT_DEVICES.iter().any(|&(n, ..)| n == name)
+        || DEFAULT_LINKS.iter().any(|&(_, n)| n == name)
+}
+
+/// A later mount might depend on defaults which ordinary setup has not made yet. Earlier guarded
+/// mounts have touched none of these names, so remove the pristine defaults, then run ordinary setup.
+fn clear_prepared_dev(tree: &OwnedFd) -> Result<(), OciError> {
+    for name in DEFAULT_DEVICES
+        .iter()
+        .map(|&(n, ..)| n)
+        .chain(DEFAULT_LINKS.iter().map(|&(_, n)| n))
+    {
+        rustix::fs::unlinkat(tree, name, rustix::fs::AtFlags::empty())
+            .map_err(|e| OciError::os("restoring /dev mount ordering", e))?;
+    }
+    Ok(())
 }
 
 /// The container's `/dev`: the default devices (OCI spec §Default Devices), the spec's own, then the

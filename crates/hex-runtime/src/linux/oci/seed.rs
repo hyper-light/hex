@@ -747,7 +747,7 @@ fn serve_create_pruned(
             ),
         );
     }
-    let path_joins: Vec<OwnedFd> = fds.collect();
+    let path_joins: Vec<OwnedFd> = fds.by_ref().take(create.path_joins as usize).collect();
     if path_joins.len() != create.path_joins as usize {
         return refused(
             Failed::Request,
@@ -758,6 +758,18 @@ fn serve_create_pruned(
             ),
         );
     }
+    let dev_mount = match create.dev_mount {
+        Some(mount) => match fds.next() {
+            Some(tree) => Some(super::run::PreparedDev { mount, tree }),
+            None => {
+                return refused(
+                    Failed::Request,
+                    "a prepared create carried no /dev tree".to_owned(),
+                );
+            }
+        },
+        None => None,
+    };
     let spec = match read_config_at(bundle_dir.as_fd()) {
         Ok(spec) => spec,
         Err(e) => return refused(Failed::Start, e.to_string()),
@@ -796,6 +808,7 @@ fn serve_create_pruned(
             // exec FIFO, whose error goes to the agent on the sync pipe.
             let sources = init::PrunedSources {
                 rootfs,
+                dev_mount,
                 binds,
                 path_joins,
             };
@@ -815,7 +828,7 @@ fn serve_create_pruned(
         }
         Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
             drop((sync_w, cgroup_dir, container_dir, rootfs, binds, network));
-            drop(path_joins);
+            drop((path_joins, dev_mount));
             match u32::try_from(pid) {
                 Ok(pid) => (Answer::Started { pid }, Some(pidfd)),
                 Err(_) => {

@@ -1123,6 +1123,19 @@ This takes it off create's path on a root node, with no new kernel version (deci
   first and looked for only when the kernel refuses a name as there, each with the outcome the look before each gave,
   and the rootfs attached on `/` directly, where step 2 attached it at `/r` and moved it with `MS_MOVE`: the same tree,
   one attach and one hold of `namespace_sem` fewer.
+- **Fresh `/dev` mounts are made ahead for eligible pruned creates.** One worker prepares a detached
+  tmpfs with the mount's exact source, flags and data, its six default device nodes and five links
+  (`goal5-mounts.md` §6). A take transfers a fresh filesystem to one container; no used mount is returned.
+  The pure core holds four LRU configurations with eight mounts each, at most 32 mounts, with one make
+  outstanding. Cold, dry, disabled, failed and ineligible cases use ordinary construction and are
+  counted by fixed reason. Explicit inode quotas, custom devices, duplicate/read-only/non-tmpfs `/dev`,
+  keys over 2 KiB and descriptor capacity keep ordinary setup. The init guards later mount targets
+  against observing early defaults; a sensitive target clears the pristine defaults before ordinary
+  mount resolution and device creation. Parent components are conservative fallback, and any symlink
+  in a target falls back. The worker never changes the agent's umask; descriptors are close-on-exec.
+  Device/link metadata and mount source/options are compared with ordinary setup, hostile refusals
+  match byte for byte, and two live pooled containers must have distinct superblocks and isolated
+  mutations. Whole-create p99 is recorded beside part 19; reducing a part alone does not prove a gain.
 - **Why a root on `/` is contained here and MS_MOVE in a copy of the host's namespace is not.** runc's and crun's
   `--no-pivot` (MS_MOVE and chroot in a copy of the host's mount namespace) is unsafe as a default, and the probe
   confirms three escapes the kernel's rules predict (`goal5-root.md` §3, §4): the host's proc stays visible to

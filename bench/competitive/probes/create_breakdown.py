@@ -4,7 +4,7 @@
   create_breakdown.py drain <trace_pipe> <out file> <stop file>
   create_breakdown.py check <run dir> <prefix>
   create_breakdown.py summarize <run dir>
-  create_breakdown.py switch <trace file> <trace stats> [seam result json]
+  create_breakdown.py switch <trace file> <trace stats> [seam result json] [switch|mounts]
   create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h> [pruned|classic]
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
@@ -607,39 +607,30 @@ def summarize(run):
     return 0
 
 
-def switch(trace, stats, seam_json=None):
-    """Goal 5 plan step 2's AC-e, read off a trace of a throughput phase run at eight creates in flight
-    (`HEXBENCH_THROUGHPUT_CONC=8`) with the root's parts' events on. The criterion bounds the p99 of the
-    pruned root's *parts* at 0.5 ms under that concurrency with at least 8,000 idle host threads, so this
-    reports two per init, as create_cuts delimits them (run 4's parts 19 and 20):
-      - the mounts (part 19): from the init's join of the namespace made ahead (setns `CLONE_NEWNET`) to
-        its `chroot` — where it attaches the rootfs and binds (`move_mount`), mounts proc and /dev
-        (`fsmount`), sets a mount read-only (`mount_setattr`) and makes device nodes; move_mount/fsmount
-        aren't traced, so the span runs from the net-ns join to the chroot;
-      - the switch (part 20): the `chroot` itself, paired entry to exit (step 2's init moved its root onto /
-        by `MS_MOVE` in part 19, before it).
-    Both hold at or below 0.5 ms because neither walks the host: `chroot` is O(1), and the fd-based mounts
-    touch only this container's tree, where `pivot_root` would walk every task under `namespace_sem`.
+def switch(trace, stats, seam_json=None, scope="switch"):
+    """Read the root switch and mounts at concurrency eight. A pooled-network init's part 19
+    starts on successful CLONE_NEWNET setns exit. A dry-network init makes that namespace in clone3,
+    so its span starts on its own clone3 return zero and includes its initial/loopback setup. No
+    create is dropped for being dry. Only chrooting pids are inits; other pivots are seed prunes.
 
-    It also evidences AC-a (no init pivot_root) directly over the raw trace, not by the cutter's internal
-    assertion. Two kinds of `pivot_root` can appear, told apart by their caller: a pruned *seed* prunes its
-    own mount namespace once at start with a `pivot_root` (decision 5), and that caller never `chroot`s; an
-    *init* on the pruned path `chroot`s and never `pivot_root`s. So a `pivot_root` by a pid that also
-    `chroot`s would be an init switching both ways (off the path) and fails; `pivot_root`s by pids that
-    never `chroot` are the seeds' prunes, reported as such. With the seam result given, every create must
-    have switched via `chroot` (chroots == creates): a create that fell back to the classic path would
-    `pivot_root` in place of `chroot`, dropping the count. A lost or unpaired event is refused."""
-    ev, _unread = eb.parse(trace)
+    The mounts criterion requires every create's span and whole-create sample, concurrency eight,
+    and exact agreement between clone-started spans and the seam's made_on_path network counter.
+    The historical switch-only criterion can read old traces without clone-exit instrumentation.
+    Lost/unpaired events, failed switches and an init pivot are always refused.
+    """
+    if scope not in ("switch", "mounts"):
+        print("refusing: switch criterion is switch or mounts", file=sys.stderr)
+        return 1
+    ev, unread = eb.parse(trace)
     n_lost = eb.lost(stats)
-    # Per pid (an init is single-threaded here, so its events don't interleave with its own): the net-ns
-    # join's setns exit opens part 19, and the chroot closes it and is part 20. Eight inits in flight are
-    # eight distinct pids. pivot_root by a chrooting pid is an init pivot (AC-a); by one that never chroots,
-    # a seed's prune.
-    setns_flags, newnet_exit = {}, {}
+    setns_flags, newnet_exit, clone_exit = {}, {}, {}
     pending, switch_us, mounts_us, dangling = {}, [], [], 0
     chroot_pids, pivot_by_pid = set(), {}
+    clone_starts, setns_starts, failed_switches = 0, 0, 0
     for e in ev:
-        if e.name == "setns":
+        if e.name == "clone3" and e.kind == "exit" and int(e.text, 0) == 0:
+            clone_exit.setdefault(e.pid, e.ts)
+        elif e.name == "setns":
             if e.kind == "enter":
                 m = dict(ARG.findall(e.text))
                 try:
@@ -647,85 +638,112 @@ def switch(trace, stats, seam_json=None):
                 except ValueError:
                     setns_flags[e.pid] = 0
             elif e.kind == "exit":
-                if (setns_flags.pop(e.pid, 0) & CLONE_NEWNET) and e.pid not in newnet_exit:
-                    newnet_exit[e.pid] = e.ts
+                flags = setns_flags.pop(e.pid, 0)
+                if flags & CLONE_NEWNET and int(e.text, 0) == 0:
+                    newnet_exit.setdefault(e.pid, e.ts)
         elif e.name == "chroot":
             if e.kind == "enter":
-                dangling += e.pid in pending  # a second entry before the first's exit: unexpected
+                dangling += e.pid in pending
                 pending[e.pid] = e.ts
                 chroot_pids.add(e.pid)
-                if e.pid in newnet_exit:
-                    mounts_us.append(e.ts - newnet_exit[e.pid])
+                start = newnet_exit.get(e.pid)
+                boundary = "setns"
+                if start is None:
+                    start, boundary = clone_exit.get(e.pid), "clone3"
+                if start is not None and start <= e.ts:
+                    mounts_us.append(e.ts - start)
+                    setns_starts += boundary == "setns"
+                    clone_starts += boundary == "clone3"
             elif e.kind == "exit":
                 t0 = pending.pop(e.pid, None)
-                if t0 is None:
+                if t0 is None or t0 > e.ts:
                     dangling += 1
                 else:
                     switch_us.append(e.ts - t0)
+                    failed_switches += int(e.text, 0) != 0
         elif e.name == "pivot_root" and e.kind == "enter":
             pivot_by_pid[e.pid] = pivot_by_pid.get(e.pid, 0) + 1
-    dangling += len(pending)  # chroot entries with no exit
+    dangling += len(pending)
     init_pivots = sum(c for pid, c in pivot_by_pid.items() if pid in chroot_pids)
     seed_prune_pivots = sum(c for pid, c in pivot_by_pid.items() if pid not in chroot_pids)
-    creates = None
+    creates, create_ms, dev_mounts, expected_dry, levels = None, [], None, None, []
+    seam_error = None
     if seam_json:
         try:
             with open(seam_json) as f:
-                tp = json.load(f).get("phases", {}).get("throughput", {})
-            creates = sum(v["lifecycles"] for k, v in tp.items() if k.isdigit()) or None
-        except (OSError, ValueError, KeyError, TypeError):
-            creates = None
+                result = json.load(f)
+            if result.get("errors"):
+                raise ValueError("the seam reported errors")
+            tp = result["phases"]["throughput"]
+            levels = [k for k in tp if k.isdigit()]
+            creates = sum(tp[k]["lifecycles"] for k in levels) or None
+            create_ms = sorted(x for k in levels for x in tp[k].get("create_ms", []))
+            dev_mounts = tp.get("dev_mounts")
+            expected_dry = tp.get("netns", {}).get("made_on_path")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            seam_error = str(e)
     ms = lambda us: None if us is None else us / 1e3
     def pcts(xs):
         return eb.pct(xs, 0.5), eb.pct(xs, 0.99), (max(xs) if xs else None)
     mp50, mp99, mmax = pcts(mounts_us)
     sp50, sp99, smax = pcts(switch_us)
-    all_switched = creates is None or creates == len(switch_us)
-    # A few creates find the net-ns pool dry and unshare their own net namespace rather than join a
-    # made-ahead one, so they have no CLONE_NEWNET setns to open part 19 by (the seam result's
-    # made_on_path count); tolerate up to 1%.
+    all_switched = (not seam_json or (creates is not None and creates == len(switch_us)))
     missing_spans = len(switch_us) - len(mounts_us)
-    mounts_covered = missing_spans <= max(1, len(switch_us) // 100)
+    # New measurements have both boundaries. Old switch-only records tolerate their original 1%
+    # missing mount spans; mounts records must cover every create, including network-pool misses.
+    mounts_covered = (missing_spans == 0 if scope == "mounts"
+                      else 0 <= missing_spans <= max(1, len(switch_us) // 100))
+    whole_covered = creates is not None and len(create_ms) == creates
+    fallback_counts_match = expected_dry is not None and expected_dry == clone_starts
+    mount_evidence = (levels == ["8"] and whole_covered and fallback_counts_match)
     switch_le_bar = sp99 is not None and sp99 <= 500
     mounts_le_bar = mp99 is not None and mp99 <= 500
-    # AC-e's 0.5 ms bar gates the switch (part 20): the pruned path's purpose is to make the root switch
-    # O(1), off pivot_root's walk of every host thread. The mounts (part 19) take the mount namespace's
-    # lock as the classic path's do (run 4's part 19 was 1.012 ms p99 at concurrency 1, over the bar),
-    # and the pruned path doesn't change that, so they are reported beside the switch, not gated here.
-    ok = (n_lost == 0 and dangling == 0 and bool(switch_us) and init_pivots == 0
-          and all_switched and mounts_covered and switch_le_bar)
+    ok = (n_lost == 0 and dangling == 0 and failed_switches == 0 and seam_error is None
+          and bool(switch_us) and init_pivots == 0 and all_switched and mounts_covered
+          and switch_le_bar and (scope != "mounts" or (mounts_le_bar and mount_evidence)))
     print(json.dumps({"ac": "AC-T7.1.4 e", "concurrency": 8, "creates": creates,
                       "chroots": len(switch_us), "mounts_spans": len(mounts_us),
                       "mounts_p50_ms": ms(mp50), "mounts_p99_ms": ms(mp99), "mounts_max_ms": ms(mmax),
-                      "mounts_le_bar": mounts_le_bar,
+                      "mounts_le_bar": mounts_le_bar, "setns_started_spans": setns_starts,
+                      "clone_started_spans": clone_starts, "expected_network_on_path": expected_dry,
+                      "fallback_counts_match": fallback_counts_match,
                       "switch_p50_ms": ms(sp50), "switch_p99_ms": ms(sp99), "switch_max_ms": ms(smax),
-                      "switch_le_bar": switch_le_bar,
+                      "switch_le_bar": switch_le_bar, "failed_switches": failed_switches,
                       "init_pivot_roots": init_pivots, "seed_prune_pivot_roots": seed_prune_pivots,
-                      "lost_events": n_lost, "unpaired_chroots": dangling, "bar_ms": 0.5, "pass": ok}))
+                      "lost_events": n_lost, "unread_lines": unread, "unpaired_chroots": dangling,
+                      "bar_ms": 0.5, "criterion": scope, "create_samples": len(create_ms),
+                      "create_p50_ms": eb.pct(create_ms, 0.5), "create_p99_ms": eb.pct(create_ms, 0.99),
+                      "dev_mounts": dev_mounts, "pass": ok}))
     if switch_us:
-        print(f"AC-e over {len(switch_us)} creates at 8 in flight — the root's parts: "
-              f"switch (part 20, chroot) p50 {eb.ms3(ms(sp50))} / p99 {eb.ms3(ms(sp99))} / max {eb.ms3(ms(smax))} ms "
-              f"(bar p99 <= 0.5 ms: {'met' if switch_le_bar else 'OVER'}); "
-              f"mounts (part 19) p50 {eb.ms3(ms(mp50))} / p99 {eb.ms3(ms(mp99))} / max {eb.ms3(ms(mmax))} ms "
-              f"({'<=' if mounts_le_bar else '>'} 0.5 ms, the mount namespace's lock, reported). "
-              f"AC-a: {init_pivots} init pivot_roots (the {seed_prune_pivots} in the trace are the pruned seeds' "
-              f"prune, by pids that never chroot).")
+        print(f"AC-e over {len(switch_us)} creates at 8 in flight: switch (part 20) "
+              f"p50 {eb.ms3(ms(sp50))} / p99 {eb.ms3(ms(sp99))} / max {eb.ms3(ms(smax))} ms; "
+              f"mounts (part 19) p50 {eb.ms3(ms(mp50))} / p99 {eb.ms3(ms(mp99))} / "
+              f"max {eb.ms3(ms(mmax))} ms (bar p99 <= 0.5 ms: "
+              f"{'met' if mounts_le_bar else 'OVER'}). "
+              f"Boundaries: {setns_starts} successful network joins, {clone_starts} child clone returns "
+              f"(network made on path: {expected_dry}); {missing_spans} missing.")
+    if create_ms:
+        print(f"Whole create at the same concurrency: p50 {eb.pct(create_ms, 0.5):.3f} / "
+              f"p99 {eb.pct(create_ms, 0.99):.3f} ms; prepared /dev counts: {dev_mounts}.")
     if n_lost:
         print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
-    if dangling:
-        print(f"refusing: {dangling} chroot entries or exits didn't pair", file=sys.stderr)
+    if dangling or failed_switches:
+        print(f"refusing: {dangling} unpaired chroot events, {failed_switches} failed chroots", file=sys.stderr)
     if not switch_us:
-        print("refusing: no chroot traced (did the pruned path run? HEXBENCH_THROUGHPUT_CONC set?)",
-              file=sys.stderr)
+        print("refusing: no chroot traced", file=sys.stderr)
     if not mounts_covered:
-        print(f"refusing: {missing_spans} of {len(switch_us)} chroots had no net-ns-join setns before them "
-              f"(over the 1% the dry net-ns pool explains)", file=sys.stderr)
-    if init_pivots:
-        print(f"off the pruned path: {init_pivots} init pivot_roots (a chrooting pid also pivot_rooted)",
+        print(f"refusing: {missing_spans} of {len(switch_us)} chroots had no valid mount-start boundary",
               file=sys.stderr)
+    if init_pivots:
+        print(f"off the pruned path: {init_pivots} init pivot_roots", file=sys.stderr)
     if not all_switched:
-        print(f"off the pruned path: {len(switch_us)} chroots != {creates} creates (some fell back to "
-              f"the classic pivot_root path)", file=sys.stderr)
+        print(f"off the pruned path: {len(switch_us)} chroots != {creates} creates", file=sys.stderr)
+    if seam_error:
+        print(f"refusing: the seam result is incomplete: {seam_error}", file=sys.stderr)
+    if scope == "mounts" and not mount_evidence:
+        print(f"refusing: mounts need concurrency 8, every whole-create sample, and matching network "
+              f"fallback counts (levels {levels}, samples {len(create_ms)}/{creates}, "
+              f"clone spans {clone_starts}/{expected_dry})", file=sys.stderr)
     return 0 if ok else 1
 
 
@@ -814,6 +832,14 @@ def mounts(trace, stats, header, path="pruned"):
     def charge(table, label, d):
         table[label] = table.get(label, 0) + d
 
+    def gap(w, call, ts):
+        """The init's own code since its last call (or the span's start), and the page faults in it, charged to the
+        call it leads to: where in the init's code the time between calls goes."""
+        g = w["gaps"].setdefault(call, [0, 0])
+        g[0] += ts - w["last"]
+        g[1] += w["pending"]
+        w["pending"] = 0
+
     with open(trace, errors="replace") as f:
         for line in f:
             m = eb.LINE.match(line)
@@ -838,6 +864,7 @@ def mounts(trace, stats, header, path="pruned"):
                 nr = int(e["nr"])
                 w = window.get(pid)
                 if w is not None and nr in (NR_CHROOT, NR_PIVOT_ROOT):
+                    gap(w, (nr, None), ts)
                     w["end"], w["ends"] = ts, name((nr, None))
                     creates.append(window.pop(pid))
                     continue
@@ -845,25 +872,31 @@ def mounts(trace, stats, header, path="pruned"):
                 if (path == "classic" and nr == NR_MOUNT and pid in born and pid not in window
                         and len(args) > 3 and args[3] == MS_REC_PRIVATE):
                     window[pid] = {"start": ts, "opens": "mount (private)", "calls": [], "attaches": [],
-                                   "user_run": 0, "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {}}
+                                   "user_run": 0, "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {},
+                                   "last": ts, "pending": 0, "gaps": {}}
+                if (w := window.get(pid)) is not None:
+                    gap(w, (nr, kind_of(nr, args)), ts)
                 cur[pid] = {"nr": nr, "t": ts, "args": args, "run": 0, "blocked": 0}
             elif (e := RAW_EXIT.match(body)):
                 nr, c = int(e["nr"]), cur.pop(pid, None)
                 if (path == "classic" and c is None and nr in (NR_CLONE, NR_CLONE3) and int(e["ret"]) == 0
                         and pid in born and pid not in window):
                     window[pid] = {"start": ts, "opens": "first run", "calls": [], "attaches": [], "user_run": 0,
-                                   "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {}}
+                                   "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {},
+                                   "last": ts, "pending": 0, "gaps": {}}
                     continue
                 if c is None or c["nr"] != nr:
                     continue
                 w = window.get(pid)
                 if w is not None:
+                    w["last"] = ts
                     w["calls"].append(((nr, kind_of(nr, c["args"])), ts - c["t"], c["run"], c["blocked"]))
                     if nr in ATTACHES:
                         w["attaches"].append(len(w["calls"]))
                 if nr == NR_SETNS and int(e["ret"]) == 0 and len(c["args"]) > 1 and c["args"][1] & CLONE_NEWNET:
                     window[pid] = {"start": ts, "opens": "setns", "calls": [], "attaches": [], "user_run": 0,
-                                   "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {}}
+                                   "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {},
+                                   "last": ts, "pending": 0, "gaps": {}}
             elif (e := SWITCH.match(body)):
                 # Off the CPU runnable (prev_state R, preempted) or not (blocked: waiting on a lock or I/O). A
                 # preemption is charged to the process the CPU went to first, by its name without a kernel
@@ -888,6 +921,7 @@ def mounts(trace, stats, header, path="pruned"):
             elif body.startswith("page_fault_user:"):
                 if pid in window:
                     window[pid]["faults"] += 1
+                    window[pid]["pending"] += 1
             else:
                 unread += 1
     n_lost = eb.lost(stats)
@@ -942,6 +976,18 @@ def mounts(trace, stats, header, path="pruned"):
                      f"- Softirqs run on the init itself as an interrupt returned (us per create): "
                      f"{top('on') or 'none'}."]
 
+    def gaps(ws):
+        n, per = len(ws), {}
+        for w in ws:
+            for call, (d, faults) in w["gaps"].items():
+                p = per.setdefault(call, [0, 0])
+                p[0] += d
+                p[1] += faults
+        out = ["| the init's code before | us per create | page faults per create |", "|---|---|---|"]
+        for call, (d, faults) in sorted(per.items(), key=lambda kv: -kv[1][0])[:16]:
+            out.append(f"| {name(call)} | {d / n:.1f} | {faults / n:.1f} |")
+        return out
+
     def shares(ws):
         most = max(len(w["shares"]) for w in ws)
         out = ["| share | creates | us in its calls per create | its calls, in order (the first create's) |",
@@ -962,7 +1008,8 @@ def mounts(trace, stats, header, path="pruned"):
          f" to its {' or '.join(sorted({w['ends'] for w in creates}))}: span p50 {eb.pct(spans, 0.5)} us, "
          f"p99 {eb.pct(spans, 0.99)}, max {spans[-1]}. {read} events read, {unread} lines not read as events, "
          f"{n_lost} lost.", "", "## Every create", ""]
-        + table(creates) + ["", "## Each mount's share (every create)", ""] + shares(creates)
+        + table(creates) + ["", "## The init's own code between calls, by the call it leads to (every create)", ""]
+        + gaps(creates) + ["", "## Each mount's share (every create)", ""] + shares(creates)
         + ["", f"## The slowest 1% ({len(tail)} creates, span {cut} us or more)", ""] + table(tail)))
     n = len(creates)
     with open(os.path.splitext(trace)[0] + ".summary.json", "w") as f:
@@ -987,8 +1034,8 @@ def main():
         return check(a[1], a[2])
     if len(a) == 2 and a[0] == "summarize":
         return summarize(a[1])
-    if a[0] == "switch" and len(a) in (3, 4):
-        return switch(a[1], a[2], a[3] if len(a) == 4 else None)
+    if a and a[0] == "switch" and len(a) in (3, 4, 5):
+        return switch(a[1], a[2], a[3] if len(a) >= 4 else None, a[4] if len(a) == 5 else "switch")
     if a[0] == "mounts" and len(a) in (4, 5) and (len(a) == 4 or a[4] in ("pruned", "classic")):
         return mounts(*a[1:])
     print(__doc__, file=sys.stderr)

@@ -299,3 +299,56 @@ d236217 (a0f704d9a2e3eb18), and its smaller buffer, 5cccb60. Part figures are th
 - **The root lab at d236217** (adacachy, as root, `docker_lab.sh`): `oci_box` (the mount kinds on both paths; E0-E3
   contained; the classic reasons counted, none under `Rootless`), `oci_spec_box` (AC-f: the seed lists its one
   read-only tmpfs) and `node_socket` pass; rootless, `oci_cgroupfs_box` and `oci_box`.
+
+
+## 6. Fresh `/dev` mounts made ahead (2026-11-02)
+
+The bounded pool addresses the p99 records in §5. Keep `setsid` where it is; measure the whole
+create as well as part 19, so moving work between the cuts cannot count as an improvement.
+
+A worker makes a fresh detached tmpfs with exactly the spec's source, flags and data, its six default
+device nodes and five default links, before a create takes it. `fsmount(2)` returns an `O_PATH` dirfd
+usable by the `*at` calls, including making files before attachment, and an unconsumed mount dies with
+its last descriptor ([Linux man-pages, fsmount](https://man7.org/linux/man-pages/man2/fsmount.2.html),
+description and example; Linux v6.19 `fs/namespace.c`, `fsmount`). The rootless/classic paths continue
+to make their own. No filesystem is shared between containers: a take moves ownership out, and no
+used mount ever goes back. This takes tmpfs's superblock creation, six mknods, five symlinks and the
+umask changes off the create's critical path. It does not remove this work from the machine.
+
+The pool key is the exact decoded mount operation (including source and data, so mode, size, uid/gid
+and labels never bleed between specs). Tmpfs gives each instance its own limits; `size` and
+`nr_inodes` are limits, not allocations ([kernel tmpfs documentation](https://docs.kernel.org/filesystems/tmpfs.html)).
+Keep four keys, LRU-evicting the least recently requested, eight mounts per key (the acceptance test's
+eight creates in flight): at most 32 fresh mounts and one refill worker. A key longer than 2 KiB or a
+spec with its own devices, duplicate `/dev`, a read-only `/dev`, an explicit `nr_inodes` quota, or no
+writable tmpfs `/dev` uses ordinary setup. Early defaults could otherwise change which operation
+exhausts the inode quota. These cases and descriptor capacity are counted by fixed eligibility reason,
+without retaining a pool key. A cold/dry pool makes the mount on the path and wakes refill. Failed preparation is counted and
+stops refill for that key until another request, as decision 4's network pool does. Shutdown closes the
+held mounts and joins the one worker. Use explicit chmod for prepared node modes; never change the
+multi-threaded agent's umask. Preparation allocates metadata only, no device data, and keeps no host
+mountpoint or temporary path. Pool metadata belongs to the agent's cgroup; workload allocations belong
+to the container's cgroup as before.
+
+Mount ordering needs a guard: the ordinary init creates defaults after the spec's mounts, and a later
+mount can name one of those defaults or reach it through an image symlink. The init only attaches a
+prepared mount at a `/dev` reached without symlinks. Before each later mount, a lexical default-name
+check and `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS)` check whether its target
+could depend on the early defaults. Missing ordinary components are safe: the ordinary mount creates
+them. If the target could depend on a default, remove the eleven pristine defaults through the owned
+`/dev` fd before doing that mount, and finish with today's `make_dev`. Previous guarded mounts touched
+none of those entries. The fallback keeps each refusal at its original operation and name. Custom
+devices use the original path from the outset, preserving their order before default links. Tests
+must compare pooled and ordinary success/refusal behavior on those hostile layouts.
+
+The seed's version-2 CREATE bytes stay byte for byte. A new kind appends the prepared mount's index and
+one fd after all existing descriptors; old readers refuse the unknown kind. The total stays within
+SCM_MAX_FD (253); at that limit the optional prepared mount is omitted. No new unsafe is needed.
+
+Falsifiers: a mount option/source or device mode/ownership differs; one container can see another's
+`/dev` mutation; a hostile target's refusal changes; an evicted/in-flight mount is kept or reused; a
+failed maker spins; shutdown leaks a descriptor; or fedora's whole-create p99 does not improve alongside
+part 19 at eight in flight with 8,000 idle host threads. Record every result, including misses and
+refill failures, and rerun mount kinds, cgroupfs, escape, root-side Rootless=0, validation, HEX-RT and
+the seven gates at the final tree. No p99 success is claimed from a harness whose pass bit only checks
+the root switch.

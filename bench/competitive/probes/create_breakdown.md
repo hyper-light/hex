@@ -535,11 +535,12 @@ task on the host (`fs/namespace.c`, `fs/fs_struct.c`, quoted under run 1), while
 own `fs->root` under its `fs->lock`. AC-e covers the root's parts under concurrency — eight creates in flight with
 at least 8,000 idle threads on the host, which a `pivot_root` would walk: the **switch** (part 20) at or below a
 0.5 ms p99, and the init's **root mounts** beside it (part 19, run 4's). The mounts still take the mount namespace's
-lock, which the classic path takes too, so their p99 is reported at concurrency, not held to the switch's bar.
+lock, which the classic path takes too. Step 2 reports that cost; step 3 additionally requires the
+mounts' p99 at or below 0.5 ms, selected with `AC_E_MOUNTS=1`.
 
-`create_breakdown.py switch <trace> <stats> [seam json]` reads both parts. The harness runs it under
+`create_breakdown.py switch <trace> <stats> [seam json] [switch|mounts]` reads both parts. The harness runs it under
 `AC_E=<lifecycles>`: `seam_oci`'s throughput phase pinned to eight in flight (`HEXBENCH_THROUGHPUT_CONC=8`) with the
-root's events on (`sys_enter`/`sys_exit` of `setns`, `chroot` and `pivot_root`, filtered to the runtime's `seam_oci`
+root's events on (`sys_enter`/`sys_exit` of `setns`, `chroot` and `pivot_root`, plus `sys_exit_clone3`, filtered to the runtime's `seam_oci`
 and `hex`), recording for the whole phase — no `HEXBENCH_TRACE`, so `seam_oci` never toggles `tracing_on`. The
 **switch** (part 20) is each thread's `chroot` entry to its exit; the **mounts** (part 19) run from the net-namespace
 join (`setns` with `CLONE_NEWNET`) that opens them to the `chroot`, spanning the init's `move_mount`/`fsmount` of the
@@ -550,6 +551,27 @@ the container's pid namespace. Two kinds of `pivot_root` can appear and are told
 **init** on this path `chroot`s and never `pivot_root`s. So an init `pivot_root` is one by a pid that also `chroot`s
 (AC-a: none), and the reader checks every create switched via `chroot` (chroots == creates), a create that fell back
 to the classic path `pivot_root`ing in place of `chroot` dropping the count.
+
+A network-pool miss has no network `setns`: the init is born with `CLONE_NEWNET`. Its part 19 starts
+on that init's `clone3` return zero, including initial setup and bringing loopback up. A successful
+network `setns` exit remains the preferred cut. The mounts criterion requires every create to have
+a mount span and whole-create sample, with the fallback count exactly matching `netns.made_on_path`
+and only concurrency eight in the seam JSON. Missing JSON, lost events, failed/unpaired switches,
+classic fallback and incomplete coverage refuse the run. No dry creates are omitted. Old switch-only
+records retain their original coverage rule for historical reading.
+
+For the prepared `/dev` comparison, `HEXBENCH_DEVFS=0` and `1` use the same release and concurrency;
+JSON records whole-create `create_ms` and fixed pool reasons outside each timed phase. The fixed
+before binary bf77298 uses a timing-only backport in an archived benchmark tree: only `seam_oci.rs`
+throughput sampling and its timed helper change, with production sources untouched. The instrumented
+bench source SHA256 is `c0e6e2e1352fb8c769f67f1fda5c6805a8f9b03b124cefe0fb3f0f549cc47c79`.
+Report every run's whole-create p50/p99 beside part 19, including failed coverage or latency results.
+
+`python3 -B -I bench/competitive/probes/create_breakdown_switch_test.py` exercises real parsers with
+in-memory ftrace and seam fixtures: pooled, dry and mixed boundaries; 499/500/501/600 us and CLI scope;
+missing/failed starts or switches; counter/sample/concurrency errors; lost events and init pivots.
+The fixtures fail the pre-fix reader (10 assertions and one new-field error) and pass all five tests
+with the complete-coverage reader. These are reader regressions, not performance measurements.
 
 ### Run 8 (2026-11-01, fedora): AC-e, not of record
 

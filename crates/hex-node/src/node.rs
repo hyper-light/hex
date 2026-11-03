@@ -39,6 +39,7 @@ use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
 use crate::createpool::CreatePool;
+use crate::devfs::Devfs;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
@@ -116,6 +117,7 @@ pub struct Node {
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
+    devfs: Devfs,
 }
 
 /// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
@@ -200,6 +202,7 @@ impl Node {
             inject: None,
             specs: Mutex::new(Specs::default()),
             netns,
+            devfs: Devfs::start(owner == Owner::Root)?,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
@@ -207,6 +210,19 @@ impl Node {
             )
             .map_err(|e| Refusal::os("opening /dev/null", e))?,
         })
+    }
+
+    /// Enables or disables fresh prepared `/dev` mounts; disabled creates use ordinary setup.
+    /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
+    pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
+        self.devfs = Devfs::start(enabled && self.owner == Owner::Root)?;
+        Ok(self)
+    }
+
+    /// Fresh `/dev` mounts made, taken, discarded or missed. Counts include failed creates and
+    /// every preparation failure, so a speed measurement cannot hide a dry or disabled pool.
+    pub fn dev_mounts(&self) -> Result<hex_core::devfs::Counts, Refusal> {
+        self.devfs.counts()
     }
 
     /// Sets how many `oci` boxes' inits the node watches at once, [`supervise::INIT_BUDGET`] unless
@@ -616,6 +632,7 @@ impl Node {
                     Held {
                         networks: Some(&self.netns),
                         devices: Some(&self.devices),
+                        dev_mounts: Some(&self.devfs),
                     },
                     seeds,
                 )

@@ -150,7 +150,7 @@ traced() {
 # against <out name>.stats (its per-CPU counts).
 switch() {
   local name=$1 lc=$2 rc=0
-  local SW="syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root"
+  local SW="syscalls/sys_exit_clone3 syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 8192 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $SW; do
@@ -227,7 +227,7 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
   echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
-    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0}"
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0} HEXBENCH_DEVFS=${HEXBENCH_DEVFS:-1} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
@@ -269,7 +269,9 @@ if [ "${AC_E:-0}" -gt 0 ]; then
     || { echo "refusing: the concurrency-8 seam probe failed ($OUT/switch.log)" >&2; echo done > "$OUT/inside.done"; exit 5; }
   switch switch "$AC_E" \
     || { echo "refusing: the switch trace failed ($OUT/switch.log)" >&2; echo done > "$OUT/inside.done"; exit 6; }
-  python3 -I /opt/lab/probes/create_breakdown.py switch "$OUT/switch.txt" "$OUT/switch.stats" "$OUT/switch.json" | tee "$OUT/switch.result"
+  scope=switch
+  [ "${AC_E_MOUNTS:-0}" = 1 ] && scope=mounts
+  python3 -I /opt/lab/probes/create_breakdown.py switch "$OUT/switch.txt" "$OUT/switch.stats" "$OUT/switch.json" "$scope" | tee "$OUT/switch.result"
   rc=${PIPESTATUS[0]}
   echo "AC-e done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"
   echo done > "$OUT/inside.done"

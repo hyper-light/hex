@@ -18,6 +18,7 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 LAB_HOME=${LAB_HOME:-$HOME/.cache/hex-t7/seam-root-home}
 mkdir -p "$LAB_HOME"
 docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+  ${BENCH_MEMORY:+--memory="$BENCH_MEMORY"} ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$TGT:$TGT" -v "$HERE:/opt/lab:ro" -v "$LAB_HOME:/root" -e HOME=/root \
   "$IMAGE" bash /opt/lab/seam_root_inside.sh "$@"

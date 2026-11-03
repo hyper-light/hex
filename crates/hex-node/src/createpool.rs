@@ -218,6 +218,10 @@ impl CloneInit for CreatePool {
                 .pruned
                 .as_ref()
                 .map_or(0, |p| u32::try_from(p.binds.len()).unwrap_or(u32::MAX)),
+            dev_mount: req
+                .pruned
+                .as_ref()
+                .and_then(|p| p.dev_mount.as_ref().map(|d| d.mount)),
             path_joins: req
                 .pruned
                 .as_ref()
@@ -237,6 +241,9 @@ impl CloneInit for CreatePool {
             fds.push(pruned.rootfs.as_fd());
             fds.extend(pruned.binds.iter().map(AsFd::as_fd));
             fds.extend(pruned.path_joins.iter().map(AsFd::as_fd));
+            if let Some(dev) = &pruned.dev_mount {
+                fds.push(dev.tree.as_fd());
+            }
         }
         match round_trip(proc.socket.as_fd(), &create, &fds) {
             Ok(started) => {

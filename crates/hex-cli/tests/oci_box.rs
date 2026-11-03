@@ -55,6 +55,15 @@ use hex_runtime::linux::disks;
 use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
+/// Runs just the prepared-device oracle through the existing root/delegation fixture, in a fresh
+/// process so it cannot become a subreaper before the full suite's agent-crash check.
+const PREPARED_DEV_ENV: &str = "HEX_OCI_BOX_PREPARED_DEV";
+const PREPARED_DEV_PASS: &str = "prepared /dev oracle completed with actual pooled takes";
+/// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
+/// recover the test-only lock after a failed full suite so the independent oracle still runs.
+static LAB_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Remember the delegated parent before the first fixture moves this process into its agent leaf.
+static LAB_PARENT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
 const AGENT_ENV: &str = "HEX_OCI_BOX_AGENT";
 
@@ -65,6 +74,7 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
     if let Some(dirs) = std::env::var_os(AGENT_ENV) {
         play_the_agent(Path::new(&dirs), &exe);
     }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     match prepare_cgroup(&cache) {
         Ok(own) => exercise(&own, &cache, &exe),
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
@@ -92,6 +102,49 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
             eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
         }
     }
+}
+
+/// AC-T7.1.4, goal 5 step 3: run the prepared-/dev ordering and isolation oracle independently of
+/// the earlier full-suite checks. A failure in either test remains visible to the test harness.
+#[test]
+fn prepared_devs_match_ordinary_setup_and_isolate_containers() {
+    if host_id("-u") != 0 {
+        eprintln!("SKIP: the prepared /dev oracle requires the privileged root lab");
+        return;
+    }
+    let _serial = LAB_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let parent = prepare_cgroup(&cache_dir()).expect("a delegated parent for the root oracle");
+    let own = parent.join(format!("hex-devfs-oracle-{}", std::process::id()));
+    std::fs::create_dir(&own).expect("a fresh cgroup for the independent oracle");
+    // The full suite already moved our parent process into hex-agent. Move only this fresh child
+    // into its own empty cgroup before exec, so its fixture can delegate controllers to its boxes.
+    let output = Command::new("/bin/sh")
+        .args([
+            "-e",
+            "-c",
+            r#"printf '%s' "$$" > "$1/cgroup.procs"; shift; exec "$@""#,
+            "hex-devfs-oracle",
+        ])
+        .arg(&own)
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(PREPARED_DEV_ENV, "1")
+        .output()
+        .expect("run the prepared /dev oracle through the root fixture");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprint!("{log}");
+    assert!(
+        output.status.success(),
+        "the independent prepared /dev oracle failed"
+    );
+    assert!(
+        log.lines().any(|line| line == PREPARED_DEV_PASS),
+        "the root oracle did not run; a skipped delegation is not evidence"
+    );
 }
 
 /// Where one run keeps its bundles, records and box root.
@@ -274,6 +327,12 @@ impl Fixture for Lab {
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
     let lab = Lab::new(cache, exe);
+    if std::env::var_os(PREPARED_DEV_ENV).is_some() {
+        assert!(!lab.rootless, "the prepared /dev oracle needs root");
+        prepared_devs_preserve_order_and_are_never_shared(&lab, own);
+        eprintln!("{PREPARED_DEV_PASS}");
+        return;
+    }
     // First, while this process is no node's and so no subreaper; it also finds out whether a
     // container runs here at all (rootless needs unprivileged user namespaces).
     if let Err(e) = crash_and_restart(&lab, own) {
@@ -303,6 +362,193 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
     rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
     every_mount_kind_is_in_the_box_as_its_spec_asks(&lab, own);
+    prepared_devs_preserve_order_and_are_never_shared(&lab, own);
+}
+
+/// AC-T7.1.4, goal 5 step 3: compare ordinary and prepopulated /dev on hostile mount layouts.
+/// Expect byte-identical refusals, matching devices/links/options on success, two actual pooled
+/// takes for live containers, and no cross-container mutation or host-namespace attachment.
+fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    let ordinary_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let pooled_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let ordinary = lab
+        .node(&own.join("devfs-ordinary"), ordinary_state.path())
+        .with_prepared_dev_mounts(false)
+        .unwrap();
+    let pooled = lab.node(&own.join("devfs-pooled"), pooled_state.path());
+    let before_mounts = agent_mount_points();
+
+    let bundle = |case: &str, dest: Option<&str>| {
+        let dir = tempfile::Builder::new()
+            .prefix("devfs-bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let root = dir.join("rootfs");
+        build_rootfs(&root);
+        if case == "alias" {
+            std::os::unix::fs::symlink("/dev/null", root.join("alias")).unwrap();
+        }
+        if case == "file-component" {
+            std::fs::write(root.join("blocked"), "file").unwrap();
+        }
+        if case == "dev-symlink" {
+            std::fs::rename(root.join("dev"), root.join("devices")).unwrap();
+            std::os::unix::fs::symlink("devices", root.join("dev")).unwrap();
+        }
+        let mut spec: serde_json::Value =
+            serde_json::from_str(&lab.config(&Lab::act(&Act::Wait), false)).unwrap();
+        spec["root"]["path"] = serde_json::json!(root);
+        if let Some(dest) = dest {
+            spec["mounts"].as_array_mut().unwrap().push(serde_json::json!({
+                "destination":dest, "type":"tmpfs", "source":"late", "options":["mode=701","size=64k"]
+            }));
+        }
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        dir
+    };
+    let create = |node: &Node, id: &BoxId, dir: &Path| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.to_owned()),
+        })
+    };
+    let prime = bundle("prime", None);
+    let id = BoxId::new("prime").unwrap();
+    create(&pooled, &id, &prime).unwrap();
+    pooled.delete(&id).unwrap();
+    wait_for(
+        || pooled.dev_mounts().unwrap().made >= hex_core::devfs::PER_KEY as u64,
+        "the prepared /dev pool to fill after its first key",
+    );
+    assert_eq!(pooled.dev_mounts().unwrap().failed, 0);
+    let root_of = |node: &Node, id: &BoxId| {
+        PathBuf::from(format!("/proc/{}/root", init_pid(&node.container_dir(id))))
+    };
+    let snapshot = |node: &Node, id: &BoxId| {
+        let root = root_of(node, id);
+        let mut out = Vec::new();
+        for name in [
+            "null", "zero", "full", "random", "urandom", "tty", "fd", "stdin", "stdout", "stderr",
+            "ptmx",
+        ] {
+            let path = root.join("dev").join(name);
+            let m = std::fs::symlink_metadata(&path).unwrap();
+            out.push(format!(
+                "{name} {:o} {} {} {} {:?}",
+                m.mode(),
+                m.uid(),
+                m.gid(),
+                m.rdev(),
+                std::fs::read_link(&path).ok()
+            ));
+        }
+        let pid = init_pid(&node.container_dir(id));
+        for m in listed_mounts(&std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).unwrap())
+        {
+            if m.point == "/dev" || m.source == "late" {
+                out.push(format!(
+                    "{} {} {} {:?} {:?}",
+                    m.point, m.fstype, m.source, m.opts, m.sb_opts
+                ));
+            }
+        }
+        out
+    };
+    for (case, target) in [
+        ("plain", None),
+        ("dev-symlink", None),
+        ("default-node", Some("/dev/null")),
+        ("through-node", Some("/dev/null/child")),
+        ("default-link", Some("/dev/fd/extra")),
+        ("alias", Some("/alias")),
+        ("file-component", Some("/blocked/child")),
+        ("parent", Some("/dev/shm/../null")),
+    ] {
+        let dir = bundle(case, target);
+        let id = BoxId::new(case).unwrap();
+        let run = |node: &Node| match create(node, &id, &dir) {
+            Err(e) => Err(e),
+            Ok(_) => {
+                let got = snapshot(node, &id);
+                node.delete(&id).unwrap();
+                Ok(got)
+            }
+        };
+        let a = run(&ordinary);
+        if case != "parent" {
+            wait_for(
+                || {
+                    let c = pooled.dev_mounts().unwrap();
+                    c.made > c.taken + c.discarded
+                },
+                "a prepared mount for the oracle case",
+            );
+        }
+        let taken = pooled.dev_mounts().unwrap().taken;
+        let b = run(&pooled);
+        assert_eq!(a, b, "prepared /dev changed {case}");
+        if case != "parent" {
+            assert_eq!(
+                pooled.dev_mounts().unwrap().taken,
+                taken + 1,
+                "{case} must consume a prepared mount (including guarded fallback)"
+            );
+        }
+    }
+
+    let first = BoxId::new("isolated-a").unwrap();
+    let second = BoxId::new("isolated-b").unwrap();
+    wait_for(
+        || {
+            let c = pooled.dev_mounts().unwrap();
+            c.made >= c.taken + c.discarded + 2
+        },
+        "two prepared mounts for isolation",
+    );
+    let taken = pooled.dev_mounts().unwrap().taken;
+    create(&pooled, &first, &prime).unwrap();
+    create(&pooled, &second, &prime).unwrap();
+    assert_eq!(pooled.dev_mounts().unwrap().taken, taken + 2);
+    let aroot = root_of(&pooled, &first);
+    let broot = root_of(&pooled, &second);
+    assert_ne!(
+        std::fs::metadata(aroot.join("dev")).unwrap().dev(),
+        std::fs::metadata(broot.join("dev")).unwrap().dev(),
+        "a fresh superblock per container"
+    );
+    std::fs::write(aroot.join("dev/private-marker"), "first only").unwrap();
+    std::fs::set_permissions(
+        aroot.join("dev/null"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert!(!broot.join("dev/private-marker").exists());
+    assert_eq!(
+        std::fs::metadata(broot.join("dev/null")).unwrap().mode() & 0o777,
+        0o666
+    );
+    pooled.delete(&first).unwrap();
+    assert!(
+        std::fs::metadata(broot.join("dev/zero"))
+            .unwrap()
+            .file_type()
+            .is_char_device()
+    );
+    pooled.delete(&second).unwrap();
+    assert_eq!(
+        agent_mount_points(),
+        before_mounts,
+        "prepared mounts never attach in the agent"
+    );
+    eprintln!(
+        "prepared /dev: fixed pool counters, hostile ordering/refusal oracle, exact devices/links/options, distinct superblocks and isolated mutation all pass"
+    );
 }
 
 /// Goal 5 plan step 3 (T-T7.1.4; CLAUDE.md §6): every mount kind a spec can ask for is in the box's own
@@ -620,7 +866,13 @@ fn bind_source_of(path: &Path) -> (String, String) {
         })
         .unwrap_or_else(|| panic!("no mount holds {}", real.display()));
     let below = real.strip_prefix(&holder.point).unwrap();
-    let root = Path::new(&holder.root).join(below);
+    // `path` may be the mount point itself (a lab that binds the host's /usr in), and joining an
+    // empty path adds a trailing separator mountinfo never shows.
+    let root = if below.as_os_str().is_empty() {
+        PathBuf::from(&holder.root)
+    } else {
+        Path::new(&holder.root).join(below)
+    };
     (holder.dev.clone(), root.to_string_lossy().into_owned())
 }
 
@@ -2588,7 +2840,7 @@ fn own_cgroup() -> PathBuf {
 /// Moves this process into a leaf of its own cgroup and confirms every controller is delegated, as
 /// oci_seccomp.rs does; returns the own cgroup dir, or why it isn't ours to subdivide.
 fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
-    let own = own_cgroup();
+    let own = LAB_PARENT.get_or_init(own_cgroup).clone();
     let leaf = own.join("hex-agent");
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))

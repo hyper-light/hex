@@ -312,30 +312,44 @@ mod linux {
         for conc in throughput_concurrency() {
             let per = (lifecycles / conc).max(1);
             let start = Barrier::new(conc + 1);
-            let (wall, cpu_s, errs) = {
+            let (wall, cpu_s, errs, create_ms) = {
                 std::thread::scope(|s| {
                     let threads: Vec<_> = (0..conc)
                         .map(|w| {
                             let start = &start;
                             s.spawn(move || {
                                 start.wait();
-                                (0..per).try_for_each(|j| {
-                                    run_true_container(node, bundle, &format!("t{conc}-{w}-{j:06}"))
-                                })
+                                let mut create_ms = Vec::with_capacity(per);
+                                for j in 0..per {
+                                    let d = run_true_container_timed(
+                                        node,
+                                        bundle,
+                                        &format!("t{conc}-{w}-{j:06}"),
+                                    )?;
+                                    create_ms.push(d.as_secs_f64() * 1e3);
+                                }
+                                Ok::<_, String>(create_ms)
                             })
                         })
                         .collect();
                     start.wait();
                     let (c0, t0) = (cpu_usec(own), Instant::now());
-                    let errs: Vec<String> = threads
-                        .into_iter()
-                        .filter_map(|t| {
-                            t.join()
-                                .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
-                                .err()
-                        })
-                        .collect();
-                    (t0.elapsed(), (cpu_usec(own) - c0) as f64 / 1e6, errs)
+                    let (mut errs, mut create_ms) = (Vec::new(), Vec::new());
+                    for t in threads {
+                        match t
+                            .join()
+                            .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
+                        {
+                            Ok(samples) => create_ms.extend(samples),
+                            Err(e) => errs.push(e),
+                        }
+                    }
+                    (
+                        t0.elapsed(),
+                        (cpu_usec(own) - c0) as f64 / 1e6,
+                        errs,
+                        create_ms,
+                    )
                 })
             };
             if let Some(e) = errs.into_iter().next() {
@@ -344,7 +358,7 @@ mod linux {
             let total = per * conc;
             out.insert(
                 conc.to_string(),
-                json!({"lifecycles": total, "wall_s": wall.as_secs_f64(),
+                json!({"lifecycles": total, "wall_s": wall.as_secs_f64(), "create_ms": create_ms,
                        "per_s": total as f64 / wall.as_secs_f64(),
                        "cpu_s_per_lifecycle": cpu_s / total as f64}),
             );
@@ -458,12 +472,23 @@ mod linux {
 
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
     fn run_true_container(node: &dyn Runtime, bundle: &Path, id: &str) -> Result<(), String> {
+        run_true_container_timed(node, bundle, id).map(|_| ())
+    }
+
+    /// The complete create is timed alongside part 19, under the same concurrency and host load.
+    fn run_true_container_timed(
+        node: &dyn Runtime,
+        bundle: &Path,
+        id: &str,
+    ) -> Result<Duration, String> {
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
-        node.create(spec(&bid, bundle))
-            .map_err(|e| format!("create {id}: {e}"))?;
+        let spec = spec(&bid, bundle);
+        let t = Instant::now();
+        node.create(spec).map_err(|e| format!("create {id}: {e}"))?;
+        let create = t.elapsed();
         let started = node.start(&bid).map_err(|e| format!("start {id}: {e}"));
         node.delete(&bid).map_err(|e| format!("delete {id}: {e}"))?;
-        started
+        started.map(|_| create)
     }
 
     /// Inspect of one running `sleep` container, `n` times after `warmup`, each timed alone: a call
@@ -547,6 +572,14 @@ mod linux {
                     .create_seeds()
                     .map(Some)
                     .map_err(|e| format!("the node's create seeds' counts: {e}")),
+                Self::Socket { .. } => Ok(None),
+            }
+        }
+
+        /// Direct preparation counters; the socket wire remains unchanged.
+        fn dev_mounts(&self) -> Result<Option<hex_core::devfs::Counts>, String> {
+            match self {
+                Self::InProcess(node) => node.dev_mounts().map(Some).map_err(|e| e.to_string()),
                 Self::Socket { .. } => Ok(None),
             }
         }
@@ -665,6 +698,9 @@ mod linux {
                     )
                 })
                 .with_oci_helper(PathBuf::from(hex));
+            let node = node
+                .with_prepared_dev_mounts(std::env::var("HEXBENCH_DEVFS").as_deref() != Ok("0"))
+                .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"));
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();
@@ -691,6 +727,7 @@ mod linux {
             // The node's counts before and after the phase, outside its timing: what it added.
             let r = driver.netns().and_then(|before| {
                 let seeds_before = driver.seeds()?;
+                let dev_before = driver.dev_mounts()?;
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -711,6 +748,27 @@ mod linux {
                 };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
+                    if let (Some(before), Some(after)) = (dev_before, driver.dev_mounts()?) {
+                        fields.insert("dev_mounts".to_owned(), json!({
+                            "made":after.made-before.made, "taken":after.taken-before.taken,
+                            "on_path":after.on_path-before.on_path, "discarded":after.discarded-before.discarded,
+                            "failed":after.failed-before.failed, "cold":after.cold-before.cold,
+                            "dry":after.dry-before.dry, "disabled":after.disabled-before.disabled,
+                            "after_failure":after.after_failure-before.after_failure,
+                            "unpooled_missing":after.unpooled_missing-before.unpooled_missing,
+                            "unpooled_devices":after.unpooled_devices-before.unpooled_devices,
+                            "unpooled_duplicate":after.unpooled_duplicate-before.unpooled_duplicate,
+                            "unpooled_kind":after.unpooled_kind-before.unpooled_kind,
+                            "unpooled_readonly":after.unpooled_readonly-before.unpooled_readonly,
+                            "unpooled_inodes":after.unpooled_inodes-before.unpooled_inodes,
+                            "unpooled_key_bytes":after.unpooled_key_bytes-before.unpooled_key_bytes,
+                            "unpooled_capacity":after.unpooled_capacity-before.unpooled_capacity,
+                            "failed_filesystem":after.failed_filesystem-before.failed_filesystem,
+                            "failed_device":after.failed_device-before.failed_device,
+                            "failed_link":after.failed_link-before.failed_link,
+                            "held_after":after.made-after.taken-after.discarded,
+                        }));
+                    }
                     if let Some(seeds_rose) = seeds_rose {
                         fields.insert("seeds".to_owned(), seeds_rose);
                     }

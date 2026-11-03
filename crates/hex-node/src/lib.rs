@@ -21,6 +21,8 @@ pub mod store;
 #[cfg(target_os = "linux")]
 mod createpool;
 #[cfg(target_os = "linux")]
+mod devfs;
+#[cfg(target_os = "linux")]
 mod netns;
 #[cfg(target_os = "linux")]
 mod node;

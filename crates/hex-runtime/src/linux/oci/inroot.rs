@@ -59,6 +59,22 @@ impl<'a> Root<'a> {
         self.walk(dest, make)
     }
 
+    /// Optimization guard only: a prepared `/dev` may expose defaults earlier than ordinary setup.
+    /// A path with any symlink is left to ordinary setup. NOENT is safe: all earlier components were
+    /// ordinary and the mount creates the missing components. Errors are reproduced by `open` later.
+    pub(crate) fn without_symlinks(&self, dest: &str) -> bool {
+        match rustix::fs::openat2(
+            self.fd,
+            normal(dest),
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+        ) {
+            Ok(_) | Err(Errno::NOENT) => true,
+            Err(_) => false,
+        }
+    }
+
     /// `dest`'s parent directory opened in the root (made when missing) and `dest`'s last component,
     /// for a call that makes that component itself, relative to the directory (`mknodat`, `symlinkat`).
     pub fn parent(&self, dest: &str) -> Result<(OwnedFd, String), OciError> {
