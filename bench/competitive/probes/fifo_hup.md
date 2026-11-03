@@ -115,3 +115,36 @@ FIFO's name after its open, and a FIFO with none says the container is running
 
 **What would falsify it.** A hang-up or an error polled from a FIFO held to read and to write: a kernel whose
 `pipe_poll` reported either with a writer and a reader there would show it in the rows above opened so.
+
+## Upstream report: pending, on Ada's call (2026-11-03): report later
+
+Nothing is sent until Ada says so. What a report would carry:
+- **Kernels:** fails on 6.19.10-300.fc44.x86_64 (measured above: 22 hang-ups alone in 18,000,000 polls, 7 of them
+  followed by EAGAIN, and in a second run 36 in 18,000,000, 4 of them followed by EAGAIN). The same code is in v7.2 (`fs/pipe.c:789`, `:1290-1291`) and in master as read on 2026-11-03
+  (`:774`, `:1275-1276`), so by reading those fail too; not run there.
+- **The lines, at v6.19:** `pipe_poll` reads the pipe's state without its lock (`fs/pipe.c:670`) and reports a hang-up
+  when there's no writer and the writers' counter has moved past the one the reader's open recorded (`:691-692`); a
+  reader's open made without blocking, with no writer, records the counter (`:1172-1174`); an open for writing raises
+  the counter, then the writers (`:1192-1193`); the read after a spurious hang-up finds the pipe empty with a writer
+  open and returns EAGAIN (`:374-376`), where with no writer it would return end-of-file (`:370-371`).
+- **The reproducer:** `fifo_hup.c` beside this record (two pinned threads; see above for how it's built and run).
+
+Draft, to the VFS maintainers on linux-fsdevel:
+
+> Subject: fs/pipe: poll() on a FIFO can report POLLHUP while a writer is opening it
+>
+> A reader that opens a FIFO with O_NONBLOCK while no writer has it open, then polls it, can see POLLHUP without
+> POLLIN while a writer is in fifo_open(), and the read() that follows returns -EAGAIN: the writer is there, its data
+> not yet written. pipe_poll() reads pipe->writers and pipe->w_counter without the pipe's mutex (fs/pipe.c:670) and
+> reports EPOLLHUP when there is no writer and w_counter differs from the value the reader's open saved in
+> filp->f_pipe (v6.19 :691-692, :1174). fifo_open() raises w_counter before writers (:1192-1193), so a poll whose two
+> loads fall between those
+> stores sees "no writer, counter moved": a hang-up with a writer present. On 6.19.10 the attached reproducer (two
+> pinned threads: the reader opens O_NONBLOCK, signals the writer, polls and reads; the writer opens O_WRONLY, writes
+> one byte and closes) sees it 22 times in 18,000,000 iterations, 7 of them then reading -EAGAIN; the code is the same
+> in v7.2 and in master. Raising writers before w_counter in fifo_open(), or reading them in pipe_poll() in an order
+> that pairs with the open's stores, would close it. Userspace that treats POLLHUP on a FIFO as "the writer is gone"
+> (as a container runtime's start does with its exec FIFO) refuses spuriously.
+
+Hex doesn't depend on the fix: its start holds a writer of its own, so no poll it makes can report the hang-up
+(`wait_for_byte`, above).
