@@ -807,7 +807,8 @@ mod linux {
                "given_back": after.given_back - before.given_back,
                "checked": after.checked - before.checked,
                "unchecked": after.unchecked - before.unchecked,
-               "lost_home": after.lost_home - before.lost_home})
+               "lost_home": after.lost_home - before.lost_home,
+               "made_on_path": after.made_on_path - before.made_on_path})
     }
 
     /// What the node's idle cgroups and its deletes did from `before` to `after`.

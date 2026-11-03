@@ -614,7 +614,9 @@ def switch(trace, stats, seam_json=None, scope="switch"):
     create is dropped for being dry. Only chrooting pids are inits; other pivots are seed prunes.
 
     The mounts criterion requires every create's span and whole-create sample, concurrency eight,
-    and exact agreement between clone-started spans and the seam's made_on_path network counter.
+    and exact agreement between clone-started spans and the seam's made_on_path network counter, less
+    the namespaces the node made on the path for owners' boxes (netns_reuse made_on_path), which their
+    inits join by setns as they join pooled ones.
     The historical switch-only criterion can read old traces without clone-exit instrumentation.
     Lost/unpaired events, failed switches and an init pivot are always refused.
     """
@@ -667,6 +669,7 @@ def switch(trace, stats, seam_json=None, scope="switch"):
     init_pivots = sum(c for pid, c in pivot_by_pid.items() if pid in chroot_pids)
     seed_prune_pivots = sum(c for pid, c in pivot_by_pid.items() if pid not in chroot_pids)
     creates, create_ms, dev_mounts, expected_dry, levels = None, [], None, None, []
+    node_made = None
     seam_error = None
     if seam_json:
         try:
@@ -679,7 +682,12 @@ def switch(trace, stats, seam_json=None, scope="switch"):
             creates = sum(tp[k]["lifecycles"] for k in levels) or None
             create_ms = sorted(x for k in levels for x in tp[k].get("create_ms", []))
             dev_mounts = tp.get("dev_mounts")
+            # A namespace the node made on the path for an owner's box (step 6's reuse) is joined by setns,
+            # as a pooled one is; the pool counts it among its takes made on the path all the same.
             expected_dry = tp.get("netns", {}).get("made_on_path")
+            node_made = tp.get("netns_reuse", {}).get("made_on_path", 0)
+            if expected_dry is not None:
+                expected_dry -= node_made
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             seam_error = str(e)
     ms = lambda us: None if us is None else us / 1e3
@@ -706,6 +714,7 @@ def switch(trace, stats, seam_json=None, scope="switch"):
                       "mounts_p50_ms": ms(mp50), "mounts_p99_ms": ms(mp99), "mounts_max_ms": ms(mmax),
                       "mounts_le_bar": mounts_le_bar, "setns_started_spans": setns_starts,
                       "clone_started_spans": clone_starts, "expected_network_on_path": expected_dry,
+                      "network_made_by_node": node_made,
                       "fallback_counts_match": fallback_counts_match,
                       "switch_p50_ms": ms(sp50), "switch_p99_ms": ms(sp99), "switch_max_ms": ms(smax),
                       "switch_le_bar": switch_le_bar, "failed_switches": failed_switches,
@@ -721,7 +730,8 @@ def switch(trace, stats, seam_json=None, scope="switch"):
               f"max {eb.ms3(ms(mmax))} ms (bar p99 <= 0.5 ms: "
               f"{'met' if mounts_le_bar else 'OVER'}). "
               f"Boundaries: {setns_starts} successful network joins, {clone_starts} child clone returns "
-              f"(network made on path: {expected_dry}); {missing_spans} missing.")
+              f"(network made on path by the clone: {expected_dry}, by the node for an owner's box: "
+              f"{node_made}); {missing_spans} missing.")
     if create_ms:
         print(f"Whole create at the same concurrency: p50 {eb.pct(create_ms, 0.5):.3f} / "
               f"p99 {eb.pct(create_ms, 0.99):.3f} ms; prepared /dev counts: {dev_mounts}.")

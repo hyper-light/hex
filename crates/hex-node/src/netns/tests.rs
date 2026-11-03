@@ -80,3 +80,69 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     let c = pool.counts().unwrap();
     assert_eq!((c.taken, c.made_on_path, c.failed), (1, 0, 0), "{c:?}");
 }
+
+/// Goal 5 extended step 3 (AC-e's reader; T-T7.1.4): a create of an owner's box that finds the pool dry is
+/// given a namespace the node makes on its path, which the box's init joins as it joins one from the pool,
+/// and the node counts it apart from the pool's other takes made on the path, whose containers make their
+/// own. Do: a node keeping namespaces, its pool empty and never refilled; take for an owner's box that may
+/// share. Expect, where the agent may make network namespaces (as root): a namespace that isn't this
+/// process's, its loopback up, kept for the owner, counted once by the pool as made on the path and once by
+/// the node; where it may not: the take refused, the pool's count risen and the node's not.
+#[test]
+fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
+    let state = Arc::new(KeptState {
+        idle: Mutex::new(Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE)),
+        held: Mutex::new(BTreeMap::new()),
+        given_back: AtomicU64::new(0),
+        checked: AtomicU64::new(0),
+        unchecked: AtomicU64::new(0),
+        lost_home: AtomicU64::new(0),
+        made_on_path: AtomicU64::new(0),
+    });
+    let netns = Netns {
+        shared: Arc::new(Shared {
+            pool: Mutex::new(Pool::new(1)),
+            wake: Condvar::new(),
+        }),
+        refill: None,
+        kept: Some(Keeping {
+            state,
+            returns: None,
+            checker: None,
+        }),
+    };
+    let owner = BoxOwner::named("dry-owner").unwrap();
+    let choice = netns.choice(Some(&owner));
+    let taken = choice.take_for(Ok(()));
+    let pool = netns.counts().unwrap();
+    let node = netns.reuse_counts().unwrap().unwrap();
+    assert_eq!(
+        (pool.taken, pool.made_on_path),
+        (0, 1),
+        "the pool counts the dry take: {pool:?}"
+    );
+    match taken {
+        Ok(Some(ns)) => {
+            assert_eq!(node.made_on_path, 1, "the node counts its make: {node:?}");
+            assert_ne!(
+                std::fs::read_link(format!("/proc/self/fd/{}", ns.as_fd().as_raw_fd())).unwrap(),
+                std::fs::read_link("/proc/self/ns/net").unwrap(),
+                "a namespace of its own"
+            );
+            assert!(loopback_up_in(&ns), "its loopback is up");
+            assert!(choice.kept().is_some(), "kept for the owner's next box");
+        }
+        Ok(None) => panic!("a take for an owner's box that may share is never left to its clone"),
+        Err(e) => {
+            assert_ne!(
+                rustix::process::geteuid().as_raw(),
+                0,
+                "root makes namespaces: {e}"
+            );
+            assert_eq!(
+                node.made_on_path, 0,
+                "nothing made, nothing counted: {node:?}"
+            );
+        }
+    }
+}

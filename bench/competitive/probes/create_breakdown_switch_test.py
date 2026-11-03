@@ -15,7 +15,10 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import create_breakdown as cb
 
 
-def fixture(dry=0, mount_us=100, clones=True):
+def fixture(dry=0, mount_us=100, clones=True, node_made=None):
+    """100 creates at eight in flight: the first `dry` inits born with their network namespace, the rest
+    joining one by setns. With `node_made`, that many of those joined were made by the node on the path
+    for an owner's box (step 6's reuse), counted among the pool's takes made on the path too."""
     def line(pid, ts, body):
         sec, us = divmod(ts, 1_000_000)
         return f"hex-{pid} [004] d..2 {sec}.{us:06d}: {body}\n"
@@ -33,9 +36,12 @@ def fixture(dry=0, mount_us=100, clones=True):
         trace.append(line(pid, start + mount_us + 1, "sys_chroot -> 0x0"))
     seam = {"errors": {}, "phases": {"throughput": {
         "8": {"lifecycles": 100, "create_ms": [1.0] * 98 + [2.5, 3.0]},
-        "netns": {"made_on_path": dry},
+        "netns": {"made_on_path": dry + (node_made or 0)},
         "dev_mounts": {"taken": 97, "on_path": 3, "failed": 0},
     }}}
+    if node_made is not None:
+        seam["phases"]["throughput"]["netns_reuse"] = {"handed_on": 50, "fresh": 50 - dry,
+                                                       "made_on_path": node_made}
     return {"trace": "".join(trace), "stats": "overrun: 0\n", "seam": json.dumps(seam)}
 
 
@@ -64,6 +70,25 @@ class SwitchEvidence(unittest.TestCase):
                 self.assertTrue(result["fallback_counts_match"])
                 self.assertEqual(result["create_p99_ms"], 2.5)
                 self.assertEqual(result["dev_mounts"]["taken"], 97)
+
+    def test_a_namespace_the_node_made_on_path_for_an_owner_is_counted_as_joined(self):
+        """Goal 5 extended step 3 (T-T7.1.4): with step 6's reuse a create that finds the pool dry is given
+        a namespace the node makes on its path, which the init joins by setns. Expect the clone-started
+        spans to match the pool's takes made on the path less the node's, and a node count that
+        disagrees refused."""
+        for dry, node_made in ((0, 3), (17, 3), (17, 0)):
+            with self.subTest(dry=dry, node_made=node_made):
+                rc, result, _ = run(fixture(dry=dry, node_made=node_made))
+                self.assertEqual(rc, 0)
+                self.assertEqual(result["clone_started_spans"], dry)
+                self.assertEqual(result["network_made_by_node"], node_made)
+                self.assertEqual(result["expected_network_on_path"], dry)
+                self.assertTrue(result["fallback_counts_match"])
+        files = fixture(dry=17, node_made=3)
+        files["seam"] = files["seam"].replace('"made_on_path": 3}', '"made_on_path": 2}')
+        rc, result, _ = run(files)
+        self.assertEqual(rc, 1)
+        self.assertFalse(result["fallback_counts_match"])
 
     def test_mounts_bar_boundary_and_cli_scope(self):
         for us, passed in ((499, True), (500, True), (501, False), (600, False)):

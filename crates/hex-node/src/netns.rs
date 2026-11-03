@@ -61,6 +61,10 @@ struct KeptState {
     unchecked: AtomicU64,
     /// Checks after which the checker couldn't go back to its own namespace.
     lost_home: AtomicU64,
+    /// Namespaces the node made on a create's path for a box it keeps one for, the pool dry, which the box's
+    /// init joins as it joins one taken from the pool. The pool counts each among its takes made on the path
+    /// too, with the takes whose container makes its own, so this tells the two apart.
+    made_on_path: AtomicU64,
 }
 
 /// What the kept namespaces have done, as the bench and the tests read it. Every namespace given back is
@@ -73,6 +77,7 @@ pub struct ReuseCounts {
     pub checked: u64,
     pub unchecked: u64,
     pub lost_home: u64,
+    pub made_on_path: u64,
 }
 
 struct Shared {
@@ -118,6 +123,7 @@ impl Netns {
             checked: AtomicU64::new(0),
             unchecked: AtomicU64::new(0),
             lost_home: AtomicU64::new(0),
+            made_on_path: AtomicU64::new(0),
         });
         let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
         let checking = Arc::clone(&state);
@@ -208,6 +214,7 @@ impl Netns {
             checked,
             unchecked,
             lost_home: kept.state.lost_home.load(Ordering::Acquire),
+            made_on_path: kept.state.made_on_path.load(Ordering::Acquire),
         }))
     }
 
@@ -227,10 +234,15 @@ impl Netns {
     }
 
     /// A namespace made on the calling thread, when the pool is dry and the node keeps the box's: made
-    /// as the pool makes them ([`net::make_ahead`]), so the node holds it.
+    /// as the pool makes them ([`net::make_ahead`]), so the node holds it, and counted
+    /// ([`ReuseCounts::made_on_path`]).
     fn make_on_path(&self) -> Result<OwnedFd, OciError> {
         let home = net::thread_network()?;
-        net::make_ahead(home.as_fd())
+        let ns = net::make_ahead(home.as_fd())?;
+        if let Some(kept) = &self.kept {
+            kept.state.made_on_path.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(ns)
     }
 
     /// What the pool has done. Counted at the take, so a create that fails after it took a namespace,

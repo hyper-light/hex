@@ -574,7 +574,10 @@ A network-pool miss has no network `setns`: the init is born with `CLONE_NEWNET`
 on that init's `clone3` return zero, including initial setup and bringing loopback up. A successful
 network `setns` exit remains the preferred cut. The mounts criterion requires every create to have
 a mount span and whole-create sample, with the fallback count exactly matching `netns.made_on_path`
-and only concurrency eight in the seam JSON. Missing JSON, lost events, failed/unpaired switches,
+less `netns_reuse.made_on_path`, and only concurrency eight in the seam JSON. The second count is step 6's
+reuse: an owner's box that finds the pool dry is given a namespace the node makes on its path
+(`hex_node::netns`, `make_on_path`), which its init joins by `setns` as it joins a pooled one, while the pool
+counts the take among those made on the path all the same. Missing JSON, lost events, failed/unpaired switches,
 classic fallback and incomplete coverage refuse the run. No dry creates are omitted. Old switch-only
 records retain their original coverage rule for historical reading.
 
@@ -589,7 +592,9 @@ Report every run's whole-create p50/p99 beside part 19, including failed coverag
 in-memory ftrace and seam fixtures: pooled, dry and mixed boundaries; 499/500/501/600 us and CLI scope;
 missing/failed starts or switches; counter/sample/concurrency errors; lost events and init pivots.
 The fixtures fail the pre-fix reader (10 assertions and one new-field error) and pass all five tests
-with the complete-coverage reader. These are reader regressions, not performance measurements.
+with the complete-coverage reader. These are reader regressions, not performance measurements. A sixth,
+namespaces the node made on the path for owners, fails the reader before the reuse count (both
+reuse cases refused, rc 1, and the new field missing) and passes with it.
 
 ### Run 8 (2026-11-01, fedora): AC-e, not of record
 
