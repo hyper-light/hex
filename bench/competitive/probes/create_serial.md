@@ -727,6 +727,54 @@ Each directory's i_rwsem at concurrency 32, ms a lifecycle (`create_serial.py`):
 - **What waits next is an rwsem that isn't a directory's,** 0.308 ms a lifecycle to write (run 19: 0.210): the
   mount namespace's lock or a process's mmap_lock. `cgroup_mutex` 1.073 holds a lifecycle, waited for 0.038 ms.
 
+## Run 21 (2026-11-03, fedora): offcpu, the runtime's own futexes named by the code that made them
+
+- **Binaries:** run 20's mr10 (`hex` 59d490d19f583b50), one owner's boxes, on the E-cores 16-31, the unit
+  `hex-g5x-s6-verify14-20261103T172457Z`, with each futex call timed by the user stack that made it (2968579) and
+  read by cf5b67f's reader. Under the probe Hex's sustained phase ran 9,363 a second and libcrun's 1,216; load 2.8 at
+  its start, 18.1 at its end, other tenants beside it.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-offcpu-20261103T172457Z`.
+
+Off-CPU ms per lifecycle (the mount namespace's lock now counts open_tree's clone and its dissolve, cf5b67f):
+
+| What the lifecycle waits on | hex.c1 | hex.c32 | crun.c32 |
+|---|---|---|---|
+| a directory's `i_rwsem` | 0.000 | 0.079 | 7.085 |
+| `cgroup_mutex` | 0.000 | 0.073 | 1.463 |
+| the mount namespace's lock | 0.000 | 0.206 | 2.992 |
+| an RCU grace period (umount) | 0.006 | 0.095 | 1.114 |
+| a futex (the runtime's own locks) | 0.003 | 0.435 | 0.000 |
+| work: a socket | 1.962 | 2.234 | 9.729 |
+| work: a pipe or FIFO | 0.270 | 0.809 | 0.222 |
+| work: a poll | 0.389 | 1.462 | 0.000 |
+| work: a child | 0.001 | 0.001 | 0.007 |
+| a sleep (the runtime's own polling) | 0.000 | 0.000 | 4.683 |
+| other | 0.019 | 0.981 | 4.732 |
+
+Hex's futex calls at concurrency 32, 0.460 ms a lifecycle in all, by the code that made them (each call timed from
+its entry to its exit, a wake's as a wait's):
+
+| ms a lifecycle | the code |
+|---|---|
+| 0.190 | `hex_node::createpool::Shared::lock`: the create seeds' pool's lock |
+| 0.107 | seam_oci's main thread in `pthread_join`, waiting out the phase: not a lifecycle's |
+| 0.072 | `hex_node::supervise::Supervisor::inits`: the supervisor's lock on its inits |
+| 0.044 | `std::sync::mpmc::waker::SyncWaker::notify`: a channel's wake |
+| 0.022 | `syscall`, its caller not unwound |
+| 0.009 | `CreatePool::clone_init`: a create in the seeds' line |
+| 0.016 | the rest, each under 0.006 |
+
+- **The node's own futexes are the pool's lock, then the supervisor's:** the pool's 0.190 ms a lifecycle is creates
+  waiting for its mutex, which every create held while it woke the pool's starting thread, and the thread took it
+  in turn to find nothing to start; every seed given back also woke a line no create was in. The supervisor's lock is
+  held across a system call as a create watches its init (`epoll_ctl`), as a start asks whether it runs (a `poll` of
+  its pidfd) and as a delete stops watching it (`epoll_ctl`), and the delete scans every watched init's token for its
+  box's.
+- **The rwsem that isn't a directory's (run 20) is the mount namespace's,** `namespace_sem`, taken to write by the
+  init's `move_mount` (0.099 ms a lifecycle) and by the node's `open_tree(OPEN_TREE_CLONE)` (0.067), whose
+  `get_detached_copy` takes it (Linux v6.19 `fs/namespace.c:3017`).
+- **The directory's wait stays gone:** 0.079 ms a lifecycle, against run 14's 0.626 before the records' shards.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
