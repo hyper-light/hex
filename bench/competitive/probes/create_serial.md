@@ -684,6 +684,28 @@ CPU a lifecycle, by thread (`create_serial.py`):
   fresh one, as before. The checks of these boxes, which make no socket, took the count of 1: 4.00 opens a check
   against mr7's 5.00, the protocols' none.
 
+## Run 19 (2026-11-03, fedora): locks, which directory concurrency 32 waits on, on the steps 2, 3 and 6 merge
+
+- **Binaries:** `reuse_pass.md` run 9's mr9 (`hex` 2245470c0ac31f07: run 8's merge with step 6's three changes to the
+  checks and the exec FIFO's fix), one owner's boxes, on the E-cores 16-31, the unit
+  `hex-g5x-s6-locks-20261103T163029Z`. Under the probe Hex's sustained phase ran 9,376 a second, 10,075 without a
+  network namespace, and libcrun's 1,305.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261103T163029Z`.
+
+Each directory's i_rwsem at concurrency 32, ms a lifecycle (`create_serial.py`):
+
+| directory | mkdir, rmdir a lifecycle | waited to write | waited to read |
+|---|---|---|---|
+| `/run/hex-node/4d5b5d7df88ceb63.records`, the node's records | 0, 0 | 0.548 | 0.189 |
+| `/run/hex-node`, the containers' state | 1.00, 1.00 | 0.031 | 0.000 |
+| `/run/bundle-true/rootfs/proc` | 0, 0 | 0.039 | 0.000 |
+| `/sys/fs/cgroup/hex-oci-seam/.oci`, the oci boxes' root | 0, 0 | 0.004 | 0.019 |
+
+- **The node's record directory is the one concurrency 32 waits on,** 0.737 ms a lifecycle: each create makes its
+  box's record there with `O_EXCL` and each delete unlinks it, both under the directory's lock held exclusively,
+  and each create's look for an earlier record of its id reads it. Every box's in the one directory.
+- **`cgroup_mutex`** is 1.052 holds a lifecycle, the init's clone into the cgroup it was handed, waited for 0.065 ms.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
