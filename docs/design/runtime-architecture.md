@@ -469,13 +469,49 @@ in the slow), so the target stands; the seam has 0.06-0.17 ms over the floor to 
 #### Start in one FIFO operation (goal 3, plan step 3)
 
 **The choice.** Start does what crun's does: one operation on the exec FIFO. The runtime reads the container's
-state once, opens the FIFO the init is blocked on, takes its byte and removes the FIFO; it writes no state. A
+state once, opens the FIFO the init is blocked on, waits for its byte and removes the FIFO; it writes no state. A
 container's status is derived as crun derives it (`state::derive`; libcrun's `libcrun_get_container_state_string`):
 `created` while its init lives and the FIFO is there, `running` once the FIFO is gone, `stopped` once the init no
 longer lives (by its pid and recorded start time). A state that a start from before this derivation marked
 `running` reads as running while its init lives. Create records whether the bundle names poststart hooks, so start
 reads `config.json` only when it does. The node agent tries an oci box's start first, reading none of the box's
-record on that path, and judges the init's liveness by the pidfd its supervisor holds, a `poll`.
+record on that path, and watches the init's end through the pidfd its supervisor holds.
+
+**A start holds both of the FIFO's ends, so no poll can lie** (found under goal 5 extended's load; Ada's call,
+2026-11-03: a start that never depends on the hang-up). <!-- record: bench/competitive/probes/fifo_hup.md -->A poll on
+the FIFO can report a hang-up as the init opens its end, before its byte: Linux's `pipe_poll` judges the hang-up
+without the pipe's lock (v6.19 `fs/pipe.c:670`, `:691-692`), and an open for writing raises the writers' counter
+before the writers (`:1192-1193`), so the read after it finds the init's end open and returns EAGAIN (`:374-376`). The
+competitive bench saw one start refused so (`20261103T064217Z`), and from a reader opened read-only, as the start's
+was, `probes/fifo_hup.c` saw 36 such polls in 18,000,000 (unit `hex-g5x-s6-verify21-20261103T201127Z`).<!-- /record -->
+A hang-up needs a FIFO with no writer (`:691-692`), so the start opens its end to read and to write: Linux never blocks
+that open and counts it a reader and a writer both (`:1202-1216`), so the init's blocking open to write returns at
+once, and while the start holds its end the FIFO always has a writer. <!-- record: bench/competitive/probes/fifo_hup.md -->From
+a reader opened so, `fifo_hup.c` saw none in 18,000,000 polls, every one of them input alone.<!-- /record --> The
+init's end comes from its pidfd, polled beside the FIFO: the node agent hands the one its supervisor has held since
+create, and the command line opens one by the state's pid and checks the start time create recorded before it trusts
+it. The init's byte is counted (`FIONREAD`, under the pipe's lock, `:625-637`) and never read, so two starts at once
+both see it and the FIFO's removal says which reports the start; the other finds the container running. An open that
+crossed that removal and the close after it holds a new pipe on a FIFO with no name, the old pipe gone with its last
+close (`:709-721`, `:1129-1147`), so a start looks for the name before it waits. Each wait ends at the start's
+patience, a typed refusal; nothing sleeps (`run::wait_for_byte`).
+
+**runc and crun beside it** (read at their tags, v1.5.2 and 1.30.1).
+- runc's start opens the FIFO read-only with a blocking open, in a goroutine (`libcontainer/container_linux.go:236`,
+  `:267-281`), and reads to end-of-file: a byte is the start, end-of-file alone "cannot start an already running
+  container" (`:256-264`). Its init opens its end to write, blocking, writes `0` and closes it before its exec
+  (`libcontainer/standard_init_linux.go:264-279`). It never polls the FIFO, so the race can't reach it. What it risks:
+  while the open blocks it checks the init every 100 ms, by pid alone (`container_linux.go:242-251`), so it sees the
+  init's end up to 100 ms late, and an init whose pid has gone to another process leaves the open blocked for good.
+- crun has the init read and the start write. Create opens the FIFO read-only without blocking and hands it to the
+  init (`src/libcrun/status.c:765`, `src/libcrun/container.c:2989-2993`); the init `select`s, then reads, and ends at
+  any read error (`container.c:1309-1331`). The start opens its end to write, removes the FIFO, then writes its byte
+  (`status.c:786-794`), so of two starts at once the second's removal fails before it writes. What it risks: the
+  init's `select` is a poll the race can lie to (a start's open crossing it, the init reads EAGAIN and ends), and a
+  start that ends between its removal and its write leaves the init reading end-of-file again and again, with no FIFO
+  left for another start to open.
+- Hex keeps runc's direction (the init writes, and a start waits for its byte) without its blocked open or its 100 ms
+  tick, and decides between starts as crun does, by the FIFO's removal, after the byte rather than before it.
 
 **Evidence.** Step 1 cut start into its parts: half of it (0.12-0.13 ms) was the rewrite of `state.json` as
 running, with a second read of the state and a read of `config.json` for hooks the bundle didn't have. Without them,
@@ -483,8 +519,14 @@ in the breakdown run `exec-breakdown-20261028T224731Z`, start was 0.084-0.090 ms
 
 **Tests.** The derivation as a pure function, against an oracle table of every combination (recorded status, the
 FIFO there or not, the init live with its start time, live with another, a zombie or gone): `created`, `running` or
-`stopped` as the runtime-spec defines them (`state::tests`, AC-T7.1.4). runtime-tools and the cgroups lab hold start
-and state to the runtime-spec on the command line.
+`stopped` as the runtime-spec defines them (`state::tests`, AC-T7.1.4). With real FIFOs, pidfds and polls
+(`run::tests`, AC-T7.1.4): a start sees the init's byte whichever end opened first; a writer that came and went without
+a byte is no end while the init lives (with the start's end opened read-only, as before, the poll reports a hang-up
+and the test fails); an init that ended without its byte is stopped by its pidfd, and one that wrote it and ended is
+started; of two starts at once, 64 times, one starts the container and the other finds it running; an open crossing
+another's removal and close finds no name; a pid given to a
+later process is never taken for the init. runtime-tools and the cgroups lab hold start and state to the runtime-spec
+on the command line.
 
 #### Descriptors reach a program only on purpose (found under goal 5 extended, 2026-11-03)
 

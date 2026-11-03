@@ -291,16 +291,6 @@ impl Supervisor {
         }))
     }
 
-    /// Whether box `id`'s init is watched and runs ([`Supervisor::live`]), without a duplicate of its
-    /// pidfd.
-    pub fn runs(&self, id: &BoxId) -> Result<bool, Refusal> {
-        let inits = self.inits()?;
-        match inits.by_box.get(id).and_then(|init| init.pidfd.as_ref()) {
-            Some(pidfd) => Ok(!ended(pidfd.as_fd())?),
-            None => Ok(false),
-        }
-    }
-
     /// How box `id`'s init ended, if it is watched and has: reaped now if it has ended and the
     /// supervising thread hasn't come to it yet, so inspect never reads a stopped box without its
     /// exit. `None` when it runs or isn't watched.

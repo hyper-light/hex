@@ -650,11 +650,10 @@ impl Runtime for Node {
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         // An oci box's start is tried first, so the hot path reads only the container's state: a box with
         // no container under the oci root is a process box or no box, which the record then says (goal 3
-        // plan step 3: start costs one FIFO operation and the state read beside it). The init's liveness is
-        // judged by the pidfd the supervisor holds for it, a poll.
-        let started = self.oci().start_with(id.as_str(), &|_| {
-            matches!(self.supervisor.runs(id), Ok(true))
-        });
+        // plan step 3: start costs one FIFO operation and the state read beside it). The init's end is
+        // watched through the pidfd the supervisor holds for it; one not watched is found from its state.
+        let init = self.supervisor.live(id)?.map(|live| live.pidfd);
+        let started = self.oci().start_with(id.as_str(), init);
         match started {
             Ok(()) => Ok(()),
             // `running` has started already (Invalid); `stopped` or mid-create has no live init to start
