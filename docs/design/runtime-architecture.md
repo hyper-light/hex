@@ -1213,6 +1213,32 @@ lifecycle without changing what a box may do.
     - a namespace reaching another owner's box, which would carry what crosses within an owner, the TCP metrics and a
       socket never hashed, to another;
     - eligible boxes being rare, because specs grant CAP_NET_ADMIN or keep `/proc/sys` writable.
+- **A box's cgroup files opened through its directory, held open** (3ea3ffa).
+  <!-- record: bench/competitive/probes/create_serial.md -->Once the namespace was reused, the largest wait at
+  concurrency 32 was the node's, to read a kernfs root's lock on a path walk: 2.649 ms of each lifecycle (run 12),
+  3.082 ms in locks mode and 0.083 with no network namespace at all (run 13).<!-- /record --> The runtime opened each
+  cgroup file by its whole path. Each walk revalidates every kernfs dentry it passes under its root's lock (Linux v6.19
+  fs/kernfs/dir.c:1145-1146, :1185), `/sys`'s among them, which every network device made or removed takes to write.
+  - The box root holds its directory open (`BoxRoot`), and a slot's or a box's cgroup is opened by its name relative to
+    it and holds its own (`BoxCgroup`).
+  - Each file is then opened by its name relative to that directory.
+  - The create's lookups of a cgroup named by the box's id stay, as one name each relative to the root: without them
+    a failed slotted create's scrub would reach an id-named cgroup left outside the records (the lead, 2026-11-03).
+  - A test moves every directory above a slot away and reads and writes its files through the slot. On the code
+    before, it fails at its first read.
+  <!-- record: bench/competitive/probes/reuse_pass.md -->With it, reuse on kept 10.17 of 12 CPUs busy at concurrency
+  32 and ran 5.76x, against 3.74x (run 7, the base moved from 148d12e to 16e52a9 with it).<!-- /record -->
+- **Four checkers** (893ea05). <!-- record: bench/competitive/probes/reuse_pass.md -->One checker took 127.2 and
+  130.8 us a namespace, so it checked at most about 7,700 a second while concurrency 32 gave back 8,364, and 12% of the
+  boxes were given a fresh namespace (run 7).<!-- /record --> Each such namespace was made and torn down under RTNL.
+  - `CHECKERS` threads take from the one line, which stays bounded at `PER_NODE`, a namespace given back with it full
+    closed unchecked, counted.
+  - Each holds its own `/proc/thread-self/net` open and opens each file of the checked namespace by its name after
+    the `setns`. A name looked up there names the file of the namespace the thread is in (fs/proc/proc_net.c:268-301),
+    looked up afresh at each open (:123, :217). So no check walks `/proc`, `thread-self` and the thread's directory
+    five times.
+  - The check's CPU runs beside concurrency 1's lifecycle but competes with concurrency 32's: the work off concurrency
+    1's critical path that caps concurrency 32 (the lead, 2026-11-03).
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->The bench's lifecycle left at most
   1,748,992 bytes in 256 idle cgroups of fedora's OCI pass 20261103T044133Z. Over six runs of test 2 on adacachy
