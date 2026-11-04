@@ -47,7 +47,11 @@ fn a_frame_cut_anywhere_reads_back_whole() {
         let (head, tail) = bytes.split_at(cut);
         assert!(read_all(&mut d, head).unwrap().is_empty(), "cut {cut}");
         assert!(!d.at_boundary(), "cut {cut}");
-        assert_eq!(read_all(&mut d, tail).unwrap(), vec![m.clone()], "cut {cut}");
+        assert_eq!(
+            read_all(&mut d, tail).unwrap(),
+            vec![m.clone()],
+            "cut {cut}"
+        );
         assert!(d.at_boundary());
     }
 }
@@ -139,9 +143,26 @@ fn an_execs_streams_are_gathered_in_order_after_its_exec() {
     let now = Instant::now();
     let mut g = Gather::new(4);
     g.expect(9, streams(false, true, true), now).unwrap();
-    assert_eq!(g.arrive(Named { exec: 9, stream: Stdio::Err }, "err", now), Ok(None));
     assert_eq!(
-        g.arrive(Named { exec: 9, stream: Stdio::Out }, "out", now),
+        g.arrive(
+            Named {
+                exec: 9,
+                stream: Stdio::Err
+            },
+            "err",
+            now
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        g.arrive(
+            Named {
+                exec: 9,
+                stream: Stdio::Out
+            },
+            "out",
+            now
+        ),
         Ok(Some((9, vec!["out", "err"])))
     );
     assert!(g.is_empty());
@@ -153,8 +174,21 @@ fn an_execs_streams_are_gathered_in_order_after_its_exec() {
 fn a_stream_before_its_exec_is_held_until_the_exec_comes() {
     let now = Instant::now();
     let mut g = Gather::new(4);
-    assert_eq!(g.arrive(Named { exec: 3, stream: Stdio::In }, "in", now), Ok(None));
-    assert_eq!(g.expect(3, streams(true, false, false), now), Ok(Some((3, vec!["in"]))));
+    assert_eq!(
+        g.arrive(
+            Named {
+                exec: 3,
+                stream: Stdio::In
+            },
+            "in",
+            now
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        g.expect(3, streams(true, false, false), now),
+        Ok(Some((3, vec!["in"])))
+    );
     assert!(g.is_empty());
 }
 
@@ -162,7 +196,10 @@ fn a_stream_before_its_exec_is_held_until_the_exec_comes() {
 #[test]
 fn an_exec_with_no_streams_is_complete_at_once() {
     let mut g = Gather::<&str>::new(1);
-    assert_eq!(g.expect(1, streams(false, false, false), Instant::now()), Ok(Some((1, vec![]))));
+    assert_eq!(
+        g.expect(1, streams(false, false, false), Instant::now()),
+        Ok(Some((1, vec![])))
+    );
 }
 
 /// HEX-GUEST-3: name a stream twice, a stream the exec didn't ask for, or an exec twice: expect each
@@ -172,18 +209,51 @@ fn duplicate_and_unwanted_streams_are_refused() {
     let now = Instant::now();
     let mut g = Gather::new(4);
     g.expect(5, streams(true, true, false), now).unwrap();
-    assert_eq!(g.arrive(Named { exec: 5, stream: Stdio::In }, "a", now), Ok(None));
     assert_eq!(
-        g.arrive(Named { exec: 5, stream: Stdio::In }, "b", now),
-        Err(Stray { conn: "b", why: Why::Twice })
+        g.arrive(
+            Named {
+                exec: 5,
+                stream: Stdio::In
+            },
+            "a",
+            now
+        ),
+        Ok(None)
     );
     assert_eq!(
-        g.arrive(Named { exec: 5, stream: Stdio::Err }, "c", now),
-        Err(Stray { conn: "c", why: Why::Unwanted })
+        g.arrive(
+            Named {
+                exec: 5,
+                stream: Stdio::In
+            },
+            "b",
+            now
+        ),
+        Err(Stray {
+            conn: "b",
+            why: Why::Twice
+        })
+    );
+    assert_eq!(
+        g.arrive(
+            Named {
+                exec: 5,
+                stream: Stdio::Err
+            },
+            "c",
+            now
+        ),
+        Err(Stray {
+            conn: "c",
+            why: Why::Unwanted
+        })
     );
     assert_eq!(
         g.expect(5, streams(true, true, false), now),
-        Err(Refused { why: Why::Twice, conns: vec![] })
+        Err(Refused {
+            why: Why::Twice,
+            conns: vec![]
+        })
     );
 }
 
@@ -193,10 +263,21 @@ fn duplicate_and_unwanted_streams_are_refused() {
 fn an_early_stream_its_exec_doesnt_want_is_handed_back() {
     let now = Instant::now();
     let mut g = Gather::new(4);
-    g.arrive(Named { exec: 4, stream: Stdio::Err }, "err", now).unwrap();
+    g.arrive(
+        Named {
+            exec: 4,
+            stream: Stdio::Err,
+        },
+        "err",
+        now,
+    )
+    .unwrap();
     assert_eq!(
         g.expect(4, streams(true, false, false), now),
-        Err(Refused { why: Why::Unwanted, conns: vec!["err"] })
+        Err(Refused {
+            why: Why::Unwanted,
+            conns: vec!["err"]
+        })
     );
     assert!(g.is_empty());
 }
@@ -210,11 +291,24 @@ fn execs_past_the_bound_are_refused() {
     g.expect(1, streams(true, false, false), now).unwrap();
     assert_eq!(
         g.expect(2, streams(true, false, false), now),
-        Err(Refused { why: Why::Full { bound: 1 }, conns: vec![] })
+        Err(Refused {
+            why: Why::Full { bound: 1 },
+            conns: vec![]
+        })
     );
     assert_eq!(
-        g.arrive(Named { exec: 3, stream: Stdio::In }, "x", now),
-        Err(Stray { conn: "x", why: Why::Full { bound: 1 } })
+        g.arrive(
+            Named {
+                exec: 3,
+                stream: Stdio::In
+            },
+            "x",
+            now
+        ),
+        Err(Stray {
+            conn: "x",
+            why: Why::Full { bound: 1 }
+        })
     );
 }
 
@@ -226,13 +320,32 @@ fn an_incomplete_set_past_its_patience_is_handed_back() {
     let patience = Duration::from_secs(5);
     let mut g = Gather::new(4);
     g.expect(1, streams(true, true, false), t0).unwrap();
-    g.arrive(Named { exec: 1, stream: Stdio::Out }, "out", t0).unwrap();
+    g.arrive(
+        Named {
+            exec: 1,
+            stream: Stdio::Out,
+        },
+        "out",
+        t0,
+    )
+    .unwrap();
     let t1 = t0 + Duration::from_secs(3);
-    g.arrive(Named { exec: 2, stream: Stdio::In }, "in", t1).unwrap();
+    g.arrive(
+        Named {
+            exec: 2,
+            stream: Stdio::In,
+        },
+        "in",
+        t1,
+    )
+    .unwrap();
     let late = t0 + Duration::from_secs(6);
     assert_eq!(g.expire(late, patience), vec![(1, vec!["out"])]);
     assert!(!g.is_empty());
-    assert_eq!(g.expire(t1 + Duration::from_secs(6), patience), vec![(2, vec!["in"])]);
+    assert_eq!(
+        g.expire(t1 + Duration::from_secs(6), patience),
+        vec![(2, vec!["in"])]
+    );
     assert!(g.is_empty());
 }
 

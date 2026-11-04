@@ -8,7 +8,9 @@
 //! agent then ends the programs it still watches for it (the disconnect rule).
 //!
 //! Linux only: the socket passes descriptors over `SOCK_SEQPACKET` (unix(7)), which macOS's and
-//! Windows' local sockets lack; elsewhere [`Client::connect`] refuses, naming the platform.
+//! Windows' local sockets lack; elsewhere [`Client::connect`] refuses, naming the platform. On every
+//! platform, [`guest::Client`] reaches a node agent in a Shards guest over a byte stream
+//! (docs/design/shards-guest.md §3), the same calls on another transport.
 
 #![cfg_attr(
     test,
@@ -23,6 +25,9 @@
 )]
 
 use std::time::Duration;
+
+mod calls;
+pub mod guest;
 
 #[cfg(target_os = "linux")]
 mod linux;

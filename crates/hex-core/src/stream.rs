@@ -17,6 +17,12 @@ use std::time::{Duration, Instant};
 
 use crate::wire::{self, Fault};
 
+/// The guest's vsock port the host's client dials for its control connection, and the one it dials for
+/// each stdio stream. Above 1024, as the ports of vsock(7) below it take `CAP_NET_BIND_SERVICE` to bind,
+/// and spelling `HEX` so a capture reads them.
+pub const CONTROL_PORT: u32 = 0x4845_5800;
+pub const STDIO_PORT: u32 = 0x4845_5801;
+
 /// A frame's prefix: the message's length, big-endian.
 const PREFIX: usize = 4;
 
@@ -219,7 +225,10 @@ pub fn read_name(bytes: &[u8; NAME_BYTES]) -> Result<Named, Fault> {
         });
     }
     if pad != 0 {
-        return Err(Fault::value("stdio name", format!("its pad byte is {pad}, not 0")));
+        return Err(Fault::value(
+            "stdio name",
+            format!("its pad byte is {pad}, not 0"),
+        ));
     }
     Ok(Named {
         exec: u64::from_le_bytes(id),
