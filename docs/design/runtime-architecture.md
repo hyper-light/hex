@@ -2202,6 +2202,11 @@ wrapper each box keeps (f13).
   program's watch reports before the agent can tell it, its box still being removed, is waited for on a
   worker, so the socket's thread waits on no removal; a program reaped before the socket could watch it is
   answered started and ended at once.
+- **Measured** (`bench/competitive/RESULT.md`, "Goal 7"; fedora, CPUs 4-15, noisy, best of 3):
+  <!-- record: bench/competitive/RESULT.md -->a run of `true` through the seam has a p50 of 0.41 ms, against a
+  systemd scope's 5.82 in the same run (14.10x). It costs 0.55 ms of CPU against the scope's 6.39 (11.59x), and
+  holds 0.27 MiB per idle box against the scope's 0.30. Each of goal 7's three bars is met. In the same rounds
+  the vfork-class clone took the p50 from 0.471 to 0.413 ms and runs/s at 32 from 1,993 to 2,583.<!-- /record -->
 
 ### 8. The tail: what bounds p99.9 and max
 

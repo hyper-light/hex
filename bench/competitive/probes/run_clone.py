@@ -9,7 +9,8 @@ import os
 import re
 import sys
 
-STAT = re.compile(r"^@(\w+)\[(.+?)\]: count (\d+), average (\d+), total (\d+)$")
+# bpftrace v0.24's stats(): `@name[key]: { .count = N, .average = N, .total = N }`.
+STAT = re.compile(r"^@(\w+)\[(.+?)\]: \{ \.count = (\d+), \.average = (\d+), \.total = (\d+) \}$")
 
 
 def stats(path):

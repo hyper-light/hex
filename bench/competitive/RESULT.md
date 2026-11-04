@@ -828,6 +828,69 @@ On the way:
   an upgrade between a node and a seed of another build, which JSON does by construction, so it waits (the lead,
   2026-11-09).
 
+## Goal 7: the process class through the seam with no wrapper (2026-11-04, fedora)
+
+Implementation goal 7 (decision 7). A run of `true` through the `Runtime` seam is now one call:
+`Runtime::run`, then a wait for its end, which comes once the node agent has removed the box. The program is
+cloned vfork-class into its box's cgroup. host.sh ran box_bench.py (`hex box run`, a systemd scope, a systemd
+service) and seam_box in the same run, then the fork-class seam_box, round by round (`timed.sh` below). The binaries
+measured are `cp/t7-g7`'s (b82c7ff, and 8660a5e for the fork-class clone), from before goal 7 was carried onto the one
+client core and wire (`cp/t7-port-g7`, 2026-11-09), which is not measured here.
+
+- **Where.** fedora (kiln-a094a12d, Intel Core i9-14900HX, Linux 6.19.10-300.fc44), every method pinned to
+  CPUs 4-15, under the shared timed lock (`fedora-timed.lock`), 2026-11-04T08:54:41Z to 09:18:38Z.
+- **Noisy, by design.** Run with LOAD_GATE=0, as Ada asks of every bench (bars hold under load). The
+  1-minute load was 11.06, 10.62 and 15.93 at the three rounds' starts and 27.33 at the end. About 25 other
+  containers ran beside it the whole time (`cotenants.txt`).
+- **Binaries.** `hex` b82c7ff (sha256 e84fe970608bb352); seam_box b82c7ff (9ccb4f07884a6868); the
+  fork-class base, seam_box 8660a5e (e0ce1b07fd17cdc1).
+- **Runs.** `~/.cache/hex-t7/g7/bench/out/g7-20261104T085441Z` and `…-forkclone`. Each round: N 10,000
+  (100 warm-up), 2,000 lifecycles at each concurrency, density to 1,000 boxes. Best of 3.
+
+| Axis | Hex seam | systemd scope (same run) | systemd service | `hex box run` | Hex seam vs scope | Goal 7's bar |
+|---|---|---|---|---|---|---|
+| run of `true` p50 (ms) | 0.41 | 5.82 | 11.26 | 3.91 | 14.10x | at most a quarter of the scope's: **met** (also against 7.13 of record: 17.4x) |
+| run of `true` p99 / p99.9 / max (ms) | 2.78 / 4.86 / 24.93 | 8.33 / 12.75 / 30.77 | 35.78 / 49.59 / 133.74 | 7.03 / 9.16 / 13.81 | 3.00x / 2.62x / 1.23x | (decision 8's) |
+| runs/s at 1 / 8 / 32 | 1,683 / 2,526 / 2,583 | 197 / 170 / 157 | 79 / 148 / 179 | n/a (below) | 8.52x / 14.88x / 14.39x (vs the service at 32) | |
+| CPU per run (ms) | 0.55 | 6.39 | 12.97 | 3.53 | 11.59x | at most a quarter of the scope's: **met** (also against 7.81 of record: 14.2x) |
+| memory held per idle box (MiB) | 0.27 | 0.30 | 0.33 | 0.80 | 1.12x | at most the scope's: **met** (also against 0.28 of record) |
+| density (idle boxes per GiB held) | 3,800 | 3,384 | 3,100 | 1,282 | 1.12x | |
+
+By round, the seam's held memory per idle box was 0.2694, 0.2711 and 0.2730 MiB over 1,000 boxes. The scope's
+was 0.3037, 0.3026 and 0.3029.
+
+**The vfork-class clone, A/B in the same rounds** (seam_box 8660a5e is the same run path with the fork-class
+clone; round by round, vfork / fork):
+
+| Round (load at start) | run of `true` p50 (ms) | CPU per run, median (ms) | runs/s at 32 |
+|---|---|---|---|
+| 1 (11.06) | 0.413 / 0.471 | 0.447 / 0.515 | 2,583 / 1,993 |
+| 2 (10.62) | 0.441 / 0.529 | 0.475 / 0.579 | 2,294 / 1,638 |
+| 3 (15.93) | 0.794 / 0.862 | 0.834 / 0.958 | 1,444 / 1,385 |
+
+**cgroup_mutex, per run of `true`** (`probes/run_clone.sh`, `run-clone-20261104T091838Z`, b82c7ff, CPUs 4-15,
+load 27.3 at its start, right after the timed run; µs; `probes/run_clone.md` reads it):
+
+| | concurrency 1 (2,020 runs) | concurrency 32 (20,000 runs, 2,310/s) |
+|---|---|---|
+| clone into the cgroup, `cgroup_can_fork` to `cgroup_post_fork`'s return (the lock's wait and hold) | 51.9 | 262.7 |
+| `cgroup_mkdir`, whole | 154.3 | 217.3 |
+| `cgroup_rmdir`, whole | 52.0 | 100.7 |
+| `cgroup_kill_write`, whole (8% of runs at 1, 0.7% at 32) | 1.4 | 1.9 |
+| the runtime's own waits for the lock, within those | 139.8 (0.53 waits) | 434.5 (1.67 waits) |
+| everyone else's waits for it, over the same time | 437.4 (3.43 waits) | 2,758.3 (10.30 waits) |
+
+**`hex box run` at concurrency 32.** box_bench.py's own removal of a worker's cgroup failed with EBUSY at
+`.hexbox-run` in each round, so the CLI wrapper's throughput has no reading. Goal 7 didn't change that path:
+`box_run.rs`, `process::join_on_exec`, `sys::join_cgroup_on_exec`, `PidfdProc::of_child` and `cgroup.rs` are as
+they were at ca6dc80. It is open, outside this goal.
+
+**timed.sh** (on fedora, `~/.cache/hex-t7/g7/timed.sh`): for each of 3 rounds,
+`OUT_DIR=… ROUND_FIRST=r PHASES="box boxseam" SEAM_BIN=<seam_box b82c7ff> bash host.sh <hex b82c7ff>`, then
+`HEXBENCH_PHASES="latency throughput" OUT_DIR=…-forkclone ROUND_FIRST=r PHASES=boxseam SEAM_BIN=<seam_box
+8660a5e> bash host.sh <hex b82c7ff>`, with `CPUSET=4-15 LOAD_GATE=0 FETCH=0 N=10000 WARMUP=100 LIFECYCLES=2000
+CAP=1000 BOX_BUDGET_MIB=4096 ROUNDS=1`. The run's load and co-tenants were logged before each round.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**
