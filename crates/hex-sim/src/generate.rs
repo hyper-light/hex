@@ -101,6 +101,9 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             0..400 => Kind::Plain,
             400..650 => Kind::Build,
             650..800 => Kind::Benchmark,
+            // A session drawn against a host above 90% might fit no node that admits it; keep the
+            // promise that every workload fits somewhere.
+            _ if hot(host) => Kind::Plain,
             _ => Kind::Session,
         };
         workloads.push(WorkloadSpec {
@@ -112,6 +115,14 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         });
     }
     Ok(Cluster { nodes, workloads })
+}
+
+/// Above 90% CPU from its background alone: `index::HOT_PER_MILLE`, as busy * 1000 > capacity * 900.
+fn hot(node: &NodeSpec) -> bool {
+    let lhs = u128::from(node.background_milli).checked_mul(1000);
+    let rhs =
+        u128::from(node.capacity.cpu_milli).checked_mul(u128::from(crate::index::HOT_PER_MILLE));
+    matches!((lhs, rhs), (Some(l), Some(r)) if l > r)
 }
 
 #[cfg(test)]
@@ -135,8 +146,9 @@ mod tests {
         let a = cluster(3, &shape()).unwrap();
         assert_eq!(a, cluster(3, &shape()).unwrap());
         assert_ne!(a, cluster(4, &shape()).unwrap());
+        let empty = crate::index::FitIndex::new(&a.nodes).unwrap();
         for w in &a.workloads {
-            assert!(a.nodes.iter().any(|n| n.capacity.holds(&w.need)));
+            assert!(empty.admitted_anywhere(&w.demand()), "{w:?}");
         }
         for kind in [Kind::Plain, Kind::Build, Kind::Benchmark, Kind::Session] {
             assert!(a.workloads.iter().any(|w| w.kind == kind), "{kind:?}");
