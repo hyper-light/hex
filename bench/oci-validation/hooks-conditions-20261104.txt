@@ -1,0 +1,37 @@
+# The lead's conditions on the hooks fix (2026-11-04 08:38Z and 09:09Z), on fedora: kiln-a094a12d.attlocal.net,
+# i9-14900HX, 6.19.10-300.fc44.x86_64, Docker 29.8.2, image registry.fedoraproject.org/fedora:44. Each unit is
+# MemoryHigh 6G, MemoryMax 8G, OOMScoreAdjust 1000, CPUs 16-31, started through hex-slot; containers --memory 8g
+# --oom-score-adj 1000. Load average 9.5-14 throughout, with about 100 other containers up (pgvector fleets,
+# a kind cluster, buildkit) and other agents' units. Nothing here is timed.
+#
+# 1. Crash points (T-T7.1.2), node_socket at 60fe2fc, unit hex-hooks-conditions-20261104T091625Z:
+#    crash-tmpfs-init            rootless, root  killed: record None, cgroup and state dir made, state not written;
+#                                                restarted: cleaned up, nothing left
+#    crash-disk-init             rootless        the same
+#    crash-tmpfs-createcontainer rootless, root  killed inside the createContainer hook, past the init's H stop:
+#                                                the same
+#    crash-disk-createcontainer  rootless        the same
+#    (A root node keeps its state under /run, so its disk cases SKIP, as every crash-disk case has as root.)
+#    Past createContainer, the init's next stop is its ready signal, which every create had before the change,
+#    so it has no point of its own.
+# 2. A hookless create is unchanged: hooks_trace.sh at c84a575, unit hex-hooks-trace-20261104T092519Z, before =
+#    ca6dc80's release hex (sha256 288ad31689303d1d), after = 60fe2fc's (4019f871c4ee952c), `hex oci create`
+#    (the shim path) as root:
+#    hookless create, sync-pipe lines   before: P R     after: P R     (no H at either)
+#    hooked create, after               P H R           (the trace sees the stop: not vacuous)
+#    strace -c, hookless create, five each, interleaved: 282 calls every time at both, and every syscall's
+#    count is the same before and after.
+#    (An earlier run, unit hex-hooks-trace-20261104T092446Z, had one ca6dc80 create making 287 calls,
+#    against 282 for the after binary: one more file write. So the check compares each syscall's least
+#    count over five creates.)
+#    The create breakdown A/B (the pruned path's parts) is not recorded here: at ca6dc80 the harness refuses
+#    every create ("lacks the cgroup's mkdir"), with ca6dc80's own binaries too (unit
+#    hex-hooks-abbase-20261104T092401Z). The lead has the question.
+# 3. The state's startContainer field is append-only: state.rs's
+#    the_start_container_field_is_read_by_an_old_reader_and_absent_reads_as_none passes (hex-runtime's lib, 131
+#    tests); and in hooks_trace.sh, ca6dc80's binary reads (status created) and deletes a container whose state
+#    the after binary wrote with "startContainer".
+# 4. A failing hook is a typed error naming it, never 'stopped', oci_box at 60fe2fc, rootless and as root:
+#    createContainer hook exits 3: create refused, Os { op: "container init", why: "createContainer hook failed: \"/bin/sh\" exited exit status: 3" }
+#    startContainer hook exits 3:  start refused,  Os { op: "start", why: "startContainer hook failed: \"/bin/sh\" exited exit status: 3" }
+# 5. runtime-tools before and after: hooks-20261104.txt (26 pass, 32 fail at both, no test differs).

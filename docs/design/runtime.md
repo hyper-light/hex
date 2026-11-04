@@ -550,6 +550,13 @@ hook holds only its stdio, a startContainer hook alone routes classic, and each 
 operation by name. Two `run.rs` unit tests cover the shim's `P`/`H` race, and an init that is ready
 without stopping for its hooks, which is refused. runtime-tools bd3b0bd before and after: 26 pass and 32
 fail both, and no test's result differs (the same record).
+The lead's conditions, recorded in `bench/oci-validation/hooks-conditions-20261104.txt`:
+- `At::Init` and `At::CreateContainer` each recover with nothing left.
+- A hookless create writes the same sync lines (`P R`, no `H`) and makes the same calls per syscall at
+  ca6dc80 and after (`hooks_trace.sh`).
+- ca6dc80's binary reads and deletes the new state.
+- A failing createContainer hook and a failing startContainer hook each come back as an `Os` refusal
+  naming the hook.
 
 **What would falsify it.** A runtime-tools test that passed before and fails after. A hook that observes
 a namespace other than the init's. A startContainer hook that finishes after its program starts. Or a
