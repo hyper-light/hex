@@ -1021,3 +1021,27 @@ The sustained phase at concurrency 32 through host.sh (`PHASES=oci RUNTIMES=libc
 lifecycles a round, in process, `CPUSET=4-15`): the pool was dry for 0, 0 and 30 creates in run A's tree
 (out/20261103T225951Z) and 0, 25 and 0 in run B's (out/20261103T231112Z), at most 0.30% of creates. The socket driver's
 node runs the same pool, whose counts the socket doesn't carry (as the prepared `/dev` pool's).
+
+## The reader on the integrated tree, reuse on and off (goal 5 extended, the tree step 7 measures; 2026-11-04)
+
+Step 7 measures on `cp/t7-g5x-integrate`, so its reader must cut that tree's creates. At fcdad98 it cut none. e2c130d
+(cp/t7-ext-s3 into step 6) had taken step 3's breakdown files whole, losing step 5's record-once cuts and the
+opens' kprobes, and the reader took an owner's create's first mkdir for its cgroup. Two probe runs on fedora showed
+it, each refusing every traced create:
+- reuse off: create-breakdown-20261104T143904Z, "lacks record write 2's file's open entry";
+- reuse on (`HEXBENCH_OWNER`): create-breakdown-20261104T143859Z, "the first mkdir is the box's cgroup (it made
+  '/run/hex-node/<key>-l000001')".
+
+With step 5's three commits re-applied (cherry-picks -x of f99b755, 933cfa0, 50bd7a2), the kprobes enabled again
+(fd11626) and the chosen cgroup cut (2c72226), both kinds of run cut every traced create whole. Fedora, CPUs 4-15,
+N=1000, WARMUP=100, 3 rounds, the tree's release binaries (hex sha256 633cb8d3658e908e, dynamically linked, so not of
+record; seam_oci 87def3de2a860cf1). Load 45-57 and Docker's co-tenants as each env.txt lists. The figures are a
+check of the reader, not a measure of the tree.
+
+| run | reuse | path the reader took | probes cut whole | rounds' traced creates cut whole | cgroups |
+|---|---|---|---|---|---|
+| create-breakdown-20261104T144934Z | on | pruned, record once, chosen cgroup | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one handed on |
+| create-breakdown-20261104T145145Z | off | pruned, record once, the cgroup's mkdir | 2 of 2, 10 of 10 | 1,500 of 1,500 | made, each its own |
+
+In the reuse-on run every traced create was handed its owner's idle cgroup. Only the warm-up's first box makes a fresh
+slot, and it isn't traced, so a fresh slot's cut rests on the selftest (`create_breakdown.py test`).
