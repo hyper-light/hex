@@ -657,8 +657,7 @@ spawn duplicates into the child alone, and the seed moves it off fd 0 and puts `
 **Before foreign code.** Whatever a window anywhere above it left a process holding, every descriptor from 3 up is
 marked close-on-exec before foreign code runs (`linux::sys::mark_cloexec_from_3`): in `Becoming::apply`, which a
 container's init, the exec helper and a seed's exec child all make, before the seccomp filter a strict profile would
-refuse it under; in the `process` class's two children; in a hook's, which the agent starts itself; and at a seed's
-start. `close_range(2)`; where the kernel
+refuse it under; in the `process` class's two children; and at a seed's start. `close_range(2)`; where the kernel
 refuses it, each descriptor `/proc/self/fd` lists; with neither, the start is refused. It allocates nothing, so a
 vfork-style child can make it. runc does the same before its init and before the container's exec, create and exec
 both (v1.5.2 `libcontainer/container_linux.go:341-349`, `init_linux.go:300-306`, called from
@@ -672,7 +671,7 @@ the create's handshake with it, for the sleep's 30 s (fedora, unit `hex-g5x-s6-f
 **Tests.** A bystander started inside the shim's spawn, as another thread's would be, holds no pipe past its stdio
 (`run::tests`, AC-T7.1.4). With the flag cleared before the spawn, it held both of the create's (unit
 `hex-g5x-s6-fdh2-20261103T211928Z`). A descriptor opened without the flag has it after the mark, by `close_range` and by
-the walk of `/proc/self/fd` (`linux::sys::tests`), and a hook holds nothing the agent left open (`run::tests`).
+the walk of `/proc/self/fd` (`linux::sys::tests`).
 
 **What would falsify it.** A bystander holding one of a create's descriptors with the flag never cleared: a descriptor
 the agent opens without close-on-exec.
