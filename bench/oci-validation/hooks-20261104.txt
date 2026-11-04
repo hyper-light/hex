@@ -1,0 +1,82 @@
+# createContainer and startContainer hooks (cp/t7-hooks; AC-T7.1.4, T-T7.1.4;
+# docs/design/runtime.md, "createContainer and startContainer hooks run in the container").
+# host kiln-a094a12d.attlocal.net (fedora) 6.19.10-300.fc44.x86_64, cgroup v2, Docker 29.8.2;
+# image registry.fedoraproject.org/fedora:44; runtime-tools bd3b0bd.
+# run 2026-11-04T09:01:50Z, systemd --user unit hex-hooks-failpass-20261104T090150Z (MemoryHigh 6G,
+# MemoryMax 8G, OOMScoreAdjust 1000, CPUs 16-31, nice 10, cargo -j 4; containers --memory 8g
+# --oom-score-adj 1000). Load average 10.24 at the start; co-tenants: other agents' units and the
+# containers loving_gagarin (rust:1-bookworm) and romantic_lumiere (hexlab-vm7:44). Nothing here is timed.
+#
+# The new test, crates/hex-cli/tests/oci_box.rs create_and_start_container_hooks_run_in_the_containers_namespaces:
+#   418e787 (the test, before the fix)  rootless FAIL  as root FAIL  (oci_box.rs:1401: the createContainer
+#                                        hook never ran: obs/cc.order missing)
+#   d431489 (the fix and its tests)     rootless PASS  as root PASS  (seam_root.sh)
+# At d431489 node_socket passes rootless and as root, its At::Init crash point now "state not written"
+# (createRuntime runs before the switch); hex-runtime's lib tests pass (130).
+#
+# runtime-tools, each binary a release build, the same harness (d431489's run_hex.sh):
+#   ca6dc80 (before)  pass=26 fail=32 skip=0
+#   d431489 (after)   pass=26 fail=32 skip=0
+#   no test's result differs. Per test, before then after:
+config_updates_without_affect	pass	pass
+create	pass	pass
+default	pass	pass
+delete	pass	pass
+delete_only_create_resources	fail	fail
+delete_resources	fail	fail
+hooks	fail	fail
+hooks_stdin	pass	pass
+hostname	pass	pass
+kill	pass	pass
+kill_no_effect	pass	pass
+killsig	pass	pass
+linux_cgroups_blkio	fail	fail
+linux_cgroups_cpus	fail	fail
+linux_cgroups_devices	fail	fail
+linux_cgroups_hugetlb	fail	fail
+linux_cgroups_memory	fail	fail
+linux_cgroups_network	fail	fail
+linux_cgroups_pids	fail	fail
+linux_cgroups_relative_blkio	fail	fail
+linux_cgroups_relative_cpus	fail	fail
+linux_cgroups_relative_devices	fail	fail
+linux_cgroups_relative_hugetlb	fail	fail
+linux_cgroups_relative_memory	fail	fail
+linux_cgroups_relative_network	fail	fail
+linux_cgroups_relative_pids	fail	fail
+linux_devices	pass	pass
+linux_masked_paths	fail	fail
+linux_mount_label	fail	fail
+linux_ns_itype	pass	pass
+linux_ns_nopath	pass	pass
+linux_ns_path	pass	pass
+linux_ns_path_type	pass	pass
+linux_process_apparmor_profile	fail	fail
+linux_readonly_paths	fail	fail
+linux_rootfs_propagation	pass	pass
+linux_seccomp	pass	pass
+linux_sysctl	pass	pass
+linux_uid_mappings	pass	pass
+misc_props	fail	fail
+mounts	pass	pass
+pidfile	fail	fail
+poststart	fail	fail
+poststart_fail	fail	fail
+poststop	fail	fail
+poststop_fail	fail	fail
+prestart	fail	fail
+prestart_fail	fail	fail
+process	pass	pass
+process_capabilities	pass	pass
+process_capabilities_fail	fail	fail
+process_oom_score_adj	pass	pass
+process_rlimits	fail	fail
+process_rlimits_fail	fail	fail
+process_user	pass	pass
+root_readonly_true	pass	pass
+start	pass	pass
+state	pass	pass
+#
+# A first cut (7771300, since rewritten) gave the create-time hooks `creating`, as runc does, and
+# failed hooks_stdin (pass=25): runtime-tools requires `created` for prestart (hooks_stdin.go:54-56),
+# as runtime.md:19-20 defines it. Run hex-hooks-failpass-20261104T084953Z, the same host.

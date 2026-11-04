@@ -31,6 +31,9 @@ pub struct Seen {
     pub parts: Parts,
     /// For a record with an init: whether that very process still runs.
     pub init_alive: Option<bool>,
+    /// For an `oci` box: a start of it had begun and never took the byte when the agent stopped (its
+    /// state directory's start mark beside its exec FIFO, hex_runtime's `state::start_interrupted`).
+    pub start_interrupted: bool,
 }
 
 /// What to do with a box.
@@ -59,6 +62,9 @@ pub enum Why {
     NoRecord(Parts),
     /// Its record can't be read, for this reason.
     Unreadable(String),
+    /// The agent stopped while it started the box, as the box's startContainer hooks ran: the start never
+    /// took, and its init ends when it finds the start gone. Removed whether the init has ended yet or not.
+    StartInterrupted,
 }
 
 /// The decision for one box.
@@ -70,6 +76,9 @@ pub fn decide(seen: &Seen) -> Decision {
             Phase::Creating => Decision::Remove(Why::MidCreate),
             Phase::Deleting => Decision::Remove(Why::MidDelete),
             Phase::Ready if !seen.parts.cgroup => Decision::Remove(Why::NoCgroup),
+            Phase::Ready if r.spec.class.class() == Class::Oci && seen.start_interrupted => {
+                Decision::Remove(Why::StartInterrupted)
+            }
             Phase::Ready if r.spec.class.class() == Class::Oci && seen.init_alive != Some(true) => {
                 Decision::Remove(Why::InitGone)
             }
@@ -350,6 +359,7 @@ mod tests {
                     record: Some(Ok(r.clone())),
                     parts: parts(m, id),
                     init_alive,
+                    start_interrupted: false,
                 },
             );
         }
@@ -358,6 +368,7 @@ mod tests {
                 record: None,
                 parts: parts(m, id),
                 init_alive: None,
+                start_interrupted: false,
             });
         }
         seen
@@ -484,6 +495,7 @@ mod tests {
                 record: None,
                 parts,
                 init_alive: None,
+                start_interrupted: false,
             };
             assert_eq!(
                 decide(&seen),
@@ -516,6 +528,7 @@ mod tests {
                     record: None,
                     parts: cgroup,
                     init_alive: None,
+                    start_interrupted: false,
                 },
                 Decision::Remove(Why::NoRecord(cgroup)),
             ),
@@ -524,6 +537,7 @@ mod tests {
                     record: Some(Err("bad".into())),
                     parts: cgroup,
                     init_alive: None,
+                    start_interrupted: false,
                 },
                 Decision::Remove(Why::Unreadable("bad".into())),
             ),
@@ -533,6 +547,7 @@ mod tests {
                     record: r(Phase::Creating, Kind::Process),
                     parts: cgroup,
                     init_alive: None,
+                    start_interrupted: false,
                 },
                 Decision::Remove(Why::MidCreate),
             ),
@@ -541,6 +556,7 @@ mod tests {
                     record: r(Phase::Deleting, Kind::Process),
                     parts: cgroup,
                     init_alive: None,
+                    start_interrupted: false,
                 },
                 Decision::Remove(Why::MidDelete),
             ),
@@ -549,6 +565,7 @@ mod tests {
                     record: r(Phase::Ready, Kind::Process),
                     parts: Parts::default(),
                     init_alive: None,
+                    start_interrupted: false,
                 },
                 Decision::Remove(Why::NoCgroup),
             ),
@@ -557,6 +574,7 @@ mod tests {
                     record: r(Phase::Ready, Kind::Rendered),
                     parts: cgroup,
                     init_alive: Some(false),
+                    start_interrupted: false,
                 },
                 Decision::Remove(Why::InitGone),
             ),
@@ -565,14 +583,36 @@ mod tests {
                     record: r(Phase::Ready, Kind::Bundle),
                     parts: cgroup,
                     init_alive: Some(true),
+                    start_interrupted: false,
                 },
                 Decision::Adopt,
+            ),
+            // A start under way, in its startContainer hooks, when the agent stopped: removed by that
+            // reason whether its init still runs or has ended at the start it found gone.
+            (
+                Seen {
+                    record: r(Phase::Ready, Kind::Bundle),
+                    parts: cgroup,
+                    init_alive: Some(true),
+                    start_interrupted: true,
+                },
+                Decision::Remove(Why::StartInterrupted),
+            ),
+            (
+                Seen {
+                    record: r(Phase::Ready, Kind::Rendered),
+                    parts: cgroup,
+                    init_alive: Some(false),
+                    start_interrupted: true,
+                },
+                Decision::Remove(Why::StartInterrupted),
             ),
             (
                 Seen {
                     record: r(Phase::Ready, Kind::Process),
                     parts: cgroup,
                     init_alive: None,
+                    start_interrupted: false,
                 },
                 Decision::Adopt,
             ),

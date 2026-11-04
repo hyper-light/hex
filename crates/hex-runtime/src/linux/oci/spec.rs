@@ -550,6 +550,25 @@ impl Spec {
                     .to_owned(),
             ));
         }
+        // Each hook's path is absolute and its timeout above zero (config.md:556, :559-560), and the
+        // startContainer hooks' timeouts sum to the seconds `start` waits on them besides its own.
+        let hooks = &self.hooks;
+        for (kind, list) in [
+            ("prestart", &hooks.prestart),
+            ("createRuntime", &hooks.create_runtime),
+            ("createContainer", &hooks.create_container),
+            ("startContainer", &hooks.start_container),
+            ("poststart", &hooks.poststart),
+            ("poststop", &hooks.poststop),
+        ] {
+            if let Some(hook) = list.iter().find(|h| !h.path.starts_with('/')) {
+                return Err(OciError::Config(format!(
+                    "a {kind} hook's path {:?} isn't absolute",
+                    hook.path
+                )));
+            }
+            super::hooks::budget(kind, list)?;
+        }
         Ok(())
     }
 

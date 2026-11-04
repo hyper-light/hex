@@ -68,6 +68,12 @@ pub struct State {
     /// 6). Absent in state written before, which reads as no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_namespace: Option<bool>,
+    /// The seconds the bundle's startContainer hooks may take together, recorded at create where it names
+    /// any: Hex's own field, so `start` waits for them as well as for the init, and reads what the init
+    /// wrote on the exec FIFO. Absent where it names none, and in state written before, whose init ran no
+    /// startContainer hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_container: Option<u64>,
 }
 
 impl State {
@@ -83,6 +89,7 @@ impl State {
             start_time: None,
             poststart: None,
             pid_namespace: None,
+            start_container: None,
         }
     }
 
@@ -125,7 +132,7 @@ impl Dir {
     }
 
     pub fn fifo(&self) -> PathBuf {
-        self.dir.join("exec.fifo")
+        self.dir.join(EXEC_FIFO)
     }
 
     /// Whether the exec FIFO is still there: `start` removes it once the init has its byte. A failure to
@@ -236,6 +243,18 @@ fn parse_start_time(stat: &str) -> Option<u64> {
         "Z" | "X" => None,
         _ => fields.nth(18)?.parse().ok(),
     }
+}
+
+/// The exec FIFO's name in a container's state directory.
+const EXEC_FIFO: &str = "exec.fifo";
+
+/// Whether a start of the container whose state directory is `dir` was under way when its node agent
+/// stopped: it had begun ([`crate::linux::oci::hooks::START_BEGUN`], made only for a container with
+/// startContainer hooks) and never took the exec FIFO's byte (the FIFO still named). Recovery removes such
+/// a box by that reason.
+pub fn start_interrupted(dir: &Path) -> bool {
+    let named = |name: &str| std::fs::symlink_metadata(dir.join(name)).is_ok();
+    named(crate::linux::oci::hooks::START_BEGUN) && named(EXEC_FIFO)
 }
 
 #[cfg(test)]
@@ -386,6 +405,69 @@ mod tests {
         with.poststart = Some(false);
         let back: State = serde_json::from_slice(&with.to_json().unwrap()).unwrap();
         assert_eq!(back, with);
+    }
+
+    /// The state as ca6dc80 read it, its fields and their serde attributes as they were there, before the
+    /// startContainer field: an old reader.
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BeforeStartContainer {
+        oci_version: String,
+        id: String,
+        status: Status,
+        pid: i32,
+        bundle: String,
+        #[serde(default)]
+        annotations: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        cgroup: Option<String>,
+        #[serde(default)]
+        start_time: Option<u64>,
+        #[serde(default)]
+        poststart: Option<bool>,
+        #[serde(default)]
+        pid_namespace: Option<bool>,
+    }
+
+    /// Append-only (CLAUDE.md "wire formats change append-only"; AC-T7.1.4): the startContainer field. Do:
+    /// write a state that has it, and read it as a reader from before it did (ca6dc80's fields), and read state
+    /// from before it as today's. Expect: the old reader reads every field it knows, unchanged; today's reads
+    /// the old state with no startContainer hooks (`None`); and the field round-trips.
+    #[test]
+    fn the_start_container_field_is_read_by_an_old_reader_and_absent_reads_as_none() {
+        let mut st = State::new("c1", "/b");
+        st.status = Status::Created;
+        st.pid = 7;
+        st.start_time = Some(9);
+        st.poststart = Some(false);
+        st.pid_namespace = Some(true);
+        st.start_container = Some(30);
+        let json = st.to_json().unwrap();
+        assert!(
+            String::from_utf8_lossy(&json).contains(r#""startContainer":30"#),
+            "the field is written"
+        );
+        let old: BeforeStartContainer = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            old,
+            BeforeStartContainer {
+                oci_version: st.oci_version.clone(),
+                id: "c1".to_owned(),
+                status: Status::Created,
+                pid: 7,
+                bundle: "/b".to_owned(),
+                annotations: std::collections::BTreeMap::new(),
+                cgroup: None,
+                start_time: Some(9),
+                poststart: Some(false),
+                pid_namespace: Some(true),
+            }
+        );
+        let before = br#"{"ociVersion":"1.3.0","id":"c1","status":"created","pid":7,"bundle":"/b","poststart":false}"#;
+        let today: State = serde_json::from_slice(before).unwrap();
+        assert_eq!(today.start_container, None);
+        let back: State = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, st);
     }
 
     #[test]

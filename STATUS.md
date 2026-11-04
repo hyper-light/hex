@@ -122,7 +122,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 - **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
   extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
   FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete
-  flake's pidfd kill, and a box's turn for a create or delete of a box being made (in place of step 6's claim). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
+  flake's pidfd kill, a box's turn for a create or delete of a box being made (in place of step 6's claim), a
+  container made from the spec the runtime checked (the shim and the create seed no longer read config.json again),
+  and createContainer and startContainer hooks run in the container (cp/t7-hooks a4e0261). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
   seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
   lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
   - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at

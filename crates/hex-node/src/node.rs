@@ -717,6 +717,8 @@ impl Node {
                 && record.spec.class.class() == Class::Oci
             {
                 s.init_alive = Some(record.init.is_some_and(init_alive));
+                s.start_interrupted =
+                    hex_runtime::linux::oci::state::start_interrupted(&self.container_dir(id));
             }
         }
         let mut summary = RecoverySummary::default();
@@ -1648,6 +1650,10 @@ fn why_text(why: &Why) -> String {
             )
         }
         Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
+        Why::StartInterrupted => {
+            "the node agent stopped while it started the box, in its startContainer hooks"
+                .to_owned()
+        }
     }
 }
 

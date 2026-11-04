@@ -1726,8 +1726,10 @@ measures). Each step's work, merged in one tree, each merge's resolutions in its
 - the fixes found on the way: a descriptor reaches a program only on purpose (decision 3, main's code), a hook swept
   too (held for Ada: CLAUDE.md §12, one merge of its own), a path with a `..` tried again where Linux can't vouch for
   it, a start holding both of the exec FIFO's ends, a spec naming no capabilities refused in a user namespace on a
-  borrowed network as CAP_SYS_ADMIN is, a box killed through a pidfd for each of its processes, and a create or delete
-  of a box being made waiting for it by the box's turn, in place of step 6's claim on its id (decision 1).
+  borrowed network as CAP_SYS_ADMIN is, a box killed through a pidfd for each of its processes, a create or delete
+  of a box being made waiting for it by the box's turn, in place of step 6's claim on its id (decision 1), a container
+  made from the spec the runtime checked, never a later read of its bundle (above), and createContainer and
+  startContainer hooks run in the container at the spec's points (`docs/design/runtime.md`).
 
 ### 6. Mount namespaces without copying, where the kernel has it
 

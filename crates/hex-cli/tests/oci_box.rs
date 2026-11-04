@@ -431,6 +431,9 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     escapes_are_contained(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
+    create_and_start_container_hooks_run_in_the_containers_namespaces(&lab, own);
+    a_failing_create_container_hook_fails_the_create_naming_it(&lab, own);
+    a_failing_start_container_hook_fails_the_start_naming_it(&lab, own);
     an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
     rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
     every_mount_kind_is_in_the_box_as_its_spec_asks(&lab, own);
@@ -1325,6 +1328,356 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
     eprintln!(
         "classic reasons: a user namespace (UserNamespace), createContainer hooks (Hooks) and a mount namespace by path (JoinsByPath) each counted, none pruned, none under Rootless"
     );
+}
+
+/// OCI hooks (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3; docs/design/runtime.md, "createContainer and
+/// startContainer hooks run in the container"; OCI runtime-spec v1.3.0 config.md:607-634, runtime.md:26-27
+/// and :62-73). Do: create a box whose bundle names a createRuntime, a createContainer and a startContainer
+/// hook, each writing what it sees to a directory the box binds, then start it. Expect: after create, the
+/// createRuntime hook saw `created` (runtime.md:20: after lifecycle step 2) and the init's host pid; the
+/// createContainer hook ran after it and before the root switch (the bundle's host path in view), in
+/// every one of the init's namespaces, given `created` and the pid the container sees (1: the spec makes
+/// a pid namespace); the startContainer hook
+/// has not run. After start it has, in the init's namespaces inside the root (the host path out of view),
+/// given `created` and pid 1, before the program, which finds its record. Neither holds a descriptor but
+/// its stdio. A box with a startContainer hook alone takes the classic path, counted as the create-time
+/// hooks are (`Hooks` as root, `Rootless` rootless), and its hook runs.
+fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, own: &Path) {
+    const KINDS: [&str; 7] = ["mnt", "pid", "ipc", "uts", "net", "cgroup", "user"];
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hooks"), state.path());
+    std::fs::create_dir_all(lab.rootfs.join("obs")).unwrap();
+    let (namespaces, mappings) = if lab.rootless {
+        (
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            format!(
+                r#","uidMappings":[{{"containerID":0,"hostID":{},"size":1}}],"gidMappings":[{{"containerID":0,"hostID":{},"size":1}}]"#,
+                lab.uid, lab.gid
+            ),
+        )
+    } else {
+        (
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            String::new(),
+        )
+    };
+    let classic = if lab.rootless {
+        ClassicReason::Rootless
+    } else {
+        ClassicReason::Hooks
+    };
+    let sh = |script: String| serde_json::json!({"path": "/bin/sh", "args": ["sh", "-c", script], "env": ["PATH=/usr/bin:/bin"]});
+    // A fresh bundle directory and the directory its box binds at /obs.
+    let fresh = || {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let obs = dir.join("obs");
+        std::fs::create_dir(&obs).unwrap();
+        (dir, obs)
+    };
+    // What a container-namespace hook writes under `at` (/obs as it sees it): its state, its namespaces,
+    // the descriptors its `ls` holds (`/proc/self` resolves in the host's procfs before the switch, where
+    // the shell's `$$`, its pid in the container's pid namespace, names another process), and whether the
+    // bundle's host path is in view.
+    let sees = |at: &str, tag: &str, dir: &Path| {
+        format!(
+            "cat > {at}/{tag}.state; for n in {kinds}; do echo $n $(readlink /proc/self/ns/$n); done > {at}/{tag}.ns; \
+             ls -l /proc/self/fd/ > {at}/{tag}.fds; if test -e {bundle}; then echo host; else echo container; fi > {at}/{tag}.root",
+            kinds = KINDS.join(" "),
+            bundle = dir.join("config.json").display(),
+        )
+    };
+    // Writes the bundle's config with `hooks`; its program records whether the startContainer hook ran
+    // before it, then waits.
+    let write = |dir: &Path, obs: &Path, hooks: serde_json::Value| {
+        let bind = format!(
+            r#",
+    {{"destination": "/obs", "type": "bind", "source": "{}", "options": ["rbind","rw"]}}"#,
+            obs.display()
+        );
+        let program = strings(&[
+            "/bin/sh",
+            "-c",
+            "if test -e /obs/sc.state; then echo after; else echo before; fi > /obs/program; exec /usr/bin/sleep 600",
+        ]);
+        let hooks = format!(r#","hooks":{hooks}"#);
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(&program, namespaces, &mappings, &bind, &hooks, ""),
+        )
+        .unwrap();
+    };
+    let make = |id: &BoxId, dir: PathBuf| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+    };
+    let read =
+        |p: PathBuf| std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    let json = |p: PathBuf| -> serde_json::Value { serde_json::from_str(&read(p)).unwrap() };
+    let ns_of = |pid: i64| -> Vec<String> {
+        KINDS
+            .iter()
+            .map(|n| {
+                let link = std::fs::read_link(format!("/proc/{pid}/ns/{n}")).unwrap();
+                format!("{n} {}", link.display())
+            })
+            .collect()
+    };
+    // The hook's `ls` holds what the hook did: its stdio, and besides only the directory it lists.
+    let only_stdio = |fds: String, what: &str| {
+        let held: Vec<(&str, &str)> = fds
+            .lines()
+            .filter_map(|l| l.split_once(" -> "))
+            .filter_map(|(head, target)| Some((head.rsplit(' ').next()?, target)))
+            .collect();
+        let numbers: BTreeSet<&str> = held.iter().map(|(fd, _)| *fd).collect();
+        assert!(
+            ["0", "1", "2"].iter().all(|fd| numbers.contains(fd)),
+            "the {what} hook has its stdio: {fds}"
+        );
+        for (fd, target) in held {
+            assert!(
+                ["0", "1", "2"].contains(&fd)
+                    || (target.starts_with("/proc/") && target.ends_with("/fd")),
+                "the {what} hook holds {fd} -> {target}, which it didn't ask for: {fds}"
+            );
+        }
+    };
+
+    // Every create- and start-time hook at once.
+    let (dir, obs) = fresh();
+    let o = obs.display().to_string();
+    write(
+        &dir,
+        &obs,
+        serde_json::json!({
+            "createRuntime": [sh(format!("cat > {o}/rt.state"))],
+            "createContainer": [sh(format!(
+                "if test -e {o}/rt.state; then echo after-createRuntime > {o}/cc.order; fi; {}",
+                sees(&o, "cc", &dir)
+            ))],
+            "startContainer": [sh(sees("/obs", "sc", &dir))],
+        }),
+    );
+    let id = BoxId::new("hooked").unwrap();
+    let before = node.classic_creates_for(classic);
+    make(&id, dir).expect("create a box with createContainer and startContainer hooks");
+    assert_eq!(
+        node.classic_creates_for(classic),
+        before + 1,
+        "it took the classic path, under {classic:?}"
+    );
+    let container = node.container_dir(&id);
+    let init = i64::from(init_pid(&container));
+    let rt = json(obs.join("rt.state"));
+    assert_eq!(
+        (rt["status"].as_str(), rt["pid"].as_i64()),
+        (Some("created"), Some(init)),
+        "createRuntime's state: {rt}"
+    );
+    assert_eq!(
+        read(obs.join("cc.order")).trim(),
+        "after-createRuntime",
+        "createContainer ran after createRuntime"
+    );
+    assert_eq!(
+        read(obs.join("cc.root")).trim(),
+        "host",
+        "createContainer ran before the root switch"
+    );
+    let cc = json(obs.join("cc.state"));
+    assert_eq!(
+        (cc["status"].as_str(), cc["pid"].as_i64(), cc["id"].as_str()),
+        (
+            Some("created"),
+            Some(1),
+            container.file_name().and_then(|n| n.to_str())
+        ),
+        "createContainer's state: {cc}"
+    );
+    let init_ns = ns_of(init);
+    assert_eq!(
+        read(obs.join("cc.ns")).lines().collect::<Vec<_>>(),
+        init_ns,
+        "createContainer ran in the init's namespaces"
+    );
+    let ours = ns_of(i64::from(std::process::id()));
+    for (at, kind) in KINDS.iter().enumerate().take(4) {
+        assert_ne!(
+            init_ns[at], ours[at],
+            "the container's {kind} namespace is its own, not the agent's"
+        );
+    }
+    only_stdio(read(obs.join("cc.fds")), "createContainer");
+    assert!(
+        !obs.join("sc.state").exists(),
+        "startContainer waits for start"
+    );
+    // The init waits for start with SIGPIPE ignored (a `hex` process, as Rust's runtime leaves it), so a
+    // start gone before it hands the byte is an EPIPE it ends on by its own status, never the signal
+    // (hex_runtime's hooks::START_ABANDONED).
+    let status = read(PathBuf::from(format!("/proc/{init}/status")));
+    let ignored = status
+        .lines()
+        .find_map(|l| l.strip_prefix("SigIgn:"))
+        .map(|m| u64::from_str_radix(m.trim(), 16).unwrap())
+        .unwrap();
+    const SIGPIPE: u32 = 13; // signal(7), on every Linux architecture Hex runs on
+    assert_ne!(
+        ignored & (1 << (SIGPIPE - 1)),
+        0,
+        "the init ignores SIGPIPE: SigIgn {ignored:#x}"
+    );
+
+    node.start(&id).expect("start the hooked box");
+    wait_for(|| obs.join("program").exists(), "the program to run");
+    assert_eq!(
+        read(obs.join("program")).trim(),
+        "after",
+        "startContainer ran before the program"
+    );
+    assert_eq!(
+        read(obs.join("sc.root")).trim(),
+        "container",
+        "startContainer ran inside the root"
+    );
+    let sc = json(obs.join("sc.state"));
+    assert_eq!(
+        (sc["status"].as_str(), sc["pid"].as_i64()),
+        (Some("created"), Some(1)),
+        "startContainer's state: {sc}"
+    );
+    assert_eq!(
+        read(obs.join("sc.ns")).lines().collect::<Vec<_>>(),
+        init_ns,
+        "startContainer ran in the init's namespaces"
+    );
+    only_stdio(read(obs.join("sc.fds")), "startContainer");
+    node.delete(&id).expect("delete the hooked box");
+
+    // A startContainer hook alone routes the create classic as well, and runs.
+    let (dir, obs) = fresh();
+    write(
+        &dir,
+        &obs,
+        serde_json::json!({"startContainer": [sh("echo ran > /obs/sc.state".to_owned())]}),
+    );
+    let id = BoxId::new("hooked-start").unwrap();
+    let before = node.classic_creates_for(classic);
+    make(&id, dir).expect("create a box with a startContainer hook alone");
+    assert_eq!(
+        node.classic_creates_for(classic),
+        before + 1,
+        "a startContainer hook takes the classic path"
+    );
+    node.start(&id).expect("start it");
+    wait_for(|| obs.join("program").exists(), "the program to run");
+    assert_eq!(
+        read(obs.join("program")).trim(),
+        "after",
+        "its startContainer hook ran first"
+    );
+    node.delete(&id).expect("delete it");
+
+    eprintln!(
+        "hooks: createRuntime, createContainer and startContainer each ran at its point and in its namespaces"
+    );
+}
+
+/// A bundle whose box binds a fresh directory at /obs, runs a program that writes /obs/program, and names
+/// `hooks`: the failing-hook tests' (AC-T7.1.4).
+fn hooked_bundle(lab: &Lab, hooks: serde_json::Value) -> (PathBuf, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    let obs = dir.join("obs");
+    std::fs::create_dir(&obs).unwrap();
+    std::fs::create_dir_all(lab.rootfs.join("obs")).unwrap();
+    let program = strings(&[
+        "/bin/sh",
+        "-c",
+        "echo ran > /obs/program; exec /usr/bin/sleep 600",
+    ]);
+    let mut spec: serde_json::Value = serde_json::from_str(&lab.config(&program, false)).unwrap();
+    spec["mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(
+            {"destination": "/obs", "type": "bind", "source": obs, "options": ["rbind", "rw"]}
+        ));
+    spec["hooks"] = hooks;
+    std::fs::write(dir.join("config.json"), spec.to_string()).unwrap();
+    (dir, obs)
+}
+
+/// A hook that exits 3, run by `/bin/sh` (found in the runtime's namespace and in the box's root alike).
+fn failing_hook() -> serde_json::Value {
+    serde_json::json!([{"path": "/bin/sh", "args": ["sh", "-c", "exit 3"], "env": ["PATH=/usr/bin:/bin"]}])
+}
+
+/// runtime.md:66-67 (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3). Do: create a box whose createContainer hook exits 3.
+/// Expect: the create refused by type, an `Os` refusal naming the createContainer hook, never the refusal a
+/// stopped box gets (`NotRunning`); the box isn't there afterwards and its program never ran.
+fn a_failing_create_container_hook_fails_the_create_naming_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hook-create-fails"), state.path());
+    let (dir, obs) = hooked_bundle(lab, serde_json::json!({"createContainer": failing_hook()}));
+    let id = BoxId::new("hooked-create-fails").unwrap();
+    let refused = node
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+        .expect_err("a failing createContainer hook fails the create");
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("createContainer hook failed") && !why.contains("stopped")),
+        "the refusal is typed and names the hook: {refused:?}"
+    );
+    assert_eq!(
+        node.inspect(&id),
+        Err(Refusal::NoSuchBox(id.clone())),
+        "a refused create leaves no box"
+    );
+    assert!(!obs.join("program").exists(), "the program never ran");
+    eprintln!("hooks: a failing createContainer hook failed the create, naming it: {refused:?}");
+}
+
+/// runtime.md:69-70 (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3). Do: create a box whose startContainer hook exits 3,
+/// then start it. Expect: the create made, the start refused by type, an `Os` refusal naming the
+/// startContainer hook, never `NotRunning` (the refusal a stopped box's start gets); its program never ran.
+fn a_failing_start_container_hook_fails_the_start_naming_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hook-start-fails"), state.path());
+    let (dir, obs) = hooked_bundle(lab, serde_json::json!({"startContainer": failing_hook()}));
+    let id = BoxId::new("hooked-start-fails").unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir),
+        owner: None,
+    })
+    .expect("create a box whose startContainer hook fails");
+    let refused = node
+        .start(&id)
+        .expect_err("a failing startContainer hook fails the start");
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("startContainer hook failed") && !why.contains("stopped")),
+        "the refusal is typed and names the hook: {refused:?}"
+    );
+    assert!(!obs.join("program").exists(), "the program never ran");
+    node.delete(&id).expect("delete the box");
+    eprintln!("hooks: a failing startContainer hook failed the start, naming it: {refused:?}");
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4): rootfsPropagation shared, slave and private each show on the box's
