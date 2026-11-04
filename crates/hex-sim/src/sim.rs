@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::ops::Bound;
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Key};
+use crate::index::{FitIndex, Key, Sample, Sampled};
 use crate::model::{Cluster, NodeId, Resources, Time, WorkloadId, WorkloadSpec};
 use crate::rng::Rng;
 use crate::store::{Outcome, State, Store, Write};
@@ -84,6 +84,8 @@ pub struct Config {
     pub max_events: usize,
     pub max_steps: u64,
     pub nemesis: Nemesis,
+    /// How deciders sample nodes; the serial specification samples the same way.
+    pub sample: Sample,
 }
 
 impl Default for Config {
@@ -104,6 +106,7 @@ impl Default for Config {
             max_events: 1 << 22,
             max_steps: 1 << 32,
             nemesis: Nemesis::None,
+            sample: Sample::default(),
         }
     }
 }
@@ -121,6 +124,13 @@ pub struct Report {
     /// Of those, decisions older than the change window.
     pub stale: u64,
     pub placements: u64,
+    /// Sampled decisions made, by deciders and again at commit.
+    pub decisions: u64,
+    /// Workloads found holding on no node, each marking its equivalence class so until capacity
+    /// comes back (at most one per class per such stretch).
+    pub class_checks: u64,
+    /// Workloads passed over because their class was marked so, undecided.
+    pub class_skips: u64,
     /// Summed over crashes, the workloads running on nodes when the control plane went down.
     pub running_through_crashes: u64,
     pub steps: u64,
@@ -143,6 +153,8 @@ pub struct Run {
     pub refused: Vec<bool>,
     /// Where and when each workload's first start ran, by id.
     pub ran: Vec<Option<Ran>>,
+    /// The sampling the run's deciders used, for its serial specification.
+    pub sample: Sample,
 }
 
 /// One run of a workload on a node, as its node agent saw it.
@@ -157,8 +169,14 @@ pub struct Ran {
 /// A decision: the best-fit key, or none, against the view after change `snap`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Decision {
-    node: Option<Key>,
+    sampled: Sampled,
     snap: u64,
+}
+
+impl Decision {
+    fn node(&self) -> Option<Key> {
+        self.sampled.best
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,12 +222,12 @@ impl Event {
             Event::Proposal { seq, decision, .. } => [
                 3,
                 seq,
-                decision.node.map_or(u64::MAX, |k| u64::from(k.node.0)),
+                decision.node().map_or(u64::MAX, |k| u64::from(k.node.0)),
             ],
             Event::CommitDue { seq, decision, .. } => [
                 4,
                 seq,
-                decision.node.map_or(u64::MAX, |k| u64::from(k.node.0)),
+                decision.node().map_or(u64::MAX, |k| u64::from(k.node.0)),
             ],
             Event::NodeStart { at: a, node } => [5, at(a), u64::from(node.0)],
             Event::NodeDone { at: a, node, .. } => [6, at(a), u64::from(node.0)],
@@ -261,6 +279,8 @@ struct Plane {
     /// Changes up to this number have left the window.
     forgotten: u64,
     committing: bool,
+    /// Equivalence classes (needs) no node holds, since capacity last came back.
+    infeasible: BTreeSet<Resources>,
 }
 
 impl Plane {
@@ -295,6 +315,7 @@ impl Plane {
             change_no: 0,
             forgotten: 0,
             committing: false,
+            infeasible: BTreeSet::new(),
         })
     }
 }
@@ -407,6 +428,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         acked: sim.acked,
         refused: sim.refused,
         ran: sim.ran,
+        sample: sim.config.sample,
     })
 }
 
@@ -632,10 +654,12 @@ impl Sim<'_> {
             let Some(&id) = self.plane.pending.get(&seq) else {
                 continue;
             };
-            let decision = Decision {
-                node: self.plane.view.best_fit(&self.need(id)?),
-                snap: self.plane.change_no,
-            };
+            let need = self.need(id)?;
+            if self.plane.infeasible.contains(&need) {
+                // Its class holds nowhere; the committer passes over it until capacity comes back.
+                continue;
+            }
+            let decision = self.decide(&need)?;
             self.plane.deciding.insert(seq);
             self.plane.idle_workers = self
                 .plane
@@ -672,10 +696,23 @@ impl Sim<'_> {
         self.sequence()
     }
 
-    /// Whether `decision` is still the best fit for `need`: no node changed since it was made that
-    /// could now come first, nor the node it chose. Free capacity only moves by changes, so a node
-    /// unchanged since keeps the place it had.
-    fn still_holds(&mut self, need: &Resources, decision: &Decision) -> Result<bool, SimError> {
+    /// A sampled decision against the plane's view now.
+    fn decide(&mut self, need: &Resources) -> Result<Decision, SimError> {
+        self.report.decisions = self
+            .report
+            .decisions
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        Ok(Decision {
+            sampled: self.plane.view.sampled_fit(need, &self.config.sample),
+            snap: self.plane.change_no,
+        })
+    }
+
+    /// Whether `decision` is still what a scan now would choose: no node in the window it scanned
+    /// changed since. A change outside the window leaves the scan's stopping point and every key it saw
+    /// as they were, so the same nodes are found and the same one is best.
+    fn still_holds(&mut self, decision: &Decision) -> Result<bool, SimError> {
         if decision.snap < self.plane.forgotten {
             self.report.stale = self
                 .report
@@ -684,23 +721,20 @@ impl Sim<'_> {
                 .ok_or(SimError::StepBudget(self.config.max_steps))?;
             return Ok(false);
         }
+        let nodes = self.plane.view.len();
         let voided = self
             .plane
             .changes
             .iter()
             .rev()
             .take_while(|(no, _)| *no > decision.snap)
-            .any(|(_, key)| {
-                let chosen_changed = decision.node.is_some_and(|k| k.node == key.node);
-                let now_first = key.holds(need) && decision.node.is_none_or(|k| *key < k);
-                chosen_changed || now_first
-            });
+            .any(|(_, key)| decision.sampled.covers(key.node, nodes));
         Ok(!voided)
     }
 
     /// `decision` if it still holds, else a fresh one (a conflict).
     fn late_bind(&mut self, need: &Resources, decision: Decision) -> Result<Decision, SimError> {
-        if self.still_holds(need, &decision)? {
+        if self.still_holds(&decision)? {
             return Ok(decision);
         }
         self.report.conflicts = self
@@ -708,10 +742,18 @@ impl Sim<'_> {
             .conflicts
             .checked_add(1)
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
-        Ok(Decision {
-            node: self.plane.view.best_fit(need),
-            snap: self.plane.change_no,
-        })
+        self.decide(need)
+    }
+
+    /// `need`'s class holds on no node: mark it so until capacity comes back.
+    fn mark_infeasible(&mut self, need: Resources) -> Result<(), SimError> {
+        self.report.class_checks = self
+            .report
+            .class_checks
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.plane.infeasible.insert(need);
+        Ok(())
     }
 
     /// The committer: takes the queue in order from past `cursor`, passes over workloads no node
@@ -728,6 +770,17 @@ impl Sim<'_> {
             else {
                 return Ok(());
             };
+            let need = self.need(id)?;
+            if self.plane.infeasible.contains(&need) {
+                self.plane.proposals.remove(&seq);
+                self.plane.cursor = Some(seq);
+                self.report.class_skips = self
+                    .report
+                    .class_skips
+                    .checked_add(1)
+                    .ok_or(SimError::StepBudget(self.config.max_steps))?;
+                continue;
+            }
             let Some(decision) = self.plane.proposals.remove(&seq) else {
                 if !self.plane.deciding.contains(&seq) {
                     self.plane.undecided.insert(seq);
@@ -735,9 +788,10 @@ impl Sim<'_> {
                 }
                 return Ok(());
             };
-            let decision = self.late_bind(&self.need(id)?, decision)?;
-            if decision.node.is_none() {
+            let decision = self.late_bind(&need, decision)?;
+            if decision.node().is_none() {
                 self.plane.cursor = Some(seq);
+                self.mark_infeasible(need)?;
                 continue;
             }
             self.plane.committing = true;
@@ -776,8 +830,9 @@ impl Sim<'_> {
         }
         let need = self.need(id)?;
         let decision = self.late_bind(&need, decision)?;
-        let Some(key) = decision.node else {
+        let Some(key) = decision.node() else {
             self.plane.cursor = Some(seq);
+            self.mark_infeasible(need)?;
             return self.sequence();
         };
         let version = *self
@@ -916,6 +971,7 @@ impl Sim<'_> {
                 self.note_change(changed)?;
                 self.plane.versions.remove(&id);
                 self.plane.cursor = None;
+                self.plane.infeasible.clear();
                 self.plane.resets = self
                     .plane
                     .resets

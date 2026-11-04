@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use crate::error::SimError;
 use crate::model::{NodeId, NodeSpec, Resources};
+use crate::trace::TraceHash;
 
 /// A node's place in the best-fit order: its free capacity, then its id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,6 +34,79 @@ impl Key {
         need.cpu_milli <= self.cpu_milli
             && need.mem_bytes <= self.mem_bytes
             && need.gpus <= self.gpus
+    }
+}
+
+/// How the fast path samples (`scheduler-architecture.md` S2): a need's equivalence class scans the
+/// nodes in id order from a start its need and `seed` fix, and stops at the `want`-th node that holds
+/// it, choosing the best fit among those. `want` is at least `min_feasible` and at least `per_mille` of
+/// the nodes, never more than all of them: kube-scheduler's floors, `minFeasibleNodesToFind = 100` and
+/// `minFeasibleNodesPercentageToFind = 5` (pkg/scheduler/schedule_one.go:57,62 at v1.37.1), and Borg's
+/// relaxed randomization (EuroSys 2015 §3.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sample {
+    pub seed: u64,
+    pub min_feasible: u32,
+    pub per_mille: u32,
+}
+
+impl Default for Sample {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            min_feasible: 100,
+            per_mille: 50,
+        }
+    }
+}
+
+impl Sample {
+    /// How many feasible nodes a scan over `nodes` stops at.
+    pub fn want(&self, nodes: usize) -> usize {
+        let share = nodes
+            .checked_mul(usize::try_from(self.per_mille).unwrap_or(usize::MAX))
+            .map_or(nodes, |x| x.div_ceil(1000));
+        let floor = usize::try_from(self.min_feasible).unwrap_or(usize::MAX);
+        share.max(floor).max(1).min(nodes)
+    }
+
+    /// Where `need`'s class starts its scan over `nodes` (0 for none).
+    pub fn start(&self, need: &Resources, nodes: usize) -> usize {
+        let mut h = TraceHash::default();
+        for word in [
+            self.seed,
+            need.cpu_milli,
+            need.mem_bytes,
+            u64::from(need.gpus),
+        ] {
+            h.word(word);
+        }
+        u64::try_from(nodes)
+            .ok()
+            .and_then(|n| h.finish().checked_rem(n))
+            .and_then(|at| usize::try_from(at).ok())
+            .unwrap_or(0)
+    }
+}
+
+/// A sampled decision: the best fit among the scanned nodes that hold the need, and the window
+/// scanned, `span` nodes from `start` in id order (wrapping).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sampled {
+    pub best: Option<Key>,
+    pub start: usize,
+    pub span: usize,
+}
+
+impl Sampled {
+    /// Whether `node` lies in the scanned window, of a cluster of `nodes`.
+    pub fn covers(&self, node: NodeId, nodes: usize) -> bool {
+        usize::try_from(node.0)
+            .ok()
+            .and_then(|at| at.checked_add(nodes))
+            .and_then(|x| x.checked_sub(self.start))
+            .and_then(|x| x.checked_rem(nodes))
+            .is_none_or(|offset| offset < self.span)
     }
 }
 
@@ -91,6 +165,42 @@ impl FitIndex {
             .range(from..)
             .find(|key| key.holds(need))
             .copied()
+    }
+
+    /// The sampled best fit for `need` ([`Sample`]). It visits each node at most once, so the node
+    /// count bounds it; a need no node holds scans them all and finds none.
+    pub fn sampled_fit(&self, need: &Resources, sample: &Sample) -> Sampled {
+        let n = self.free.len();
+        let start = sample.start(need, n);
+        let want = sample.want(n);
+        let (mut best, mut found) = (None::<Key>, 0usize);
+        for offset in 0..n {
+            let Some(at) = start.checked_add(offset).and_then(|x| x.checked_rem(n)) else {
+                break;
+            };
+            let (Some(free), Ok(id)) = (self.free.get(at), u32::try_from(at)) else {
+                break;
+            };
+            if !free.holds(need) {
+                continue;
+            }
+            let key = Key::of(NodeId(id), free);
+            best = Some(best.map_or(key, |b| b.min(key)));
+            // found and offset count nodes, so they stay below the node count.
+            found = found.saturating_add(1);
+            if found >= want {
+                return Sampled {
+                    best,
+                    start,
+                    span: offset.saturating_add(1),
+                };
+            }
+        }
+        Sampled {
+            best,
+            start,
+            span: n,
+        }
     }
 
     /// Takes `need` from `node`'s free capacity; its new key.
@@ -192,6 +302,57 @@ mod tests {
         assert_eq!(
             index.take(NodeId(3), &res(1, 1, 0)),
             Err(SimError::UnknownNode(NodeId(3)))
+        );
+    }
+
+    /// T-T7.4.1: with a sample that wants every node, the sampled fit is best fit; with one that wants
+    /// one node, it is the first node from the class's start that holds the need.
+    #[test]
+    fn the_sample_stops_at_its_wanted_feasible_node() {
+        let index = FitIndex::new(&nodes(&[
+            res(8000, 16, 0),
+            res(2000, 16, 0),
+            res(4000, 4, 1),
+            res(3000, 16, 0),
+        ]))
+        .unwrap();
+        let need = res(1000, 8, 0);
+        let all = Sample {
+            seed: 3,
+            min_feasible: 100,
+            per_mille: 0,
+        };
+        assert_eq!(index.sampled_fit(&need, &all).best, index.best_fit(&need));
+        let one = Sample {
+            seed: 3,
+            min_feasible: 1,
+            per_mille: 0,
+        };
+        let s = index.sampled_fit(&need, &one);
+        let first = (0..4)
+            .map(|o| (s.start + o) % 4)
+            .find(|&at| {
+                index
+                    .key(NodeId(u32::try_from(at).unwrap()))
+                    .unwrap()
+                    .holds(&need)
+            })
+            .unwrap();
+        assert_eq!(
+            s.best.map(|k| k.node),
+            Some(NodeId(u32::try_from(first).unwrap()))
+        );
+        assert!(s.covers(NodeId(u32::try_from(first).unwrap()), 4));
+        let none = index.sampled_fit(&res(1, 100, 0), &one);
+        assert_eq!((none.best, none.span), (None, 4));
+    }
+
+    #[test]
+    fn want_follows_kube_schedulers_floors() {
+        let s = Sample::default();
+        assert_eq!(
+            (s.want(10), s.want(1_000), s.want(10_000), s.want(0)),
+            (10, 100, 500, 0)
         );
     }
 

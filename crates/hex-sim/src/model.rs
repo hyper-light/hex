@@ -9,7 +9,8 @@ pub struct NodeId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkloadId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Ordered field by field, so a need can key an equivalence class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Resources {
     pub cpu_milli: u64,
     pub mem_bytes: u64,

@@ -151,6 +151,36 @@ disturbed. The 10,000 seeds check the same on every run.
 **What would falsify it.** A workload running through a crash that is started again, moved, cut short,
 or never recorded done. The mutant that rebuilds placed workloads as pending fails both tests.
 
+### H8. The fast path samples per equivalence class and skips a class that holds nowhere
+
+**The choice.** A workload's need is its equivalence class. Its decision scans nodes in id order
+from a start that the class and a seed fix (`Sample::start`), stops at the `want`-th node that holds the
+need, and takes the best fit among those (`FitIndex::sampled_fit`). `want` is at least `min_feasible` and
+`per_mille` of the nodes, by default 100 and 5%: kube-scheduler's floors. Late binding voids a decision
+when any node inside its scanned window changed since it was made (a node outside can't move the
+scan's stop or any key it saw), and it is made again (a conflict). When a class is found to hold on no
+node, it is marked until capacity comes back: the committer passes its other workloads over undecided
+(`class_skips`), and deciders don't decide them. So a completion under saturation re-checks each pending
+class once (`class_checks`), not each workload. The serial specification chooses with the same sample,
+so `T-T7.4.1` tests the fast path itself.
+
+**Sources.** Borg: "Borg only does feasibility and scoring for one task per equivalence class", and
+it "examines machines in a random order until it has found 'enough' feasible machines to score" (EuroSys
+2015 §3.4); kube-scheduler: `minFeasibleNodesToFind = 100`, `minFeasibleNodesPercentageToFind = 5`
+(pkg/scheduler/schedule_one.go:57,62 at v1.37.1); Sparrow's late binding comes "within 5% (4ms) of an
+omniscient scheduler" (SOSP 2013 §3, p. 5).
+
+**Evidence.** `placements_equal_the_serial_specification_on_generated_clusters`: 1,000 generated
+clusters with samples of 1-8 nodes or up to 30%. `with_capacity_only_shrinking_placements_equal_a_serial_run`
+also shows that sampling chose differently from a whole-cluster best fit in some runs.
+`a_completion_under_saturation_rechecks_each_class_once`: at most 3 class checks per stretch between
+completions over 600 workloads in 3 classes, and the rest of each class passed over undecided.
+
+**What would falsify it.** A run whose log the sampled specification refuses (the late-binding check
+missed a change that mattered), or a class checked more than once in a stretch with no completion. The
+window check is conservative, so it can count more conflicts than strictly needed. Step 5's bench is
+what says whether that costs too much.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue

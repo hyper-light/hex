@@ -1,7 +1,7 @@
 //! The scheduler's serial specification (`scheduler-architecture.md` S6): one scheduler, one cycle.
 //! Workloads queue in the order the store accepted them; whenever state changes, the scheduler takes
-//! the queue in order and puts each workload on its best-fit node ([`FitIndex`]), passing over one no
-//! node holds now. A placement is correct when this specification could have made it.
+//! the queue in order and puts each workload on the best fit its class's sample finds
+//! ([`FitIndex::sampled_fit`], the fast path's own choice), passing over one no node holds now. A placement is correct when this specification could have made it.
 //!
 //! [`serial_place`] runs the specification directly on a cluster whose capacity only shrinks.
 //! [`check_log`] replays a run's store log and refuses the first write the specification couldn't
@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::SimError;
-use crate::index::FitIndex;
+use crate::index::{FitIndex, Sample};
 use crate::model::{Cluster, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
 use crate::sim::Run;
 use crate::store::{Op, State};
@@ -56,15 +56,16 @@ impl From<SimError> for Violation {
     }
 }
 
-/// The specification run directly: each workload, in order, on its best-fit node or none.
+/// The specification run directly: each workload, in order, on its sampled best fit or none.
 pub fn serial_place(
     nodes: &[NodeSpec],
     workloads: &[WorkloadSpec],
+    sample: &Sample,
 ) -> Result<Vec<Option<NodeId>>, SimError> {
     let mut index = FitIndex::new(nodes)?;
     let mut out = Vec::with_capacity(workloads.len());
     for w in workloads {
-        let choice = index.best_fit(&w.need).map(|k| k.node);
+        let choice = index.sampled_fit(&w.need, sample).best.map(|k| k.node);
         if let Some(node) = choice {
             index.take(node, &w.need)?;
         }
@@ -121,7 +122,7 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                         ahead: *ahead,
                     });
                 }
-                let spec = index.best_fit(&need).map(|k| k.node);
+                let spec = index.sampled_fit(&need, &run.sample).best.map(|k| k.node);
                 if spec != Some(node) {
                     return Err(Violation::NotSerialChoice {
                         workload,
