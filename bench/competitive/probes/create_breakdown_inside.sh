@@ -114,6 +114,7 @@ T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hexcb-$TAG"
 KG="hexcb_$TAG"
+PROBES="$KG/openat_in $KG/open_in"
 case $(uname -m) in
   x86_64) SYS=__x64_sys ;;
   aarch64) SYS=__arm64_sys ;;
@@ -186,7 +187,7 @@ traced() {
 # against <out name>.stats (its per-CPU counts).
 switch() {
   local name=$1 lc=$2 rc=0
-  local SW="syscalls/sys_exit_clone3 syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root"
+  local SW="syscalls/sys_exit_clone3 syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root syscalls/sys_enter_chdir"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 8192 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $SW; do

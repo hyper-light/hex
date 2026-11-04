@@ -143,6 +143,7 @@ def named_parts(parts, *names):
 ARG = re.compile(r"\b(\w+): (0x[0-9a-f]+|\d+)")
 BPF_PROG_LOAD, BPF_PROG_ATTACH = 5, 8  # include/uapi/linux/bpf.h, enum bpf_cmd
 CLONE_NEWNET = 0x40000000  # include/uapi/linux/sched.h
+CLONE_NEWNS = 0x00020000  # include/uapi/linux/sched.h
 
 
 def arg(e, name):
@@ -623,6 +624,14 @@ def switch(trace, stats, seam_json=None, scope="switch"):
     inits join by setns as they join pooled ones.
     The historical switch-only criterion can read old traces without clone-exit instrumentation.
     Lost/unpaired events, failed switches and an init pivot are always refused.
+
+    Beside part 19, the root in place ("root_*"), which reads alike on every way a pruned create's mount
+    namespace is made (goal 6, decision 6's update): an init made from its tree joins the namespace by
+    setns(CLONE_NEWNS) before its network and makes no chroot, so part 19 has no end there. The root's span
+    runs from part 19's start to the init's first chdir after it (the chdir("/") that follows the chroot, or
+    on a joined namespace stands for it), plus the mount namespace's join where it came before that start.
+    So it is part 19 and the chroot (part 20) on the copied ways, and the same work on the joined one. It needs
+    the trace's chdir entries (traces before it have none: it reads no spans there).
     """
     if scope not in ("switch", "mounts"):
         print("refusing: switch criterion is switch or mounts", file=sys.stderr)
@@ -630,6 +639,7 @@ def switch(trace, stats, seam_json=None, scope="switch"):
     ev, unread = eb.parse(trace)
     n_lost = eb.lost(stats)
     setns_flags, newnet_exit, clone_exit = {}, {}, {}
+    newns_enter, newns_join, chdir_enters = {}, {}, {}
     pending, switch_us, mounts_us, dangling = {}, [], [], 0
     chroot_pids, pivot_by_pid = set(), {}
     clone_starts, setns_starts, failed_switches = 0, 0, 0
@@ -643,10 +653,17 @@ def switch(trace, stats, seam_json=None, scope="switch"):
                     setns_flags[e.pid] = int(m.get("flags", "0"), 0)
                 except ValueError:
                     setns_flags[e.pid] = 0
+                if setns_flags[e.pid] & CLONE_NEWNS:
+                    newns_enter[e.pid] = e.ts
             elif e.kind == "exit":
                 flags = setns_flags.pop(e.pid, 0)
                 if flags & CLONE_NEWNET and int(e.text, 0) == 0:
                     newnet_exit.setdefault(e.pid, e.ts)
+                t0 = newns_enter.pop(e.pid, None)
+                if flags & CLONE_NEWNS and int(e.text, 0) == 0 and t0 is not None and t0 <= e.ts:
+                    newns_join.setdefault(e.pid, (t0, e.ts))
+        elif e.name == "chdir" and e.kind == "enter":
+            chdir_enters.setdefault(e.pid, []).append(e.ts)
         elif e.name == "chroot":
             if e.kind == "enter":
                 dangling += e.pid in pending
@@ -670,6 +687,22 @@ def switch(trace, stats, seam_json=None, scope="switch"):
         elif e.name == "pivot_root" and e.kind == "enter":
             pivot_by_pid[e.pid] = pivot_by_pid.get(e.pid, 0) + 1
     dangling += len(pending)
+    root_us, root_joins, root_unended = [], 0, 0
+    for pid, cloned in clone_exit.items():
+        if pid in pivot_by_pid:
+            continue  # a seed, which prunes its own namespace
+        start = newnet_exit.get(pid, cloned)
+        end = next((t for t in chdir_enters.get(pid, []) if t >= start), None)
+        if end is None:
+            root_unended += pid in chroot_pids or pid in newns_join
+            continue
+        span = end - start
+        join = newns_join.get(pid)
+        if join is not None and join[1] <= start:
+            span += join[1] - join[0]
+        if join is not None:
+            root_joins += 1
+        root_us.append(span)
     init_pivots = sum(c for pid, c in pivot_by_pid.items() if pid in chroot_pids)
     seed_prune_pivots = sum(c for pid, c in pivot_by_pid.items() if pid not in chroot_pids)
     creates, create_ms, dev_mounts, expected_dry, levels = None, [], None, None, []
@@ -726,7 +759,10 @@ def switch(trace, stats, seam_json=None, scope="switch"):
                       "lost_events": n_lost, "unread_lines": unread, "unpaired_chroots": dangling,
                       "bar_ms": 0.5, "criterion": scope, "create_samples": len(create_ms),
                       "create_p50_ms": eb.pct(create_ms, 0.5), "create_p99_ms": eb.pct(create_ms, 0.99),
-                      "dev_mounts": dev_mounts, "pass": ok}))
+                      "dev_mounts": dev_mounts,
+                      "root_spans": len(root_us), "root_p50_ms": ms(eb.pct(root_us, 0.5)),
+                      "root_p99_ms": ms(eb.pct(root_us, 0.99)), "root_max_ms": ms(max(root_us) if root_us else None),
+                      "root_mntns_joins": root_joins, "root_unended": root_unended, "pass": ok}))
     if switch_us:
         print(f"AC-e over {len(switch_us)} creates at 8 in flight: switch (part 20) "
               f"p50 {eb.ms3(ms(sp50))} / p99 {eb.ms3(ms(sp99))} / max {eb.ms3(ms(smax))} ms; "
@@ -736,6 +772,10 @@ def switch(trace, stats, seam_json=None, scope="switch"):
               f"Boundaries: {setns_starts} successful network joins, {clone_starts} child clone returns "
               f"(network made on path by the clone: {expected_dry}, by the node for an owner's box: "
               f"{node_made}); {missing_spans} missing.")
+    if root_us:
+        print(f"Root in place (part 19 to the init's chdir, its mount namespace's join counted) over "
+              f"{len(root_us)} inits, {root_joins} joining a namespace made from its tree: "
+              f"p50 {eb.ms3(ms(eb.pct(root_us, 0.5)))} / p99 {eb.ms3(ms(eb.pct(root_us, 0.99)))} ms.")
     if create_ms:
         print(f"Whole create at the same concurrency: p50 {eb.pct(create_ms, 0.5):.3f} / "
               f"p99 {eb.pct(create_ms, 0.99):.3f} ms; prepared /dev counts: {dev_mounts}.")
