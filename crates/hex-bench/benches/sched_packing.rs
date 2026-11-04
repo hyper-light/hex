@@ -2,9 +2,9 @@
 //!
 //!   cargo bench -p hex-bench --bench sched_packing -- [trace-file]
 //!
-//! With a trace (a recorded workload, `hex_sim::replay`'s format) it packs that; without one it packs
-//! generated clusters, which say how the scorers compare but are not the number of record (the bar
-//! names a recorded kiln workload). Each scorer packs the same arrivals through the fast path's
+//! With a trace (a recorded workload, `hex_sim::replay`'s format) it packs that. Without one it packs
+//! generated clusters with needs rounded to power-of-two cores and GiB, which show how the scorers
+//! compare but are not the number of record (the bar names a recorded kiln workload). Each scorer packs the same arrivals through the fast path's
 //! sampled choice to 90% of the CPU (`hex_sim::packing::pack`), and the stranded CPU of each is
 //! printed with the reduction.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
@@ -82,10 +82,14 @@ fn main() {
             gpu_nodes_per_mille: 100,
             max_share_per_mille: 400,
         };
-        cuts.push(compare(
-            &format!("generated seed={seed}"),
-            &generate::cluster(seed, &shape).unwrap(),
-        ));
+        let mut cluster = generate::cluster(seed, &shape).unwrap();
+        // CI legs ask for whole cores and round memory: round each need up to a power of two cores
+        // and GiB, so the shapes are few and coarse, as a recorded workload's would be.
+        for w in &mut cluster.workloads {
+            w.need.cpu_milli = w.need.cpu_milli.div_ceil(1000).next_power_of_two() * 1000;
+            w.need.mem_bytes = w.need.mem_bytes.div_ceil(1 << 30).next_power_of_two() << 30;
+        }
+        cuts.push(compare(&format!("generated seed={seed}"), &cluster));
     }
     let min = cuts.iter().copied().fold(f64::INFINITY, f64::min);
     println!(
