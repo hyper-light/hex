@@ -36,6 +36,7 @@ implementation" and its numbers are established, before any design or code.
 | [`cgroup-v2-resource-control.md`](runtime/cgroup-v2-resource-control.md) | memory.min/low/high/max, cpu/io weights, io.latency and io.cost, PSI, TMO and oomd; machine protection |
 | [`oci-spec-defaults.md`](runtime/oci-spec-defaults.md) | What `docker run`, containerd and runc's rootless mode give a container from an image; the kernel's overlayfs, mount and openat2 facts a structured spec's bundle rests on |
 | [`native-platforms.md`](runtime/native-platforms.md) | Boxes on macOS and Windows natively: why a Linux image needs a Linux kernel (WSL 1→2, Apple's Containerization), Windows containers and job objects, macOS App Sandbox inheritance and its missing tree caps (XNU, the SDK), Linux guests through Shards |
+| [`windows-hcs.md`](runtime/windows-hcs.md) | The Windows `oci` class: the OCI spec's Windows section over HCS v2, layers to a scratch volume (documented vs vmcompute), no suspended start, nested jobs, device grants, read-only mounts, host and image versions, the Containers feature and load-time linking |
 | [`matrix.md`](runtime/matrix.md) | The cross-system comparison: isolation, start latency, throughput, density, overhead — every cell cited |
 
 ### Scheduler (`scheduler/`)
