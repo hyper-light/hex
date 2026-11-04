@@ -876,6 +876,11 @@ mod linux {
                "protocols": after.protocols - before.protocols,
                "through_files": after.through_files - before.through_files,
                "files_failed": after.files_failed - before.files_failed,
+               "files_bounded": after.files_bounded - before.files_bounded,
+               "files_held": after.files_held,
+               "files_bound": after.files_bound.map(|f| f.namespaces),
+               "descriptors_soft": after.files_bound.and_then(|f| f.soft),
+               "descriptors_own": after.files_bound.map(|f| f.own),
                "check_us_mean": (after.check_ns - before.check_ns) as f64
                    / 1e3 / ((after.checked - before.checked).max(1)) as f64})
     }

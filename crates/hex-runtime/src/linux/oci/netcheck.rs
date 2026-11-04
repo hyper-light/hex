@@ -292,7 +292,9 @@ pub struct Checked {
 /// `/proc/thread-self/net` is `proc_net` and whose buffers are `scratch`: entered, read and left. `socket` is the
 /// netlink socket the check keeps in `ns`, made here the first time and kept by the caller with the namespace,
 /// closed with it, and `files` the namespace's files it holds likewise, once it has: then it reads through
-/// them and never enters, but for a socket past its own, whose protocols it enters to read.
+/// them and never enters, but for a socket past its own, whose protocols it enters to read. `files` is `None`
+/// where the namespace holds none and may not open them (its holder's bound on held files is taken): then it
+/// enters, and opens none.
 pub fn check(
     ns: BorrowedFd<'_>,
     home: BorrowedFd<'_>,
@@ -300,8 +302,13 @@ pub fn check(
     fresh: &Fresh,
     scratch: &mut Scratch,
     socket: &mut Option<OwnedFd>,
-    files: &mut Option<Files>,
+    files: Option<&mut Option<Files>>,
 ) -> Checked {
+    let mut none = None;
+    let (files, may_hold) = match files {
+        Some(files) => (files, true),
+        None => (&mut none, false),
+    };
     let mut checked = Checked {
         verdict: Err(Refused::Unreadable),
         home: true,
@@ -327,7 +334,7 @@ pub fn check(
         return checked;
     }
     checked.verdict = look(proc_net, fresh, scratch, socket, &mut checked.protocols);
-    if checked.verdict.is_ok() && files.is_none() {
+    if checked.verdict.is_ok() && files.is_none() && may_hold {
         match Files::open(proc_net) {
             Ok(opened) => *files = opened,
             Err(_) => checked.files_failed = true,

@@ -46,7 +46,7 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
 /// and is counted too.
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
-    let pool = Netns::start(2).unwrap();
+    let pool = Netns::start(2, FilesBound::now()).unwrap();
     wait_for("first make", || {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
@@ -81,54 +81,68 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     assert_eq!((c.taken, c.made_on_path, c.failed), (1, 0, 0), "{c:?}");
 }
 
-/// Goal 5 extended step 6, the lead's second condition for a kept namespace's files (CLAUDE.md §2, §3): the
-/// descriptor limit is checked at the node's start against all it may hold, raised to that, and where it can't be
-/// the refusal names the shortfall. Do: ask of limits that hold it, and of limits under it. Expect: nothing asked of
-/// the first; the soft limit raised, and a hard one under it too; the shortfall in the refusal's words.
+/// Goal 5 extended step 6, the lead's second condition for a kept namespace's files as he restated it
+/// (2026-11-03T23:07Z, 2026-11-04T09:15Z; CLAUDE.md §2, §3): the limit the node was given stays as it is, and what
+/// it leaves past the node's own descriptors at its bounds is how many namespaces may hold their four files. Do: ask
+/// of a soft limit at systemd's default, of one just past the node's own, of one leaving room for two namespaces
+/// and a little more, and of none. Expect: none hold files at the default; two at the room for two; every namespace
+/// there may be, under no limit; the node's own the same each time and past 65,536 boxes' four descriptors.
 #[test]
-fn the_descriptor_limit_is_raised_to_all_a_node_may_hold_or_the_shortfall_refused() {
+fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace() {
     use rustix::process::Rlimit;
 
-    let needs = descriptors_a_node_may_hold();
-    assert!(
-        needs >= 65_536 * 8,
-        "each live box's kept namespace and its own are in it: {needs}"
-    );
-    for enough in [
-        Rlimit {
-            current: Some(needs),
-            maximum: Some(needs),
-        },
-        Rlimit {
-            current: None,
-            maximum: None,
-        },
-    ] {
-        assert!(raised_limit(needs, &enough).is_none());
-    }
-    let soft = raised_limit(
-        needs,
-        &Rlimit {
-            current: Some(1_024),
-            maximum: Some(needs + 1),
-        },
-    )
-    .unwrap();
-    assert_eq!((soft.current, soft.maximum), (Some(needs), Some(needs + 1)));
-    let low = Rlimit {
-        current: Some(1_024),
-        maximum: Some(4_096),
+    let at = |soft: Option<u64>| {
+        FilesBound::of(&Rlimit {
+            current: soft,
+            maximum: soft,
+        })
     };
-    let both = raised_limit(needs, &low).unwrap();
-    assert_eq!((both.current, both.maximum), (Some(needs), Some(needs)));
-    let refused = short_of(needs, &low, "EPERM").to_string();
-    for word in [
-        needs.to_string(),
-        4_096.to_string(),
-        (needs - 4_096).to_string(),
-    ] {
-        assert!(refused.contains(&word), "{word} in {refused}");
-    }
+    let own = at(Some(1_024)).own;
+    assert!(
+        own >= 65_536 * 4,
+        "each live box's own descriptors and its kept namespace's are in it: {own}"
+    );
+    assert_eq!(
+        at(Some(1_024)).namespaces,
+        0,
+        "systemd's default holds none"
+    );
+    assert_eq!(at(Some(own)).namespaces, 0, "just the node's own");
+    assert_eq!(
+        at(Some(own + 3)).namespaces,
+        0,
+        "short of one namespace's four"
+    );
+    assert_eq!(at(Some(own + 2 * 4 + 3)).namespaces, 2);
+    let unlimited = at(None);
+    assert_eq!(unlimited.soft, None);
+    assert_eq!(unlimited.own, own);
+    assert!(unlimited.namespaces >= 65_536, "{unlimited:?}");
+    assert_eq!(
+        at(Some(u64::MAX)).namespaces,
+        unlimited.namespaces,
+        "never more than there may be namespaces"
+    );
+}
+
+/// Goal 5 extended step 6, the bound on namespaces holding files (CLAUDE.md §2): a place under it is taken before a
+/// check opens files and given back as it drops. Do: take places under a bound of two until one is refused, drop one,
+/// take again. Expect: two taken, the third refused; one dropped frees one; the count back to none at the end.
+#[test]
+fn a_files_slot_is_taken_up_to_the_bound_and_given_back_as_it_drops() {
+    let held = Arc::new(AtomicU64::new(0));
+    let first = FilesSlot::take(&held, 2).expect("the first of two");
+    let second = FilesSlot::take(&held, 2).expect("the second of two");
+    assert!(FilesSlot::take(&held, 2).is_none(), "past the bound");
+    assert_eq!(held.load(Ordering::Acquire), 2);
+    drop(first);
+    let third = FilesSlot::take(&held, 2).expect("the place the first gave back");
+    assert!(
+        FilesSlot::take(&held, 0).is_none(),
+        "a bound of none takes none"
+    );
+    drop((second, third));
+    assert_eq!(held.load(Ordering::Acquire), 0);
 }
 
 /// Goal 5 extended step 6, the lead's conditions for the check's own socket (2026-11-03T17:36Z; CLAUDE.md §2): the
@@ -160,6 +174,7 @@ fn a_kept_namespaces_socket_is_held_in_its_bound_and_closed_when_the_bound_puts_
                 ns,
                 socket: Some(write),
                 files: None,
+                slot: None,
             },
         ));
         ends.push(read);

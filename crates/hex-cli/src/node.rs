@@ -120,6 +120,28 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         for (id, why) in &recovered.removed {
             let _ = writeln!(err, "hex node: recovered: removed {id}: {why}");
         }
+        // The kept namespaces' held files fit in the descriptor limit the node was given, never raised:
+        // say how many may hold them, so a node at a default limit isn't read as holding any.
+        if let Ok(Some(kept)) = node.netns_reuse()
+            && let Some(files) = kept.files_bound
+        {
+            let soft = files
+                .soft
+                .map_or_else(|| "unlimited".to_owned(), |n| n.to_string());
+            let _ = writeln!(
+                err,
+                "hex node: kept network namespaces hold their /proc/net files for at most {} of them: \
+                 the soft descriptor limit is {soft}, the node's own at its bounds {}{}",
+                files.namespaces,
+                files.own,
+                if files.namespaces == 0 {
+                    "; each check enters its namespace instead, counted (a soft limit past the node's own \
+                     lets them hold files)"
+                } else {
+                    ""
+                }
+            );
+        }
     }
     let mut server = Server::bind(&args.socket, Arc::new(node), LIMITS, WORKERS).map_err(failed)?;
     let mut out = std::io::stdout().lock();
