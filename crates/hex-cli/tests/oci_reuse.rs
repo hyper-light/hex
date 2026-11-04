@@ -991,12 +991,14 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
 
 /// Goal 5 extended, step 6 (a kept namespace's `/proc/net` files, so a later check needn't enter it; the lead's
 /// conditions: closed on every path, counted; CLAUDE.md §2). Do: keep one owner's namespace, reuse it, leave an
-/// address in it, a socket in the next, release what's idle, give one past the owner's bound, then let the node go
-/// with a box's namespace held and recover over its state, counting the files open in this process by the names
-/// their links show, and all its descriptors at the end. Expect: the first clean check enters and opens the four;
-/// each later one comes to its verdict through them, a dirty one's too, but a socket past its own, which enters; a
-/// box's namespace keeps them; a namespace refused, released or put out by the bound closes them, and so does the
-/// node's end; a node recovered holds none; and every descriptor is back to the count before the first node.
+/// address in it, a socket in the next, release what's idle, give one past the owner's bound, take and give back
+/// each of the bound's again, then let the node go with a box's namespace held and recover over its state, counting
+/// the files open in this process by the names their links show, and all its descriptors at the end. Expect: the
+/// first clean check enters and opens the four; each later one comes to its verdict through them, a dirty one's
+/// too, and one whose files' dentries a later open of their names unhashed, but a socket past its own, which
+/// enters; a box's namespace keeps them; a namespace refused, released or put out by the bound closes them, and so
+/// does the node's end; a node recovered holds none; and every descriptor is back to the count before the first
+/// node.
 fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, own: &Path) {
     if lab.rootless {
         eprintln!("SKIP held files: a rootless node keeps no network namespaces");
@@ -1166,6 +1168,30 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
         files * hex_core::netns_reuse::PER_OWNER,
         "the namespace the owner's bound put out closed its files: {filled:?}"
     );
+    // A checker's directory keeps one hashed dentry a name, so most of the bound's files stand on dentries a later
+    // open unhashed (above). Each kept namespace taken by a box and given back is checked through its files all the
+    // same.
+    let again: Vec<String> = (0..hex_core::netns_reuse::PER_OWNER)
+        .map(|n| format!("files-again-{n}"))
+        .collect();
+    for id in &again {
+        node.create(make(id)).unwrap();
+    }
+    for id in &again {
+        settled(id);
+    }
+    let taken = ruled();
+    for id in &again {
+        delete(id);
+    }
+    let checked = ruled();
+    assert_eq!(
+        checked.through_files,
+        taken.through_files + u64::try_from(again.len()).unwrap(),
+        "each through its files: {checked:?}"
+    );
+    assert_eq!(checked.files_failed, 0, "{checked:?}");
+    assert_eq!(held(), files * hex_core::netns_reuse::PER_OWNER);
     node.release_idle().unwrap();
     wait_for(|| held() == 0, "the bound's namespaces released closing");
     assert_eq!(counts().files_failed, 0);
