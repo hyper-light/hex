@@ -1126,6 +1126,28 @@ impl Runtime {
     pub fn start_with(&self, id: &str, init: Option<OwnedFd>) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         let state = dir.get(id)?;
+        // A container with startContainer hooks is marked as starting while the start waits for them, so a
+        // node agent that stops meanwhile leaves its restart a fact to remove the box by
+        // ([`state::start_interrupted`]); the mark goes when the start returns, however it ends.
+        if state.start_container.is_none() {
+            return self.take_start(id, &dir, state, init);
+        }
+        let begun = dir.path().join(hooks::START_BEGUN);
+        std::fs::File::create(&begun).map_err(|e| OciError::os("marking the start begun", e))?;
+        let started = self.take_start(id, &dir, state, init);
+        let unmarked =
+            std::fs::remove_file(&begun).map_err(|e| OciError::os("unmarking the start", e));
+        started.and(unmarked)
+    }
+
+    /// The start itself: [`Runtime::start_with`]'s, the FIFO opened, its byte waited for and the FIFO removed.
+    fn take_start(
+        &self,
+        id: &str,
+        dir: &Dir,
+        state: State,
+        init: Option<OwnedFd>,
+    ) -> Result<(), OciError> {
         if !matches!(state.status, Status::Created | Status::Running) {
             return Err(OciError::WrongState(
                 id.to_owned(),

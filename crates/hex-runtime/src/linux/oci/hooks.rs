@@ -30,6 +30,19 @@ pub const MAX_START_FAILURE: usize = 4096;
 pub const START_TAKEN: u8 = b'0';
 pub const START_FAILED: u8 = b'h';
 
+/// The init's exit status when the start that opened its exec FIFO ended before the init could hand it
+/// the byte: its write found the FIFO's reader gone (EPIPE; the init, a `hex` process, has SIGPIPE ignored,
+/// as Rust's runtime leaves every program it starts). With startContainer hooks that window lasts as long
+/// as they run, so a node agent stopped then leaves an init that ends with this status, never by a bare
+/// SIGPIPE. Distinct from the init's 127 for a set-up that failed.
+pub const START_ABANDONED: u8 = 122;
+
+/// The file in a container's state directory that says a start of a container with startContainer hooks
+/// has begun: made before the start waits on the exec FIFO, removed when the start returns. Found beside
+/// a FIFO still named, it says the start never took the byte: the node agent stopped during the start
+/// ([`crate::linux::oci::state::start_interrupted`]), so recovery removes the box by that reason.
+pub const START_BEGUN: &str = "start-begun";
+
 impl Hooks {
     /// Whether the init stops before its root switch for the runtime: it runs prestart and createRuntime
     /// there (config.md:607) and hands the init the state its createContainer and startContainer hooks

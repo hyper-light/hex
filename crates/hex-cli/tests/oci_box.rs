@@ -1500,6 +1500,21 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
         !obs.join("sc.state").exists(),
         "startContainer waits for start"
     );
+    // The init waits for start with SIGPIPE ignored (a `hex` process, as Rust's runtime leaves it), so a
+    // start gone before it hands the byte is an EPIPE it ends on by its own status, never the signal
+    // (hex_runtime's hooks::START_ABANDONED).
+    let status = read(PathBuf::from(format!("/proc/{init}/status")));
+    let ignored = status
+        .lines()
+        .find_map(|l| l.strip_prefix("SigIgn:"))
+        .map(|m| u64::from_str_radix(m.trim(), 16).unwrap())
+        .unwrap();
+    const SIGPIPE: u32 = 13; // signal(7), on every Linux architecture Hex runs on
+    assert_ne!(
+        ignored & (1 << (SIGPIPE - 1)),
+        0,
+        "the init ignores SIGPIPE: SigIgn {ignored:#x}"
+    );
 
     node.start(&id).expect("start the hooked box");
     wait_for(|| obs.join("program").exists(), "the program to run");

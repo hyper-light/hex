@@ -537,6 +537,18 @@ Sources: `docs/research/runtime/oci-hooks.md`.
   stop. Both recover with nothing of the box left (T-T7.1.2).
 - Every create- and start-time hook is given `created` (runtime.md:19-20), not runc's `creating`.
 
+**A start cut in its startContainer hooks.** The init holds its start byte until its hooks have run. So
+if the node agent stops meanwhile, the start's end of the FIFO is gone by the time the init writes.
+- The init is a `hex` process, which Rust's runtime starts with SIGPIPE ignored, so its write fails with
+  EPIPE. It then ends with status 122 (`hooks::START_ABANDONED`), not by the signal and not with its
+  127 for a failed set-up.
+- The restarted agent can't read that status: the init is no longer its child. So `start` marks a
+  container with startContainer hooks as starting (`start-begun` in its state directory) before it waits,
+  and removes the mark when it returns.
+- Recovery reads the mark beside a FIFO still named as a start that never took. It removes the box by
+  `Why::StartInterrupted`, says so, and leaves nothing (node_socket's `At::StartContainer`, T-T7.1.2).
+- A container without these hooks writes no mark: its start is unchanged.
+
 A spec with no create- or start-time hook takes the path it took before: the init never stops (`H`
 comes only from `Hooks::sync_init`), the shim closes the map pipe before its fork as before, and the
 pruned path's routing test is the same except that it now also sends startContainer classic.

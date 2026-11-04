@@ -473,11 +473,33 @@ pub(crate) fn container(
     let fifo = rustix::fs::openat(&fifo_dir, "exec.fifo", OFlags::WRONLY, Mode::empty())
         .map_err(|e| OciError::os("opening the exec fifo", e))?;
     start_hooks(spec, hooked.as_ref(), &fifo)?;
-    rustix::io::write(&fifo, &[hooks::START_TAKEN])
-        .map_err(|e| OciError::os("writing the exec fifo", e))?;
+    if let Taken::Abandoned = take_start(&fifo)? {
+        sys::exit_child(hooks::START_ABANDONED);
+    }
     drop(fifo);
 
     exec(&process)
+}
+
+/// What the init's write of the start's byte on the exec FIFO found.
+#[derive(Debug, PartialEq, Eq)]
+enum Taken {
+    /// The start has the byte.
+    Taken,
+    /// The start that opened the FIFO had ended: the write found its reader gone (EPIPE). The init, a
+    /// `hex` process, has SIGPIPE ignored (Rust's runtime ignores it in every program it starts), so the
+    /// write returns the error rather than the signal ending the init; it then ends with
+    /// [`hooks::START_ABANDONED`].
+    Abandoned,
+}
+
+/// Writes the start's byte on the exec FIFO `fifo`, or finds the start gone ([`Taken`]).
+fn take_start(fifo: &OwnedFd) -> Result<Taken, OciError> {
+    match rustix::io::write(fifo, &[hooks::START_TAKEN]) {
+        Ok(_) => Ok(Taken::Taken),
+        Err(rustix::io::Errno::PIPE) => Ok(Taken::Abandoned),
+        Err(e) => Err(OciError::os("writing the exec fifo", e)),
+    }
 }
 
 /// Stops for the runtime before the root switch, where the spec names create- or start-time hooks
@@ -2268,5 +2290,16 @@ mod tests {
             matches!(&through, Err(OciError::Os { why, .. }) if why.starts_with("/file/data (file/data): ")),
             "{through:?}"
         );
+    }
+
+    /// T-T7.1.2 (CLAUDE.md §3): the init's end when its start is gone. Do: write the start's byte on a
+    /// pipe whose reader has closed, in a process with SIGPIPE ignored as every `hex` process has it. Expect:
+    /// `Abandoned`, the EPIPE taken, never the signal; and on a pipe with its reader, `Taken`.
+    #[test]
+    fn a_start_whose_reader_is_gone_is_abandoned_not_a_sigpipe() {
+        let (r, w) = rustix::pipe::pipe().unwrap();
+        assert_eq!(take_start(&w).unwrap(), Taken::Taken);
+        drop(r);
+        assert_eq!(take_start(&w).unwrap(), Taken::Abandoned);
     }
 }

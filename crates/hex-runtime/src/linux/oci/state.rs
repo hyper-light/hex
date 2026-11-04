@@ -132,7 +132,7 @@ impl Dir {
     }
 
     pub fn fifo(&self) -> PathBuf {
-        self.dir.join("exec.fifo")
+        self.dir.join(EXEC_FIFO)
     }
 
     /// Whether the exec FIFO is still there: `start` removes it once the init has its byte. A failure to
@@ -243,6 +243,18 @@ fn parse_start_time(stat: &str) -> Option<u64> {
         "Z" | "X" => None,
         _ => fields.nth(18)?.parse().ok(),
     }
+}
+
+/// The exec FIFO's name in a container's state directory.
+const EXEC_FIFO: &str = "exec.fifo";
+
+/// Whether a start of the container whose state directory is `dir` was under way when its node agent
+/// stopped: it had begun ([`crate::linux::oci::hooks::START_BEGUN`], made only for a container with
+/// startContainer hooks) and never took the exec FIFO's byte (the FIFO still named). Recovery removes such
+/// a box by that reason.
+pub fn start_interrupted(dir: &Path) -> bool {
+    let named = |name: &str| std::fs::symlink_metadata(dir.join(name)).is_ok();
+    named(crate::linux::oci::hooks::START_BEGUN) && named(EXEC_FIFO)
 }
 
 #[cfg(test)]
