@@ -1157,6 +1157,21 @@ lifecycle without changing what a box may do.
     (f47): the delete falls back to `cgroup.kill` at once, on that fact rather than a timeout, counted.
   - `process` boxes, inits without a pid namespace of their own, and boxes taken back after a restart (whose init the
     agent no longer holds) keep `cgroup.kill` (f49).
+  - *Its mount namespace goes off the path* (the lead's go, 2026-11-04T09:18Z; docs/research/runtime/goal5-cgroup-lock.md,
+    "The box's mount teardown on its exit path"). An init that ends drops its namespaces before it notifies its pidfd,
+    so the last reference to its mount namespace unmounts the box's tree under the host's mount lock and waits out an
+    expedited grace period on the lifecycle's path. The supervisor holds one more as it watches the init: it opens
+    `/proc/<pid>/ns/mnt` (`fs/proc/namespaces.c:42-61`), by the pid just checked as its own unreaped child, an nsfs
+    reference with no `unsafe`
+    (`PIDFD_GET_MNT_NAMESPACE` gives the same through an `ioctl` rustix wraps unsafely). Once the init has ended,
+    by its own exit or its delete, the reference goes to a closer thread over a bounded queue
+    (`supervise::CLOSER_BOUND`, 64), which lets it go there, timing its lag; a full queue lets it go where the init
+    ended, counted (`closed_inline`). An init in the agent's own mount namespace, or one whose namespace the open
+    refuses, isn't held, counted (`unheld`). It is one more descriptor a live box holds, in the node's budget at its
+    bounds, and one more each exec from the agent copies with its table (`dup_fd`), which `Container`'s note had
+    kept at none. A delete leaves nothing a host operation needs: the box's mounts outlive it by the closer's lag,
+    and its bundle's directory, root and volumes' sources are removed and made again at once, the same id made from
+    them again (root lab); an agent killed holding them lets them go as it ends, so recovery finds none (T-T7.1.2).
   - Every `cgroup.kill` here is the box's kill as the delete flake's fix (5013c4b, T-T7.1.2) left it, which this step
     is built on: `cgroup.kill`, then, while the box is still populated, a bounded sweep of its subtree's processes,
     each sent a process-directed SIGKILL through a process pidfd once a re-read shows it still in the box. That
@@ -1327,8 +1342,8 @@ lifecycle without changing what a box may do.
     stderr with both numbers. A namespace past that bound holds none and each of its checks enters, counted
     (`files_bounded`); a limit too small for the node's own work shows where it runs out, as that call's typed refusal.
     At systemd's default soft limit of 1024 the bound is 0, so where nodes run today no namespace holds its files and
-    the saving can't appear: what lets it is the node's soft limit, past its own descriptors at its bounds (about 330
-    thousand), which the installer sets. Every bench record says which bound its node ran with and how many checks went
+    the saving can't appear: what lets it is the node's soft limit, past its own descriptors at its bounds (about 396
+    thousand, with each live box's held mount namespace), which the installer sets. Every bench record says which bound its node ran with and how many checks went
     through the files and how many through the protocols (`interleaved_pool.py`). They close with the
     namespace on every path, tested by counting them by their links: refused by way of the files or of entering,
     released, put out by the owner's bound, with the node's end while a box's namespace holds them; a node recovered

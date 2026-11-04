@@ -424,7 +424,10 @@ superblocks' teardown run 23 found spinning (`list_lru_destroy < deactivate_lock
   (`PTRACE_MODE_READ_FSCREDS`, `:514`), which the agent has to its own boxes' inits, and answers `ESRCH` once the task has
   dropped its namespaces (`:508`). Held by the agent, the init's exit no longer drops the last reference, so
   `put_mnt_ns` returns at once and the teardown, the grace period and the superblocks wait for that descriptor's close.
-- **The lever.** The agent takes the descriptor as the box is made, holds it while the box lives, and once its wait has
+- **The lever.** The agent takes the descriptor as the box is made (by `open("/proc/<pid>/ns/mnt")`, which takes the same
+  nsfs reference as the ioctl through the same ptrace check, `proc_ns_get_link` and `ns_get_path`,
+  `fs/proc/namespaces.c:42-61`, sha256 72168761206b13f4, with no `unsafe` call: the pid is the agent's own unreaped
+  child, so no later process holds it), holds it while the box lives, and once its wait has
   seen the init end hands it to a closer thread over a bounded channel; a full channel closes it inline, counted, never
   dropped. The teardown then runs on the closer, off the lifecycle's path; it is the same work, moved, so it is measured
   by each lifecycle's p50 and p99 at 1 and 32 as well as the three ratios, and by the closer's lag.
