@@ -26,6 +26,11 @@ left out of the sum, and their on-CPU profile at 4999 Hz (@samples), by the syst
 mode (@on_sys[number], @on_user: count) and by the kernel work its stack names (@cpu[kstack, ustack]: count), and
 the samples allocating netlink's answers.
 
+A MODE=oncpu run, the same profile for the runtime's own processes (seam_oci, and hex: its seeds and inits before they
+exec), each figure per lifecycle: their system calls by number, their on-CPU samples by system call, user mode apart,
+and by kernel stack, and the samples spinning on a lock (an MCS or queued spinlock, a mutex's or an rwsem's optimistic
+spin) by the stack above the spin.
+
 A MODE=threads run, each figure per lifecycle: the runtime's threads' CPU by name, sampled at 999 Hz (@thread[comm]:
 count), and the other tasks on the probe's CPUs by name (@beside[comm]: count).
 
@@ -66,13 +71,30 @@ FILESYSTEMS = {"cgroup2", "tmpfs", "overlay", "btrfs", "proc", "sysfs", "devtmpf
 STATS = r'\{? ?\.?count:? =? ?(\d+), \.?average:? =? ?(\d+), \.?total:? =? ?(\d+) ?\}?'
 
 
-# x86_64's numbers for the calls a checker makes (arch/x86/entry/syscalls/syscall_64.tbl).
-SYSCALLS = {0: "read", 1: "write", 2: "open", 3: "close", 9: "mmap", 10: "mprotect", 11: "munmap",
-            14: "rt_sigprocmask", 28: "madvise", 41: "socket", 44: "sendto", 45: "recvfrom", 49: "bind",
-            54: "setsockopt", 131: "sigaltstack", 186: "gettid", 202: "futex", 204: "sched_getaffinity",
-            257: "openat", 258: "mkdirat", 259: "mknodat", 263: "unlinkat", 266: "symlinkat", 268: "fchmodat",
-            272: "unshare", 308: "setns", 428: "open_tree", 429: "move_mount", 430: "fsopen", 431: "fsconfig",
-            432: "fsmount", 452: "fchmodat2"}
+# x86_64's numbers for the calls a checker and the runtime make (Linux v6.19 arch/x86/entry/syscalls/syscall_64.tbl).
+SYSCALLS = {0: "read", 1: "write", 2: "open", 3: "close", 7: "poll", 8: "lseek", 9: "mmap", 10: "mprotect",
+            11: "munmap", 12: "brk", 13: "rt_sigaction", 14: "rt_sigprocmask", 15: "rt_sigreturn", 16: "ioctl",
+            17: "pread64", 18: "pwrite64", 24: "sched_yield", 28: "madvise", 35: "nanosleep", 39: "getpid",
+            41: "socket", 44: "sendto", 45: "recvfrom", 46: "sendmsg", 47: "recvmsg", 49: "bind", 53: "socketpair",
+            54: "setsockopt", 56: "clone", 59: "execve", 61: "wait4", 62: "kill", 72: "fcntl", 74: "fsync",
+            75: "fdatasync", 80: "chdir", 81: "fchdir", 95: "umask", 112: "setsid", 116: "setgroups", 117: "setresuid",
+            119: "setresgid", 126: "capset", 131: "sigaltstack", 138: "fstatfs", 155: "pivot_root", 157: "prctl",
+            161: "chroot", 165: "mount", 166: "umount2", 170: "sethostname", 186: "gettid", 202: "futex",
+            204: "sched_getaffinity", 217: "getdents64", 230: "clock_nanosleep", 231: "exit_group", 232: "epoll_wait",
+            233: "epoll_ctl", 234: "tgkill", 247: "waitid", 257: "openat", 258: "mkdirat", 259: "mknodat",
+            262: "newfstatat", 263: "unlinkat", 265: "linkat", 266: "symlinkat", 267: "readlinkat", 268: "fchmodat",
+            271: "ppoll", 272: "unshare", 281: "epoll_pwait", 288: "accept4", 289: "signalfd4", 290: "eventfd2",
+            292: "dup3", 293: "pipe2", 302: "prlimit64", 308: "setns", 316: "renameat2", 317: "seccomp",
+            318: "getrandom", 319: "memfd_create", 321: "bpf", 332: "statx", 424: "pidfd_send_signal",
+            428: "open_tree", 429: "move_mount", 430: "fsopen", 431: "fsconfig", 432: "fsmount", 434: "pidfd_open",
+            435: "clone3", 436: "close_range", 437: "openat2", 439: "faccessat2", 441: "epoll_pwait2",
+            442: "mount_setattr", 452: "fchmodat2"}
+# A kernel frame that spins on a lock: an MCS lock's queue (osq_lock), a queued spinlock's or rwlock's slow path, a
+# mutex's or an rwsem's optimistic spin on its owner; a compiler's clone suffix (.constprop.0, .isra.0) cut first.
+SPIN = r'^(osq_lock|native_queued_spin_lock_slowpath|queued_spin_lock_slowpath|__pv_queued_spin_lock_slowpath|' \
+       r'mutex_spin_on_owner|mutex_optimistic_spin|rwsem_spin_on_owner|rwsem_optimistic_spin|' \
+       r'queued_read_lock_slowpath|queued_write_lock_slowpath)$'
+CLONE_SUFFIX = r'\.(constprop|isra|part|cold)(\.\d+)?$'
 PROFILE_HZ = 4999
 # A checker's kernel stack's work, by the first rule any of whose frames match, innermost first.
 CHECKER_WORK = [
@@ -325,8 +347,12 @@ def counts(txt, name):
     return {int(m.group(1)): int(m.group(2)) for m in re.finditer(rf'@{name}\[(\d+)\]: (\d+)', txt)}
 
 
-def report_checker(label, path, txt):
-    """A MODE=checker run, per namespace checked; a MODE=devfs run, per /dev the pool's thread made."""
+def report_checker(label, n, path, txt):
+    """A MODE=checker run, per namespace checked; a MODE=devfs run, per /dev the pool's thread made; a MODE=oncpu
+    run, per lifecycle."""
+    if label.startswith("oncpu."):
+        report_oncpu(label, n, txt)
+        return
     out = json.load(open(os.path.join(os.path.dirname(path), f"out.{label}.json")))
     if label.startswith("devfs."):
         report_devfs(label, out, txt)
@@ -402,6 +428,44 @@ def report_devfs(label, out, txt):
         print(f"  {v * us:7.1f} us  {name[:120]}")
 
 
+def kernel_frames(stack):
+    """A @cpu[kstack, ustack] key's kernel frames, innermost first, their offsets cut."""
+    lines = stack.split('\n')
+    cut = next((i for i, line in enumerate(lines) if line.strip() == ','), len(lines))
+    return [re.sub(r'\+\d+$', '', line.strip()) for line in lines[:cut] if line.strip()]
+
+
+def report_oncpu(label, n, txt):
+    """A MODE=oncpu run, per lifecycle: the runtime's own processes' system calls, their on-CPU samples by the system
+    call each fell in and by kernel stack, and the samples spinning on a lock by the stack above the spin."""
+    samples = int(re.search(r'@samples: (\d+)', txt).group(1))
+    user = int(m.group(1)) if (m := re.search(r'@on_user: (\d+)', txt)) else 0
+    us = 1e6 / PROFILE_HZ / n
+    print(f"{label}: on-CPU {samples * us:.1f} us a lifecycle ({samples} samples, {n} lifecycles), user mode "
+          f"{user * us:.1f} us")
+    calls = {int(k[0]): v for k, v in stats(txt, 'sys', 1).items()}
+    print(f"  system calls a lifecycle: {sum(c for c, _ in calls.values()) / n:.1f} calls, "
+          f"{sum(t for _, t in calls.values()) / 1e3 / n:.1f} us, waits among them")
+    for k, (c, t) in sorted(calls.items(), key=lambda kv: -kv[1][1])[:16]:
+        print(f"  {c / n:7.2f} calls {t / 1e3 / n:7.1f} us  {SYSCALLS.get(k, k)}")
+    print("  on-CPU a lifecycle by the system call each sample fell in:")
+    for k, v in sorted(counts(txt, 'on_sys').items(), key=lambda kv: -kv[1])[:16]:
+        print(f"  {v * us:7.1f} us  {SYSCALLS.get(k, k)}")
+    tops, spins = defaultdict(int), defaultdict(int)
+    for m in re.finditer(r'@cpu\[\n(.*?)\n\]: (\d+)', txt, re.S):
+        frames, v = kernel_frames(m.group(1)), int(m.group(2))
+        tops[' < '.join(frames[:4]) or '(user)'] += v
+        at = next((i for i, f in enumerate(frames) if re.match(SPIN, re.sub(CLONE_SUFFIX, '', f))), None)
+        if at is not None:
+            spins[' < '.join(frames[at:at + 5])] += v
+    print(f"  spinning on a lock: {sum(spins.values()) * us:.1f} us a lifecycle, by the stack from the spin out:")
+    for name, v in sorted(spins.items(), key=lambda kv: -kv[1])[:12]:
+        print(f"  {v * us:7.1f} us  {name[:140]}")
+    print("  on-CPU a lifecycle by kernel stack:")
+    for name, v in sorted(tops.items(), key=lambda kv: -kv[1])[:16]:
+        print(f"  {v * us:7.1f} us  {name[:140]}")
+
+
 def report_threads(label, n, txt):
     """A MODE=threads run, per lifecycle."""
     us = 1e6 / 999 / n
@@ -431,7 +495,7 @@ for label, n, path, txt in runs:
         report_futex(label, n, path, txt)
 for label, n, path, txt in runs:
     if '@samples:' in txt and '@sys[' in txt:
-        report_checker(label, path, txt)
+        report_checker(label, n, path, txt)
     elif '@thread[' in txt:
         report_threads(label, n, txt)
 for label, n, path, txt in runs:

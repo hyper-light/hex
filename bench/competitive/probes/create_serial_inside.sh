@@ -38,6 +38,10 @@
 # MODE=devfs: the same profile for the thread that makes each box's /dev ahead of its create (hex-devfs, step 3's pool,
 # crates/hex-node/src/devfs.rs): its system calls timed by number, the futex waits among them, and its on-CPU samples;
 # two runs, hex.c1 over 5000 lifecycles and hex.c32, read per /dev it made.
+# MODE=oncpu: the same profile for the runtime's own processes, the lifecycles in process (seam_oci) and its seeds and
+# inits before they exec (hex): their system calls timed by number, and their on-CPU samples by kernel and user stack
+# and by the system call each fell in, so concurrency 32's CPU a lifecycle past concurrency 1's is named by the call
+# and the kernel work it went to, a lock's spinning among them. Two runs, hex.c1 over 5000 lifecycles and hex.c32.
 # MODE=threads: where each of a runtime's threads spends its CPU, by name: Hex's lifecycles (seam_oci), the node's
 # threads (hex-netns-check, hex-netns, hex-seeds, hex-supervisor, hex-cgroup-remover, the socket's), its seeds and
 # inits before they exec (hex) and the program (true), sampled on every CPU at 999 Hz, and beside them the other
@@ -140,6 +144,7 @@ END { clear(@s); clear(@n); }
 BT
 }
 devfs(){ checker "$1"; } # devfs <filter on a comm value $c>: the checker's program, for the /dev pool's thread
+oncpu(){ checker "$1"; } # oncpu <filter on a comm value $c>: the checker's program, for the runtime's own processes
 threads(){ # threads <filter on a comm value $c>: each of the filter's threads' samples by name; the rest on the probe's CPUs
   # The idle task told by the task's own pid, not bpftrace's pid: that is the pid namespace's, and fails for every task
   # outside the probe container's (as checker()'s keys say).
@@ -349,9 +354,10 @@ case $MODE in
   checker) [ -n "${HEXBENCH_OWNER:-}" ] || { echo "refusing: MODE=checker needs HEXBENCH_OWNER"; exit 2; }
     run checker.hex.c1 "$CHECK" hex_c1k; run checker.hex.c32 "$CHECK" hex_c32 ;;
   devfs) run devfs.hex.c1 "$DEVFS" hex_c1k; run devfs.hex.c32 "$DEVFS" hex_c32 ;;
+  oncpu) run oncpu.hex.c1 "$HEX" hex_c1k; run oncpu.hex.c32 "$HEX" hex_c32 ;;
   threads) case ${CPUSET:-} in [0-9]*-[0-9]*) ;; *) echo "refusing: MODE=threads needs CPUSET as from-to, not ${CPUSET:-none}"; exit 2 ;; esac
     run threads.hex.c1 "$THREADS" hex_c1k; run threads.hex.c32 "$THREADS" hex_c32 ;;
-  *) echo "refusing: MODE is offcpu, locks, checker, devfs or threads, not $MODE"; exit 2 ;;
+  *) echo "refusing: MODE is offcpu, locks, checker, devfs, oncpu or threads, not $MODE"; exit 2 ;;
 esac
 nm -C -n --defined-only /opt/bin/seam_oci > /run/syms.seam_oci.txt 2>/dev/null
 nm -D -C -n --defined-only "$(readlink -f /usr/lib64/libc.so.6)" > /run/syms.libc.txt 2>/dev/null

@@ -7,9 +7,10 @@
 # what holds those locks and which directory each wait is for, for both at concurrency 1 and 32
 # (create_serial_inside.sh says which processes are each one's). create_serial.py reads them. MODE=checker: where the
 # time of the threads that check a given-back network namespace goes, by system call and on-CPU stack (one owner's
-# boxes: HEXBENCH_OWNER). MODE=devfs: the same for the thread that makes each box's /dev ahead. MODE=threads: each of
-# Hex's threads' CPU, by name. On fedora:
-#   [MODE=locks|checker|devfs|threads] create_serial.sh <hex release binary> <seam_oci release binary>
+# boxes: HEXBENCH_OWNER). MODE=devfs: the same for the thread that makes each box's /dev ahead. MODE=oncpu: the same
+# for the runtime's own processes, its lifecycles and its seeds and inits. MODE=threads: each of Hex's threads' CPU, by
+# name. On fedora:
+#   [MODE=locks|checker|devfs|oncpu|threads] create_serial.sh <hex release binary> <seam_oci release binary>
 # Not a timed pass: the load is recorded, not gated; what it reads is where the threads wait, not how fast.
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
