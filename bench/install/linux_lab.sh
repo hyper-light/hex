@@ -33,7 +33,8 @@ mounts=(-v /usr:/usr:ro --tmpfs /usr/local:rw,exec -v "$HERE:/opt/lab:ro" -v "$R
 BUILT=$(dirname "$(dirname "$TESTBIN")")
 mounts+=(-v "$BUILT:$BUILT:ro")
 case $HEX in "$BUILT"/*) ;; *) mounts+=(-v "$HEX:$HEX:ro") ;; esac
-cid=$(docker run -d --name "$NAME" --privileged --security-opt label=disable --cgroupns=private \
+# A console (-t), so systemd's own words are in the container's log when it can't start.
+cid=$(docker run -d -t --name "$NAME" --privileged --security-opt label=disable --cgroupns=private \
   --network=none --memory "$MEM" --oom-score-adj "$OOM" \
   --tmpfs /run:rw,exec --tmpfs /run/lock --tmpfs /tmp:rw,exec -e container=docker \
   "${mounts[@]}" "$IMAGE" /usr/lib/systemd/systemd)
@@ -42,6 +43,10 @@ set +e
 docker exec "$NAME" bash /opt/lab/linux_lab_inside.sh "$HEX" "$TESTBIN" 2>&1 | tee "$RECORD"
 status=${PIPESTATUS[0]}
 set -e
+if [ "$status" != 0 ] && [ "$(docker inspect -f '{{.State.Status}}' "$NAME")" != running ]; then
+  echo "the lab container ended ($(docker inspect -f 'exit {{.State.ExitCode}}' "$NAME")); its systemd said:" | tee -a "$RECORD"
+  docker logs --tail 8 "$NAME" 2>&1 | tr -d '\r' | sed 's/\x1b\[[0-9;:?]*[A-Za-z]//g' | tee -a "$RECORD"
+fi
 # The container is this lab's, by the name it was given.
 docker rm -f "$NAME" >/dev/null
 exit "$status"
