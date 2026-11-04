@@ -55,6 +55,19 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
 
 - Both AC benchmarks are now of-record (above). Remaining CP-T7.1 work: the first-consumer default-on
   flip (gated on a full dispatched-leg smoke) and the second consumer (the `hex` CI executor).
+- **The Windows `oci` class** (native plan step 4; `docs/design/runtime.md`, "the Windows `oci` class is an HCS
+  silo holding a Hex job"; `docs/research/runtime/windows-hcs.md`): built, not yet run on Windows.
+  `hex_core::hcs` is the sans-IO core: Microsoft's host/image version table, a bundle's `windows` section or an
+  `OciSpec` to the container, every field honored or refused by name, the HCS v2 document, HCS's error kinds,
+  and the launcher's wire. Its tests pass on Linux. `hex_runtime::windows::oci` makes a process-isolated
+  compute system over the image's layers, with the box's job nested in the silo. Every program starts suspended
+  in that job, through `hex oci-launch`; HCS is loaded at run time. It is cross-checked by the Windows clippy
+  gate. What closes it: jupiter (offline) runs `crates/hex-cli/tests/windows_oci_box.rs` — HEX-RT-1..13, a
+  device not granted isn't visible, a read-only mount refuses writes, a mismatched image refused by name — and
+  settles the research note's §9 probes. Create, start and delete are then measured against Docker's and
+  containerd's runhcs on jupiter, recorded in `bench/`. Open until then: the silo's own memory baseline, which
+  sets an `OciSpec` box's container-wide HCS memory bound (probe 3); until it is measured, such a box's bound
+  holds on its members only.
 - **Consumer #1** (host CI legs + harness in `process` boxes, kiln `cp/t7-hex` behind `KILN_HEX_BOX`):
   the boxed path is e2e-validated under real delegation — the `the_boxed_path_holds_its_bounds_under_
   delegation` lab passes on fedora (vacate to supervisor, cpu/io/memory/pids delegated, fair-share
