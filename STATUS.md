@@ -123,7 +123,8 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
   FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete
   flake's pidfd kill, a box's turn for a create or delete of a box being made (in place of step 6's claim), a
-  container made from the spec the runtime checked (the shim and the create seed no longer read config.json again),
+  container made from the spec the runtime checked, and its execs and its start's and delete's hooks too (kept with its
+  state; nothing reads the bundle's config.json after create's check),
   and createContainer and startContainer hooks run in the container (cp/t7-hooks a4e0261). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
   seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
   lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
