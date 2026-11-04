@@ -118,6 +118,7 @@ T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hexcb-$TAG"
 KG="hexcb_$TAG"
+PROBES="$KG/openat_in $KG/open_in"
 case $(uname -m) in
   x86_64) SYS=__x64_sys ;;
   aarch64) SYS=__arm64_sys ;;
