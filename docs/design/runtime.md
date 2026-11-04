@@ -556,6 +556,69 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   missing.
 - **What would falsify it:** §6. **Measured before it is built on:** §7.
 
+## Decision (native plan step 6, 2026-11-04): the installer, per OS — admin rights once
+
+The plan's step: "Hex's installer asks for admin rights once", turning on what each OS's classes need, a node
+lacking any of it "refuses that class by name, saying what's missing", and "Uninstall undoes it". The evidence is
+`docs/research/runtime/installer-per-os.md` (§n below are its sections).
+
+- **One script per OS, run once by a person with admin rights:** `scripts/install/linux.sh` (bash, as root),
+  `scripts/install/windows.ps1` (PowerShell, elevating itself once through UAC) and `scripts/install/macos.sh`
+  (bash, as root through `sudo`). Each has the same three verbs: `install`, `uninstall` and `check`, and
+  `--dry-run` on the first two.
+- **The plan is the record:** every thing install makes is one `<kind> <target>` line of a plan computed before
+  anything is made (a file, a link, a folder it made, a feature it turned on, a user, a service). Install
+  writes the plan to its manifest first, so an install cut short is undone too; `--dry-run` prints the plan
+  and makes nothing; uninstall undoes the manifest's lines, Hex's own and nothing else (a folder only once
+  empty, a directory only by Hex's names, a feature only if install turned it on), then lists every line
+  still present, which is none. `check <plan>` is that listing on its own: on a machine fresh of Hex, and
+  after uninstall, it lists nothing (CLAUDE.md §3: nothing is left silently).
+- **Linux** (§1): the classes need a cgroup v2 subtree the node owns with `cpu`, `io`, `memory` and `pids`
+  (`hex_core::cgroup::CONTROLLERS`). systemd's own `user@.service` delegates only `pids memory cpu`, never `io`,
+  in every release from v244 to v259 (§1.3; fedora's systemd 259 ships the same line), so install adds a
+  drop-in for every user's manager, `/etc/systemd/system/user@.service.d/50-hex-delegate.conf`
+  (`Delegate=cpu io memory pids`, which adds to the unit's own list rather than replacing it, §1.2), and a
+  `hex-node` user service (`Delegate=yes`, `DelegateSubgroup=agent`: the node runs in the
+  leaf `agent` and its boxes in `hex` beside it, so cgroup v2's no-internal-processes rule holds, §1.1-1.2;
+  systemd ≥254, refused by name below it), enabled for every user (`systemctl --global enable`). A running user manager reads which
+  controllers it may hand on only when it starts (§1.4), so `daemon-reload` alone leaves it without `io`:
+  measured, the lab's installed node was refused `io` until install re-executed each running user manager
+  (`systemctl reload user@UID.service`, which keeps its processes), as install now does. For each `--user` it
+  turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
+  starts the service, its socket at `$XDG_RUNTIME_DIR/hex/node.sock`. Rootless `oci` boxes need nothing more: each maps
+  only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6). Ubuntu
+  24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no Ubuntu
+  machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
+- **Windows** (§2): the `process` class's job objects need no admin. Install turns on the `Containers`
+  (Windows images through HCS, plan step 4) and `HypervisorPlatform` (the Shards guest for Linux images,
+  plan step 5) optional features with `Enable-WindowsOptionalFeature -Online -All -NoRestart`, records each
+  feature it turned on (those `-All` brought too), and asks before the one reboot Windows asks for
+  (`RestartNeeded`). It puts `hex.exe` in `%ProgramFiles%\Hex`.
+- **macOS** (§3): install makes the box users' pool as Nix's installer makes its build users (§3.1: `dscl`, a
+  group and hidden users with shell `/sbin/nologin` and home `/var/empty`, from a uid range it checks is free,
+  as Sequoia's move of Apple's own users into 300-304 pushed Nix's to 351) and installs step 2's
+  privileged helper as a launchd daemon (`/Library/LaunchDaemons`, `launchctl bootstrap system`), a plain
+  property list rather than `SMAppService`, which needs a signed app bundle and the user's approval in System
+  Settings (§3.4); an unprivileged node tells it is there by `launchctl print system/<label>` (exit 0, else
+  113) and by its socket answering (§3.5).
+- **A node lacking it refuses the class by name** (`hex_core::setup`): on Linux, a box root whose parent lacks a
+  controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
+  missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
+  the installer turns it on (HEX-INST-2), the state read without elevation from `Win32_OptionalFeature`
+  (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) by
+  PowerShell run as the member of a job-object box of its own, so its wait is the class's bounded one and the
+  box's end takes whatever it left; `hex_core::setup::features_off` parses its listing and refuses anything
+  else by name.
+- **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working
+  with no further step, and uninstall leaves nothing of Hex's behind, checked by listing what install made.
+  On Linux, `bench/install/linux_lab.sh` boots a fresh Fedora as a container with systemd its init, shows the
+  by-name refusal before install, installs, passes the conformance suite over the installed node's socket for
+  both classes as an ordinary user (HEX-INST-3), uninstalls and lists nothing left (HEX-INST-4).
+- **What would falsify it:** a drop-in's `Delegate=` list that replaced rather than merged with the unit's (the
+  lab's installed node got all four); a running user manager that a re-exec didn't give the new delegation,
+  so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
+  Windows feature whose state an unprivileged node can't read; a box user macOS lets a member drop.
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is
@@ -596,6 +659,12 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
   kernels that keep it (Linux's `pids.events`) — Ada's decision (2026-11-03). Windows'
   `oci` (HCS) and Linux images through a Shards guest follow. Off a platform whose class isn't built yet,
   `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
+- **The installer** (native plan step 6, the decision above): **Linux's is built** and its fresh-machine lab
+  passes on fedora (`bench/install/linux_lab.sh`: refused by name before, the conformance suite on both classes
+  over the installed node, nothing left after uninstall). **Windows' is built and lint-clean**; it waits on
+  jupiter, an administrator's UAC prompt and a reboot each way, and the feature query's standard-user access
+  and time are measured there. **macOS's** installs step 2's box users and helper, and waits on step 2. Not
+  covered yet: Ubuntu 24.04's restriction on unprivileged user namespaces (an AppArmor profile for `hex`).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
   legs' parent box capped (`memory.high`) and the runner and agents protected (`memory.low`) so a
