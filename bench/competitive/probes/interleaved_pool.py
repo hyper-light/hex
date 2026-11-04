@@ -151,8 +151,9 @@ def main(argv):
             print(f"  {half} halves pinned to {', '.join(sorted(asked))}: every task on those CPUs alone in {held} "
                   f"of {len(rows)} pairs")
         # The kept namespaces' checks and the held files' bound the node ran with (the lead, 2026-11-04T09:15Z): a
-        # run whose bound is 0, as at systemd's default soft limit, held no files and tests none.
-        print(f"  {netns_line([ph for *_, ph in rows])}")
+        # run whose bound is 0, as at systemd's default soft limit, held no files and tests none. Each round's phase
+        # once: its pairs' rows all carry it.
+        print(f"  {netns_line(list({id(ph): ph for *_, ph in rows}.values()))}")
 
 
 if __name__ == "__main__":
