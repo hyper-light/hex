@@ -123,3 +123,91 @@ Hex's tests of the channel, each citing its ID:
   splices (`splice(2)`) between the socket and the pipe instead of copying.
 - The guest's interpreted BPF (`CONFIG_BPF_JIT` unset) making a device check measurably slower than the bar: then
   the guest kernel adds the JIT, with Shards.
+
+## Appendix A: the draft `shards-api`, ready to apply (not agreed)
+
+Drafted by Hex for Shards' owner to review, change or replace (CLAUDE.md §9). Nothing here is built against
+until the seam is agreed, or Ada waives that (asked through the lead, 2026-11-04 09:16Z).
+
+**Where it lives.** A crate `shards-api` at `crates/api` in Shards' repository, owned by Shards. Hex takes it by
+name and version (`shards-api = "0.1"`), patched in Hex's `[patch.crates-io]` to its vendored copy.
+
+**The trait** (its real implementation in Shards, over `shards-vmm`'s `start`, `Handle::stop`, `Running::wait` and
+`VsockHost`, `shards-guest.md` §2-§3):
+
+```rust
+pub struct GuestSpec {
+    pub kernel: PathBuf,
+    pub init: Init,
+    pub cmdline: String,
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    pub disks: Vec<Disk>,
+}
+pub enum Init { Initrd(PathBuf), Executable(PathBuf) }      // shards-vmm's `initrd` / `init`
+pub struct Disk { pub path: PathBuf, pub read_only: bool }
+pub enum Backend { Kvm, HypervisorFramework, WindowsHypervisorPlatform }
+pub enum End { PowerOff, Reset, Stopped, Failed(String) }  // shards-vmm's ExitReason, less Snapshotted
+
+#[derive(thiserror::Error)]
+pub enum Refusal {
+    NoBackend { os: &'static str, arch: &'static str },    // macOS x86_64, Windows arm64 today
+    Bounds { what: &'static str, why: String },            // vCPUs, memory (shards-vmm's checks)
+    Boot(String),                                          // the kernel, the init, a disk
+    Channel { port: u32, why: String },                    // CONNECT <port> refused or unanswered
+    Ended(End),                                            // the guest is gone
+}
+
+pub trait Stream: Read + Write + Send + Sync {
+    fn try_clone(&self) -> io::Result<Box<dyn Stream>>;
+    fn shutdown(&self, how: Shutdown) -> io::Result<()>;
+    fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()>;
+    fn set_write_timeout(&self, t: Option<Duration>) -> io::Result<()>;
+}
+
+pub trait Guests: Send + Sync {
+    /// What this host boots with, or the refusal naming the backend it lacks.
+    fn backend(&self) -> Result<Backend, Refusal>;
+    /// Boots a guest; refused before boot past the host's bounds.
+    fn boot(&self, spec: &GuestSpec) -> Result<Arc<dyn Guest>, Refusal>;
+}
+
+pub trait Guest: Send + Sync {
+    /// A stream to the guest's vsock `port` (`CONNECT <port>`, Firecracker's mapping), within `patience`.
+    fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal>;
+    /// Stops it: its `wait_for` then returns `Stopped`.
+    fn stop(&self) -> Result<(), Refusal>;
+    /// Its end, once it has come, waiting at most `timeout`.
+    fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal>;
+}
+```
+
+**The simulator** (`shards_api::sim`): `SimGuests` boots a `SimGuest` whose "guest" is a closure the test gives,
+run on a thread, serving vsock ports over in-process socket pairs (`UnixStream::pair` on Unix, `shards_afunix`'s on
+Windows): `connect(port)` hands the closure the other end, refusing an unserved port as `Channel`; `stop` and the
+closure's return end it. Its bounds mirror `shards-vmm`'s (vCPUs ≥ 1 and ≤ the host's; memory even, ≥ 64 MiB on
+arm64, 128 MiB on x86_64), so the same refusals come from both.
+
+**The conformance suite** (`shards_api::conformance`), run against the simulator in `shards-api`'s tests and
+against the real implementation on each backend: a spec past the bounds is refused before boot; a booted guest's
+served port answers bytes both ways and a half-close reaches the other side (D12's half-close); an unserved port is
+refused as `Channel` within its patience; `stop` ends it as `Stopped` and every later `connect` is refused
+`Ended`; a guest that powers off ends as `PowerOff`; and `backend()` on macOS x86_64 or Windows arm64 is
+`NoBackend` naming them.
+
+**Hex's side**: `hex_client::guest::Link` over a `Guest` (`connect(CONTROL_PORT | STDIO_PORT)`), and the host's
+`oci` class booting one guest per node (§1) and routing to `hex_client::guest::Client`.
+
+**Vendoring Shards** (checked 2026-11-04, `scripts/vendor.py` and Shards `b3e5ca27`):
+- `vendor.py` takes a `kind = "git"` project at a full commit, re-applies `vendor/patches/shards/*.patch` in a
+  scratch git (`Scratch.apply`), so a patch may add a new crate's files; `check` proves the tree is upstream plus
+  those, each a row of `vendor/shards/UPSTREAM.md`. A draft `crates/api` would be recorded so until Shards lands it.
+- Shards is 175 MB in 5,391 files and holds a symbolic link (`scripts/frontend/agentfile-cases/symlink/agent/escape`),
+  which `vendor.py` refuses unless excluded. `shards-vmm` needs, of Shards' own crates, `abi`, `afunix`, `ipc`,
+  `netring`, `ntfs`, `syscall-filter` and `testdir`; everything else (its docs, `resources`, `vendor/aws-lc-sys`,
+  the other crates) goes in the manifest's `exclude`.
+- Shards' root `Cargo.toml` lists every crate as a member (`:3`) and excludes `vendor` (`:49`); with the rest
+  excluded, a recorded patch trims its members to those kept, and Hex's workspace excludes `vendor/shards`.
+- On macOS the process that calls Hypervisor.framework must be signed with the hypervisor entitlement (Shards signs
+  `shards-vm` so, `docs/design/architecture.md:1979`); the host's `hex node` is signed with it, ad hoc on the Mac
+  Studio.
