@@ -166,6 +166,13 @@ enum ShimStdio {
     Null,
 }
 
+/// What a create made ahead and hands the shim, each by the path of this process's descriptor for it: a network
+/// namespace from the node's pool, and a `/dev` tree from its `/dev` pool.
+struct Ahead {
+    network: Option<OwnedFd>,
+    dev: Option<PreparedDev>,
+}
+
 /// A seed that clones a container's init for the `Runtime` seam (decision 5, goal 5 plan step 4). The
 /// node agent implements it over its pool of `hex __oci-seed` processes: in place of the shim's re-exec
 /// of the hex binary, a seed clones the init with `clone3` into its cgroup and the fresh namespaces its
@@ -279,6 +286,34 @@ pub struct PrunedCreate {
 pub struct PreparedDev {
     pub mount: u32,
     pub tree: OwnedFd,
+}
+
+/// A `/dev` made ahead for a create a node's seed sends through the shim (goal 5 extended, step 3), taken as
+/// the pruned path takes one: by the spec's eligibility ([`super::devmount::eligible`]), each miss counted by
+/// its reason. A container in a user namespace of its own binds the host's device nodes in, which the node's
+/// can't stand for, so it makes its own, counted.
+fn shim_dev(
+    spec: &Spec,
+    dev_mounts: Option<&dyn DevMounts>,
+) -> Result<Option<PreparedDev>, OciError> {
+    let Some(pool) = dev_mounts else {
+        return Ok(None);
+    };
+    if spec.in_user_namespace() {
+        pool.unpooled(hex_core::devfs::Unpooled::UserNamespace)?;
+        return Ok(None);
+    }
+    // A plan the spec can't make takes nothing: its init refuses it, as it would with no pool.
+    let Ok(plan) = super::mount::plan(&spec.mounts) else {
+        return Ok(None);
+    };
+    match super::devmount::eligible(spec, &plan) {
+        Ok((mount, key)) => Ok(pool.take(key)?.map(|tree| PreparedDev { mount, tree })),
+        Err(reason) => {
+            pool.unpooled(reason)?;
+            Ok(None)
+        }
+    }
 }
 
 /// Where a container's cgroup comes from.
@@ -566,7 +601,7 @@ impl Runtime {
                 &making,
                 &spec,
                 &cgroup,
-                network,
+                Ahead { network, dev: None },
                 ShimStdio::Inherited,
                 &Command::spawn,
             ),
@@ -586,7 +621,7 @@ impl Runtime {
         making: &Making<'_>,
         spec: &Spec,
         cgroup: &BoxCgroup,
-        network: Option<OwnedFd>,
+        ahead: Ahead,
         stdio: ShimStdio,
         spawn: &dyn Fn(&mut Command) -> std::io::Result<std::process::Child>,
     ) -> Result<State, OciError> {
@@ -597,6 +632,7 @@ impl Runtime {
             dir,
             pid_file: _,
         } = *making;
+        let Ahead { network, dev } = ahead;
         // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. The shim opens its
         // ends, and a network namespace made ahead, by the path of this process's descriptors for them,
         // which stay close-on-exec: a flag cleared for the spawn would leave a window in which a process
@@ -618,6 +654,15 @@ impl Runtime {
             .env(init::ENV_CGROUP, cgroup.dir());
         if let Some(network) = &network {
             cmd.env(init::ENV_NETWORK, by_path(network));
+        }
+        // A `/dev` made ahead goes the same way, by the path of this process's descriptor for the
+        // detached tree, with its mount's index in the spec's mounts.
+        if let Some(dev) = &dev {
+            cmd.env(
+                init::ENV_DEV,
+                format!("/proc/{}/fd/{}", std::process::id(), dev.tree.as_raw_fd()),
+            )
+            .env(init::ENV_DEV_MOUNT, dev.mount.to_string());
         }
         if let ShimStdio::Null = stdio {
             cmd.stdin(std::process::Stdio::null())
@@ -650,8 +695,10 @@ impl Runtime {
                 Ok((pid, start_time))
             });
         // The shim has opened the namespace made ahead by its pid line, or never will: it is the
-        // container's alone now.
+        // container's alone now. So with the `/dev` made ahead, which the container attached before its
+        // ready line, or which goes with this descriptor, unattached.
         drop(network);
+        drop(dev);
         if outcome.is_err() {
             // A create that fails leaves nothing running: the container the shim forked, if it said
             // which, and the shim itself, killed and reaped here (on success it exits by itself and
@@ -688,11 +735,12 @@ impl Runtime {
     ) -> Result<State, OciError> {
         if init::needs_shim(spec) {
             seeds.classic(ClassicReason::NamespaceByPath);
+            let dev = shim_dev(spec, dev_mounts)?;
             return self.start_shim(
                 making,
                 spec,
                 cgroup,
-                network,
+                Ahead { network, dev },
                 ShimStdio::Null,
                 &Command::spawn,
             );
@@ -733,11 +781,12 @@ impl Runtime {
                 }
                 Err(reason) => {
                     seeds.classic(reason);
+                    let dev = shim_dev(spec, dev_mounts)?;
                     self.start_shim(
                         making,
                         spec,
                         cgroup,
-                        network,
+                        Ahead { network, dev },
                         ShimStdio::Null,
                         &Command::spawn,
                     )
@@ -2384,7 +2433,10 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
                 &making,
                 &spec,
                 &cgroup,
-                Some(network),
+                Ahead {
+                    network: Some(network),
+                    dev: None,
+                },
                 ShimStdio::Inherited,
                 &Command::spawn
             )
@@ -2451,8 +2503,18 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             cmd.spawn()
         };
         assert!(
-            rt.start_shim(&making, &spec, &cgroup, None, ShimStdio::Inherited, &spawn)
-                .is_err(),
+            rt.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                Ahead {
+                    network: None,
+                    dev: None,
+                },
+                ShimStdio::Inherited,
+                &spawn,
+            )
+            .is_err(),
             "the stand-in ends without a word"
         );
         let held = held.into_inner();

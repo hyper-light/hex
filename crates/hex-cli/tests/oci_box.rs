@@ -429,9 +429,11 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     prepared_devs_preserve_order_and_are_never_shared(&lab, own);
 }
 
-/// AC-T7.1.4, goal 5 step 3: compare ordinary and prepopulated /dev on hostile mount layouts.
-/// Expect byte-identical refusals, matching devices/links/options on success, two actual pooled
-/// takes for live containers, and no cross-container mutation or host-namespace attachment.
+/// AC-T7.1.4, goal 5 step 3: compare ordinary and prepopulated /dev on hostile mount layouts, on the pruned
+/// path and on the classic one a createRuntime hook takes through the shim (goal 5 extended step 3).
+/// Expect byte-identical refusals, matching devices/links/options on success, a pooled take for each case on
+/// each path, two actual pooled takes for live containers, and no cross-container mutation or
+/// host-namespace attachment.
 fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     if lab.rootless {
         return;
@@ -446,7 +448,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     let pooled = lab.node(&own.join("devfs-pooled"), pooled_state.path());
     let before_mounts = agent_mount_points();
 
-    let bundle = |case: &str, dest: Option<&str>| {
+    let bundle = |case: &str, dest: Option<&str>, shim: bool| {
         let dir = tempfile::Builder::new()
             .prefix("devfs-bundle-")
             .tempdir_in(lab.bundles.path())
@@ -472,6 +474,10 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
                 "destination":dest, "type":"tmpfs", "source":"late", "options":["mode=701","size=64k"]
             }));
         }
+        if shim {
+            spec["hooks"] =
+                serde_json::json!({"createRuntime":[{"path":"/usr/bin/true","args":["true"]}]});
+        }
         std::fs::write(dir.join("config.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
         dir
     };
@@ -483,7 +489,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
             owner: None,
         })
     };
-    let prime = bundle("prime", None);
+    let prime = bundle("prime", None, false);
     let id = BoxId::new("prime").unwrap();
     create(&pooled, &id, &prime).unwrap();
     pooled.delete(&id).unwrap();
@@ -525,7 +531,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
         }
         out
     };
-    for (case, target) in [
+    for (case, target, shim) in [
         ("plain", None),
         ("dev-symlink", None),
         ("default-node", Some("/dev/null")),
@@ -534,9 +540,13 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
         ("alias", Some("/alias")),
         ("file-component", Some("/blocked/child")),
         ("parent", Some("/dev/shm/../null")),
-    ] {
-        let dir = bundle(case, target);
-        let id = BoxId::new(case).unwrap();
+    ]
+    .into_iter()
+    .flat_map(|(case, target)| [(case, target, false), (case, target, true)])
+    {
+        let dir = bundle(case, target, shim);
+        let id = BoxId::new(&format!("{case}-{}", if shim { "shim" } else { "pruned" })).unwrap();
+        let through_shim = pooled.creates_through_shim();
         let run = |node: &Node| match create(node, &id, &dir) {
             Err(e) => Err(e),
             Ok(_) => {
@@ -557,12 +567,20 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
         }
         let taken = pooled.dev_mounts().unwrap().taken;
         let b = run(&pooled);
-        assert_eq!(a, b, "prepared /dev changed {case}");
+        assert_eq!(
+            a, b,
+            "prepared /dev changed {case} (through the shim: {shim})"
+        );
         if case != "parent" {
             assert_eq!(
                 pooled.dev_mounts().unwrap().taken,
                 taken + 1,
-                "{case} must consume a prepared mount (including guarded fallback)"
+                "{case} must consume a prepared mount (including guarded fallback; through the shim: {shim})"
+            );
+            assert_eq!(
+                pooled.creates_through_shim() - through_shim,
+                u64::from(shim),
+                "{case} took the path it was meant to (through the shim: {shim})"
             );
         }
     }

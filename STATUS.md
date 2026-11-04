@@ -107,6 +107,17 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   host-network box's carried host cgroup filesystem read-only. Built on cp/t7-seed, not merged: it
   reaches main with goal 5's merge, on Ada's call.
 
+- **Goal 5 extended, plan step 3, the init's mounts at the system calls' cost: closes on its written bars by Ada's ruling
+  (2026-11-03).** Built on `cp/t7-ext-s3`, not merged. Part 19's pooled p50 is at most 0.16 ms on both paths (fedora: pruned
+  0.044-0.055 ms, classic 0.132-0.133), validation is as before (26 pass, 32 fail, 0 differ), HEX-RT passes over the node and
+  the socket, and every mount kind is made on each path. Part 19's p99 at 8 in flight with 8,000 idle threads is under 0.5 ms
+  on the merged trees with step 6's reuse (0.280-0.432 ms) and over on step 3's tree alone (0.729-1.568). Her under-load bar is
+  now a written bar of runtime design goal 6: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle threads, with 6 and 12
+  busy loops on the same cores and Docker's paths, the whole create's p99 improving with it, no priority, nice, RT or slice
+  change. Today it reads 1.081-1.835 ms at 6 loops and 1.519-2.313 at 12 (without Docker's paths 0.454-0.580 and 0.702-1.068;
+  `docs/research/runtime/goal5-mounts.md` §11). The masked directories' tmpfs made ahead was built and measured: part 19's p50
+  about 15% lower with Docker's paths, no gain on either p99 or the whole create, so it stays on `cp/t7-ext-s3-maskpool` (§13).
+
 ## Design decided, implementation under way (2026-10-24)
 
 After the runtime research, the competitive baseline and the runtime design, the track moved to
