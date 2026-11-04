@@ -35,3 +35,20 @@
 #    createContainer hook exits 3: create refused, Os { op: "container init", why: "createContainer hook failed: \"/bin/sh\" exited exit status: 3" }
 #    startContainer hook exits 3:  start refused,  Os { op: "start", why: "startContainer hook failed: \"/bin/sh\" exited exit status: 3" }
 # 5. runtime-tools before and after: hooks-20261104.txt (26 pass, 32 fail at both, no test differs).
+#
+# 6. A start cut in its startContainer hooks (the lead's follow-on): node_socket's At::StartContainer, unit
+#    hex-hooks-startpass-20261104T142208Z (fedora, as above; started through hex-slot):
+#    532cf5b (the test, before the handling)  rootless FAIL  as root FAIL: recovery took the box back as
+#        Created ("crash-tmpfs-startcontainer: the box killed mid-create is cleaned up", left: Ok(BoxInfo
+#        {.. state: Created ..})): it had no fact to tell a start cut in its hooks from a box waiting to start
+#    d45b160 (the handling)                   rootless PASS (tmpfs, disk)  as root PASS (tmpfs; disk SKIPs
+#        as every root disk case does): "killed with the record Some(Ready), its cgroup made, its container's
+#        state directory made and its state written; after the restart cleaned up, nothing left", the agent
+#        saying the start was interrupted in its startContainer hooks
+#    At d45b160: oci_box passes rootless and as root, its init's SigIgn holding SIGPIPE; hex-core's and
+#    hex-runtime's lib tests pass (take_start on a pipe whose reader closed is Abandoned; recovery decides
+#    StartInterrupted with the init alive or ended); and the 7 gates exit 0.
+#    The commit before the handling runs last: its expected failure leaves the cut box's state under the
+#    shared rootless runtime directory (/run/user/1000/hex-node), where an earlier order counted it in a
+#    later run's case (hex-hooks-startpass-20261104T141822Z, "(container states, the cgroup) at the kill":
+#    2 and 3, against 1). Those leftovers were the test's own, their inits ended, and were removed.
