@@ -53,8 +53,17 @@
 #    later run's case (hex-hooks-startpass-20261104T141822Z, "(container states, the cgroup) at the kill":
 #    2 and 3, against 1). Those leftovers were the test's own, their inits ended, and were removed.
 #
-# 7. The lead's (c), an interleaved create p50/p99 A/B, ca6dc80 against f369f6f, until the breakdown's reader
-#    knows step 6's path (b). exec_ab.sh at f369f6f: every build's seam_oci lifecycle phase (create, start, exec
+# 7. The breakdown's parts A/B, tried as the lead ordered (14:14Z), then (c).
+#    cp/t7-g5x-integrate 618b44a's bench/competitive, taken as a scratch copy, with ca6dc80's binaries as
+#    BEFORE_HEX/BEFORE_SEAM against f369f6f's, a probe pass (N=50 WARMUP=10 ROUNDS=1, CPUs 4-15, under the timed
+#    lock; unit hex-hooks-bdprobe-20261104T145058Z, load 45-58): its reader refuses every create both ways,
+#    "check probe: traced: create l000001 lacks the cgroup's mkdir", 0 of 2 traced creates cut whole:
+#      HEXBENCH_REUSE=1 (the default)  create-breakdown-20261104T145142Z
+#      HEXBENCH_REUSE=0                create-breakdown-20261104T150016Z
+#    (These probes name no owner, so reuse is off either way: the missing mkdir is something other than step
+#    6's reuse path. Unit hex-hooks-abbase-20261104T092401Z refused the same with ca6dc80's own binaries.)
+#    The parts are left to step 7's harness. So (c): an interleaved create p50/p99 A/B, ca6dc80 against
+#    f369f6f. exec_ab.sh at f369f6f: every build's seam_oci lifecycle phase (create, start, exec
 #    and delete, each timed alone) and libcrun's in process, in shuffled order each round; N=1000 WARMUP=100
 #    ROUNDS=5, the container on CPUs 4-15, root, so the pruned path; every round's errors {}. Static-glibc release
 #    binaries: before hex 66486e0e576e3d93 / seam_oci 504b8250ccc63883, after hex 0bf490040d4d57d1 / seam_oci
