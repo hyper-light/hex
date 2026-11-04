@@ -1815,6 +1815,7 @@ fn run_one_hook(hook: &crate::linux::oci::spec::Hook, state_json: &[u8]) -> Resu
         }
     }
     cmd.stdin(std::process::Stdio::piped());
+    crate::linux::sys::sweep_on_exec(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| OciError::os("starting a hook", e))?;
@@ -2518,6 +2519,37 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         );
         let held = held.into_inner();
         assert!(held.is_empty(), "the bystander inherited {held:?}");
+    }
+
+    /// A hook holds nothing the agent above it left open (CVE-2024-21626's class; decision 3, "Descriptors reach a
+    /// program only on purpose"; AC-T7.1.4). Do: leave a file open in this process without close-on-exec, as a
+    /// window above a program would, and run a hook that writes what each of its descriptors names. Expect: its
+    /// stdio there, and the file not.
+    #[test]
+    fn a_hook_holds_nothing_the_agent_left_open() {
+        let lab = tempfile::tempdir().unwrap();
+        let stray_at = lab.path().join("stray");
+        std::fs::write(&stray_at, b"").unwrap();
+        let _stray = rustix::fs::open(&stray_at, OFlags::RDONLY, Mode::empty()).unwrap();
+        let report = lab.path().join("report");
+        let hook_at = lab.path().join("hook");
+        stand_in_at(
+            &hook_at,
+            &format!(
+                "#!/bin/sh\nfor fd in /proc/$$/fd/*; do readlink \"$fd\"; done > {}\nexit 0\n",
+                report.display()
+            ),
+        );
+        let hook = crate::linux::oci::spec::Hook {
+            path: hook_at.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            env: Vec::new(),
+            timeout: None,
+        };
+        run_hooks(&[hook], &State::new("c1", "/bundle")).unwrap();
+        let held = std::fs::read_to_string(&report).unwrap();
+        assert!(held.lines().count() >= 3, "its stdio: {held}");
+        assert!(!held.contains("stray"), "the hook inherited it: {held}");
     }
 
     /// A pool that records what it is asked, its take answered by `answer`.
