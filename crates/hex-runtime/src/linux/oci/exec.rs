@@ -121,7 +121,7 @@ fn helper() -> Result<u8, (u8, OciError)> {
             cgroup_ns = Some(fd);
             continue;
         }
-        sys::setns(fd.as_fd(), flag).map_err(cannot)?;
+        sys::setns(fd.as_fd(), flag).map_err(|f| cannot(f.into()))?;
     }
 
     let signals = sys::forward_signals(&FORWARDED).map_err(cannot)?;

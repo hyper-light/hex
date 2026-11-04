@@ -56,6 +56,20 @@ fn failing_step() -> Option<(Step, hex_core::netns::Missing)> {
     hex_core::netns::Missing::of(sys_admin, net_admin).map(|missing| (step, missing))
 }
 
+/// HEX-NETNS-14: the agent's stderr line for a failed make names the step and why, errno and text.
+#[test]
+fn a_failed_make_is_said_with_its_step_and_reason() {
+    let reason = Reason::new(
+        Some(1),
+        "unshare failed: Operation not permitted (os error 1)",
+    );
+    assert_eq!(
+        failed_line(Step::Unshare, &reason),
+        "hex node: a network namespace made ahead failed at unshare: errno 1: unshare failed: \
+         Operation not permitted (os error 1)\n"
+    );
+}
+
 /// HEX-NETNS-11: the refill thread hands the pool each namespace it makes, or counts each make that
 /// fails, and a create is served either way. Do: start a pool of 2 and wait for its thread's first
 /// outcome. Expect, where the agent may make network namespaces (CAP_SYS_ADMIN and CAP_NET_ADMIN):
@@ -86,11 +100,22 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
         let c = pool.counts().unwrap();
         assert_eq!((c.made_ahead, c.failed), (0, 1), "{c:?}");
         let mut by = hex_core::netns::FailedBy::default();
-        match step {
-            Step::Unshare => by.unshare = 1,
-            _ => by.loopback = 1,
-        }
+        let last = match step {
+            Step::Unshare => {
+                by.unshare = 1;
+                &c.last_failed.unshare
+            }
+            _ => {
+                by.loopback = 1;
+                &c.last_failed.loopback
+            }
+        };
         assert_eq!(c.failed_by, by, "counted under the step that failed");
+        // HEX-NETNS-14: the kernel's refusal is kept, errno and text: EPERM, a capability missing.
+        let reason = last.as_ref().expect("the step's reason is kept");
+        let eperm = rustix::io::Errno::PERM.raw_os_error();
+        assert_eq!(reason.errno(), Some(eperm), "{reason}");
+        assert!(reason.text().contains("not permitted"), "{reason}");
         assert!(pool.take().unwrap().is_none(), "a dry take");
         assert_eq!(pool.counts().unwrap().made_on_path, 1);
         wait_for("second failed make", || pool.counts().unwrap().failed == 2);

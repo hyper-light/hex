@@ -158,6 +158,19 @@ fn counts_v3() -> netns::Counts {
     }
 }
 
+/// The counts version 4 adds to: version 3's, with the latest reason kept at two steps, one with an errno and
+/// one without.
+fn counts_v4() -> netns::Counts {
+    netns::Counts {
+        last_failed: netns::LastFailed {
+            unshare: Some(netns::Reason::new(Some(1), "EPERM")),
+            loopback: Some(netns::Reason::new(None, "not an ack")),
+            ..netns::LastFailed::default()
+        },
+        ..counts_v3()
+    }
+}
+
 fn refusals() -> Vec<Refusal> {
     vec![
         Refusal::Invalid {
@@ -440,6 +453,78 @@ fn version_3_messages_are_the_bytes_recorded() {
         ))
     );
 }
+
+/// HEX-SOCK-2, append-only, and HEX-NETNS-14 over the socket: version 4 appends the latest reason a make
+/// failed for at each step to the network namespace counts' answer, whose bytes are the ones recorded here;
+/// written in version 3 the answer is version 3's bytes, and every other kind is written in version 4 as in
+/// version 3 but for the version in its header. A version 3 answer with version 4's fields behind it is
+/// refused, as is a reason whose text is past its bound.
+#[test]
+fn version_4_messages_are_the_bytes_recorded() {
+    let v4 = answer(4, 12, &Answer::Netns(counts_v4()), MAX_MESSAGE).unwrap();
+    assert_eq!(hex(&v4), GOLDEN_NETNS_V4);
+    assert_eq!(
+        read_answer(&received(&v4, 0), MAX_MESSAGE).unwrap().1,
+        Answer::Netns(counts_v4())
+    );
+    assert_eq!(
+        hex(&answer(3, 12, &Answer::Netns(counts_v4()), MAX_MESSAGE).unwrap()),
+        GOLDEN_NETNS_V3
+    );
+    let as_v3 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+        bytes
+    };
+    for (n, req, _) in requests() {
+        assert_eq!(
+            as_v3(request(4, n, &req, MAX_MESSAGE).unwrap()),
+            request(3, n, &req, MAX_MESSAGE).unwrap(),
+            "{req:?}"
+        );
+    }
+    for (n, ans) in answers()
+        .into_iter()
+        .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
+    {
+        assert_eq!(
+            as_v3(answer(4, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(3, n, &ans, MAX_MESSAGE).unwrap(),
+            "{ans:?}"
+        );
+    }
+    assert!(matches!(
+        read_answer(&received(&as_v3(v4), 0), MAX_MESSAGE),
+        Err(Fault::Trailing { .. })
+    ));
+    // A text one byte past the bound, written as a writer that didn't cut it would.
+    let mut long = answer(4, 12, &Answer::Netns(counts_v3()), MAX_MESSAGE).unwrap();
+    long.truncate(long.len() - 2);
+    long.extend_from_slice(&[1, 0]);
+    let text = "x".repeat(netns::MAX_REASON + 1);
+    long.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+    long.extend_from_slice(text.as_bytes());
+    long.push(0);
+    assert_eq!(
+        read_answer(&received(&long, 0), MAX_MESSAGE),
+        Err(Fault::value(
+            "a failed make's reason",
+            format!("257 bytes is over the {}-byte bound", netns::MAX_REASON)
+        ))
+    );
+}
+
+/// [`counts_v4`]'s answer in version 4, id 12.
+const GOLDEN_NETNS_V4: &str = concat!(
+    "48455857040009800c00000000000000",
+    "01000000000000000200000000000000030000000000000004000000000000000f00000000000000",
+    "0100000000000000020000000000000003000000000000000400000000000000050000000000000003",
+    "0600000000000000",
+    "00",
+    "01010100000005000000455045524d",
+    "00",
+    "01000a0000006e6f7420616e2061636b",
+    "00",
+);
 
 /// [`counts_v3`]'s answer in version 3, id 12.
 const GOLDEN_NETNS_V3: &str = concat!(
@@ -1047,12 +1132,16 @@ proptest! {
 
     /// HEX-SOCK-2: any box info, list, refusal and network namespace counts read back as written.
     #[test]
-    fn any_answer_reads_back(infos in proptest::collection::vec(any_info(), 0..4), refusal in any_refusal(), exit in any_exit(), n in any::<[u64; 11]>(), bits in 0u8..4) {
+    fn any_answer_reads_back(infos in proptest::collection::vec(any_info(), 0..4), refusal in any_refusal(), exit in any_exit(), n in any::<[u64; 11]>(), bits in 0u8..4, errno in proptest::option::of(any::<i32>()), text in "[a-zé ]{0,300}") {
         let counts = netns::Counts {
             made_ahead: n[0], taken: n[1], made_on_path: n[2], discarded: n[3], failed: n[4],
             failed_by: netns::FailedBy { home: n[5], unshare: n[6], open: n[7], loopback: n[8], back: n[9] },
             refused: netns::Missing::of(bits & 1 == 0, bits & 2 == 0),
             refused_on_path: n[10],
+            last_failed: netns::LastFailed {
+                open: Some(netns::Reason::new(errno, &text)),
+                ..netns::LastFailed::default()
+            },
         };
         for ans in [Answer::Boxes { infos, more: false }, Answer::Refused(refusal), Answer::Exited(exit), Answer::Netns(counts)] {
             let bytes = answer(VERSION, 7, &ans, MAX_MESSAGE).unwrap();

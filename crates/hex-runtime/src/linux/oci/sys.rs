@@ -779,14 +779,17 @@ pub fn set_keepcaps(keep: bool) -> Result<(), rustix::io::Errno> {
 }
 
 /// Joins the namespace the open `fd` refers to, checking it is of type `nstype` (a `CLONE_NEW*`
-/// flag); `setns` fails if the fd's namespace is of another type.
-pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciError> {
+/// flag); `setns` fails if the fd's namespace is of another type. Refused with its errno.
+pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), Failure> {
     use std::os::fd::AsRawFd;
     // SAFETY: setns(2) with a file descriptor and a type flag; it takes no pointers and writes
     // nothing. The return value is checked.
     let r = unsafe { libc::setns(fd.as_raw_fd(), nstype) };
     if r == -1 {
-        Err(OciError::os("setns", std::io::Error::last_os_error()))
+        Err(Failure {
+            what: "setns",
+            errno: last_errno(),
+        })
     } else {
         Ok(())
     }
@@ -796,7 +799,7 @@ pub fn setns(fd: std::os::fd::BorrowedFd<'_>, nstype: i32) -> Result<(), OciErro
 /// `unshare` unsound (it can detach file descriptors another thread is using); its callers, the init
 /// (single-threaded after its re-exec) and the node agent's thread that makes network namespaces ahead
 /// ([`super::net::make_ahead`]), use only the `NEW*` namespace flags.
-pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
+pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), Failure> {
     // CLONE_FILES is the one flag that makes `unshare` unsound; clear it defensively (callers only
     // ever pass namespace flags) so the invariant below holds whatever the caller passed.
     let flags = flags.difference(rustix::thread::UnshareFlags::FILES);
@@ -805,7 +808,7 @@ pub fn unshare(flags: rustix::thread::UnshareFlags) -> Result<(), OciError> {
     }
     // SAFETY: the flags are namespace flags only (CLONE_FILES cleared above), so no file-descriptor
     // table is detached; the invariant `unshare_unsafe` documents holds.
-    unsafe { rustix::thread::unshare_unsafe(flags) }.map_err(|e| OciError::os("unshare", e))
+    unsafe { rustix::thread::unshare_unsafe(flags) }.map_err(Failure::of("unshare"))
 }
 
 /// Drops capability number `cap` from the process's bounding set (`PR_CAPBSET_DROP`).

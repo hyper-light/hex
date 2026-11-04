@@ -18,8 +18,10 @@
 //! - **Dry**: a take from an empty pool is answered [`Take::MakeOnPath`] and counted; the create makes its
 //!   namespace on the path, as with no pool. A create the pool can't serve, a container with a user namespace
 //!   of its own (decision 4), makes its namespace on the path too, and [`Pool::on_path`] counts it the same.
-//! - **Failed makes**: each is reported with the step of the make that failed ([`Step`]), and counted by it
-//!   ([`FailedBy`]), so a make the kernel refuses is never only a number (CLAUDE.md §3).
+//! - **Failed makes**: each is reported with the step of the make that failed ([`Step`]) and why ([`Reason`]: the
+//!   errno and the error's text), counted by step ([`FailedBy`]), and the latest reason kept for each step
+//!   ([`LastFailed`], one a step, so what is kept stays bounded), so a make the kernel refuses is never only a
+//!   number (CLAUDE.md §3).
 //! - **Refused**: a node that lacks a capability a make takes ([`Missing`]) starts no pool whose every make
 //!   would fail ([`Pool::refused`]): it holds none and asks for none, and every take is made on the path,
 //!   counted under that reason ([`Counts::refused_on_path`]).
@@ -70,6 +72,92 @@ impl FailedBy {
             Step::Back => &mut self.back,
         };
         *n = n.saturating_add(1);
+    }
+}
+
+impl std::fmt::Display for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Step::Home => "opening its thread's own namespace",
+            Step::Unshare => "unshare",
+            Step::Open => "opening the namespace made",
+            Step::Loopback => "bringing its loopback up",
+            Step::Back => "setns back home",
+        })
+    }
+}
+
+/// The most bytes of a failed make's text a [`Reason`] keeps: a longer one is cut at a character boundary and
+/// the cut marked `…`. A stated bound, not a measured one: the longest text a make gives today, a loopback
+/// refusal with its OS error, is under 100 bytes, and 256 holds it with room to spare.
+pub const MAX_REASON: usize = 256;
+
+/// Why a make failed at its step: the errno the kernel gave, where there was one, and the error's text, at most
+/// [`MAX_REASON`] bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reason {
+    errno: Option<i32>,
+    text: String,
+}
+
+impl Reason {
+    /// The reason for `errno` and `text`, the text cut to [`MAX_REASON`] bytes.
+    pub fn new(errno: Option<i32>, text: &str) -> Self {
+        let text = if text.len() <= MAX_REASON {
+            text.to_owned()
+        } else {
+            let keep = MAX_REASON.saturating_sub('…'.len_utf8());
+            let cut = text
+                .char_indices()
+                .map(|(at, c)| at.saturating_add(c.len_utf8()))
+                .take_while(|end| *end <= keep)
+                .last()
+                .unwrap_or(0);
+            format!("{}…", text.get(..cut).unwrap_or_default())
+        };
+        Self { errno, text }
+    }
+
+    /// The errno, where the kernel gave one.
+    pub fn errno(&self) -> Option<i32> {
+        self.errno
+    }
+
+    /// The error's text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.errno {
+            Some(errno) => write!(f, "errno {errno}: {}", self.text),
+            None => f.write_str(&self.text),
+        }
+    }
+}
+
+/// The latest [`Reason`] a make failed for at each [`Step`]: one a step, replaced by the next.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LastFailed {
+    pub home: Option<Reason>,
+    pub unshare: Option<Reason>,
+    pub open: Option<Reason>,
+    pub loopback: Option<Reason>,
+    pub back: Option<Reason>,
+}
+
+impl LastFailed {
+    fn keep(&mut self, step: Step, reason: Reason) {
+        let slot = match step {
+            Step::Home => &mut self.home,
+            Step::Unshare => &mut self.unshare,
+            Step::Open => &mut self.open,
+            Step::Loopback => &mut self.loopback,
+            Step::Back => &mut self.back,
+        };
+        *slot = Some(reason);
     }
 }
 
@@ -148,7 +236,7 @@ pub enum Refused<T> {
 /// in, so every one made ahead was taken, is held or was discarded: `made_ahead` is `taken`, plus
 /// [`Pool::held`], plus `discarded`. A count stops at `u64::MAX`, which at one a nanosecond takes 584 years to
 /// reach.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
     /// Namespaces made ahead and taken into the pool.
     pub made_ahead: u64,
@@ -163,6 +251,8 @@ pub struct Counts {
     pub failed: u64,
     /// Makes that failed, by the step that failed.
     pub failed_by: FailedBy,
+    /// The latest reason a make failed for, at each step.
+    pub last_failed: LastFailed,
     /// What the node lacks, when its pool was refused for it ([`Pool::refused`]): it makes none ahead.
     pub refused: Option<Missing>,
     /// Of `made_on_path`, the takes made on the path because the pool was refused.
@@ -232,10 +322,12 @@ impl<T> Pool<T> {
         pool
     }
 
-    /// A make that failed at `step`: counted by it, and the pool asks for no more until the next take.
-    pub fn failed(&mut self, step: Step) {
+    /// A make that failed at `step` for `reason`: counted by step, the reason kept as that step's latest, and the
+    /// pool asks for no more until the next take.
+    pub fn failed(&mut self, step: Step, reason: Reason) {
         self.counts.failed = self.counts.failed.saturating_add(1);
         self.counts.failed_by.count(step);
+        self.counts.last_failed.keep(step, reason);
         self.asking = false;
     }
 
@@ -296,7 +388,7 @@ impl<T> Pool<T> {
 
     /// What the pool has done.
     pub fn counts(&self) -> Counts {
-        self.counts
+        self.counts.clone()
     }
 }
 

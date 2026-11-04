@@ -271,7 +271,9 @@ version added is refused in an earlier version's message, as one that version do
 in as many messages as its boxes need, so a dense node answers it whole. Version 2 (goal 4 plan step 2) adds one
 request and its answer, the node's network namespace counts (decision 4), and writes every version 1 kind as
 version 1 does but for its header's version. Version 3 appends to that answer why its failed makes failed, by step,
-and whether the pool was refused and for what (decision 4), and writes every version 2 kind as version 2 does. A
+and whether the pool was refused and for what (decision 4), and writes every version 2 kind as version 2 does;
+version 4 appends the latest reason a make failed for at each step, and writes every version 3 kind as version 3
+does. A
 client says hello in version 1, which an agent of any version reads,
 learns the highest version the agent speaks from its answer, and writes the rest in the highest both speak; an
 agent answers each request in its version, and refuses what it can't read in version 1, so a client of either
@@ -681,8 +683,10 @@ a burst of its whole width finds a namespace each, at most 24 MiB of the kernel'
 and it keeps up with sustained churn: no sustained phase of record found the pool dry (above). A make that fails
 stops the refill until the next take, so a kernel that refuses every make costs that thread one failed make a take,
 never a loop of them (CLAUDE.md §2). A failed make is counted by the step that failed (opening the thread's own
-namespace, the unshare, opening the one made, its loopback, going back), so what the kernel refused is never only a
-number (§3). A make takes CAP_SYS_ADMIN, for `unshare(CLONE_NEWNET)` and `setns` (unshare(2), setns(2)), and
+namespace, the unshare, opening the one made, its loopback, going back), and the latest reason at each step is
+kept, the errno where the kernel gave one and the error's text cut to 256 bytes, one a step, so what is kept stays
+bounded; the agent also says each failed make on its stderr, at most one a take. So what the kernel refused is
+never only a number (§3). A make takes CAP_SYS_ADMIN, for `unshare(CLONE_NEWNET)` and `setns` (unshare(2), setns(2)), and
 CAP_NET_ADMIN, for loopback's rtnetlink request: run as root with CAP_SYS_ADMIN added and not CAP_NET_ADMIN, the
 make fails at its loopback (fedora unit hex-ci-fix-20261104T083657Z), and uid 0 alone holds neither where a container
 runtime's default set applies, as in a Kubernetes pod (kiln CI's gates pod, CapEff `a80425fb`). A root node checks
@@ -709,7 +713,9 @@ shutdown a take is refused, and what it held is handed back and counted as disca
 room below its bound until a make fails, then for nothing until the next take (HEX-NETNS-5); each failed make is
 counted by the step that failed (HEX-NETNS-12); and a pool refused for what the node lacks asks for nothing, and
 every take from it is made on the path, counted under the refusal, which the counts name (HEX-NETNS-13, with what a
-node lacks held to `/proc/self/status`'s `CapEff` and `hex node`'s line naming it). Its counts (made ahead,
+node lacks held to `/proc/self/status`'s `CapEff` and `hex node`'s line naming it); and the latest reason a make
+failed for is kept at each step, its text cut to its bound, the kernel's EPERM kept where a capability is missing,
+and said on the agent's stderr (HEX-NETNS-14). Its counts (made ahead,
 taken, made on the path, discarded, failed) are what the bench reads, and they equal the oracle's. A doc-truth test
 holds the core's bound to this decision's. The node's shell (goal 4 plan step 4): a stand-in shim holds no
 descriptor of the namespace made ahead it is handed, reaches it by its path, and finds the agent's descriptor

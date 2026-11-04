@@ -33,6 +33,10 @@
 //! refused ([`netns::Counts`]'s `failed_by`, `refused` and `refused_on_path`): five `u64`s, one per
 //! [`netns::Step`], a byte naming what the node lacks (0 nothing, its bit 1 CAP_SYS_ADMIN, its bit 2
 //! CAP_NET_ADMIN), and a `u64`. Every version 2 message reads the same in it.
+//!
+//! Version 4 appends the latest reason a make failed for at each step ([`netns::Counts`]'s `last_failed`): for
+//! each [`netns::Step`] in order an option of the reason, which is an option of its errno (an `i32`) and its
+//! text, a string of at most [`netns::MAX_REASON`] bytes. Every version 3 message reads the same in it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -48,7 +52,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -400,6 +404,21 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
                 }));
                 w.u64(counts.refused_on_path);
             }
+            if version >= 4 {
+                let last = &counts.last_failed;
+                for reason in [
+                    &last.home,
+                    &last.unshare,
+                    &last.open,
+                    &last.loopback,
+                    &last.back,
+                ] {
+                    w.option_with(reason.as_ref(), |w, reason| {
+                        w.option(reason.errno(), |w, errno| w.i32(errno));
+                        w.string(reason.text())
+                    })?;
+                }
+            }
         }
     }
     w.done()
@@ -594,6 +613,15 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
                 counts.refused = missing(r.u8()?)?;
                 counts.refused_on_path = r.u64()?;
             }
+            if version >= 4 {
+                counts.last_failed = netns::LastFailed {
+                    home: reason(&mut r)?,
+                    unshare: reason(&mut r)?,
+                    open: reason(&mut r)?,
+                    loopback: reason(&mut r)?,
+                    back: reason(&mut r)?,
+                };
+            }
             Answer::Netns(counts)
         }
         _ => {
@@ -624,6 +652,26 @@ fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
 }
 
 /// That this side speaks `version`.
+/// A step's latest reason for a failed make (version 4): an option of its errno and its text, a text past
+/// [`netns::MAX_REASON`] bytes refused rather than cut, so what is read is what was written.
+fn reason(r: &mut Reader<'_>) -> Result<Option<netns::Reason>, Fault> {
+    r.option(|r| {
+        let errno = r.option(Reader::i32)?;
+        let text = r.string("a failed make's reason")?;
+        if text.len() > netns::MAX_REASON {
+            return Err(Fault::value(
+                "a failed make's reason",
+                format!(
+                    "{} bytes is over the {}-byte bound",
+                    text.len(),
+                    netns::MAX_REASON
+                ),
+            ));
+        }
+        Ok(netns::Reason::new(errno, &text))
+    })
+}
+
 /// What a node lacks, from its byte in the network namespace counts (version 3): nothing, or what its
 /// bits name; a bit no version defines is refused.
 fn missing(bits: u8) -> Result<Option<netns::Missing>, Fault> {

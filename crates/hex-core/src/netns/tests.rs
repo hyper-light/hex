@@ -21,8 +21,8 @@ enum Event {
     Take,
     /// The refill thread hands in a namespace it made.
     Made,
-    /// The refill thread's make failed at a step.
-    Failed(Step),
+    /// The refill thread's make failed at a step, with an errno.
+    Failed(Step, i32),
     /// A create the pool can't serve makes its namespace on the path.
     OnPath,
     /// The node shuts the pool down.
@@ -132,20 +132,24 @@ fn play(bound: usize, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                 };
                 prop_assert_eq!(pool.made(id), want);
             }
-            Event::Failed(step) => {
+            Event::Failed(step, errno) => {
                 if oracle.wanted() > 0 {
                     seen.stopped_asking += 1;
                 }
-                pool.failed(*step);
+                let reason = Reason::new(Some(*errno), &format!("make {errno}"));
+                pool.failed(*step, reason.clone());
                 oracle.counts.failed += 1;
                 let by = &mut oracle.counts.failed_by;
-                match step {
-                    Step::Home => by.home += 1,
-                    Step::Unshare => by.unshare += 1,
-                    Step::Open => by.open += 1,
-                    Step::Loopback => by.loopback += 1,
-                    Step::Back => by.back += 1,
-                }
+                let last = &mut oracle.counts.last_failed;
+                let (n, kept) = match step {
+                    Step::Home => (&mut by.home, &mut last.home),
+                    Step::Unshare => (&mut by.unshare, &mut last.unshare),
+                    Step::Open => (&mut by.open, &mut last.open),
+                    Step::Loopback => (&mut by.loopback, &mut last.loopback),
+                    Step::Back => (&mut by.back, &mut last.back),
+                };
+                *n += 1;
+                *kept = Some(reason);
                 oracle.asking = false;
             }
             Event::OnPath => {
@@ -188,7 +192,7 @@ fn play(bound: usize, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
         prop_assert_eq!(pool.wanted(), oracle.wanted());
         prop_assert_eq!(pool.is_shut_down(), !oracle.open);
         let counts = pool.counts();
-        prop_assert_eq!(counts, oracle.counts);
+        prop_assert_eq!(&counts, &oracle.counts);
         prop_assert_eq!(
             counts.made_ahead,
             counts.taken + pool.held() as u64 + counts.discarded
@@ -209,14 +213,17 @@ fn event() -> impl Strategy<Value = Event> {
     prop_oneof![
         8 => Just(Event::Take),
         8 => Just(Event::Made),
-        2 => prop_oneof![
-            Just(Step::Home),
-            Just(Step::Unshare),
-            Just(Step::Open),
-            Just(Step::Loopback),
-            Just(Step::Back),
-        ]
-        .prop_map(Event::Failed),
+        2 => (
+            prop_oneof![
+                Just(Step::Home),
+                Just(Step::Unshare),
+                Just(Step::Open),
+                Just(Step::Loopback),
+                Just(Step::Back),
+            ],
+            1i32..140
+        )
+            .prop_map(|(step, errno)| Event::Failed(step, errno)),
         2 => Just(Event::OnPath),
         1 => Just(Event::ShutDown),
     ]
@@ -295,7 +302,7 @@ fn a_take_from_an_empty_pool_is_made_on_the_path_and_counted() {
 fn a_create_the_pool_cant_serve_is_counted_on_the_path_and_takes_nothing() {
     let mut pool = Pool::new(2);
     pool.made(1).unwrap();
-    pool.failed(Step::Unshare);
+    pool.failed(Step::Unshare, Reason::new(Some(1), "unshare failed"));
     assert_eq!(pool.on_path(), Ok(()));
     assert_eq!(pool.held(), 1);
     assert_eq!(pool.wanted(), 0);
@@ -308,6 +315,10 @@ fn a_create_the_pool_cant_serve_is_counted_on_the_path_and_takes_nothing() {
             failed_by: FailedBy {
                 unshare: 1,
                 ..FailedBy::default()
+            },
+            last_failed: LastFailed {
+                unshare: Some(Reason::new(Some(1), "unshare failed")),
+                ..LastFailed::default()
             },
             ..Counts::default()
         }
@@ -371,7 +382,7 @@ fn a_failed_make_stops_the_asking_until_the_next_take() {
     assert_eq!(pool.wanted(), 3);
     pool.made(1).unwrap();
     assert_eq!(pool.wanted(), 2);
-    pool.failed(Step::Unshare);
+    pool.failed(Step::Unshare, Reason::new(Some(1), "unshare failed"));
     assert_eq!(pool.wanted(), 0);
     pool.made(2).unwrap();
     assert_eq!(pool.wanted(), 0);
@@ -394,7 +405,7 @@ fn each_failed_make_is_counted_by_the_step_that_failed() {
         Step::Loopback,
         Step::Back,
     ] {
-        pool.failed(step);
+        pool.failed(step, Reason::new(None, "failed"));
     }
     let counts = pool.counts();
     assert_eq!(counts.failed, 6);
@@ -408,6 +419,50 @@ fn each_failed_make_is_counted_by_the_step_that_failed() {
             back: 1,
         }
     );
+}
+
+/// HEX-NETNS-14: the latest reason a make failed for is kept at each step, errno and text, one a step, so the
+/// OS error isn't dropped once counted (CLAUDE.md §3); a later failure at a step replaces its reason, and a
+/// step that never failed keeps none. Do: fail the unshare with EPERM, then with ENOSPC, and the loopback with
+/// no errno. Expect: the unshare's reason is ENOSPC's, the loopback's has no errno, the rest none.
+#[test]
+fn the_latest_reason_is_kept_at_each_step() {
+    let mut pool = Pool::<u64>::new(2);
+    pool.failed(Step::Unshare, Reason::new(Some(1), "unshare failed: EPERM"));
+    pool.failed(
+        Step::Unshare,
+        Reason::new(Some(28), "unshare failed: ENOSPC"),
+    );
+    pool.failed(Step::Loopback, Reason::new(None, "not an ack"));
+    let last = pool.counts().last_failed;
+    assert_eq!(
+        last,
+        LastFailed {
+            unshare: Some(Reason::new(Some(28), "unshare failed: ENOSPC")),
+            loopback: Some(Reason::new(None, "not an ack")),
+            ..LastFailed::default()
+        }
+    );
+    assert_eq!(
+        last.unshare.unwrap().to_string(),
+        "errno 28: unshare failed: ENOSPC"
+    );
+    assert_eq!(last.loopback.unwrap().to_string(), "not an ack");
+}
+
+/// HEX-NETNS-14: a reason's text is cut to MAX_REASON bytes at a character boundary, the cut marked, so what a
+/// step keeps is bounded whatever the error says. Do: a text of 1,000 two-byte characters, and one of exactly
+/// the bound. Expect: the first within the bound, ending in the mark, a prefix of the text; the second whole.
+#[test]
+fn a_reasons_text_is_cut_to_its_bound() {
+    let long = "é".repeat(1_000);
+    let cut = Reason::new(Some(1), &long);
+    assert!(cut.text().len() <= MAX_REASON, "{}", cut.text().len());
+    assert!(cut.text().len() > MAX_REASON - 4);
+    assert!(long.starts_with(cut.text().strip_suffix('…').unwrap()));
+    assert_eq!(cut.errno(), Some(1));
+    let exact = "x".repeat(MAX_REASON);
+    assert_eq!(Reason::new(None, &exact).text(), exact);
 }
 
 /// HEX-NETNS-13: a pool refused for what the node lacks asks for nothing and holds nothing; every take is made
