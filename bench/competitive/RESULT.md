@@ -881,9 +881,19 @@ load 27.3 at its start, right after the timed run; µs; `probes/run_clone.md` re
 | everyone else's waits for it, over the same time | 437.4 (3.43 waits) | 2,758.3 (10.30 waits) |
 
 **`hex box run` at concurrency 32.** box_bench.py's own removal of a worker's cgroup failed with EBUSY at
-`.hexbox-run` in each round, so the CLI wrapper's throughput has no reading. Goal 7 didn't change that path:
-`box_run.rs`, `process::join_on_exec`, `sys::join_cgroup_on_exec`, `PidfdProc::of_child` and `cgroup.rs` are as
-they were at ca6dc80. It is open, outside this goal.
+`.hexbox-run` in each round, so the CLI wrapper's throughput has no reading here. Goal 7 didn't change that
+path. The cause was the driver's: it removed the cgroup as soon as wait4 reaped the call. On Linux 6.19 a
+reaped task leaves its cgroup only at its final switch (`check_box_removal.py`), so the rmdir sometimes came
+first. Fixed on `cp/t7-boxrun-ebusy` (869712d): remove_tree waits for `cgroup.events` to read `populated 0`.
+
+The throughput phase again, with that fix (run `~/.cache/hex-t7/g7/bench/out/20261104T142342Z`, 2026-11-04T14:23:42Z,
+CPUs 4-15, under the timed lock, noisy: load 37.27 at the start and 28.90 at the end; `hex` b82c7ff, sha256
+e84fe970608bb352; 3 rounds of 2,000 lifecycles, best of 3; no phase error in any round):
+
+| runs/s at 1 / 8 / 32 | `hex box run` | systemd scope | systemd service |
+|---|---|---|---|
+| best of 3 | 260 / 585 / 529 | 143 / 145 / 113 | 67 / 149 / 164 |
+| by round, at 32 | 514, 466, 529 | 106, 113, 111 | 164, 162, 149 |
 
 **timed.sh** (on fedora, `~/.cache/hex-t7/g7/timed.sh`): for each of 3 rounds,
 `OUT_DIR=… ROUND_FIRST=r PHASES="box boxseam" SEAM_BIN=<seam_box b82c7ff> bash host.sh <hex b82c7ff>`, then
