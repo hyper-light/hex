@@ -662,8 +662,8 @@ enum At {
     /// Its cgroup and its container's state directory made: the create held reading its bundle's
     /// config.json, a FIFO no one has opened.
     StateDir,
-    /// Its init cloned, waiting at the exec FIFO, and its container's state written: the create held in
-    /// its createRuntime hook.
+    /// Its init cloned and stopped before its root switch, its container's state not yet written: the
+    /// create held in its createRuntime hook, which runs there (OCI config.md:607).
     Init,
     /// In the record write that marks it ready, a durable record's (so one written to a temp file and
     /// renamed): the box made, the write held opening its temp file, a FIFO no one has opened. A
@@ -701,7 +701,7 @@ impl At {
 /// the write, leaving a torn record: no file it opens can hold it at any of these. Elsewhere it is held
 /// at a point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the
 /// kernel shows it waiting there: with the cgroup and the container's state directory made; with the
-/// init cloned and the container's state written; inside a durable record's write, opening the temp
+/// init cloned and stopped for its create-time hooks; inside a durable record's write, opening the temp
 /// file it renames; and after the create. Restarted, the agent removes the box killed mid-create by
 /// what it finds of it — a torn record it reads as unreadable, and says so — and takes back the one
 /// made, which then deletes, so at every point nothing of the box is left: no record in either place,
@@ -865,7 +865,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         });
     }
     // What the kill leaves, as the point says: a record only once the box is made, its container's
-    // state directory from the runtime's create on, its state written from its init's clone on.
+    // state directory from the runtime's create on, its state written once its init is past its hooks.
     let containers = || containers_of(&oci_root, &id);
     // A record counts as written only once it decodes whole: a crash between a non-durable record's
     // open and its write leaves a torn file, which reads as no record (At::TornRecord).
@@ -904,7 +904,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         .is_some_and(|c| c.join("state.json").exists());
     assert_eq!(
         state_written,
-        state_dir_made && at != At::StateDir,
+        state_dir_made && !matches!(at, At::StateDir | At::Init),
         "{name}: the container's state at the kill"
     );
     drop(agent);

@@ -27,6 +27,10 @@ code), none measured.
 - **startContainer**: "MUST be called before the user-specified process is executed as part of the
   `start` operation" (`:630`); its path resolves in, and it runs in, the container namespace (`:633-634`).
   The summary table says the same (`:659-661`).
+- **Status.** `creating` is "being created (step 2 in the lifecycle)"; `created` is "after step 2 …, and
+  the container process has neither exited nor executed the user-specified program" [H-2]
+  `runtime.md:19-20`. prestart, createRuntime, createContainer and startContainer are steps 3, 4, 5 and 7
+  (`:62-70`), so each sees `created`.
 - **State on stdin.** "The state of the container MUST be passed to hooks over stdin" (`:592`). The state's
   `pid`: "For hooks executed in the runtime namespace, it is the pid as seen by the runtime. For hooks
   executed in the container namespace, it is the pid as seen by the container" [H-2] `runtime.md:26-27`.
@@ -45,6 +49,7 @@ code), none measured.
   before we switch to the new root". The parent sets the cgroup, then runs prestart and createRuntime with
   `Status = creating` and the init's host pid, and replies `procHooksDone` (`process_linux.go:1017-1046`).
 - The init then `fchdir`s into the root and runs createContainer with its own `getpid()` and `creating`
+  (its parent gives prestart and createRuntime `creating` too)
   (`rootfs_linux.go:222-232`), then pivots (`:234-241`). Read-only and masked paths come after the pivot
   (`standard_init_linux.go:139`, `:144`).
 - The state the init's hooks see is sent to it only when it has createContainer or startContainer hooks
@@ -57,8 +62,11 @@ code), none measured.
 ## 3. crun 1.30.1
 
 - createContainer runs in the init "after the mounts are set up but before the pivot_root"; when it is
-  present crun takes the deferred-pivot path ([H-4] `container.c:1063-1079`). Like runc's, its createRuntime
-  hooks are the parent's.
+  present crun takes the deferred-pivot path ([H-4] `container.c:1063-1079`), given `created` (`:1074`).
+  Like runc's, its prestart and createRuntime hooks are the parent's, given `created` (`:2664`, `:2672`).
+  Its startContainer hooks are given `starting` (`:1377`), a status the spec doesn't name.
+- runtime-tools bd3b0bd's `hooks_stdin` requires the prestart hook's status to be `created`
+  (`validation/hooks_stdin/hooks_stdin.go:54-56`).
 - The init reads the exec FIFO (`:1309-1329`) and then runs startContainer (`:1369-1384`), so start has
   already been answered, as in runc.
 - crun turns off its `OPEN_TREE_NAMESPACE` path when create-time hooks exist (`:2250-2252` gathers the
@@ -72,7 +80,8 @@ code), none measured.
   ran them after the switch, with the init already waiting at the FIFO, which `config.md:607` doesn't
   allow.
 - A container-namespace hook is given the pid the container sees (`runtime.md:27`), which only the init
-  knows, so the init fills it in.
+  knows, so the init fills it in. Every one of these hooks is given `created`, as crun gives and
+  runtime-tools checks; runc's `creating` contradicts `runtime.md:19-20`.
 - startContainer can run before the FIFO byte: once the init's write-open of the FIFO returns, start has
   been called. If the byte comes only after the hooks, the spec's order (startContainer, program,
   poststart) holds, and a hook failure can be reported by start itself. Neither runc nor crun does this.

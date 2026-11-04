@@ -18,6 +18,7 @@ pub mod devmount;
 pub mod devshare;
 pub mod escape;
 pub mod exec;
+pub mod hooks;
 pub mod init;
 pub mod inroot;
 pub mod mount;

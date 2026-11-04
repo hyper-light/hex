@@ -491,6 +491,57 @@ overlayfs.
 runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
 is a security posture for the person to choose.
 
+## Decision: createContainer and startContainer hooks run in the container, at the spec's points (AC-T7.1.4)
+
+**What.** Before this decision, the runtime ran prestart, createRuntime, poststart and poststop, and parsed but
+never ran createContainer or startContainer: a silent drop (CLAUDE.md §3). Now every create- and
+start-time hook runs where the spec puts it:
+
+- The init makes its mounts and `/dev`, then stops before its root switch and says `H` on the sync pipe.
+  The runtime runs prestart, then createRuntime, in its own namespaces, given `created` and the init's
+  pid as the runtime sees it. Then it hands the init that state on the map pipe as a frame (a 4-byte
+  length, then the JSON; at most twice the config's bound). The init runs the createContainer hooks
+  itself, in its namespaces, given `created` and the pid it sees. Then it applies the masks and
+  read-only paths and switches root, as runc does.
+- At `start`, once the init's open of the exec FIFO returns, the init runs the startContainer hooks inside
+  the root, given `created`. Only then does it write the FIFO's byte and exec. A failing hook writes `h`
+  and the reason in place of the byte, and the init ends. `start` reads that without taking it
+  (`tee(2)`, so a second start at once sees what the first did) and fails with the reason. `start` waits
+  its own patience plus the hooks' timeouts, which create records in the state (`startContainer`, Hex's
+  own field, append-only).
+- A spec with any of these four hook lists takes the classic path (`ClassicReason::Hooks` as root,
+  `Rootless` rootless). The pruned init holds no map pipe; one handed such a spec anyway is refused.
+- A hook's path must be absolute and its timeout above zero, or the spec is refused by name. Each hook
+  holds only its stdio (the `sweep_on_exec` sweep). Its stdin is written without blocking, so a hook that
+  doesn't read it can't hold the runtime past its timeout.
+
+**Why.** createContainer "MUST be called … before the `pivot_root`" and "after the `createRuntime` hooks",
+and createRuntime also before the pivot (config.md:607, :618-619), so createRuntime moved too: Hex had
+run it after the switch. A container-namespace hook's pid is "the pid as seen by the container"
+(runtime.md:27), which only the init knows. Every create- and start-time hook is given `created`: the
+four lists are lifecycle steps 3 to 7, "after step 2", where `created` begins (runtime.md:19-20). crun
+gives the same (container.c:1074, :2664, :2672), and runtime-tools' `hooks_stdin` checks it for prestart.
+runc gives `creating`, and so did a first cut of this change, which failed `hooks_stdin`. The lifecycle orders startContainer, then the program, then
+poststart, and a failed startContainer hook makes the runtime "generate an error" (runtime.md:69-73).
+runc and crun answer `start` before their startContainer hooks run (runc v1.5.2
+`standard_init_linux.go:269`, `:283-289`; crun 1.30.1 `container.c:1309-1384`). So their poststart can
+run before startContainer ends, and a startContainer failure surfaces after `start` has already
+succeeded. Writing the byte after the hooks keeps the spec's order and reports the failure from `start`.
+Sources: `docs/research/runtime/oci-hooks.md`.
+
+**Evidence.** `crates/hex-cli/tests/oci_box.rs`,
+`create_and_start_container_hooks_run_in_the_containers_namespaces` (AC-T7.1.4, T-T7.1.4). It fails at
+the test's commit and passes after the fix, rootless (the seed's classic path) and as root (the shim).
+Each hook's namespaces equal the init's, its state and pid are as the spec says, the order holds, each
+hook holds only its stdio, a startContainer hook alone routes classic, and each failing hook fails its
+operation by name. Two `run.rs` unit tests cover the shim's `P`/`H` race, and an init that is ready
+without stopping for its hooks, which is refused. runtime-tools before and after:
+`bench/oci-validation/` (recorded with this change).
+
+**What would falsify it.** A runtime-tools test that passed before and fails after. A hook that observes
+a namespace other than the init's. A startContainer hook that finishes after its program starts. Or a
+spec with create- or start-time hooks that creates and starts without running them.
+
 ## Open (STATUS.md)
 
 - The `process` box on macOS (QoS and limits) and Windows (job objects); today a typed refusal

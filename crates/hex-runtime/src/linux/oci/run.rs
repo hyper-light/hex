@@ -23,12 +23,12 @@ use rustix::pipe::PipeFlags;
 use rustix::process::PidfdFlags;
 
 use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
-use crate::linux::oci::init;
 use crate::linux::oci::programs::{self, Programs};
 use crate::linux::oci::resources::{self, Insn, Plan};
 use crate::linux::oci::spec::{IdMapping, Resources, Spec};
 use crate::linux::oci::state::{self, Dir, State, Status};
 use crate::linux::oci::{OciError, devshare, sys};
+use crate::linux::oci::{hooks, init};
 
 /// The controllers a container's cgroup gets, beyond those its resources need, where its parent has
 /// them: what Hex's boxes get ([`hex_core::cgroup::CONTROLLERS`]), so a container's memory, CPU, IO
@@ -685,7 +685,7 @@ impl Runtime {
 
         let mut container_pid = None;
         let outcome = self
-            .handshake(id, spec, sync_r, map_w, &mut container_pid)
+            .handshake(making, spec, sync_r, map_w, &mut container_pid)
             .and_then(|pid| {
                 // The container is blocked at the exec FIFO, so its start time is its own.
                 let start_time = state::start_time(pid).ok_or_else(|| {
@@ -831,10 +831,9 @@ impl Runtime {
         if spec.makes_namespace("user") {
             return Err(ClassicReason::UserNamespace);
         }
-        if !spec.hooks.prestart.is_empty()
-            || !spec.hooks.create_runtime.is_empty()
-            || !spec.hooks.create_container.is_empty()
-        {
+        // Create-time hooks stop the init before its root switch, and the init runs createContainer and
+        // startContainer itself, over the map pipe the pruned init doesn't hold.
+        if spec.hooks.sync_init() {
             return Err(ClassicReason::Hooks);
         }
         let plan =
@@ -967,7 +966,7 @@ impl Runtime {
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
         // the init's ends once it had cloned, so the init alone holds them now.
         let outcome = self
-            .handshake_seed(&sync_r, &map_w, pid, spec)
+            .handshake_seed(making, &sync_r, &map_w, pid, spec)
             .and_then(|()| {
                 // The init is blocked at the exec FIFO, so its start time is its own.
                 state::start_time(pid).ok_or_else(|| {
@@ -988,9 +987,8 @@ impl Runtime {
         }
     }
 
-    /// Writes the `created` state for a container whose init is at the exec FIFO, its pid file (if asked)
-    /// and its create-time hooks: the tail both the shim and the seed paths share. Returns the state as
-    /// written.
+    /// Writes the `created` state for a container whose init is at the exec FIFO, and its pid file (if
+    /// asked): the tail both the shim and the seed paths share. Returns the state as written.
     fn record_created(
         &self,
         making: &Making<'_>,
@@ -1007,24 +1005,29 @@ impl Runtime {
         state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
         state.poststart = Some(!spec.hooks.poststart.is_empty());
         state.pid_namespace = Some(spec.makes_namespace("pid"));
+        if !spec.hooks.start_container.is_empty() {
+            state.start_container = Some(hooks::budget(
+                "startContainer",
+                &spec.hooks.start_container,
+            )?);
+        }
         making.dir.put(&state)?;
         if let Some(path) = making.pid_file {
             std::fs::write(path, format!("{pid}\n"))
                 .map_err(|e| OciError::os("writing the pid file", e))?;
         }
-        // The create-time hooks run in the runtime's namespace while the container waits at the exec
-        // FIFO (OCI §Lifecycle): prestart (deprecated) then createRuntime.
-        run_hooks(&spec.hooks.prestart, &state)?;
-        run_hooks(&spec.hooks.create_runtime, &state)?;
+        // The create-time hooks ran while the init waited before its root switch ([`answer_hooks`]).
         Ok(state)
     }
 
     /// The sync handshake for a create through a seed: the init writes the sync pipe, as the shim's child
     /// does, but its pid came back from the seed, so the protocol carries no pid line. A `U` asks for the
     /// user namespace's maps, which the runtime writes against `pid` (the init's) and acks on the map
-    /// pipe; `R` is the ready signal; `E` a setup failure. Returns once the init is ready, or the error.
+    /// pipe; `H` stops the init before its root switch for the create-time hooks ([`answer_hooks`]); `R`
+    /// is the ready signal; `E` a setup failure. Returns once the init is ready, or the error.
     fn handshake_seed(
         &self,
+        making: &Making<'_>,
         sync_r: &OwnedFd,
         map_w: &OwnedFd,
         pid: i32,
@@ -1040,6 +1043,7 @@ impl Runtime {
                 .try_clone()
                 .map_err(|e| OciError::os("duplicating the map pipe", e))?,
         );
+        let mut hooked = false;
         let mut line = String::new();
         loop {
             line.clear();
@@ -1059,6 +1063,11 @@ impl Runtime {
                         .write_all(&[1])
                         .map_err(|e| OciError::os("acking the maps", e))?;
                 }
+                Some('H') => {
+                    answer_hooks(making, spec, pid, &mut map_w)?;
+                    hooked = true;
+                }
+                Some('R') if spec.hooks.sync_init() && !hooked => return Err(unhooked(making.id)),
                 Some('R') => return Ok(()),
                 Some('E') => {
                     return Err(OciError::Os {
@@ -1072,12 +1081,13 @@ impl Runtime {
         }
     }
 
-    /// Reads the sync pipe: writes the user-namespace maps when asked, then returns the container
-    /// pid once the init has sent both it and its ready signal. `container_pid` holds the pid as
+    /// Reads the sync pipe: writes the user-namespace maps when asked, runs the create-time hooks when
+    /// the init stops for them ([`answer_hooks`]), then returns the container pid once the init has sent
+    /// both it and its ready signal. `container_pid` holds the pid as
     /// soon as it is known, so a create that fails can still end the container.
     fn handshake(
         &self,
-        id: &str,
+        making: &Making<'_>,
         spec: &Spec,
         sync_r: OwnedFd,
         map_w: OwnedFd,
@@ -1087,12 +1097,16 @@ impl Runtime {
         let mut map_w = std::fs::File::from(map_w);
         read_sync(
             &mut reader,
-            id,
-            |pid| {
-                write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
-                map_w
-                    .write_all(&[1])
-                    .map_err(|e| OciError::os("acking the maps", e))
+            making.id,
+            spec.hooks.sync_init(),
+            |ask| match ask {
+                Ask::Maps(pid) => {
+                    write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
+                    map_w
+                        .write_all(&[1])
+                        .map_err(|e| OciError::os("acking the maps", e))
+                }
+                Ask::Hooks(pid) => answer_hooks(making, spec, pid, &mut map_w),
             },
             container_pid,
         )
@@ -1143,14 +1157,26 @@ impl Runtime {
         // The init writes one byte as it takes the start. An init that ended without it (killed, or
         // OOM'd, before or after it opened its end) is stopped, not running: refused, never reported
         // running (CLAUDE.md §3); the FIFO stays, and the init's end says stopped.
-        match wait_for_byte(&fifo, &init, START_PATIENCE)? {
+        // The init runs its startContainer hooks before it writes, so the start waits for them too.
+        let patience = state
+            .start_container
+            .and_then(|secs| START_PATIENCE.checked_add(Duration::from_secs(secs)))
+            .unwrap_or(START_PATIENCE);
+        match wait_for_byte(&fifo, &init, patience)? {
             Took::Byte => {}
             Took::End => return Err(stopped()),
             Took::Nothing => {
                 return Err(OciError::Broken(format!(
-                    "container {id} did not take the start within {START_PATIENCE:?}"
+                    "container {id} did not take the start within {patience:?}"
                 )));
             }
+        }
+        // A startContainer hook that failed wrote why in place of the byte, and its init ends: the start
+        // fails, naming it (runtime.md:69-70). Read without taking it, as another start may be waiting.
+        if state.start_container.is_some()
+            && let Some(why) = hooks::peek_start(fifo.as_fd())?
+        {
+            return Err(OciError::Os { op: "start", why });
         }
         // From here the FIFO's absence is what says the container runs. Of two starts at once, both
         // see the byte, and the one whose removal finds the FIFO gone finds the container running.
@@ -1168,7 +1194,7 @@ impl Runtime {
         {
             let mut running = state;
             running.status = Status::Running;
-            run_hooks(&hooks.poststart, &running)?;
+            hooks::run("poststart hook", &hooks.poststart, &running)?;
         }
         Ok(())
     }
@@ -1297,7 +1323,7 @@ impl Runtime {
         if let Some(hooks) = load_hooks(&state) {
             let mut stopped = state.clone();
             stopped.status = Status::Stopped;
-            run_hooks(&hooks.poststop, &stopped)?;
+            hooks::run("poststop hook", &hooks.poststop, &stopped)?;
         }
         dir.remove()
     }
@@ -1723,13 +1749,26 @@ fn signal_cgroup(cg: &BoxCgroup, sig: i32) -> Result<(), OciError> {
 fn read_sync(
     reader: &mut impl BufRead,
     id: &str,
-    mut on_map: impl FnMut(i32) -> Result<(), OciError>,
+    hooks: bool,
+    mut on: impl FnMut(Ask) -> Result<(), OciError>,
     container_pid: &mut Option<i32>,
 ) -> Result<i32, OciError> {
     let mut ready = false;
+    // The shim's `P` and its child's `H` race on the pipe, so the hooks wait for the pid either way.
+    let (mut asked, mut answered) = (false, false);
     let mut line = String::new();
     loop {
+        if asked
+            && !answered
+            && let Some(pid) = *container_pid
+        {
+            on(Ask::Hooks(pid))?;
+            answered = true;
+        }
         if ready && let Some(pid) = *container_pid {
+            if hooks && !answered {
+                return Err(unhooked(id));
+            }
             return Ok(pid);
         }
         line.clear();
@@ -1755,8 +1794,9 @@ fn read_sync(
                 let pid: i32 = rest
                     .parse()
                     .map_err(|_| OciError::Broken(format!("bad map request {msg:?}")))?;
-                on_map(pid)?;
+                on(Ask::Maps(pid))?;
             }
+            Some('H') => asked = true,
             Some('P') => {
                 *container_pid = Some(
                     rest.parse()
@@ -1776,96 +1816,49 @@ fn read_sync(
     }
 }
 
+/// What the init asks of the runtime on the sync pipe, with the pid the runtime knows it by.
+enum Ask {
+    /// A user namespace's id maps (`U`).
+    Maps(i32),
+    /// The create-time hooks (`H`), the init stopped before its root switch.
+    Hooks(i32),
+}
+
+/// The init's `H`: it stops before its root switch, its mounts made, for the runtime to run the prestart
+/// then the createRuntime hooks in the runtime's namespace, given `created` (lifecycle steps 3 and 4 come
+/// after step 2, runtime.md:20, :62-65; crun's and runtime-tools' reading) and the init's pid as the
+/// runtime sees it (config.md:598, :607-610; runtime.md:26). Then the init is handed that state, for the
+/// createContainer hooks it runs before the switch and the startContainer hooks it runs at `start`, each
+/// given the pid the container sees (runtime.md:27; docs/research/runtime/oci-hooks.md). A hook that fails
+/// fails the create, which ends the init.
+fn answer_hooks(
+    making: &Making<'_>,
+    spec: &Spec,
+    pid: i32,
+    map_w: &mut impl Write,
+) -> Result<(), OciError> {
+    let mut state = State::new(making.id, &making.bundle.to_string_lossy());
+    state.status = Status::Created;
+    state.pid = pid;
+    state.annotations = spec.annotations.clone();
+    hooks::run("prestart hook", &spec.hooks.prestart, &state)?;
+    hooks::run("createRuntime hook", &spec.hooks.create_runtime, &state)?;
+    hooks::send_state(map_w, &state)
+}
+
+/// An init that said it was ready without stopping for the create-time hooks its spec names: refused,
+/// never a create whose hooks didn't run (CLAUDE.md §3).
+fn unhooked(id: &str) -> OciError {
+    OciError::Broken(format!(
+        "the container init for {id} was ready without stopping for its create-time hooks"
+    ))
+}
+
 /// The hooks from a container's bundle (`state.bundle/config.json`); `None` when the config can no
 /// longer be read (the bundle is gone), so `delete`/`start` still proceed.
 fn load_hooks(state: &State) -> Option<crate::linux::oci::spec::Hooks> {
     let bytes = std::fs::read(Path::new(&state.bundle).join("config.json")).ok()?;
     Spec::parse(&bytes).ok().map(|s| s.hooks)
-}
-
-/// Runs each hook in order with the container state JSON on its stdin (OCI §POSIX hooks); a hook
-/// that exits non-zero, or outlives its timeout (default [`HOOK_TIMEOUT`]), is an error.
-fn run_hooks(hooks: &[crate::linux::oci::spec::Hook], state: &State) -> Result<(), OciError> {
-    if hooks.is_empty() {
-        return Ok(());
-    }
-    let json = serde_json::to_vec(state)
-        .map_err(|e| OciError::Broken(format!("encoding state for a hook: {e}")))?;
-    for hook in hooks {
-        run_one_hook(hook, &json)?;
-    }
-    Ok(())
-}
-
-/// Longest a hook may run when it names no timeout; a bound so a stuck hook can't wedge the runtime.
-pub const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn run_one_hook(hook: &crate::linux::oci::spec::Hook, state_json: &[u8]) -> Result<(), OciError> {
-    use std::io::Write as _;
-    use std::os::unix::process::CommandExt as _;
-    let mut cmd = Command::new(&hook.path);
-    if let Some(argv0) = hook.args.first() {
-        cmd.arg0(argv0);
-        cmd.args(hook.args.get(1..).unwrap_or_default());
-    }
-    cmd.env_clear();
-    for entry in &hook.env {
-        if let Some((k, v)) = entry.split_once('=') {
-            cmd.env(k, v);
-        }
-    }
-    cmd.stdin(std::process::Stdio::piped());
-    crate::linux::sys::sweep_on_exec(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| OciError::os("starting a hook", e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(state_json);
-    }
-    let timeout = hook
-        .timeout
-        .and_then(|t| u64::try_from(t).ok())
-        .map(Duration::from_secs)
-        .unwrap_or(HOOK_TIMEOUT);
-    match wait_timeout(&mut child, timeout)? {
-        Some(status) if status.success() => Ok(()),
-        Some(status) => Err(OciError::Os {
-            op: "hook",
-            why: format!("{:?} exited {status}", hook.path),
-        }),
-        None => {
-            let _ = child.kill();
-            Err(OciError::Os {
-                op: "hook",
-                why: format!("{:?} outlived its {timeout:?} timeout", hook.path),
-            })
-        }
-    }
-}
-
-/// Waits at most `timeout` for `child`; `Ok(None)` when it is still running (a reaper thread then
-/// collects it after the kill).
-fn wait_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Result<Option<std::process::ExitStatus>, OciError> {
-    let deadline = std::time::Instant::now().checked_add(timeout);
-    loop {
-        match child
-            .try_wait()
-            .map_err(|e| OciError::os("waiting for a hook", e))?
-        {
-            Some(status) => return Ok(Some(status)),
-            None => {
-                let past = deadline.is_none_or(|d| std::time::Instant::now() >= d);
-                if past {
-                    return Ok(None);
-                }
-                // park_timeout (not the disallowed thread::sleep) yields the CPU between polls.
-                std::thread::park_timeout(Duration::from_millis(5));
-            }
-        }
-    }
 }
 
 /// Makes the exec FIFO, world-writable so a container that has dropped to a non-root user (or a
@@ -2046,18 +2039,55 @@ mod tests {
     }
 
     fn read(wire: &str) -> (Result<i32, OciError>, Option<i32>, Vec<i32>) {
-        let mut maps = Vec::new();
+        let (got, pid, maps, _) = read_hooked(wire, false);
+        (got, pid, maps)
+    }
+
+    /// `read`, for a spec with create-time hooks when `hooks` is set: also the pids the hooks were asked
+    /// for, in order.
+    fn read_hooked(
+        wire: &str,
+        hooks: bool,
+    ) -> (Result<i32, OciError>, Option<i32>, Vec<i32>, Vec<i32>) {
+        let (mut maps, mut hooked) = (Vec::new(), Vec::new());
         let mut pid = None;
         let got = read_sync(
             &mut Cursor::new(wire.as_bytes()),
             "c1",
-            |p| {
-                maps.push(p);
+            hooks,
+            |ask| {
+                match ask {
+                    Ask::Maps(p) => maps.push(p),
+                    Ask::Hooks(p) => hooked.push(p),
+                }
                 Ok(())
             },
             &mut pid,
         );
-        (got, pid, maps)
+        (got, pid, maps, hooked)
+    }
+
+    /// The create-time hooks (AC-T7.1.4; config.md:607, :619): the shim's child stops for them before
+    /// its root switch, and its `H` and the shim's `P` race on the pipe. Do: read each order. Expect: the
+    /// hooks run once, with the pid, whichever came first, before the ready signal is taken.
+    #[test]
+    fn the_hooks_run_once_with_the_pid_whichever_line_comes_first() {
+        for wire in ["H\nP42\nR\n", "P42\nH\nR\n"] {
+            let (got, _, _, hooked) = read_hooked(wire, true);
+            assert_eq!((got.unwrap(), hooked), (42, vec![42]), "{wire:?}");
+        }
+    }
+
+    /// CLAUDE.md §3: a create whose spec names create-time hooks is never reported made without them. Do:
+    /// an init that says it's ready without stopping for them. Expect: the create refused, by type.
+    #[test]
+    fn an_init_ready_without_stopping_for_its_hooks_is_refused() {
+        let (got, _, _, hooked) = read_hooked("P42\nR\n", true);
+        assert!(
+            matches!(&got, Err(OciError::Broken(why)) if why.contains("create-time hooks")),
+            "{got:?}"
+        );
+        assert!(hooked.is_empty());
     }
 
     #[test]
@@ -2546,7 +2576,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             env: Vec::new(),
             timeout: None,
         };
-        run_hooks(&[hook], &State::new("c1", "/bundle")).unwrap();
+        hooks::run("a hook", &[hook], &State::new("c1", "/bundle")).unwrap();
         let held = std::fs::read_to_string(&report).unwrap();
         assert!(held.lines().count() >= 3, "its stdio: {held}");
         assert!(!held.contains("stray"), "the hook inherited it: {held}");

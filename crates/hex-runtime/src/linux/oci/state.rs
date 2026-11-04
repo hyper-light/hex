@@ -68,6 +68,12 @@ pub struct State {
     /// 6). Absent in state written before, which reads as no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_namespace: Option<bool>,
+    /// The seconds the bundle's startContainer hooks may take together, recorded at create where it names
+    /// any: Hex's own field, so `start` waits for them as well as for the init, and reads what the init
+    /// wrote on the exec FIFO. Absent where it names none, and in state written before, whose init ran no
+    /// startContainer hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_container: Option<u64>,
 }
 
 impl State {
@@ -83,6 +89,7 @@ impl State {
             start_time: None,
             poststart: None,
             pid_namespace: None,
+            start_container: None,
         }
     }
 
