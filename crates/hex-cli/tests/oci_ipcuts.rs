@@ -11,7 +11,7 @@
 //!   its `/dev/mqueue` mounts shows its ipc namespace is its user namespace's: mounting needs `CAP_SYS_ADMIN` in the
 //!   user namespace that owns the ipc namespace, which a pair the node made would refuse it, as `setns` would.
 //! - HEX-IPCUTS-6, rootless: a node makes none, a bound above 0 is refused, and its container is counted on the path.
-
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
