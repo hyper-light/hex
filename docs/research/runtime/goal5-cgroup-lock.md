@@ -440,6 +440,13 @@ superblocks' teardown run 23 found spinning (`list_lru_destroy < deactivate_lock
   down then and recovery finds none (T-T7.1.2).
 - **What would falsify it:** a lifecycle at 32 no shorter on its path, its p50 or p99 at 1 or 32 higher, or a closer
   whose lag grows without bound.
+- **What run 17 found: falsified as built** (`reuse_pass.md`). On 4-15 at the installed limit, 32's p50 rose from
+  3.62 to 3.90 ms and its p99 from 9.36 to 11.04, and the ratio fell in all three readings. The closer let go of 33 to
+  58% of the namespaces; the rest closed inline in the supervisor's thread. The grace period is why one closer can't
+  keep up. `synchronize_rcu_expedited` lets callers that wait at once share one grace period: one another task
+  completed satisfies the rest (`exp_funnel_lock`, `kernel/rcu/tree_exp.h:295-301`, `:955-957`, retrieved
+  2026-11-04, sha256 1fb29bc537c6b048). So inits exiting together waited out their grace periods side by side, where
+  one closer waits them one after another: the loop that function's comment advises against (`:912-915`).
 
 ## The containers' state directories under one parent (Linux v6.19, read 2026-11-04)
 
