@@ -1473,14 +1473,22 @@ mod tests {
     /// message is refused, typed, never read on; a request that can't become a process is refused.
     #[test]
     fn a_hostile_launcher_message_is_refused() {
-        let big = vec![b'x'; MAX_WIRE + 1];
-        assert!(matches!(
-            decode::<Launch>(&big),
+        // A well-formed message past the bound, so the bound (not the parser) is what refuses it.
+        let big = serde_json::to_vec(&Launch {
+            job: 1,
+            stdio: [2, 3, 4],
+            command_line: "y".repeat(MAX_WIRE),
+            env: vec![],
+            cwd: None,
+        })
+        .unwrap();
+        match decode::<Launch>(&big) {
             Err(Refusal::Invalid {
                 what: "launcher message",
-                ..
-            })
-        ));
+                why,
+            }) => assert!(why.contains(&format!("past {MAX_WIRE}")), "{why}"),
+            other => panic!("an oversized message: {other:?}"),
+        }
         assert!(decode::<Launched>(b"{\"full\":null}\n{}\n").is_err());
         assert!(decode::<Launched>(b"not json").is_err());
         let mut l = Launch {
