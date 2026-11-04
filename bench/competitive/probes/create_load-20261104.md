@@ -49,3 +49,25 @@ integration agent has it. 5bc0a2c doesn't touch the record's writes.
 
 **Not done.** No fix, as the lead asked. The (c) runs (exec_ab) ran with exec_ab.sh's hard-coded `--memory=40g`
 and no OOM score, not the 8g cap; the runs here honor BENCH_MEMORY and BENCH_OOM.
+
+## On the integrated tree, through exec_ab's own lifecycle (the lead's follow-on)
+
+The lead asked to reproduce the 19 ms on cp/t7-g5x-integrate 891245f with exec_ab's lifecycle (each create timed alone,
+starts, execs and deletes in the same cycle, host.sh's pass of record's shape). The breakdown's `seam` row above is that
+same seam_oci lifecycle phase, so the cycle's shape isn't what differs; `/run` is. Two runs of exec_ab.sh on 891245f's
+static release binaries (hex f35641592e47972d, seam_oci 85fefcccf5e5b641), back to back, each under the timed lock; unit
+hex-hooks-execab-20261104T161801Z through hex-slot. Scratch copies of 891245f's exec_ab.sh: (X) its `--memory=40g`
+replaced by BENCH_MEMORY/BENCH_OOM (8g, 1000), nothing else; (Y) the same plus `--tmpfs /run:rw,exec,nosuid,size=1g`.
+N=1000 WARMUP=100 ROUNDS=3, CPUs 4-15, root, every round's errors {}. Pooled, p50 / p99 (ms):
+
+| run | load, start → end | Hex create | Hex start | Hex exec | Hex delete | libcrun create |
+|---|---|---|---|---|---|---|
+| (X) state on the overlay, exec-ab-20261104T161801Z | 25.6 → 47.1 | 17.082 / 37.292 | 1.001 / 2.237 | 1.497 / 2.969 | 18.724 / 39.181 | 13.825 / 22.003 |
+| (Y) `/run` a tmpfs, exec-ab-20261104T162449Z | 75.5 → 59.9 | 2.005 / 3.959 | 0.902 / 2.591 | 1.314 / 2.899 | 2.444 / 5.242 | 13.776 / 41.646 |
+
+The tmpfs alone takes 15 ms off create, and off delete, whose record removal syncs too, at a higher load. Start and exec
+don't move. libcrun's create in these rounds is 13.8 ms (its delete 10.3) at load 25-75, against 1.7-2.1 in the
+breakdown at load 18-24. That is the host's load on libcrun's own path, so in (Y) Hex's create is 0.15x libcrun's.
+Hex's 2.0 ms in (Y), against 0.44 in the breakdown at load 24, is the host's load at 52-75; how much of that is Hex's
+own sensitivity would need a lower-load pair, and fedora has been 16-75 all day. create_serial's off-CPU and lock
+modes weren't needed for the 15 ms: the breakdown's parts 22 and 24 name the two fsyncs.
