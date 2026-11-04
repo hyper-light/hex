@@ -6,7 +6,7 @@
   create_breakdown.py summarize <run dir>
   create_breakdown.py switch <trace file> <trace stats> [seam result json] [switch|mounts]
   create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h> [pruned|classic]
-  create_breakdown.py test   (selftest: the record-write cutter over synthetic traces)
+  create_breakdown.py test   (selftest: the record-write and chosen-cgroup cutters over synthetic traces)
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
 (exec_breakdown.py's).
@@ -137,6 +137,23 @@ ONCE_PARTS = [
 ] + CREATE_PARTS[7:13] + SEED_PARTS[13:23] + [RECORD_ENCODED, TEMP_MADE] + CREATE_PARTS[30:]
 # The same on the pruned-seed path (goal 5 plan step 2), its seed and root parts the pruned path's.
 PRUNED_ONCE_PARTS = ONCE_PARTS[:8] + PRUNED_SEED_PARTS[13:23] + ONCE_PARTS[18:]
+# The record-once parts where the node's owner chooses the box's cgroup once the runtime has read its spec (goal 5
+# extended step 6: node.rs create_oci's Choice, oci/run.rs Cgroup::Chosen): the state directory and the exec FIFO are
+# made first, then the cgroup is chosen, an idle one of the owner's read clean and handed on (no mkdir, its bounds
+# written only where they differ) or a fresh one made (a slot's mkdirat, `.<n>`, or the box's own). The same number of
+# parts as ONCE_PARTS, so each run's parts line up; where a cgroup is handed on, the made and bounds parts are empty.
+CHOSEN_PARTS = [
+    ONCE_PARTS[0],
+    ("a watch slot reserved; the owner's cgroup and network choosers made", OWN),
+    ("the container's state directory made; config.json read and parsed; its device policy planned", OWN),
+    ("the exec FIFO made; the cgroup chosen: an idle one of its owner's read clean and handed on, or a fresh one named",
+     CGROUP),
+    ("a fresh cgroup made (kernel); none where one was handed on", CGROUP),
+    ("a fresh cgroup's bounds written; the device program's instructions made", CGROUP),
+] + ONCE_PARTS[6:]
+PRUNED_CHOSEN_PARTS = CHOSEN_PARTS[:8] + PRUNED_SEED_PARTS[13:23] + CHOSEN_PARTS[18:]
+# The part lists whose record is written once (goal 5 extended step 5), which summarize's bookkeeping reads.
+ONCE_LISTS = (ONCE_PARTS, PRUNED_ONCE_PARTS, CHOSEN_PARTS, PRUNED_CHOSEN_PARTS)
 # The node's bookkeeping, goal 5 extended step 5's first measure: the record's writes and the container's state
 # written, and read back where it is, as run 4 cut them (its parts 2-6 and 23-29: the record written twice, the state
 # written and read back), bookkeeping_of.
@@ -158,7 +175,8 @@ def cgroup_made_of(parts):
     """The cgroup's making, which a pool made ahead would take off the path, its bounds still written at the take
     (plan step 5)."""
     return [k for k, (n, _) in enumerate(parts) if n in ("the box root listed, its boxes counted",
-                                                         ONCE_PARTS[1][0], "the cgroup made (kernel)")]
+                                                         ONCE_PARTS[1][0], "the cgroup made (kernel)",
+                                                         CHOSEN_PARTS[4][0])]
 
 
 def bookkeeping_of(parts):
@@ -258,13 +276,58 @@ def record_write_cuts(c, ev, bench, cid, n, split=False):
         c.at += [terminal] * 4
 
 
-def create_cuts(ev, bench, cid, seeded=False, pruned=False, once=False):
+SLOT = re.compile(r"\.(0|[1-9][0-9]*)")
+
+
+def chosen_cuts(c, ev, bench, cid):
+    """A chosen cgroup's cuts (CHOSEN_PARTS[1:8]), appended to `c`: the state directory's mkdir, the exec FIFO's
+    mknod, a fresh cgroup's mkdir and its return (a slot's, named `.<n>` under the oci boxes' root as hex_core::reuse
+    names it, or the box's own), then the device program's load and attach as on the other paths. A cgroup handed on
+    from the owner's earlier box makes no mkdir: its made part is empty, cut where the program's first call or the
+    create's first pipe starts, and its choice (the idle cgroup's files read, bounds written where they differ) lies
+    in the part from the FIFO. `c.cgroups` records which: "fresh" or "handed on"."""
+    state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
+    held(state_dir(ev[state].path(), cid),
+         f"a chosen cgroup's create makes the container's state directory first (it made {ev[state].path()!r})")
+    fifo = c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
+    pipe = first(ev, fifo, enter(bench, "pipe2"), "the create's first pipe")
+    calls = [i for i in range(fifo, pipe) if enter(bench, "bpf")(ev[i])]
+    made = [i for i in range(fifo, pipe) if enter(bench, "mkdir", "mkdirat")(ev[i])]
+    if made:
+        held(len(made) == 1, f"a chosen cgroup is made by one mkdir, not {len(made)}")
+        name = ev[made[0]].path()
+        held(SLOT.fullmatch(name) is not None or name == cid
+             or (name.startswith("/sys/fs/cgroup/") and named(name, cid)),
+             f"the chosen cgroup's mkdir makes a slot or the box's own (it made {name!r})")
+        c.at.append(made[0])
+        c.to(exited(bench, "mkdir", "mkdirat"), "the chosen cgroup's mkdir returning")
+        c.cgroups.append("fresh")
+    else:
+        c.at += [calls[0] if calls else pipe] * 2
+        c.cgroups.append("handed on")
+    loads = [i for i in calls if arg(ev[i], "cmd") == BPF_PROG_LOAD]
+    if loads:
+        c.at.append(loads[0])
+        c.to(exited(bench, "bpf"), "the load returning")
+    else:
+        c.at += [calls[0] if calls else pipe] * 2
+    if calls:
+        held(arg(ev[calls[-1]], "cmd") == BPF_PROG_ATTACH,
+             "the agent's last bpf call before its pipes is the device program's attach")
+        c.at.append(first(ev, calls[-1], exited(bench, "bpf"), "the attach returning"))
+    else:
+        c.at.append(pipe)
+
+
+def create_cuts(ev, bench, cid, seeded=False, pruned=False, once=False, chosen=False):
     """A create's cuts on the shim path, with `seeded` on the seed path (goal 5 plan step 4), or with
     `pruned` on the pruned-seed path (goal 5 plan step 2): the init builds its root from descriptors and
     ends with chroot, so the switch is the chroot and no init pivot_root appears. With `once` as well where
-    the record is written once, last (goal 5 extended step 5)."""
+    the record is written once, last (goal 5 extended step 5), and `chosen` where the box's owner chooses its
+    cgroup once the runtime has read its spec (goal 5 extended step 6, chosen_cuts)."""
     c = eb.Cuts(ev)
     c.record_kinds = []  # "rename" (a durable record) or "close" (O_EXCL, goal 5 extended step 5), per write
+    c.cgroups = []  # "fresh" or "handed on" where the cgroup is chosen (goal 5 extended step 6)
     tmp = f".{cid}.tmp"
 
     def opened_last_before(pid, call, before, test, what):
@@ -285,35 +348,38 @@ def create_cuts(ev, bench, cid, seeded=False, pruned=False, once=False):
     else:
         c.opened(bench, "openat", 1, 0, looked, "the node's look for the box's record")
         record_write(1)
-    made = c.to(enter(bench, "mkdir", "mkdirat"), "the cgroup's mkdir")
-    # By its path, or, since the node makes a box's cgroup through the box root's directory it holds open
-    # (3ea3ffa), by its name alone under that directory: a mkdirat of the box's id.
-    cgroup = ev[made].path()
-    held((cgroup.startswith("/sys/fs/cgroup/") and named(cgroup, cid))
-         or (ev[made].name == "mkdirat" and cgroup == cid),
-         f"the first mkdir is the box's cgroup (it made {cgroup!r})")
-    c.to(exited(bench, "mkdir", "mkdirat"), "the cgroup's mkdir returning")
-    state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
-    held(state_dir(ev[state].path(), cid),
-         f"the second mkdir is the container's state directory (it made {ev[state].path()!r})")
-    fifo = c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
-    # The device program, between the FIFO and the create's first pipe: its load where the node holds no program
-    # for the box's policy, then its attach; a box whose program the oci boxes' root carries makes neither call
-    # (goal 5 extended, step 1). A part with no call is empty, cut where the next one starts.
-    pipe = first(ev, fifo, enter(bench, "pipe2"), "the create's first pipe")
-    calls = [i for i in range(fifo, pipe) if enter(bench, "bpf")(ev[i])]
-    loads = [i for i in calls if arg(ev[i], "cmd") == BPF_PROG_LOAD]
-    if loads:
-        c.at.append(loads[0])
-        c.to(exited(bench, "bpf"), "the load returning")
+    if chosen:
+        chosen_cuts(c, ev, bench, cid)
     else:
-        c.at += [calls[0] if calls else pipe] * 2
-    if calls:
-        held(arg(ev[calls[-1]], "cmd") == BPF_PROG_ATTACH,
-             "the agent's last bpf call before its pipes is the device program's attach")
-        c.at.append(first(ev, calls[-1], exited(bench, "bpf"), "the attach returning"))
-    else:
-        c.at.append(pipe)
+        made = c.to(enter(bench, "mkdir", "mkdirat"), "the cgroup's mkdir")
+        # By its path, or, since the node makes a box's cgroup through the box root's directory it holds open
+        # (3ea3ffa), by its name alone under that directory: a mkdirat of the box's id.
+        cgroup = ev[made].path()
+        held((cgroup.startswith("/sys/fs/cgroup/") and named(cgroup, cid))
+             or (ev[made].name == "mkdirat" and cgroup == cid),
+             f"the first mkdir is the box's cgroup (it made {cgroup!r})")
+        c.to(exited(bench, "mkdir", "mkdirat"), "the cgroup's mkdir returning")
+        state = c.to(enter(bench, "mkdir", "mkdirat"), "the state directory's mkdir")
+        held(state_dir(ev[state].path(), cid),
+             f"the second mkdir is the container's state directory (it made {ev[state].path()!r})")
+        fifo = c.to(enter(bench, "mknodat", "mknod"), "the exec FIFO's mknod")
+        # The device program, between the FIFO and the create's first pipe: its load where the node holds no program
+        # for the box's policy, then its attach; a box whose program the oci boxes' root carries makes neither call
+        # (goal 5 extended, step 1). A part with no call is empty, cut where the next one starts.
+        pipe = first(ev, fifo, enter(bench, "pipe2"), "the create's first pipe")
+        calls = [i for i in range(fifo, pipe) if enter(bench, "bpf")(ev[i])]
+        loads = [i for i in calls if arg(ev[i], "cmd") == BPF_PROG_LOAD]
+        if loads:
+            c.at.append(loads[0])
+            c.to(exited(bench, "bpf"), "the load returning")
+        else:
+            c.at += [calls[0] if calls else pipe] * 2
+        if calls:
+            held(arg(ev[calls[-1]], "cmd") == BPF_PROG_ATTACH,
+                 "the agent's last bpf call before its pipes is the device program's attach")
+            c.at.append(first(ev, calls[-1], exited(bench, "bpf"), "the attach returning"))
+        else:
+            c.at.append(pipe)
     if seeded:
         # A seed clones the init into its cgroup and the namespaces the spec makes; the init joins the network
         # namespace made ahead itself. On the classic seed path the seed opens the box's cgroup by path; on the
@@ -400,27 +466,40 @@ PRUNED_ONCE_OPS = {
     "create": (PRUNED_ONCE_PARTS,
                lambda ev, bench, cid: create_cuts(ev, bench, cid, seeded=True, pruned=True, once=True))
 }
+CHOSEN_OPS = {
+    "create": (CHOSEN_PARTS,
+               lambda ev, bench, cid: create_cuts(ev, bench, cid, seeded=True, once=True, chosen=True))
+}
+PRUNED_CHOSEN_OPS = {
+    "create": (PRUNED_CHOSEN_PARTS,
+               lambda ev, bench, cid: create_cuts(ev, bench, cid, seeded=True, pruned=True, once=True, chosen=True))
+}
 
 
 def ops_for(trace):
     """The op table for a trace: the seed path's when no create forked from the agent itself (a seed cloned its
     init, goal 5 plan step 4), else the shim path's, read from the trace's first traced create; on the seed path,
     the record-once path's when the agent renamed nothing into place before its first mkdir, the box's cgroup (goal
-    5 extended step 5)."""
+    5 extended step 5), and the chosen cgroup's when that first mkdir is the container's state directory (goal 5
+    extended step 6: an owner's box, its cgroup chosen once the runtime has read its spec)."""
     ev, _ = eb.parse(trace)
     begin = next((i for i, e in enumerate(ev) if e.kind == "mark" and e.text.split()[:3] == ["hexbd", "B", "create"]),
                  None)
     if begin is None:
         return OPS
     bench = ev[begin].pid
-    renamed, made = False, False
+    cid = ev[begin].text.split()[3]
+    renamed, made, chosen = False, False, False
     for e in ev[begin + 1:]:
         if e.kind == "mark" and e.pid == bench and e.text.split()[:2] == ["hexbd", "E"]:
             # Seeded. The pruned-seed path's init chroots and never pivot_roots (goal 5 plan step 2); the
             # classic seed path pivot_roots. Tell them apart by whether any init chroots in the trace. A record
             # renamed into place before the cgroup's mkdir is the record written twice; none, written once
             # (goal 5 extended step 5).
-            if any(x.kind == "enter" and x.name == "chroot" for x in ev):
+            pruned = any(x.kind == "enter" and x.name == "chroot" for x in ev)
+            if chosen:
+                return PRUNED_CHOSEN_OPS if pruned else CHOSEN_OPS
+            if pruned:
                 return PRUNED_SEED_OPS if renamed else PRUNED_ONCE_OPS
             return SEED_OPS if renamed else ONCE_OPS
         if e.kind == "sched" and e.name == "fork" and e.pid == bench:
@@ -428,6 +507,7 @@ def ops_for(trace):
         if e.pid == bench and not made:
             renamed |= e.kind == "exit" and e.name in RENAMES
             made = e.kind == "enter" and e.name in ("mkdir", "mkdirat")
+            chosen = made and not renamed and state_dir(e.path(), cid)
     return OPS
 
 
@@ -450,12 +530,15 @@ def check(run, prefix):
             # seam_oci traces every other timed lifecycle, the first of them included.
             if len(got) != (len(ms) + 1) // 2:
                 bad.append(f"{kind}: {len(got)} creates traced of {len(ms)} timed")
-            kinds = {}
+            kinds, cgroups = {}, {}
             for c in got:
                 for k in c.get("record_kinds", []):
                     kinds[k] = kinds.get(k, 0) + 1
+                for k in c.get("cgroups", []):
+                    cgroups[k] = cgroups.get(k, 0) + 1
             print(f"check {prefix}.{kind}: {sum('parts' in c for c in got)} of {len(got)} traced creates cut whole, "
-                  f"{unread} trace lines not read as events; record writes by kind {kinds}")
+                  f"{unread} trace lines not read as events; record writes by kind {kinds}"
+                  + (f"; chosen cgroups {cgroups}" if cgroups else ""))
     for b in bad:
         print(f"check {prefix}: {b}")
     return 1 if bad else 0
@@ -782,7 +865,7 @@ def summarize(run):
     # Goal 5 extended step 5: the node's bookkeeping (the container's state written, the record's one write) against
     # run 4's, and a record write's filesystem work, each create's own (its temp file made, written, closed, renamed
     # and, where it must outlive the host, synced).
-    if whole and spec is ONCE_PARTS:
+    if whole and any(spec is p for p in ONCE_LISTS):
         kept = bookkeeping_of(spec)
         fs_parts = named_parts(spec, *RECORD_FS)
         bookkeeping = sum(parts[k]["p50"] for k in kept)
@@ -1292,7 +1375,7 @@ def selftest():
 
     def cuts(events):
         c = eb.Cuts(events)
-        c.record_kinds = []
+        c.record_kinds, c.cgroups = [], []
         return c
 
     # A non-durable record (O_EXCL): its open's kprobe entry and exit (fd 5), a write, the fd's close. No rename.
@@ -1334,7 +1417,38 @@ def selftest():
     record_write_cuts(c, other, bench, cid, 2, split=True)
     assert c.at == [0, 1, 2, 7, 7, 7, 7], c.at  # the fd-5 close exit is at 7, not the fd-9 close at 5
 
-    print("create_breakdown selftest: ok (close-cut, rename-cut, fd match, and refusal)")
+    # A chosen cgroup (goal 5 extended step 6): the state directory and the FIFO first, then the owner's choice. Handed
+    # on: no mkdir, the idle cgroup's files opened and closed, the made parts empty at the create's first pipe.
+    state = e("enter", "mkdir", 'pathname: 0x1 "/run/hex-node/0123456789abcdef-b", mode: 0x1ff')
+    fifo = e("enter", "mknodat", 'dfd: 0x1, filename: 0x2 "/run/hex-node/0123456789abcdef-b/exec.fifo", mode: 0x1192')
+    reads = [e("exit", "openat", "0x15"), e("enter", "close", "fd: 0x15"), e("exit", "close", "0x0")]
+    pipe = e("enter", "pipe2", "fildes: 0x3, flags: 0x80000")
+    handed = [after[0], state, e("exit", "mkdir", "0x0"), fifo] + reads + [pipe]
+    c = cuts(handed)
+    chosen_cuts(c, handed, bench, cid)
+    assert c.cgroups == ["handed on"], c.cgroups
+    assert c.at == [0, 1, 3, 7, 7, 7, 7, 7], c.at
+    # Fresh: a slot's mkdirat under the oci boxes' root, cut as the cgroup made.
+    slot = [e("enter", "mkdirat", 'dfd: 0x10, pathname: 0x4 ".4", mode: 0x1ff'), e("exit", "mkdirat", "0x0")]
+    fresh = [after[0], state, e("exit", "mkdir", "0x0"), fifo] + slot + [pipe]
+    c = cuts(fresh)
+    chosen_cuts(c, fresh, bench, cid)
+    assert c.cgroups == ["fresh"], c.cgroups
+    assert c.at == [0, 1, 3, 4, 5, 6, 6, 6], c.at
+    # A mkdir that makes neither a slot nor the box's own cgroup is refused, as is a create whose first mkdir isn't
+    # its state directory.
+    for bad in ([after[0], state, e("exit", "mkdir", "0x0"), fifo,
+                 e("enter", "mkdirat", 'dfd: 0x10, pathname: 0x4 ".04", mode: 0x1ff'), e("exit", "mkdirat", "0x0"), pipe],
+                [after[0], slot[0], slot[1], state, e("exit", "mkdir", "0x0"), fifo, pipe]):
+        try:
+            chosen_cuts(cuts(bad), bad, bench, cid)
+        except Missing:
+            pass
+        else:
+            raise AssertionError("a chosen cgroup's create with a stray mkdir must be refused")
+
+    print("create_breakdown selftest: ok (close-cut, rename-cut, fd match, refusal, and a chosen cgroup handed on, "
+          "fresh, and refused)")
     return 0
 
 
