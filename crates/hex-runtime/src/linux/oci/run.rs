@@ -581,6 +581,9 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
+        // Kept with the container's state, so its execs and its start's and delete's hooks take this spec too,
+        // never the bundle as it is by then (checked::spec_of).
+        checked::keep(dir.path(), &config)?;
         // The bytes just parsed and checked, sealed, so whatever starts the init makes the container from this
         // spec and never reads the bundle again: a config.json swapped after this read is never the container's
         // (AC-T7.1.1).
@@ -1286,7 +1289,7 @@ impl Runtime {
         // poststart hooks run after the workload has started (OCI §Lifecycle), with the state they see as
         // running; the config is read only when create found hooks there (or state from before it looked).
         if state.poststart != Some(false)
-            && let Some(hooks) = load_hooks(&state)
+            && let Some(hooks) = load_hooks(dir.path(), &state)?
         {
             let mut running = state;
             running.status = Status::Running;
@@ -1308,7 +1311,8 @@ impl Runtime {
         user: Option<(u32, Option<u32>)>,
         seam: bool,
     ) -> Result<Command, OciError> {
-        let state = self.dir(id)?.get(id)?;
+        let dir = self.dir(id)?;
+        let state = dir.get(id)?;
         if !matches!(state.status, Status::Created | Status::Running) {
             return Err(OciError::WrongState(
                 id.to_owned(),
@@ -1335,6 +1339,7 @@ impl Runtime {
             env,
             user,
             seam,
+            dir: Some(dir.path().to_string_lossy().into_owned()),
         };
         let json = serde_json::to_string(&request)
             .map_err(|e| OciError::Broken(format!("the exec request: {e}")))?;
@@ -1416,7 +1421,7 @@ impl Runtime {
             }
         }
         // poststop hooks run after the container is stopped, before its directory is removed.
-        if let Some(hooks) = load_hooks(&state) {
+        if let Some(hooks) = load_hooks(dir.path(), &state)? {
             let mut stopped = state.clone();
             stopped.status = Status::Stopped;
             hooks::run("poststop hook", &hooks.poststop, &stopped)?;
@@ -1950,11 +1955,15 @@ fn unhooked(id: &str) -> OciError {
     ))
 }
 
-/// The hooks from a container's bundle (`state.bundle/config.json`); `None` when the config can no
-/// longer be read (the bundle is gone), so `delete`/`start` still proceed.
-fn load_hooks(state: &State) -> Option<crate::linux::oci::spec::Hooks> {
-    let bytes = std::fs::read(Path::new(&state.bundle).join("config.json")).ok()?;
-    Spec::parse(&bytes).ok().map(|s| s.hooks)
+/// The hooks of container `dir` (its state directory): from the spec its create checked and kept, never its
+/// bundle as it is now, since the agent runs them on the host (AC-T7.1.1). A container made before its spec was
+/// kept has its bundle's spec checked again ([`checked::spec_of`]); one the checks refuse refuses the start or the
+/// delete by type, and `None` only where there is no spec at all (its bundle gone), so `delete`/`start` proceed.
+fn load_hooks(
+    dir: &Path,
+    state: &State,
+) -> Result<Option<crate::linux::oci::spec::Hooks>, OciError> {
+    Ok(checked::spec_of(Some(dir), Path::new(&state.bundle))?.map(|s| s.hooks))
 }
 
 /// Makes the exec FIFO, world-writable so a container that has dropped to a non-root user (or a

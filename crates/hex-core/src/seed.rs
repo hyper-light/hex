@@ -91,6 +91,7 @@ mod kind {
     pub const CREATE_PREPARED: u16 = 0x0003;
     pub const CREATE_AHEAD: u16 = 0x0004;
     pub const CREATE_CONFIG: u16 = 0x0005;
+    pub const EXEC_CHECKED: u16 = 0x0006;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
 }
@@ -117,6 +118,11 @@ pub struct Request {
     pub env: Vec<String>,
     /// Overrides the process's user: a uid, and a gid (the process's own when absent).
     pub user: Option<(u32, Option<u32>)>,
+    /// New EXEC_CHECKED kind (AC-T7.1.1, found 2026-11-04): the container's state directory, where its create kept
+    /// the spec it checked (`checked.json`), which the program's process settings are taken from, never the
+    /// bundle's `config.json` as it is now. Absent in the older EXEC kind, whose bytes are unchanged; the seed then
+    /// checks the bundle's spec again, with the same checks.
+    pub dir: Option<String>,
 }
 
 /// A container for the seed to make (decision 5): its init cloned into its cgroup and the namespaces its
@@ -264,7 +270,14 @@ impl Answer {
 /// An exec request as a message.
 pub fn request(req: &Request) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
-    header(&mut w, kind::EXEC);
+    header(
+        &mut w,
+        if req.dir.is_some() {
+            kind::EXEC_CHECKED
+        } else {
+            kind::EXEC
+        },
+    );
     w.i32(req.init_pid);
     w.string(&req.bundle)?;
     w.option_with(req.cgroup.as_deref(), |w, c| w.string(c))?;
@@ -275,6 +288,9 @@ pub fn request(req: &Request) -> Result<Vec<u8>, Fault> {
         w.u32(uid);
         w.option(gid, Writer::u32);
     });
+    if let Some(dir) = &req.dir {
+        w.string(dir)?;
+    }
     w.done()
 }
 
@@ -289,7 +305,7 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
     }
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
-    if kind != kind::EXEC {
+    if kind != kind::EXEC && kind != kind::EXEC_CHECKED {
         return Err(Fault::Kind {
             kind,
             version,
@@ -304,8 +320,13 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
         cwd: r.option(|r| r.string("cwd"))?,
         env: r.list(|r| r.string("env"))?,
         user: r.option(|r| Ok((r.u32()?, r.option(Reader::u32)?)))?,
+        dir: if kind == kind::EXEC_CHECKED {
+            Some(r.string("dir")?)
+        } else {
+            None
+        },
     };
-    r.end(kind::EXEC, version)?;
+    r.end(kind, version)?;
     if req.args.is_empty() {
         return Err(Fault::value("args", "an exec needs a program"));
     }
@@ -439,7 +460,7 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
-        kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
+        kind::EXEC | kind::EXEC_CHECKED => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
         kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD | kind::CREATE_CONFIG => {
             let create = read_create(bytes, size)?;
             let want = create.fds();

@@ -1713,6 +1713,17 @@ never the bundle's path to read again. Test:
 the runtime the lab's spec and any later read the same spec holding CAP_SYS_ADMIN, through the node (a seed) and
 through the runtime alone (the shim). Before the fix the root lab's node made the container with CAP_SYS_ADMIN. What
 would falsify it: a container whose capabilities, namespaces or mounts differ from the spec the runtime read.
+The same holds after create. An exec takes its program's process settings (capabilities, seccomp, user, rlimits)
+from the container's spec, and a start's poststart hooks and a delete's poststop hooks come from it too, and the
+agent runs those on the host. So create keeps the checked bytes with the container's state (`checked.json`, written
+once, 0600, in the state directory the runtime alone writes), as runc keeps the config it built in its state. Every
+later reader takes the spec from there: `hex __oci-exec` (its request names the state directory), the exec seed (the
+wire's kind 6, `EXEC_CHECKED`, append-only, with the directory) and an exec straight from the agent, and the start's
+and the delete's hooks. A container made before its spec was kept has its bundle's `config.json` read and checked
+again with the same checks, never taken unchecked: a spec they refuse refuses the exec, the start or the delete by
+type. Tests: `an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create` and
+`a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create` (`oci_box.rs`). What would falsify it: an
+exec'd program, or a hook, acting on a spec the create didn't check.
 
 **What the integrated tree holds** (goal 5 extended, 2026-11-04; branch `cp/t7-g5x-integrate`, the tree step 7
 measures). Each step's work, merged in one tree, each merge's resolutions in its message:

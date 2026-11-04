@@ -1136,6 +1136,7 @@ impl Node {
             cwd: program.cwd,
             env,
             user,
+            dir: Some(self.container_dir(id).to_string_lossy().into_owned()),
         };
         // Each stream the caller gave, else the null device the node holds open, so an exec opens and
         // duplicates nothing for its stdio. The caller's pipes are closed here once the program has its

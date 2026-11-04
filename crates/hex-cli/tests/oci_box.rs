@@ -421,6 +421,8 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     records_in_both_places_are_found_after_a_restart(&lab, own);
     a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(&lab, own);
     a_config_swapped_after_the_check_never_makes_the_container(&lab, own);
+    an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create(&lab, own);
+    a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create(&lab, own);
     a_create_or_delete_of_a_box_being_made_waits_for_it(&lab, own);
     a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(&lab, own);
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
@@ -3066,6 +3068,115 @@ fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &P
             "the shim's container was made from the swapped spec, not the one checked"
         );
     }
+}
+
+/// AC-T7.1.1, T-T7.1.4 (the same class as the create's hole, found 2026-11-04): an exec takes its program's process
+/// settings from the spec its box's create checked, never the bundle's config.json as it is by then. Do: make and
+/// start a box from the lab's spec; then write in its bundle the same spec holding CAP_SYS_ADMIN (which rootless, in a
+/// user namespace on the host's network, the checks refuse); exec a program. Expect: the program runs, without
+/// CAP_SYS_ADMIN, as the checked spec has it. Then, as a box made before its spec was kept: its kept spec removed and
+/// a spec the checks refuse in its bundle. Expect: the exec refused by type, never run from that spec unchecked.
+fn an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-swap-exec"), state.path());
+    let id = BoxId::new("swap-exec").unwrap();
+    let sleep = ["/usr/bin/sleep".to_owned(), "600".to_owned()];
+    let spec = lab.running(id.clone(), &sleep);
+    let ClassSpec::Bundle(bundle) = &spec.class else {
+        panic!("lab.running makes a bundle")
+    };
+    let bundle = bundle.clone();
+    node.create(spec).expect("create");
+    node.start(&id).expect("start");
+    let checked = std::fs::read_to_string(bundle.join("config.json")).unwrap();
+    let swapped = checked.replace(r#""CAP_CHOWN""#, r#""CAP_SYS_ADMIN", "CAP_CHOWN""#);
+    assert_ne!(checked, swapped, "the swapped spec names CAP_SYS_ADMIN");
+    std::fs::write(bundle.join("config.json"), &swapped).unwrap();
+    let exec = node.exec(
+        &id,
+        hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+        hex_api::Stdio::null(),
+    );
+    let held = exec.as_ref().ok().map(|exec| {
+        let pid = exec.pid();
+        wait_for(
+            || cmdline_has(pid, "/usr/bin/sleep"),
+            "the exec'd program to run",
+        );
+        holds_sys_admin(pid)
+    });
+    drop(exec);
+    // A box made before its spec was kept, its bundle's spec one the checks refuse.
+    match std::fs::remove_file(node.container_dir(&id).join("checked.json")) {
+        Ok(()) => {}
+        // A tree that keeps no spec (before AC-T7.1.1's fix): the box is an older one as it is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("removing the kept spec: {e}"),
+    }
+    std::fs::write(bundle.join("config.json"), r#"{"ociVersion":""}"#).unwrap();
+    let older = node.exec(
+        &id,
+        hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+        hex_api::Stdio::null(),
+    );
+    let older_ran = older.is_ok();
+    drop(older);
+    node.delete(&id).expect("delete");
+    assert_eq!(
+        held,
+        Some(false),
+        "the exec'd program held the swapped spec's capabilities, or didn't run"
+    );
+    assert!(
+        !older_ran,
+        "an exec ran from a bundle spec the checks refuse"
+    );
+}
+
+/// AC-T7.1.1, T-T7.1.4: a start's poststart hooks, which the agent runs on the host, are the ones the box's create
+/// checked, never the bundle's config.json's as it is by then. Do: make a box whose spec names a poststart hook that
+/// marks file A; then write in its bundle the same spec, its hook marking file B; start the box. Expect: A marked, B
+/// not.
+fn a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-swap-start"), state.path());
+    let id = BoxId::new("swap-start").unwrap();
+    let marks = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let (checked_mark, swapped_mark) = (marks.path().join("checked"), marks.path().join("swapped"));
+    let with_hook = |mark: &Path| {
+        let config = lab.config(&Lab::act(&Act::Wait), false);
+        let end = config.rfind('}').unwrap();
+        format!(
+            r#"{},"hooks":{{"poststart":[{{"path":"/bin/sh","args":["sh","-c","touch {}"]}}]}}}}"#,
+            config.get(..end).unwrap().trim_end(),
+            mark.display()
+        )
+    };
+    let bundle = tempfile::Builder::new()
+        .prefix("swap-start-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(bundle.join("config.json"), with_hook(&checked_mark)).unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle.clone()),
+        owner: None,
+    })
+    .expect("create");
+    std::fs::write(bundle.join("config.json"), with_hook(&swapped_mark)).unwrap();
+    let started = node.start(&id);
+    node.delete(&id).expect("delete");
+    started.expect("start");
+    assert!(
+        checked_mark.exists(),
+        "the checked spec's poststart hook didn't run"
+    );
+    assert!(
+        !swapped_mark.exists(),
+        "the swapped spec's poststart hook ran on the host"
+    );
 }
 
 /// Goal 5 extended step 5 (T-T7.1.2): a box being made has no record yet, so a second create of its id,

@@ -231,9 +231,29 @@ struct Identity {
 }
 
 impl Specs {
-    fn get(&mut self, bundle: &str) -> Result<&Spec, OciError> {
-        let path = Path::new(bundle).join("config.json");
-        let st = rustix::fs::stat(&path).map_err(|e| OciError::os("reading config.json", e))?;
+    /// The spec an exec into container `dir` (its state directory) takes its process from: the one its create
+    /// checked and kept there, never its bundle as it is now; with none kept (an older container) or no `dir`
+    /// named (an older request), the bundle's `config.json`, checked again with the same checks (AC-T7.1.1,
+    /// [`super::checked::spec_of`]). Parsed once per file, by its identity.
+    fn get(&mut self, dir: Option<&str>, bundle: &str) -> Result<&Spec, OciError> {
+        let kept = dir.map(|d| Path::new(d).join(super::checked::KEPT));
+        let found = match kept {
+            Some(kept) => match rustix::fs::stat(&kept) {
+                Ok(st) => Some((kept, st)),
+                Err(rustix::io::Errno::NOENT) => None,
+                Err(e) => return Err(OciError::os("reading the checked spec", e)),
+            },
+            None => None,
+        };
+        let (path, st) = match found {
+            Some(found) => found,
+            None => {
+                let path = Path::new(bundle).join("config.json");
+                let st =
+                    rustix::fs::stat(&path).map_err(|e| OciError::os("reading config.json", e))?;
+                (path, st)
+            }
+        };
         let id = Identity {
             path,
             dev: st.st_dev,
@@ -282,7 +302,7 @@ struct Prepared {
 /// path, CLAUDE.md §8). The cgroup is the caller's to give: a seed opens it ([`open_cgroup`]), and the
 /// node agent holds it open for an exec straight from its threads.
 fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, OciError> {
-    let spec = specs.get(&req.bundle)?;
+    let spec = specs.get(req.dir.as_deref(), &req.bundle)?;
     let request = exec::Request {
         pid: req.init_pid,
         bundle: req.bundle.clone(),
@@ -292,6 +312,7 @@ fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, 
         env: req.env.clone(),
         user: req.user,
         seam: true,
+        dir: req.dir.clone(),
     };
     let process = exec::process_for(spec.process.clone().unwrap_or_default(), &request);
     Ok(Prepared {

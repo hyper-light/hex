@@ -16,6 +16,7 @@ fn full() -> Request {
         cwd: Some("/work".to_owned()),
         env: vec!["PATH=/usr/bin".to_owned(), "HOME=/root".to_owned()],
         user: Some((1000, Some(100))),
+        dir: None,
     }
 }
 
@@ -636,4 +637,43 @@ fn a_create_with_its_checked_spec_appends_only_in_its_new_kind() {
     })
     .unwrap();
     assert!(read_create(&over, over.len()).is_err());
+}
+
+/// HEX-SEED-2, append-only (AC-T7.1.1: an exec's process settings from the spec its create checked and kept, never
+/// the bundle as it is now). Do: write an exec naming the container's state directory. Expect: kind 6, its body the
+/// older exec's bytes with the directory appended; it reads back whole, through read_request and read_message with
+/// the exec's four descriptors; every cut and trailing bytes are refused; a create reader refuses its kind; and an
+/// exec naming none still writes the older kind, byte for byte (its recorded bytes).
+#[test]
+fn an_exec_naming_its_state_directory_appends_only_in_its_new_kind() {
+    let older = full();
+    let old = request(&older).unwrap();
+    let checked = Request {
+        dir: Some("/run/hex-node/0123456789abcdef-box-1".to_owned()),
+        ..older.clone()
+    };
+    let bytes = request(&checked).unwrap();
+    assert_eq!(&bytes[..6], &old[..6], "magic and version");
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 6);
+    assert_eq!(
+        &bytes[8..old.len()],
+        &old[8..],
+        "the older exec's body, unchanged"
+    );
+    assert_eq!(read_request(&bytes, bytes.len()).unwrap(), checked);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), REQUEST_FDS).unwrap(),
+        Message::Exec(checked.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_request(&bytes[..len], len).is_err(), "cut at {len}");
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(read_request(&trailing, trailing.len()).is_err());
+    assert!(matches!(
+        read_create(&bytes, bytes.len()),
+        Err(Fault::Kind { .. })
+    ));
+    assert_eq!(hex(&old), GOLDEN_FULL);
 }
