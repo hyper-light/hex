@@ -1639,6 +1639,29 @@ This takes it off create's path on a root node, with no new kernel version (deci
   `createpool` tests read them; they become `hex_*` metrics once kiln's Observe owner agrees their names. This joins
   the `needs_shim` reasons decision 5 already counts (a pid or user namespace by path, made through the shim on either
   node).
+- **The init's ipc and uts namespaces are made ahead** (goal 5 extended, step 4). Making an ipc namespace mounts a mqueue
+  filesystem of its own and registers two sysctl tables of its own (Linux v6.19 `ipc/namespace.c:38-90`,
+  `ipc/mqueue.c:469-489`, `ipc/mq_sysctl.c:146`, `ipc/ipc_sysctl.c:293`), the costliest namespace a clone makes (f88-f91).
+  So a root node's pool makes pairs ahead, as decision 4's makes network namespaces (`hex_core::netns::Pool`, bounded at
+  `IPC_UTS_BOUND`, a pair taken never handed out again, one thread making them off the path), and a create routed to a
+  pruned seed takes one, which rides last in the seed's `CREATE_AHEAD` kind; the init joins it by `setns` before it
+  mounts `/dev/mqueue`, sets the hostname or writes a sysctl, and its clone leaves out `CLONE_NEWIPC | CLONE_NEWUTS`. A
+  dry pool, or a create with no room under `SCM_MAX_FD`, leaves the clone's flags as they were, counted, and so does
+  every container the pool can't serve: one that makes only one of the two, or is routed through the shim, or is in a
+  user namespace of its own, which `setns` would refuse a pair the node made (`ipc/namespace.c:233-244`,
+  `kernel/utsname.c:127-140`). <!-- record: bench/competitive/probes/create_breakdown.md -->Pool on against drained in
+  one run, part 16's pooled p50 is 0.104 ms against 0.143 (0.727); part 17, which holds the joins, 0.052 against 0.041;
+  and interleaved lifecycle by lifecycle the create is 0.0171 to 0.0373 ms faster in every one of 8 rounds, with the
+  pool dry for at most 30 of 10,000 creates at concurrency 32<!-- /record --> (`probes/create_breakdown.md`, "The ipc and
+  uts namespaces made ahead"; the kernel's side in `docs/research/runtime/goal5-ipcuts.md`).
+  <!-- record: bench/competitive/probes/netns_pool.md -->A pair costs 6.9 KiB charged
+  and about 21 us of the refill thread's time<!-- /record --> (`probes/netns_pool.md`). The refill thread is woken only
+  once the pool is half empty, since a wake is a system call on create's path, and the init leaves the pair for its
+  exec to close, so the close isn't on create's path either. Linux only: macOS and Windows have no ipc or uts namespace
+  for a box to be given.
+  What would falsify it (fedora, pool on against drained in one run): part 16 not falling by 15%, the whole create not
+  faster in the interleaved pairs, the pool dry for more than 1% of a sustained phase's creates, or a box seeing
+  another's or the node's System V objects, queues or hostname (`oci_ipcuts.rs`).
 - **What would falsify it** (each on fedora 6.19, in the same run as libcrun): the root-escape test reaching the marker
   or any host path from a pruned-path container; a nested proc mount succeeding past a mask in one; the pruned root's
   switch growing more than 10% between 0 and 24,000 extra host threads; create p50 through the seam not dropping by at

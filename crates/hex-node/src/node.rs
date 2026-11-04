@@ -44,6 +44,7 @@ use hex_runtime::linux::{disks, process};
 use crate::cgroups::{self, Cgroups, Choice, Made};
 use crate::createpool::CreatePool;
 use crate::devfs::Devfs;
+use crate::ipcuts::IpcUtsPool;
 use crate::netns::Netns;
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
@@ -166,6 +167,8 @@ pub struct Node {
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
+    /// The ipc and uts namespaces it makes ahead (goal 5 extended, step 4; [`Node::ipc_uts`]).
+    ipc_uts: IpcUtsPool,
     devfs: Devfs,
 }
 
@@ -237,6 +240,10 @@ impl Node {
             Owner::Root => netns::BOUND,
             Owner::Rootless { .. } => 0,
         })?;
+        let ipc_uts = IpcUtsPool::start(match owner {
+            Owner::Root => netns::IPC_UTS_BOUND,
+            Owner::Rootless { .. } => 0,
+        })?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
@@ -268,6 +275,7 @@ impl Node {
             inject: None,
             specs: Mutex::new(Specs::default()),
             netns,
+            ipc_uts,
             devfs: Devfs::start(owner == Owner::Root)?,
             null: rustix::fs::open(
                 "/dev/null",
@@ -382,6 +390,22 @@ impl Node {
             });
         }
         self.netns = Netns::start(bound)?;
+        Ok(self)
+    }
+
+    /// Sets the most ipc and uts namespace pairs a root node makes ahead, [`netns::IPC_UTS_BOUND`] unless set,
+    /// in place of the pool it opened with, which closes what it held. With 0 it makes none, and every
+    /// container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
+    pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
+        if bound > 0 && self.owner != Owner::Root {
+            return Err(Refusal::Invalid {
+                what: "ipc and uts namespace bound",
+                why: format!(
+                    "a rootless node makes no ipc or uts namespaces ahead, so it can't hold {bound}"
+                ),
+            });
+        }
+        self.ipc_uts = IpcUtsPool::start(bound)?;
         Ok(self)
     }
 
@@ -517,6 +541,14 @@ impl Node {
     /// ([`crate::serve::Host::netns`]).
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         self.netns.counts()
+    }
+
+    /// What the node has counted of its containers' ipc and uts namespaces since its pool opened (goal 5
+    /// extended, step 4): pairs made ahead, taken by a create, made on a create's path (the pool dry, or a
+    /// container the pool can't serve), discarded at shutdown, and makes that failed. Read in process, as the
+    /// seeds' counts are.
+    pub fn ipc_uts(&self) -> Result<netns::Counts, Refusal> {
+        self.ipc_uts.counts()
     }
 
     fn record(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
@@ -930,6 +962,7 @@ impl Node {
                 networks: Some(&networks),
                 devices: Some(&self.devices),
                 dev_mounts: Some(&self.devfs),
+                ipc_uts: Some(&self.ipc_uts),
             };
             let name = self.container(&id);
             match (cgroup, &choice) {

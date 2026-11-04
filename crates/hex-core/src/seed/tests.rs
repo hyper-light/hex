@@ -53,6 +53,7 @@ fn creates() -> Vec<Create> {
             binds: 0,
             path_joins: 0,
             dev_mount: None,
+            ipc_uts: false,
         },
         Create {
             bundle: "/b".to_owned(),
@@ -63,6 +64,7 @@ fn creates() -> Vec<Create> {
             binds: 0,
             path_joins: 0,
             dev_mount: None,
+            ipc_uts: false,
         },
         // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
         // one namespace joined by path.
@@ -75,6 +77,7 @@ fn creates() -> Vec<Create> {
             binds: 2,
             path_joins: 1,
             dev_mount: None,
+            ipc_uts: false,
         },
     ]
 }
@@ -490,4 +493,84 @@ fn a_prepared_create_appends_only_in_its_new_kind() {
     })
     .unwrap();
     assert!(read_create(&wrong_path, wrong_path.len()).is_err());
+}
+
+/// HEX-IPCUTS-7 (goal 5 extended, step 4): a create with a pair is a kind of its own, every older kind's bytes as they
+/// were. Do: write a create with a pair, with and without a prepared `/dev`, read each back, and read hostile ones.
+/// Expect: its bytes are the ordinary create's, its kind apart, with an option appended; it says two descriptors more;
+/// it reads back whole; a cut one, one with trailing bytes, one short of its descriptors, one that isn't pruned and one
+/// past `SCM_MAX_FD` are each refused by type; and one without a pair still writes the older kinds.
+#[test]
+fn a_create_with_a_pair_appends_only_in_its_new_kind() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    let ahead = Create {
+        ipc_uts: true,
+        ..ordinary.clone()
+    };
+    let bytes = create(&ahead).unwrap();
+    assert_eq!(&bytes[..6], &old[..6]);
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+    assert_eq!(&bytes[8..old.len()], &old[8..]);
+    assert_eq!(&bytes[old.len()..], &[0u8]);
+    assert_eq!(ahead.fds(), ordinary.fds() + IPC_UTS_FDS);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), ahead.fds()).unwrap(),
+        Message::Create(ahead.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_create(&bytes[..len], len).is_err());
+    }
+    assert!(matches!(
+        read_message(&bytes, bytes.len(), ordinary.fds()),
+        Err(Fault::Descriptors { .. })
+    ));
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(read_create(&trailing, trailing.len()).is_err());
+
+    let both = Create {
+        dev_mount: Some(7),
+        ..ahead.clone()
+    };
+    let bytes = create(&both).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+    assert_eq!(both.fds(), ordinary.fds() + IPC_UTS_FDS + 1);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), both.fds()).unwrap(),
+        Message::Create(both)
+    );
+
+    let not_pruned = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        ipc_uts: true,
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&not_pruned, not_pruned.len()),
+        Err(Fault::Value {
+            what: "ipc_uts",
+            ..
+        })
+    ));
+    let over = create(&Create {
+        binds: u32::try_from(MAX_BINDS).unwrap(),
+        path_joins: u32::try_from(MAX_PATH_JOINS).unwrap(),
+        network: true,
+        ipc_uts: true,
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(read_create(&over, over.len()).is_err());
+
+    let prepared = create(&Create {
+        dev_mount: Some(7),
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert_eq!(u16::from_le_bytes(prepared[6..8].try_into().unwrap()), 3);
+    assert_eq!(u16::from_le_bytes(old[6..8].try_into().unwrap()), 2);
 }

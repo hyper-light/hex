@@ -118,3 +118,22 @@ Each figure decision 4 draws from the records above, with its arithmetic (to two
   Studio: in process 1.723 / 1.714 = 1.01 (+0.5%); over the socket 1.735 / 1.790 = 0.97. libcrun's in the same run,
   each namespace made on its create's path: 1.983 / 1.644 = 1.21. Before the pool (3db2173) Hex's was 1.23.
 
+## An ipc and uts pair (goal 5 extended step 4; 2026-11-03, fedora)
+
+The node's ipc and uts pool holds pairs (`hex-runtime` `oci/ipcuts.rs`); `netns_pool.py` with `POOL_KIND=ipcuts` runs what
+its thread does for each: `unshare(CLONE_NEWIPC | CLONE_NEWUTS)`, both namespaces opened through `/proc/thread-self/ns`,
+and `setns` back to the thread's own two. Not of record for latency: 3 rounds of 1,000 on fedora's E-cores (`CPUS=16-31`,
+away from other runs' timed parts), in unit `hex-s4-job1-20261103T225115Z`, kernel 6.19.10, load 10.29 falling to 8.18.
+
+| round | make p50 (ms) | p99 | one thread, pairs/s | the cgroup holds, a pair | the host's Slab rose, a pair |
+|---|---|---|---|---|---|
+| 1 | 0.021 | 0.032 | 43,885 | 6.9 KiB | 14.1 KiB |
+| 2 | 0.021 | 0.035 | 43,112 | 6.9 KiB | 10.4 KiB |
+| 3 | 0.022 | 0.030 | 43,165 | 6.9 KiB | 4.1 KiB |
+
+- **The bound's cost.** The kernel charges the maker 6.9 KiB a pair, all slab; a uts namespace isn't charged
+  (`kernel/utsname.c:49`, `GFP_KERNEL`), and the host's Slab, which other tenants move too, rose at most 14.1 KiB. So
+  `IPC_UTS_BOUND`'s 32 pairs hold at most 451 KiB and 64 descriptors, about 2% of what the same number of network
+  namespaces hold above.
+- **The refill's margin.** One thread makes a pair in about 21 us on an E-core, some 20 times the 2,100 creates a second
+  the sustained phase has reached (`hex_core::netns::BOUND`'s pool, by contrast, runs dry at that rate).

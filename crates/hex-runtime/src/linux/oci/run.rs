@@ -124,6 +124,19 @@ pub trait DevMounts {
     fn unpooled(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError>;
 }
 
+/// The ipc and uts namespaces a node agent makes ahead (goal 5 extended, step 4), which a create routed to a
+/// pruned seed asks for.
+pub trait IpcUtsAhead {
+    /// A pair made ahead, now the container's: the caller keeps no copy. `None` when there is none to give, and
+    /// the init's clone makes them.
+    fn take(&self) -> Result<Option<super::ipcuts::Pair>, OciError>;
+
+    /// A container that makes either namespace but can't take a pair: its user namespace isn't this process's
+    /// and a namespace belongs to its maker's (user_namespaces(7)), or it makes one of the two alone, or its
+    /// create has no room for the descriptors. Its clone, or its shim, makes them on the path.
+    fn on_path(&self) -> Result<(), OciError>;
+}
+
 /// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
 /// pool), asked once the spec is read, and the device programs it keeps loaded, one per policy
 /// ([`Programs::attach`]; goal 5 extended, step 1). A create given neither makes its container's
@@ -133,6 +146,14 @@ pub struct Held<'a> {
     pub networks: Option<&'a dyn Networks>,
     pub devices: Option<&'a Programs>,
     pub dev_mounts: Option<&'a dyn DevMounts>,
+    pub ipc_uts: Option<&'a dyn IpcUtsAhead>,
+}
+
+/// What a seed's create may take from the node once it knows its route.
+#[derive(Clone, Copy)]
+struct SeedPools<'a> {
+    dev_mounts: Option<&'a dyn DevMounts>,
+    ipc_uts: Option<&'a dyn IpcUtsAhead>,
 }
 
 /// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
@@ -142,6 +163,7 @@ struct Route<'a> {
     networks: Option<&'a dyn Networks>,
     devices: Option<&'a Programs>,
     dev_mounts: Option<&'a dyn DevMounts>,
+    ipc_uts: Option<&'a dyn IpcUtsAhead>,
     start: Start<'a>,
 }
 
@@ -275,6 +297,9 @@ pub struct PrunedCreate {
     pub container_dir: OwnedFd,
     pub rootfs: OwnedFd,
     pub dev_mount: Option<PreparedDev>,
+    /// An ipc and uts pair made ahead, which the init joins in place of its clone making them (goal 5 extended,
+    /// step 4).
+    pub ipc_uts: Option<super::ipcuts::Pair>,
     pub binds: Vec<OwnedFd>,
     /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
     /// namespace order, which the init joins by `setns` (the pruned seed can't open the host path). A
@@ -415,6 +440,7 @@ impl Runtime {
                 networks: None,
                 devices: None,
                 dev_mounts: None,
+                ipc_uts: None,
                 start: Start::Shim,
             },
         )
@@ -447,6 +473,7 @@ impl Runtime {
                 networks: held.networks,
                 devices: held.devices,
                 dev_mounts: held.dev_mounts,
+                ipc_uts: held.ipc_uts,
                 start: Start::Shim,
             },
         )
@@ -479,6 +506,7 @@ impl Runtime {
                 networks: held.networks,
                 devices: held.devices,
                 dev_mounts: held.dev_mounts,
+                ipc_uts: held.ipc_uts,
                 start: Start::Seed(seeds),
             },
         )
@@ -505,6 +533,7 @@ impl Runtime {
                 networks: held.networks,
                 devices: held.devices,
                 dev_mounts: held.dev_mounts,
+                ipc_uts: held.ipc_uts,
                 start: Start::Seed(seeds),
             },
         )
@@ -539,6 +568,7 @@ impl Runtime {
             networks,
             devices,
             dev_mounts,
+            ipc_uts,
             start,
         } = route;
         let config = std::fs::read(bundle.join("config.json"))
@@ -597,17 +627,27 @@ impl Runtime {
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
-            Start::Shim => self.start_shim(
+            Start::Shim => ipc_uts_on_path(&spec, ipc_uts).and_then(|()| {
+                self.start_shim(
+                    &making,
+                    &spec,
+                    &cgroup,
+                    Ahead { network, dev: None },
+                    ShimStdio::Inherited,
+                    &Command::spawn,
+                )
+            }),
+            Start::Seed(seeds) => self.start_seeded(
                 &making,
                 &spec,
                 &cgroup,
-                Ahead { network, dev: None },
-                ShimStdio::Inherited,
-                &Command::spawn,
+                network,
+                seeds,
+                SeedPools {
+                    dev_mounts,
+                    ipc_uts,
+                },
             ),
-            Start::Seed(seeds) => {
-                self.start_seeded(&making, &spec, &cgroup, network, seeds, dev_mounts)
-            }
         });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
@@ -731,10 +771,15 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         seeds: &dyn CloneInit,
-        dev_mounts: Option<&dyn DevMounts>,
+        pools: SeedPools<'_>,
     ) -> Result<State, OciError> {
+        let SeedPools {
+            dev_mounts,
+            ipc_uts,
+        } = pools;
         if init::needs_shim(spec) {
             seeds.classic(ClassicReason::NamespaceByPath);
+            ipc_uts_on_path(spec, ipc_uts)?;
             let dev = shim_dev(spec, dev_mounts)?;
             return self.start_shim(
                 making,
@@ -777,10 +822,18 @@ impl Runtime {
                             }
                         }
                     }
+                    // Asked last, as a network namespace is, so a create routed elsewhere takes none.
+                    let fits = pair_fits(
+                        pruned.binds.len(),
+                        pruned.path_joins.len(),
+                        pruned.dev_mount.is_some(),
+                    );
+                    pruned.ipc_uts = ipc_uts_for(spec, ipc_uts, fits)?;
                     self.start_via_seed(making, spec, cgroup, network, seeds, Some(pruned))
                 }
                 Err(reason) => {
                     seeds.classic(reason);
+                    ipc_uts_on_path(spec, ipc_uts)?;
                     let dev = shim_dev(spec, dev_mounts)?;
                     self.start_shim(
                         making,
@@ -794,6 +847,7 @@ impl Runtime {
             }
         } else {
             seeds.classic(ClassicReason::Rootless);
+            ipc_uts_on_path(spec, ipc_uts)?;
             self.start_via_seed(making, spec, cgroup, network, seeds, None)
         }
     }
@@ -926,6 +980,7 @@ impl Runtime {
             container_dir,
             rootfs,
             dev_mount: None,
+            ipc_uts: None,
             binds,
             path_joins,
         })
@@ -1967,6 +2022,49 @@ fn first_word(sync_r: &OwnedFd, shim: &std::process::Child) -> Result<(), OciErr
     }
 }
 
+/// Whether a pruned create with `binds` trees, `path_joins` namespaces joined by path and maybe a prepared `/dev`
+/// has room for a pair under `SCM_MAX_FD`, as the prepared `/dev` is held to it, leaving the older limits as they
+/// were: a create with no room makes its namespaces in its clone, counted.
+fn pair_fits(binds: usize, path_joins: usize, dev: bool) -> bool {
+    const FIXED: usize = hex_core::seed::CREATE_FDS
+        + 1
+        + hex_core::seed::PRUNED_FIXED_FDS
+        + hex_core::seed::IPC_UTS_FDS;
+    binds
+        .checked_add(path_joins)
+        .and_then(|n| n.checked_add(FIXED))
+        .and_then(|n| n.checked_add(usize::from(dev)))
+        .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS)
+}
+
+/// The ipc and uts pair a pruned create takes (goal 5 extended, step 4): taken for a container that makes both
+/// namespaces, when its create has room (`fits`); counted as made on the path for one that makes one of the two or
+/// has no room, whose clone makes them; and nothing asked for one that makes neither.
+fn ipc_uts_for(
+    spec: &Spec,
+    pool: Option<&dyn IpcUtsAhead>,
+    fits: bool,
+) -> Result<Option<super::ipcuts::Pair>, OciError> {
+    let Some(pool) = pool else {
+        return Ok(None);
+    };
+    match (spec.makes_namespace("ipc"), spec.makes_namespace("uts")) {
+        (false, false) => Ok(None),
+        (true, true) if fits => pool.take(),
+        _ => pool.on_path().map(|()| None),
+    }
+}
+
+/// Counts a container routed where no pair goes, through the shim or a rootless node's seed, that makes either
+/// namespace: as a container in a user namespace of its own must be, since a namespace belongs to its maker's user
+/// namespace, and `setns` into a pair the node made would be refused it (`ipc/namespace.c:233-244`).
+fn ipc_uts_on_path(spec: &Spec, pool: Option<&dyn IpcUtsAhead>) -> Result<(), OciError> {
+    match pool {
+        Some(pool) if spec.makes_namespace("ipc") || spec.makes_namespace("uts") => pool.on_path(),
+        _ => Ok(()),
+    }
+}
+
 /// Writes a user namespace's uid and gid maps for process `pid` (OCI `uidMappings`/`gidMappings`).
 /// `setgroups` is denied before the gid map, as the kernel requires when mapping without privilege.
 fn write_id_maps(pid: i32, uids: &[IdMapping], gids: &[IdMapping]) -> Result<(), OciError> {
@@ -2609,6 +2707,94 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         Err(OciError::Broken(
             "the network-namespace pool is shut down".to_owned(),
         ))
+    }
+
+    /// A pool of pairs as a create meets it, recording what it's asked.
+    struct Pairs {
+        takes: std::cell::Cell<u32>,
+        on_paths: std::cell::Cell<u32>,
+        dry: bool,
+    }
+
+    impl Pairs {
+        fn new(dry: bool) -> Self {
+            Self {
+                takes: std::cell::Cell::new(0),
+                on_paths: std::cell::Cell::new(0),
+                dry,
+            }
+        }
+
+        fn asked(&self) -> (u32, u32) {
+            (self.takes.get(), self.on_paths.get())
+        }
+    }
+
+    impl IpcUtsAhead for Pairs {
+        fn take(&self) -> Result<Option<crate::linux::oci::ipcuts::Pair>, OciError> {
+            self.takes.set(self.takes.get() + 1);
+            if self.dry {
+                return Ok(None);
+            }
+            crate::linux::oci::ipcuts::Pair::of_this_thread().map(Some)
+        }
+
+        fn on_path(&self) -> Result<(), OciError> {
+            self.on_paths.set(self.on_paths.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// HEX-IPCUTS-8 (goal 5 extended, step 4). Do: ask for each kind of container, on the pruned route and off it.
+    /// Expect: one that makes both takes a pair, or none from a dry pool; one that makes one of the two, or has no
+    /// room, is counted on the path; one that makes neither asks nothing; off the route, one in a user namespace of
+    /// its own, or any that makes either, is counted on the path and takes none.
+    #[test]
+    fn a_pair_goes_only_to_a_pruned_create_that_makes_both_and_has_room() {
+        let both = spec_with(r#"{"type":"pid"},{"type":"ipc"},{"type":"uts"}"#);
+        let pool = Pairs::new(false);
+        assert!(ipc_uts_for(&both, Some(&pool), true).unwrap().is_some());
+        assert_eq!(pool.asked(), (1, 0));
+        assert!(ipc_uts_for(&both, Some(&pool), false).unwrap().is_none());
+        assert_eq!(pool.asked(), (1, 1));
+        let dry = Pairs::new(true);
+        assert!(ipc_uts_for(&both, Some(&dry), true).unwrap().is_none());
+        assert_eq!(dry.asked(), (1, 0));
+        assert!(ipc_uts_for(&both, None, true).unwrap().is_none());
+        for one in [
+            r#"{"type":"ipc"}"#,
+            r#"{"type":"uts"}"#,
+            r#"{"type":"ipc"},{"type":"uts","path":"/proc/1/ns/uts"}"#,
+        ] {
+            let pool = Pairs::new(false);
+            assert!(
+                ipc_uts_for(&spec_with(one), Some(&pool), true)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(pool.asked(), (0, 1), "{one}");
+        }
+        let neither = spec_with(r#"{"type":"pid"},{"type":"mount"}"#);
+        let pool = Pairs::new(false);
+        assert!(ipc_uts_for(&neither, Some(&pool), true).unwrap().is_none());
+        ipc_uts_on_path(&neither, Some(&pool)).unwrap();
+        assert_eq!(pool.asked(), (0, 0));
+        let user = spec_with(r#"{"type":"user"},{"type":"ipc"},{"type":"uts"}"#);
+        ipc_uts_on_path(&user, Some(&pool)).unwrap();
+        assert_eq!(pool.asked(), (0, 1));
+    }
+
+    /// HEX-IPCUTS-8's room: do ask at `SCM_MAX_FD`'s edge; expect the pair to fit up to it and not past it, a prepared
+    /// `/dev` counted.
+    #[test]
+    fn a_pair_fits_up_to_the_most_descriptors_a_create_carries() {
+        use hex_core::seed::{CREATE_FDS, IPC_UTS_FDS, MAX_REQUEST_FDS, PRUNED_FIXED_FDS};
+        let most = MAX_REQUEST_FDS - CREATE_FDS - 1 - PRUNED_FIXED_FDS - IPC_UTS_FDS;
+        assert!(pair_fits(most, 0, false));
+        assert!(!pair_fits(most + 1, 0, false));
+        assert!(!pair_fits(most, 0, true));
+        assert!(pair_fits(most - 4, 3, true));
+        assert!(!pair_fits(usize::MAX, 1, false));
     }
 
     fn spec_with(namespaces: &str) -> Spec {

@@ -76,12 +76,16 @@ pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS - MAX_PATH_
 pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS + MAX_PATH_JOINS;
 /// Descriptors a started answer carries: the pidfd of the process the seed started.
 pub const STARTED_FDS: usize = 1;
+/// Descriptors of an ipc and a uts namespace made ahead, which ride last in a create that says so
+/// ([`Create::ipc_uts`]).
+pub const IPC_UTS_FDS: usize = 2;
 
 /// The kinds of version 1.
 mod kind {
     pub const EXEC: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
     pub const CREATE_PREPARED: u16 = 0x0003;
+    pub const CREATE_AHEAD: u16 = 0x0004;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
 }
@@ -120,7 +124,8 @@ pub struct Request {
 /// host, so what it read by path comes as descriptors instead: after the network namespace ride
 /// [`PRUNED_FIXED_FDS`] (the bundle directory, the cgroup directory, the state directory and the rootfs
 /// tree), then `binds` bind-source trees in the order the spec lists its bind mounts. The agent cloned
-/// each with `open_tree` in its own mount namespace and sends them here.
+/// each with `open_tree` in its own mount namespace and sends them here. Last ride an ipc and a uts namespace made
+/// ahead, when `ipc_uts` says so (goal 5 extended, step 4).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Create {
     /// The container's bundle, whose `config.json` gives its namespaces and the init's set-up.
@@ -149,12 +154,17 @@ pub struct Create {
     /// New CREATE_PREPARED kind: mount-plan index of a prepared `/dev`; its fd rides last. Old
     /// CREATE bytes stay unchanged and readers without this kind refuse it explicitly.
     pub dev_mount: Option<u32>,
+    /// New CREATE_AHEAD kind (goal 5 extended, step 4): an ipc and a uts namespace made ahead ride last, which the
+    /// init joins in place of its clone making them. Pruned creates only: a seed that isn't pruned belongs to a
+    /// rootless node, whose containers' namespaces belong to user namespaces of their own. Older kinds' bytes
+    /// stay unchanged, and readers without this kind refuse it explicitly.
+    pub ipc_uts: bool,
 }
 
 impl Create {
     /// How many descriptors this create carries: the two pipes always, then a network namespace made
     /// ahead when there is one, then on the pruned path the four fixed descriptors, one tree per bind
-    /// mount, and one descriptor per namespace joined by path.
+    /// mount, one descriptor per namespace joined by path, a prepared `/dev` and an ipc and uts pair.
     pub fn fds(&self) -> usize {
         let mut n = CREATE_FDS.saturating_add(usize::from(self.network));
         if self.pruned {
@@ -162,7 +172,8 @@ impl Create {
                 .saturating_add(PRUNED_FIXED_FDS)
                 .saturating_add(self.binds as usize)
                 .saturating_add(self.path_joins as usize)
-                .saturating_add(usize::from(self.dev_mount.is_some()));
+                .saturating_add(usize::from(self.dev_mount.is_some()))
+                .saturating_add(if self.ipc_uts { IPC_UTS_FDS } else { 0 });
         }
         n
     }
@@ -292,10 +303,10 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
     header(
         &mut w,
-        if create.dev_mount.is_some() {
-            kind::CREATE_PREPARED
-        } else {
-            kind::CREATE
+        match (create.ipc_uts, create.dev_mount) {
+            (true, _) => kind::CREATE_AHEAD,
+            (false, Some(_)) => kind::CREATE_PREPARED,
+            (false, None) => kind::CREATE,
         },
     );
     w.string(&create.bundle)?;
@@ -305,7 +316,14 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.bool(create.pruned);
     w.u32(create.binds);
     w.u32(create.path_joins);
-    if let Some(mount) = create.dev_mount {
+    // CREATE_PREPARED's index is bare, as that kind's bytes have it; CREATE_AHEAD's is an option, since a pair rides
+    // with or without a prepared `/dev`.
+    if create.ipc_uts {
+        w.option_with(create.dev_mount, |w, mount| {
+            w.u32(mount);
+            Ok(())
+        })?;
+    } else if let Some(mount) = create.dev_mount {
         w.u32(mount);
     }
     w.done()
@@ -321,7 +339,10 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
     }
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
-    if !matches!(kind, kind::CREATE | kind::CREATE_PREPARED) {
+    if !matches!(
+        kind,
+        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD
+    ) {
         return Err(Fault::Kind {
             kind,
             version,
@@ -336,11 +357,12 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         pruned: r.bool("pruned")?,
         binds: r.u32()?,
         path_joins: r.u32()?,
-        dev_mount: if kind == kind::CREATE_PREPARED {
-            Some(r.u32()?)
-        } else {
-            None
+        dev_mount: match kind {
+            kind::CREATE_PREPARED => Some(r.u32()?),
+            kind::CREATE_AHEAD => r.option(|r| r.u32())?,
+            _ => None,
         },
+        ipc_uts: kind == kind::CREATE_AHEAD,
     };
     r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
@@ -370,6 +392,12 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             "only a pruned create carries bind-source trees or path-joined namespaces",
         ));
     }
+    if !create.pruned && create.ipc_uts {
+        return Err(Fault::value(
+            "ipc_uts",
+            "only a pruned create carries ipc and uts namespaces made ahead",
+        ));
+    }
     if create.fds() > MAX_REQUEST_FDS {
         return Err(Fault::value(
             "dev_mount",
@@ -386,7 +414,7 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
         kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
-        kind::CREATE | kind::CREATE_PREPARED => {
+        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)

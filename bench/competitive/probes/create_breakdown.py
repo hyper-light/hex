@@ -89,8 +89,10 @@ CREATE_PARTS = [
 SEED_PARTS = CREATE_PARTS[:13] + [
     ("the pipes made; a namespace made ahead taken; the request sent to a seed, which wakes and opens the cgroup", SEED),
     ("the seed's clone prepared", SEED),
-    ("the init's clone into its cgroup and new namespaces: pid, mount, ipc, uts (kernel), until it runs", INIT),
-    ("the init's first steps, to its join of the namespace made ahead", INIT),
+    ("the init's clone into its cgroup and new namespaces: pid, mount, and ipc and uts unless a pair is made ahead "
+     "(kernel), until it runs", INIT),
+    ("the init's first steps, with its joins of an ipc and uts pair made ahead, to its join of the network namespace "
+     "made ahead", INIT),
     ("the namespace made ahead joined (setns, kernel)", INIT),
     ("the init's root mounted: the rootfs bound, /usr, /proc and /dev, its device nodes made", INIT),
     ("pivot_root (kernel)", INIT),
@@ -143,6 +145,8 @@ def named_parts(parts, *names):
 ARG = re.compile(r"\b(\w+): (0x[0-9a-f]+|\d+)")
 BPF_PROG_LOAD, BPF_PROG_ATTACH = 5, 8  # include/uapi/linux/bpf.h, enum bpf_cmd
 CLONE_NEWNET = 0x40000000  # include/uapi/linux/sched.h
+CLONE_NEWIPC = 0x08000000
+CLONE_NEWUTS = 0x04000000
 
 
 def arg(e, name):
@@ -261,8 +265,14 @@ def create_cuts(ev, bench, cid, seeded=False, pruned=False):
             c.at += [opened, clone]
             c.opens.append((opened, seed, "open", lambda p: named(p, cid), "the seed's open of the box's cgroup"))
         c.to(exited(init, "clone3"), "the init's first run")
-        joins = c.to(enter(init, "setns"), "the init's join of the namespace made ahead")
-        held(arg(ev[joins], "flags") == CLONE_NEWNET, "the init's setns joins a network namespace")
+        # An ipc and uts pair made ahead is joined first (goal 5 extended step 4), inside part 17, so the network
+        # namespace's join is the setns named for it, and each join before it names one of the pair.
+        is_join = enter(init, "setns")
+        since = c.at[-1]
+        joins = c.to(lambda e: is_join(e) and arg(e, "flags") == CLONE_NEWNET,
+                     "the init's join of the network namespace made ahead")
+        before = [arg(e, "flags") for e in ev[since:joins] if is_join(e)]
+        held(before in ([], [CLONE_NEWIPC, CLONE_NEWUTS]), "the init joins the pair, or none, before the network namespace")
         c.to(exited(init, "setns"), "the join returning")
     else:
         spawn = first(ev, c.at[-1], enter(bench, "clone3", "clone"), "the shim's spawn")
@@ -385,7 +395,7 @@ def summarize(run):
     # Each round's create p50: libcrun's and the seam's untraced runs, and the traced run's creates with the
     # tracer recording (every other one) and between them.
     rows = {kind: {r: eb.lifecycle_ms(p, "create") for r, p in eb.rounds(run, kind).items()}
-            for kind in ("libcrun", "seam", "before", "seam_idle", "libcrun_idle")
+            for kind in ("libcrun", "seam", "before", "seam_idle", "libcrun_idle", "seam_drained")
             if kind in ("libcrun", "seam") or eb.rounds(run, kind)}
     rows["traced: recording"], rows["traced: between"] = {}, {}
     for rnd, path in eb.rounds(run, "traced").items():
@@ -462,6 +472,71 @@ def summarize(run):
             groups[g]["rounds"][r] += parts_r[r][k]["p50"] or 0
         groups[g]["p50"] += parts[k]["p50"] or 0
         groups[g]["mean"] += parts[k]["mean"] or 0
+    # The ipc and uts pool on against drained (IPCUTS_AB, goal 5 extended step 4), every figure from the same shuffled
+    # rounds: the whole create, untraced, for what a create gains; and, traced, the init's clone (part 16) with what
+    # follows it up to the network join (part 17, which holds the pair's joins), so what moved shows beside what fell.
+    # Each kind's counts say which it was: a pool on takes, a drained one makes on the path.
+    drained = {}
+    for rnd, path in eb.rounds(run, "traced_drained").items():
+        got, _ = eb.calls(path[:-len(".json")] + ".txt", ops_for(path[:-len(".json")] + ".txt"))
+        drained[rnd] = [c for c in got if "parts" in c]
+    if drained and "seam_drained" in lat:
+        clone = next(k for k, (name, _) in enumerate(spec) if name.startswith("the init's clone into"))
+        steps = next(k for k, (name, _) in enumerate(spec) if name.startswith("the init's first steps"))
+
+        def of(calls, *ks):
+            return eb.dist([sum(c["parts"][k] for k in ks) / 1000 for c in calls])
+
+        def counts(kind):
+            total = {"taken": 0, "made_on_path": 0}
+            for path in eb.rounds(run, kind).values():
+                with open(path) as f:
+                    got = json.load(f)["phases"]["lifecycle"]["ipc_uts"]
+                for key in total:
+                    total[key] += got[key]
+            return total
+
+        common = sorted(r for r in rnds if r in drained)
+        seam_r, dry_r = lat["seam"]["rounds"], lat["seam_drained"]["rounds"]
+        paired = [r for r in sorted(seam_r) if r in dry_r]
+        ab = {"counts": {k: counts(k) for k in ("seam", "seam_drained", "traced", "traced_drained")},
+              "create": {"rounds": {r: ratio(seam_r[r]["p50"], dry_r[r]["p50"]) for r in paired},
+                         "on": lat["seam"]["pooled"], "drained": lat["seam_drained"]["pooled"],
+                         "p50_ratio": ratio(lat["seam"]["pooled"]["p50"], lat["seam_drained"]["pooled"]["p50"]),
+                         "p99_ratio": ratio(lat["seam"]["pooled"]["p99"], lat["seam_drained"]["pooled"]["p99"])}}
+        for name, ks in (("part 16", (clone,)), ("part 17", (steps,)), ("parts 16+17", (clone, steps))):
+            on = of([c for r in common for c in by_round[r]], *ks)
+            off = of([c for r in common for c in drained[r]], *ks)
+            ab[name] = {"rounds": {r: ratio(of(by_round[r], *ks)["p50"], of(drained[r], *ks)["p50"]) for r in common},
+                        "on": on, "drained": off, "p50_ratio": ratio(on["p50"], off["p50"]),
+                        "p99_ratio": ratio(on["p99"], off["p99"])}
+        # The interleaved lifecycles (seam_oci's ipc_uts_pairs): each round's on and drained p50, the median of its
+        # pairs' differences and how many pairs the pool won, for each op, so work moved to another shows there.
+        pairs = {}
+        for rnd, path in eb.rounds(run, "pairs").items():
+            with open(path) as f:
+                pairs[rnd] = json.load(f)["phases"]["ipc_uts_pairs"]
+        ab["pairs"] = pairs
+        s["ipcuts_ab"] = ab
+        lines += ["## The ipc and uts pool on against drained, in the same rounds", "",
+                  f"Counts (taken, made on the path): {ab['counts']}", "",
+                  "| | on p50 (ms) | drained p50 | on over drained, p50 | on p99 | drained p99 | on over drained, p99 | "
+                  "p50 ratio by round |", "|---|---|---|---|---|---|---|---|"]
+        for name in ("create", "part 16", "part 17", "parts 16+17"):
+            v = ab[name]
+            lines.append(f"| {name} | {eb.ms3(v['on']['p50'])} | {eb.ms3(v['drained']['p50'])} | {v['p50_ratio']:.3f} | "
+                         f"{eb.ms3(v['on']['p99'])} | {eb.ms3(v['drained']['p99'])} | {v['p99_ratio']:.3f} | "
+                         + " ".join(f"{x:.3f}" for x in v["rounds"].values()) + " |")
+        lines.append("")
+        if pairs:
+            lines += ["Interleaved lifecycle by lifecycle, by round: median difference in ms, on minus drained (the share of "
+                      "pairs the pool won); then its op's on and drained p50 (ms):", "",
+                      "| round | create | start | exec | delete |", "|---|---|---|---|---|"]
+            def cell(p):
+                return (f"{p['median_difference']:+.4f} ({p['on_faster']:.2f}); {p['on_p50']:.3f} v {p['drained_p50']:.3f}")
+            for rnd, p in sorted(pairs.items()):
+                lines.append(f"| r{rnd} | " + " | ".join(cell(p[op]) for op in ("create", "start", "exec", "delete")) + " |")
+            lines.append("")
     sum_p50 = sum(p["p50"] for p in parts) if whole else None
     per_round = {}
     for r in rnds:
