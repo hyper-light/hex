@@ -509,3 +509,23 @@ higher pooled figure is its first run's: CPU pressure stood at 35 to 38% through
 of CPU a lifecycle against 0.70 to 0.75 in the other three, so 1,206 a second. Its second run, at 4.74x, lies beside
 mr17's second, at 4.62x, and concurrency 32 ran 9,137 to 9,428 a second in the three steady runs. Step 3's changes since
 16e52a9 are its classic init's (`e1b85f4`, `933d56f`), which the pruned path the bench takes doesn't run.
+
+## What criterion 2 needs on 4-15, from these runs
+
+The ratio is the CPUs each concurrency keeps busy times the CPU a lifecycle costs, (busy32 / busy1) x (cpu1 / cpu32).
+Run 16's two steady runs: (10.25 / 1.25) x (0.705 / 1.195) = 4.84x, against the 4.62x and 4.74x measured.
+
+- **cpu32 / cpu1 has a floor from the cores, not from Hex:** 4-15 is six cores' two threads each. On one thread of each
+  core concurrency 32 cost 1.18 times concurrency 1's CPU a lifecycle (run 8), on both 1.36 to 1.44 (run 9, CPU pressure
+  25%), so sharing a core adds about 1.19 times; run 16, with other tenants on the same cores, 1.69. At 1.19 alone, with
+  all 12 CPUs busy and today's 1.25 at concurrency 1: 12 / 1.25 / 1.19 = 8.07x, the bar with nothing to spare.
+- **busy1 is above 1 by the work beside concurrency 1's path:** the namespace checker and the `/dev` pool (about 0.16 ms
+  a lifecycle in `create_serial.md` run 23's threads, before the held files) and the overlap of the agent's and the
+  init's steps. Work cut from the path speeds concurrency 1 as much as 32; work cut from beside it speeds 32 alone.
+- **So 8x on 4-15 needs all three at once:** concurrency 32's CPUs all busy (10.2 to 10.4 of 12 today), its CPU a
+  lifecycle within the cores' sharing of concurrency 1's (1.69 times today, under load), and next to no work beside
+  concurrency 1's path. With every CPU busy and none beside the path, today's 1.69 still caps it at 12 / 1.0 / 1.69 =
+  7.1x. What run 16 has left beside the path: the checker's netlink dumps (about 30 us a check), the `/dev` pool's tmpfs
+  and nodes (about 70 us a box, `devfs_clone.md`).
+- **Option 1 at 7.52x** puts concurrency 32 on 4-31's 28 CPUs, 20.1 of them busy: there the ratio moves with how many
+  of the 28 a lifecycle's waits leave idle as much as with the CPU a lifecycle.
