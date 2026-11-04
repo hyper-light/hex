@@ -30,7 +30,11 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         .map(|id| {
             let cores = 1u64 << rng.range(2, 6);
             let mem_gib = cores.checked_mul(rng.range(2, 8)).unwrap_or(cores);
-            let gpus = if rng.chance(shape.gpu_nodes_per_mille) { u32::try_from(rng.range(1, 8)).unwrap_or(1) } else { 0 };
+            let gpus = if rng.chance(shape.gpu_nodes_per_mille) {
+                u32::try_from(rng.range(1, 8)).unwrap_or(1)
+            } else {
+                0
+            };
             NodeSpec {
                 id: NodeId(id),
                 capacity: Resources {
@@ -43,30 +47,54 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         .collect();
     let mut workloads = Vec::new();
     workloads
-        .try_reserve_exact(usize::try_from(shape.workloads).map_err(|_| SimError::Config("too many workloads"))?)
+        .try_reserve_exact(
+            usize::try_from(shape.workloads).map_err(|_| SimError::Config("too many workloads"))?,
+        )
         .map_err(|_| SimError::Config("no memory for the workloads"))?;
     let mut arrives: Time = 0;
-    let last = u64::from(shape.nodes).checked_sub(1).ok_or(SimError::Config("a cluster has at least one node"))?;
+    let last = u64::from(shape.nodes)
+        .checked_sub(1)
+        .ok_or(SimError::Config("a cluster has at least one node"))?;
     for id in 0..shape.workloads {
         let at = rng.range(0, last);
-        let host = nodes.get(usize::try_from(at).map_err(|_| SimError::Config("node index"))?).ok_or(SimError::Config("node index"))?;
+        let host = nodes
+            .get(usize::try_from(at).map_err(|_| SimError::Config("node index"))?)
+            .ok_or(SimError::Config("node index"))?;
         let share = |rng: &mut Rng, of: u64| -> u64 {
-            let most = of.checked_mul(shape.max_share_per_mille).map_or(of, |x| x / 1000).max(1);
+            let most = of
+                .checked_mul(shape.max_share_per_mille)
+                .map_or(of, |x| x / 1000)
+                .max(1);
             rng.range(1, most.min(of.max(1)))
         };
         let wants_gpu = host.capacity.gpus > 0 && rng.chance(500);
         let need = Resources {
             cpu_milli: share(&mut rng, host.capacity.cpu_milli),
             mem_bytes: share(&mut rng, host.capacity.mem_bytes),
-            gpus: if wants_gpu { u32::try_from(rng.range(1, u64::from(host.capacity.gpus))).unwrap_or(1) } else { 0 },
+            gpus: if wants_gpu {
+                u32::try_from(rng.range(1, u64::from(host.capacity.gpus))).unwrap_or(1)
+            } else {
+                0
+            },
         };
-        let gap = rng.range(0, shape.mean_gap.checked_mul(2).ok_or(SimError::TimeOverflow)?);
+        let gap = rng.range(
+            0,
+            shape
+                .mean_gap
+                .checked_mul(2)
+                .ok_or(SimError::TimeOverflow)?,
+        );
         arrives = arrives.checked_add(gap).ok_or(SimError::TimeOverflow)?;
         let runs_for = match shape.mean_run {
             Some(mean) => Some(rng.range(1, mean.checked_mul(2).ok_or(SimError::TimeOverflow)?)),
             None => None,
         };
-        workloads.push(WorkloadSpec { id: WorkloadId(id), need, arrives, runs_for });
+        workloads.push(WorkloadSpec {
+            id: WorkloadId(id),
+            need,
+            arrives,
+            runs_for,
+        });
     }
     Ok(Cluster { nodes, workloads })
 }
@@ -77,7 +105,14 @@ mod tests {
     use crate::index::FitIndex;
 
     fn shape() -> Shape {
-        Shape { nodes: 50, workloads: 500, mean_gap: 1_000, mean_run: Some(50_000), gpu_nodes_per_mille: 200, max_share_per_mille: 500 }
+        Shape {
+            nodes: 50,
+            workloads: 500,
+            mean_gap: 1_000,
+            mean_run: Some(50_000),
+            gpu_nodes_per_mille: 200,
+            max_share_per_mille: 500,
+        }
     }
 
     /// T-T7.4.1's generator: one seed, one cluster; every workload fits an empty node, arrivals in order.

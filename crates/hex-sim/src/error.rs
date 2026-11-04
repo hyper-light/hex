@@ -22,6 +22,8 @@ pub enum SimError {
     ClientGaveUp(WorkloadId, u32),
     #[error("node {0:?} gave up reporting workload {1:?} done after {2} attempts")]
     ReportGaveUp(NodeId, WorkloadId, u32),
-    #[error("the control plane's own commit of {0:?} conflicted, which its sole-writer design rules out")]
+    #[error(
+        "the control plane's own commit of {0:?} conflicted, which its sole-writer design rules out"
+    )]
     UnexpectedConflict(WorkloadId),
 }

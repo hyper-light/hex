@@ -11,7 +11,7 @@
 //! - [`spec`]: the serial specification (one scheduler, one cycle) as the oracle a run's log is
 //!   checked against (`T-T7.4.1`), and the end-state check that nothing was lost or started twice
 //!   (`AC-T7.3.3`).
-//! - [`gen`]: generated clusters and workloads from a seed.
+//! - [`generate`]: generated clusters and workloads from a seed.
 
 #![cfg_attr(
     test,
@@ -26,7 +26,7 @@
 )]
 
 pub mod error;
-pub mod gen;
+pub mod generate;
 pub mod index;
 pub mod model;
 pub mod rng;

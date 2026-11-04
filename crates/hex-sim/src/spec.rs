@@ -8,6 +8,9 @@
 //! have made: the model-based oracle of `T-T7.4.1`, in the shape of QuickCheck's state-machine model
 //! checked at every step (DS[10], DS[11] in `docs/research/scheduler/deterministic-simulation.md`).
 //! [`check_end`] counts what `AC-T7.3.3` holds to zero: workloads lost or started twice.
+//!
+//! Counters here saturate: each counts a run's workloads or writes, bounded by the store far below
+//! `u64::MAX`, so saturation is the unreachable case's stand-in, never a value a report shows.
 
 use std::collections::BTreeMap;
 
@@ -26,10 +29,19 @@ pub enum Violation {
     NotSubmitted(WorkloadId),
     #[error("{0:?} was placed while not pending")]
     NotPending(WorkloadId),
-    #[error("{placed:?} was placed while {ahead:?}, ahead of it in the queue, had a node that held it")]
-    JumpedQueue { placed: WorkloadId, ahead: WorkloadId },
+    #[error(
+        "{placed:?} was placed while {ahead:?}, ahead of it in the queue, had a node that held it"
+    )]
+    JumpedQueue {
+        placed: WorkloadId,
+        ahead: WorkloadId,
+    },
     #[error("{workload:?} went to {chose:?}; the specification puts it on {spec:?}")]
-    NotSerialChoice { workload: WorkloadId, chose: NodeId, spec: Option<NodeId> },
+    NotSerialChoice {
+        workload: WorkloadId,
+        chose: NodeId,
+        spec: Option<NodeId>,
+    },
     #[error("{0:?} completed on a node it wasn't placed on")]
     CompletedElsewhere(WorkloadId),
     #[error("{0:?} was left pending while a node held it")]
@@ -45,7 +57,10 @@ impl From<SimError> for Violation {
 }
 
 /// The specification run directly: each workload, in order, on its best-fit node or none.
-pub fn serial_place(nodes: &[NodeSpec], workloads: &[WorkloadSpec]) -> Result<Vec<Option<NodeId>>, SimError> {
+pub fn serial_place(
+    nodes: &[NodeSpec],
+    workloads: &[WorkloadSpec],
+) -> Result<Vec<Option<NodeId>>, SimError> {
     let mut index = FitIndex::new(nodes)?;
     let mut out = Vec::with_capacity(workloads.len());
     for w in workloads {
@@ -80,7 +95,12 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
     for entry in run.store.log() {
         match entry.op {
             Op::Submit { workload, seq } => {
-                let need = run.store.record(workload).ok_or(Violation::NotSubmitted(workload))?.spec.need;
+                let need = run
+                    .store
+                    .record(workload)
+                    .ok_or(Violation::NotSubmitted(workload))?
+                    .spec
+                    .need;
                 if seq_of.insert(workload, seq).is_some() {
                     return Err(Violation::SubmittedTwice(workload));
                 }
@@ -88,14 +108,26 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                 report.submits = report.submits.saturating_add(1);
             }
             Op::Place { workload, node } => {
-                let seq = *seq_of.get(&workload).ok_or(Violation::NotSubmitted(workload))?;
+                let seq = *seq_of
+                    .get(&workload)
+                    .ok_or(Violation::NotSubmitted(workload))?;
                 let (_, need) = *pending.get(&seq).ok_or(Violation::NotPending(workload))?;
-                if let Some((_, (ahead, _))) = pending.range(..seq).find(|(_, (_, n))| index.best_fit(n).is_some()) {
-                    return Err(Violation::JumpedQueue { placed: workload, ahead: *ahead });
+                if let Some((_, (ahead, _))) = pending
+                    .range(..seq)
+                    .find(|(_, (_, n))| index.best_fit(n).is_some())
+                {
+                    return Err(Violation::JumpedQueue {
+                        placed: workload,
+                        ahead: *ahead,
+                    });
                 }
                 let spec = index.best_fit(&need).map(|k| k.node);
                 if spec != Some(node) {
-                    return Err(Violation::NotSerialChoice { workload, chose: node, spec });
+                    return Err(Violation::NotSerialChoice {
+                        workload,
+                        chose: node,
+                        spec,
+                    });
                 }
                 index.take(node, &need)?;
                 pending.remove(&seq);
@@ -106,7 +138,12 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                 if placed.remove(&workload) != Some(node) {
                     return Err(Violation::CompletedElsewhere(workload));
                 }
-                let need = run.store.record(workload).ok_or(Violation::NotSubmitted(workload))?.spec.need;
+                let need = run
+                    .store
+                    .record(workload)
+                    .ok_or(Violation::NotSubmitted(workload))?
+                    .spec
+                    .need;
                 index.give(node, &need)?;
                 report.completions = report.completions.saturating_add(1);
             }

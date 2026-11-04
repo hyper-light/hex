@@ -24,7 +24,11 @@ impl Rng {
     pub fn range(&mut self, low: u64, high: u64) -> u64 {
         match high.checked_sub(low).and_then(|span| span.checked_add(1)) {
             // low + (x % width) <= high, so the add can't overflow; high stands in for the impossible.
-            Some(width) => self.next_u64().checked_rem(width).and_then(|x| low.checked_add(x)).unwrap_or(high),
+            Some(width) => self
+                .next_u64()
+                .checked_rem(width)
+                .and_then(|x| low.checked_add(x))
+                .unwrap_or(high),
             // high - low + 1 overflowed: the range is every u64 from low.
             None if high >= low => self.next_u64(),
             None => low,

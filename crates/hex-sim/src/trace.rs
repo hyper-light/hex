@@ -75,7 +75,10 @@ mod tests {
     fn nearest_rank_quantiles() {
         let l = Latencies::new((1..=1000).rev().collect());
         let q = l.quantiles().unwrap();
-        assert_eq!((q.count, q.p50, q.p99, q.p999, q.max), (1000, 500, 990, 999, 1000));
+        assert_eq!(
+            (q.count, q.p50, q.p99, q.p999, q.max),
+            (1000, 500, 990, 999, 1000)
+        );
         assert_eq!(Latencies::new(vec![]).quantiles(), None);
         assert_eq!(Latencies::new(vec![7]).at(990), Some(7));
     }

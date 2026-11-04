@@ -127,12 +127,34 @@ struct Decision {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Event {
-    Arrive { at: usize, attempt: u32 },
-    ClientCheck { at: usize, attempt: u32 },
-    Proposal { epoch: u64, seq: u64, decision: Decision },
-    CommitDue { epoch: u64, seq: u64, decision: Decision, resets: u64 },
-    NodeStart { at: usize, node: NodeId },
-    NodeDone { at: usize, node: NodeId, attempt: u32 },
+    Arrive {
+        at: usize,
+        attempt: u32,
+    },
+    ClientCheck {
+        at: usize,
+        attempt: u32,
+    },
+    Proposal {
+        epoch: u64,
+        seq: u64,
+        decision: Decision,
+    },
+    CommitDue {
+        epoch: u64,
+        seq: u64,
+        decision: Decision,
+        resets: u64,
+    },
+    NodeStart {
+        at: usize,
+        node: NodeId,
+    },
+    NodeDone {
+        at: usize,
+        node: NodeId,
+        attempt: u32,
+    },
     Restart,
 }
 
@@ -143,8 +165,16 @@ impl Event {
         match *self {
             Event::Arrive { at: a, attempt } => [1, at(a), u64::from(attempt)],
             Event::ClientCheck { at: a, attempt } => [2, at(a), u64::from(attempt)],
-            Event::Proposal { seq, decision, .. } => [3, seq, decision.node.map_or(u64::MAX, |k| u64::from(k.node.0))],
-            Event::CommitDue { seq, decision, .. } => [4, seq, decision.node.map_or(u64::MAX, |k| u64::from(k.node.0))],
+            Event::Proposal { seq, decision, .. } => [
+                3,
+                seq,
+                decision.node.map_or(u64::MAX, |k| u64::from(k.node.0)),
+            ],
+            Event::CommitDue { seq, decision, .. } => [
+                4,
+                seq,
+                decision.node.map_or(u64::MAX, |k| u64::from(k.node.0)),
+            ],
             Event::NodeStart { at: a, node } => [5, at(a), u64::from(node.0)],
             Event::NodeDone { at: a, node, .. } => [6, at(a), u64::from(node.0)],
             Event::Restart => [7, 0, 0],
@@ -253,22 +283,34 @@ struct Sim<'a> {
 
 pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
     if config.workers == 0 {
-        return Err(SimError::Config("the control plane has at least one decider"));
+        return Err(SimError::Config(
+            "the control plane has at least one decider",
+        ));
     }
     if config.change_window == 0 {
-        return Err(SimError::Config("the change window holds at least one change"));
+        return Err(SimError::Config(
+            "the change window holds at least one change",
+        ));
     }
     for (at, w) in cluster.workloads.iter().enumerate() {
         if usize::try_from(w.id.0).ok() != Some(at) {
-            return Err(SimError::Config("workload ids must be dense from 0, in order"));
+            return Err(SimError::Config(
+                "workload ids must be dense from 0, in order",
+            ));
         }
     }
-    if cluster.workloads.windows(2).any(|p| p.first().map(|a| a.arrives) > p.get(1).map(|b| b.arrives)) {
+    if cluster
+        .workloads
+        .windows(2)
+        .any(|p| p.first().map(|a| a.arrives) > p.get(1).map(|b| b.arrives))
+    {
         return Err(SimError::Config("workloads must be in arrival order"));
     }
     let n = cluster.workloads.len();
     // The log holds a submit, a placement and a completion per workload.
-    let max_log = n.checked_mul(3).ok_or(SimError::Config("too many workloads"))?;
+    let max_log = n
+        .checked_mul(3)
+        .ok_or(SimError::Config("too many workloads"))?;
     let store = Store::new(&cluster.nodes, n, max_log)?;
     let plane = Plane::rebuild(&store, 0, config.workers)?;
     let mut sim = Sim {
@@ -291,7 +333,11 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         sim.schedule(first.arrives, Event::Arrive { at: 0, attempt: 0 })?;
     }
     while let Some(Reverse(next)) = sim.queue.pop() {
-        sim.report.steps = sim.report.steps.checked_add(1).ok_or(SimError::StepBudget(sim.config.max_steps))?;
+        sim.report.steps = sim
+            .report
+            .steps
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(sim.config.max_steps))?;
         if sim.report.steps > sim.config.max_steps {
             return Err(SimError::StepBudget(sim.config.max_steps));
         }
@@ -308,16 +354,32 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
     sim.report.end = sim.now;
     sim.report.trace_hash = sim.hash.finish();
     sim.report.latencies = Latencies::new(sim.latencies);
-    Ok(Run { report: sim.report, store: sim.store, starts: sim.starts, acked: sim.acked, refused: sim.refused })
+    Ok(Run {
+        report: sim.report,
+        store: sim.store,
+        starts: sim.starts,
+        acked: sim.acked,
+        refused: sim.refused,
+    })
 }
 
 impl Sim<'_> {
     fn schedule(&mut self, at: Time, event: Event) -> Result<(), SimError> {
         if self.queue.len() >= self.config.max_events {
-            return Err(SimError::Full { what: "the event queue", bound: self.config.max_events });
+            return Err(SimError::Full {
+                what: "the event queue",
+                bound: self.config.max_events,
+            });
         }
-        self.order = self.order.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
-        self.queue.push(Reverse(Scheduled { at, order: self.order, event }));
+        self.order = self
+            .order
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.queue.push(Reverse(Scheduled {
+            at,
+            order: self.order,
+            event,
+        }));
         Ok(())
     }
 
@@ -326,19 +388,34 @@ impl Sim<'_> {
     }
 
     fn workload(&self, at: usize) -> Result<&WorkloadSpec, SimError> {
-        self.cluster.workloads.get(at).ok_or(SimError::Config("workload index"))
+        self.cluster
+            .workloads
+            .get(at)
+            .ok_or(SimError::Config("workload index"))
     }
 
     fn need(&self, id: WorkloadId) -> Result<Resources, SimError> {
-        self.store.record(id).map(|r| r.spec.need).ok_or(SimError::UnknownWorkload(id))
+        self.store
+            .record(id)
+            .map(|r| r.spec.need)
+            .ok_or(SimError::UnknownWorkload(id))
     }
 
     fn handle(&mut self, event: Event) -> Result<(), SimError> {
         match event {
             Event::Arrive { at, attempt } => self.arrive(at, attempt),
             Event::ClientCheck { at, attempt } => self.client_check(at, attempt),
-            Event::Proposal { epoch, seq, decision } => self.proposal(epoch, seq, decision),
-            Event::CommitDue { epoch, seq, decision, resets } => self.commit_due(epoch, seq, decision, resets),
+            Event::Proposal {
+                epoch,
+                seq,
+                decision,
+            } => self.proposal(epoch, seq, decision),
+            Event::CommitDue {
+                epoch,
+                seq,
+                decision,
+                resets,
+            } => self.commit_due(epoch, seq, decision, resets),
             Event::NodeStart { at, node } => self.node_start(at, node),
             Event::NodeDone { at, node, attempt } => self.node_done(at, node, attempt),
             Event::Restart => {
@@ -352,7 +429,9 @@ impl Sim<'_> {
     /// The control plane's store write, where the nemesis strikes. `None`: the plane crashed there.
     fn write(&mut self, write: Write) -> Result<Option<Outcome>, SimError> {
         let number = self.report.writes;
-        self.report.writes = number.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.report.writes = number
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
         let crash = self.config.crash.filter(|c| c.write == number);
         if crash.map(|c| c.when) == Some(When::Before) {
             self.crash()?;
@@ -361,8 +440,12 @@ impl Sim<'_> {
         let outcome = self.store.apply(self.now, write)?;
         if let (Outcome::Applied { .. }, Write::Place { workload, node, .. }) = (outcome, write) {
             // The store's feed tells the node, whatever becomes of the plane.
-            let at = usize::try_from(workload.0).map_err(|_| SimError::UnknownWorkload(workload))?;
-            self.schedule(self.after(self.config.feed_ns)?, Event::NodeStart { at, node })?;
+            let at =
+                usize::try_from(workload.0).map_err(|_| SimError::UnknownWorkload(workload))?;
+            self.schedule(
+                self.after(self.config.feed_ns)?,
+                Event::NodeStart { at, node },
+            )?;
         }
         if crash.is_some() {
             self.crash()?;
@@ -372,20 +455,39 @@ impl Sim<'_> {
     }
 
     fn crash(&mut self) -> Result<(), SimError> {
-        self.report.crashes = self.report.crashes.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.report.crashes = self
+            .report
+            .crashes
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
         self.plane.up = false;
-        self.plane.epoch = self.plane.epoch.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.plane.epoch = self
+            .plane
+            .epoch
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
         self.schedule(self.after(self.config.restart_ns)?, Event::Restart)
     }
 
     fn arrive(&mut self, at: usize, attempt: u32) -> Result<(), SimError> {
         if attempt == 0 {
-            let next = at.checked_add(1).ok_or(SimError::Config("workload index"))?;
+            let next = at
+                .checked_add(1)
+                .ok_or(SimError::Config("workload index"))?;
             if let Some(w) = self.cluster.workloads.get(next) {
-                self.schedule(w.arrives.max(self.now), Event::Arrive { at: next, attempt: 0 })?;
+                self.schedule(
+                    w.arrives.max(self.now),
+                    Event::Arrive {
+                        at: next,
+                        attempt: 0,
+                    },
+                )?;
             }
         }
-        self.schedule(self.after(self.config.client_retry_ns)?, Event::ClientCheck { at, attempt })?;
+        self.schedule(
+            self.after(self.config.client_retry_ns)?,
+            Event::ClientCheck { at, attempt },
+        )?;
         if !self.plane.up {
             return Ok(());
         }
@@ -400,14 +502,19 @@ impl Sim<'_> {
             return Ok(());
         };
         match outcome {
-            Outcome::Applied { op: crate::store::Op::Submit { seq, .. }, version } => {
+            Outcome::Applied {
+                op: crate::store::Op::Submit { seq, .. },
+                version,
+            } => {
                 self.plane.pending.insert(seq, spec.id);
                 self.plane.versions.insert(spec.id, version);
                 self.plane.undecided.insert(seq);
             }
             // Stored before a crash; the rebuilt plane already queues it.
             Outcome::Duplicate { .. } => {}
-            Outcome::Applied { .. } | Outcome::Conflict(_) => return Err(SimError::UnexpectedConflict(spec.id)),
+            Outcome::Applied { .. } | Outcome::Conflict(_) => {
+                return Err(SimError::UnexpectedConflict(spec.id));
+            }
         }
         if let Some(a) = self.acked.get_mut(at) {
             *a = true;
@@ -417,10 +524,14 @@ impl Sim<'_> {
     }
 
     fn client_check(&mut self, at: usize, attempt: u32) -> Result<(), SimError> {
-        if self.acked.get(at).copied().unwrap_or(true) || self.refused.get(at).copied().unwrap_or(true) {
+        if self.acked.get(at).copied().unwrap_or(true)
+            || self.refused.get(at).copied().unwrap_or(true)
+        {
             return Ok(());
         }
-        let next = attempt.checked_add(1).ok_or(SimError::Config("client attempts"))?;
+        let next = attempt
+            .checked_add(1)
+            .ok_or(SimError::Config("client attempts"))?;
         if next >= self.config.client_attempts {
             return Err(SimError::ClientGaveUp(self.workload(at)?.id, next));
         }
@@ -436,11 +547,25 @@ impl Sim<'_> {
             let Some(&id) = self.plane.pending.get(&seq) else {
                 continue;
             };
-            let decision = Decision { node: self.plane.view.best_fit(&self.need(id)?), snap: self.plane.change_no };
+            let decision = Decision {
+                node: self.plane.view.best_fit(&self.need(id)?),
+                snap: self.plane.change_no,
+            };
             self.plane.deciding.insert(seq);
-            self.plane.idle_workers = self.plane.idle_workers.checked_sub(1).ok_or(SimError::Config("idle deciders"))?;
+            self.plane.idle_workers = self
+                .plane
+                .idle_workers
+                .checked_sub(1)
+                .ok_or(SimError::Config("idle deciders"))?;
             let epoch = self.plane.epoch;
-            self.schedule(self.after(self.config.decide_ns)?, Event::Proposal { epoch, seq, decision })?;
+            self.schedule(
+                self.after(self.config.decide_ns)?,
+                Event::Proposal {
+                    epoch,
+                    seq,
+                    decision,
+                },
+            )?;
         }
         Ok(())
     }
@@ -449,7 +574,11 @@ impl Sim<'_> {
         if epoch != self.plane.epoch || !self.plane.up {
             return Ok(());
         }
-        self.plane.idle_workers = self.plane.idle_workers.checked_add(1).ok_or(SimError::Config("idle deciders"))?;
+        self.plane.idle_workers = self
+            .plane
+            .idle_workers
+            .checked_add(1)
+            .ok_or(SimError::Config("idle deciders"))?;
         self.plane.deciding.remove(&seq);
         if self.plane.pending.contains_key(&seq) {
             self.plane.proposals.insert(seq, decision);
@@ -463,14 +592,24 @@ impl Sim<'_> {
     /// unchanged since keeps the place it had.
     fn still_holds(&mut self, need: &Resources, decision: &Decision) -> Result<bool, SimError> {
         if decision.snap < self.plane.forgotten {
-            self.report.stale = self.report.stale.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
+            self.report.stale = self
+                .report
+                .stale
+                .checked_add(1)
+                .ok_or(SimError::StepBudget(self.config.max_steps))?;
             return Ok(false);
         }
-        let voided = self.plane.changes.iter().rev().take_while(|(no, _)| *no > decision.snap).any(|(_, key)| {
-            let chosen_changed = decision.node.is_some_and(|k| k.node == key.node);
-            let now_first = key.holds(need) && decision.node.is_none_or(|k| *key < k);
-            chosen_changed || now_first
-        });
+        let voided = self
+            .plane
+            .changes
+            .iter()
+            .rev()
+            .take_while(|(no, _)| *no > decision.snap)
+            .any(|(_, key)| {
+                let chosen_changed = decision.node.is_some_and(|k| k.node == key.node);
+                let now_first = key.holds(need) && decision.node.is_none_or(|k| *key < k);
+                chosen_changed || now_first
+            });
         Ok(!voided)
     }
 
@@ -479,8 +618,15 @@ impl Sim<'_> {
         if self.still_holds(need, &decision)? {
             return Ok(decision);
         }
-        self.report.conflicts = self.report.conflicts.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
-        Ok(Decision { node: self.plane.view.best_fit(need), snap: self.plane.change_no })
+        self.report.conflicts = self
+            .report
+            .conflicts
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        Ok(Decision {
+            node: self.plane.view.best_fit(need),
+            snap: self.plane.change_no,
+        })
     }
 
     /// The committer: takes the queue in order from past `cursor`, passes over workloads no node
@@ -493,7 +639,8 @@ impl Sim<'_> {
                 return Ok(());
             }
             let from = self.plane.cursor.map_or(Bound::Unbounded, Bound::Excluded);
-            let Some((&seq, &id)) = self.plane.pending.range((from, Bound::Unbounded)).next() else {
+            let Some((&seq, &id)) = self.plane.pending.range((from, Bound::Unbounded)).next()
+            else {
                 return Ok(());
             };
             let Some(decision) = self.plane.proposals.remove(&seq) else {
@@ -510,12 +657,26 @@ impl Sim<'_> {
             }
             self.plane.committing = true;
             let (epoch, resets) = (self.plane.epoch, self.plane.resets);
-            return self.schedule(self.after(self.config.commit_ns)?, Event::CommitDue { epoch, seq, decision, resets });
+            return self.schedule(
+                self.after(self.config.commit_ns)?,
+                Event::CommitDue {
+                    epoch,
+                    seq,
+                    decision,
+                    resets,
+                },
+            );
         }
         Ok(())
     }
 
-    fn commit_due(&mut self, epoch: u64, seq: u64, decision: Decision, resets: u64) -> Result<(), SimError> {
+    fn commit_due(
+        &mut self,
+        epoch: u64,
+        seq: u64,
+        decision: Decision,
+        resets: u64,
+    ) -> Result<(), SimError> {
         if epoch != self.plane.epoch || !self.plane.up {
             return Ok(());
         }
@@ -534,8 +695,17 @@ impl Sim<'_> {
             self.plane.cursor = Some(seq);
             return self.sequence();
         };
-        let version = *self.plane.versions.get(&id).ok_or(SimError::UnknownWorkload(id))?;
-        let Some(outcome) = self.write(Write::Place { workload: id, node: key.node, version })? else {
+        let version = *self
+            .plane
+            .versions
+            .get(&id)
+            .ok_or(SimError::UnknownWorkload(id))?;
+        let Some(outcome) = self.write(Write::Place {
+            workload: id,
+            node: key.node,
+            version,
+        })?
+        else {
             return Ok(());
         };
         let Outcome::Applied { version, .. } = outcome else {
@@ -546,14 +716,30 @@ impl Sim<'_> {
         self.plane.pending.remove(&seq);
         self.plane.versions.insert(id, version);
         self.plane.cursor = Some(seq);
-        self.report.placements = self.report.placements.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
-        let arrives = self.store.record(id).map(|r| r.spec.arrives).ok_or(SimError::UnknownWorkload(id))?;
-        self.latencies.push(self.now.checked_sub(arrives).ok_or(SimError::TimeOverflow)?);
+        self.report.placements = self
+            .report
+            .placements
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        let arrives = self
+            .store
+            .record(id)
+            .map(|r| r.spec.arrives)
+            .ok_or(SimError::UnknownWorkload(id))?;
+        self.latencies.push(
+            self.now
+                .checked_sub(arrives)
+                .ok_or(SimError::TimeOverflow)?,
+        );
         self.sequence()
     }
 
     fn note_change(&mut self, key: Key) -> Result<(), SimError> {
-        self.plane.change_no = self.plane.change_no.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.plane.change_no = self
+            .plane
+            .change_no
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
         if self.plane.changes.len() >= self.config.change_window {
             if let Some((no, _)) = self.plane.changes.pop_front() {
                 self.plane.forgotten = no;
@@ -564,10 +750,20 @@ impl Sim<'_> {
     }
 
     fn node_start(&mut self, at: usize, node: NodeId) -> Result<(), SimError> {
-        let starts = self.starts.get_mut(at).ok_or(SimError::Config("workload index"))?;
+        let starts = self
+            .starts
+            .get_mut(at)
+            .ok_or(SimError::Config("workload index"))?;
         *starts = starts.checked_add(1).ok_or(SimError::Config("starts"))?;
         if let Some(runs_for) = self.workload(at)?.runs_for {
-            self.schedule(self.after(runs_for)?, Event::NodeDone { at, node, attempt: 0 })?;
+            self.schedule(
+                self.after(runs_for)?,
+                Event::NodeDone {
+                    at,
+                    node,
+                    attempt: 0,
+                },
+            )?;
         }
         Ok(())
     }
@@ -575,11 +771,20 @@ impl Sim<'_> {
     fn node_done(&mut self, at: usize, node: NodeId, attempt: u32) -> Result<(), SimError> {
         let id = self.workload(at)?.id;
         let resend = |sim: &mut Self| -> Result<(), SimError> {
-            let next = attempt.checked_add(1).ok_or(SimError::Config("report attempts"))?;
+            let next = attempt
+                .checked_add(1)
+                .ok_or(SimError::Config("report attempts"))?;
             if next >= sim.config.report_attempts {
                 return Err(SimError::ReportGaveUp(node, id, next));
             }
-            sim.schedule(sim.after(sim.config.report_retry_ns)?, Event::NodeDone { at, node, attempt: next })
+            sim.schedule(
+                sim.after(sim.config.report_retry_ns)?,
+                Event::NodeDone {
+                    at,
+                    node,
+                    attempt: next,
+                },
+            )
         };
         if !self.plane.up {
             return resend(self);
@@ -587,7 +792,12 @@ impl Sim<'_> {
         // A workload the plane holds no version for was recorded done already (it rebuilt from a
         // store that has it complete); the store answers a repeat as a duplicate.
         let version = self.plane.versions.get(&id).copied().unwrap_or(0);
-        let Some(outcome) = self.write(Write::Complete { workload: id, node, version })? else {
+        let Some(outcome) = self.write(Write::Complete {
+            workload: id,
+            node,
+            version,
+        })?
+        else {
             return resend(self);
         };
         match outcome {
@@ -596,7 +806,11 @@ impl Sim<'_> {
                 self.note_change(changed)?;
                 self.plane.versions.remove(&id);
                 self.plane.cursor = None;
-                self.plane.resets = self.plane.resets.checked_add(1).ok_or(SimError::StepBudget(self.config.max_steps))?;
+                self.plane.resets = self
+                    .plane
+                    .resets
+                    .checked_add(1)
+                    .ok_or(SimError::StepBudget(self.config.max_steps))?;
                 self.assign()?;
                 self.sequence()
             }

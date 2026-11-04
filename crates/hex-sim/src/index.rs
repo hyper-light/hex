@@ -21,11 +21,18 @@ pub struct Key {
 
 impl Key {
     fn of(node: NodeId, free: &Resources) -> Self {
-        Self { cpu_milli: free.cpu_milli, mem_bytes: free.mem_bytes, gpus: free.gpus, node }
+        Self {
+            cpu_milli: free.cpu_milli,
+            mem_bytes: free.mem_bytes,
+            gpus: free.gpus,
+            node,
+        }
     }
 
     pub fn holds(&self, need: &Resources) -> bool {
-        need.cpu_milli <= self.cpu_milli && need.mem_bytes <= self.mem_bytes && need.gpus <= self.gpus
+        need.cpu_milli <= self.cpu_milli
+            && need.mem_bytes <= self.mem_bytes
+            && need.gpus <= self.gpus
     }
 }
 
@@ -64,15 +71,26 @@ impl FitIndex {
     }
 
     fn free_of(&self, node: NodeId) -> Result<&Resources, SimError> {
-        usize::try_from(node.0).ok().and_then(|at| self.free.get(at)).ok_or(SimError::UnknownNode(node))
+        usize::try_from(node.0)
+            .ok()
+            .and_then(|at| self.free.get(at))
+            .ok_or(SimError::UnknownNode(node))
     }
 
     /// The best-fit node for `need`, or `None` when no node holds it. The scan starts at the first
     /// node with enough CPU and ends at the first that holds the rest; it visits each node at most
     /// once, so the node count bounds it.
     pub fn best_fit(&self, need: &Resources) -> Option<Key> {
-        let from = Key { cpu_milli: need.cpu_milli, mem_bytes: 0, gpus: 0, node: NodeId(0) };
-        self.order.range(from..).find(|key| key.holds(need)).copied()
+        let from = Key {
+            cpu_milli: need.cpu_milli,
+            mem_bytes: 0,
+            gpus: 0,
+            node: NodeId(0),
+        };
+        self.order
+            .range(from..)
+            .find(|key| key.holds(need))
+            .copied()
     }
 
     /// Takes `need` from `node`'s free capacity; its new key.
@@ -85,7 +103,11 @@ impl FitIndex {
         self.change(node, |free| free.checked_add(need))
     }
 
-    fn change(&mut self, node: NodeId, f: impl FnOnce(&Resources) -> Option<Resources>) -> Result<Key, SimError> {
+    fn change(
+        &mut self,
+        node: NodeId,
+        f: impl FnOnce(&Resources) -> Option<Resources>,
+    ) -> Result<Key, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let slot = self.free.get_mut(at).ok_or(SimError::UnknownNode(node))?;
         let next = f(slot).ok_or(SimError::Resources(node))?;
@@ -102,26 +124,53 @@ mod tests {
     use super::*;
 
     fn res(cpu: u64, mem: u64, gpus: u32) -> Resources {
-        Resources { cpu_milli: cpu, mem_bytes: mem, gpus }
+        Resources {
+            cpu_milli: cpu,
+            mem_bytes: mem,
+            gpus,
+        }
     }
 
     fn nodes(caps: &[Resources]) -> Vec<NodeSpec> {
-        caps.iter().enumerate().map(|(i, c)| NodeSpec { id: NodeId(i as u32), capacity: *c }).collect()
+        caps.iter()
+            .enumerate()
+            .map(|(i, c)| NodeSpec {
+                id: NodeId(i as u32),
+                capacity: *c,
+            })
+            .collect()
     }
 
     /// Brute force: the least key among the nodes that hold the need.
     fn oracle(index: &FitIndex, need: &Resources) -> Option<Key> {
-        (0..index.len()).map(|i| index.key(NodeId(i as u32)).unwrap()).filter(|k| k.holds(need)).min()
+        (0..index.len())
+            .map(|i| index.key(NodeId(i as u32)).unwrap())
+            .filter(|k| k.holds(need))
+            .min()
     }
 
     /// T-T7.4.1: place on a few nodes, expect the least-free node that holds the need, GPU work only on
     /// a GPU node.
     #[test]
     fn best_fit_is_the_least_free_node_that_holds_the_need() {
-        let index = FitIndex::new(&nodes(&[res(8000, 16, 0), res(2000, 16, 0), res(4000, 4, 1)])).unwrap();
-        assert_eq!(index.best_fit(&res(1000, 8, 0)).map(|k| k.node), Some(NodeId(1)));
-        assert_eq!(index.best_fit(&res(3000, 8, 0)).map(|k| k.node), Some(NodeId(0)));
-        assert_eq!(index.best_fit(&res(1000, 1, 1)).map(|k| k.node), Some(NodeId(2)));
+        let index = FitIndex::new(&nodes(&[
+            res(8000, 16, 0),
+            res(2000, 16, 0),
+            res(4000, 4, 1),
+        ]))
+        .unwrap();
+        assert_eq!(
+            index.best_fit(&res(1000, 8, 0)).map(|k| k.node),
+            Some(NodeId(1))
+        );
+        assert_eq!(
+            index.best_fit(&res(3000, 8, 0)).map(|k| k.node),
+            Some(NodeId(0))
+        );
+        assert_eq!(
+            index.best_fit(&res(1000, 1, 1)).map(|k| k.node),
+            Some(NodeId(2))
+        );
         assert_eq!(index.best_fit(&res(1000, 8, 1)), None);
     }
 
@@ -135,9 +184,15 @@ mod tests {
     #[test]
     fn taking_more_than_is_free_is_refused_and_changes_nothing() {
         let mut index = FitIndex::new(&nodes(&[res(1000, 10, 0)])).unwrap();
-        assert_eq!(index.take(NodeId(0), &res(2000, 1, 0)), Err(SimError::Resources(NodeId(0))));
+        assert_eq!(
+            index.take(NodeId(0), &res(2000, 1, 0)),
+            Err(SimError::Resources(NodeId(0)))
+        );
         assert_eq!(index.key(NodeId(0)).unwrap().cpu_milli, 1000);
-        assert_eq!(index.take(NodeId(3), &res(1, 1, 0)), Err(SimError::UnknownNode(NodeId(3))));
+        assert_eq!(
+            index.take(NodeId(3), &res(1, 1, 0)),
+            Err(SimError::UnknownNode(NodeId(3)))
+        );
     }
 
     proptest::proptest! {

@@ -31,8 +31,16 @@ pub struct Record {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Write {
     Submit(WorkloadSpec),
-    Place { workload: WorkloadId, node: NodeId, version: u64 },
-    Complete { workload: WorkloadId, node: NodeId, version: u64 },
+    Place {
+        workload: WorkloadId,
+        node: NodeId,
+        version: u64,
+    },
+    Complete {
+        workload: WorkloadId,
+        node: NodeId,
+        version: u64,
+    },
 }
 
 /// An applied write, as the log keeps it.
@@ -63,9 +71,14 @@ pub enum Conflict {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    Applied { op: Op, version: u64 },
+    Applied {
+        op: Op,
+        version: u64,
+    },
     /// The write was already applied (a client's resubmit, a node's repeated report): nothing changes.
-    Duplicate { version: u64 },
+    Duplicate {
+        version: u64,
+    },
     Conflict(Conflict),
 }
 
@@ -103,12 +116,23 @@ impl Store {
     pub fn apply(&mut self, at: Time, write: Write) -> Result<Outcome, SimError> {
         let outcome = match write {
             Write::Submit(spec) => self.submit(spec)?,
-            Write::Place { workload, node, version } => self.place(workload, node, version)?,
-            Write::Complete { workload, node, version } => self.complete(workload, node, version)?,
+            Write::Place {
+                workload,
+                node,
+                version,
+            } => self.place(workload, node, version)?,
+            Write::Complete {
+                workload,
+                node,
+                version,
+            } => self.complete(workload, node, version)?,
         };
         if let Outcome::Applied { op, .. } = outcome {
             if self.log.len() >= self.max_log {
-                return Err(SimError::Full { what: "the store's log", bound: self.max_log });
+                return Err(SimError::Full {
+                    what: "the store's log",
+                    bound: self.max_log,
+                });
             }
             self.log.push(Entry { at, op });
         }
@@ -117,68 +141,124 @@ impl Store {
 
     fn submit(&mut self, spec: WorkloadSpec) -> Result<Outcome, SimError> {
         if let Some(record) = self.records.get(&spec.id) {
-            return Ok(Outcome::Duplicate { version: record.version });
+            return Ok(Outcome::Duplicate {
+                version: record.version,
+            });
         }
         if self.records.len() >= self.max_records || self.log.len() >= self.max_log {
-            return Err(SimError::Full { what: "the store's records", bound: self.max_records });
+            return Err(SimError::Full {
+                what: "the store's records",
+                bound: self.max_records,
+            });
         }
         let seq = self.next_seq;
-        self.next_seq = seq.checked_add(1).ok_or(SimError::Full { what: "submit sequence", bound: usize::MAX })?;
-        self.records.insert(spec.id, Record { spec, seq, version: 1, state: State::Pending });
-        Ok(Outcome::Applied { op: Op::Submit { workload: spec.id, seq }, version: 1 })
+        self.next_seq = seq.checked_add(1).ok_or(SimError::Full {
+            what: "submit sequence",
+            bound: usize::MAX,
+        })?;
+        self.records.insert(
+            spec.id,
+            Record {
+                spec,
+                seq,
+                version: 1,
+                state: State::Pending,
+            },
+        );
+        Ok(Outcome::Applied {
+            op: Op::Submit {
+                workload: spec.id,
+                seq,
+            },
+            version: 1,
+        })
     }
 
-    fn place(&mut self, workload: WorkloadId, node: NodeId, read: u64) -> Result<Outcome, SimError> {
+    fn place(
+        &mut self,
+        workload: WorkloadId,
+        node: NodeId,
+        read: u64,
+    ) -> Result<Outcome, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let Some(record) = self.records.get_mut(&workload) else {
             return Ok(Outcome::Conflict(Conflict::Missing));
         };
         if record.version != read {
-            return Ok(Outcome::Conflict(Conflict::Version { read, found: record.version }));
+            return Ok(Outcome::Conflict(Conflict::Version {
+                read,
+                found: record.version,
+            }));
         }
         if record.state != State::Pending {
             return Ok(Outcome::Conflict(Conflict::State(record.state)));
         }
         let capacity = self.capacity.get(at).ok_or(SimError::UnknownNode(node))?;
         let used = self.used.get_mut(at).ok_or(SimError::UnknownNode(node))?;
-        let after = used.checked_add(&record.spec.need).ok_or(SimError::Resources(node))?;
+        let after = used
+            .checked_add(&record.spec.need)
+            .ok_or(SimError::Resources(node))?;
         if !capacity.holds(&after) {
             return Ok(Outcome::Conflict(Conflict::NodeFull));
         }
         let version = bump(record.version)?;
         if self.log.len() >= self.max_log {
-            return Err(SimError::Full { what: "the store's log", bound: self.max_log });
+            return Err(SimError::Full {
+                what: "the store's log",
+                bound: self.max_log,
+            });
         }
         *used = after;
         record.version = version;
         record.state = State::Placed(node);
-        Ok(Outcome::Applied { op: Op::Place { workload, node }, version })
+        Ok(Outcome::Applied {
+            op: Op::Place { workload, node },
+            version,
+        })
     }
 
-    fn complete(&mut self, workload: WorkloadId, node: NodeId, read: u64) -> Result<Outcome, SimError> {
+    fn complete(
+        &mut self,
+        workload: WorkloadId,
+        node: NodeId,
+        read: u64,
+    ) -> Result<Outcome, SimError> {
         let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
         let Some(record) = self.records.get_mut(&workload) else {
             return Ok(Outcome::Conflict(Conflict::Missing));
         };
         if record.state == State::Complete(node) {
-            return Ok(Outcome::Duplicate { version: record.version });
+            return Ok(Outcome::Duplicate {
+                version: record.version,
+            });
         }
         if record.state != State::Placed(node) {
             return Ok(Outcome::Conflict(Conflict::State(record.state)));
         }
         if record.version != read {
-            return Ok(Outcome::Conflict(Conflict::Version { read, found: record.version }));
+            return Ok(Outcome::Conflict(Conflict::Version {
+                read,
+                found: record.version,
+            }));
         }
         let used = self.used.get_mut(at).ok_or(SimError::UnknownNode(node))?;
-        let after = used.checked_sub(&record.spec.need).ok_or(SimError::Resources(node))?;
+        let after = used
+            .checked_sub(&record.spec.need)
+            .ok_or(SimError::Resources(node))?;
         let version = bump(record.version)?;
         if self.log.len() >= self.max_log {
-            return Err(SimError::Full { what: "the store's log", bound: self.max_log });
+            return Err(SimError::Full {
+                what: "the store's log",
+                bound: self.max_log,
+            });
         }
         *used = after;
         record.version = version;
         record.state = State::Complete(node);
-        Ok(Outcome::Applied { op: Op::Complete { workload, node }, version })
+        Ok(Outcome::Applied {
+            op: Op::Complete { workload, node },
+            version,
+        })
     }
 
     pub fn record(&self, workload: WorkloadId) -> Option<&Record> {
@@ -197,8 +277,12 @@ impl Store {
     pub fn free(&self) -> Result<Vec<NodeSpec>, SimError> {
         let mut out = Vec::with_capacity(self.capacity.len());
         for (at, (cap, used)) in self.capacity.iter().zip(&self.used).enumerate() {
-            let id = NodeId(u32::try_from(at).map_err(|_| SimError::Config("more nodes than u32 ids"))?);
-            out.push(NodeSpec { id, capacity: cap.checked_sub(used).ok_or(SimError::Resources(id))? });
+            let id =
+                NodeId(u32::try_from(at).map_err(|_| SimError::Config("more nodes than u32 ids"))?);
+            out.push(NodeSpec {
+                id,
+                capacity: cap.checked_sub(used).ok_or(SimError::Resources(id))?,
+            });
         }
         Ok(out)
     }
@@ -212,7 +296,10 @@ impl Store {
 }
 
 fn bump(version: u64) -> Result<u64, SimError> {
-    version.checked_add(1).ok_or(SimError::Full { what: "a record's version", bound: usize::MAX })
+    version.checked_add(1).ok_or(SimError::Full {
+        what: "a record's version",
+        bound: usize::MAX,
+    })
 }
 
 #[cfg(test)]
@@ -220,22 +307,51 @@ mod tests {
     use super::*;
 
     fn store() -> Store {
-        let nodes = [NodeSpec { id: NodeId(0), capacity: Resources { cpu_milli: 1000, mem_bytes: 10, gpus: 0 } }];
+        let nodes = [NodeSpec {
+            id: NodeId(0),
+            capacity: Resources {
+                cpu_milli: 1000,
+                mem_bytes: 10,
+                gpus: 0,
+            },
+        }];
         Store::new(&nodes, 4, 16).unwrap()
     }
 
     fn spec(id: u64, cpu: u64) -> WorkloadSpec {
-        WorkloadSpec { id: WorkloadId(id), need: Resources { cpu_milli: cpu, mem_bytes: 1, gpus: 0 }, arrives: 0, runs_for: None }
+        WorkloadSpec {
+            id: WorkloadId(id),
+            need: Resources {
+                cpu_milli: cpu,
+                mem_bytes: 1,
+                gpus: 0,
+            },
+            arrives: 0,
+            runs_for: None,
+        }
     }
 
     /// AC-T7.3.3: a placement committed twice from the same read starts once; the second is a conflict.
     #[test]
     fn a_placement_from_a_stale_read_conflicts() {
         let mut s = store();
-        assert!(matches!(s.apply(0, Write::Submit(spec(1, 100))).unwrap(), Outcome::Applied { version: 1, .. }));
-        let place = Write::Place { workload: WorkloadId(1), node: NodeId(0), version: 1 };
-        assert!(matches!(s.apply(1, place).unwrap(), Outcome::Applied { version: 2, .. }));
-        assert_eq!(s.apply(2, place).unwrap(), Outcome::Conflict(Conflict::Version { read: 1, found: 2 }));
+        assert!(matches!(
+            s.apply(0, Write::Submit(spec(1, 100))).unwrap(),
+            Outcome::Applied { version: 1, .. }
+        ));
+        let place = Write::Place {
+            workload: WorkloadId(1),
+            node: NodeId(0),
+            version: 1,
+        };
+        assert!(matches!(
+            s.apply(1, place).unwrap(),
+            Outcome::Applied { version: 2, .. }
+        ));
+        assert_eq!(
+            s.apply(2, place).unwrap(),
+            Outcome::Conflict(Conflict::Version { read: 1, found: 2 })
+        );
         assert_eq!(s.log().len(), 2);
     }
 
@@ -244,9 +360,24 @@ mod tests {
     fn resubmits_and_repeated_reports_are_duplicates() {
         let mut s = store();
         s.apply(0, Write::Submit(spec(1, 100))).unwrap();
-        assert_eq!(s.apply(1, Write::Submit(spec(1, 100))).unwrap(), Outcome::Duplicate { version: 1 });
-        s.apply(2, Write::Place { workload: WorkloadId(1), node: NodeId(0), version: 1 }).unwrap();
-        let done = Write::Complete { workload: WorkloadId(1), node: NodeId(0), version: 2 };
+        assert_eq!(
+            s.apply(1, Write::Submit(spec(1, 100))).unwrap(),
+            Outcome::Duplicate { version: 1 }
+        );
+        s.apply(
+            2,
+            Write::Place {
+                workload: WorkloadId(1),
+                node: NodeId(0),
+                version: 1,
+            },
+        )
+        .unwrap();
+        let done = Write::Complete {
+            workload: WorkloadId(1),
+            node: NodeId(0),
+            version: 2,
+        };
         assert!(matches!(s.apply(3, done).unwrap(), Outcome::Applied { .. }));
         assert_eq!(s.apply(4, done).unwrap(), Outcome::Duplicate { version: 3 });
         assert_eq!(s.free().unwrap()[0].capacity.cpu_milli, 1000);
@@ -257,8 +388,25 @@ mod tests {
         let mut s = store();
         s.apply(0, Write::Submit(spec(1, 700))).unwrap();
         s.apply(0, Write::Submit(spec(2, 700))).unwrap();
-        s.apply(1, Write::Place { workload: WorkloadId(1), node: NodeId(0), version: 1 }).unwrap();
-        let second = s.apply(2, Write::Place { workload: WorkloadId(2), node: NodeId(0), version: 1 }).unwrap();
+        s.apply(
+            1,
+            Write::Place {
+                workload: WorkloadId(1),
+                node: NodeId(0),
+                version: 1,
+            },
+        )
+        .unwrap();
+        let second = s
+            .apply(
+                2,
+                Write::Place {
+                    workload: WorkloadId(2),
+                    node: NodeId(0),
+                    version: 1,
+                },
+            )
+            .unwrap();
         assert_eq!(second, Outcome::Conflict(Conflict::NodeFull));
     }
 
@@ -269,6 +417,9 @@ mod tests {
         for id in 0..4 {
             s.apply(0, Write::Submit(spec(id, 1))).unwrap();
         }
-        assert!(matches!(s.apply(0, Write::Submit(spec(9, 1))), Err(SimError::Full { .. })));
+        assert!(matches!(
+            s.apply(0, Write::Submit(spec(9, 1))),
+            Err(SimError::Full { .. })
+        ));
     }
 }

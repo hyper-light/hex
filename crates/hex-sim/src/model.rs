@@ -19,7 +19,9 @@ pub struct Resources {
 impl Resources {
     /// Whether `need` fits in what this is.
     pub fn holds(&self, need: &Resources) -> bool {
-        need.cpu_milli <= self.cpu_milli && need.mem_bytes <= self.mem_bytes && need.gpus <= self.gpus
+        need.cpu_milli <= self.cpu_milli
+            && need.mem_bytes <= self.mem_bytes
+            && need.gpus <= self.gpus
     }
 
     pub fn checked_sub(&self, other: &Resources) -> Option<Resources> {
