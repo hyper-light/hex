@@ -297,9 +297,13 @@ mod linux {
                 .ok_or_else(|| format!("box {}'s sleep outlived its box's delete", p.pid()))?;
         }
         let boxes_left = node.list().map_err(|e| e.to_string())?.len();
+        // The node's own root for oci boxes (`.oci`, since 32db274) is no box.
         let cgroups_left = std::fs::read_dir(root)
             .map_err(|e| format!("listing {}: {e}", root.display()))?
-            .filter(|e| e.as_ref().is_ok_and(|e| e.path().is_dir()))
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.path().is_dir() && e.file_name() != hex_node::OCI_BOXES)
+            })
             .count();
         if boxes_left > 0 || cgroups_left > 0 {
             return Err(format!(
