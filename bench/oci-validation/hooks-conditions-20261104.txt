@@ -52,3 +52,24 @@
 #    shared rootless runtime directory (/run/user/1000/hex-node), where an earlier order counted it in a
 #    later run's case (hex-hooks-startpass-20261104T141822Z, "(container states, the cgroup) at the kill":
 #    2 and 3, against 1). Those leftovers were the test's own, their inits ended, and were removed.
+#
+# 7. The lead's (c), an interleaved create p50/p99 A/B, ca6dc80 against f369f6f, until the breakdown's reader
+#    knows step 6's path (b). exec_ab.sh at f369f6f: every build's seam_oci lifecycle phase (create, start, exec
+#    and delete, each timed alone) and libcrun's in process, in shuffled order each round; N=1000 WARMUP=100
+#    ROUNDS=5, the container on CPUs 4-15, root, so the pruned path; every round's errors {}. Static-glibc release
+#    binaries: before hex 66486e0e576e3d93 / seam_oci 504b8250ccc63883, after hex 0bf490040d4d57d1 / seam_oci
+#    cc3f8fb4d8bf0229. Under the timed lock, units started through hex-slot. fedora had rebooted at about
+#    10:00Z; load average 22-61 throughout (CPU pressure some avg10 about 25%), with the kind cluster, buildkit
+#    builders and other agents' units up. Nearest-rank, ms:
+#    Run 1, unit hex-hooks-abc-20261104T142625Z (exec-ab-20261104T142957Z, load 22-51):
+#      create p50/p99  before 18.825/40.275  after 19.868/41.497  libcrun 2.378/10.601 (pooled, n=5000 each)
+#      after/before    pooled p50 1.055 p99 1.030; by round p50 1.053 1.318 1.014 1.014 1.097
+#    Run 2, unit hex-hooks-abc2-20261104T143943Z (exec-ab-20261104T143943Z, load 37-61):
+#      create p50/p99  before 18.575/42.134  after 19.183/38.924  libcrun 2.244/44.600
+#      after/before    pooled p50 1.033 p99 0.924; by round p50 0.933 0.979 1.153 1.071 1.175
+#    Reading: the two runs' round ratios overlap both sides of 1 (p50 0.933-1.318, p99 0.637-1.366), so under this
+#    load the A/B resolves no difference finer than about ±15% a round. The pooled p50 is 3-5% higher after in
+#    both runs, which this host can't tell from noise; the trace (2.) shows a hookless create making the same calls
+#    at both. Hex's create here is about 19 ms, against 0.713 ms for the seam on this host on 2026-11-03 (load 2.8,
+#    create_breakdown.md), so the host's load sets these numbers, not the builds. A run at lower load, or the parts
+#    A/B once the reader is fixed, would resolve finer.
