@@ -113,8 +113,8 @@ PRUNED_SEED_PARTS = (
     + [
         # The pruned seed is handed the cgroup as a descriptor, so it opens none; it reads config.json
         # through the bundle descriptor instead (goal 5 plan step 2).
-        ("the pipes made; a namespace made ahead taken; the request sent to a seed, which wakes and reads "
-         "config.json", SEED),
+        ("the pipes made; a namespace made ahead taken; the request sent to a seed, which wakes and reads its "
+         "spec (config.json; since 5bc0a2c, the checked spec's sealed memfd)", SEED),
     ]
     + SEED_PARTS[14:18]
     + [
@@ -388,11 +388,18 @@ def create_cuts(ev, bench, cid, seeded=False, pruned=False, once=False, chosen=F
         born, seed, init = seed_fork(ev, c.at[-1], bench)
         clone = last_before(ev, c.at[-1] + 1, born, enter(seed, "clone3"), "the seed's clone of the init")
         if pruned:
-            opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "openat"),
-                                 "the seed's read of config.json")
-            c.at += [opened, clone]
-            c.opens.append((opened, seed, "openat", lambda p: named(p, "config.json"),
-                            "the seed's read of config.json"))
+            # Since 5bc0a2c the seed takes the spec the runtime checked from a sealed memfd, read with pread
+            # (linux::oci::checked), so its last pread before the clone ends the read; an older seed opened
+            # config.json through the bundle's descriptor.
+            reads = [i for i in range(c.at[-1] + 1, clone) if exited(seed, "pread64")(ev[i])]
+            if reads:
+                c.at += [reads[-1], clone]
+            else:
+                opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "openat"),
+                                     "the seed's read of config.json, or of the checked spec")
+                c.at += [opened, clone]
+                c.opens.append((opened, seed, "openat", lambda p: named(p, "config.json"),
+                                "the seed's read of config.json"))
         else:
             opened = last_before(ev, c.at[-1] + 1, clone, exited(seed, "open"),
                                  "the seed's open of the box's cgroup")
