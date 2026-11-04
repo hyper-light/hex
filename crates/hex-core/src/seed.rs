@@ -120,8 +120,8 @@ pub struct Request {
 }
 
 /// A container for the seed to make (decision 5): its init cloned into its cgroup and the namespaces its
-/// spec asks for, set up to the exec FIFO. On the classic path the seed reads the spec from the bundle's
-/// `config.json` by path and opens the cgroup the create names, as `hex __oci-exec` does; the descriptors
+/// spec asks for, set up to the exec FIFO. On the classic path the seed opens the cgroup the create names, as
+/// `hex __oci-exec` does, and takes the spec from the create's last descriptor ([`Create::config`]); the descriptors
 /// that ride with it ([`CREATE_FDS`]) are the init's sync pipe (the write end) and the map pipe (the read
 /// end), and, when `network` says so, the network namespace made ahead the init joins.
 ///

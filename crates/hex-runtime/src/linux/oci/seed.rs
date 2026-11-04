@@ -730,8 +730,8 @@ fn serve_create(create: &seed::Create, fds: Vec<OwnedFd>) -> (Answer, Option<Own
 /// Makes a container on the pruned-seed root path (goal 5 plan step 2). The seed's own mount namespace
 /// is pruned to two mounts, so it reaches no host path; the create carried, after the two pipes and a
 /// network namespace, four fixed descriptors (the bundle directory, the cgroup, the state directory and
-/// the rootfs tree) and one tree per bind mount. The seed reads the spec from the bundle descriptor,
-/// clones the init into the cgroup with the fresh namespaces the spec asks for (`CLONE_NEWNS` copies the
+/// the rootfs tree) and one tree per bind mount, and last the spec the runtime checked. The seed makes the
+/// container from that spec (the bundle descriptor rides, unread), clones the init into the cgroup with the fresh namespaces the spec asks for (`CLONE_NEWNS` copies the
 /// pruned namespace), and the init builds the root from the trees ([`init::clone_child_pruned`]), with no
 /// `pivot_root`. The runtime routes a user-namespaced, hook-bearing or path-joined container to the shim,
 /// never here; one that reaches here anyway is refused by type (CLAUDE.md §3).
