@@ -483,3 +483,29 @@ a lifecycle against 0.75 to 0.77 in the other three), the host's swing run 14 fo
 mr17 5.29x (SE 0.18) and mr13 5.18x (SE 0.13), inside each other's spread.
 Concurrency 32's CPU a lifecycle is 1.21 to 1.26 ms in all four. The held files' own saving is on the checker's thread
 and is still to be measured apart.
+
+## Run 16 (2026-11-04, fedora): the final ratio's merge against step 3's a600107, A B B A on 4-15, and option 1
+
+- **Binaries:** the final merge, `cp/t7-ext-s6-x-s3-final` at ca6dc80 (x-s3 c912114 with step 6's b84bbaf, then step 3's
+  final a600107; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91), against mr17 (run 15's: `hex` fc991e45d9cbb5ce,
+  `seam_oci` 5c607a9069d096a2). The merge's gates (018867e, ca6dc80) and its root lab passed in the same unit first.
+- **Method:** the unit `hex-g5x-s6-fdh25-20261104T054328Z`, run 9's method, A B B A from 05:47:38Z to 05:50:07Z, then one
+  option-1 pass to 05:50:33Z; one owner's boxes, reuse on, interleaved pairs on 4-15, 2 rounds of 10 pairs a run; kiln's
+  pool of about 103 containers beside it and no other unit of Hex's. CPU pressure rose under the second run.
+
+| run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | over the socket (SE) | load, CPU pressure |
+|---|---|---|---|---|---|---|---|
+| `20261104T054739Z` | mr17 | 5.77x (0.19) | 9,137/s over 1,569/s | 0.75, 1.19 ms | 1.22, 10.14 | 5.07x (0.10) | 8.6 to 12.5, 0.4 to 8% |
+| `20261104T054815Z` | final | 6.63x (0.20) | 8,026/s over 1,206/s | 0.94, 1.29 ms | 1.15, 9.61 | 6.83x (0.38) | 24 to 28, 35 to 38% |
+| `20261104T054901Z` | final | 4.74x (0.11) | 9,238/s over 1,944/s | 0.71, 1.20 ms | 1.27, 10.28 | 4.69x (0.06) | 27 to 28, 16 to 19% |
+| `20261104T054934Z` | mr17 | 4.62x (0.07) | 9,428/s over 2,036/s | 0.70, 1.19 ms | 1.24, 10.21 | 4.89x (0.06) | 25 to 27, 18 to 19% |
+| `20261104T055007Z` | final, option 1 | 7.52x (0.16) | 15,926/s over 2,125/s | 0.65, 1.39 ms | 1.28, 20.07 | 7.28x (0.15) | 23, 16 to 17% |
+
+Pooled over 40 pairs each, on 4-15: mr17 5.20x (SE 0.13), 9,281/s over 1,772/s; the final merge 5.69x (SE 0.19),
+8,589/s over 1,489/s. Over the socket, 4.98x (SE 0.06) and 5.76x (SE 0.27).
+
+**What it says: the final merge is mr17 on this path, and neither reaches 8x; option 1 reads 7.52x.** The final merge's
+higher pooled figure is its first run's: CPU pressure stood at 35 to 38% through it, and its concurrency 1 ran at 0.94 ms
+of CPU a lifecycle against 0.70 to 0.75 in the other three, so 1,206 a second. Its second run, at 4.74x, lies beside
+mr17's second, at 4.62x, and concurrency 32 ran 9,137 to 9,428 a second in the three steady runs. Step 3's changes since
+16e52a9 are its classic init's (`e1b85f4`, `933d56f`), which the pruned path the bench takes doesn't run.
