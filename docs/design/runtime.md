@@ -531,12 +531,13 @@ Sources: `docs/research/runtime/oci-hooks.md`.
 
 **Evidence.** `crates/hex-cli/tests/oci_box.rs`,
 `create_and_start_container_hooks_run_in_the_containers_namespaces` (AC-T7.1.4, T-T7.1.4). It fails at
-the test's commit and passes after the fix, rootless (the seed's classic path) and as root (the shim).
+the test's commit and passes after the fix, rootless (the seed's classic path) and as root (the shim):
+fedora, 2026-11-04, unit hex-hooks-failpass-20261104T090150Z, `bench/oci-validation/hooks-20261104.txt`.
 Each hook's namespaces equal the init's, its state and pid are as the spec says, the order holds, each
 hook holds only its stdio, a startContainer hook alone routes classic, and each failing hook fails its
 operation by name. Two `run.rs` unit tests cover the shim's `P`/`H` race, and an init that is ready
-without stopping for its hooks, which is refused. runtime-tools before and after:
-`bench/oci-validation/` (recorded with this change).
+without stopping for its hooks, which is refused. runtime-tools bd3b0bd before and after: 26 pass and 32
+fail both, and no test's result differs (the same record).
 
 **What would falsify it.** A runtime-tools test that passed before and fails after. A hook that observes
 a namespace other than the init's. A startContainer hook that finishes after its program starts. Or a
