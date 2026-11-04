@@ -284,6 +284,7 @@ impl Lab {
     "args": {args:?},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {capabilities},
     "noNewPrivileges": true
   }},
   "mounts": [
@@ -297,25 +298,9 @@ impl Lab {
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
+            capabilities = capabilities(),
         );
         std::fs::write(dir.join("config.json"), config).expect("config.json");
-        dir
-    }
-
-    /// A bundle whose container runs `args` holding Docker's default capabilities (no CAP_SYS_ADMIN), so
-    /// its box's cgroup may be handed to its owner's next box (goal 5 extended, step 6).
-    fn bundle_owned(&self, args: &[String]) -> PathBuf {
-        let dir = self.bundle(args);
-        let caps = r#"["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]"#;
-        let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
-        let config = config.replace(
-            r#""noNewPrivileges": true"#,
-            &format!(
-                r#""capabilities": {{"bounding": {caps}, "effective": {caps}, "permitted": {caps}}},
-    "noNewPrivileges": true"#
-            ),
-        );
-        std::fs::write(dir.join("config.json"), config).unwrap();
         dir
     }
 
@@ -1108,7 +1093,7 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
             .create(BoxSpec {
                 id: id(name),
                 bounds: Bounds::default(),
-                class: ClassSpec::Bundle(lab.bundle_owned(&wait)),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
                 owner: owner.cloned(),
             })
             .unwrap();
@@ -1301,6 +1286,14 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
         std::thread::park_timeout(Duration::from_millis(10));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec
+/// naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the host's
+/// network may not hold (spec.rs refuses it).
+fn capabilities() -> String {
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
+    format!(r#"{{"bounding": {set}, "effective": {set}, "permitted": {set}}}"#)
 }
 
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it.

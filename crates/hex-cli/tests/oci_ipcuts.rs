@@ -446,7 +446,10 @@ impl Lab {
             .unwrap()
             .keep();
         let hostname = hostname.map_or(String::new(), |h| format!(r#""hostname": "{h}","#));
-        let (user, mappings) = if user_ns {
+        // A box in a user namespace of its own on the host's network names Docker's default capability
+        // sets (`hex_core::bundle`), without CAP_SYS_ADMIN, which spec.rs refuses it (b1c8e99).
+        let (user, mappings, caps) = if user_ns {
+            let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
             (
                 r#"{"type": "user"}, "#.to_owned(),
                 format!(
@@ -454,9 +457,12 @@ impl Lab {
                        "gidMappings": [{{"containerID": 0, "hostID": {}, "size": 1}}]"#,
                     self.uid, self.gid
                 ),
+                format!(
+                    r#""capabilities": {{"bounding": {set}, "effective": {set}, "permitted": {set}}}, "#
+                ),
             )
         } else {
-            (String::new(), String::new())
+            (String::new(), String::new(), String::new())
         };
         let config = format!(
             r#"{{
@@ -464,7 +470,7 @@ impl Lab {
   {hostname}
   "root": {{"path": "{rootfs}", "readonly": false}},
   "process": {{"cwd": "/", "args": ["/hex", "selftest-box", "wait"], "env": ["{PATH}"],
-              "user": {{"uid": 0, "gid": 0}}, "noNewPrivileges": true}},
+              "user": {{"uid": 0, "gid": 0}}, {caps}"noNewPrivileges": true}},
   "mounts": [
     {{"destination": "/proc", "type": "proc", "source": "proc"}},
     {{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","mode=755","size=65536k"]}},

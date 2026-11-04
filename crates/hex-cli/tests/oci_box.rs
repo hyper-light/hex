@@ -296,6 +296,7 @@ impl Lab {
     "args": {args},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {capabilities},
     "noNewPrivileges": true
   }},
   "mounts": [
@@ -309,6 +310,7 @@ impl Lab {
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
+            capabilities = capabilities(),
         )
     }
 
@@ -1025,6 +1027,18 @@ fn escapes_are_contained(lab: &Lab, own: &Path) {
                 marker.clone(),
             ],
         );
+        // Full capabilities, as the escapes need (E3 masks /proc/kcore with a mount): the lab's bundles
+        // name Docker's default sets (b1c8e99), so this one names none and keeps its creator's.
+        let ClassSpec::Bundle(bundle) = &spec.class else {
+            panic!("lab.running makes a bundle")
+        };
+        let config = std::fs::read_to_string(bundle.join("config.json")).unwrap();
+        let config: String = config
+            .lines()
+            .filter(|l| !l.trim_start().starts_with(r#""capabilities":"#))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(bundle.join("config.json"), config).unwrap();
         node.create(spec).expect("create the escape box");
         node.start(&id).expect("start the escape box");
         let info = wait_exit(&node, &id);
@@ -3245,6 +3259,14 @@ fn kill(pid: i32, sig: i32) {
 fn json_args(args: &[String]) -> String {
     assert!(args.iter().all(|a| a.is_ascii() && !a.contains('\\')));
     format!("{args:?}")
+}
+
+/// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec
+/// naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the host's
+/// network may not hold (spec.rs refuses it).
+fn capabilities() -> String {
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
+    format!(r#"{{"bounding": {set}, "effective": {set}, "permitted": {set}}}"#)
 }
 
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it
