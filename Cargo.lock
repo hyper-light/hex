@@ -165,6 +165,7 @@ dependencies = [
  "hex-core",
  "hex-node",
  "hex-runtime",
+ "rustix",
  "serde_json",
  "tempfile",
 ]

@@ -84,7 +84,9 @@ type and the box is scrubbed, where before the box was made showing the init's e
 
 A box's record is written once, when the box is whole, and kept where it belongs (goal 5 extended, step 5): one
 that must outlive the host in the node's state directory, fsynced; every other record beside the containers'
-state, in a directory of the node's own under its runtime directory (`<node key>.records`), never synced. Until the
+state, in a directory of the node's own under its runtime directory (`<node key>.records`), never synced, spread
+over 64 subdirectories by the box's id so the boxes made and deleted at once rarely wait on one directory's lock
+(goal 5 extended, step 6; recovery moves a record an older node left in the directory itself to its shard). Until the
 record is written, each part a create makes lies at a path the box's id fixes: its cgroup (`<box root>/.oci/<id>`,
 or `<box root>/<id>` for a process box), its rendered bundle (`<state>/bundles/<id>`) and its container's state
 directory (`<node key>-<id>` under the runtime directory), the init inside the cgroup. So recovery
@@ -1241,14 +1243,19 @@ lifecycle without changing what a box may do.
   - *Kept.* The node holds each such box's namespace from its create to its delete: one from decision 4's pool, or,
     with the pool dry, one the node makes on the path as the pool would, so that it holds it.
   - *The check* (`netcheck::check`) runs when the box and its record are gone, on the node's checker thread, which
-    enters the namespace with `setns` and goes back after. It requires, each read before the check opens a socket
-    there:
-    - each protocol's sockets in use (`/proc/net/protocols`) at most a fresh namespace's. A unix, netlink or packet
-      socket counts from its making, a UDP one once bound, a TCP one once listening or connected and until its
-      connection has ended. Not `sockstat`'s "sockets: used": a closed netlink socket stays in it until an RCU
-      grace period has passed (Linux v6.19 net/netlink/af_netlink.c:794-796), so the check's own reads and a box's
-      last ones would read as sockets left, the more so under load. The first root lab's TIME_WAIT case found it
-      (`hex-g5x-s6-netlab-20261103T054433Z`);
+    enters the namespace with `setns` and goes back after. It keeps one netlink socket of its own in the namespace,
+    made at its first check and closed with it, for its dumps. It requires:
+    - no socket but its own: `sockstat`'s "sockets: used", every socket from its making to its freeing (Linux v6.19
+      net/core/sock.c:2316-2319, :2417-2418), at 1, the check's own alone; and past 1 each protocol's sockets in use
+      (`/proc/net/protocols`) at most a fresh namespace's but for the check's own. A unix, netlink or packet socket
+      counts there from its making, a UDP one once bound, a TCP one once listening or connected and until its
+      connection has ended. The count alone can't decide past 1: a closed netlink socket stays in it until an RCU
+      grace period has passed (net/netlink/af_netlink.c:794-796), so a box's last reads would read as sockets left,
+      the more so under load (the first root lab's TIME_WAIT case found it, `hex-g5x-s6-netlab-20261103T054433Z`),
+      and for the same reason the check's own socket is kept, never closed between checks. A box that may share its
+      namespace can't write to that socket: NETLINK_ROUTE takes a message to another socket only from one with
+      CAP_NET_ADMIN over the namespace's owner (net/core/rtnetlink.c:7038; net/netlink/af_netlink.c:1842-1847,
+      :904-908);
     - no TCP connection in TIME_WAIT, IPv4's or IPv6's (`sockstat`'s "tw");
     - loopback the only link (`/proc/net/dev`);
     - no iptables table;
@@ -1256,9 +1263,7 @@ lifecycle without changing what a box may do.
       read by itself, since none of those takes RTNL where an `AF_UNSPEC` one does. The fresh one's are read once
       its `::1` is no longer tentative, which its DAD work clears once it gets RTNL.
     Nothing runs in an idle namespace, so what the check saw holds until it's handed on. A namespace that fails is
-    closed, counted by why; one given back with the checker's line full is closed unchecked, counted. What the
-    check doesn't see: a TCP or UDP socket never bound, or a TCP one bound but neither listening nor connected,
-    held by a process outside the box, counts in no protocol.
+    closed, counted by why; one given back with the checker's line full is closed unchecked, counted.
   - *Bounds.* At most `PER_OWNER` 32 idle for one owner and `PER_NODE` 256 for the node, as the cgroups', the oldest
     closed past either. An owner's oldest is handed on first, so a connection a box left in TIME_WAIT has had the
     longest to end.
@@ -1274,13 +1279,100 @@ lifecycle without changing what a box may do.
     the round-trip times of the predecessor's loopback connections whose TIME_WAIT had ended before it did; one
     still in TIME_WAIT refuses the namespace. The namespace's own `net.ipv4.tcp_no_metrics_save` (`:352`) would stop
     the saving; no box that may share can set it, `/proc/sys` being read-only.
+  - *A socket never hashed crosses within the owner, unseen* (the lead's approval, 2026-11-03T06:40Z). An inet socket
+    enters its protocol's count only once hashed: a UDP one at its bind (Linux v6.19 net/ipv4/udp.c:333), a TCP one
+    at its listen or connect (net/ipv4/inet_hashtables.c:747, :811). So a TCP or UDP socket never bound, or a TCP one
+    bound but neither listening nor connected, counts in no protocol: `sockstat`'s count has it, which sends the
+    check to the protocols, and there it isn't, so the check passes it. Refusing every count past the check's own
+    would refuse each box whose last netlink reads are still waiting out their grace period too. The box's own
+    processes are gone when it's checked, so only a process outside the box can still hold one, and through it bind
+    or connect in the namespace once the owner's next box has it. That stays within one owner because no namespace is
+    handed to another owner's box: the core's model test checks it after every step, and the root lab gives three
+    boxes of another owner, beside an idle namespace of the first's, fresh ones.
+  - *The check's own socket stays with its namespace, within the owner* (the lead's go, with its conditions,
+    2026-11-03T17:36Z). The check keeps one NETLINK_ROUTE socket in each namespace it checks, made at its first check
+    and kept with the namespace, idle, handed on and held for the owner's next box, and closed with it, put out by the
+    bounds, refused by a check or let go with the node. So a box given a checked namespace sees one more socket in its
+    `/proc/net/netlink` than a fresh namespace has, a route socket with a portid, the node's (Linux v6.19
+    net/netlink/af_netlink.c:2703), and one more in `sockstat`'s count. It can't send to it: NETLINK_ROUTE lets any
+    socket receive but none send to another socket (`NL_CFG_F_NONROOT_RECV` without `NL_CFG_F_NONROOT_SEND`,
+    net/core/rtnetlink.c:7038) unless it holds CAP_NET_ADMIN over the namespace's owner
+    (net/netlink/af_netlink.c:1844-1846, :904-908; a connect to it likewise, :1083), and a box that may share holds
+    none. Nor can it read it: a socket's queue is read through its descriptor, which the node alone holds. `sockstat`
+    counts it from its making to its freeing (net/core/sock.c:2316-2319, :2417-2418), which is why it's kept rather than
+    made and closed at each check, and it stays within one owner, as its namespace does. Each kept namespace holds at
+    most one, so the sockets are within the namespaces' bounds: `PER_NODE` idle, `PER_NODE` on the checkers' line and
+    one for each live box. Tested: a box's send to it refused with EPERM, its send to the kernel gone, the socket's
+    queue and drops unchanged and the namespace kept again at its next check (root lab); one the bound puts out closed
+    with its namespace. *What would falsify it*: a box that may share reaching the socket, so that a check could read
+    its message as a dump's answer; or the socket outliving its namespace.
+  - *A kept namespace's `/proc/net` files stay open with it, so a later check needn't enter it* (the lead's go, with its
+    four conditions, 2026-11-03). From a namespace's first clean check on, its `sockstat`, `dev`, `ip_tables_names` and
+    `ip6_tables_names` are held with it, open. Such a file stays the namespace's wherever its holder stands, having taken
+    the namespace as it opened (`seq_open_net`, `single_open_net`, Linux v6.19 fs/proc/proc_net.c:39-50, :183), a read
+    from its start reads it anew (`seq_read_iter`, fs/seq_file.c:185-188), and the kept socket answers for its own
+    namespace, so a later check makes no `setns`, `openat` or `close`: those were 58 us of a check's 149 on-CPU at
+    concurrency 1 and 44 of its 83 at 32 (`create-serial-checker-20261103T193211Z`). A socket past the check's own
+    enters to read the protocols, as before. An iptables file is absent while its module isn't loaded (fedora's kernel has
+    `ip_tables_names` and no `ip6_tables_names`), and comes to be in every namespace when it loads
+    (`register_pernet_subsys`, net/ipv4/netfilter/ip_tables.c:1838-1857, net/ipv6/netfilter/ip6_tables.c:1845-1864), so a
+    namespace holds those there are, a check looks by name where it stands for one it doesn't hold, and one that has come
+    to be sends it in, which opens it. A box can't reach them: they are the agent's descriptors, close-on-exec, so no program inherits them;
+    its `/proc/<pid>/fd` shows them only to a process with ptrace access to it (kernel/ptrace.c:276), which a box
+    short of the agent's capabilities hasn't (security/commoncap.c:164-182), where a box sees the agent's pid at all; and
+    what they read is that one namespace's counts, its owner's.
+    The conditions: at most four such files a kept namespace, six descriptors with its own and the socket, inside the
+    namespaces' bounds. As the node starts, `RLIMIT_NOFILE` is checked against all the node may hold, those bounds with
+    each live box's, its connections' and the seeds', raised to that where it's short (a root node may, up to
+    `fs.nr_open`), and where it can't be the refusal names the shortfall, never a silent cap. They close with the
+    namespace on every path, tested by counting them by their links: refused by way of the files or of entering,
+    released, put out by the owner's bound, with the node's end while a box's namespace holds them; a node recovered
+    holds none; and all the process's descriptors are back where they began (root lab). A failed read drops them and
+    looks by entering, counted (`files_failed`, as `through_files` counts the checks they answered), and refuses nothing
+    on its own.
   - *Another owner's box* gets a fresh namespace, counted `Owner`, and the idle one stays its owner's, as the cgroup's
-    does (Ada's call).
+    does (Ada's call). The counts the node keeps (`ReuseCounts`: the core's, and how many namespaces were given back,
+    checked and closed unchecked, and how many checks read the protocols) are internal; no `hex_*` metric names them
+    until Observe agrees the names (CLAUDE.md §10).
   - *What would falsify it*:
     - concurrency 32 not rising once the namespace's making is off the lifecycle;
     - a namespace passing the check while it holds what the check reads;
     - the check's own cost at concurrency 32 rivalling the making's;
+    - a namespace reaching another owner's box, which would carry what crosses within an owner, the TCP metrics and a
+      socket never hashed, to another;
     - eligible boxes being rare, because specs grant CAP_NET_ADMIN or keep `/proc/sys` writable.
+- **A box's cgroup files opened through its directory, held open** (3ea3ffa).
+  <!-- record: bench/competitive/probes/create_serial.md -->Once the namespace was reused, the largest wait at
+  concurrency 32 was the node's, to read a kernfs root's lock on a path walk: 2.649 ms of each lifecycle (run 12),
+  3.082 ms in locks mode and 0.083 with no network namespace at all (run 13).<!-- /record --> The runtime opened each
+  cgroup file by its whole path. Each walk revalidates every kernfs dentry it passes under its root's lock (Linux v6.19
+  fs/kernfs/dir.c:1145-1146, :1185), `/sys`'s among them, which every network device made or removed takes to write.
+  - The box root holds its directory open (`BoxRoot`), and a slot's or a box's cgroup is opened by its name relative to
+    it and holds its own (`BoxCgroup`).
+  - Each file is then opened by its name relative to that directory.
+  - The create's lookups of a cgroup named by the box's id stay, as one name each relative to the root: without them
+    a failed slotted create's scrub would reach an id-named cgroup left outside the records (the lead, 2026-11-03).
+  - A test moves every directory above a slot away and reads and writes its files through the slot. On the code
+    before, it fails at its first read.
+  <!-- record: bench/competitive/probes/reuse_pass.md -->With it, reuse on kept 10.17 of 12 CPUs busy at concurrency
+  32 and ran 5.76x, against 3.74x (run 7, the base moved from 148d12e to 16e52a9 with it).<!-- /record -->
+- **Four checkers** (893ea05). <!-- record: bench/competitive/probes/reuse_pass.md -->One checker took 127.2 and
+  130.8 us a namespace, so it checked at most about 7,700 a second while concurrency 32 gave back 8,364, and 12% of the
+  boxes were given a fresh namespace (run 7).<!-- /record --> Each such namespace was made and torn down under RTNL.
+  - `CHECKERS` threads take from the one line, which stays bounded at `PER_NODE`, a namespace given back with it full
+    closed unchecked, counted.
+  - Each holds its own `/proc/thread-self/net` open and opens each file of the checked namespace by its name after
+    the `setns`. A name looked up there names the file of the namespace the thread is in (fs/proc/proc_net.c:268-301),
+    looked up afresh at each open (:123, :217). So no check walks `/proc`, `thread-self` and the thread's directory
+    five times.
+  - The check's CPU runs beside concurrency 1's lifecycle but competes with concurrency 32's: the work off concurrency
+    1's critical path that caps concurrency 32 (the lead, 2026-11-03).
+- **The checks' CPU** (8753abe, 4c54e58, ad6f333). <!-- record: bench/competitive/probes/create_serial.md -->On the
+  E-cores a check cost 151.2 and 157.1 us of CPU at concurrency 1; with the buffers each checker holds from one check
+  to the next and reads straight into, 138.7 and 129.5 (run 15). The dumps' answers then took 13.7 and 14.5 us a check
+  to allocate, the kernel sizing each by the socket's largest read, 32 KiB; read 8 KiB at a time, 7.2 and 7.0 (run
+  16). With the namespace's own socket kept and sockstat's count read first, 141.4 and 141.2 us fell to 94.2 and 97.0,
+  the protocols never opened (run 18).<!-- /record --> What the check decides is unchanged.
 - **`RESIDUAL`, 16 MiB.** What a box whose processes have all ended leaves charged is the charge cached per CPU and some
   kernel memory (f30). <!-- record: bench/competitive/probes/reuse_residual.md -->The bench's lifecycle left at most
   1,748,992 bytes in 256 idle cgroups of fedora's OCI pass 20261103T044133Z. Over six runs of test 2 on adacachy
@@ -1317,7 +1409,23 @@ lifecycle without changing what a box may do.
     without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
     box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
     holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
-  - *The rate* (the second, at least 8x, a minimum: not met yet). <!-- record: bench/competitive/probes/reuse_pass.md
+  - *The rate* (the second, at least 8x, a minimum: not met). The bar is 8x on 4-15 with interleaved pairs the
+    method of record, since they control the load's drift that makes the criterion's own phases swing (the lead,
+    2026-11-03T17:47Z). Option 1, each pair's concurrency 1 on 4-15 and its 32 on all of 4-31, is measured beside it
+    for Ada's choice of the bar, and neither is called met until she makes it.
+    <!-- record: bench/competitive/probes/reuse_pass.md -->The merge of steps 2, 3 and 6 reads 4.78x in process and
+    4.92x over the socket on 4-15, and 7.55x and 7.16x as option 1, every task of each half on its CPUs as read back
+    (run 12). Step 6 alone read 1.84x and 1.59x in that hour, under about 7,500 host threads (runs 12,
+    13).<!-- /record --> <!-- record: bench/competitive/probes/create_serial.md -->A third of its lone lifecycle's CPU
+    was pivot_root's walk of the host's threads, under the host's mount lock (run 22).<!-- /record --> Step 6 alone
+    keeps the classic root, made with pivot_root, so its figures depend on the host's thread count; the merge's
+    pruned root, step 2's, makes none, and its figures don't.
+    <!-- record: bench/competitive/probes/reuse_pass.md -->As the criterion's text reads it,
+    on host.sh's own CPUs, 4-31, flattered there since a lone lifecycle runs on the E-cores too: the merge 25.12x in
+    process (its rounds 24.88x to 26.48x) and 23.55x over the socket, step 6 alone 8.29x (7.93x to 9.32x) and 8.01x;
+    on 4-15 the merge 7.74x and 7.80x, step 6 alone 6.44x and 5.95x. Interleaved, on 4-31 the merge 18.96x and step
+    6 alone 5.89x; on 4-15 5.11x and 3.09x (run 10).<!-- /record -->
+    <!-- record: bench/competitive/probes/reuse_pass.md
     -->Sustained at concurrency 32 over throughput at concurrency 1 in one OCI pass, one owner's boxes: 4.32x and
     4.21x in process, 4.41x and 4.81x over the socket (run 1, 4-31, as host.sh runs it). With steps 2 and 3 merged in,
     an experiment of record for no branch, 4.05x to 4.83x, against 4.62x to 5.41x for this step alone beside it (run
@@ -1333,6 +1441,19 @@ lifecycle without changing what a box may do.
     10).<!-- /record --> So the second falsifier below tripped: the holds fell and 8x didn't follow. The next
     host-wide locks are taken in making a network namespace a box, which a pool that makes them ahead moves off the
     create but not off the host: hence the namespace handed from box to box of one owner, below.
+    <!-- record: bench/competitive/probes/reuse_pass.md -->Interleaved on 4-15, the ratio pooled over adjacent pairs:
+    3.74x with the namespace handed on, on steps 2 and 3 at 148d12e (run 6); 5.76x with the cgroup files opened
+    through their directory, on 16e52a9 (run 7); 4.87x with four checkers, concurrency 32 at 8,914 a second where run
+    7's was 8,364, but concurrency 1 at 1,832 on a quieter host where run 7's was 1,453 (run 8). With the checks'
+    three changes (the checks' CPU, above), 6.17x in process against 5.53x without them in the same A B B A, and
+    concurrency 32 at 10,531 a second against 9,808; over the socket 7.19x against 7.14x (run 9). A lifecycle's CPU
+    at concurrency 32 is 1.36 to 1.44 times its CPU at 1 there, where run 6's pass without a network namespace, at
+    load 37.4 to 39.0, gave 1.93, so run 8's ceiling of about 6.6 times concurrency 1 was its load's and is withdrawn.
+    On run 9's figures, all of concurrency 1's work beside its own path gone puts concurrency 32 at about 7.2 times
+    concurrency 1, and its CPUs kept busy as well, 10.2 of 12 now, at about 8.4 times (run 9).<!-- /record -->
+    <!-- record: bench/competitive/probes/create_serial.md -->That work is 272 to 299 us a lifecycle on the E-cores, 17%
+    of concurrency 1's CPU: the checkers 162 to 191, step 3's pool of each box's `/dev` 97 to 101, the seeds' starter
+    and the namespace refill 9 to 11 (run 17).<!-- /record --> The bar, 8x on 4-15 or option 1, is Ada's call.
   - *Reuse off* (the third: met, Ada's call, 2026-11-03T06:01Z: faster than before passes).
     <!-- record: bench/competitive/probes/create_breakdown.md -->On boxes of no owner, this step's create p50 against
     the binary before it in the same rounds: over 100 rounds in five runs on 4-15, a mean paired difference of

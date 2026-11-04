@@ -23,7 +23,9 @@
 //! (docs/design/runtime-architecture.md, decision 1).
 //!
 //! Changes of one box's record are made one at a time; changes of different boxes never wait on each
-//! other, so one box's fsync never holds up another box's create (goal 5 plan step 2).
+//! other, so one box's fsync never holds up another box's create (goal 5 plan step 2). Nor do they wait on
+//! one directory's lock: the runtime directory's records are spread over [`SHARDS`] subdirectories by
+//! their box's id (goal 5 extended, step 6).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -37,6 +39,17 @@ use std::time::{Duration, Instant};
 
 use hex_api::{BoxId, Refusal};
 use hex_core::record::BoxRecord;
+
+/// How many subdirectories the runtime directory's records are spread over, by their box's id: 64, the shard's
+/// name two hex digits of [`SHARD_MASK`]. Each create makes its box's record file and each delete removes it, and
+/// a directory makes a name or removes one only under its own inode's lock, held exclusively (Linux v6.19
+/// fs/namei.c:4545-4546 for an open that may create, :2873 for an unlink, from :5429), so with every record in
+/// one directory the boxes made and deleted at once queued on it: 0.548 ms a lifecycle waiting to write it and
+/// 0.189 to read it at concurrency 32 on fedora's E-cores (bench/competitive/probes/create_serial.md, run 19).
+/// A stated bound, not a tuning: 64 directories, made as the store opens.
+pub const SHARDS: usize = 64;
+/// The bits of a box id's hash that name its shard, [`SHARDS`] of them.
+const SHARD_MASK: u64 = 0x3f;
 
 /// How long a change to a box's record waits for the change of the same box before it to finish:
 /// that one's write and its fsyncs, which take milliseconds. A minute is far past any real delay, so
@@ -138,6 +151,12 @@ impl Store {
         fs::create_dir_all(run)
             .and_then(|()| owner_only(run))
             .map_err(|e| Refusal::os("making the runtime record directory", e))?;
+        for n in 0..=SHARD_MASK {
+            let shard = run.join(format!("{n:02x}"));
+            fs::create_dir_all(&shard)
+                .and_then(|()| owner_only(&shard))
+                .map_err(|e| Refusal::os("making a shard of the runtime record directory", e))?;
+        }
         Ok(Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
@@ -215,9 +234,22 @@ impl Store {
         }
     }
 
-    /// The two places records are kept: the state directory, then the runtime directory's.
-    fn places(&self) -> [&Path; 2] {
-        [&self.disk, &self.run]
+    /// Box `id`'s record files in the two places it may be kept: the runtime directory's, in its shard, then the
+    /// state directory's. A record a node before step 6 left in the runtime directory itself is in neither:
+    /// recovery moves it to its shard first ([`Store::settle`]), so no create or delete reads that directory.
+    fn files(&self, id: &BoxId) -> [PathBuf; 2] {
+        [
+            record_file(&self.run.join(shard(id)), id),
+            record_file(&self.disk, id),
+        ]
+    }
+
+    /// The directories records are found in, each listed whole by recovery: the state directory, the runtime
+    /// directory (a node's before step 6), then each of its shards.
+    fn listed(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.disk.clone(), self.run.clone()];
+        dirs.extend((0..=SHARD_MASK).map(|n| self.run.join(format!("{n:02x}"))));
+        dirs
     }
 
     /// The fsyncs the store has made since it opened.
@@ -258,15 +290,22 @@ impl Store {
         let (dir, durable) = self.place(record);
         #[cfg(target_os = "linux")]
         let dir_fd = if durable { &self.disk_fd } else { &self.run_fd };
+        // A non-durable record goes to its shard of the runtime directory: a name under it on linux, where
+        // the runtime directory's descriptor is held.
+        let under = if durable {
+            String::new()
+        } else {
+            format!("{}/", shard(&record.spec.id))
+        };
         #[cfg(target_os = "linux")]
         let (tmp, final_path) = (
-            format!(".{}.tmp", record.spec.id),
-            format!("{}.json", record.spec.id),
+            format!("{under}.{}.tmp", record.spec.id),
+            format!("{under}{}.json", record.spec.id),
         );
         #[cfg(not(target_os = "linux"))]
-        let final_path = record_file(dir, &record.spec.id);
+        let final_path = record_file(&dir.join(&under), &record.spec.id);
         #[cfg(not(target_os = "linux"))]
-        let tmp = temp_file(dir, &record.spec.id);
+        let tmp = temp_file(&dir.join(&under), &record.spec.id);
         // A record that need not outlive the host (its box's directories all on tmpfs) is written once
         // per create (goal 5 extended step 5), so its first write goes straight to its file with O_EXCL:
         // no temp, no rename (criterion 3). A crash mid-write leaves a torn file that never decodes, which
@@ -351,8 +390,8 @@ impl Store {
     /// directory's. An unreadable file is returned as its reason, so recovery can clean the box up
     /// rather than crash (T-T7.1.2).
     pub fn get(&self, id: &BoxId) -> Result<Option<Result<BoxRecord, String>>, Refusal> {
-        for dir in [&self.run, &self.disk] {
-            match fs::read(record_file(dir, id)) {
+        for file in self.files(id) {
+            match fs::read(file) {
                 Ok(bytes) => return Ok(Some(BoxRecord::decode(&bytes))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Refusal::os("reading a record", e)),
@@ -366,8 +405,8 @@ impl Store {
     /// recovery scrubs again.
     pub fn remove(&self, id: &BoxId) -> Result<(), Refusal> {
         let _turn = self.claim(id)?;
-        for dir in self.places() {
-            match fs::remove_file(record_file(dir, id)) {
+        for file in self.files(id) {
+            match fs::remove_file(file) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(Refusal::os("removing a record", e)),
@@ -383,8 +422,8 @@ impl Store {
     /// written there since.
     pub fn all(&self) -> Result<BTreeMap<BoxId, Result<BoxRecord, String>>, Refusal> {
         let mut out = BTreeMap::new();
-        for dir in self.places() {
-            for (id, path) in records_in(dir)? {
+        for dir in self.listed() {
+            for (id, path) in records_in(&dir)? {
                 let record = match fs::read(path) {
                     Ok(bytes) => BoxRecord::decode(&bytes),
                     Err(e) => Err(format!("reading the record: {e}")),
@@ -401,6 +440,23 @@ impl Store {
     /// the state directory, and an unreadable record is left where it is, for recovery to remove.
     pub fn settle(&self) -> Result<usize, Refusal> {
         let mut moved = 0usize;
+        // A node before step 6 kept the runtime directory's records in it, not in its shards: each is moved to
+        // its shard whole, readable or not (recovery removes an unreadable one's box from there), and one its
+        // shard holds already is the shard's, written since.
+        for (id, path) in records_in(&self.run)? {
+            let _turn = self.claim(&id)?;
+            let [to, _] = self.files(&id);
+            let gone = if to.exists() {
+                fs::remove_file(&path)
+            } else {
+                fs::rename(&path, &to)
+            };
+            match gone {
+                Ok(()) => moved = moved.saturating_add(1),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Refusal::os("moving a record to its shard", e)),
+            }
+        }
         for (id, path) in records_in(&self.disk)? {
             let _turn = self.claim(&id)?;
             let Ok(Ok(record)) = fs::read(&path).map(|bytes| BoxRecord::decode(&bytes)) else {
@@ -424,8 +480,8 @@ impl Store {
     /// crash at a record write leaves nothing behind (T-T7.1.2).
     pub fn remove_strays(&self) -> Result<usize, Refusal> {
         let mut removed = 0usize;
-        for dir in self.places() {
-            let entries = fs::read_dir(dir).map_err(|e| Refusal::os("listing records", e))?;
+        for dir in self.listed() {
+            let entries = fs::read_dir(&dir).map_err(|e| Refusal::os("listing records", e))?;
             for entry in entries {
                 let entry = entry.map_err(|e| Refusal::os("listing records", e))?;
                 let name = entry.file_name();
@@ -438,7 +494,7 @@ impl Store {
                     continue;
                 };
                 let _turn = self.claim(&id)?;
-                match fs::remove_file(temp_file(dir, &id)) {
+                match fs::remove_file(temp_file(&dir, &id)) {
                     Ok(()) => removed = removed.saturating_add(1),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => return Err(Refusal::os("removing a record's stray temp file", e)),
@@ -490,6 +546,33 @@ fn owner_only(dir: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn owner_only(_dir: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Box `id`'s shard of the runtime directory: two hex digits of FNV-1a over its id, the same in every run of
+/// every build.
+fn shard(id: &BoxId) -> String {
+    format!("{:02x}", fnv1a(id.as_str().as_bytes()) & SHARD_MASK)
+}
+
+/// FNV-1a, 64-bit: its arithmetic is modulo 2^64 by definition, so the multiply wraps. A record's shard's hash,
+/// and the node's key's on linux. FNV-1a because the hash must come out the same in every run of every build,
+/// which std's hashers don't promise; the offset basis and prime are FNV-1a's own (IETF
+/// draft-eastlake-fnv, "FNV Basics" and "FNV Constants").
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Where box `id`'s record is kept in the runtime record directory `run` ([`crate::records_dir`]): in its
+/// shard. For tests and tools that look for a box's record from outside the store.
+pub fn runtime_record(run: &Path, id: &BoxId) -> PathBuf {
+    record_file(&run.join(shard(id)), id)
+}
+
+/// The temp file a write of box `id`'s record goes through in the runtime record directory `run`.
+pub fn runtime_temp(run: &Path, id: &BoxId) -> PathBuf {
+    temp_file(&run.join(shard(id)), id)
 }
 
 /// Box `id`'s record file in `dir`.
@@ -588,6 +671,15 @@ mod tests {
     /// A store over `<dir>/state` and `<dir>/run`, its two places.
     fn store_in(dir: &Path) -> Store {
         Store::open(&dir.join("state"), &dir.join("run")).unwrap()
+    }
+
+    /// The names of the records in the runtime record directory `run`'s shards, sorted.
+    fn sharded(run: &Path) -> Vec<String> {
+        let mut out: Vec<String> = (0..=SHARD_MASK)
+            .flat_map(|n| names(&run.join(format!("{n:02x}"))))
+            .collect();
+        out.sort();
+        out
     }
 
     /// The names of the files in `dir`, sorted.
@@ -693,7 +785,7 @@ mod tests {
         assert_eq!(
             (
                 names(&dir.path().join("state")),
-                names(&dir.path().join("run"))
+                sharded(&dir.path().join("run"))
             ),
             (
                 vec!["d.json".to_owned()],
@@ -765,7 +857,7 @@ mod tests {
             ["broken.json", "bundles", "staying.json"],
             "the durable record, the unreadable one and the bundles stay"
         );
-        assert_eq!(names(&dir.path().join("run")), ["moving.json"]);
+        assert_eq!(sharded(&dir.path().join("run")), ["moving.json"]);
         assert_eq!(store.get(&moving.spec.id).unwrap(), Some(Ok(moving)));
         assert_eq!(store.get(&staying.spec.id).unwrap(), Some(Ok(staying)));
         assert_eq!(
@@ -936,12 +1028,19 @@ mod tests {
         let store = store_in(dir.path());
         store.put(&record("a")).unwrap();
         let (state, run) = (dir.path().join("state"), dir.path().join("run"));
-        fs::write(run.join(".a.tmp"), b"{ half").unwrap();
+        // One in a shard, one where a node before the shards wrote, one in the state directory.
+        fs::write(runtime_temp(&run, &BoxId::new("a").unwrap()), b"{ half").unwrap();
+        fs::write(run.join(".c.tmp"), b"{ half").unwrap();
         fs::write(state.join(".b.tmp"), b"").unwrap();
         fs::write(run.join(".notes"), b"hi").unwrap();
         fs::write(state.join(".notes"), b"hi").unwrap();
-        assert_eq!(store.remove_strays().unwrap(), 2);
-        assert_eq!(names(&run), [".notes", "a.json"]);
+        assert_eq!(store.remove_strays().unwrap(), 3);
+        assert_eq!(sharded(&run), ["a.json"]);
+        assert!(
+            names(&run).iter().all(|n| n == ".notes" || n.len() == 2),
+            "the runtime directory holds its shards and the notes: {:?}",
+            names(&run)
+        );
         assert_eq!(names(&state), [".notes"]);
         assert_eq!(store.remove_strays().unwrap(), 0);
     }
@@ -962,5 +1061,85 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert!(all[&BoxId::new("a").unwrap()].is_ok());
         assert!(all[&BoxId::new("d").unwrap()].is_err());
+    }
+
+    /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each
+    /// where [`runtime_record`] says, none in the directory itself, so the boxes made and deleted at once rarely
+    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards.
+    #[test]
+    fn records_are_spread_over_the_shards_by_their_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let run = dir.path().join("run");
+        assert_eq!(
+            names(&run).len(),
+            SHARDS,
+            "the shards are made as the store opens"
+        );
+        let ids: Vec<BoxId> = (0..256)
+            .map(|n| BoxId::new(&format!("s{n:06}")).unwrap())
+            .collect();
+        for id in &ids {
+            store.put(&record(id.as_str())).unwrap();
+            assert!(runtime_record(&run, id).exists(), "{id} in its shard");
+        }
+        assert_eq!(names(&run).len(), SHARDS, "nothing in the directory itself");
+        let used: BTreeSet<PathBuf> = ids
+            .iter()
+            .filter_map(|id| runtime_record(&run, id).parent().map(Path::to_owned))
+            .collect();
+        assert!(
+            used.len() >= 48,
+            "256 ids took {} of the shards",
+            used.len()
+        );
+        assert_eq!(store.all().unwrap().len(), 256);
+        for id in &ids {
+            assert!(store.get(id).unwrap().is_some_and(|r| r.is_ok()));
+            store.remove(id).unwrap();
+            assert!(!runtime_record(&run, id).exists());
+        }
+        assert!(sharded(&run).is_empty());
+    }
+
+    /// Goal 5 extended step 6, T-T7.1.2 across the shards' upgrade: a node before them kept the runtime
+    /// directory's records in it. Recovery's settle moves each to its shard, readable or not (recovery then
+    /// removes an unreadable one's box from there), and of a record its shard holds already keeps the shard's,
+    /// written since; a second settle moves nothing, and no create or delete reads the directory itself.
+    #[test]
+    fn a_record_an_older_node_left_in_the_runtime_directory_is_moved_to_its_shard() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        let run = dir.path().join("run");
+        let moving = record("moving");
+        fs::write(run.join("moving.json"), moving.encode().unwrap()).unwrap();
+        fs::write(run.join("broken.json"), b"{ not json").unwrap();
+        let mut newer = record("both");
+        newer.abandoned = 3;
+        store.put(&newer).unwrap();
+        fs::write(run.join("both.json"), record("both").encode().unwrap()).unwrap();
+        assert_eq!(store.settle().unwrap(), 3);
+        assert_eq!(
+            sharded(&run),
+            ["both.json", "broken.json", "moving.json"],
+            "each in its shard"
+        );
+        assert!(
+            names(&run).iter().all(|n| n.len() == 2),
+            "{:?}",
+            names(&run)
+        );
+        assert_eq!(store.get(&moving.spec.id).unwrap(), Some(Ok(moving)));
+        assert_eq!(
+            store.get(&newer.spec.id).unwrap(),
+            Some(Ok(newer)),
+            "the shard's copy, written since"
+        );
+        let all = store.all().unwrap();
+        assert!(
+            all[&BoxId::new("broken").unwrap()].is_err(),
+            "still found, as unreadable"
+        );
+        assert_eq!(store.settle().unwrap(), 0);
     }
 }

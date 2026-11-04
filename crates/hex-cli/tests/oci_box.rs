@@ -2603,13 +2603,25 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
         return;
     }
     let records = records_dir(&runtime, state.path()).unwrap();
-    // The records in a place, by file name.
+    // The records in a place, by file name: in it, or in its shards for the runtime record directory's
+    // (goal 5 extended, step 6).
     let kept = |dir: &Path| -> BTreeSet<String> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.ends_with(".json"))
-            .collect()
+        let mut out = BTreeSet::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".json") {
+                out.insert(name);
+            } else if entry.file_type().unwrap().is_dir() && name.len() == 2 {
+                for inner in std::fs::read_dir(entry.path()).unwrap() {
+                    let inner = inner.unwrap().file_name().to_string_lossy().into_owned();
+                    if inner.ends_with(".json") {
+                        out.insert(inner);
+                    }
+                }
+            }
+        }
+        out
     };
     let names = |ids: &[&BoxId]| -> BTreeSet<String> {
         ids.iter().map(|id| format!("{id}.json")).collect()

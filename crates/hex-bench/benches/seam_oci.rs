@@ -14,7 +14,11 @@
 //!   `HEXBENCH_INTERLEAVED` pairs of turns (10), 500 lifecycles at 1 then 4,000 at 32 in each, so the two
 //!   meet the host as it is at that moment, its load included: each pair's rates and their ratio, and the
 //!   ratio of the pooled rates (the lead, 2026-11-03T06:01Z, for goal 5 extended step 6's second
-//!   criterion);
+//!   criterion). `HEXBENCH_INTERLEAVED_CPUS1` and `HEXBENCH_INTERLEAVED_CPUS32` (CPU lists, `4-15`) pin
+//!   each half to its CPUs (the lead, 2026-11-03T17:48Z: concurrency 1 on the P-cores, 32 on all): at each
+//!   switch every thread of this process and of its descendants (the socket driver's node agent, the
+//!   agent's create seeds, the boxes' inits) is pinned, and each task's `Cpus_allowed_list` read back
+//!   and recorded with the pair;
 //! - `rtt`: inspect of a running box, timed alone, whose work is the same either way, so the socket's
 //!   cost per call is the two drivers' difference in one run.
 //!
@@ -464,14 +468,15 @@ mod linux {
 
     /// `lifecycles` of the throughput lifecycle at concurrency `conc`, each thread taking the next until
     /// none are left or one has failed, the clock started once every thread is at the barrier: its wall
-    /// time.
+    /// time, and the CPU the subtree `own` (the agent and its boxes) used in it, in seconds.
     fn at_concurrency(
         node: &dyn Runtime,
         bundle: &Path,
+        own: &Path,
         conc: usize,
         lifecycles: usize,
         tag: &str,
-    ) -> Result<Duration, String> {
+    ) -> Result<(Duration, f64), String> {
         let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
         let start = Barrier::new(conc + 1);
         std::thread::scope(|s| {
@@ -496,7 +501,7 @@ mod linux {
                 })
                 .collect();
             start.wait();
-            let t0 = Instant::now();
+            let (c0, t0) = (cpu_usec(own), Instant::now());
             let errs: Vec<String> = threads
                 .into_iter()
                 .filter_map(|t| {
@@ -505,8 +510,8 @@ mod linux {
                         .err()
                 })
                 .collect();
-            let wall = t0.elapsed();
-            errs.into_iter().next().map_or(Ok(wall), Err)
+            let (wall, cpu_s) = (t0.elapsed(), (cpu_usec(own) - c0) as f64 / 1e6);
+            errs.into_iter().next().map_or(Ok((wall, cpu_s)), Err)
         })
     }
 
@@ -531,17 +536,37 @@ mod linux {
 
     /// Concurrency 1 and [`SUSTAINED_CONCURRENCY`] in turn, `pairs` times: [`INTERLEAVED_C1`] lifecycles at
     /// 1, then [`INTERLEAVED_C32`] at 32, as the sustained phase runs them, so both meet the host as it is
-    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end,
-    /// and the ratio of the pooled rates, each concurrency's lifecycles over its time.
-    fn interleaved(node: &dyn Runtime, bundle: &Path, pairs: usize) -> Result<Value, String> {
+    /// then. Each pair's rates and their ratio, with the host's load and CPU pressure at its start and end
+    /// and each half's CPU, per lifecycle and as the CPUs it kept busy on average (the agent and its boxes,
+    /// `own`'s cpu.stat): whether concurrency 32 is held by the CPUs it has or by waiting. And the ratio of
+    /// the pooled rates, each concurrency's lifecycles over its time.
+    fn interleaved(
+        node: &dyn Runtime,
+        bundle: &Path,
+        own: &Path,
+        pairs: usize,
+    ) -> Result<Value, String> {
+        let (cpus1, cpus32) = (
+            cpu_list("HEXBENCH_INTERLEAVED_CPUS1"),
+            cpu_list("HEXBENCH_INTERLEAVED_CPUS32"),
+        );
+        let started_on = rustix::thread::sched_getaffinity(None)
+            .map_err(|e| format!("reading this process's CPUs: {e}"))?;
+        let pin_to = |cpus: &Option<(String, rustix::thread::CpuSet)>| {
+            cpus.as_ref().map_or(Ok(Value::Null), |(_, set)| pin(set))
+        };
         let (mut rows, mut ratios) = (Vec::new(), Vec::new());
         let (mut one_s, mut many_s) = (0.0, 0.0);
         for p in 0..pairs {
             let at_start = host_load();
-            let one = at_concurrency(node, bundle, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
-            let many = at_concurrency(
+            let c1_pinned = pin_to(&cpus1)?;
+            let (one, one_cpu) =
+                at_concurrency(node, bundle, own, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
+            let c32_pinned = pin_to(&cpus32)?;
+            let (many, many_cpu) = at_concurrency(
                 node,
                 bundle,
+                own,
                 SUSTAINED_CONCURRENCY,
                 INTERLEAVED_C32,
                 &format!("i{p:03}b"),
@@ -554,7 +579,15 @@ mod linux {
             many_s += many.as_secs_f64();
             ratios.push(r32 / r1);
             rows.push(json!({"c1_per_s": r1, "c32_per_s": r32, "ratio": r32 / r1,
+                             "c1_cpu_ms_per_lifecycle": one_cpu * 1e3 / INTERLEAVED_C1 as f64,
+                             "c32_cpu_ms_per_lifecycle": many_cpu * 1e3 / INTERLEAVED_C32 as f64,
+                             "c1_cpus_busy": one_cpu / one.as_secs_f64(),
+                             "c32_cpus_busy": many_cpu / many.as_secs_f64(),
+                             "c1_pinned": c1_pinned, "c32_pinned": c32_pinned,
                              "at_start": at_start, "at_end": host_load()}));
+        }
+        if cpus1.is_some() || cpus32.is_some() {
+            pin(&started_on)?;
         }
         ratios.sort_by(f64::total_cmp);
         let c1 = (pairs * INTERLEAVED_C1) as f64 / one_s;
@@ -563,8 +596,91 @@ mod linux {
             json!({"pairs": rows, "concurrency": SUSTAINED_CONCURRENCY, "c1_lifecycles": INTERLEAVED_C1,
                   "c32_lifecycles": INTERLEAVED_C32, "c1_per_s": c1, "c32_per_s": c32, "ratio": c32 / c1,
                   "ratio_median": ratios.get(ratios.len() / 2), "ratio_min": ratios.first(),
-                  "ratio_max": ratios.last()}),
+                  "ratio_max": ratios.last(), "c1_cpus": cpus1.map(|(l, _)| l),
+                  "c32_cpus": cpus32.map(|(l, _)| l)}),
         )
+    }
+
+    /// The most tasks a pin walks: this process's threads and its descendants', a few hundred here.
+    const PIN_TASKS: usize = 65_536;
+
+    /// The CPU list in `var` (`4-15`, `4-15,20`) and its set; `None` when it's unset or empty.
+    fn cpu_list(var: &str) -> Option<(String, rustix::thread::CpuSet)> {
+        let list = std::env::var(var).ok().filter(|v| !v.is_empty())?;
+        let mut set = rustix::thread::CpuSet::new();
+        for part in list.split(',') {
+            let (lo, hi) = part.split_once('-').unwrap_or((part, part));
+            let cpu = |n: &str| -> usize {
+                let c = n
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{var}={list:?}: {e}"));
+                assert!(
+                    c < rustix::thread::CpuSet::MAX_CPU,
+                    "{var}={list:?}: CPU {c}"
+                );
+                c
+            };
+            for c in cpu(lo)..=cpu(hi) {
+                set.set(c);
+            }
+        }
+        Some((list, set))
+    }
+
+    /// Pins every thread of this process and of its descendants (the socket driver's node agent, the agent's
+    /// create seeds, the boxes' inits) to `cpus`, so what they start after inherits it, walking the tree
+    /// through each task's `children`; a task that ends meanwhile is passed over. Then reads each pinned task's
+    /// `Cpus_allowed_list` back: how many were pinned, and how many hold each list, which should be `cpus`'
+    /// alone.
+    fn pin(cpus: &rustix::thread::CpuSet) -> Result<Value, String> {
+        let mut procs = vec![std::process::id()];
+        let mut tasks = Vec::new();
+        let mut next = 0;
+        while let Some(&pid) = procs.get(next) {
+            next += 1;
+            let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+                continue;
+            };
+            for task in dir.flatten() {
+                let Some(tid) = task
+                    .file_name()
+                    .to_str()
+                    .and_then(|t| t.parse::<i32>().ok())
+                else {
+                    continue;
+                };
+                if tasks.len() >= PIN_TASKS {
+                    return Err(format!("more than {PIN_TASKS} tasks to pin"));
+                }
+                match rustix::thread::sched_setaffinity(rustix::process::Pid::from_raw(tid), cpus) {
+                    Ok(()) => tasks.push(tid),
+                    Err(rustix::io::Errno::SRCH) => continue,
+                    Err(e) => return Err(format!("pinning task {tid}: {e}")),
+                }
+                if let Ok(children) =
+                    std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children"))
+                {
+                    procs.extend(
+                        children
+                            .split_whitespace()
+                            .filter_map(|c| c.parse::<u32>().ok()),
+                    );
+                }
+            }
+        }
+        let mut allowed: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for tid in &tasks {
+            let status = std::fs::read_to_string(format!("/proc/{tid}/status")).unwrap_or_default();
+            if let Some(list) = status
+                .lines()
+                .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+            {
+                *allowed.entry(list.trim().to_owned()).or_default() += 1;
+            }
+        }
+        Ok(json!({"tasks": tasks.len(), "cpus_allowed": allowed}))
     }
 
     /// n sequential create+start of a `true` container after `warmup` untimed ones, the two calls'
@@ -808,7 +924,12 @@ mod linux {
                "checked": after.checked - before.checked,
                "unchecked": after.unchecked - before.unchecked,
                "lost_home": after.lost_home - before.lost_home,
-               "made_on_path": after.made_on_path - before.made_on_path})
+               "made_on_path": after.made_on_path - before.made_on_path,
+               "protocols": after.protocols - before.protocols,
+               "through_files": after.through_files - before.through_files,
+               "files_failed": after.files_failed - before.files_failed,
+               "check_us_mean": (after.check_ns - before.check_ns) as f64
+                   / 1e3 / ((after.checked - before.checked).max(1)) as f64})
     }
 
     /// What the node's idle cgroups and its deletes did from `before` to `after`.
@@ -980,7 +1101,7 @@ mod linux {
                     "start_true" => start_true(node, &true_bundle, n, warmup),
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
-                    "interleaved" => interleaved(node, &true_bundle, interleaved_pairs),
+                    "interleaved" => interleaved(node, &true_bundle, &parent, interleaved_pairs),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);

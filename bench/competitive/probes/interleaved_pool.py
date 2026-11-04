@@ -7,7 +7,10 @@ round of every pass given, for each driver apart (`hex-seam` in process, `hex-se
 socket): their mean, its standard error by a bootstrap over the pairs (B resamples, seeded), their median, least and
 most, and the ratio of the pooled rates (each concurrency's lifecycles over its time). Each pair is printed with the
 host's 1-minute load and CPU pressure (`some avg10`) at its start and end (the lead, 2026-11-03T06:12Z: the ratio per
-adjacent pair, pooled with a bootstrap SE, load and CPU pressure beside each round).
+adjacent pair, pooled with a bootstrap SE, load and CPU pressure beside each round), and, where the phase records it,
+each half's CPU per lifecycle and the CPUs it kept busy: concurrency 32 held by the CPUs it has, or by waiting; and,
+where the phase pinned its halves (HEXBENCH_INTERLEAVED_CPUS1 and _CPUS32), each half's CPUs as read back from every
+task the pin reached, and in how many pairs every task held its half's CPUs alone.
 
   interleaved_pool.py [--boot B] <pass dir>...
 """
@@ -42,6 +45,34 @@ def load(at):
     return f"load {at.get('load1')}, cpu some {at.get('cpu_some_avg10')}%"
 
 
+def cpu(p):
+    """A pair's CPU, where its phase recorded it."""
+    if "c1_cpu_ms_per_lifecycle" not in p:
+        return ""
+    return (f"; CPU a lifecycle {p['c1_cpu_ms_per_lifecycle']:.2f} ms at 1, {p['c32_cpu_ms_per_lifecycle']:.2f} at 32; "
+            f"CPUs busy {p['c1_cpus_busy']:.2f} at 1, {p['c32_cpus_busy']:.2f} at 32")
+
+
+def cpu_set(text):
+    """A CPU list's CPUs ("4-15,20")."""
+    out = set()
+    for part in text.split(","):
+        lo, _, hi = part.strip().partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return frozenset(out)
+
+
+def pinned(p):
+    """A pair's halves' CPUs as pinned and read back, where its phase pinned them."""
+    out = []
+    for half in ("c1", "c32"):
+        pin = p.get(f"{half}_pinned")
+        if pin:
+            lists = ", ".join(f"{cpus} on {n}" for cpus, n in sorted(pin["cpus_allowed"].items()))
+            out.append(f"{half} pinned {pin['tasks']} tasks, read back {lists}")
+    return "; " + "; ".join(out) if out else ""
+
+
 def main(argv):
     boot, runs = 2000, []
     args = iter(argv)
@@ -63,7 +94,8 @@ def main(argv):
         print(f"{name}:")
         for run, rnd, i, p, _ in rows:
             print(f"  {run} round {rnd} pair {i + 1}: concurrency 1 {p['c1_per_s']:.0f}/s, 32 {p['c32_per_s']:.0f}/s, "
-                  f"{p['ratio']:.2f}x; at its start {load(p['at_start'])}; at its end {load(p['at_end'])}")
+                  f"{p['ratio']:.2f}x; at its start {load(p['at_start'])}; at its end {load(p['at_end'])}{cpu(p)}"
+                  f"{pinned(p)}")
         ratios = [p["ratio"] for _, _, _, p, _ in rows]
         means = sorted(st.fmean(rng.choices(ratios, k=len(ratios))) for _ in range(boot))
         se = st.pstdev(means)
@@ -76,6 +108,23 @@ def main(argv):
               f"resamples; 95% of resampled means {lo:.2f}x to {hi:.2f}x); median {st.median(ratios):.2f}x, least "
               f"{min(ratios):.2f}x, most {max(ratios):.2f}x; pooled rates {c32_n / c32_s:.0f}/s over "
               f"{c1_n / c1_s:.0f}/s, {(c32_n / c32_s) / (c1_n / c1_s):.2f}x")
+        with_cpu = [p for _, _, _, p, _ in rows if "c1_cpu_ms_per_lifecycle" in p]
+        if with_cpu:
+            m = {k: st.median(p[k] for p in with_cpu) for k in
+                 ("c1_cpu_ms_per_lifecycle", "c32_cpu_ms_per_lifecycle", "c1_cpus_busy", "c32_cpus_busy")}
+            print(f"  CPU, the pairs' medians: {m['c1_cpu_ms_per_lifecycle']:.2f} ms a lifecycle at 1 and "
+                  f"{m['c32_cpu_ms_per_lifecycle']:.2f} at 32; CPUs busy {m['c1_cpus_busy']:.2f} at 1 and "
+                  f"{m['c32_cpus_busy']:.2f} at 32")
+        # Each half's pin as read back: every task the pin reached held the half's CPUs alone, in how many pairs.
+        for half in ("c1", "c32"):
+            asked = {ph.get(f"{half}_cpus") for *_, ph in rows} - {None}
+            if not asked:
+                continue
+            held = sum(1 for _, _, _, p, ph in rows
+                       if p.get(f"{half}_pinned")
+                       and {cpu_set(c) for c in p[f"{half}_pinned"]["cpus_allowed"]} == {cpu_set(ph[f"{half}_cpus"])})
+            print(f"  {half} halves pinned to {', '.join(sorted(asked))}: every task on those CPUs alone in {held} "
+                  f"of {len(rows)} pairs")
 
 
 if __name__ == "__main__":

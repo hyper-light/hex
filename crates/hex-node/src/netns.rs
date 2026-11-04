@@ -9,8 +9,8 @@
 //!
 //! But for a box that may share its owner's (goal 5 extended, step 6; Ada's call of 2026-11-03): its
 //! namespace, taken from the pool or made by the node on the path, is kept by the node while the box lives
-//! ([`Netns::hold`]), and when the box and its record are gone it goes to a checker thread
-//! ([`netcheck::check`]), which keeps it idle for the owner's next box ([`hex_core::netns_reuse::Idle`]) if
+//! ([`Netns::hold`]), and when the box and its record are gone it goes to the node's checker threads
+//! ([`netcheck::check`]), one of which keeps it idle for the owner's next box ([`hex_core::netns_reuse::Idle`]) if
 //! nothing of the box is left in it, and closes it, counted by why, if something is. Nothing runs in an idle
 //! namespace, so what the check saw holds until it's handed on. That takes the making, the loopback's bringing
 //! up and the teardown, each under the host's one RTNL and one `sysctl_lock`, off the owner's next box's
@@ -28,35 +28,127 @@ use hex_core::netns::{Counts, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
-use hex_runtime::linux::oci::netcheck::{self, Fresh};
+use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet, Scratch};
 use hex_runtime::linux::oci::run::Networks;
 
 /// The pool and the thread that fills it, and the namespaces kept for their owners' next boxes (goal 5
 /// extended, step 6) with the thread that checks each as its box goes. Dropped, it shuts the pool down,
-/// which closes what it held, closes every kept namespace, and waits for both threads.
+/// which closes what it held, closes every kept namespace, and waits for its threads.
 pub struct Netns {
     shared: Arc<Shared>,
     refill: Option<JoinHandle<()>>,
     kept: Option<Keeping>,
 }
 
+/// How many threads check the namespaces given back. With one, [`netcheck::check`] took 127 to 131 us a
+/// namespace at concurrency 32 on fedora, so it checked at most about 7,700 a second while that concurrency gave
+/// back 8,364, and 12% of its boxes found none of their owner's idle and were given a fresh one
+/// (bench/competitive/probes/reuse_pass.md, run 7). Four check about 30,000 a second, 3.6 times that, so a burst
+/// of 32 given back at once clears in about a millisecond; a namespace given back with the line full is closed
+/// unchecked, counted.
+const CHECKERS: usize = 4;
+
 /// The namespaces kept for owners: none on a node without a pool (a rootless node's containers make
 /// theirs in user namespaces of their own), so its creates take as before.
 struct Keeping {
     state: Arc<KeptState>,
-    returns: Option<SyncSender<(String, OwnedFd)>>,
-    checker: Option<JoinHandle<()>>,
+    returns: Option<SyncSender<(String, KeptNet)>>,
+    checkers: Vec<JoinHandle<()>>,
+}
+
+/// A namespace kept for an owner, the netlink socket the checks keep in it from its first check on, so they
+/// never close one of their own there, and its `/proc/net` files they hold from its first clean check on
+/// ([`netcheck::check`]), so they needn't enter it: closed together.
+pub struct KeptNet {
+    ns: OwnedFd,
+    socket: Option<OwnedFd>,
+    files: Option<netcheck::Files>,
+}
+
+/// The descriptors a kept namespace holds at most: its own, the check's socket and four `/proc/net` files.
+const FDS_A_KEPT: u64 = 6;
+/// A live box's besides its kept namespace's: the supervisor's pidfd of its init and its cgroup's directory.
+const FDS_A_BOX: u64 = 2;
+/// A seed's: its socket and its pidfd.
+const FDS_A_SEED: u64 = 2;
+/// The most exec seeds a node keeps (`seed::default_budget`'s ceiling).
+const EXEC_SEEDS: u64 = 128;
+/// What the agent holds open past those bounds, its listener, its polls and what its threads open for a moment:
+/// a margin, stated rather than measured, well past the few dozen it is.
+const FDS_BESIDE: u64 = 1_024;
+
+/// The descriptors this node may hold at once, each by its bound: kept namespaces idle, on the checkers' line and
+/// one for each live box; each live box's own; a connection and the programs it watches; the seeds of both pools.
+fn descriptors_a_node_may_hold() -> u64 {
+    let of = |count: usize, each: u64| {
+        u64::try_from(count)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(each)
+    };
+    let boxes = hex_runtime::linux::cgroup::MAX_BOXES;
+    let connections = crate::serve::LIMITS.connections;
+    [
+        of(netns_reuse::PER_NODE, FDS_A_KEPT),
+        of(netns_reuse::PER_NODE, FDS_A_KEPT),
+        of(boxes, FDS_A_KEPT.saturating_add(FDS_A_BOX)),
+        of(connections, 1),
+        of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
+        of(hex_core::seeds::SEEDS.get(), FDS_A_SEED),
+        EXEC_SEEDS.saturating_mul(FDS_A_SEED),
+        FDS_BESIDE,
+    ]
+    .into_iter()
+    .fold(0, u64::saturating_add)
+}
+
+/// The descriptor limit a node that may hold `needs` must have, from the one it has: `None` where that holds
+/// them already. A soft limit is raised, and a hard one under `needs` with it, which a root node may
+/// (setrlimit(2), up to `fs.nr_open`), and only a root node keeps namespaces.
+fn raised_limit(needs: u64, limit: &rustix::process::Rlimit) -> Option<rustix::process::Rlimit> {
+    if limit.current.is_none_or(|soft| soft >= needs) {
+        return None;
+    }
+    Some(rustix::process::Rlimit {
+        current: Some(needs),
+        maximum: limit.maximum.map(|hard| hard.max(needs)),
+    })
+}
+
+/// The refusal of a node whose descriptor limit can't be raised to what it may hold (CLAUDE.md §2, §3), naming
+/// the shortfall: never a silent cap.
+fn short_of(needs: u64, limit: &rustix::process::Rlimit, why: impl std::fmt::Display) -> Refusal {
+    let have = limit.maximum.or(limit.current).unwrap_or(u64::MAX);
+    Refusal::os(
+        "keeping network namespaces",
+        format!(
+            "this node may hold {needs} descriptors, and its limit of {have} is {} short of them and can't be raised: {why}",
+            needs.saturating_sub(have)
+        ),
+    )
+}
+
+/// Room in this process's descriptor limit for all a root node may hold, checked as it starts, before its pool's
+/// thread or anything that holds one starts.
+pub fn room_for_the_node() -> Result<(), Refusal> {
+    let needs = descriptors_a_node_may_hold();
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let Some(raised) = raised_limit(needs, &limit) else {
+        return Ok(());
+    };
+    rustix::process::setrlimit(rustix::process::Resource::Nofile, raised)
+        .map_err(|e| short_of(needs, &limit, e))
 }
 
 struct KeptState {
-    idle: Mutex<Idle<OwnedFd>>,
+    idle: Mutex<Idle<KeptNet>>,
     /// Each live box's namespace, kept from its create to its delete, with its owner: at most one a box.
-    held: Mutex<BTreeMap<BoxId, (String, OwnedFd)>>,
+    held: Mutex<BTreeMap<BoxId, (String, KeptNet)>>,
     /// Namespaces given back as their boxes went, each then checked or closed unchecked.
     given_back: AtomicU64,
     /// Namespaces the checker ruled on, kept idle or closed.
     checked: AtomicU64,
-    /// Namespaces given back with the checker's line full ([`netns_reuse::PER_NODE`]), or after it ended,
+    /// Namespaces given back with the checkers' line full ([`netns_reuse::PER_NODE`]), or after every checker
+    /// ended,
     /// closed unchecked.
     unchecked: AtomicU64,
     /// Checks after which the checker couldn't go back to its own namespace.
@@ -65,6 +157,14 @@ struct KeptState {
     /// init joins as it joins one taken from the pool. The pool counts each among its takes made on the path
     /// too, with the takes whose container makes its own, so this tells the two apart.
     made_on_path: AtomicU64,
+    /// Checks whose sockets' count wasn't the check's own socket alone, which read the protocols.
+    protocols: AtomicU64,
+    /// Checks that came to their verdict through the namespace's held files, with no entry.
+    through_files: AtomicU64,
+    /// Checks in which a read or an open of those files failed, which looked by entering instead.
+    files_failed: AtomicU64,
+    /// The time the checks took, all together, in nanoseconds: each check's wall time on the checker.
+    check_ns: AtomicU64,
 }
 
 /// What the kept namespaces have done, as the bench and the tests read it. Every namespace given back is
@@ -78,6 +178,14 @@ pub struct ReuseCounts {
     pub unchecked: u64,
     pub lost_home: u64,
     pub made_on_path: u64,
+    /// Checks that read the protocols, `sockstat`'s count past the check's own socket.
+    pub protocols: u64,
+    /// Checks that came to their verdict through the namespace's held files, with no entry.
+    pub through_files: u64,
+    /// Checks in which a read or an open of those files failed, which looked by entering instead.
+    pub files_failed: u64,
+    /// The checks' time, all together, in nanoseconds.
+    pub check_ns: u64,
 }
 
 struct Shared {
@@ -124,20 +232,29 @@ impl Netns {
             unchecked: AtomicU64::new(0),
             lost_home: AtomicU64::new(0),
             made_on_path: AtomicU64::new(0),
+            protocols: AtomicU64::new(0),
+            through_files: AtomicU64::new(0),
+            files_failed: AtomicU64::new(0),
+            check_ns: AtomicU64::new(0),
         });
         let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
-        let checking = Arc::clone(&state);
-        let checker = std::thread::Builder::new()
-            .name("hex-netns-check".to_owned())
-            .spawn(move || check_returns(&checking, &line))
-            .map_err(|e| Refusal::os("starting the network-namespace checker", e))?;
+        let line = Arc::new(Mutex::new(line));
+        let mut checkers = Vec::with_capacity(CHECKERS);
+        for n in 0..CHECKERS {
+            let (checking, taking) = (Arc::clone(&state), Arc::clone(&line));
+            let checker = std::thread::Builder::new()
+                .name(format!("hex-netns-check-{n}"))
+                .spawn(move || check_returns(&checking, &taking))
+                .map_err(|e| Refusal::os("starting a network-namespace checker", e))?;
+            checkers.push(checker);
+        }
         Ok(Self {
             shared,
             refill: Some(refill),
             kept: Some(Keeping {
                 state,
                 returns: Some(returns),
-                checker: Some(checker),
+                checkers,
             }),
         })
     }
@@ -153,7 +270,7 @@ impl Netns {
     }
 
     /// Keeps box `id`'s namespace, `ns`, for its owner, from its create on.
-    pub fn hold(&self, id: &BoxId, owner: &str, ns: OwnedFd) -> Result<(), Refusal> {
+    pub fn hold(&self, id: &BoxId, owner: &str, ns: KeptNet) -> Result<(), Refusal> {
         let Some(kept) = &self.kept else {
             return Ok(());
         };
@@ -215,6 +332,10 @@ impl Netns {
             unchecked,
             lost_home: kept.state.lost_home.load(Ordering::Acquire),
             made_on_path: kept.state.made_on_path.load(Ordering::Acquire),
+            protocols: kept.state.protocols.load(Ordering::Acquire),
+            through_files: kept.state.through_files.load(Ordering::Acquire),
+            files_failed: kept.state.files_failed.load(Ordering::Acquire),
+            check_ns: kept.state.check_ns.load(Ordering::Acquire),
         }))
     }
 
@@ -287,7 +408,7 @@ impl Drop for Netns {
         if let Some(mut kept) = self.kept.take() {
             // The checker ends once its line is closed and drained.
             drop(kept.returns.take());
-            if let Some(checker) = kept.checker.take() {
+            for checker in kept.checkers.drain(..) {
                 let _ = checker.join();
             }
             if let Ok(mut idle) = kept.state.idle.lock() {
@@ -302,12 +423,12 @@ impl Drop for Netns {
 pub struct NetChoice<'a> {
     netns: &'a Netns,
     owner: Option<&'a BoxOwner>,
-    kept: Mutex<Option<OwnedFd>>,
+    kept: Mutex<Option<KeptNet>>,
 }
 
 impl NetChoice<'_> {
     /// The namespace this create was given and the node keeps for its owner, if it was.
-    pub fn kept(self) -> Option<OwnedFd> {
+    pub fn kept(self) -> Option<KeptNet> {
         self.kept.into_inner().ok().flatten()
     }
 
@@ -319,7 +440,7 @@ impl NetChoice<'_> {
         }
     }
 
-    fn idle(&self) -> Result<Option<MutexGuard<'_, Idle<OwnedFd>>>, OciError> {
+    fn idle(&self) -> Result<Option<MutexGuard<'_, Idle<KeptNet>>>, OciError> {
         match &self.netns.kept {
             None => Ok(None),
             Some(kept) => {
@@ -356,17 +477,21 @@ impl Networks for NetChoice<'_> {
                 taken
             }
         };
-        let ns = match taken {
+        let (ns, socket, files) = match taken {
             Kept::Own(_) => return self.netns.take(),
-            Kept::Idle(ns) => ns,
+            Kept::Idle(kept) => (kept.ns, kept.socket, kept.files),
             Kept::Fresh => match self.netns.take()? {
-                Some(ns) => ns,
-                None => self.netns.make_on_path()?,
+                Some(ns) => (ns, None, None),
+                None => (self.netns.make_on_path()?, None, None),
             },
         };
-        let keep = ns
-            .try_clone()
-            .map_err(|e| OciError::os("keeping a box's network namespace", e))?;
+        let keep = KeptNet {
+            ns: ns
+                .try_clone()
+                .map_err(|e| OciError::os("keeping a box's network namespace", e))?,
+            socket,
+            files,
+        };
         *self.kept.lock().map_err(|_| {
             OciError::Broken("a create's kept namespace's lock was poisoned".to_owned())
         })? = Some(keep);
@@ -374,23 +499,55 @@ impl Networks for NetChoice<'_> {
     }
 }
 
-/// The checker: checks each namespace given back as it comes against a fresh namespace's dumps
-/// ([`Fresh::read`]), keeping it idle for its owner if it passes and closing it, counted by why, if not. It
-/// ends once the line is closed. Until it has read a fresh namespace's dumps, which it tries again at each
-/// namespace given back, it refuses each as unreadable, so a node whose kernel it can't read keeps none and
-/// says so in its counts. A check after which it couldn't go back to its own namespace refuses the namespace
-/// and ends it, counted, so no namespace is checked from another's, and those given back after are closed
-/// unchecked, counted ([`Netns::give_back`]).
-fn check_returns(state: &KeptState, line: &Receiver<(String, OwnedFd)>) {
+/// A checker, one of [`CHECKERS`]: checks each namespace it takes off the line against a fresh namespace's
+/// dumps ([`Fresh::read`]), keeping it idle for its owner if it passes and closing it, counted by why, if not.
+/// It ends once the line is closed. Until it has read a fresh namespace's dumps, which it tries again at each
+/// namespace it takes, it refuses each as unreadable, so a node whose kernel it can't read keeps none and says
+/// so in its counts. A check after which it couldn't go back to its own namespace refuses the namespace and
+/// ends that checker, counted, so no namespace is checked from another's; once every checker has ended, those
+/// given back are closed unchecked, counted ([`Netns::give_back`]).
+fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
     let home = net::thread_network().ok();
+    let proc_net = ProcNet::of_this_thread().ok();
     let mut fresh = None;
-    for (owner, ns) in line {
-        if fresh.is_none() {
-            fresh = home.as_ref().and_then(|h| Fresh::read(h.as_fd()).ok());
+    let mut scratch = Scratch::default();
+    loop {
+        // One checker waits on the line at a time, the others on its lock; each checks what it took apart.
+        let next = match line.lock() {
+            Ok(line) => line.recv(),
+            Err(_) => return,
+        };
+        let Ok((owner, mut kept)) = next else {
+            return;
+        };
+        if fresh.is_none()
+            && let (Some(home), Some(proc_net)) = (&home, &proc_net)
+        {
+            fresh = Fresh::read(home.as_fd(), proc_net).ok();
         }
-        let (verdict, lost) = match (&home, &fresh) {
-            (Some(home), Some(fresh)) => {
-                let checked = netcheck::check(ns.as_fd(), home.as_fd(), fresh);
+        let (verdict, lost) = match (&home, &proc_net, &fresh) {
+            (Some(home), Some(proc_net), Some(fresh)) => {
+                let started = std::time::Instant::now();
+                let checked = netcheck::check(
+                    kept.ns.as_fd(),
+                    home.as_fd(),
+                    proc_net,
+                    fresh,
+                    &mut scratch,
+                    &mut kept.socket,
+                    &mut kept.files,
+                );
+                let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                state.check_ns.fetch_add(took, Ordering::AcqRel);
+                if checked.protocols {
+                    state.protocols.fetch_add(1, Ordering::AcqRel);
+                }
+                if checked.through_files {
+                    state.through_files.fetch_add(1, Ordering::AcqRel);
+                }
+                if checked.files_failed {
+                    state.files_failed.fetch_add(1, Ordering::AcqRel);
+                }
                 (checked.verdict, !checked.home)
             }
             _ => (Err(Why::Unreadable), false),
@@ -406,10 +563,10 @@ fn check_returns(state: &KeptState, line: &Receiver<(String, OwnedFd)>) {
             return;
         };
         let closed = match verdict {
-            Ok(()) => idle.give(&owner, ns),
+            Ok(()) => idle.give(&owner, kept),
             Err(why) => {
                 idle.refuse(why);
-                vec![ns]
+                vec![kept]
             }
         };
         // Closed with the lock let go.

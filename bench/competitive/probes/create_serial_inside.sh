@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bench/competitive/probes: where creates wait under concurrency, inside the probe container (create_serial.sh).
-# MODE=offcpu (the default): off-CPU time by kernel stack (bpftrace on finish_task_switch) and an on-CPU profile for
-# a runtime's own processes, and each one's directory operations (vfs_mkdir, vfs_rmdir, vfs_unlink, vfs_mknod)
+# MODE=offcpu (the default): off-CPU time by kernel stack (bpftrace on finish_task_switch), each futex call's time by
+# the user stack that made it (so the runtime's own locks are named), and an on-CPU profile for a runtime's own
+# processes, and each one's directory operations (vfs_mkdir, vfs_rmdir, vfs_unlink, vfs_mknod)
 # counted by the filesystem of the directory they change: cgroup2 (a cgroup parent), tmpfs (a state root) or overlay
 # (the container's own disk). Three runs, back to back on the same host state:
 #   hex.c1    seam_oci's start_true (create, start and delete of `true`, one at a time): the node agent in process
@@ -18,7 +19,11 @@
 # css_killed_work_fn, css_release_work_fn, cgroup_bpf_release), and a fork from cgroup_can_fork to cgroup_post_fork's
 # return, by whether it clones into a cgroup (CLONE_INTO_CGROUP holds cgroup_mutex across that span); each wait for
 # cgroup_mutex timed alone, from the lock's contention_begin tracepoint to its contention_end, by whether the waiter
-# is the runtime's. Those takers count every kworker's work on the host and the node's own start; so each taker,
+# is the runtime's; and each time cgroup_mutex's holder leaves its CPU while it holds the lock, until it runs again,
+# by whether it was preempted (still runnable: the switch's prev_state 0 or TASK_REPORT_MAX, Linux v6.19
+# include/trace/events/sched.h:202-213, include/linux/sched.h:1661-1662) or blocked, and whether it is the runtime's,
+# so a convoy behind a preempted holder is told from the lock's own work. Those takers count every kworker's work on
+# the host and the node's own start; so each taker,
 # the attach and the fork into a cgroup are also counted for the boxes' own cgroups alone (@box: those directly
 # under seam_oci's oci boxes' root, /sys/fs/cgroup/hex-oci-seam/.oci, found from the work's or the call's cgroup).
 # And how much of the time each lock is taken, sampled on every CPU at 999 Hz in 100 ms buckets:
@@ -29,12 +34,29 @@
 # sustained phase on a `true` bundle without a network namespace of its own. Each run lists the directories under
 # /run and /sys/fs/cgroup (each its own filesystem) with their inode numbers (dirs.<label>.txt), so create_serial.py
 # names the directory each inode is.
+# MODE=checker: where the time of the threads that check a given-back network namespace before its owner's next box
+# has it goes (hex-netns-check, crates/hex-node/src/netns.rs; goal 5 extended, step 6): each system call they make
+# timed, by its number, and an on-CPU profile of them at 4999 Hz by kernel and user stack and by the system call each
+# sample fell in. Two runs, hex.c1 over 5000 lifecycles and hex.c32; HEXBENCH_OWNER must be set, for the namespaces
+# are kept only for an owner's boxes.
+# MODE=devfs: the same profile for the thread that makes each box's /dev ahead of its create (hex-devfs, step 3's pool,
+# crates/hex-node/src/devfs.rs): its system calls timed by number, the futex waits among them, and its on-CPU samples;
+# two runs, hex.c1 over 5000 lifecycles and hex.c32, read per /dev it made.
+# MODE=oncpu: the same profile for the runtime's own processes, the lifecycles in process (seam_oci) and its seeds and
+# inits before they exec (hex): their system calls timed by number, and their on-CPU samples by kernel and user stack
+# and by the system call each fell in, so concurrency 32's CPU a lifecycle past concurrency 1's is named by the call
+# and the kernel work it went to, a lock's spinning among them. Two runs, hex.c1 over 5000 lifecycles and hex.c32.
+# MODE=threads: where each of a runtime's threads spends its CPU, by name: Hex's lifecycles (seam_oci), the node's
+# threads (hex-netns-check, hex-netns, hex-seeds, hex-supervisor, hex-cgroup-remover, the socket's), its seeds and
+# inits before they exec (hex) and the program (true), sampled on every CPU at 999 Hz, and beside them the other
+# tasks on the probe's CPUs by name (CPUSET): what concurrency 1 runs beside its lifecycle's own path. Two runs, hex.c1
+# over 5000 lifecycles and hex.c32, one owner's boxes where HEXBENCH_OWNER is set.
 # Env: MODE (offcpu), SUSTAINED (5000), HEXBENCH_OWNER (one owner for every box seam_oci makes, so a box's cgroup
 # is handed to the owner's next box: goal 5 extended, step 6; the bundles' processes then hold Docker's default
 # capabilities, libcrun's alike, since a box that keeps all of root's never shares a cgroup).
 set -uo pipefail
 SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
-dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c >/run/dnf.log 2>&1 \
+dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c binutils >/run/dnf.log 2>&1 \
   || { echo "dnf failed"; tail -5 /run/dnf.log; exit 3; }
 echo "tools: $(perf --version 2>&1 | head -1); $(bpftrace --version 2>&1 | head -1)"
 mountpoint -q /sys/kernel/tracing || mount -t tracefs nodev /sys/kernel/tracing
@@ -76,7 +98,69 @@ kprobe:vfs_mkdir, kprobe:vfs_rmdir, kprobe:vfs_unlink, kprobe:vfs_mknod
 	if ($f) { @dirops[func, str(((struct inode *)arg1)->i_sb->s_type->name)] = count(); }
 }
 profile:hz:999 { \$c = comm; if ($f) { @cpu[kstack(10)] = count(); } }
-END { clear(@start); }
+tracepoint:syscalls:sys_enter_futex
+{
+	\$c = comm;
+	if ($f) { @fx[(uint64)curtask->pid] = nsecs; }
+}
+tracepoint:syscalls:sys_exit_futex
+{
+	\$t = @fx[(uint64)curtask->pid];
+	if (\$t != 0) {
+		@futex[ustack(12)] = sum(nsecs - \$t);
+		delete(@fx[(uint64)curtask->pid]);
+	}
+}
+END { clear(@start); clear(@fx); }
+BT
+}
+checker(){ # checker <filter on a comm value $c>: the checker program for the threads the filter names
+  local f=$1
+  # Keyed by the task's own pid, not bpftrace's tid: that is the pid namespace's (get_ns_current_pid_tgid), which
+  # fails for every task outside the probe container's, as the system call probes see them all.
+  cat <<BT
+config = { max_map_keys = 262144 }
+tracepoint:raw_syscalls:sys_enter
+{
+	\$c = comm;
+	if ($f) { @s[(uint64)curtask->pid] = nsecs; @n[(uint64)curtask->pid] = args.id; }
+}
+tracepoint:raw_syscalls:sys_exit
+{
+	\$t = @s[(uint64)curtask->pid];
+	if (\$t != 0) {
+		@sys[@n[(uint64)curtask->pid]] = stats(nsecs - \$t);
+		@sys_ns = sum(nsecs - \$t);
+		delete(@s[(uint64)curtask->pid]);
+		delete(@n[(uint64)curtask->pid]);
+	}
+}
+profile:hz:4999
+{
+	\$c = comm;
+	if ($f) {
+		if (@s[(uint64)curtask->pid] != 0) { @on_sys[@n[(uint64)curtask->pid]] = count(); } else { @on_user = count(); }
+		@cpu[kstack(16), ustack(10)] = count();
+		@samples = count();
+	}
+}
+END { clear(@s); clear(@n); }
+BT
+}
+devfs(){ checker "$1"; } # devfs <filter on a comm value $c>: the checker's program, for the /dev pool's thread
+oncpu(){ checker "$1"; } # oncpu <filter on a comm value $c>: the checker's program, for the runtime's own processes
+threads(){ # threads <filter on a comm value $c>: each of the filter's threads' samples by name; the rest on the probe's CPUs
+  # The idle task told by the task's own pid, not bpftrace's pid: that is the pid namespace's, and fails for every task
+  # outside the probe container's (as checker()'s keys say).
+  local f=$1 lo=${CPUSET%%-*} hi=${CPUSET##*-}
+  cat <<BT
+profile:hz:999
+{
+	\$c = comm;
+	if ($f) { @thread[comm] = count(); @ours = count(); }
+	else if (cpu >= $lo && cpu <= $hi && curtask->pid != 0) { @beside[comm] = count(); }
+	@samples = count();
+}
 BT
 }
 locks(){ # locks <filter on a comm value $c>: the locks program for one runtime's processes
@@ -223,6 +307,22 @@ tracepoint:lock:contention_end
 		}
 	}
 }
+tracepoint:sched:sched_switch
+{
+	\$o = (uint64)((struct mutex *)kaddr("cgroup_mutex"))->owner.counter & 0xfffffffffffffff8;
+	if (\$o != 0 && \$o == (uint64)curtask) {
+		\$c = comm;
+		\$s = args.prev_state;
+		@ho[(uint64)args.prev_pid] = nsecs;
+		@hk[(uint64)args.prev_pid] = (($f) ? 2 : 0) + ((\$s == 0 || (\$s & 0x100) != 0) ? 1 : 0);
+	}
+	\$t = @ho[(uint64)args.next_pid];
+	if (\$t != 0) {
+		@holder_off[@hk[(uint64)args.next_pid]] = stats(nsecs - \$t);
+		delete(@ho[(uint64)args.next_pid]);
+		delete(@hk[(uint64)args.next_pid]);
+	}
+}
 profile:hz:999
 {
 	\$o = (uint64)((struct mutex *)kaddr("cgroup_mutex"))->owner.counter;
@@ -232,7 +332,7 @@ profile:hz:999
 		@dir_state[nsecs / 100000000, (\$n & 1) != 0 ? 3 : (((\$n >> 8) & 0x7fffffffffffff) != 0 ? 2 : (\$n != 0 ? 1 : 0))] = count();
 	}
 }
-END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); clear(@ina); }
+END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); clear(@ina); clear(@ho); clear(@hk); }
 BT
 }
 run(){ # run <label> <filter> <command...>: the mode's program over one workload, and the directories it made
@@ -250,13 +350,19 @@ run(){ # run <label> <filter> <command...>: the mode's program over one workload
   ( for i in 1 2 3 4 5 6; do sleep 0.5; find /run /sys/fs/cgroup -xdev -maxdepth 4 -type d -printf '%i %p\n' 2>/dev/null; done \
       | sort -u > "/run/dirs.$label.txt" ) &
   local dirs=$!
+  # The bench process's mappings once it's up: bpftrace prints a user stack only after the process is gone, as
+  # addresses, which create_serial.py names by these and syms.*.txt.
+  ( for i in $(seq 1 600); do p=$(pgrep -x seam_oci | head -1); [ -n "$p" ] && { sleep 1; cat "/proc/$p/maps" > "/run/maps.$label.txt" 2>/dev/null; break; }
+      sleep 0.1; done ) &
+  local maps=$!
   "$@" > "/run/$label.log" 2>&1 || echo "$label: the workload failed (/run/$label.log)"
-  wait $dirs
+  wait $dirs $maps
   kill -INT $bt; wait $bt 2>/dev/null
   echo "$label: $(wc -l < /run/bt.$label.txt) lines"
 }
-HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'
+HEX='$c == "seam_oci" || $c == "hex"'; CRUN='$c == "libcrun-driver"'; CHECK='$c == "hex-netns-check"'; DEVFS='$c == "hex-devfs"'; THREADS='$c == "seam_oci" || $c == "hex" || $c == "true" || strncmp($c, "hex-", 4) == 0'
 hex_c1(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 500 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
+hex_c1k(){ env HEXBENCH_PHASES=start_true /opt/bin/seam_oci "/run/out.$MODE.hex.c1.json" 5000 20 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c32(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true; }
 hex_c32nonet(){ env HEXBENCH_PHASES=sustained HEXBENCH_SUSTAINED="$SUSTAINED" /opt/bin/seam_oci "/run/out.$MODE.hex.c32nonet.json" 20 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true-nonet; }
 crun_c1(){ env HEXBENCH_PHASES=start_true HEXBENCH_BIN=/opt/bin python3 -I /opt/lab/oci_bench.py libcrun "/run/out.$MODE.crun.c1.json" 500 20 0 0 64; }
@@ -265,8 +371,16 @@ case $MODE in
   offcpu) run offcpu.hex.c1 "$HEX" hex_c1; run offcpu.hex.c32 "$HEX" hex_c32; run offcpu.crun.c32 "$CRUN" crun_c32 ;;
   locks) run locks.hex.c1 "$HEX" hex_c1; run locks.crun.c1 "$CRUN" crun_c1; run locks.hex.c32 "$HEX" hex_c32; run locks.crun.c32 "$CRUN" crun_c32
     run locks.hex.c32nonet "$HEX" hex_c32nonet ;;
-  *) echo "refusing: MODE is offcpu or locks, not $MODE"; exit 2 ;;
+  checker) [ -n "${HEXBENCH_OWNER:-}" ] || { echo "refusing: MODE=checker needs HEXBENCH_OWNER"; exit 2; }
+    run checker.hex.c1 "$CHECK" hex_c1k; run checker.hex.c32 "$CHECK" hex_c32 ;;
+  devfs) run devfs.hex.c1 "$DEVFS" hex_c1k; run devfs.hex.c32 "$DEVFS" hex_c32 ;;
+  oncpu) run oncpu.hex.c1 "$HEX" hex_c1k; run oncpu.hex.c32 "$HEX" hex_c32 ;;
+  threads) case ${CPUSET:-} in [0-9]*-[0-9]*) ;; *) echo "refusing: MODE=threads needs CPUSET as from-to, not ${CPUSET:-none}"; exit 2 ;; esac
+    run threads.hex.c1 "$THREADS" hex_c1k; run threads.hex.c32 "$THREADS" hex_c32 ;;
+  *) echo "refusing: MODE is offcpu, locks, checker, devfs, oncpu or threads, not $MODE"; exit 2 ;;
 esac
+nm -C -n --defined-only /opt/bin/seam_oci > /run/syms.seam_oci.txt 2>/dev/null
+nm -D -C -n --defined-only "$(readlink -f /usr/lib64/libc.so.6)" > /run/syms.libc.txt 2>/dev/null
 for f in /run/out.*.json; do python3 -I -c "
 import json,sys; d=json.load(open('$f')); ph=d.get('phases',{})
 for k,v in ph.items():

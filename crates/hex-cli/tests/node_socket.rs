@@ -826,8 +826,17 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         Kept::Tmpfs => hex_node::records_dir(&oci_root, &state).unwrap(),
         Kept::Disk => state.clone(),
     };
-    let record = records.join(format!("{id}.json"));
-    let temp = records.join(format!(".{id}.tmp"));
+    // A non-durable record is kept in its shard of the runtime record directory (goal 5 extended, step 6).
+    let (record, temp) = match kept {
+        Kept::Tmpfs => (
+            hex_node::store::runtime_record(&records, &id),
+            hex_node::store::runtime_temp(&records, &id),
+        ),
+        Kept::Disk => (
+            records.join(format!("{id}.json")),
+            records.join(format!(".{id}.tmp")),
+        ),
+    };
     let socket = agent.socket.clone();
     let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
     match at {

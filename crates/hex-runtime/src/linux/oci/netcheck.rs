@@ -7,18 +7,23 @@
 //! what it could still have left, and what nothing but a process outside it could have changed, from a thread
 //! of the node's that enters the namespace with `setns` and goes back after:
 //!
-//! - **sockets**: `/proc/net/protocols`, read before this opens any socket there, gives each protocol's sockets
-//!   in use in the namespace (`sock_prot_inuse_get`, net/core/sock.c:4320, a file of each namespace's, :4373),
-//!   which must be a fresh namespace's. A unix, netlink or packet socket counts from its making to its release
-//!   (net/unix/af_unix.c:1128, :653; net/netlink/af_netlink.c:688, :794; net/packet/af_packet.c:3395, :3134), a
-//!   UDP socket once bound (net/ipv4/udp.c:333, :2244), and a TCP one once listening or connected, until it's
-//!   unhashed, so a connection still ending counts (net/ipv4/inet_hashtables.c:747, :811, :839). The box's
-//!   processes are gone, so a socket still counted was handed to a process outside it, which would still
-//!   reach the next box. Not `sockstat`'s "sockets: used": a netlink socket closed stays in it until an RCU
-//!   grace period has passed (net/netlink/af_netlink.c:794-796, :703-715; net/core/sock.c:2418), so it would
-//!   count this check's own reads, loopback's bringing up and a box's last netlink reads as sockets left. A TCP
-//!   or UDP socket never bound, or a TCP one bound but neither listening nor connected, counts in no protocol,
-//!   and this doesn't see one;
+//! - **sockets**: `/proc/net/sockstat`'s "sockets: used" first, every socket of the namespace's from its making to
+//!   its freeing (net/core/sock.c:2316-2319, :2417-2418). The check's own netlink socket is made in the namespace the
+//!   first time it's checked and kept with it ([`check`]'s `socket`), never closed between checks, since a closed
+//!   one would stay counted until an RCU grace period had passed (net/netlink/af_netlink.c:794-796, :703-715). So a
+//!   count of 1 is that socket alone: no socket of any kind is left, bound or not. Any other count reads
+//!   `/proc/net/protocols`, each protocol's sockets in use (`sock_prot_inuse_get`, net/core/sock.c:4320, a file of
+//!   each namespace's, :4373), which must be a fresh namespace's but for the check's own, so a box's netlink sockets
+//!   waiting out their grace period aren't taken for sockets left. A unix, netlink or packet socket counts there from
+//!   its making to its release (net/unix/af_unix.c:1128, :653; net/netlink/af_netlink.c:688, :794;
+//!   net/packet/af_packet.c:3395, :3134), a UDP socket once bound (net/ipv4/udp.c:333, :2244), and a TCP one once
+//!   listening or connected, until it's unhashed, so a connection still ending counts
+//!   (net/ipv4/inet_hashtables.c:747, :811, :839). The box's processes are gone, so a socket still counted was
+//!   handed to a process outside it, which would still reach the next box. A TCP or UDP socket never bound, or a
+//!   TCP one bound but neither listening nor connected, counts in no protocol, and past a count of 1 this doesn't
+//!   see one. A box that may share its namespace can't write to the check's socket: NETLINK_ROUTE takes a message
+//!   to another socket only from one with CAP_NET_ADMIN over the namespace's owner (net/core/rtnetlink.c:7038;
+//!   net/netlink/af_netlink.c:1842-1847, :904-908);
 //! - **TIME_WAIT**: `/proc/net/sockstat`'s "tw" counts the namespace's TCP connections in TIME_WAIT, IPv4's and
 //!   IPv6's (net/ipv4/proc.c:60-63; IPv6's share the namespace's death row, net/ipv6/tcp_ipv6.c:287, :314). One
 //!   would meet the next box's own on its port, and none can be ended without CAP_NET_ADMIN, so it's refused;
@@ -39,18 +44,27 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
 use hex_core::netns_reuse::Refused;
+use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
 use crate::linux::oci::{OciError, net, sys};
 
-/// Most bytes one of the namespace's `/proc/net` files may hold: a clean namespace's are a few hundred.
+/// Most bytes one of the namespace's `/proc/net` files may hold: a clean namespace's are a few hundred, its
+/// `protocols` about 5 KiB.
 const MAX_PROC_FILE: usize = 64 << 10;
 /// Most bytes one dump may answer with, all its messages together: a fresh namespace's are under 2 KiB.
 const MAX_DUMP_BYTES: usize = 256 << 10;
 /// Most reads one dump may take before it ends.
 const MAX_DUMP_READS: usize = 64;
-/// Room for one read of a dump's answer.
-const READ_BYTES: usize = 32 << 10;
+/// Room for one read of a dump's answer: what the kernel allocates each of the dump's answers at, so the less the
+/// better, but more than `NLMSG_GOODSIZE`, or an answer could be cut. A socket's dumps are answered in buffers of
+/// its largest read so far, capped at 32 KiB (Linux v6.19 net/netlink/af_netlink.c:1940-1943, :2279-2290), each
+/// filled no further than that (:2302-2312), where none was read larger than `NLMSG_GOODSIZE`, just under a page
+/// or 8 KiB, whichever is less (include/linux/netlink.h:273-275); no dump this asks for sets a larger least
+/// (net/core/rtnetlink.c:6905-6906, links' alone). At 32 KiB, fedora spent 5 to 7% of a check allocating and
+/// clearing them (`bench/competitive/probes/create_serial.md`, run 15). 8 KiB is over `NLMSG_GOODSIZE` at any page
+/// size, and a fresh namespace's answers are under 2 KiB.
+const READ_BYTES: usize = 8 << 10;
 /// Most one read of a dump's answer waits. A bound, not a tuning: the kernel builds a dump's answer as it's
 /// read, so a read waits on nothing but the reading.
 const READ_WAIT: Duration = Duration::from_secs(1);
@@ -66,6 +80,10 @@ const SETTLE_WAIT: Duration = Duration::from_millis(125);
 const IFA_F_TENTATIVE: u8 = 0x40;
 /// `RTMGRP_IPV6_IFADDR` (include/uapi/linux/rtnetlink.h): the group of `RTNLGRP_IPV6_IFADDR`'s notices.
 const RTMGRP_IPV6_IFADDR: u32 = 0x100;
+
+/// The protocol of the socket the check keeps in each namespace it checks, one, as `/proc/net/protocols` names it
+/// (net/netlink/af_netlink.c:613).
+const OWN_PROTOCOL: &str = "NETLINK";
 
 /// `AF_INET`, `AF_INET6` and `AF_UNSPEC` (include/linux/socket.h).
 const AF_INET: u8 = 2;
@@ -144,6 +162,27 @@ const DUMPS: [Dump; 5] = [
     },
 ];
 
+/// The buffers a checking thread reads a namespace's files and dumps into, kept from one check to the next, so
+/// a check allocates and clears none of them: with a buffer each per check, a fifth of a check's CPU on fedora
+/// was its own code, the C library's most of it (`bench/competitive/probes/create_serial.md`, run 15). One file's
+/// room is [`MAX_PROC_FILE`] and a byte (one past it is a file too long), one read of a dump's [`READ_BYTES`],
+/// and a dump's answer grows to the longest one read, at most [`MAX_DUMP_BYTES`].
+pub struct Scratch {
+    text: Vec<u8>,
+    answer: Vec<u8>,
+    read: Vec<u8>,
+}
+
+impl Default for Scratch {
+    fn default() -> Self {
+        Self {
+            text: vec![0; MAX_PROC_FILE.saturating_add(1)],
+            answer: Vec::new(),
+            read: vec![0; READ_BYTES],
+        }
+    }
+}
+
 /// A fresh namespace's sockets in use by protocol and its five dumps, each dump's messages normalized and
 /// sorted: what an idle namespace's must equal. Read from a namespace made as the pool makes them
 /// ([`net::make_ahead`]), its loopback up, once its loopback's IPv6 address is no longer tentative, as an idle
@@ -155,16 +194,18 @@ pub struct Fresh {
 }
 
 impl Fresh {
-    /// A fresh namespace's counts and dumps, read on the calling thread, which `home` is the namespace of: the
-    /// namespace is made, entered, read and closed, and the thread goes back home whether or not the reads
-    /// worked.
-    pub fn read(home: BorrowedFd<'_>) -> Result<Self, OciError> {
+    /// A fresh namespace's counts and dumps, read on the calling thread, which `home` is the namespace of and
+    /// `proc_net` its `/proc/thread-self/net` ([`ProcNet`]): the namespace is made, entered, read and closed, and
+    /// the thread goes back home whether or not the reads worked.
+    pub fn read(home: BorrowedFd<'_>, proc_net: &ProcNet) -> Result<Self, OciError> {
         let ns = net::make_ahead(home)?;
         sys::setns(ns.as_fd(), libc::CLONE_NEWNET)?;
-        let read = proc_file("protocols")
-            .and_then(|text| in_use(&text.ok_or(Refused::Unreadable)?))
+        let mut scratch = Scratch::default();
+        let read = proc_net
+            .file("protocols", &mut scratch.text)
+            .and_then(|text| in_use(text.ok_or(Refused::Unreadable)?))
             .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))
-            .and_then(|protocols| settled().map(|dumps| Self { protocols, dumps }));
+            .and_then(|protocols| settled(&mut scratch).map(|dumps| Self { protocols, dumps }));
         let back = sys::setns(home, libc::CLONE_NEWNET);
         match (read, back) {
             (Ok(fresh), Ok(())) => Ok(fresh),
@@ -176,7 +217,7 @@ impl Fresh {
 /// The dumps of the namespace the calling thread is in, once no IPv6 address in it is tentative: read at
 /// most [`SETTLE_TRIES`] times, each after the namespace's next IPv6 address notice or [`SETTLE_WAIT`],
 /// whichever comes first. The socket the notices come to is bound before the first read, so none is missed.
-fn settled() -> Result<Vec<Vec<Vec<u8>>>, OciError> {
+fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     const WAITING: &str = "waiting for a fresh network namespace's IPv6 address notices";
     let notices = rustix::net::socket_with(
         AddressFamily::NETLINK,
@@ -197,8 +238,10 @@ fn settled() -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     )
     .map_err(|e| OciError::os(WAITING, e))?;
     let mut notice = vec![0u8; READ_BYTES];
+    let socket = dump_socket()
+        .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))?;
     for _ in 0..SETTLE_TRIES {
-        let seen = dumps().map_err(|why| {
+        let seen = dumps(&socket, scratch).map_err(|why| {
             OciError::os("reading a fresh network namespace", why.name().to_owned())
         })?;
         if !tentative(&seen) {
@@ -235,33 +278,184 @@ pub struct Checked {
     /// Whether the thread is back in `home`. A thread that isn't is still in the namespace it checked, so
     /// the shell checks nothing more on it.
     pub home: bool,
+    /// Whether the sockets' check read `/proc/net/protocols`: `sockstat`'s count wasn't the check's own socket
+    /// alone.
+    pub protocols: bool,
+    /// Whether the check came to its verdict through the files it holds ([`Files`]), with no entry.
+    pub through_files: bool,
+    /// Whether a read of the files it holds failed, or their open, so it looked by entering, as it does
+    /// without them, and holds none until a later clean check opens them.
+    pub files_failed: bool,
 }
 
-/// Checks the namespace `ns` from the calling thread, whose own namespace is `home`: entered, read and left.
-pub fn check(ns: BorrowedFd<'_>, home: BorrowedFd<'_>, fresh: &Fresh) -> Checked {
-    if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
-        return Checked {
-            verdict: Err(Refused::Unreadable),
-            home: true,
-        };
+/// Checks the namespace `ns` from the calling thread, whose own namespace is `home`, whose
+/// `/proc/thread-self/net` is `proc_net` and whose buffers are `scratch`: entered, read and left. `socket` is the
+/// netlink socket the check keeps in `ns`, made here the first time and kept by the caller with the namespace,
+/// closed with it, and `files` the namespace's files it holds likewise, once it has: then it reads through
+/// them and never enters, but for a socket past its own, whose protocols it enters to read.
+pub fn check(
+    ns: BorrowedFd<'_>,
+    home: BorrowedFd<'_>,
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    scratch: &mut Scratch,
+    socket: &mut Option<OwnedFd>,
+    files: &mut Option<Files>,
+) -> Checked {
+    let mut checked = Checked {
+        verdict: Err(Refused::Unreadable),
+        home: true,
+        protocols: false,
+        through_files: false,
+        files_failed: false,
+    };
+    if let (Some(held), Some(kept)) = (files.as_ref(), socket.as_ref()) {
+        match look_held(held, kept, proc_net, fresh, scratch) {
+            HeldLook::Done(verdict) => {
+                checked.verdict = verdict;
+                checked.through_files = true;
+                return checked;
+            }
+            HeldLook::Past => {}
+            HeldLook::Failed => {
+                *files = None;
+                checked.files_failed = true;
+            }
+        }
     }
-    let verdict = look(fresh);
-    let home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
-    Checked { verdict, home }
+    if sys::setns(ns, libc::CLONE_NEWNET).is_err() {
+        return checked;
+    }
+    checked.verdict = look(proc_net, fresh, scratch, socket, &mut checked.protocols);
+    if checked.verdict.is_ok() && files.is_none() {
+        match Files::open(proc_net) {
+            Ok(opened) => *files = opened,
+            Err(_) => checked.files_failed = true,
+        }
+    }
+    checked.home = sys::setns(home, libc::CLONE_NEWNET).is_ok();
+    checked
+}
+
+/// What a look through the files it holds came to.
+enum HeldLook {
+    /// A verdict, as [`look`] gives it.
+    Done(Result<(), Refused>),
+    /// A socket past the check's own: its protocols are read by entering.
+    Past,
+    /// A read failed: no verdict.
+    Failed,
+}
+
+/// [`look`]'s checks, in its order, through what the check holds of the namespace, wherever the calling thread
+/// stands: the socket answers for its own namespace (`sock_net`), and each file for the namespace it was opened
+/// in ([`Files`]). `proc_net` is the calling thread's: it looks by name there for an iptables file not held.
+fn look_held(
+    files: &Files,
+    socket: &OwnedFd,
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    scratch: &mut Scratch,
+) -> HeldLook {
+    let text = &mut scratch.text;
+    let Ok(sockstat) = read_whole(&files.sockstat, text) else {
+        return HeldLook::Failed;
+    };
+    if let Err(why) = time_wait(sockstat) {
+        return HeldLook::Done(Err(why));
+    }
+    match used(sockstat) {
+        Ok(1) => {}
+        Ok(_) => return HeldLook::Past,
+        Err(why) => return HeldLook::Done(Err(why)),
+    }
+    let Ok(dev) = read_whole(&files.dev, text) else {
+        return HeldLook::Failed;
+    };
+    if let Err(why) = links(dev) {
+        return HeldLook::Done(Err(why));
+    }
+    for (name, table) in TABLES.iter().zip(&files.tables) {
+        let Some(table) = table else {
+            if matches!(proc_net.open(name), Ok(None)) {
+                continue;
+            }
+            return HeldLook::Failed;
+        };
+        let Ok(names) = read_whole(table, text) else {
+            return HeldLook::Failed;
+        };
+        if !names.trim().is_empty() {
+            return HeldLook::Done(Err(Refused::Firewall));
+        }
+    }
+    HeldLook::Done(same_dumps(socket, fresh, scratch))
+}
+
+/// A namespace's `/proc/net` files a clean check reads, open: held with the namespace from its first clean check
+/// on, closed with it, so a later check makes no `setns` and no `openat`. Such a file stays the namespace's
+/// wherever its holder stands, having taken the namespace as it opened (`seq_open_net`, `single_open_net`, Linux
+/// v6.19 fs/proc/proc_net.c:39-50, :183), and a read from its start reads it anew (`seq_read_iter`, fs/seq_file.c:185-188).
+///
+/// An iptables file is absent while its module isn't loaded, and comes to be in every namespace when it loads
+/// (`register_pernet_subsys`, net/ipv4/netfilter/ip_tables.c:1838-1857, net/ipv6/netfilter/ip6_tables.c:1845-1864),
+/// so one not held is looked for by name where the check stands, and one that has come to be sends it in.
+pub struct Files {
+    sockstat: OwnedFd,
+    dev: OwnedFd,
+    tables: [Option<OwnedFd>; 2],
+}
+
+/// The namespace's iptables files, in the order [`Files`] holds them.
+const TABLES: [&str; 2] = ["ip_tables_names", "ip6_tables_names"];
+
+impl Files {
+    /// The files of the namespace the calling thread is in, `None` if it has no `sockstat` or `dev`.
+    fn open(proc_net: &ProcNet) -> Result<Option<Self>, Refused> {
+        let (Some(sockstat), Some(dev)) = (proc_net.open("sockstat")?, proc_net.open("dev")?)
+        else {
+            return Ok(None);
+        };
+        let [v4, v6] = TABLES;
+        Ok(Some(Self {
+            sockstat,
+            dev,
+            tables: [proc_net.open(v4)?, proc_net.open(v6)?],
+        }))
+    }
 }
 
 /// The checks, in the namespace the thread is in: sockets first, before this opens one of its own there.
-fn look(fresh: &Fresh) -> Result<(), Refused> {
-    let protocols = in_use(&proc_file("protocols")?.ok_or(Refused::Unreadable)?)?;
-    sockets(&protocols, &fresh.protocols)?;
-    time_wait(&proc_file("sockstat")?.ok_or(Refused::Unreadable)?)?;
-    links(&proc_file("dev")?.ok_or(Refused::Unreadable)?)?;
-    for tables in ["ip_tables_names", "ip6_tables_names"] {
-        if proc_file(tables)?.is_some_and(|t| !t.trim().is_empty()) {
+/// `protocols` is set if the sockets' check read the protocols.
+fn look(
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    scratch: &mut Scratch,
+    socket: &mut Option<OwnedFd>,
+    protocols: &mut bool,
+) -> Result<(), Refused> {
+    // Made before the count is read, so the count has it.
+    if socket.is_none() {
+        *socket = Some(dump_socket()?);
+    }
+    let socket = socket.as_ref().ok_or(Refused::Unreadable)?;
+    sockets_left(proc_net, fresh, &mut scratch.text, protocols)?;
+    let text = &mut scratch.text;
+    links(proc_net.file("dev", text)?.ok_or(Refused::Unreadable)?)?;
+    for tables in TABLES {
+        if proc_net
+            .file(tables, text)?
+            .is_some_and(|t| !t.trim().is_empty())
+        {
             return Err(Refused::Firewall);
         }
     }
-    let seen = dumps()?;
+    same_dumps(socket, fresh, scratch)
+}
+
+/// Whether the namespace's dumps, through `socket`, are a fresh namespace's.
+fn same_dumps(socket: &OwnedFd, fresh: &Fresh, scratch: &mut Scratch) -> Result<(), Refused> {
+    let seen = dumps(socket, scratch)?;
     for ((d, have), want) in DUMPS.iter().zip(&seen).zip(&fresh.dumps) {
         if have != want {
             return Err(d.refused);
@@ -270,32 +464,103 @@ fn look(fresh: &Fresh) -> Result<(), Refused> {
     Ok(())
 }
 
-/// The calling thread's `/proc/thread-self/net/<name>`, `None` where the kernel has no such file (a module
-/// not loaded), bounded at [`MAX_PROC_FILE`].
-fn proc_file(name: &str) -> Result<Option<String>, Refused> {
-    use std::io::Read;
-    let path = format!("/proc/thread-self/net/{name}");
-    let file = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(Refused::Unreadable),
-    };
-    let mut text = String::new();
-    let limit = u64::try_from(MAX_PROC_FILE)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    file.take(limit)
-        .read_to_string(&mut text)
-        .map_err(|_| Refused::Unreadable)?;
-    if text.len() > MAX_PROC_FILE {
-        return Err(Refused::Unreadable);
+/// Whether a socket or a TCP connection in TIME_WAIT is left in the namespace the calling thread is in, whose
+/// `/proc/net` is `proc_net`, the check's own socket made there already: `sockstat` first, its TIME_WAIT and every
+/// socket's count, and the protocols' counts only when that count isn't the check's own socket alone, which sets
+/// `protocols`.
+fn sockets_left(
+    proc_net: &ProcNet,
+    fresh: &Fresh,
+    text: &mut [u8],
+    protocols: &mut bool,
+) -> Result<(), Refused> {
+    let sockstat = proc_net
+        .file("sockstat", text)?
+        .ok_or(Refused::Unreadable)?;
+    time_wait(sockstat)?;
+    if used(sockstat)? == 1 {
+        return Ok(());
     }
-    Ok(Some(text))
+    *protocols = true;
+    sockets(
+        proc_net
+            .file("protocols", text)?
+            .ok_or(Refused::Unreadable)?,
+        &fresh.protocols,
+    )
 }
 
-/// `/proc/net/protocols`' sockets in use by protocol: under its header (net/core/sock.c:4346-4359), each line
-/// names a protocol first and gives its sockets third (:4313-4320).
-fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
+/// A thread's `/proc/thread-self/net`, held open by the thread that opened it, so each check opens a file of
+/// it by its name alone, not by a walk through `/proc`, `thread-self` and the thread's directory each time. A
+/// name looked up in it names the file of the namespace the thread is in at the lookup
+/// (`proc_tgid_net_lookup`, `get_proc_task_net`, Linux v6.19 fs/proc/proc_net.c:268-301), and each of those
+/// files is looked up again at each open, never taken from the dentry cache (`pde_force_lookup`, :123, :217;
+/// `proc_net_d_revalidate`, fs/proc/generic.c:350), so after a `setns` it opens the new namespace's.
+pub struct ProcNet(OwnedFd);
+
+impl ProcNet {
+    /// The calling thread's: the checks must run on that thread.
+    pub fn of_this_thread() -> Result<Self, OciError> {
+        rustix::fs::open(
+            "/proc/thread-self/net",
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(Self)
+        .map_err(|e| OciError::os("opening /proc/thread-self/net", e))
+    }
+
+    /// Its file `name` open, `None` where the kernel has no such file (a module not loaded).
+    fn open(&self, name: &str) -> Result<Option<OwnedFd>, Refused> {
+        match rustix::fs::openat(
+            &self.0,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(_) => Err(Refused::Unreadable),
+        }
+    }
+
+    /// Its file `name`, read whole into `room` ([`read_whole`]), `None` where the kernel has no such file.
+    fn file<'r>(&self, name: &str, room: &'r mut [u8]) -> Result<Option<&'r str>, Refused> {
+        match self.open(name)? {
+            Some(fd) => read_whole(&fd, room).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// `fd`'s file from its start, whole, into `room`, each read as large as the room left. Bounded at
+/// [`MAX_PROC_FILE`]: a file that fills `room` to one byte past it is refused.
+fn read_whole<'r>(fd: &OwnedFd, room: &'r mut [u8]) -> Result<&'r str, Refused> {
+    let mut filled = 0;
+    // Each read fills at least a byte of `room` or ends the file, so this ends within `room`'s length.
+    loop {
+        let left = room.get_mut(filled..).ok_or(Refused::Unreadable)?;
+        if left.is_empty() {
+            break;
+        }
+        let at = u64::try_from(filled).map_err(|_| Refused::Unreadable)?;
+        match rustix::io::pread(fd, left, at).map_err(|_| Refused::Unreadable)? {
+            0 => break,
+            n => filled = filled.checked_add(n).ok_or(Refused::Unreadable)?,
+        }
+    }
+    if filled > MAX_PROC_FILE {
+        return Err(Refused::Unreadable);
+    }
+    let room: &'r [u8] = room;
+    let text = room.get(..filled).ok_or(Refused::Unreadable)?;
+    std::str::from_utf8(text).map_err(|_| Refused::Unreadable)
+}
+
+/// `/proc/net/protocols`' sockets in use by protocol, each handed to `each` as it's read: under its header
+/// (net/core/sock.c:4346-4359), each line names a protocol first and gives its sockets third (:4313-4320). A
+/// file that doesn't parse, or names no protocol, is unreadable.
+fn each_in_use(protocols: &str, mut each: impl FnMut(&str, u64)) -> Result<(), Refused> {
     let mut lines = protocols.lines();
     let mut header = lines
         .next()
@@ -304,30 +569,50 @@ fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
     if header.next() != Some("protocol") || header.nth(1) != Some("sockets") {
         return Err(Refused::Unreadable);
     }
-    let mut out = BTreeMap::new();
+    let mut named = false;
     for line in lines {
         let mut words = line.split_ascii_whitespace();
         let (Some(name), Some(sockets)) = (words.next(), words.nth(1)) else {
             return Err(Refused::Unreadable);
         };
-        let n = sockets.parse().map_err(|_| Refused::Unreadable)?;
+        each(name, sockets.parse().map_err(|_| Refused::Unreadable)?);
+        named = true;
+    }
+    if named {
+        Ok(())
+    } else {
+        Err(Refused::Unreadable)
+    }
+}
+
+/// A fresh namespace's sockets in use by protocol.
+fn in_use(protocols: &str) -> Result<BTreeMap<String, u64>, Refused> {
+    let mut out = BTreeMap::new();
+    each_in_use(protocols, |name, n| {
         out.insert(name.to_owned(), n);
-    }
-    if out.is_empty() {
-        return Err(Refused::Unreadable);
-    }
+    })?;
     Ok(out)
 }
 
-/// Whether a socket is left: a protocol with more sockets in use than in a fresh namespace.
-fn sockets(have: &BTreeMap<String, u64>, fresh: &BTreeMap<String, u64>) -> Result<(), Refused> {
-    if have
-        .iter()
-        .any(|(name, n)| *n > fresh.get(name).copied().unwrap_or(0))
-    {
-        return Err(Refused::Sockets);
-    }
-    Ok(())
+/// Whether a socket is left: a protocol in `protocols` with more sockets in use than in a fresh namespace, the
+/// check's own netlink socket aside.
+fn sockets(protocols: &str, fresh: &BTreeMap<String, u64>) -> Result<(), Refused> {
+    let mut left = false;
+    each_in_use(protocols, |name, n| {
+        let own = u64::from(name == OWN_PROTOCOL);
+        left |= n > fresh.get(name).copied().unwrap_or(0).saturating_add(own);
+    })?;
+    if left { Err(Refused::Sockets) } else { Ok(()) }
+}
+
+/// `sockstat`'s count of the namespace's sockets: its "sockets: used" (`sock_inuse_get`, net/socket.c:3321, from
+/// net/ipv4/proc.c:60).
+fn used(sockstat: &str) -> Result<u64, Refused> {
+    sockstat
+        .lines()
+        .find_map(|line| line.strip_prefix("sockets: used "))
+        .and_then(|n| n.trim().parse().ok())
+        .ok_or(Refused::Unreadable)
 }
 
 /// `sockstat`'s word on TIME_WAIT: its TCP line's "tw" (net/ipv4/proc.c:60-63).
@@ -361,8 +646,21 @@ fn links(dev: &str) -> Result<(), Refused> {
     if lo { Ok(()) } else { Err(Refused::Links) }
 }
 
-/// The five dumps of the namespace the calling thread is in, each normalized and sorted.
-fn dumps() -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+/// The five dumps of `socket`'s namespace, the one it was made in, each normalized and sorted, read through
+/// `scratch`.
+fn dumps(socket: &OwnedFd, scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
+    let mut out = Vec::with_capacity(DUMPS.len());
+    for (seq, d) in (1u32..).zip(DUMPS.iter()) {
+        ask(socket, &request(d.kind, d.family, d.header, seq), scratch)?;
+        let mut msgs = normalized(&scratch.answer, d, seq)?;
+        msgs.sort_unstable();
+        out.push(msgs);
+    }
+    Ok(out)
+}
+
+/// A netlink socket for the dumps, in the namespace the calling thread is in, each read bounded by [`READ_WAIT`].
+fn dump_socket() -> Result<OwnedFd, Refused> {
     let fd = rustix::net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
@@ -376,14 +674,7 @@ fn dumps() -> Result<Vec<Vec<Vec<u8>>>, Refused> {
         Some(READ_WAIT),
     )
     .map_err(|_| Refused::Unreadable)?;
-    let mut out = Vec::with_capacity(DUMPS.len());
-    for (seq, d) in (1u32..).zip(DUMPS.iter()) {
-        let answer = ask(&fd, &request(d.kind, d.family, d.header, seq))?;
-        let mut msgs = normalized(&answer, d, seq)?;
-        msgs.sort_unstable();
-        out.push(msgs);
-    }
-    Ok(out)
+    Ok(fd)
 }
 
 /// A dump request: a `struct nlmsghdr` and the family header, zero but for its family.
@@ -400,25 +691,24 @@ fn request(kind: u16, family: u8, header: usize, seq: u32) -> Vec<u8> {
     m
 }
 
-/// Sends `request` and reads the whole answer, until `NLMSG_DONE`, bounded.
-fn ask(fd: &OwnedFd, request: &[u8]) -> Result<Vec<u8>, Refused> {
+/// Sends `request` and reads the whole answer into `scratch`'s, until `NLMSG_DONE`, bounded.
+fn ask(fd: &OwnedFd, request: &[u8], scratch: &mut Scratch) -> Result<(), Refused> {
     let sent =
         rustix::net::send(fd, request, SendFlags::empty()).map_err(|_| Refused::Unreadable)?;
     if sent != request.len() {
         return Err(Refused::Unreadable);
     }
-    let mut answer = Vec::new();
-    let mut buf = vec![0u8; READ_BYTES];
+    scratch.answer.clear();
     for _ in 0..MAX_DUMP_READS {
-        let (got, _) =
-            rustix::net::recv(fd, &mut buf, RecvFlags::empty()).map_err(|_| Refused::Unreadable)?;
-        let chunk = buf.get(..got).ok_or(Refused::Unreadable)?;
-        if answer.len().saturating_add(chunk.len()) > MAX_DUMP_BYTES {
+        let (got, _) = rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty())
+            .map_err(|_| Refused::Unreadable)?;
+        let chunk = scratch.read.get(..got).ok_or(Refused::Unreadable)?;
+        if scratch.answer.len().saturating_add(chunk.len()) > MAX_DUMP_BYTES {
             return Err(Refused::Unreadable);
         }
-        answer.extend_from_slice(chunk);
+        scratch.answer.extend_from_slice(chunk);
         if ends(chunk)? {
-            return Ok(answer);
+            return Ok(());
         }
     }
     Err(Refused::Unreadable)

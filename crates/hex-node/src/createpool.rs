@@ -71,9 +71,9 @@ struct Shared {
     /// The monotonic point the core's durations are measured from.
     base: Instant,
     inner: Mutex<Inner>,
-    /// A create in line waits on it; a seed freed, handed or started wakes it.
+    /// A create in line waits on it; a seed handed to one, a refusal of one, and shutdown wake it.
     free: Condvar,
-    /// The starting thread waits on it; a create taking or waiting for a seed, a seed's death or hang,
+    /// The starting thread waits on it; a create that leaves it a seed to start, a seed's death or hang,
     /// and shutdown wake it.
     wake: Condvar,
     /// Creates on the classic root path, counted by reason ([`ClassicReason`], a fixed set, so no
@@ -84,6 +84,9 @@ struct Shared {
     /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`.
     /// Zero on a rootless node, whose seeds don't prune. Stops at `u64::MAX`.
     pruned: AtomicU64,
+    /// The wakes sent the starting thread and the line, for the tests.
+    #[cfg(test)]
+    woke: [AtomicU64; 2],
 }
 
 struct Inner {
@@ -146,6 +149,8 @@ impl CreatePool {
             wake: Condvar::new(),
             classic: std::array::from_fn(|_| AtomicU64::new(0)),
             pruned: AtomicU64::new(0),
+            #[cfg(test)]
+            woke: [AtomicU64::new(0), AtomicU64::new(0)],
         });
         let starting = Arc::clone(&shared);
         let starter = std::thread::Builder::new()
@@ -306,10 +311,25 @@ impl Shared {
         self.base.elapsed()
     }
 
+    /// Wakes the starting thread, for a seed to start.
+    fn wake_starter(&self) {
+        #[cfg(test)]
+        self.woke[0].fetch_add(1, Ordering::Relaxed);
+        self.wake.notify_one();
+    }
+
+    /// Wakes the creates in line, each to claim by its ticket: a seed was handed to one or one refused.
+    fn wake_line(&self) {
+        #[cfg(test)]
+        self.woke[1].fetch_add(1, Ordering::Relaxed);
+        self.free.notify_all();
+    }
+
     /// An idle seed for a create: handed one at once, or, with none idle, a wait in line for one, within
-    /// the core's bounds. Either way the starting thread is woken, to keep its spare. Returns the seed and
-    /// its checked-out process (its slot's `procs` entry taken until [`done`](Self::done) or
-    /// [`died`](Self::died)).
+    /// the core's bounds. The starting thread is woken when the create leaves it a seed to start, to keep
+    /// its spare, and not otherwise: a wake is a system call, and the woken thread takes the lock this
+    /// create holds. Returns the seed and its checked-out process (its slot's `procs` entry taken until
+    /// [`done`](Self::done) or [`died`](Self::died)).
     fn acquire(&self) -> Result<(SeedId, Proc), OciError> {
         let mut inner = self.lock()?;
         // A seed that has served a create for the hang bound is taken for hung here, killed and its slot
@@ -320,7 +340,9 @@ impl Shared {
             .seeds
             .create(now)
             .map_err(|r| refused(r, inner.start_failure.as_deref()))?;
-        self.wake.notify_one();
+        if wants_start(&inner) {
+            self.wake_starter();
+        }
         let ticket = match admit {
             Admit::Seed(id) => return Ok((id, take(&mut inner, id)?)),
             Admit::Wait { ticket, .. } => ticket,
@@ -353,8 +375,8 @@ impl Shared {
             woke = true;
         }
         if woke {
-            self.free.notify_all();
-            self.wake.notify_one();
+            self.wake_line();
+            self.wake_starter();
         }
     }
 
@@ -371,10 +393,11 @@ impl Shared {
             None => end(&proc),
         }
         let now = self.now();
-        // Stale only if the seed left meanwhile (it can't: this create held it); either way the waiters
-        // are woken.
-        let _ = inner.seeds.done(id, now);
-        self.free.notify_all();
+        // The line is woken for the create the seed went to, and not when none waits. Stale only if the
+        // seed left meanwhile (it can't: this create held it); the line is woken then too.
+        if !matches!(inner.seeds.done(id, now), Ok(None)) {
+            self.wake_line();
+        }
     }
 
     /// An unusable seed ended and its slot freed: killed and reaped, the core told it died (which counts
@@ -383,8 +406,8 @@ impl Shared {
         end(&proc);
         if let Ok(mut inner) = self.lock() {
             let _ = inner.seeds.died(id);
-            self.free.notify_all();
-            self.wake.notify_one();
+            self.wake_line();
+            self.wake_starter();
         }
     }
 }
@@ -445,24 +468,27 @@ fn start_seeds(shared: &Shared) {
                 return;
             }
             Ok(proc) => match inner.seeds.started(id, shared.now()) {
-                Ok(_handed) => {
+                Ok(handed) => {
                     inner.start_failure = None;
                     match inner.procs.get_mut(id.slot()) {
                         Some(slot) => *slot = Some(proc),
                         None => end(&proc),
+                    }
+                    // The create it went to, if any, is woken; one it didn't go to waits on.
+                    if handed.is_some() {
+                        shared.wake_line();
                     }
                 }
                 // The core isn't starting it (it was reported dead meanwhile): end it.
                 Err(_stale) => end(&proc),
             },
             // Counted by the core, which stops asking until the next create; the cause is kept for the
-            // refusals of the creates that find no seed meanwhile.
+            // refusals of the creates that find no seed meanwhile, each at its wait's end.
             Err(e) => {
                 inner.start_failure = Some(e.to_string());
                 let _ = inner.seeds.start_failed(id);
             }
         }
-        shared.free.notify_all();
     }
 }
 
@@ -694,5 +720,110 @@ mod tests {
             (1, 0),
             "{counts:?}"
         );
+    }
+
+    /// Goal 5 extended step 6 (criterion 2, the rate at concurrency 32): a create wakes the starting thread
+    /// only when it leaves it a seed to start, and a seed given back wakes the line only when a create waits
+    /// in it. At concurrency 32 the creates waited 0.190 ms a lifecycle on the pool's lock (create_serial.md
+    /// run 21): each woke the thread, which took the lock the create held to find nothing to start, and
+    /// each seed given back made a system call to wake a line no create was in. Do: open a pool of two slots
+    /// on a stand-in seed program; take a seed and give it back until both slots' seeds are up and idle;
+    /// then take and give back a seed 1,000 times. Expect: the takes before woke the thread, which started
+    /// the second seed (non-vacuity); the 1,000 woke neither the thread nor the line.
+    #[test]
+    fn a_create_wakes_the_starting_thread_only_for_a_seed_to_start() {
+        let limits = Limits {
+            seeds: std::num::NonZeroUsize::new(2).unwrap(),
+            wait: Duration::from_secs(10),
+            ..hex_core::seeds::LIMITS
+        };
+        let pool = CreatePool::with_limits(
+            PathBuf::from("/bin/sh"),
+            limits,
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
+        let shared = &pool.shared;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (id, proc) = shared.acquire().unwrap();
+            shared.done(id, proc);
+            if shared.lock().unwrap().seeds.idle() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the pool never had both seeds up"
+            );
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+        let (starter, line) = (
+            shared.woke[0].load(Ordering::Relaxed),
+            shared.woke[1].load(Ordering::Relaxed),
+        );
+        assert!(
+            starter >= 1,
+            "the take of the only spare woke the starting thread"
+        );
+        assert_eq!(pool.counts().unwrap().started, 2);
+        for _ in 0..1_000 {
+            let (id, proc) = shared.acquire().unwrap();
+            shared.done(id, proc);
+        }
+        assert_eq!(
+            (
+                shared.woke[0].load(Ordering::Relaxed) - starter,
+                shared.woke[1].load(Ordering::Relaxed) - line
+            ),
+            (0, 0),
+            "the wakes sent the starting thread and the line over 1,000 creates that left nothing to start"
+        );
+    }
+
+    /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the
+    /// hand-off and not by its wait's end. Do: open a pool of one slot whose creates wait up to an hour;
+    /// take its seed; ask for another from a thread of the test's, and once that create waits in line,
+    /// give the first back. Expect: the waiting create is handed the seed given back (the test waits a
+    /// minute for it, the create an hour, so a hand-off that woke no one fails).
+    #[test]
+    fn a_seed_given_back_goes_at_once_to_the_create_in_line() {
+        let limits = Limits {
+            seeds: std::num::NonZeroUsize::new(1).unwrap(),
+            wait: Duration::from_secs(3600),
+            ..hex_core::seeds::LIMITS
+        };
+        let pool = CreatePool::with_limits(
+            PathBuf::from("/bin/sh"),
+            limits,
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
+        let (id, proc) = pool.shared.acquire().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = Arc::clone(&pool.shared);
+        std::thread::spawn(move || {
+            let handed = shared.acquire().map(|(id, proc)| {
+                shared.done(id, proc);
+                id
+            });
+            tx.send(handed).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while pool.shared.lock().unwrap().seeds.waiting() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the second create never waited in line"
+            );
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+        pool.shared.done(id, proc);
+        let handed = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the create in line was handed the seed given back");
+        assert_eq!(handed.unwrap(), id);
     }
 }

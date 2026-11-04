@@ -179,3 +179,307 @@ so each stands as measured (the lead, 2026-11-03T00:48Z). Their absolute rates a
   (step 6 at a6f32f1) ran (819 to 1,028) and step 6 alone in run 4 (832 to 953), on a host at load 26 to 41. With run 4's 832,
   the 4,784 would be 5.75x. A lifecycle alone is what the host's load slows most, so the ratio here rises with the
   load; it needs concurrency 1 measured on a quieter host, or beside concurrency 32 in each round.
+
+## Run 6 (2026-11-03, fedora): concurrency 1 and 32 interleaved, steps 2, 3 and 6 merged, the network namespace reused
+
+- **Why:** the second criterion, 8x a minimum (Ada, via the lead, 2026-11-03), measured as the lead set it: concurrency 1
+  and 32 in turn in each round (seam_oci's `interleaved` phase: 10 pairs a round of 500 lifecycles at 1 then 4,000 at
+  32), each adjacent pair's ratio, pooled with a bootstrap standard error (`interleaved_pool.py`), the host's load and CPU
+  pressure beside each pair. The same for reuse on and off (`HEXBENCH_REUSE=0`: the owner opts out, its bundles
+  unchanged), with network namespaces and without (`NETNS`), and for step 6 alone.
+- **The merge:** run 2's resolution on `cp/t7-ext-s6` at 4e9ef6a with `cp/t7-ext-s3` at **148d12e**, uncommitted. That base
+  lacks step 3's propagation fix (e2dd76c), so these figures are of record for no branch and are marked with it; later
+  merges are on 16e52a9 (the lead, 2026-11-03).
+- **Binaries:** the merge `hex` 42bd32d4d8a88d65 with `seam_oci` 9e5f8f386309aff0 (the first unit) and 42304065482ac3e3
+  (the second, which also records each half's CPU: c9c0cf7); step 6 alone, `hex` 02f441a98f6eb8dd with `seam_oci`
+  e1e01b3bd503a858 and 897dc7f829890263.
+- **Host:** kiln-a094a12d, Linux 6.19.10-300.fc44.x86_64, each pass's container pinned to CPUs 4-15 (6 P-cores, 2 threads
+  each) and capped (`--memory 8g`, `--oom-score-adj 1000`), `LOAD_GATE=0`, 2 rounds, every box `bench-owner`'s. The
+  fedora units `hex-g5x-s6-verify4-20261103T062500Z` and `hex-g5x-s6-verify5-20261103T063629Z`.
+- **Two passes are contaminated, kept only as such:** `20261103T062725Z` (reuse on: 4.72x and 4.64x) and
+  `20261103T062813Z` (reuse off: 2.17x and 2.38x) met the lead's trace unit on the same CPUs, 06:27:30 to 06:28:34Z.
+  They were run again in the second unit.
+
+| run | what | load | in process: c1, c32 (lifecycles/s) | ratio (SE) | over the socket: c1, c32 | ratio (SE) |
+|---|---|---|---|---|---|---|
+| 20261103T064217Z | merge, reuse on | 4.8 to 15.8 | 1,923, 7,178 | 3.74x (0.06) | 1,388, 7,211 | 5.23x (0.29), 10 pairs |
+| 20261103T064252Z | merge, reuse off | 15.8 to 37.4 | 1,252, 2,605 | 2.08x (0.05) | 1,148, 2,574 | 2.24x (0.03) |
+| 20261103T064414Z | merge, no network namespace | 37.4 to 39.0 | 1,806, 9,855 | 5.45x (0.13) | 1,582, 8,163 | 5.17x (0.12) |
+| 20261103T064447Z | step 6 alone, reuse on | 39.0 to 30.1 | 1,117, 3,204 | 2.87x (0.05) | 1,007, 3,164 | 3.14x (0.06) |
+| 20261103T062941Z | merge, no network namespace (first unit) | 22 to 35 | 1,716, 9,425 | 5.49x (0.15) | 1,464, 7,748 | 5.32x (0.16) |
+| 20261103T063016Z | step 6 alone, reuse on (first unit) | 35 to 24 | 968, 3,034 | 3.13x (0.10) | 997, 3,187 | 3.19x (0.08) |
+
+The pairs' medians of each half's CPU (the second unit's, in process; over the socket alike):
+
+| run | CPU a lifecycle, c1 | c32 | CPUs busy, c1 | c32 |
+|---|---|---|---|---|
+| 20261103T064217Z, reuse on | 0.64 ms | 1.19 ms | 1.24 | 8.60 |
+| 20261103T064252Z, reuse off | 1.02 ms | 1.77 ms | 1.33 | 4.64 |
+| 20261103T064414Z, no network namespace | 0.54 ms | 1.04 ms | 1.03 | 10.29 |
+| 20261103T064447Z, step 6 alone | 0.94 ms | 1.92 ms | 1.10 | 6.16 |
+
+- **Reuse works under load:** with it on, 98.4 to 99.6% of each round's 45,000 boxes were handed a kept namespace, none
+  refused and none closed unchecked; the rest were given a fresh one when none of their owner's was idle, as the one
+  checker thread fell behind (`create_serial.md`, run 12).
+- **The ratio is the CPUs kept busy times the CPU per lifecycle:** c32 over c1 is (CPUs busy at 32 over at 1) times (CPU a
+  lifecycle at 1 over at 32): for reuse on, 6.94 times 0.54, 3.73x. Reuse off keeps 4.64 of 12 CPUs busy at
+  concurrency 32: it waits (run 10's RTNL). Reuse on keeps 8.60 busy, and its waits are run 12's.
+- **With no network namespace at all,** concurrency 32 kept 10.29 of the 12 CPUs busy, and each lifecycle cost 1.93
+  times the CPU it cost alone. Two threads share each core's units there, and 6 cores run at a lower clock than 1, so a
+  lifecycle held by CPU can't be run 32 at once on these CPUs much past 6x what it runs alone.
+- **One start failed:** the socket driver's second round of `20261103T064217Z`, at its seventh pair, with "start
+  i006b003224: reading the exec fifo failed: Resource temporarily unavailable". So that row is over 10 pairs. Since
+  explained: the start's poll reported a hang-up as the init opened its end of the FIFO, before its byte, a race in
+  the kernel's FIFO poll (`fifo_hup.md`), and 756072f has the start poll again.
+
+## Run 7 (2026-11-03, fedora): run 6's method on 16e52a9, with the cgroup files opened through their directory
+
+- **The merge:** `cp/t7-ext-s6-x-s3`'s resolution (e9f58a0 with `cp/t7-ext-s3` at 16e52a9, step 3's propagation fix
+  in), with step 6's tip through 9cf1562 merged on it, uncommitted (of record for no branch): the cgroup files opened
+  through their held directory (3ea3ffa) and the checker's time counted (9cf1562). `hex` beef4e8e13cb4680, `seam_oci`
+  5e692e576c1daf7c.
+- **Host:** run 6's, CPUs 4-15, the unit `hex-g5x-s6-verify6b-20261103T070138Z`, 2 rounds of 10 pairs.
+
+| run | what | load | in process: c1, c32 | ratio (SE) | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket: ratio (SE) |
+|---|---|---|---|---|---|---|---|
+| 20261103T070533Z | reuse on | 9.4 to 23.1 | 1,453, 8,364 | 5.76x (0.12) | 0.81, 1.21 ms | 1.19, 10.17 | 6.19x (0.27) |
+| 20261103T070613Z | reuse off | 23.1 to 33.0 | 1,215, 2,596 | 2.14x (0.05) | 1.11, 1.73 ms | 1.31, 4.56 | 2.54x (0.07) |
+
+- **The cgroup files' walks were run 6's cap:** with them opened by name through the held directory, reuse on keeps
+  10.17 of 12 CPUs busy at concurrency 32, against run 6's 8.60, and the ratio is 5.76x against 3.74x. The base moved
+  too, 148d12e to 16e52a9, so the lever's own share is the same pass on the branch without it.
+- **The next cap is the one checker:** it took 127.2 and 130.8 us a namespace, so it checked at most about 7,700 a
+  second while concurrency 32 gave back 8,364. 5,508 and 5,248 of each round's 45,000 boxes found none of their
+  owner's idle and were given a fresh namespace (12%), and 2,448 and 2,827 were closed past the owner's bound: each
+  made and torn down under RTNL.
+- **The extra CPU a lifecycle costs at concurrency 32 isn't spinning** (`create-serial-offcpu-20261103T070739Z`, the
+  same binaries, on-CPU samples at 999 Hz): 0.509 ms a lifecycle at concurrency 1, 1.016 at 32. Lock spinning is
+  0.064 of it (0.004 at 1). The rest rises across code that takes no lock: user code 0.102 to 0.186, page faults
+  0.036 to 0.069, process teardown 0.016 to 0.049, fork 0.022 to 0.038, syscall entry 0.056 to 0.080. Two threads
+  share each core on these CPUs.
+- No start failed in either pass, over 90,000 lifecycles each.
+
+## Run 8 (2026-11-03, fedora): the four checkers, and the cores' shared threads
+
+- **The merge:** `cp/t7-ext-s6-x-s3` at e9fb28f with step 6's tip through fcc002d merged on it, uncommitted (of record
+  for no branch): run 7's, and the four checkers each reading through its own held `/proc/thread-self/net` (893ea05).
+  `hex` 63fd1465f9f87837, built on fedora. The unit `hex-g5x-s6-verify7-20261103T071725Z`, 2 rounds of 10 pairs.
+
+| run | CPUs | what | load | in process: c1, c32 | ratio (SE) | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket: ratio (SE) |
+|---|---|---|---|---|---|---|---|---|
+| 20261103T075855Z | 4-15 | reuse on | 6.9 to 19.4 | 1,832, 8,914 | 4.87x (0.10) | 0.71, 1.15 ms | 1.35, 10.32 | 5.11x (0.12) |
+| 20261103T075932Z | 4-15 | reuse off | 19.4 to 34.6 | 1,178, 2,593 | 2.20x (0.04) | 1.16, 1.72 ms | 1.41, 4.48 | 2.51x (0.05) |
+| 20261103T080056Z | 4,6,8,10,12,14 | no network namespace | 34.6 to 32.6 | 1,771, 7,057 | 3.98x (0.08) | 0.61, 0.72 ms | 1.10, 5.18 | 4.25x (0.13) |
+| 20261103T080138Z | 4,6,8,10,12,14 | reuse on | 32.6 to 30.1 | 1,417, 6,003 | 4.24x (0.14) | 0.81, 0.86 ms | 1.19, 5.13 | 4.29x (0.14) |
+| 20261103T080227Z | 4-31 | reuse on | 30.1 to 30.9 | 1,005, 12,334 | 12.32x (0.21) | 1.25, 1.43 ms | 1.28, 18.01 | 11.46x (0.25) |
+
+- **The checkers keep up:** with four, 1.5% and 1.7% of each round's boxes were given a fresh namespace on 4-15, against
+  run 7's 12%, and concurrency 32 ran 8,914 a second against 8,364. Each check's wall time rose to 208.2 and 212.9 us
+  from run 7's 127.2 and 130.8: four checkers among 32 lifecycles on 12 CPUs.
+- **The ratio fell from run 7's 5.76x though concurrency 32 rose,** because concurrency 1 rose more on a quieter host:
+  1,832 a second against 1,453.
+- **The CPU a lifecycle cost at concurrency 32 doubled in this pass, and the ceiling drawn from it is withdrawn (run
+  9):** on one thread of each of the same 6 cores, with no network namespace, it cost 1.18 times its CPU alone (0.72
+  against 0.61 ms), where on both threads of each it cost 1.93 times (run 6's 20261103T064414Z: 1.04 against 0.54).
+  This run took that for the cores' shared threads and drew from it a ceiling on CPUs 4-15 of about 12 CPUs over 1.9
+  times a lifecycle's CPU alone, about 12,100 a second, 6.6 times concurrency 1. Run 9 measured 1.36 to 1.44 times on
+  both threads of each core at CPU pressure 25%: the 1.93 was run 6's load, 37.4 to 39.0, not the threads, and 6.6x
+  is no ceiling.
+- **On 4-31 the ratio is 12.32x, but concurrency 1 is slower there:** a lone lifecycle runs on the E-cores too, at 1.25
+  ms of CPU against 0.71 on the P-cores, so 1,005 a second against 1,832. Concurrency 32 ran 12,334 a second there.
+- **No start failed** in these passes, nor in 1,200,000 lifecycles at concurrency 32 sustained (3 rounds of 100,000 a
+  driver on each of this merge and the 148d12e one with the FIFO diagnostics: `20261103T080305Z`, `20261103T080909Z`).
+
+## Run 9 (2026-11-03, fedora): the checks' three changes, interleaved on 4-15
+
+- **The binaries:** run 8's merge (four checkers) as mr4f, against the same tree with step 6's three changes to the
+  checks, 8753abe (held buffers), 4c54e58 (8 KiB dump reads) and ad6f333 (the namespace's own netlink socket kept,
+  sockstat's count first; on `cp/t7-ext-s6-kept-socket`), as mr9; each with the exec FIFO's fix (756072f's run.rs),
+  as one of `create_serial.md` run 18's passes ended at that race without it. Uncommitted, of record for no branch.
+  `hex` dca1aaf3bb8d527d and 2245470c0ac31f07, `seam_oci` 250bcce2ff44e489 and da929fde2f21a1ee.
+- **Host:** CPUs 4-15, the unit `hex-g5x-s6-verify11-20261103T101353Z`, A B B A, each pass 2 rounds of 10 pairs,
+  one owner's boxes, reuse on, a network namespace each; other tenants' load beside it, CPU pressure 24 to 26% at
+  the passes' ends.
+
+| run | what | load | in process: c1, c32 | ratio (SE) | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket: ratio (SE) |
+|---|---|---|---|---|---|---|---|
+| 20261103T101506Z | mr4f | 5.6 to 14.1 | 1,774, 9,600 | 5.41x (0.08) | 0.75, 1.07 ms | 1.36, 10.33 | 6.79x (0.35) |
+| 20261103T101543Z | mr9 | 14.1 to 23.1 | 1,850, 10,774 | 5.82x (0.15) | 0.69, 0.94 ms | 1.28, 10.30 | 8.08x (0.39) |
+| 20261103T101618Z | mr9 | 23.1 to 19.5 | 1,581, 10,299 | 6.52x (0.31) | 0.69, 0.97 ms | 1.22, 10.14 | 6.30x (0.31) |
+| 20261103T101652Z | mr4f | 19.5 to 17.4 | 1,779, 10,026 | 5.64x (0.20) | 0.71, 1.02 ms | 1.36, 10.37 | 7.48x (0.44) |
+
+- **Pooled over each binary's 40 pairs, in process:** mr4f 5.53x (SE 0.11), concurrency 32 at 9,808 a second;
+  mr9 6.17x (SE 0.19), at 10,531. Over the socket 7.14x (SE 0.30) and 7.19x (SE 0.29).
+- **The checks' changes take 8% off a lifecycle's CPU at both concurrencies,** 0.75 to 0.69 ms at 1 and 1.04 to 0.96
+  at 32 (the pairs' medians), and concurrency 1 keeps fewer CPUs busy beside its own path, 1.36 to 1.27: the work
+  they took off was beside it. Concurrency 32 rose 7%, the ratio 12%.
+- **Over the socket one pass passed 8x, 8.08x, and its twin read 6.30x:** that driver's concurrency 1 waits on the
+  agent's socket as well, so its ratio swings with the host more than the in-process one.
+- **Run 8's ceiling was its load's:** a lifecycle's CPU at concurrency 32 is 1.36 to 1.44 times its CPU at 1 here (each
+  pass's medians), where run 6's pass without a network namespace (20261103T064414Z, which run 8 cites), at load 37.4 to
+  39.0, gave 1.93. How much more a lifecycle costs 32 at once moves with the host's load, so run 8's "about 6.6 times
+  concurrency 1, with all of its work off its own path gone" is withdrawn. On this run's figures, that work gone (17% of
+  concurrency 1's CPU, `create_serial.md` run 17) puts concurrency 32 at about 7.2 times concurrency 1, and its CPUs
+  kept busy as well, 10.2 of 12 now, at about 8.4 times.
+
+## Run 10 (2026-11-03, fedora): criterion 2 as its text reads it, on host.sh's CPU set and on 4-15
+
+- **What the criterion reads:** "sustained lifecycles a second at concurrency 32 against throughput at concurrency 1
+  in the same OCI pass, one owner's boxes, at least 8x, measured by seam_oci's throughput and sustained phases
+  through host.sh on fedora". It names no CPU set, so host.sh's own, 4-31, governs, with 4-15 beside it (the lead,
+  2026-11-03T16:50Z); latency parts stay on 4-15.
+- **The binaries:** step 6 alone at its tip, tip8 (`cp/t7-ext-s6-kept-socket` at 9693bfc, b82bf7f's code but for one
+  line's formatting; `hex` bcc6cd4556b7a9e2, `seam_oci` f103b11339f33b5e), and the merge, mr10 (`cp/t7-ext-s6-x-s3`'s
+  e9fb28f with step 6's checks' three changes, the exec FIFO's fix and the runtime records' shards, uncommitted, of
+  record for no branch; `hex` 59d490d19f583b50, `seam_oci` 83fd243409634180).
+- **Host:** the unit `hex-g5x-s6-verify13b-20261103T165417Z`, one owner's boxes, reuse on, a network namespace each;
+  host.sh with its throughput and sustained phases, 3 rounds, `LIFECYCLES` 2,000 and `HEXBENCH_SUSTAINED` 10,000;
+  then the interleaved phase, 2 rounds of 10 pairs; load 3.6 to 24.1 over the runs, other tenants beside them.
+
+As the criterion reads it, each round's sustained rate over its throughput phase's at concurrency 1 (each pass's 3
+rounds: the median, least to most):
+
+| run | tree | CPUs | in process | over the socket |
+|---|---|---|---|---|
+| 20261103T165526Z | merge | 4-31 | 25.12x (24.88 to 26.48) | 23.55x (20.87 to 23.62) |
+| 20261103T170058Z | step 6 alone | 4-31 | 8.29x (7.93 to 9.32) | 8.01x (7.87 to 9.10) |
+| 20261103T165826Z | merge | 4-15 | 7.74x (5.87 to 9.09) | 7.80x (6.79 to 8.42) |
+| 20261103T170431Z | step 6 alone | 4-15 | 6.44x (6.42 to 7.33) | 5.95x (3.35 to 6.23) |
+
+Interleaved, the cross-check, pooled over 20 pairs (mean ratio, bootstrap SE; each half's CPU, the pairs' medians):
+
+| run | tree | CPUs | in process | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket |
+|---|---|---|---|---|---|---|
+| 20261103T170721Z | merge | 4-31 | 18.96x (0.27) | 1.18, 1.22 ms | 1.10, 21.49 | 19.94x (1.09) |
+| 20261103T170834Z | step 6 alone | 4-31 | 5.89x (0.07) | 1.55, 2.36 ms | 0.98, 8.83 | 7.80x (0.41) |
+| 20261103T170802Z | merge | 4-15 | 5.11x (0.19) | 0.58, 1.02 ms | 1.28, 10.28 | 4.96x (0.15) |
+| 20261103T171011Z | step 6 alone | 4-15 | 3.09x (0.14) | 0.78, 1.61 ms | 1.09, 6.62 | 3.10x (0.07) |
+
+- **On host.sh's 4-31 the merge passes 8x by both measures,** 25.12x as the criterion reads it and 18.96x
+  interleaved; step 6 alone reads 8.29x as written, its least round 7.93x, and 5.89x interleaved.
+- **On 4-31 a lone lifecycle runs slower,** at more CPU than one of 32 at once (the merge's throughput phase: 1.57 to
+  1.74 ms a lifecycle at 1 against 1.20 to 1.24 at 32): there one runs on the E-cores too, or at their clocks, as
+  run 8 found, which lifts the ratio. On 4-15, two threads share each core: the ratio is the CPUs kept busy times the
+  CPU a lifecycle, (busy32/busy1) x (cpu1/cpu32), for the merge's interleaved pass (10.28/1.28) x (0.58/1.02),
+  about 4.6x, its CPU a lifecycle 1.76 times its CPU alone under that pass's load (run 9's: 1.36 to 1.44).
+- No start or create was refused in any of the eight passes.
+
+## Run 11 (2026-11-03, fedora): the create pool's wakes, A B B A on 4-15
+
+- **Binaries:** mr10, run 10's merge (`hex` 59d490d19f583b50, `seam_oci` 83fd243409634180), against mr11, mr10 with
+  508acde's change to the create pool ported to x-s3's pool: its starting thread woken only for a seed to start, its
+  line only for a hand-off (`hex` ed7e76509fa73fb0, `seam_oci` 678990fb38e15538).
+- **Host:** the unit `hex-g5x-s6-verify15b-20261103T180307Z`, 18:03 to 18:10Z, run 9's method, A B B A; load 7.7 at its
+  start and 19.5 to 32.4 after, CPU pressure 1.0% at its start and 24.2 to 29.0% after, other tenants beside it.
+
+Pooled over 40 pairs each (mean ratio, bootstrap SE; CPU a lifecycle and CPUs busy, the pairs' medians):
+
+| tree | runs | in process | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket |
+|---|---|---|---|---|---|
+| mr10 | 20261103T180310Z, T180505Z | 6.30x (0.41), 8,586/s over 1,316/s | 0.71, 1.06 ms | 1.17, 9.86 | 7.06x (0.31) |
+| mr11 | 20261103T180349Z, T180427Z | 5.61x (0.18), 9,690/s over 1,733/s | 0.70, 1.05 ms | 1.28, 10.42 | 6.03x (0.18) |
+
+- **The pool's change keeps more of concurrency 32's CPUs busy, not a higher ratio here:** in process those rose from
+  9.86 to 10.42 at the same CPU a lifecycle, the waits on the pool's lock gone (`create_serial.md` run 21); over the
+  socket concurrency 32's rate didn't move, 8,122 a second against 8,090. The ratio swung with concurrency 1's rate,
+  which moved with the load: mr10's second pass ran at load 26 to 32, its concurrency 1 at 1,077 a second.
+- **As the criterion reads it, for mr11:** on 4-15 5.15x in process (4.72x to 5.23x) and 5.16x over the socket (4.03x
+  to 5.74x), run 20261103T180548Z; on 4-31 16.00x (10.86x to 20.20x) and 15.12x (10.90x to 15.33x), run
+  20261103T180816Z, flattered as run 10's.
+
+## Run 12 (2026-11-03, fedora): option 1, concurrency 1 on the P-cores and 32 on all, beside 4-15, in one interleaved pass
+
+- **What it measures** (the lead, 2026-11-03T17:48Z, for Ada's choice of the bar): interleaved pairs with each pair's
+  concurrency 1 pinned to 4-15 and its 32 to 4-31 (2ff615a: every thread of seam_oci and of its descendants re-pinned
+  at each switch, and its CPUs read back), beside the 4-15-only interleaved ratio, the stricter measure and the method
+  of record (the lead, 2026-11-03T17:47Z). Both reported; neither is called met until Ada picks the bar.
+- **Binaries:** the merge, mr12h: mr11 with step 3's setsid first (cbe5673) and the harness (`hex` ff5cef383a844f85,
+  `seam_oci` abf25aa454bc75ef); step 6 alone, tip9 (2ff615a; `hex` 72a5769b437bcfa4, `seam_oci` 40e9653e5c0fd8c4).
+- **Host:** the unit `hex-g5x-s6-verify17-20261103T183130Z`, 18:32 to 18:45Z, A B C D D C B A; load 26.6 to 44.0, CPU
+  pressure 2.1 to 29.9%, about 64 other tenants' containers.
+
+Pooled over 40 pairs each:
+
+| tree | measure | runs | in process | CPU a lifecycle, c1, c32 | CPUs busy, c1, c32 | over the socket |
+|---|---|---|---|---|---|---|
+| merge | option 1 | 20261103T183222Z, T184504Z | 7.55x (0.15), 11,199/s over 1,513/s | 0.81, 1.42 ms | 1.26, 16.19 | 7.16x (0.12) |
+| merge | 4-15 | 20261103T183613Z, T184151Z | 4.78x (0.07), 8,632/s over 1,806/s | 0.68, 1.17 ms | 1.28, 10.22 | 4.92x (0.10) |
+| step 6 alone | option 1 | 20261103T183303Z, T184226Z | 1.59x (0.03), 1,194/s over 750/s | 1.38, 5.48 ms | 1.04, 6.66 | 1.73x (0.04) |
+| step 6 alone | 4-15 | 20261103T183701Z, T183931Z | 1.84x (0.02), 1,430/s over 779/s | 1.30, 3.70 ms | 1.05, 5.34 | 2.02x (0.03) |
+
+- **Each half held its CPUs:** in every pair of every option-1 run, every task the pin reached held its half's CPUs
+  alone, as its `Cpus_allowed_list` read back: 11 to 90 tasks at a switch.
+- **The merge reads 7.55x as option 1 and 4.78x on 4-15 alone.** A lifecycle at concurrency 32 costs 1.42 ms on all of
+  fedora's CPUs against 1.17 on 4-15: part of its work runs on the E-cores.
+- **Step 6 alone fell to a fifth of run 10's rate at concurrency 32:** run 13 and `create_serial.md` run 22 show why.
+
+## Run 13 (2026-11-03, fedora): step 6 alone, before and after the create pool's change, under about 7,500 host threads
+
+- **Binaries:** tip8 (9693bfc; `hex` bcc6cd4556b7a9e2, `seam_oci` f103b11339f33b5e) against tip9 (2ff615a), A B B A,
+  interleaved on the E-cores 16-31; the unit `hex-g5x-s6-verify18-20261103T185412Z`, 18:54 to 19:12Z; the host's
+  threads 7,292 to 7,580 at each pass's start, load 23.2 to 46.7, CPU pressure 0.2 to 3.5%, kiln's pool containers
+  beside it.
+
+| run | tree | in process | CPU a lifecycle, c1, c32 | over the socket |
+|---|---|---|---|---|
+| 20261103T185413Z | tip8 | 2.67x (0.16), 715/s over 260/s | 2.86, 6.64 ms | 2.89x (0.17) |
+| 20261103T190013Z | tip9 | 3.33x (0.13), 967/s over 292/s | 3.70, 6.40 ms | 3.82x (0.14) |
+| 20261103T190431Z | tip9 | 3.45x (0.12), 973/s over 283/s | 3.81, 6.45 ms | 3.52x (0.15) |
+| 20261103T190832Z | tip8 | 3.38x (0.15), 989/s over 293/s | 3.77, 6.40 ms | 2.95x (0.16) |
+
+- **The fall is the host's, not the create pool's change or the protocols' count:** tip8 and tip9 cost the same, 2.9
+  to 3.8 ms a lifecycle at concurrency 1 and 6.4 to 6.6 at 32, where run 10's tip8 cost 0.78 and 1.61 on 4-15.
+  `create_serial.md` run 22 profiles both: a third of a lone lifecycle's CPU is pivot_root's walk of the host's threads.
+
+
+## Run 14 (2026-11-03, fedora): the `/dev` pool's low mark, interleaved A B B A on 4-15
+
+- **Binaries:** mr12h (`hex` ff5cef383a844f85), and mr13 (`hex` 252eea5c30632778), which is mr12h with the pool's thread
+  woken only at a key's low mark and filling the key in one pass (`3260249`, on step 3's branch).
+- **Method:** the unit `hex-g5x-s6-v23-20261103T220545Z`, 22:14Z to 22:17Z. Interleaved pairs on 4-15, 2 rounds of 10
+  pairs a run, one owner's boxes, reuse on, one-minute load 19 to 39 with kiln's pool of about 65 containers beside it.
+
+| run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 |
+|---|---|---|---|---|---|
+| `20261103T221421Z` | mr12h | 6.27x (0.19) | 7,721/s over 1,234/s | 1.01, 1.27 ms | 1.27, 9.96 |
+| `20261103T221508Z` | mr13 | 6.12x (0.14) | 8,305/s over 1,354/s | 0.90, 1.23 ms | 1.26, 10.25 |
+| `20261103T221550Z` | mr13 | 5.83x (0.13) | 8,146/s over 1,399/s | 0.88, 1.24 ms | 1.25, 10.27 |
+| `20261103T221634Z` | mr12h | 4.74x (0.09) | 8,431/s over 1,776/s | 0.69, 1.20 ms | 1.27, 10.34 |
+
+Pooled over 40 pairs each: mr12h 5.51x (SE 0.16), 8,060/s over 1,457/s; mr13 5.98x (SE 0.10), 8,225/s over 1,376/s. Over
+the socket, 5.22x (SE 0.17) and 5.58x (SE 0.09).
+
+**What it says: nothing for the low mark, and neither reaches 8x.** mr12h alone reads 6.27x and then 4.74x minutes apart,
+as its concurrency 1 moves from 1.01 ms of CPU a lifecycle to 0.69, and mr13's two runs lie inside that. Concurrency 32's
+pooled rate moves 2%, within its runs' spread. The low mark's own effect is on its thread (`devfs_clone.md`). What the
+ratio swings with here is concurrency 1's CPU a lifecycle, 46% on one binary within three minutes, which is the host's
+state and not this change. Its cause isn't named yet.
+
+## Run 15 (2026-11-03, fedora): the held files, the descriptor sweep and the FIFO's two ends, A B B A on 4-15
+
+- **Binaries:** mr13 (`hex` 252eea5c30632778), and mr17 (`hex` fc991e45d9cbb5ce, `seam_oci` 5c607a9069d096a2; `334aee5`,
+  merged for measurement only): x-s3's series and step 6's, so mr13's low mark with a kept namespace's `/proc/net` files
+  held (`f37032d`), every descriptor from 3 up marked close-on-exec before foreign code, a start holding both FIFO
+  ends, and the `/dev` pool's thread with a umask of 0 (held for Ada).
+- **Method:** the unit `hex-g5x-s6-v24-20261103T225919Z`, 23:03Z to 23:06:30Z, run noisy on the lead's order: interleaved
+  pairs on 4-15, 2 rounds of 10 pairs a run, one owner's boxes, reuse on, one-minute load 35 to 52, the host's threads
+  about 7,100 to 7,350, kiln's pool beside it, `create_serial.md` run 23 just before. Step 4's timed unit
+  `hex-s4-job3-20261103T225951Z` (a sustained pass, then a create breakdown) ran on 4-15 too until about 23:05Z, beside
+  the first two runs.
+
+| run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | over the socket (SE) |
+|---|---|---|---|---|---|---|
+| `20261103T230320Z` | mr13 | 4.82x (0.12) | 7,451/s over 1,546/s | 0.76, 1.26 ms | 1.21, 9.49 | 5.74x (0.11) |
+| `20261103T230409Z` | mr17 | 5.64x (0.35) | 6,512/s over 1,162/s | 0.96, 1.26 ms | 1.13, 9.10 | 5.44x (0.17) |
+| `20261103T230500Z` | mr17 | 5.29x (0.18) | 8,046/s over 1,527/s | 0.77, 1.22 ms | 1.19, 9.80 | 5.06x (0.11) |
+| `20261103T230545Z` | mr13 | 5.18x (0.13) | 8,299/s over 1,603/s | 0.75, 1.21 ms | 1.24, 10.33 | 5.21x (0.24) |
+
+Pooled over 40 pairs each: mr13 5.00x (SE 0.09), 7,852/s over 1,574/s; mr17 5.46x (SE 0.20), 7,198/s over 1,320/s. Over
+the socket, mr13 5.47x (SE 0.14) and mr17 5.25x (SE 0.11).
+
+**What it says: no gain to claim, and neither reaches 8x.** In process mr17 reads 0.46x higher, about two standard
+errors, and over the socket 0.22x lower. Its higher ratio comes from its first run's slower concurrency 1 (0.96 ms of CPU
+a lifecycle against 0.75 to 0.77 in the other three), the host's swing run 14 found; its second run lies beside mr13's. The two runs after step 4's unit ended read
+mr17 5.29x (SE 0.18) and mr13 5.18x (SE 0.13), inside each other's spread.
+Concurrency 32's CPU a lifecycle is 1.21 to 1.26 ms in all four. The held files' own saving is on the checker's thread
+and is still to be measured apart.

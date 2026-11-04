@@ -15,8 +15,8 @@ fn sockstat_says_whether_a_time_wait_connection_is_left() {
     assert_eq!(time_wait(CLEAN_SOCKSTAT), Ok(()));
     let tw = CLEAN_SOCKSTAT.replace("tw 0", "tw 2");
     assert_eq!(time_wait(&tw), Err(Refused::TimeWait));
-    // "sockets: used" keeps a closed netlink socket until an RCU grace period has passed, so it isn't read;
-    // nor are the host-wide orphan and allocation counts, which aren't the namespace's.
+    // TIME_WAIT alone: the sockets' count is `used`'s, and the host-wide orphan and allocation counts aren't the
+    // namespace's.
     assert_eq!(
         time_wait(&CLEAN_SOCKSTAT.replace("used 0", "used 3")),
         Ok(())
@@ -46,36 +46,53 @@ UDP       1344      0       0   NI       0   yes  kernel      y  y  y  n  y  y  
 TCP       2496      0     881   no     320   yes  kernel      y  y  y  y  y  y  y  y  y  y  y  y  y  n  y  y  y  y\n\
 NETLINK   1112      0      -1   NI       0   no   kernel      n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n  n\n";
 
+/// `sockstat`'s count of every socket in the namespace, read before the protocols' (`sockets_left`).
+#[test]
+fn sockstat_counts_the_namespaces_sockets() {
+    assert_eq!(used(CLEAN_SOCKSTAT), Ok(0));
+    assert_eq!(used(&CLEAN_SOCKSTAT.replace("used 0", "used 1")), Ok(1));
+    for broken in [
+        "",
+        "sockets: used\n",
+        "sockets: used x\n",
+        "sockets: used -1\n",
+        "TCP: inuse 0 orphan 0 tw 0\n",
+    ] {
+        assert_eq!(used(broken), Err(Refused::Unreadable), "{broken:?}");
+    }
+}
+
 #[test]
 fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
     let fresh = in_use(PROTOCOLS).unwrap();
     assert_eq!(fresh.len(), 7);
     assert_eq!(fresh.get("UDP"), Some(&0));
-    assert_eq!(sockets(&fresh, &fresh), Ok(()));
-    let udp = in_use(&PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1")).unwrap();
+    assert_eq!(sockets(PROTOCOLS, &fresh), Ok(()));
+    let udp = PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1");
     assert_eq!(
         sockets(&udp, &fresh),
         Err(Refused::Sockets),
         "a bound UDP socket held outside"
     );
-    let unix =
-        in_use(&PROTOCOLS.replace("UNIX      1152      0", "UNIX      1152      2")).unwrap();
+    let unix = PROTOCOLS.replace("UNIX      1152      0", "UNIX      1152      2");
     assert_eq!(sockets(&unix, &fresh), Err(Refused::Sockets));
+    // The check's own netlink socket, kept in the namespace, is no socket left; a second is.
+    let netlink =
+        |n: u32| PROTOCOLS.replace("NETLINK   1112      0", &format!("NETLINK   1112      {n}"));
+    assert_eq!(sockets(&netlink(1), &fresh), Ok(()));
+    assert_eq!(sockets(&netlink(2), &fresh), Err(Refused::Sockets));
     // A protocol a module brought after the fresh namespace was read: none of its sockets, or one.
     let sctp = |n: u32| {
         format!(
             "{PROTOCOLS}SCTP      1600      {n}       0   no       0   yes  sctp        y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y  y\n"
         )
     };
-    assert_eq!(sockets(&in_use(&sctp(0)).unwrap(), &fresh), Ok(()));
-    assert_eq!(
-        sockets(&in_use(&sctp(1)).unwrap(), &fresh),
-        Err(Refused::Sockets)
-    );
+    assert_eq!(sockets(&sctp(0), &fresh), Ok(()));
+    assert_eq!(sockets(&sctp(1), &fresh), Err(Refused::Sockets));
     // Fewer than a fresh namespace's is no socket left.
     let mut more = fresh.clone();
     more.insert("NETLINK".to_owned(), 1);
-    assert_eq!(sockets(&fresh, &more), Ok(()));
+    assert_eq!(sockets(PROTOCOLS, &more), Ok(()));
     for broken in [
         "",
         "protocol  size\n",
@@ -85,6 +102,11 @@ fn protocols_say_whether_a_socket_is_left_against_a_fresh_namespaces() {
         "protocol  size sockets  memory\nTCP 2496 -1\n",
     ] {
         assert_eq!(in_use(broken), Err(Refused::Unreadable), "{broken:?}");
+        assert_eq!(
+            sockets(broken, &fresh),
+            Err(Refused::Unreadable),
+            "{broken:?}"
+        );
     }
 }
 
@@ -100,6 +122,215 @@ fn net_dev_says_whether_a_link_besides_loopback_is_there() {
     assert_eq!(links(&more), Err(Refused::Links));
     let none = LO_ONLY.lines().take(2).collect::<Vec<_>>().join("\n");
     assert_eq!(links(&none), Err(Refused::Links), "no loopback");
+}
+
+/// Goal 5 extended step 6, the lead's fourth condition for a kept namespace's files: a read of one that fails is
+/// no verdict: the check drops them and looks as it does without them, counted, and refuses nothing on its own. Do:
+/// hold ends of pipes for them, which can't be read at an offset (ESPIPE), and check. Expect: no verdict through
+/// them, and the check counted as having failed them, holding none after.
+#[test]
+fn a_held_file_whose_read_fails_is_no_verdict_and_the_check_falls_back_counted() {
+    let end = || {
+        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .unwrap()
+            .0
+    };
+    let mut files = Some(Files {
+        sockstat: end(),
+        dev: end(),
+        tables: [Some(end()), Some(end())],
+    });
+    let fresh = Fresh {
+        protocols: BTreeMap::new(),
+        dumps: Vec::new(),
+    };
+    let mut scratch = Scratch::default();
+    let socket = end();
+    let proc_net = ProcNet::of_this_thread().unwrap();
+    assert!(matches!(
+        look_held(
+            files.as_ref().unwrap(),
+            &socket,
+            &proc_net,
+            &fresh,
+            &mut scratch
+        ),
+        HeldLook::Failed
+    ));
+    let own = || {
+        rustix::fs::open(
+            "/proc/self/ns/net",
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    };
+    let (ns, home) = (own(), own());
+    let checked = check(
+        ns.as_fd(),
+        home.as_fd(),
+        &proc_net,
+        &fresh,
+        &mut scratch,
+        &mut Some(socket),
+        &mut files,
+    );
+    assert!(checked.files_failed && !checked.through_files);
+    assert!(files.is_none());
+}
+
+/// An iptables file is absent while its module isn't loaded, and comes to be in every namespace when it loads, so a
+/// namespace holds those there are, and a check looks by name, where it stands, for one it doesn't hold: fedora's kernel
+/// has `ip_tables_names` and no `ip6_tables_names`. Do: hold a `/proc/net` with neither, look, then make one, and look.
+/// Expect: past them to the dumps, whose socket here refuses; then no verdict, and the check sent in.
+#[test]
+fn an_iptables_file_not_held_is_looked_for_and_one_come_to_be_sends_the_check_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let sockstat = CLEAN_SOCKSTAT.replace("sockets: used 0", "sockets: used 1");
+    std::fs::write(dir.path().join("sockstat"), sockstat).unwrap();
+    std::fs::write(dir.path().join("dev"), LO_ONLY).unwrap();
+    let proc_net = ProcNet(
+        rustix::fs::open(
+            dir.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let files = Files::open(&proc_net).unwrap().unwrap();
+    assert!(files.tables.iter().all(Option::is_none));
+    let fresh = Fresh {
+        protocols: BTreeMap::new(),
+        dumps: Vec::new(),
+    };
+    let mut scratch = Scratch::default();
+    let socket = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+        .unwrap()
+        .0;
+    assert!(matches!(
+        look_held(&files, &socket, &proc_net, &fresh, &mut scratch),
+        HeldLook::Done(Err(_))
+    ));
+    std::fs::write(dir.path().join("ip6_tables_names"), b"").unwrap();
+    assert!(matches!(
+        look_held(&files, &socket, &proc_net, &fresh, &mut scratch),
+        HeldLook::Failed
+    ));
+}
+
+/// A file of a namespace's `/proc/net` is read whole into the thread's held room, again and again into the same
+/// room; one too long for the bound is refused, and one the kernel hasn't is none (CLAUDE.md §6: hostile input).
+#[test]
+fn a_proc_net_file_is_read_whole_into_the_held_room_and_one_past_the_bound_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_net = ProcNet(
+        rustix::fs::open(
+            dir.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let mut scratch = Scratch::default();
+    std::fs::write(dir.path().join("protocols"), PROTOCOLS).unwrap();
+    std::fs::write(dir.path().join("sockstat"), CLEAN_SOCKSTAT).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            proc_net.file("protocols", &mut scratch.text),
+            Ok(Some(PROTOCOLS))
+        );
+        assert_eq!(
+            proc_net.file("sockstat", &mut scratch.text),
+            Ok(Some(CLEAN_SOCKSTAT)),
+            "a shorter file after a longer one is itself alone"
+        );
+    }
+    assert_eq!(
+        proc_net.file("ip6_tables_names", &mut scratch.text),
+        Ok(None)
+    );
+    std::fs::write(dir.path().join("empty"), "").unwrap();
+    assert_eq!(proc_net.file("empty", &mut scratch.text), Ok(Some("")));
+    let at_bound = "x".repeat(MAX_PROC_FILE);
+    std::fs::write(dir.path().join("at"), &at_bound).unwrap();
+    assert_eq!(
+        proc_net.file("at", &mut scratch.text),
+        Ok(Some(at_bound.as_str()))
+    );
+    std::fs::write(dir.path().join("past"), "x".repeat(MAX_PROC_FILE + 1)).unwrap();
+    assert_eq!(
+        proc_net.file("past", &mut scratch.text),
+        Err(Refused::Unreadable)
+    );
+    std::fs::write(dir.path().join("binary"), b"\xff\xfe\x00").unwrap();
+    assert_eq!(
+        proc_net.file("binary", &mut scratch.text),
+        Err(Refused::Unreadable),
+        "not text"
+    );
+}
+
+/// The sockets' check reads `sockstat` first, and the protocols only past a count of the check's own socket: a count
+/// of 1 needs no protocols file, and any other count reads it, said in `protocols` for the node to count, which tells
+/// a box's netlink socket waiting out its grace period from a socket held outside; TIME_WAIT refuses whatever the
+/// count (CLAUDE.md §6). Goal 5 extended step 6, the lead's conditions for the kept socket (2026-11-03T17:36Z): a
+/// count past 1 from the RCU lag (a closed netlink socket counted until its grace period has passed, Linux v6.19
+/// net/netlink/af_netlink.c:794-796, :703-715) reads the protocols, counted, and is never refused for it.
+#[test]
+fn the_sockets_are_read_from_the_protocols_only_past_the_checks_own_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let proc_net = ProcNet(
+        rustix::fs::open(
+            dir.path(),
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap(),
+    );
+    let fresh = Fresh {
+        protocols: in_use(PROTOCOLS).unwrap(),
+        dumps: Vec::new(),
+    };
+    let mut text = Scratch::default().text;
+    let mut left = || {
+        let mut protocols = false;
+        let verdict = sockets_left(&proc_net, &fresh, &mut text, &mut protocols);
+        (verdict, protocols)
+    };
+    let write = |name: &str, body: &str| std::fs::write(dir.path().join(name), body).unwrap();
+    write("sockstat", &CLEAN_SOCKSTAT.replace("used 0", "used 1"));
+    assert_eq!(left(), (Ok(()), false), "the check's own socket alone");
+    write("sockstat", &CLEAN_SOCKSTAT.replace("used 0", "used 2"));
+    assert_eq!(
+        left(),
+        (Err(Refused::Unreadable), true),
+        "past it the protocols are read, and there are none here"
+    );
+    write(
+        "protocols",
+        &PROTOCOLS.replace("NETLINK   1112      0", "NETLINK   1112      1"),
+    );
+    assert_eq!(
+        left(),
+        (Ok(()), true),
+        "a box's netlink socket still counted in sockstat, gone from the protocols"
+    );
+    write(
+        "protocols",
+        &PROTOCOLS.replace("UDP       1344      0", "UDP       1344      1"),
+    );
+    assert_eq!(
+        left(),
+        (Err(Refused::Sockets), true),
+        "a bound UDP socket held outside"
+    );
+    write(
+        "sockstat",
+        &CLEAN_SOCKSTAT
+            .replace("used 0", "used 1")
+            .replace("tw 0", "tw 1"),
+    );
+    assert_eq!(left(), (Err(Refused::TimeWait), false));
 }
 
 #[test]
@@ -204,7 +435,9 @@ proptest! {
         }
         let _ = ends(&bytes);
         let _ = time_wait(&text);
+        let _ = used(&text);
         let _ = in_use(&text);
+        let _ = sockets(&text, &BTreeMap::new());
         let _ = links(&text);
     }
 }

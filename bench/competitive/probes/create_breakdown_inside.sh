@@ -96,12 +96,29 @@ for c in cpu memory pids io; do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_contr
 # seed, and the container's init either clones, until the init execs its workload at start); a write only for hex's,
 # the shim's pid line and the init's ready signal. open as well as openat: rustix opens with open(2) on x86_64. The
 # clock is CLOCK_MONOTONIC's.
+#
+# Each open's entry is marked too, by a kprobe on the openat and open system calls' entry points that records
+# nothing but where it fired (goal 5 extended step 5): it fetches no path, so it costs a call little, and a record
+# write is cut from its file's open on, its filesystem work its own parts: a durable record to the rename that puts
+# it in place, a non-durable one — written once straight to its file with O_EXCL, no temp and no rename (goal 5
+# extended step 5) — to that fd's close, so close is traced too (sys_enter_close names the fd sys_exit_openat
+# returned, sys_exit_close is the cut's end). The kprobes are defined for this run alone (group hexcb_<tag>),
+# enabled only in its instance, and removed when it ends. The instance and the group are named by the tag
+# create_breakdown.sh gives the run (TRACE_TAG, its UTC stamp and its pid on the host): this shell's own pid is 1 in
+# every probe container, so a name of it would be every run's, and a killed run's instance would refuse the next
+# (create_breakdown.md, the 100 rounds' second chunk). UNTRACE_ONLY=1 takes the tag's instance and kprobes down and
+# ends: create_breakdown.sh runs it once its container is gone, for a run killed before its own trap ran.
+TAG=${TRACE_TAG:?create_breakdown.sh gives the run its TRACE_TAG}
+case $TAG in *[!A-Za-z0-9_]*|"") echo "refusing: TRACE_TAG $TAG names no trace instance" >&2; exit 2 ;; esac
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
-# A per-run instance name. `$$` is 1 in the bench container (bash is its init) and tracefs is the host's,
-# shared across containers, so `hexcb-$$` was `hexcb-1` for every run and collided when a prior run left
-# its instance behind under load (its untrace's rmdir raced); the epoch-nanosecond suffix makes it unique.
-I="$T/instances/hexcb-$$-$(date +%s%N)"
+I="$T/instances/hexcb-$TAG"
+KG="hexcb_$TAG"
+case $(uname -m) in
+  x86_64) SYS=__x64_sys ;;
+  aarch64) SYS=__arm64_sys ;;
+  *) echo "refusing: no syscall entry points known for $(uname -m)" >&2; exit 4 ;;
+esac
 EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit
   syscalls/sys_exit_openat syscalls/sys_exit_open syscalls/sys_enter_fsync syscalls/sys_exit_fsync
   syscalls/sys_exit_rename syscalls/sys_exit_renameat syscalls/sys_exit_renameat2
@@ -127,7 +144,14 @@ untrace() { # the instance's events off and the instance gone, whatever state it
   for ev in $EVENTS $DETAIL; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
-trap untrace EXIT
+unprobe() { # this run's kprobes gone, once no instance has them on
+  untrace
+  for ev in $PROBES; do echo "-:$ev" >> "$T/kprobe_events" 2>/dev/null; done
+}
+trap unprobe EXIT
+[ "${UNTRACE_ONLY:-0}" = 1 ] && exit 0
+{ echo "p:$KG/openat_in ${SYS}_openat" >> "$T/kprobe_events" && echo "p:$KG/open_in ${SYS}_open" >> "$T/kprobe_events"; } \
+  || { echo "refusing: the opens' entry kprobes couldn't be defined" >&2; exit 4; }
 
 # traced <out name> <n> <warmup> [detail]: seam_oci's lifecycle phase with the tracer on around create, its trace in
 # <out name>.txt and the instance's per-CPU counts in <out name>.stats (create_breakdown.py refuses a trace that lost
