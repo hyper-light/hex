@@ -268,3 +268,49 @@ What only a Windows host can settle is marked **(probe)** and is measured on jup
 5. Which images HCS starts on build 26200: `ltsc2025` (26100) and `ltsc2022` (20348) (§7).
 6. Whether a Rust binary built against the static C runtime runs in nanoserver as the launcher (nanoserver's VC
    runtime is not in these sources).
+
+## 10. Each new test fails when its code is broken (mutation record)
+
+Each row is one scratch commit on `357bb83`: one file changed by one exact-text mutation, signed, kept under
+`refs/scratch/native-s4/mut-NN` and on no branch. On fedora, the commit's tree was extracted with fresh
+mtimes, and the tests of that piece were run (`cargo test -p <crate> --lib <filter>`). Every row's test fails;
+the unmutated `357bb83` passes the same tests (hex-core 111, hex-api 13). Runs: units
+`hex-native-s4-mutants-20261104T092407Z` (rows 1-7, 9-24) and `-092501Z` (row 8), 2026-11-04.
+
+| # | Piece | Mutation | Failing test | Commit |
+|---|---|---|---|---|
+| 1 | version table | every host/image pair allowed | `hcs::tests::a_host_runs_the_images_microsofts_table_allows` | `c720a6398` |
+| 2 | version table | Windows 11 runs Server 2025 images before 24H2 | `hcs::tests::a_host_runs_the_images_microsofts_table_allows` | `60e9a2d17` |
+| 3 | version table | the refusal omits the image's build | `hcs::tests::a_mismatch_names_both_builds` | `8442d0d3f` |
+| 4 | bundle/spec render | `windows.hyperv` not refused | `hcs::tests::each_field_hex_doesnt_render_is_refused_by_its_name` | `3ef0a5cd5` |
+| 5 | bundle/spec render | nested mount destinations not refused | `hcs::tests::each_field_hex_doesnt_render_is_refused_by_its_name` | `ce6f2181b` |
+| 6 | bundle/spec render | memory limit rounded to half-MiB, not MiB | `hcs::tests::a_bundle_becomes_the_container_its_windows_section_asks_for` | `b8f19658c` |
+| 7 | bundle/spec render | an OciSpec's layers not reversed to topmost first | `hcs::tests::an_oci_spec_becomes_the_container_it_asks_for` | `9d4bf6d88` |
+| 8 | bundle/spec render | `Rootfs::Dir` accepted as a layer | `hcs::tests::an_oci_spec_a_windows_container_cant_be_is_refused_by_name` | `aa0ef4ac7` |
+| 9 | HCS document | `ReadOnly` dropped from mapped directories | `hcs::tests::the_document_is_hcs_v2s_process_isolated_container` | `6781a983a` |
+| 10 | HCS document | a device grant without its `ClassGuid` type | `hcs::tests::the_document_is_hcs_v2s_process_isolated_container` | `f5edaaffb` |
+| 11 | HCS document | `ShouldTerminateOnLastHandleClosed` off | `hcs::tests::the_document_is_hcs_v2s_process_isolated_container` | `3caf76095` |
+| 12 | HCS document | the layer id compared case-sensitively | `hcs::tests::a_layer_id_is_one_stable_guid_per_folder` | `59a6f7c34` |
+| 13 | HRESULT kinds | the image-mismatch code misread | `hcs::tests::an_hcs_error_reads_the_same_in_either_form` | `5e60b11a0` |
+| 14 | HRESULT kinds | severity bits not masked (one encoding only) | `hcs::tests::an_hcs_error_reads_the_same_in_either_form` | `172c931a2` |
+| 15 | HRESULT kinds | service-unavailable not the Containers-feature refusal | `hcs::tests::an_hcs_error_reads_the_same_in_either_form` | `e83a74a2c` |
+| 16 | launcher wire | decode's size bound removed | `hcs::tests::a_hostile_launcher_message_is_refused` | `d2a653499` |
+| 17 | launcher wire | decode's one-line rule removed | `hcs::tests::a_hostile_launcher_message_is_refused` | `da978f751` |
+| 18 | launcher wire | encode's size bound removed | `hcs::tests::a_hostile_launcher_message_is_refused` | `e7877b3cf` |
+| 19 | launcher wire | an `=` in a variable name accepted | `hcs::tests::a_hostile_launcher_message_is_refused` | `b8a7b8339` |
+| 20 | job quoting | backslashes before a quote not doubled | `job::tests::a_command_line_round_trips_through_the_c_runtime` | `195e41251` |
+| 21 | job quoting | a tab left bare | `job::tests::a_command_line_round_trips_through_the_c_runtime` | `13c31ed3b` |
+| 22 | job quoting | the environment block left unsorted | `job::tests::an_environment_block_is_sorted_and_double_nul_terminated` | `acfe77a76` |
+| 23 | hex-api Windows path | a drive-absolute host path refused (the check before `c76c458`) | `spec::tests::a_windows_path_passes_where_its_form_is_absolute` | `b2ddfe1a9` |
+| 24 | hex-api Windows path | a `..` behind a backslash missed | `spec::tests::a_windows_path_passes_where_its_form_is_absolute` | `622b40e88` |
+
+Two tests did not fail at first and were fixed until they did:
+- Row 16's test fed oversized bytes that weren't JSON, so the parser refused them whether or not the bound was
+  there. It now sends a well-formed message past the bound (`0ad9c0d`).
+- Row 17 had no test. JSON reads a second, empty line as trailing whitespace, so only the one-line rule refuses
+  it (`357bb83`).
+
+Row 8's first mutation didn't compile, so it showed nothing; it was replaced by one that accepts the folder.
+One method note: an earlier pass (`-092334Z`) restored the commit timestamps when it extracted each tree into
+one shared target directory, so cargo re-ran the previous mutant's binary. That pass is discarded, and every
+row above comes from trees extracted with fresh mtimes.
