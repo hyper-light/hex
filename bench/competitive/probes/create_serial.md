@@ -812,7 +812,9 @@ On-CPU samples, the largest shares:
 
 - **Binary:** mr13 (`hex` 252eea5c30632778), one owner's boxes, reuse on, on 4-31 (28 logical CPUs), the unit
   `hex-g5x-s6-fdh13-20261103T225919Z`, 23:00:29Z to 23:03:15Z, one-minute load 37 to 52, run noisy on the lead's order
-  with kiln's pool beside it, and each CPU's state read every second (`cpustat.sh`).
+  with kiln's pool beside it, and each CPU's state read every second (`cpustat.sh`). Step 4's timed unit
+  `hex-s4-job3-20261103T225951Z` ran on 4-15 throughout, and this probe's programs (on every context switch and
+  futex call on the host) ran on its work too.
 - **Runs:** `create-serial-offcpu-20261103T230030Z`, `create-serial-threads-20261103T230232Z` (sustained 9,247/s at 32).
 
 Off-CPU time a lifecycle by what the thread waited on, ms:

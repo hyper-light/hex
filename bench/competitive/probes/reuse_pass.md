@@ -463,7 +463,9 @@ state and not this change. Its cause isn't named yet.
   ends, and the `/dev` pool's thread with a umask of 0 (held for Ada).
 - **Method:** the unit `hex-g5x-s6-v24-20261103T225919Z`, 23:03Z to 23:06:30Z, run noisy on the lead's order: interleaved
   pairs on 4-15, 2 rounds of 10 pairs a run, one owner's boxes, reuse on, one-minute load 35 to 52, the host's threads
-  about 7,100 to 7,350, kiln's pool beside it, `create_serial.md` run 23 just before.
+  about 7,100 to 7,350, kiln's pool beside it, `create_serial.md` run 23 just before. Step 4's timed unit
+  `hex-s4-job3-20261103T225951Z` (a sustained pass, then a create breakdown) ran on 4-15 too until about 23:05Z, beside
+  the first two runs.
 
 | run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | over the socket (SE) |
 |---|---|---|---|---|---|---|
@@ -477,6 +479,7 @@ the socket, mr13 5.47x (SE 0.14) and mr17 5.25x (SE 0.11).
 
 **What it says: no gain to claim, and neither reaches 8x.** In process mr17 reads 0.46x higher, about two standard
 errors, and over the socket 0.22x lower. Its higher ratio comes from its first run's slower concurrency 1 (0.96 ms of CPU
-a lifecycle against 0.75 to 0.77 in the other three), the host's swing run 14 found; its second run lies beside mr13's.
+a lifecycle against 0.75 to 0.77 in the other three), the host's swing run 14 found; its second run lies beside mr13's. The two runs after step 4's unit ended read
+mr17 5.29x (SE 0.18) and mr13 5.18x (SE 0.13), inside each other's spread.
 Concurrency 32's CPU a lifecycle is 1.21 to 1.26 ms in all four. The held files' own saving is on the checker's thread
 and is still to be measured apart.
