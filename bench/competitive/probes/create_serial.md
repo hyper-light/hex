@@ -911,6 +911,34 @@ times at 183 us and blocked 0.029 times at 89 us).
   namespace checker, the `/dev` pool). Work cut from the path speeds both concurrencies; work cut from beside it, or work
   that grows with concurrency (this run's spinning, about 5% of 32's CPU), speeds only 32.
 
+## Run 25 (2026-11-04, fedora): offcpu and threads on 4-31, the final merge, a quiet host: what idles option 1's 32
+
+- **Binary:** the final merge (ca6dc80; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91), one owner's boxes, the
+  probe container on 4-31, the unit `hex-g5x-s6-fdh28-20261104T061914Z`, 06:19:14Z to 06:21:36Z, load 1.7 to 6.7, CPU
+  pressure under 1%; beside it a build's LLVM thread (`opt cgu.13`) and kiln's services.
+- **Runs:** `create-serial-offcpu-20261104T061914Z` (sustained at 32: 16,345 a second, 1.29 ms of CPU a lifecycle),
+  `create-serial-threads-20261104T062058Z`.
+
+Off-CPU time a lifecycle at 32, the runtime's processes, ms: the seeds' idle `recvmsg` 1.468; the agent's `ppoll`
+(the init's sync and exit) 0.774; its read of the init's sync pipe 0.337; the init's open of the exec FIFO until the
+start 0.163; the mount lock 0.153 (`move_mount` in the init 0.082, `open_tree`'s copy in the agent 0.043, the clone's
+`copy_mnt_ns` 0.021); futexes 0.108, of which 0.061 is the driver's `pthread_join` and none over 0.003 is a create's
+(`Store::claim`, the create pool, the cgroups' and namespaces' locks); RCU grace periods as the box's mount namespace
+goes (`synchronize_rcu_expedited` < `namespace_unlock`) 0.051; a directory's `i_rwsem` 0.043; `cgroup_mutex` 0.024.
+
+The runtime's threads, CPU a lifecycle, at 1 (5,020 lifecycles) and 32: `hex` 493.7 and 536.3 us, `seam_oci` 364.1
+and 521.4, `true` 70.4 and 90.1, `hex-devfs` 80.6 and 46.3, `hex-netns-check` 45.3 and 46.9 (90.1 at 1 in run 23,
+before the held files), `hex-netns` 2.2 and 2.4: 1,056.2 and 1,244.3 in all.
+
+- **At 32 on 4-31 a lifecycle waits on its own steps more than on CPUs:** 32 in flight at 16,345 a second is 1.96 ms a
+  lifecycle against 1.29 ms of CPU spread over its processes, and each step waits for the one before (the agent for
+  the init's sync, the init for the start, the agent for the exit), so 32 lifecycles keep about 21 of the 28 CPUs
+  busy, as option 1's 20.1 (`reuse_pass.md` run 16).
+- **About 0.27 ms of each lifecycle's wall is the host's locks on its path:** the mount lock, the RCU grace period as
+  its mount namespace goes, a directory's `i_rwsem` and `cgroup_mutex`. With CPUs to spare, 32 in flight would run
+  about 32 / (1.96 - 0.27) ms, some 18,900 a second, without them, which is how option 1's 32 can rise without its 1.
+- **The work beside concurrency 1's path is 128 us of its 1,056 here:** the `/dev` pool's 80.6 and the checker's 45.3.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
