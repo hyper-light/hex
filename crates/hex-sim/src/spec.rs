@@ -212,3 +212,39 @@ pub fn check_end(cluster: &Cluster, run: &Run) -> EndReport {
     }
     r
 }
+
+/// What `AC-T7.3.4` holds: control-plane restarts leave running work running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeptReport {
+    /// Workloads that ran, each started once on the node it was placed on, ran its whole run time
+    /// there, and is recorded done there (or still running there, for one that never ends).
+    pub kept: u64,
+    /// Workloads that ran and broke any of that.
+    pub disturbed: u64,
+}
+
+pub fn check_kept_running(cluster: &Cluster, run: &Run) -> KeptReport {
+    let mut r = KeptReport::default();
+    for (at, w) in cluster.workloads.iter().enumerate() {
+        let Some(Some(ran)) = run.ran.get(at).copied() else {
+            continue;
+        };
+        let once = run.starts.get(at).copied() == Some(1);
+        let state = run.store.record(w.id).map(|rec| rec.state);
+        let whole = match w.runs_for {
+            Some(d) => {
+                ran.started
+                    .checked_add(d)
+                    .is_some_and(|end| ran.ended == Some(end))
+                    && state == Some(State::Complete(ran.node))
+            }
+            None => ran.ended.is_none() && state == Some(State::Placed(ran.node)),
+        };
+        if once && whole {
+            r.kept = r.kept.saturating_add(1);
+        } else {
+            r.disturbed = r.disturbed.saturating_add(1);
+        }
+    }
+    r
+}

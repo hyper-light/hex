@@ -68,7 +68,7 @@ moved behind the crash), the sweep fails at write 3, `After`: one workload lost 
 
 **What would falsify it.** A crash point whose run loses or doubles a workload: a defect in recovery,
 fixed at its cause (CLAUDE.md §4). This sweep is one crash per run on one cluster; `AC-T7.3.3`'s 10,000
-crash seeds, with the nemesis's other faults, are implementation goal 1.
+crash seeds, several crashes each, are H6; the nemesis's other faults are implementation goal 5.
 
 ### H3. Decide in parallel, commit in order, late-bound
 
@@ -112,6 +112,45 @@ recorded history to a checker DS[6].
 hand-made case; or a case where concurrency forces a divergence that isn't a defect, which would then be
 stated as the specification's allowance.
 
+### H6. AC-T7.3.3's crash seeds: the nemesis's faults are a function of its seed
+
+**The choice.** A crash seed draws a cluster, a control plane (deciders, costs, change window,
+restart time) and a nemesis from one generator. The nemesis (`Nemesis::Random`) crashes the plane at a
+write the seed picks among the submits, so every run has at least one crash, then at each later write
+with a seeded probability (0.5% to 20%), at most a seeded 1 to 8 crashes, each before or after its write
+by a fair draw from the nemesis's own generator. A seed is one run; 10,000 seeds are `AC-T7.3.3`'s
+10,000.
+
+**Sources.** FoundationDB draws its faults, and randomises its tuning parameters, from the simulation's
+seed, and tunes fault rates so they don't shrink the state space DS[1]; the VOPR draws every fault
+probability from one generator seeded by one number DS[4].
+
+**Evidence.** `ten_thousand_crash_seeds_lose_and_double_nothing`: 10,000 seeds, every one crashed,
+lost or started twice exactly 0, every log one the serial specification makes, and running work
+undisturbed (H7).
+
+**What would falsify it.** A seed whose run loses or doubles a workload, or one the specification
+refuses: a recovery defect, fixed at its cause and kept as a named regression seed.
+
+### H7. A control-plane restart leaves running work running
+
+**The choice.** Node agents and the store outlive the control plane. A restarted plane rebuilds its
+view from the store, counting placed workloads as running on their nodes, never as pending; node agents
+keep running what they run and resend each completion until it is recorded. A workload that ran is kept
+when it was started once, on the node it was placed on, ran its whole run time there and is recorded done
+there (or is still placed there, for one that never ends): `spec::check_kept_running`.
+
+**Sources.** Borg: "already-running tasks continue to run even if the Borgmaster or a task's Borglet goes
+down" (Verma et al., EuroSys 2015, p. 6; `docs/research/scheduler/cluster-managers-at-scale.md` [1] §3.3).
+The desired/observed split with the store as the record is `scheduler-architecture.md` S6.
+
+**Evidence.** `a_control_plane_restart_leaves_running_workloads_running`: up to 6 crashes over 60
+long-running workloads, and again with workloads that never end; dozens running through crashes, none
+disturbed. The 10,000 seeds check the same on every run.
+
+**What would falsify it.** A workload running through a crash that is started again, moved, cut short,
+or never recorded done. The mutant that rebuilds placed workloads as pending fails both tests.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue
@@ -125,7 +164,7 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 
 ## What it doesn't do yet
 
-Each goes with the implementation goal that needs it: the nemesis's other faults (gray, fail-slow, mass
+Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
 loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
 quotas (A3), priorities and fair share (goal 4), sharded control planes, cells and regions (goals 6-7),
 heap accounting per workload (`AC-T7.11.4`; `Store::record_bytes` is the record's layout only), and

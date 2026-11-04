@@ -17,7 +17,7 @@ use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
 use hex_sim::model::{Cluster, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
 use hex_sim::rng::Rng;
-use hex_sim::sim::{self, Config, Crash, Report, Run, When};
+use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
 use hex_sim::spec::{self, Violation};
 use hex_sim::store::{State, Store, Write};
 
@@ -134,7 +134,7 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
             let run = sim::run(
                 &cluster,
                 &Config {
-                    crash: Some(Crash { write, when }),
+                    nemesis: Nemesis::At(Crash { write, when }),
                     ..base
                 },
             )
@@ -150,6 +150,8 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
                 u64::try_from(cluster.workloads.len()).unwrap(),
                 "write {write} {when:?}: {end:?}"
             );
+            let kept = spec::check_kept_running(&cluster, &run);
+            assert_eq!(kept.disturbed, 0, "write {write} {when:?}: {kept:?}");
             if run.store.log() != clean.store.log() {
                 changed_history += 1;
             }
@@ -253,6 +255,7 @@ fn run_of(store: Store, n: usize) -> Run {
         starts: vec![1; n],
         acked: vec![true; n],
         refused: vec![false; n],
+        ran: vec![None; n],
     }
 }
 
@@ -379,7 +382,7 @@ fn bounds_refuse_typed() {
         }
     ));
     let restart_forever = Config {
-        crash: Some(Crash {
+        nemesis: Nemesis::At(Crash {
             write: 0,
             when: When::Before,
         }),
@@ -391,4 +394,111 @@ fn bounds_refuse_typed() {
         sim::run(&cluster, &restart_forever).unwrap_err(),
         SimError::ClientGaveUp(WorkloadId(0), 2)
     ));
+}
+
+/// One of AC-T7.3.3's crash seeds: a generated cluster and control plane, and a nemesis that
+/// crashes the plane at a write the seed picks (one of the submits, so every run has it) and then at
+/// a seeded rate, up to a seeded cap.
+fn crash_seed(seed: u64) -> (Cluster, Config) {
+    let mut r = Rng::new(seed ^ 0xdead_beef);
+    let workloads = r.range(20, 60);
+    let shape = Shape {
+        nodes: u32::try_from(r.range(1, 12)).unwrap(),
+        workloads,
+        mean_gap: r.range(0, 40_000),
+        mean_run: if r.chance(100) {
+            None
+        } else {
+            Some(r.range(1, 4_000_000))
+        },
+        gpu_nodes_per_mille: r.range(0, 500),
+        max_share_per_mille: r.range(100, 1000),
+    };
+    let cluster = generate::cluster(seed, &shape).unwrap();
+    let config = Config {
+        workers: u32::try_from(r.range(1, 8)).unwrap(),
+        decide_ns: r.range(0, 200_000),
+        commit_ns: r.range(0, 100_000),
+        change_window: usize::try_from(r.range(1, 64)).unwrap(),
+        restart_ns: r.range(0, 5_000_000),
+        nemesis: Nemesis::Random {
+            seed: r.next_u64(),
+            first: r.range(0, workloads - 1),
+            per_mille: r.range(5, 200),
+            max_crashes: u32::try_from(r.range(1, 8)).unwrap(),
+        },
+        ..Config::default()
+    };
+    (cluster, config)
+}
+
+/// AC-T7.3.3: do 10,000 crash seeds, each a generated cluster whose control plane the nemesis
+/// crashes one to eight times, before or after its writes; expect every run's log one the serial
+/// specification makes, workloads lost or started twice exactly 0, and running work undisturbed;
+/// and (non-vacuity) every seed crashed at least once, with work running through crashes.
+#[test]
+fn ten_thousand_crash_seeds_lose_and_double_nothing() {
+    let (mut crashes, mut seeds_crashed, mut through, mut lost_or_double) =
+        (0u64, 0u64, 0u64, 0u64);
+    for seed in 0..10_000 {
+        let (cluster, config) = crash_seed(seed);
+        let run = sim::run(&cluster, &config).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        spec::check_log(&cluster.nodes, &run).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+        let end = spec::check_end(&cluster, &run);
+        lost_or_double += end.lost_or_double();
+        assert_eq!(end.lost_or_double(), 0, "seed {seed}: {end:?}");
+        let kept = spec::check_kept_running(&cluster, &run);
+        assert_eq!(kept.disturbed, 0, "seed {seed}: {kept:?}");
+        crashes += run.report.crashes;
+        seeds_crashed += u64::from(run.report.crashes > 0);
+        through += run.report.running_through_crashes;
+    }
+    assert_eq!(lost_or_double, 0);
+    assert_eq!(seeds_crashed, 10_000, "a seed ran without a crash");
+    assert!(crashes > 15_000, "{crashes} crashes over 10,000 seeds");
+    assert!(through > 10_000, "{through} workloads ran through a crash");
+}
+
+/// AC-T7.3.4: do long-running workloads (and ones that never end) while the nemesis crashes and
+/// restarts the control plane several times; expect every workload started once, on the node it was
+/// placed on, run its whole time there and recorded done there (or still running there), with
+/// (non-vacuity) dozens of them running through crashes.
+#[test]
+fn a_control_plane_restart_leaves_running_workloads_running() {
+    for mean_run in [Some(50_000_000), None] {
+        let shape = Shape {
+            nodes: 8,
+            workloads: 60,
+            mean_gap: 200_000,
+            mean_run,
+            gpu_nodes_per_mille: 200,
+            max_share_per_mille: 300,
+        };
+        let cluster = generate::cluster(5, &shape).unwrap();
+        let config = Config {
+            nemesis: Nemesis::Random {
+                seed: 9,
+                first: 20,
+                per_mille: 100,
+                max_crashes: 6,
+            },
+            ..Config::default()
+        };
+        let run = sim::run(&cluster, &config).unwrap();
+        assert!(
+            run.report.crashes >= 2,
+            "{mean_run:?}: {} crashes",
+            run.report.crashes
+        );
+        assert!(
+            run.report.running_through_crashes >= 20,
+            "{mean_run:?}: {} running through crashes",
+            run.report.running_through_crashes
+        );
+        let kept = spec::check_kept_running(&cluster, &run);
+        assert_eq!(kept.disturbed, 0, "{mean_run:?}: {kept:?}");
+        assert!(kept.kept >= 40, "{mean_run:?}: {kept:?}");
+        spec::check_log(&cluster.nodes, &run).unwrap();
+        assert_eq!(spec::check_end(&cluster, &run).lost_or_double(), 0);
+    }
 }

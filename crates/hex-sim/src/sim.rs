@@ -10,9 +10,12 @@
 //!   ([`crate::spec::check_log`]), while deciding runs in parallel.
 //! - **Node agents** start a workload when the store's feed shows it placed on them, and report it
 //!   done when it ends, resending until the control plane records it.
-//! - **The nemesis** crashes the control plane at one chosen store write, before it is applied or
-//!   after it is applied and before anyone hears of it (DS[1][5]). Everything the control plane holds
-//!   in memory is lost; it restarts after `restart_ns` and rebuilds its view from the store.
+//! - **The nemesis** crashes the control plane at store writes, before one is applied or after it
+//!   is applied and before anyone hears of it (DS[1][5]): at one chosen write ([`Nemesis::At`]), or at
+//!   writes its own seed picks ([`Nemesis::Random`], `AC-T7.3.3`'s crash seeds). Everything the
+//!   control plane holds in memory is lost; it restarts after `restart_ns` and rebuilds its view from
+//!   the store. Node agents and the work they run go on through it (`AC-T7.3.4`), as Borg's tasks do
+//!   when the Borgmaster is down (Verma et al., EuroSys 2015, p. 6).
 //!
 //! Every queue and map is bounded by the run's workloads or by a [`Config`] field, and the run by
 //! `max_steps` (CLAUDE.md §2). Nothing in it calls itself (§11): each event is handled by a function
@@ -25,6 +28,7 @@ use std::ops::Bound;
 use crate::error::SimError;
 use crate::index::{FitIndex, Key};
 use crate::model::{Cluster, NodeId, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::rng::Rng;
 use crate::store::{Outcome, State, Store, Write};
 use crate::trace::{Latencies, TraceHash};
 
@@ -42,6 +46,22 @@ pub enum When {
 pub struct Crash {
     pub write: u64,
     pub when: When,
+}
+
+/// Where the nemesis crashes the control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nemesis {
+    None,
+    At(Crash),
+    /// A crash at write `first`, then one at each later write with probability `per_mille / 1000`,
+    /// at most `max_crashes` in all, each before or after its write by a fair draw; every draw from
+    /// `seed`'s own generator, so the faults are a function of the seed (DS[1][4]).
+    Random {
+        seed: u64,
+        first: u64,
+        per_mille: u64,
+        max_crashes: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +83,7 @@ pub struct Config {
     pub change_window: usize,
     pub max_events: usize,
     pub max_steps: u64,
-    pub crash: Option<Crash>,
+    pub nemesis: Nemesis,
 }
 
 impl Default for Config {
@@ -83,7 +103,7 @@ impl Default for Config {
             change_window: 4_096,
             max_events: 1 << 22,
             max_steps: 1 << 32,
-            crash: None,
+            nemesis: Nemesis::None,
         }
     }
 }
@@ -98,6 +118,8 @@ pub struct Report {
     /// Of those, decisions older than the change window.
     pub stale: u64,
     pub placements: u64,
+    /// Summed over crashes, the workloads running on nodes when the control plane went down.
+    pub running_through_crashes: u64,
     pub steps: u64,
     pub end: Time,
     /// Submit to placement, per placement.
@@ -116,6 +138,17 @@ pub struct Run {
     pub acked: Vec<bool>,
     /// Whether each workload's client was told it could never be placed.
     pub refused: Vec<bool>,
+    /// Where and when each workload's first start ran, by id.
+    pub ran: Vec<Option<Ran>>,
+}
+
+/// One run of a workload on a node, as its node agent saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ran {
+    pub node: NodeId,
+    pub started: Time,
+    /// When the node agent saw it end; `None` while it runs.
+    pub ended: Option<Time>,
 }
 
 /// A decision: the best-fit key, or none, against the view after change `snap`.
@@ -276,6 +309,10 @@ struct Sim<'a> {
     starts: Vec<u32>,
     acked: Vec<bool>,
     refused: Vec<bool>,
+    ran: Vec<Option<Ran>>,
+    /// Workloads running on nodes now.
+    running: u64,
+    nemesis_rng: Rng,
     latencies: Vec<Time>,
     hash: TraceHash,
     report: Report,
@@ -325,6 +362,12 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         starts: vec![0; n],
         acked: vec![false; n],
         refused: vec![false; n],
+        ran: vec![None; n],
+        running: 0,
+        nemesis_rng: Rng::new(match config.nemesis {
+            Nemesis::Random { seed, .. } => seed,
+            Nemesis::None | Nemesis::At(_) => 0,
+        }),
         latencies: Vec::with_capacity(n),
         hash: TraceHash::default(),
         report: Report::default(),
@@ -360,6 +403,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         starts: sim.starts,
         acked: sim.acked,
         refused: sim.refused,
+        ran: sim.ran,
     })
 }
 
@@ -432,8 +476,8 @@ impl Sim<'_> {
         self.report.writes = number
             .checked_add(1)
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
-        let crash = self.config.crash.filter(|c| c.write == number);
-        if crash.map(|c| c.when) == Some(When::Before) {
+        let crash = self.strike(number);
+        if crash == Some(When::Before) {
             self.crash()?;
             return Ok(None);
         }
@@ -454,7 +498,38 @@ impl Sim<'_> {
         Ok(Some(outcome))
     }
 
+    /// Whether the nemesis crashes the plane at write `number`, and on which side of it.
+    fn strike(&mut self, number: u64) -> Option<When> {
+        match self.config.nemesis {
+            Nemesis::None => None,
+            Nemesis::At(crash) if crash.write == number => Some(crash.when),
+            Nemesis::At(_) => None,
+            Nemesis::Random {
+                first,
+                per_mille,
+                max_crashes,
+                ..
+            } => {
+                let room = self.report.crashes < u64::from(max_crashes);
+                let hit = number == first || (number > first && self.nemesis_rng.chance(per_mille));
+                if !(room && hit) {
+                    return None;
+                }
+                Some(if self.nemesis_rng.chance(500) {
+                    When::Before
+                } else {
+                    When::After
+                })
+            }
+        }
+    }
+
     fn crash(&mut self) -> Result<(), SimError> {
+        self.report.running_through_crashes = self
+            .report
+            .running_through_crashes
+            .checked_add(self.running)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
         self.report.crashes = self
             .report
             .crashes
@@ -755,6 +830,21 @@ impl Sim<'_> {
             .get_mut(at)
             .ok_or(SimError::Config("workload index"))?;
         *starts = starts.checked_add(1).ok_or(SimError::Config("starts"))?;
+        let ran = self
+            .ran
+            .get_mut(at)
+            .ok_or(SimError::Config("workload index"))?;
+        if ran.is_none() {
+            *ran = Some(Ran {
+                node,
+                started: self.now,
+                ended: None,
+            });
+        }
+        self.running = self
+            .running
+            .checked_add(1)
+            .ok_or(SimError::Config("running"))?;
         if let Some(runs_for) = self.workload(at)?.runs_for {
             self.schedule(
                 self.after(runs_for)?,
@@ -770,6 +860,16 @@ impl Sim<'_> {
 
     fn node_done(&mut self, at: usize, node: NodeId, attempt: u32) -> Result<(), SimError> {
         let id = self.workload(at)?.id;
+        if attempt == 0 {
+            // The run itself ends here; what follows is its report.
+            self.running = self
+                .running
+                .checked_sub(1)
+                .ok_or(SimError::Config("running"))?;
+            if let Some(Some(ran)) = self.ran.get_mut(at) {
+                ran.ended.get_or_insert(self.now);
+            }
+        }
         let resend = |sim: &mut Self| -> Result<(), SimError> {
             let next = attempt
                 .checked_add(1)
