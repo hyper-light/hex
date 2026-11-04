@@ -95,7 +95,52 @@ fn an_installed_node_serves_every_class() {
     assert!(failures.is_empty(), "oci boxes: {failures:#?}");
     let failures = conformance::run(&client, &ProcessBoxes(exe));
     assert!(failures.is_empty(), "process boxes: {failures:#?}");
+    // What a box whose spec names no RLIMIT_NOFILE gets from the installed node: recorded for the lab,
+    // since the unit's LimitNOFILE= reaches it (docs/research/runtime/nofile-limit.md).
+    for (class, spec) in [
+        ("oci", ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait)))),
+        ("process", ClassSpec::Process),
+    ] {
+        eprintln!(
+            "{class} box, no RLIMIT_NOFILE in its spec: soft:hard {}",
+            nofile_seen(&client, spec)
+        );
+    }
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// The soft and hard descriptor limits a program sees in a box made from `class`, as `soft:hard`.
+fn nofile_seen(client: &Client, class: ClassSpec) -> String {
+    let id = BoxId::new("nofile").unwrap();
+    client
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class,
+        })
+        .unwrap();
+    if client.inspect(&id).unwrap().state == BoxState::Created {
+        client.start(&id).unwrap();
+    }
+    let (mut out, w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &id,
+            Program::of(&["/bin/sh", "-c", "echo $(ulimit -Sn):$(ulimit -Hn)"]),
+            Stdio {
+                stdout: Some(w),
+                ..Stdio::null()
+            },
+        )
+        .unwrap();
+    let mut said = String::new();
+    out.read_to_string(&mut said).unwrap();
+    assert_eq!(
+        proc.wait_for(conformance::PATIENCE).unwrap(),
+        Some(Exit::Code(0))
+    );
+    client.delete(&id).unwrap();
+    said.trim().to_owned()
 }
 
 /// A `hex node` process serving its socket, killed when dropped.

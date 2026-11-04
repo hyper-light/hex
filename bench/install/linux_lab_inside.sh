@@ -84,6 +84,20 @@ bash $INSTALL install --binary "$HEX" --user $U
 systemctl show user@$UID_.service -p DelegateControllers
 bash $INSTALL check /tmp/plan || true
 
+# The node's descriptors at its bounds (330,112) and the four /proc/net files each of up to 66,048 kept
+# network namespaces may hold (cp/t7-ext-s6 crates/hex-node/src/netns.rs, FilesBound: 256 x 2 + 65,536
+# kept, four files each): 330,112 + 264,192.
+NOFILE_NEED=594304
+step "HEX-INST-5: the installed node's soft descriptor limit covers its own and every kept namespace's files"
+NODE_PID=$(as_user systemctl --user show -p MainPID --value hex-node.service)
+grep "Max open files" /proc/$NODE_PID/limits
+soft=$(awk '/Max open files/ {print $4}' /proc/$NODE_PID/limits)
+if [ "$soft" = unlimited ] || [ "$soft" -ge "$NOFILE_NEED" ]; then
+  echo "PASS: soft $soft >= $NOFILE_NEED"
+else
+  echo "FAIL: soft $soft < $NOFILE_NEED"; exit 1
+fi
+
 step "HEX-INST-3: the installed node serves every class to $U with no further step"
 set +e
 as_user env HEX_INSTALLED_SOCKET=/run/user/$UID_/hex/node.sock \
