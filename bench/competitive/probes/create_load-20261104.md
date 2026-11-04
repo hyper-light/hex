@@ -148,3 +148,11 @@ At this load the pair costs 15.6 ms at p50 and 37.9 at p99 on the rootless state
 container overlay's 9.2 ms p50 (parts 22 and 24, at load 17). The two fsyncs are 89% of the durable write's p50 and 98% of
 its mean; the rename and opens are the rest. The script is `~/.cache/hex-t7/hooks/bin/record_fsync.py` on fedora; its output is beside the
 unit's log.
+
+## exec_ab.sh fixed
+
+From cp/t7-hooks f5c1a9d exec_ab.sh caps its container by BENCH_MEMORY and BENCH_OOM, and from the commit after it its
+/run is a tmpfs (the lead's word, 2026-11-04). The exec_ab runs before those, all UNCAPPED (`--memory=40g`, no OOM
+score) and with their state ON THE OVERLAY, so their Hex creates and deletes paid the record's two fsyncs:
+exec-ab-20261104T142957Z and exec-ab-20261104T143943Z (hooks-conditions-20261104.txt §7), and exec-ab-20261104T161801Z
+above, (X). Of the runs above, only (Y), exec-ab-20261104T162449Z, had a tmpfs /run: a scratch copy, capped.
