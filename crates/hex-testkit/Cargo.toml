@@ -1,0 +1,15 @@
+[package]
+name = "hex-testkit"
+description = "What Hex's tests share: the skip record, which says every skipped test where libtest's capture can't hide it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

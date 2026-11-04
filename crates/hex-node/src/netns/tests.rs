@@ -41,16 +41,19 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
 /// takes `CLONE_NEWNET` only from a caller with CAP_SYS_ADMIN in its user namespace, and rtnetlink
 /// takes loopback's RTM_NEWLINK only with CAP_NET_ADMIN (rtnetlink(7)). uid 0 alone gives neither: a
 /// container runtime's default set, a Kubernetes pod's root's (kiln CI's), holds neither.
-fn failing_step() -> Option<Step> {
+fn failing_step() -> Option<(Step, hex_core::netns::Missing)> {
     use rustix::thread::CapabilitySet;
     let held = rustix::thread::capabilities(None).unwrap().effective;
-    if !held.contains(CapabilitySet::SYS_ADMIN) {
-        Some(Step::Unshare)
-    } else if !held.contains(CapabilitySet::NET_ADMIN) {
-        Some(Step::Loopback)
+    let (sys_admin, net_admin) = (
+        held.contains(CapabilitySet::SYS_ADMIN),
+        held.contains(CapabilitySet::NET_ADMIN),
+    );
+    let step = if !sys_admin {
+        Step::Unshare
     } else {
-        None
-    }
+        Step::Loopback
+    };
+    hex_core::netns::Missing::of(sys_admin, net_admin).map(|missing| (step, missing))
 }
 
 /// HEX-NETNS-11: the refill thread hands the pool each namespace it makes, or counts each make that
@@ -73,10 +76,13 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
         failing.is_some(),
         "a make fails exactly where CAP_SYS_ADMIN or CAP_NET_ADMIN is missing"
     );
-    if let Some(step) = failing {
-        eprintln!(
-            "without CAP_SYS_ADMIN and CAP_NET_ADMIN: the pool's failed makes are tested, its full pool isn't"
-        );
+    if let Some((step, missing)) = failing {
+        hex_testkit::skip(
+            "netns::tests::the_refill_thread_fills_the_pool_or_counts_each_make_that_fails",
+            &missing.to_string(),
+            "its full pool (made ahead, taken, loopback up) isn't tested here; its failed makes are",
+        )
+        .unwrap();
         let c = pool.counts().unwrap();
         assert_eq!((c.made_ahead, c.failed), (0, 1), "{c:?}");
         let mut by = hex_core::netns::FailedBy::default();

@@ -5,7 +5,8 @@
 //! controllers delegated). Each `hex box run` here is launched in its own transient
 //! `systemd-run --user --scope -p Delegate=yes`, so the wrapper is alone in a delegated cgroup —
 //! exactly how a kiln runner (with `Delegate=yes` on its unit) invokes it. Where `systemd --user`
-//! isn't available the test prints SKIP rather than a false pass. Run on a cgroup-v2 host (fedora).
+//! isn't available the test records the skip (hex_testkit, which the gate prints) rather
+//! than pass falsely. Run on a cgroup-v2 host (fedora).
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -49,7 +50,12 @@ fn box_run(limits: &[&str], program: &[&str]) -> std::process::Output {
 #[test]
 fn box_run_boxes_a_program_and_passes_its_status() {
     if !have_systemd() {
-        eprintln!("SKIP: no systemd --user for a delegated scope; run on a cgroup-v2 host");
+        hex_testkit::skip(
+            "box_run_boxes_a_program_and_passes_its_status",
+            "systemd --user",
+            "no delegated scope to run hex box run in; run on a cgroup-v2 host",
+        )
+        .expect("recording the skip");
         return;
     }
 

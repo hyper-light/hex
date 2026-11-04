@@ -17,7 +17,8 @@
 //!
 //! Rootless where the caller isn't root (overlayfs mounts unprivileged since Linux 5.11), as root in a
 //! privileged container otherwise (bench/oci-validation's setting); in a delegated cgroup v2 subtree,
-//! as oci_box.rs. Where none of that is possible it prints SKIP and why rather than pass falsely.
+//! as oci_box.rs. Where none of that is possible it records the skip and why (hex_testkit, which
+//! the gate prints) rather than pass falsely.
 #![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
@@ -58,9 +59,14 @@ fn oci_spec_boxes_run_from_the_bundles_the_node_renders() {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
+                hex_testkit::skip(
+                    "oci_spec_boxes_run_from_the_bundles_the_node_renders",
+                    "cgroup v2 delegation",
+                    &format!(
+                        "own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
+                    ),
+                )
+                .expect("recording the skip");
                 return;
             }
             let status = Command::new("systemd-run")
@@ -73,7 +79,12 @@ fn oci_spec_boxes_run_from_the_bundles_the_node_renders() {
             assert!(status.success(), "the delegated re-run failed");
         }
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "oci_spec_boxes_run_from_the_bundles_the_node_renders",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }
@@ -182,7 +193,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     // A rootless container needs unprivileged user namespaces; a host without them can't run one,
     // which is a reason to skip, said. Past that, any failure is the lab's to report.
     if lab.rootless && !userns_available() {
-        eprintln!("SKIP: unprivileged user namespaces aren't available here");
+        hex_testkit::skip(
+            "oci_spec_boxes_run_from_the_bundles_the_node_renders",
+            "unprivileged user namespaces",
+            "this host makes none for an unprivileged user",
+        )
+        .expect("recording the skip");
         return;
     }
     layered_box(&lab, own);

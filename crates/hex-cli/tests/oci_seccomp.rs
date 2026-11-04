@@ -54,9 +54,14 @@ fn oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest() {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
+                hex_testkit::skip(
+                    "oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest",
+                    "cgroup v2 delegation",
+                    &format!(
+                        "own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
+                    ),
+                )
+                .expect("recording the skip");
                 return;
             }
             let test_bin = std::env::current_exe().expect("test binary path");
@@ -75,7 +80,12 @@ fn oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest() {
             assert!(status.success(), "the delegated re-run failed");
         }
         Err(direct) => {
-            eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
+            hex_testkit::skip(
+                "oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest",
+                "cgroup v2 delegation",
+                &format!("none in the delegated scope either ({direct}); run on a cgroup-v2 host"),
+            )
+            .expect("recording the skip");
         }
     }
 }
@@ -98,7 +108,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
             "under the deny-mkdir profile the probe should report mkdir blocked + touch allowed (42)"
         ),
         Err(e) if is_userns_refusal(&e) => {
-            eprintln!("SKIP: rootless OCI unavailable here ({e})");
+            hex_testkit::skip(
+                "oci_seccomp_refuses_a_denied_syscall_and_allows_the_rest",
+                "unprivileged user namespaces",
+                &format!("rootless OCI unavailable here ({e})"),
+            )
+            .expect("recording the skip");
             return;
         }
         Err(e) => panic!("the profiled container failed: {e}"),

@@ -178,6 +178,7 @@ dependencies = [
  "hex-core",
  "hex-node",
  "hex-runtime",
+ "hex-testkit",
  "rustix",
  "tempfile",
 ]
@@ -211,6 +212,7 @@ dependencies = [
  "hex-client",
  "hex-core",
  "hex-runtime",
+ "hex-testkit",
  "rustix",
  "serde_json",
  "tempfile",
@@ -230,6 +232,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "hex-testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
