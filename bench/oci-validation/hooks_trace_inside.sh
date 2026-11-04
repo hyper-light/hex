@@ -35,7 +35,7 @@ lines() { grep -oE 'write\([0-9]+, "(U|P[0-9]*|H|R|E[^"]*)\\n", [0-9]+\)' "$1" |
 # the fact) for the create's state, so the create has returned; the caller's delete then ends the init and strace.
 traced() {
   local id=$1 out=$2 flags=$3 hex=$5 bundle=$6
-  strace -f -qq $flags -o "$out" "$hex" oci create --bundle "$bundle" "$id" & STRACE=$!
+  /opt/strace -f -qq $flags -o "$out" "$hex" oci create --bundle "$bundle" "$id" & STRACE=$!
   for _ in $(seq 1 100); do grep -qs '"status":"created"' "$HEX_OCI_ROOT/$id/state.json" && return 0; sleep 0.1; done
   echo "the create of $id never reached created" | tee -a "$OUT/checks"; return 1
 }
@@ -46,9 +46,10 @@ for b in before after; do
   traced "count-$b" "$OUT/$b.plain.count" "-c" -- "/opt/$b-hex" "$W/plain"
   "/opt/$b-hex" oci delete --force "count-$b"; wait "$STRACE"
 done
-check "a hookless create writes no H (before)" '! lines "$OUT/before.plain.trace" | grep -qw H'
-check "a hookless create writes no H (after)" '! lines "$OUT/after.plain.trace" | grep -qw H'
-check "a hookless create's sync lines are the same before and after" '[ "$(lines "$OUT/before.plain.trace")" = "$(lines "$OUT/after.plain.trace")" ]'
+# Each "no H" holds only over a trace that saw the create's ready line: a missing trace is a failure, not a pass.
+check "a hookless create writes R and no H (before)" 'lines "$OUT/before.plain.trace" | grep -qw R && ! lines "$OUT/before.plain.trace" | grep -qw H'
+check "a hookless create writes R and no H (after)" 'lines "$OUT/after.plain.trace" | grep -qw R && ! lines "$OUT/after.plain.trace" | grep -qw H'
+check "a hookless create's sync lines are the same before and after" '[ -n "$(lines "$OUT/before.plain.trace")" ] && [ "$(lines "$OUT/before.plain.trace")" = "$(lines "$OUT/after.plain.trace")" ]'
 traced hooked "$OUT/after.hooked.trace" "-e trace=write -s 32" -- /opt/after-hex "$W/hooked"
 cp "$HEX_OCI_ROOT/hooked/state.json" "$OUT/hooked.state.json" 2>/dev/null
 echo "after hooked create: sync lines $(lines "$OUT/after.hooked.trace")" | tee -a "$OUT/checks"
