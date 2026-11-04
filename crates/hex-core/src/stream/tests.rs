@@ -181,7 +181,24 @@ fn duplicate_and_unwanted_streams_are_refused() {
         g.arrive(Named { exec: 5, stream: Stdio::Err }, "c", now),
         Err(Stray { conn: "c", why: Why::Unwanted })
     );
-    assert_eq!(g.expect(5, streams(true, true, false), now), Err(Why::Twice));
+    assert_eq!(
+        g.expect(5, streams(true, true, false), now),
+        Err(Refused { why: Why::Twice, conns: vec![] })
+    );
+}
+
+/// HEX-GUEST-3: have a stream arrive that its exec, coming after, doesn't ask for: expect the exec
+/// refused by type and the early stream handed back to close (CLAUDE.md §3).
+#[test]
+fn an_early_stream_its_exec_doesnt_want_is_handed_back() {
+    let now = Instant::now();
+    let mut g = Gather::new(4);
+    g.arrive(Named { exec: 4, stream: Stdio::Err }, "err", now).unwrap();
+    assert_eq!(
+        g.expect(4, streams(true, false, false), now),
+        Err(Refused { why: Why::Unwanted, conns: vec!["err"] })
+    );
+    assert!(g.is_empty());
 }
 
 /// HEX-GUEST-3: gather more execs at once than the bound: expect the next refused by type, both as an
@@ -191,7 +208,10 @@ fn execs_past_the_bound_are_refused() {
     let now = Instant::now();
     let mut g = Gather::new(1);
     g.expect(1, streams(true, false, false), now).unwrap();
-    assert_eq!(g.expect(2, streams(true, false, false), now), Err(Why::Full { bound: 1 }));
+    assert_eq!(
+        g.expect(2, streams(true, false, false), now),
+        Err(Refused { why: Why::Full { bound: 1 }, conns: vec![] })
+    );
     assert_eq!(
         g.arrive(Named { exec: 3, stream: Stdio::In }, "x", now),
         Err(Stray { conn: "x", why: Why::Full { bound: 1 } })

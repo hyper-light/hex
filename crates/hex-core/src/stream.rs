@@ -1,114 +1,395 @@
-//! The node agent's wire over a byte stream (docs/design/shards-guest.md §3): the stub its tests fail
-//! against, before the core is written.
+//! The node agent's wire over a byte stream (docs/design/shards-guest.md §3): how the host's client
+//! reaches the node agent in a Shards guest over vsock, which carries bytes and no descriptors. Pure: the
+//! shells, the host's guest client and the guest's relay, move the bytes; this decides where each message
+//! ends, what each stdio connection names, and when an exec's streams are all there.
+//!
+//! - **Control:** each [`wire`] message framed by its length, a big-endian `u32`, at most a bound the
+//!   reader holds ([`wire::MAX_MESSAGE`] or the node's own); a longer one is refused from its prefix,
+//!   before its body is buffered.
+//! - **Stdio:** an exec's stdin, stdout and stderr each ride a connection of their own, whose first
+//!   [`NAME_BYTES`] bytes name the exec (its request's id) and the stream. In the guest, that
+//!   connection's socket is the descriptor the relay passes the node as the program's stream.
+//! - **Gather:** the relay holds an exec, or the streams that came before it, until the set its exec
+//!   names is whole ([`Gather`]), at most a bound of sets at once and each at most a patience long.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::wire::{self, Fault};
 
-pub const NAME_BYTES: usize = 16;
+/// A frame's prefix: the message's length, big-endian.
+const PREFIX: usize = 4;
 
-pub fn frame(_message: &[u8], _bound: usize) -> Result<Vec<u8>, Fault> {
-    Err(Fault::Magic)
+/// A stdio connection's first bytes: `HEXS`, the version (`u16`, little-endian as the wire's
+/// integers), the stream, a zero byte, and the exec's id (`u64`).
+pub const NAME_BYTES: usize = 16;
+const NAME_MAGIC: [u8; 4] = *b"HEXS";
+/// The stdio name's only version. It changes append-only, as the wire's.
+const NAME_VERSION: u16 = 1;
+
+/// `message` framed, when it is at most `bound` bytes.
+pub fn frame(message: &[u8], bound: usize) -> Result<Vec<u8>, Fault> {
+    let oversized = || Fault::Oversized {
+        bytes: message.len(),
+        bound,
+    };
+    if message.len() > bound {
+        return Err(oversized());
+    }
+    let len = u32::try_from(message.len()).map_err(|_| oversized())?;
+    let mut out = Vec::with_capacity(message.len().checked_add(PREFIX).ok_or_else(oversized)?);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(message);
+    Ok(out)
 }
 
+/// Reads framed messages from a stream's bytes as they come. It holds at most one frame: its prefix,
+/// then its body, never more than its bound.
+#[derive(Debug)]
 pub struct Deframer {
     bound: usize,
+    prefix: [u8; PREFIX],
+    have_prefix: usize,
+    /// The body under way, once its prefix is whole, and its announced length.
+    body: Option<(usize, Vec<u8>)>,
+    /// Why the stream can't be read further, once it can't: every later take is refused the same.
+    broken: Option<Fault>,
 }
 
 impl Deframer {
+    /// A reader of messages of at most `bound` bytes.
     pub fn new(bound: usize) -> Self {
-        Self { bound }
+        Self {
+            bound,
+            prefix: [0; PREFIX],
+            have_prefix: 0,
+            body: None,
+            broken: None,
+        }
     }
 
-    pub fn take(&mut self, _input: &[u8]) -> Result<(usize, Option<Vec<u8>>), Fault> {
-        Err(Fault::Magic)
+    /// Takes bytes from `input`, at most to the end of the frame under way, and returns how many it took
+    /// (at least one, when `input` has any) and the message, once whole. The caller takes again with
+    /// what is left.
+    pub fn take(&mut self, input: &[u8]) -> Result<(usize, Option<Vec<u8>>), Fault> {
+        if let Some(fault) = &self.broken {
+            return Err(fault.clone());
+        }
+        match self.step(input) {
+            Ok(taken) => Ok(taken),
+            Err(fault) => {
+                self.broken = Some(fault.clone());
+                Err(fault)
+            }
+        }
     }
 
+    fn step(&mut self, input: &[u8]) -> Result<(usize, Option<Vec<u8>>), Fault> {
+        let Some((len, body)) = self.body.as_mut() else {
+            let room = self
+                .prefix
+                .get_mut(self.have_prefix..)
+                .ok_or_else(|| Fault::value("frame", "its prefix is over-full"))?;
+            let n = room.len().min(input.len());
+            let (Some(into), Some(from)) = (room.get_mut(..n), input.get(..n)) else {
+                return Err(Fault::value("frame", "its prefix is over-full"));
+            };
+            into.copy_from_slice(from);
+            self.have_prefix = self
+                .have_prefix
+                .checked_add(n)
+                .ok_or_else(|| Fault::value("frame", "its prefix is over-full"))?;
+            if self.have_prefix == PREFIX {
+                let len = usize::try_from(u32::from_be_bytes(self.prefix)).map_err(|_| {
+                    Fault::value("frame", "its length doesn't fit this machine's addresses")
+                })?;
+                if len > self.bound {
+                    return Err(Fault::Oversized {
+                        bytes: len,
+                        bound: self.bound,
+                    });
+                }
+                if len < wire::HEADER_BYTES {
+                    return Err(Fault::Truncated {
+                        need: wire::HEADER_BYTES,
+                        have: len,
+                    });
+                }
+                self.body = Some((len, Vec::with_capacity(len)));
+            }
+            return Ok((n, None));
+        };
+        let want = len.saturating_sub(body.len());
+        let n = want.min(input.len());
+        body.extend_from_slice(input.get(..n).unwrap_or_default());
+        if body.len() < *len {
+            return Ok((n, None));
+        }
+        let whole = std::mem::take(body);
+        self.body = None;
+        self.have_prefix = 0;
+        Ok((n, Some(whole)))
+    }
+
+    /// Whether the stream may end here: no frame is partly read.
     pub fn at_boundary(&self) -> bool {
-        false
+        self.broken.is_none() && self.have_prefix == 0 && self.body.is_none()
     }
 
+    /// Bytes held of the frame under way, its prefix's included.
     pub fn buffered(&self) -> usize {
-        self.bound
+        self.body
+            .as_ref()
+            .map_or(self.have_prefix, |(_, body)| body.len())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One of a program's standard streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stdio {
     In,
     Out,
     Err,
 }
 
+impl Stdio {
+    fn tag(self) -> u8 {
+        match self {
+            Self::In => 0,
+            Self::Out => 1,
+            Self::Err => 2,
+        }
+    }
+
+    fn of(tag: u8) -> Result<Self, Fault> {
+        match tag {
+            0 => Ok(Self::In),
+            1 => Ok(Self::Out),
+            2 => Ok(Self::Err),
+            other => Err(Fault::value(
+                "stdio name",
+                format!("stream {other} is none of stdin, stdout and stderr"),
+            )),
+        }
+    }
+
+    fn wanted(self, streams: wire::Streams) -> bool {
+        match self {
+            Self::In => streams.stdin,
+            Self::Out => streams.stdout,
+            Self::Err => streams.stderr,
+        }
+    }
+}
+
+/// What a stdio connection names: its exec's request id and which stream it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Named {
     pub exec: u64,
     pub stream: Stdio,
 }
 
-pub fn name(_named: Named) -> [u8; NAME_BYTES] {
-    [0; NAME_BYTES]
+/// A stdio connection's first bytes.
+pub fn name(named: Named) -> [u8; NAME_BYTES] {
+    let mut out = [0; NAME_BYTES];
+    let parts: [&[u8]; 5] = [
+        &NAME_MAGIC,
+        &NAME_VERSION.to_le_bytes(),
+        &[named.stream.tag()],
+        &[0],
+        &named.exec.to_le_bytes(),
+    ];
+    for (to, from) in out.iter_mut().zip(parts.into_iter().flatten()) {
+        *to = *from;
+    }
+    out
 }
 
-pub fn read_name(_bytes: &[u8; NAME_BYTES]) -> Result<Named, Fault> {
-    Err(Fault::Magic)
+/// What a stdio connection's first bytes name, or why they name nothing.
+pub fn read_name(bytes: &[u8; NAME_BYTES]) -> Result<Named, Fault> {
+    let [m0, m1, m2, m3, v0, v1, stream, pad, id @ ..] = *bytes;
+    if [m0, m1, m2, m3] != NAME_MAGIC {
+        return Err(Fault::Magic);
+    }
+    let version = u16::from_le_bytes([v0, v1]);
+    if version != NAME_VERSION {
+        return Err(Fault::Version {
+            got: version,
+            speaks: NAME_VERSION,
+        });
+    }
+    if pad != 0 {
+        return Err(Fault::value("stdio name", format!("its pad byte is {pad}, not 0")));
+    }
+    Ok(Named {
+        exec: u64::from_le_bytes(id),
+        stream: Stdio::of(stream)?,
+    })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why the gather refused an exec or a stream.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Why {
+    #[error("it came twice")]
     Twice,
+    #[error("its exec didn't ask for that stream")]
     Unwanted,
+    #[error("{bound} execs are already waiting for their streams")]
     Full { bound: usize },
 }
 
+/// A stream the gather refused, handed back for the shell to close.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stray<C> {
     pub conn: C,
     pub why: Why,
 }
 
+/// An exec's id and its connections, in stdin-stdout-stderr order of those it named.
 pub type Complete<C> = (u64, Vec<C>);
 
+/// An exec the gather refused, with the streams that came for it before, for the shell to close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused<C> {
+    pub why: Why,
+    pub conns: Vec<C>,
+}
+
+/// Execs waiting for their streams, and streams waiting for their execs, by the exec's id.
+#[derive(Debug)]
 pub struct Gather<C> {
-    sets: BTreeMap<u64, C>,
+    bound: usize,
+    sets: BTreeMap<u64, Set<C>>,
+}
+
+#[derive(Debug)]
+struct Set<C> {
+    /// What the exec asked for, once it has come.
+    want: Option<wire::Streams>,
+    have: BTreeMap<Stdio, C>,
+    /// When the set began: its patience runs from here.
+    since: Instant,
+}
+
+impl<C> Set<C> {
+    fn complete(&mut self) -> Option<Vec<C>> {
+        let want = self.want?;
+        let needed = [Stdio::In, Stdio::Out, Stdio::Err]
+            .into_iter()
+            .filter(|s| s.wanted(want));
+        if needed.clone().any(|s| !self.have.contains_key(&s)) {
+            return None;
+        }
+        let have = std::mem::take(&mut self.have);
+        Some(have.into_values().collect())
+    }
 }
 
 impl<C> Gather<C> {
-    pub fn new(_bound: usize) -> Self {
+    /// A gather of at most `bound` sets at once.
+    pub fn new(bound: usize) -> Self {
         Self {
+            bound,
             sets: BTreeMap::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        false
+        self.sets.is_empty()
     }
 
+    fn set(&mut self, exec: u64, now: Instant) -> Result<&mut Set<C>, Why> {
+        if !self.sets.contains_key(&exec) && self.sets.len() >= self.bound {
+            return Err(Why::Full { bound: self.bound });
+        }
+        Ok(self.sets.entry(exec).or_insert_with(|| Set {
+            want: None,
+            have: BTreeMap::new(),
+            since: now,
+        }))
+    }
+
+    fn finish(&mut self, exec: u64) -> Option<Complete<C>> {
+        let conns = self.sets.get_mut(&exec)?.complete()?;
+        self.sets.remove(&exec);
+        Some((exec, conns))
+    }
+
+    /// The exec `exec` has come, asking for `streams`: its set, once whole.
     pub fn expect(
         &mut self,
-        _exec: u64,
-        _streams: wire::Streams,
-        _now: Instant,
-    ) -> Result<Option<Complete<C>>, Why> {
-        Err(Why::Twice)
+        exec: u64,
+        streams: wire::Streams,
+        now: Instant,
+    ) -> Result<Option<Complete<C>>, Refused<C>> {
+        let refused = |why| Refused {
+            why,
+            conns: Vec::new(),
+        };
+        let set = self.set(exec, now).map_err(refused)?;
+        if set.want.is_some() {
+            return Err(refused(Why::Twice));
+        }
+        if set.have.keys().any(|s| !s.wanted(streams)) {
+            // A stream came that its exec doesn't ask for: the exec is refused, and its set with it.
+            let conns = self
+                .sets
+                .remove(&exec)
+                .map(|set| set.have.into_values().collect())
+                .unwrap_or_default();
+            return Err(Refused {
+                why: Why::Unwanted,
+                conns,
+            });
+        }
+        set.want = Some(streams);
+        Ok(self.finish(exec))
     }
 
+    /// A stream named `named` has come on `conn`: its exec's set, once whole, or the stream handed back
+    /// with why it is refused.
     pub fn arrive(
         &mut self,
-        _named: Named,
+        named: Named,
         conn: C,
-        _now: Instant,
+        now: Instant,
     ) -> Result<Option<Complete<C>>, Stray<C>> {
-        Err(Stray {
-            conn,
-            why: Why::Twice,
-        })
+        let set = match self.set(named.exec, now) {
+            Ok(set) => set,
+            Err(why) => return Err(Stray { conn, why }),
+        };
+        if set.want.is_some_and(|want| !named.stream.wanted(want)) {
+            return Err(Stray {
+                conn,
+                why: Why::Unwanted,
+            });
+        }
+        if set.have.contains_key(&named.stream) {
+            return Err(Stray {
+                conn,
+                why: Why::Twice,
+            });
+        }
+        set.have.insert(named.stream, conn);
+        Ok(self.finish(named.exec))
     }
 
-    pub fn expire(&mut self, _now: Instant, _patience: Duration) -> Vec<Complete<C>> {
-        let _ = &self.sets;
-        Vec::new()
+    /// Sets begun more than `patience` before `now`, taken out with the connections they held, for the
+    /// shell to refuse and close.
+    pub fn expire(&mut self, now: Instant, patience: Duration) -> Vec<Complete<C>> {
+        let late: Vec<u64> = self
+            .sets
+            .iter()
+            .filter(|(_, set)| now.saturating_duration_since(set.since) > patience)
+            .map(|(exec, _)| *exec)
+            .collect();
+        late.into_iter()
+            .filter_map(|exec| {
+                self.sets
+                    .remove(&exec)
+                    .map(|set| (exec, set.have.into_values().collect()))
+            })
+            .collect()
     }
 }
 
