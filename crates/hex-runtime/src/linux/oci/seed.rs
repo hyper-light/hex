@@ -31,13 +31,13 @@
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char};
-use std::io::{IoSlice, IoSliceMut, Read, Write};
+use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use hex_core::seed::{self, Answer, Failed, Request};
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::Mode;
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags,
@@ -622,7 +622,7 @@ fn serve_one(
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     match seed::read_message(bytes, size, fds.len()) {
         Ok(seed::Message::Exec(req)) => serve_exec(req, fds, pid_for, specs),
-        Ok(seed::Message::Create(create)) => serve_create(&create, fds, specs),
+        Ok(seed::Message::Create(create)) => serve_create(&create, fds),
         Err(fault) => refused(Failed::Request, fault.to_string()),
     }
 }
@@ -638,11 +638,24 @@ fn serve_one(
 /// namespace made ahead when the create says one rides with it. The init joins the namespaces its spec
 /// names by path itself; one that joins a pid or user namespace by path can't be made by one clone, so the
 /// runtime makes it through the shim and never hands it here (`init::needs_shim`).
-fn serve_create(
-    create: &seed::Create,
-    fds: Vec<OwnedFd>,
-    specs: &mut Specs,
-) -> (Answer, Option<OwnedFd>) {
+fn serve_create(create: &seed::Create, fds: Vec<OwnedFd>) -> (Answer, Option<OwnedFd>) {
+    // The spec the runtime checked rides last (`read_message` held the count to the create's), and the
+    // container is made from its bytes alone, never from a read of the bundle, which may since hold a spec
+    // nobody checked (AC-T7.1.1). A create without it is refused.
+    let mut fds = fds;
+    let checked = if create.config { fds.pop() } else { None };
+    let Some(checked) = checked else {
+        return refused(
+            Failed::Request,
+            "a create carries the spec its runtime checked (a create kind of this build)"
+                .to_owned(),
+        );
+    };
+    let spec = match super::checked::read(checked.as_fd()).and_then(|bytes| Spec::parse(&bytes)) {
+        Ok(spec) => spec,
+        Err(e) => return refused(Failed::Request, e.to_string()),
+    };
+    drop(checked);
     let mut fds = fds.into_iter();
     let (Some(sync_w), Some(map_r)) = (fds.next(), fds.next()) else {
         return refused(
@@ -654,16 +667,12 @@ fn serve_create(
     // exactly when the create says one does, then (on the pruned path) the root descriptors.
     let network = if create.network { fds.next() } else { None };
     if create.pruned {
-        return serve_create_pruned(create, fds, sync_w, map_r, network);
+        return serve_create_pruned(create, &spec, fds, sync_w, map_r, network);
     }
-    let spec = match specs.get(&create.bundle) {
-        Ok(spec) => spec,
-        Err(e) => return refused(Failed::Start, e.to_string()),
-    };
     // The runtime hands a seed no container that joins a pid or user namespace by path (it makes those
     // through the shim, `init::needs_shim`); one that came anyway is refused by type, never made in the
     // wrong namespace (CLAUDE.md §3). Every other namespace by path the init joins itself.
-    if init::needs_shim(spec) {
+    if init::needs_shim(&spec) {
         return refused(
             Failed::Start,
             "a container that joins a pid or user namespace by path is made through the shim, not a seed"
@@ -675,7 +684,7 @@ fn serve_create(
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
     let made_ahead = network.is_some();
-    let flags = init::fresh_clone_flags(spec, made_ahead, false);
+    let flags = init::fresh_clone_flags(&spec, made_ahead, false);
     match sys::clone_sibling(cgroup.as_ref().map(AsFd::as_fd), flags) {
         Ok(None) => refused(
             Failed::Unable,
@@ -686,7 +695,7 @@ fn serve_create(
             // the agent on the sync pipe, as the shim's does, then it exits (it must not run the seed's
             // serve loop). Born in the cgroup and the fresh namespaces, the agent's own child.
             let r = init::clone_child(
-                spec,
+                &spec,
                 &create.bundle,
                 Path::new(&create.dir),
                 sync_w.as_fd(),
@@ -728,6 +737,7 @@ fn serve_create(
 /// never here; one that reaches here anyway is refused by type (CLAUDE.md §3).
 fn serve_create_pruned(
     create: &seed::Create,
+    spec: &Spec,
     mut fds: impl Iterator<Item = OwnedFd>,
     sync_w: OwnedFd,
     map_r: OwnedFd,
@@ -793,10 +803,8 @@ fn serve_create_pruned(
     } else {
         None
     };
-    let spec = match read_config_at(bundle_dir.as_fd()) {
-        Ok(spec) => spec,
-        Err(e) => return refused(Failed::Start, e.to_string()),
-    };
+    // The bundle directory still rides (the pruned kinds' descriptors are fixed), but nothing reads it: the
+    // spec is the one the runtime checked.
     drop(bundle_dir);
     // The runtime routes a container with a user namespace of its own, or one that joins a pid, user or
     // mount namespace by path, through the shim (the classic root path), never to a pruned seed; one
@@ -807,7 +815,7 @@ fn serve_create_pruned(
         .namespaces
         .iter()
         .any(|n| n.kind == "mount" && n.path.is_some());
-    if spec.makes_namespace("user") || init::needs_shim(&spec) || joins_mount_by_path {
+    if spec.makes_namespace("user") || init::needs_shim(spec) || joins_mount_by_path {
         return refused(
             Failed::Start,
             "a pruned create makes no user namespace and joins no pid, user or mount namespace by path; \
@@ -825,7 +833,7 @@ fn serve_create_pruned(
         );
     }
     let made_ahead = network.is_some();
-    let flags = init::fresh_clone_flags(&spec, made_ahead, ipc_uts.is_some());
+    let flags = init::fresh_clone_flags(spec, made_ahead, ipc_uts.is_some());
     // The map pipe carries only a user namespace's map ack, which the pruned path never asks for: the
     // seed's copy is dropped before the clone, so the init doesn't inherit it.
     drop(map_r);
@@ -845,7 +853,7 @@ fn serve_create_pruned(
                 path_joins,
             };
             let r = init::clone_child_pruned(
-                &spec,
+                spec,
                 &create.bundle,
                 container_dir,
                 sources,
@@ -876,25 +884,6 @@ fn serve_create_pruned(
         }
         Err(e) => refused(Failed::Start, e.to_string()),
     }
-}
-
-/// The container's `config.json`, read through the bundle directory's descriptor rather than by path:
-/// a pruned seed can't reach the host path. Bounded at [`seed::MAX_REQUEST`]; a larger config is cut
-/// and refused by the parser (CLAUDE.md §2).
-fn read_config_at(bundle_dir: BorrowedFd<'_>) -> Result<Spec, OciError> {
-    let fd = rustix::fs::openat(
-        bundle_dir,
-        "config.json",
-        OFlags::RDONLY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| OciError::os("opening config.json", e))?;
-    let mut buf = Vec::new();
-    std::fs::File::from(fd)
-        .take(seed::MAX_REQUEST as u64)
-        .read_to_end(&mut buf)
-        .map_err(|e| OciError::os("reading config.json", e))?;
-    Spec::parse(&buf)
 }
 
 /// Serves an exec into a container (decision 3): the program started by a single clone where the seed

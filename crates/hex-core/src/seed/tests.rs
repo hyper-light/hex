@@ -54,6 +54,7 @@ fn creates() -> Vec<Create> {
             path_joins: 0,
             dev_mount: None,
             ipc_uts: false,
+            config: false,
         },
         Create {
             bundle: "/b".to_owned(),
@@ -65,6 +66,7 @@ fn creates() -> Vec<Create> {
             path_joins: 0,
             dev_mount: None,
             ipc_uts: false,
+            config: false,
         },
         // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
         // one namespace joined by path.
@@ -78,6 +80,7 @@ fn creates() -> Vec<Create> {
             path_joins: 1,
             dev_mount: None,
             ipc_uts: false,
+            config: false,
         },
     ]
 }
@@ -573,4 +576,64 @@ fn a_create_with_a_pair_appends_only_in_its_new_kind() {
     .unwrap();
     assert_eq!(u16::from_le_bytes(prepared[6..8].try_into().unwrap()), 3);
     assert_eq!(u16::from_le_bytes(old[6..8].try_into().unwrap()), 2);
+}
+
+/// HEX-SEED-3, append-only (AC-T7.1.1, T-T7.1.4: the spec the runtime checked, never a later read of the bundle).
+/// Do: write a create carrying its checked spec, of each shape (ordinary, pruned, with a prepared `/dev` and a pair).
+/// Expect: kind 5, its body the older kinds' fields with the `/dev` index an option and the pair a flag; one descriptor
+/// more, last; it reads back whole; every cut, trailing bytes and one short of its descriptors are refused by type;
+/// an exec reader refuses its kind; and a create without it still writes the older kinds, byte for byte.
+#[test]
+fn a_create_with_its_checked_spec_appends_only_in_its_new_kind() {
+    let shapes = [
+        creates()[0].clone(),
+        creates()[2].clone(),
+        Create {
+            dev_mount: Some(7),
+            ipc_uts: true,
+            ..creates()[2].clone()
+        },
+    ];
+    for older in shapes {
+        let old = create(&older).unwrap();
+        let checked = Create {
+            config: true,
+            ..older.clone()
+        };
+        let bytes = create(&checked).unwrap();
+        assert_eq!(&bytes[..6], &old[..6], "magic and version");
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 5);
+        assert_eq!(checked.fds(), older.fds() + CONFIG_FDS);
+        assert_eq!(read_create(&bytes, bytes.len()).unwrap(), checked);
+        assert_eq!(
+            read_message(&bytes, bytes.len(), checked.fds()).unwrap(),
+            Message::Create(checked.clone())
+        );
+        for len in 0..bytes.len() {
+            assert!(read_create(&bytes[..len], len).is_err(), "cut at {len}");
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(read_create(&trailing, trailing.len()).is_err());
+        assert!(matches!(
+            read_message(&bytes, bytes.len(), older.fds()),
+            Err(Fault::Descriptors { .. })
+        ));
+        assert!(matches!(
+            read_request(&bytes, bytes.len()),
+            Err(Fault::Kind { .. })
+        ));
+    }
+    assert_eq!(hex(&create(&creates()[0]).unwrap()), GOLDEN_CREATE);
+    assert_eq!(hex(&create(&creates()[2]).unwrap()), GOLDEN_CREATE_PRUNED);
+    // Past SCM_MAX_FD with its spec, as with a pair: refused by type.
+    let over = create(&Create {
+        binds: u32::try_from(MAX_BINDS).unwrap(),
+        path_joins: u32::try_from(MAX_PATH_JOINS).unwrap(),
+        network: true,
+        config: true,
+        ..creates()[2].clone()
+    })
+    .unwrap();
+    assert!(read_create(&over, over.len()).is_err());
 }

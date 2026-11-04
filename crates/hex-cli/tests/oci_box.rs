@@ -420,6 +420,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
     records_in_both_places_are_found_after_a_restart(&lab, own);
     a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(&lab, own);
+    a_config_swapped_after_the_check_never_makes_the_container(&lab, own);
     a_create_or_delete_of_a_box_being_made_waits_for_it(&lab, own);
     a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(&lab, own);
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
@@ -2622,6 +2623,98 @@ enum Second {
     Delete,
 }
 
+/// AC-T7.1.1, T-T7.1.4 (a time-of-check-to-time-of-use hole, found 2026-11-04): the runtime parses and checks the
+/// spec in a bundle's config.json, and whatever then starts the container's init, a create seed or the shim, must
+/// make the container from that spec, never from a later read of the bundle. Do: hold a create reading its config.json
+/// (a FIFO); once the agent has it open, give the agent the lab's spec and put in its place, for any later read, the
+/// same spec holding CAP_SYS_ADMIN, which rootless (a user namespace on the host's network) spec.rs refuses. Through
+/// the node (a seed starts the init) and through the runtime alone (the shim). Expect: the create refused, or its init
+/// without CAP_SYS_ADMIN, as the spec the runtime checked has it.
+fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &Path) {
+    let wait = Lab::act(&Act::Wait);
+    let checked = lab.config(&wait, false);
+    let swapped = checked.replace(r#""CAP_CHOWN""#, r#""CAP_SYS_ADMIN", "CAP_CHOWN""#);
+    assert_ne!(checked, swapped, "the swapped spec names CAP_SYS_ADMIN");
+    let held_bundle = || {
+        let bundle = tempfile::Builder::new()
+            .prefix("swap-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        assert!(
+            Command::new("mkfifo")
+                .arg(bundle.join("config.json"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        bundle
+    };
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+
+    // Through the node: a seed starts the init.
+    let node = lab.node(&own.join("hex-oci-swap"), state.path());
+    let id = BoxId::new("swap-node").unwrap();
+    let bundle = held_bundle();
+    let config = bundle.join("config.json");
+    let made = std::thread::scope(|s| {
+        let made = s.spawn(|| {
+            node.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(bundle.clone()),
+                owner: None,
+            })
+        });
+        wait_for(
+            blocked_opening_a_fifo,
+            "the create to wait reading its config",
+        );
+        swap_the_held_config(&config, &checked, &swapped);
+        made.join().unwrap()
+    });
+    if made.is_ok() {
+        let pid = u32::try_from(init_pid(&node.container_dir(&id))).unwrap();
+        let held = holds_sys_admin(pid);
+        node.delete(&id).unwrap();
+        assert!(
+            !held,
+            "the node's container was made from the swapped spec, not the one checked"
+        );
+    }
+
+    // Through the runtime alone: the shim starts the init.
+    let root = BoxRoot::open(
+        &own.join("hex-oci-swap-shim"),
+        disks::under(state.path()).unwrap(),
+    )
+    .unwrap();
+    let id = BoxId::new("swap-shim").unwrap();
+    let cgroup = root.create(&id, &Bounds::default()).unwrap();
+    let _cleanup = Killing(&root, id.clone());
+    let runtime = OciRuntime::with_helper(state.path().join("shim-oci"), PathBuf::from(&lab.exe));
+    let bundle = held_bundle();
+    let config = bundle.join("config.json");
+    let made = std::thread::scope(|s| {
+        let made = s.spawn(|| {
+            runtime.create_in_cgroup(id.as_str(), &bundle, None, cgroup, Held::default())
+        });
+        wait_for(
+            blocked_opening_a_fifo,
+            "the runtime's create to wait reading its config",
+        );
+        swap_the_held_config(&config, &checked, &swapped);
+        made.join().unwrap()
+    });
+    if made.is_ok() {
+        let pid = u32::try_from(runtime.state(id.as_str()).unwrap().pid).unwrap();
+        assert!(
+            !holds_sys_admin(pid),
+            "the shim's container was made from the swapped spec, not the one checked"
+        );
+    }
+}
+
 /// Goal 5 extended step 5 (T-T7.1.2): a box being made has no record yet, so a second create of its id,
 /// or a delete, waits for the create under way rather than make or remove parts at the paths the id
 /// fixes. Do: hold a create reading its bundle's config.json, a FIFO no one has opened, once its cgroup
@@ -3491,19 +3584,34 @@ fn as_an_older_node_wrote(state: &Path, record: &BoxRecord) {
 
 /// Whether a thread of this process is blocked opening a FIFO no one has opened the other end of: the
 /// kernel shows it waiting in `wait_for_partner` (fs/pipe.c), or in `fifo_open` where that's inlined.
-/// Lets a create held reading its bundle's config.json, a FIFO, go with `text`. The agent reads the config and then
-/// the create seed reads it again (seed.rs, `read_config_at`), so once the agent has the FIFO open to read, a file
-/// of the same config takes its name, for the seed, and the agent's copy is written into the FIFO. On the FIFO
-/// alone the seed's open would wait for a writer, and the create end in the seed's patience.
+/// Lets a create held reading its bundle's config.json, a FIFO, go with `text`, as [`swap_the_held_config`] does
+/// with the same text for whatever reads the config after the agent.
 fn let_the_held_create_go(config: &Path, text: &str) {
+    swap_the_held_config(config, text, text);
+}
+
+/// Lets a create held reading its bundle's config.json, a FIFO, go: once the agent has the FIFO open to read, a
+/// file of `later` takes its name, for whatever opens config.json after the agent's read, and the agent's own
+/// read gets `agent`. A reader after the agent opening the FIFO alone would wait for a writer.
+fn swap_the_held_config(config: &Path, agent: &str, later: &str) {
     let mut fifo = std::fs::OpenOptions::new()
         .write(true)
         .open(config)
         .unwrap();
     let file = config.with_extension("file");
-    std::fs::write(&file, text).unwrap();
+    std::fs::write(&file, later).unwrap();
     std::fs::rename(&file, config).unwrap();
-    std::io::Write::write_all(&mut fifo, text.as_bytes()).unwrap();
+    std::io::Write::write_all(&mut fifo, agent.as_bytes()).unwrap();
+}
+
+/// Whether process `pid` holds CAP_SYS_ADMIN (capability 21) in its effective set, as /proc/<pid>/status says.
+fn holds_sys_admin(pid: u32) -> bool {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let eff = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .expect("a CapEff line");
+    u64::from_str_radix(eff.trim(), 16).unwrap() & (1 << 21) != 0
 }
 
 fn blocked_opening_a_fifo() -> bool {

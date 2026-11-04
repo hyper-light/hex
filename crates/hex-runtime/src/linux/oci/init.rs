@@ -44,6 +44,10 @@ pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
 /// mount's index in the spec's mounts: the container attaches it in place of making its own.
 pub const ENV_DEV: &str = "HEX_OCI_DEV";
 pub const ENV_DEV_MOUNT: &str = "HEX_OCI_DEV_MOUNT";
+/// The spec the runtime parsed and checked, a sealed memfd (`checked::seal`), by the path of the runtime's
+/// descriptor for it (`/proc/<pid>/fd/<n>`), which stays close-on-exec: the shim makes the container from it, never
+/// from the bundle's `config.json`, which may since hold a spec nobody checked (AC-T7.1.1).
+pub const ENV_CONFIG: &str = "HEX_OCI_CONFIG";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
 /// (name in `/dev`, major, minor, mode); all character devices.
@@ -89,10 +93,9 @@ pub fn run() -> u8 {
 fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     let container_dir = PathBuf::from(env_var(ENV_DIR)?);
     let bundle = env_var(ENV_BUNDLE)?;
-    let spec = Spec::parse(
-        &fs::read(Path::new(&bundle).join("config.json"))
-            .map_err(|e| OciError::os("reading config.json", e))?,
-    )?;
+    let checked = handed_fd(ENV_CONFIG, OFlags::RDONLY)?;
+    let spec = Spec::parse(&super::checked::read(checked.as_fd())?)?;
+    drop(checked);
     // The cgroup, opened before any namespace changes: its directory, for the container to be born in
     // (`clone3` with `CLONE_INTO_CGROUP`), and its `cgroup.procs`, for it to join by migration where it
     // can't be. The kernel checks a migration against the credentials and cgroup namespace the file was
@@ -1966,7 +1969,7 @@ fn env_var(name: &str) -> Result<String, OciError> {
 fn handed_fd(name: &str, flags: OFlags) -> Result<OwnedFd, OciError> {
     let path = env_var(name)?;
     rustix::fs::open(path.as_str(), flags | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|e| OciError::os("opening a pipe the runtime holds", e))
+        .map_err(|e| OciError::os("opening a descriptor the runtime holds", e))
 }
 
 /// Writes one newline-terminated sync message; a broken pipe is ignored (the runtime has gone).

@@ -1696,6 +1696,24 @@ research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs
 (`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
 (`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
 
+**The spec a container is made from** (found 2026-11-04, AC-T7.1.1). The runtime reads a bundle's `config.json`,
+parses it and checks it: among the rest, `Spec::check` refuses a container in a user namespace holding CAP_SYS_ADMIN
+without a network namespace of its own. The create seed then read `config.json` again, by path on a rootless node
+and through the bundle's descriptor on a root one, and so did the shim, and each made the container from what it
+read. A bundle whose `config.json` was swapped between the two reads got a container from a spec the runtime never
+checked: a time-of-check-to-time-of-use hole, CWE-367's class. Now nothing reads the bundle after the runtime's one
+read. The runtime puts the bytes it parsed in a memfd sealed against every change (`F_SEAL_WRITE`, `F_SEAL_SHRINK`,
+`F_SEAL_GROW`, `F_SEAL_SEAL`: memfd_create(2), fcntl(2) "File Sealing"). The seed takes it as a create's last
+descriptor (the wire's kind 5, `CREATE_CONFIG`, append-only), the shim by its `/proc/<pid>/fd` path as it takes its
+pipes, and each refuses one that isn't sealed so (`linux::oci::checked`). A seed refuses a create of an older kind,
+which carries no spec. runc makes the same choice: its init is sent the config runc built (`newInitConfig`, v1.5.2
+`libcontainer/container_linux.go:680`) as JSON over its init socket (`libcontainer/process_linux.go:508`, `:905`),
+never the bundle's path to read again. Test:
+`oci_box.rs`, `a_config_swapped_after_the_check_never_makes_the_container`. It holds a create on a FIFO config, gives
+the runtime the lab's spec and any later read the same spec holding CAP_SYS_ADMIN, through the node (a seed) and
+through the runtime alone (the shim). Before the fix the root lab's node made the container with CAP_SYS_ADMIN. What
+would falsify it: a container whose capabilities, namespaces or mounts differ from the spec the runtime read.
+
 **What the integrated tree holds** (goal 5 extended, 2026-11-04; branch `cp/t7-g5x-integrate`, the tree step 7
 measures). Each step's work, merged in one tree, each merge's resolutions in its message:
 - step 1, a box's device program loaded once per policy and held by the node (decision 2);

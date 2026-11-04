@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,7 @@ use rustix::pipe::PipeFlags;
 use rustix::process::PidfdFlags;
 
 use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
+use crate::linux::oci::checked;
 use crate::linux::oci::init;
 use crate::linux::oci::programs::{self, Programs};
 use crate::linux::oci::resources::{self, Insn, Plan};
@@ -89,6 +90,9 @@ struct Making<'a> {
     bundle: &'a Path,
     dir: &'a Dir,
     pid_file: Option<&'a Path>,
+    /// The `config.json` bytes the runtime parsed and checked, sealed ([`checked::seal`]): what the shim or a
+    /// seed makes the container from, never a later read of the bundle (AC-T7.1.1).
+    config: BorrowedFd<'a>,
 }
 
 /// The network namespaces a node agent makes ahead (decision 4's pool), which a create asks once it
@@ -280,6 +284,9 @@ pub struct CloneReq<'a> {
     pub network: Option<OwnedFd>,
     pub sync_w: OwnedFd,
     pub map_r: OwnedFd,
+    /// The spec the runtime checked, sealed ([`checked::seal`]), which the seed makes the container from in place
+    /// of reading the bundle (AC-T7.1.1).
+    pub config: BorrowedFd<'a>,
     /// On the pruned root path (goal 5 plan step 2): the bundle, cgroup and state directories as
     /// descriptors and the rootfs and bind-source trees the runtime cloned in its own mount namespace,
     /// which the seed hands the init to build the root from. `None` on the classic seed path (a rootless
@@ -574,6 +581,10 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
+        // The bytes just parsed and checked, sealed, so whatever starts the init makes the container from this
+        // spec and never reads the bundle again: a config.json swapped after this read is never the container's
+        // (AC-T7.1.1).
+        let config = checked::seal(&config)?;
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
         // Hex keeps the guarantee and shares one program per policy (devshare): a node's oci boxes' root
@@ -624,6 +635,7 @@ impl Runtime {
             bundle,
             dir,
             pid_file,
+            config: config.as_fd(),
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
@@ -671,6 +683,7 @@ impl Runtime {
             bundle,
             dir,
             pid_file: _,
+            config,
         } = *making;
         let Ahead { network, dev } = ahead;
         // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. The shim opens its
@@ -691,7 +704,11 @@ impl Runtime {
             .env(init::ENV_MAP_R, by_path(&map_r))
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
-            .env(init::ENV_CGROUP, cgroup.dir());
+            .env(init::ENV_CGROUP, cgroup.dir())
+            .env(
+                init::ENV_CONFIG,
+                format!("/proc/{}/fd/{}", std::process::id(), config.as_raw_fd()),
+            );
         if let Some(network) = &network {
             cmd.env(init::ENV_NETWORK, by_path(network));
         }
@@ -805,6 +822,7 @@ impl Runtime {
                                     hex_core::seed::CREATE_FDS
                                         + 1
                                         + hex_core::seed::PRUNED_FIXED_FDS
+                                        + hex_core::seed::CONFIG_FDS
                                         + 1,
                                 )
                             })
@@ -1017,6 +1035,7 @@ impl Runtime {
             network,
             sync_w,
             map_r,
+            config: making.config,
             pruned,
         })?;
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
@@ -2029,6 +2048,7 @@ fn pair_fits(binds: usize, path_joins: usize, dev: bool) -> bool {
     const FIXED: usize = hex_core::seed::CREATE_FDS
         + 1
         + hex_core::seed::PRUNED_FIXED_FDS
+        + hex_core::seed::CONFIG_FDS
         + hex_core::seed::IPC_UTS_FDS;
     binds
         .checked_add(path_joins)
@@ -2519,11 +2539,13 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         )
         .unwrap();
         let named = std::fs::read_link("/proc/self/ns/net").unwrap();
+        let checked = checked::seal(b"{}").unwrap();
         let making = Making {
             id: "c1",
             bundle: lab.path(),
             dir: &dir,
             pid_file: None,
+            config: checked.as_fd(),
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         assert!(
@@ -2564,11 +2586,13 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         let dir = rt.dir("c1").unwrap();
         dir.create("c1").unwrap();
         let spec = Spec::parse(br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"}}"#).unwrap();
+        let checked = checked::seal(b"{}").unwrap();
         let making = Making {
             id: "c1",
             bundle: lab.path(),
             dir: &dir,
             pid_file: None,
+            config: checked.as_fd(),
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         // What the bystander holds is read, and it is ended, inside the spawn: a pipe it inherited would
@@ -2788,8 +2812,10 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// `/dev` counted.
     #[test]
     fn a_pair_fits_up_to_the_most_descriptors_a_create_carries() {
-        use hex_core::seed::{CREATE_FDS, IPC_UTS_FDS, MAX_REQUEST_FDS, PRUNED_FIXED_FDS};
-        let most = MAX_REQUEST_FDS - CREATE_FDS - 1 - PRUNED_FIXED_FDS - IPC_UTS_FDS;
+        use hex_core::seed::{
+            CONFIG_FDS, CREATE_FDS, IPC_UTS_FDS, MAX_REQUEST_FDS, PRUNED_FIXED_FDS,
+        };
+        let most = MAX_REQUEST_FDS - CREATE_FDS - 1 - PRUNED_FIXED_FDS - CONFIG_FDS - IPC_UTS_FDS;
         assert!(pair_fits(most, 0, false));
         assert!(!pair_fits(most + 1, 0, false));
         assert!(!pair_fits(most, 0, true));

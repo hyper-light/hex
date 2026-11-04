@@ -232,6 +232,7 @@ impl CloneInit for CreatePool {
                 .as_ref()
                 .map_or(0, |p| u32::try_from(p.path_joins.len()).unwrap_or(u32::MAX)),
             ipc_uts: req.pruned.as_ref().is_some_and(|p| p.ipc_uts.is_some()),
+            config: true,
         };
         // The descriptors ride in the order the seed reads them (`serve_create`): the two pipes, a
         // network namespace, then on the pruned path the four fixed descriptors and the bind trees, in
@@ -255,6 +256,8 @@ impl CloneInit for CreatePool {
                 fds.push(pair.uts.as_fd());
             }
         }
+        // Last, the spec the runtime checked, which the seed makes the container from (AC-T7.1.1).
+        fds.push(req.config);
         match round_trip(proc.socket.as_fd(), &create, &fds) {
             Ok(started) => {
                 if pruned {

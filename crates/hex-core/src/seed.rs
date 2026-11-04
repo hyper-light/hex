@@ -76,6 +76,10 @@ pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS - MAX_PATH_
 pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS + MAX_PATH_JOINS;
 /// Descriptors a started answer carries: the pidfd of the process the seed started.
 pub const STARTED_FDS: usize = 1;
+/// Descriptors a create carries last when it carries the spec its runtime checked ([`Create::config`]): a sealed memfd
+/// of the exact `config.json` bytes the runtime parsed and checked, which the seed makes the container from in place
+/// of reading the bundle again.
+pub const CONFIG_FDS: usize = 1;
 /// Descriptors of an ipc and a uts namespace made ahead, which ride last in a create that says so
 /// ([`Create::ipc_uts`]).
 pub const IPC_UTS_FDS: usize = 2;
@@ -86,6 +90,7 @@ mod kind {
     pub const CREATE: u16 = 0x0002;
     pub const CREATE_PREPARED: u16 = 0x0003;
     pub const CREATE_AHEAD: u16 = 0x0004;
+    pub const CREATE_CONFIG: u16 = 0x0005;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
 }
@@ -159,6 +164,12 @@ pub struct Create {
     /// rootless node, whose containers' namespaces belong to user namespaces of their own. Older kinds' bytes
     /// stay unchanged, and readers without this kind refuse it explicitly.
     pub ipc_uts: bool,
+    /// New CREATE_CONFIG kind (AC-T7.1.1, found 2026-11-04): the spec the runtime parsed and checked rides last, a
+    /// sealed memfd of its `config.json` bytes, and the seed makes the container from it, never from a later read
+    /// of the bundle, which could have been swapped for a spec nobody checked. Its body is every field above, the
+    /// prepared `/dev`'s index an option and the pair a flag. Older kinds' bytes stay unchanged, readers without
+    /// this kind refuse it explicitly, and a seed of this build refuses a create that doesn't carry it.
+    pub config: bool,
 }
 
 impl Create {
@@ -174,6 +185,9 @@ impl Create {
                 .saturating_add(self.path_joins as usize)
                 .saturating_add(usize::from(self.dev_mount.is_some()))
                 .saturating_add(if self.ipc_uts { IPC_UTS_FDS } else { 0 });
+        }
+        if self.config {
+            n = n.saturating_add(CONFIG_FDS);
         }
         n
     }
@@ -303,10 +317,11 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
     header(
         &mut w,
-        match (create.ipc_uts, create.dev_mount) {
-            (true, _) => kind::CREATE_AHEAD,
-            (false, Some(_)) => kind::CREATE_PREPARED,
-            (false, None) => kind::CREATE,
+        match (create.config, create.ipc_uts, create.dev_mount) {
+            (true, _, _) => kind::CREATE_CONFIG,
+            (false, true, _) => kind::CREATE_AHEAD,
+            (false, false, Some(_)) => kind::CREATE_PREPARED,
+            (false, false, None) => kind::CREATE,
         },
     );
     w.string(&create.bundle)?;
@@ -317,8 +332,14 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.u32(create.binds);
     w.u32(create.path_joins);
     // CREATE_PREPARED's index is bare, as that kind's bytes have it; CREATE_AHEAD's is an option, since a pair rides
-    // with or without a prepared `/dev`.
-    if create.ipc_uts {
+    // with or without a prepared `/dev`; CREATE_CONFIG's is an option, then the pair's flag.
+    if create.config {
+        w.option_with(create.dev_mount, |w, mount| {
+            w.u32(mount);
+            Ok(())
+        })?;
+        w.bool(create.ipc_uts);
+    } else if create.ipc_uts {
         w.option_with(create.dev_mount, |w, mount| {
             w.u32(mount);
             Ok(())
@@ -341,7 +362,7 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
     let (version, kind) = read_header(&mut r)?;
     if !matches!(
         kind,
-        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD
+        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD | kind::CREATE_CONFIG
     ) {
         return Err(Fault::Kind {
             kind,
@@ -359,10 +380,15 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         path_joins: r.u32()?,
         dev_mount: match kind {
             kind::CREATE_PREPARED => Some(r.u32()?),
-            kind::CREATE_AHEAD => r.option(|r| r.u32())?,
+            kind::CREATE_AHEAD | kind::CREATE_CONFIG => r.option(|r| r.u32())?,
             _ => None,
         },
-        ipc_uts: kind == kind::CREATE_AHEAD,
+        ipc_uts: match kind {
+            kind::CREATE_AHEAD => true,
+            kind::CREATE_CONFIG => r.bool("ipc_uts")?,
+            _ => false,
+        },
+        config: kind == kind::CREATE_CONFIG,
     };
     r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
@@ -414,7 +440,7 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
         kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
-        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD => {
+        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_AHEAD | kind::CREATE_CONFIG => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)
