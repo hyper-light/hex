@@ -128,6 +128,13 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   and createContainer and startContainer hooks run in the container (cp/t7-hooks a4e0261). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
   seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
   lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
+  - goal 5x step 7, goal 5's create against its bar on this tree (1714f72, fedora, 2026-11-04, noisy;
+    `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7"; decision 5). host.sh's OCI pass, best of 2,
+    Hex over libcrun: reuse on (out/20261104T170413Z) create p50 0.150x, p99.9 0.036x, create+start of `true` p50 0.219x,
+    p99.9 0.267x (just over 0.25x); reuse off (out/20261104T172313Z) 0.356x, 0.938x, 0.264x, 0.833x. The breakdown's parts'
+    p50s summed are 80.8% and 86.8% of create's p50 (create-breakdown-20261104T165844Z, -170123Z, loads 31-106): step 7's
+    10% not met, the parts' means summing to the mean span exactly. Over the bar, so the levers are named for Ada:
+    goal 6's 7.x namespace, the shared empty-directory masks (cp/t7-g6), the record's fsync on disk, step 6's reuse.
   - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at
     c32; cp/t7-ext-s4 209cea4.
   - goal 5x step 3: closed on its written bars by Ada's ruling (2026-11-03), with the under-load bar moved to goal 6;

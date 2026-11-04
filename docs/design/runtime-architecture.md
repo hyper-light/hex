@@ -1696,6 +1696,38 @@ research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs
 (`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
 (`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
 
+**Goal 5's create measured against its bar** (goal 5 extended step 7, 2026-11-04, the integrated tree 1714f72, fedora,
+CPUs 4-15, noisy; `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7"). The bar is Hex's create
+and create+start of `true` through the seam at most a quarter of libcrun's, at p50 and p99.9. host.sh's OCI pass, best
+of two rounds of ten thousand, against libcrun in the same run:
+<!-- record: bench/competitive/probes/create_breakdown.md -->
+
+| run | reuse | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| out/20261104T170413Z | on | 0.50 / 3.34 ms, 0.150x | 0.88 / 24.36 ms, 0.036x | 0.53 / 2.42 ms, 0.219x | 1.25 / 4.69 ms, 0.267x |
+| out/20261104T172313Z | off | 0.83 / 2.33 ms, 0.356x | 3.94 / 4.20 ms, 0.938x | 0.66 / 2.50 ms, 0.264x | 4.23 / 5.08 ms, 0.833x |
+
+<!-- /record -->
+With step 6's reuse on (every box one owner's), three of the four are under the bar. Create+start of `true` at p99.9
+is just over it. With reuse off, none is: create's tail is near libcrun's. The create breakdown (seed path, pruned)
+ran in the same unit at loads of 31 to 106. Its parts' p50s summed come to
+<!-- record: bench/competitive/probes/create_breakdown.md -->80.8% (reuse on, create-breakdown-20261104T165844Z) and
+86.8% (off, create-breakdown-20261104T170123Z)<!-- /record --> of create's p50, outside step 7's 10%. Its means sum to
+the mean span exactly, so the parts are whole and the gap is the skew of a few under load. What's left, part by part,
+pooled p50 in ms, reuse on / off:
+<!-- record: bench/competitive/probes/create_breakdown.md -->the init's clone into its cgroup and namespaces 0.555 /
+0.527, the init's root's mounts 0.127 / 0.108, the cgroup 0.264 / 0.174, the handshake 0.138 / 0.511, the node's and the
+runtime's own work 0.209 / 0.199, the seed's request 0.110 / 0.094, the box's record 0.046 / 0.033<!-- /record -->. The
+levers that would take what's left, for Ada:
+- goal 6's 7.x namespace (`OPEN_TREE_NAMESPACE`, `CLONE_EMPTY_MNTNS`), which takes the mount namespace's copy out of
+  the init's clone, the largest part;
+- the shared empty-directory masks (`cp/t7-g6`), which take mounts off the init's root;
+- the record's fsync on disk: zero here with `/run` on tmpfs, but on a `/run` on the container's overlay the record's
+  two fsyncs are most of create (the hooks agent's `create_load-20261104.md` on `cp/t7-hooks`);
+- step 6's two levers, the init's pidfd end and the cgroup reused within one owner. Both are in this tree, and reuse
+  is what moves the pass from the second row to the first. What's left of the cgroup on reuse is the idle cgroup's
+  check, read file by file.
+
 **The spec a container is made from** (found 2026-11-04, AC-T7.1.1). The runtime reads a bundle's `config.json`,
 parses it and checks it: among the rest, `Spec::check` refuses a container in a user namespace holding CAP_SYS_ADMIN
 without a network namespace of its own. The create seed then read `config.json` again, by path on a rootless node

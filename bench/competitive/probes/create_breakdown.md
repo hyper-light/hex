@@ -1057,3 +1057,46 @@ record:
 |---|---|---|---|---|---|
 | create-breakdown-20261104T162204Z | on | pruned, record once, chosen cgroup (handed on) | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one |
 | create-breakdown-20261104T162704Z | off | pruned, record once, the cgroup's mkdir | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one |
+
+## Goal 5 extended step 7: goal 5's create measured against its bar (2026-11-04, the integrated tree 1714f72)
+
+Fedora (kiln-a094a12d, i9-14900HX, Linux 6.19.10), the integrated tree at 1714f72 (steps 1-6, main's fd fix, the turns,
+the hooks, the checked spec), static-glibc hex sha256 5c2fc732d92a41ee (static-pie linked), seam_oci decb8a6e69dc67e4,
+libcrun 1.30.1 in process. Every timed part ran on CPUs 4-15 under the shared lock, --tmpfs /run as host.sh has it,
+containers at 8 GB and oom-score-adj 1000, noisy (LOAD_GATE=0), one after another in unit
+hex-integrate-step7-20261104T165634Z. Step 6's reuse on means HEXBENCH_OWNER set, every box of one owner; off, no owner.
+The host's clock (host_clock.sh, a 100,000-step burst, p50): before, P-cores 0.112 ms at rest and 0.110 held, E-cores
+0.201 and 0.199, load 31.64; after, P-cores 0.098 and 0.101, E-cores 0.187 and 0.189, load 12.72.
+
+### host.sh's OCI pass: lifecycle and start_true, 2 rounds of 10,000, best of 2
+
+| run | reuse | load at start, end | Hex create p50 / libcrun | ratio | Hex create p99.9 / libcrun | ratio | Hex create+start of `true` p50 / libcrun | ratio | Hex create+start of `true` p99.9 / libcrun | ratio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| out/20261104T170413Z | on | 106.50, 20.28 | 0.50 / 3.34 ms | 0.150x | 0.88 / 24.36 ms | 0.036x | 0.53 / 2.42 ms | 0.219x | 1.25 / 4.69 ms | 0.267x |
+| out/20261104T172313Z | off | 20.28, 12.72 | 0.83 / 2.33 ms | 0.356x | 3.94 / 4.20 ms | 0.938x | 0.66 / 2.50 ms | 0.264x | 4.23 / 5.08 ms | 0.833x |
+
+The ratios are Hex's figure over libcrun's as table.md prints them (ms to two places). Both passes recorded 0 errors
+in every round's driver (libcrun, the seam in process and over the socket). The reuse-on pass handed on 10,098 of
+10,100 cgroups a round (2 fresh); the reuse-off pass took 10,100 and 10,099 network namespaces from the pool, 1 made on
+the path. Over the socket (hex-seam-socket), reuse on: create p50 0.83, p99.9 2.41 ms; create+start of `true` p50 0.83,
+p99.9 2.12. Reuse off: create p50 0.73, p99.9 3.53; create+start of `true` p50 0.76, p99.9 4.53.
+
+### The create breakdown, seed path (pruned), N=1000, 3 rounds
+
+| run | reuse | load at start, end | Hex create p50 (seam, pooled) | libcrun's | ratio | parts' p50s summed | over the creates between (p50) | events lost |
+|---|---|---|---|---|---|---|---|---|
+| create-breakdown-20261104T165844Z | on | 31.59, 47.75 | 1.924 | 14.241 | 0.135x | 1.571 | 0.808 (1.945) | 0 |
+| create-breakdown-20261104T170123Z | off | 47.75, 106.50 | 1.989 | 14.551 | 0.137x | 1.731 | 0.868 (1.994) | 0 |
+
+The parts' p50s summed are 80.8% and 86.8% of create's p50 in the same run: outside step 7's 10%, its criterion not
+met at this load. Their means sum to the creates' mean span exactly (2.381 and 2.257 ms), so every part is cut; what
+the p50s miss is skew. The init's clone (part 11) has a mean of 0.840 and 0.631 against p50s of 0.555 and 0.527, and the
+handshake (part 17) 0.356 against 0.138 with reuse on. A sum of medians undercounts a sum of skewed parts. Both
+breakdowns ran at loads of 31 to 106, where Hex's create through the breakdown's seam was about 2 ms and libcrun's
+about 14, against 0.50 to 0.83 and 2.33 to 3.34 in the passes at 12 to 28 after them.
+
+The parts by group, pooled p50 (ms), reuse on / off: the box's record 0.046 / 0.033; the cgroup, made and bounded (on:
+an idle one read clean and handed on; off: mkdir and bounds) 0.264 / 0.174; the seed, the request and its clone's
+preparing 0.110 / 0.094; the init's set-up to the exec FIFO 0.804 / 0.720, of it the init's clone into its cgroup and
+namespaces 0.555 / 0.527 and its root's mounts 0.127 / 0.108; the handshake 0.138 / 0.511; the node's and the runtime's
+own work 0.209 / 0.199.
