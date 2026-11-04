@@ -59,8 +59,8 @@ check "the before binary reads it (status created)" 'grep -q "\"status\":\"creat
 /opt/before-hex oci delete --force hooked 2>> "$OUT/hooked.state-by-before.err"; wait "$STRACE"
 check "the before binary deletes it" '[ ! -e "$HEX_OCI_ROOT/hooked" ]'
 check "a hooked create writes H (the trace sees the stop it looks for)" 'lines "$OUT/after.hooked.trace" | grep -qw H'
-echo "strace -c, hookless create, before vs after (calls by syscall):"
-diff <(awk 'NR>2 && $NF!="total" && NF>=5 {print $NF, $(NF-2)}' "$OUT/before.plain.count" | sort) \
-     <(awk 'NR>2 && $NF!="total" && NF>=5 {print $NF, $(NF-2)}' "$OUT/after.plain.count" | sort) > "$OUT/plain.count.diff"
-cat "$OUT/plain.count.diff"
+# strace -c's columns: % time, seconds, usecs/call, calls, errors (blank where none), syscall.
+calls() { awk '$NF!="total" && $1 ~ /^[0-9.]+$/ {print $NF, $4}' "$1" | sort; }
+calls "$OUT/before.plain.count" > "$OUT/before.plain.calls"; calls "$OUT/after.plain.count" > "$OUT/after.plain.calls"
+check "a hookless create makes the same calls, each as many times, before and after" 'diff "$OUT/before.plain.calls" "$OUT/after.plain.calls"'
 ! grep -q '^FAIL' "$OUT/checks"
