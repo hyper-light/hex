@@ -148,7 +148,7 @@ filter() { # filter <event>: the processes it's kept for
 untrace() { # the instance's events off and the instance gone, whatever state it's in
   [ -d "$I" ] || return 0
   echo 0 > "$I/tracing_on" 2>/dev/null
-  for ev in $EVENTS $DETAIL; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
+  for ev in $EVENTS $DETAIL $PROBES; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
 unprobe() { # this run's kprobes gone, once no instance has them on
@@ -168,7 +168,7 @@ traced() {
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
-  for ev in $events; do
+  for ev in $events $PROBES; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
       || { echo "event $ev couldn't be filtered and enabled" >&2; untrace; return 1; }
   done
