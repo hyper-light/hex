@@ -129,7 +129,8 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
             Some(status) if status.success() => return Ok(()),
             Some(status) => return Err(failed(format!("{:?} exited {status}", hook.path))),
             None => {
-                if deadline.is_none_or(|d| Instant::now() >= d) {
+                // A timeout past what an Instant holds is no earlier deadline.
+                if deadline.is_some_and(|d| Instant::now() >= d) {
                     let _ = child.kill();
                     return Err(failed(format!(
                         "{:?} outlived its {limit:?} timeout",
@@ -227,5 +228,158 @@ pub fn peek_start(fifo: BorrowedFd<'_>) -> Result<Option<String>, OciError> {
         _ => Err(OciError::Broken(format!(
             "the exec fifo holds {buf:?}, not a start's byte"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The hooks' runner and frames (AC-T7.1.4, T-T7.1.4; CLAUDE.md §2, §3; config.md:556-560, :592).
+
+    use super::*;
+    use crate::linux::oci::spec::Spec;
+
+    fn sh(script: &str, timeout: Option<i64>) -> Hook {
+        Hook {
+            path: "/bin/sh".to_owned(),
+            args: vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            env: vec!["PATH=/usr/bin:/bin".to_owned()],
+            timeout,
+        }
+    }
+
+    /// Do: hand a state through a frame. Expect: the same state back.
+    #[test]
+    fn a_state_handed_through_a_frame_comes_back_whole() {
+        let mut state = State::new("c1", "/bundle");
+        state.pid = 42;
+        state.annotations.insert("k".to_owned(), "v".to_owned());
+        let (r, w) = rustix::pipe::pipe().unwrap();
+        let mut w = std::fs::File::from(w);
+        send_state(&mut w, &state).unwrap();
+        drop(w);
+        assert_eq!(read_state(r.as_fd()).unwrap(), state);
+    }
+
+    /// Hostile input to the frame's reader. Do: a length over [`MAX_STATE_BYTES`], then a frame cut short.
+    /// Expect: each refused by type, nothing allocated for the first.
+    #[test]
+    fn a_frame_over_its_bound_or_cut_short_is_refused() {
+        let over = u32::try_from(MAX_STATE_BYTES + 1).unwrap().to_le_bytes();
+        for wire in [over.to_vec(), [4, 0, 0, 0, b'{'].to_vec(), vec![1, 0]] {
+            let (r, w) = rustix::pipe::pipe().unwrap();
+            rustix::io::write(&w, &wire).unwrap();
+            drop(w);
+            assert!(
+                matches!(read_state(r.as_fd()), Err(OciError::Broken(_))),
+                "{wire:?}"
+            );
+        }
+    }
+
+    /// Do: a startContainer failure whose reason is longer than a pipe's atomic write, peeked from a FIFO,
+    /// then peeked again. Expect: the reason, cut at a character's edge to fit, both times (nothing taken),
+    /// and a taken start reads as none.
+    #[test]
+    fn a_start_failure_is_read_whole_without_being_taken() {
+        let long = OciError::Os {
+            op: "startContainer hook",
+            why: "é".repeat(MAX_START_FAILURE),
+        };
+        let frame = start_failure(&long);
+        assert!(frame.len() <= MAX_START_FAILURE, "{}", frame.len());
+        let (r, w) = rustix::pipe::pipe().unwrap();
+        rustix::io::write(&w, &frame).unwrap();
+        let first = peek_start(r.as_fd()).unwrap().unwrap();
+        assert!(
+            first.starts_with("startContainer hook failed: é"),
+            "{first}"
+        );
+        assert_eq!(peek_start(r.as_fd()).unwrap(), Some(first));
+        let (r, w) = rustix::pipe::pipe().unwrap();
+        rustix::io::write(&w, &[START_TAKEN]).unwrap();
+        assert_eq!(peek_start(r.as_fd()).unwrap(), None);
+    }
+
+    /// CLAUDE.md §2. Do: run a hook that never reads its stdin, with a state bigger than a pipe holds,
+    /// and a one-second timeout. Expect: refused for outliving its timeout, not a write blocked for good.
+    #[test]
+    fn a_hook_that_never_reads_its_stdin_ends_at_its_timeout() {
+        let mut state = State::new("c1", "/bundle");
+        state
+            .annotations
+            .insert("big".to_owned(), "x".repeat(1 << 20));
+        let started = Instant::now();
+        let got = run("a hook", &[sh("exec sleep 30", Some(1))], &state);
+        assert!(
+            matches!(&got, Err(OciError::Os { why, .. }) if why.contains("timeout")),
+            "{got:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// config.md:592. Do: a hook that copies its stdin out, and one that fails. Expect: the state as
+    /// JSON, and the failure named by its list.
+    #[test]
+    fn a_hook_is_given_the_state_and_a_failure_names_its_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("state");
+        let state = State::new("c1", "/bundle");
+        run(
+            "a hook",
+            &[sh(&format!("cat > {}", out.display()), None)],
+            &state,
+        )
+        .unwrap();
+        let seen: State = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(seen, state);
+        let got = run("createContainer hook", &[sh("exit 3", None)], &state);
+        assert!(
+            got.as_ref()
+                .is_err_and(|e| e.to_string().starts_with("createContainer hook failed")),
+            "{got:?}"
+        );
+    }
+
+    /// config.md:556, :559-560. Do: parse specs whose hook has a relative path, a zero timeout, or
+    /// startContainer timeouts that overflow. Expect: each refused by name; a spec with none of these is
+    /// taken.
+    #[test]
+    fn a_hook_the_spec_forbids_is_refused_by_name() {
+        let spec = |hooks: &str| {
+            Spec::parse(
+                format!(r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},"hooks":{hooks}}}"#)
+                    .as_bytes(),
+            )
+        };
+        let max = i64::MAX;
+        for (hooks, names) in [
+            (r#"{"createContainer":[{"path":"sh"}]}"#, "createContainer"),
+            (
+                r#"{"startContainer":[{"path":"/bin/sh","timeout":0}]}"#,
+                "above zero",
+            ),
+            (
+                &format!(
+                    r#"{{"startContainer":[{{"path":"/bin/sh","timeout":{max}}},{{"path":"/bin/sh","timeout":{max}}},{{"path":"/bin/sh","timeout":{max}}}]}}"#
+                ),
+                "overflow",
+            ),
+        ] {
+            let got = spec(hooks);
+            assert!(
+                matches!(&got, Err(OciError::Config(why)) if why.contains(names)),
+                "{hooks}: {got:?}"
+            );
+        }
+        let ok = spec(r#"{"startContainer":[{"path":"/bin/sh","timeout":5}]}"#).unwrap();
+        assert_eq!(
+            budget("startContainer", &ok.hooks.start_container).unwrap(),
+            5
+        );
+        assert!(ok.hooks.sync_init());
     }
 }

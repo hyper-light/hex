@@ -1157,11 +1157,11 @@ impl Runtime {
         // The init writes one byte as it takes the start. An init that ended without it (killed, or
         // OOM'd, before or after it opened its end) is stopped, not running: refused, never reported
         // running (CLAUDE.md §3); the FIFO stays, and the init's end says stopped.
-        // The init runs its startContainer hooks before it writes, so the start waits for them too.
-        let patience = state
-            .start_container
-            .and_then(|secs| START_PATIENCE.checked_add(Duration::from_secs(secs)))
-            .unwrap_or(START_PATIENCE);
+        // The init runs its startContainer hooks before it writes, so the start waits for them too, as
+        // long as they may take, saturating where that is past what a Duration holds.
+        let patience = state.start_container.map_or(START_PATIENCE, |secs| {
+            START_PATIENCE.saturating_add(Duration::from_secs(secs))
+        });
         match wait_for_byte(&fifo, &init, patience)? {
             Took::Byte => {}
             Took::End => return Err(stopped()),
