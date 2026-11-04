@@ -41,6 +41,24 @@ def pairs_of(run):
     return out
 
 
+def netns_line(phases):
+    """The kept namespaces' checks over `phases` (each a round's interleaved phase), and the held files' bound."""
+    reuse = [ph["netns_reuse"] for ph in phases if ph.get("netns_reuse")]
+    if not reuse:
+        return "kept namespaces: none counted (a node that keeps none, or a pass before the counts)"
+    total = {k: sum(r.get(k, 0) for r in reuse) for k in
+             ("checked", "through_files", "protocols", "files_bounded", "files_failed")}
+    bounds = {(r.get("files_bound"), r.get("descriptors_soft"), r.get("descriptors_own")) for r in reuse}
+    if bounds == {(None, None, None)}:
+        bound = "the held files' bound not reported (a binary before it)"
+    else:
+        bound = "; ".join(f"held files for at most {b} namespaces (soft limit {s}, the node's own {o})"
+                          for b, s, o in sorted(bounds, key=str))
+    return (f"kept namespaces: {total['checked']} checks, {total['through_files']} through held files, "
+            f"{total['protocols']} through the protocols, {total['files_bounded']} entered for the bound, "
+            f"{total['files_failed']} whose files failed; {bound}")
+
+
 def load(at):
     return f"load {at.get('load1')}, cpu some {at.get('cpu_some_avg10')}%"
 
@@ -125,6 +143,9 @@ def main(argv):
                        and {cpu_set(c) for c in p[f"{half}_pinned"]["cpus_allowed"]} == {cpu_set(ph[f"{half}_cpus"])})
             print(f"  {half} halves pinned to {', '.join(sorted(asked))}: every task on those CPUs alone in {held} "
                   f"of {len(rows)} pairs")
+        # The kept namespaces' checks and the held files' bound the node ran with (the lead, 2026-11-04T09:15Z): a
+        # run whose bound is 0, as at systemd's default soft limit, held no files and tests none.
+        print(f"  {netns_line([ph for *_, ph in rows])}")
 
 
 if __name__ == "__main__":

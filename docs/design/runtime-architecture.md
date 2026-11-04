@@ -1319,10 +1319,17 @@ lifecycle without changing what a box may do.
     its `/proc/<pid>/fd` shows them only to a process with ptrace access to it (kernel/ptrace.c:276), which a box
     short of the agent's capabilities hasn't (security/commoncap.c:164-182), where a box sees the agent's pid at all; and
     what they read is that one namespace's counts, its owner's.
-    The conditions: at most four such files a kept namespace, six descriptors with its own and the socket, inside the
-    namespaces' bounds. As the node starts, `RLIMIT_NOFILE` is checked against all the node may hold, those bounds with
-    each live box's, its connections' and the seeds', raised to that where it's short (a root node may, up to
-    `fs.nr_open`), and where it can't be the refusal names the shortfall, never a silent cap. They close with the
+    The conditions: at most four such files a kept namespace, besides its own descriptor and the socket's. The
+    descriptor limit stays as the node was given it, never raised: a box without an rlimit of its own sees the limit it
+    would without the files (the lead, 2026-11-03T23:07Z). As the node starts it works out how many namespaces may hold
+    them, what the soft `RLIMIT_NOFILE` leaves past the node's own descriptors at its bounds (the kept namespaces', each
+    live box's, its connections' and programs', the seeds'), four a namespace (`FilesBound`), and says so on the agent's
+    stderr with both numbers. A namespace past that bound holds none and each of its checks enters, counted
+    (`files_bounded`); a limit too small for the node's own work shows where it runs out, as that call's typed refusal.
+    At systemd's default soft limit of 1024 the bound is 0, so where nodes run today no namespace holds its files and
+    the saving can't appear: what lets it is the node's soft limit, past its own descriptors at its bounds (about 330
+    thousand), which the installer sets. Every bench record says which bound its node ran with and how many checks went
+    through the files and how many through the protocols (`interleaved_pool.py`). They close with the
     namespace on every path, tested by counting them by their links: refused by way of the files or of entering,
     released, put out by the owner's bound, with the node's end while a box's namespace holds them; a node recovered
     holds none; and all the process's descriptors are back where they began (root lab). A failed read drops them and
