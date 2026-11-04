@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hex_api::{Refusal, Stdio};
-use hex_core::stream::{self, Deframer, Named};
+use hex_core::stream::{self, Deframer, Exec, Named};
 use hex_core::wire::{self, Received};
 
 use crate::ANSWER_PATIENCE;
@@ -23,6 +23,7 @@ pub trait Duplex: Read + Write + Send + Sync + 'static {
     fn try_clone(&self) -> io::Result<Box<dyn Duplex>>;
     fn shutdown(&self, how: Shutdown) -> io::Result<()>;
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 
 impl Duplex for TcpStream {
@@ -36,6 +37,10 @@ impl Duplex for TcpStream {
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         TcpStream::set_write_timeout(self, timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
     }
 }
 
@@ -52,6 +57,10 @@ impl Duplex for std::os::unix::net::UnixStream {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         std::os::unix::net::UnixStream::set_write_timeout(self, timeout)
     }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        std::os::unix::net::UnixStream::set_read_timeout(self, timeout)
+    }
 }
 
 /// What dials the guest's ports.
@@ -66,6 +75,8 @@ pub type Client = Core<Stream>;
 /// The control connection, as a client's transport.
 pub struct Stream {
     link: Arc<dyn Link>,
+    /// The token the relay sent first on the control connection, which its stdio connections name.
+    token: u64,
     /// The writing handle: one message at a time.
     write: Mutex<Box<dyn Duplex>>,
     /// A handle to end the connection with while a send holds the writing one.
@@ -124,6 +135,10 @@ impl Transport for Stream {
     type Stdio = ();
 
     fn stdio(&self, exec: u64, stdio: Stdio) -> Result<(), Refusal> {
+        let exec = Exec {
+            conn: self.token,
+            id: exec,
+        };
         let named = |stream| Named { exec, stream };
         if let Some(r) = stdio.stdin {
             self.stream(named(stream::Stdio::In), Copier::In(r))?;
@@ -229,9 +244,13 @@ fn read(shared: &Shared<Stream>, mut conn: Box<dyn Duplex>) {
 impl Client {
     /// Dials the guest's node agent through `link` and learns what it runs and its bounds.
     pub fn connect(link: Arc<dyn Link>) -> Result<Self, Refusal> {
-        let conn = link.dial(stream::CONTROL_PORT)?;
+        let mut conn = link.dial(stream::CONTROL_PORT)?;
         conn.set_write_timeout(Some(ANSWER_PATIENCE))
             .map_err(os("bounding the node agent connection's sends"))?;
+        let mut token = [0u8; stream::TOKEN_BYTES];
+        conn.read_exact(&mut token)
+            .map_err(os("reading the relay's token for the connection"))?;
+        let token = u64::from_le_bytes(token);
         let reading = conn
             .try_clone()
             .map_err(os("holding the node agent's connection"))?;
@@ -240,6 +259,7 @@ impl Client {
             .map_err(os("holding the node agent's connection"))?;
         let shared = Arc::new(Shared::new(Stream {
             link,
+            token,
             write: Mutex::new(conn),
             end,
         }));

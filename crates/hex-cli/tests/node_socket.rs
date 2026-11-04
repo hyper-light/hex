@@ -6,6 +6,10 @@
 //! - the hex-api conformance suite, every case, over the socket, on `oci` and on `process` boxes, and on
 //!   `oci` boxes each with a network namespace of its own: as root they take the agent's pooled ones,
 //!   rootless they make theirs on the create's path (decision 4; goal 4 plan step 4);
+//! - HEX-GUEST-8 (native plan step 5, docs/design/shards-guest.md §3): the conformance suite, every
+//!   case, on `oci` and `process` boxes, again through `hex guest relay` and `hex_client::guest`'s
+//!   client, the path a macOS or Windows host takes to the node in its Shards guest, Unix sockets
+//!   standing in for vsock;
 //! - HEX-SOCK-10: a box whose bundle makes a network namespace of its own is counted, as root as one
 //!   taken from the agent's pool, rootless as one made on its create's path, and the counts cross the
 //!   socket (decision 4; goal 4 plan steps 2 and 4);
@@ -39,6 +43,7 @@ use hex_api::{
 };
 use hex_client::Client;
 use hex_core::record::{BoxRecord, Phase};
+use hex_core::stream;
 use hex_core::wire::{self, Answer, Call, Request, Streams};
 
 const TEST: &str = "the_seam_holds_its_contract_over_the_node_agents_socket";
@@ -333,9 +338,66 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         failures.is_empty(),
         "process boxes over the socket: {failures:#?}"
     );
+    through_the_guest_relay(&lab, &agent, exe);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// The guest's ports as Unix sockets in the relay's directory.
+struct GuestPorts(PathBuf);
+
+impl hex_client::guest::Link for GuestPorts {
+    fn dial(&self, port: u32) -> Result<Box<dyn hex_client::guest::Duplex>, Refusal> {
+        let name = match port {
+            stream::CONTROL_PORT => "control.sock",
+            stream::STDIO_PORT => "stdio.sock",
+            other => panic!("dialed port {other:#x}"),
+        };
+        Ok(Box::new(
+            std::os::unix::net::UnixStream::connect(self.0.join(name)).unwrap(),
+        ))
+    }
+}
+
+/// HEX-GUEST-8: start `hex guest relay` to the agent's socket, connect through it as a host reaches
+/// the node in its guest, and run the conformance suite on `oci` and `process` boxes: expect every case
+/// to pass, as over the socket itself.
+fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("relay-")
+        .tempdir_in(agent.socket.parent().unwrap())
+        .unwrap();
+    let mut relay = Command::new(exe)
+        .args(["guest", "relay", "--node"])
+        .arg(&agent.socket)
+        .arg("--unix")
+        .arg(dir.path())
+        .stdout(Std::piped())
+        .spawn()
+        .expect("start hex guest relay");
+    let mut line = String::new();
+    BufReader::new(relay.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "ready", "hex guest relay said {line:?}");
+    let guest =
+        hex_client::guest::Client::connect(std::sync::Arc::new(GuestPorts(dir.path().to_owned())))
+            .expect("connect through the guest relay");
+    assert_eq!(guest.classes(), [Class::Process, Class::Oci]);
+    let failures = conformance::run(&guest, &OciBoxes(lab, false));
+    assert!(
+        failures.is_empty(),
+        "oci boxes through the guest relay: {failures:#?}"
+    );
+    let failures = conformance::run(&guest, &ProcessBoxes(exe));
+    assert!(
+        failures.is_empty(),
+        "process boxes through the guest relay: {failures:#?}"
+    );
+    drop(guest);
+    relay.kill().unwrap();
+    relay.wait().unwrap();
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it

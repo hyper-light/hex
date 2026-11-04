@@ -42,6 +42,11 @@ fn main() -> ExitCode {
             let rest: Vec<String> = rest.iter().flatten().cloned().collect();
             return ExitCode::from(hex_cli::node::main(&rest));
         }
+        // `hex guest relay …` relays a Shards guest's vsock to its node agent's socket.
+        if first == "guest" {
+            let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+            return ExitCode::from(hex_cli::guest::main(&rest));
+        }
         // `hex box run <limits> -- program args…` runs a program in a process box.
         if first == "box"
             && let [Some(verb), box_args @ ..] = rest

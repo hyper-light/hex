@@ -66,7 +66,9 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
 - **Control:** the same `hex_core::wire` messages, each framed on the stream by its length (a big-endian `u32`, at
   most the wire's `MAX_MESSAGE`; a longer one is a typed fault that closes the connection, never a partial read).
 - **Stdio:** each exec's stdin, stdout and stderr ride a vsock connection of their own, which the host opens and
-  names in its first 16 bytes (the exec's id and which stream; `hex_core::stream::name`). The node takes only a
+  names in its first 24 bytes (its control connection's token, the exec's request id and which stream;
+  `hex_core::stream::name`). The relay sends each control connection its token first, as request ids are a
+  connection's own. The node takes only a
   pipe's end as a program's stream (`crates/hex-node/src/serve.rs:1208`: "the right end of a pipe, as the
   seam's `Stdio` holds; anything else is refused by name"), so the relay makes a pipe per stream, passes its end
   to the node with the exec, and copies between the pipe and the vsock connection; on the host, the client

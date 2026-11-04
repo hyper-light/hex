@@ -60,7 +60,11 @@ fn send_answer(conn: &mut TcpStream, version: u16, id: u64, answer: &Answer) {
         .unwrap();
 }
 
+/// The relay's token for every stand-in connection.
+const TOKEN: u64 = 0x7465_7374;
+
 fn hello(conn: &mut TcpStream) -> Header {
+    conn.write_all(&TOKEN.to_le_bytes()).unwrap();
     let (h, request) = next_request(conn);
     assert_eq!(request, Request::Hello);
     send_answer(
@@ -132,7 +136,14 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
             let mut name = [0u8; stream::NAME_BYTES];
             s.read_exact(&mut name).unwrap();
             let n = stream::read_name(&name).unwrap();
-            assert_eq!(n.exec, h.id, "a stream names its exec's request id");
+            assert_eq!(
+                n.exec,
+                Exec {
+                    conn: TOKEN,
+                    id: h.id
+                },
+                "a stream names its connection's token and its exec's request id"
+            );
             named.insert(n.stream, s);
         }
         send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 42 });

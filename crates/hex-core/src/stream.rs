@@ -7,7 +7,8 @@
 //!   reader holds ([`wire::MAX_MESSAGE`] or the node's own); a longer one is refused from its prefix,
 //!   before its body is buffered.
 //! - **Stdio:** an exec's stdin, stdout and stderr each ride a connection of their own, whose first
-//!   [`NAME_BYTES`] bytes name the exec (its request's id) and the stream. In the guest, that
+//!   [`NAME_BYTES`] bytes name its control connection (the [`TOKEN_BYTES`] the relay sent first on it),
+//!   the exec (its request's id, which is its connection's own) and the stream. In the guest, that
 //!   connection's socket is the descriptor the relay passes the node as the program's stream.
 //! - **Gather:** the relay holds an exec, or the streams that came before it, until the set its exec
 //!   names is whole ([`Gather`]), at most a bound of sets at once and each at most a patience long.
@@ -26,9 +27,13 @@ pub const STDIO_PORT: u32 = 0x4845_5801;
 /// A frame's prefix: the message's length, big-endian.
 const PREFIX: usize = 4;
 
+/// A control connection's first bytes, the relay's, before any frame: the connection's token (`u64`,
+/// little-endian), which its stdio connections name, as its request ids are its own.
+pub const TOKEN_BYTES: usize = 8;
+
 /// A stdio connection's first bytes: `HEXS`, the version (`u16`, little-endian as the wire's
-/// integers), the stream, a zero byte, and the exec's id (`u64`).
-pub const NAME_BYTES: usize = 16;
+/// integers), the stream, a zero byte, its control connection's token (`u64`) and the exec's id (`u64`).
+pub const NAME_BYTES: usize = 24;
 const NAME_MAGIC: [u8; 4] = *b"HEXS";
 /// The stdio name's only version. It changes append-only, as the wire's.
 const NAME_VERSION: u16 = 1;
@@ -188,22 +193,30 @@ impl Stdio {
     }
 }
 
-/// What a stdio connection names: its exec's request id and which stream it is.
+/// An exec, by its control connection's token and its request id there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Exec {
+    pub conn: u64,
+    pub id: u64,
+}
+
+/// What a stdio connection names: its exec and which stream it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Named {
-    pub exec: u64,
+    pub exec: Exec,
     pub stream: Stdio,
 }
 
 /// A stdio connection's first bytes.
 pub fn name(named: Named) -> [u8; NAME_BYTES] {
     let mut out = [0; NAME_BYTES];
-    let parts: [&[u8]; 5] = [
+    let parts: [&[u8]; 6] = [
         &NAME_MAGIC,
         &NAME_VERSION.to_le_bytes(),
         &[named.stream.tag()],
         &[0],
-        &named.exec.to_le_bytes(),
+        &named.exec.conn.to_le_bytes(),
+        &named.exec.id.to_le_bytes(),
     ];
     for (to, from) in out.iter_mut().zip(parts.into_iter().flatten()) {
         *to = *from;
@@ -213,7 +226,25 @@ pub fn name(named: Named) -> [u8; NAME_BYTES] {
 
 /// What a stdio connection's first bytes name, or why they name nothing.
 pub fn read_name(bytes: &[u8; NAME_BYTES]) -> Result<Named, Fault> {
-    let [m0, m1, m2, m3, v0, v1, stream, pad, id @ ..] = *bytes;
+    let [
+        m0,
+        m1,
+        m2,
+        m3,
+        v0,
+        v1,
+        stream,
+        pad,
+        c0,
+        c1,
+        c2,
+        c3,
+        c4,
+        c5,
+        c6,
+        c7,
+        id @ ..,
+    ] = *bytes;
     if [m0, m1, m2, m3] != NAME_MAGIC {
         return Err(Fault::Magic);
     }
@@ -231,7 +262,10 @@ pub fn read_name(bytes: &[u8; NAME_BYTES]) -> Result<Named, Fault> {
         ));
     }
     Ok(Named {
-        exec: u64::from_le_bytes(id),
+        exec: Exec {
+            conn: u64::from_le_bytes([c0, c1, c2, c3, c4, c5, c6, c7]),
+            id: u64::from_le_bytes(id),
+        },
         stream: Stdio::of(stream)?,
     })
 }
@@ -255,7 +289,7 @@ pub struct Stray<C> {
 }
 
 /// An exec's id and its connections, in stdin-stdout-stderr order of those it named.
-pub type Complete<C> = (u64, Vec<C>);
+pub type Complete<C> = (Exec, Vec<C>);
 
 /// An exec the gather refused, with the streams that came for it before, for the shell to close.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,7 +302,7 @@ pub struct Refused<C> {
 #[derive(Debug)]
 pub struct Gather<C> {
     bound: usize,
-    sets: BTreeMap<u64, Set<C>>,
+    sets: BTreeMap<Exec, Set<C>>,
 }
 
 #[derive(Debug)]
@@ -307,7 +341,7 @@ impl<C> Gather<C> {
         self.sets.is_empty()
     }
 
-    fn set(&mut self, exec: u64, now: Instant) -> Result<&mut Set<C>, Why> {
+    fn set(&mut self, exec: Exec, now: Instant) -> Result<&mut Set<C>, Why> {
         if !self.sets.contains_key(&exec) && self.sets.len() >= self.bound {
             return Err(Why::Full { bound: self.bound });
         }
@@ -318,7 +352,7 @@ impl<C> Gather<C> {
         }))
     }
 
-    fn finish(&mut self, exec: u64) -> Option<Complete<C>> {
+    fn finish(&mut self, exec: Exec) -> Option<Complete<C>> {
         let conns = self.sets.get_mut(&exec)?.complete()?;
         self.sets.remove(&exec);
         Some((exec, conns))
@@ -327,7 +361,7 @@ impl<C> Gather<C> {
     /// The exec `exec` has come, asking for `streams`: its set, once whole.
     pub fn expect(
         &mut self,
-        exec: u64,
+        exec: Exec,
         streams: wire::Streams,
         now: Instant,
     ) -> Result<Option<Complete<C>>, Refused<C>> {
@@ -386,7 +420,7 @@ impl<C> Gather<C> {
     /// Sets begun more than `patience` before `now`, taken out with the connections they held, for the
     /// shell to refuse and close.
     pub fn expire(&mut self, now: Instant, patience: Duration) -> Vec<Complete<C>> {
-        let late: Vec<u64> = self
+        let late: Vec<Exec> = self
             .sets
             .iter()
             .filter(|(_, set)| now.saturating_duration_since(set.since) > patience)

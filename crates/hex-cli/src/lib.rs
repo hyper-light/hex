@@ -19,6 +19,8 @@ pub mod selftest;
 #[cfg(target_os = "linux")]
 pub mod box_run;
 #[cfg(target_os = "linux")]
+pub mod guest;
+#[cfg(target_os = "linux")]
 pub mod node;
 #[cfg(target_os = "linux")]
 pub mod oci;
