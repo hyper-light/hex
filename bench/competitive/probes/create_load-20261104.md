@@ -71,3 +71,44 @@ breakdown at load 18-24. That is the host's load on libcrun's own path, so in (Y
 Hex's 2.0 ms in (Y), against 0.44 in the breakdown at load 24, is the host's load at 52-75; how much of that is Hex's
 own sensitivity would need a lower-load pair, and fedora has been 16-75 all day. create_serial's off-CPU and lock
 modes weren't needed for the 15 ms: the breakdown's parts 22 and 24 name the two fsyncs.
+
+## The parts, (A) tmpfs and (B) disk, and the record's fsync's share of (B)
+
+A box whose bundle is on disk keeps its record on disk, fsynced (goal 5 extended step 5; decision 1), so (B) is what a
+node with disk bundles pays on every create, not only a bench's setup. Pooled over 1,500 traced creates a run,
+create-breakdown-20261104T161018Z (A) and -161115Z (B), the same binaries and run as above. p50 / p99 / mean, ms:
+
+| # | part | (A) tmpfs | (B) disk |
+|---|---|---|---|
+| 1 | the call reaches the node; the spec checked; its turn taken; the record looked for | 0.009 / 0.023 / 0.011 | 0.013 / 0.045 / 0.017 |
+| 2 | its cgroup looked for; a watch slot reserved; the box root counted | 0.006 / 0.016 / 0.006 | 0.009 / 0.026 / 0.011 |
+| 3 | the cgroup made (kernel) | 0.078 / 0.300 / 0.089 | 0.100 / 0.334 / 0.126 |
+| 4 | its bounds written | 0.019 / 0.300 / 0.029 | 0.028 / 0.093 / 0.035 |
+| 5 | the state directory made; config.json read and parsed; its device policy planned | 0.018 / 0.039 / 0.023 | 0.055 / 0.173 / 0.068 |
+| 6 | the exec FIFO made; the device program's instructions made | 0.023 / 0.040 / 0.025 | 0.048 / 0.151 / 0.058 |
+| 7-8 | the device program loaded and attached (held: none) | 0 / 0 / 0 | 0 / 0 / 0 |
+| 9 | the pipes; a namespace made ahead taken; the request to a seed | 0.024 / 0.092 / 0.031 | 0.051 / 0.215 / 0.065 |
+| 10 | the seed's clone prepared | 0.018 / 0.087 / 0.023 | 0.034 / 0.096 / 0.040 |
+| 11 | the init's clone into its cgroup and namespaces | 0.080 / 0.480 / 0.102 | 0.119 / 0.512 / 0.157 |
+| 12 | the init's first steps, to its join of the network namespace made ahead | 0.028 / 0.126 / 0.041 | 0.038 / 0.128 / 0.052 |
+| 13 | the namespace made ahead joined (setns) | 0.002 / 0.015 / 0.003 | 0.003 / 0.018 / 0.005 |
+| 14 | the init's root attached and its mounts made | 0.052 / 0.286 / 0.066 | 0.073 / 0.249 / 0.095 |
+| 15 | the root chrooted into | 0.001 / 0.002 / 0.001 | 0.001 / 0.004 / 0.001 |
+| 16 | the hostname; the process become; ready sent | 0.010 / 0.028 / 0.013 | 0.018 / 0.050 / 0.021 |
+| 17 | the agent wakes to the ready signal; the init's stat opened | 0.010 / 0.137 / 0.017 | 0.015 / 0.128 / 0.021 |
+| 18 | the init's start time read; state.json written and renamed | 0.023 / 0.071 / 0.025 | 0.067 / 0.238 / 0.087 |
+| 19 | the record encoded | 0.010 / 0.033 / 0.012 | 0.016 / 0.055 / 0.020 |
+| 20 | its temp file made (kernel) | 0.003 / 0.011 / 0.003 | 0.014 / 0.058 / 0.017 |
+| 21 | the record written | 0.002 / 0.010 / 0.002 | 0.004 / 0.020 / 0.006 |
+| **22** | **the record's fsync (kernel)** | 0 / 0 / 0 | **4.078 / 20.525 / 5.921** |
+| 23 | the record closed and renamed; the store's directory opened | 0 / 0 / 0 | 0.092 / 0.271 / 0.114 |
+| **24** | **the directory's fsync (kernel)** | 0 / 0 / 0 | **5.149 / 20.780 / 7.001** |
+| 25 | the init watched; the box's info made; the call returns | 0.012 / 0.029 / 0.013 | 0.062 / 0.141 / 0.068 |
+| | the parts summed | 0.428 (p50s) / 0.535 (means) | 10.087 (p50s) / 14.009 (means) |
+
+**The record's fsync's share of (B):** the two fsyncs (22, 24) are 9.227 ms of the parts' 10.087 ms p50 sum (91.5%),
+and 12.922 ms of their 14.009 ms mean (92.2%). The box's record as a whole (parts 19-24) is 9.353 ms p50 (92.7%), 13.080
+mean (93.4%). Everything else in (B) sums to 0.734 ms at p50 against (A)'s 0.428: 1.7x, the overlay's metadata
+operations (parts 5, 6, 18, 20) and the host. The parts cover the traced rounds, whose creates were 9.78 ms at p50. The
+untraced seam rounds of the same run were 19.41 ms, the fsync's own variance by round (the traced rounds 8.6, 19.7 and
+8.6 ms). At p99 each fsync is about 20.5 ms.
