@@ -100,7 +100,12 @@ fn an_oci_box_is_refused_naming_the_features_that_are_off() {
             class: ClassSpec::Bundle(std::path::PathBuf::from(r"C:\nowhere")),
         })
         .unwrap_err();
-    let hex_api::Refusal::Platform { what, platform, why } = &refused else {
+    let hex_api::Refusal::Platform {
+        what,
+        platform,
+        why,
+    } = &refused
+    else {
         panic!("not refused by name: {refused:?}");
     };
     assert_eq!((*what, *platform), ("the oci class", "windows"));
