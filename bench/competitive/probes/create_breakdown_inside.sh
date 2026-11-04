@@ -137,7 +137,7 @@ EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_ex
   syscalls/sys_enter_chroot syscalls/sys_exit_chroot
   syscalls/sys_enter_open_tree syscalls/sys_exit_open_tree
   syscalls/sys_enter_write syscalls/sys_exit_poll syscalls/sys_exit_ppoll syscalls/sys_exit_wait4
-  syscalls/sys_exit_waitid"
+  syscalls/sys_exit_waitid syscalls/sys_enter_close syscalls/sys_exit_close"
 DETAIL="syscalls/sys_enter_openat syscalls/sys_enter_open"
 filter() { # filter <event>: the processes it's kept for
   case $1 in
