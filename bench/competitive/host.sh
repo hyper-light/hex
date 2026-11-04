@@ -9,7 +9,8 @@
 # A later pass in the same run directory: OUT_DIR names it, ROUND_FIRST (1) numbers its rounds after the
 # ones there, HEXBENCH_PHASES picks the drivers' phases (all), HEXBENCH_SUSTAINED sets the sustained phase's
 # lifecycles (10000), HEXBENCH_INTERLEAVED_CPUS1 and _CPUS32 pin the interleaved phase's halves to their CPUs (seam_oci
-# says how), HEXBENCH_OWNER names one owner for every box seam_oci makes and NETNS=0 gives the OCI pass's
+# says how), HEXBENCH_OWNER names one owner for every box seam_oci makes, HEXBENCH_NOFILE sets the soft descriptor
+# limit its node runs with (`hard`, as Hex's installer sets a node's, or a number; oci_inside.sh says how) and NETNS=0 gives the OCI pass's
 # bundles no network namespace of their own (oci_inside.sh says how), BENCH_MEMORY and BENCH_OOM set each container's
 # --memory (40g) and --oom-score-adj (none) on a shared host, as create_breakdown.sh's, and FETCH=0 keeps the competitors' binaries
 # already in $BASE/bin (their sha256 is recorded) rather than resolving each project's latest release again.
@@ -55,7 +56,7 @@ done
   echo "cpu: $(lscpu | sed -n 's/^Model name: *//p') ($(nproc) cpus), pinned to $CPUSET"
   echo "memory: $(free -g | awk '/^Mem/ {print $2}') GiB"; echo "load at start: $(cat /proc/loadavg)"
   echo "hex: $HEX ($(sha256sum "$HEX" | cut -c1-16))"; [ -z "${SEAM:-}" ] || echo "seam_box: $SEAM ($(sha256sum "$SEAM" | cut -c1-16))"
-  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_INTERLEAVED=${HEXBENCH_INTERLEAVED:-10} HEXBENCH_INTERLEAVED_CPUS1=${HEXBENCH_INTERLEAVED_CPUS1:-all} HEXBENCH_INTERLEAVED_CPUS32=${HEXBENCH_INTERLEAVED_CPUS32:-all} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_REUSE=${HEXBENCH_REUSE:-1} NETNS=${NETNS:-1} BENCH_MEMORY=${BENCH_MEMORY:-40g} BENCH_OOM=${BENCH_OOM:-none}"
+  echo "params: ROUNDS=$ROUNDS ROUND_FIRST=$ROUND_FIRST N=$N WARMUP=$WARMUP N_OVERRIDE=$N_OVERRIDE LIFECYCLES=$LIFECYCLES CAP=$CAP BUDGET_MIB=$BUDGET_MIB BOX_BUDGET_MIB=$BOX_BUDGET_MIB HEXBENCH_PHASES=${HEXBENCH_PHASES:-all} HEXBENCH_SUSTAINED=${HEXBENCH_SUSTAINED:-10000} HEXBENCH_INTERLEAVED=${HEXBENCH_INTERLEAVED:-10} HEXBENCH_INTERLEAVED_CPUS1=${HEXBENCH_INTERLEAVED_CPUS1:-all} HEXBENCH_INTERLEAVED_CPUS32=${HEXBENCH_INTERLEAVED_CPUS32:-all} HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_REUSE=${HEXBENCH_REUSE:-1} HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given} NETNS=${NETNS:-1} BENCH_MEMORY=${BENCH_MEMORY:-40g} BENCH_OOM=${BENCH_OOM:-none}"
 } >> "$OUT/env.txt"
 
 if [ "${FETCH:-1}" = 0 ]; then
@@ -118,7 +119,7 @@ if [[ " $PHASES " == *" oci "* ]]; then
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
     -e HEXBENCH_SUSTAINED -e HEXBENCH_INTERLEAVED -e HEXBENCH_INTERLEAVED_CPUS1 -e HEXBENCH_INTERLEAVED_CPUS32 -e HEXBENCH_OWNER \
-    -e HEXBENCH_REUSE -e NETNS -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e HEXBENCH_REUSE -e HEXBENCH_NOFILE -e NETNS -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag
