@@ -583,8 +583,14 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   systemd ≥254, refused by name below it), enabled for every user (`systemctl --global enable`). A running user manager reads which
   controllers it may hand on only when it starts (§1.4), so `daemon-reload` alone leaves it without `io`:
   measured, the lab's installed node was refused `io` until install re-executed each running user manager
-  (`systemctl reload user@UID.service`, which keeps its processes), as install now does. For each `--user` it
-  turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
+  (`systemctl reload user@UID.service`, which keeps its processes), as install now does. The node's descriptor limit is
+  the unit's `LimitNOFILE=1048576`, soft and hard: its own descriptors at its bounds (330,112) and every kept
+  namespace's held `/proc/net` files (4 × 66,048) need 594,304; 1,048,576 is the kernel's default
+  `fs.nr_open` and dockerd's old value (`docs/research/runtime/nofile-limit.md`). A user unit can't exceed its
+  manager's hard limit, so the drop-in also gives `user@.service` `LimitNOFILE=1024:1048576` (everything else
+  a user runs keeps systemd's soft 1024). A box whose spec names no `RLIMIT_NOFILE` inherits the node's
+  limit, as crun's containers inherit theirs; Docker 29 gives 1024:524288 (open, the lead's to bring Ada).
+  For each `--user` it turns on lingering (their manager, and so their node, runs with no session, as a CI runner's must, §1.5) and
   starts the service, its socket at `$XDG_RUNTIME_DIR/hex/node.sock`. Rootless `oci` boxes need nothing more: each maps
   only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6). Ubuntu
   24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no Ubuntu

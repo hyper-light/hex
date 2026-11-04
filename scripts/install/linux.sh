@@ -24,6 +24,8 @@ UNIT=/etc/systemd/user/hex-node.service
 WANTS=/etc/systemd/user/default.target.wants/hex-node.service
 STATE=/var/lib/hex-install
 MANIFEST=$STATE/manifest
+# The node's descriptor limit, soft and hard (the unit below says why).
+NOFILE=1048576
 # DelegateSubgroup= is systemd 254's (systemd.resource-control(5)).
 SYSTEMD_MIN=254
 # How long a user's manager and node get to come up: a bounded wait, counted in 0.1 s steps.
@@ -159,11 +161,14 @@ install_hex() {
   # The plan is the manifest from the start, so an install cut short is undone by uninstall too.
   printf '%s\n' "$made" >"$MANIFEST"
   install -D -m 0755 "$BINARY" "$BIN"
-  write_file "$DROPIN" 0644 <<'EOF'
+  write_file "$DROPIN" 0644 <<EOF
 # Installed by Hex's installer (scripts/install/linux.sh): every user's manager is delegated the
-# controllers Hex's boxes use, so a user's hex-node service hands them on to its boxes.
+# controllers Hex's boxes use, so a user's hex-node service hands them on to its boxes, and a hard
+# descriptor limit its hex-node service may take up to (a user unit can't exceed its manager's; the soft
+# limit everything else starts with stays systemd's 1024). docs/research/runtime/nofile-limit.md.
 [Service]
 Delegate=cpu io memory pids
+LimitNOFILE=1024:$NOFILE
 EOF
   write_file "$UNIT" 0644 <<EOF
 # Installed by Hex's installer (scripts/install/linux.sh): the node agent, serving its socket at
@@ -179,6 +184,11 @@ RuntimeDirectory=hex
 StateDirectory=hex
 Delegate=yes
 DelegateSubgroup=agent
+# Room for the node's own descriptors at its bounds (330,112) and every kept network namespace's held
+# /proc/net files (4 x 66,048): 594,304. 1,048,576 is the kernel's default fs.nr_open, the most a hard
+# limit may be without that sysctl changed, and dockerd's before moby dropped infinity
+# (docs/research/runtime/nofile-limit.md §2-§3, §5).
+LimitNOFILE=$NOFILE
 Restart=on-failure
 
 [Install]
