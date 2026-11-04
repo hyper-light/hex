@@ -133,6 +133,13 @@ def main(argv):
             print(f"  CPU, the pairs' medians: {m['c1_cpu_ms_per_lifecycle']:.2f} ms a lifecycle at 1 and "
                   f"{m['c32_cpu_ms_per_lifecycle']:.2f} at 32; CPUs busy {m['c1_cpus_busy']:.2f} at 1 and "
                   f"{m['c32_cpus_busy']:.2f} at 32")
+        with_took = [p for _, _, _, p, _ in rows if p.get("c1_p50_ms") is not None]
+        if with_took:
+            t = {k: st.median(p[k] for p in with_took) for k in ("c1_p50_ms", "c1_p99_ms", "c32_p50_ms", "c32_p99_ms")}
+            worst = max(p["c32_p99_ms"] for p in with_took)
+            print(f"  a lifecycle's wall, the pairs' medians: p50 {t['c1_p50_ms']:.3f} ms and p99 {t['c1_p99_ms']:.3f} at "
+                  f"1, p50 {t['c32_p50_ms']:.3f} and p99 {t['c32_p99_ms']:.3f} at 32 (the most of any pair's p99 at 32: "
+                  f"{worst:.3f})")
         # Each half's pin as read back: every task the pin reached held the half's CPUs alone, in how many pairs.
         for half in ("c1", "c32"):
             asked = {ph.get(f"{half}_cpus") for *_, ph in rows} - {None}

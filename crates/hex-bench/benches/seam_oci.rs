@@ -444,43 +444,55 @@ mod linux {
         conc: usize,
         lifecycles: usize,
         tag: &str,
-    ) -> Result<(Duration, f64), String> {
+    ) -> Result<(Duration, f64, Vec<f64>), String> {
         let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
         let start = Barrier::new(conc + 1);
         std::thread::scope(|s| {
             let threads: Vec<_> = (0..conc)
                 .map(|_| {
                     s.spawn(|| {
+                        let mut took = Vec::new();
                         start.wait();
                         while !failed.load(Ordering::Relaxed) {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             if i >= lifecycles {
                                 break;
                             }
+                            let began = Instant::now();
                             if let Err(e) =
                                 run_true_container(node, bundle, &format!("{tag}{i:06}"))
                             {
                                 failed.store(true, Ordering::Relaxed);
                                 return Err(e);
                             }
+                            took.push(began.elapsed().as_secs_f64() * 1e3);
                         }
-                        Ok(())
+                        Ok(took)
                     })
                 })
                 .collect();
             start.wait();
             let (c0, t0) = (cpu_usec(own), Instant::now());
-            let errs: Vec<String> = threads
-                .into_iter()
-                .filter_map(|t| {
-                    t.join()
-                        .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
-                        .err()
-                })
-                .collect();
+            let (mut took, mut errs) = (Vec::with_capacity(lifecycles), Vec::new());
+            for t in threads {
+                match t
+                    .join()
+                    .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
+                {
+                    Ok(each) => took.extend(each),
+                    Err(e) => errs.push(e),
+                }
+            }
             let (wall, cpu_s) = (t0.elapsed(), (cpu_usec(own) - c0) as f64 / 1e6);
-            errs.into_iter().next().map_or(Ok((wall, cpu_s)), Err)
+            took.sort_by(f64::total_cmp);
+            errs.into_iter().next().map_or(Ok((wall, cpu_s, took)), Err)
         })
+    }
+
+    /// The `per_mille` quantile of `sorted`, ascending, by its nearest rank; `None` for none.
+    fn quantile(sorted: &[f64], per_mille: usize) -> Option<f64> {
+        let n = sorted.len();
+        (n > 0).then(|| sorted[(n * per_mille).div_ceil(1000).clamp(1, n) - 1])
     }
 
     /// The host's 1-minute load average and its CPU pressure, the share of the last 10 s some task waited
@@ -528,10 +540,10 @@ mod linux {
         for p in 0..pairs {
             let at_start = host_load();
             let c1_pinned = pin_to(&cpus1)?;
-            let (one, one_cpu) =
+            let (one, one_cpu, one_took) =
                 at_concurrency(node, bundle, own, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
             let c32_pinned = pin_to(&cpus32)?;
-            let (many, many_cpu) = at_concurrency(
+            let (many, many_cpu, many_took) = at_concurrency(
                 node,
                 bundle,
                 own,
@@ -551,6 +563,10 @@ mod linux {
                              "c32_cpu_ms_per_lifecycle": many_cpu * 1e3 / INTERLEAVED_C32 as f64,
                              "c1_cpus_busy": one_cpu / one.as_secs_f64(),
                              "c32_cpus_busy": many_cpu / many.as_secs_f64(),
+                             "c1_p50_ms": quantile(&one_took, 500),
+                             "c1_p99_ms": quantile(&one_took, 990),
+                             "c32_p50_ms": quantile(&many_took, 500),
+                             "c32_p99_ms": quantile(&many_took, 990),
                              "c1_pinned": c1_pinned, "c32_pinned": c32_pinned,
                              "at_start": at_start, "at_end": host_load()}));
         }
