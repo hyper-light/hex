@@ -165,6 +165,7 @@ dependencies = [
  "hex-core",
  "hex-node",
  "hex-runtime",
+ "hex-sim",
  "serde_json",
  "tempfile",
 ]
