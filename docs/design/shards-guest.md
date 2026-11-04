@@ -66,13 +66,17 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
 - **Control:** the same `hex_core::wire` messages, each framed on the stream by its length (a big-endian `u32`, at
   most the wire's `MAX_MESSAGE`; a longer one is a typed fault that closes the connection, never a partial read).
 - **Stdio:** each exec's stdin, stdout and stderr ride a vsock connection of their own, which the host opens and
-  names in its first frame (the exec's id and which stream). In the guest, that connection's socket **is** the
-  descriptor passed to the unchanged node over its own socket: the program reads and writes the vsock socket
-  directly, so the guest copies no stdio bytes. On the host, the client copies between the caller's pipes and the
-  stream, one bounded buffer per stream.
+  names in its first 16 bytes (the exec's id and which stream; `hex_core::stream::name`). The node takes only a
+  pipe's end as a program's stream (`crates/hex-node/src/serve.rs:1208`: "the right end of a pipe, as the
+  seam's `Stdio` holds; anything else is refused by name"), so the relay makes a pipe per stream, passes its end
+  to the node with the exec, and copies between the pipe and the vsock connection; on the host, the client
+  copies between the caller's pipes and its connections. One bounded buffer per stream on each side.
 - **In the guest**, a relay (`hex guest relay`) accepts the host's vsock connections and speaks the node's own
-  socket, so the node and its wire stay as they are (CLAUDE.md §8). It is a sans-IO core (the framing and the
-  stream naming) driven by a shell (CLAUDE.md §9).
+  socket, one node connection per host control connection, so the node, its wire and its disconnect rule stay
+  as they are (CLAUDE.md §8). Its framing, stream names and gathering of an exec's streams are a sans-IO core
+  (`hex_core::stream`, HEX-GUEST-1..3) driven by the relay and the host's client (CLAUDE.md §9). The guest
+  listens on AF_VSOCK through `socket2`'s safe `SockAddr::vsock` (socket2 0.6, feature `all`; rustix 1.1 has
+  the family but no address type), so no `unsafe` is added.
 - **Bounds:** at most `wire::Limits`' calls in flight, as the local client; at most three stdio streams per exec;
   stdio connections that never name an exec within the answer patience are closed with a typed refusal logged on
   `hex.guest` (`event = "stdio_unnamed"`). Shards' muxer holds at most 1023 connections (`muxer.rs:42`), so a
@@ -101,6 +105,7 @@ the seam, and every gate passes.
 ## 7. What would falsify it
 
 - Shards' owner choosing another seam (§2): the routing (§1) and channel (§3) stand; the implementation changes.
-- A vsock socket refused as a program's stdio in the guest (§3): then the relay pumps bytes through pipes instead.
+- A copy per stdio byte in the relay measurably slowing a program's output against a Linux host's: then the relay
+  splices (`splice(2)`) between the socket and the pipe instead of copying.
 - The guest's interpreted BPF (`CONFIG_BPF_JIT` unset) making a device check measurably slower than the bar: then
   the guest kernel adds the JIT, with Shards.
