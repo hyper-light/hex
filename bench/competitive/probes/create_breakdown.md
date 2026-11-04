@@ -1045,3 +1045,15 @@ check of the reader, not a measure of the tree.
 
 In the reuse-on run every traced create was handed its owner's idle cgroup. Only the warm-up's first box makes a fresh
 slot, and it isn't traced, so a fresh slot's cut rests on the selftest (`create_breakdown.py test`).
+
+Since 5bc0a2c a pruned seed reads the spec the runtime checked with a pread of its sealed memfd, and opens no
+config.json. The reader then found no cut there and refused every create on the tree's own binaries (the hooks
+agent's create-breakdown-20261104T160938Z at 891245f). At 0b2e18b the rounds trace pread64's exit and the seed's part
+ends at its last pread before the clone. Two runs on that tree's binaries (hex sha256 8ae605e02c4e63b2, dynamically
+linked; seam_oci dff934f4187caac9; CPUs 4-15, N=1000, 3 rounds, load 47-60), again a check of the reader, not of
+record:
+
+| run | reuse | path the reader took | probes cut whole | rounds' traced creates cut whole | seed reads cut at a pread |
+|---|---|---|---|---|---|
+| create-breakdown-20261104T162204Z | on | pruned, record once, chosen cgroup (handed on) | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one |
+| create-breakdown-20261104T162704Z | off | pruned, record once, the cgroup's mkdir | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one |
