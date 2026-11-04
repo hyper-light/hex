@@ -33,7 +33,10 @@ on kiln research `01a190c51f137042a9697949c8fe2c7a`, f88-f91 (`bench/competitive
 - Pool on against drained in one run: the clone (part 16) fell 0.143 to 0.104 ms, about 39 us, more than f88-f91's
   30-35 + 7-8 under a busier host; the joins put about 11 us back (part 17, 0.041 to 0.052), twice f91's 6, since each
   `setns` copies an nsproxy and the init's first steps pay for it.
-- The first build (run A) gave most of the clone's saving back: a wake of the refill thread per take, whose make then ran
-  beside the next create's clone, and the init's close of the pair (the last references, freed on the path). Waking the
-  thread only once the pool is half empty, and leaving the pair for the exec to close, took the whole create from
-  0.985 of drained in run A to 17-37 us faster than drained, pair by pair, in every round of run B.
+- Two runs of the A/B (run A before the refill thread's wake was cut to half empty and the init's close moved to its
+  exec, run B after) give part 16 at 0.854 and 0.727 of drained. The pooled side was the same in both, part for part
+  (part 16 0.105 and 0.104 ms); the drained clone took 0.123 ms in one and 0.143 in the other. Its cost moves with the
+  host because a drained clone makes the mqueue mount, and every new mount takes the global mount lock (v6.19
+  `fs/namespace.c:1154-1166`, `setup_mnt`). So the criterion is met within run B, and the changes between the runs didn't
+  move the pooled path measurably. What shows the work left the path is run B's interleaved pairs: a create 17-37 us
+  faster than its drained twin in every round, with start, exec and delete unchanged.

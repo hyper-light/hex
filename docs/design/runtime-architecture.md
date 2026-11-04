@@ -1198,8 +1198,8 @@ This takes it off create's path on a root node, with no new kernel version (deci
   <!-- record: bench/competitive/probes/netns_pool.md -->A pair costs 6.9 KiB charged
   and about 21 us of the refill thread's time<!-- /record --> (`probes/netns_pool.md`). The refill thread is woken only
   once the pool is half empty, since a wake is a system call on create's path, and the init leaves the pair for its
-  exec to close, since the last close frees each namespace's file. Linux only: macOS and Windows have no ipc or uts
-  namespace for a box to be given.
+  exec to close, so the close isn't on create's path either. Linux only: macOS and Windows have no ipc or uts namespace
+  for a box to be given.
   What would falsify it (fedora, pool on against drained in one run): part 16 not falling by 15%, the whole create not
   faster in the interleaved pairs, the pool dry for more than 1% of a sustained phase's creates, or a box seeing
   another's or the node's System V objects, queues or hostname (`oci_ipcuts.rs`).

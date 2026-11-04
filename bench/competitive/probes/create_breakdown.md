@@ -860,17 +860,17 @@ lifecycle on a node with the pool and one with it drained, interleaved one by on
 All on fedora, Linux 6.19.10, `CPUSET=4-15`, N=1000, WARMUP=100, `LOAD_GATE=0` with Focal's and others' containers up
 beside it; every round's counts confirm which it was: each pooled create took a pair, each drained one made its own.
 
-**Run A**, create-breakdown-20261103T230157Z (unit hex-s4-job3-20261103T225951Z, tree 53330b0, 6 rounds, load 74.10 at
-the start, 38.45 at the end): before the two changes below. Part 16, the init's clone into its cgroup and namespaces,
-pooled p50 0.105 ms on against 0.123 drained, 0.854; part 17, which holds the pair's two joins, 0.053 against 0.036; the
-two together 0.981; the whole create 0.818 against 0.831, 0.985, its rounds 0.913 to 1.045. Short of the bar, and most
-of what the clone saved spent again after it: two `setns`, the init's close of both descriptors (the last, so each
-namespace's file was freed on the path), and a wake of the refill thread per take, whose make then ran beside the next
-create's clone.
+**Run A**, create-breakdown-20261103T230157Z (unit hex-s4-job3-20261103T225951Z, tree 53330b0, 6 rounds, 23:01:57Z to
+23:05:25Z, load 74.10 at the start, 38.45 at the end). Step 6's profile ran beside it: bpftrace on every context switch
+and futex call, with perf, on CPUs 4-31 from 23:00:29Z to 23:03:15Z (unit hex-g5x-s6-fdh13-20261103T225919Z), then its
+interleaved pairs pinned to 4-15 to about 23:06:30Z (hex-g5x-s6-v24-20261103T225919Z). Part 16, the init's clone into
+its cgroup and namespaces, pooled p50 0.105 ms on against 0.123 drained, 0.854, short of the bar; part 17, which holds
+the pair's two joins, 0.053 against 0.036; the whole create 0.818 against 0.831, 0.985, its rounds 0.913 to 1.045.
 
 **Run B**, create-breakdown-20261103T231406Z (unit hex-s4-job4-20261103T231047Z, the tree of step 4's next commit, hex
 e924de4229967190, seam_oci 6b751ac622d96411, 8 rounds, load 77.67 at the start, 38.36 at the end), with the refill thread
-woken only once the pool is half empty and the pair left for the init's exec to close, as the pipes are:
+woken only once the pool is half empty and the pair left for the init's exec to close, as the pipes are. No timed part
+of step 6's overlapped it; only its untimed gates and root lab ran, on 16-31 (hex-g5x-s6-fdh23-20261103T231544Z):
 
 | | on p50 (ms) | drained p50 | on over drained, p50 | on p99 | drained p99 | on over drained, p99 |
 |---|---|---|---|---|---|---|
@@ -884,6 +884,22 @@ median of the pairs' create differences, on minus drained, and the share of pair
 -0.0220 (0.57), -0.0275 (0.59), -0.0208 (0.57), -0.0343 (0.52), -0.0373 (0.63), -0.0171 (0.53), -0.0318 (0.55). Start's,
 exec's and delete's medians stayed within -0.0025 to +0.0095 ms of zero, so nothing moved to them. So the clone sheds
 about 39 us of the pair's making, the joins add about 11 back, and a create is 17 to 37 us faster in every round.
+
+The two runs side by side, pooled p50 (ms):
+
+| | run A on | run A drained | run A ratio | run B on | run B drained | run B ratio |
+|---|---|---|---|---|---|---|
+| part 16 | 0.105 | 0.123 | 0.854 | 0.104 | 0.143 | 0.727 |
+| part 17 | 0.053 | 0.036 | 1.472 | 0.052 | 0.041 | 1.268 |
+| create | 0.818 | 0.831 | 0.985 | 0.816 | 0.978 | 0.834 |
+
+The pool's side was the same in both runs, part for part; what moved is the drained side: its clone took 0.123 ms in run
+A and 0.143 in run B, at like loads at each run's start and end. So the ratio's gain from run A to run B came from the
+drained creates, not from the pooled path getting faster, and the two changes between the runs left the pooled parts
+where they were. That the drained clone's cost moves with the host is what its work predicts: making an ipc namespace
+mounts its mqueue filesystem, and every new mount takes the global mount lock (Linux v6.19 `fs/namespace.c:1154-1166`,
+`setup_mnt`), as it registers two sysctl tables under the sysctl lock, so it waits on whatever else mounts or registers
+then. The criterion compares creates within one run, which run B meets and run A misses by 0.004.
 
 The sustained phase at concurrency 32 through host.sh (`PHASES=oci RUNTIMES=libcrun HEXBENCH_PHASES=sustained`, 10,000
 lifecycles a round, in process, `CPUSET=4-15`): the pool was dry for 0, 0 and 30 creates in run A's tree
