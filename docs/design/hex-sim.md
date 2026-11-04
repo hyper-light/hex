@@ -62,7 +62,9 @@ Jepsen's nemesis is a process scheduled like a client DS[6][7].
 **Evidence.** `a_crash_at_every_control_plane_write_loses_and_doubles_nothing`: every one of the clean
 run's writes, both sides, leaves a log the specification accepts and zero lost or doubled, with exactly
 one crash per run (injected = 2 × writes seen), and more than half of the crashed histories differ from
-the clean one (the crash had effect).
+the clean one (the crash had effect). With node agents told of a placement only when its writer survives (the feed
+moved behind the crash), the sweep fails at write 3, `After`: one workload lost (same unit, mutant
+`feed-after-crash`).
 
 **What would falsify it.** A crash point whose run loses or doubles a workload: a defect in recovery,
 fixed at its cause (CLAUDE.md §4). This sweep is one crash per run on one cluster; `AC-T7.3.3`'s 10,000
@@ -83,7 +85,8 @@ Gödel's single binder PA[4a]), in `scheduler-architecture.md` S2 and S6.
 **Evidence.** Free capacity changes only through recorded changes, so a node unchanged since a decision
 keeps its place in the order; the check is exact. `placements_equal_the_serial_specification_on_generated_clusters`
 holds it over 1,000 generated clusters with 1-8 deciders and windows of 1-64, with conflicts and stale
-decisions both reached (non-vacuity).
+decisions both reached (non-vacuity). With the check turned off (every decision kept), the same test fails:
+the store refuses a stale placement as overcommitting its node (`UnexpectedConflict`): fedora unit `hex-sched-all-20261104T084349Z` at 3b1345c, mutant `no-late-binding`.
 
 **What would falsify it.** A run whose log the specification refuses. Its cost, not its truth, is what
 implementation goal 2 measures: the in-order committer is the serial point the 10,000/s bar tests.
