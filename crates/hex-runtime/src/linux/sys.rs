@@ -228,8 +228,10 @@ std::thread_local! {
 /// ([`clone_vfork`], goal 5's trampoline). The program is in the box from its first instruction, with no
 /// `cgroup.procs` write and the kernel's migration locks it takes, and nothing of the node agent is
 /// copied for it: the child runs on a stack of its own in the agent's memory until its execve, and this
-/// thread waits until then (decision 7 of docs/design/runtime-architecture.md). Returns once the program
-/// has executed; one that can't comes back as its errno, its child reaped.
+/// thread waits until then (decision 7 of docs/design/runtime-architecture.md). Returns once the child's
+/// execve has replaced its memory, past which the exec can't come back to the caller (the vfork's release,
+/// Linux v6.19 fs/exec.c:854, kernel/fork.c:1488); the kernel names the program a moment later
+/// (fs/exec.c:1242-1246). One that can't execute comes back as its errno, its child reaped.
 pub fn clone_into_cgroup(cgroup: BorrowedFd<'_>, spawn: Spawn) -> std::io::Result<Cloned> {
     let argv = pointers(&spawn.argv);
     let envp = pointers(&spawn.envp);

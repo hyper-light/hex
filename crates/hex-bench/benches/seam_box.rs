@@ -213,10 +213,18 @@ mod linux {
         Ok(Value::Object(out))
     }
 
-    /// Whether `pid` runs `sleep`. std's spawn returns once the child's exec has succeeded or failed,
-    /// so a box's program is running when `exec` returns: a fact to check, not one to wait for.
+    /// Whether process `pid` runs `sleep`, waited for at most CALL_TIMEOUT: a run returns once the
+    /// program's execve has released the agent's memory (the vfork's release, Linux v6.19
+    /// fs/exec.c:854, kernel/fork.c:1488), and the kernel names it a moment later (fs/exec.c:1242-1246).
     fn runs_sleep(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "sleep")
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        loop {
+            match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                Ok(c) if c.trim() == "sleep" => return true,
+                Ok(_) if Instant::now() < deadline => std::thread::yield_now(),
+                _ => return false,
+            }
+        }
     }
 
     /// How many cgroups under `cg` are removed but not yet released (`cgroup.stat` nr_dying_descendants).
