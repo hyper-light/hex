@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn each_filter_refuses_what_it_names() {
         let mut ns = nodes(&[res(10_000, 100, 0), res(10_000, 100, 2)]);
-        ns[0].background_milli = 8_500;
+        ns[0].background_milli = 9_100;
         let mut index = FitIndex::new(&ns).unwrap();
         let session = Demand {
             need: res(1_000, 1, 0),
