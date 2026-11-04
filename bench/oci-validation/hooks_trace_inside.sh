@@ -5,7 +5,8 @@
 # 2. A hooked create through the after binary writes `H` (the trace sees the stop it looks for: not vacuous).
 # 3. The before binary reads and deletes a container the after binary made with a startContainer hook, its
 #    state carrying the startContainer field (an old reader of the new state).
-# strace's per-call counts of each hookless create are kept beside them ($OUT/<binary>.plain.count).
+# 4. A hookless create makes the same calls before and after, each syscall's least count over five creates a
+#    binary ($OUT/<binary>.plain.count.<n>, strace -c's; the least, $OUT/<binary>.plain.calls).
 set -uo pipefail
 CG=/sys/fs/cgroup
 mkdir -p "$CG/lab"
@@ -43,9 +44,13 @@ for b in before after; do
   traced "plain-$b" "$OUT/$b.plain.trace" "-e trace=write -s 32" -- "/opt/$b-hex" "$W/plain"
   "/opt/$b-hex" oci delete --force "plain-$b"; wait "$STRACE"
   echo "$b hookless create: sync lines $(lines "$OUT/$b.plain.trace")" | tee -a "$OUT/checks"
-  traced "count-$b" "$OUT/$b.plain.count" "-c" -- "/opt/$b-hex" "$W/plain"
-  "/opt/$b-hex" oci delete --force "count-$b"; wait "$STRACE"
 done
+# Per-call counts, five creates a binary, interleaved: a create's count varies from one to the next (a write can
+# be taken twice), so each syscall's least count over the five is compared.
+for i in 1 2 3 4 5; do for b in before after; do
+  traced "count-$b-$i" "$OUT/$b.plain.count.$i" "-c" -- "/opt/$b-hex" "$W/plain"
+  "/opt/$b-hex" oci delete --force "count-$b-$i"; wait "$STRACE"
+done; done
 # Each "no H" holds only over a trace that saw the create's ready line: a missing trace is a failure, not a pass.
 check "a hookless create writes R and no H (before)" 'lines "$OUT/before.plain.trace" | grep -qw R && ! lines "$OUT/before.plain.trace" | grep -qw H'
 check "a hookless create writes R and no H (after)" 'lines "$OUT/after.plain.trace" | grep -qw R && ! lines "$OUT/after.plain.trace" | grep -qw H'
@@ -61,6 +66,7 @@ check "the before binary deletes it" '[ ! -e "$HEX_OCI_ROOT/hooked" ]'
 check "a hooked create writes H (the trace sees the stop it looks for)" 'lines "$OUT/after.hooked.trace" | grep -qw H'
 # strace -c's columns: % time, seconds, usecs/call, calls, errors (blank where none), syscall.
 calls() { awk '$NF!="total" && $1 ~ /^[0-9.]+$/ {print $NF, $4}' "$1" | sort; }
-calls "$OUT/before.plain.count" > "$OUT/before.plain.calls"; calls "$OUT/after.plain.count" > "$OUT/after.plain.calls"
-check "a hookless create makes the same calls, each as many times, before and after" 'diff "$OUT/before.plain.calls" "$OUT/after.plain.calls"'
+least() { for f in "$OUT/$1".plain.count.*; do calls "$f"; done | awk '!($1 in m) || $2 < m[$1] {m[$1] = $2} END {for (k in m) print k, m[k]}' | sort; }
+least before > "$OUT/before.plain.calls"; least after > "$OUT/after.plain.calls"
+check "a hookless create makes the same calls, each as many times at least, before and after" 'diff "$OUT/before.plain.calls" "$OUT/after.plain.calls"'
 ! grep -q '^FAIL' "$OUT/checks"
