@@ -845,6 +845,26 @@ On-CPU time a lifecycle in the runtime's threads: 1,333.1 us at 1 (`hex` 587.6, 
   hold to write (run 2).
 - **The futex and socket waits are threads with nothing to do,** not the path: they fall a lifecycle as the same idle
   time spreads over more lifecycles. The polls' 5.6 ms at 32 are still to be named by caller.
+- **The concurrency 1 column weighs the node's start too:** that run is 520 lifecycles (`hex_c1`, 500 after 20), about
+  a second, in which the node's pools fill (32 seeds, the namespaces and the `/dev` trees made ahead); concurrency 32's
+  is 20,000 sustained. Its on-CPU profile is mostly that start, so only concurrency 32's is read below.
+- **At concurrency 32, 18.1% of the runtime's on-CPU samples spin on a lock** (28,932 samples, about 1.45 ms a
+  lifecycle), nearly all on three of the host's mutexes:
+
+  | where | share |
+  |---|---|
+  | `list_lrus_mutex`, a superblock made: `__list_lru_init < alloc_super < sget_fc` | 7.27% |
+  | `cgroup_mutex`, the clone into the box's cgroup: `cgroup_css_set_fork < cgroup_can_fork < copy_process` | 4.87% |
+  | `list_lrus_mutex`, a superblock let go: `list_lru_destroy < deactivate_locked_super < cleanup_mnt` | 1.45% |
+  | `shrinker_mutex`, a superblock made: `shrinker_register < sget_fc < get_tree_nodev` | 1.09% |
+  | everything else (files tables, sysctl tables, the mount lock, a directory's `i_rwsem`) | under 0.2% each |
+
+  Every superblock made takes `list_lrus_mutex` for each of its two LRU lists (Linux v6.19 `fs/super.c:388-390`,
+  `mm/list_lru.c:27-35`) and `shrinker_mutex` twice (`mm/shrinker.c:216-237`, `:738-751`, the second across
+  `shrinker_debugfs_add`); each let go takes `list_lrus_mutex` twice more and `shrinker_mutex` once (`fs/super.c:300-302`,
+  `mm/list_lru.c:37-45`). A box makes up to three: its `/proc`, its `/dev` tmpfs and its IPC namespace's mqueue, which every new IPC
+  namespace mounts for itself (`ipc/namespace.c:73`, `ipc/mqueue.c:1626-1637`, `:426-438`). The
+  `/proc` one comes with its own pid namespace; the other two are the ones a lifecycle could make fewer of.
 
 ## What the runs find
 
