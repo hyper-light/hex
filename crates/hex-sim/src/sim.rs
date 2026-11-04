@@ -113,6 +113,9 @@ pub struct Report {
     /// Store writes the control plane attempted, including one the nemesis cut off.
     pub writes: u64,
     pub crashes: u64,
+    /// Of those, crashes before their write was applied, and after.
+    pub crashes_before: u64,
+    pub crashes_after: u64,
     /// Decisions made again at commit because a node change since could have changed them.
     pub conflicts: u64,
     /// Of those, decisions older than the change window.
@@ -478,7 +481,7 @@ impl Sim<'_> {
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
         let crash = self.strike(number);
         if crash == Some(When::Before) {
-            self.crash()?;
+            self.crash(When::Before)?;
             return Ok(None);
         }
         let outcome = self.store.apply(self.now, write)?;
@@ -492,7 +495,7 @@ impl Sim<'_> {
             )?;
         }
         if crash.is_some() {
-            self.crash()?;
+            self.crash(When::After)?;
             return Ok(None);
         }
         Ok(Some(outcome))
@@ -524,7 +527,14 @@ impl Sim<'_> {
         }
     }
 
-    fn crash(&mut self) -> Result<(), SimError> {
+    fn crash(&mut self, when: When) -> Result<(), SimError> {
+        let side = match when {
+            When::Before => &mut self.report.crashes_before,
+            When::After => &mut self.report.crashes_after,
+        };
+        *side = side
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
         self.report.running_through_crashes = self
             .report
             .running_through_crashes

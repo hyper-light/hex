@@ -113,7 +113,7 @@ fn crash_cluster() -> Cluster {
 /// AC-T7.3.3's nemesis, at every write: do the same run once per control-plane store write, crashing
 /// the control plane before that write and again after it; expect each run's log to satisfy the
 /// specification and nothing lost or started twice, and (non-vacuity) exactly one crash per run and
-/// crashes injected == 2 x writes seen.
+/// crashes injected before writes == writes seen and crashes injected after writes == writes seen.
 #[test]
 fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
     let cluster = crash_cluster();
@@ -128,7 +128,7 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
         writes >= 3 * u64::try_from(cluster.workloads.len()).unwrap(),
         "{writes} writes"
     );
-    let (mut injected, mut changed_history) = (0u64, 0u64);
+    let (mut before, mut after, mut changed_history) = (0u64, 0u64, 0u64);
     for write in 0..writes {
         for when in [When::Before, When::After] {
             let run = sim::run(
@@ -140,7 +140,9 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
             )
             .unwrap();
             assert_eq!(run.report.crashes, 1, "write {write} {when:?}");
-            injected += run.report.crashes;
+            assert_eq!(run.report.crashes_before + run.report.crashes_after, 1);
+            before += run.report.crashes_before;
+            after += run.report.crashes_after;
             spec::check_log(&cluster.nodes, &run)
                 .unwrap_or_else(|v| panic!("write {write} {when:?}: {v}"));
             let end = spec::check_end(&cluster, &run);
@@ -157,7 +159,8 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
             }
         }
     }
-    assert_eq!(injected, 2 * writes);
+    assert_eq!(before, writes, "crashes before writes");
+    assert_eq!(after, writes, "crashes after writes");
     assert!(
         changed_history > writes,
         "crashes changed only {changed_history} of {} histories",

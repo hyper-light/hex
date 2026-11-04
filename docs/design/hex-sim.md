@@ -61,7 +61,7 @@ Jepsen's nemesis is a process scheduled like a client DS[6][7].
 
 **Evidence.** `a_crash_at_every_control_plane_write_loses_and_doubles_nothing`: every one of the clean
 run's writes, both sides, leaves a log the specification accepts and zero lost or doubled, with exactly
-one crash per run (injected = 2 × writes seen), and more than half of the crashed histories differ from
+one crash per run (crashes before writes = writes seen, and crashes after writes = writes seen), and more than half of the crashed histories differ from
 the clean one (the crash had effect). With node agents told of a placement only when its writer survives (the feed
 moved behind the crash), the sweep fails at write 3, `After`: one workload lost (same unit, mutant
 `feed-after-crash`).
