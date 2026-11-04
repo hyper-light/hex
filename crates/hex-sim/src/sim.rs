@@ -740,10 +740,10 @@ impl Sim<'_> {
             .change_no
             .checked_add(1)
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
-        if self.plane.changes.len() >= self.config.change_window {
-            if let Some((no, _)) = self.plane.changes.pop_front() {
-                self.plane.forgotten = no;
-            }
+        if self.plane.changes.len() >= self.config.change_window
+            && let Some((no, _)) = self.plane.changes.pop_front()
+        {
+            self.plane.forgotten = no;
         }
         self.plane.changes.push_back((self.plane.change_no, key));
         Ok(())

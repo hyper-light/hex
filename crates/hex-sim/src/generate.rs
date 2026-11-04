@@ -26,27 +26,29 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         return Err(SimError::Config("a cluster has at least one node"));
     }
     let mut rng = Rng::new(seed);
-    let nodes: Vec<NodeSpec> = (0..shape.nodes)
-        .map(|id| {
-            let cores = 2u64
-                .checked_pow(u32::try_from(rng.range(2, 6)).unwrap_or(2))
-                .unwrap_or(4);
-            let mem_gib = cores.checked_mul(rng.range(2, 8)).unwrap_or(cores);
-            let gpus = if rng.chance(shape.gpu_nodes_per_mille) {
-                u32::try_from(rng.range(1, 8)).unwrap_or(1)
-            } else {
-                0
-            };
-            NodeSpec {
-                id: NodeId(id),
-                capacity: Resources {
-                    cpu_milli: cores.checked_mul(1000).unwrap_or(u64::MAX),
-                    mem_bytes: mem_gib.checked_mul(GIB).unwrap_or(u64::MAX),
-                    gpus,
-                },
-            }
-        })
-        .collect();
+    // At most 64 cores and 8 GiB a core: every product below is far inside u64.
+    let mut nodes = Vec::new();
+    for id in 0..shape.nodes {
+        let cores = 2u64
+            .checked_pow(u32::try_from(rng.range(2, 6)).map_err(|_| SimError::Config("cores"))?)
+            .ok_or(SimError::Config("cores"))?;
+        let mem_gib = cores
+            .checked_mul(rng.range(2, 8))
+            .ok_or(SimError::Config("memory"))?;
+        let gpus = if rng.chance(shape.gpu_nodes_per_mille) {
+            u32::try_from(rng.range(1, 8)).map_err(|_| SimError::Config("gpus"))?
+        } else {
+            0
+        };
+        nodes.push(NodeSpec {
+            id: NodeId(id),
+            capacity: Resources {
+                cpu_milli: cores.checked_mul(1000).ok_or(SimError::Config("cores"))?,
+                mem_bytes: mem_gib.checked_mul(GIB).ok_or(SimError::Config("memory"))?,
+                gpus,
+            },
+        });
+    }
     let mut workloads = Vec::new();
     workloads
         .try_reserve_exact(
