@@ -179,18 +179,28 @@ pub fn clone_sibling(
     cgroup: Option<std::os::fd::BorrowedFd<'_>>,
     ns: u64,
 ) -> Result<Option<Sibling>, OciError> {
+    clone_sibling_errno(cgroup, ns)
+        .map_err(|e| OciError::os("clone3 the program into the container", e))
+}
+
+/// [`clone_sibling`], its refusal the kernel's errno, so a caller can tell one refusal from another: a
+/// create seed reads `EINVAL` for `CLONE_EMPTY_MNTNS` as a kernel without it (Linux 7.1,
+/// `docs/research/runtime/goal6-mntns.md` §6).
+pub fn clone_sibling_errno(
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    ns: u64,
+) -> Result<Option<Sibling>, rustix::io::Errno> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let (flags, cgroup) = match cgroup {
         Some(dir) => (
             CLONE_PARENT | CLONE_PIDFD | CLONE_INTO_CGROUP | ns,
-            u64::try_from(dir.as_raw_fd())
-                .map_err(|_| OciError::os("clone3 a sibling", "a negative file descriptor"))?,
+            u64::try_from(dir.as_raw_fd()).map_err(|_| rustix::io::Errno::BADF)?,
         ),
         None => (CLONE_PARENT | CLONE_PIDFD | ns, 0),
     };
     let mut pidfd: libc::c_int = -1;
-    let pidfd_ptr = u64::try_from((&raw mut pidfd).addr())
-        .map_err(|_| OciError::os("clone3 a sibling", "a pointer wider than 64 bits"))?;
+    let pidfd_ptr =
+        u64::try_from((&raw mut pidfd).addr()).map_err(|_| rustix::io::Errno::OVERFLOW)?;
     let args = CloneArgs {
         flags,
         pidfd: pidfd_ptr,
@@ -219,20 +229,17 @@ pub fn clone_sibling(
         )
     };
     match r {
-        -1 => {
-            let e = std::io::Error::last_os_error();
-            match e.raw_os_error() {
-                Some(libc::ENOSYS) | Some(libc::E2BIG) => Ok(None),
-                _ => Err(OciError::os("clone3 the program into the container", e)),
-            }
-        }
+        -1 => match rustix::io::Errno::from_io_error(&std::io::Error::last_os_error()) {
+            Some(rustix::io::Errno::NOSYS | rustix::io::Errno::TOOBIG) => Ok(None),
+            Some(e) => Err(e),
+            None => Err(rustix::io::Errno::INVAL),
+        },
         0 => Ok(Some(Sibling::Child)),
         child => {
             // SAFETY: the clone succeeded, so the kernel made `pidfd` for the child and nothing else
             // in this process owns it.
             let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(pidfd) };
-            let pid = i32::try_from(child)
-                .map_err(|_| OciError::os("clone3 a sibling", "a pid out of range"))?;
+            let pid = i32::try_from(child).map_err(|_| rustix::io::Errno::RANGE)?;
             Ok(Some(Sibling::Parent { pid, pidfd }))
         }
     }

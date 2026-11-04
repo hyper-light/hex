@@ -82,8 +82,14 @@ mod kind {
     pub const EXEC: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
     pub const CREATE_PREPARED: u16 = 0x0003;
+    /// A pruned create that names how its mount namespace is made or carries a prepared proc: the
+    /// prepared kind's body with its `/dev` index as an option, then its proc's index as an option, then
+    /// the way (decision 6's update). A create with neither keeps its old kind and bytes.
+    pub const CREATE_MOUNT_NAMESPACE: u16 = 0x0004;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
+    /// A started answer, then how the init's mount namespace was made.
+    pub const STARTED_IN: u16 = 0x8003;
 }
 
 /// What to run in a container and where: the init whose namespaces the program joins, the cgroup it is
@@ -149,6 +155,55 @@ pub struct Create {
     /// New CREATE_PREPARED kind: mount-plan index of a prepared `/dev`; its fd rides last. Old
     /// CREATE bytes stay unchanged and readers without this kind refuse it explicitly.
     pub dev_mount: Option<u32>,
+    /// How a pruned create's mount namespace is made (decision 6's update): the seed's namespace copied,
+    /// empty (`CLONE_EMPTY_MNTNS`), or the agent's namespace made from the rootfs's tree
+    /// (`OPEN_TREE_NAMESPACE`), which then rides in the rootfs tree's place. [`MountNamespace::Copy`]
+    /// for every create that isn't pruned.
+    pub mount_namespace: MountNamespace,
+    /// The mount-plan index of a proc made ahead (decision 6's update, part 2): its pid namespace and its
+    /// tree ride after the prepared `/dev`'s, and the init is cloned into that pid namespace.
+    pub proc_mount: Option<u32>,
+    /// Whether the node's one empty read-only tmpfs rides last, which the init clones for each masked
+    /// directory in place of a tmpfs of its own (decision 6's update): no superblock per mask.
+    pub masked_directory: bool,
+}
+
+/// Descriptors a prepared proc adds to a create: its pid namespace and its tree.
+pub const PROC_FDS: usize = 2;
+
+/// How a pruned create's mount namespace is made (decision 6's update, `goal6-mntns.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MountNamespace {
+    /// The seed's pruned namespace copied by the init's clone (`CLONE_NEWNS`): goal 5's way, on every
+    /// kernel.
+    #[default]
+    Copy,
+    /// A namespace holding only its root, made by the init's clone (`CLONE_EMPTY_MNTNS`, Linux 7.1).
+    Empty,
+    /// A namespace the agent made from the rootfs's tree (`OPEN_TREE_NAMESPACE`, Linux 7.0; a layered
+    /// root's by `FSMOUNT_NAMESPACE`, 7.1), which the init joins.
+    FromTree,
+}
+
+impl MountNamespace {
+    /// This way's byte on the wire.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Copy => 0,
+            Self::Empty => 1,
+            Self::FromTree => 2,
+        }
+    }
+
+    /// The way a byte on the wire names, or `None` for one no way has.
+    pub fn of(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Copy),
+            1 => Some(Self::Empty),
+            2 => Some(Self::FromTree),
+            _ => None,
+        }
+    }
 }
 
 impl Create {
@@ -162,7 +217,13 @@ impl Create {
                 .saturating_add(PRUNED_FIXED_FDS)
                 .saturating_add(self.binds as usize)
                 .saturating_add(self.path_joins as usize)
-                .saturating_add(usize::from(self.dev_mount.is_some()));
+                .saturating_add(usize::from(self.dev_mount.is_some()))
+                .saturating_add(if self.proc_mount.is_some() {
+                    PROC_FDS
+                } else {
+                    0
+                })
+                .saturating_add(usize::from(self.masked_directory));
         }
         n
     }
@@ -224,13 +285,19 @@ pub enum Answer {
     Started { pid: u32 },
     /// Nothing was started.
     Refused { failed: Failed, why: String },
+    /// A pruned create's init runs: its pid (the descriptor is its pidfd), and how its mount namespace
+    /// was made, which can differ from the way asked where the kernel hasn't it (decision 6's update).
+    StartedIn {
+        pid: u32,
+        mount_namespace: MountNamespace,
+    },
 }
 
 impl Answer {
     /// How many descriptors this answer carries.
     pub fn fds(&self) -> usize {
         match self {
-            Self::Started { .. } => STARTED_FDS,
+            Self::Started { .. } | Self::StartedIn { .. } => STARTED_FDS,
             Self::Refused { .. } => 0,
         }
     }
@@ -290,9 +357,14 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
 /// A create as a message.
 pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
+    let named = create.mount_namespace != MountNamespace::Copy
+        || create.proc_mount.is_some()
+        || create.masked_directory;
     header(
         &mut w,
-        if create.dev_mount.is_some() {
+        if named {
+            kind::CREATE_MOUNT_NAMESPACE
+        } else if create.dev_mount.is_some() {
             kind::CREATE_PREPARED
         } else {
             kind::CREATE
@@ -305,7 +377,12 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.bool(create.pruned);
     w.u32(create.binds);
     w.u32(create.path_joins);
-    if let Some(mount) = create.dev_mount {
+    if named {
+        w.option(create.dev_mount, Writer::u32);
+        w.option(create.proc_mount, Writer::u32);
+        w.u8(create.mount_namespace.code());
+        w.bool(create.masked_directory);
+    } else if let Some(mount) = create.dev_mount {
         w.u32(mount);
     }
     w.done()
@@ -321,14 +398,17 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
     }
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
-    if !matches!(kind, kind::CREATE | kind::CREATE_PREPARED) {
+    if !matches!(
+        kind,
+        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_MOUNT_NAMESPACE
+    ) {
         return Err(Fault::Kind {
             kind,
             version,
             expected: "a create",
         });
     }
-    let create = Create {
+    let mut create = Create {
         bundle: r.string("bundle")?,
         dir: r.string("dir")?,
         cgroup: r.option(|r| r.string("cgroup"))?,
@@ -336,12 +416,34 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         pruned: r.bool("pruned")?,
         binds: r.u32()?,
         path_joins: r.u32()?,
-        dev_mount: if kind == kind::CREATE_PREPARED {
-            Some(r.u32()?)
-        } else {
-            None
-        },
+        dev_mount: None,
+        mount_namespace: MountNamespace::Copy,
+        proc_mount: None,
+        masked_directory: false,
     };
+    match kind {
+        kind::CREATE_PREPARED => create.dev_mount = Some(r.u32()?),
+        kind::CREATE_MOUNT_NAMESPACE => {
+            create.dev_mount = r.option(Reader::u32)?;
+            create.proc_mount = r.option(Reader::u32)?;
+            create.mount_namespace = MountNamespace::of(r.u8()?).ok_or_else(|| {
+                Fault::value("mount_namespace", "no mount namespace is made that way")
+            })?;
+            create.masked_directory = r.bool("masked_directory")?;
+            // A create with none of these has its old kinds: one encoding a value, so it is refused here.
+            if create.mount_namespace == MountNamespace::Copy
+                && create.proc_mount.is_none()
+                && !create.masked_directory
+            {
+                return Err(Fault::value(
+                    "mount_namespace",
+                    "a create in this kind is made empty or from its tree, or carries a proc or a \
+                     masked directory's source",
+                ));
+            }
+        }
+        _ => {}
+    }
     r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
         return Err(Fault::value(
@@ -370,6 +472,16 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             "only a pruned create carries bind-source trees or path-joined namespaces",
         ));
     }
+    if !create.pruned
+        && (create.mount_namespace != MountNamespace::Copy
+            || create.proc_mount.is_some()
+            || create.masked_directory)
+    {
+        return Err(Fault::value(
+            "mount_namespace",
+            "only a pruned create's mount namespace is made empty or from its tree, or carries a proc",
+        ));
+    }
     if create.fds() > MAX_REQUEST_FDS {
         return Err(Fault::value(
             "dev_mount",
@@ -386,7 +498,7 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
         kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
-        kind::CREATE | kind::CREATE_PREPARED => {
+        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_MOUNT_NAMESPACE => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)
@@ -417,6 +529,14 @@ pub fn answer(answer: &Answer) -> Result<Vec<u8>, Fault> {
             header(&mut w, kind::STARTED);
             w.u32(*pid);
         }
+        Answer::StartedIn {
+            pid,
+            mount_namespace,
+        } => {
+            header(&mut w, kind::STARTED_IN);
+            w.u32(*pid);
+            w.u8(mount_namespace.code());
+        }
         Answer::Refused { failed, why } => {
             header(&mut w, kind::REFUSED);
             w.u16(failed.code());
@@ -439,6 +559,12 @@ pub fn read_answer(bytes: &[u8], size: usize, fds: usize) -> Result<Answer, Faul
     let (version, kind) = read_header(&mut r)?;
     let answer = match kind {
         kind::STARTED => Answer::Started { pid: r.u32()? },
+        kind::STARTED_IN => Answer::StartedIn {
+            pid: r.u32()?,
+            mount_namespace: MountNamespace::of(r.u8()?).ok_or_else(|| {
+                Fault::value("mount_namespace", "no mount namespace is made that way")
+            })?,
+        },
         kind::REFUSED => Answer::Refused {
             failed: Failed::of(r.u16()?)?,
             why: r.string("why")?,

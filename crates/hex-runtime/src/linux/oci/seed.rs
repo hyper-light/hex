@@ -35,8 +35,9 @@ use std::io::{IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use hex_core::seed::{self, Answer, Failed, Request};
+use hex_core::seed::{self, Answer, Failed, MountNamespace, Request};
 use rustix::fs::{Mode, OFlags};
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use rustix::net::{
@@ -190,6 +191,14 @@ impl PidFor {
     /// nothing changed then.
     fn set(&mut self, init: BorrowedFd<'_>) -> rustix::io::Result<()> {
         rustix::thread::move_into_thread_name_spaces(init, Ns::PROCESS_ID)?;
+        self.is_own = false;
+        Ok(())
+    }
+
+    /// The pid namespace `ns` (a namespace file) for the seed's next children: a prepared proc's, made ahead
+    /// (decision 6's update, part 2).
+    fn join(&mut self, ns: BorrowedFd<'_>) -> Result<(), OciError> {
+        sys::setns(ns, libc::CLONE_NEWPID)?;
         self.is_own = false;
         Ok(())
     }
@@ -621,7 +630,7 @@ fn serve_one(
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     match seed::read_message(bytes, size, fds.len()) {
         Ok(seed::Message::Exec(req)) => serve_exec(req, fds, pid_for, specs),
-        Ok(seed::Message::Create(create)) => serve_create(&create, fds, specs),
+        Ok(seed::Message::Create(create)) => serve_create(&create, fds, pid_for, specs),
         Err(fault) => refused(Failed::Request, fault.to_string()),
     }
 }
@@ -640,6 +649,7 @@ fn serve_one(
 fn serve_create(
     create: &seed::Create,
     fds: Vec<OwnedFd>,
+    pid_for: &mut PidFor,
     specs: &mut Specs,
 ) -> (Answer, Option<OwnedFd>) {
     let mut fds = fds.into_iter();
@@ -653,7 +663,7 @@ fn serve_create(
     // exactly when the create says one does, then (on the pruned path) the root descriptors.
     let network = if create.network { fds.next() } else { None };
     if create.pruned {
-        return serve_create_pruned(create, fds, sync_w, map_r, network);
+        return serve_create_pruned(create, fds, sync_w, map_r, network, pid_for);
     }
     let spec = match specs.get(&create.bundle) {
         Ok(spec) => spec,
@@ -731,6 +741,7 @@ fn serve_create_pruned(
     sync_w: OwnedFd,
     map_r: OwnedFd,
     network: Option<OwnedFd>,
+    pid_for: &mut PidFor,
 ) -> (Answer, Option<OwnedFd>) {
     let (Some(bundle_dir), Some(cgroup_dir), Some(container_dir), Some(rootfs)) =
         (fds.next(), fds.next(), fds.next(), fds.next())
@@ -777,6 +788,34 @@ fn serve_create_pruned(
         },
         None => None,
     };
+    let proc_mount = match create.proc_mount {
+        Some(mount) => match (fds.next(), fds.next()) {
+            (Some(pid_namespace), Some(tree)) => Some((
+                mount,
+                init::PreparedProc {
+                    pid_namespace,
+                    tree,
+                },
+            )),
+            _ => {
+                return refused(
+                    Failed::Request,
+                    "a create with a prepared proc carried no pid namespace and tree".to_owned(),
+                );
+            }
+        },
+        None => None,
+    };
+    let masked_directory = match (create.masked_directory, fds.next()) {
+        (false, _) => None,
+        (true, Some(empty)) => Some(empty),
+        (true, None) => {
+            return refused(
+                Failed::Request,
+                "a create with the masked directories' source carried none".to_owned(),
+            );
+        }
+    };
     let spec = match read_config_at(bundle_dir.as_fd()) {
         Ok(spec) => spec,
         Err(e) => return refused(Failed::Start, e.to_string()),
@@ -800,11 +839,33 @@ fn serve_create_pruned(
         );
     }
     let made_ahead = network.is_some();
-    let flags = init::fresh_clone_flags(&spec, made_ahead);
+    let mut flags = init::fresh_clone_flags(&spec, made_ahead);
     // The map pipe carries only a user namespace's map ack, which the pruned path never asks for: the
     // seed's copy is dropped before the clone, so the init doesn't inherit it.
     drop(map_r);
-    match sys::clone_sibling(Some(cgroup_dir.as_fd()), flags) {
+    // A proc made ahead shows a pid namespace made ahead (decision 6's update, part 2): the init is cloned
+    // into it, its pid 1, in place of a fresh one, and the seed's next children are its own again after.
+    if let Some((_, proc)) = &proc_mount {
+        if let Err(e) = pid_for.join(proc.pid_namespace.as_fd()) {
+            return refused(Failed::Start, e.to_string());
+        }
+        flags &= !u64::try_from(libc::CLONE_NEWPID).unwrap_or(0);
+    }
+    let (made, cloned) = clone_pruned(cgroup_dir.as_fd(), flags, create.mount_namespace);
+    // The seed's next children are born in its own pid namespace again, whatever the clone did; a seed that
+    // can't set that back would bear them in another container's, so it is broken and the agent replaces
+    // it (with the init it just started ended). The clone's child doesn't: it is the init.
+    let reset = match &cloned {
+        Ok(Some(sys::Sibling::Child)) => Ok(()),
+        _ => pid_for.reset(),
+    };
+    if let Err(e) = reset {
+        if let Ok(Some(sys::Sibling::Parent { pidfd, .. })) = &cloned {
+            let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+        }
+        return refused(Failed::Seed, e.to_string());
+    }
+    match cloned {
         Ok(None) => refused(
             Failed::Unable,
             "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
@@ -815,7 +876,10 @@ fn serve_create_pruned(
             // exec FIFO, whose error goes to the agent on the sync pipe.
             let sources = init::PrunedSources {
                 rootfs,
+                from_tree: made == MountNamespace::FromTree,
                 dev_mount,
+                proc_mount,
+                masked_directory,
                 binds,
                 path_joins,
             };
@@ -835,9 +899,15 @@ fn serve_create_pruned(
         }
         Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
             drop((sync_w, cgroup_dir, container_dir, rootfs, binds, network));
-            drop((path_joins, dev_mount));
+            drop((path_joins, dev_mount, proc_mount, masked_directory));
             match u32::try_from(pid) {
-                Ok(pid) => (Answer::Started { pid }, Some(pidfd)),
+                Ok(pid) => (
+                    Answer::StartedIn {
+                        pid,
+                        mount_namespace: made,
+                    },
+                    Some(pidfd),
+                ),
                 Err(_) => {
                     let _ =
                         rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
@@ -848,7 +918,52 @@ fn serve_create_pruned(
                 }
             }
         }
-        Err(e) => refused(Failed::Start, e.to_string()),
+        Err(e) => refused(
+            Failed::Start,
+            OciError::os("clone3 the program into the container", e).to_string(),
+        ),
+    }
+}
+
+/// Whether this seed's kernel refused `CLONE_EMPTY_MNTNS` once (Linux 7.1): learned from its first such
+/// clone and kept for the seed's life, so the refusal costs one `clone3` a seed (`goal6-mntns.md` §6).
+static NO_EMPTY_MNTNS: AtomicBool = AtomicBool::new(false);
+
+/// Clones a pruned create's init (decision 6's update) with its namespace made `way`, and says how it was
+/// made. The spec's `flags` hold `CLONE_NEWNS`, the seed's namespace copied. From its tree, the init is
+/// cloned without it and joins the namespace the agent made. Empty, `CLONE_EMPTY_MNTNS` takes its place;
+/// a kernel that refuses that flag with `EINVAL` (it refuses unknown flags before it makes anything,
+/// `kernel/fork.c:3017-3022`) gets the copy, now and for the seed's life, and the answer says so. The
+/// spec's other flags are the ones the copy's clone takes, so an `EINVAL` the copy would get too comes
+/// back from the copy's clone, not hidden.
+fn clone_pruned(
+    cgroup: BorrowedFd<'_>,
+    flags: u64,
+    way: MountNamespace,
+) -> (
+    MountNamespace,
+    Result<Option<sys::Sibling>, rustix::io::Errno>,
+) {
+    let newns = u64::try_from(libc::CLONE_NEWNS).unwrap_or(0);
+    match way {
+        MountNamespace::FromTree => (way, sys::clone_sibling_errno(Some(cgroup), flags & !newns)),
+        MountNamespace::Empty if !NO_EMPTY_MNTNS.load(Ordering::Relaxed) => {
+            let empty = (flags & !newns) | super::mntns::CLONE_EMPTY_MNTNS;
+            match sys::clone_sibling_errno(Some(cgroup), empty) {
+                Err(rustix::io::Errno::INVAL) => {
+                    NO_EMPTY_MNTNS.store(true, Ordering::Relaxed);
+                    (
+                        MountNamespace::Copy,
+                        sys::clone_sibling_errno(Some(cgroup), flags),
+                    )
+                }
+                cloned => (way, cloned),
+            }
+        }
+        MountNamespace::Empty | MountNamespace::Copy => (
+            MountNamespace::Copy,
+            sys::clone_sibling_errno(Some(cgroup), flags),
+        ),
     }
 }
 

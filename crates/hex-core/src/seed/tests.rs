@@ -53,6 +53,9 @@ fn creates() -> Vec<Create> {
             binds: 0,
             path_joins: 0,
             dev_mount: None,
+            mount_namespace: MountNamespace::Copy,
+            proc_mount: None,
+            masked_directory: false,
         },
         Create {
             bundle: "/b".to_owned(),
@@ -63,6 +66,9 @@ fn creates() -> Vec<Create> {
             binds: 0,
             path_joins: 0,
             dev_mount: None,
+            mount_namespace: MountNamespace::Copy,
+            proc_mount: None,
+            masked_directory: false,
         },
         // A pruned create (goal 5 plan step 2): no network, four fixed descriptors, two bind trees and
         // one namespace joined by path.
@@ -75,6 +81,9 @@ fn creates() -> Vec<Create> {
             binds: 2,
             path_joins: 1,
             dev_mount: None,
+            mount_namespace: MountNamespace::Copy,
+            proc_mount: None,
+            masked_directory: false,
         },
     ]
 }
@@ -490,4 +499,201 @@ fn a_prepared_create_appends_only_in_its_new_kind() {
     })
     .unwrap();
     assert!(read_create(&wrong_path, wrong_path.len()).is_err());
+}
+
+/// HEX-MNTNS-2/3 (decision 6's update), HEX-SEED-2/3: a pruned create that says how its mount namespace is
+/// made, from its tree or empty, does so in a new kind whose bytes are the old create's with the prepared
+/// `/dev`'s option and the way appended, so a create made the old way keeps its bytes. Expect each to read
+/// back as written with the descriptors it always carried, every truncation and a trailing byte refused, an
+/// unknown way refused, the old way in the new kind refused (one encoding a value), and a way named by a
+/// create that isn't pruned refused.
+#[test]
+fn a_create_naming_its_mount_namespace_appends_only_in_its_new_kind() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    for (way, code) in [(MountNamespace::Empty, 1u8), (MountNamespace::FromTree, 2)] {
+        let named = Create {
+            mount_namespace: way,
+            ..ordinary.clone()
+        };
+        let bytes = create(&named).unwrap();
+        assert_eq!(&bytes[..6], &old[..6]);
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+        assert_eq!(&bytes[8..old.len()], &old[8..]);
+        assert_eq!(
+            &bytes[old.len()..],
+            &[0, 0, code, 0],
+            "no prepared /dev, no prepared proc, the way, no masked directory's source"
+        );
+        assert_eq!(
+            named.fds(),
+            ordinary.fds(),
+            "the namespace rides in the rootfs's place"
+        );
+        assert_eq!(
+            read_message(&bytes, bytes.len(), named.fds()).unwrap(),
+            Message::Create(named.clone())
+        );
+        for len in 0..bytes.len() {
+            assert!(read_create(&bytes[..len], len).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(read_create(&trailing, trailing.len()).is_err());
+        let with_dev = Create {
+            dev_mount: Some(5),
+            ..named.clone()
+        };
+        let bytes = create(&with_dev).unwrap();
+        assert_eq!(&bytes[old.len()..], &[1, 5, 0, 0, 0, 0, code, 0]);
+        assert_eq!(with_dev.fds(), ordinary.fds() + 1);
+        assert_eq!(read_create(&bytes, bytes.len()).unwrap(), with_dev);
+    }
+    let mut unknown = create(&Create {
+        mount_namespace: MountNamespace::Empty,
+        ..ordinary.clone()
+    })
+    .unwrap();
+    let at = unknown.len() - 2;
+    for code in [0u8, 3, 0xff] {
+        *unknown.get_mut(at).unwrap() = code;
+        // The copy is the old kinds' unless a proc rides; 3 and 255 name no way.
+        assert!(
+            matches!(
+                read_create(&unknown, unknown.len()),
+                Err(Fault::Value {
+                    what: "mount_namespace",
+                    ..
+                })
+            ),
+            "way {code} is refused in the new kind"
+        );
+    }
+    let unpruned = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        mount_namespace: MountNamespace::FromTree,
+        ..ordinary
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&unpruned, unpruned.len()),
+        Err(Fault::Value {
+            what: "mount_namespace",
+            ..
+        })
+    ));
+}
+
+/// HEX-MNTNS-2/3, HEX-SEED-2: a started answer that says how the init's mount namespace was made reads back
+/// as written, in a kind of its own after the started answer's bytes, with its pidfd; an unknown way and
+/// every truncation are refused.
+#[test]
+fn a_started_answer_names_how_its_namespace_was_made() {
+    for way in [
+        MountNamespace::Copy,
+        MountNamespace::Empty,
+        MountNamespace::FromTree,
+    ] {
+        let want = Answer::StartedIn {
+            pid: 4243,
+            mount_namespace: way,
+        };
+        let bytes = answer(&want).unwrap();
+        let started = answer(&Answer::Started { pid: 4243 }).unwrap();
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 0x8003);
+        assert_eq!(&bytes[8..started.len()], &started[8..]);
+        assert_eq!(bytes.len(), started.len() + 1);
+        assert_eq!(read_answer(&bytes, bytes.len(), STARTED_FDS).unwrap(), want);
+        assert!(read_answer(&bytes, bytes.len(), 0).is_err());
+        for len in 0..bytes.len() {
+            assert!(read_answer(&bytes[..len], len, STARTED_FDS).is_err());
+        }
+    }
+    let mut bad = answer(&Answer::StartedIn {
+        pid: 1,
+        mount_namespace: MountNamespace::Copy,
+    })
+    .unwrap();
+    *bad.last_mut().unwrap() = 3;
+    assert!(read_answer(&bad, bad.len(), STARTED_FDS).is_err());
+}
+
+/// HEX-MNTNS-6 (decision 6's update, part 2), HEX-SEED-2/3: a pruned create carrying a proc made ahead, made
+/// the old way or another, in the new kind. Expect its index after the `/dev` option, its two descriptors
+/// counted, a read back as written, every truncation refused, and a proc on a create that isn't pruned
+/// refused.
+#[test]
+fn a_create_carrying_a_prepared_proc_counts_its_two_descriptors() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    for way in [MountNamespace::Copy, MountNamespace::FromTree] {
+        let with_proc = Create {
+            proc_mount: Some(3),
+            dev_mount: Some(4),
+            mount_namespace: way,
+            ..ordinary.clone()
+        };
+        let bytes = create(&with_proc).unwrap();
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+        assert_eq!(
+            &bytes[old.len()..],
+            &[1, 4, 0, 0, 0, 1, 3, 0, 0, 0, way.code(), 0]
+        );
+        assert_eq!(with_proc.fds(), ordinary.fds() + 1 + PROC_FDS);
+        assert_eq!(
+            read_message(&bytes, bytes.len(), with_proc.fds()).unwrap(),
+            Message::Create(with_proc.clone())
+        );
+        for len in 0..bytes.len() {
+            assert!(read_create(&bytes[..len], len).is_err());
+        }
+    }
+    let unpruned = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        proc_mount: Some(1),
+        ..ordinary
+    })
+    .unwrap();
+    assert!(read_create(&unpruned, unpruned.len()).is_err());
+}
+
+/// HEX-MNTNS-8 (decision 6's update), HEX-SEED-2/3: a pruned create carrying the node's empty read-only tmpfs for
+/// its masked directories, made the old way, in the new kind. Expect the flag last, its one descriptor counted, a
+/// read back as written, every truncation refused, a byte that is neither 0 nor 1 refused, and the flag on a create
+/// that isn't pruned refused.
+#[test]
+fn a_create_carrying_the_masked_directory_source_counts_its_descriptor() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    let with = Create {
+        masked_directory: true,
+        ..ordinary.clone()
+    };
+    let bytes = create(&with).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+    assert_eq!(&bytes[old.len()..], &[0, 0, 0, 1]);
+    assert_eq!(with.fds(), ordinary.fds() + 1);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), with.fds()).unwrap(),
+        Message::Create(with.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_create(&bytes[..len], len).is_err());
+    }
+    let mut two = bytes.clone();
+    *two.last_mut().unwrap() = 2;
+    assert!(read_create(&two, two.len()).is_err());
+    let unpruned = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        masked_directory: true,
+        ..ordinary
+    })
+    .unwrap();
+    assert!(read_create(&unpruned, unpruned.len()).is_err());
 }

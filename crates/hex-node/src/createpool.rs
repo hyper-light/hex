@@ -32,11 +32,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
-use hex_core::seed::{Answer, Create, Failed};
+use hex_core::seed::{Answer, Create, Failed, MountNamespace};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
-use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq};
 use hex_runtime::linux::oci::seed as rt_seed;
+use hex_runtime::linux::oci::{OciError, mntns};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::process::{Pid, PidfdFlags, Signal, WaitId, WaitIdOptions};
 
@@ -81,9 +81,13 @@ struct Shared {
     /// pid or user namespace by path, and by a seed with the classic root on a rootless node. Each stops
     /// at `u64::MAX`, as the core's counts do.
     classic: [AtomicU64; ClassicReason::COUNT],
-    /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`.
-    /// Zero on a rootless node, whose seeds don't prune. Stops at `u64::MAX`.
-    pruned: AtomicU64,
+    /// How this node makes a pruned create's mount namespace (decision 6's update), chosen as the pool
+    /// opens: the copy on a rootless node, whose seeds don't prune.
+    mount_namespace: MountNamespace,
+    /// Creates a pruned seed made on the pruned root path (goal 5 plan step 2), with no `pivot_root`, by
+    /// the way their mount namespace was made as the seed answered ([`MountNamespace::code`]'s index).
+    /// Zero on a rootless node, whose seeds don't prune. Each stops at `u64::MAX`.
+    made: [AtomicU64; 3],
     /// The wakes sent the starting thread and the line, for the tests.
     #[cfg(test)]
     woke: [AtomicU64; 2],
@@ -110,16 +114,20 @@ impl CreatePool {
     /// A pool that re-execs `exe` as `hex __oci-seed`, with the node's default bounds
     /// ([`hex_core::seeds::LIMITS`]), its starting thread up and starting the first spare. `prune`, when
     /// given, is the mountpoint each seed prunes its mount namespace at (a root node, goal 5 plan
-    /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace.
+    /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace. `asked`, when
+    /// given, is the way a pruned create's mount namespace is made, in [`mntns::ENV_WAY`]'s words
+    /// (decision 6's update); a way this node can't take is refused by type.
     pub fn new(
         exe: PathBuf,
         prune: Option<PathBuf>,
+        asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
         Self::with_limits(
             exe,
             hex_core::seeds::LIMITS,
             prune,
+            asked,
             #[cfg(debug_assertions)]
             inject,
         )
@@ -130,8 +138,15 @@ impl CreatePool {
         exe: PathBuf,
         limits: Limits,
         prune: Option<PathBuf>,
+        asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
     ) -> Result<Self, Refusal> {
+        // Only a pruning node's creates have a mount namespace to make another way; the probe makes
+        // nothing and takes no lock (`goal6-mntns.md` §6).
+        let mount_namespace = match prune {
+            Some(_) => mntns::choose(mntns::probe()?, asked)?,
+            None => MountNamespace::Copy,
+        };
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
             exe,
@@ -148,7 +163,8 @@ impl CreatePool {
             free: Condvar::new(),
             wake: Condvar::new(),
             classic: std::array::from_fn(|_| AtomicU64::new(0)),
-            pruned: AtomicU64::new(0),
+            mount_namespace,
+            made: std::array::from_fn(|_| AtomicU64::new(0)),
             #[cfg(test)]
             woke: [AtomicU64::new(0), AtomicU64::new(0)],
         });
@@ -187,7 +203,20 @@ impl CreatePool {
     /// How many creates a pruned seed made on the pruned root path since the pool opened (goal 5 plan
     /// step 2): zero on a rootless node, positive on a root node once it has made a pruned-eligible box.
     pub fn pruned_creates(&self) -> u64 {
-        self.shared.pruned.load(Ordering::Relaxed)
+        self.shared
+            .made
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// How many pruned creates had their mount namespace made `way` since the pool opened, as their
+    /// seeds answered (decision 6's update).
+    pub fn mount_namespaces_made(&self, way: MountNamespace) -> u64 {
+        self.shared
+            .made
+            .get(usize::from(way.code()))
+            .map_or(0, |c| c.load(Ordering::Relaxed))
     }
 
     /// What the pool has done, as the bench and the node's metrics read it.
@@ -199,6 +228,10 @@ impl CreatePool {
 impl CloneInit for CreatePool {
     fn prunes_root(&self) -> bool {
         self.shared.prune.is_some()
+    }
+
+    fn mount_namespace(&self) -> MountNamespace {
+        self.shared.mount_namespace
     }
 
     fn classic(&self, reason: ClassicReason) {
@@ -231,6 +264,18 @@ impl CloneInit for CreatePool {
                 .pruned
                 .as_ref()
                 .map_or(0, |p| u32::try_from(p.path_joins.len()).unwrap_or(u32::MAX)),
+            mount_namespace: req
+                .pruned
+                .as_ref()
+                .map_or(MountNamespace::Copy, |p| p.mount_namespace),
+            proc_mount: req
+                .pruned
+                .as_ref()
+                .and_then(|p| p.proc_mount.as_ref().map(|(mount, _)| *mount)),
+            masked_directory: req
+                .pruned
+                .as_ref()
+                .is_some_and(|p| p.masked_directory.is_some()),
         };
         // The descriptors ride in the order the seed reads them (`serve_create`): the two pipes, a
         // network namespace, then on the pruned path the four fixed descriptors and the bind trees, in
@@ -249,16 +294,22 @@ impl CloneInit for CreatePool {
             if let Some(dev) = &pruned.dev_mount {
                 fds.push(dev.tree.as_fd());
             }
+            if let Some((_, proc)) = &pruned.proc_mount {
+                fds.push(proc.pid_namespace.as_fd());
+                fds.push(proc.tree.as_fd());
+            }
+            if let Some(empty) = &pruned.masked_directory {
+                fds.push(empty.as_fd());
+            }
         }
         match round_trip(proc.socket.as_fd(), &create, &fds) {
-            Ok(started) => {
-                if pruned {
-                    let _ = shared
-                        .pruned
-                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                            Some(n.saturating_add(1))
-                        });
+            Ok((pid, pidfd, made)) => {
+                if pruned && let Some(count) = shared.made.get(usize::from(made.code())) {
+                    let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_add(1))
+                    });
                 }
+                let started = (pid, pidfd);
                 shared.done(id, proc);
                 Ok(started)
             }
@@ -572,7 +623,7 @@ fn round_trip(
     socket: BorrowedFd<'_>,
     create: &Create,
     fds: &[BorrowedFd<'_>],
-) -> Result<(i32, OwnedFd), Trip> {
+) -> Result<(i32, OwnedFd, MountNamespace), Trip> {
     rt_seed::send_create(socket, create, fds).map_err(Trip::Broken)?;
     if !readable(socket, ANSWER_PATIENCE).map_err(Trip::Broken)? {
         return Err(Trip::Broken(OciError::Broken(format!(
@@ -580,33 +631,37 @@ fn round_trip(
         ))));
     }
     let (answer, pidfd) = rt_seed::recv_answer(socket).map_err(Trip::Broken)?;
-    match answer {
-        Answer::Started { pid } => {
-            let pid = i32::try_from(pid).map_err(|_| {
-                Trip::Broken(OciError::Broken(
-                    "a create seed sent a pid out of range".to_owned(),
-                ))
-            })?;
-            match pidfd {
-                Some(pidfd) => Ok((pid, pidfd)),
-                None => Err(Trip::Broken(OciError::Broken(
-                    "a create seed said an init started but sent no pidfd".to_owned(),
-                ))),
-            }
-        }
+    let (pid, made) = match answer {
+        // A classic create's answer names no way: its namespace, if any, is the seed's copied.
+        Answer::Started { pid } => (pid, MountNamespace::Copy),
+        Answer::StartedIn {
+            pid,
+            mount_namespace,
+        } => (pid, mount_namespace),
         Answer::Refused { failed, why } => {
             let e = OciError::Os {
                 op: "create in a container",
                 why,
             };
-            match failed {
+            return match failed {
                 // The seed's own machinery broke: replace it.
                 Failed::Seed => Err(Trip::Broken(e)),
                 // A bad request, a container the seed couldn't make, or one no clone3-into-cgroup kernel
                 // can make here: the seed is whole, the create refused by type.
                 Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(e)),
-            }
+            };
         }
+    };
+    let pid = i32::try_from(pid).map_err(|_| {
+        Trip::Broken(OciError::Broken(
+            "a create seed sent a pid out of range".to_owned(),
+        ))
+    })?;
+    match pidfd {
+        Some(pidfd) => Ok((pid, pidfd, made)),
+        None => Err(Trip::Broken(OciError::Broken(
+            "a create seed said an init started but sent no pidfd".to_owned(),
+        ))),
     }
 }
 
@@ -668,6 +723,7 @@ mod tests {
         let pool = CreatePool::new(
             PathBuf::from("/nonexistent/hex-for-the-test"),
             None,
+            None,
             #[cfg(debug_assertions)]
             None,
         )
@@ -696,6 +752,7 @@ mod tests {
         let pool = CreatePool::with_limits(
             PathBuf::from("/nonexistent/hex-for-the-test"),
             limits,
+            None,
             None,
             #[cfg(debug_assertions)]
             None,
@@ -740,6 +797,7 @@ mod tests {
         let pool = CreatePool::with_limits(
             PathBuf::from("/bin/sh"),
             limits,
+            None,
             None,
             #[cfg(debug_assertions)]
             None,
@@ -797,6 +855,7 @@ mod tests {
         let pool = CreatePool::with_limits(
             PathBuf::from("/bin/sh"),
             limits,
+            None,
             None,
             #[cfg(debug_assertions)]
             None,

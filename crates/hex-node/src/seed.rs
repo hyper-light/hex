@@ -266,6 +266,10 @@ fn round_trip(
                 "a seed said a program started but sent no pidfd".to_owned(),
             ))),
         },
+        // Only a pruned create's answer names a mount namespace; an exec seed sending one is broken.
+        Answer::StartedIn { .. } => Err(Trip::Broken(Refusal::Broken(
+            "an exec seed answered as a create seed".to_owned(),
+        ))),
         Answer::Refused { failed, why } => {
             let refusal = Refusal::Os {
                 op: "exec in a container",

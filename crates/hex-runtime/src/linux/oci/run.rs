@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,6 +122,15 @@ pub trait Networks {
 pub trait DevMounts {
     fn take(&self, key: super::devmount::Key) -> Result<Option<OwnedFd>, OciError>;
     fn unpooled(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError>;
+    /// A proc made ahead for `key`, with its pid namespace (decision 6's update, part 2), or `None` when
+    /// none is ready: the create makes its own, counted.
+    fn take_proc(&self, key: super::procmount::Key)
+    -> Result<Option<init::PreparedProc>, OciError>;
+    /// A create no prepared proc can serve, counted by `reason`.
+    fn unpooled_proc(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError>;
+    /// The node's one empty read-only tmpfs, which the init clones for each masked directory in place of a tmpfs
+    /// of its own (decision 6's update): `None` where the node keeps none.
+    fn masked_directory(&self) -> Option<BorrowedFd<'_>>;
 }
 
 /// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
@@ -171,6 +180,8 @@ enum ShimStdio {
 struct Ahead {
     network: Option<OwnedFd>,
     dev: Option<PreparedDev>,
+    /// The node's empty read-only tmpfs, which the init clones for each masked directory (decision 6's update).
+    masked_directory: Option<OwnedFd>,
 }
 
 /// A seed that clones a container's init for the `Runtime` seam (decision 5, goal 5 plan step 4). The
@@ -191,6 +202,10 @@ pub trait CloneInit {
     /// through the shim, counted; false on a rootless node, whose seeds keep the agent's mount namespace
     /// and build the root the classic way in the init, counted under [`ClassicReason::Rootless`].
     fn prunes_root(&self) -> bool;
+
+    /// How this node makes a pruned create's mount namespace (decision 6's update): the seed's copy,
+    /// empty, or from the rootfs's tree, chosen once ([`super::mntns::choose`]).
+    fn mount_namespace(&self) -> super::mntns::MountNamespace;
 
     /// A container made on the classic root path rather than a pruned seed's, by its reason (a fixed set,
     /// so no high-cardinality label; CLAUDE.md §10): counted, so the node can tell how often a create
@@ -273,8 +288,16 @@ pub struct PrunedCreate {
     pub bundle_dir: OwnedFd,
     pub cgroup_dir: OwnedFd,
     pub container_dir: OwnedFd,
+    /// The rootfs's detached tree; where `mount_namespace` is from its tree, the mount namespace made from
+    /// it (decision 6's update), which rides in its place.
     pub rootfs: OwnedFd,
+    /// How the init's mount namespace is made: asked of the seed, which answers how it was.
+    pub mount_namespace: super::mntns::MountNamespace,
     pub dev_mount: Option<PreparedDev>,
+    /// A proc made ahead, its index in the mount plan (decision 6's update, part 2).
+    pub proc_mount: Option<(u32, init::PreparedProc)>,
+    /// The node's empty read-only tmpfs, which the init clones for each masked directory.
+    pub masked_directory: Option<OwnedFd>,
     pub binds: Vec<OwnedFd>,
     /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
     /// namespace order, which the init joins by `setns` (the pruned seed can't open the host path). A
@@ -314,6 +337,25 @@ fn shim_dev(
             Ok(None)
         }
     }
+}
+
+/// A duplicate of the node's empty read-only tmpfs for a create made through the shim, whose init clones it for
+/// each masked directory (decision 6's update). A container with a user namespace of its own makes its own
+/// tmpfs per mask in that namespace, as before: a mount made in the agent's user namespace isn't one its init
+/// may attach there.
+fn shim_masked_directory(
+    spec: &Spec,
+    dev_mounts: Option<&dyn DevMounts>,
+) -> Result<Option<OwnedFd>, OciError> {
+    match dev_mounts.and_then(DevMounts::masked_directory) {
+        Some(empty) if !spec.in_user_namespace() => duplicate(empty).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// A close-on-exec duplicate of `fd`.
+fn duplicate(fd: BorrowedFd<'_>) -> Result<OwnedFd, OciError> {
+    rustix::io::fcntl_dupfd_cloexec(fd, 0).map_err(|e| OciError::os("duplicating a descriptor", e))
 }
 
 /// Where a container's cgroup comes from.
@@ -601,7 +643,11 @@ impl Runtime {
                 &making,
                 &spec,
                 &cgroup,
-                Ahead { network, dev: None },
+                Ahead {
+                    network,
+                    dev: None,
+                    masked_directory: shim_masked_directory(&spec, dev_mounts)?,
+                },
                 ShimStdio::Inherited,
                 &Command::spawn,
             ),
@@ -632,7 +678,11 @@ impl Runtime {
             dir,
             pid_file: _,
         } = *making;
-        let Ahead { network, dev } = ahead;
+        let Ahead {
+            network,
+            dev,
+            masked_directory,
+        } = ahead;
         // Two pipes: the init writes the sync pipe, the runtime writes the map pipe. The shim opens its
         // ends, and a network namespace made ahead, by the path of this process's descriptors for them,
         // which stay close-on-exec: a flag cleared for the spawn would leave a window in which a process
@@ -663,6 +713,9 @@ impl Runtime {
                 format!("/proc/{}/fd/{}", std::process::id(), dev.tree.as_raw_fd()),
             )
             .env(init::ENV_DEV_MOUNT, dev.mount.to_string());
+        }
+        if let Some(empty) = &masked_directory {
+            cmd.env(init::ENV_MASKED_DIRECTORY, by_path(empty));
         }
         if let ShimStdio::Null = stdio {
             cmd.stdin(std::process::Stdio::null())
@@ -740,13 +793,17 @@ impl Runtime {
                 making,
                 spec,
                 cgroup,
-                Ahead { network, dev },
+                Ahead {
+                    network,
+                    dev,
+                    masked_directory: shim_masked_directory(spec, dev_mounts)?,
+                },
                 ShimStdio::Null,
                 &Command::spawn,
             );
         }
         if seeds.prunes_root() {
-            match self.pruned_create(making, spec, cgroup) {
+            match self.pruned_create(making, spec, cgroup, seeds.mount_namespace()) {
                 Ok(mut pruned) => {
                     if let Some(pool) = dev_mounts {
                         let plan = super::mount::plan(&spec.mounts)?;
@@ -776,6 +833,59 @@ impl Runtime {
                                 Err(reason) => pool.unpooled(reason)?,
                             }
                         }
+                        // A proc made ahead adds its pid namespace and its tree, within the same bound.
+                        let room = pruned
+                            .binds
+                            .len()
+                            .checked_add(pruned.path_joins.len())
+                            .and_then(|n| {
+                                n.checked_add(
+                                    hex_core::seed::CREATE_FDS
+                                        + 1
+                                        + hex_core::seed::PRUNED_FIXED_FDS
+                                        + hex_core::seed::PROC_FDS,
+                                )
+                            })
+                            .and_then(|n| n.checked_add(usize::from(pruned.dev_mount.is_some())))
+                            .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
+                        if !room {
+                            pool.unpooled_proc(hex_core::devfs::Unpooled::Capacity)?;
+                        } else {
+                            match super::procmount::eligible(spec, &plan) {
+                                Ok((mount, key)) => {
+                                    if let Some(proc) = pool.take_proc(key)? {
+                                        pruned.proc_mount = Some((mount, proc));
+                                    }
+                                }
+                                Err(reason) => pool.unpooled_proc(reason)?,
+                            }
+                        }
+                        // The node's empty tmpfs for the masked directories adds one, within the same bound;
+                        // past it the init makes a tmpfs per mask, as before.
+                        let room = pruned
+                            .binds
+                            .len()
+                            .checked_add(pruned.path_joins.len())
+                            .and_then(|n| {
+                                n.checked_add(
+                                    hex_core::seed::CREATE_FDS
+                                        + 1
+                                        + hex_core::seed::PRUNED_FIXED_FDS
+                                        + 1,
+                                )
+                            })
+                            .and_then(|n| n.checked_add(usize::from(pruned.dev_mount.is_some())))
+                            .and_then(|n| {
+                                n.checked_add(if pruned.proc_mount.is_some() {
+                                    hex_core::seed::PROC_FDS
+                                } else {
+                                    0
+                                })
+                            })
+                            .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
+                        if room && let Some(empty) = pool.masked_directory() {
+                            pruned.masked_directory = Some(duplicate(empty)?);
+                        }
                     }
                     self.start_via_seed(making, spec, cgroup, network, seeds, Some(pruned))
                 }
@@ -786,7 +896,11 @@ impl Runtime {
                         making,
                         spec,
                         cgroup,
-                        Ahead { network, dev },
+                        Ahead {
+                            network,
+                            dev,
+                            masked_directory: shim_masked_directory(spec, dev_mounts)?,
+                        },
                         ShimStdio::Null,
                         &Command::spawn,
                     )
@@ -805,12 +919,20 @@ impl Runtime {
     /// binds are cloned in [`crate::linux::oci::mount::plan`]'s order, which the seed's init follows when
     /// it attaches them. The bundle, cgroup and state directories are opened as descriptors too, so a
     /// pruned seed, which reaches no host path, builds the whole root from descriptors.
+    ///
+    /// Where `way` is from its tree (decision 6's update), the agent makes the container's mount namespace
+    /// itself from the rootfs, here where the rootfs's host path is reachable, in one hold of the mount
+    /// lock (`goal6-mntns.md` §4): a directory root by `open_tree(OPEN_TREE_NAMESPACE)` on its path, a
+    /// layered root's overlay as a new namespace's filesystem ([`init::make_fs_namespace`]). The init joins
+    /// it and changes its propagation itself, so the agent clones nothing for the root and sets nothing.
     fn pruned_create(
         &self,
         making: &Making<'_>,
         spec: &Spec,
         cgroup: &BoxCgroup,
+        way: super::mntns::MountNamespace,
     ) -> Result<PrunedCreate, ClassicReason> {
+        let from_tree = way == super::mntns::MountNamespace::FromTree;
         // A mount namespace joined by path: the pruned init would `setns` into an existing namespace,
         // not build the pruned one. The container names a mount namespace, by path, so this is
         // `JoinsByPath`, not `NoMountNamespace`; it is checked first because `makes_namespace` counts
@@ -842,14 +964,21 @@ impl Runtime {
         // The rootfs: the mount at `/` built as a detached mount where there is one (a layered root's
         // overlay, whose layers are host paths reachable here but not in the pruned seed), else the
         // root directory cloned (a directory root). The init attaches it and skips the `/` mount.
+        let tree = |path: &Path| {
+            if from_tree {
+                init::namespace_of(rustix::fs::CWD, path)
+            } else {
+                clone_tree(path)
+            }
+        };
         let rootfs = match plan.iter().find(|op| op.destination == "/") {
-            Some(op) if !op.is_bind => {
+            Some(op) if !op.is_bind => if from_tree {
+                init::make_fs_namespace(&op.kind_source, &op.fstype, &op.data, op.flags)
+            } else {
                 init::make_fs(&op.kind_source, &op.fstype, &op.data, op.flags)
-                    .map_err(|_| ClassicReason::Source)?
             }
-            Some(op) => {
-                clone_tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?
-            }
+            .map_err(|_| ClassicReason::Source)?,
+            Some(op) => tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?,
             None => {
                 let p = Path::new(&spec.root.path);
                 let rootfs_path = if p.is_absolute() {
@@ -857,26 +986,25 @@ impl Runtime {
                 } else {
                     making.bundle.join(p)
                 };
-                clone_tree(&rootfs_path).map_err(|_| ClassicReason::Source)?
+                tree(&rootfs_path).map_err(|_| ClassicReason::Source)?
             }
         };
         // open_tree clones retain a source's shared peer group. Isolate the detached root before
         // the init attaches it or mounts beneath it (goal5-root.md §9). A slave keeps incoming host
-        // events; a final shared root gets a new peer group instead of sharing the host's.
-        let propagation = match spec.linux.rootfs_propagation.as_deref() {
-            Some("slave" | "shared") => sys::MS_SLAVE,
-            _ => sys::MS_PRIVATE,
-        };
-        sys::mount_setattr(
-            rootfs.as_fd(),
-            true,
-            &sys::MountAttrs {
-                set: 0,
-                clr: 0,
-                propagation,
-            },
-        )
-        .map_err(|_| ClassicReason::Source)?;
+        // events; a final shared root gets a new peer group instead of sharing the host's. A namespace
+        // made from the tree isn't this process's to change: its init does the same once it has joined.
+        if !from_tree {
+            sys::mount_setattr(
+                rootfs.as_fd(),
+                true,
+                &sys::MountAttrs {
+                    set: 0,
+                    clr: 0,
+                    propagation: init::isolating_propagation(spec),
+                },
+            )
+            .map_err(|_| ClassicReason::Source)?;
+        }
         let mut binds = Vec::new();
         for op in &plan {
             if op.destination == "/" {
@@ -925,7 +1053,10 @@ impl Runtime {
             cgroup_dir,
             container_dir,
             rootfs,
+            mount_namespace: way,
             dev_mount: None,
+            proc_mount: None,
+            masked_directory: None,
             binds,
             path_joins,
         })
@@ -2436,6 +2567,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
                 Ahead {
                     network: Some(network),
                     dev: None,
+                    masked_directory: None,
                 },
                 ShimStdio::Inherited,
                 &Command::spawn
@@ -2510,6 +2642,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
                 Ahead {
                     network: None,
                     dev: None,
+                    masked_directory: None,
                 },
                 ShimStdio::Inherited,
                 &spawn,
