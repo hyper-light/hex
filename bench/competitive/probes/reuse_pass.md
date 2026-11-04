@@ -461,6 +461,9 @@ state and not this change. Its cause isn't named yet.
   merged for measurement only): x-s3's series and step 6's, so mr13's low mark with a kept namespace's `/proc/net` files
   held (`f37032d`), every descriptor from 3 up marked close-on-exec before foreign code, a start holding both FIFO
   ends, and the `/dev` pool's thread with a umask of 0 (held for Ada).
+- **Under the old raising code:** mr17's node raised the process's descriptor limit to all it might hold (f37032d,
+  before the held files' bound, b49e81e), so every kept namespace held its `/proc/net` files; mr13 predates them. A
+  node now keeps the limit it is given, and at a container's default of 1024 holds none.
 - **Method:** the unit `hex-g5x-s6-v24-20261103T225919Z`, 23:03Z to 23:06:30Z, run noisy on the lead's order: interleaved
   pairs on 4-15, 2 rounds of 10 pairs a run, one owner's boxes, reuse on, one-minute load 35 to 52, the host's threads
   about 7,100 to 7,350, kiln's pool beside it, `create_serial.md` run 23 just before. Step 4's timed unit
@@ -489,6 +492,9 @@ and is still to be measured apart.
 - **Binaries:** the final merge, `cp/t7-ext-s6-x-s3-final` at ca6dc80 (x-s3 c912114 with step 6's b84bbaf, then step 3's
   final a600107; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91), against mr17 (run 15's: `hex` fc991e45d9cbb5ce,
   `seam_oci` 5c607a9069d096a2). The merge's gates (018867e, ca6dc80) and its root lab passed in the same unit first.
+- **Under the old raising code:** its node raised the process's descriptor limit to all it might hold (f37032d,
+  before the held files' bound, b49e81e), so every kept namespace held its `/proc/net` files; a node now keeps the
+  limit it is given, and at a container's default of 1024 holds none (`What criterion 2 needs on 4-15`).
 - **Method:** the unit `hex-g5x-s6-fdh25-20261104T054328Z`, run 9's method, A B B A from 05:47:38Z to 05:50:07Z, then one
   option-1 pass to 05:50:33Z; one owner's boxes, reuse on, interleaved pairs on 4-15, 2 rounds of 10 pairs a run; kiln's
   pool of about 103 containers beside it and no other unit of Hex's, and the session-lab agent's kiln gate unit
