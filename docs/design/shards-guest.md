@@ -104,6 +104,18 @@ The `oci` class's conformance suite (`hex_api::conformance`) and the OCI runtime
 (`bench/oci-validation/`) pass in the guest on the Mac Studio and on jupiter, reached from the host's node through
 the seam, and every gate passes.
 
+Hex's tests of the channel, each citing its ID:
+- HEX-GUEST-1: the wire framed by length over a stream, refused from its prefix past its bound; an exec whose stdio
+  travels apart (`hex_core::stream`, `hex_core::wire::read_request_apart`).
+- HEX-GUEST-2: a stdio connection's name, and hostile names refused.
+- HEX-GUEST-3: an exec's streams gathered in either order, per connection, within their bound and patience.
+- HEX-GUEST-4..5: the guest client's calls, stdio and end over a stream; an agent's bad bytes refused
+  (`hex_client::guest`).
+- HEX-GUEST-6..7: the relay to the node's own socket; its bounds refused by type (`hex_node::relay`).
+- HEX-GUEST-8: the conformance suite, every case, on `oci` and `process` boxes, through `hex guest relay` and the
+  guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
+  rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).
+
 ## 7. What would falsify it
 
 - Shards' owner choosing another seam (§2): the routing (§1) and channel (§3) stand; the implementation changes.
