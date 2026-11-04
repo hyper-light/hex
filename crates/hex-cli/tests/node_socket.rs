@@ -76,6 +76,28 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
     }
 }
 
+/// HEX-INST-3 (native plan step 6): on a machine where Hex's installer ran its one admin step, the
+/// node it installed (the `hex-node` user service) serves every Linux class with no further step: the
+/// conformance suite passes over its socket, `HEX_INSTALLED_SOCKET`, on `oci` and `process` boxes.
+/// Run by the installer's lab (bench/install/linux_lab.sh); elsewhere it prints SKIP.
+#[test]
+fn an_installed_node_serves_every_class() {
+    let Some(socket) = std::env::var_os("HEX_INSTALLED_SOCKET") else {
+        eprintln!("SKIP: HEX_INSTALLED_SOCKET names no installed node's socket");
+        return;
+    };
+    let exe = env!("CARGO_BIN_EXE_hex");
+    let client = Client::connect(Path::new(&socket)).expect("connect to the installed node");
+    assert_eq!(client.classes(), [Class::Process, Class::Oci]);
+    let lab = Lab::new(&cache_dir(), exe);
+    example(&lab, &client).expect("an oci box on the installed node");
+    let failures = conformance::run(&client, &OciBoxes(&lab, false));
+    assert!(failures.is_empty(), "oci boxes: {failures:#?}");
+    let failures = conformance::run(&client, &ProcessBoxes(exe));
+    assert!(failures.is_empty(), "process boxes: {failures:#?}");
+    assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
 /// A `hex node` process serving its socket, killed when dropped.
 struct Agent {
     child: Child,
