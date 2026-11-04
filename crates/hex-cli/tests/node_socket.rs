@@ -665,6 +665,10 @@ enum At {
     /// Its init cloned and stopped before its root switch, its container's state not yet written: the
     /// create held in its createRuntime hook, which runs there (OCI config.md:607).
     Init,
+    /// Past that stop: the init handed its state and running its createContainer hook, in its own
+    /// namespaces before its root switch (config.md:618-622), the agent waiting for its ready signal; its
+    /// container's state not yet written. The create held in that hook.
+    CreateContainer,
     /// In the record write that marks it ready, a durable record's (so one written to a temp file and
     /// renamed): the box made, the write held opening its temp file, a FIFO no one has opened. A
     /// non-durable record's first write takes no temp ([`At::TornRecord`]).
@@ -689,7 +693,7 @@ impl At {
             Self::BundleRendered => Some("bundle-rendered"),
             #[cfg(debug_assertions)]
             Self::TornRecord => Some("record-first-write"),
-            Self::StateDir | Self::Init | Self::Ready | Self::Made => None,
+            Self::StateDir | Self::Init | Self::CreateContainer | Self::Ready | Self::Made => None,
         }
     }
 }
@@ -701,7 +705,8 @@ impl At {
 /// the write, leaving a torn record: no file it opens can hold it at any of these. Elsewhere it is held
 /// at a point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the
 /// kernel shows it waiting there: with the cgroup and the container's state directory made; with the
-/// init cloned and stopped for its create-time hooks; inside a durable record's write, opening the temp
+/// init cloned and stopped for its create-time hooks; with the init past that stop, in its createContainer
+/// hook; inside a durable record's write, opening the temp
 /// file it renames; and after the create. Restarted, the agent removes the box killed mid-create by
 /// what it finds of it — a torn record it reads as unreadable, and says so — and takes back the one
 /// made, which then deletes, so at every point nothing of the box is left: no record in either place,
@@ -711,7 +716,7 @@ fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
         let mut points = Vec::new();
         #[cfg(debug_assertions)]
         points.extend([At::CgroupMade, At::BundleRendered]);
-        points.extend([At::StateDir, At::Init]);
+        points.extend([At::StateDir, At::Init, At::CreateContainer]);
         // The record write that marks a box ready is held by where its record is kept: a durable
         // record (on disk) is written to a temp file and renamed, so a FIFO holds the agent opening the
         // temp ([`At::Ready`]); a non-durable record (on tmpfs) is written once, straight to its file,
@@ -778,7 +783,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             mkfifo(&bundle.join("config.json"));
             ClassSpec::Bundle(bundle)
         }
-        At::Init | At::Ready => {
+        At::Init | At::CreateContainer | At::Ready => {
             mkfifo(&go);
             hook_release = Some(
                 std::fs::OpenOptions::new()
@@ -787,12 +792,18 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
                     .open(&go)
                     .unwrap(),
             );
-            // The create waits in its createRuntime hook, its container made, until this test
-            // writes a line, or closes the writer on an assertion failure.
+            // The create waits in its createRuntime hook (or, past the init's stop for the hooks, in its
+            // createContainer hook), its container made, until this test writes a line, or closes the
+            // writer on an assertion failure.
             let script = crash_hook_script(&hooked, &go);
+            let list = if at == At::CreateContainer {
+                "createContainer"
+            } else {
+                "createRuntime"
+            };
             let hooks = format!(
                 r#",
-  "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
+  "hooks": {{"{list}": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
             );
             ClassSpec::Bundle(lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks))
         }
@@ -851,7 +862,9 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             );
         }
         At::StateDir => {}
-        At::Init => wait_for("the create's hook to hold it", || hooked.exists()),
+        At::Init | At::CreateContainer => {
+            wait_for("the create's hook to hold it", || hooked.exists())
+        }
         At::Ready => {
             wait_for("the create's hook to hold it", || hooked.exists());
             mkfifo(&temp);
@@ -904,12 +917,12 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         .is_some_and(|c| c.join("state.json").exists());
     assert_eq!(
         state_written,
-        state_dir_made && !matches!(at, At::StateDir | At::Init),
+        state_dir_made && !matches!(at, At::StateDir | At::Init | At::CreateContainer),
         "{name}: the container's state at the kill"
     );
     drop(agent);
-    if at == At::Init {
-        // The hook outlives the agent it ran under; let it end.
+    if matches!(at, At::Init | At::CreateContainer) {
+        // The hook may outlive the agent it ran under; let it end.
         hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
     }
     let created = create.join().unwrap();

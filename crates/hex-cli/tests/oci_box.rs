@@ -424,6 +424,8 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
     create_and_start_container_hooks_run_in_the_containers_namespaces(&lab, own);
+    a_failing_create_container_hook_fails_the_create_naming_it(&lab, own);
+    a_failing_start_container_hook_fails_the_start_naming_it(&lab, own);
     an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
     rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
     every_mount_kind_is_in_the_box_as_its_spec_asks(&lab, own);
@@ -1319,8 +1321,7 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
 /// has not run. After start it has, in the init's namespaces inside the root (the host path out of view),
 /// given `created` and pid 1, before the program, which finds its record. Neither holds a descriptor but
 /// its stdio. A box with a startContainer hook alone takes the classic path, counted as the create-time
-/// hooks are (`Hooks` as root, `Rootless` rootless), and its hook runs. A createContainer hook that fails
-/// fails the create, and a startContainer hook that fails fails the start, each naming the hook.
+/// hooks are (`Hooks` as root, `Rootless` rootless), and its hook runs.
 fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, own: &Path) {
     const KINDS: [&str; 7] = ["mnt", "pid", "ipc", "uts", "net", "cgroup", "user"];
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
@@ -1550,40 +1551,98 @@ fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, 
     );
     node.delete(&id).expect("delete it");
 
-    // A failing hook fails its operation, naming the hook.
-    let (dir, obs) = fresh();
-    write(
-        &dir,
-        &obs,
-        serde_json::json!({"createContainer": [sh("exit 3".to_owned())]}),
+    eprintln!(
+        "hooks: createRuntime, createContainer and startContainer each ran at its point and in its namespaces"
     );
+}
+
+/// A bundle whose box binds a fresh directory at /obs, runs a program that writes /obs/program, and names
+/// `hooks`: the failing-hook tests' (AC-T7.1.4).
+fn hooked_bundle(lab: &Lab, hooks: serde_json::Value) -> (PathBuf, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    let obs = dir.join("obs");
+    std::fs::create_dir(&obs).unwrap();
+    std::fs::create_dir_all(lab.rootfs.join("obs")).unwrap();
+    let program = strings(&[
+        "/bin/sh",
+        "-c",
+        "echo ran > /obs/program; exec /usr/bin/sleep 600",
+    ]);
+    let mut spec: serde_json::Value = serde_json::from_str(&lab.config(&program, false)).unwrap();
+    spec["mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(
+            {"destination": "/obs", "type": "bind", "source": obs, "options": ["rbind", "rw"]}
+        ));
+    spec["hooks"] = hooks;
+    std::fs::write(dir.join("config.json"), spec.to_string()).unwrap();
+    (dir, obs)
+}
+
+/// A hook that exits 3, run by `/bin/sh` (found in the runtime's namespace and in the box's root alike).
+fn failing_hook() -> serde_json::Value {
+    serde_json::json!([{"path": "/bin/sh", "args": ["sh", "-c", "exit 3"], "env": ["PATH=/usr/bin:/bin"]}])
+}
+
+/// runtime.md:66-67 (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3). Do: create a box whose createContainer hook exits 3.
+/// Expect: the create refused by type, an `Os` refusal naming the createContainer hook, never the refusal a
+/// stopped box gets (`NotRunning`); the box isn't there afterwards and its program never ran.
+fn a_failing_create_container_hook_fails_the_create_naming_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hook-create-fails"), state.path());
+    let (dir, obs) = hooked_bundle(lab, serde_json::json!({"createContainer": failing_hook()}));
     let id = BoxId::new("hooked-create-fails").unwrap();
-    let refused = make(&id, dir).expect_err("a failing createContainer hook fails the create");
+    let refused = node
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+        .expect_err("a failing createContainer hook fails the create");
     assert!(
-        format!("{refused:?}").contains("createContainer"),
-        "the refusal names the hook: {refused:?}"
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("createContainer hook failed") && !why.contains("stopped")),
+        "the refusal is typed and names the hook: {refused:?}"
     );
-    let _ = node.delete(&id);
-    let (dir, obs) = fresh();
-    write(
-        &dir,
-        &obs,
-        serde_json::json!({"startContainer": [sh("exit 3".to_owned())]}),
+    assert_eq!(
+        node.inspect(&id),
+        Err(Refusal::NoSuchBox(id.clone())),
+        "a refused create leaves no box"
     );
+    assert!(!obs.join("program").exists(), "the program never ran");
+    eprintln!("hooks: a failing createContainer hook failed the create, naming it: {refused:?}");
+}
+
+/// runtime.md:69-70 (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3). Do: create a box whose startContainer hook exits 3,
+/// then start it. Expect: the create made, the start refused by type, an `Os` refusal naming the
+/// startContainer hook, never `NotRunning` (the refusal a stopped box's start gets); its program never ran.
+fn a_failing_start_container_hook_fails_the_start_naming_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hook-start-fails"), state.path());
+    let (dir, obs) = hooked_bundle(lab, serde_json::json!({"startContainer": failing_hook()}));
     let id = BoxId::new("hooked-start-fails").unwrap();
-    make(&id, dir).expect("create a box whose startContainer hook fails");
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir),
+        owner: None,
+    })
+    .expect("create a box whose startContainer hook fails");
     let refused = node
         .start(&id)
         .expect_err("a failing startContainer hook fails the start");
     assert!(
-        format!("{refused:?}").contains("startContainer"),
-        "the refusal names the hook: {refused:?}"
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("startContainer hook failed") && !why.contains("stopped")),
+        "the refusal is typed and names the hook: {refused:?}"
     );
     assert!(!obs.join("program").exists(), "the program never ran");
-    let _ = node.delete(&id);
-    eprintln!(
-        "hooks: createRuntime, createContainer and startContainer each ran at its point and in its namespaces; a failing one failed its operation, by name"
-    );
+    node.delete(&id).expect("delete the box");
+    eprintln!("hooks: a failing startContainer hook failed the start, naming it: {refused:?}");
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4): rootfsPropagation shared, slave and private each show on the box's

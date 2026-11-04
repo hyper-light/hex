@@ -529,6 +529,18 @@ run before startContainer ends, and a startContainer failure surfaces after `sta
 succeeded. Writing the byte after the hooks keeps the spec's order and reports the failure from `start`.
 Sources: `docs/research/runtime/oci-hooks.md`.
 
+**Two changes to what Hex did, each the spec's.**
+- prestart and createRuntime now run before the root switch, where they had run after it, with the container
+  at the exec FIFO and its state written. config.md:607 puts createRuntime before the pivot, and :619 puts
+  createContainer after it. So node_socket's `At::Init` crash point now holds a create whose state isn't
+  written. A new point, `At::CreateContainer`, holds it inside a createContainer hook, past the init's `H`
+  stop. Both recover with nothing of the box left (T-T7.1.2).
+- Every create- and start-time hook is given `created` (runtime.md:19-20), not runc's `creating`.
+
+A spec with no create- or start-time hook takes the path it took before: the init never stops (`H`
+comes only from `Hooks::sync_init`), the shim closes the map pipe before its fork as before, and the
+pruned path's routing test is the same except that it now also sends startContainer classic.
+
 **Evidence.** `crates/hex-cli/tests/oci_box.rs`,
 `create_and_start_container_hooks_run_in_the_containers_namespaces` (AC-T7.1.4, T-T7.1.4). It fails at
 the test's commit and passes after the fix, rootless (the seed's classic path) and as root (the shim):
