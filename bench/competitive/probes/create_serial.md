@@ -866,6 +866,51 @@ On-CPU time a lifecycle in the runtime's threads: 1,333.1 us at 1 (`hex` 587.6, 
   namespace mounts for itself (`ipc/namespace.c:73`, `ipc/mqueue.c:1626-1637`, `:426-438`). The
   `/proc` one comes with its own pid namespace; the other two are the ones a lifecycle could make fewer of.
 
+## Run 24 (2026-11-04, fedora): oncpu and locks on the final merge, 4-15: where concurrency 32's CPU a lifecycle goes
+
+- **Binary:** the final merge (`cp/t7-ext-s6-x-s3-final` ca6dc80; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91),
+  one owner's boxes, the probe container on 4-15, the unit `hex-g5x-s6-fdh25-20261104T054328Z` after `reuse_pass.md` run
+  16: oncpu 05:50:33Z to 05:55:23Z (load 26.3 falling to 5.4), locks 05:55:23Z to 05:58:36Z (load 5.4 to 6.4), about
+  6,800 to 6,900 host threads, kiln's pool beside it. Both programs run on every system call or context switch on the
+  host, so their absolute times carry that cost; the split is what the runs read.
+- **Runs:** `create-serial-oncpu-20261104T055033Z` (concurrency 1 over 5,020 lifecycles, 32 over 20,000 sustained),
+  `create-serial-locks-20261104T055523Z`.
+
+The runtime's own processes (`seam_oci`, and `hex`: its seeds and inits before they exec), per lifecycle:
+
+| | concurrency 1 | concurrency 32 |
+|---|---|---|
+| on-CPU | 464.3 us | 916.0 us |
+| user mode | 181.4 us | 313.2 us |
+| in `clone3` (1 call) | 47.5 us | 107.1 us |
+| in `openat` (41 calls) | 39.7 us | 96.6 us |
+| in `execve` | 34.9 us | 59.4 us |
+| in `read` (53 to 54 calls) | 21.4 us | 41.3 us |
+| in `close` (72 calls) | 16.2 us | 33.6 us |
+| in `fsconfig` | 11.8 us | 27.5 us |
+| spinning on a lock | 0.6 us | 47.2 us |
+
+At 32 the spinning is `list_lrus_mutex` as a superblock is made (16.0 us) and let go (1.3), `cgroup_mutex` in the clone
+into the box's cgroup (5.0), `seam_oci`'s own file table as its 32 threads open and close (`alloc_fd`, `file_close_fd`:
+4.4), the mount lock in `move_mount`, `copy_mnt_ns` and `open_tree`'s copy (4.3), and `shrinker_mutex` (1.7). In the
+locks run at 32, `cgroup_mutex` was held 19.9% of the busy buckets' samples and handed off 6.6%; the fork into the box's
+cgroup took 77.7 us whole, once a lifecycle; the runtime waited for the lock 0.26 times a lifecycle, 269.5 us each
+(0.070 ms); and the lock's holder was off its CPU while holding it 0.005 ms a lifecycle (the runtime's, preempted 0.013
+times at 183 us and blocked 0.029 times at 89 us).
+
+- **Concurrency 32 costs twice concurrency 1's CPU a lifecycle, spread over everything:** user mode 1.73 times, each kind
+  of call about twice, spinning 47 us of the 452 more. At 32 both threads of each of 4-15's six cores run; at 1 one does
+  (`reuse_pass.md` runs 8 and 9: 1.18 times on one thread of each core, 1.36 to 1.44 on both, at a quieter host), and
+  the probes' cost a call grows with them.
+- **No convoy behind a preempted holder at this load:** the clone's holder of `cgroup_mutex` sat off its CPU 0.005 ms a
+  lifecycle and the lock was free three quarters of the time, so it doesn't cap 32's rate here. Run 23's 3.87 ms a
+  lifecycle of waits was at load 37 to 52 on 4-31, where this probe hasn't run.
+- **A lifecycle opens 41 files and reads 54 times** (its cgroup's files, `/proc` stat files, its records): at 32 those
+  opens, reads and closes are 171.5 us of the 916.
+- **What can raise the ratio:** concurrency 1 keeps 1.2 to 1.3 CPUs busy, so part of its CPU runs beside its path (the
+  namespace checker, the `/dev` pool). Work cut from the path speeds both concurrencies; work cut from beside it, or work
+  that grows with concurrency (this run's spinning, about 5% of 32's CPU), speeds only 32.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
