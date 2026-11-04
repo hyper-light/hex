@@ -967,3 +967,88 @@ With Docker's paths, medians over 17 pairs, off → on:
   No gain.
 
 So it stays on `cp/t7-ext-s3-maskpool`. Every cell, the pairs, the trace and the reasons are in `docs/research/runtime/goal5-mounts.md` §13.
+
+## Masked directories cloned from the node's one empty tmpfs: a host A/B of record (goal 6, 2026-11-04)
+
+A = ca6dc80 (hex 5e81afc74796948f, seam_oci b977d36c69ba11b0), B = 1333092 (hex e781c85262a49a7f, seam_oci
+fd9f9e1b6ccaf833), each built in release from a `git archive` of its commit (every file touched after extraction) in
+its own target dir: unit hex-g6-abbuild-20261104T144907Z. Of B's changes only one acts on Linux 6.19: each masked
+directory is a clone of the node's one empty read-only tmpfs, not a tmpfs of its own. With Docker's paths that's 3
+tmpfs superblocks a create fewer, for one more mount-lock hold per masked directory.
+
+- **Host and conditions:** fedora (`kiln-a094a12d`, i9-14900HX, Linux 6.19.10), the bench container on CPUs 4-15
+  (`BENCH_MEMORY=8g BENCH_OOM=1000`). AC-e's harness (`AC_E=2000 AC_E_MOUNTS=1`): 8 in flight, 8,000 idle host threads
+  (8,001 up, about 11,300 host threads), owner bundles (`HEXBENCH_OWNER=bench-owner`), reuse on, `HEXBENCH_DEVFS=1`,
+  Docker's default masked and read-only paths (`HEXBENCH_DOCKER_PATHS=1`). L = 0, 6 and 12 busy loops pinned to 4-15
+  at nice 0, started and killed by recorded PID. Both arms ran the tip's harness (B's snapshot, the reader with the
+  root in place, a76b58d), so neither run's `env.txt` names a harness commit.
+- **When and load:** unit hex-g6-abtimed-20261104T145145Z, under `fedora-timed.lock`, 14:54:09Z to 15:00:16Z. 6 rounds,
+  A and B adjacent at each L, each round's order the last's reversed. Load 48.7-70.6 at each run's start, from kiln CI
+  beside it; up on the host, a kind control plane, three buildkit builders, a registry and minio, and the hooks
+  agent's unit waiting on the same lock. Each run's load, `docker ps` and the loops' PIDs are in
+  `~/.cache/hex-t7/g6/ab-20261104T144907Z/` (`context.txt`, `pids`, `ace-<arm>-L<n>-r<round>.log`).
+- **Coverage:** all 36 runs read 2,000 creates, chroots == creates (one B run 2,002 of 2,000 spans), no event lost,
+  the fallback counts matched, every init with a root-in-place span. Each exits 1 because part 19's p99 is over the
+  0.5 ms bar, not for missing data.
+
+Each cell is A / B in ms. Root is the reader's root in place (part 19 to the init's chdir after its `chroot`; on 6.19
+no init joins a namespace made from its tree, so it is part 19 plus the switch). Part 19 as the reader always gave it
+is in the medians below.
+
+| L = 0 | root p50 | root p99 | create p50 | create p99 |
+|---|---|---|---|---|
+| r1 (A, B) | 0.243 / 0.238 | 1.077 / 0.571 | 1.830 / 0.892 | 4.770 / 2.864 |
+| r2 (B, A) | 0.241 / 0.216 | 0.990 / 0.977 | 1.961 / 2.050 | 4.609 / 4.109 |
+| r3 | 0.246 / 0.209 | 1.448 / 1.204 | 2.033 / 1.987 | 5.248 / 4.547 |
+| r4 | 0.234 / 0.196 | 0.739 / 0.535 | 0.771 / 0.702 | 2.030 / 7.839 |
+| r5 | 0.217 / 0.186 | 1.343 / 1.109 | 1.872 / 1.957 | 4.701 / 6.437 |
+| r6 | 0.251 / 0.241 | 1.760 / 0.712 | 1.921 / 0.946 | 4.865 / 2.068 |
+
+| L = 6 | root p50 | root p99 | create p50 | create p99 |
+|---|---|---|---|---|
+| r1 | 0.289 / 0.223 | 1.308 / 1.287 | 1.309 / 2.184 | 3.364 / 5.591 |
+| r2 | 0.287 / 0.224 | 1.711 / 1.250 | 1.617 / 2.087 | 16.182 / 4.184 |
+| r3 | 0.269 / 0.233 | 2.078 / 1.477 | 2.152 / 2.177 | 5.000 / 5.106 |
+| r4 | 0.234 / 0.219 | 2.139 / 1.084 | 1.950 / 1.196 | 4.769 / 2.888 |
+| r5 | 0.225 / 0.200 | 1.303 / 1.235 | 2.007 / 1.981 | 4.342 / 4.199 |
+| r6 | 0.259 / 0.220 | 1.465 / 1.598 | 2.085 / 2.053 | 5.292 / 10.756 |
+
+| L = 12 | root p50 | root p99 | create p50 | create p99 |
+|---|---|---|---|---|
+| r1 | 0.264 / 0.222 | 1.822 / 1.379 | 2.148 / 2.080 | 4.971 / 4.428 |
+| r2 | 0.280 / 0.244 | 1.709 / 1.638 | 2.204 / 2.224 | 5.390 / 4.493 |
+| r3 | 0.255 / 0.209 | 1.778 / 1.578 | 2.160 / 1.981 | 4.965 / 19.930 |
+| r4 | 0.230 / 0.203 | 1.926 / 1.644 | 1.991 / 1.945 | 9.193 / 15.067 |
+| r5 | 0.272 / 0.235 | 2.745 / 1.479 | 2.105 / 2.178 | 17.648 / 8.545 |
+| r6 | 0.277 / 0.218 | 1.900 / 1.225 | 2.179 / 2.003 | 7.635 / 4.903 |
+
+Medians A → B over the 6 rounds, the median of B less A over the 6 pairs, and how many pairs read lower:
+
+| L | root p50 | root p99 | part 19 p50 | part 19 p99 | create p50 | create p99 |
+|---|---|---|---|---|---|---|
+| 0 | 0.242 → 0.212 (-0.028, 6) | 1.210 → 0.845 (-0.239, 6) | 0.236 → 0.207 (-0.028, 6) | 1.093 → 0.781 (-0.307, 5) | 1.896 → 1.451 (-0.057, 4) | 4.736 → 4.328 (-0.600, 4) |
+| 6 | 0.264 → 0.222 (-0.038, 6) | 1.588 → 1.268 (-0.264, 5) | 0.257 → 0.216 (-0.038, 6) | 1.466 → 1.106 (-0.314, 6) | 1.979 → 2.070 (-0.001, 3) | 4.884 → 4.653 (-0.018, 3) |
+| 12 | 0.268 → 0.220 (-0.040, 6) | 1.861 → 1.529 (-0.363, 6) | 0.260 → 0.211 (-0.039, 6) | 1.545 → 1.338 (-0.293, 6) | 2.154 → 2.042 (-0.057, 4) | 6.512 → 6.724 (-0.720, 4) |
+
+**Non-vacuity.** After the rounds, each arm's mounts trace (`MOUNTS=1000 MOUNTS_CONC=8`, the same paths and owner,
+no idle threads; create-breakdown-20261104T145958Z A, 150010Z B, none lost). Per create, in the init's part 19:
+- A: `fsconfig` create 4.0 (proc and 3 masked directories' tmpfs), `fsopen`/`fsmount` 4.0, `open_tree` 10.0, the
+  mount lock held for write 28.0.
+- B: `fsconfig` create 1.1 (proc; the 0.1 is `/dev` made on the path when its pool ran dry, beside 0.6 `mknodat`),
+  `fsopen`/`fsmount` 1.1, `open_tree` 13.0, the lock held for write 31.0. The 3 superblocks became 3 clones, and 3
+  more holds, as named.
+- B's seam JSON in every AC-e run: `mount_namespaces` copy 2,000, empty 0, tree 0; the proc pool made none (taken 0,
+  its first make refused for the pid namespace, `failed_namespace` 1, the rest `disabled`). So nothing else of B's acted.
+
+**Read.**
+- Part 19's p50 falls 12-19%, lower in every pair at every L (18 of 18), by about the 0.035 ms §13's stock saved. The
+  superblocks are gone from the path, not moved to a seed: the clone is of one tmpfs made for the node's life.
+- Part 19's p99 falls too, unlike §13's stock: lower in 17 of 18 pairs (root p99 also 17 of 18), by 0.24-0.36 ms of
+  medians. A's and B's ranges overlap at 0 and 6 loops and stand apart at 12 (A 1.475-2.486, B 1.029-1.453). Still
+  over the 0.5 ms bar at every L: B's medians 0.78-1.34 ms.
+- The whole create isn't resolved. Its p50 runs bimodal on this host (0.7-1.3 against about 2.0 ms in either arm), and
+  the pair medians are -0.057, -0.001 and -0.057 ms with 4, 3 and 4 of 6 lower. Its p99 is 2-20 ms, set by
+  the host's tail; on neither side.
+- What would falsify it: a pair-for-pair rerun at a lower load with B's part 19 p99 not lower in most pairs. One A/B at
+  load 50-70 holds what the 6.19 change is meant for (the p50, by the superblocks) and suggests the tail; the create's
+  own gain needs a quieter host or many more rounds.
