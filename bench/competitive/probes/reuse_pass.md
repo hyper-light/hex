@@ -491,7 +491,9 @@ and is still to be measured apart.
   `seam_oci` 5c607a9069d096a2). The merge's gates (018867e, ca6dc80) and its root lab passed in the same unit first.
 - **Method:** the unit `hex-g5x-s6-fdh25-20261104T054328Z`, run 9's method, A B B A from 05:47:38Z to 05:50:07Z, then one
   option-1 pass to 05:50:33Z; one owner's boxes, reuse on, interleaved pairs on 4-15, 2 rounds of 10 pairs a run; kiln's
-  pool of about 103 containers beside it and no other unit of Hex's. CPU pressure rose under the second run.
+  pool of about 103 containers beside it and no other unit of Hex's, and the session-lab agent's kiln gate unit
+  `kiln-gate-9c245a2959aa-1793770896` (from 05:41Z, CPUWeight 1, Nice 19, its tests starting Docker containers),
+  pinned to 16-31 only from 05:50Z, so on 4-15 beside the first two runs. CPU pressure rose under the second run.
 
 | run | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | over the socket (SE) | load, CPU pressure |
 |---|---|---|---|---|---|---|---|
