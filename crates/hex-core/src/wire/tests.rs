@@ -136,6 +136,25 @@ fn counts() -> netns::Counts {
         made_on_path: 3,
         discarded: 4,
         failed: u64::MAX,
+        ..netns::Counts::default()
+    }
+}
+
+/// The counts version 3 adds to, each of its fields a different value: makes failed at every step, the pool
+/// refused for both capabilities.
+fn counts_v3() -> netns::Counts {
+    netns::Counts {
+        failed: 15,
+        failed_by: netns::FailedBy {
+            home: 1,
+            unshare: 2,
+            open: 3,
+            loopback: 4,
+            back: 5,
+        },
+        refused: netns::Missing::of(false, false),
+        refused_on_path: 6,
+        ..counts()
     }
 }
 
@@ -368,6 +387,68 @@ const GOLDEN_EXHAUSTED: &str = concat!(
 );
 // Version 2's network namespace counts, answered: made ahead 1, taken 2, made on the path 3, discarded
 // 4, failed u64::MAX.
+/// HEX-SOCK-2, append-only, and HEX-NETNS-12/13 over the socket: version 3 appends why makes failed and
+/// whether the pool was refused to the network namespace counts' answer, whose bytes are the ones recorded
+/// here; written in version 2 the answer is version 2's bytes, and every other kind is written in version 3 as
+/// in version 2 but for the version in its header. A version 2 answer with version 3's fields behind it is
+/// refused, as is a byte naming a capability no version defines.
+#[test]
+fn version_3_messages_are_the_bytes_recorded() {
+    let v3 = answer(3, 12, &Answer::Netns(counts_v3()), MAX_MESSAGE).unwrap();
+    assert_eq!(hex(&v3), GOLDEN_NETNS_V3);
+    assert_eq!(
+        read_answer(&received(&v3, 0), MAX_MESSAGE).unwrap().1,
+        Answer::Netns(counts_v3())
+    );
+    assert_eq!(
+        hex(&answer(2, 12, &Answer::Netns(counts()), MAX_MESSAGE).unwrap()),
+        GOLDEN_NETNS
+    );
+    let as_v2 = |mut bytes: Vec<u8>| {
+        bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+        bytes
+    };
+    for (n, req, _) in requests() {
+        assert_eq!(
+            as_v2(request(3, n, &req, MAX_MESSAGE).unwrap()),
+            request(2, n, &req, MAX_MESSAGE).unwrap(),
+            "{req:?}"
+        );
+    }
+    for (n, ans) in answers()
+        .into_iter()
+        .filter(|(_, a)| !matches!(a, Answer::Netns(_)))
+    {
+        assert_eq!(
+            as_v2(answer(3, n, &ans, MAX_MESSAGE).unwrap()),
+            answer(2, n, &ans, MAX_MESSAGE).unwrap(),
+            "{ans:?}"
+        );
+    }
+    assert!(matches!(
+        read_answer(&received(&as_v2(v3.clone()), 0), MAX_MESSAGE),
+        Err(Fault::Trailing { .. })
+    ));
+    let mut unknown = v3;
+    let byte = HEADER_BYTES + 10 * 8;
+    unknown[byte] = 4;
+    assert_eq!(
+        read_answer(&received(&unknown, 0), MAX_MESSAGE),
+        Err(Fault::value(
+            "missing capabilities",
+            "0x04 names a capability no version defines"
+        ))
+    );
+}
+
+/// [`counts_v3`]'s answer in version 3, id 12.
+const GOLDEN_NETNS_V3: &str = concat!(
+    "48455857030009800c00000000000000",
+    "01000000000000000200000000000000030000000000000004000000000000000f00000000000000",
+    "0100000000000000020000000000000003000000000000000400000000000000050000000000000003",
+    "0600000000000000",
+);
+
 const GOLDEN_NETNS: &str = concat!(
     "48455857020009800c00000000000000",
     "0100000000000000020000000000000003000000000000000400000000000000ffffffffffffffff",
@@ -966,8 +1047,13 @@ proptest! {
 
     /// HEX-SOCK-2: any box info, list, refusal and network namespace counts read back as written.
     #[test]
-    fn any_answer_reads_back(infos in proptest::collection::vec(any_info(), 0..4), refusal in any_refusal(), exit in any_exit(), n in any::<[u64; 5]>()) {
-        let counts = netns::Counts { made_ahead: n[0], taken: n[1], made_on_path: n[2], discarded: n[3], failed: n[4] };
+    fn any_answer_reads_back(infos in proptest::collection::vec(any_info(), 0..4), refusal in any_refusal(), exit in any_exit(), n in any::<[u64; 11]>(), bits in 0u8..4) {
+        let counts = netns::Counts {
+            made_ahead: n[0], taken: n[1], made_on_path: n[2], discarded: n[3], failed: n[4],
+            failed_by: netns::FailedBy { home: n[5], unshare: n[6], open: n[7], loopback: n[8], back: n[9] },
+            refused: netns::Missing::of(bits & 1 == 0, bits & 2 == 0),
+            refused_on_path: n[10],
+        };
         for ans in [Answer::Boxes { infos, more: false }, Answer::Refused(refusal), Answer::Exited(exit), Answer::Netns(counts)] {
             let bytes = answer(VERSION, 7, &ans, MAX_MESSAGE).unwrap();
             prop_assert_eq!(read_answer(&received(&bytes, 0), MAX_MESSAGE).unwrap().1, ans);

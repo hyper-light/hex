@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::Refusal;
-use hex_core::netns::{Counts, Pool, Take};
+use hex_core::netns::{Counts, Missing, Pool, Step, Take};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
 use hex_runtime::linux::oci::run::Networks;
@@ -65,6 +65,18 @@ impl Netns {
         })
     }
 
+    /// A pool refused because the node lacks what a make takes (`missing`): no thread, and every take is
+    /// made on the path, counted under that reason ([`Pool::refused`]).
+    pub fn refused(missing: Missing) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                pool: Mutex::new(Pool::refused(missing)),
+                wake: Condvar::new(),
+            }),
+            refill: None,
+        }
+    }
+
     /// What the pool has done. Counted at the take, so a create that fails after it took a namespace,
     /// or found the pool dry, is counted all the same.
     pub fn counts(&self) -> Result<Counts, Refusal> {
@@ -109,7 +121,8 @@ impl Drop for Netns {
 
 /// The refill thread: makes a namespace whenever the pool asks for one and hands it in, one at a time,
 /// as the pool's count of what it asks for needs, and ends once the pool is shut down. It opens its
-/// home namespace first; a thread that can't makes none, each make it is asked for failing, counted.
+/// home namespace first; a thread that can't makes none, each make it is asked for failing, counted
+/// under [`Step::Home`]. Each failed make is counted by the step that failed.
 /// A namespace the pool refuses (past its bound, which one maker never reaches, or after shutdown) is
 /// closed here. A poisoned lock ends it, and every create then refuses on the same lock.
 fn refill(shared: &Shared) {
@@ -130,8 +143,8 @@ fn refill(shared: &Shared) {
         // Made with the lock let go, so a take never waits on a make.
         drop(pool);
         let made = match &home {
-            Ok(home) => net::make_ahead(home.as_fd()),
-            Err(e) => Err(e.clone()),
+            Ok(home) => net::make_ahead(home.as_fd()).map_err(|e| e.step),
+            Err(_) => Err(Step::Home),
         };
         let Ok(mut pool) = shared.pool.lock() else {
             return;
@@ -140,7 +153,7 @@ fn refill(shared: &Shared) {
             Ok(ns) => {
                 let _ = pool.made(ns);
             }
-            Err(_) => pool.failed(),
+            Err(step) => pool.failed(step),
         }
     }
 }

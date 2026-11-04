@@ -18,6 +18,11 @@
 //! - **Dry**: a take from an empty pool is answered [`Take::MakeOnPath`] and counted; the create makes its
 //!   namespace on the path, as with no pool. A create the pool can't serve, a container with a user namespace
 //!   of its own (decision 4), makes its namespace on the path too, and [`Pool::on_path`] counts it the same.
+//! - **Failed makes**: each is reported with the step of the make that failed ([`Step`]), and counted by it
+//!   ([`FailedBy`]), so a make the kernel refuses is never only a number (CLAUDE.md §3).
+//! - **Refused**: a node that lacks a capability a make takes ([`Missing`]) starts no pool whose every make
+//!   would fail ([`Pool::refused`]): it holds none and asks for none, and every take is made on the path,
+//!   counted under that reason ([`Counts::refused_on_path`]).
 //! - **Shutdown**: [`Pool::shut_down`] hands back what the pool holds, counted as discarded, and every take after
 //!   it is refused ([`ShutDown`]); a namespace made after it is handed back ([`Refused::ShutDown`]).
 //!
@@ -29,6 +34,88 @@ use std::collections::VecDeque;
 /// (concurrency 32), so a burst of its whole width finds a namespace each, at most 24 MiB of kernel memory on
 /// the heavier machine measured (`bench/competitive/probes/netns_pool.md`).
 pub const BOUND: usize = 32;
+
+/// The step of a make ahead that failed: why it failed, as the shell reports it ([`Pool::failed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Opening the making thread's own namespace, which it goes back to after each make.
+    Home,
+    /// `unshare(CLONE_NEWNET)`, which takes CAP_SYS_ADMIN (unshare(2)).
+    Unshare,
+    /// Opening the namespace made, the descriptor that keeps it alive.
+    Open,
+    /// Bringing its loopback up, an rtnetlink request that takes CAP_NET_ADMIN (rtnetlink(7)).
+    Loopback,
+    /// Going back to the thread's own namespace, `setns`, which takes CAP_SYS_ADMIN (setns(2)).
+    Back,
+}
+
+/// Failed makes, counted by the [`Step`] that failed; they sum to [`Counts::failed`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailedBy {
+    pub home: u64,
+    pub unshare: u64,
+    pub open: u64,
+    pub loopback: u64,
+    pub back: u64,
+}
+
+impl FailedBy {
+    fn count(&mut self, step: Step) {
+        let n = match step {
+            Step::Home => &mut self.home,
+            Step::Unshare => &mut self.unshare,
+            Step::Open => &mut self.open,
+            Step::Loopback => &mut self.loopback,
+            Step::Back => &mut self.back,
+        };
+        *n = n.saturating_add(1);
+    }
+}
+
+/// What a node lacks of the capabilities a make ahead takes, in its own user namespace: CAP_SYS_ADMIN for
+/// `unshare` and `setns`, CAP_NET_ADMIN for loopback's rtnetlink request. At least one is missing: a node
+/// that holds both has none ([`Missing::of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Missing {
+    sys_admin: bool,
+    net_admin: bool,
+}
+
+impl Missing {
+    /// What a node that holds CAP_SYS_ADMIN when `sys_admin` and CAP_NET_ADMIN when `net_admin` lacks, or
+    /// nothing when it holds both.
+    pub fn of(sys_admin: bool, net_admin: bool) -> Option<Self> {
+        if sys_admin && net_admin {
+            None
+        } else {
+            Some(Self {
+                sys_admin: !sys_admin,
+                net_admin: !net_admin,
+            })
+        }
+    }
+
+    /// Whether CAP_SYS_ADMIN is missing.
+    pub fn sys_admin(self) -> bool {
+        self.sys_admin
+    }
+
+    /// Whether CAP_NET_ADMIN is missing.
+    pub fn net_admin(self) -> bool {
+        self.net_admin
+    }
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match (self.sys_admin, self.net_admin) {
+            (true, true) => "CAP_SYS_ADMIN and CAP_NET_ADMIN",
+            (true, false) => "CAP_SYS_ADMIN",
+            _ => "CAP_NET_ADMIN",
+        })
+    }
+}
 
 /// What a take is answered with.
 #[derive(Debug, PartialEq, Eq)]
@@ -74,6 +161,12 @@ pub struct Counts {
     pub discarded: u64,
     /// Makes that failed.
     pub failed: u64,
+    /// Makes that failed, by the step that failed.
+    pub failed_by: FailedBy,
+    /// What the node lacks, when its pool was refused for it ([`Pool::refused`]): it makes none ahead.
+    pub refused: Option<Missing>,
+    /// Of `made_on_path`, the takes made on the path because the pool was refused.
+    pub refused_on_path: u64,
 }
 
 /// The pool: the namespaces it holds as the shell's `T`, whether it asks for more, and what it has done. The
@@ -131,9 +224,18 @@ impl<T> Pool<T> {
         Ok(())
     }
 
-    /// A make that failed (the shell reports why): counted, and the pool asks for no more until the next take.
-    pub fn failed(&mut self) {
+    /// A pool refused because the node lacks what a make takes (`missing`): it holds none and asks for none,
+    /// and every take is made on the path, counted under that reason.
+    pub fn refused(missing: Missing) -> Self {
+        let mut pool = Self::new(0);
+        pool.counts.refused = Some(missing);
+        pool
+    }
+
+    /// A make that failed at `step`: counted by it, and the pool asks for no more until the next take.
+    pub fn failed(&mut self, step: Step) {
         self.counts.failed = self.counts.failed.saturating_add(1);
+        self.counts.failed_by.count(step);
         self.asking = false;
     }
 
@@ -151,6 +253,9 @@ impl<T> Pool<T> {
             }
             None => {
                 self.counts.made_on_path = self.counts.made_on_path.saturating_add(1);
+                if self.counts.refused.is_some() {
+                    self.counts.refused_on_path = self.counts.refused_on_path.saturating_add(1);
+                }
                 Take::MakeOnPath
             }
         })

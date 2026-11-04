@@ -11,6 +11,8 @@
 
 use std::os::fd::{BorrowedFd, OwnedFd};
 
+use hex_core::netns::Step;
+
 use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 use rustix::thread::UnshareFlags;
@@ -75,14 +77,36 @@ pub fn thread_network() -> Result<OwnedFd, OciError> {
 /// this file descriptor remains open, the namespace will remain alive", namespaces(7)). The thread
 /// goes back to `home`, its own namespace ([`thread_network`]), before this returns, whether or not
 /// the make worked, so it holds none of the namespaces it makes and each ends with the container it
-/// went to. A thread that can't go back is refused as the make is; its next make moves it on.
-pub fn make_ahead(home: BorrowedFd<'_>) -> Result<OwnedFd, OciError> {
-    sys::unshare(UnshareFlags::NEWNET)?;
-    let made = thread_network().and_then(|ns| loopback_up().map(|()| ns));
-    let back = sys::setns(home, libc::CLONE_NEWNET);
+/// went to. A thread that can't go back is refused as the make is; its next make moves it on. A make
+/// refused is refused with the step that failed, the first one where two did.
+pub fn make_ahead(home: BorrowedFd<'_>) -> Result<OwnedFd, MakeFailed> {
+    sys::unshare(UnshareFlags::NEWNET).map_err(MakeFailed::at(Step::Unshare))?;
+    let made = thread_network()
+        .map_err(MakeFailed::at(Step::Open))
+        .and_then(|ns| {
+            loopback_up()
+                .map(|()| ns)
+                .map_err(MakeFailed::at(Step::Loopback))
+        });
+    let back = sys::setns(home, libc::CLONE_NEWNET).map_err(MakeFailed::at(Step::Back));
     match (made, back) {
         (Ok(ns), Ok(())) => Ok(ns),
         (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+    }
+}
+
+/// A make ahead refused: the step that failed, and what the kernel said.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("making a network namespace ahead, step {step:?}: {error}")]
+pub struct MakeFailed {
+    pub step: Step,
+    pub error: OciError,
+}
+
+impl MakeFailed {
+    /// A closure that names `step` as the one that failed with the error it is given.
+    pub fn at(step: Step) -> impl Fn(OciError) -> Self {
+        move |error| Self { step, error }
     }
 }
 

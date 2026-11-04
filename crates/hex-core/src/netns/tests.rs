@@ -21,8 +21,8 @@ enum Event {
     Take,
     /// The refill thread hands in a namespace it made.
     Made,
-    /// The refill thread's make failed.
-    Failed,
+    /// The refill thread's make failed at a step.
+    Failed(Step),
     /// A create the pool can't serve makes its namespace on the path.
     OnPath,
     /// The node shuts the pool down.
@@ -132,12 +132,20 @@ fn play(bound: usize, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
                 };
                 prop_assert_eq!(pool.made(id), want);
             }
-            Event::Failed => {
+            Event::Failed(step) => {
                 if oracle.wanted() > 0 {
                     seen.stopped_asking += 1;
                 }
-                pool.failed();
+                pool.failed(*step);
                 oracle.counts.failed += 1;
+                let by = &mut oracle.counts.failed_by;
+                match step {
+                    Step::Home => by.home += 1,
+                    Step::Unshare => by.unshare += 1,
+                    Step::Open => by.open += 1,
+                    Step::Loopback => by.loopback += 1,
+                    Step::Back => by.back += 1,
+                }
                 oracle.asking = false;
             }
             Event::OnPath => {
@@ -185,6 +193,11 @@ fn play(bound: usize, events: &[Event], paths: &Cell<Paths>) -> Result<(), TestC
             counts.made_ahead,
             counts.taken + pool.held() as u64 + counts.discarded
         );
+        let by = counts.failed_by;
+        prop_assert_eq!(
+            by.home + by.unshare + by.open + by.loopback + by.back,
+            counts.failed
+        );
     }
     paths.set(seen);
     Ok(())
@@ -196,7 +209,14 @@ fn event() -> impl Strategy<Value = Event> {
     prop_oneof![
         8 => Just(Event::Take),
         8 => Just(Event::Made),
-        2 => Just(Event::Failed),
+        2 => prop_oneof![
+            Just(Step::Home),
+            Just(Step::Unshare),
+            Just(Step::Open),
+            Just(Step::Loopback),
+            Just(Step::Back),
+        ]
+        .prop_map(Event::Failed),
         2 => Just(Event::OnPath),
         1 => Just(Event::ShutDown),
     ]
@@ -275,7 +295,7 @@ fn a_take_from_an_empty_pool_is_made_on_the_path_and_counted() {
 fn a_create_the_pool_cant_serve_is_counted_on_the_path_and_takes_nothing() {
     let mut pool = Pool::new(2);
     pool.made(1).unwrap();
-    pool.failed();
+    pool.failed(Step::Unshare);
     assert_eq!(pool.on_path(), Ok(()));
     assert_eq!(pool.held(), 1);
     assert_eq!(pool.wanted(), 0);
@@ -285,6 +305,10 @@ fn a_create_the_pool_cant_serve_is_counted_on_the_path_and_takes_nothing() {
             made_ahead: 1,
             made_on_path: 1,
             failed: 1,
+            failed_by: FailedBy {
+                unshare: 1,
+                ..FailedBy::default()
+            },
             ..Counts::default()
         }
     );
@@ -347,13 +371,82 @@ fn a_failed_make_stops_the_asking_until_the_next_take() {
     assert_eq!(pool.wanted(), 3);
     pool.made(1).unwrap();
     assert_eq!(pool.wanted(), 2);
-    pool.failed();
+    pool.failed(Step::Unshare);
     assert_eq!(pool.wanted(), 0);
     pool.made(2).unwrap();
     assert_eq!(pool.wanted(), 0);
     assert_eq!(pool.take(), Ok(Take::Pooled(1)));
     assert_eq!(pool.wanted(), 2);
     assert_eq!(pool.counts().failed, 1);
+}
+
+/// HEX-NETNS-12: each failed make is counted by the step that failed, the steps' counts summing to the failed
+/// makes, so the reason the kernel gave is kept (CLAUDE.md §3). Do: fail a make at each step, the unshare twice.
+/// Expect: each step counted once, the unshare twice, six failed in all.
+#[test]
+fn each_failed_make_is_counted_by_the_step_that_failed() {
+    let mut pool = Pool::<u64>::new(2);
+    for step in [
+        Step::Home,
+        Step::Unshare,
+        Step::Unshare,
+        Step::Open,
+        Step::Loopback,
+        Step::Back,
+    ] {
+        pool.failed(step);
+    }
+    let counts = pool.counts();
+    assert_eq!(counts.failed, 6);
+    assert_eq!(
+        counts.failed_by,
+        FailedBy {
+            home: 1,
+            unshare: 2,
+            open: 1,
+            loopback: 1,
+            back: 1,
+        }
+    );
+}
+
+/// HEX-NETNS-13: a pool refused for what the node lacks asks for nothing and holds nothing; every take is made
+/// on the path, counted under the refusal, which the counts name; a create the pool can't serve is counted on
+/// the path but not under it. Do: refuse a pool for CAP_NET_ADMIN, take twice, count one create on the path.
+/// Expect: nothing wanted, a make refused, three made on the path, two of them refused ones, the refusal named.
+#[test]
+fn a_refused_pool_makes_every_take_on_the_path_counted_under_its_reason() {
+    let missing = Missing::of(true, false).unwrap();
+    let mut pool = Pool::refused(missing);
+    assert_eq!(pool.wanted(), 0);
+    assert_eq!(pool.made(1), Err(Refused::Full { bound: 0, ns: 1 }));
+    assert_eq!(pool.take(), Ok(Take::MakeOnPath));
+    assert_eq!(pool.take(), Ok(Take::MakeOnPath));
+    assert_eq!(pool.on_path(), Ok(()));
+    assert_eq!(pool.wanted(), 0);
+    assert_eq!(
+        pool.counts(),
+        Counts {
+            made_on_path: 3,
+            refused: Some(missing),
+            refused_on_path: 2,
+            ..Counts::default()
+        }
+    );
+    assert_eq!(pool.counts().refused.unwrap().to_string(), "CAP_NET_ADMIN");
+}
+
+/// HEX-NETNS-13: what a node lacks is what it doesn't hold of CAP_SYS_ADMIN and CAP_NET_ADMIN, named so; a node
+/// that holds both lacks nothing.
+#[test]
+fn what_a_node_lacks_is_named() {
+    assert_eq!(Missing::of(true, true), None);
+    let named = |s, n| Missing::of(s, n).unwrap().to_string();
+    assert_eq!(named(false, true), "CAP_SYS_ADMIN");
+    assert_eq!(named(true, false), "CAP_NET_ADMIN");
+    assert_eq!(named(false, false), "CAP_SYS_ADMIN and CAP_NET_ADMIN");
+    let both = Missing::of(false, false).unwrap();
+    assert!(both.sys_admin() && both.net_admin());
 }
 
 /// Doc-truth: the bound in code is the one decision 4 sets.

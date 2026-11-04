@@ -104,7 +104,16 @@ const COUNTS: netns::Counts = netns::Counts {
     taken: 4,
     made_on_path: 3,
     discarded: 2,
-    failed: 1,
+    failed: 15,
+    failed_by: netns::FailedBy {
+        home: 1,
+        unshare: 2,
+        open: 3,
+        loopback: 4,
+        back: 5,
+    },
+    refused: None,
+    refused_on_path: 6,
 };
 
 struct Lab {
@@ -305,7 +314,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             0,
             "HEXW",
         ),
-        Hostile("version 3", with(4, [3, 0]), vec![], 9, "version 3"),
+        Hostile("version 4", with(4, [4, 0]), vec![], 9, "version 4"),
         Hostile("unknown kind", with(6, [0x0c, 0]), vec![], 9, "kind 0x000c"),
         Hostile(
             "a version 2 kind in version 1",
@@ -326,7 +335,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
             trailing,
             vec![],
             5,
-            "follow what version 2 defines",
+            "follow what version 3 defines",
         ),
         Hostile(
             "oversized",
@@ -385,7 +394,7 @@ fn hostile_messages_are_refused_and_the_connection_is_served_after() {
 }
 
 /// HEX-SOCK-10: the node's network namespace counts cross the socket as its host holds them: asked
-/// through `hex-client`, and on a raw connection in version 2, answered in its request's version with
+/// through `hex-client`, and on a raw connection in version 3, answered in its request's version with
 /// its id.
 #[test]
 fn the_network_namespace_counts_cross_the_socket() {

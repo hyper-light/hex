@@ -7,7 +7,8 @@
 //! cgroup) and their records under `--state`, takes back or cleans up what an agent before it left
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, binds the socket, says
 //! `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on stderr
-//! and exits 1. A socket an ended agent left at the path is replaced; one a live agent serves is
+//! and exits 1. A root node whose network-namespace pool was refused for a capability it lacks says so
+//! on stderr as it opens (decision 4). A socket an ended agent left at the path is replaced; one a live agent serves is
 //! refused.
 
 use std::io::Write;
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hex_api::Refusal;
+use hex_core::netns::Counts;
 use hex_node::Node;
 use hex_node::serve::{LIMITS, Server, WORKERS};
 use rustix::process::Resource;
@@ -76,6 +78,9 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         None => Node::beside_self(&args.state, &args.state),
     }
     .map_err(failed)?;
+    if let Some(line) = refused_pool(&node.netns().map_err(failed)?) {
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
+    }
     node.recover().map_err(failed)?;
     let mut server = Server::bind(&args.socket, Arc::new(node), LIMITS, WORKERS).map_err(failed)?;
     let mut out = std::io::stdout().lock();
@@ -87,6 +92,17 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         .wait()
         .unwrap_or_else(|| "its socket stopped".to_owned());
     Err((1, why))
+}
+
+/// What `hex node` says on stderr when its network-namespace pool was refused: what the node lacks,
+/// and that its creates make their namespaces on the path, which its counts say as `refused_on_path`.
+fn refused_pool(counts: &Counts) -> Option<String> {
+    counts.refused.map(|missing| {
+        format!(
+            "hex node: network-namespace pool refused: this node lacks {missing}, which making one \
+             ahead takes; each create makes its container's on its path (counted as refused_on_path)\n"
+        )
+    })
 }
 
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
@@ -106,4 +122,27 @@ fn raise_descriptor_limit() -> Result<(), Refusal> {
         .map_err(|e| Refusal::os("raising the descriptor limit", e))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hex_core::netns::Missing;
+
+    /// HEX-NETNS-13: a node whose pool was refused says so on stderr, naming what it lacks; one whose
+    /// pool wasn't says nothing. Do: render both. Expect: the line naming CAP_SYS_ADMIN, and none.
+    #[test]
+    fn a_refused_pool_is_said_by_name() {
+        let refused = Counts {
+            refused: Missing::of(false, true),
+            ..Counts::default()
+        };
+        assert_eq!(
+            refused_pool(&refused).unwrap(),
+            "hex node: network-namespace pool refused: this node lacks CAP_SYS_ADMIN, which making \
+             one ahead takes; each create makes its container's on its path (counted as \
+             refused_on_path)\n"
+        );
+        assert_eq!(refused_pool(&Counts::default()), None);
+    }
 }

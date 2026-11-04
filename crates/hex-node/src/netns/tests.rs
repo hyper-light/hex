@@ -37,26 +37,29 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
     .unwrap()
 }
 
-/// Whether this process may make a namespace ahead (`net::make_ahead`): unshare(2) takes
-/// `CLONE_NEWNET`, and setns(2) the way home, only from a caller with CAP_SYS_ADMIN in its user
-/// namespace, and rtnetlink takes loopback's RTM_NEWLINK only with CAP_NET_ADMIN (rtnetlink(7)).
-/// uid 0 alone gives neither: a container runtime's default set, a Kubernetes pod's root's (kiln
-/// CI's), holds neither.
-fn may_make_namespaces() -> bool {
+/// The step at which this process's make ahead (`net::make_ahead`) fails, if one does: unshare(2)
+/// takes `CLONE_NEWNET` only from a caller with CAP_SYS_ADMIN in its user namespace, and rtnetlink
+/// takes loopback's RTM_NEWLINK only with CAP_NET_ADMIN (rtnetlink(7)). uid 0 alone gives neither: a
+/// container runtime's default set, a Kubernetes pod's root's (kiln CI's), holds neither.
+fn failing_step() -> Option<Step> {
     use rustix::thread::CapabilitySet;
-    rustix::thread::capabilities(None)
-        .unwrap()
-        .effective
-        .contains(CapabilitySet::SYS_ADMIN | CapabilitySet::NET_ADMIN)
+    let held = rustix::thread::capabilities(None).unwrap().effective;
+    if !held.contains(CapabilitySet::SYS_ADMIN) {
+        Some(Step::Unshare)
+    } else if !held.contains(CapabilitySet::NET_ADMIN) {
+        Some(Step::Loopback)
+    } else {
+        None
+    }
 }
 
 /// HEX-NETNS-11: the refill thread hands the pool each namespace it makes, or counts each make that
 /// fails, and a create is served either way. Do: start a pool of 2 and wait for its thread's first
 /// outcome. Expect, where the agent may make network namespaces (CAP_SYS_ADMIN and CAP_NET_ADMIN):
-/// the pool fills to its bound; a take hands over a namespace that isn't this process's, its loopback up, and the
-/// thread makes another in its place. Expect, where it may not: one failed make, counted and nothing
-/// made; then a take answered on the path, counted, which asks the thread for one more, and that make
-/// fails and is counted too.
+/// the pool fills to its bound; a take hands over a namespace that isn't this process's, its loopback
+/// up, and the thread makes another in its place. Expect, where it may not: one failed make, counted
+/// under the step the missing capability fails (HEX-NETNS-12) and nothing made; then a take answered
+/// on the path, counted, which asks the thread for one more, and that make fails and is counted too.
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     let pool = Netns::start(2).unwrap();
@@ -64,18 +67,24 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
     });
-    let failed = pool.counts().unwrap().failed > 0;
+    let failing = failing_step();
     assert_eq!(
-        failed,
-        !may_make_namespaces(),
+        pool.counts().unwrap().failed > 0,
+        failing.is_some(),
         "a make fails exactly where CAP_SYS_ADMIN or CAP_NET_ADMIN is missing"
     );
-    if failed {
+    if let Some(step) = failing {
         eprintln!(
             "without CAP_SYS_ADMIN and CAP_NET_ADMIN: the pool's failed makes are tested, its full pool isn't"
         );
         let c = pool.counts().unwrap();
         assert_eq!((c.made_ahead, c.failed), (0, 1), "{c:?}");
+        let mut by = hex_core::netns::FailedBy::default();
+        match step {
+            Step::Unshare => by.unshare = 1,
+            _ => by.loopback = 1,
+        }
+        assert_eq!(c.failed_by, by, "counted under the step that failed");
         assert!(pool.take().unwrap().is_none(), "a dry take");
         assert_eq!(pool.counts().unwrap().made_on_path, 1);
         wait_for("second failed make", || pool.counts().unwrap().failed == 2);

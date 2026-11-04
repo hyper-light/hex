@@ -28,6 +28,11 @@
 //!
 //! Version 2 (goal 4 plan step 2) adds one request and its answer: the node agent's network namespace
 //! counts ([`Call::Netns`], [`Answer::Netns`]). Every version 1 kind reads the same in it.
+//!
+//! Version 3 appends to that answer's body why the counts' failed makes failed and whether the pool was
+//! refused ([`netns::Counts`]'s `failed_by`, `refused` and `refused_on_path`): five `u64`s, one per
+//! [`netns::Step`], a byte naming what the node lacks (0 nothing, its bit 1 CAP_SYS_ADMIN, its bit 2
+//! CAP_NET_ADMIN), and a `u64`. Every version 2 message reads the same in it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -43,7 +48,7 @@ use crate::netns;
 /// Every message's first bytes.
 pub const MAGIC: [u8; 4] = *b"HEXW";
 /// The highest version this side speaks; it reads and writes every one from [`FIRST`].
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 /// The first version, which every side reads: a client's hello goes in it, and so does a refusal of a
 /// message whose version this side can't tell or doesn't speak.
 pub const FIRST: u16 = 1;
@@ -385,6 +390,16 @@ pub fn answer(version: u16, id: u64, answer: &Answer, bound: usize) -> Result<Ve
             ] {
                 w.u64(n);
             }
+            if version >= 3 {
+                let by = counts.failed_by;
+                for n in [by.home, by.unshare, by.open, by.loopback, by.back] {
+                    w.u64(n);
+                }
+                w.u8(counts.refused.map_or(0, |m| {
+                    u8::from(m.sys_admin()) | (u8::from(m.net_admin()) << 1)
+                }));
+                w.u64(counts.refused_on_path);
+            }
         }
     }
     w.done()
@@ -559,13 +574,28 @@ pub fn read_answer(msg: &Received<'_>, bound: usize) -> Result<(Header, Answer),
         },
         kind::REFUSED => Answer::Refused(refusal(&mut r)?),
         kind::EXITED => Answer::Exited(exit(&mut r)?),
-        kind::NETNS_ANSWER => Answer::Netns(netns::Counts {
-            made_ahead: r.u64()?,
-            taken: r.u64()?,
-            made_on_path: r.u64()?,
-            discarded: r.u64()?,
-            failed: r.u64()?,
-        }),
+        kind::NETNS_ANSWER => {
+            let mut counts = netns::Counts {
+                made_ahead: r.u64()?,
+                taken: r.u64()?,
+                made_on_path: r.u64()?,
+                discarded: r.u64()?,
+                failed: r.u64()?,
+                ..netns::Counts::default()
+            };
+            if version >= 3 {
+                counts.failed_by = netns::FailedBy {
+                    home: r.u64()?,
+                    unshare: r.u64()?,
+                    open: r.u64()?,
+                    loopback: r.u64()?,
+                    back: r.u64()?,
+                };
+                counts.refused = missing(r.u8()?)?;
+                counts.refused_on_path = r.u64()?;
+            }
+            Answer::Netns(counts)
+        }
         _ => {
             return Err(Fault::Kind {
                 kind,
@@ -594,6 +624,19 @@ fn check(msg: &Received<'_>, bound: usize, version: u16) -> Result<(), Fault> {
 }
 
 /// That this side speaks `version`.
+/// What a node lacks, from its byte in the network namespace counts (version 3): nothing, or what its
+/// bits name; a bit no version defines is refused.
+fn missing(bits: u8) -> Result<Option<netns::Missing>, Fault> {
+    match bits {
+        0 => Ok(None),
+        1..=3 => Ok(netns::Missing::of(bits & 1 == 0, bits & 2 == 0)),
+        _ => Err(Fault::value(
+            "missing capabilities",
+            format!("{bits:#04x} names a capability no version defines"),
+        )),
+    }
+}
+
 fn speaks(version: u16) -> Result<(), Fault> {
     if (FIRST..=VERSION).contains(&version) {
         Ok(())
