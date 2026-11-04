@@ -128,3 +128,8 @@ quotas (A3), priorities and fair share (goal 4), sharded control planes, cells a
 heap accounting per workload (`AC-T7.11.4`; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`
 are chosen for tests, not measured; goal 2 sets them from the measured fast path.
+
+Under saturation each completion sends the committer back to the front of the queue and every pending
+workload ahead of a placement is decided again, as the specification itself does; the equivalence
+classes of S2 (goal 2) are what make that cheap, so hex-sim's own runs are sized below saturation
+until then.

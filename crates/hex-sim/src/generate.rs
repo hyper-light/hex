@@ -28,7 +28,9 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
     let mut rng = Rng::new(seed);
     let nodes: Vec<NodeSpec> = (0..shape.nodes)
         .map(|id| {
-            let cores = 1u64 << rng.range(2, 6);
+            let cores = 2u64
+                .checked_pow(u32::try_from(rng.range(2, 6)).unwrap_or(2))
+                .unwrap_or(4);
             let mem_gib = cores.checked_mul(rng.range(2, 8)).unwrap_or(cores);
             let gpus = if rng.chance(shape.gpu_nodes_per_mille) {
                 u32::try_from(rng.range(1, 8)).unwrap_or(1)

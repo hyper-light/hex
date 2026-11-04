@@ -135,7 +135,7 @@ mod tests {
         caps.iter()
             .enumerate()
             .map(|(i, c)| NodeSpec {
-                id: NodeId(i as u32),
+                id: NodeId(u32::try_from(i).unwrap()),
                 capacity: *c,
             })
             .collect()
@@ -144,7 +144,7 @@ mod tests {
     /// Brute force: the least key among the nodes that hold the need.
     fn oracle(index: &FitIndex, need: &Resources) -> Option<Key> {
         (0..index.len())
-            .map(|i| index.key(NodeId(i as u32)).unwrap())
+            .map(|i| index.key(NodeId(u32::try_from(i).unwrap())).unwrap())
             .filter(|k| k.holds(need))
             .min()
     }
@@ -207,7 +207,7 @@ mod tests {
             let caps: Vec<Resources> = caps.into_iter().map(|(c, m, g)| res(c, m, g)).collect();
             let mut index = FitIndex::new(&nodes(&caps)).unwrap();
             for (node, c, m, g, give) in ops {
-                let node = NodeId(node % caps.len() as u32);
+                let node = NodeId(node % u32::try_from(caps.len()).unwrap());
                 let delta = res(c, m, g);
                 let _ = if give { index.give(node, &delta) } else { index.take(node, &delta) };
             }

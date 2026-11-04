@@ -125,7 +125,7 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
     assert_eq!(clean.report.crashes, 0);
     let writes = clean.report.writes;
     assert!(
-        writes >= 3 * cluster.workloads.len() as u64,
+        writes >= 3 * u64::try_from(cluster.workloads.len()).unwrap(),
         "{writes} writes"
     );
     let (mut injected, mut changed_history) = (0u64, 0u64);
@@ -147,7 +147,7 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
             assert_eq!(end.lost_or_double(), 0, "write {write} {when:?}: {end:?}");
             assert_eq!(
                 end.complete,
-                cluster.workloads.len() as u64,
+                u64::try_from(cluster.workloads.len()).unwrap(),
                 "write {write} {when:?}: {end:?}"
             );
             if run.store.log() != clean.store.log() {
@@ -189,8 +189,8 @@ fn ten_thousand_nodes_run_deterministically() {
     let shape = Shape {
         nodes: 10_000,
         workloads: 100_000,
-        mean_gap: 2_000,
-        mean_run: Some(20_000_000_000),
+        mean_gap: 20_000,
+        mean_run: Some(100_000_000),
         gpu_nodes_per_mille: 100,
         max_share_per_mille: 250,
     };
