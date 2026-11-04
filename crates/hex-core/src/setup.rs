@@ -72,7 +72,11 @@ pub fn undelegated(parent: &Path, why: Undelegated) -> Refusal {
                 "the {} controller{} {} delegated to {parent} (it has {})",
                 missing.join(", "),
                 if missing.len() == 1 { "" } else { "s" },
-                if missing.len() == 1 { "isn't" } else { "aren't" },
+                if missing.len() == 1 {
+                    "isn't"
+                } else {
+                    "aren't"
+                },
                 if have.is_empty() {
                     "none".to_owned()
                 } else {
@@ -115,6 +119,55 @@ impl WindowsFeature {
             Self::HypervisorPlatform => "HypervisorPlatform",
         }
     }
+}
+
+/// Most bytes of a feature listing [`features_off`] reads: two short lines, far under it.
+pub const FEATURE_LISTING_MAX: usize = 4096;
+
+/// The query an unprivileged node runs (PowerShell) for the installer's features' state:
+/// `Win32_OptionalFeature`, one `<name> <InstallState>` line per feature Windows lists.
+pub const FEATURE_QUERY: &str = "Get-CimInstance -ClassName Win32_OptionalFeature -Filter \"Name='Containers' OR Name='HypervisorPlatform'\" | ForEach-Object { '{0} {1}' -f $_.Name, $_.InstallState }";
+
+/// The features of [`WindowsFeature::ALL`] that are off, from [`FEATURE_QUERY`]'s output: a feature is
+/// on only when listed with `InstallState` 1 (Enabled; 2 Disabled, 3 Absent, 4 Unknown); one Windows
+/// doesn't list is off. Anything else in the listing (an unknown name or state, a feature listed
+/// twice, more than [`FEATURE_LISTING_MAX`] bytes) is refused, never guessed at.
+pub fn features_off(listing: &str) -> Result<BTreeSet<WindowsFeature>, Refusal> {
+    let bad = |why: String| Refusal::Invalid {
+        what: "the Windows feature listing",
+        why,
+    };
+    if listing.len() > FEATURE_LISTING_MAX {
+        return Err(bad(format!(
+            "{} bytes, past its bound of {FEATURE_LISTING_MAX}",
+            listing.len()
+        )));
+    }
+    let mut on = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for line in listing.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (name, state) = line
+            .split_once(' ')
+            .ok_or_else(|| bad(format!("{line:?} isn't \"<name> <state>\"")))?;
+        let feature = WindowsFeature::ALL
+            .into_iter()
+            .find(|f| f.name() == name)
+            .ok_or_else(|| bad(format!("{name:?} isn't a feature it asked for")))?;
+        if !seen.insert(feature) {
+            return Err(bad(format!("{name} is listed twice")));
+        }
+        match state.trim() {
+            "1" => {
+                on.insert(feature);
+            }
+            "2" | "3" | "4" => {}
+            other => return Err(bad(format!("{name}'s state {other:?} isn't 1-4"))),
+        }
+    }
+    Ok(WindowsFeature::ALL
+        .into_iter()
+        .filter(|f| !on.contains(f))
+        .collect())
 }
 
 /// The Windows `oci` class's refusal: the features it needs that are `off`, by name, and that the
@@ -161,7 +214,8 @@ mod tests {
     /// what the parent has, and that the installer sets it up.
     #[test]
     fn a_parent_lacking_a_controller_refuses_the_classes_by_name() {
-        let parent = Path::new("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice");
+        let parent =
+            Path::new("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice");
         assert_eq!(
             check_controllers(parent, &set(&["cpuset", "cpu", "io", "memory", "pids"])),
             Ok(())
@@ -196,7 +250,10 @@ mod tests {
                 "/sys/fs/cgroup/user.slice isn't delegated to the node agent's user (Permission denied); Hex's installer sets the delegation up: {LINUX_INSTALLER}"
             )
         );
-        let occupied = undelegated(parent, Undelegated::Occupied("Device or resource busy".to_owned()));
+        let occupied = undelegated(
+            parent,
+            Undelegated::Occupied("Device or resource busy".to_owned()),
+        );
         assert!(why(&occupied).starts_with(
             "/sys/fs/cgroup/user.slice holds processes of its own, so cgroup v2 can't hand its controllers to the box root (Device or resource busy)"
         ));
@@ -237,6 +294,47 @@ mod tests {
         }
     }
 
+    /// HEX-INST-2: the feature listing reads as Windows writes it: a feature is on only at state 1, and
+    /// one Windows doesn't list is off.
+    #[test]
+    fn a_feature_is_on_only_when_listed_enabled() {
+        let both: BTreeSet<WindowsFeature> = WindowsFeature::ALL.into_iter().collect();
+        assert_eq!(
+            features_off("Containers 1\r\nHypervisorPlatform 1\r\n"),
+            Ok(BTreeSet::new())
+        );
+        assert_eq!(
+            features_off("Containers 2\nHypervisorPlatform 1\n"),
+            Ok([WindowsFeature::Containers].into())
+        );
+        assert_eq!(features_off("HypervisorPlatform 3\n"), Ok(both.clone()));
+        assert_eq!(features_off(""), Ok(both));
+        for hostile in [
+            "Containers\n",
+            "Containers 5\n",
+            "Containers 1\nContainers 1\n",
+            "Microsoft-Hyper-V 1\n",
+            "Containers one\n",
+        ] {
+            assert!(
+                matches!(features_off(hostile), Err(Refusal::Invalid { .. })),
+                "{hostile:?}"
+            );
+        }
+        assert!(features_off(&"x".repeat(FEATURE_LISTING_MAX + 1)).is_err());
+    }
+
+    proptest! {
+        /// HEX-INST-2, hostile input to the parser (CLAUDE.md §6): any bytes, never a panic; what it
+        /// accepts names only features it asked for.
+        #[test]
+        fn the_feature_listing_parser_never_panics(text in "(?s).{0,600}") {
+            if let Ok(off) = features_off(&text) {
+                prop_assert!(off.iter().all(|f| WindowsFeature::ALL.contains(f)));
+            }
+        }
+    }
+
     /// HEX-INST-2 (native plan step 6): the Windows oci class names each feature that's off and says
     /// the installer turns it on; with both on, it says only what the class still waits on.
     #[test]
@@ -250,8 +348,9 @@ mod tests {
             )
         );
         let one: BTreeSet<WindowsFeature> = [WindowsFeature::HypervisorPlatform].into();
-        assert!(why(&windows_oci(&one, not_built))
-            .starts_with("the Windows feature it needs is off: HypervisorPlatform; Hex's installer turns it on"));
+        assert!(why(&windows_oci(&one, not_built)).starts_with(
+            "the Windows feature it needs is off: HypervisorPlatform; Hex's installer turns it on"
+        ));
         let on = windows_oci(&BTreeSet::new(), not_built);
         assert_eq!(
             on,

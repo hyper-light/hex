@@ -1,24 +1,27 @@
 //! The Windows runtime: [`hex_api::Runtime`] over the `process` class (docs/design/runtime.md). A box
 //! is a job object; its bounds are the kernel's and hard (`process`, `sys`, [`hex_core::job`]), and a
 //! member is started suspended inside the job and resumed, so nothing runs outside it. The `oci` class
-//! is a Linux kernel's, refused by name here until a Shards guest carries it (the native plan's step
-//! 5). This is the node's runtime seam on Windows; the records, recovery and socket that wrap it on
+//! is refused by name here: it names each Windows feature Hex's installer turns on that is off
+//! ([`features`]), and with both on, that a Shards guest carries Linux images (the native plan's step
+//! 5) and HCS Windows images (its step 4). This is the node's runtime seam on Windows; the records, recovery and socket that wrap it on
 //! Linux (`hex-node`) are not yet cross-OS, so this holds its boxes in memory and is driven in process.
 
+pub mod features;
 pub mod proc;
 pub mod process;
 pub mod sys;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::os::windows::io::OwnedHandle;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal,
     Stdio, Usage,
 };
 
+use hex_core::setup::{self, WindowsFeature};
 use process::JobBox;
 use sys::{Spawn, Started};
 
@@ -27,7 +30,13 @@ pub struct WinRuntime {
     /// The machine's logical processors, the CPU hard cap's denominator (read once at node start).
     processors: NonZeroU32,
     boxes: Mutex<BTreeMap<BoxId, Arc<JobBox>>>,
+    /// The installer's features that are off, read at the first `oci` create: a feature turns on or
+    /// off only across a reboot, which starts the node again.
+    features_off: OnceLock<BTreeSet<WindowsFeature>>,
 }
+
+/// What the Windows `oci` class waits on once the installer's features are on.
+const OCI_NOT_BUILT: &str = "a Linux image needs a Linux kernel, which a Shards guest carries (native plan step 5), and Windows images run through HCS (native plan step 4); neither is built yet";
 
 impl WinRuntime {
     /// A runtime for this machine, its processor count read from Windows.
@@ -40,7 +49,18 @@ impl WinRuntime {
         Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
             boxes: Mutex::new(BTreeMap::new()),
+            features_off: OnceLock::new(),
         }
+    }
+
+    /// The installer's features that are off, read once ([`features::off`]); a failed read is refused
+    /// and tried again at the next ask.
+    fn features_off(&self) -> Result<&BTreeSet<WindowsFeature>, Refusal> {
+        if let Some(off) = self.features_off.get() {
+            return Ok(off);
+        }
+        let off = features::off(self.processors)?;
+        Ok(self.features_off.get_or_init(|| off))
     }
 
     fn boxes(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<BoxId, Arc<JobBox>>>, Refusal> {
@@ -88,12 +108,7 @@ impl Runtime for WinRuntime {
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.bounds.check()?;
         let ClassSpec::Process = spec.class else {
-            return Err(Refusal::Platform {
-                what: "the oci class",
-                platform: "windows",
-                why: "a Linux image needs a Linux kernel; a Shards guest carries it (native plan step 5)"
-                    .to_owned(),
-            });
+            return Err(setup::windows_oci(self.features_off()?, OCI_NOT_BUILT));
         };
         let mut boxes = self.boxes()?;
         if boxes.contains_key(&spec.id) {
