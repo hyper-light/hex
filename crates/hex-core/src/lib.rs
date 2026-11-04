@@ -28,5 +28,6 @@ pub mod record;
 pub mod recovery;
 pub mod seed;
 pub mod seeds;
+pub mod stream;
 pub mod watch;
 pub mod wire;
