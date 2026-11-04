@@ -1490,6 +1490,14 @@ mod tests {
             other => panic!("an oversized message: {other:?}"),
         }
         assert!(decode::<Launched>(b"{\"full\":null}\n{}\n").is_err());
+        // Two lines, the second empty: JSON would read the whitespace as trailing, so the one-line rule
+        // is what refuses it.
+        match decode::<Launched>(b"\"full\"\n\n") {
+            Err(Refusal::Invalid { why, .. }) => {
+                assert!(why.contains("more than one line"), "{why}")
+            }
+            other => panic!("a two-line message: {other:?}"),
+        }
         assert!(decode::<Launched>(b"not json").is_err());
         let mut l = Launch {
             job: 1,
