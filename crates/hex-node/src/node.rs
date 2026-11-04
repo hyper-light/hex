@@ -31,7 +31,7 @@ use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
-use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
+use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
@@ -50,6 +50,7 @@ use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
 use crate::supervise::{self, Forgotten, Live, Supervisor};
+use crate::turns::{Turn, Turns};
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -64,6 +65,12 @@ pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
 /// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long a create or delete of a box waits for the one under way for the same box before it refuses:
+/// a create or delete takes milliseconds, and one that ends a box waits at most [`EMPTY_PATIENCE`] for it
+/// to empty and [`REMOVE_PATIENCE`] for its directories to go, so past their sum is a fault to report,
+/// not a limit to raise (CLAUDE.md §4).
+pub const TURN_PATIENCE: Duration = EMPTY_PATIENCE.saturating_add(REMOVE_PATIENCE);
 
 /// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
 /// runtime directory is shared with every node of this user on the host, so its entries are theirs as
@@ -118,10 +125,6 @@ pub struct Node {
     /// The `oci` boxes' cgroups that may be handed from box to box of one owner, and how the node's
     /// deletes ended their boxes (goal 5 extended, step 6).
     cgroups: Cgroups,
-    /// The ids of the creates under way: a second create of one is refused as [`Refusal::Exists`] before
-    /// it makes anything, whatever its cgroup is named, since an owned box's is named by its slot and its
-    /// `mkdir` claims no id. At most [`hex_runtime::linux::cgroup::MAX_BOXES`].
-    making: Mutex<BTreeSet<BoxId>>,
     store: Store,
     /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under
     /// ([`oci_root`]), shared with the other nodes on the host that run as this one's user.
@@ -164,6 +167,13 @@ pub struct Node {
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
+    /// Each box's turn to be made or removed. A box has no record until it's whole (goal 5 extended,
+    /// step 5), so this is what tells a box being made: a second create of its id, or a delete, waits
+    /// for the create under way and then finds the box made or not, rather than make or remove parts at
+    /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
+    /// at once, the node's box budget, a wait at most [`TURN_PATIENCE`]; past either the call is refused
+    /// by type, a create past the budget as [`Refusal::Full`] ([`create_turn`]).
+    turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
@@ -259,7 +269,6 @@ impl Node {
             oci_boxes,
             devices,
             cgroups,
-            making: Mutex::new(BTreeSet::new()),
             store,
             oci_root,
             key,
@@ -283,6 +292,12 @@ impl Node {
                 rustix::fs::Mode::empty(),
             )
             .map_err(|e| Refusal::os("opening /dev/null", e))?,
+            turns: Turns::new(
+                "making or removing a box",
+                "creates and deletes under way",
+                TURN_PATIENCE,
+                MAX_BOXES,
+            ),
             #[cfg(debug_assertions)]
             crash_at: None,
         })
@@ -469,25 +484,6 @@ impl Node {
         self.oci_boxes.get(id).or_else(|| self.root.get(id))
     }
 
-    /// Takes `id` for a create under way, refused as [`Refusal::Exists`] while another holds it; released
-    /// when the claim drops.
-    fn claim(&self, id: &BoxId) -> Result<Claim<'_>, Refusal> {
-        let mut making = self
-            .making
-            .lock()
-            .map_err(|_| Refusal::Broken("the node's creates' lock was poisoned".to_owned()))?;
-        if making.len() >= hex_runtime::linux::cgroup::MAX_BOXES {
-            return Err(Refusal::Full(hex_runtime::linux::cgroup::MAX_BOXES));
-        }
-        if !making.insert(id.clone()) {
-            return Err(Refusal::Exists(id.clone()));
-        }
-        Ok(Claim {
-            making: &self.making,
-            id: id.clone(),
-        })
-    }
-
     /// The `oci` runtime, over the node's state root and helper binary.
     fn oci(&self) -> OciRuntime {
         self.oci_in(self.oci_root.clone())
@@ -549,6 +545,11 @@ impl Node {
     /// seeds' counts are.
     pub fn ipc_uts(&self) -> Result<netns::Counts, Refusal> {
         self.ipc_uts.counts()
+    }
+
+    /// How many creates and deletes have waited for one of the same box under way ([`Node::turns`]).
+    pub fn waited_for_a_box(&self) -> u64 {
+        self.turns.waited()
     }
 
     fn record(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
@@ -906,7 +907,7 @@ impl Node {
     /// A box whose spec names an owner has its cgroup chosen once the runtime has read its spec
     /// ([`Choice`]): its owner's idle cgroup under the box's device policy when one reads clean, else a
     /// fresh slot, else a cgroup of its own (goal 5 extended, step 6). Its bundle comes first, and the id is
-    /// the create's claim's ([`Node::claim`]).
+    /// held by the create's turn ([`Node::turns`]).
     fn create_oci(&self, spec: BoxSpec, source: Source) -> Result<BoxInfo, Refusal> {
         // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
         // left unwatched.
@@ -1267,7 +1268,8 @@ impl Runtime for Node {
         // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
         // HEX-RT-14).
         spec.check()?;
-        let _claim = self.claim(&spec.id)?;
+        // Held until the create is done, made or scrubbed: a box being made has no record yet.
+        let _turn: Turn<'_> = create_turn(&self.turns, &spec.id)?;
         // A cgroup under either root is a box's, recorded or not: a failed create's scrub would end it.
         if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
@@ -1406,6 +1408,9 @@ impl Runtime for Node {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        // After a create or delete of the box under way, so it removes what that one made, or finds it
+        // gone, and scrubs nothing it's doing.
+        let _turn: Turn<'_> = self.turns.take(id)?;
         let record = self.record(id)?;
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
@@ -1550,18 +1555,15 @@ enum Ending<'a> {
     Kill,
 }
 
-/// A create's claim on its box's id ([`Node::claim`]), let go when it drops.
-struct Claim<'a> {
-    making: &'a Mutex<BTreeSet<BoxId>>,
-    id: BoxId,
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut making) = self.making.lock() {
-            making.remove(&self.id);
-        }
-    }
+/// A create's turn for box `id` ([`Node::turns`]): past the turns' bound, [`MAX_BOXES`] creates and deletes at once,
+/// the node's box budget, the create is refused as [`Refusal::Full`], as the node refuses a box past its budget
+/// (CLAUDE.md §2; the bound step 6's claim held creates to). A wait for a create or delete of the same box is refused
+/// past [`TURN_PATIENCE`] as [`Turns::take`] refuses it.
+fn create_turn<'a>(turns: &'a Turns, id: &BoxId) -> Result<Turn<'a>, Refusal> {
+    turns.take(id).map_err(|e| match e {
+        Refusal::Exhausted { bound, .. } => Refusal::Full(bound),
+        e => e,
+    })
 }
 
 /// The slots under the oci boxes' root, by number, lowest first ([`reuse::slot_of`]).
@@ -1846,6 +1848,28 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
+    /// never queued. Do: turns bounded at two, two boxes' turns held, a third box's create turn asked. Expect:
+    /// `Full(2)`; with one let go, the third box's turn given.
+    #[test]
+    fn a_create_past_the_turns_bound_is_refused_full() {
+        let turns = Turns::new(
+            "making or removing a box",
+            "creates and deletes under way",
+            TURN_PATIENCE,
+            2,
+        );
+        let id = |n: &str| BoxId::new(n).unwrap();
+        let a = create_turn(&turns, &id("a")).unwrap();
+        let _b = create_turn(&turns, &id("b")).unwrap();
+        assert_eq!(create_turn(&turns, &id("c")).err(), Some(Refusal::Full(2)));
+        drop(a);
+        assert!(
+            create_turn(&turns, &id("c")).is_ok(),
+            "a turn let go is free again"
+        );
+    }
 
     /// Decision 2: an oci box's init is told from a process given its pid since by its start time, as
     /// crun's `process-start-time` does. A record naming the running test process is alive; one

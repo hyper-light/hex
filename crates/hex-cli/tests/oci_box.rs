@@ -24,7 +24,9 @@
 //!   box's where it belongs, the boxes whose directories all lie on tmpfs among its runtime directory's
 //!   records and one with its rendered bundle's writable layer on disk in its state directory,
 //!   fsynced; it takes back the live ones and removes the one whose init ended, and leaves nothing once
-//!   they're deleted;
+//!   they're deleted; a delete of a box while a create of the same id is under way leaves the node
+//!   consistent, the create completing and the box then removed, and a second create of a box being made,
+//!   or a delete, waits for the create under way (the follow-on fix, §4);
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
 //! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
@@ -49,8 +51,8 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec, Refusal, Rootfs,
-    Runtime,
+    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec,
+    Refusal, Rootfs, Runtime,
 };
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_node::{Node, OCI_BOXES, records_dir};
@@ -417,6 +419,9 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_made_before_the_move_is_adopted(&lab, own);
     a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
     records_in_both_places_are_found_after_a_restart(&lab, own);
+    a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(&lab, own);
+    a_create_or_delete_of_a_box_being_made_waits_for_it(&lab, own);
+    a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(&lab, own);
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
     each_seed_cloned_container_is_randomized_afresh(&lab, own);
     a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
@@ -2610,6 +2615,313 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
     assert!(!in_b.exists(), "b's container state is left");
 }
 
+/// What a call made while another box's create is held does with the same id.
+#[derive(Clone, Copy, Debug)]
+enum Second {
+    Create,
+    Delete,
+}
+
+/// Goal 5 extended step 5 (T-T7.1.2): a box being made has no record yet, so a second create of its id,
+/// or a delete, waits for the create under way rather than make or remove parts at the paths the id
+/// fixes. Do: hold a create reading its bundle's config.json, a FIFO no one has opened, once its cgroup
+/// and its container's state directory are made; while it's held, create the same id from a second
+/// thread, or delete it; then let the first go ([`let_the_held_create_go`]). Expect: the second
+/// call waits (the node counts it) until the first is done; the first makes its box whole; then the
+/// second create is refused as `Exists`, the box running on as made, or the delete removes the box,
+/// leaving nothing of it.
+fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-turns");
+    let node = lab.node(&box_root, state.path());
+    let wait = Lab::act(&Act::Wait);
+    for second in [Second::Create, Second::Delete] {
+        let id = BoxId::new(&format!("being-made-{second:?}").to_lowercase()).unwrap();
+        let bundle = tempfile::Builder::new()
+            .prefix("held-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = bundle.join("config.json");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&config)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(bundle),
+            owner: None,
+        };
+        let waited = node.waited_for_a_box();
+        let (made, then, both_waited) = std::thread::scope(|s| {
+            let first = s.spawn(|| node.create(spec));
+            wait_for(
+                blocked_opening_a_fifo,
+                "the create to wait reading its config",
+            );
+            let then = s.spawn(|| match second {
+                Second::Create => node.create(lab.running(id.clone(), &wait)).map(|_| ()),
+                Second::Delete => node.delete(&id),
+            });
+            // The second waits, or (a node without the turn) ends at once; either way the first is let
+            // go before anything is asserted, so a failure is reported rather than leaving it blocked.
+            wait_for(
+                || node.waited_for_a_box() > waited || then.is_finished(),
+                "the second call to wait for the create under way, or end",
+            );
+            let both_waited = !first.is_finished() && !then.is_finished();
+            let_the_held_create_go(&config, &lab.config(&wait, false));
+            (first.join().unwrap(), then.join().unwrap(), both_waited)
+        });
+        assert!(both_waited, "{second:?}: both wait: {then:?}");
+        assert_eq!(
+            node.waited_for_a_box(),
+            waited + 1,
+            "{second:?}: one call waited"
+        );
+        // The held create makes its box whole; what the second call then finds is that box.
+        let made = made.expect("the held create makes its box");
+        assert_eq!(
+            made.state,
+            BoxState::Created,
+            "the held create made its box"
+        );
+        match second {
+            Second::Create => {
+                assert_eq!(
+                    then,
+                    Err(Refusal::Exists(id.clone())),
+                    "the second create sees the box"
+                );
+                assert_eq!(
+                    node.inspect(&id).unwrap().state,
+                    BoxState::Created,
+                    "the box runs on as made"
+                );
+                node.delete(&id).unwrap();
+            }
+            Second::Delete => {
+                assert_eq!(then, Ok(()), "the delete removes the box the create made");
+            }
+        }
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "a record is left"
+        );
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
+            "{id}'s cgroup is left"
+        );
+        assert!(
+            !node.container_dir(&id).exists(),
+            "{id}'s container state is left"
+        );
+    }
+}
+
+/// Goal 5 extended step 5's turn with step 6's reuse on (T-T7.1.2; the turn in place of step 6's claim, the lead's
+/// call of 2026-11-04): an owned box's create takes a slot-named cgroup, so while it's being made no cgroup and no
+/// record carry its id, and only its turn says it's being made. Do: hold the create of a box of owner O reading its
+/// bundle's config.json (a FIFO no one has opened); while it's held, create the same id for O from a second thread;
+/// then let the first go. Expect: the second waits for the first (the node counts it); once the first has made the box
+/// in a slot, the second is refused as `Exists`; one slot is taken, never two: one more slot under the oci boxes' root
+/// and one cgroup given out (fresh or handed on).
+fn a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-turns-owned");
+    let node = lab.node(&box_root, state.path());
+    let owner = BoxOwner::named("owner-turns").unwrap();
+    let id = BoxId::new("being-made-owned").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let bundle = tempfile::Builder::new()
+        .prefix("held-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    let config = bundle.join("config.json");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&config)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let slots = || {
+        std::fs::read_dir(box_root.join(OCI_BOXES))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| hex_core::reuse::slot_of(&e.file_name().to_string_lossy()).is_some())
+            .count()
+    };
+    let given = |n: &Node| {
+        let c = n.cgroup_reuse().unwrap();
+        c.pool.fresh + c.pool.handed_on
+    };
+    let (slots_before, given_before) = (slots(), given(&node));
+    let waited = node.waited_for_a_box();
+    let spec = BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+        owner: Some(owner.clone()),
+    };
+    let (made, then, both_waited) = std::thread::scope(|s| {
+        let first = s.spawn(|| node.create(spec));
+        wait_for(
+            blocked_opening_a_fifo,
+            "the create to wait reading its config",
+        );
+        let then = s.spawn(|| {
+            node.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
+                owner: Some(owner.clone()),
+            })
+        });
+        // The second waits, or (a node without the turn) ends at once; either way the first is let go below,
+        // so a failure is reported rather than leaving it blocked.
+        wait_for(
+            || node.waited_for_a_box() > waited || then.is_finished(),
+            "the second create to wait for the one under way, or end",
+        );
+        let both_waited = !first.is_finished() && !then.is_finished();
+        let_the_held_create_go(&config, &lab.config(&wait, false));
+        (first.join().unwrap(), then.join().unwrap(), both_waited)
+    });
+    assert!(
+        both_waited,
+        "the second create waits for the one under way: {then:?}"
+    );
+    assert_eq!(node.waited_for_a_box(), waited + 1, "one create waited");
+    let made = made.expect("the held create makes its box");
+    assert_eq!(
+        made.state,
+        BoxState::Created,
+        "the held create made its box"
+    );
+    assert_eq!(
+        then.map(|_| ()),
+        Err(Refusal::Exists(id.clone())),
+        "the second create sees the box"
+    );
+    let dir = node.cgroup_dir(&id).expect("the box's cgroup");
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        hex_core::reuse::slot_of(&name).is_some(),
+        "the box's cgroup is a slot: {name}"
+    );
+    assert_eq!(slots(), slots_before + 1, "one slot more, not two");
+    assert_eq!(given(&node), given_before + 1, "one cgroup given out");
+    if node.inspect(&id).is_ok() {
+        node.delete(&id).unwrap();
+    }
+    assert_eq!(
+        node.inspect(&id),
+        Err(Refusal::NoSuchBox(id.clone())),
+        "nothing of the box is left"
+    );
+}
+
+/// §4, goal 5 extended step 5's follow-on fix: a delete of a box while a create of the same id is under
+/// way must leave the node consistent, whatever outcome the node lawfully gives. The create's cgroup, made
+/// first, claims the id, but with no record until the box is whole; a delete that arrives while the create
+/// is held could take that cgroup for a made box and scrub it, so the create then builds into the removed
+/// cgroup and is refused, or writes a Ready record over nothing. Force the race by a fact, not a sleep:
+/// hold a create reading its bundle's config.json (a FIFO no one has opened), its cgroup already made; run
+/// a delete of the same id; wait until the delete has had its chance to race — the cgroup gone (the
+/// un-fixed node scrubs it) or a wait for the create's turn registered (the fixed node) — then let the
+/// create go. Require: the delete waited for the create's turn (the raced path ran, and the fix is present
+/// — non-vacuity); a lawful result (the create made the box or the node refused it by type, never refused
+/// building into a scrubbed cgroup; the delete removed the box or found none); and nothing of the box left
+/// in any place, no Ready over nothing. Without the per-box turn the delete does not wait — it scrubs the
+/// create's cgroup — so `waited_for_a_box` never rises and the test fails. The turn (the follow-on fix)
+/// makes the delete wait for the create and then remove the box it made.
+fn a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-delete-race");
+    let node = lab.node(&box_root, state.path());
+    let id = BoxId::new("delete-race").unwrap();
+    let bundle = tempfile::Builder::new()
+        .prefix("held-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    let config = bundle.join("config.json");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&config)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let cgroup = box_root.join(OCI_BOXES).join(id.as_str());
+    let spec = BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+        owner: None,
+    };
+    let wait = Lab::act(&Act::Wait);
+    let waited = node.waited_for_a_box();
+    let (created, deleted) = std::thread::scope(|s| {
+        let create = s.spawn(|| node.create(spec));
+        wait_for(
+            blocked_opening_a_fifo,
+            "the create to block reading its config",
+        );
+        let delete = s.spawn(|| node.delete(&id));
+        // Wait on a fact, not a clock: the delete has had its chance to race the held create — it took
+        // the box's cgroup (scrubbed it: the un-fixed node) or it waited for the create's turn (the
+        // fixed node). Only then do we let the create go, so the race is always forced.
+        wait_for(
+            || !cgroup.exists() || node.waited_for_a_box() > waited,
+            "the delete to take the box's cgroup or wait for the create's turn",
+        );
+        // Let the create go: its config, written into the FIFO it is reading.
+        std::fs::write(&config, lab.config(&wait, false)).unwrap();
+        (create.join().unwrap(), delete.join().unwrap())
+    });
+    // Non-vacuity, and the fix: the delete waited for the create's turn. The un-fixed node does not
+    // wait — it scrubs the create's half-made cgroup — so this stays at `waited` there and the test
+    // fails, which is the bug. A run where the delete never contended (it ran after the create) also
+    // leaves it unchanged, so that fails too: the raced path never ran.
+    assert!(
+        node.waited_for_a_box() > waited,
+        "the delete did not wait for the create's turn (the raced path never ran, or the fix is \
+         absent): created {created:?}, deleted {deleted:?}"
+    );
+    // Every lawful outcome: the create made its box, or the node refused it by type (e.g. the seed's
+    // patience under load); the delete removed the box, or found none. The delete waited (above), so
+    // the create was never refused building into a cgroup a delete scrubbed from under it.
+    if let Ok(made) = &created {
+        assert_eq!(made.state, BoxState::Created, "the create made its box");
+    }
+    if let Err(refusal) = &deleted {
+        assert!(
+            matches!(refusal, Refusal::NoSuchBox(_)),
+            "the delete was refused unlawfully: {refusal:?}"
+        );
+    }
+    // Consistent in every case: nothing of the box left in any place, and no Ready over nothing.
+    assert_eq!(
+        node.inspect(&id),
+        Err(Refusal::NoSuchBox(id.clone())),
+        "a record is left"
+    );
+    assert!(node.list().unwrap().is_empty(), "a box is left");
+    assert!(!cgroup.exists(), "its cgroup is left");
+    assert!(
+        !node.container_dir(&id).exists(),
+        "its container state is left"
+    );
+}
+
 /// T-T7.1.2 (goal 5 extended step 5): a node restarted over records in both its places. Do: make two
 /// boxes whose directories all lie on tmpfs (from bundles, their container state under the runtime
 /// directory) and one from an `OciSpec` of layers (its rendered bundle's writable layer on disk, in the
@@ -3179,6 +3491,21 @@ fn as_an_older_node_wrote(state: &Path, record: &BoxRecord) {
 
 /// Whether a thread of this process is blocked opening a FIFO no one has opened the other end of: the
 /// kernel shows it waiting in `wait_for_partner` (fs/pipe.c), or in `fifo_open` where that's inlined.
+/// Lets a create held reading its bundle's config.json, a FIFO, go with `text`. The agent reads the config and then
+/// the create seed reads it again (seed.rs, `read_config_at`), so once the agent has the FIFO open to read, a file
+/// of the same config takes its name, for the seed, and the agent's copy is written into the FIFO. On the FIFO
+/// alone the seed's open would wait for a writer, and the create end in the seed's patience.
+fn let_the_held_create_go(config: &Path, text: &str) {
+    let mut fifo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(config)
+        .unwrap();
+    let file = config.with_extension("file");
+    std::fs::write(&file, text).unwrap();
+    std::fs::rename(&file, config).unwrap();
+    std::io::Write::write_all(&mut fifo, text.as_bytes()).unwrap();
+}
+
 fn blocked_opening_a_fifo() -> bool {
     std::fs::read_dir("/proc/self/task")
         .unwrap()

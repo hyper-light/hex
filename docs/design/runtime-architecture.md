@@ -96,7 +96,21 @@ moves a record such a node left in the state directory to its place. The oci run
 wrote, so create reads none back, and the box's info is what create made. The record was what claimed a box's id
 while it was made; now its cgroup does, made first (mkdir is atomic): a create of an id another create has taken
 since its check fails at that mkdir, having made nothing, and is refused as `Exists` without removing anything,
-where before such a create's failure scrubbed the other's box.
+where before such a create's failure scrubbed the other's box. And a box's create or delete takes the box's turn in
+the node's memory (`crates/hex-node/src/turns.rs`, the record store's per-box turns, shared): a second create of its
+id, or a delete, waits for the create under way and then finds the box made or not. So a second create is refused
+as `Exists` only once a box was made, never while a create that will fail is under way, and a delete removes the box
+the create made rather than answer no such box while it's being made, which would leave a box its caller thinks gone.
+The wait ends at 120 s (`TURN_PATIENCE`, a delete's longest wait for a box to empty and its directories to go),
+refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
+is refused as `Full`, as step 6's claim refused it, and a delete as `Exhausted`; other boxes'
+creates and deletes never wait. A box whose owner's create takes a slot-named cgroup (goal 5 extended,
+step 6, decision 5) has no cgroup named by its id either, so its turn is all that says it's being made. Step 6 had
+given the node a set of the ids being made for that, which refused a second create at once as `Exists`. In the
+integrated tree the turn replaces it (the lead's call, 2026-11-04): the second create waits and then finds the box
+made, or goes ahead if the first failed, and a delete waits too, which the set never covered. A second create of an
+owned box being made takes no second slot (`oci_box.rs`,
+`a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot`).
 
 The Linux record store opens its two directories once, retaining two close-on-exec descriptors
 shared by its clones. Each write opens only `.<id>.tmp` relative to its directory and renames that
