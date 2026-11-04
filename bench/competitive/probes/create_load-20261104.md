@@ -112,3 +112,39 @@ mean (93.4%). Everything else in (B) sums to 0.734 ms at p50 against (A)'s 0.428
 operations (parts 5, 6, 18, 20) and the host. The parts cover the traced rounds, whose creates were 9.78 ms at p50. The
 untraced seam rounds of the same run were 19.41 ms, the fsync's own variance by round (the traced rounds 8.6, 19.7 and
 8.6 ms). At p99 each fsync is about 20.5 ms.
+
+## A rootless node: which of its boxes pay, and what it costs on its disk
+
+**Which boxes pay.** A record is durable, fsynced file and directory, when any directory it names lies off tmpfs
+(`crates/hex-node/src/store.rs:608-613`); otherwise it is written once, with no sync (`:309-345`). On a rootless node:
+- **Container state** sits under `$XDG_RUNTIME_DIR` (`/run/user/<uid>`), tmpfs on a systemd host. A **bundle** box
+  (`ClassSpec::Bundle`, the caller's bundle) names only that state, so its record is non-durable: **no fsync**.
+- An **OciSpec** box (`ClassSpec::Oci`, rendered by the node) also names its rendered bundle and writable layer,
+  under the node's **state directory** (`<state>/bundles/<id>`, node_socket.rs's `rendered`), which is on disk. Its record
+  is durable: **two fsyncs on every create**, and its delete's update and removal sync too.
+- A **process** box names no directory: non-durable, no fsync.
+- A rootless node with **no `XDG_RUNTIME_DIR`** keeps container state in its state directory on disk
+  (node_socket.rs's `Kept::Disk`), so every `oci` box pays.
+
+kiln's runners today (`docs/design/runtime.md`, consumer #2 and CP-T7.1's HexSandbox): the sandbox links the node for
+**process** boxes (no fsync), and the container executor shells out to `hex oci` (the runtime alone, no node record).
+So neither of kiln's current paths pays this. A node making OciSpec boxes does, as goal 3's `docker run`-like boxes and
+the seam's OciSpec class are made, or one without a tmpfs runtime directory.
+
+**What it costs there.** The store's durable write reproduced: the temp file opened `O_CREAT|O_TRUNC`, ~1.5 KB
+written, fsynced, renamed into place, its directory opened and fsynced (`store.rs:345-375`). Against the non-durable
+write (`O_CREAT|O_EXCL`, written, no sync). Python's os calls, the same system calls, not Hex's code. On a rootless
+node's state directory's filesystem (`$HOME`, btrfs `compress=zstd:1`, not an overlay) and its runtime directory
+(`/run/user/1000`, tmpfs): 5 rounds of 1,000 each, interleaved, single-threaded on CPUs 4-15 under the timed lock. Unit
+hex-hooks-recfsync-20261104T163103Z through hex-slot; load 111.3 at the start, 55.4 at the end, I/O pressure avg60 22.7%.
+p50 / p99 / mean, ms:
+
+| where | durable write, whole | of it, the file's fsync | of it, the directory's fsync | non-durable write |
+|---|---|---|---|---|
+| `$HOME` (btrfs), a rootless node's state directory | 15.634 / 37.859 / 16.263 | 7.595 / 22.361 / 8.527 | 6.257 / 20.387 / 7.344 | 0.074 / 1.274 / 0.112 |
+| `/run/user/1000` (tmpfs), its runtime directory | 0.012 / 0.022 / 0.013 | 0.000 / 0.001 / 0.000 | 0.000 / 0.000 / 0.000 | 0.006 / 0.012 / 0.007 |
+
+At this load the pair costs 15.6 ms at p50 and 37.9 at p99 on the rootless state directory's disk, near the root
+container overlay's 9.2 ms p50 (parts 22 and 24, at load 17). The two fsyncs are 89% of the durable write's p50 and 98% of
+its mean; the rename and opens are the rest. The script is `~/.cache/hex-t7/hooks/bin/record_fsync.py` on fedora; its output is beside the
+unit's log.
