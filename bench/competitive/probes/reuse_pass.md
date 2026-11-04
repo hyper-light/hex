@@ -518,6 +518,137 @@ of CPU a lifecycle against 0.70 to 0.75 in the other three, so 1,206 a second. I
 mr17's second, at 4.62x, and concurrency 32 ran 9,137 to 9,428 a second in the three steady runs. Step 3's changes since
 16e52a9 are its classic init's (`e1b85f4`, `933d56f`), which the pruned path the bench takes doesn't run.
 
+## Run 17 (2026-11-04, fedora): the held mount namespace, A B B A in the three readings, at both descriptor limits
+
+- **What it measures** (the lead, 2026-11-04): the held mount namespace (`337243d`: a box's mount namespace held by a
+  descriptor past its init's exit, let go by a closer thread) against the same tree without it, A B B A, in each
+  reading of criterion 2 Ada is to choose among: host.sh's own (concurrency 1 and 32 on 4-31), option 1 (1 on 4-15, 32
+  on 4-31) and 4-15 alone. Each at two descriptor limits: the soft limit Hex's installer will set, the hard limit the
+  lab container is given (524,288, `HEXBENCH_NOFILE=hard`), where the held files' bound is 48,544 namespaces without
+  the held mount namespace and 32,144 with it (the node's own at its bounds 330,112 and 395,712); and the container's
+  given 1,024 (`HEXBENCH_NOFILE=given`, systemd's default today), where the bound is 0. Each lifecycle's p50 and p99 at
+  1 and 32 beside the ratio, so moving the teardown can't hide a cost elsewhere.
+- **Binaries:** A, mr19a: goal 6's tip fde0ec1 with step 6 through 3701885 (the held files' bound, each lifecycle's
+  timing), merged for measurement only (`d0f0843`; `hex` 8f4199ab197500b0, `seam_oci` e23acefaf5744d1c). B, mr19b:
+  mr19a's tree with the held mount namespace (`d41f96d`, step 6 through f7b3f77; `hex` fb429b3e3f681a4a, `seam_oci`
+  cd5cc47060dbbf7a). g6, goal 6's tip alone (`fde0ec1`; `hex` 3d32f5efc2d4494e, `seam_oci` ef2c73e11b1539c9), once
+  after each A B B A: it predates the bound, so it runs under the old raising code, its node raising its own limit and
+  holding the files at both limits; its seam_oci predates the per-lifecycle timing.
+- **Method:** the unit `hex-g5x-s6-fdh38-20261104T202258Z` through hex-slot: step 6's gates and root lab at 71d3830
+  first, the three trees' release builds, then the timed part under fedora's timed lock, 20:29Z to 21:03:36Z. Run 9's
+  method, interleaved pairs, 2 rounds of 10 pairs a run, one owner's boxes, reuse on; for each reading A B B A g6 at
+  the installed limit, then again at the given. Each run's `nofile.txt` records the limit its node started with.
+- **Host:** run noisy on the lead's order: one-minute load 9.5 to 56, CPU pressure 0.3 to 36%. Beside it were one kiln
+  agent's unit (`kiln-agent-01a14c4f-01a1576c-01a19962`) and six containers (a kind cluster and its registry, three
+  buildkit builders, a minio). No other unit of Hex's ran; the goal 6 agent and Focal were told before the timed part.
+  From 20:45Z to 20:52Z load stood at 49 to 56 and CPU pressure at 25 to 33%: option 1's first two runs at the
+  installed limit kept concurrency 1 to 0.49 and 0.69 CPUs.
+
+| run | reading | limit | binary | in process (SE) | rates, 32 over 1 | over the socket (SE) |
+|---|---|---|---|---|---|---|
+| `20261104T202901Z` | host.sh's | installed | A | 13.32x (0.50) | 6,844/s over 523/s | 10.98x (0.21) |
+| `20261104T203016Z` | host.sh's | installed | B | 8.61x (0.16) | 6,981/s over 816/s | 6.28x (0.12) |
+| `20261104T203116Z` | host.sh's | installed | B | 6.59x (0.17) | 3,117/s over 477/s | 6.02x (0.34) |
+| `20261104T203335Z` | host.sh's | installed | A | 12.48x (0.23) | 7,512/s over 603/s | 9.82x (0.13) |
+| `20261104T203439Z` | host.sh's | installed | g6 | 12.10x (0.22) | 7,049/s over 583/s | 9.76x (0.14) |
+| `20261104T203546Z` | host.sh's | given | A | 11.64x (0.22) | 7,140/s over 616/s | 9.87x (0.16) |
+| `20261104T203649Z` | host.sh's | given | B | 9.03x (0.12) | 6,703/s over 744/s | 5.74x (0.17) |
+| `20261104T203958Z` | host.sh's | given | B | 6.63x (0.15) | 5,444/s over 825/s | 4.85x (0.10) |
+| `20261104T204411Z` | host.sh's | given | A | 11.83x (0.31) | 7,148/s over 607/s | 9.87x (0.35) |
+| `20261104T204525Z` | host.sh's | given | g6 | 12.02x (0.82) | 4,819/s over 381/s | 12.43x (1.49) |
+| `20261104T204718Z` | option 1 | installed | A | 20.29x (1.45) | 4,067/s over 224/s | 22.76x (2.02) |
+| `20261104T205032Z` | option 1 | installed | B | 11.83x (0.50) | 4,065/s over 342/s | 12.17x (0.65) |
+| `20261104T205240Z` | option 1 | installed | B | 7.51x (0.11) | 12,529/s over 1,670/s | 7.21x (0.09) |
+| `20261104T205313Z` | option 1 | installed | A | 9.81x (0.17) | 12,193/s over 1,242/s | 8.73x (0.15) |
+| `20261104T205348Z` | option 1 | installed | g6 | 9.02x (0.16) | 12,300/s over 1,370/s | 8.53x (0.16) |
+| `20261104T205422Z` | option 1 | given | A | 7.24x (0.08) | 15,180/s over 2,100/s | 7.41x (0.13) |
+| `20261104T205448Z` | option 1 | given | B | 6.70x (0.27) | 5,615/s over 911/s | 6.42x (0.24) |
+| `20261104T205537Z` | option 1 | given | B | 6.63x (0.13) | 13,909/s over 2,094/s | 7.00x (0.20) |
+| `20261104T205606Z` | option 1 | given | A | 7.30x (0.11) | 14,829/s over 2,030/s | 7.33x (0.17) |
+| `20261104T205632Z` | option 1 | given | g6 | 7.16x (0.12) | 15,400/s over 2,152/s | 7.14x (0.11) |
+| `20261104T205658Z` | 4-15 | installed | A | 4.61x (0.09) | 8,227/s over 1,782/s | 4.53x (0.08) |
+| `20261104T205735Z` | 4-15 | installed | B | 3.68x (0.05) | 7,390/s over 2,011/s | 3.91x (0.08) |
+| `20261104T205814Z` | 4-15 | installed | B | 3.71x (0.05) | 7,348/s over 1,983/s | 4.02x (0.09) |
+| `20261104T205853Z` | 4-15 | installed | A | 5.26x (0.28) | 7,873/s over 1,496/s | 4.83x (0.13) |
+| `20261104T205933Z` | 4-15 | installed | g6 | 5.59x (0.20) | 7,748/s over 1,392/s | 5.85x (0.10) |
+| `20261104T210016Z` | 4-15 | given | A | 5.09x (0.09) | 8,387/s over 1,647/s | 5.11x (0.12) |
+| `20261104T210054Z` | 4-15 | given | B | 4.10x (0.09) | 7,600/s over 1,859/s | 4.46x (0.08) |
+| `20261104T210132Z` | 4-15 | given | B | 4.74x (0.13) | 7,082/s over 1,495/s | 5.28x (0.09) |
+| `20261104T210217Z` | 4-15 | given | A | 4.91x (0.18) | 7,834/s over 1,600/s | 4.93x (0.13) |
+| `20261104T210300Z` | 4-15 | given | g6 | 4.25x (0.07) | 8,182/s over 1,929/s | 4.33x (0.06) |
+
+Pooled, A and B over their 40 pairs each, g6 over its run's 20 (the pairs' medians for CPU and wall; g6's seam_oci
+times no lifecycle):
+
+| reading | limit | binary | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | p50, p99 at 1 | p50, p99 at 32 | over the socket (SE) |
+|---|---|---|---|---|---|---|---|---|---|
+| host.sh's | installed | A | 12.90x (0.27) | 7,163/s over 560/s | 1.84, 1.60 ms | 1.05, 11.92 | 1.578, 2.550 ms | 3.956, 9.575 ms | 10.40x (0.15) |
+| host.sh's | installed | B | 7.60x (0.19) | 4,310/s over 602/s | 1.68, 1.70 ms | 1.31, 10.12 | 1.246, 1.704 ms | 4.792, 16.294 ms | 6.15x (0.18) |
+| host.sh's | installed | g6 | 12.10x (0.22) | 7,049/s over 583/s | 1.82, 1.65 ms | 1.07, 11.66 | | | 9.76x (0.14) |
+| host.sh's | given | A | 11.74x (0.19) | 7,144/s over 611/s | 1.76, 1.60 ms | 1.09, 11.76 | 1.474, 2.486 ms | 4.010, 10.360 ms | 9.87x (0.20) |
+| host.sh's | given | B | 7.83x (0.21) | 6,008/s over 782/s | 1.77, 1.73 ms | 1.34, 10.50 | 1.308, 1.606 ms | 4.676, 14.295 ms | 5.29x (0.11) |
+| host.sh's | given | g6 | 12.02x (0.82) | 4,819/s over 381/s | 1.74, 1.60 ms | 0.96, 9.59 | | | 12.43x (1.49) |
+| option 1 | installed | A | 15.05x (1.11) | 6,100/s over 380/s | 1.49, 1.48 ms | 0.90, 13.27 | 2.138, 4.161 ms | 3.418, 10.696 ms | 15.75x (1.52) |
+| option 1 | installed | B | 9.67x (0.43) | 6,139/s over 568/s | 0.90, 1.55 ms | 1.29, 15.68 | 0.654, 1.311 ms | 2.783, 12.363 ms | 9.69x (0.51) |
+| option 1 | installed | g6 | 9.02x (0.16) | 12,300/s over 1,370/s | 0.91, 1.42 ms | 1.26, 17.94 | | | 8.53x (0.16) |
+| option 1 | given | A | 7.27x (0.07) | 15,003/s over 2,064/s | 0.60, 1.37 ms | 1.29, 20.71 | 0.450, 0.784 ms | 1.995, 4.156 ms | 7.37x (0.10) |
+| option 1 | given | B | 6.66x (0.15) | 8,000/s over 1,270/s | 0.90, 1.50 ms | 1.39, 17.82 | 0.613, 0.948 ms | 2.452, 6.273 ms | 6.71x (0.16) |
+| option 1 | given | g6 | 7.16x (0.12) | 15,400/s over 2,152/s | 0.57, 1.34 ms | 1.26, 21.04 | | | 7.14x (0.11) |
+| 4-15 | installed | A | 4.94x (0.15) | 8,046/s over 1,626/s | 0.68, 1.13 ms | 1.25, 9.22 | 0.527, 0.935 ms | 3.623, 9.361 ms | 4.68x (0.08) |
+| 4-15 | installed | B | 3.69x (0.04) | 7,369/s over 1,997/s | 0.69, 1.19 ms | 1.38, 8.75 | 0.478, 0.800 ms | 3.895, 11.038 ms | 3.97x (0.06) |
+| 4-15 | installed | g6 | 5.59x (0.20) | 7,748/s over 1,392/s | 0.91, 1.17 ms | 1.25, 9.13 | | | 5.85x (0.10) |
+| 4-15 | given | A | 5.00x (0.10) | 8,101/s over 1,623/s | 0.78, 1.18 ms | 1.30, 9.55 | 0.576, 0.969 ms | 3.618, 9.404 ms | 5.02x (0.09) |
+| 4-15 | given | B | 4.42x (0.10) | 7,332/s over 1,657/s | 0.81, 1.23 ms | 1.41, 9.04 | 0.562, 0.945 ms | 3.955, 11.677 ms | 4.87x (0.09) |
+| 4-15 | given | g6 | 4.25x (0.07) | 8,182/s over 1,929/s | 0.65, 1.12 ms | 1.25, 9.30 | | | 4.33x (0.06) |
+
+B's held mount namespaces, every box's (90,000 a run, none unheld; each round's `mounts` counts, summed over a run's
+two):
+
+| run | reading, limit | let go by the closer | closed inline | the closer's lag, mean and most |
+|---|---|---|---|---|
+| `20261104T203016Z` | host.sh's, installed | 30,401 | 59,477 | 24.1, 118.1 ms |
+| `20261104T203116Z` | host.sh's, installed | 35,274 | 54,619 | 45.9, 196.1 ms |
+| `20261104T203649Z` | host.sh's, given | 29,811 | 60,068 | 25.5, 120.0 ms |
+| `20261104T203958Z` | host.sh's, given | 31,041 | 58,843 | 30.3, 132.1 ms |
+| `20261104T205032Z` | option 1, installed | 35,034 | 54,855 | 36.0, 192.0 ms |
+| `20261104T205240Z` | option 1, installed | 32,373 | 57,559 | 12.4, 32.6 ms |
+| `20261104T205448Z` | option 1, given | 39,697 | 50,220 | 22.1, 136.0 ms |
+| `20261104T205537Z` | option 1, given | 32,368 | 57,573 | 11.2, 29.9 ms |
+| `20261104T205735Z` | 4-15, installed | 51,038 | 38,849 | 12.6, 41.2 ms |
+| `20261104T205814Z` | 4-15, installed | 51,435 | 38,457 | 12.6, 40.0 ms |
+| `20261104T210054Z` | 4-15, given | 50,379 | 39,512 | 12.4, 43.6 ms |
+| `20261104T210132Z` | 4-15, given | 52,048 | 37,864 | 12.8, 38.4 ms |
+
+**What it says: the held mount namespace lowers the ratio in every reading, at both limits.** Pooled, A against B:
+host.sh's 12.90x against 7.60x at the installed limit and 11.74x against 7.83x at the given; option 1 15.05x against
+9.67x and 7.27x against 6.66x; 4-15 alone 4.94x against 3.69x and 5.00x against 4.42x; over the socket the same way in
+all six. On 4-15 it speeds concurrency 1 (1,626/s to 1,997/s at the installed limit, its p50 0.527 to 0.478 ms) and
+slows 32 (8,046/s to 7,369/s, its p99 9.36 to 11.04 ms; at the given limit 8,101/s to 7,332/s and 9.40 to 11.68 ms):
+32's CPUs busy fall (9.22 to 8.75, 9.55 to 9.04) and its CPU a lifecycle rises (1.13 to 1.19 ms, 1.18 to 1.23).
+
+- **Its closer falls behind.** It let go of 33 to 58% of the namespaces; the rest closed inline in the
+  supervisor's thread when its 64 places were full, and its lag averaged 11 to 46 ms. The kernel's code gives the
+  cause. A mount namespace's last put takes namespace_sem for writing and unmounts its tree (fs/namespace.c:6031-6039);
+  releasing the lock, it waits for an expedited RCU grace period before the mounts' last puts (namespace_unlock,
+  :1680-1721, the wait at :1715). Callers waiting at once share a grace period, one another task completed satisfying
+  the rest (kernel/rcu/tree_exp.h:295-301, :955-957), so inits exiting together tore their namespaces down side by
+  side. One closer waits one grace period after another, the loop the function's own comment warns against (:912-915),
+  and what overflows waits in the supervisor's thread, which reaps every box's exit. What would falsify it: an off-CPU
+  profile of the closer's thread at concurrency 32 whose waits aren't mostly in synchronize_rcu_expedited.
+- **A closer that kept up would still take the teardown off concurrency 1's path.** Concurrency 1 gains the teardown's
+  wall (about 0.05 ms of its 0.53 ms p50 on 4-15); 32 gains only if the inits' waits are what leaves its CPUs idle, and
+  its CPUs busy fell with the hold rather than rose.
+- **The held files** (A at the installed limit against A at the given, on 4-15): 175,636 of 180,000 checks went
+  through them, against none at the given limit, where all 180,000 entered, counted as bounded. They cut the CPU a
+  lifecycle costs, 0.68 against 0.78 ms at concurrency 1 and 1.13 against 1.18 at 32, with the rates and the ratio
+  unmoved: 8,046/s and 8,101/s at 32, 4.94x and 5.00x.
+- **The three readings without the held mount namespace (A):** host.sh's 12.90x at the installed limit and 11.74x at
+  the given (over the socket 10.40x and 9.87x), its concurrency 1 on 4-31 at 1.76 to 1.84 ms of CPU a lifecycle
+  against 0.68 to 0.78 on 4-15. Option 1 7.27x at the given (7.37x); at the installed 15.05x pooled from 20.29x and
+  9.81x, under the window's heaviest load. g6, whose node holds the files at both limits, read 9.02x and 7.16x three
+  minutes apart as its concurrency 1 went from 0.91 to 0.57 ms of CPU a lifecycle: option 1's ratio follows
+  concurrency 1's CPU, the host's swing runs 14 to 16 found. 4-15 alone 4.94x and 5.00x (4.68x and 5.02x).
+
 ## What criterion 2 needs on 4-15, from these runs
 
 The ratio is the CPUs each concurrency keeps busy times the CPU a lifecycle costs, (busy32 / busy1) x (cpu1 / cpu32).
@@ -529,7 +660,8 @@ Run 16's two steady runs: (10.25 / 1.25) x (0.705 / 1.195) = 4.84x, against the 
   all 12 CPUs busy and today's 1.25 at concurrency 1: 12 / 1.25 / 1.19 = 8.07x, the bar with nothing to spare.
 - **busy1 is above 1 by the work beside concurrency 1's path:** the namespace checker and the `/dev` pool (about 0.16 ms
   a lifecycle in `create_serial.md` run 23's threads, before the held files) and the overlap of the agent's and the
-  init's steps. Work cut from the path speeds concurrency 1 as much as 32; work cut from beside it speeds 32 alone.
+  init's steps. Work cut from the path speeds concurrency 1 as much as 32; work cut from beside it speeds 32 alone;
+  work moved from the path to beside it speeds 1 alone (run 17's held mount namespace).
 - **So 8x on 4-15 needs all three at once:** concurrency 32's CPUs all busy (10.2 to 10.4 of 12 today), its CPU a
   lifecycle within the cores' sharing of concurrency 1's (1.69 times today, under load), and next to no work beside
   concurrency 1's path. With every CPU busy and none beside the path, today's 1.69 still caps it at 12 / 1.0 / 1.69 =
