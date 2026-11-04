@@ -20,44 +20,49 @@
 )]
 
 use hex_sim::generate::{self, Shape};
-use hex_sim::index::{Sample, Scorer};
+use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::Cluster;
-use hex_sim::packing::{pack, stranded_per_mille};
+use hex_sim::packing::{minimal_shapes, pack, stranded_per_mille};
 
 fn compare(name: &str, cluster: &Cluster) -> f64 {
     let base = Sample::default();
-    let best = pack(
-        cluster,
-        &Sample {
-            scorer: Scorer::BestFit,
-            ..base
-        },
-        900,
-    )
-    .unwrap();
-    let align = pack(
-        cluster,
-        &Sample {
-            scorer: Scorer::Align,
-            ..base
-        },
-        900,
-    )
-    .unwrap();
-    let cut = if best.stranded_cpu_milli == 0 {
-        0.0
-    } else {
-        100.0 * (1.0 - align.stranded_cpu_milli as f64 / best.stranded_cpu_milli as f64)
+    let shapes = Shapes::of(minimal_shapes(cluster));
+    let run = |scorer| {
+        pack(
+            cluster,
+            &Sample {
+                scorer,
+                shapes,
+                ..base
+            },
+            900,
+        )
+        .unwrap()
     };
+    let best = run(Scorer::BestFit);
+    let cut = |r: &hex_sim::packing::PackReport| {
+        if best.stranded_cpu_milli == 0 {
+            0.0
+        } else {
+            100.0 * (1.0 - r.stranded_cpu_milli as f64 / best.stranded_cpu_milli as f64)
+        }
+    };
+    let align = run(Scorer::Align);
+    let fragment = run(Scorer::Fragment);
     println!(
-        "{name}: nodes={} best_fit stranded={}‰ (reached {}) align stranded={}‰ (reached {}) reduction={cut:.1}%",
+        "{name}: nodes={} shapes={} best_fit stranded={}‰ (reached {}) | align {}‰ (reached {}) cut {:.1}% | fragment {}‰ (reached {}) cut {:.1}%",
         cluster.nodes.len(),
+        shapes.iter().count(),
         stranded_per_mille(&best),
         best.reached,
         stranded_per_mille(&align),
-        align.reached
+        align.reached,
+        cut(&align),
+        stranded_per_mille(&fragment),
+        fragment.reached,
+        cut(&fragment)
     );
-    cut
+    cut(&fragment)
 }
 
 fn main() {
@@ -76,7 +81,7 @@ fn main() {
     for seed in 0..8 {
         let shape = Shape {
             nodes: 1_000,
-            workloads: 60_000,
+            workloads: 200_000,
             mean_gap: 1,
             mean_run: None,
             gpu_nodes_per_mille: 100,

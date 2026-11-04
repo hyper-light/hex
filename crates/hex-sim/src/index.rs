@@ -48,6 +48,42 @@ pub struct Sample {
     pub per_mille: u32,
     /// How the sampled nodes are ranked.
     pub scorer: Scorer,
+    /// The workload shapes [`Scorer::Fragment`] keeps usable.
+    pub shapes: Shapes,
+}
+
+/// At most [`Shapes::MAX`] workload shapes, kept in a fixed array so a [`Sample`] stays a plain
+/// value. Past the bound, [`Shapes::of`] keeps the smallest (by CPU, then memory, then GPUs): a free
+/// capacity a larger shape fits, a smaller one fits too, so the smallest are what decide whether a
+/// leftover can still be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Shapes {
+    len: usize,
+    items: [Resources; Shapes::MAX],
+}
+
+impl Shapes {
+    pub const MAX: usize = 16;
+
+    pub fn of(mut shapes: Vec<Resources>) -> Self {
+        shapes.sort_unstable();
+        shapes.dedup();
+        let mut out = Self::default();
+        for (slot, shape) in out.items.iter_mut().zip(shapes) {
+            *slot = shape;
+            out.len = out.len.saturating_add(1);
+        }
+        out
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Resources> {
+        self.items.iter().take(self.len)
+    }
+
+    /// Whether some shape fits `free`.
+    fn usable(&self, free: &Resources) -> bool {
+        self.iter().any(|s| free.holds(s))
+    }
 }
 
 /// How a decision ranks the nodes its sample admits.
@@ -60,6 +96,10 @@ pub enum Scorer {
     /// node's free capacity, each resource taken as a share of the node's capacity, ties by
     /// [`Key`]'s order.
     Align,
+    /// Least stranded: the node whose leftover after placing the need is either nothing or still
+    /// fits one of the sample's [`Shapes`], so no CPU is left that no workload can use; then
+    /// [`Scorer::Align`]; then [`Key`]'s order.
+    Fragment,
 }
 
 impl Default for Sample {
@@ -69,6 +109,10 @@ impl Default for Sample {
             min_feasible: 100,
             per_mille: 50,
             scorer: Scorer::BestFit,
+            shapes: Shapes {
+                len: 0,
+                items: [Resources::default(); Shapes::MAX],
+            },
         }
     }
 }
@@ -81,6 +125,10 @@ impl Sample {
             min_feasible: u32::MAX,
             per_mille: 0,
             scorer: Scorer::BestFit,
+            shapes: Shapes {
+                len: 0,
+                items: [Resources::default(); Shapes::MAX],
+            },
         }
     }
 
@@ -214,6 +262,19 @@ impl Slot {
         .fold(0u64, u64::saturating_add)
     }
 
+    /// The CPU placing `need` here would leave that no shape can use: the leftover's CPU when it
+    /// isn't empty and fits no shape, else nothing.
+    fn stranded_after(&self, need: &Resources, shapes: &Shapes) -> u64 {
+        let Some(left) = self.free.checked_sub(need) else {
+            return u64::MAX;
+        };
+        if left.cpu_milli == 0 || shapes.usable(&left) {
+            0
+        } else {
+            left.cpu_milli
+        }
+    }
+
     /// CPU in use, background and placed, above 90% of the node's CPU. Compared as
     /// busy * 1000 > capacity * 900 in u128, where neither side can overflow; a busy count past u64
     /// is hot.
@@ -298,7 +359,7 @@ impl FitIndex {
         let n = self.slots.len();
         let start = sample.start(demand, n);
         let want = sample.want(n);
-        let (mut best, mut best_score, mut found) = (None::<Key>, 0u64, 0usize);
+        let (mut best, mut best_score, mut found) = (None::<Key>, 0u128, 0usize);
         let mut refused = Refusals::default();
         // found, offset and the refusals count nodes, so they stay below the node count.
         for offset in 0..n {
@@ -327,7 +388,16 @@ impl FitIndex {
             let key = Key::of(NodeId(id), &slot.free);
             let score = match sample.scorer {
                 Scorer::BestFit => 0,
-                Scorer::Align => slot.alignment(&demand.need),
+                Scorer::Align => u128::from(slot.alignment(&demand.need)),
+                Scorer::Fragment => {
+                    // Lexicographic in one number: least stranded CPU in the high word, then
+                    // alignment in the low word.
+                    let stranded = slot.stranded_after(&demand.need, &sample.shapes);
+                    u128::from(u64::MAX.saturating_sub(stranded))
+                        .checked_mul(1 << 64)
+                        .unwrap_or(0)
+                        | u128::from(slot.alignment(&demand.need))
+                }
             };
             // A higher score wins; between equal scores, the least key.
             let wins = best.is_none_or(|b| score > best_score || (score == best_score && key < b));
@@ -530,7 +600,7 @@ mod tests {
             seed: 3,
             min_feasible: 1,
             per_mille: 0,
-            scorer: Scorer::BestFit,
+            ..Sample::default()
         };
         let s = index.sampled_fit(&demand, &one);
         let first = (0..4)
