@@ -37,13 +37,23 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
     .unwrap()
 }
 
+/// Whether this process may make a network namespace: unshare(2) takes `CLONE_NEWNET` only from a
+/// caller with CAP_SYS_ADMIN in its user namespace, which uid 0 alone doesn't give (a Kubernetes
+/// pod's root, kiln CI's, runs without it).
+fn may_make_namespaces() -> bool {
+    rustix::thread::capabilities(None)
+        .unwrap()
+        .effective
+        .contains(rustix::thread::CapabilitySet::SYS_ADMIN)
+}
+
 /// HEX-NETNS-11: the refill thread hands the pool each namespace it makes, or counts each make that
 /// fails, and a create is served either way. Do: start a pool of 2 and wait for its thread's first
-/// outcome. Expect, where the agent may make network namespaces (as root): the pool fills to its
-/// bound; a take hands over a namespace that isn't this process's, its loopback up, and the thread
-/// makes another in its place. Expect, where it may not: one failed make, counted and nothing made;
-/// then a take answered on the path, counted, which asks the thread for one more, and that make fails
-/// and is counted too.
+/// outcome. Expect, where the agent may make network namespaces (CAP_SYS_ADMIN): the pool fills to
+/// its bound; a take hands over a namespace that isn't this process's, its loopback up, and the
+/// thread makes another in its place. Expect, where it may not: one failed make, counted and nothing
+/// made; then a take answered on the path, counted, which asks the thread for one more, and that make
+/// fails and is counted too.
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
     let pool = Netns::start(2).unwrap();
@@ -51,12 +61,14 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
     });
-    if pool.counts().unwrap().failed > 0 {
-        assert_ne!(
-            rustix::process::geteuid().as_raw(),
-            0,
-            "root makes namespaces ahead"
-        );
+    let failed = pool.counts().unwrap().failed > 0;
+    assert_eq!(
+        failed,
+        !may_make_namespaces(),
+        "a make fails exactly where CAP_SYS_ADMIN is missing"
+    );
+    if failed {
+        eprintln!("without CAP_SYS_ADMIN: the pool's failed makes are tested, its full pool isn't");
         let c = pool.counts().unwrap();
         assert_eq!((c.made_ahead, c.failed), (0, 1), "{c:?}");
         assert!(pool.take().unwrap().is_none(), "a dry take");

@@ -706,10 +706,11 @@ refuses the create when the pool refuses (HEX-NETNS-7, against a recording fake)
 their namespaces differ from each other's, an earlier box's and the host's, loopback up, and the agent holds neither
 (HEX-NETNS-8, `oci_box`); a pool of 0 makes a box's namespace on the path, loopback up, counted so (HEX-NETNS-9);
 rootless, the box's namespace is made in its own user namespace, which owns it, nothing taken (HEX-NETNS-10); and
-the refill thread fills its pool to the bound as root, each namespace its own with loopback up, or counts each
-failed make where it may not and serves takes on the path (HEX-NETNS-11). The hex-api conformance suite passes over
-the socket on `oci` boxes that each take a pooled namespace as root, or make their own on the path rootless
-(`node_socket`), as it does in process on boxes from OciSpecs with a private network (`oci_spec_box`).
+the refill thread fills its pool to the bound where it holds CAP_SYS_ADMIN, each namespace its own with loopback
+up, or counts each failed make where it doesn't (a pod's root, as in kiln CI) and serves takes on the path
+(HEX-NETNS-11). The hex-api conformance suite passes over the socket on `oci` boxes that each take a pooled
+namespace as root, or make their own on the path rootless (`node_socket`), as it does in process on boxes from
+OciSpecs with a private network (`oci_spec_box`).
 
 **Sources.** `docs/research/runtime/netns-pool.md`: the kernel's `net/core/net_namespace.c` at v6.19; namespaces(7),
 setns(2) and user_namespaces(7); containerd v2.2.0's `pkg/netns`; Lambda's networking account (Vogels, 2026); AFaaS
