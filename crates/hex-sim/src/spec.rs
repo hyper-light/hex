@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Sample};
-use crate::model::{Cluster, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use crate::model::{Cluster, Demand, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
 use crate::sim::Run;
 use crate::store::{Op, State};
 
@@ -65,9 +65,9 @@ pub fn serial_place(
     let mut index = FitIndex::new(nodes)?;
     let mut out = Vec::with_capacity(workloads.len());
     for w in workloads {
-        let choice = index.sampled_fit(&w.need, sample).best.map(|k| k.node);
+        let choice = index.sampled_fit(&w.demand(), sample).best.map(|k| k.node);
         if let Some(node) = choice {
-            index.take(node, &w.need)?;
+            index.take(node, &w.demand())?;
         }
         out.push(choice);
     }
@@ -89,7 +89,7 @@ pub struct LogReport {
 /// times the node count: an oracle for test-sized runs.
 pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> {
     let mut index = FitIndex::new(nodes)?;
-    let mut pending: BTreeMap<u64, (WorkloadId, Resources)> = BTreeMap::new();
+    let mut pending: BTreeMap<u64, (WorkloadId, Demand)> = BTreeMap::new();
     let mut seq_of: BTreeMap<WorkloadId, u64> = BTreeMap::new();
     let mut placed: BTreeMap<WorkloadId, NodeId> = BTreeMap::new();
     let mut report = LogReport::default();
@@ -101,7 +101,7 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                     .record(workload)
                     .ok_or(Violation::NotSubmitted(workload))?
                     .spec
-                    .need;
+                    .demand();
                 if seq_of.insert(workload, seq).is_some() {
                     return Err(Violation::SubmittedTwice(workload));
                 }
@@ -115,7 +115,7 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                 let (_, need) = *pending.get(&seq).ok_or(Violation::NotPending(workload))?;
                 if let Some((_, (ahead, _))) = pending
                     .range(..seq)
-                    .find(|(_, (_, n))| index.best_fit(n).is_some())
+                    .find(|(_, (_, d))| index.admitted_anywhere(d))
                 {
                     return Err(Violation::JumpedQueue {
                         placed: workload,
@@ -144,14 +144,14 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                     .record(workload)
                     .ok_or(Violation::NotSubmitted(workload))?
                     .spec
-                    .need;
+                    .demand();
                 index.give(node, &need)?;
                 report.completions = report.completions.saturating_add(1);
             }
         }
     }
     for (workload, need) in pending.values() {
-        if index.best_fit(need).is_some() {
+        if index.admitted_anywhere(need) {
             return Err(Violation::LeftPending(*workload));
         }
         report.waiting = report.waiting.saturating_add(1);
@@ -248,4 +248,113 @@ pub fn check_kept_running(cluster: &Cluster, run: &Run) -> KeptReport {
         }
     }
     r
+}
+
+/// What step 2's filters hold to zero over a run's placements (`AC-T7.6.3`, S3), counted by a replay
+/// of the log against the cluster's facts alone, apart from [`FitIndex`]'s own verdicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FilterReport {
+    pub placements: u64,
+    /// GPU work placed on a node without GPUs.
+    pub gpu_off_gpu: u64,
+    /// A benchmark placed beside a running build, or a build beside a running benchmark.
+    pub benchmark_with_build: u64,
+    /// A session placed on a node above 90% CPU while another node had the room and wasn't.
+    pub hot_sessions: u64,
+}
+
+impl FilterReport {
+    pub fn violations(&self) -> u64 {
+        self.gpu_off_gpu
+            .saturating_add(self.benchmark_with_build)
+            .saturating_add(self.hot_sessions)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    used: Resources,
+    builds: u64,
+    benchmarks: u64,
+}
+
+/// Above 90%: busy * 10 > capacity * 9, in u128 so neither side can overflow.
+fn over_ninety(capacity: &NodeSpec, used: &Resources) -> bool {
+    let busy = u128::from(used.cpu_milli).saturating_add(u128::from(capacity.background_milli));
+    busy.saturating_mul(10) > u128::from(capacity.capacity.cpu_milli).saturating_mul(9)
+}
+
+pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Violation> {
+    let mut seen = vec![Seen::default(); cluster.nodes.len()];
+    let mut r = FilterReport::default();
+    let at = |node: NodeId| {
+        usize::try_from(node.0).map_err(|_| Violation::Replay(SimError::UnknownNode(node)))
+    };
+    for entry in run.store.log() {
+        let (workload, node, placing) = match entry.op {
+            Op::Submit { .. } => continue,
+            Op::Place { workload, node } => (workload, node, true),
+            Op::Complete { workload, node } => (workload, node, false),
+        };
+        let spec = run
+            .store
+            .record(workload)
+            .ok_or(Violation::NotSubmitted(workload))?
+            .spec;
+        let i = at(node)?;
+        let facts = cluster
+            .nodes
+            .get(i)
+            .ok_or(Violation::Replay(SimError::UnknownNode(node)))?;
+        if placing {
+            let now = seen.get(i).copied().unwrap_or_default();
+            r.placements = r.placements.saturating_add(1);
+            if spec.need.gpus > 0 && facts.capacity.gpus == 0 {
+                r.gpu_off_gpu = r.gpu_off_gpu.saturating_add(1);
+            }
+            let shares = match spec.kind {
+                Kind::Benchmark => now.builds > 0,
+                Kind::Build => now.benchmarks > 0,
+                Kind::Plain | Kind::Session => false,
+            };
+            if shares {
+                r.benchmark_with_build = r.benchmark_with_build.saturating_add(1);
+            }
+            if spec.kind == Kind::Session && over_ninety(facts, &now.used) {
+                let elsewhere = cluster.nodes.iter().zip(&seen).any(|(other, o)| {
+                    other.id != node
+                        && other
+                            .capacity
+                            .checked_sub(&o.used)
+                            .is_some_and(|free| free.holds(&spec.need))
+                        && !over_ninety(other, &o.used)
+                });
+                if elsewhere {
+                    r.hot_sessions = r.hot_sessions.saturating_add(1);
+                }
+            }
+        }
+        let slot = seen
+            .get_mut(i)
+            .ok_or(Violation::Replay(SimError::UnknownNode(node)))?;
+        let step = |n: u64| {
+            if placing {
+                n.saturating_add(1)
+            } else {
+                n.saturating_sub(1)
+            }
+        };
+        slot.used = if placing {
+            slot.used.checked_add(&spec.need)
+        } else {
+            slot.used.checked_sub(&spec.need)
+        }
+        .ok_or(Violation::Replay(SimError::Resources(node)))?;
+        match spec.kind {
+            Kind::Build => slot.builds = step(slot.builds),
+            Kind::Benchmark => slot.benchmarks = step(slot.benchmarks),
+            Kind::Plain | Kind::Session => {}
+        }
+    }
+    Ok(r)
 }

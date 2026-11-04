@@ -273,20 +273,6 @@ impl Store {
         &self.log
     }
 
-    /// Each node's free capacity as the store has it, in id order.
-    pub fn free(&self) -> Result<Vec<NodeSpec>, SimError> {
-        let mut out = Vec::with_capacity(self.capacity.len());
-        for (at, (cap, used)) in self.capacity.iter().zip(&self.used).enumerate() {
-            let id =
-                NodeId(u32::try_from(at).map_err(|_| SimError::Config("more nodes than u32 ids"))?);
-            out.push(NodeSpec {
-                id,
-                capacity: cap.checked_sub(used).ok_or(SimError::Resources(id))?,
-            });
-        }
-        Ok(out)
-    }
-
     /// The bytes one workload's record takes in the store's map, by its in-memory layout: the key
     /// and the record. The map's node overhead (amortised over its B-tree's entries) is not counted;
     /// `AC-T7.11.4`'s accounting, implementation goal 6, measures the heap.
@@ -314,6 +300,7 @@ mod tests {
                 mem_bytes: 10,
                 gpus: 0,
             },
+            background_milli: 0,
         }];
         Store::new(&nodes, 4, 16).unwrap()
     }
@@ -326,6 +313,7 @@ mod tests {
                 mem_bytes: 1,
                 gpus: 0,
             },
+            kind: crate::model::Kind::Plain,
             arrives: 0,
             runs_for: None,
         }
@@ -380,7 +368,10 @@ mod tests {
         };
         assert!(matches!(s.apply(3, done).unwrap(), Outcome::Applied { .. }));
         assert_eq!(s.apply(4, done).unwrap(), Outcome::Duplicate { version: 3 });
-        assert_eq!(s.free().unwrap()[0].capacity.cpu_milli, 1000);
+        assert_eq!(
+            s.record(WorkloadId(1)).unwrap().state,
+            State::Complete(NodeId(0))
+        );
     }
 
     #[test]

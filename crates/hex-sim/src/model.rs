@@ -46,16 +46,51 @@ impl Resources {
 pub struct NodeSpec {
     pub id: NodeId,
     pub capacity: Resources,
+    /// CPU in use by what runs there outside Hex's placements (co-tenants, the host itself), which
+    /// the 90% CPU rule counts beside what Hex placed.
+    pub background_milli: u64,
+}
+
+/// What a workload is, for the filters that keep work off hosts it would harm or be harmed by
+/// (`scheduler-architecture.md` S3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Kind {
+    #[default]
+    Plain,
+    /// Changes its host while it runs (a build): never beside a benchmark.
+    Build,
+    /// Interference-sensitive (a benchmark): never beside a build.
+    Benchmark,
+    /// An agent session: never on a node above 90% CPU (`AC-T7.6.3`).
+    Session,
+}
+
+/// A workload's equivalence class: what it needs and what it is. Workloads of one class are
+/// placed alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Demand {
+    pub need: Resources,
+    pub kind: Kind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkloadSpec {
     pub id: WorkloadId,
     pub need: Resources,
+    pub kind: Kind,
     /// When its client first submits it.
     pub arrives: Time,
     /// How long it runs once started; `None` runs until the run ends.
     pub runs_for: Option<Time>,
+}
+
+impl WorkloadSpec {
+    pub fn demand(&self) -> Demand {
+        Demand {
+            need: self.need,
+            kind: self.kind,
+        }
+    }
 }
 
 /// A run's input: its nodes (ids dense from 0) and its workloads (ids dense from 0, by arrival).

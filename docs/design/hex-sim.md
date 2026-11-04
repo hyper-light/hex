@@ -181,6 +181,32 @@ missed a change that mattered), or a class checked more than once in a stretch w
 window check is conservative, so it can count more conflicts than strictly needed. Step 5's bench is
 what says whether that costs too much.
 
+### H9. Hard filters: GPU, benchmark against build, and the 90% CPU rule
+
+**The choice.** A workload declares its kind: plain, a build (it changes its host), a benchmark
+(interference-sensitive) or an agent session. A node carries its background CPU load (co-tenants
+and the host), beside what Hex placed. A node admits a workload only when:
+- the workload needs no GPU, or the node has GPUs;
+- it has the room;
+- it isn't a benchmark beside a running build, or a build beside a running benchmark;
+- it isn't a session on a node whose CPU in use is above 90%.
+
+The class is need and kind (`Demand`). Each filter's refusals of nodes that had the room are counted
+(`Report::refused`). `spec::check_filters` replays the log against the cluster's facts alone and counts
+every placement that broke a filter, apart from the index's own verdicts.
+
+**Sources.** `scheduler-architecture.md` S3 (hard filters on facts, the declare-and-assign contract);
+`AC-T7.6.3`'s 90%; a GPU is a fact of the node (AW[21]).
+
+**Evidence.** `the_hard_filters_keep_every_placement_in_bounds`: 500 generated clusters with GPU
+nodes, background load and every kind. Hot sessions, GPU work off GPU nodes and benchmarks beside builds
+are all 0, and every filter refused nodes that had room. The 1,000-cluster, 10,000-crash-seed and
+10,000-node tests check the same on every run. Mutants that switch off the hot or the benchmark/build
+filter fail the test.
+
+**What would falsify it.** A run whose replay counts a violation. A session refused everywhere while
+some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue

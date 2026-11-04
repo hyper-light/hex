@@ -16,7 +16,7 @@
 use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
 use hex_sim::index::Sample;
-use hex_sim::model::{Cluster, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
 use hex_sim::spec::{self, Violation};
@@ -73,6 +73,8 @@ fn placements_equal_the_serial_specification_on_generated_clusters() {
             spec::check_log(&cluster.nodes, &run).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
         let end = spec::check_end(&cluster, &run);
         assert_eq!(end.lost_or_double(), 0, "seed {seed}: {end:?}");
+        let filters = spec::check_filters(&cluster, &run).unwrap();
+        assert_eq!(filters.violations(), 0, "seed {seed}: {filters:?}");
         conflicts += run.report.conflicts;
         stale += run.report.stale;
         placements += log.placements;
@@ -240,6 +242,7 @@ fn ten_thousand_nodes_run_deterministically() {
     assert_eq!(end.lost_or_double(), 0, "{end:?}");
     assert_eq!(end.complete, 100_000);
     spec::check_log(&cluster.nodes, &a).unwrap();
+    assert_eq!(spec::check_filters(&cluster, &a).unwrap().violations(), 0);
     let q = a.report.latencies.quantiles().unwrap();
     assert_eq!(q.count, 100_000);
     assert!(q.p50 <= q.p99 && q.p99 <= q.p999 && q.p999 <= q.max);
@@ -260,10 +263,12 @@ fn two_nodes() -> Vec<NodeSpec> {
         NodeSpec {
             id: NodeId(0),
             capacity: res(1000),
+            background_milli: 0,
         },
         NodeSpec {
             id: NodeId(1),
             capacity: res(4000),
+            background_milli: 0,
         },
     ]
 }
@@ -272,6 +277,7 @@ fn work(id: u64, cpu: u64) -> WorkloadSpec {
     WorkloadSpec {
         id: WorkloadId(id),
         need: res(cpu),
+        kind: Kind::Plain,
         arrives: 0,
         runs_for: None,
     }
@@ -480,6 +486,8 @@ fn ten_thousand_crash_seeds_lose_and_double_nothing() {
         assert_eq!(end.lost_or_double(), 0, "seed {seed}: {end:?}");
         let kept = spec::check_kept_running(&cluster, &run);
         assert_eq!(kept.disturbed, 0, "seed {seed}: {kept:?}");
+        let filters = spec::check_filters(&cluster, &run).unwrap();
+        assert_eq!(filters.violations(), 0, "seed {seed}: {filters:?}");
         crashes += run.report.crashes;
         seeds_crashed += u64::from(run.report.crashes > 0);
         through += run.report.running_through_crashes;
@@ -552,6 +560,7 @@ fn a_completion_under_saturation_rechecks_each_class_once() {
     let classes: Vec<_> = cluster.workloads.iter().take(3).map(|w| w.need).collect();
     for (i, w) in cluster.workloads.iter_mut().enumerate() {
         w.need = classes[i % 3];
+        w.kind = Kind::Plain;
     }
     let config = Config {
         workers: 4,
@@ -578,5 +587,68 @@ fn a_completion_under_saturation_rechecks_each_class_once() {
         "{} skips, {} checks",
         r.class_skips,
         r.class_checks
+    );
+}
+
+/// G2 step 2 (AC-T7.6.3 and S3's filters): do generated clusters of GPU and non-GPU nodes, many
+/// above 90% CPU from their co-tenants, with plain work, builds, benchmarks and agent sessions;
+/// expect, by a replay of each log against the cluster's facts alone, sessions on a node above 90%
+/// while another had room = 0, GPU work off GPU nodes = 0 and benchmarks beside builds = 0; and
+/// (non-vacuity) each filter refused nodes that had the room, and some node ran hot while a session
+/// was placed elsewhere.
+#[test]
+fn the_hard_filters_keep_every_placement_in_bounds() {
+    let mut total = spec::FilterReport::default();
+    let mut refused = hex_sim::index::Refusals::default();
+    let mut sessions = 0u64;
+    for seed in 0..500 {
+        let shape = Shape {
+            gpu_nodes_per_mille: 300,
+            ..small(seed)
+        };
+        let cluster = generate::cluster(seed, &shape).unwrap();
+        let run = sim::run(&cluster, &config(seed)).unwrap();
+        spec::check_log(&cluster.nodes, &run).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+        assert_eq!(
+            spec::check_end(&cluster, &run).lost_or_double(),
+            0,
+            "seed {seed}"
+        );
+        let f = spec::check_filters(&cluster, &run).unwrap();
+        total.placements += f.placements;
+        total.gpu_off_gpu += f.gpu_off_gpu;
+        total.benchmark_with_build += f.benchmark_with_build;
+        total.hot_sessions += f.hot_sessions;
+        refused.gpu += run.report.refused.gpu;
+        refused.shares += run.report.refused.shares;
+        refused.hot += run.report.refused.hot;
+        sessions += u64::try_from(
+            cluster
+                .workloads
+                .iter()
+                .filter(|w| {
+                    w.kind == Kind::Session
+                        && matches!(
+                            run.store.record(w.id).map(|r| r.state),
+                            Some(State::Placed(_) | State::Complete(_))
+                        )
+                })
+                .count(),
+        )
+        .unwrap();
+    }
+    assert_eq!(total.hot_sessions, 0, "AC-T7.6.3: {total:?}");
+    assert_eq!(
+        total.gpu_off_gpu + total.benchmark_with_build,
+        0,
+        "{total:?}"
+    );
+    assert!(
+        refused.gpu > 0 && refused.shares > 0 && refused.hot > 0,
+        "a filter never refused: {refused:?}"
+    );
+    assert!(
+        sessions > 1_000 && total.placements > 20_000,
+        "{sessions} sessions, {total:?}"
     );
 }

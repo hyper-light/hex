@@ -2,7 +2,7 @@
 //! capacity, so every workload fits somewhere and GPU work is drawn only against a GPU node.
 
 use crate::error::SimError;
-use crate::model::{Cluster, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::model::{Cluster, Kind, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
 use crate::rng::Rng;
 
 const GIB: u64 = 1 << 30;
@@ -40,13 +40,17 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         } else {
             0
         };
+        let cpu_milli = cores.checked_mul(1000).ok_or(SimError::Config("cores"))?;
         nodes.push(NodeSpec {
             id: NodeId(id),
             capacity: Resources {
-                cpu_milli: cores.checked_mul(1000).ok_or(SimError::Config("cores"))?,
+                cpu_milli,
                 mem_bytes: mem_gib.checked_mul(GIB).ok_or(SimError::Config("memory"))?,
                 gpus,
             },
+            // Uniform up to the node's CPU: about one node in ten starts above 90% from its
+            // co-tenants alone, and placements push others past it.
+            background_milli: rng.range(0, cpu_milli),
         });
     }
     let mut workloads = Vec::new();
@@ -93,9 +97,16 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             Some(mean) => Some(rng.range(1, mean.checked_mul(2).ok_or(SimError::TimeOverflow)?)),
             None => None,
         };
+        let kind = match rng.range(0, 999) {
+            0..400 => Kind::Plain,
+            400..650 => Kind::Build,
+            650..800 => Kind::Benchmark,
+            _ => Kind::Session,
+        };
         workloads.push(WorkloadSpec {
             id: WorkloadId(id),
             need,
+            kind,
             arrives,
             runs_for,
         });
@@ -106,7 +117,6 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::FitIndex;
 
     fn shape() -> Shape {
         Shape {
@@ -125,10 +135,11 @@ mod tests {
         let a = cluster(3, &shape()).unwrap();
         assert_eq!(a, cluster(3, &shape()).unwrap());
         assert_ne!(a, cluster(4, &shape()).unwrap());
-        let empty = FitIndex::new(&a.nodes).unwrap();
         for w in &a.workloads {
-            let key = empty.best_fit(&w.need).unwrap();
-            assert!(w.need.gpus == 0 || key.gpus > 0);
+            assert!(a.nodes.iter().any(|n| n.capacity.holds(&w.need)));
+        }
+        for kind in [Kind::Plain, Kind::Build, Kind::Benchmark, Kind::Session] {
+            assert!(a.workloads.iter().any(|w| w.kind == kind), "{kind:?}");
         }
         assert!(a.workloads.windows(2).all(|p| p[0].arrives <= p[1].arrives));
         assert!(a.workloads.iter().any(|w| w.need.gpus > 0));

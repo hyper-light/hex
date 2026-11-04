@@ -26,8 +26,8 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::ops::Bound;
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Key, Sample, Sampled};
-use crate::model::{Cluster, NodeId, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::index::{FitIndex, Key, Refusals, Sample, Sampled};
+use crate::model::{Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId, WorkloadSpec};
 use crate::rng::Rng;
 use crate::store::{Outcome, State, Store, Write};
 use crate::trace::{Latencies, TraceHash};
@@ -126,6 +126,8 @@ pub struct Report {
     pub placements: u64,
     /// Sampled decisions made, by deciders and again at commit.
     pub decisions: u64,
+    /// Over those decisions' scans, nodes with room that a filter refused, by filter.
+    pub refused: Refusals,
     /// Workloads found holding on no node, each marking its equivalence class so until capacity
     /// comes back (at most one per class per such stretch).
     pub class_checks: u64,
@@ -280,11 +282,17 @@ struct Plane {
     forgotten: u64,
     committing: bool,
     /// Equivalence classes (needs) no node holds, since capacity last came back.
-    infeasible: BTreeSet<Resources>,
+    infeasible: BTreeSet<Demand>,
 }
 
 impl Plane {
-    fn rebuild(store: &Store, epoch: u64, workers: u32) -> Result<Self, SimError> {
+    fn rebuild(
+        store: &Store,
+        nodes: &[NodeSpec],
+        epoch: u64,
+        workers: u32,
+    ) -> Result<Self, SimError> {
+        let mut view = FitIndex::new(nodes)?;
         let mut pending = BTreeMap::new();
         let mut versions = BTreeMap::new();
         for record in store.records() {
@@ -293,7 +301,8 @@ impl Plane {
                     pending.insert(record.seq, record.spec.id);
                     versions.insert(record.spec.id, record.version);
                 }
-                State::Placed(_) => {
+                State::Placed(node) => {
+                    view.take(node, &record.spec.demand())?;
                     versions.insert(record.spec.id, record.version);
                 }
                 State::Complete(_) => {}
@@ -302,7 +311,7 @@ impl Plane {
         Ok(Self {
             up: true,
             epoch,
-            view: FitIndex::new(&store.free()?)?,
+            view,
             undecided: pending.keys().copied().collect(),
             pending,
             versions,
@@ -373,7 +382,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         .checked_mul(3)
         .ok_or(SimError::Config("too many workloads"))?;
     let store = Store::new(&cluster.nodes, n, max_log)?;
-    let plane = Plane::rebuild(&store, 0, config.workers)?;
+    let plane = Plane::rebuild(&store, &cluster.nodes, 0, config.workers)?;
     let mut sim = Sim {
         cluster,
         config: *config,
@@ -463,10 +472,10 @@ impl Sim<'_> {
             .ok_or(SimError::Config("workload index"))
     }
 
-    fn need(&self, id: WorkloadId) -> Result<Resources, SimError> {
+    fn demand(&self, id: WorkloadId) -> Result<Demand, SimError> {
         self.store
             .record(id)
-            .map(|r| r.spec.need)
+            .map(|r| r.spec.demand())
             .ok_or(SimError::UnknownWorkload(id))
     }
 
@@ -488,7 +497,12 @@ impl Sim<'_> {
             Event::NodeStart { at, node } => self.node_start(at, node),
             Event::NodeDone { at, node, attempt } => self.node_done(at, node, attempt),
             Event::Restart => {
-                self.plane = Plane::rebuild(&self.store, self.plane.epoch, self.config.workers)?;
+                self.plane = Plane::rebuild(
+                    &self.store,
+                    &self.cluster.nodes,
+                    self.plane.epoch,
+                    self.config.workers,
+                )?;
                 self.assign()?;
                 self.sequence()
             }
@@ -599,7 +613,7 @@ impl Sim<'_> {
             return Ok(());
         }
         let spec = *self.workload(at)?;
-        if self.empty.best_fit(&spec.need).is_none() {
+        if !self.empty.admitted_anywhere(&spec.demand()) {
             if let Some(r) = self.refused.get_mut(at) {
                 *r = true;
             }
@@ -654,7 +668,7 @@ impl Sim<'_> {
             let Some(&id) = self.plane.pending.get(&seq) else {
                 continue;
             };
-            let need = self.need(id)?;
+            let need = self.demand(id)?;
             if self.plane.infeasible.contains(&need) {
                 // Its class holds nowhere; the committer passes over it until capacity comes back.
                 continue;
@@ -697,14 +711,25 @@ impl Sim<'_> {
     }
 
     /// A sampled decision against the plane's view now.
-    fn decide(&mut self, need: &Resources) -> Result<Decision, SimError> {
+    fn decide(&mut self, need: &Demand) -> Result<Decision, SimError> {
         self.report.decisions = self
             .report
             .decisions
             .checked_add(1)
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        let sampled = self.plane.view.sampled_fit(need, &self.config.sample);
+        let r = &mut self.report.refused;
+        for (total, now) in [
+            (&mut r.gpu, sampled.refused.gpu),
+            (&mut r.shares, sampled.refused.shares),
+            (&mut r.hot, sampled.refused.hot),
+        ] {
+            *total = total
+                .checked_add(now)
+                .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        }
         Ok(Decision {
-            sampled: self.plane.view.sampled_fit(need, &self.config.sample),
+            sampled,
             snap: self.plane.change_no,
         })
     }
@@ -733,7 +758,7 @@ impl Sim<'_> {
     }
 
     /// `decision` if it still holds, else a fresh one (a conflict).
-    fn late_bind(&mut self, need: &Resources, decision: Decision) -> Result<Decision, SimError> {
+    fn late_bind(&mut self, need: &Demand, decision: Decision) -> Result<Decision, SimError> {
         if self.still_holds(&decision)? {
             return Ok(decision);
         }
@@ -746,7 +771,7 @@ impl Sim<'_> {
     }
 
     /// `need`'s class holds on no node: mark it so until capacity comes back.
-    fn mark_infeasible(&mut self, need: Resources) -> Result<(), SimError> {
+    fn mark_infeasible(&mut self, need: Demand) -> Result<(), SimError> {
         self.report.class_checks = self
             .report
             .class_checks
@@ -770,7 +795,7 @@ impl Sim<'_> {
             else {
                 return Ok(());
             };
-            let need = self.need(id)?;
+            let need = self.demand(id)?;
             if self.plane.infeasible.contains(&need) {
                 self.plane.proposals.remove(&seq);
                 self.plane.cursor = Some(seq);
@@ -828,7 +853,7 @@ impl Sim<'_> {
             self.plane.proposals.insert(seq, decision);
             return self.sequence();
         }
-        let need = self.need(id)?;
+        let need = self.demand(id)?;
         let decision = self.late_bind(&need, decision)?;
         let Some(key) = decision.node() else {
             self.plane.cursor = Some(seq);
@@ -967,7 +992,7 @@ impl Sim<'_> {
         };
         match outcome {
             Outcome::Applied { .. } => {
-                let changed = self.plane.view.give(node, &self.need(id)?)?;
+                let changed = self.plane.view.give(node, &self.demand(id)?)?;
                 self.note_change(changed)?;
                 self.plane.versions.remove(&id);
                 self.plane.cursor = None;
