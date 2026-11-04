@@ -37,8 +37,25 @@ thiserror = "2.0.21"
 ureq = "3"
 # The Windows `process` class: job objects, suspended process creation with a job and handle list, and
 # the job's accounting and guaranteed memory-limit violation (crates/hex-runtime/src/windows). Security
-# is for the SECURITY_ATTRIBUTES the process- and job-creation signatures name (Hex passes null).
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# is for the SECURITY_ATTRIBUTES the process- and job-creation signatures name (Hex passes null). The
+# Windows `oci` class (crates/hex-runtime/src/windows/oci) adds the Host Compute Service's and the virtual
+# disk's types (their calls are resolved at run time, docs/research/runtime/windows-hcs.md §7), the
+# loader, RtlGetVersion, file version resources, device interface lists and the job access rights.
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Vhd",
+    "Win32_System_HostComputeSystem",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 # The no-panic rule and the rest of CLAUDE.md as lints. Production code is checked again by
 # scripts/check-production.sh, without the test allowances.

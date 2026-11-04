@@ -109,10 +109,7 @@ impl OciSpec {
             host_path(&format!("mounts[{i}].source"), &m.source)?;
             let field = format!("mounts[{i}].destination");
             container_path(&field, &m.destination)?;
-            if m.destination
-                .split('/')
-                .all(|part| part.is_empty() || part == ".")
-            {
+            if path_parts(&m.destination).all(|part| part.is_empty() || part == ".") {
                 return Err(invalid_spec(format!(
                     "{field} is the root: a mount over it would hide the rootfs"
                 )));
@@ -140,7 +137,29 @@ fn invalid_spec(why: String) -> Refusal {
     }
 }
 
-/// A host path a spec names: absolute on the Linux host that runs the container, and UTF-8 without a
+/// Whether `path` is drive-absolute, Windows' absolute form (`C:\…` or `C:/…`); `C:data` is relative to
+/// the drive's current folder and `\\server\share` a UNC path, neither absolute here.
+pub fn drive_absolute(path: &str) -> bool {
+    let mut c = path.chars();
+    matches!(
+        (c.next(), c.next(), c.next()),
+        (Some(d), Some(':'), Some('\\' | '/')) if d.is_ascii_alphabetic()
+    )
+}
+
+/// The components of an absolute path in either form: after its drive for a drive-absolute one, split on
+/// both separators; split on `/` alone for a POSIX one, as Linux reads it.
+fn path_parts(path: &str) -> impl Iterator<Item = &str> {
+    let (rest, windows) = if drive_absolute(path) {
+        (path.get(2..).unwrap_or(""), true)
+    } else {
+        (path, false)
+    };
+    rest.split(move |c| c == '/' || (windows && c == '\\'))
+}
+
+/// A host path a spec names: absolute on the host that runs the container (POSIX-absolute on Linux and
+/// macOS, drive-absolute on Windows; the runtime refuses the form its host can't use), and UTF-8 without a
 /// NUL, since `config.json` carries it as a JSON string and the kernel takes it as a C string.
 fn host_path(field: &str, path: &Path) -> Result<(), Refusal> {
     let Some(text) = path.to_str() else {
@@ -151,7 +170,7 @@ fn host_path(field: &str, path: &Path) -> Result<(), Refusal> {
     if text.contains('\0') {
         return Err(invalid_spec(format!("{field} {text:?} holds a NUL")));
     }
-    if !text.starts_with('/') {
+    if !text.starts_with('/') && !drive_absolute(text) {
         return Err(invalid_spec(format!(
             "{field} {text:?} isn't an absolute path"
         )));
@@ -160,17 +179,18 @@ fn host_path(field: &str, path: &Path) -> Result<(), Refusal> {
 }
 
 /// A path in the container: absolute, without a NUL, and with no `..`, which could reach above the
-/// rootfs before the runtime has pivoted into it. Split on `/` alone, as the container's Linux does.
+/// rootfs before the runtime has pivoted into it. A POSIX path splits on `/` alone, as a Linux container
+/// does; a drive-absolute one (a Windows container's) on both separators.
 fn container_path(field: &str, path: &str) -> Result<(), Refusal> {
     if path.contains('\0') {
         return Err(invalid_spec(format!("{field} {path:?} holds a NUL")));
     }
-    if !path.starts_with('/') {
+    if !path.starts_with('/') && !drive_absolute(path) {
         return Err(invalid_spec(format!(
             "{field} {path:?} isn't an absolute path"
         )));
     }
-    if path.split('/').any(|part| part == "..") {
+    if path_parts(path).any(|part| part == "..") {
         return Err(invalid_spec(format!(
             "{field} {path:?} has a '..' component"
         )));
@@ -410,6 +430,47 @@ mod tests {
             let mut s = spec();
             break_it(&mut s);
             refused_naming(&s, field);
+        }
+    }
+
+    /// AC-T7.1.1 (one code path, CLAUDE.md §8): a spec for a Windows node names Windows paths — a host
+    /// path and a container path drive-absolute — and they pass as POSIX ones do; a drive-relative path
+    /// (`C:data`), a UNC path, and a `..` behind a backslash are refused by the field's name.
+    #[test]
+    fn a_windows_path_passes_where_its_form_is_absolute() {
+        let mut s = spec();
+        s.rootfs = Rootfs::Layers(vec![r"D:\layers\base".into(), "C:/layers/app".into()]);
+        s.mounts[0].source = r"D:\srv\data".into();
+        s.mounts[0].destination = r"C:\data".to_owned();
+        s.init.cwd = Some(r"c:\work".to_owned());
+        assert_eq!(s.check(), Ok(()));
+        type Break = Box<dyn Fn(&mut OciSpec)>;
+        let cases: Vec<(&str, Break)> = vec![
+            (
+                "rootfs.layers[0]",
+                Box::new(|s| s.rootfs = Rootfs::Layers(vec![r"D:layers".into()])),
+            ),
+            (
+                "rootfs.layers[0]",
+                Box::new(|s| s.rootfs = Rootfs::Layers(vec![r"\\server\share".into()])),
+            ),
+            (
+                "mounts[0].destination",
+                Box::new(|s| s.mounts[0].destination = r"C:\data\..\Windows".to_owned()),
+            ),
+            (
+                "mounts[0].destination is the root",
+                Box::new(|s| s.mounts[0].destination = r"C:\".to_owned()),
+            ),
+            (
+                "init.cwd",
+                Box::new(|s| s.init.cwd = Some("C:work".to_owned())),
+            ),
+        ];
+        for (field, break_it) in cases {
+            let mut w = s.clone();
+            break_it(&mut w);
+            refused_naming(&w, field);
         }
     }
 

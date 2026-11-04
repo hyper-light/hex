@@ -247,6 +247,87 @@ pub fn exit(code: u32, sent: Sent) -> Exit {
     Exit::Code(i32::from_ne_bytes(code.to_ne_bytes()))
 }
 
+/// The command line for `args`: each argument quoted as the Microsoft C runtime parses `argv`
+/// (`docs/research/runtime/windows-job-objects.md`, cpp-docs main-function-command-line-args.md), so a
+/// program reads back exactly the arguments it was given. The caller has refused a NUL in any argument
+/// (`Program::check`).
+pub fn command_line(args: &[String]) -> String {
+    let mut s = String::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        push_quoted(arg, &mut s);
+    }
+    s
+}
+
+/// Appends `arg` to a command line, quoted as the C runtime parses it: a run of backslashes is doubled
+/// only before a quote or the closing quote, and an embedded quote is escaped with a backslash.
+fn push_quoted(arg: &str, out: &mut String) {
+    let bare = !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|c| matches!(c, ' ' | '\t' | '\n' | '\u{0b}' | '"'));
+    if bare {
+        out.push_str(arg);
+        return;
+    }
+    out.push('"');
+    let mut backslashes: usize = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes = backslashes.saturating_add(1),
+            '"' => {
+                // The run of backslashes is literal (double it) and the quote is escaped (one more).
+                for _ in 0..backslashes.saturating_mul(2).saturating_add(1) {
+                    out.push('\\');
+                }
+                out.push('"');
+                backslashes = 0;
+            }
+            other => {
+                for _ in 0..backslashes {
+                    out.push('\\');
+                }
+                backslashes = 0;
+                out.push(other);
+            }
+        }
+    }
+    // Trailing backslashes precede the closing quote, so they are doubled to stay literal.
+    for _ in 0..backslashes.saturating_mul(2) {
+        out.push('\\');
+    }
+    out.push('"');
+}
+
+/// The environment block for `env`, UTF-16: each `name=value` NUL-terminated, the strings sorted
+/// case-insensitively (Windows reads a sorted block, `changing-environment-variables.md:15`), the whole
+/// double-NUL-terminated. Nothing is inherited; an empty environment is an empty block (two NULs). The
+/// caller has refused a NUL or an `=` in a name and a NUL in a value (`Program::check`).
+pub fn environment(env: &[(String, String)]) -> Vec<u16> {
+    let mut vars: Vec<&(String, String)> = env.iter().collect();
+    vars.sort_by(|a, b| {
+        a.0.to_uppercase()
+            .cmp(&b.0.to_uppercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut block: Vec<u16> = Vec::new();
+    for (k, v) in vars {
+        block.extend(k.encode_utf16());
+        block.push(u16::from(b'='));
+        block.extend(v.encode_utf16());
+        block.push(0);
+    }
+    // An empty block is still a valid double-NUL-terminated block.
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use hex_api::IoRates;
@@ -535,6 +616,87 @@ mod tests {
             let ours = code & 0xFFFF_FF00 == TERMINATED && signals.iter().any(|s| i64::from(n) == *s);
             let want = if ours { Exit::Signal(n) } else { Exit::Code(i32::from_ne_bytes(code.to_ne_bytes())) };
             prop_assert_eq!(exit(code, sent), want);
+        }
+    }
+
+    /// The Microsoft C runtime's `argv` parse of a command line with no program-name special case
+    /// (cpp-docs main-function-command-line-args.md, "Parsing C++ command-line arguments"): whitespace
+    /// separates arguments outside quotes; `2n` backslashes before a quote are `n` backslashes and the
+    /// quote toggles quoting; `2n+1` are `n` and a literal quote; other backslashes are literal.
+    fn crt_argv(line: &str) -> Vec<String> {
+        let chars: Vec<char> = line.chars().collect();
+        let mut args = Vec::new();
+        let mut i = 0;
+        loop {
+            while i < chars.len() && matches!(chars[i], ' ' | '\t') {
+                i += 1;
+            }
+            if i >= chars.len() {
+                return args;
+            }
+            let mut arg = String::new();
+            let mut quoted = false;
+            while i < chars.len() && (quoted || !matches!(chars[i], ' ' | '\t')) {
+                let mut slashes = 0;
+                while i < chars.len() && chars[i] == '\\' {
+                    slashes += 1;
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] == '"' {
+                    arg.extend(std::iter::repeat_n('\\', slashes / 2));
+                    if slashes % 2 == 1 {
+                        arg.push('"');
+                    } else if quoted && i + 1 < chars.len() && chars[i + 1] == '"' {
+                        // A doubled quote inside quotes is one literal quote (post-2008 CRT).
+                        arg.push('"');
+                        i += 1;
+                    } else {
+                        quoted = !quoted;
+                    }
+                    i += 1;
+                } else {
+                    arg.extend(std::iter::repeat_n('\\', slashes));
+                    if i < chars.len() && (quoted || !matches!(chars[i], ' ' | '\t')) {
+                        arg.push(chars[i]);
+                        i += 1;
+                    }
+                }
+            }
+            args.push(arg);
+        }
+    }
+
+    /// HEX-WIN-4: known cases quote as the C runtime reads them: a bare word stays bare, a space or a
+    /// quote is quoted, backslashes are doubled only before a quote, and an empty argument is `""`.
+    #[test]
+    fn a_command_line_quotes_each_argument_as_the_c_runtime_reads_it() {
+        let line =
+            |args: &[&str]| command_line(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>());
+        assert_eq!(line(&["hex", "say", "hi"]), "hex say hi");
+        assert_eq!(line(&["a b", ""]), r#""a b" """#);
+        assert_eq!(line(&[r#"say "hi""#]), r#""say \"hi\"""#);
+        assert_eq!(line(&[r"C:\dir\"]), r"C:\dir\");
+        assert_eq!(line(&[r"C:\my dir\"]), r#""C:\my dir\\""#);
+    }
+
+    /// HEX-WIN-4: a sorted, double-NUL-terminated environment block; an empty one is two NULs.
+    #[test]
+    fn an_environment_block_is_sorted_and_double_nul_terminated() {
+        let env = vec![
+            ("b".to_owned(), "2".to_owned()),
+            ("A".to_owned(), "1".to_owned()),
+        ];
+        let want: Vec<u16> = "A=1\0b=2\0\0".encode_utf16().collect();
+        assert_eq!(environment(&env), want);
+        assert_eq!(environment(&[]), vec![0, 0]);
+    }
+
+    proptest! {
+        /// HEX-WIN-4 (oracle, CLAUDE.md §6): any arguments without a NUL read back exactly through the C
+        /// runtime's parse, so a program in a box sees the arguments it was given.
+        #[test]
+        fn a_command_line_round_trips_through_the_c_runtime(args in proptest::collection::vec("[a-z \\\\\"\t]{0,8}", 1..6)) {
+            prop_assert_eq!(crt_argv(&command_line(&args)), args);
         }
     }
 }
