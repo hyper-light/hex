@@ -1696,6 +1696,21 @@ research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs
 (`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
 (`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
 
+**What the integrated tree holds** (goal 5 extended, 2026-11-04; branch `cp/t7-g5x-integrate`, the tree step 7
+measures). Each step's work, merged in one tree, each merge's resolutions in its message:
+- step 1, a box's device program loaded once per policy and held by the node (decision 2);
+- step 2, the pruned seed's root, with no `pivot_root` (above);
+- step 3, the init's mounts made on descriptors at the system calls' cost (`docs/research/runtime/goal5-mounts.md`);
+- step 4, the init's ipc and uts namespaces made ahead (above);
+- step 5, a box's record written once, when the box is whole, and kept off create's path (decision 1);
+- step 6, fewer `cgroup_mutex` holds per lifecycle: a box ended through its init's pidfd, its cgroup and network
+  namespace handed on within one owner, the records spread over shards (above);
+- the fixes found on the way: a descriptor reaches a program only on purpose (decision 3, main's code), a hook swept
+  too (held for Ada: CLAUDE.md §12, one merge of its own), a path with a `..` tried again where Linux can't vouch for
+  it, a start holding both of the exec FIFO's ends, a spec naming no capabilities refused in a user namespace on a
+  borrowed network as CAP_SYS_ADMIN is, a box killed through a pidfd for each of its processes, and a create or delete
+  of a box being made waiting for it by the box's turn, in place of step 6's claim on its id (decision 1).
+
 ### 6. Mount namespaces without copying, where the kernel has it
 
 **The choice.** On Linux 7.0 and later, `create` builds the container's mount namespace with

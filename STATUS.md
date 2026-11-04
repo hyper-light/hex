@@ -119,6 +119,17 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `docs/research/runtime/goal5-mounts.md` §11). The masked directories' tmpfs made ahead was built and measured: part 19's p50
   about 15% lower with Docker's paths, no gain on either p99 or the whole create, so it stays on `cp/t7-ext-s3-maskpool` (§13).
 
+- **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
+  extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
+  FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete
+  flake's pidfd kill, and a box's turn for a create or delete of a box being made (in place of step 6's claim). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
+  seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
+  lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
+  - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at
+    c32; cp/t7-ext-s4 209cea4.
+  - goal 5x step 3: closed on its written bars by Ada's ruling (2026-11-03), with the under-load bar moved to goal 6;
+    tip a600107.
+
 ## Design decided, implementation under way (2026-10-24)
 
 After the runtime research, the competitive baseline and the runtime design, the track moved to
