@@ -1100,3 +1100,34 @@ an idle one read clean and handed on; off: mkdir and bounds) 0.264 / 0.174; the 
 preparing 0.110 / 0.094; the init's set-up to the exec FIFO 0.804 / 0.720, of it the init's clone into its cgroup and
 namespaces 0.555 / 0.527 and its root's mounts 0.127 / 0.108; the handshake 0.138 / 0.511; the node's and the runtime's
 own work 0.209 / 0.199.
+
+### The parts criterion, best of N (the lead's call, 2026-11-04)
+
+Two more breakdowns per reuse mode, alternating, at the same binaries (hex 5c2fc732d92a41ee, seam_oci decb8a6e69dc67e4),
+each under the lock on CPUs 4-15, noisy, in unit hex-integrate-step7more-20261104T173958Z. The host's clock before:
+P-cores 0.101 ms at rest and 0.107 held, E-cores 0.182 and 0.201, load 16.06; after: P-cores 0.106 and 0.101, E-cores
+0.196 and 0.182, load 30.76. Every run is here, the two above among them. "Parts" is the pooled part p50s summed, "%" is
+that over the creates between the traced ones (p50), and "means" is the part means summed beside the creates' mean
+span, marker to marker.
+
+| run | reuse | load at start, end | Hex create p50 (seam) / libcrun's | ratio | parts | creates between p50 | % | means / mean span | events lost | within 10% |
+|---|---|---|---|---|---|---|---|---|---|---|
+| create-breakdown-20261104T165844Z | on | 31.59, 47.75 | 1.924 / 14.241 | 0.135x | 1.571 | 1.945 | 80.8% | 2.381 / 2.381 | 0 | no |
+| create-breakdown-20261104T170123Z | off | 47.75, 106.50 | 1.989 / 14.551 | 0.137x | 1.731 | 1.994 | 86.8% | 2.257 / 2.257 | 0 | no |
+| create-breakdown-20261104T174001Z | on | 15.98, 20.95 | 0.656 / 2.635 | 0.249x | 0.780 | 0.742 | 105.1% | 0.928 / 0.928 | 0 | yes |
+| create-breakdown-20261104T174116Z | off | 20.79, 23.86 | 0.639 / 2.175 | 0.294x | 0.692 | 0.675 | 102.5% | 0.855 / 0.855 | 0 | yes |
+| create-breakdown-20261104T174221Z | on | 23.86, 22.38 | 0.419 / 1.858 | 0.226x | 0.475 | 0.456 | 104.2% | 0.519 / 0.519 | 0 | yes |
+| create-breakdown-20261104T174319Z | off | 22.38, 31.95 | 0.631 / 3.158 | 0.200x | 0.617 | 0.597 | 103.3% | 0.960 / 0.960 | 0 | yes |
+
+Step 7's criterion, the parts summed within 10% of create's p50 in the same run, is met: four of the six runs land
+inside it (102.5% to 105.1%), in both reuse modes, at loads of 16 to 32. The two outside it ran at loads of 31 to 106,
+where the parts' p50s sum short of the p50 (80.8%, 86.8%) while their means sum to the mean span exactly. The tracer
+cuts every create whole at any load; the sum of medians undercounts once a few parts' tails grow (the init's clone,
+the handshake).
+
+The parts by group in the run closest to 100% in each mode, pooled p50 (ms): reuse on, create-breakdown-20261104T174221Z:
+the box's record 0.024, the cgroup (an idle one read clean and handed on) 0.106, the seed's request 0.045, the init's
+set-up 0.185, of it the init's clone 0.056 and its root's mounts 0.065, the handshake 0.012, the node's and the
+runtime's own work 0.103. Reuse off, create-breakdown-20261104T174116Z: the record 0.031, the cgroup (mkdir 0.123,
+bounds 0.035) 0.168, the seed's request 0.060, the init's set-up 0.249, of it the clone 0.096 and the mounts 0.085, the
+handshake 0.018, the node's and the runtime's own work 0.166.

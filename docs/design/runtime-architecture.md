@@ -1710,14 +1710,20 @@ of two rounds of ten thousand, against libcrun in the same run:
 <!-- /record -->
 With step 6's reuse on (every box one owner's), three of the four are under the bar. Create+start of `true` at p99.9
 is just over it. With reuse off, none is: create's tail is near libcrun's. The create breakdown (seed path, pruned)
-ran in the same unit at loads of 31 to 106. Its parts' p50s summed come to
-<!-- record: bench/competitive/probes/create_breakdown.md -->80.8% (reuse on, create-breakdown-20261104T165844Z) and
-86.8% (off, create-breakdown-20261104T170123Z)<!-- /record --> of create's p50, outside step 7's 10%. Its means sum to
-the mean span exactly, so the parts are whole and the gap is the skew of a few under load. What's left, part by part,
-pooled p50 in ms, reuse on / off:
-<!-- record: bench/competitive/probes/create_breakdown.md -->the init's clone into its cgroup and namespaces 0.555 /
-0.527, the init's root's mounts 0.127 / 0.108, the cgroup 0.264 / 0.174, the handshake 0.138 / 0.511, the node's and the
-runtime's own work 0.209 / 0.199, the seed's request 0.110 / 0.094, the box's record 0.046 / 0.033<!-- /record -->. The
+ran six times, three per reuse mode, best of N. Every run cut every create whole and lost no event. The parts' p50s
+summed, against create's p50 in the same run:
+<!-- record: bench/competitive/probes/create_breakdown.md -->105.1% (on, create-breakdown-20261104T174001Z), 102.5% (off,
+-174116Z), 104.2% (on, -174221Z) and 103.3% (off, -174319Z) at loads of 16 to 32; 80.8% (on, -165844Z) and 86.8% (off,
+-170123Z) at 31 to 106, where the parts' means still sum to the mean span exactly (2.381 and 2.257 ms)<!-- /record -->.
+Step 7's criterion, within 10%, is met by four runs. Under heavy load a sum of medians undercounts, because a few parts'
+tails grow (the init's clone, the handshake). What's left, part by part, pooled p50 in ms, in the runs closest to 100%
+(reuse on / off):
+<!-- record: bench/competitive/probes/create_breakdown.md -->the init's set-up 0.185 / 0.249, of it the init's clone
+0.056 / 0.096 and its root's mounts 0.065 / 0.085; the cgroup 0.106 / 0.168; the node's and the runtime's own work
+0.103 / 0.166; the seed's request 0.045 / 0.060; the box's record 0.024 / 0.031; the handshake 0.012 /
+0.018<!-- /record -->. At loads of 31 to 106 the same parts were
+<!-- record: bench/competitive/probes/create_breakdown.md -->0.555 / 0.527 for the init's clone and 0.138 / 0.511 for
+the handshake<!-- /record -->, the parts load stretches most. The
 levers that would take what's left, for Ada:
 - goal 6's 7.x namespace (`OPEN_TREE_NAMESPACE`, `CLONE_EMPTY_MNTNS`), which takes the mount namespace's copy out of
   the init's clone, the largest part;

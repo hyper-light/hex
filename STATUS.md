@@ -131,9 +131,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   - goal 5x step 7, goal 5's create against its bar on this tree (1714f72, fedora, 2026-11-04, noisy;
     `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7"; decision 5). host.sh's OCI pass, best of 2,
     Hex over libcrun: reuse on (out/20261104T170413Z) create p50 0.150x, p99.9 0.036x, create+start of `true` p50 0.219x,
-    p99.9 0.267x (just over 0.25x); reuse off (out/20261104T172313Z) 0.356x, 0.938x, 0.264x, 0.833x. The breakdown's parts'
-    p50s summed are 80.8% and 86.8% of create's p50 (create-breakdown-20261104T165844Z, -170123Z, loads 31-106): step 7's
-    10% not met, the parts' means summing to the mean span exactly. Over the bar, so the levers are named for Ada:
+    p99.9 0.267x (just over 0.25x); reuse off (out/20261104T172313Z) 0.356x, 0.938x, 0.264x, 0.833x. The breakdown, six
+    runs best of N: the parts' p50s summed are 102.5% to 105.1% of create's p50 in the four at loads 16-32 (step 7's 10%
+    met), and 80.8% and 86.8% in the two at loads 31-106, where the parts' means sum to the mean span exactly (a sum of
+    medians undercounts under load). Over the bar, so the levers are named for Ada:
     goal 6's 7.x namespace, the shared empty-directory masks (cp/t7-g6), the record's fsync on disk, step 6's reuse.
   - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at
     c32; cp/t7-ext-s4 209cea4.
