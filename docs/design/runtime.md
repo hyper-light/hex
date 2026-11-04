@@ -569,6 +569,8 @@ The lead's conditions, recorded in `bench/oci-validation/hooks-conditions-202611
 - ca6dc80's binary reads and deletes the new state.
 - A failing createContainer hook and a failing startContainer hook each come back as an `Os` refusal
   naming the hook.
+- The create breakdown A/B on the pruned path, ca6dc80 against the fix, shows a hookless create at
+  0.997x and 0.998x the earlier binary's p50, in the same rounds, in two runs.
 
 **What would falsify it.** A runtime-tools test that passed before and fails after. A hook that observes
 a namespace other than the init's. A startContainer hook that finishes after its program starts. Or a

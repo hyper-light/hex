@@ -82,3 +82,29 @@
 #    at both. Hex's create here is about 19 ms, against 0.713 ms for the seam on this host on 2026-11-03 (load 2.8,
 #    create_breakdown.md), so the host's load sets these numbers, not the builds. A run at lower load, or the parts
 #    A/B once the reader is fixed, would resolve finer.
+#
+# 8. The breakdown's parts A/B, on the integration agent's reader (cp/t7-g5x-integrate f825ac0's bench/competitive,
+#    a scratch overlay on an export of f369f6f, not merged). create_breakdown.sh with ca6dc80's binaries staged as
+#    BEFORE_HEX/BEFORE_SEAM (hex 66486e0e576e3d93, seam_oci 504b8250ccc63883) against f369f6f's (hex
+#    0bf490040d4d57d1, seam_oci cc3f8fb4d8bf0229), both static-glibc; N=1000 WARMUP=100 ROUNDS=3, CPUs 4-15,
+#    HEXBENCH_DEVFS=1, no owner (reuse off), root: the pruned path. Each run under the timed lock; unit
+#    hex-hooks-parts-20261104T150143Z, through hex-slot. The kind cluster, buildkit builders and other agents'
+#    units up. Every probe and traced create cut whole (1,500 of 1,500 a run, the before binary's too), 0 events lost.
+#    create p50, ms, by round and pooled (p99 pooled):
+#      create-breakdown-20261104T150143Z (load 55.8 at the start, 27 at the end; CPU pressure avg10 37.7% at the start)
+#        seam (f369f6f)   0.497 0.465 0.427  pooled 0.467 (p99 1.296)
+#        before (ca6dc80) 0.490 0.463 0.435  pooled 0.469 (p99 1.490)
+#        libcrun          1.857 3.193 2.118  pooled 2.122 (p99 5.299)
+#        seam over before, in the same rounds: 1.015, 1.002, 0.982; pooled 0.997
+#        the parts summed 0.488 ms, 97.8% of the creates between (the probe's criterion, within 10%: met)
+#        bookkeeping (state and record writes, 7 parts) 2.3% under the before binary's (0.044 ms)
+#      create-breakdown-20261104T150257Z (load 27.1 at the start, 18.0 at the end)
+#        seam (f369f6f)   0.448 0.428 0.424  pooled 0.433 (p99 1.322)
+#        before (ca6dc80) 0.467 0.420 0.422  pooled 0.434 (p99 1.352)
+#        libcrun          1.812 1.927 2.562  pooled 1.978 (p99 4.562)
+#        seam over before: 0.959, 1.018, 1.006; pooled 0.998
+#        the parts summed 0.448 ms, 95.5% of the creates between: met; bookkeeping 0.0% under the before binary's (0.039 ms)
+#    Reading: a hookless create through the seam on the pruned path takes what it took at ca6dc80, within the rounds'
+#    spread (0.959-1.018) and 0.3% pooled in both runs; its parts are as step 3's final runs cut them (the
+#    init's set-up 40%, the cgroup 24%). (c)'s 19 ms creates (7.) were exec_ab's lifecycle under load 22-61, not
+#    this path.
