@@ -432,6 +432,15 @@ three different things (CLAUDE.md "Working here"):
     p99 lower than the classic path's in every cell. Classic against the default counts goal 5's prune and pools with
     goal 6's ways. Held in reserve: the init's JSON parse of the checked spec (15.8 µs first, 8.2 warm). Closed once
     merged and gated.
+  - **goal 7, the process class through the seam with no wrapper** — **met on fedora** (2026-11-04) at `cp/t7-g7`
+    (6ce0039); carried onto the one client core and wire on `cp/t7-port-g7` (2026-11-09; not merged, not measured
+    again). `Runtime::run` makes a process box for one program's life; the node agent clones the program in
+    vfork-class (`clone3` with `CLONE_VM | CLONE_VFORK | CLONE_INTO_CGROUP | CLONE_PIDFD`), supervises it by pidfd and
+    removes the box when it ends (HEX-RT-15; one request on the wire; recovery removes a run whose program ended);
+    macOS's and Windows' nodes refuse a run, naming their platform. Run `g7-20261104T085441Z`, 3 rounds, CPUs 4-15,
+    noisy, the scope in the same run: run of `true` p50 0.41 ms against the scope's 5.82 (14.10x), CPU 0.55 ms against
+    6.39 (11.59x), 0.27 MiB held per idle box against 0.30 (`bench/competitive/RESULT.md`, "Goal 7"). Its §12 wording
+    (e71daaf there, 712bdf8 here) waits on Ada.
 - **The scheduler's architecture** (`docs/design/scheduler-architecture.md`, decided): goodput over
   balance, a sampled fast path with an optimiser tier, suitability filters on declared needs, Vivaldi
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
