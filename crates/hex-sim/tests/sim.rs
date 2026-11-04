@@ -15,7 +15,7 @@
 
 use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
-use hex_sim::index::Sample;
+use hex_sim::index::{Sample, Scorer};
 use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
@@ -57,6 +57,11 @@ fn sample(r: &mut Rng) -> Sample {
         seed: r.next_u64(),
         min_feasible: u32::try_from(r.range(1, 8)).unwrap(),
         per_mille: u32::try_from(r.range(0, 300)).unwrap(),
+        scorer: if r.chance(500) {
+            Scorer::Align
+        } else {
+            Scorer::BestFit
+        },
     }
 }
 

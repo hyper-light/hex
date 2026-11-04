@@ -46,6 +46,20 @@ pub struct Sample {
     pub seed: u64,
     pub min_feasible: u32,
     pub per_mille: u32,
+    /// How the sampled nodes are ranked.
+    pub scorer: Scorer,
+}
+
+/// How a decision ranks the nodes its sample admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scorer {
+    /// The least free capacity first ([`Key`]'s order): best fit, the baseline (Borg's, S1).
+    #[default]
+    BestFit,
+    /// Tetris's alignment (Grandl et al., SIGCOMM 2014): the largest dot product of the need and the
+    /// node's free capacity, each resource taken as a share of the node's capacity, ties by
+    /// [`Key`]'s order.
+    Align,
 }
 
 impl Default for Sample {
@@ -54,6 +68,7 @@ impl Default for Sample {
             seed: 0,
             min_feasible: 100,
             per_mille: 50,
+            scorer: Scorer::BestFit,
         }
     }
 }
@@ -65,6 +80,7 @@ impl Sample {
             seed: 0,
             min_feasible: u32::MAX,
             per_mille: 0,
+            scorer: Scorer::BestFit,
         }
     }
 
@@ -176,6 +192,28 @@ impl Slot {
         }
     }
 
+    /// Tetris's alignment of `need` with this node's free capacity: the sum over CPU, memory and
+    /// GPUs of (need / capacity) * (free / capacity), each share in millionths, so each term is at
+    /// most 10^12 and the sum fits u64. A resource the node has none of adds nothing.
+    fn alignment(&self, need: &Resources) -> u64 {
+        let share = |part: u64, whole: u64| -> u64 {
+            u128::from(part)
+                .checked_mul(1_000_000)
+                .and_then(|x| x.checked_div(u128::from(whole)))
+                .and_then(|x| u64::try_from(x).ok())
+                .unwrap_or(0)
+        };
+        let term = |n: u64, f: u64, c: u64| share(n, c).checked_mul(share(f, c)).unwrap_or(0);
+        let (c, f) = (&self.capacity, &self.free);
+        [
+            term(need.cpu_milli, f.cpu_milli, c.cpu_milli),
+            term(need.mem_bytes, f.mem_bytes, c.mem_bytes),
+            term(u64::from(need.gpus), u64::from(f.gpus), u64::from(c.gpus)),
+        ]
+        .into_iter()
+        .fold(0u64, u64::saturating_add)
+    }
+
     /// CPU in use, background and placed, above 90% of the node's CPU. Compared as
     /// busy * 1000 > capacity * 900 in u128, where neither side can overflow; a busy count past u64
     /// is hot.
@@ -260,7 +298,7 @@ impl FitIndex {
         let n = self.slots.len();
         let start = sample.start(demand, n);
         let want = sample.want(n);
-        let (mut best, mut found) = (None::<Key>, 0usize);
+        let (mut best, mut best_score, mut found) = (None::<Key>, 0u64, 0usize);
         let mut refused = Refusals::default();
         // found, offset and the refusals count nodes, so they stay below the node count.
         for offset in 0..n {
@@ -287,7 +325,16 @@ impl FitIndex {
                 }
             }
             let key = Key::of(NodeId(id), &slot.free);
-            best = Some(best.map_or(key, |b| b.min(key)));
+            let score = match sample.scorer {
+                Scorer::BestFit => 0,
+                Scorer::Align => slot.alignment(&demand.need),
+            };
+            // A higher score wins; between equal scores, the least key.
+            let wins = best.is_none_or(|b| score > best_score || (score == best_score && key < b));
+            if wins {
+                best = Some(key);
+                best_score = score;
+            }
             found = found.saturating_add(1);
             if found >= want {
                 return Sampled {
@@ -483,6 +530,7 @@ mod tests {
             seed: 3,
             min_feasible: 1,
             per_mille: 0,
+            scorer: Scorer::BestFit,
         };
         let s = index.sampled_fit(&demand, &one);
         let first = (0..4)
