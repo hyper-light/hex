@@ -399,3 +399,57 @@ Sound for isolation and for Hex's own accounting, not transparent to the box (in
 Without reuse, the sound levers left are the root default program and the pidfd end, 17 to 15 holds, plus fewer
 controllers per box (each one an offline and a release, f23), which changes per-box isolation. A pool made ahead moves
 holds but doesn't remove them (`create_serial.md`, "What wouldn't").
+
+## The box's mount teardown on its exit path (Linux v6.19, read 2026-11-04)
+
+Read at the v6.19 tag, retrieved 2026-11-04 (sha256 first 16 hex digits: `kernel/exit.c` bc44f0b5489c871c,
+`kernel/nsproxy.c` 2332aa254bf3b569, `fs/namespace.c` 9bf94300e1326c3f, `fs/pidfs.c` 83b27c3d51dfa224,
+`include/uapi/linux/pidfd.h` 36821dd42e79f6e6), for the wait `create_serial.md` run 25 found on a lifecycle's path at
+concurrency 32 (an RCU grace period as the box's mount namespace goes, 0.051 ms a lifecycle at 32, 0.004 at 1) and the
+superblocks' teardown run 23 found spinning (`list_lru_destroy < deactivate_locked_super < cleanup_mnt`, 1.45% of
+32's samples).
+
+- **The init tears its mount namespace down before the agent hears it ended.** `do_exit` (`kernel/exit.c:896`) drops
+  its namespaces (`exit_nsproxy_namespaces`, `:970`), then runs its task work (`exit_task_work`, `:971`), and only then
+  `exit_notify` (`:983`), which wakes a pidfd's pollers (`do_notify_pidfd`, `:762`). Dropping them puts the mount
+  namespace (`nsproxy_free`, `kernel/nsproxy.c:63-65`); on its last reference `put_mnt_ns` takes the mount lock to write
+  and unmounts the whole tree (`fs/namespace.c:6031-6039`), and `namespace_unlock` lets the lock go and then waits out
+  an expedited grace period before it puts each mount (`synchronize_rcu_expedited`, `:1715`). Each mount's last put
+  queues its cleanup as the exiting task's work (`:1384-1385`), which `exit_task_work` runs: the box's `/dev` tmpfs and
+  `/proc` superblocks go there (`deactivate_locked_super`, each taking `list_lrus_mutex` and `shrinker_mutex`, run 23).
+  The agent, polling the init's pidfd, waits for all of it.
+- **A descriptor holds the namespace past the init.** `ioctl(pidfd, PIDFD_GET_MNT_NAMESPACE)`
+  (`include/uapi/linux/pidfd.h:109`) takes a reference to the task's mount namespace (`ns_ref_get`,
+  `fs/pidfs.c:533-536`) and returns an nsfs descriptor holding it; it needs ptrace read access to the task
+  (`PTRACE_MODE_READ_FSCREDS`, `:514`), which the agent has to its own boxes' inits, and answers `ESRCH` once the task has
+  dropped its namespaces (`:508`). Held by the agent, the init's exit no longer drops the last reference, so
+  `put_mnt_ns` returns at once and the teardown, the grace period and the superblocks wait for that descriptor's close.
+- **The lever.** The agent takes the descriptor as the box is made, holds it while the box lives, and once its wait has
+  seen the init end hands it to a closer thread over a bounded channel; a full channel closes it inline, counted, never
+  dropped. The teardown then runs on the closer, off the lifecycle's path; it is the same work, moved, so it is measured
+  by each lifecycle's p50 and p99 at 1 and 32 as well as the three ratios, and by the closer's lag.
+- **What it holds meanwhile.** The box's mounts outlive its delete by the closer's lag: its root's clone pins the
+  bundle's root directory, which isn't a mount point in the host's namespace, so it can still be removed, renamed and
+  reused; its `/dev` tmpfs keeps its pages; its `/proc` keeps the pid namespace's structure. A test shows it: right
+  after delete returns, the bundle's directory and the volumes' sources are removed and reused, and the same id made
+  again from the same bundle. The descriptor is one more a live box holds, in the descriptor budget at its bounds (the
+  held files' arithmetic). An agent that dies holding them closes them as it goes, so the kernel tears each namespace
+  down then and recovery finds none (T-T7.1.2).
+- **What would falsify it:** a lifecycle at 32 no shorter on its path, its p50 or p99 at 1 or 32 higher, or a closer
+  whose lag grows without bound.
+
+## The containers' state directories under one parent (Linux v6.19, read 2026-11-04)
+
+Read at the v6.19 tag, retrieved 2026-11-04 (`fs/namei.c` sha256 first 16 hex digits 2a7a5d9869d0baf0), for the wait
+on a directory's `i_rwsem` `create_serial.md` run 25 found on a lifecycle's path at concurrency 32 (0.043 ms, none at
+1), which runs 19 and 20 place on `/run/hex-node`, the containers' state, made and removed once a lifecycle each.
+
+- **A mkdir and an rmdir hold their parent to write.** `filename_create` (`fs/namei.c:4858`), which `mkdirat` takes, and
+  `do_rmdir` (`:5263`) both go through `start_dirop` (`:4888`, `:5293`), which locks the parent exclusively
+  (`__start_dirop`, `inode_lock_nested(dir, I_MUTEX_PARENT)`, `:2860-2873`), so every create's and delete's state
+  directory waits on every other's under one parent. Run 20 sharded the node's records the same way, by a hash of the
+  id over 64 parents, and that directory's waits went.
+- **The lever.** The state directories go under shards of the same kind; recovery reads both the one parent and the
+  shards, adopting or removing what each holds, with an upgrade test from a node holding boxes in the old layout; the
+  record and wire formats change only by what they add.
+- **What would falsify it:** the wait not falling at 32, or a lifecycle's p50 or p99 at 1 or 32 rising.
