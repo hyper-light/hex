@@ -600,7 +600,10 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   privileged helper as a launchd daemon (`/Library/LaunchDaemons`, `launchctl bootstrap system`), a plain
   property list rather than `SMAppService`, which needs a signed app bundle and the user's approval in System
   Settings (§3.4); an unprivileged node tells it is there by `launchctl print system/<label>` (exit 0, else
-  113) and by its socket answering (§3.5).
+  113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
+  group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
+  run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
+  can't run without the helper.
 - **A node lacking it refuses the class by name** (`hex_core::setup`): on Linux, a box root whose parent lacks a
   controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
   missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
@@ -611,6 +614,9 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   else by name.
 - **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working
   with no further step, and uninstall leaves nothing of Hex's behind, checked by listing what install made.
+  The bar is not narrowed per OS: on Windows the `oci` class is native plan steps 4 and 5, so Windows' part is
+  met only once they land and its install lab is run again then (the lead, 2026-11-04: sequencing, not a
+  change to the bar).
   On Linux, `bench/install/linux_lab.sh` boots a fresh Fedora as a container with systemd its init, shows the
   by-name refusal before install, installs, passes the conformance suite over the installed node's socket for
   both classes as an ordinary user (HEX-INST-3), uninstalls and lists nothing left (HEX-INST-4).
@@ -661,9 +667,10 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   `process`/`oci` give a typed refusal naming it (CLAUDE.md §12).
 - **The installer** (native plan step 6, the decision above): **Linux's is built** and its fresh-machine lab
   passes on fedora (`bench/install/linux_lab.sh`: refused by name before, the conformance suite on both classes
-  over the installed node, nothing left after uninstall). **Windows' is built and lint-clean**; it waits on
-  jupiter, an administrator's UAC prompt and a reboot each way, and the feature query's standard-user access
-  and time are measured there. **macOS's** installs step 2's box users and helper, and waits on step 2. Not
+  over the installed node, nothing left after uninstall). **Windows' is built and lint-clean, and open**: it
+  waits on jupiter, an administrator's UAC prompt and a reboot each way (the feature query's standard-user
+  access and time are measured there), and is met only once the `oci` class's steps 4 and 5 land and the
+  install lab runs again. **macOS's** installs step 2's box users and helper, and waits on step 2. Not
   covered yet: Ubuntu 24.04's restriction on unprivileged user namespaces (an AppArmor profile for `hex`).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the

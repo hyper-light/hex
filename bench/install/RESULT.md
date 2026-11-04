@@ -33,6 +33,7 @@ installed node was refused `io`, unit `hex-native-s6-lab-20261104T085256Z`), as 
 `bench/install/windows_lab.ps1` runs as a standard user around an administrator's `windows.ps1 install` and
 `uninstall` (one UAC prompt and the reboot Windows asks for, each): `before`, `installed`, `uninstalled`. The
 Windows `oci` class itself is native plan steps 4 and 5, not built, so after install it is refused for that
-alone.
+alone. Windows' part is open until steps 4 and 5 land: the step's "every class working" isn't narrowed, so the
+lab runs again then.
 
 ## macOS: waits on native plan step 2 (the box users' pool and the privileged helper)
