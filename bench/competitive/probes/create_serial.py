@@ -14,7 +14,8 @@ the libc call it waited in.
 A MODE=locks run: each directory's exclusive holds (@hold[vfs_mkdir or vfs_rmdir, fs, ino]: stats) beside the waits
 on its i_rwsem (@rw[slow path, fs, ino]: stats), each directory named from the run's dirs.<label>.txt; cgroup_mutex's
 takers, each timed whole, wait and hold (@fn[function, 1 if the runtime's own]: stats), the forks (@fork[1 if into a
-cgroup]: stats) and the waits for the lock alone (@cgm_wait[1 if the runtime's]: stats); the lookups that missed the
+cgroup]: stats) and the waits for the lock alone (@cgm_wait[1 if the runtime's]: stats); the lock's holder's times off
+its CPU while it held it (@holder_off[2 if the runtime's + 1 if preempted]: stats); the lookups that missed the
 dcache (@lookups[fs, directory, name]: count), with each name's digits and hex runs written as #; and the share of the
 time cgroup_mutex and the runtime's cgroup directory's i_rwsem were in each state (@cgm_state[bucket, 2 held, 1
 handed off, 0 free] and @dir_state[bucket, 3 write-held, 2 read-held, 1 handed off, 0 free]: samples), over the 100
@@ -261,6 +262,14 @@ def report_locks(label, n, txt, named):
         who = "the runtime's" if own == '1' else "other processes'"
         print(f"{label}: waits for cgroup_mutex, {who}: {cnt / n:.2f} a lifecycle, {tot / max(cnt, 1) / 1e3:.1f} us "
               f"each on average, {tot / n / 1e6:.3f} ms a lifecycle")
+    holder = {3: "the runtime's, preempted", 2: "the runtime's, blocked", 1: "another's, preempted",
+              0: "another's, blocked"}
+    off = stats(txt, 'holder_off', 1)
+    if off:
+        print(f"{label}: cgroup_mutex's holder off its CPU while it held the lock, per lifecycle:")
+    for (kind,), (cnt, tot) in sorted(off.items(), key=lambda kv: -kv[1][1]):
+        print(f"  {cnt / n:6.3f} x {tot / max(cnt, 1) / 1e3:8.1f} us = {tot / n / 1e6:7.3f} ms  "
+              f"{holder.get(int(kind), kind)}")
     lookups = defaultdict(int)
     for m in re.finditer(r'@lookups\[([^,\]]*), ([^,\]]*), ([^\]]*)\]: (\d+)', txt):
         lookups[(m.group(1), pattern(m.group(2)), pattern(m.group(3)))] += int(m.group(4))

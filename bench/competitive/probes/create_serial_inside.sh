@@ -19,7 +19,11 @@
 # css_killed_work_fn, css_release_work_fn, cgroup_bpf_release), and a fork from cgroup_can_fork to cgroup_post_fork's
 # return, by whether it clones into a cgroup (CLONE_INTO_CGROUP holds cgroup_mutex across that span); each wait for
 # cgroup_mutex timed alone, from the lock's contention_begin tracepoint to its contention_end, by whether the waiter
-# is the runtime's. Those takers count every kworker's work on the host and the node's own start; so each taker,
+# is the runtime's; and each time cgroup_mutex's holder leaves its CPU while it holds the lock, until it runs again,
+# by whether it was preempted (still runnable: the switch's prev_state 0 or TASK_REPORT_MAX, Linux v6.19
+# include/trace/events/sched.h:202-213, include/linux/sched.h:1661-1662) or blocked, and whether it is the runtime's,
+# so a convoy behind a preempted holder is told from the lock's own work. Those takers count every kworker's work on
+# the host and the node's own start; so each taker,
 # the attach and the fork into a cgroup are also counted for the boxes' own cgroups alone (@box: those directly
 # under seam_oci's oci boxes' root, /sys/fs/cgroup/hex-oci-seam/.oci, found from the work's or the call's cgroup).
 # And how much of the time each lock is taken, sampled on every CPU at 999 Hz in 100 ms buckets:
@@ -303,6 +307,22 @@ tracepoint:lock:contention_end
 		}
 	}
 }
+tracepoint:sched:sched_switch
+{
+	\$o = (uint64)((struct mutex *)kaddr("cgroup_mutex"))->owner.counter & 0xfffffffffffffff8;
+	if (\$o != 0 && \$o == (uint64)curtask) {
+		\$c = comm;
+		\$s = args.prev_state;
+		@ho[(uint64)args.prev_pid] = nsecs;
+		@hk[(uint64)args.prev_pid] = (($f) ? 2 : 0) + ((\$s == 0 || (\$s & 0x100) != 0) ? 1 : 0);
+	}
+	\$t = @ho[(uint64)args.next_pid];
+	if (\$t != 0) {
+		@holder_off[@hk[(uint64)args.next_pid]] = stats(nsecs - \$t);
+		delete(@ho[(uint64)args.next_pid]);
+		delete(@hk[(uint64)args.next_pid]);
+	}
+}
 profile:hz:999
 {
 	\$o = (uint64)((struct mutex *)kaddr("cgroup_mutex"))->owner.counter;
@@ -312,7 +332,7 @@ profile:hz:999
 		@dir_state[nsecs / 100000000, (\$n & 1) != 0 ? 3 : (((\$n >> 8) & 0x7fffffffffffff) != 0 ? 2 : (\$n != 0 ? 1 : 0))] = count();
 	}
 }
-END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); clear(@ina); }
+END { clear(@dt); clear(@dd); clear(@rt); clear(@rs); clear(@ft); clear(@fk); clear(@fi); clear(@cgparent); clear(@cw); clear(@ina); clear(@ho); clear(@hk); }
 BT
 }
 run(){ # run <label> <filter> <command...>: the mode's program over one workload, and the directories it made
