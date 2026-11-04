@@ -105,7 +105,9 @@ run_user env CARGO_TARGET_DIR="$USERTARGET" cargo build -q --manifest-path "$REP
 HEXBIN="$USERTARGET/debug/hex"
 run_user env CARGO_TARGET_DIR="$USERTARGET" cargo test -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --test macos_process_box --no-run \
     || { echo "boxlab: conformance-test build failed" >&2; exit 1; }
-TESTBIN="$(find "$USERTARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*' -type f -perm +111 2>/dev/null | head -1)"
+# The newest of the test's executables: the target keeps every earlier build's beside the one just made.
+TESTBIN="$(find "$USERTARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*' -type f -perm +111 -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null | head -1)"
 
 {
     echo "# boxlab, ROOT, adas-mac-studio-3, macOS $(sw_vers -productVersion) $(sw_vers -buildVersion), $(uname -m), $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -115,15 +117,26 @@ TESTBIN="$(find "$USERTARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*'
     if make_user; then
         "$PROBE" uid "$LABUID" "$N"
 
-        echo "## box-user class end to end: a real 'hex __box-helper' + box-user HEX-RT conformance"
+        echo "## box-user class end to end: a real 'hex __box-helper' + box-user HEX-RT conformance + helper CPU"
         "$HEXBIN" __box-helper --socket "$SOCK" --users "$LABUID" --nproc 1024 &
         HELPER_PID=$!
         for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
         if [ -S "$SOCK" ] && [ -n "$TESTBIN" ]; then
+            # Helper CPU at rest, no box: the event-driven daemon blocked on mach_msg plus its
+            # defense-in-depth pump poll (criterion: helper CPU <= 0.1% of a core).
+            if r0="$("$PROBE" cputime "$HELPER_PID")" && sleep 2 && r1="$("$PROBE" cputime "$HELPER_PID")"; then
+                echo "$r0 $r1" | awk '{dw=$4-$2; if(dw>0) printf "helper daemon CPU at rest (no box, 2 s): %.3f%% of a core\n",($3-$1)/dw*100}'
+            fi
+            # Helper CPU across the conformance run (acquire/arm/start/inspect/signal/delete).
+            c0="$("$PROBE" cputime "$HELPER_PID")" || c0=""
             if HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored box_user_boxes_hold_the_contract --nocapture; then
                 echo "box-user HEX-RT conformance: PASS"
             else
                 echo "box-user HEX-RT conformance: FAIL"
+            fi
+            c1="$("$PROBE" cputime "$HELPER_PID")" || c1=""
+            if [ -n "$c0" ] && [ -n "$c1" ]; then
+                echo "$c0 $c1" | awk '{dw=$4-$2; if(dw>0) printf "helper daemon CPU across the conformance run: %.3f%% of a core (%.1f ms CPU / %.1f ms wall)\n",($3-$1)/dw*100,($3-$1)/1e6,dw/1e6}'
             fi
         else
             echo "the helper socket never appeared or the test binary is missing; skipping conformance"

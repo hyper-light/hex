@@ -9,7 +9,8 @@
 //   cap soft MB        a hog armed with a non-fatal task_set_phys_footprint_limit, watched on an EXC_MASK_RESOURCE
 //                      port: time to the notification, that it fires once, and whether a root re-arm re-fires it
 //   uid UID N          N members run as pool user UID, one daemonized (setsid): proc_listpids(PROC_UID_ONLY)
-//                      finds all, RLIMIT_NPROC caps the forks, a kill-all empties the uid
+//                      finds all, a fork past RLIMIT_NPROC (set to N) is refused in the kernel, a kill-all
+//                      empties the uid
 //   box B N kind       a box of bound B MiB across N members each allocating at full speed, per-task FATAL limits
 //                      apportioned to sum to B; kind=steady spawns them, kind=burst forks them at once: the box's
 //                      total overshoot past B, and the watcher/helper CPU
@@ -308,7 +309,10 @@ static int do_uid(uid_t uid, int n) {
     // A leader that drops to UID, sets RLIMIT_NPROC, and forks N-1 members, one of which setsid()s.
     pid_t leader = fork();
     if (leader == 0) {
-        struct rlimit rl = {.rlim_cur = (rlim_t)(n + 4), .rlim_max = (rlim_t)(n + 4)};
+        // RLIMIT_NPROC = n: the pool uid may hold exactly n processes (this leader plus n-1 members). Set
+        // before the drop to the uid; the kernel checks it against the real uid at fork (kern_fork.c), so it
+        // binds the box's user however its members fork.
+        struct rlimit rl = {.rlim_cur = (rlim_t)n, .rlim_max = (rlim_t)n};
         setrlimit(RLIMIT_NPROC, &rl);
         if (setgid(uid) != 0 || setuid(uid) != 0) _exit(3);
         for (int i = 0; i < n - 1; i++) {
@@ -318,6 +322,17 @@ static int do_uid(uid_t uid, int n) {
                 for (;;) sleep(1);
             }
         }
+        // The uid now holds n processes, at RLIMIT_NPROC. One more fork must be refused in the kernel: this
+        // is the cap biting, not just being set.
+        errno = 0;
+        pid_t over = fork();
+        if (over == 0) _exit(0); // reached only if the cap did NOT bite; this extra child exits at once
+        if (over < 0)
+            printf("uid %u: RLIMIT_NPROC=%d bit -> a fork past the cap was refused in the kernel (%s)\n", uid,
+                   n, strerror(errno));
+        else
+            printf("uid %u: RLIMIT_NPROC=%d did NOT bite -> a fork past the cap succeeded (pid %d)\n", uid, n,
+                   over);
         for (;;) sleep(1);
     }
     usleep(300000);
@@ -406,6 +421,20 @@ static int do_box(uint64_t b_mib, int n, const char *kind) {
     return 0;
 }
 
+// cputime PID: print the process's cumulative CPU time (user+system) and a monotonic clock, both in
+// nanoseconds, so a caller can sample a daemon's CPU across an interval. Used to measure the privileged
+// helper's CPU (step 2's "helper CPU <= 0.1% of a core" criterion), at rest and while it serves a box.
+static int do_cputime(pid_t pid) {
+    struct rusage_info_v4 ri;
+    if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&ri) != 0) {
+        fprintf(stderr, "cputime: proc_pid_rusage(%d): %s\n", pid, strerror(errno));
+        return 1;
+    }
+    printf("%llu %llu\n", (unsigned long long)(ri.ri_user_time + ri.ri_system_time),
+           (unsigned long long)now_ns());
+    return 0;
+}
+
 int main(int argc, char **argv) {
     // Resolve this binary's path for re-exec as __hog.
     uint32_t sz = sizeof g_self;
@@ -424,7 +453,9 @@ int main(int argc, char **argv) {
         return do_uid((uid_t)strtoul(argv[2], NULL, 10), atoi(argv[3]));
     if (argc >= 5 && strcmp(argv[1], "box") == 0)
         return do_box(strtoull(argv[2], NULL, 10), atoi(argv[3]), argv[4]);
-    fprintf(stderr,
-            "usage: boxuser_probe priv MB | cap fatal MB | cap soft MB | uid UID N | box B N steady|burst\n");
+    if (argc >= 3 && strcmp(argv[1], "cputime") == 0)
+        return do_cputime((pid_t)strtol(argv[2], NULL, 10));
+    fprintf(stderr, "usage: boxuser_probe priv MB | cap fatal MB | cap soft MB | fork CAP ALLOC | uid UID N "
+                    "| box B N steady|burst | cputime PID\n");
     return 2;
 }
