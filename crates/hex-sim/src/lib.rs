@@ -12,6 +12,7 @@
 //!   checked against (`T-T7.4.1`), and the end-state check that nothing was lost or started twice
 //!   (`AC-T7.3.3`).
 //! - [`generate`]: generated clusters and workloads from a seed.
+//! - [`replay`]: a recorded workload read from text, for replaying a real day.
 
 #![cfg_attr(
     test,
@@ -29,6 +30,7 @@ pub mod error;
 pub mod generate;
 pub mod index;
 pub mod model;
+pub mod replay;
 pub mod rng;
 pub mod sim;
 pub mod spec;
