@@ -1083,11 +1083,40 @@ fn slots_under(oci: &Path) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// Whether a process here holds the mount namespace `ns` (its `mnt:[inode]` link): as its own, or by a
+/// descriptor. A process whose `/proc` entries this user can't read is passed over.
+fn mount_namespace_held(ns: &str) -> bool {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter(|p| {
+            p.file_name()
+                .to_str()
+                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .any(|p| {
+            let links = |dir: PathBuf| {
+                std::fs::read_dir(dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+                    .collect::<Vec<_>>()
+            };
+            std::fs::read_link(p.path().join("ns/mnt")).is_ok_and(|own| own.to_string_lossy() == ns)
+                || links(p.path().join("fd"))
+                    .iter()
+                    .any(|held| held.to_string_lossy() == ns)
+        })
+}
+
 /// Goal 5 extended, step 6 (T-T7.1.2). Do: over the socket, make and start boxes A and B of owner O and a
 /// box U of none, delete A (its slot goes idle), SIGKILL the agent, and start it again over the same
 /// state. Expect: the restarted agent removes A's idle slot and says so; takes B back in its recorded
 /// slot and U by its id, both running, B's usage read through its slot; and once both are deleted
-/// nothing is left under the oci boxes' root and no box is listed.
+/// nothing is left under the oci boxes' root, no box is listed, and no process holds any of the three
+/// boxes' mount namespaces, which the agent held by descriptor when it was killed (the lead's condition
+/// for the held mount namespaces, 2026-11-04T09:18Z).
 fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path, exe: &str) {
     let dir = tempfile::Builder::new()
         .prefix("agent-reuse-")
@@ -1117,6 +1146,23 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     let oci = box_root.join(OCI_BOXES);
     let slots = slots_under(&oci);
     assert_eq!(slots.len(), 2, "A and B each hold a slot: {slots:?}");
+    let namespaces: Vec<String> = slots
+        .iter()
+        .map(String::as_str)
+        .chain(["crash-u"])
+        .flat_map(|cg| {
+            std::fs::read_to_string(oci.join(cg).join("cgroup.procs"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|pid| std::fs::read_link(format!("/proc/{pid}/ns/mnt")).ok())
+                .map(|ns| ns.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        namespaces.len() >= 3,
+        "each box's init's mount namespace: {namespaces:?}"
+    );
     assert!(
         oci.join("crash-u").is_dir(),
         "U's cgroup is its own, named by its id"
@@ -1170,6 +1216,9 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
         "nothing is left under the oci boxes' root: {names:?}"
     );
     assert!(client.list().unwrap().is_empty(), "no box is listed");
+    wait_for("the boxes' mount namespaces gone", || {
+        namespaces.iter().all(|ns| !mount_namespace_held(ns))
+    });
     eprintln!(
         "T-T7.1.2, step 6: idle slot removed on restart ({}), B taken back in {left:?}, nothing left",
         again
