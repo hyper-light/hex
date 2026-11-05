@@ -41,6 +41,24 @@ def pairs_of(run):
     return out
 
 
+def netns_line(phases):
+    """The kept namespaces' checks over `phases` (each a round's interleaved phase), and the held files' bound."""
+    reuse = [ph["netns_reuse"] for ph in phases if ph.get("netns_reuse")]
+    if not reuse:
+        return "kept namespaces: none counted (a node that keeps none, or a pass before the counts)"
+    total = {k: sum(r.get(k, 0) for r in reuse) for k in
+             ("checked", "through_files", "protocols", "files_bounded", "files_failed")}
+    bounds = {(r.get("files_bound"), r.get("descriptors_soft"), r.get("descriptors_own")) for r in reuse}
+    if bounds == {(None, None, None)}:
+        bound = "the held files' bound not reported (a binary before it)"
+    else:
+        bound = "; ".join(f"held files for at most {b} namespaces (soft limit {s}, the node's own {o})"
+                          for b, s, o in sorted(bounds, key=str))
+    return (f"kept namespaces: {total['checked']} checks, {total['through_files']} through held files, "
+            f"{total['protocols']} through the protocols, {total['files_bounded']} entered for the bound, "
+            f"{total['files_failed']} whose files failed; {bound}")
+
+
 def load(at):
     return f"load {at.get('load1')}, cpu some {at.get('cpu_some_avg10')}%"
 
@@ -115,6 +133,13 @@ def main(argv):
             print(f"  CPU, the pairs' medians: {m['c1_cpu_ms_per_lifecycle']:.2f} ms a lifecycle at 1 and "
                   f"{m['c32_cpu_ms_per_lifecycle']:.2f} at 32; CPUs busy {m['c1_cpus_busy']:.2f} at 1 and "
                   f"{m['c32_cpus_busy']:.2f} at 32")
+        with_took = [p for _, _, _, p, _ in rows if p.get("c1_p50_ms") is not None]
+        if with_took:
+            t = {k: st.median(p[k] for p in with_took) for k in ("c1_p50_ms", "c1_p99_ms", "c32_p50_ms", "c32_p99_ms")}
+            worst = max(p["c32_p99_ms"] for p in with_took)
+            print(f"  a lifecycle's wall, the pairs' medians: p50 {t['c1_p50_ms']:.3f} ms and p99 {t['c1_p99_ms']:.3f} at "
+                  f"1, p50 {t['c32_p50_ms']:.3f} and p99 {t['c32_p99_ms']:.3f} at 32 (the most of any pair's p99 at 32: "
+                  f"{worst:.3f})")
         # Each half's pin as read back: every task the pin reached held the half's CPUs alone, in how many pairs.
         for half in ("c1", "c32"):
             asked = {ph.get(f"{half}_cpus") for *_, ph in rows} - {None}
@@ -125,6 +150,10 @@ def main(argv):
                        and {cpu_set(c) for c in p[f"{half}_pinned"]["cpus_allowed"]} == {cpu_set(ph[f"{half}_cpus"])})
             print(f"  {half} halves pinned to {', '.join(sorted(asked))}: every task on those CPUs alone in {held} "
                   f"of {len(rows)} pairs")
+        # The kept namespaces' checks and the held files' bound the node ran with (the lead, 2026-11-04T09:15Z): a
+        # run whose bound is 0, as at systemd's default soft limit, held no files and tests none. Each round's phase
+        # once: its pairs' rows all carry it.
+        print(f"  {netns_line(list({id(ph): ph for *_, ph in rows}.values()))}")
 
 
 if __name__ == "__main__":

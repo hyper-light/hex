@@ -173,7 +173,7 @@ fn a_held_file_whose_read_fails_is_no_verdict_and_the_check_falls_back_counted()
         &fresh,
         &mut scratch,
         &mut Some(socket),
-        &mut files,
+        Some(&mut files),
     );
     assert!(checked.files_failed && !checked.through_files);
     assert!(files.is_none());

@@ -56,6 +56,15 @@
 # capabilities, libcrun's alike, since a box that keeps all of root's never shares a cgroup).
 set -uo pipefail
 SUSTAINED=${SUSTAINED:-5000}; MODE=${MODE:-offcpu}
+# The soft descriptor limit everything here runs with (HEXBENCH_NOFILE): `hard` for the hard limit the container was
+# given, as Hex's installer sets a node's (the lead, 2026-11-04), a number for that, unset for the container's own
+# (dockerd's 1024), at which a Hex node holds no /proc/net files. Said here and in nofile.txt.
+case "${HEXBENCH_NOFILE:-given}" in
+  given) ;;
+  hard) ulimit -Sn "$(ulimit -Hn)" ;;
+  *) ulimit -Sn "$HEXBENCH_NOFILE" ;;
+esac
+echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given})" | tee "/opt/out/nofile.txt"
 dnf -y -q install perf bpftrace procps-ng util-linux python3 libseccomp libcap json-c binutils >/run/dnf.log 2>&1 \
   || { echo "dnf failed"; tail -5 /run/dnf.log; exit 3; }
 echo "tools: $(perf --version 2>&1 | head -1); $(bpftrace --version 2>&1 | head -1)"

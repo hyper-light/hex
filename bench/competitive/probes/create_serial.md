@@ -871,7 +871,8 @@ On-CPU time a lifecycle in the runtime's threads: 1,333.1 us at 1 (`hex` 587.6, 
 - **Binary:** the final merge (`cp/t7-ext-s6-x-s3-final` ca6dc80; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91),
   one owner's boxes, the probe container on 4-15, the unit `hex-g5x-s6-fdh25-20261104T054328Z` after `reuse_pass.md` run
   16: oncpu 05:50:33Z to 05:55:23Z (load 26.3 falling to 5.4), locks 05:55:23Z to 05:58:36Z (load 5.4 to 6.4), about
-  6,800 to 6,900 host threads, kiln's pool beside it. Both programs run on every system call or context switch on the
+  6,800 to 6,900 host threads, kiln's pool beside it, and the session-lab agent's kiln gate unit, pinned to 16-31 then
+  (`reuse_pass.md` run 16). Both programs run on every system call or context switch on the
   host, so their absolute times carry that cost; the split is what the runs read.
 - **Runs:** `create-serial-oncpu-20261104T055033Z` (concurrency 1 over 5,020 lifecycles, 32 over 20,000 sustained),
   `create-serial-locks-20261104T055523Z`.
@@ -915,7 +916,8 @@ times at 183 us and blocked 0.029 times at 89 us).
 
 - **Binary:** the final merge (ca6dc80; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91), one owner's boxes, the
   probe container on 4-31, the unit `hex-g5x-s6-fdh28-20261104T061914Z`, 06:19:14Z to 06:21:36Z, load 1.7 to 6.7, CPU
-  pressure under 1%; beside it a build's LLVM thread (`opt cgu.13`) and kiln's services.
+  pressure under 1%; beside it, on 16-31, the session-lab agent's kiln gate unit (`kiln-gate-9c245a2959aa-1793770896`,
+  CPUWeight 1, Nice 19), whose build is the LLVM thread (`opt cgu.13`), and kiln's services.
 - **Runs:** `create-serial-offcpu-20261104T061914Z` (sustained at 32: 16,345 a second, 1.29 ms of CPU a lifecycle),
   `create-serial-threads-20261104T062058Z`.
 
@@ -938,6 +940,42 @@ before the held files), `hex-netns` 2.2 and 2.4: 1,056.2 and 1,244.3 in all.
   its mount namespace goes, a directory's `i_rwsem` and `cgroup_mutex`. With CPUs to spare, 32 in flight would run
   about 32 / (1.96 - 0.27) ms, some 18,900 a second, without them, which is how option 1's 32 can rise without its 1.
 - **The work beside concurrency 1's path is 128 us of its 1,056 here:** the `/dev` pool's 80.6 and the checker's 45.3.
+
+## Run 26 (2026-11-05, fedora): locks at the step's final tip, one owner's boxes, on 4-15: the first criterion again
+
+- **Why:** goal 5 extended step 6's retry (the lead, 2026-11-05): the first criterion at the step branch's final tip,
+  a12e526, where run 11's 1.089 was at f7c4065. Since then the step gained the network namespace handed on within one
+  owner, the four checkers, the held files within the node's descriptor limit and the bench's per-lifecycle timing;
+  the held mount namespace came and went (`reuse_pass.md` run 17).
+- **Binaries:** built on fedora from an export of a12e526 (the unit `hex-g5x-s6-fdh41-20261105T050241Z`): `hex`
+  38aa25927874f98c, `seam_oci` 5bcde75f86745354; the harness the same export's (`env.txt` names no commit: an export
+  has no `.git`).
+- **Host and load:** fedora, Linux 6.19.10-300.fc44.x86_64, 2026-11-05T05:58:56Z, the container pinned to 4-15 and
+  capped (`--memory 8g`, `--oom-score-adj 1000`), in the unit `hex-g5x-s6-fdh45-20261105T054903Z` under fedora's timed
+  lock; the 1-minute load 19.96 at the start and 17.85 at the end, falling after a global out-of-memory stall at about
+  05:35Z (its 15-minute load 129.30 at the start), about 4,100 host threads, a kind cluster, buildkit builders and a
+  minio beside it.
+- **Run:** `~/.cache/hex-t7/g5x-s6/hex-bench/out/create-serial-locks-20261105T055856Z`, each workload started on the
+  probes' attach, read by `create_serial.py` (the unit's `locks-report.txt`).
+- **What the node did:** at concurrency 1, 519 of 520 boxes were handed an idle cgroup and 1 a fresh one; at 32, with a
+  network namespace and without, 4,968 of 5,000 and 32 fresh. None was refused, and every box ended through its init's
+  pidfd, none by `cgroup.kill`. Under the probes the sustained phase ran 1,977/s, without a network namespace 1,450/s.
+
+| `cgroup_mutex` holds for the boxes' own cgroups, per lifecycle | hex.c1 (520) | hex.c32 (5,000) | hex.c32nonet (5,000) |
+|---|---|---|---|
+| a fork into the cgroup (`CLONE_INTO_CGROUP`) | 1.000 | 1.000 | 1.000 |
+| `cgroup_mkdir` | 0.002 | 0.006 | 0.006 |
+| `cgroup_rmdir` | 0.002 | 0.006 | 0.006 |
+| `cgroup_kill_write` | 0 | 0 | 0 |
+| `css_killed_work_fn`, a kworker's | 0.010 | 0.032 | 0.032 |
+| `css_release_work_fn`, a kworker's | 0.008 | 0.038 | 0.038 |
+| `cgroup_bpf_release`, a kworker's | 0.002 | 0.006 | 0.006 |
+| in all | 1.023 | 1.089 | 1.089 |
+
+- **The first criterion holds at the final tip:** 1.089 holds a lifecycle at concurrency 32, against a bar of 3, as at
+  f7c4065 (run 11). The rest is the 32 fresh cgroups' making and, at the end, their removal.
+- **The lock is mostly free:** held 13.7% of the busiest buckets' samples at concurrency 32, 18.4% without a network
+  namespace, 1.9% at concurrency 1.
 
 ## What the runs find
 
