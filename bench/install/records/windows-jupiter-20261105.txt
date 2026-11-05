@@ -65,6 +65,22 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    windows-before-21cb432-20261105T084555Z.txt. The same as entry 4: fresh of Hex, the same 4-line plan,
    "FEATURES: Containers on" and "FEATURES: HypervisorPlatform on", both refusals as there. PHASE before: PASS.
 
+7. step 7's suite and its native_box bench at e322d7b (step 7's abdbfd0 merged), for step 7.
+   cargo test -p hex-cli --test windows_process_box -- --nocapture --test-threads=1, 2026-11-05T10:00:00Z, load 83%
+   CPU: 9 passed, 0 failed (windows-s7suite-e322d7b-20261105T100000Z.txt).
+   native_box (release hex.exe as HEX_BIN; args n 500, warmup 50, runs 20), two passes alternating hex and procgov,
+   2026-11-05T10:02:38Z-10:04:08Z, load 58-82% CPU, 10 co-tenant cargo/rustc (raw JSON
+   native_box-e322d7b-20261105T100140Z\). Every box bounded to 256 MiB. Times in ms:
+     driver  pass  create p50/p99    start p50/p99/max      delete p50/p99   bound: past bound, end p50
+     hex     1     0.048/0.182       52.2/85.3/259.3        1.49/4.87        -6 MiB (20/20 at 250), 248
+     hex     2     0.044/0.170       54.9/92.9/237.3        1.73/5.09        -6 MiB (20/20 at 250), 259
+   Each climb ended Code(-1073740791) (0xC0000409: the program aborting on the commit the job refused).
+   procgov (Process Governor 4.1.26190.22, procgov.exe from its GitHub release, unsigned, sha256
+   fa59212a32306ca22c22680a36c047ca3ffea52f511acb09dd9d7145c1673069): BOTH PASSES FAILED, exit 101, because the
+   driver read procgov's banner ("Process Governor v4.1.26190.22 - sets limits on processes") as the program's
+   first line. procgov -q prints only the program's output (checked); sent to step 7 to fix. No procgov figure yet.
+   The 7 gates on fedora at e322d7b: exit 0, 273 tests (unit hex-windows-gates-20261105T095938Z).
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
