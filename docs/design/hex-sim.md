@@ -398,11 +398,136 @@ Hex, which no cited floor replaces (`scale-and-shards.md:77-78`).
 Hex's side commits to an in-process store and kube-scheduler's to an API server and etcd. When Hex's
 store is Amphora over its seam, the comparison is run again.
 
+### H14. Cells and regions: a federation over independent cells, one code path
+
+Implementation goal 7 (CP-T7.12, S7). `CR[n]` refers to `docs/research/scheduler/cells-and-regions.md`.
+
+**The choice.** A topology is `regions` regions of `cells` cells each. A cell is today's hex-sim run
+(`sim::run`) over its own nodes, with its own store and its own shards (H10, H11): nothing in one cell
+reads or writes another's store, plane or nodes. The nodes are split into regions, and each region's
+into cells, as `Layout` splits slices: contiguous ranges of node ids. A pure core,
+`federation::Federation` (sans-IO, CLAUDE.md §9), routes each workload once, when it arrives:
+- to its home region, `id mod regions`, a fixed per-region decomposition of capacity, as Twine's
+  Federation does instead of a global allocator making ad hoc choices (CR[2] §7.3 p. 14,
+  `cells-and-regions.md:31-38`);
+- in that region, to the first cell, from `id mod cells` on, whose empty nodes admit it (H10's rule
+  one level up). None does: it tries the other regions in order; none does: it's refused, typed.
+
+Each cell's workloads keep their arrival order and are numbered densely within it, as `Layout` numbers
+a slice's nodes. With one region of one cell the federation hands the cluster to `sim::run` unchanged,
+so one cell through the federation is today's hex-sim, bit for bit (CLAUDE.md §8): one node is that
+with a one-node cluster, and three regions add only the routing.
+
+**Sources.** Cells as independent failure domains, the reason for bounding a cell, not its scale:
+Borg CR[1] §4 p. 6 (`cells-and-regions.md:18-23`). A regional plane widens the blast radius, which
+Twine bounds by shards that each manage a small fraction (CR[2] §4 p. 9, `cells-and-regions.md:24-30`).
+Explicit per-region capacity over regional planes: CR[2] §7.3 (`cells-and-regions.md:31-38`). Karmada
+spreads across clusters by topology groups (CR[7] `:446-461`, `cells-and-regions.md:62-63`).
+
+**Evidence.** H10's routing is already held by `tests/shards.rs`: a pure function of the spec and the
+cluster, which needs no shared state, so the federation's is too. The one-code-path claim is a test
+(H17): one cell through the federation and `sim::run` give the same report and trace hash.
+
+**What would falsify it.** One cell through the federation differing from `sim::run` on any seed. Or
+any write, read or decision of one cell's touching another's nodes or store.
+
+### H15. A cell's control plane lost: no other cell's workload disturbed
+
+**The choice.** A cell-loss drill loses every shard of one cell for good (`Nemesis::Lose` for each, with
+no live shard left to take over). No other cell's control plane takes over: a cell can't act on
+another's nodes (H14). The lost cell's running work keeps running (H7: node agents outlive the plane),
+and its pending work waits; the drill doesn't re-route it, because a cell's loss is a repair, not a
+failover (the region's loss is, H16). `AC-T7.12.2`'s count of other cells' workloads disturbed is
+measured two ways: each other cell's run is the same, report and trace hash, as the same run without
+the loss; and `spec::check_kept_running` over them counts 0.
+
+**Sources.** Borg's cells are independent "to minimize the chance of correlated operator errors and
+failure propagation" and its running tasks outlive every Borgmaster replica (CR[1] §4 p. 6,
+`cells-and-regions.md:18-23`). Twine: "even if all Twine components fail, existing tasks continue to
+run" (CR[2] §4 p. 9, `cells-and-regions.md:29-30`).
+
+**Evidence.** The drill's test. Its non-vacuity: a mutant that re-routes a lost cell's pending work to
+the next cell changes that cell's run, and the test fails.
+
+**What would falsify it.** Any other cell's report or trace differing with the loss, or a running
+workload in the lost cell stopped.
+
+### H16. A region lost: its work re-placed within the others' capacity, checked before it moves
+
+**The choice.** A region is lost wholesale at time `at`: its nodes and its cells' planes. The
+federation sees it after `region_grace_ns` without a report (default 40 s, cited: Karmada's
+`cluster-monitor-grace-period`, CR[3] `:34`; `T-T7.12.1` sets no time bar, so the competitor's default
+is the drill's). Then:
+- **What moves:** every workload the federation routed to the lost region and not reported ended. A lost
+  region is a total loss, as MultiKueue treats a lost worker (CR[11] `:351-356`). The region is fenced by
+  an epoch: the federation refuses its reports after the loss, so a region that comes back can't start a
+  second copy (H11's rule one level up).
+- **Where it goes:** the federation reads each surviving region's per-node free capacity at the moment
+  it acts, from that region's own store, not an estimate. It deducts first what is already pending
+  there, then each moved workload as it admits it ("assume and deduct", CR[9] `:14`). A moved workload
+  goes, in id order, to the first surviving region, from its home on, whose free nodes hold it by best
+  fit. None does: it's refused, typed (`Refusal::NoCapacity`), and counted. Nothing moves that doesn't
+  fit, so no region is overcommitted.
+- Admitted workloads arrive in their new region's cells at `at + region_grace_ns`, as new submissions.
+
+**Sources.** Karmada re-places only on an explicit taint, keeps its spread rules and paces evictions;
+its estimator reads a stale snapshot and "may over-commit", which "assume and deduct" closes (CR[4]-[9],
+`cells-and-regions.md:39-63`). MultiKueue re-admits against a global quota that may exceed the workers'
+(CR[10] `:33-38`, `cells-and-regions.md:64-75`). Neither checks that the lost work fits before moving it
+(`cells-and-regions.md:87-91`): `T-T7.12.1` asks for that check.
+
+**Evidence.** `T-T7.12.1`'s test, at two capacities: with room, every moved workload is placed in a
+surviving region and none refused; when tight, exactly those for which no surviving node had room are
+refused, which a brute-force check confirms. Both: no node over capacity, each surviving cell's log
+accepted by the serial specification, and lost-or-double 0 across the federation. Mutant: admitting
+without deducting the pending work overcommits, the test fails.
+
+**What would falsify it.** A moved workload refused while a surviving region could hold it, a node
+over capacity, or a workload started in two regions.
+
+### H17. The differential suite: one node, one cell, three regions, on one specification
+
+**The choice.** `AC-T7.12.3`'s suite runs each of a set of generated seeds (H1's generator) at three
+scales: one node (the seed's first node, all its workloads), one cell (one region of one cell, the seed's
+nodes) and three regions (three regions of two cells, the same nodes). Each runs clean and with H6's
+random crash nemesis. Every run must hold what the specification fixes, the same at every scale:
+lost-or-double 0 (`spec::check_end`), every cell's log accepted by the serial specification
+(`spec::check_slices`), the hard filters (`spec::check_filters`), and every workload placed, refused
+typed, or waiting where no node of its routing has room. Where a node lands is not compared across
+scales, because capacity per domain differs by configuration: Csmith compares "within an equivalence
+class but not across classes" (CR[14] §2.6 p. 5, `cells-and-regions.md:76-83`). And one cell through
+the federation must equal `sim::run`, report and trace hash, on every seed (H14).
+
+**Sources.** Differential testing needs comparable, deterministic implementations, and a difference,
+loop or crash is a candidate bug (McKeeman CR[13] p. 1; Csmith CR[14] §2.1 p. 2,
+`cells-and-regions.md:76-83`). No source applies it across scales of one system
+(`cells-and-regions.md:105-107`): Hex compares configurations of one implementation against one
+specification, the same rule on another axis.
+
+**Evidence and falsifier.** The suite itself; any seed where a scale breaks an invariant, or one cell
+differs from `sim::run`, falsifies H14's one code path.
+
+### H18. Cell selection against Karmada's
+
+**The choice.** `crates/hex-bench/benches/sched_cells.rs` times the federation's selection on 100
+simulated cells, Karmada's 100 member clusters: each workload's route to a region and a cell with room,
+read from each cell's live free capacity and deducted as it goes (H16's check, the comparable step to
+Karmada's capacity-weighted `cluster_schedule`). 2,000,000 workloads, Karmada's report's total, each
+timed alone. The record gives p50, p90, p99, p99.9 and max, release, fedora CPUs 4-15 under the timed
+lock, best of 5, in `bench/sched/cells.md`. The bar: p99 at most a fifth of Karmada's 32 ms.
+
+**Sources.** Karmada's 2022 report: 100 clusters of 5,000 simulated nodes and 20,000 pods each,
+`cluster_schedule` P50 12 ms, P90 15 ms, P99 32 ms (`cluster-managers-at-scale.md:239-245`, [41], MV;
+its nodes are `fake-kubelet` objects and its authors say it isn't a stress test).
+
+**What would falsify it.** Hex's p99 over 6.4 ms. Karmada's step includes its API objects' handling,
+Hex's selection is in-process; the record says so, as `bench/sched/kube_scheduler_kwok.md` does.
+
 ## What it doesn't do yet
 
 Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
 loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
-quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H10-H13, built by goal 6), cells and regions (goal 7),
+quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H10-H13, built by goal 6), cells and regions (decided in H14-H18, built by goal 7),
 heap accounting per workload (`AC-T7.11.4`, H12; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`
 are chosen for tests, not measured; goal 2 sets them from the measured fast path.

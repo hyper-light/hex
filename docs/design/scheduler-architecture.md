@@ -246,6 +246,15 @@ The cell's sharding, its shard-loss takeover, its memory accounting and its scal
 - H13: the 1,000,000-placement bench and the kwok comparison method, with kube-scheduler at its default
   and raised QPS, on the same node and pod shapes (`AC-T7.11.2`, `AC-T7.11.3`).
 
+Cells and regions are decided there too:
+- H14: a federation over independent cells, each today's hex-sim run with its own store and shards;
+  workloads routed to a home region, then a cell, by pure functions; one cell is `sim::run` bit for bit.
+- H15: the cell-loss drill (`AC-T7.12.2`), measured as every other cell's run unchanged.
+- H16: a lost region's work moved only where a surviving region's live free capacity holds it, after
+  deducting what is pending there; the rest refused, typed (`T-T7.12.1`).
+- H17: the differential suite on one node, one cell and three regions (`AC-T7.12.3`).
+- H18: cell selection on 100 simulated cells against Karmada's P99 32 ms.
+
 **What would falsify it.** The differential suite diverging across one node, one cell and three regions
 (`AC-T7.12.3`), or a cell's control-plane loss disturbing another cell's workloads (`AC-T7.12.2`, the
 cell-loss drill) — either breaks the failure-domain guarantee.
