@@ -1391,6 +1391,9 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
     let hooks = r#","hooks":{"createRuntime":[{"path":"/usr/bin/true","args":["true"]}]}"#;
     let mut devs = BTreeSet::new();
     let mut masked = 0;
+    // Each box's masked directories' devices, apart: a box's filesystems end at its delete, and the kernel gives
+    // a freed anonymous device's number to the next one it makes, so only within a box do distinct ones show.
+    let mut each_box: Vec<(usize, BTreeSet<String>)> = Vec::new();
     for (n, (path, hook)) in [
         ("pruned", ""),
         ("pruned", ""),
@@ -1434,6 +1437,7 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
         node.start(&id).expect("start");
         let (_, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
         node.delete(&id).expect("delete");
+        let (mut here, mut its) = (0, BTreeSet::new());
         // proc_pid_mountinfo(5): the third field is the filesystem's major:minor, the fifth the mount point.
         for line in mi.lines() {
             let fields: Vec<&str> = line.split(' ').collect();
@@ -1447,9 +1451,12 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
                     "{point} in box {n} is masked by a read-only tmpfs: {line}"
                 );
                 devs.insert((*dev).to_owned());
+                its.insert((*dev).to_owned());
                 masked += 1;
+                here += 1;
             }
         }
+        each_box.push((here, its));
     }
     assert!(masked >= 4, "masked directories to compare: {masked}");
     if kernel_clones_a_detached_mount() {
@@ -1459,11 +1466,13 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
             "one empty filesystem for every masked directory of every box: {devs:?}"
         );
     } else {
-        assert_eq!(
-            devs.len(),
-            masked,
-            "a tmpfs of its own for every masked directory: {devs:?}"
-        );
+        for (n, (here, its)) in each_box.iter().enumerate() {
+            assert_eq!(
+                its.len(),
+                *here,
+                "a tmpfs of its own for every masked directory of box {n}: {its:?}"
+            );
+        }
     }
     eprintln!("masked directories: {masked} across 4 boxes, on {devs:?}");
 }
