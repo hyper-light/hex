@@ -3,7 +3,7 @@
 //! each is a typed [`Fault`], and a kind the protocol doesn't define is refused as one (the helper "does
 //! nothing else").
 
-use hex_api::{BoxId, Program, User};
+use hex_api::{BoxId, Exit, Program, User};
 use proptest::prelude::*;
 use proptest::test_runner::TestRunner;
 
@@ -61,6 +61,10 @@ fn requests_round_trip() {
             box_id: box_id("b1"),
             signal: 15,
         },
+        Request::Wait {
+            box_id: box_id("b1"),
+            pid: 4242,
+        },
     ];
     for req in &requests {
         let bytes = encode_request(VERSION, 7, req).expect("encode");
@@ -95,6 +99,10 @@ fn answers_round_trip() {
         Answer::Refused(Refused::NotPermitted("exec arbitrary".to_owned())),
         Answer::Refused(Refused::Malformed("bad id".to_owned())),
         Answer::Refused(Refused::NotRunning(box_id("b9"))),
+        Answer::Waited(None),
+        Answer::Waited(Some(Exit::Code(3))),
+        Answer::Waited(Some(Exit::Signal(9))),
+        Answer::Waited(Some(Exit::Unknown)),
     ];
     for ans in &answers {
         let bytes = encode_answer(VERSION, 9, ans).expect("encode");

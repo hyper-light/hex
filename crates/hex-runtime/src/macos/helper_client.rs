@@ -13,9 +13,10 @@ use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hex_api::{BoxId, Program, Refusal};
+use hex_api::{BoxId, Exit, Program, Refusal};
 use hex_core::helper::{self, Answer, MAX_MESSAGE, Refused, Request, START_FDS, State, VERSION};
 use rustix::io::Errno;
 use rustix::net::{
@@ -36,6 +37,9 @@ pub struct Helper {
     next_id: AtomicU64,
     /// Where the helper listens, for messages and refusals that name it.
     path: PathBuf,
+    /// Held across one request and its answer, so callers on several threads (the node's calls, and each
+    /// waiting program's [`Helper::wait`]) never interleave their frames on the one stream.
+    turn: Mutex<()>,
 }
 
 impl Helper {
@@ -65,6 +69,7 @@ impl Helper {
             version: VERSION,
             next_id: AtomicU64::new(1),
             path: path.to_path_buf(),
+            turn: Mutex::new(()),
         };
         // Settle the version both speak; the helper answers the highest it and we share.
         match helper.rpc(&Request::Hello { version: VERSION }, &[])? {
@@ -87,6 +92,7 @@ impl Helper {
             version,
             next_id: AtomicU64::new(1),
             path: PathBuf::from("<connected>"),
+            turn: Mutex::new(()),
         }
     }
 
@@ -159,6 +165,22 @@ impl Helper {
         }
     }
 
+    /// How program `pid` of the box ended, reaped by the helper (its parent); `None` while it runs. The
+    /// node asks once it has seen the program's exit event; an end is answered once.
+    pub fn wait(&self, box_id: &BoxId, pid: i32) -> Result<Option<Exit>, Refusal> {
+        match self.rpc(
+            &Request::Wait {
+                box_id: box_id.clone(),
+                pid,
+            },
+            &[],
+        )? {
+            Answer::Waited(exit) => Ok(exit),
+            Answer::Refused(r) => Err(refusal(r)),
+            other => Err(unexpected("wait", &other)),
+        }
+    }
+
     /// What the box holds now.
     pub fn inspect(&self, box_id: &BoxId) -> Result<State, Refusal> {
         match self.rpc(
@@ -187,6 +209,10 @@ impl Helper {
                 ),
             });
         }
+        let _turn = self
+            .turn
+            .lock()
+            .map_err(|_| Refusal::Broken("the helper connection's lock is poisoned".to_owned()))?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let msg =
             helper::encode_request(self.version, id, request).map_err(|e| Refusal::Invalid {
@@ -240,6 +266,7 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
         Answer::Ended => "an ended box",
         Answer::State(_) => "a box's state",
         Answer::Signalled => "a signalled box",
+        Answer::Waited(_) => "a program's end",
         Answer::Refused(_) => "a refusal",
     };
     Refusal::Broken(format!("the helper answered a {call} with {kind}"))

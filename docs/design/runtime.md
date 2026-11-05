@@ -544,6 +544,15 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     crossing woke it or its timeout paced it, so a member unarmed in the fork window or a missed exception
     is still caught (`docs/research/runtime/macos-box-user-and-ledger.md`). A node with no helper runs the
     class as step 1's, and says so in its inspect (`BoxInfo.membership`).
+
+    **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
+    one else (`docs/research/runtime/native-platforms.md` §3, "A box user's program ends where only the
+    helper can see how"). The helper watches each program it starts from its start and reaps it, in its
+    sweep or when asked, holding each end until the node reads it once: at most `RLIMIT_NPROC` programs a
+    box (a start past that drops the box's oldest unread end, or is refused while all still run), and a
+    deleted box's ends for as many boxes as the pool has users. The node waits on the program's `NOTE_EXIT`
+    on a kqueue of its own and then asks for its end (`Wait`), so a wait is the fact, never a poll, and no
+    end is made up as `Unknown` because the node couldn't reap a program it doesn't parent.
 - **`oci`:**
   - Linux: as today.
   - Windows: Windows images run natively, process-isolated through HCS (the OCI spec's Windows section).

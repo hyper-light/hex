@@ -5,15 +5,20 @@
 //! user, exec→start as that user (stdio by `SCM_RIGHTS`), inspect, list, delete, and that inspect reports
 //! box-user membership.
 
-use std::io;
+use std::collections::BTreeMap;
+use std::io::{self, BufRead, BufReader};
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, OwnedFd};
-use std::sync::Mutex;
+use std::process::{Child, Command, Stdio as Piped};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use hex_api::{
-    Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Membership, Program, Refusal, Runtime, Stdio,
+    Bounds, BoxId, BoxSpec, BoxState, ClassSpec, Exit, Membership, Proc, Program, Refusal, Runtime,
+    Stdio,
 };
+use hex_core::helper::START_FDS;
 
 use super::MacRuntime;
 use super::helper_daemon::{self, Daemon, Member, Privileged};
@@ -22,7 +27,7 @@ use super::helper_daemon::{self, Daemon, Member, Privileged};
 /// spawning or arming real processes, so the node→daemon path runs without root or side effects.
 #[derive(Default)]
 struct Sim {
-    inner: Mutex<SimState>,
+    inner: Arc<Mutex<SimState>>,
 }
 
 #[derive(Default)]
@@ -49,6 +54,13 @@ impl Privileged for Sim {
         Ok(pid)
     }
 
+    fn watch(&self, pid: i32) -> io::Result<Box<dyn Proc>> {
+        Ok(Box::new(SimProc {
+            pid,
+            state: Arc::clone(&self.inner),
+        }))
+    }
+
     fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
         Ok(())
     }
@@ -64,6 +76,31 @@ impl Privileged for Sim {
             s.members.clear();
         }
         Ok(n)
+    }
+}
+
+/// The stand-in's watch: a program has ended (by KILL, the stand-in's only end) once it is no member.
+struct SimProc {
+    pid: i32,
+    state: Arc<Mutex<SimState>>,
+}
+
+impl Proc for SimProc {
+    fn pid(&self) -> u32 {
+        u32::try_from(self.pid).unwrap_or(0)
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        let s = self.state.lock().expect("sim lock");
+        if s.members.iter().any(|m| m.pid == self.pid) {
+            Ok(None)
+        } else {
+            Ok(Some(Exit::Signal(9)))
+        }
+    }
+
+    fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        self.try_wait()
     }
 }
 
@@ -125,4 +162,150 @@ fn box_user_mode_routes_through_the_helper() {
     drop(rt);
     // The daemon thread parks on accept once the node disconnects; it ends with the test process.
     drop(server);
+}
+
+/// A backend whose programs are real but children of a shell of their own, never of this process: as a
+/// box-user program is the root helper's child, not the node's. Each spawn starts
+/// `sh -c '"$@" & echo $!; wait $!; echo $?'`, reads the program's pid, and a thread reads its status.
+#[derive(Default)]
+struct Shells {
+    ends: Mutex<BTreeMap<i32, mpsc::Receiver<Exit>>>,
+    live: Mutex<Vec<i32>>,
+}
+
+struct ShellProc {
+    pid: i32,
+    end: mpsc::Receiver<Exit>,
+}
+
+impl Proc for ShellProc {
+    fn pid(&self) -> u32 {
+        u32::try_from(self.pid).unwrap_or(0)
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        Ok(self.end.try_recv().ok())
+    }
+
+    /// The helper asks only once the node saw the program's exit, and the real reap then waits for the
+    /// zombie (`proc::BoxProc`); so does this, up to a bound past any test's run.
+    fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
+        Ok(self.end.recv_timeout(Duration::from_secs(30)).ok())
+    }
+}
+
+impl Privileged for Shells {
+    fn spawn(
+        &self,
+        _uid: u32,
+        program: &Program,
+        _fds: [OwnedFd; START_FDS],
+        _leader: bool,
+        _cap_mib: u32,
+        _nproc: u32,
+    ) -> io::Result<i32> {
+        let mut shell: Child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "\"$@\" </dev/null >/dev/null 2>&1 & echo $!; wait $!; echo $?",
+                "sh",
+            ])
+            .args(&program.args)
+            .stdout(Piped::piped())
+            .spawn()?;
+        let mut lines = BufReader::new(shell.stdout.take().expect("piped")).lines();
+        let pid: i32 = lines
+            .next()
+            .transpose()?
+            .and_then(|l| l.trim().parse().ok())
+            .ok_or_else(|| io::Error::other("the shell named no pid"))?;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let status: i32 = lines
+                .next()
+                .and_then(Result::ok)
+                .and_then(|l| l.trim().parse().ok())
+                .unwrap_or(-1);
+            let _ = shell.wait();
+            let _ = tx.send(if status > 128 {
+                Exit::Signal(status - 128)
+            } else {
+                Exit::Code(status)
+            });
+        });
+        self.ends.lock().unwrap().insert(pid, rx);
+        self.live.lock().unwrap().push(pid);
+        Ok(pid)
+    }
+
+    fn watch(&self, pid: i32) -> io::Result<Box<dyn Proc>> {
+        let end = self
+            .ends
+            .lock()
+            .unwrap()
+            .remove(&pid)
+            .ok_or_else(|| io::Error::other("no such program"))?;
+        Ok(Box::new(ShellProc { pid, end }))
+    }
+
+    fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn list(&self, _uid: u32) -> io::Result<Vec<Member>> {
+        Ok(Vec::new())
+    }
+
+    fn kill(&self, _uid: u32, _signal: i32) -> io::Result<usize> {
+        Ok(0)
+    }
+}
+
+/// HEX-RT-3, AC-T7.1.1 (box-user mode, end to end): a node in box-user mode, through a daemon on a real
+/// socket, starts programs that are another process's children, as the root helper's are. Do run one that
+/// sleeps, then one that exits 3; expect the first not ended while it runs and both ends as they were,
+/// never an end the node made up because it couldn't reap a program it doesn't parent.
+#[test]
+fn a_box_user_programs_end_is_its_own_not_unknown() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sock = dir.path().join("helper.sock");
+    let listener = helper_daemon::bind(&sock).expect("bind");
+    thread::spawn(move || {
+        let daemon = Daemon::new(Shells::default(), vec![7000], 64);
+        let _ = daemon.serve_listener(listener.as_fd());
+    });
+    let rt = MacRuntime::detect(
+        NonZeroU64::new(1 << 40).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        &sock,
+    )
+    .expect("a box-user runtime");
+    let id = BoxId::new("bu-end").unwrap();
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let sh = |script: &str| Program {
+        args: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+        env: vec![],
+        cwd: None,
+        user: None,
+    };
+    let mut sleeper = rt.exec(&id, sh("sleep 0.5"), Stdio::null()).expect("exec");
+    assert_eq!(
+        sleeper.try_wait().unwrap(),
+        None,
+        "a running program read as ended"
+    );
+    assert_eq!(
+        sleeper.wait_for(Duration::from_secs(10)).unwrap(),
+        Some(Exit::Code(0))
+    );
+    let mut three = rt.exec(&id, sh("exit 3"), Stdio::null()).expect("exec");
+    assert_eq!(
+        three.wait_for(Duration::from_secs(10)).unwrap(),
+        Some(Exit::Code(3))
+    );
 }

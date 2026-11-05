@@ -17,7 +17,7 @@
 //! message on the stream with a `u32` length before it ([`read_request`]/[`read_answer`] take one whole
 //! message's bytes); a descriptor rides out of band with its message (`SCM_RIGHTS`), never in the bytes.
 
-use hex_api::{BoxId, Program};
+use hex_api::{BoxId, Exit, Program};
 
 use crate::wire::{self, Fault, Reader, Writer};
 
@@ -43,6 +43,7 @@ mod kind {
     pub const END: u16 = 0x0004;
     pub const INSPECT: u16 = 0x0005;
     pub const SIGNAL: u16 = 0x0006;
+    pub const WAIT: u16 = 0x0007;
 
     pub const ANSWER: u16 = 0x8000;
     pub const A_HELLO: u16 = ANSWER | HELLO;
@@ -51,6 +52,7 @@ mod kind {
     pub const A_END: u16 = ANSWER | END;
     pub const A_INSPECT: u16 = ANSWER | INSPECT;
     pub const A_SIGNAL: u16 = ANSWER | SIGNAL;
+    pub const A_WAIT: u16 = ANSWER | WAIT;
     pub const A_REFUSED: u16 = ANSWER | 0x00ff;
 }
 
@@ -85,6 +87,12 @@ pub enum Request {
     /// `signal` is the Linux signal number, as the rest of Hex carries it; the helper maps it to macOS's
     /// (`hex_core::darwin`), as the process class does. Refused as not running when no member is live.
     Signal { box_id: BoxId, signal: i32 },
+    /// How program `pid`, which the helper started in the box, ended. The helper is its parent, so only it
+    /// can reap it (`waitid` is the parent's: `bsd/kern/kern_exit.c:3194-3361` returns `ECHILD` to any
+    /// other); the node asks once it has seen the program's `NOTE_EXIT` on a kqueue of its own. Answered
+    /// [`Answer::Waited`] with `None` while it runs, and its end only once: a program the helper didn't
+    /// start in the box, or whose end was read already, is [`Exit::Unknown`].
+    Wait { box_id: BoxId, pid: i32 },
 }
 
 /// What the box holds now, as the helper reports it (`proc_listpids(PROC_UID_ONLY)` of the box's user, each
@@ -108,12 +116,20 @@ pub struct State {
 /// What the helper answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
-    Hello { version: u16 },
-    Acquired { uid: u32 },
-    Started { pid: i32 },
+    Hello {
+        version: u16,
+    },
+    Acquired {
+        uid: u32,
+    },
+    Started {
+        pid: i32,
+    },
     Ended,
     State(State),
     Signalled,
+    /// A [`Request::Wait`]'s program's end, `None` while it runs.
+    Waited(Option<Exit>),
     Refused(Refused),
 }
 
@@ -145,6 +161,7 @@ impl Request {
             Request::End { .. } => kind::END,
             Request::Inspect { .. } => kind::INSPECT,
             Request::Signal { .. } => kind::SIGNAL,
+            Request::Wait { .. } => kind::WAIT,
         }
     }
 
@@ -208,6 +225,10 @@ pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8
             w.string(box_id.as_str())?;
             w.i32(*signal);
         }
+        Request::Wait { box_id, pid } => {
+            w.string(box_id.as_str())?;
+            w.i32(*pid);
+        }
     }
     w.done()
 }
@@ -222,6 +243,7 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
         Answer::Ended => kind::A_END,
         Answer::State(_) => kind::A_INSPECT,
         Answer::Signalled => kind::A_SIGNAL,
+        Answer::Waited(_) => kind::A_WAIT,
         Answer::Refused(_) => kind::A_REFUSED,
     };
     put_header(&mut w, version, kind, id);
@@ -230,6 +252,7 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
         Answer::Acquired { uid } => w.u32(*uid),
         Answer::Started { pid } => w.i32(*pid),
         Answer::Ended | Answer::Signalled => {}
+        Answer::Waited(exit) => put_exit(&mut w, *exit),
         Answer::State(s) => {
             w.u32(s.members);
             w.u64(s.footprint);
@@ -309,6 +332,10 @@ pub fn read_request(bytes: &[u8], descriptors: usize) -> Result<(u16, u64, Reque
             box_id: wire::box_id(&mut r)?,
             signal: r.i32()?,
         },
+        kind::WAIT => Request::Wait {
+            box_id: wire::box_id(&mut r)?,
+            pid: r.i32()?,
+        },
         other => {
             return Err(Fault::Kind {
                 kind: other,
@@ -352,6 +379,7 @@ pub fn read_answer(bytes: &[u8]) -> Result<(u16, u64, Answer), Fault> {
             ended_over: r.bool("ended_over")?,
         }),
         kind::A_SIGNAL => Answer::Signalled,
+        kind::A_WAIT => Answer::Waited(read_exit(&mut r)?),
         kind::A_REFUSED => Answer::Refused(read_refused(&mut r)?),
         other => {
             return Err(Fault::Kind {
@@ -363,6 +391,33 @@ pub fn read_answer(bytes: &[u8]) -> Result<(u16, u64, Answer), Fault> {
     };
     r.end(kind, version)?;
     Ok((version, id, answer))
+}
+
+/// A [`Answer::Waited`]'s end: a tag (0 running, 1 a code, 2 a signal, 3 unknown), then the code or
+/// signal as an `i32`.
+fn put_exit(w: &mut Writer, exit: Option<Exit>) {
+    match exit {
+        None => w.u8(0),
+        Some(Exit::Code(c)) => {
+            w.u8(1);
+            w.i32(c);
+        }
+        Some(Exit::Signal(s)) => {
+            w.u8(2);
+            w.i32(s);
+        }
+        Some(Exit::Unknown) => w.u8(3),
+    }
+}
+
+fn read_exit(r: &mut Reader<'_>) -> Result<Option<Exit>, Fault> {
+    Ok(match r.u8()? {
+        0 => None,
+        1 => Some(Exit::Code(r.i32()?)),
+        2 => Some(Exit::Signal(r.i32()?)),
+        3 => Some(Exit::Unknown),
+        t => return Err(Fault::value("exit", format!("variant {t}"))),
+    })
 }
 
 fn read_refused(r: &mut Reader<'_>) -> Result<Refused, Fault> {

@@ -45,7 +45,8 @@ struct UserBox {
 /// The node's box-user backend (native plan step 2): a connection to the privileged helper and the boxes
 /// it manages.
 struct BoxUser {
-    helper: helper_client::Helper,
+    /// Shared with each program it starts, which asks the helper for its end ([`proc::UserProc`]).
+    helper: Arc<helper_client::Helper>,
     boxes: Mutex<BTreeMap<BoxId, UserBox>>,
 }
 
@@ -88,7 +89,7 @@ impl MacRuntime {
                     shared: Arc::new(shared),
                     boxes: Mutex::new(BTreeMap::new()),
                     helper: Some(BoxUser {
-                        helper,
+                        helper: Arc::new(helper),
                         boxes: Mutex::new(BTreeMap::new()),
                     }),
                 })
@@ -287,7 +288,11 @@ impl Runtime for MacRuntime {
                 });
             }
             let pid = bu.exec(id, &program, stdio_fds(stdio)?)?;
-            return Ok(Box::new(proc::BoxProc::watch(pid, None)?));
+            return Ok(Box::new(proc::UserProc::watch(
+                pid,
+                id.clone(),
+                Arc::clone(&bu.helper),
+            )?));
         }
         let b = self.get(id)?;
         // The box's whole memory bound arms each member with a fatal per-process cap (native plan step 1's

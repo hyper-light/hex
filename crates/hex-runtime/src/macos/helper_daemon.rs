@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
-use hex_api::{BoxId, Program, Refusal, Signal};
+use hex_api::{BoxId, Exit, Proc, Program, Refusal, Signal};
 use hex_core::boxuser::{self, Bound, Use};
 use hex_core::darwin;
 use hex_core::helper::{self, Answer, Refused, Request, START_FDS, State};
@@ -27,10 +27,19 @@ use hex_core::helper::{self, Answer, Refused, Request, START_FDS, State};
 use super::helper_client::{recv_framed, send_framed};
 use super::sys;
 
+mod kids;
+use kids::{Full, Kids, Taken};
+
 /// How long [`Daemon::end`] waits for a killed box's user to empty before it reports the kill didn't take
 /// (a `SIGKILL` ends a user's processes in milliseconds; missing a generous bound is a fault, not a limit
 /// to raise, CLAUDE.md §4). Freeing the uid before it is empty would hand a live process to the next box.
 const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
+
+/// How long a [`Request::Wait`] waits for its program's zombie. Not a tuning: the node asks once it has
+/// seen the program's `NOTE_EXIT`, so the daemon's own watch has that event queued and its reap waits for
+/// the zombie the same exit path makes (`proc::BoxProc`); this bounds only a wait asked of a program
+/// still running, which answers `None` and holds the daemon's connection no longer than this.
+const REAP_PATIENCE: Duration = Duration::from_millis(100);
 
 /// One live member of a box's user: its pid and its physical footprint in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +221,9 @@ pub trait Privileged {
         nproc: u32,
     ) -> io::Result<i32>;
 
+    /// Watch program `pid`, just started (the daemon is its parent), for its end and its reap.
+    fn watch(&self, pid: i32) -> io::Result<Box<dyn Proc>>;
+
     /// Re-arm a running member's footprint at `cap_mib` (a forked member, or a rebalance of its share).
     fn arm(&self, pid: i32, cap_mib: u32) -> io::Result<()>;
 
@@ -243,16 +255,23 @@ pub struct Daemon<P: Privileged> {
     /// returns it on delete once its user is empty.
     pool: Mutex<Vec<u32>>,
     boxes: Mutex<BTreeMap<BoxId, Tracked>>,
+    /// The programs the daemon started, until the node reads each one's end ([`kids`]).
+    kids: Mutex<Kids>,
     nproc: u32,
 }
 
 impl<P: Privileged> Daemon<P> {
     /// A daemon over `ops`, with the free `pool` users and a per-user process cap `nproc`.
+    /// A box holds at most `nproc` programs the daemon started (its user can run no more), and the unread
+    /// ends of as many ended boxes as the pool has users.
     pub fn new(ops: P, pool: Vec<u32>, nproc: u32) -> Self {
+        let cap = usize::try_from(nproc).unwrap_or(usize::MAX).max(1);
+        let graves = pool.len().max(1);
         Self {
             ops,
             pool: Mutex::new(pool),
             boxes: Mutex::new(BTreeMap::new()),
+            kids: Mutex::new(Kids::new(cap, graves)),
             nproc,
         }
     }
@@ -308,6 +327,8 @@ impl<P: Privileged> Daemon<P> {
         for (id, uid) in boxes {
             let _ = self.rearm(&id, uid);
         }
+        // Reap the programs that ended, so none stays a zombie under its user.
+        self.kids()?.sweep();
         Ok(())
     }
 
@@ -354,6 +375,7 @@ impl<P: Privileged> Daemon<P> {
             Request::End { box_id } => self.end(&box_id),
             Request::Inspect { box_id } => self.inspect(&box_id),
             Request::Signal { box_id, signal } => self.signal(&box_id, signal),
+            Request::Wait { box_id, pid } => self.wait(&box_id, pid),
         }
     }
 
@@ -361,6 +383,12 @@ impl<P: Privileged> Daemon<P> {
         self.boxes
             .lock()
             .map_err(|_| poisoned("the daemon's boxes"))
+    }
+
+    fn kids(&self) -> Result<std::sync::MutexGuard<'_, Kids>, Refusal> {
+        self.kids
+            .lock()
+            .map_err(|_| Refusal::Broken("the daemon's programs lock is poisoned".to_owned()))
     }
 
     fn acquire(&self, box_id: BoxId, bound: u64, reserve: u64) -> Answer {
@@ -378,6 +406,10 @@ impl<P: Privileged> Daemon<P> {
             return Answer::Refused(Refused::NoFreeUser);
         };
         drop(pool);
+        match self.kids() {
+            Ok(mut k) => k.open(&box_id),
+            Err(_) => return poisoned("the daemon's programs"),
+        }
         boxes.insert(box_id, Tracked::new(uid, bound, reserve));
         Answer::Acquired { uid }
     }
@@ -398,6 +430,16 @@ impl<P: Privileged> Daemon<P> {
                 None => return Answer::Refused(Refused::UnknownBox(box_id.clone())),
             }
         };
+        match self.kids().map(|mut k| k.room(box_id)) {
+            Ok(Ok(())) => {}
+            Ok(Err(Full::NoBox)) => return Answer::Refused(Refused::UnknownBox(box_id.clone())),
+            Ok(Err(Full::Running(cap))) => {
+                return Answer::Refused(Refused::StartFailed(format!(
+                    "the box runs {cap} programs the helper started, its most"
+                )));
+            }
+            Err(_) => return poisoned("the daemon's programs"),
+        }
         // Spawn generously at the whole apportionable bound (the only member may use it all), then
         // re-apportion against the live membership and arm each member down to its share.
         let pid = match self.ops.spawn(
@@ -411,6 +453,23 @@ impl<P: Privileged> Daemon<P> {
             Ok(pid) => pid,
             Err(e) => return Answer::Refused(Refused::StartFailed(e.to_string())),
         };
+        // Watched from its start, so its end is seen and reaped however soon it comes.
+        let held = self
+            .ops
+            .watch(pid)
+            .map_err(|e| e.to_string())
+            .and_then(|p| match self.kids() {
+                Ok(mut k) => k.hold(box_id, pid, p).map_err(|f| format!("{f:?}")),
+                Err(e) => Err(e.to_string()),
+            });
+        if let Err(why) = held {
+            if let Some(p) = rustix::process::Pid::from_raw(pid) {
+                let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
+            }
+            return Answer::Refused(Refused::StartFailed(format!(
+                "watching the started program {pid}: {why}; it was killed"
+            )));
+        }
         if let Err(a) = self.rearm(box_id, uid) {
             return a;
         }
@@ -484,6 +543,10 @@ impl<P: Privileged> Daemon<P> {
                 Err(e) => return os("checking a box's user is empty", &e),
             }
         }
+        // Reap the box's programs (each a zombie now, or about to be) and keep their ends for the node.
+        if let Ok(mut k) = self.kids() {
+            k.close(box_id, Instant::now().checked_add(DRAIN_PATIENCE));
+        }
         if let Ok(mut pool) = self.pool.lock() {
             pool.push(uid);
         }
@@ -539,6 +602,37 @@ impl<P: Privileged> Daemon<P> {
             Ok(0) => Answer::Refused(Refused::NotRunning(box_id.clone())),
             Ok(_) => Answer::Signalled,
             Err(e) => os("signalling a box", &e),
+        }
+    }
+}
+
+impl<P: Privileged> Daemon<P> {
+    /// A [`Request::Wait`]: the program's end, reaped here (the daemon is its parent), read once.
+    fn wait(&self, box_id: &BoxId, pid: i32) -> Answer {
+        let taken = match self.kids() {
+            Ok(mut k) => k.take(box_id, pid),
+            Err(_) => return poisoned("the daemon's programs"),
+        };
+        let mut proc = match taken {
+            None => return Answer::Refused(Refused::UnknownBox(box_id.clone())),
+            Some(None) => return Answer::Waited(Some(Exit::Unknown)),
+            Some(Some(Taken::Ended(exit))) => return Answer::Waited(Some(exit)),
+            Some(Some(Taken::Live(p))) => p,
+        };
+        let got = proc.wait_for(REAP_PATIENCE);
+        if !matches!(got, Ok(Some(_))) {
+            let back = match self.kids() {
+                Ok(mut k) => k.put_back(box_id, pid, proc),
+                Err(_) => Err(proc),
+            };
+            // Its box was dropped meanwhile: reap it here rather than leave a zombie.
+            if let Err(mut p) = back {
+                let _ = p.wait_for(DRAIN_PATIENCE);
+            }
+        }
+        match got {
+            Ok(exit) => Answer::Waited(exit),
+            Err(e) => Answer::Refused(Refused::StartFailed(format!("waiting on {pid}: {e}"))),
         }
     }
 }
