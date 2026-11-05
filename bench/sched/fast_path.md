@@ -1,7 +1,8 @@
 # The scheduler fast path's decision latency (AC-T7.4.2)
 
 **Bar:** placement decision p99 at 10,000 placements/s on 10,000 simulated nodes is at most 10 ms
-(`AC-T7.4.2`; G2 step 5). **Result: MET, p99 81.0 µs (best of 5), every run's p99 between 81 and 92 µs.**
+(`AC-T7.4.2`; G2 step 5). **Result: MET, p99 78.0 µs (best of 5) at `e201e11`, every run's p99 between 78
+and 94 µs; 81.0 µs at `e6ebcc7` before it.**
 
 ## What was measured
 
@@ -21,6 +22,32 @@ Decisions that find no node with room ("refused") are included. They are the slo
 every node: at 85% placed CPU, some generated needs fit nowhere, 5-39% of timed decisions per run.
 
 ## The run of record
+
+Re-measured at the tip after G2 step 4 changed `FitIndex::sampled_fit` (a scorer arm added; the default
+`BestFit` path the bench drives is unchanged, and each seed refused as many arrivals as it did before).
+
+- Host: fedora, `kiln-a094a12d.attlocal.net`, Intel Core i9-14900HX (24 cores, 32 threads), Linux
+  6.19.10-300.fc44.
+- Placement: CPUs 4-15 (`AllowedCPUs=4-15`, affinity checked: `4-15`), under
+  `flock /home/adalundhe/.cache/hex-t7/fedora-timed.lock`.
+- Commit: `e201e11` (cp/t7-sched), release (`cargo bench` profile).
+- Date: 2026-11-05, 22:09:26Z to 22:10:30Z. Units: hex-sched-benchbuild-20261105T220338Z (build, CPUs 16-31)
+  and hex-sched-benchtime-20261105T220338Z (timed).
+- Load: noisy. Load average 21.62 before and 17.09 after. Six docker containers were up (others' labs and
+  builders: issue556oss-control-plane, three buildx builders, kind-registry, kiln-t10-minio), and unit
+  hex-sched-gates-20261105T220957Z ran the gates on CPUs 16-31 from 22:09:57Z. Nothing was done to quiet the
+  host.
+- Runs: 5 x 100,000 timed placements, best of 5 by p99.
+
+| seed | refused | p50 µs | p99 µs | p99.9 µs | max µs |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 6,971 | 49.1 | 83.8 | 121.1 | 427.8 |
+| 1 | 15,198 | 49.9 | 87.4 | 705.1 | 3,632.6 |
+| 2 | 38,593 | 45.1 | **78.0** | 123.4 | 3,114.8 |
+| 3 | 4,905 | 48.5 | 80.7 | 126.0 | 2,950.6 |
+| 4 | 12,643 | 45.8 | 93.8 | 1,228.2 | 3,495.4 |
+
+## The run before it
 
 - Host: fedora, `kiln-a094a12d.attlocal.net`, Intel Core i9-14900HX (24 cores, 32 threads), Linux
   6.19.10-300.fc44.
