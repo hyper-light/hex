@@ -137,3 +137,22 @@ away from other runs' timed parts), in unit `hex-s4-job1-20261103T225115Z`, kern
   namespaces hold above.
 - **The refill's margin.** One thread makes a pair in about 21 us on an E-core, some 20 times the 2,100 creates a second
   the sustained phase has reached (`hex_core::netns::BOUND`'s pool, by contrast, runs dry at that rate).
+
+## The ipc and uts pool's dry rate under the under-load bar (decision 8's parked-proc A/Bs; 2026-11-05, fedora)
+
+The parked-proc mounts A/Bs (`parked_procs_ab.md`) ran four times on fedora's host: at 9e13b95, 506a263, 195e86a
+and 2caebe2, each run 16 cells of 2,000 creates at 8 in flight, with 8,000 idle threads and 6 or 12 busy loops on the
+creates' CPUs. That is 64 cells. Their creates that made ipc and uts namespaces on the path, the pool dry
+(`ipc_uts.made_on_path`), every nonzero cell:
+- 9e13b95: B-L6-r3, 18;
+- 506a263: A-L12-r2, 5, and A-L6-r1, 5;
+- 195e86a: A-L12-r1, 3;
+- 2caebe2: B-L12-r1, 4.
+
+The other 59 cells read 0. That is at most 0.9% of a cell's creates, and it comes as often with parked procs off (3
+cells) as on (2), so the parked procs' faster creates don't drain the pool.
+
+**Reading (DESIGN, not measured apart):** `IPC_UTS_BOUND`'s 32 pairs are about 10 ms of demand at about 3,000 creates
+a second, and one refill thread makes some 43,000 a second (above). A dry take then means that thread didn't run for
+over about 10 ms under the busy loops: preempted, not a bound too small for the rate. The bound stays 32 (the lead,
+2026-11-05T16:00Z). A probe of the refill's longest gap under load would test this reading; none has been run.
