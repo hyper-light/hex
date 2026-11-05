@@ -2078,14 +2078,22 @@ part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked i
 That proc is made with a pid namespace of its own, which the seed clones the init into, and a parked init is pid 1 of
 the pid namespace it was parked in. So on 7.x with prepared procs on, every create clones fresh. On 6.19 there is no
 prepared proc at all: through 7.0 the kernel won't hand over a pid namespace with no process in it (`goal6-mntns.md`
-§7), so part 19's init makes its proc and masks on the path (with Docker's paths, 28 write holds and 4 superblocks a create:
-`goal5-mounts.md` §11, as decision 6's update cites it).
+§7), so part 19's init makes its proc and masks on the path. With Docker's paths that is 28 write holds and 4
+superblocks a create (`goal5-mounts.md` §11, as decision 6's update cites it), and about 314 µs of the init's CPU: the
+proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `move_mount` (`goal6-mntns.md` §11).
 - **The fact it rests on.** A parked init's pid namespace has a process in it, and procfs mounts for any pid namespace
-  given by descriptor (`pidns=`), on 6.19 as on 7.x (v6.19 `fs/proc/root.c:48`, `:115-150`). The agent opens the
-  namespace as `/proc/<parked pid>/ns/pid` in its own mount namespace, which on a root node has `/proc`. So the proc
-  and its masks can be made at park time, off create's path, on both kernels.
-- **At park.** The park job carries the proc key the owner's last box would have had (`procmount::eligible`, kept by
-  `Choose::init_made` beside its clone flags; for a box of no owner, the last such box's). Once the init says it is
+  given by descriptor (`pidns=`). That option came in Linux 6.18, so 6.19 has it (v6.19 `fs/proc/root.c:48`,
+  `:115-160`), and it asks only for `CAP_SYS_ADMIN` over the target namespace's user namespace and a target descended
+  from the mounter's active pid namespace (`:153-159`). It doesn't care whether the namespace has processes. Goal 6's
+  pool needs 7.1 only because it opens a namespace with none yet (`goal6-mntns.md` §7). The agent opens the parked
+  init's namespace through the pidfd it holds (`ioctl(PIDFD_GET_PID_NAMESPACE)`, Linux 6.11 and later), never by
+  `/proc/<pid>`, so a reused pid can't hand it another process's. So the proc and its masks can be made at park time,
+  off create's path, on both kernels.
+- **At park.** The park job carries the proc key the owner's last box would have had (`procmount::Key`: the proc
+  mount's data and flags and the masked and read-only paths beneath `/proc`, in the spec's order, from
+  `procmount::eligible`; kept by `Choose::init_made` beside its clone flags; for a box of no owner, the last such
+  box's). A box `procmount::eligible` refuses (no pid namespace of its own, another mount at or beneath `/proc`, a
+  `..`, or a `linux.mountLabel`: a labelled container takes nothing the node made ahead) parks with no proc. Once the init says it is
   parked, the node's refill worker (the `/dev` and proc pools' worker) makes the proc for the parked init's pid
   namespace: the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
   and flags, `fsmount`, then the masks and read-only paths), with the same `ProcSources`. The parked slot keeps the
@@ -2112,9 +2120,11 @@ prepared proc at all: through 7.0 the kernel won't hand over a pid namespace wit
   bytes charged.
 - **The A/B, of record, on fedora (6.19)**, under the under-load bar's conditions: 8 in flight, 8,000 idle threads,
   6 and 12 busy loops, Docker's paths, no priority change. Interleaved, the setting on against off, both with parked
-  inits. Beside it: part 19's p50 and p99, the whole create's p50 and p99, mount holds a create, and the predicted
-  key's hits and misses. The g6 agent owns part 19's harness and its numbers. The 7.2 guest runs the same,
-  indicative only.
+  inits. Beside it: part 19's p50 and p99, the whole create's p50 and p99, mount holds a create (the mounts trace's
+  holds by holder and its unpreempted p99: cp/t7-g6 92443a8's reader), and the predicted key's hits and misses. The g6
+  agent owns part 19's harness and its numbers. The 7.2 guest (Fedora's 7.2.15 kernel, the image
+  `vm7_build.sh` made, driven by `bench/oci-validation/vm7_breakdown.sh` with the tree way) runs the same, indicative
+  only. There, goal 6's procs made ahead took part 19's p50 down about 3x.
 - **What would falsify it.** Part 19's p99 under the bar's conditions not falling with the setting on. Or the whole
   create's p99 not falling. Or misses making the setting cost more than it saves.
 
