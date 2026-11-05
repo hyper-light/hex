@@ -1144,13 +1144,12 @@ impl Runtime {
                             }
                         }
                         // A proc made ahead adds its pid namespace and its tree, within the same bound. None is
-                        // taken from the pool where an init is parked in the cgroup and the namespace is made the
-                        // old way: the parked init, which has its pid namespace already, takes the create (decision
-                        // 8), and a pool's proc would keep it from doing so. The proc made for that init's own pid
+                        // taken from the pool where an init is parked in the cgroup, whatever the way: the parked
+                        // init, which has its pid namespace already, takes the create (decision 8), and a pool's
+                        // proc would keep it from doing so: a create takes one or the other, never both. The proc made for that init's own pid
                         // namespace, if the node made one (parked procs), is the create's when its key is the
                         // spec's and it fits; otherwise it ends unused, a miss, and the init mounts its own.
-                        let parked_takes = parking.parked.is_some()
-                            && pruned.mount_namespace == super::mntns::MountNamespace::Copy;
+                        let parked_takes = parking.parked.is_some();
                         let parked_proc = if parked_takes {
                             parking.parked.as_mut().and_then(Parked::take_proc)
                         } else {
@@ -1475,16 +1474,22 @@ impl Runtime {
             pruned,
         };
         let Parking { parked, chooser } = parking;
-        // A parked init was cloned with its own pid and mount namespaces: it can't take a create that carries a
-        // pool's proc made ahead (whose pid namespace the init would be cloned into) or one whose mount namespace
-        // is made another way (decision 6's update), so such a create is cloned fresh and the parked init ended.
-        // The proc made for the parked init's own pid namespace is the one it takes.
-        let takes_parked = req.pruned.as_ref().is_none_or(|p| {
-            (p.proc_mount.is_none() || p.proc_sink.is_some())
-                && p.mount_namespace == super::mntns::MountNamespace::Copy
-        });
+        // A parked init was cloned with its own pid namespace: it can't take a create that carries a pool's proc
+        // made ahead (whose pid namespace the init would be cloned into), so such a create is cloned fresh and the
+        // parked init ended. The proc made for the parked init's own pid namespace is the one it takes.
+        let takes_parked = req
+            .pruned
+            .as_ref()
+            .is_none_or(|p| p.proc_mount.is_none() || p.proc_sink.is_some());
+        // Its mount namespace's way changes the flags it is cloned with, so a parked init is made, and held, to the
+        // way's (decision 6's update, decision 8).
+        let way = req
+            .pruned
+            .as_ref()
+            .map_or(super::mntns::MountNamespace::Copy, |p| p.mount_namespace);
+        let made_with = super::mntns::clone_flags(flags, way);
         let claimed = match parked {
-            Some(p) if p.flags == flags && takes_parked => seeds.claim(p, &req).ok(),
+            Some(p) if p.flags == made_with && takes_parked => seeds.claim(p, &req).ok(),
             _ => None,
         };
         // A parked init's proc shows that init's pid namespace, so a create its init didn't take mounts its own:
@@ -1506,7 +1511,7 @@ impl Runtime {
             }
         }
         if let Some(chooser) = chooser {
-            chooser.init_made(flags, claimed.is_some());
+            chooser.init_made(made_with, claimed.is_some());
         }
         let (pid, pidfd) = match claimed {
             Some(started) => {

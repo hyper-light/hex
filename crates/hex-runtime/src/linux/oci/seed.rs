@@ -768,7 +768,8 @@ fn serve_park(
     }
 }
 
-/// The namespaces a park may make: `CLONE_NEW*` bits, nothing that shares or changes the clone otherwise. A user
+/// The namespaces a park may make: `CLONE_NEW*` bits and `CLONE_EMPTY_MNTNS` (an init parked for the empty way,
+/// [`super::mntns::clone_flags`]), nothing that shares or changes the clone otherwise. A user
 /// namespace's maps are written once the init is claimed, by the create's own handshake, as for a fresh clone.
 fn parkable() -> u64 {
     [
@@ -781,7 +782,7 @@ fn parkable() -> u64 {
     ]
     .into_iter()
     .filter_map(|f| u64::try_from(f).ok())
-    .fold(0, |all, f| all | f)
+    .fold(super::mntns::CLONE_EMPTY_MNTNS, |all, f| all | f)
 }
 
 /// A parked init's life (decision 8): it empties its effective capabilities, says on `claim` that it is parked,
@@ -1147,20 +1148,15 @@ fn serve_create_pruned(
                 cloned.map_err(|e| OciError::os("clone3 the program into the container", e)),
             )
         }
-        // An init parked ahead has its pid and mount namespaces already (decision 8): a create making its mount
-        // namespace another way (decision 6's update) isn't one it can take, nor one carrying a proc of another pid
-        // namespace than its own. The proc the node made for it (parked procs) shows this init as its pid 1, its
+        // An init parked ahead has its pid namespace already (decision 8), and its mount namespace as the create's
+        // way makes it (decision 6's update; [`super::mntns::clone_flags`]): copied or empty, made at its clone; from
+        // the tree, none of its own until it joins the agent's in the init's build, as a fresh one does. A create
+        // whose way's flags aren't the ones it was parked with is refused ([`begin`]), and so is one carrying a proc
+        // of another pid namespace than its own. The proc the node made for it (parked procs) shows this init as its pid 1, its
         // `self` reading "1" (proc(5), /proc/self; the pid as the mount's pid namespace numbers it), and only that
         // proc is taken. The runtime sends it no other (run.rs, start_via_seed); one that came anyway is refused by
         // type.
         How::Parked { .. } => {
-            if create.mount_namespace != MountNamespace::Copy {
-                return refused(
-                    Failed::Request,
-                    "a parked init was claimed by a create with a mount namespace made another way"
-                        .to_owned(),
-                );
-            }
             if let Some((_, proc)) = &proc_mount
                 && !shows_self_as_one(proc.tree.as_fd())
             {
@@ -1171,8 +1167,12 @@ fn serve_create_pruned(
                 );
             }
             (
-                MountNamespace::Copy,
-                begin(how, Some(cgroup_dir.as_fd()), flags),
+                create.mount_namespace,
+                begin(
+                    how,
+                    Some(cgroup_dir.as_fd()),
+                    super::mntns::clone_flags(flags, create.mount_namespace),
+                ),
             )
         }
     };
@@ -1260,11 +1260,13 @@ fn clone_pruned(
     MountNamespace,
     Result<Option<sys::Sibling>, rustix::io::Errno>,
 ) {
-    let newns = u64::try_from(libc::CLONE_NEWNS).unwrap_or(0);
     match way {
-        MountNamespace::FromTree => (way, sys::clone_sibling_errno(Some(cgroup), flags & !newns)),
+        MountNamespace::FromTree => (
+            way,
+            sys::clone_sibling_errno(Some(cgroup), super::mntns::clone_flags(flags, way)),
+        ),
         MountNamespace::Empty if !NO_EMPTY_MNTNS.load(Ordering::Relaxed) => {
-            let empty = (flags & !newns) | super::mntns::CLONE_EMPTY_MNTNS;
+            let empty = super::mntns::clone_flags(flags, way);
             match sys::clone_sibling_errno(Some(cgroup), empty) {
                 Err(rustix::io::Errno::INVAL) => {
                     NO_EMPTY_MNTNS.store(true, Ordering::Relaxed);
