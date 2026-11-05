@@ -262,7 +262,13 @@ Read:
   much of it comes from Hex's own make-ahead work running beside creates in flight. A lever that removes holds rather
   than trading them, to try next (indicative first):
   - keep the pools from running dry under 8 in flight, so no create makes on the path;
-  - batch the pools' refills, so each refill takes the lock once rather than once per proc or `/dev`;
+  - a prepared proc's masked files: each is a clone of the host's `/dev/null` made private, then attached
+    (`init::prepare_proc`), 3 holds a file. A clone of a mount that's already private joins no peer group, so a
+    node that keeps one private detached clone of `/dev/null` (as it keeps the empty tmpfs, where the kernel
+    clones a detached mount) makes each masked file in 2 holds. The init's own masks already take 2, from the
+    container's `/dev/null`;
   - fewer `mount_setattr` holds in the init (2 a create).
+  Batching the refills removes nothing: every attach to a detached tree is a hold of its own, however many are
+  made in a row.
   `open_tree_attr` doesn't merge a clone and its attributes into one hold (`goal5-mounts.md`, step 3's notes).
 - A guest's tail isn't the host's (§9). A reading of record waits on a 7.x bench host.
