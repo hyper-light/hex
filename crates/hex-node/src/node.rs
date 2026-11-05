@@ -839,12 +839,16 @@ impl Node {
     /// since the init's end waits for them (f48), and once the init has ended anything still in the cgroup
     /// with a process of its own is outside the namespace (f47): then, and for every other box, ended
     /// by `cgroup.kill` as before (f49). An `oci` box whose init ended and was reaped before its delete
-    /// needs no kill when its cgroup holds nothing: a pid namespace of its own ended with it. Each way is
+    /// needs no kill when its cgroup holds nothing live, and is waited on, bounded, to empty: a pid namespace
+    /// of its own ended with it. Each way is
     /// counted ([`Node::kills`]). Says whether it wrote `cgroup.kill`, after which the cgroup can't be
     /// handed on ([`cgroups::Held`]'s `killed`).
     fn end(&self, id: &BoxId, cg: &BoxCgroup, ending: &Ending<'_>) -> Result<bool, Refusal> {
+        // A reaped init still counts in its cgroup until its last switch (Linux v6.19,
+        // kernel/sched/core.c:5156), so the cgroup may read populated with nothing live in it: then it
+        // empties without a kill, as below.
         if let Ending::Ended = ending
-            && !cg.populated()?
+            && (!cg.populated()? || (!outsiders(cg, 0) && cg.wait_empty(EMPTY_PATIENCE)?))
         {
             self.cgroups.ended_through_init();
             return Ok(false);
