@@ -1339,8 +1339,9 @@ lifecycle without changing what a box may do.
     descriptor limit stays as the node was given it, never raised: a box without an rlimit of its own sees the limit it
     would without the files (the lead, 2026-11-03T23:07Z). As the node starts it works out how many namespaces may hold
     them, what the soft `RLIMIT_NOFILE` leaves past the node's own descriptors at its bounds (the kept namespaces', each
-    live box's, its connections' and programs', the seeds', and the network namespaces and ipc and uts pairs its two
-    pools make ahead at their bounds, with their refill threads' and each call's takes), four a namespace
+    live box's, its connections' and programs', the seeds', the network namespaces and ipc and uts pairs its two pools
+    make ahead and step 3's prepared `/dev` mounts at their bounds, with their makers' and each call's takes), four a
+    namespace
     (`FilesBound`), and says so on the agent's stderr with both numbers. A namespace past that bound holds none and each of its checks enters, counted
     (`files_bounded`); a limit too small for the node's own work shows where it runs out, as that call's typed refusal.
     At systemd's default soft limit of 1024 the bound is 0, so where nodes run today no namespace holds its files and

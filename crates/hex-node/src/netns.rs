@@ -85,6 +85,19 @@ const FDS_BESIDE: u64 = 1_024;
 /// it is making.
 const FDS_A_REFILL: u64 = 2;
 
+/// Step 3's prepared `/dev` pool at its bound, one descriptor each: four keys of eight (`hex_core::devfs::KEYS`,
+/// `PER_KEY`).
+fn devfs_held() -> u64 {
+    of(
+        hex_core::devfs::KEYS.saturating_mul(hex_core::devfs::PER_KEY),
+        1,
+    )
+}
+/// The pool's one maker at its peak (init's `make_fs`): the filesystem's context and its tree.
+const FDS_A_DEVFS_MAKE: u64 = 2;
+/// A call's take of a prepared `/dev` until its box's init has it.
+const FDS_DEVFS_TAKES: u64 = 1;
+
 /// The bounds of the node's pools made ahead: decision 4's network namespaces, one descriptor each, and step 4's
 /// ipc and uts pairs, two each; and whether it keeps step 3's prepared `/dev` mounts ([`crate::devfs::Devfs`]), a
 /// root node's alone.
@@ -108,7 +121,7 @@ impl Pools {
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
     /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
-    /// none has no thread.
+    /// none has no thread. The prepared `/dev` pool the same, where the node keeps it.
     fn descriptors(self) -> u64 {
         let pool = |bound: usize, each: u64| {
             if bound == 0 {
@@ -119,9 +132,17 @@ impl Pools {
         };
         let takes =
             u64::from(self.netns > 0).saturating_add(u64::from(self.ipc_uts > 0).saturating_mul(2));
+        let devfs = if self.devfs {
+            devfs_held()
+                .saturating_add(FDS_A_DEVFS_MAKE)
+                .saturating_add(of(crate::serve::WORKERS, FDS_DEVFS_TAKES))
+        } else {
+            0
+        };
         pool(self.netns, 1)
             .saturating_add(pool(self.ipc_uts, 2))
             .saturating_add(of(crate::serve::WORKERS, takes))
+            .saturating_add(devfs)
     }
 }
 
@@ -138,7 +159,7 @@ fn kept_at_most() -> u64 {
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
 /// kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools; the
-/// namespaces made ahead under `pools`.
+/// namespaces and the `/dev` mounts made ahead under `pools`.
 fn descriptors_of_the_node(pools: Pools) -> u64 {
     let connections = crate::serve::LIMITS.connections;
     [
