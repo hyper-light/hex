@@ -502,11 +502,20 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
   - Serially (host.sh's lifecycle pass, cp/t7-g5-parkproc f15393c's record), the delete's in-process p50 rises
     0.03-0.12 ms, with every create a hit.
 - **Where the proc is made, decided (the lead, 2026-11-05 17:00Z): on the parking thread**, as built at
-  cp/t7-g5-parkproc f15393c. Both worker arms failed. A single worker couldn't keep pace (hits 409-663 of 1,992, part 19
+  cp/t7-g5-parkproc f15393c, and at its gated tip a4915c6 (code tree 1e5e956; gates 7/7, root lab 7 of 7 and the
+  guest lab 2 of 2 in one unit, hex-g5tail-ppfull-20261105T170215Z). Both worker arms failed. A single worker couldn't keep pace (hits 409-663 of 1,992, part 19
   back at the off arm's numbers), and the workers were bound by the one shared mount lock all the procs' holds take.
 - **It's opt-in:** `Node::with_parked_procs`, off by default. Whether it goes on by default is Ada's call.
-- So with parked procs on, the under-load bar is approached on 6.19, but not yet met: part 19's p99 is 351-761 us
-  against 0.5 ms, under it in 2 of 8 cells, with a p50 of ~37 us.
+- **The re-run at that tree** (parked_procs_ab.md, "at 1e5e956"; harness cp/t7-g6 f8933bd by git archive; 17:05-17:12Z,
+  under heavier load, 43-53):
+  - part 19's p50: 240-257 us → 42-47 us;
+  - its p99: 1,357-2,366 → 549-867 us at 6 loops, and 1,972-2,332 → 508-1,373 us at 12;
+  - its unpreempted p99: 470-1,644 → 58-812 us;
+  - every claim a hit.
+  The serial delete-cost pass there reads the delete flat, and the 32-in-flight rate 1-3% lower.
+- So with parked procs on, the under-load bar is approached on 6.19, but not yet met. Part 19's p99 is 351-761 us in
+  the A/B of record (under 0.5 ms in 2 of 8 cells), with a p50 of ~37 us, and 508-1,373 us in the heavier-loaded
+  re-run at the gated tip.
 
 What can reach the bar is goal 6's 7.x path: the namespace made from a tree, with procs made ahead.
 - In the Linux 7.2 guest, part 19's p50 is about a third of 6.19's (56-80 us against about 250, §9-§10). Both the
