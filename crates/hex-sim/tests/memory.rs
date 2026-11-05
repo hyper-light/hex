@@ -1,0 +1,152 @@
+//! `AC-T7.11.4`: control-plane memory per workload, measured by a counting global allocator
+//! (`docs/design/hex-sim.md` H12). `cap` wraps the system allocator and counts the bytes live on the
+//! heap, as the callers' layouts ask for them (not the allocator's own per-chunk overhead). A run's
+//! store and every shard's plane (eight shards, H13's sharded row) are dropped, and what the count
+//! falls by is the heap they held.
+//!
+//! What's counted, for a placed workload: the store's record (its spec, queue position, version and
+//! state) in the records map with the map's own nodes, its two log entries (submit and placement;
+//! a third, its completion, comes when it ends), and every plane's version entry for it. Beside those,
+//! amortised over the workloads, each plane's fit index over the nodes, its change window and its
+//! queues, and the store's per-node capacity and use. The store's log is Amphora's in production, so
+//! counting it here is conservative. The clients' and node agents' state (`Run::starts`, `acked`,
+//! `ran`, ...) and the run's input (`Cluster`) are not the control plane's and are not counted.
+//!
+//! This binary holds one test, so nothing else allocates while it measures.
+
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::disallowed_macros
+    )
+)]
+
+use std::alloc::System;
+
+use cap::Cap;
+use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::sim::{self, Config, Run};
+use hex_sim::spec;
+use hex_sim::store::{State, Store};
+
+#[global_allocator]
+static ALLOC: Cap<System> = Cap::new(System, usize::MAX);
+
+/// `AC-T7.11.4`'s bar: at most 4 KiB of control-plane memory per workload.
+const BAR_BYTES: usize = 4096;
+
+const NODES: u32 = 10_000;
+const WORKLOADS: u64 = 1_000_000;
+const SHARDS: u32 = 8;
+const MIB: u64 = 1 << 20;
+const GIB: u64 = 1 << 30;
+
+/// H13's shape: `scheduler_perf`'s pause pod (100m CPU, 500Mi) on nodes of 11 CPU and 55 GiB, which
+/// hold 110 of them; 1,000,000 on 10,000 nodes fill the 1,100,000 slots to 91%. All are submitted at
+/// once and none ends.
+fn h13() -> Cluster {
+    let nodes = (0..NODES)
+        .map(|id| NodeSpec {
+            id: NodeId(id),
+            capacity: Resources {
+                cpu_milli: 11_000,
+                mem_bytes: 55 * GIB,
+                gpus: 0,
+            },
+            background_milli: 0,
+        })
+        .collect();
+    let workloads = (0..WORKLOADS)
+        .map(|id| WorkloadSpec {
+            id: WorkloadId(id),
+            need: Resources {
+                cpu_milli: 100,
+                mem_bytes: 500 * MIB,
+                gpus: 0,
+            },
+            kind: Kind::Plain,
+            arrives: 0,
+            runs_for: None,
+        })
+        .collect();
+    Cluster { nodes, workloads }
+}
+
+/// H12's non-vacuity for the counter itself: do allocate a buffer of known size and free it; expect
+/// the count to rise by exactly its bytes and fall back.
+fn counter_counts() {
+    let before = ALLOC.allocated();
+    let buffer = vec![0u8; 1 << 20];
+    assert_eq!(ALLOC.allocated() - before, 1 << 20);
+    drop(buffer);
+    assert_eq!(ALLOC.allocated(), before);
+}
+
+/// AC-T7.11.4: do run 1,000,000 workloads to all placed on 10,000 nodes under 8 shards, then drop the
+/// store and every shard's plane; expect the heap they held, with their inline sizes, to be at most
+/// 4096 bytes a workload. Non-vacuity: the counter moves by what's allocated, every workload is placed
+/// and held by the store and by a plane when it reads, every slice's log is one the serial
+/// specification makes, and the store's count is at least its records' layouts.
+#[test]
+fn a_million_placed_workloads_hold_at_most_4_kib_each() {
+    counter_counts();
+    let cluster = h13();
+    let config = Config {
+        shards: SHARDS,
+        workers: 16,
+        ..Config::default()
+    };
+    let run = sim::run(&cluster, &config).unwrap();
+
+    let workloads = usize::try_from(WORKLOADS).unwrap();
+    let placed = run
+        .store
+        .records()
+        .filter(|r| matches!(r.state, State::Placed(_)))
+        .count();
+    assert_eq!(placed, workloads);
+    let end = spec::check_end(&cluster, &run);
+    assert_eq!(end.lost_or_double(), 0, "{end:?}");
+    assert_eq!(
+        spec::check_slices(&cluster, &run).unwrap().len(),
+        usize::try_from(SHARDS).unwrap()
+    );
+    assert_eq!(run.planes.len(), usize::try_from(SHARDS).unwrap());
+    assert!(run.planes.iter().all(|p| p.pending() == 0));
+    let held_by_planes: usize = run.planes.iter().map(|p| p.workloads()).sum();
+    assert_eq!(held_by_planes, workloads);
+
+    let Run { store, planes, .. } = run;
+    let inline = size_of_val(&store) + size_of_val(&planes);
+    let held = ALLOC.allocated();
+    drop(store);
+    let after_store = ALLOC.allocated();
+    drop(planes);
+    let after_planes = ALLOC.allocated();
+    let store_bytes = held - after_store;
+    let plane_bytes = after_store - after_planes;
+    let total = store_bytes + plane_bytes + inline;
+    eprintln!(
+        "AC-T7.11.4: store {store_bytes} B, planes {plane_bytes} B, inline {inline} B; \
+         {} B per workload over {WORKLOADS} on {NODES} nodes, {SHARDS} shards (bar {BAR_BYTES})",
+        total / workloads
+    );
+
+    assert!(
+        store_bytes >= Store::record_bytes() * placed,
+        "the count missed the store's records: {store_bytes} B"
+    );
+    assert!(
+        plane_bytes >= size_of::<(WorkloadId, u64)>() * placed,
+        "the count missed the planes' versions: {plane_bytes} B"
+    );
+    assert!(
+        total <= BAR_BYTES * workloads,
+        "{total} B over {WORKLOADS} workloads, over {BAR_BYTES} each"
+    );
+}
