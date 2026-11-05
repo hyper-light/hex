@@ -79,3 +79,43 @@ four were never all waiting at once (0.00 contended hours), so there are no shar
 hold to 2% of 25%, and the test refuses it ("no contention in the recording"). No day of the fourteen has
 four repositories each asking for more than a quarter of the cluster: kiln and slates ask for nearly all
 of it, and the rest ask for little.
+
+### The bar on recorded days, measured (2026-11-05, for Ada's call on AC-T7.5.2)
+
+`crates/hex-sim/tests/recorded.rs`, hex-sim run on jupiter (Windows x86_64, release; hex-sim is
+deterministic, so any machine gives these numbers), bands-then-DRF beside submit order (FIFO) on the
+same input. "Parts" are each owner's part of the dominant shares held while every owner had work waiting.
+
+**(a) 2026-10-25, four equal-weight owners, on the largest cluster at which each asks for more than a
+quarter of it.** Sizing: each owner's mean ask over the day (sum of need times run time, over 24 h)
+allows a cluster CPU just under four times its mean millicores, or a memory just under four times its
+mean bytes. Each owner is held by its CPU limit or else by its memory limit. The candidates take each
+owner's CPU limit as the CPU, and the least memory limit of the owners that CPU leaves as the memory;
+the largest is the one whose smaller fraction of the 10 real runners is largest. Result: one node of
+1,497 millicores (hyper-raft's CPU sets it) and 9.49 GiB (hyperscale's memory sets it). 212 of the 599
+legs are larger than that node (kiln 165, slates 42, hyper-raft 5) and are refused at admission.
+
+| policy | contended | parts: kiln, slates, hyperscale, hyper-raft | worst from 25% | bar (5,000 ppm) |
+|---|---|---|---:|---|
+| DRF | 14.33 h, one stretch | 2.9%, 35.0%, 32.5%, 29.6% | 220,640 ppm | missed |
+| FIFO | 1.46 h, one stretch | 0.1%, 1.7%, 69.9%, 28.3% | 448,998 ppm | missed |
+
+Reading: kiln asks for more than a quarter only through legs too large for the cluster. Those of its
+legs that fit ask for 0.012 cores over the day, under 1% of the node, so no policy can hold it at 25%.
+
+**(b) kiln against slates, two equal-weight owners, at the 10 real runners**, on 2026-10-30
+(`kiln-ci-20261030-kiln-slates.trace`, 170 legs). Of the fourteen days, run one by one under DRF, it is
+the one where the two waited together longest: 560 us in all, in 3 stretches (FIFO: 420 us). Other days
+range down to none on 2026-10-22.
+
+| policy | contended | parts: kiln, slates | worst from 50% | bar (10,000 ppm) |
+|---|---|---|---:|---|
+| DRF | 560 us, 3 stretches | 85.2%, 14.8% | 351,665 ppm | missed |
+| FIFO | 420 us, 3 stretches | 100%, 0% | 500,000 ppm | missed |
+
+Reading: at the real cluster kiln and slates never wait together for longer than the control plane's
+commit latency, so there is no contention for a share to be measured over.
+
+On none of the fourteen days does the bar's precondition hold: four repositories each asking for
+more than a quarter of the cluster they ran on. The generated four-repository day of
+`tests/fair.rs` (worst 479 ppm under DRF, 133,982 under FIFO) is where it holds.

@@ -309,6 +309,8 @@ pub struct ShareReport {
     pub shares_ppm: Vec<u64>,
     /// Each owner's mean dominant share of the cluster while contended, in parts per million.
     pub of_cluster_ppm: Vec<u64>,
+    /// The length of each stretch of contention, in order: at most one per event of the sweep.
+    pub intervals: Vec<Time>,
 }
 
 impl ShareReport {
@@ -352,11 +354,24 @@ pub fn measure(cluster: &Cluster, ran: &[Option<Ran>], end: Time) -> Result<Shar
     let mut held = vec![0u128; owners];
     let mut contended_ns: Time = 0;
     let mut last: Time = 0;
+    let mut intervals: Vec<Time> = Vec::new();
+    let mut open: Option<Time> = None;
     for (t, what, at) in events {
         let t = t.min(end);
+        if !waiting.iter().all(|&w| w > 0)
+            && let Some(o) = open.take()
+            && o > 0
+        {
+            intervals.push(o);
+        }
         if waiting.iter().all(|&w| w > 0) {
             let dt = t.checked_sub(last).ok_or(SimError::TimeOverflow)?;
             contended_ns = contended_ns.checked_add(dt).ok_or(SimError::TimeOverflow)?;
+            if let Some(o) = open.as_mut() {
+                *o = o.checked_add(dt).ok_or(SimError::TimeOverflow)?;
+            } else {
+                open = Some(dt);
+            }
             for (h, u) in held.iter_mut().zip(&used) {
                 let add = dominant(u, &total)
                     .checked_mul(u128::from(dt))
@@ -390,6 +405,9 @@ pub fn measure(cluster: &Cluster, ran: &[Option<Ran>], end: Time) -> Result<Shar
             }
         }
     }
+    if let Some(o) = open.filter(|&o| o > 0) {
+        intervals.push(o);
+    }
     let sum = held
         .iter()
         .try_fold(0u128, |a, h| a.checked_add(*h))
@@ -408,6 +426,7 @@ pub fn measure(cluster: &Cluster, ran: &[Option<Ran>], end: Time) -> Result<Shar
             .iter()
             .map(|&h| held_time.map_or(0, |d| ppm(h, d)))
             .collect(),
+        intervals,
     })
 }
 
