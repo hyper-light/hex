@@ -626,6 +626,39 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
   Create, start and delete through the seam are measured against Docker's and containerd's (runhcs) on jupiter, with
   the same image in the same run, and recorded in `bench/`.
 
+## Decision: one differential suite on every OS, the simulator its oracle (native plan step 7)
+
+CLAUDE.md §8 asks that one suite pass on every platform. The conformance suite (`hex_api::conformance`,
+HEX-RT-1..13) checks each call alone; the differential suite (`hex_api::differential`, HEX-DIFF-1..6) adds
+scripts of calls on several boxes and programs at once, played on the class under test and on the
+simulator, and compares what each step shows (`docs/research/runtime/differential-suite.md`).
+
+- **One suite, run as each OS's tests:** `differential::run` is the conformance suite and then every
+  scenario. Each class's own test calls it with its own fixture: Linux `process` (`process_box.rs`), `oci`
+  from bundles and from specs (`oci_box.rs`, `oci_spec_box.rs`) and both over the node's socket
+  (`node_socket.rs`); macOS `process` (`macos_process_box.rs`); Windows `process`
+  (`windows_process_box.rs`). A class that lands later (Windows `oci`, the Shards guest) joins by calling it.
+- **The oracle is the simulator for the same class**, made the same way (process, bundle or spec). A step
+  shows a normalized fact: a refusal's kind, a box's state and its init's exit, a program's exit (or only
+  whether it exited 0, or whether a signal ended it, where OSes differ by design), its output, whether
+  list shows a box, whether a memory kill is counted.
+- **A reading waits for the fact:** a step that reads a box reads again until it shows the oracle's
+  answer or `PATIENCE` passes, so a late report passes and a missing one fails (CLAUDE.md §4).
+- **A divergence is fixed where the contract says.** The first two it found:
+  - A Windows box with nothing running took a signal, where the simulator, Linux and macOS refuse it as
+    `NotRunning`; Windows now refuses it (HEX-DIFF-2).
+  - An `oci` box signalled TERM kept its init running on fedora, where the simulator ended it. The kernel
+    is right: a PID namespace's init takes from an ancestor namespace only the signals it has a handler
+    for, and KILL and STOP, which are forced (pid_namespaces(7), man-pages 6.19); Docker's stop waits out
+    the same rule before it kills. The simulator was wrong, and now models it: a signal other than KILL
+    ends a box's exec'd programs and leaves its init running (HEX-DIFF-1, HEX-DIFF-2).
+- **Non-vacuity:** runtimes that are the simulator but for one lie (a signal of nothing taken, a deleted
+  box kept, a box stuck running) each fail the scenario that shows it, at the step named; one that reports
+  a box late passes (`crates/hex-api/src/differential.rs` tests).
+- **What would falsify it:** a behavior two classes show differently that no scenario reaches (the
+  scenarios grow with it), or the simulator diverging from the design text (then the simulator is fixed
+  and every class re-run).
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is

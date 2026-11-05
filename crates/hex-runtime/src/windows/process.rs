@@ -217,9 +217,13 @@ impl JobBox {
     }
 
     /// Ends every process in the box with `signal` (KILL or TERM, which both end the job). A member's
-    /// exit code then reads as `signal` ([`super::proc`]).
+    /// exit code then reads as `signal` ([`super::proc`]). Refused as not running when no member runs,
+    /// as every class refuses it (HEX-DIFF-2).
     pub fn signal(&self, signal: Signal) -> Result<(), Refusal> {
         job::ends_job(signal)?;
+        if !self.running()? {
+            return Err(Refusal::NotRunning(self.id().clone(), "signal"));
+        }
         {
             let mut c = self.state.counts()?;
             c.sent.add(signal);
