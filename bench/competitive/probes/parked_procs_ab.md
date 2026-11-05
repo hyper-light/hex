@@ -94,6 +94,29 @@ Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T153245Z`.
 - With the proc made on the park's own thread (the delete, or the refill: 9e13b95 and 506a263, above), every claim
   was a hit, 1,992 of 1,992. This run is what falsifies one worker thread, not the parked proc.
 
+## Experiment: 8 workers making the procs (side branch cp/t7-g5-parkproc-workers 6dcd731; the lead's 15:09Z (b))
+
+**Run.** The same body and harness, at 6dcd731: the one-worker build (e9a6e66) on f15393c's tree, with `PROC_WORKERS` = 8
+threads on one queue bounded at `PER_NODE`. fedora, 2026-11-05 16:53:15Z-16:59:03Z, under the timed lock. Load rose from
+45 to 133 during it (another tenant's), so this host was much busier than for the other runs. Body:
+`~/.cache/hex-t7/g5tail/ab-pp-20261105T165218Z`.
+
+| L | arm | part 19 p50 | create p50 / p99 (ms) | delete p50 / p99 (ms) | hits | dry | skipped | orphaned |
+|---|-----|-------------|-----------------------|-----------------------|------|-----|---------|----------|
+| 6 | A | 239, 251, 250, 258 | 1.29/9.91, 1.42/5.75, 1.39/4.92, 1.49/5.08 | 1.56/5.95, 1.83/6.73, 1.53/7.79, 1.61/5.77 | - | - | - | - |
+| 6 | B | 228, 241, 233, 239 | 1.35/14.89, 1.39/4.56, 1.35/4.29, 1.37/4.52 | 1.82/5.80, 1.97/7.05, 1.87/15.47, 1.89/7.16 | 665, 643, 619, 680 | 1327, 1349, 1373, 1312 | 754, 738, 807, 735 | 573, 611, 566, 577 |
+| 12 | A | 241, 238, 246, 240 | 1.69/10.48, 1.67/7.95, 1.68/7.60, 1.61/5.15 | 3.06/14.55, 2.83/20.28, 2.69/7.03, 2.65/7.59 | - | - | - | - |
+| 12 | B | 221, 227, 228, 229 | 1.75/6.84, 1.62/6.12, 1.74/10.08, 1.71/8.53 | 3.16/15.00, 2.60/11.09, 3.83/28.28, 3.79/20.27 | 853, 771, 782, 868 | 1139, 1221, 1210, 1124 | 743, 799, 799, 738 | 396, 422, 411, 386 |
+
+- Eight workers fare little better than one: 31-44% of claims hit, about 750 parks a cell find the queue full, and
+  390-610 procs are made after their init was claimed. Part 19 stays at A's numbers.
+- The delete still grows: B's p50 is 1.82-1.97 ms at L6 against A's 1.53-1.83. Taking the proc off the delete's
+  thread doesn't take its cost off the delete.
+- A proc's 34 mount-lock holds are writes to the host's one `namespace_sem`, so more threads queue on the same lock
+  (DESIGN, read from part 19's trace; not measured apart here).
+- On this host's load, the experiment falsifies making the proc on workers, at 1 or 8 threads. Making it on the
+  parking thread is what gets the hits (2caebe2, below).
+
 ## Of record at 2caebe2: the proc made on the parking thread, with the delete timed (the lead's 14:23Z)
 
 **Run.** The same body and harness, at cp/t7-g5-parkproc 2caebe2. The proc is made on the parking thread again
