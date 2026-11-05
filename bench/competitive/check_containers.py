@@ -118,11 +118,15 @@ class RunEnd(unittest.TestCase):
         shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_sigkilled_units_containers_are_removed_by_its_stop_post(self):
-        # Do: kill the unit with SIGKILL mid-pass (no trap of host.sh's runs). Expect: its ExecStopPost (reap.sh)
-        # leaves no container of the run, which was labelled with the run while it ran.
+        # Do: SIGKILL every process of the unit at once mid-pass (its cgroup.kill, as the kernel's OOM kill of a
+        # unit's cgroup does; no trap of host.sh's runs). Expect: its ExecStopPost (reap.sh) leaves no container of
+        # the run, which was labelled with the run while it ran. (systemctl kill would race the ExecStopPost it
+        # starts, SIGKILLing that too.)
         unit, name, labelled = self.pass_in_unit("kill", stop_post=True)
         try:
-            quiet("systemctl", "--user", "kill", "-s", "SIGKILL", unit)
+            cgroup = quiet("systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit).stdout.strip()
+            with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
+                f.write("1")
             until(lambda: self.ended(unit), f"{unit} ending")
             self.assertEqual(containers(f"name=^/{name}$"), [], f"{name} left running after {unit}'s SIGKILL")
         finally:
