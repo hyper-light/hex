@@ -79,6 +79,15 @@ against `hyper-light/shards` `integrate` `b3e5ca27`):
 
 So the host's `hex node` needs no hypervisor entitlement of its own: it starts Shards' signed binary.
 
+Two details, from Shards' lead's second answer (2026-11-04):
+- **Which binary:** a path in the spec (or the environment), else `shards` on `PATH`. On macOS it is a signed Shards
+  build as shipped, run where it is installed and never copied, since the VM process it carries holds the
+  entitlement.
+- **Readiness is over vsock only:** stdout and stderr are diagnostics, never a protocol. The guest is ready when a
+  `CONNECT` to the relay's control port gets `OK`. Until the guest listens, the handshake is refused or closed, so
+  the client retries with backoff up to the boot deadline (a typed `Boot` refusal past it), and the process ending
+  first is a boot failure carrying its exit code.
+
 ## 3. The channel: the node's wire over a byte stream
 
 The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_RIGHTS` descriptors
