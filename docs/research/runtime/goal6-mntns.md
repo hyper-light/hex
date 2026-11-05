@@ -230,3 +230,39 @@ B sits within A's ranges; D within C's (its 12-loop p99 .497 .483 .560, the only
   create's p99 doesn't fall. In a guest whose vCPUs are themselves preempted by a host at load 7-35, that tail can't
   be told from the VM's; this falsifies nothing and confirms nothing about the bar. The reading of record needs a 7.x
   bench host.
+
+## 10. Part 19's tail in a 7.2 guest, by its mount-lock waits: indicative, NOT of record (2026-11-05)
+
+The mounts trace of part 19 (root in place) in the same guest as §9, with the mount lock's holds and the slowpaths of
+its waits probed (kprobes on `down_write`/`down_read` filtered to `namespace_sem`, and on
+`rwsem_down_write_slowpath`/`rwsem_down_read_slowpath`). Release binaries of 4ac134b, harness 7c8c150; 2,000
+creates at 8 in flight, 8,000 idle guest threads, owner bundles with reuse on, Docker's paths, the `/dev` pool on.
+Cells: C (from its tree, procs made ahead) at 0 and 12 loops, A (copy, no procs made ahead) at 12. Unit
+hex-g6-mttimed2-20261105T084016Z, timed 09:00:44-09:01:36Z under the lock, fedora load 27-43; records under
+`~/.cache/hex-t7/g6/mt/hex-g6-mttimed2-20261105T084016Z/` on fedora. An earlier run of the same cells
+(hex-g6-mttimed-20261105T031100Z) found the slowest creates asleep in `mount_setattr` and `move_mount`, but its
+probes never attached: the guest has no `awk`, which looked up `namespace_sem`'s address (fixed at 7c8c150).
+
+| cell | span p50, us | p99 | write holds per create: all / the slowest 1% | blocked on the lock per create: all / the slowest 1%, us |
+|---|---|---|---|---|
+| C, 0 loops | 62 | 506 | 5.8 / 12.2 | 6.7 / 327 |
+| C, 12 loops | 73 | 3,046 | 5.1 / 8.6 | 31.9 / 2,346 |
+| A, 12 loops | 206 | 1,921 | 29.0 / 29.0 | 7.7 / 530 |
+
+Read:
+- The slowest 1% of creates spend most of their span asleep waiting for `namespace_sem` for write. With procs made
+  ahead at 12 loops, that's 2,346 of a mean 4,708 us. Each wait is in `mount_setattr` or `move_mount`, and each sleeper
+  is woken by the holder that releases the lock. The holders named are Hex's own processes: the node agent (`hex`), the
+  `/dev` pool (`hex-devfs`) and the bench driver (`seam_oci`). The 1,169 us preempted between calls is the guest's 12
+  loops, which §9 can't tell apart from the VM's own preemption.
+- The slow creates also take more holds than the median: 8.6-12.2 against 5.1-5.8. The extra holds are `open_tree`
+  (1.8-3.6 a create), i.e. the creates whose proc or namespace was made on the path because a pool ran dry.
+- The copy keeps its 29 holds a create, and its tail waits behind the same holders.
+- So, with goal 6's two parts in place, what remains of part 19's tail on 7.x is contention on the one mount lock, and
+  much of it comes from Hex's own make-ahead work running beside creates in flight. A lever that removes holds rather
+  than trading them, to try next (indicative first):
+  - keep the pools from running dry under 8 in flight, so no create makes on the path;
+  - batch the pools' refills, so each refill takes the lock once rather than once per proc or `/dev`;
+  - fewer `mount_setattr` holds in the init (2 a create).
+  `open_tree_attr` doesn't merge a clone and its attributes into one hold (`goal5-mounts.md`, step 3's notes).
+- A guest's tail isn't the host's (§9). A reading of record waits on a 7.x bench host.
