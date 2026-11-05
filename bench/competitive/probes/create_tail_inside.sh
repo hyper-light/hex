@@ -93,8 +93,9 @@ for round in $(seq 1 "$ROUNDS"); do
     /opt/bin/seam_oci "$OUT/seam.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true \
     >> "$OUT/seam.log" 2>&1 || echo "round $round: seam_oci failed ($(tail -c 300 "$OUT/seam.log"))"
 done
-echo 0 > "$I/tracing_on"
+# The reader ends at this marker, so it goes in before the instance stops recording.
 echo "hexbd D" > "$I/trace_marker" 2>/dev/null
+echo 0 > "$I/tracing_on"
 echo "dropped (per cpu, from per_cpu/*/stats): $(cat "$I"/per_cpu/cpu*/stats 2>/dev/null | awk '/^overrun:/{s+=$2} /^dropped events:/{s+=$3} END{print s+0}')" >> "$OUT/env.txt"
 # The reader ends on "hexbd D"; give it the fact that the instance is done, then wait for it to say so.
 for i in $(seq 1 1200); do [ -f "$OUT/read" ] && break; sleep 0.1; done
