@@ -486,3 +486,40 @@ What can reach the bar is goal 6's 7.x path: the namespace made from a tree, wit
 - In the Linux 7.2 guest, part 19's p50 is about a third of 6.19's (56-80 us against about 250, §9-§10). Both the
   unpreempted tail and the chance of being preempted shrink with it.
 - A reading of record needs a bench host on Linux 7.1 or later. Whether fedora moves to 7.x is Ada's decision.
+
+### Lever (4)'s short A/B with a co-tenant (the lead's 13:45Z ask), 2026-11-05
+
+A is 34107da, B is 43eb4ab, the harness 19485e1's. Unit hex-g6-ab4b-20261105T141018Z, timed 14:11:24-14:13:34Z under
+the lock, load 13-16. Conditions as above, at 6 and 12 loops, 2 rounds interleaved (AB, then BA); all 8 cells exited
+0.
+- The co-tenant is `bench/competitive/probes/mount_cotenant.c`. It's rootless, in a user and mount namespace of its
+  own, on CPUs 16-31. It mounts and unmounts a tmpfs every ~200 us, from 1 s before each node starts, and times each
+  pair on the trace's clock.
+- "During start" runs from the trace's first event to the 20th create's part 19 end.
+- Readings by `seedstart_extract.py`.
+
+| L | round | arm | seed-start `pivot_root` holds | first 20 creates' part 19 p50 / max, us | co-tenant's worst pair during start, us | steady part 19 p50 / p99, us | whole create p99, ms |
+|---|---|---|---|---|---|---|---|
+| 6 | 1 | A | 8: 954-1,186 us | 322 / 6,858 | 4,431 | 234 / 563 | 2.102 |
+| 6 | 1 | B | 1: 1,048 us (the node's prune) | 222 / 584 | 1,005 | 236 / 628 | 1.772 |
+| 12 | 1 | A | 9: 924-1,160 us | 240 / 4,627 | 2,480 | 234 / 628 | 2.742 |
+| 12 | 1 | B | 1: 1,050 us | 233 / 424 | 871 | 236 / 713 | 2.193 |
+| 6 | 2 | B | 1: 1,159 us | 248 / 689 | 1,174 | 240 / 713 | 1.956 |
+| 6 | 2 | A | 8: 1,164-1,272 us | 551 / 7,982 | 3,411 | 241 / 689 | 1.816 |
+| 12 | 2 | B | 1: 1,121 us | 238 / 2,670 | 1,141 | 251 / 850 | 4.268 |
+| 12 | 2 | A | 9: 927-1,365 us | 255 / 7,123 | 5,369 | 249 / 834 | 2.154 |
+
+B's prune thread also took 4 short holds (0-43 us), its other mount calls.
+
+Read:
+- **At node start, lever (4) does what it was built for.** The seeds' 8-9 holds of ~0.9-1.4 ms become the node's one.
+  - The first 20 creates' worst part 19 falls from 4.6-8.0 ms to 0.4-2.7 ms, lower in 4 of 4 pairs.
+  - The co-tenant's worst mount during start falls from 2.5-5.4 ms to 0.9-1.2 ms, lower in 4 of 4 pairs.
+- **The steady readings don't read equal.**
+  - Part 19's p50 is level (234-251 us).
+  - Its p99 is higher with B in all 4 pairs here, by 15-85 us, and in 7 of 10 pairs across this run and the one
+    above. That's inside this host's run-to-run spread (A alone read 563-903 us across the two runs), but one-sided.
+    Not explained; the cause isn't measured.
+  - The whole create's p99 is mixed: B lower in 2 of 4 here, 5 of 6 above.
+- **The co-tenant's worst mount after the start** is 1.6-109 ms in both arms, from causes the trace doesn't name (it
+  follows only Hex's processes off their CPUs).
