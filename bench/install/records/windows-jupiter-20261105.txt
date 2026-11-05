@@ -81,6 +81,28 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    first line. procgov -q prints only the program's output (checked); sent to step 7 to fix. No procgov figure yet.
    The 7 gates on fedora at e322d7b: exit 0, 273 tests (unit hex-windows-gates-20261105T095938Z).
 
+8. native_box at b1ddb89 (step 7's own tip, procgov -q; built from a worktree of that commit on jupiter,
+   C:\Users\corph\.cache\hex-t7-windows\wt-b1ddb89), for step 7's bench/native/RESULT.md. Release hex.exe as HEX_BIN;
+   args n 200, warmup 20, runs 20; hex and procgov interleaved, 3 passes, 2026-11-05T11:04:00Z-11:09:25Z.
+   Host: Jupiter, Microsoft Windows NT 10.0.26200.0, AMD RYZEN AI MAX+ 395 w/ Radeon 8060S, 32 logical CPUs.
+   procgov: Process Governor v4.1.26190.22, sha256 fa59212a32306ca22c22680a36c047ca3ffea52f511acb09dd9d7145c1673069.
+   Raw: C:\Users\corph\.cache\hex-t7-windows\records\native_box-b1ddb89-20261105T110322Z\ (runs.txt, <driver>-<pass>.json).
+   Load and co-tenants (CPU % from Win32_Processor; co-tenants = other users' cargo/rustc processes), start / end:
+     pass 1 hex 77% 12 / 11% 9      procgov 77% 9 / 65% 9
+     pass 2 hex 13% 9 / 17% 6       procgov 35% 6 / 24% 6
+     pass 3 hex 33% 6 / 29% 6       procgov 16% 6 / 12% 3
+   Every box bounded to 256 MiB. Times in ms (procgov has no separate create: its start is create and start):
+     driver   pass  create p50/p99   start p50/p99/max     delete p50/p99/max       bound: past bound, end p50/max
+     hex      1     0.042/0.075      43.5/61.5/63.4        0.885/1.95/3.76          -6 MiB (20/20 at 250), 195.9/305.0
+     hex      2     0.036/0.046      38.3/51.8/53.3        0.984/1.64/8.03          -6 MiB (20/20 at 250), 197.6/223.0
+     hex      3     0.028/0.054      21.9/39.6/43.8        0.866/1.26/7.73          -6 MiB (20/20 at 250), 186.8/201.8
+     procgov  1     -                58.5/70.2/84.9        268.9/327.2/340.4        -3 MiB (20/20 at 253), 438.4/6239.0
+     procgov  2     -                57.4/70.1/80.9        256.2/313.7/318.8        -3 MiB (20/20 at 253), 420.1/446.1
+     procgov  3     -                52.0/100.0/165.5      221.6/324.1/4442.2       -3 MiB (20/20 at 253), 406.6/451.4
+   Best of 3 (p50): hex create 0.028, start 21.9, delete 0.866, bound end 186.8; procgov start 52.0, delete 221.6
+   (taskkill /T /F of procgov's process), bound end 406.6. hex's climbs ended Code(-1073740791) (0xC0000409, the
+   program aborting on the refused commit); procgov's ExitStatus(3221226505) (0xC0000409 too). All 6 passes exit 0.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
