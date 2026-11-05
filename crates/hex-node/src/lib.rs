@@ -16,6 +16,7 @@
     )
 )]
 
+pub mod disk_probe;
 pub mod store;
 
 #[cfg(target_os = "linux")]

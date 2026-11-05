@@ -165,6 +165,44 @@ fn lifeguard_cuts_false_positives_from_slow_members_to_under_two_percent_of_swim
     );
 }
 
+/// S8, step 3's case (Lifeguard's, PF[9]): do 200 seeds of 32 to 128 members with one member slow
+/// from 2 s, its delay drawn from 1 s up to half Lifeguard's suspicion max timeout; expect no healthy
+/// member declared dead with Lifeguard, and some with it off (non-vacuity). Every declaration against
+/// a healthy member is the slow member's own: its suspicion is refuted only once its gossip reached
+/// the target and the refutation came back, each processed a delay late, so it holds a false
+/// suspicion only past 2·delay. Under half the max timeout, Lifeguard's dynamic suspicion outwaits
+/// that; SWIM's fixed timeout (its min, 6.0-8.4 s) doesn't from 3-4.2 s on.
+#[test]
+fn a_slow_member_makes_lifeguard_declare_no_healthy_member_dead() {
+    let (mut swim, mut lifeguard) = (0u64, 0u64);
+    for seed in 0..200 {
+        let mut r = Rng::new(seed ^ 0x51_0e01);
+        let n = u32::try_from(r.range(32, 128)).unwrap();
+        let slow = u32::try_from(r.range(0, u64::from(n) - 1)).unwrap();
+        let (_, max) = Config::lan(n, true).suspicion_bounds().unwrap();
+        let delay_ns = r.range(SECOND, max / 2);
+        for on in [false, true] {
+            let mut config = Config::lan(n, on);
+            config.end_ns = 120 * SECOND;
+            let fault = Fault::Slow {
+                member: slow,
+                from_ns: 2 * SECOND,
+                until_ns: config.end_ns,
+                delay_ns,
+            };
+            let report = membership::run(&config, &[fault], seed).unwrap();
+            if on {
+                lifeguard += report.false_positives;
+            } else {
+                swim += report.false_positives;
+            }
+        }
+    }
+    println!("one slow member, delay under half the max timeout: SWIM {swim}, Lifeguard {lifeguard}");
+    assert!(swim > 0, "the SWIM baseline made no false positives");
+    assert_eq!(lifeguard, 0);
+}
+
 /// H1 (a run is a function of its seed), for S8's model: do one crash-and-slow run twice from one
 /// seed and once from another; expect equal reports, and a different trace hash from the other seed.
 #[test]

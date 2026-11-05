@@ -11,8 +11,10 @@ publish.workspace = true
 [dependencies]
 hex-api.workspace = true
 hex-core.workspace = true
+hex-health.workspace = true
 hex-runtime.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
