@@ -336,9 +336,9 @@ pub struct PrunedCreate {
     pub ipc_uts: Option<super::ipcuts::Pair>,
     /// A proc made ahead, its index in the mount plan (decision 6's update, part 2).
     pub proc_mount: Option<(u32, init::PreparedProc)>,
-    /// Whether `proc_mount` is the one made for the init parked in the cgroup (decision 8, parked procs), so only a
-    /// claim of that init takes it.
-    pub proc_from_parked: bool,
+    /// Where `proc_mount` goes unattached when it is the one made for the init parked in the cgroup (decision 8,
+    /// parked procs): set only then, so only a claim of that init takes it.
+    pub proc_sink: Option<ProcSink>,
     /// The node's empty read-only tmpfs, which the init clones for each masked directory.
     pub masked_directory: Option<OwnedFd>,
     pub binds: Vec<OwnedFd>,
@@ -485,7 +485,40 @@ pub struct Parked {
     pub flags: u64,
     /// The proc made for this init's own pid namespace and its key (decision 8, parked procs), held by the node alone
     /// until a claim with the key takes it; it ends with the init otherwise.
-    proc: Option<(super::procmount::Key, init::PreparedProc)>,
+    proc: Option<(super::procmount::Key, init::PreparedProc, ProcSink)>,
+}
+
+/// Where a parked init's proc goes when no init attaches it (decision 8, parked procs): a thread of the node's, by a
+/// queue of a bound the node sets. A detached tree's last close unmounts it and its masks, which takes the host's
+/// `namespace_sem` for write and then waits for an expedited RCU grace period (`namespace_unlock`, v6.19
+/// `fs/namespace.c:1680-1721`; the wait at `:1715`), so that is never a create's to pay. Past the bound the tree is
+/// dropped where it is, counted.
+#[derive(Clone, Debug)]
+pub struct ProcSink {
+    queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+    inline: std::sync::Arc<AtomicU64>,
+}
+
+impl ProcSink {
+    /// A sink onto `queue`, counting in `inline` each tree dropped where it was, its queue full or closed.
+    pub fn new(
+        queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+        inline: std::sync::Arc<AtomicU64>,
+    ) -> Self {
+        Self { queue, inline }
+    }
+
+    /// `proc`, unattached, handed to the node's thread to drop.
+    pub fn discard(&self, proc: init::PreparedProc) {
+        if let Err(
+            std::sync::mpsc::TrySendError::Full(proc)
+            | std::sync::mpsc::TrySendError::Disconnected(proc),
+        ) = self.queue.try_send(proc)
+        {
+            self.inline.fetch_add(1, Ordering::Relaxed);
+            drop(proc);
+        }
+    }
 }
 
 impl std::fmt::Debug for Parked {
@@ -493,7 +526,7 @@ impl std::fmt::Debug for Parked {
         f.debug_struct("Parked")
             .field("pid", &self.pid())
             .field("flags", &self.flags)
-            .field("proc", &self.proc.as_ref().map(|(k, _)| k))
+            .field("proc", &self.proc.as_ref().map(|(k, ..)| k))
             .finish()
     }
 }
@@ -538,18 +571,24 @@ impl Parked {
         Ok(ns)
     }
 
-    /// The proc made for this init's pid namespace, for `key`, held with it until a claim takes it.
-    pub fn set_proc(&mut self, key: super::procmount::Key, proc: init::PreparedProc) {
-        self.proc = Some((key, proc));
+    /// The proc made for this init's pid namespace, for `key`, held with it until a claim takes it; `sink` drops it
+    /// if none does.
+    pub fn set_proc(
+        &mut self,
+        key: super::procmount::Key,
+        proc: init::PreparedProc,
+        sink: ProcSink,
+    ) {
+        self.proc = Some((key, proc, sink));
     }
 
     /// The key this init's proc was made for, if one was.
     pub fn proc_key(&self) -> Option<&super::procmount::Key> {
-        self.proc.as_ref().map(|(k, _)| k)
+        self.proc.as_ref().map(|(k, ..)| k)
     }
 
     /// This init's proc, the caller's from here: taken once, so no second init is ever handed it.
-    pub fn take_proc(&mut self) -> Option<(super::procmount::Key, init::PreparedProc)> {
+    pub fn take_proc(&mut self) -> Option<(super::procmount::Key, init::PreparedProc, ProcSink)> {
         self.proc.take()
     }
 
@@ -602,6 +641,10 @@ impl Drop for Parked {
                 rustix::process::WaitId::PidFd(pidfd.as_fd()),
                 rustix::process::WaitIdOptions::EXITED,
             );
+        }
+        // Its proc, if no create took it, goes to the node's thread to drop ([`ProcSink`]).
+        if let Some((_, proc, sink)) = self.proc.take() {
+            sink.discard(proc);
         }
     }
 }
@@ -1131,16 +1174,21 @@ impl Runtime {
                         if parked_takes {
                             let eligible = super::procmount::eligible(spec, &plan).ok();
                             let outcome = match (parked_proc, eligible) {
-                                (Some((made, proc)), Some((mount, key))) if room && made == key => {
+                                (Some((made, proc, sink)), Some((mount, key)))
+                                    if room && made == key =>
+                                {
                                     pruned.proc_mount = Some((mount, proc));
-                                    pruned.proc_from_parked = true;
+                                    pruned.proc_sink = Some(sink);
                                     // Counted once the claim is known (start_via_seed).
                                     None
                                 }
                                 (None, Some(_)) if room => Some(ParkedProc::Dry),
                                 // None made, for a create none could serve: neither.
                                 (None, _) => None,
-                                (Some(_), _) => Some(ParkedProc::Miss),
+                                (Some((_, proc, sink)), _) => {
+                                    sink.discard(proc);
+                                    Some(ParkedProc::Miss)
+                                }
                             };
                             if let (Some(outcome), Some(chooser)) = (outcome, parking.chooser) {
                                 chooser.parked_proc(outcome);
@@ -1368,7 +1416,7 @@ impl Runtime {
         let cgroup_dir = open_cgroup_dir(cgroup.dir()).map_err(|_| ClassicReason::Source)?;
         let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
         Ok(PrunedCreate {
-            proc_from_parked: false,
+            proc_sink: None,
             bundle_dir,
             cgroup_dir,
             container_dir,
@@ -1432,7 +1480,7 @@ impl Runtime {
         // is made another way (decision 6's update), so such a create is cloned fresh and the parked init ended.
         // The proc made for the parked init's own pid namespace is the one it takes.
         let takes_parked = req.pruned.as_ref().is_none_or(|p| {
-            (p.proc_mount.is_none() || p.proc_from_parked)
+            (p.proc_mount.is_none() || p.proc_sink.is_some())
                 && p.mount_namespace == super::mntns::MountNamespace::Copy
         });
         let claimed = match parked {
@@ -1440,12 +1488,14 @@ impl Runtime {
             _ => None,
         };
         // A parked init's proc shows that init's pid namespace, so a create its init didn't take mounts its own:
-        // the proc ends here, unused, with the init it was made for.
+        // the proc goes unused, to the node's thread to drop, as the init it was made for has ended.
         if let Some(p) = req.pruned.as_mut()
-            && p.proc_from_parked
+            && let Some(sink) = &p.proc_sink
         {
-            if claimed.is_none() {
-                p.proc_mount = None;
+            if claimed.is_none()
+                && let Some((_, proc)) = p.proc_mount.take()
+            {
+                sink.discard(proc);
             }
             if let Some(chooser) = chooser {
                 chooser.parked_proc(if claimed.is_some() {

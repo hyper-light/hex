@@ -19,8 +19,9 @@ use hex_api::{Bounds, BoxId, BoxOwner, Refusal, Usage};
 use hex_core::cgroup::Baseline;
 use hex_core::reuse::{self, PER_NODE, PER_OWNER, Pool, Refused, Take, Whose};
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
+use hex_runtime::linux::oci::init::PreparedProc;
 use hex_runtime::linux::oci::resources::Insn;
-use hex_runtime::linux::oci::run::{Choose, Chosen, Parked, ParkedProc, Wants};
+use hex_runtime::linux::oci::run::{Choose, Chosen, Parked, ParkedProc, ProcSink, Wants};
 use hex_runtime::linux::oci::{OciError, procmount};
 
 use crate::createpool::Parker;
@@ -41,6 +42,10 @@ pub const RESIDUAL: u64 = 16 << 20;
 /// How many cgroups may wait for the remover at once: every idle cgroup the pool can put out at one time
 /// ([`PER_NODE`]). Past it the caller removes the cgroup itself, as every delete did before.
 const REMOVALS: usize = PER_NODE;
+
+/// How many unattached procs may wait for the node's thread that drops them (decision 8, parked procs): every one
+/// held at once, one an init parked in an idle slot ([`PER_NODE`]). Past it a tree is dropped where it is, counted.
+const PROC_DROPS: usize = PER_NODE;
 
 /// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
 const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
@@ -120,6 +125,10 @@ pub struct ParkCounts {
     pub procs_failed: u64,
     /// Procs held now with the inits they were made for, at most one an init parked.
     pub procs_held: usize,
+    /// Unattached procs (misses, and those of inits ended unclaimed) dropped by the node's thread for them, off
+    /// every create's path, and those dropped where they were, its queue full.
+    pub procs_dropped: u64,
+    pub procs_dropped_inline: u64,
 }
 
 /// What the cgroups made ahead for boxes of no owner did (decision 8, "The p99.9 that stayed"): made, each with an
@@ -218,6 +227,10 @@ struct Parking {
     proc_misses: AtomicU64,
     proc_dry: AtomicU64,
     procs_failed: AtomicU64,
+    /// Where unattached procs go to be dropped, and what its thread dropped, once the node's cgroups start.
+    drops: OnceLock<ProcSink>,
+    dropped: Arc<AtomicU64>,
+    dropped_inline: Arc<AtomicU64>,
 }
 
 impl Parking {
@@ -258,18 +271,20 @@ impl Parking {
                     .filter(|(p, _)| p.proc_key().is_some())
                     .count()
             }),
+            procs_dropped: self.dropped.load(Ordering::Relaxed),
+            procs_dropped_inline: self.dropped_inline.load(Ordering::Relaxed),
         }
     }
 
     /// The proc of `parked`'s own pid namespace made for `key` and held with it, when the node makes them and the
     /// key is known; one that can't be made leaves the init parked without one, counted.
     fn with_proc(&self, parked: &mut Parked, key: Option<&procmount::Key>) {
-        let (Some(maker), Some(key)) = (self.procs.get(), key) else {
+        let (Some(maker), Some(key), Some(sink)) = (self.procs.get(), key, self.drops.get()) else {
             return;
         };
         match parked.pid_namespace().and_then(|ns| maker.make(ns, key)) {
             Ok(proc) => {
-                parked.set_proc(key.clone(), proc);
+                parked.set_proc(key.clone(), proc, sink.clone());
                 self.procs_made.fetch_add(1, Ordering::Relaxed);
             }
             Err(_) => {
@@ -446,6 +461,16 @@ impl Cgroups {
             .name("hex-cgroup-remover".to_owned())
             .spawn(move || remove_each(&queue, &theirs))
             .map_err(|e| Refusal::os("starting the cgroup remover", e))?;
+        let parking = Parking::default();
+        let (drops, unattached) = mpsc::sync_channel(PROC_DROPS);
+        let dropped = Arc::clone(&parking.dropped);
+        std::thread::Builder::new()
+            .name("hex-proc-drop".to_owned())
+            .spawn(move || drop_each(&unattached, &dropped))
+            .map_err(|e| Refusal::os("starting the unattached procs' dropper", e))?;
+        let _ = parking
+            .drops
+            .set(ProcSink::new(drops, Arc::clone(&parking.dropped_inline)));
         Ok(Self {
             pool: Arc::new(Mutex::new(Pool::new(PER_OWNER, PER_NODE, first))),
             held: Mutex::new(BTreeMap::new()),
@@ -456,7 +481,7 @@ impl Cgroups {
             cgroup_kill: AtomicU64::new(0),
             discarded_killed: AtomicU64::new(0),
             no_owner: AtomicU64::new(0),
-            parking: Arc::new(Parking::default()),
+            parking: Arc::new(parking),
             ahead: Arc::new(Ahead::default()),
             parker: OnceLock::new(),
         })
@@ -732,6 +757,15 @@ impl Drop for Cgroups {
     fn drop(&mut self) {
         self.ahead.shut.store(true, Ordering::Relaxed);
         self.ahead.want.notify_all();
+    }
+}
+
+/// The dropper's thread: drops each unattached proc it's handed, so its unmount waits here, until the node's end
+/// closes its queue (every sink with it).
+fn drop_each(queue: &Receiver<PreparedProc>, dropped: &AtomicU64) {
+    while let Ok(proc) = queue.recv() {
+        drop(proc);
+        dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
 
