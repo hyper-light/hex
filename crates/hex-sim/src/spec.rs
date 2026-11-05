@@ -16,9 +16,11 @@
 use std::collections::BTreeMap;
 
 use crate::error::SimError;
-use crate::fair::{Queue, Shares};
+use crate::fair::{self, Passed, Placed, Preemption, Queue, Shares};
 use crate::index::{FitIndex, Sample};
-use crate::model::{Cluster, Demand, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use crate::model::{
+    Cluster, Demand, GroupId, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec,
+};
 use crate::sim::Run;
 use crate::store::{Op, State};
 
@@ -50,6 +52,12 @@ pub enum Violation {
     LeftPending(WorkloadId),
     #[error("{0:?} was placed apart from the rest of its gang")]
     PartialGang(WorkloadId),
+    #[error("a preemption put {0:?} past its disruption budget")]
+    BudgetBroken(GroupId),
+    #[error("{0:?}'s preemption is not the one the specification makes")]
+    NotSerialPreemption(WorkloadId),
+    #[error("{0:?} was left pending while it could preempt within the rules")]
+    Inversion(WorkloadId),
     #[error("the replay itself failed: {0}")]
     Replay(SimError),
 }
@@ -83,6 +91,8 @@ pub struct LogReport {
     pub submits: u64,
     pub placements: u64,
     pub completions: u64,
+    /// Workloads preempted, each within its group's budget.
+    pub preempted: u64,
     /// Workloads still pending at the end that no node holds: waiting, correctly.
     pub waiting: u64,
 }
@@ -98,7 +108,10 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
     let mut shares = Shares::new(nodes, run.owners.iter().map(|o| o.weight).collect())?;
     let mut pending: Pending = BTreeMap::new();
     let mut seq_of: BTreeMap<WorkloadId, u64> = BTreeMap::new();
-    let mut placed: BTreeMap<WorkloadId, NodeId> = BTreeMap::new();
+    // Each placed workload's node and the write that placed it.
+    let mut placed: BTreeMap<WorkloadId, (NodeId, u64)> = BTreeMap::new();
+    let mut disrupted: BTreeMap<GroupId, u32> = BTreeMap::new();
+    let mut preempted: BTreeMap<WorkloadId, Option<GroupId>> = BTreeMap::new();
     let mut report = LogReport::default();
     let log = run.store.log();
     let mut at = 0usize;
@@ -155,8 +168,15 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                     })
                     .map(|(s, (w, d, q))| (*s, *w, *d, *q))
                     .collect();
+                let state = Now {
+                    run,
+                    pending: &pending,
+                    placed: &placed,
+                    shares: &shares,
+                    disrupted: &disrupted,
+                };
                 for (_, ahead, d, q) in earlier {
-                    if q != queue || holds(&mut index, run, &pending, ahead, &d)? {
+                    if q != queue || state.goes(&mut index, ahead, &d)? {
                         return Err(Violation::JumpedQueue {
                             placed: workload,
                             ahead,
@@ -179,15 +199,104 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
                     }
                     index.take(*node, need)?;
                     shares.take(owner_of(run, *w)?, &need.need)?;
-                    placed.insert(*w, *node);
+                    placed.insert(*w, (*node, entry.write));
+                    placed_again(&mut preempted, &mut disrupted, *w);
                     report.placements = report.placements.saturating_add(1);
                 }
                 for seq in seqs {
                     pending.remove(&seq);
                 }
             }
+            Op::Preempt { workload, node } => {
+                // The write: its victims, then the preemptor's placement.
+                let mut victims = vec![(workload, node)];
+                let mut head = None;
+                while let Some(next) = log.get(at).filter(|e| e.write == entry.write) {
+                    at = at.saturating_add(1);
+                    match next.op {
+                        Op::Preempt { workload, node } if head.is_none() => {
+                            victims.push((workload, node));
+                        }
+                        Op::Place { workload, node } if head.is_none() => {
+                            head = Some((workload, node));
+                        }
+                        _ => return Err(Violation::NotSerialPreemption(workload)),
+                    }
+                }
+                let (id, node) = head.ok_or(Violation::NotSerialPreemption(workload))?;
+                let spec = spec_of(run, id)?;
+                let seq = *seq_of.get(&id).ok_or(Violation::NotSubmitted(id))?;
+                let (_, need, queue) = *pending.get(&seq).ok_or(Violation::NotPending(id))?;
+                let rank = shares.rank(run.policy, queue);
+                let earlier: Vec<(WorkloadId, Demand, Queue)> = pending
+                    .iter()
+                    .filter(|(s, (_, _, q))| {
+                        shares.rank(run.policy, *q) < rank || (*q == queue && **s < seq)
+                    })
+                    .map(|(_, (w, d, q))| (*w, *d, *q))
+                    .collect();
+                let state = Now {
+                    run,
+                    pending: &pending,
+                    placed: &placed,
+                    shares: &shares,
+                    disrupted: &disrupted,
+                };
+                for (ahead, d, q) in earlier {
+                    if q != queue || state.goes(&mut index, ahead, &d)? {
+                        return Err(Violation::JumpedQueue { placed: id, ahead });
+                    }
+                }
+                let want = Preemption {
+                    node,
+                    victims: victims.iter().map(|(w, _)| *w).collect(),
+                };
+                let serial = state.preemption(&mut index, &spec)?;
+                // Budgets first: a preemption past one is that, whatever else is wrong with it.
+                for (w, n) in victims {
+                    if placed.remove(&w).map(|(at, _)| at) != Some(n) {
+                        return Err(Violation::NotSerialPreemption(id));
+                    }
+                    let victim = spec_of(run, w)?;
+                    index.give(n, &victim.demand())?;
+                    shares.give(victim.tenancy.owner, &victim.need)?;
+                    let s = *seq_of.get(&w).ok_or(Violation::NotSubmitted(w))?;
+                    pending.insert(s, (w, victim.demand(), run.policy.queue(&victim)));
+                    preempted.insert(w, victim.tenancy.group);
+                    if let Some(g) = victim.tenancy.group {
+                        let d = disrupted.entry(g).or_default();
+                        *d = d.saturating_add(1);
+                        let budget = usize::try_from(g.0)
+                            .ok()
+                            .and_then(|at| run.groups.get(at))
+                            .map_or(0, |g| g.budget);
+                        if *d > budget {
+                            return Err(Violation::BudgetBroken(g));
+                        }
+                    }
+                    report.preempted = report.preempted.saturating_add(1);
+                }
+                if !run.preemption || serial != Some(want) {
+                    return Err(Violation::NotSerialPreemption(id));
+                }
+                let chosen = crate::sim::fit_whole(&mut index, &[need], &run.sample)?;
+                let spec_node = chosen.as_ref().and_then(|c| c.first()).copied();
+                if spec_node != Some(node) {
+                    return Err(Violation::NotSerialChoice {
+                        workload: id,
+                        chose: node,
+                        spec: spec_node,
+                    });
+                }
+                index.take(node, &need)?;
+                shares.take(spec.tenancy.owner, &spec.need)?;
+                placed.insert(id, (node, entry.write));
+                placed_again(&mut preempted, &mut disrupted, id);
+                pending.remove(&seq);
+                report.placements = report.placements.saturating_add(1);
+            }
             Op::Complete { workload, node } => {
-                if placed.remove(&workload) != Some(node) {
+                if placed.remove(&workload).map(|(at, _)| at) != Some(node) {
                     return Err(Violation::CompletedElsewhere(workload));
                 }
                 let need = spec_of(run, workload)?.demand();
@@ -198,6 +307,13 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
         }
     }
     let left: Vec<(WorkloadId, Demand, Queue)> = pending.values().copied().collect();
+    let state = Now {
+        run,
+        pending: &pending,
+        placed: &placed,
+        shares: &shares,
+        disrupted: &disrupted,
+    };
     for (workload, need, queue) in left {
         let rank = shares.rank(run.policy, queue);
         let blocked = pending
@@ -206,9 +322,91 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
         if !blocked && holds(&mut index, run, &pending, workload, &need)? {
             return Err(Violation::LeftPending(workload));
         }
+        if !blocked
+            && run.preemption
+            && state
+                .preemption(&mut index, &spec_of(run, workload)?)?
+                .is_some()
+        {
+            return Err(Violation::Inversion(workload));
+        }
         report.waiting = report.waiting.saturating_add(1);
     }
     Ok(report)
+}
+
+/// The specification's state at one point of the log, for what may go there.
+struct Now<'a> {
+    run: &'a Run,
+    pending: &'a Pending,
+    placed: &'a BTreeMap<WorkloadId, (NodeId, u64)>,
+    shares: &'a Shares,
+    disrupted: &'a BTreeMap<GroupId, u32>,
+}
+
+impl Now<'_> {
+    /// Whether `workload` would go now: a node holds it, or it can preempt.
+    fn goes(
+        &self,
+        index: &mut FitIndex,
+        workload: WorkloadId,
+        need: &Demand,
+    ) -> Result<bool, Violation> {
+        if holds(index, self.run, self.pending, workload, need)? {
+            return Ok(true);
+        }
+        Ok(self.run.preemption
+            && self
+                .preemption(index, &spec_of(self.run, workload)?)?
+                .is_some())
+    }
+
+    /// The preemption the specification makes for `spec` now, if any ([`fair::choose_victims`]).
+    fn preemption(
+        &self,
+        index: &mut FitIndex,
+        spec: &WorkloadSpec,
+    ) -> Result<Option<Preemption>, Violation> {
+        let mut list = Vec::with_capacity(self.placed.len());
+        for (&id, &(node, write)) in self.placed {
+            let p = spec_of(self.run, id)?;
+            list.push(Placed {
+                id,
+                node,
+                demand: p.demand(),
+                owner: p.tenancy.owner,
+                band: p.tenancy.band,
+                group: p.tenancy.group,
+                in_gang: p.tenancy.gang.is_some(),
+                write,
+            });
+        }
+        Ok(fair::choose_victims(
+            index,
+            &list,
+            spec,
+            self.shares,
+            &self.run.groups,
+            self.disrupted,
+            &mut Passed::default(),
+        )?)
+    }
+}
+
+/// A placement of `workload` ends its disruption, if it was preempted.
+fn placed_again(
+    preempted: &mut BTreeMap<WorkloadId, Option<GroupId>>,
+    disrupted: &mut BTreeMap<GroupId, u32>,
+    workload: WorkloadId,
+) {
+    if let Some(Some(g)) = preempted.remove(&workload)
+        && let Some(d) = disrupted.get_mut(&g)
+    {
+        *d = d.saturating_sub(1);
+        if *d == 0 {
+            disrupted.remove(&g);
+        }
+    }
 }
 
 /// Pending workloads by submit sequence: each one's id, class and queue.
@@ -326,28 +524,31 @@ pub fn check_end(cluster: &Cluster, run: &Run) -> EndReport {
         let starts = run.starts.get(at).copied().unwrap_or(0);
         let acked = run.acked.get(at).copied().unwrap_or(false);
         let refused = run.refused.get(at).copied().unwrap_or(false);
-        if starts > 1 {
+        let record = run.store.record(w.id);
+        // Each placement starts it once: a preempted workload placed again starts again.
+        let placements = record.map_or(0, |rec| rec.placements);
+        if starts > placements.max(1) {
             r.started_twice = r.started_twice.saturating_add(1);
         }
-        let ok = match run.store.record(w.id).map(|rec| rec.state) {
+        let ok = match record.map(|rec| rec.state) {
             None => {
                 r.refused = r.refused.saturating_add(u64::from(refused));
                 refused && starts == 0
             }
             Some(State::Pending) => {
                 r.waiting = r.waiting.saturating_add(1);
-                acked && starts == 0
+                acked && starts == placements
             }
             Some(State::Placed(_)) => {
                 r.running = r.running.saturating_add(1);
-                acked && starts == 1 && w.runs_for.is_none()
+                acked && starts == placements && w.runs_for.is_none()
             }
             Some(State::Complete(_)) => {
                 r.complete = r.complete.saturating_add(1);
-                acked && starts == 1
+                acked && starts == placements
             }
         };
-        if !ok && starts <= 1 {
+        if !ok && starts <= placements.max(1) {
             r.lost = r.lost.saturating_add(1);
         }
     }
@@ -434,7 +635,9 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
         let (workload, node, placing) = match entry.op {
             Op::Submit { .. } => continue,
             Op::Place { workload, node } => (workload, node, true),
-            Op::Complete { workload, node } => (workload, node, false),
+            Op::Complete { workload, node } | Op::Preempt { workload, node } => {
+                (workload, node, false)
+            }
         };
         let spec = run
             .store

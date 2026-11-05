@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::SimError;
-use crate::model::{NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::model::{Group, GroupId, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -26,6 +26,13 @@ pub struct Record {
     pub seq: u64,
     pub version: u64,
     pub state: State,
+    /// Times it was placed: each placement starts it once, so a preempted workload placed again
+    /// starts again without a double start.
+    pub placements: u32,
+    /// Preempted and not placed again: one of its group's disruptions (`AC-T7.5.3`).
+    pub preempted: bool,
+    /// The write that last placed it: the newer of two victims has the larger.
+    pub placed_write: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,9 +53,23 @@ pub enum Write {
 /// An applied write, as the log keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    Submit { workload: WorkloadId, seq: u64 },
-    Place { workload: WorkloadId, node: NodeId },
-    Complete { workload: WorkloadId, node: NodeId },
+    Submit {
+        workload: WorkloadId,
+        seq: u64,
+    },
+    Place {
+        workload: WorkloadId,
+        node: NodeId,
+    },
+    Complete {
+        workload: WorkloadId,
+        node: NodeId,
+    },
+    /// Taken off its node and back to pending, so a higher band or a lower share can have the room.
+    Preempt {
+        workload: WorkloadId,
+        node: NodeId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +90,8 @@ pub enum Conflict {
     NodeFull,
     /// No such record.
     Missing,
+    /// Preempting it would put its group past its disruption budget.
+    Budget(GroupId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +105,14 @@ pub enum Outcome {
         version: u64,
     },
     Conflict(Conflict),
+}
+
+/// A preemption's write: every victim back to pending and the preemptor placed, with their new
+/// versions, or nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreemptOutcome {
+    Applied { victims: Vec<u64>, placed: u64 },
+    Conflict(WorkloadId, Conflict),
 }
 
 /// A gang's write: every member placed, with its new version in the order given, or none.
@@ -100,6 +131,8 @@ pub struct Store {
     log: Vec<Entry>,
     /// Writes applied so far.
     writes: u64,
+    /// Each group's members preempted and not placed again; a group with none has no entry.
+    disrupted: BTreeMap<GroupId, u32>,
     max_records: usize,
     max_log: usize,
 }
@@ -120,6 +153,7 @@ impl Store {
             next_seq: 0,
             log: Vec::new(),
             writes: 0,
+            disrupted: BTreeMap::new(),
             max_records,
             max_log,
         })
@@ -226,6 +260,8 @@ impl Store {
             record.version = bump(record.version)?;
             record.state = State::Placed(node);
             versions.push(record.version);
+            let (group, was) = placed_again(record, self.writes)?;
+            end_disruption(&mut self.disrupted, group, was);
             self.log.push(Entry {
                 at,
                 write: self.writes,
@@ -263,6 +299,9 @@ impl Store {
                 seq,
                 version: 1,
                 state: State::Pending,
+                placements: 0,
+                preempted: false,
+                placed_write: 0,
             },
         );
         Ok(Outcome::Applied {
@@ -311,6 +350,8 @@ impl Store {
         *used = after;
         record.version = version;
         record.state = State::Placed(node);
+        let (group, was) = placed_again(record, self.writes)?;
+        end_disruption(&mut self.disrupted, group, was);
         Ok(Outcome::Applied {
             op: Op::Place { workload, node },
             version,
@@ -361,6 +402,161 @@ impl Store {
         })
     }
 
+    /// Preempts `victims` and places `head`, in one write, or refuses with nothing changed
+    /// (`AC-T7.5.3`): each victim must be placed on the node named at the version its writer read,
+    /// the head pending at its read version, no group of `groups` (by id) may end the write with
+    /// more members disrupted than its budget (a group the list doesn't name has a budget of 0),
+    /// and the head's node must hold it once the victims there are gone.
+    pub fn apply_preempt(
+        &mut self,
+        at: Time,
+        victims: &[(WorkloadId, NodeId, u64)],
+        head: (WorkloadId, NodeId, u64),
+        groups: &[Group],
+    ) -> Result<PreemptOutcome, SimError> {
+        let entries = victims.len().saturating_add(1);
+        if self.log.len().saturating_add(entries) > self.max_log {
+            return Err(SimError::Full {
+                what: "the store's log",
+                bound: self.max_log,
+            });
+        }
+        let mut freed = Resources::default();
+        let mut more: BTreeMap<GroupId, u32> = BTreeMap::new();
+        for (i, &(workload, node, read)) in victims.iter().enumerate() {
+            let Some(record) = self.records.get(&workload) else {
+                return Ok(PreemptOutcome::Conflict(workload, Conflict::Missing));
+            };
+            if record.version != read {
+                return Ok(PreemptOutcome::Conflict(
+                    workload,
+                    Conflict::Version {
+                        read,
+                        found: record.version,
+                    },
+                ));
+            }
+            if record.state != State::Placed(node)
+                || victims.iter().take(i).any(|v| v.0 == workload)
+            {
+                return Ok(PreemptOutcome::Conflict(
+                    workload,
+                    Conflict::State(record.state),
+                ));
+            }
+            if node == head.1 {
+                freed = freed
+                    .checked_add(&record.spec.need)
+                    .ok_or(SimError::Resources(node))?;
+            }
+            if let Some(g) = record.spec.tenancy.group {
+                let n = more.entry(g).or_default();
+                *n = n.checked_add(1).ok_or(SimError::Config("disruptions"))?;
+                let budget = usize::try_from(g.0)
+                    .ok()
+                    .and_then(|at| groups.get(at))
+                    .map_or(0, |g| g.budget);
+                let now = self.disrupted.get(&g).copied().unwrap_or(0);
+                if now.checked_add(*n).is_none_or(|total| total > budget) {
+                    return Ok(PreemptOutcome::Conflict(workload, Conflict::Budget(g)));
+                }
+            }
+        }
+        let (id, node, read) = head;
+        let Some(record) = self.records.get(&id) else {
+            return Ok(PreemptOutcome::Conflict(id, Conflict::Missing));
+        };
+        if record.version != read {
+            return Ok(PreemptOutcome::Conflict(
+                id,
+                Conflict::Version {
+                    read,
+                    found: record.version,
+                },
+            ));
+        }
+        if record.state != State::Pending {
+            return Ok(PreemptOutcome::Conflict(id, Conflict::State(record.state)));
+        }
+        let at_node = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+        let capacity = self
+            .capacity
+            .get(at_node)
+            .ok_or(SimError::UnknownNode(node))?;
+        let after = self
+            .used
+            .get(at_node)
+            .ok_or(SimError::UnknownNode(node))?
+            .checked_sub(&freed)
+            .and_then(|u| u.checked_add(&record.spec.need))
+            .ok_or(SimError::Resources(node))?;
+        if !capacity.holds(&after) {
+            return Ok(PreemptOutcome::Conflict(id, Conflict::NodeFull));
+        }
+        let mut versions = Vec::with_capacity(victims.len());
+        for &(workload, node, _) in victims {
+            let at_node = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+            let record = self
+                .records
+                .get_mut(&workload)
+                .ok_or(SimError::UnknownWorkload(workload))?;
+            let used = self
+                .used
+                .get_mut(at_node)
+                .ok_or(SimError::UnknownNode(node))?;
+            *used = used
+                .checked_sub(&record.spec.need)
+                .ok_or(SimError::Resources(node))?;
+            record.version = bump(record.version)?;
+            record.state = State::Pending;
+            record.preempted = true;
+            versions.push(record.version);
+            if let Some(g) = record.spec.tenancy.group {
+                let n = self.disrupted.entry(g).or_default();
+                *n = n.checked_add(1).ok_or(SimError::Config("disruptions"))?;
+            }
+            self.log.push(Entry {
+                at,
+                write: self.writes,
+                op: Op::Preempt { workload, node },
+            });
+        }
+        let record = self
+            .records
+            .get_mut(&id)
+            .ok_or(SimError::UnknownWorkload(id))?;
+        let used = self
+            .used
+            .get_mut(at_node)
+            .ok_or(SimError::UnknownNode(node))?;
+        *used = used
+            .checked_add(&record.spec.need)
+            .ok_or(SimError::Resources(node))?;
+        record.version = bump(record.version)?;
+        record.state = State::Placed(node);
+        let placed = record.version;
+        let (group, was) = placed_again(record, self.writes)?;
+        end_disruption(&mut self.disrupted, group, was);
+        self.log.push(Entry {
+            at,
+            write: self.writes,
+            op: Op::Place { workload: id, node },
+        });
+        self.writes = self.writes.checked_add(1).ok_or(SimError::Full {
+            what: "the store's writes",
+            bound: usize::MAX,
+        })?;
+        Ok(PreemptOutcome::Applied {
+            victims: versions,
+            placed,
+        })
+    }
+
+    /// `group`'s members preempted and not placed again.
+    pub fn disrupted(&self, group: GroupId) -> u32 {
+        self.disrupted.get(&group).copied().unwrap_or(0)
+    }
+
     pub fn record(&self, workload: WorkloadId) -> Option<&Record> {
         self.records.get(&workload)
     }
@@ -378,6 +574,31 @@ impl Store {
     /// `AC-T7.11.4`'s accounting, implementation goal 6, measures the heap.
     pub fn record_bytes() -> usize {
         size_of::<(WorkloadId, Record)>()
+    }
+}
+
+/// Counts a placement of `record` at write `write` and ends its disruption: its group, and whether
+/// it was disrupted.
+fn placed_again(record: &mut Record, write: u64) -> Result<(Option<GroupId>, bool), SimError> {
+    record.placements = record
+        .placements
+        .checked_add(1)
+        .ok_or(SimError::Config("placements"))?;
+    record.placed_write = write;
+    let was = record.preempted;
+    record.preempted = false;
+    Ok((record.spec.tenancy.group, was))
+}
+
+fn end_disruption(disrupted: &mut BTreeMap<GroupId, u32>, group: Option<GroupId>, was: bool) {
+    let Some(g) = group.filter(|_| was) else {
+        return;
+    };
+    if let Some(n) = disrupted.get_mut(&g) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            disrupted.remove(&g);
+        }
     }
 }
 
@@ -526,6 +747,107 @@ mod tests {
             s.apply_gang(3, &gang(&[2])).unwrap(),
             GangOutcome::Conflict(WorkloadId(2), Conflict::NodeFull)
         );
+    }
+
+    /// AC-T7.5.3 (disruption budgets): a preemption that would put a group past its budget is
+    /// refused and changes nothing; one within it moves its victims back to pending, marked
+    /// disrupted, and places the preemptor, in one write. Placing a disrupted workload again ends
+    /// its disruption.
+    #[test]
+    fn a_preemption_keeps_its_groups_budget() {
+        let mut s = store();
+        let grouped = |id, cpu| WorkloadSpec {
+            tenancy: crate::model::Tenancy {
+                group: Some(GroupId(0)),
+                ..crate::model::Tenancy::default()
+            },
+            ..spec(id, cpu)
+        };
+        let budget = [Group { budget: 1 }];
+        for id in 0..2 {
+            s.apply(0, Write::Submit(grouped(id, 400))).unwrap();
+            s.apply(
+                0,
+                Write::Place {
+                    workload: WorkloadId(id),
+                    node: NodeId(0),
+                    version: 1,
+                },
+            )
+            .unwrap();
+        }
+        s.apply(0, Write::Submit(spec(2, 1000))).unwrap();
+        let victims = [(WorkloadId(0), NodeId(0), 2), (WorkloadId(1), NodeId(0), 2)];
+        let head = (WorkloadId(2), NodeId(0), 1);
+        let log = s.log().len();
+        assert_eq!(
+            s.apply_preempt(1, &victims, head, &budget).unwrap(),
+            PreemptOutcome::Conflict(WorkloadId(1), Conflict::Budget(GroupId(0)))
+        );
+        assert_eq!(s.log().len(), log);
+        assert_eq!(s.disrupted(GroupId(0)), 0);
+        // Within budget, but the preemptor still doesn't fit: refused, nothing changes.
+        assert_eq!(
+            s.apply_preempt(1, &victims[..1], head, &budget).unwrap(),
+            PreemptOutcome::Conflict(WorkloadId(2), Conflict::NodeFull)
+        );
+        s.apply(0, Write::Submit(spec(3, 500))).unwrap();
+        assert_eq!(
+            s.apply_preempt(2, &victims[..1], (WorkloadId(3), NodeId(0), 1), &budget)
+                .unwrap(),
+            PreemptOutcome::Applied {
+                victims: vec![3],
+                placed: 2
+            }
+        );
+        let r = s.record(WorkloadId(0)).unwrap();
+        assert_eq!(
+            (r.state, r.placements, r.preempted),
+            (State::Pending, 1, true)
+        );
+        assert_eq!(s.disrupted(GroupId(0)), 1);
+        let ops: Vec<_> = s.log()[log + 1..].iter().map(|e| (e.write, e.op)).collect();
+        let w = ops[0].0;
+        assert_eq!(
+            ops,
+            vec![
+                (
+                    w,
+                    Op::Preempt {
+                        workload: WorkloadId(0),
+                        node: NodeId(0)
+                    }
+                ),
+                (
+                    w,
+                    Op::Place {
+                        workload: WorkloadId(3),
+                        node: NodeId(0)
+                    }
+                ),
+            ]
+        );
+        s.apply(
+            3,
+            Write::Complete {
+                workload: WorkloadId(3),
+                node: NodeId(0),
+                version: 2,
+            },
+        )
+        .unwrap();
+        s.apply(
+            4,
+            Write::Place {
+                workload: WorkloadId(0),
+                node: NodeId(0),
+                version: 3,
+            },
+        )
+        .unwrap();
+        let r = s.record(WorkloadId(0)).unwrap();
+        assert_eq!((r.placements, r.preempted), (2, false));
+        assert_eq!(s.disrupted(GroupId(0)), 0);
     }
 
     #[test]

@@ -504,6 +504,8 @@ fn run_of(store: Store, n: usize) -> Run {
         policy: Policy::default(),
         owners: vec![Owner::default()],
         gangs: Default::default(),
+        preemption: false,
+        groups: Vec::new(),
     }
 }
 

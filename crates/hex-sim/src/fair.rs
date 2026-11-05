@@ -9,7 +9,11 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use crate::error::SimError;
-use crate::model::{Cluster, NodeSpec, OwnerId, Resources, Time, WorkloadSpec};
+use crate::index::{FitIndex, Verdict};
+use crate::model::{
+    Cluster, Demand, Group, GroupId, NodeId, NodeSpec, OwnerId, Resources, Time, WorkloadId,
+    WorkloadSpec,
+};
 use crate::sim::Ran;
 
 /// How pending work is ordered.
@@ -104,15 +108,22 @@ impl Shares {
 
     /// `owner`'s dominant share of the cluster over its weight, in units of `1 / SCALE`.
     pub fn key(&self, owner: OwnerId) -> u128 {
+        self.key_of(owner, &self.held(owner))
+    }
+
+    /// What `owner` holds placed.
+    pub fn held(&self, owner: OwnerId) -> Resources {
+        self.used.get(&owner).copied().unwrap_or_default()
+    }
+
+    /// `owner`'s key were it to hold `used`.
+    pub fn key_of(&self, owner: OwnerId, used: &Resources) -> u128 {
         let weight = usize::try_from(owner.0)
             .ok()
             .and_then(|o| self.weights.get(o))
             .copied()
             .map_or(1, u128::from);
-        let used = self.used.get(&owner).copied().unwrap_or_default();
-        dominant(&used, &self.total)
-            .checked_div(weight)
-            .unwrap_or(0)
+        dominant(used, &self.total).checked_div(weight).unwrap_or(0)
     }
 
     /// Where `queue` stands: band first, then (under DRF) lowest weighted dominant share, then
@@ -131,6 +142,143 @@ impl Shares {
         out.sort_by_key(|q| self.rank(policy, *q));
         out
     }
+}
+
+/// A placed workload, as preemption weighs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placed {
+    pub id: WorkloadId,
+    pub node: NodeId,
+    pub demand: Demand,
+    pub owner: OwnerId,
+    pub band: u8,
+    pub group: Option<GroupId>,
+    pub in_gang: bool,
+    /// The write that placed it: the larger, the newer.
+    pub write: u64,
+}
+
+/// What a preemption takes: the node the preemptor goes to and the workloads taken off it, in the
+/// order they were chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preemption {
+    pub node: NodeId,
+    pub victims: Vec<WorkloadId>,
+}
+
+/// What [`choose_victims`] passed over, for the run's report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Passed {
+    /// Candidates passed over because their group was at its disruption budget.
+    pub for_budget: u64,
+}
+
+/// Which placed workloads `head` may preempt, and from which node (`docs/design/scheduler-fairness.md`
+/// F4), or `None`: when a node already admits it, when it is in a gang, or when no node can be
+/// freed for it within the rules. A candidate is in a strictly lower band, or in its band under
+/// another owner whose share, less what it would lose, stays above the head's owner's share with
+/// the head placed (Kueue's fair-sharing preemption rule, so no two owners preempt each other back
+/// and forth); never a gang's member (a gang is taken whole or not at all); and never one whose
+/// group would pass its budget of members disrupted at once, counting `disrupted` and those taken
+/// here (a group `groups` doesn't name has a budget of 0). Candidates are taken borrowing first (an
+/// owner above the head's owner's share), then lowest band, then newest, on each node until the
+/// node admits the head; the node needing fewest victims wins, then the lowest id. `view` is left
+/// as it was. Bounded by the placed workloads given: each is weighed at most once.
+pub fn choose_victims(
+    view: &mut FitIndex,
+    placed: &[Placed],
+    head: &WorkloadSpec,
+    shares: &Shares,
+    groups: &[Group],
+    disrupted: &BTreeMap<GroupId, u32>,
+    passed: &mut Passed,
+) -> Result<Option<Preemption>, SimError> {
+    let demand = head.demand();
+    if head.tenancy.gang.is_some() || view.admitted_anywhere(&demand) {
+        return Ok(None);
+    }
+    let owner = head.tenancy.owner;
+    let with_head = shares
+        .held(owner)
+        .checked_add(&head.need)
+        .ok_or(SimError::Config("an owner's usage overflowed"))?;
+    let head_key = shares.key_of(owner, &with_head);
+    let borrowing = |p: &Placed| p.owner != owner && shares.key(p.owner) > head_key;
+    let mut by_node: BTreeMap<NodeId, Vec<&Placed>> = BTreeMap::new();
+    for p in placed {
+        let lower = p.band < head.tenancy.band;
+        if !p.in_gang && (lower || (p.band == head.tenancy.band && borrowing(p))) {
+            by_node.entry(p.node).or_default().push(p);
+        }
+    }
+    let mut best: Option<Preemption> = None;
+    for (node, mut candidates) in by_node {
+        candidates.sort_by_key(|p| (!borrowing(p), p.band, Reverse(p.write), p.id));
+        let mut taken: Vec<&Placed> = Vec::new();
+        let mut lost: BTreeMap<OwnerId, Resources> = BTreeMap::new();
+        let mut more: BTreeMap<GroupId, u32> = BTreeMap::new();
+        let mut fits = false;
+        for p in candidates {
+            if best
+                .as_ref()
+                .is_some_and(|b| taken.len() >= b.victims.len())
+            {
+                break;
+            }
+            let lost_now = lost
+                .get(&p.owner)
+                .copied()
+                .unwrap_or_default()
+                .checked_add(&p.demand.need)
+                .ok_or(SimError::Config("an owner's usage overflowed"))?;
+            if p.band == head.tenancy.band {
+                let left = shares
+                    .held(p.owner)
+                    .checked_sub(&lost_now)
+                    .ok_or(SimError::Config("an owner gave back more than it held"))?;
+                if shares.key_of(p.owner, &left) <= head_key {
+                    continue;
+                }
+            }
+            if let Some(g) = p.group {
+                let budget = usize::try_from(g.0)
+                    .ok()
+                    .and_then(|at| groups.get(at))
+                    .map_or(0, |g| g.budget);
+                let now = disrupted.get(&g).copied().unwrap_or(0);
+                let here = more.get(&g).copied().unwrap_or(0);
+                if now
+                    .checked_add(here)
+                    .and_then(|n| n.checked_add(1))
+                    .is_none_or(|n| n > budget)
+                {
+                    passed.for_budget = passed.for_budget.saturating_add(1);
+                    continue;
+                }
+                more.insert(
+                    g,
+                    here.checked_add(1).ok_or(SimError::Config("disruptions"))?,
+                );
+            }
+            lost.insert(p.owner, lost_now);
+            view.give(node, &p.demand)?;
+            taken.push(p);
+            if view.verdict(node, &demand)? == Verdict::Admits {
+                fits = true;
+                break;
+            }
+        }
+        for p in taken.iter().rev() {
+            view.take(node, &p.demand)?;
+        }
+        if fits && best.as_ref().is_none_or(|b| taken.len() < b.victims.len()) {
+            best = Some(Preemption {
+                node,
+                victims: taken.iter().map(|p| p.id).collect(),
+            });
+        }
+    }
+    Ok(best)
 }
 
 /// The largest of `used`'s fractions of `total`, over the resources the cluster has, scaled.

@@ -3,8 +3,8 @@
 
 use crate::error::SimError;
 use crate::model::{
-    Cluster, GangId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy, Time, WorkloadId,
-    WorkloadSpec,
+    Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy,
+    Time, WorkloadId, WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -145,6 +145,33 @@ pub fn tenants(
         w.tenancy.band = u8::try_from(rng.range(0, top_band)).unwrap_or(0);
     }
     Ok(cluster)
+}
+
+/// `cluster` with `groups` disruption groups of budgets 1 to `max_budget`, each workload in one
+/// of them with probability `per_mille / 1000`.
+pub fn groups(
+    mut cluster: Cluster,
+    seed: u64,
+    groups: u32,
+    max_budget: u32,
+    per_mille: u64,
+) -> Cluster {
+    let mut rng = Rng::new(seed ^ 0x9e0b_d15e);
+    cluster.groups = (0..groups)
+        .map(|_| Group {
+            budget: u32::try_from(rng.range(1, u64::from(max_budget.max(1)))).unwrap_or(1),
+        })
+        .collect();
+    if groups == 0 {
+        return cluster;
+    }
+    for w in &mut cluster.workloads {
+        if rng.chance(per_mille) {
+            let g = rng.range(0, u64::from(groups.saturating_sub(1)));
+            w.tenancy.group = Some(GroupId(u32::try_from(g).unwrap_or(0)));
+        }
+    }
+    cluster
 }
 
 /// `cluster` with runs of 2 to `max_size` consecutive workloads made gangs (a matrix job's legs),

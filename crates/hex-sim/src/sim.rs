@@ -26,11 +26,13 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::ops::Bound;
 
 use crate::error::SimError;
-use crate::fair::{Policy, Queue, Shares};
+use crate::fair::{self, Passed, Placed, Policy, Preemption, Queue, Shares};
 use crate::index::{FitIndex, Key, Refusals, Sample, Sampled};
-use crate::model::{Cluster, Demand, GangId, NodeId, Owner, Time, WorkloadId, WorkloadSpec};
+use crate::model::{
+    Cluster, Demand, GangId, Group, GroupId, NodeId, Owner, Time, WorkloadId, WorkloadSpec,
+};
 use crate::rng::Rng;
-use crate::store::{GangOutcome, Outcome, State, Store, Write};
+use crate::store::{GangOutcome, Outcome, PreemptOutcome, State, Store, Write};
 use crate::trace::{Latencies, TraceHash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,10 @@ pub struct Config {
     pub sample: Sample,
     /// How pending work is ordered; the serial specification orders the same way.
     pub policy: Policy,
+    /// Workloads the control plane may preempt over the run (`docs/design/scheduler-fairness.md`
+    /// F4): 0 turns preemption off. Past it, nothing more is preempted and the passes are counted;
+    /// it bounds the store's log, which keeps a preemption and a placement again per victim.
+    pub preemptions: u64,
 }
 
 impl Default for Config {
@@ -111,6 +117,7 @@ impl Default for Config {
             nemesis: Nemesis::None,
             sample: Sample::default(),
             policy: Policy::default(),
+            preemptions: 0,
         }
     }
 }
@@ -130,6 +137,13 @@ pub struct Report {
     pub placements: u64,
     /// Gangs placed, each in one write.
     pub gangs: u64,
+    /// Workloads preempted, and the writes that did it.
+    pub preempted: u64,
+    pub preemptions: u64,
+    /// Candidates passed over because their group was at its disruption budget.
+    pub budget_passes: u64,
+    /// Preemptions not made because the run's budget of them was spent.
+    pub preemptions_refused: u64,
     /// Sampled decisions made, by deciders and again at commit.
     pub decisions: u64,
     /// Over those decisions' scans, nodes with room that a filter refused, by filter.
@@ -168,6 +182,9 @@ pub struct Run {
     pub owners: Vec<Owner>,
     /// Each gang's members, in id order.
     pub gangs: BTreeMap<GangId, Vec<WorkloadId>>,
+    /// Whether the run preempted, and its groups' disruption budgets.
+    pub preemption: bool,
+    pub groups: Vec<Group>,
 }
 
 /// One run of a workload on a node, as its node agent saw it.
@@ -219,14 +236,27 @@ enum Event {
         seq: u64,
         resets: u64,
     },
+    /// A preemption's commit, chosen again when it comes due.
+    PreemptDue {
+        epoch: u64,
+        seq: u64,
+        resets: u64,
+    },
     NodeStart {
         at: usize,
         node: NodeId,
     },
+    /// The node agent told to stop a preempted workload's run.
+    NodeStop {
+        at: usize,
+        node: NodeId,
+    },
+    /// Run `run` (its start count when it started) ended, or its report is sent again.
     NodeDone {
         at: usize,
         node: NodeId,
         attempt: u32,
+        run: u32,
     },
     Restart,
 }
@@ -252,6 +282,8 @@ impl Event {
             Event::NodeDone { at: a, node, .. } => [6, at(a), u64::from(node.0)],
             Event::Restart => [7, 0, 0],
             Event::GangDue { seq, .. } => [8, seq, 0],
+            Event::PreemptDue { seq, .. } => [9, seq, 0],
+            Event::NodeStop { at: a, node } => [10, at(a), u64::from(node.0)],
         }
     }
 }
@@ -309,6 +341,11 @@ struct Plane {
     committing: bool,
     /// Equivalence classes (needs) no node holds, since capacity last came back.
     infeasible: BTreeSet<Demand>,
+    /// What is placed, for preemption.
+    placed: BTreeMap<WorkloadId, Placed>,
+    /// Each group's members preempted and not placed again, and those workloads.
+    disrupted: BTreeMap<GroupId, u32>,
+    preempted: BTreeSet<WorkloadId>,
 }
 
 impl Plane {
@@ -340,12 +377,18 @@ impl Plane {
             forgotten: 0,
             committing: false,
             infeasible: BTreeSet::new(),
+            placed: BTreeMap::new(),
+            disrupted: BTreeMap::new(),
+            preempted: BTreeSet::new(),
         };
         for record in store.records() {
             match record.state {
                 State::Pending => {
                     plane.enqueue(&record.spec, record.seq);
                     plane.versions.insert(record.spec.id, record.version);
+                    if record.preempted {
+                        plane.disrupt(&record.spec)?;
+                    }
                 }
                 State::Placed(node) => {
                     plane.view.take(node, &record.spec.demand())?;
@@ -353,6 +396,10 @@ impl Plane {
                         .shares
                         .take(record.spec.tenancy.owner, &record.spec.need)?;
                     plane.versions.insert(record.spec.id, record.version);
+                    plane.placed.insert(
+                        record.spec.id,
+                        placed(&record.spec, node, record.placed_write),
+                    );
                 }
                 State::Complete(_) => {}
             }
@@ -401,6 +448,62 @@ impl Plane {
     fn order(&self) -> Vec<Queue> {
         self.shares.order(self.policy, self.pending.keys().copied())
     }
+
+    /// `spec` preempted: back to pending, and one of its group's disruptions.
+    fn disrupt(&mut self, spec: &WorkloadSpec) -> Result<(), SimError> {
+        self.preempted.insert(spec.id);
+        if let Some(g) = spec.tenancy.group {
+            let n = self.disrupted.entry(g).or_default();
+            *n = n.checked_add(1).ok_or(SimError::Config("disruptions"))?;
+        }
+        Ok(())
+    }
+
+    /// `spec` placed on `node` by write `write`: what its own placements change beyond the view
+    /// and shares. With preemption on, every other queue's cursor goes: a share that grew may make
+    /// work behind a cursor able to preempt now; and if the placement ended a disruption, its own
+    /// queue's goes too, as a group back under its budget may let work behind it preempt. Whether
+    /// it did: then the placing queue's cursor must not be set past the placement either.
+    fn note_placed(
+        &mut self,
+        spec: &WorkloadSpec,
+        node: NodeId,
+        write: u64,
+        preemption: bool,
+    ) -> bool {
+        self.placed.insert(spec.id, placed(spec, node, write));
+        // A disrupted member placed again ends its disruption (the store's rule).
+        let mut ended = false;
+        if self.preempted.remove(&spec.id)
+            && let Some(g) = spec.tenancy.group
+            && let Some(n) = self.disrupted.get_mut(&g)
+        {
+            ended = true;
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.disrupted.remove(&g);
+            }
+        }
+        if preemption {
+            let own = self.policy.queue(spec);
+            self.cursors.retain(|q, _| *q == own && !ended);
+        }
+        preemption && ended
+    }
+}
+
+/// A placed workload as preemption weighs it.
+fn placed(spec: &WorkloadSpec, node: NodeId, write: u64) -> Placed {
+    Placed {
+        id: spec.id,
+        node,
+        demand: spec.demand(),
+        owner: spec.tenancy.owner,
+        band: spec.tenancy.band,
+        group: spec.tenancy.group,
+        in_gang: spec.tenancy.gang.is_some(),
+        write,
+    }
 }
 
 struct Sim<'a> {
@@ -419,6 +522,10 @@ struct Sim<'a> {
     acked: Vec<bool>,
     refused: Vec<bool>,
     ran: Vec<Option<Ran>>,
+    /// Whether each workload's current run is going on its node.
+    live: Vec<bool>,
+    /// Each workload's runs up to this one were stopped by preemption: their reports are dropped.
+    stopped: Vec<u32>,
     /// Workloads running on nodes now.
     running: u64,
     nemesis_rng: Rng,
@@ -453,9 +560,13 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         return Err(SimError::Config("workloads must be in arrival order"));
     }
     let n = cluster.workloads.len();
-    // The log holds a submit, a placement and a completion per workload.
-    let max_log = n
-        .checked_mul(3)
+    // The log holds a submit, a placement and a completion per workload, and a preemption and a
+    // placement again per workload preempted.
+    let max_log = u64::try_from(n)
+        .ok()
+        .and_then(|n| n.checked_mul(3))
+        .and_then(|l| l.checked_add(config.preemptions.checked_mul(2)?))
+        .and_then(|l| usize::try_from(l).ok())
         .ok_or(SimError::Config("too many workloads"))?;
     let store = Store::new(&cluster.nodes, n, max_log)?;
     for w in &cluster.workloads {
@@ -488,6 +599,8 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         acked: vec![false; n],
         refused: vec![false; n],
         ran: vec![None; n],
+        live: vec![false; n],
+        stopped: vec![0; n],
         running: 0,
         nemesis_rng: Rng::new(match config.nemesis {
             Nemesis::Random { seed, .. } => seed,
@@ -537,6 +650,8 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
             .into_iter()
             .map(|(g, (members, _))| (g, members))
             .collect(),
+        preemption: sim.config.preemptions > 0,
+        groups: sim.cluster.groups.clone(),
     })
 }
 
@@ -727,8 +842,15 @@ impl Sim<'_> {
                 resets,
             } => self.commit_due(epoch, seq, decision, resets),
             Event::GangDue { epoch, seq, resets } => self.gang_due(epoch, seq, resets),
+            Event::PreemptDue { epoch, seq, resets } => self.preempt_due(epoch, seq, resets),
             Event::NodeStart { at, node } => self.node_start(at, node),
-            Event::NodeDone { at, node, attempt } => self.node_done(at, node, attempt),
+            Event::NodeStop { at, node } => self.node_stop(at, node),
+            Event::NodeDone {
+                at,
+                node,
+                attempt,
+                run,
+            } => self.node_done(at, node, attempt, run),
             Event::Restart => {
                 self.plane = Plane::rebuild(
                     &self.store,
@@ -1121,6 +1243,9 @@ impl Sim<'_> {
             let need = self.demand(id)?;
             if self.plane.infeasible.contains(&need) {
                 self.plane.proposals.remove(&seq);
+                if self.send_preemption(q, seq, id)? {
+                    return Ok(());
+                }
                 self.plane.cursors.insert(q, seq);
                 self.report.class_skips = self
                     .report
@@ -1138,8 +1263,11 @@ impl Sim<'_> {
             };
             let decision = self.late_bind(&need, decision)?;
             if decision.node().is_none() {
-                self.plane.cursors.insert(q, seq);
                 self.mark_infeasible(need)?;
+                if self.send_preemption(q, seq, id)? {
+                    return Ok(());
+                }
+                self.plane.cursors.insert(q, seq);
                 continue;
             }
             self.plane.committing = true;
@@ -1205,15 +1333,19 @@ impl Sim<'_> {
         };
         let changed = self.plane.view.take(key.node, &need)?;
         self.note_change(changed)?;
-        let owner = self
+        let (spec, write) = self
             .store
             .record(id)
-            .map(|r| r.spec.tenancy.owner)
+            .map(|r| (r.spec, r.placed_write))
             .ok_or(SimError::UnknownWorkload(id))?;
-        self.plane.shares.take(owner, &need.need)?;
+        self.plane.shares.take(spec.tenancy.owner, &need.need)?;
+        let preemption = self.config.preemptions > 0;
+        let reopened = self.plane.note_placed(&spec, key.node, write, preemption);
         self.plane.dequeue(seq);
         self.plane.versions.insert(id, version);
-        self.plane.cursors.insert(queue, seq);
+        if !reopened {
+            self.plane.cursors.insert(queue, seq);
+        }
         self.report.placements = self
             .report
             .placements
@@ -1261,11 +1393,15 @@ impl Sim<'_> {
         let Some(versions) = self.write_gang(&write)? else {
             return Ok(());
         };
+        let mut reopened = false;
         for (&(member, node, _, member_seq), version) in members.iter().zip(versions) {
             let spec = self.spec(member)?;
             let changed = self.plane.view.take(node, &spec.demand())?;
             self.note_change(changed)?;
             self.plane.shares.take(spec.tenancy.owner, &spec.need)?;
+            let write = self.store.record(member).map_or(0, |r| r.placed_write);
+            let preemption = self.config.preemptions > 0;
+            reopened |= self.plane.note_placed(&spec, node, write, preemption);
             self.plane.dequeue(member_seq);
             self.plane.proposals.remove(&member_seq);
             self.plane.versions.insert(member, version);
@@ -1285,8 +1421,207 @@ impl Sim<'_> {
             .gangs
             .checked_add(1)
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
-        self.plane.cursors.insert(queue, seq);
+        if !reopened {
+            self.plane.cursors.insert(queue, seq);
+        }
         self.sequence()
+    }
+
+    /// Victims for `id` against the plane's view now, within the run's budget of preemptions.
+    fn choose(&mut self, id: WorkloadId) -> Result<Option<Preemption>, SimError> {
+        if self.config.preemptions == 0 {
+            return Ok(None);
+        }
+        let spec = self.spec(id)?;
+        let placed: Vec<Placed> = self.plane.placed.values().copied().collect();
+        let mut passed = Passed::default();
+        let chosen = fair::choose_victims(
+            &mut self.plane.view,
+            &placed,
+            &spec,
+            &self.plane.shares,
+            &self.cluster.groups,
+            &self.plane.disrupted,
+            &mut passed,
+        )?;
+        self.report.budget_passes = self
+            .report
+            .budget_passes
+            .checked_add(passed.for_budget)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        let Some(chosen) = chosen else {
+            return Ok(None);
+        };
+        let after = u64::try_from(chosen.victims.len())
+            .ok()
+            .and_then(|n| self.report.preempted.checked_add(n));
+        if after.is_none_or(|n| n > self.config.preemptions) {
+            self.report.preemptions_refused = self
+                .report
+                .preemptions_refused
+                .checked_add(1)
+                .ok_or(SimError::StepBudget(self.config.max_steps))?;
+            return Ok(None);
+        }
+        Ok(Some(chosen))
+    }
+
+    /// Sends a preemption for `seq` of queue `q` if one can be made: `true` when one is in flight.
+    fn send_preemption(&mut self, q: Queue, seq: u64, id: WorkloadId) -> Result<bool, SimError> {
+        if self.choose(id)?.is_none() {
+            return Ok(false);
+        }
+        self.plane.committing = true;
+        self.plane.in_flight = Some((q, seq));
+        let (epoch, resets) = (self.plane.epoch, self.plane.resets);
+        self.schedule(
+            self.after(self.config.commit_ns)?,
+            Event::PreemptDue { epoch, seq, resets },
+        )?;
+        Ok(true)
+    }
+
+    /// A preemption's commit come due: its victims chosen again against the view now (late
+    /// binding), and written with the preemptor's placement in one store write.
+    fn preempt_due(&mut self, epoch: u64, seq: u64, resets: u64) -> Result<(), SimError> {
+        if epoch != self.plane.epoch || !self.plane.up {
+            return Ok(());
+        }
+        self.plane.committing = false;
+        self.plane.in_flight = None;
+        let Some(id) = self.plane.pending_id(seq) else {
+            return self.sequence();
+        };
+        if resets != self.plane.resets {
+            return self.sequence();
+        }
+        let Some(chosen) = self.choose(id)? else {
+            return self.sequence();
+        };
+        let version = |plane: &Plane, w: WorkloadId| {
+            plane
+                .versions
+                .get(&w)
+                .copied()
+                .ok_or(SimError::UnknownWorkload(w))
+        };
+        let mut victims = Vec::with_capacity(chosen.victims.len());
+        for &v in &chosen.victims {
+            let node = self
+                .plane
+                .placed
+                .get(&v)
+                .map(|p| p.node)
+                .ok_or(SimError::UnknownWorkload(v))?;
+            victims.push((v, node, version(&self.plane, v)?));
+        }
+        let head = (id, chosen.node, version(&self.plane, id)?);
+        let Some((versions, placed)) = self.write_preempt(&victims, head)? else {
+            return Ok(());
+        };
+        for (&(v, node, _), new) in victims.iter().zip(versions) {
+            let spec = self.spec(v)?;
+            let changed = self.plane.view.give(node, &spec.demand())?;
+            self.note_change(changed)?;
+            self.plane.shares.give(spec.tenancy.owner, &spec.need)?;
+            self.plane.versions.insert(v, new);
+            self.plane.placed.remove(&v);
+            let victim_seq = self
+                .store
+                .record(v)
+                .map(|r| r.seq)
+                .ok_or(SimError::UnknownWorkload(v))?;
+            self.plane.enqueue(&spec, victim_seq);
+            self.plane.disrupt(&spec)?;
+            self.report.preempted = self
+                .report
+                .preempted
+                .checked_add(1)
+                .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        }
+        let spec = self.spec(id)?;
+        let changed = self.plane.view.take(chosen.node, &spec.demand())?;
+        self.note_change(changed)?;
+        self.plane.shares.take(spec.tenancy.owner, &spec.need)?;
+        let write = self.store.record(id).map_or(0, |r| r.placed_write);
+        // Every cursor goes below, whatever this placement ended.
+        self.plane.note_placed(&spec, chosen.node, write, true);
+        self.plane.dequeue(seq);
+        self.plane.proposals.remove(&seq);
+        self.plane.versions.insert(id, placed);
+        self.report.placements = self
+            .report
+            .placements
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.report.preemptions = self
+            .report
+            .preemptions
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.latencies.push(
+            self.now
+                .checked_sub(spec.arrives)
+                .ok_or(SimError::TimeOverflow)?,
+        );
+        // Victims are pending again and may hold elsewhere: every claim of holding nowhere goes.
+        self.plane.cursors.clear();
+        self.plane.infeasible.clear();
+        self.plane.resets = self
+            .plane
+            .resets
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        self.assign()?;
+        self.sequence()
+    }
+
+    /// A preemption's store write, where the nemesis strikes as at any write: the victims' new
+    /// versions and the preemptor's, or `None` if the plane crashed there.
+    fn write_preempt(
+        &mut self,
+        victims: &[(WorkloadId, NodeId, u64)],
+        head: (WorkloadId, NodeId, u64),
+    ) -> Result<Option<(Vec<u64>, u64)>, SimError> {
+        let number = self.report.writes;
+        self.report.writes = number
+            .checked_add(1)
+            .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        let crash = self.strike(number);
+        if crash == Some(When::Before) {
+            self.crash(When::Before)?;
+            return Ok(None);
+        }
+        let outcome = self
+            .store
+            .apply_preempt(self.now, victims, head, &self.cluster.groups)?;
+        let PreemptOutcome::Applied {
+            victims: new,
+            placed,
+        } = outcome
+        else {
+            return Err(SimError::UnexpectedConflict(head.0));
+        };
+        // The store's feed tells the nodes, whatever becomes of the plane: the victims' first, so
+        // a node frees the room before its new run starts.
+        for &(workload, node, _) in victims {
+            let at =
+                usize::try_from(workload.0).map_err(|_| SimError::UnknownWorkload(workload))?;
+            self.schedule(
+                self.after(self.config.feed_ns)?,
+                Event::NodeStop { at, node },
+            )?;
+        }
+        let at = usize::try_from(head.0.0).map_err(|_| SimError::UnknownWorkload(head.0))?;
+        self.schedule(
+            self.after(self.config.feed_ns)?,
+            Event::NodeStart { at, node: head.1 },
+        )?;
+        if crash.is_some() {
+            self.crash(When::After)?;
+            return Ok(None);
+        }
+        Ok(Some((new, placed)))
     }
 
     /// A gang's store write, where the nemesis strikes as at any write. `None`: the plane crashed
@@ -1345,6 +1680,10 @@ impl Sim<'_> {
             .get_mut(at)
             .ok_or(SimError::Config("workload index"))?;
         *starts = starts.checked_add(1).ok_or(SimError::Config("starts"))?;
+        let run = *starts;
+        if let Some(live) = self.live.get_mut(at) {
+            *live = true;
+        }
         let ran = self
             .ran
             .get_mut(at)
@@ -1367,15 +1706,50 @@ impl Sim<'_> {
                     at,
                     node,
                     attempt: 0,
+                    run,
                 },
             )?;
         }
         Ok(())
     }
 
-    fn node_done(&mut self, at: usize, node: NodeId, attempt: u32) -> Result<(), SimError> {
+    /// The node agent stops a preempted workload's run: it ends now, and its report, if one is
+    /// still to come or being sent again, is dropped, as the run was stopped rather than done.
+    fn node_stop(&mut self, at: usize, _node: NodeId) -> Result<(), SimError> {
+        let starts = self.starts.get(at).copied().unwrap_or(0);
+        if let Some(stopped) = self.stopped.get_mut(at) {
+            *stopped = starts;
+        }
+        if self.live.get(at).copied().unwrap_or(false) {
+            if let Some(live) = self.live.get_mut(at) {
+                *live = false;
+            }
+            self.running = self
+                .running
+                .checked_sub(1)
+                .ok_or(SimError::Config("running"))?;
+            if let Some(Some(ran)) = self.ran.get_mut(at) {
+                ran.ended.get_or_insert(self.now);
+            }
+        }
+        Ok(())
+    }
+
+    fn node_done(
+        &mut self,
+        at: usize,
+        node: NodeId,
+        attempt: u32,
+        run: u32,
+    ) -> Result<(), SimError> {
         let id = self.workload(at)?.id;
+        if self.stopped.get(at).is_some_and(|&s| run <= s) {
+            return Ok(());
+        }
         if attempt == 0 {
+            if let Some(live) = self.live.get_mut(at) {
+                *live = false;
+            }
             // The run itself ends here; what follows is its report.
             self.running = self
                 .running
@@ -1398,6 +1772,7 @@ impl Sim<'_> {
                     at,
                     node,
                     attempt: next,
+                    run,
                 },
             )
         };
@@ -1426,6 +1801,7 @@ impl Sim<'_> {
                 self.note_change(changed)?;
                 self.plane.shares.give(spec.tenancy.owner, &spec.need)?;
                 self.plane.versions.remove(&id);
+                self.plane.placed.remove(&id);
                 self.plane.cursors.clear();
                 self.plane.infeasible.clear();
                 self.plane.resets = self

@@ -110,3 +110,47 @@ Measured 2026-11-05 on jupiter (Windows x86_64, release).
 **What would falsify it.** A write after which a gang is part placed, in any run; or gangs waiting
 behind singles so long that a recorded day's matrix jobs start later than their legs would one by
 one, which would call for a reservation for the gang at the head of its queue.
+
+### F4. Preemption within disruption budgets
+
+**The choice.** With preemption on (`Config::preemptions`, a budget of workloads preempted per run;
+0 is off, past it nothing more is preempted and the refusals are counted), when the committer reaches
+work in the first queue that holds on no node, it looks for victims (`fair::choose_victims`, one pure
+function the committer and the specification both call): placed workloads in a strictly lower band,
+or in the same band under another owner whose share, less what it would lose, stays above the
+preemptor's owner's share with the preemptor placed. Never a gang's member. Never one whose
+disruption group would then have more members preempted and not placed again than its budget.
+Candidates are taken borrowing first, then lowest band, then newest, node by node until the node
+admits the preemptor; the node needing fewest victims wins, then the lowest id. The victims go back
+to pending (at their old place in their queues) and the preemptor is placed, in one store write
+(`Store::apply_preempt`), which itself refuses a write past any group's budget (`Conflict::Budget`),
+so a budget holds even against a wrong choice. Each placement starts a workload once: a preempted
+workload placed again starts again, and `check_end` counts a double start as more starts than
+placements. The node agent stops a preempted run and drops any report of it still to come.
+
+**Sources.** Kueue's preemption ([KueuePre]): candidates "from ClusterQueues borrowing first", then
+"lowest priority", then "most recently admitted"; under fair sharing a workload preempts another only
+if its ClusterQueue's share after admission stays below the target's share after preemption, which
+is the same-band rule here. Kubernetes ([K8sPrio]) picks the node whose victims are fewest and of
+lowest priority, and ([K8sPDB]) counts a budget as pods disrupted at once. Borg's production tier
+preempts only lower priorities ([Borg] §2.5).
+
+**Evidence.** `AC-T7.5.3`: `tests/preempt.rs` `preemption_never_breaks_a_budget`, a proptest of 256
+generated clusters (1 to 8 nodes, 8 to 90 workloads; the first half in band 0 never ending, the
+rest in bands 1 and 2; up to 3 owners; most workloads in up to 4 groups with budgets 1 to 3) with
+the crash nemesis at random writes: every run's log is replayed by the specification, which refuses a
+preemption past a budget (`Violation::BudgetBroken`), one it wouldn't make, and a higher band left
+waiting while it could preempt within the budgets (`Violation::Inversion`); none occurs, and nothing is
+lost or started twice. Non-vacuity, over 300 such clusters without crashes: 825 workloads preempted
+in 589 preemptions, candidates passed over for a budget 22,383 times, none refused for the run's
+budget (`preemptions_happen_and_budgets_bind`). A crash before and after every write of a contested
+cluster with preemptions (`a_crash_at_every_write_with_preemption_loses_and_doubles_nothing`). The
+mutant ignoring budgets is refused (`the_oracle_refuses_a_preemption_past_a_budget`), as is an inversion
+(`the_oracle_refuses_a_higher_band_left_waiting`). The proptest found one bug: a placement that ended
+a disruption left its queue's cursor past work that could then preempt
+(`a_disruption_ended_by_a_placement_reopens_its_queue`). Measured 2026-11-05 on jupiter (Windows x86_64,
+release).
+
+**What would falsify it.** Any run whose log the specification refuses for a budget or an inversion; or,
+on a recorded day, preemption churn (work preempted and placed again) costing more goodput than the
+bands gain, which would call for a minimum run time before a workload can be preempted.
