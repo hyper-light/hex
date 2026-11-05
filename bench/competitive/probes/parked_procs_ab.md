@@ -86,3 +86,25 @@ the node's `hex-proc-drop` thread). fedora, 2026-11-05 15:02:19Z-15:07:53Z, unde
 - Part 19's p50 falls about 5x, as on the host. Its p99 and the whole create's p99 don't fall consistently: B-L6-r1
   and B-L12-r2 are the slowest cells of their L. With the host this loaded, the guest's tails mostly reflect the
   host, so they settle nothing either way.
+
+## The 7.2 guest on the tree way, indicative (NOT OF RECORD: a VM's numbers)
+
+**Run.** As the guest run above, but at cp/t7-g5-parkproc 8c35cf9, where a park clones with its way's flags. The
+mount namespaces are made from the tree (`HEX_OCI_MNTNS=tree`, 7.x's default). Binaries: hex c2cb3634627c093e,
+seam_oci 9638d84d168ba926. 2026-11-05 15:18:50Z-15:22:13Z, under the timed lock; fedora's load fell from 30.2 to 25.0.
+Body: `~/.cache/hex-t7/g5tail/vm-pp-20261105T151759Z`.
+
+| L | arm | part 19 p50 | part 19 p99 | unpreempted p99 | create p99 (ms) | mount-lock waits a create |
+|---|-----|-------------|-------------|-----------------|-----------------|---------------------------|
+| 6 | A | 225, 198 | 2118, 1345 | 1246, 686 | 6.745, 4.713 | 2.95, 3.93 |
+| 6 | B | 43, 41 | 747, 608 | 410, 257 | 3.552, 5.717 | 0.66, 0.67 |
+| 12 | A | 190, 202 | 1528, 1449 | 354, 357 | 13.255, 5.796 | 1.57, 1.53 |
+| 12 | B | 41, 36 | 350, 227 | 93, 71 | 4.194, 9.053 | 0.22, 0.30 |
+
+- Every cell: all 2,000 mount namespaces made from the tree, and 1,992 creates claimed a parked init. Before
+  8c35cf9's parent, 81082bd, a create on this way claimed none.
+- In the B cells: 1,992 hits, 0 misses, 0 dry, 0 failed. The proc pool served 0 to 7 creates a cell, the ones no
+  parked init was ready for. A create takes one or the other, never both.
+- The init's holds are 29.0 a create off and 5.0 on; the node's are 2.0 a box off and 31.0 on.
+- Part 19's p50 falls about 5x, and its p99 falls in all 4 pairs. The whole create's p99 doesn't settle: B is lower
+  in 2 of 4 pairs, and B-L6-r2 (5.72 ms) and B-L12-r2 (9.05 ms) are over their pairs' A.
