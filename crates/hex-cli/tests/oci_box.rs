@@ -1629,7 +1629,13 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         "N3's key isn't K: {after:?}"
     );
     assert_eq!(after.proc_hits, before.proc_hits, "{after:?}");
-    // The missed tree goes to the node's dropper, never unmounted on N3's create.
+    // The missed tree goes to the node's dropper, never unmounted on N3's create: queued by the create, dropped by
+    // the dropper, none inline.
+    assert_eq!(
+        (after.procs_queued, after.procs_dropped_inline),
+        (before.procs_queued + 1, before.procs_dropped_inline),
+        "N3's create queued its missed proc: {after:?}"
+    );
     wait_for(
         || node.cgroup_reuse().unwrap().parked.procs_dropped == before.procs_dropped + 1,
         "the missed proc dropped by the node's dropper",

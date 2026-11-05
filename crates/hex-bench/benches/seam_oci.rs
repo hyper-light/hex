@@ -1098,6 +1098,7 @@ mod linux {
                "proc_dry": a.proc_dry - b.proc_dry,
                "procs_failed": a.procs_failed - b.procs_failed,
                "procs_held": a.procs_held,
+               "procs_queued": a.procs_queued - b.procs_queued,
                "procs_dropped": a.procs_dropped - b.procs_dropped,
                "procs_dropped_inline": a.procs_dropped_inline - b.procs_dropped_inline})
     }

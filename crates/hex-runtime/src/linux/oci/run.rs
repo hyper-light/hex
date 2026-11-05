@@ -496,27 +496,38 @@ pub struct Parked {
 #[derive(Clone, Debug)]
 pub struct ProcSink {
     queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+    queued: std::sync::Arc<AtomicU64>,
     inline: std::sync::Arc<AtomicU64>,
 }
 
 impl ProcSink {
-    /// A sink onto `queue`, counting in `inline` each tree dropped where it was, its queue full or closed.
+    /// A sink onto `queue`, counting in `queued` each tree handed to it and in `inline` each dropped where it was,
+    /// its queue full or closed.
     pub fn new(
         queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+        queued: std::sync::Arc<AtomicU64>,
         inline: std::sync::Arc<AtomicU64>,
     ) -> Self {
-        Self { queue, inline }
+        Self {
+            queue,
+            queued,
+            inline,
+        }
     }
 
     /// `proc`, unattached, handed to the node's thread to drop.
     pub fn discard(&self, proc: init::PreparedProc) {
-        if let Err(
-            std::sync::mpsc::TrySendError::Full(proc)
-            | std::sync::mpsc::TrySendError::Disconnected(proc),
-        ) = self.queue.try_send(proc)
-        {
-            self.inline.fetch_add(1, Ordering::Relaxed);
-            drop(proc);
+        match self.queue.try_send(proc) {
+            Ok(()) => {
+                self.queued.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(
+                std::sync::mpsc::TrySendError::Full(proc)
+                | std::sync::mpsc::TrySendError::Disconnected(proc),
+            ) => {
+                self.inline.fetch_add(1, Ordering::Relaxed);
+                drop(proc);
+            }
         }
     }
 }
@@ -540,14 +551,38 @@ impl Parked {
         }
     }
 
-    /// The init's own pid namespace, opened through its pidfd (`PIDFD_GET_PID_NAMESPACE`, [`sys::pidfd_pid_namespace`]),
-    /// never by its pid: refused once the init has ended. The descriptor is close-on-exec (v6.19 `fs/nsfs.c:120`).
+    /// The init's own pid namespace, opened by its pid in this process's `/proc` and then held to the init by its
+    /// pidfd (decision 8, parked procs: the lead's 14:37Z, no new `unsafe`). Opened first, polled second: a pidfd
+    /// reads ready once its process has exited or been reaped (v6.19 `fs/pidfs.c:261-265`; pidfd_open(2)), and a
+    /// process doesn't come back, so one that reads not ready after the open was running at the open, and its pid
+    /// (a running process's, never reused, the init being this process's child) named it. One that reads ready is
+    /// refused, whoever reaped it.
     pub fn pid_namespace(&self) -> Result<OwnedFd, OciError> {
-        let Some((_, pidfd, _)) = &self.held else {
+        let Some((pid, pidfd, _)) = &self.held else {
             return Err(OciError::Broken("a parked init no longer held".to_owned()));
         };
-        sys::pidfd_pid_namespace(pidfd.as_fd())
-            .map_err(|e| OciError::os("opening a parked init's pid namespace through its pidfd", e))
+        let ns = rustix::fs::open(
+            format!("/proc/{pid}/ns/pid").as_str(),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening a parked init's pid namespace", e))?;
+        let mut fds = [rustix::event::PollFd::new(
+            pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        let now = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let ended = rustix::event::poll(&mut fds, Some(&now))
+            .map_err(|e| OciError::os("asking whether a parked init runs", e))?;
+        if ended != 0 {
+            return Err(OciError::Broken(
+                "a parked init ended before its pid namespace was opened".to_owned(),
+            ));
+        }
+        Ok(ns)
     }
 
     /// The proc made for this init's pid namespace, for `key`, held with it until a claim takes it; `sink` drops it

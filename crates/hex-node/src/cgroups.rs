@@ -125,8 +125,9 @@ pub struct ParkCounts {
     pub procs_failed: u64,
     /// Procs held now with the inits they were made for, at most one an init parked.
     pub procs_held: usize,
-    /// Unattached procs (misses, and those of inits ended unclaimed) dropped by the node's thread for them, off
-    /// every create's path, and those dropped where they were, its queue full.
+    /// Unattached procs (misses, and those of inits ended unclaimed) handed to the node's thread for them, those it
+    /// has dropped, off every create's path, and those dropped where they were, its queue full.
+    pub procs_queued: u64,
     pub procs_dropped: u64,
     pub procs_dropped_inline: u64,
 }
@@ -229,6 +230,7 @@ struct Parking {
     procs_failed: AtomicU64,
     /// Where unattached procs go to be dropped, and what its thread dropped, once the node's cgroups start.
     drops: OnceLock<ProcSink>,
+    queued: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     dropped_inline: Arc<AtomicU64>,
 }
@@ -271,6 +273,7 @@ impl Parking {
                     .filter(|(p, _)| p.proc_key().is_some())
                     .count()
             }),
+            procs_queued: self.queued.load(Ordering::Relaxed),
             procs_dropped: self.dropped.load(Ordering::Relaxed),
             procs_dropped_inline: self.dropped_inline.load(Ordering::Relaxed),
         }
@@ -468,9 +471,11 @@ impl Cgroups {
             .name("hex-proc-drop".to_owned())
             .spawn(move || drop_each(&unattached, &dropped))
             .map_err(|e| Refusal::os("starting the unattached procs' dropper", e))?;
-        let _ = parking
-            .drops
-            .set(ProcSink::new(drops, Arc::clone(&parking.dropped_inline)));
+        let _ = parking.drops.set(ProcSink::new(
+            drops,
+            Arc::clone(&parking.queued),
+            Arc::clone(&parking.dropped_inline),
+        ));
         Ok(Self {
             pool: Arc::new(Mutex::new(Pool::new(PER_OWNER, PER_NODE, first))),
             held: Mutex::new(BTreeMap::new()),
