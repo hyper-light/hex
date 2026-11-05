@@ -110,7 +110,12 @@ directories are made as their first container needs them and never removed. An o
 itself two hex digits shares its name with a shard; the node's containers are named `<node key>-<id>`, so none of its
 own can. Records and the wire are unchanged. **What would falsify it:** the `i_rwsem` wait on the state root not
 falling at concurrency 32, or a lifecycle's p50 or p99 at 1 or 32 rising against the one parent
-(`docs/research/runtime/goal5-cgroup-lock.md`).
+(`docs/research/runtime/goal5-cgroup-lock.md`). **Measured, and kept:** the root's mkdirs and rmdirs, one each a
+lifecycle under its `i_rwsem` at 32, are off the lock table, no shard waited on (`create_serial.md` run 27); in
+host.sh's reading, the one goal 5's bar is measured by, <!-- record: bench/competitive/probes/reuse_pass.md -->a
+lifecycle's p99 at 1 and 32 is 0.835 to 0.884 of the one parent's at both descriptor limits and its p50 at 32 0.88 to
+0.90<!-- /record --> (`reuse_pass.md` run 20); the other readings are mixed within the host's noise, and the
+lever's own cost is a second stat for a new id, about 9 us a lifecycle.
 
 The Linux record store opens its two directories once, retaining two close-on-exec descriptors
 shared by its clones. Each write opens only `.<id>.tmp` relative to its directory and renames that

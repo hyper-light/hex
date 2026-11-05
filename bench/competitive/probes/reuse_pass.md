@@ -649,6 +649,53 @@ slows 32 (8,046/s to 7,369/s, its p99 9.36 to 11.04 ms; at the given limit 8,101
   minutes apart as its concurrency 1 went from 0.91 to 0.57 ms of CPU a lifecycle: option 1's ratio follows
   concurrency 1's CPU, the host's swing runs 14 to 16 found. 4-15 alone 4.94x and 5.00x (4.68x and 5.02x).
 
+## Run 20 (2026-11-05, fedora): lever 3's state directories in shards, A B B A in the three readings, both limits
+
+- **What it measures** (the lead, 2026-11-05): lever 3 (`3f3c1b9`: each container's state directory in one of 64
+  shards of the state root, so a create's mkdir and a delete's rmdir no longer all hold one parent's `i_rwsem`)
+  against the tree it was made on, A B B A, in run 17's three readings and at its two descriptor limits, with each
+  lifecycle's c1 CPU, p50 and p99 at 1 and 32 beside the ratio. **host.sh's reading decides it:** it's the one goal
+  5's bar is measured by (the lead, 2026-11-05T12:20Z); the other two stand beside it.
+- **Binaries**, built once, release: A, `a12e526` (step 6 through the held files' bound; `hex` ba7a69173ad5d51c,
+  `seam_oci` 263a46d4777de7a0). B, `ce4924a` (A with lever 3 and its two test fixes; `hex` bf726a07d00e23e9,
+  `seam_oci` 96ed501b8bd129fa). The harness at B's tree with 270bd4f's fetch fix (`38331b7`), libcrun 1.30.1 in
+  process, one owner's boxes, `ROUNDS=2 N=200 WARMUP=20 HEXBENCH_INTERLEAVED=10`: 20 pairs a run, 40 a side.
+- **Runs:** units `hex-shards-gates-20261105T032331Z` (option 1 at the hard limit, 04:57Z to 05:08Z, and its a2 at
+  07:35Z) and `hex-shards-bench-20261105T082248Z` (the rest, 09:09Z to 11:23Z), every run under the timed lock, the
+  load 10 to 62 (each run's start and end, co-tenants and containers in the job's `log` and `*.cotenants`). That
+  first unit's host.sh and 4-15 readings all crashed (seam_oci on `HEXBENCH_INTERLEAVED_CPUS1=all`, which host.sh
+  then read as exit 0, fixed at `23c3bb7`) and are left out; the second ran them again.
+
+B over A, in process (seam_oci's own driver), the median of each side's 40 pairs:
+
+| Reading | Limit | 32/1 | c1 rate | c32 rate | c1 CPU | c32 CPU | c1 p50 / p99 | c32 p50 / p99 |
+|---|---|---|---|---|---|---|---|---|
+| **host.sh's (4-31)** | hard | 1.031 | 1.031 | 1.144 | 0.955 | 0.959 | 0.967 / 0.835 | 0.882 / 0.864 |
+| **host.sh's (4-31)** | given | 1.012 | 0.973 | 1.075 | 1.048 | 1.153 | 1.051 / 0.850 | 0.899 / 0.884 |
+| option 1 | given | 1.026 | 0.938 | 0.943 | 1.059 | 0.898 | 1.071 / 1.048 | 1.057 / 1.098 |
+| 4-15 | hard | 1.033 | 1.040 | 1.038 | 0.970 | 0.976 | 0.971 / 0.806 | 0.968 / 0.932 |
+| 4-15 | given | 0.931 | 0.953 | 0.846 | 1.079 | 1.118 | 1.069 / 1.039 | 1.168 / 1.185 |
+
+Over the node's socket: host.sh's 1.020 / 0.999 / 1.018 / 1.014 (32/1, c1 rate, c32 rate, c1 CPU) at the hard limit
+and 0.972 / 0.921 / 0.868 / 1.076 at the given; option 1 at the given 0.999 / 0.997 / 0.997 / 1.002; 4-15 1.028 /
+0.916 / 0.943 / 1.145 and 0.918 / 0.993 / 0.918 / 1.049.
+
+- **host.sh's reading:** B's p99 is 0.835 to 0.884 of A's at 1 and 32 at both limits, its p50 at 32 0.88 to 0.90,
+  its rate at 32 1.075 to 1.144: the decision's falsifier (a lifecycle's p50 or p99 rising against the one parent)
+  isn't met there.
+- **Beside it, mixed within run-to-run noise:** even or ahead at the hard limit, 3 to 8% behind at the given, which
+  ran later and busier (09:27Z to 11:23Z, the load 30 to 62). The limit isn't the cause: the node's own soft limit is
+  the hard one in both sets (`hex node`'s line, 524,288), B opens no directory a lifecycle, and the network
+  namespace pool's counts are alike (none made on the path). Where the given sets' gap goes, `create_serial.md` run
+  27: on the host, not B (crun, the same binary in every run, fell with it).
+- **Option 1 at the hard limit, left out of the table:** 1.001 / 0.716 / 0.736 / 1.406. Its A runs are steady (about
+  770 a second at 1, 1.31 to 1.39 ms of CPU) and B's first round is at their level (757, 1.388), then B's are 440 to
+  600 for the rest of the window: a degraded window, not the lever, as the fresh option 1 at the given limit shows.
+- **The lever's own cost:** 1.3 to 2.7 system calls a lifecycle (`Runtime::dir()`'s second stat, the old place, for
+  an id not in its shard), about 9 us of CPU (run 27). Not taken: skipping it for the node's own ids (about 4 us),
+  which would need recovery to publish a state the CLI trusts.
+- **Kept** (the lead, 2026-11-05T12:20Z).
+
 ## What criterion 2 needs on 4-15, from these runs
 
 The ratio is the CPUs each concurrency keeps busy times the CPU a lifecycle costs, (busy32 / busy1) x (cpu1 / cpu32).
