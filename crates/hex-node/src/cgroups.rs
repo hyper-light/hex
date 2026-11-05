@@ -47,17 +47,6 @@ const REMOVALS: usize = PER_NODE;
 /// held at once, one an init parked in an idle slot ([`PER_NODE`]). Past it a tree is dropped where it is, counted.
 const PROC_DROPS: usize = PER_NODE;
 
-/// How many parked inits may wait for the worker that makes their procs (decision 8, parked procs): one an idle slot
-/// ([`PER_NODE`]). Past it an init parks with none, counted (`procs_skipped`).
-const PROC_JOBS: usize = PER_NODE;
-
-/// A proc for the worker to make: for the init parked in slot `slot`, pid `pid`, with `key`'s options and paths.
-struct ProcJob {
-    slot: u64,
-    pid: i32,
-    key: procmount::Key,
-}
-
 /// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
 const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
@@ -136,10 +125,6 @@ pub struct ParkCounts {
     pub procs_failed: u64,
     /// Procs held now with the inits they were made for, at most one an init parked.
     pub procs_held: usize,
-    /// Parks the worker made no proc for: its queue full, or the init claimed or ended before it came to it. And
-    /// procs it made for an init its slot no longer held by the time it was made, each dropped unattached.
-    pub procs_skipped: u64,
-    pub procs_orphaned: u64,
     /// Unattached procs (misses, and those of inits ended unclaimed) dropped by the node's thread for them, off
     /// every create's path, and those dropped where they were, its queue full.
     pub procs_dropped: u64,
@@ -219,8 +204,6 @@ pub struct Cgroups {
     ahead: Arc<Ahead>,
     /// The create seeds' handle that parks inits, once they are up ([`Cgroups::start_parker`]).
     parker: OnceLock<Parker>,
-    /// The parked procs' worker's queue ([`ProcJob`]); closed with the node, which ends the worker.
-    proc_jobs: SyncSender<ProcJob>,
 }
 
 /// Each slot's init made ahead, with the bytes charged to its cgroup for it.
@@ -244,11 +227,6 @@ struct Parking {
     proc_misses: AtomicU64,
     proc_dry: AtomicU64,
     procs_failed: AtomicU64,
-    procs_skipped: AtomicU64,
-    procs_orphaned: AtomicU64,
-    /// A debug build's hold on the procs' worker ([`Cgroups::hold_parked_procs`]): it takes this before each job.
-    #[cfg(debug_assertions)]
-    hold: Mutex<()>,
     /// Where unattached procs go to be dropped, and what its thread dropped, once the node's cgroups start.
     drops: OnceLock<ProcSink>,
     dropped: Arc<AtomicU64>,
@@ -293,99 +271,26 @@ impl Parking {
                     .filter(|(p, _)| p.proc_key().is_some())
                     .count()
             }),
-            procs_skipped: self.procs_skipped.load(Ordering::Relaxed),
-            procs_orphaned: self.procs_orphaned.load(Ordering::Relaxed),
             procs_dropped: self.dropped.load(Ordering::Relaxed),
             procs_dropped_inline: self.dropped_inline.load(Ordering::Relaxed),
         }
     }
 
-    /// The init just parked in slot `slot` (pid `pid`) has its proc made for `key` by the node's worker, off the
-    /// path of the delete or refill that parked it (the g6 agent's review), when the node makes them and the key is
-    /// known. With the worker's queue full it has none, counted.
-    fn queue_proc(
-        &self,
-        jobs: &SyncSender<ProcJob>,
-        slot: u64,
-        pid: Option<i32>,
-        key: Option<&procmount::Key>,
-    ) {
-        let (Some(_), Some(pid), Some(key)) = (self.procs.get(), pid, key) else {
+    /// The proc of `parked`'s own pid namespace made for `key` and held with it, when the node makes them and the
+    /// key is known; one that can't be made leaves the init parked without one, counted.
+    fn with_proc(&self, parked: &mut Parked, key: Option<&procmount::Key>) {
+        let (Some(maker), Some(key), Some(sink)) = (self.procs.get(), key, self.drops.get()) else {
             return;
         };
-        let job = ProcJob {
-            slot,
-            pid,
-            key: key.clone(),
-        };
-        if jobs.try_send(job).is_err() {
-            self.procs_skipped.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// The worker's one job: the proc of the pid namespace of the init slot `job.slot` holds, opened through its
-    /// pidfd while the slot holds it, made unlocked, and attached to that init if the slot still holds it; else the
-    /// proc is dropped unattached, by the dropper. The superblock, and the `list_lru` and shrinker registrations a
-    /// new one takes, are this thread's.
-    fn make_proc(&self, job: ProcJob) {
-        #[cfg(debug_assertions)]
-        let _held = self.hold.lock();
-        let (Some(maker), Some(sink)) = (self.procs.get(), self.drops.get()) else {
-            return;
-        };
-        let same = |p: &Parked| p.pid() == Some(job.pid);
-        let ns = match self.slots().map(|slots| {
-            slots
-                .get(&job.slot)
-                .filter(|(p, _)| same(p))
-                .map(|(p, _)| p.pid_namespace())
-        }) {
-            Ok(Some(Ok(ns))) => ns,
-            // Claimed or ended before the worker came to it: no proc to make.
-            Ok(None) => {
-                self.procs_skipped.fetch_add(1, Ordering::Relaxed);
-                return;
+        match parked.pid_namespace().and_then(|ns| maker.make(ns, key)) {
+            Ok(proc) => {
+                parked.set_proc(key.clone(), proc, sink.clone());
+                self.procs_made.fetch_add(1, Ordering::Relaxed);
             }
-            Ok(Some(Err(_))) | Err(_) => {
-                self.procs_failed.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        let proc = match maker.make(ns, &job.key) {
-            Ok(proc) => proc,
             Err(_) => {
                 self.procs_failed.fetch_add(1, Ordering::Relaxed);
-                return;
             }
-        };
-        let left = match self.slots() {
-            Ok(mut slots) => match slots.get_mut(&job.slot) {
-                Some((p, _)) if same(p) => {
-                    p.set_proc(job.key, proc, sink.clone());
-                    None
-                }
-                _ => Some(proc),
-            },
-            Err(_) => Some(proc),
-        };
-        match left {
-            None => self.procs_made.fetch_add(1, Ordering::Relaxed),
-            Some(proc) => {
-                sink.discard(proc);
-                self.procs_orphaned.fetch_add(1, Ordering::Relaxed)
-            }
-        };
-    }
-}
-
-/// The procs' worker: makes each parked init's proc it's asked for ([`Parking::make_proc`]) until the node's end
-/// closes its queue, or its parking is gone.
-fn make_each(jobs: &Receiver<ProcJob>, parking: &std::sync::Weak<Parking>) {
-    while let Ok(job) = jobs.recv() {
-        let Some(parking) = parking.upgrade() else {
-            return;
-        };
-        parking.make_proc(job);
+        }
     }
 }
 
@@ -440,7 +345,6 @@ fn refill_ahead(
     pool: &Mutex<Pool<Policy>>,
     root: &BoxRoot,
     parker: &Parker,
-    jobs: &SyncSender<ProcJob>,
 ) {
     let mut after_failure = false;
     loop {
@@ -476,7 +380,10 @@ fn refill_ahead(
                     .create_slot(n, &Bounds::default())
                     .map_err(|e| OciError::Broken(e.to_string()))?;
                 match park_counted(parking, parker, cg.dir(), flags) {
-                    Ok(p) => Ok((n, cg, p)),
+                    Ok(mut p) => {
+                        parking.with_proc(&mut p.0, key.as_ref());
+                        Ok((n, cg, p))
+                    }
                     Err(e) => {
                         let _ = end_and_remove(&cg);
                         Err(e)
@@ -496,12 +403,10 @@ fn refill_ahead(
                     let _ = end_and_remove(&cg);
                     continue;
                 }
-                let pid = p.0.pid();
                 if let Ok(mut slots) = parking.slots() {
                     slots.insert(n, p);
                 }
                 ready.push_back((n, cg));
-                parking.queue_proc(jobs, n, pid, key.as_ref());
             }
             Err(_) => {
                 ahead.failed.fetch_add(1, Ordering::Relaxed);
@@ -566,13 +471,6 @@ impl Cgroups {
         let _ = parking
             .drops
             .set(ProcSink::new(drops, Arc::clone(&parking.dropped_inline)));
-        let parking = Arc::new(parking);
-        let (proc_jobs, jobs) = mpsc::sync_channel(PROC_JOBS);
-        let theirs = Arc::downgrade(&parking);
-        std::thread::Builder::new()
-            .name("hex-parked-procs".to_owned())
-            .spawn(move || make_each(&jobs, &theirs))
-            .map_err(|e| Refusal::os("starting the parked procs' worker", e))?;
         Ok(Self {
             pool: Arc::new(Mutex::new(Pool::new(PER_OWNER, PER_NODE, first))),
             held: Mutex::new(BTreeMap::new()),
@@ -583,8 +481,7 @@ impl Cgroups {
             cgroup_kill: AtomicU64::new(0),
             discarded_killed: AtomicU64::new(0),
             no_owner: AtomicU64::new(0),
-            parking,
-            proc_jobs,
+            parking: Arc::new(parking),
             ahead: Arc::new(Ahead::default()),
             parker: OnceLock::new(),
         })
@@ -598,17 +495,16 @@ impl Cgroups {
             return Ok(());
         }
         if self.ahead.bound.load(Ordering::Relaxed) > 0 {
-            let (ahead, parking, pool, root, theirs, jobs) = (
+            let (ahead, parking, pool, root, theirs) = (
                 Arc::clone(&self.ahead),
                 Arc::clone(&self.parking),
                 Arc::clone(&self.pool),
                 root.clone(),
                 parker.clone(),
-                self.proc_jobs.clone(),
             );
             std::thread::Builder::new()
                 .name("hex-ahead".to_owned())
-                .spawn(move || refill_ahead(&ahead, &parking, &pool, &root, &theirs, &jobs))
+                .spawn(move || refill_ahead(&ahead, &parking, &pool, &root, &theirs))
                 .map_err(|e| Refusal::os("starting the cgroups-ahead refill", e))?;
         }
         let _ = self.parker.set(parker);
@@ -627,16 +523,6 @@ impl Cgroups {
     /// owner's last spec (decision 8, parked procs). Set before the node's first create; unset, none is made.
     pub fn set_parked_procs(&self, maker: ProcMaker) {
         let _ = self.parking.procs.set(maker);
-    }
-
-    /// A debug build's hold on the parked procs' worker: while the guard lives, it makes no proc, so a test shows a
-    /// park returning before its proc is made.
-    #[cfg(debug_assertions)]
-    pub fn hold_parked_procs(&self) -> Result<MutexGuard<'_, ()>, Refusal> {
-        self.parking
-            .hold
-            .lock()
-            .map_err(|_| Refusal::Broken("the parked procs' worker's hold was poisoned".to_owned()))
     }
 
     /// Whether boxes of no owner take cgroups made ahead.
@@ -755,16 +641,11 @@ impl Cgroups {
         // idle and empty, as before, counted.
         if let (Some(flags), Some(parker)) = (held.park_flags, self.parker.get()) {
             match park_counted(&self.parking, parker, cg.dir(), flags) {
-                Ok(made) => {
-                    let pid = made.0.pid();
+                Ok(mut made) => {
+                    self.parking
+                        .with_proc(&mut made.0, held.park_proc_key.as_ref());
                     self.parking.parked.fetch_add(1, Ordering::Relaxed);
                     self.parking.slots()?.insert(held.slot, made);
-                    self.parking.queue_proc(
-                        &self.proc_jobs,
-                        held.slot,
-                        pid,
-                        held.park_proc_key.as_ref(),
-                    );
                 }
                 Err(_) => {
                     self.parking.failed.fetch_add(1, Ordering::Relaxed);
