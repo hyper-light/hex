@@ -205,6 +205,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-health"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "hex-node"
 version = "0.1.0"
 dependencies = [
