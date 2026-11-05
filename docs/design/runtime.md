@@ -614,7 +614,19 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   113) and by its socket answering (§3.5). Without the helper the `process` class still runs, as a process
   group under step 1's watcher, and its inspect says so: Ada's call in the plan's step 2 (2026-11-01), "Both
   run on a node with the helper; polling alone runs on one without". The refusal by name covers only what
-  can't run without the helper.
+  can't run without the helper. Concretely (`scripts/install/macos.sh`): the pool is `_hexbox1`..`_hexbox30` in
+  group `hexbox`, and the users whose nodes may reach the helper are put in a group `hexnode`; their ids start at
+  320 (`hexnode`'s gid, then `hexbox`'s, then the pool's uids 322-351), inside sysadminctl's 200-400 role-user
+  range and between Apple's own (300-308 on macOS 26.2) and Nix's (350-382), measured in §3.1, and any taken id,
+  name or a live process at a pool uid is refused by name before anything is made (`--first-id` moves the
+  range). The helper runs from a root-owned copy of `hex` in `/Library/PrivilegedHelperTools` (Docker's place
+  for its helper, §3.2), never from `/usr/local/bin`, which Homebrew gives the user on Intel Macs, so no user can
+  replace what runs as root. Its socket is `/var/db/hex/box-helper.sock` (persistent, so launchd's start at boot
+  finds its folder), in a folder `root:hexnode 0750`: a new file takes its folder's group (open(2)'s BSD
+  rule) and the plist's `Umask` 7 makes it `0770`, so only root and `hexnode` connect and another local user
+  can't start or end someone's boxes. Uninstall boots the daemon out first, then ends every process left at a
+  pool uid (a box's members outlive the helper that started them) before deleting the users, in rounds
+  bounded by the installer's wait.
 - **A node lacking it refuses the class by name** (`hex_core::setup`): on Linux, a box root whose parent lacks a
   controller, isn't the node's user's, or holds processes refuses the box root of both classes, naming what's
   missing and the installer (HEX-INST-1); on Windows, the `oci` class names each feature that's off and says
@@ -631,6 +643,11 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   On Linux, `bench/install/linux_lab.sh` boots a fresh Fedora as a container with systemd its init, shows the
   by-name refusal before install, installs, passes the conformance suite over the installed node's socket for
   both classes as an ordinary user (HEX-INST-3), uninstalls and lists nothing left (HEX-INST-4).
+  On macOS, `bench/install/macos_lab.sh` (one `sudo` run by an administrator, building as the invoking user)
+  shows nothing of the plan before install and the box-user contract unmet without the helper, installs, passes
+  the box-user HEX-RT contract over the installed helper's socket as that ordinary user, shows a user outside
+  `hexnode` refused the socket (HEX-INST-6), uninstalls, and lists nothing left by the plan and by `dscl` and
+  `launchctl` on their own (HEX-INST-7).
 - **What would falsify it:** a drop-in's `Delegate=` list that replaced rather than merged with the unit's (the
   lab's installed node got all four); a running user manager that a re-exec didn't give the new delegation,
   so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
@@ -685,7 +702,8 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   over the installed node, nothing left after uninstall). **Windows' is built and lint-clean, and open**: it
   waits on jupiter, an administrator's UAC prompt and a reboot each way (the feature query's standard-user
   access and time are measured there), and is met only once the `oci` class's steps 4 and 5 land and the
-  install lab runs again. **macOS's** installs step 2's box users and helper, and waits on step 2. Not
+  install lab runs again. **macOS's is built** (`scripts/install/macos.sh`, step 2's box users and helper)
+  and its lab (`bench/install/macos_lab.sh`) waits on an administrator's one `sudo` run on the Mac Studio. Not
   covered yet: Ubuntu 24.04's restriction on unprivileged user namespaces (an AppArmor profile for `hex`).
 - The kiln integration's remaining half: **consumer #1 (host CI legs + harness in `process` boxes)
   is built** — kiln's `os::contain` grows a Hex-`BoxRoot` backing behind `KILN_HEX_BOX`, with the
