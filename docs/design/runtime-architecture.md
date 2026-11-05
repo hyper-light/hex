@@ -2157,7 +2157,11 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
     rate 1-3% lower.
   - One worker and eight workers both failed (195e86a, 6dcd731: 31-44% hits at best). The cost is the host-wide
     `namespace_sem`, which more threads only share (a reading, not measured apart).
-  - The after-reply arm (1890f85) lowered the delete but left 22-37% of claims dry under concurrency. It was dropped.
+  - The after-reply arm (1890f85: the delete's serving thread makes the proc after it has answered) is a measured
+    trade, not merged. Unlike the workers, it keeps part 19's p50 (42-49 µs), and it lowers the delete and raises the
+    rate. It falls short only at its dry claims (22-36% at 8 in flight), where the same caller's next create arrives
+    before its after-reply turn: create p50 0.06-0.25 ms worse than on-park, and part 19 p99 higher in 6 of 8 rounds,
+    the under-load bar's own measure (the lead, 2026-11-05T19:19Z).
   - Whether it goes on by default (a faster create and part 19, against a slower delete) is Ada's call. Nothing
     changes by default until she says.
 - **Dropped off the path (the g6 agent's review).** A detached tree dropped unattached is unmounted, masks and
