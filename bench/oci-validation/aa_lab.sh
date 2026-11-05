@@ -6,7 +6,9 @@
 #   3. boots the guest to run oci_lsm as root (vm7_lab.sh's seam mode), with acme_secure_profile loaded;
 #   4. boots it again to run runtime-tools' validation suite against that hex (vm7_validate.sh), leaving
 #      <out>/validate/out/results.tsv and each test's log;
-#   5. and again against the guest's crun, the reference on the same kernel, into <out>/crun/out.
+#   5. and again against crun, the reference on the same kernel, into <out>/crun/out: crun's static release
+#      CRUN_VERSION (1.27, fedora's), its sha256 checked, since Ubuntu 24.04's crun 1.14 refuses the suite's
+#      runtime-spec 1.3.0 ("unknown version specified").
 # Every container and the guest are held to the shared host's caps (CPUs 16-31, BENCH_MEMORY, BENCH_OOM).
 # Usage: aa_lab.sh <repo tree> <runtime-tools checkout> <out dir>
 set -euo pipefail
@@ -44,9 +46,14 @@ say "runtime-tools in the AppArmor guest"
 VM_TAR=0 bash "$HERE/vm7_validate.sh" "$RT" "$TGT/build/release/hex" "$OUT/validate"
 validate=$?
 say "runtime-tools against crun in the AppArmor guest"
-# vm7_validate.sh runs `<binary> oci <verb>`; this stands in for the binary and hands the verb to crun.
-printf '#!/bin/sh\nshift\nexec crun "$@"\n' > "$OUT/crun-as-hex"; chmod +x "$OUT/crun-as-hex"
-VM_TAR=0 bash "$HERE/vm7_validate.sh" "$RT" "$OUT/crun-as-hex" "$OUT/crun"
+CRUN_VERSION=${CRUN_VERSION:-1.27}
+curl -fsSL -o "$OUT/crun-static" "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION-linux-amd64"
+echo "crun $CRUN_VERSION static sha256 $(sha256sum "$OUT/crun-static" | cut -d' ' -f1)"
+chmod +x "$OUT/crun-static"
+# vm7_validate.sh runs `<binary> oci <verb>`; this stands in for the binary and hands the verb to the crun
+# vm7_validate.sh puts in bin/ beside it.
+printf '#!/bin/sh\nshift\nexec "$(dirname "$0")/bin/crun" "$@"\n' > "$OUT/crun-as-hex"; chmod +x "$OUT/crun-as-hex"
+VM_TAR=0 VM_CRUN="$OUT/crun-static" bash "$HERE/vm7_validate.sh" "$RT" "$OUT/crun-as-hex" "$OUT/crun"
 set -e
 for r in validate crun; do
   echo "$r: $(cut -f2 "$OUT/$r/out/results.tsv" 2>/dev/null | sort | uniq -c | tr '\n' ' ')"

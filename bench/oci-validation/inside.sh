@@ -6,7 +6,9 @@ set -uo pipefail
 mkdir -p /sys/fs/cgroup/lab
 for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo "$p" > /sys/fs/cgroup/lab/cgroup.procs 2>/dev/null; done
 for c in $(cat /sys/fs/cgroup/cgroup.controllers); do echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; done
-: > "$OUT/results.tsv"
+# Rows go to a local file and are copied to $OUT once: appends over the guest's 9p share (vm7_lab.sh,
+# cache=loose) came back repeated, 1711 rows for 58 tests (aa_lab.sh, 2026-11-05).
+RESULTS=$(mktemp)
 cd "$RT" || exit 1
 export RUNTIME=${RUNTIME:-/opt/runtime} TMPDIR=/tmp
 for dir in validation/*/; do
@@ -28,7 +30,8 @@ for dir in validation/*/; do
     result=fail
     [ -n "$first" ] || first="exit $code: $(tail -n1 "$log" | tr '\t' ' ')"
   fi
-  printf '%s\t%s\t%s\t%s\n' "$name" "$result" "$first" "$skipped" >> "$OUT/results.tsv"
+  printf '%s\t%s\t%s\t%s\n' "$name" "$result" "$first" "$skipped" >> "$RESULTS"
 done
-printf 'pass %s fail %s skip %s\n' "$(grep -c $'\tpass\t' "$OUT/results.tsv")" \
-  "$(grep -c $'\tfail\t' "$OUT/results.tsv")" "$(grep -c $'\tskip\t' "$OUT/results.tsv")"
+cat "$RESULTS" > "$OUT/results.tsv"
+printf 'pass %s fail %s skip %s\n' "$(grep -c $'\tpass\t' "$RESULTS")" \
+  "$(grep -c $'\tfail\t' "$RESULTS")" "$(grep -c $'\tskip\t' "$RESULTS")"

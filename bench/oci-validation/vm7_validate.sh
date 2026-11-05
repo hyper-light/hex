@@ -15,5 +15,7 @@ cp -a "$RT" "$DIR/rt"
 cp "$HEX" "$DIR/hex"
 # The Fedora guest has no tar, so the host's goes in; a guest with its own (vmaa_build.sh's) sets VM_TAR=0.
 [ "${VM_TAR:-1}" = 0 ] || cp "$(command -v tar)" "$DIR/bin/tar"
+# VM_CRUN: a crun binary for the guest, beside the tar in bin/, for a reference run (aa_lab.sh).
+[ -z "${VM_CRUN:-}" ] || cp "$VM_CRUN" "$DIR/bin/crun"
 printf '#!/bin/sh\nexec %s/hex oci "$@"\n' "$DIR" > "$DIR/out/hex-oci"; chmod +x "$DIR/out/hex-oci"
 VM7_MODE=validate bash "$HERE/vm7_lab.sh" "$DIR" "$DIR/hex"
