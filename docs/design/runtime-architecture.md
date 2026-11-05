@@ -2073,8 +2073,8 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   exit on the host. Once on, it can't be fully turned off without a reboot (`cgroup.c:1341-1356`). It is a
   host decision for Ada, not Hex's.
 
-**Parked procs: a parked init with its proc made ahead (the tail agent's design, built on 6.19's Copy way behind a node
-setting, off by default until measured; the g6 agent reviews and owns part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
+**Parked procs: a parked init with its proc made ahead (the tail agent's design, built behind a node setting, off by default
+until measured; the g6 agent reviews and owns part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
 That proc is made with a pid namespace of its own, which the seed clones the init into, and a parked init is pid 1 of
 the pid namespace it was parked in. So on 7.x with prepared procs on, every create clones fresh. On 6.19 there is no
 prepared proc at all: through 7.0 the kernel won't hand over a pid namespace with no process in it (`goal6-mntns.md`
@@ -2109,11 +2109,13 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   else is refused by type. A create with another
   key still claims the parked init, which mounts its own proc as part 19 does now. The parked tree is dropped then,
   counted a miss. A create no prepared proc can serve (`Unpooled`) claims the parked init as today.
-- **Mount namespaces.** Built for Copy (6.19, and 7.x where chosen): the park clones with `CLONE_NEWNS` as now. Not
-  built: on Empty (7.1) it would park with `CLONE_EMPTY_MNTNS`, and on OpenTree (7.0) without `CLONE_NEWNS`, the
-  claimed init joining the namespace the agent made from the rootfs with `setns(CLONE_NEWNS)`, as goal 6's init does
-  after its clone. Until then a create made another way claims no parked init (as before parked procs), and the
-  parked init refuses one by type.
+- **Mount namespaces.** One code path on both kernels; only the mount namespace's way differs. A park clones with
+  the flags its way's fresh init takes (`mntns::clone_flags`): Copy (6.19, and 7.x where chosen) with `CLONE_NEWNS`
+  as now; Empty (7.1) with `CLONE_EMPTY_MNTNS` in its place; from the tree (7.0) without either, the claimed init
+  joining the namespace the agent made from the rootfs with `setns(CLONE_NEWNS)` in its build, as a fresh one does.
+  A claim's flags are held to the parked ones, so a create of another way is refused by type and clones fresh. A
+  node asked for Empty on a kernel without it parks with the flag the kernel refuses: each park fails, counted, and
+  creates clone fresh.
 - **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
   the creates no parked init is ready for: each create goes one way or the other, never both.
 - **A node setting, off by default.** `Node::with_parked_procs(bool)`, false until measured; the bench's
