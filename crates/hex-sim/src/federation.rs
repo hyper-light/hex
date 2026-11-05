@@ -103,17 +103,22 @@ impl Topo {
     }
 
     /// The region a workload goes to, and the cell in it: its home region (`id mod regions`) or the
-    /// first after whose empty nodes admit it, then that region's first such cell from `id mod
-    /// cells` (H14). One that nothing admits goes to its home's home cell, which refuses it.
+    /// first after whose empty nodes admit it, then that region's first such cell from `(id /
+    /// regions) mod cells` (H14), so the cell doesn't repeat the region's choice. One that nothing
+    /// admits goes to its home's home cell, which refuses it.
     fn route(&self, spec: &WorkloadSpec) -> Result<usize, SimError> {
         let r = match self.regions.route(spec) {
             Some(r) => r,
             None => home(spec.id, self.topology.regions)?,
         };
+        let within = WorkloadSpec {
+            id: within(spec.id, self.topology.regions)?,
+            ..*spec
+        };
         let cells = self.cells.get(r).ok_or(SimError::Config("region index"))?;
-        let c = match cells.route(spec) {
+        let c = match cells.route(&within) {
             Some(c) => c,
-            None => home(spec.id, self.topology.cells)?,
+            None => home(within.id, self.topology.cells)?,
         };
         self.index(r, c)
     }
@@ -144,6 +149,14 @@ impl Topo {
             at.checked_rem(cells).ok_or(SimError::Config("cells"))?,
         ))
     }
+}
+
+/// The id a workload's cell is chosen by within its region: its id over the regions, so a region's
+/// cells see every residue of it whatever the two counts share.
+fn within(id: WorkloadId, regions: u32) -> Result<WorkloadId, SimError> {
+    id.0.checked_div(u64::from(regions))
+        .map(WorkloadId)
+        .ok_or(SimError::Config("a topology has at least one region"))
 }
 
 fn home(id: WorkloadId, of: u32) -> Result<usize, SimError> {
@@ -383,11 +396,12 @@ impl Capacity {
     }
 
     /// The first region from the workload's home (`id mod regions`) on, and in it the first cell
-    /// from `id mod cells` on, whose free nodes hold it by the cells' own sampled best fit; that
-    /// node's capacity is deducted ("assume and deduct", H16). `None`: no node of any cell holds it.
+    /// from `(id / regions) mod cells` on, whose free nodes hold it by the cells' own sampled best
+    /// fit; that node's capacity is deducted ("assume and deduct", H16). `None`: no node of any cell
+    /// holds it.
     pub fn admit(&mut self, w: &WorkloadSpec) -> Result<Option<Admitted>, SimError> {
         let Topology { regions, cells } = self.topo.topology;
-        let (hr, hc) = (home(w.id, regions)?, home(w.id, cells)?);
+        let (hr, hc) = (home(w.id, regions)?, home(within(w.id, regions)?, cells)?);
         let d = w.demand();
         for k in 0..regions {
             let r = turn(hr, k, regions)?;

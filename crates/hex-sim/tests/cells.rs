@@ -410,3 +410,26 @@ fn a_lost_regions_work_waits_behind_what_the_others_have_queued() {
     assert!(to > 50, "{to} moved");
     assert!(refused > 50, "{refused} refused");
 }
+
+/// H14's routing: do route 9,000 small workloads over three regions of three cells (home region
+/// `id mod regions`, home cell `(id / regions) mod cells`); expect every one of the nine cells to
+/// get about a ninth, so a region's cell isn't tied to the region the id picked.
+#[test]
+fn every_cell_gets_work_when_regions_and_cells_share_a_factor() {
+    let cluster = steady(31, 90, 9_000);
+    let topology = Topology {
+        regions: 3,
+        cells: 3,
+    };
+    let out = federation::run(&cluster, &fed(topology, Config::default(), Loss::None)).unwrap();
+    assert_eq!(out.cells.len(), 9);
+    for c in &out.cells {
+        assert!(
+            (800..1_200).contains(&c.ids.len()),
+            "region {} cell {}: {} workloads",
+            c.region,
+            c.cell,
+            c.ids.len()
+        );
+    }
+}

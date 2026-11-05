@@ -410,8 +410,9 @@ into cells, as `Layout` splits slices: contiguous ranges of node ids. A pure cor
 - to its home region, `id mod regions`, a fixed per-region decomposition of capacity, as Twine's
   Federation does instead of a global allocator making ad hoc choices (CR[2] §7.3 p. 14,
   `cells-and-regions.md:31-38`);
-- in that region, to the first cell, from `id mod cells` on, whose empty nodes admit it (H10's rule
-  one level up). None does: it tries the other regions in order; none does: it's refused, typed.
+- in that region, to the first cell, from `(id / regions) mod cells` on, whose empty nodes admit it
+  (H10's rule one level up; the quotient, so that with as many cells as regions, or any shared factor,
+  a region's work still spreads over all its cells). None does: it tries the other regions in order; none does: it's refused, typed.
 
 Each cell's workloads keep their arrival order and are numbered densely within it, as `Layout` numbers
 a slice's nodes. With one region of one cell the federation hands the cluster to `sim::run` unchanged,
