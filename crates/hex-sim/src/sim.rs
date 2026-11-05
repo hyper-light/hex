@@ -23,6 +23,8 @@
 //!   `lease_ns` after its last renewal; then the next live shard takes the slice over and rebuilds its
 //!   plane from the store, at `rebuild_ns_per_record` a record read (`T-T7.11.1`). The slice's
 //!   running work goes on through it, as through a crash.
+//! - **A lost cell** ([`Nemesis::LoseCell`], H15) loses every shard at once, and no shard is left to
+//!   take a slice over; its running work goes on, its pending work waits.
 //!
 //! Every queue and map is bounded by the run's workloads or by a [`Config`] field, and the run by
 //! `max_steps` (CLAUDE.md §2). Nothing in it calls itself (§11): each event is handled by a function
@@ -72,6 +74,11 @@ pub enum Nemesis {
     /// Shard `shard` is lost for good at virtual time `at`.
     Lose {
         shard: u32,
+        at: Time,
+    },
+    /// Every shard is lost for good at `at`: a cell's control plane, with no shard left to take its
+    /// slices over (H15). Its running work keeps running; its takeovers never complete.
+    LoseCell {
         at: Time,
     },
 }
@@ -691,7 +698,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         ran: vec![None; n],
         nemesis_rng: Rng::new(match config.nemesis {
             Nemesis::Random { seed, .. } => seed,
-            Nemesis::None | Nemesis::At(_) | Nemesis::Lose { .. } => 0,
+            Nemesis::None | Nemesis::At(_) | Nemesis::Lose { .. } | Nemesis::LoseCell { .. } => 0,
         }),
         latencies: Vec::with_capacity(n),
         hash: TraceHash::default(),
@@ -702,6 +709,11 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
     }
     if let Nemesis::Lose { shard, at } = config.nemesis {
         sim.schedule(at, Event::Lose { shard })?;
+    }
+    if let Nemesis::LoseCell { at } = config.nemesis {
+        for shard in 0..config.shards {
+            sim.schedule(at, Event::Lose { shard })?;
+        }
     }
     while let Some(Reverse(next)) = sim.queue.pop() {
         sim.report.steps = sim
@@ -894,11 +906,12 @@ impl Sim<'_> {
     }
 
     /// A lost shard's lease on slice `s` has run out: the next live shard after it takes the slice
-    /// and rebuilds its plane from the store, which takes `rebuild_ns_per_record` a record read.
+    /// and rebuilds its plane from the store, which takes `rebuild_ns_per_record` a record read. With
+    /// every shard lost (a cell's plane, H15) none does, and its takeover stays without a time.
     fn take_over(&mut self, s: usize) -> Result<(), SimError> {
         let lost = slot(&mut self.slices, s)?.owner;
         let shards = u32::try_from(self.shards.len()).map_err(|_| SimError::Config("shards"))?;
-        let by = (1..shards)
+        let Some(by) = (1..shards)
             .filter_map(|k| lost.checked_add(k)?.checked_rem(shards))
             .find(|&x| {
                 usize::try_from(x)
@@ -906,7 +919,9 @@ impl Sim<'_> {
                     .and_then(|at| self.shards.get(at))
                     .is_some_and(|sh| !sh.lost)
             })
-            .ok_or(SimError::Config("no live shard to take a lost slice over"))?;
+        else {
+            return Ok(());
+        };
         let epoch = slot(&mut self.slices, s)?.plane.epoch;
         let (mut plane, records) =
             Plane::rebuild(&self.store, &self.layout, s, epoch, self.config.workers)?;
@@ -990,7 +1005,7 @@ impl Sim<'_> {
     /// Whether the nemesis crashes the plane at write `number`, and on which side of it.
     fn strike(&mut self, number: u64) -> Option<When> {
         match self.config.nemesis {
-            Nemesis::None | Nemesis::Lose { .. } => None,
+            Nemesis::None | Nemesis::Lose { .. } | Nemesis::LoseCell { .. } => None,
             Nemesis::At(crash) if crash.write == number => Some(crash.when),
             Nemesis::At(_) => None,
             Nemesis::Random {
