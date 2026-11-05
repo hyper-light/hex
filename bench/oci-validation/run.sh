@@ -16,6 +16,8 @@ OUT=$(realpath -m "${3:?out dir}")
 IMAGE=${4:-registry.fedoraproject.org/fedora:44}
 mkdir -p "$OUT"
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+. "$HERE/../competitive/containers.sh"
+bench_trap :
+docker run "${BENCH_LABELS[@]}" --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$RT:$RT:ro" -v "$OUT:$OUT" -v "$RUNTIME:/opt/runtime:ro" -v "$HERE:/opt/lab:ro" \
   -e RT="$RT" -e OUT="$OUT" "$IMAGE" bash /opt/lab/inside.sh

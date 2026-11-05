@@ -13,6 +13,8 @@ TESTS=${*:-oci_box node_socket oci_spec_box oci_seccomp oci_devices oci_ipcuts h
 # A Windows shell (Git Bash) is told to leave the containers' paths alone, and hands git a path git.exe reads.
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 HERE=$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })
+. "$HERE/../competitive/containers.sh"
+bench_trap :
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
 SHA=$(git -C "$REPO" rev-parse --short "$COMMIT")
 PACKAGES="python3 procps-ng findutils diffutils util-linux coreutils gcc make tar gzip git curl pkgconf-pkg-config \
@@ -23,8 +25,8 @@ say() { echo "$(date -u +%FT%TZ) $*"; }
 
 say "image $IMG"
 if ! docker image inspect "$IMG" > /dev/null 2>&1; then
-  NAME=hexlab-image-$SHA; trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-  docker run --name "$NAME" registry.fedoraproject.org/fedora:44 \
+  NAME=hexlab-image-$SHA; bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+  docker run "${BENCH_LABELS[@]}" --name "$NAME" registry.fedoraproject.org/fedora:44 \
     sh -c "dnf -y -q install --setopt=install_weak_deps=False $PACKAGES && dnf clean all" > /dev/null
   docker commit "$NAME" "$IMG" > /dev/null
   docker rm "$NAME" > /dev/null
@@ -34,10 +36,10 @@ fi
 # target volume for this one's.
 say "source $SHA into volume $SRC"
 docker volume create "$SRC" > /dev/null
-git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -m -C /src'
+git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run "${BENCH_LABELS[@]}" -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -m -C /src'
 
 say "build the tests: $TESTS"
-BINS=$(docker run --rm -v "$SRC:/src:ro" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexlab-target:/target \
+BINS=$(docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexlab-target:/target \
   -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 \
   -e PATH=/cargo/bin:/usr/bin:/bin -e TESTS="$TESTS" -w /src "$IMG" bash -euo pipefail -c '
     [ -x /cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none >&2
@@ -51,6 +53,6 @@ for m in map(json.loads, sys.stdin):
         print(m[\"executable\"])"')
 say "run as root: $(echo $BINS)"
 # The test binaries name /target/debug/hex, so the target volume is mounted where they were built.
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+docker run "${BENCH_LABELS[@]}" --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v hexlab-target:/target -v "$SRC:/src:ro" -v hexlab-home:/root -e HOME=/root \
   "$IMG" bash /src/bench/oci-validation/seam_root_inside.sh $BINS
