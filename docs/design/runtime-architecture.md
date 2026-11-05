@@ -1857,7 +1857,7 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   ahead ([OCI-12], [OCI-27] p.63). AFaaS keeps cgroups made ahead, and warns that a pool still jitters while another
   tenant holds the cgroup lock ([OCI-35] p.511-512), which is what is measured here. A parked init holds that lock only when it is made.
 - **Reuse off.** A box of no owner gets a cgroup of its own, so the node makes cgroups ahead for such boxes
-  (`Node::with_inits_ahead`, a bound, 0 by default). Each is a fresh slot, with default bounds and an init parked in
+  (`Node::with_inits_ahead`, a bound, 8 by default: below). Each is a fresh slot, with default bounds and an init parked in
   it, refilled by a thread of the node's own (`hex-ahead`) off every create's path. A box of no owner takes the
   oldest ready one, is given its own bounds there, and is the parked init. Its slot is removed with the box, never
   kept: such a box could have left anything in it. The parked init's namespaces are those the last box of no owner was
@@ -1877,15 +1877,34 @@ move to the delete, off create's path; the delete's cost is measured beside the 
 - **What a dry pool costs.** Nothing more than today. A reuse-on create whose idle cgroup holds no parked init (the
   park failed, counted) clones its init into it, as before. A reuse-off create that finds none ready makes its own
   cgroup and clones its init, as before, counted dry.
-- **Security.** Until it is claimed, the parked init holds nothing of the next box: no spec, no rootfs, and no
-  network, ipc or uts namespace. Its fresh pid and mount namespaces are empty of the box's. Its effective capability
-  set is empty while it waits (capabilities(7): the effective set is the one the kernel checks): it empties it, then
-  says on its socket that it is parked, and the agent holds it only then. It raises the set again only once a create
-  claims it, from its permitted set, which it keeps because it must still build the container as root, and a
-  capability dropped from the permitted set can't be regained. It is the agent's own child (`CLONE_PARENT`), in a
-  cgroup no process of the owner's is in, and its socket's other end is the agent's alone. A claim whose spec asks
-  for other namespaces than it was made with is refused by type: the init is ended and the create clones a fresh
-  one, never an init with namespaces the spec didn't ask for (CLAUDE.md §3).
+- **Security: "holds no spec, privileges or capabilities until a create claims it" (the lead's reading, 2026-11-05).**
+  The parked init keeps its permitted capabilities, since it must still build the container as root, and a
+  capability dropped from the permitted set can't be regained (capabilities(7), "Thread capability sets"). So the
+  criterion holds only if nothing but the node can make it use them. Each of these holds:
+  - *It exercises none.* Its effective set is empty from before it says it is parked (the set the kernel checks:
+    capabilities(7)). Test 2b reads `CapEff` 0 while it waits.
+  - *Nothing else can reach into it.* It is non-dumpable while it waits (`PR_SET_DUMPABLE` 0, prctl(2)). A target that
+    isn't dumpable refuses ptrace access to a caller without `CAP_SYS_PTRACE` in its user namespace (ptrace(2), "Ptrace
+    access mode checking", step 4). That covers attaching, `/proc/<pid>/mem`, `/proc/<pid>/fd` and `pidfd_getfd(2)`,
+    which checks `PTRACE_MODE_ATTACH_REALCREDS`. Test 2b has an unprivileged process of the same uid refused every one
+    of its descriptors. A process holding `CAP_SYS_PTRACE` can reach any process, the node's own included, so it is
+    outside this boundary as it is outside the node's.
+  - *It takes a spec only on the channel it inherited from the node.* Its claim socket is one end of a socketpair made
+    by the agent (`seed::socketpair`), handed to it over the seed's socket, with no name in the filesystem or the
+    abstract namespace, so no process can connect to it. The other end stays the agent's alone (`run::Parked`).
+  - *It runs no code but Hex's until claimed.* It is a fork of the create seed, the `hex` binary, which execs nothing
+    until the claimed container's program.
+  - Its dumpable state is restored once it is claimed: a rootless node writes the claimed init's user-namespace maps
+    through its `/proc` files.
+  If any of these stopped holding, its permitted set would go empty too, and the design would change. It also holds
+  nothing of the next box until it is claimed: no spec, no rootfs, no network, ipc or uts namespace, and its fresh pid
+  and mount namespaces are empty of the box's. A claim whose spec asks for other namespaces than it was made with is
+  refused by type: the init is ended and the create clones a fresh one (CLAUDE.md §3).
+- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` is 8: one per
+  box in flight at the seam bench's concurrency 8. At the bar's concurrency 1, eight never ran dry but for each round's
+  first create (1 in 10,100: the A/B below). That is about 2.1 MB a node at about 262 KB an init. It is a pool like
+  decision 4's network namespaces made ahead, on by default; `Node::with_inits_ahead(0)` keeps none. The socket's node
+  and the bench take the default.
 - **Recovery.** A parked init ends when the agent's end of its socket closes, so a node's crash ends every one. The
   idle slots and those made ahead are named by no box's record, and recovery removes them, `cgroup.kill` first, as it
   removes idle slots today.

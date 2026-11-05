@@ -97,3 +97,39 @@ grace period.
    holds; it doesn't take Hex's create off the lock.
 3. **Reuse off's teardown.** It is Hex's own work, landing on the next create's CPUs. This note records it. It isn't
    cut by (1), and it is the larger share of reuse off's p99 body.
+
+## Reuse off's teardown: where it runs (for the lever after the parked init)
+
+With the parked init, a reuse-off create is 0.337x of libcrun at p99.9 (`create_tail.md`, the A/B). Its slowest 1%
+are preempted, on their own CPUs, by the kernel's teardown of earlier boxes (run 2): cgroup work items
+(`css_killed_work_fn`, `css_release_work_fn`), `fqdir_work_fn`, and RCU callbacks. Where each runs, Linux v6.19,
+retrieved 2026-11-05:
+- **A cgroup's teardown is per-CPU work, queued where the box was removed.** The offline, release and free work goes
+  on `cgroup_offline`, `cgroup_release` and `cgroup_free`, each `alloc_workqueue(..., WQ_PERCPU, 1)`
+  (`kernel/cgroup/cgroup.c:6457-6463`). It is queued once per css: each controller's state, and the cgroup's own
+  (`:6069` offline, `:5695` release, `:5686`/`:5829` free after a grace period). A box's cgroup has one css per
+  controller its parent hands down: cpu, io, memory, pids (`hex_core::cgroup::CONTROLLERS`). A memory cgroup's
+  offline also holds `list_lrus_mutex` over every list_lru (`mm/list_lru.c:467-472`).
+- **A network namespace's fragment queues go the same way.** `fqdir_exit` queues `fqdir_work_fn` on `inet_frag_wq`
+  (`net/ipv4/inet_fragment.c:256-260`), a per-CPU workqueue (`create_workqueue`, `:213`). That frees the fragment
+  hash table, then queues the free of the fqdir itself on `system_percpu_wq` a second later (`:179-187`). Every
+  namespace's cleanup (`cleanup_net`) runs on `netns`, one single-threaded workqueue (`net/core/net_namespace.c:1264`,
+  queued at `:744`), on whatever CPU it takes.
+- **RCU callbacks run on the CPU that queued them**, in softirq or that CPU's rcuc kthread, unless the kernel is
+  booted with `rcu_nocbs=` to offload them (`Documentation/admin-guide/kernel-parameters.txt:5532-5540`).
+
+So a box's delete on a create CPU leaves that CPU work in proportion to what the box made: its cgroup's css (four
+controllers and its own) and its network namespace (fragment queues, cleanup, the RCU callbacks of all of them).
+Ada's rule rules out moving it by priority, nice or affinity. Hex can only make less of it.
+
+**The lever proposed, not built: make each box's cgroup with the controllers its bounds use, so its teardown queues
+no work for one it doesn't.**
+- The io controller is enabled for every box, but a box's io state is written only when its bounds set io
+  (`hex-runtime/src/linux/cgroup.rs:223-225`). Each controller left out of a box spares that box one offline, one
+  release and one RCU-delayed free.
+- Boxes would sit under a parent per controller set, since `cgroup.subtree_control` hands the same controllers to
+  every child.
+- It would falsify the lever if the A/B's reuse-off create p99.9 doesn't fall with the css count, or if
+  `create_tail`'s top-1% preemption by `css_*_work_fn` doesn't fall in proportion.
+- The network namespace's share (fragment queues, `cleanup_net`) isn't cut by it. A namespace of a box of no owner is
+  never handed on, since what it keeps can't be reset (`docs/research/runtime/goal5-netns-reuse.md`).
