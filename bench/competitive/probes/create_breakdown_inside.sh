@@ -222,7 +222,7 @@ switch() {
 # are the softirqs run on a hex process as an interrupt returns, which take its CPU without a switch.
 mounts_trace() {
   local name=$1 lc=$2 conc=$3 rc=0 ev f nssem
-  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork
+  local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork sched/sched_waking
     irq/softirq_entry irq/softirq_exit workqueue/workqueue_execute_start workqueue/workqueue_execute_end"
   [ -d "$T/events/exceptions/page_fault_user" ] && MT="$MT exceptions/page_fault_user"
   # The kernel's one mount lock, each hold of it counted (goal 5 extended step 3): a kprobe on down_write and one on
@@ -236,7 +236,16 @@ mounts_trace() {
        { echo "p:hexcb/nsw down_write sem=%di:x64" >> "$T/kprobe_events" \
            && echo "p:hexcb/nsr down_read sem=%di:x64" >> "$T/kprobe_events"; } \
          || { echo "the namespace_sem probes couldn't be made" >&2; return 1; }
-       MT="$MT hexcb/nsw hexcb/nsr" ;;
+       MT="$MT hexcb/nsw hexcb/nsr"
+       # A wait for the lock (goal 6): the rwsem's slowpaths, taken only when the lock can't be had at once. Where
+       # the kernel inlined them away they can't be probed, and the report's lock waits read 0: said here.
+       for ev in nsww nsrw; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+       if { echo "p:hexcb/nsww rwsem_down_write_slowpath sem=%di:x64" >> "$T/kprobe_events" \
+            && echo "p:hexcb/nsrw rwsem_down_read_slowpath sem=%di:x64" >> "$T/kprobe_events"; } 2>/dev/null; then
+         MT="$MT hexcb/nsww hexcb/nsrw"
+       else
+         echo "the mount lock's slowpaths can't be probed here: its waits go uncounted" >&2
+       fi ;;
   esac
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
@@ -245,6 +254,7 @@ mounts_trace() {
       hexcb/*) f="sem == $nssem && comm == \"hex\"" ;;
       sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
       sched/sched_process_fork) f='parent_comm == "hex"' ;;
+      sched/sched_waking) f='comm == "hex"' ;;
       irq/*) f='comm ~ "ksoftirqd*" || comm == "hex"' ;;
       workqueue/*) f='comm ~ "kworker*"' ;;
       *) f='comm == "hex"' ;;
@@ -266,7 +276,7 @@ mounts_trace() {
   for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
   for ev in $MT; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   untrace
-  for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+  for ev in nsw nsr nsww nsrw; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
 
@@ -279,7 +289,7 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
   echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
-    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0} HEXBENCH_DEVFS=${HEXBENCH_DEVFS:-1} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} MOUNTS_SPAN=${MOUNTS_SPAN:-switch} CLASSIC=${CLASSIC:-0} HEXBENCH_DEVFS=${HEXBENCH_DEVFS:-1} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built
@@ -333,7 +343,9 @@ fi
 # MOUNTS (goal 5 plan step 3): a focused run of its own, not the rounds. For each concurrency in MOUNTS_CONC (1 and
 # 8), one throughput phase of MOUNTS lifecycles with every call of the hex processes traced (mounts_trace), cut by
 # create_breakdown.py mounts into part 19's calls, the time between them, the time off the CPU and the page faults,
-# by mount; with MOUNTS_PATH=classic its creates take the classic path, through the shim. No libcrun, no rounds.
+# by mount; with MOUNTS_PATH=classic its creates take the classic path, through the shim. With MOUNTS_SPAN=root
+# (goal 6) each span is the root in place, to the init's chdir, its mount namespace's join counted (create_breakdown.py
+# mounts). No libcrun, no rounds.
 if [ "${MOUNTS:-0}" -gt 0 ]; then
   rc=0
   for conc in ${MOUNTS_CONC:-1 8}; do
@@ -341,7 +353,7 @@ if [ "${MOUNTS:-0}" -gt 0 ]; then
     mounts_trace "mounts.c$conc" "$MOUNTS" "$conc" \
       || { echo "refusing: the mounts trace at $conc failed ($OUT/mounts.log)" >&2; rc=6; continue; }
     python3 -I /opt/lab/probes/create_breakdown.py mounts "$OUT/mounts.c$conc.txt" "$OUT/mounts.c$conc.stats" \
-      /usr/include/asm/unistd_64.h "${MOUNTS_PATH:-pruned}" > "$OUT/mounts.c$conc.md" || rc=7
+      /usr/include/asm/unistd_64.h "${MOUNTS_PATH:-pruned}" "${MOUNTS_SPAN:-switch}" > "$OUT/mounts.c$conc.md" || rc=7
     cat "$OUT/mounts.c$conc.md"
   done
   echo "mounts done (inside), load $(cut -d' ' -f1-3 /proc/loadavg)" >> "$OUT/env.txt"

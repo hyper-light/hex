@@ -4,7 +4,7 @@
 # 6's update). Not of record: a VM's numbers. The run's directory (OUT_DIR, default under VM_DIR/breakdown) is the
 # guest's one share: bin/ holds the given hex and seam_oci and idlethreads (built from probes/idlethreads.c here,
 # for the guest's Fedora 44), lab/ a copy of bench/competitive, env the variables below that are set, and out/ the
-# breakdown's results, handed back. In the guest vm7_breakdown_inside.sh starts IDLE_THREADS idle threads and
+# breakdown's results, handed back; with MOUNTS set, the mounts trace (part 19 call by call) runs instead of AC-e. In the guest vm7_breakdown_inside.sh starts IDLE_THREADS idle threads and
 # LOOPS busy loops at nice 0 on every vCPU, in a cgroup beside the bench's, and the breakdown in a cgroup and
 # mount namespace of its own, as the bench container on a host. VM_CPUS, VM_SMP and VM_MEM size the guest.
 # Usage: vm7_breakdown.sh <hex release binary> <seam_oci release binary>
@@ -18,10 +18,12 @@ mkdir -p "$D"/bin "$D"/out
 cp "$HEX" "$D/bin/hex"; cp "$SEAM" "$D/bin/seam_oci"
 gcc -O2 -pthread -o "$D/bin/idlethreads" "$COMP/probes/idlethreads.c"
 rm -rf "${D:?}/lab"; cp -r "$COMP" "$D/lab"
+# The mounts trace (MOUNTS) names the calls from asm/unistd_64.h, which the guest's root lacks: the host's goes along.
+cp /usr/include/asm/unistd_64.h "$D/lab/unistd_64.h"
 # Only what's set reaches the guest; an unset one stays unset there (HEXBENCH_PROCFS unset is its pool on).
 : > "$D/env"
 for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_PROCFS HEXBENCH_DEVFS HEXBENCH_OWNER \
-  HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS; do
+  HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS MOUNTS MOUNTS_CONC MOUNTS_SPAN; do
   [ -n "${!v+x}" ] && printf 'export %s=%q\n' "$v" "${!v}" >> "$D/env"
 done
 printf 'export TRACE_TAG=vm7_%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" >> "$D/env"

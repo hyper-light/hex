@@ -11,6 +11,8 @@ S=${1:?share}
 . "$S/env"
 rm -rf /opt/bin /opt/comp /opt/out; mkdir -p /opt/bin /opt/comp /opt/out
 cp "$S"/bin/* /opt/bin/; cp -r "$S"/lab/. /opt/comp/
+# The mounts trace's call names: the host's header, where the guest has none (its root is a snapshot, so this is undone).
+[ -s /usr/include/asm/unistd_64.h ] || { mkdir -p /usr/include/asm && cp /opt/comp/unistd_64.h /usr/include/asm/; }
 C=/sys/fs/cgroup
 for c in cpu memory pids io; do echo "+$c" > "$C/cgroup.subtree_control"; done
 mkdir -p "$C/load" "$C/bench"

@@ -5,7 +5,7 @@
   create_breakdown.py check <run dir> <prefix>
   create_breakdown.py summarize <run dir>
   create_breakdown.py switch <trace file> <trace stats> [seam result json] [switch|mounts]
-  create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h> [pruned|classic]
+  create_breakdown.py mounts <trace file> <trace stats> <asm/unistd_64.h> [pruned|classic] [switch|root]
 
 drain copies a trace instance's trace_pipe to a file until the stop file appears, then takes what's left
 (exec_breakdown.py's).
@@ -811,7 +811,7 @@ SWITCH = re.compile(r"^sched_switch: prev_comm=.*? prev_pid=(?P<prev>\d+) prev_p
 # The calls part 19 opens and ends on, and the two it attaches a mount with (x86_64's numbers,
 # arch/x86/entry/syscalls/syscall_64.tbl), so the cut needs no header; the header names the rest.
 NR_SETNS, NR_CHROOT, NR_PIVOT_ROOT, NR_MOUNT, NR_MOVE_MOUNT, NR_FSCONFIG = 308, 161, 155, 165, 429, 431
-NR_CLONE, NR_CLONE3 = 56, 435
+NR_CLONE, NR_CLONE3, NR_CHDIR = 56, 435, 80
 ATTACHES = (NR_MOUNT, NR_MOVE_MOUNT)
 # fsconfig's commands (include/uapi/linux/mount.h) and mount(2)'s flags that tell its kinds apart
 # (include/uapi/linux/mount.h: MS_REMOUNT, MS_BIND, MS_MOVE, MS_REC and the propagation flags), so a call's
@@ -834,6 +834,11 @@ WORK = re.compile(r"^workqueue_execute_(?P<edge>start|end): work struct (?P<work
 # A hold of the kernel's one mount lock (namespace_sem), for write (nsw, down_write) or shared (nsr, down_read): the
 # kprobes create_breakdown_inside.sh's mounts_trace sets on the lock's address (goal 5 extended step 3).
 NSSEM = re.compile(r"^(?P<kind>nsw|nsr): \(")
+# A wait for it (goal 6): kprobes on the rwsem's slowpaths, which a down_write or down_read takes only when it can't
+# have the lock at once (kernel/locking/rwsem.c, rwsem_down_write_slowpath and rwsem_down_read_slowpath), on the same
+# address. And who woke a hex process (sched_waking, recorded on the waker), so a blocked wait names what ended it.
+NSWAIT = re.compile(r"^(?P<kind>nsww|nsrw): \(")
+WAKING = re.compile(r"^sched_waking: comm=.*? pid=(?P<pid>\d+) prio=")
 
 
 # How each span opened, for the report's first line.
@@ -843,6 +848,8 @@ OPENS = {"setns": "join of the network namespace made ahead", "first run": "firs
 
 def kind_of(nr, args):
     """A call's kind where its number alone doesn't say what part 19 does with it."""
+    if nr == NR_SETNS and len(args) > 1:
+        return "mnt" if args[1] & CLONE_NEWNS else "net" if args[1] & CLONE_NEWNET else None
     if nr == NR_FSCONFIG and len(args) > 1:
         return FSCONFIG_CMDS.get(args[1], str(args[1]))
     if nr == NR_MOUNT and len(args) > 3:
@@ -866,7 +873,7 @@ def syscall_names(header):
     return names
 
 
-def mounts(trace, stats, header, path="pruned"):
+def mounts(trace, stats, header, path="pruned", span="switch"):
     """Goal 5 plan step 3: part 19 of each create, call by call. The span is the switch reader's, from the
     exit of the init's join of the network namespace made ahead (setns with CLONE_NEWNET) to the entry of its
     chroot (the pruned path) or pivot_root (the classic one), per init pid; a classic init whose shim joined the
@@ -878,7 +885,14 @@ def mounts(trace, stats, header, path="pruned"):
     last attach (on the pruned path the devices, the links and the switch's chdir) is a share of its own. Every
     figure is a mean per create but the span's, whose p50, p99 and max are its own, so the trace's microsecond
     timestamps' rounding averages out over the creates; the slowest 1% are shown the same way beside them, so
-    what a tail is made of shows. A lost event is refused, as in switch."""
+    what a tail is made of shows. A lost event is refused, as in switch.
+
+    With `span` root (goal 6, decision 6's update), the span is the switch reader's root in place: it ends at the
+    init's first chdir instead, the chroot (where there is one) a call within it, and an init that joined its mount
+    namespace (setns with CLONE_NEWNS, a namespace made from its tree) before its network has that join counted as
+    a call of its span, as the switch reader counts it. Each time off the CPU blocked is charged to the call it slept
+    in, the process whose wakeup ended it, and whether it slept waiting for the mount lock (the rwsem slowpath
+    kprobes), so a tail's blocked time says what it waited on."""
     names = syscall_names(header)
     name = lambda call: (names.get(call[0], f"nr {call[0]}") + (f" ({call[1]})" if call[1] else ""))
     read, unread = 0, 0
@@ -886,6 +900,10 @@ def mounts(trace, stats, header, path="pruned"):
     # pre: the init preempted off each CPU; begun: a softirq's or a work item's start on each CPU.
     pre, begun = {}, {}
     probed = False
+    # joins: a mount namespace's join before the span opened, by pid; woke: who woke each blocked init; waits: a
+    # mount lock slowpath taken since the init last slept, by pid.
+    joins, woke, waits = {}, {}, {}
+    ends = (NR_CHDIR,) if span == "root" else (NR_CHROOT, NR_PIVOT_ROOT)
 
     def charge(table, label, d):
         table[label] = table.get(label, 0) + d
@@ -921,7 +939,7 @@ def mounts(trace, stats, header, path="pruned"):
             if (e := RAW_ENTER.match(body)):
                 nr = int(e["nr"])
                 w = window.get(pid)
-                if w is not None and nr in (NR_CHROOT, NR_PIVOT_ROOT):
+                if w is not None and nr in ends:
                     gap(w, (nr, None), ts)
                     w["end"], w["ends"] = ts, name((nr, None))
                     creates.append(window.pop(pid))
@@ -951,10 +969,16 @@ def mounts(trace, stats, header, path="pruned"):
                     w["calls"].append(((nr, kind_of(nr, c["args"])), ts - c["t"], c["run"], c["blocked"]))
                     if nr in ATTACHES:
                         w["attaches"].append(len(w["calls"]))
+                if (span == "root" and w is None and nr == NR_SETNS and int(e["ret"]) == 0 and len(c["args"]) > 1
+                        and c["args"][1] & CLONE_NEWNS):
+                    joins[pid] = ((nr, "mnt"), ts - c["t"], c["run"], c["blocked"])
                 if nr == NR_SETNS and int(e["ret"]) == 0 and len(c["args"]) > 1 and c["args"][1] & CLONE_NEWNET:
                     window[pid] = {"start": ts, "opens": "setns", "calls": [], "attaches": [], "user_run": 0,
                                    "user_blocked": 0, "faults": 0, "by": {}, "what": {}, "on": {},
-                                   "last": ts, "pending": 0, "gaps": {}}
+                                   "last": ts, "pending": 0, "gaps": {}, "join": 0}
+                    if (j := joins.pop(pid, None)) is not None:
+                        window[pid]["calls"].append(j)
+                        window[pid]["join"] = j[1]
             elif (e := SWITCH.match(body)):
                 # Off the CPU runnable (prev_state R, preempted) or not (blocked: waiting on a lock or I/O). A
                 # preemption is charged to the process the CPU went to first, by its name without a kernel
@@ -974,6 +998,21 @@ def mounts(trace, stats, header, path="pruned"):
                         window[nxt]["user_" + how] += ts - t0
                     if how == "run" and nxt in window:
                         charge(window[nxt]["by"], who, ts - t0)
+                    if how == "blocked" and nxt in window:
+                        c = cur.get(nxt)
+                        at = name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "between calls"
+                        lock = waits.pop(nxt, None)
+                        label = (f"{at}, woken by {woke.pop(nxt, 'nothing traced')}"
+                                 + (f", waiting for the mount lock ({lock})" if lock else ""))
+                        charge(window[nxt].setdefault("blk", {}), label, ts - t0)
+            elif (e := WAKING.match(body)):
+                woken = int(e["pid"])
+                if woken in off and off[woken][1] == "blocked":
+                    woke[woken] = m["comm"].split("/")[0]
+            elif (e := NSWAIT.match(body)):
+                if pid in window:
+                    waits[pid] = "write" if e["kind"] == "nsww" else "shared"
+                    window[pid]["lock_waits"] = window[pid].get("lock_waits", 0) + 1
             elif (e := FORK.match(body)):
                 born.add(int(e["child"]))
             elif body.startswith("page_fault_user:"):
@@ -995,7 +1034,7 @@ def mounts(trace, stats, header, path="pruned"):
               file=sys.stderr)
         return 1
     for w in creates:
-        w["span"] = w["end"] - w["start"]
+        w["span"] = w["end"] - w["start"] + w.get("join", 0)
         w["sys"] = sum(c[1] for c in w["calls"])
         w["sys_run"] = sum(c[2] for c in w["calls"])
         w["sys_blocked"] = sum(c[3] for c in w["calls"])
@@ -1034,6 +1073,8 @@ def mounts(trace, stats, header, path="pruned"):
                 for label, d in w[key].items():
                     tot[label] = tot.get(label, 0) + d
             return ", ".join(f"{label} {d / n:.1f}" for label, d in sorted(tot.items(), key=lambda kv: -kv[1])[:k])
+        for w in ws:
+            w.setdefault("blk", {})
         out = ["| call | calls per create | us per create | us per call | off the CPU in it, us per create: "
                "preempted / blocked |", "|---|---|---|---|---|"]
         for call, (k, d, run, blocked) in sorted(per.items(), key=lambda kv: -kv[1][1]):
@@ -1049,6 +1090,9 @@ def mounts(trace, stats, header, path="pruned"):
                      f"its CPU ran (us per create): {top('what') or 'nothing traced'}.",
                      f"- Softirqs run on the init itself as an interrupt returned (us per create): "
                      f"{top('on') or 'none'}.",
+                     f"- Blocked, by the call it slept in, what woke it and whether it waited for the mount lock "
+                     f"(us per create): {top('blk') or 'none'}; mount lock waits (its rwsem's slowpath) per create "
+                     f"{sum(w.get('lock_waits', 0) for w in ws) / n:.1f}.",
                      (f"- The mount lock (namespace_sem) per create: {holds(ws, 'nsw')[0]:.1f} held for write "
                       f"(by call: {holds(ws, 'nsw')[1] or 'none'}), {holds(ws, 'nsr')[0]:.1f} shared "
                       f"(by call: {holds(ws, 'nsr')[1] or 'none'})." if probed
@@ -1079,6 +1123,17 @@ def mounts(trace, stats, header, path="pruned"):
                        f"| {listed} |")
         return out
 
+    def each(ws):
+        """Each create of `ws`, slowest first: its span, its calls' time and time off the CPU, its longest calls."""
+        out = ["| span, us | in calls | preempted / blocked | its longest calls, us (preempted / blocked in them) |",
+               "|---|---|---|---|"]
+        for w in sorted(ws, key=lambda w: -w["span"]):
+            longest = sorted(w["calls"], key=lambda c: -c[1])[:4]
+            out.append(f"| {w['span']} | {w['sys']} | {w['sys_run'] + w['user_run']} / "
+                       f"{w['sys_blocked'] + w['user_blocked']} | "
+                       + ", ".join(f"{name(c[0])} {c[1]} ({c[2]} / {c[3]})" for c in longest) + " |")
+        return out
+
     print("\n".join(
         [f"# Part 19, call by call ({os.path.basename(trace)})", "",
          f"{len(creates)} creates, each from its init's "
@@ -1088,7 +1143,8 @@ def mounts(trace, stats, header, path="pruned"):
          f"{n_lost} lost.", "", "## Every create", ""]
         + table(creates) + ["", "## The init's own code between calls, by the call it leads to (every create)", ""]
         + gaps(creates) + ["", "## Each mount's share (every create)", ""] + shares(creates)
-        + ["", f"## The slowest 1% ({len(tail)} creates, span {cut} us or more)", ""] + table(tail)))
+        + ["", f"## The slowest 1% ({len(tail)} creates, span {cut} us or more)", ""] + table(tail)
+        + ["", "### Each of them", ""] + each(tail)))
     n = len(creates)
     with open(os.path.splitext(trace)[0] + ".summary.json", "w") as f:
         json.dump({"creates": n, "span_p50_us": eb.pct(spans, 0.5), "span_p99_us": eb.pct(spans, 0.99),
@@ -1099,7 +1155,9 @@ def mounts(trace, stats, header, path="pruned"):
                    "faults_per_create": sum(w["faults"] for w in creates) / n,
                    "nssem_write_per_create": holds(creates, "nsw")[0] if probed else None,
                    "nssem_write_by_call": holds(creates, "nsw")[1] if probed else None,
-                   "nssem_read_per_create": holds(creates, "nsr")[0] if probed else None}, f, indent=1)
+                   "nssem_read_per_create": holds(creates, "nsr")[0] if probed else None,
+                   "nssem_waits_per_create": sum(w.get("lock_waits", 0) for w in creates) / n,
+                   "span": span}, f, indent=1)
     if n_lost:
         print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
         return 1
@@ -1117,7 +1175,8 @@ def main():
         return summarize(a[1])
     if a and a[0] == "switch" and len(a) in (3, 4, 5):
         return switch(a[1], a[2], a[3] if len(a) >= 4 else None, a[4] if len(a) == 5 else "switch")
-    if a[0] == "mounts" and len(a) in (4, 5) and (len(a) == 4 or a[4] in ("pruned", "classic")):
+    if (a and a[0] == "mounts" and len(a) in (4, 5, 6) and (len(a) < 5 or a[4] in ("pruned", "classic"))
+            and (len(a) < 6 or a[5] in ("switch", "root"))):
         return mounts(*a[1:])
     print(__doc__, file=sys.stderr)
     return 2
