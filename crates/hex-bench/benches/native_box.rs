@@ -659,8 +659,10 @@ mod os {
         }
         fn start(&mut self, _i: usize, bound: u64, program: &[String]) -> Box<dyn Started> {
             Box::new(ChildProc::spawn(
+                // -q: procgov's banner on stdout would be read as the program's first line (jupiter,
+                // bench/install/records/windows-jupiter-20261105.txt entry 7).
                 Command::new("procgov")
-                    .args(["--maxjobmem", &format!("{}M", bound / MIB), "--"])
+                    .args(["-q", "--maxjobmem", &format!("{}M", bound / MIB), "--"])
                     .args(program),
             ))
         }
