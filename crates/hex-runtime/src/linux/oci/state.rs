@@ -281,6 +281,21 @@ mod tests {
         assert!(dir.get("c1").is_err());
     }
 
+    /// Goal 5 extended step 6, lever 3 (T-T7.1.2): a container's directory is in one of its root's shards, so the
+    /// mkdir and rmdir of containers in different shards don't wait on one parent's lock. Do: place containers
+    /// `c1`, `c2` and `a` under a root. Expect: each under the shard two hex digits of FNV-1a over its id name,
+    /// `19`, `00` and `0c` (draft-eastlake-fnv's 64-bit offset basis and prime, worked by hand), the same in every
+    /// run; and the place a node before the shards kept it, the root itself, beside.
+    #[test]
+    fn a_containers_directory_is_in_its_shard_and_the_old_place_is_the_root_itself() {
+        let root = Path::new("/run/hex-oci");
+        for (id, want) in [("c1", "19"), ("c2", "00"), ("a", "0c")] {
+            assert_eq!(shard(id), want, "{id}");
+            assert_eq!(Dir::new(root, id).path(), root.join(want).join(id), "{id}");
+            assert_eq!(Dir::unsharded(root, id).path(), root.join(id), "{id}");
+        }
+    }
+
     // AC-T7.1.4, append-only wire format: state written before the cgroup field reads as having none,
     // and the field round-trips once set.
     #[test]

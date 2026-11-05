@@ -57,6 +57,7 @@ use hex_node::{Node, OCI_BOXES, records_dir};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
 use hex_runtime::linux::oci::run::{Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::state::shard;
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Set in the re-exec'd copy of this test that plays the agent the crash kills.
@@ -286,6 +287,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     two_nodes_one_box_id(&lab, own);
     a_box_made_before_the_move_is_adopted(&lab, own);
     a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
+    a_node_upgraded_over_state_dirs_in_the_one_parent_recovers_both_layouts(&lab, own);
     records_in_both_places_are_found_after_a_restart(&lab, own);
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
     each_seed_cloned_container_is_randomized_afresh(&lab, own);
@@ -1485,6 +1487,94 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
     eprintln!(
         "oci_box upgrade: adopted {old_live} at the old place and {new_live} at .oci; removed {old_orphan}, \
          {old_mid} and {new_orphan}; nothing left after the deletes"
+    );
+}
+
+/// T-T7.1.2 across goal 5 extended step 6's shards of the containers' state directories (lever 3): a node before
+/// them kept each container's directory in the runtime directory itself, `<runtime>/<key>-<id>`; today's keeps it
+/// in one of the runtime directory's shards, `<runtime>/<shard>/<key>-<id>`. Do: with today's node, make a box
+/// whose init waits (`new-live`) and leave a state directory in its shard with no record (`new-orphan`); as the
+/// node before the shards made them, move a box whose init waits to the runtime directory itself, its record
+/// naming that directory (`old-live`), and leave a state directory there with no record (`old-orphan`); then open
+/// today's node again and recover. Expect: today's node keeps a container in its shard; the two live boxes taken
+/// back, each read where its directory is; the two orphans removed, their directories gone; and, the two deleted,
+/// nothing of any box left in either layout.
+fn a_node_upgraded_over_state_dirs_in_the_one_parent_recovers_both_layouts(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-shards");
+    let id = |n: &str| BoxId::new(n).unwrap();
+    let (old_live, old_orphan) = (id("old-live"), id("old-orphan"));
+    let (new_live, new_orphan) = (id("new-live"), id("new-orphan"));
+
+    let first = lab.node(&box_root, state.path());
+    let runtime = first.oci_root().to_owned();
+    let in_shard = first.container_dir(&new_live);
+    let name = |dir: &Path| dir.file_name().unwrap().to_str().unwrap().to_owned();
+    assert_eq!(
+        in_shard.parent().unwrap(),
+        runtime.join(shard(&name(&in_shard))),
+        "today's node keeps a container's directory in its shard"
+    );
+    first
+        .create(lab.running(new_live.clone(), &Lab::act(&Act::Wait)))
+        .expect("create in the shards");
+    // A box made as today's node makes it, its directory then moved to where the node before the shards kept
+    // it: its init holds the directory open and reaches its exec FIFO through it, so it waits on as it was.
+    first
+        .create(lab.running(old_live.clone(), &Lab::act(&Act::Wait)))
+        .expect("create the box to move");
+    drop(first);
+    // Its record, wherever the store keeps it here (the runtime directory's records on tmpfs, else the state
+    // directory's), rewritten to name the moved directory where a node before the shards wrote it.
+    let records = [
+        hex_node::store::runtime_record(&records_dir(&runtime, state.path()).unwrap(), &old_live),
+        state.path().join(format!("{old_live}.json")),
+    ];
+    let file = records.iter().find(|f| f.exists()).unwrap();
+    let mut old = BoxRecord::decode(&std::fs::read(file).unwrap()).unwrap();
+    std::fs::remove_file(file).unwrap();
+    let moved_from = old.dirs.first().unwrap().clone();
+    let old_dir = runtime.join(name(&moved_from));
+    std::fs::rename(&moved_from, &old_dir).unwrap();
+    old.dirs[0] = old_dir.clone();
+    as_an_older_node_wrote(state.path(), &old);
+    let new_orphan_dir = {
+        let node = lab.node(&box_root, state.path());
+        node.container_dir(&new_orphan)
+    };
+    let old_orphan_dir = runtime.join(name(&new_orphan_dir).replace("new-orphan", "old-orphan"));
+    std::fs::create_dir_all(&new_orphan_dir).unwrap();
+    std::fs::create_dir_all(&old_orphan_dir).unwrap();
+
+    let node = lab.node(&box_root, state.path());
+    let summary = node.recover().expect("recover");
+    let adopted: BTreeSet<BoxId> = summary.adopted.iter().cloned().collect();
+    let removed: BTreeSet<BoxId> = summary.removed.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(
+        (adopted, removed),
+        (
+            [old_live.clone(), new_live.clone()].into_iter().collect(),
+            [old_orphan.clone(), new_orphan.clone()]
+                .into_iter()
+                .collect()
+        ),
+        "{summary:?}"
+    );
+    for gone in [&new_orphan_dir, &old_orphan_dir] {
+        assert!(!gone.exists(), "{} is left", gone.display());
+    }
+    for id in [&old_live, &new_live] {
+        assert_eq!(node.inspect(id).unwrap().state, BoxState::Created, "{id}");
+        node.delete(id)
+            .unwrap_or_else(|e| panic!("delete {id}: {e}"));
+    }
+    for gone in [&old_dir, &in_shard] {
+        assert!(!gone.exists(), "{} is left", gone.display());
+    }
+    assert!(node.list().unwrap().is_empty(), "a box is left");
+    eprintln!(
+        "oci_box state shards: adopted {old_live} in the runtime directory and {new_live} in its shard; removed \
+         {old_orphan} and {new_orphan}; nothing left after the deletes"
     );
 }
 
