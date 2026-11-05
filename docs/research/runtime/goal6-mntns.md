@@ -322,3 +322,45 @@ Read:
   against 5-6. Nearly all of them are the masks and read-only paths it puts on each proc.
 - **Falsified and reverted** (dc6ec80, on the lead's word, 2026-11-05): fewer holds with a higher p99 in 6 of 6
   pairs is no lever. 6faee83 stays reachable in the branch's history, its A/B above.
+
+## 11. Part 19's tail on fedora's host (6.19), under the bar's conditions: what it is made of (2026-11-05)
+
+One run, the lead's 10:47Z ask. Unit hex-g6-holdtime-20261105T104949Z, timed 11:59:05-11:59:19Z under the lock, fedora
+load 34-38 with kiln CI beside it. Release binaries and harness of 7cc2238, which times every write hold of the mount
+lock from its grant to its `up_write`, by holder. Conditions: the copy path (6.19 makes no namespace from a tree and no
+proc ahead), 2,000 creates at 8 in flight, 8,000 idle threads (12,030 host threads), 12 busy loops on CPUs 4-15 at
+nice 0, owner bundles with reuse on, Docker's paths, the `/dev` pool on. Record:
+`~/.cache/hex-bench/out/create-breakdown-20261105T115907Z/` on fedora. Part 19 (net join to chroot): p50 278 us,
+p99 709, max 5,462.
+
+The trace was read in two passes. The reader (`mounts.c8.md`) gives the per-call table and the holds by holder. The
+splits below came from passes over `mounts.c8.txt`, the same events.
+- **The holds are short.** 72,071 write holds, 1.6 us on average. An init's average 1.3 us, with 0.1 us preempted
+  and 0.0 us blocked inside each.
+  - 51 holds lasted 50 us or more.
+  - 9 of them are the create seeds' `pivot_root` at start, 1.2 ms each and all on the CPU: `pivot_root` calls
+    `chroot_fs_refs` (`fs/fs_struct.c:54-80`), which walks every thread on the host, while the lock is held
+    (v6.19 `fs/namespace.c:4554` takes it, `:4606` the walk).
+  - The other 40, 6.4 ms in all, came after start. 4.6 ms of that was the holder preempted mid-hold, in `open_tree`
+    and `move_mount`.
+- **The startup holds only explain the first creates.** The first 5 creates of the run waited behind the seeds'
+  `pivot_root` holds (2.5-5.5 ms). From 30 ms on (1,956 creates) the p99 is 694 us.
+- **The steady tail is mostly preemption.** The slowest 1% of the steady creates average 1,102 us:
+  - preempted, 538 us (49%);
+  - waiting for the mount lock, 119 us (11%): 26 spinning, 93 asleep or runnable after wake;
+  - the init's own work on its CPU, the remaining ~445 us.
+- **Even unpreempted creates sit at the bar.** 12.4% of steady creates are preempted during part 19 at all, 3.2% for
+  over 200 us, and 0.5% for over 400 us. The 1,714 creates never preempted have a p99 of 498 us.
+- **Where part 19's CPU time goes**, per create: 22 `openat2` 68.7 us, 17 `move_mount` 58.7, 13 `open_tree` 53.4, proc's
+  `fsconfig` 22.7, 33 `close` 10.8, the init's own code 80.6 with 18 page faults. That's 314 us in all.
+
+Read:
+- On 6.19 the mount lock is not what part 19's loaded tail waits on. A lever on hold time or hold count can reach at
+  most the 11%.
+- The tail is the init's own length: its unpreempted p99 is already 0.5 ms, and its chance of being preempted by a
+  busy loop at equal weight grows with that length. To meet the bar here, part 19's CPU time has to fall well below
+  ~300 us, roughly halving.
+- The 7.2 guest's numbers are a third of that (procs made ahead and the tree, §9-§10: p50 56-80 us), so goal 6's 7.x
+  path is the lever that size.
+- Separately, a seed starting on a host with many threads holds the global mount lock ~1.2 ms in its `pivot_root`.
+  That stalls every mount on the host, co-tenants included.
