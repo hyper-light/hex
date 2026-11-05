@@ -649,6 +649,128 @@ slows 32 (8,046/s to 7,369/s, its p99 9.36 to 11.04 ms; at the given limit 8,101
   minutes apart as its concurrency 1 went from 0.91 to 0.57 ms of CPU a lifecycle: option 1's ratio follows
   concurrency 1's CPU, the host's swing runs 14 to 16 found. 4-15 alone 4.94x and 5.00x (4.68x and 5.02x).
 
+## Run 18 (2026-11-05, fedora): criterion 2 as written at the step's final tip, step 6 alone, the other readings beside it
+
+- **What it measures** (the lead, 2026-11-05, the step's retry): the second criterion as its text reads it, "sustained
+  lifecycles a second at concurrency 32 against throughput at concurrency 1 in the same OCI pass, one owner's boxes,
+  at least 8x, measured by seam_oci's throughput and sustained phases through host.sh on fedora", at the step branch's
+  final tip, a12e526. The text names no CPU set, so host.sh's own, 4-31, holds both phases (the lead,
+  2026-11-03T16:50Z). Best of 2: each pass runs 2 rounds, each round's ratio its sustained rate over its own
+  throughput rate at concurrency 1, and the pass's as host.sh's table states it, its best sustained round over its
+  best concurrency-1 round (summarize.py); two passes at each descriptor limit, the soft limit Hex's installer gives a
+  node (the lab container's hard limit, 524,288: `HEXBENCH_NOFILE=hard`) and the container's given 1,024, the second
+  pair after the rest. Beside them the readings Ada is to choose among: 4-15 alone the same way, and option 1
+  (concurrency 1 on 4-15, 32 on 4-31), host.sh's CPUs and 4-15 by run 9's interleaved method; each run with
+  concurrency 1's CPU a lifecycle.
+- **Binaries:** a12e526, step 6 alone (step 1 in, on step 5), built on fedora from an export of the commit: `hex`
+  38aa25927874f98c, `seam_oci` 5bcde75f86745354.
+- **Method:** `PHASES=oci RUNTIMES=libcrun ROUNDS=2 LIFECYCLES=2000 HEXBENCH_SUSTAINED=10000
+  HEXBENCH_OWNER=bench-owner HEXBENCH_REUSE=1 NETNS=1`, `HEXBENCH_PHASES="throughput sustained"` for the criterion's
+  passes and `interleaved` (10 pairs a round) for the rest, each container at `--memory 8g --oom-score-adj 1000`,
+  through hex-slot, the timed parts under fedora's timed lock: the unit `hex-g5x-s6-fdh41-20261105T050241Z` from
+  05:08:11Z. At about 05:35Z the host ran out of memory (its 1-minute load 240) and the kernel killed the ninth pass's
+  container (`20261105T052828Z`, exit 137) and the unit; the rest ran in `hex-g5x-s6-fdh45-20261105T054903Z` from
+  05:49:03Z. There host.sh refused four passes before measuring, exit 4, twice (`20261105T055112Z` to `055315Z`, and
+  `060212Z` to `060213Z`): fetch.py's request for crun's pinned source timed out in its TLS handshake, then GitHub
+  answered "rate limit exceeded", its unauthenticated hourly budget spent by the host's passes. 270bd4f has fetch.py
+  use the pinned tarball fedora holds; the four were started again on that harness in
+  `hex-g5x-s6-fdh48-20261105T070501Z`, and fedora left kiln (from 07:13Z) before their results could be read: they
+  aren't in this record.
+- **Host:** run noisy: the passes began at 1-minute loads of 26.9 to 52.4, with 4,300 to 5,700 host threads, a kind
+  cluster and its registry, three buildkit builders, a minio, the kiln agents' crate builds and other Hex agents'
+  units beside them; each run's `env.txt` holds its load at the start and the end.
+
+As the criterion reads it (each round's sustained rate over its throughput rate at concurrency 1; the pass's, host.sh's
+table's, in brackets):
+
+| run | CPUs | limit | in process | CPU a lifecycle at 1 | the pass's rates, 32 over 1 | over the socket |
+|---|---|---|---|---|---|---|
+| `20261105T050811Z` | 4-31 | installed | 2.96x, 2.98x (2.96x) | 2.21, 2.24 ms | 1,406/s over 475/s | 2.92x, 2.78x (2.78x) |
+| `20261105T051055Z` | 4-31 | given | 2.79x, 2.29x (2.29x) | 2.21, 1.69 ms | 1,417/s over 619/s | 2.96x, 3.35x (3.35x) |
+| `20261105T051333Z` | 4-15 | installed | 2.43x, 2.38x (2.43x) | 1.45, 1.62 ms | 1,764/s over 727/s | 2.54x, 2.19x (2.54x) |
+| `20261105T051602Z` | 4-15 | given | 2.26x, 2.58x (2.40x) | 1.70, 1.80 ms | 1,522/s over 635/s | 2.48x, 2.70x (2.60x) |
+
+Interleaved, each run's 20 pairs pooled (mean ratio, bootstrap SE; each half's CPU and wall, the pairs' medians):
+
+| run | reading | limit | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | p50, p99 at 1 | p50, p99 at 32 | over the socket (SE) |
+|---|---|---|---|---|---|---|---|---|---|
+| `20261105T051838Z` | option 1 | installed | 2.71x (0.15) | 1,203/s over 452/s | 1.76, 4.80 ms | 1.05, 6.32 | 1.659, 2.196 ms | 24.490, 39.273 ms | 2.68x (0.08) |
+| `20261105T052134Z` | option 1 | given | 2.59x (0.10) | 836/s over 320/s | 2.69, 4.38 ms | 0.84, 3.78 | 2.696, 8.567 ms | 36.221, 79.077 ms | 2.78x (0.05) |
+| `20261105T052519Z` | host.sh's | installed | 2.84x (0.03) | 1,172/s over 413/s | 2.51, 4.68 ms | 1.06, 5.50 | 2.348, 2.965 ms | 27.616, 45.571 ms | 3.14x (0.04) |
+| `20261105T054903Z` | host.sh's | given | 3.94x (0.06) | 2,051/s over 521/s | 1.96, 3.60 ms | 1.03, 7.48 | 1.888, 2.362 ms | 15.619, 23.886 ms | 4.53x (0.11) |
+
+`20261105T052828Z` (host.sh's, given) was killed in its first in-process round; its one socket round of 10 pairs read
+3.89x (0.21).
+
+- **Step 6 alone falls far short of the criterion on this host:** 2.29x to 2.98x in process as written on host.sh's
+  CPUs, about 2.4x on 4-15, under 4x by every method and reading. Concurrency 32 stays at 836 to 2,051 a second
+  whatever CPUs it has, 4-15's 12 or 4-31's 28; interleaved, each lifecycle's p50 at concurrency 32 is 15.619 to
+  36.221 ms and its CPU 3.60 to 4.80 ms, against 1.76 to 2.69 at concurrency 1: its lifecycles queue on one lock for
+  the whole host.
+- **The cause is the step's classic root, not its cgroups:** the step's branch makes each container's root with
+  pivot_root, whose walk of every thread on the host runs under the mount namespace's lock (`create_serial.md` run
+  22), and the host had 4,300 to 5,700 threads; run 10's 8.29x was at about 3,000 (its `env.txt`). The step's own lock
+  is off the path: 1.089 `cgroup_mutex` holds a lifecycle at concurrency 32, every box ended through its init's pidfd
+  (`create_serial.md` run 26). Step 2's root, made without pivot_root, is the plan's answer to the walk; run 19
+  measures the step with it in.
+
+## Run 19 (2026-11-05, fedora): criterion 2 as written on the plan's composed tree, the step's final tip in step 7's
+
+- **What it measures:** run 18's passes on mr20, the tree the plan's steps compose: step 7's integrated tree, 60b2e38
+  (steps 1 to 5 in, step 6 through 11c0b6b, the hooks), with the step's final tip, a12e526, merged in for measurement
+  only (8e10d04 on `cp/t7-ext-s6-mr20-wip`; its two conflicts resolved there: `Node::new` takes a12e526's
+  `Netns::start` with its `FilesBound` and keeps step 4's ipc and uts pool, and `netns/tests.rs` keeps step 3's
+  dry-take test beside a12e526's). The criterion names no branch: it is Hex's sustained rate with step 6 in, and step
+  6's branch alone measures the classic root's walk (run 18), so it counts here (the lead, 2026-11-05T07:30Z).
+- **Binaries:** built on fedora from an export of 8e10d04, after all seven gates and the root lab passed there (the
+  unit `hex-g5x-s6-fdh44-20261105T051744Z`): `hex` 5a15b18914395e1e, `seam_oci` 6a1231b246810b57.
+- **Method:** run 18's, on the harness at 270bd4f, in the unit `hex-g5x-s6-fdh47-20261105T061741Z` from 06:27Z; a
+  second out-of-memory stall at about 06:45Z (another tenant's process holding 53 GB) killed `20261105T064315Z` after
+  its first round; `hex-g5x-s6-fdh48-20261105T070501Z` was started to run it again, and fedora left kiln before its
+  result could be read. Two 4-15 passes on mr20's own harness, at 05:55Z and 05:57Z in fdh44, before host.sh refused
+  the rest at crun's source, stand below the table's others.
+- **Host:** run noisy: the passes began at 1-minute loads of 9.2 to 51.6, with 4,100 to 5,800 host threads, the same
+  tenants as run 18's beside them.
+
+As the criterion reads it:
+
+| run | CPUs | limit | in process | CPU a lifecycle at 1 | the pass's rates, 32 over 1 | over the socket |
+|---|---|---|---|---|---|---|
+| `20261105T062746Z` | 4-31 | installed | 8.05x, 8.39x (8.39x) | 1.71, 1.56 ms | 5,821/s over 694/s | 12.64x, 7.05x (11.92x) |
+| `20261105T063023Z` | 4-31 | given | 9.74x, 8.34x (9.72x) | 1.35, 1.35 ms | 9,291/s over 956/s | 7.29x, 6.42x (6.52x) |
+| `20261105T064125Z` | 4-31 | installed | 7.07x, 5.45x (5.45x) | 1.23, 0.83 ms | 7,825/s over 1,437/s | 5.05x, 5.29x (5.05x) |
+| `20261105T064315Z` | 4-31 | given | 5.40x, killed (5.40x) | 0.99 ms | 6,758/s over 1,251/s | 5.86x (5.86x) |
+| `20261105T063225Z` | 4-15 | installed | 5.24x, 5.84x (5.48x) | 0.90, 0.95 ms | 7,706/s over 1,407/s | 5.68x, 5.49x (5.49x) |
+| `20261105T063425Z` | 4-15 | given | 5.89x, 13.49x (5.89x) | 0.98, 1.89 ms | 7,657/s over 1,300/s | 5.48x, 6.25x (5.48x) |
+| `20261105T055519Z` | 4-15 | installed | 4.48x, 4.74x (4.48x) | 0.67, 0.70 ms | 8,569/s over 1,911/s | 4.24x, 3.90x (3.91x) |
+| `20261105T055702Z` | 4-15 | given | 4.06x, 4.98x (4.12x) | 0.65, 0.80 ms | 8,132/s over 1,973/s | 6.05x, 5.81x (5.96x) |
+
+Interleaved:
+
+| run | reading | limit | in process (SE) | rates, 32 over 1 | CPU a lifecycle at 1, 32 | CPUs busy at 1, 32 | p50, p99 at 1 | p50, p99 at 32 | over the socket (SE) |
+|---|---|---|---|---|---|---|---|---|---|
+| `20261105T063654Z` | option 1 | installed | 8.00x (0.16) | 9,164/s over 1,152/s | 1.08, 1.48 ms | 1.25, 13.67 | 0.833, 1.349 ms | 3.095, 8.698 ms | 6.52x (0.27) |
+| `20261105T063739Z` | option 1 | given | 6.91x (0.16) | 8,088/s over 1,183/s | 1.08, 1.52 ms | 1.29, 12.05 | 0.814, 1.262 ms | 3.357, 12.359 ms | 6.84x (0.13) |
+| `20261105T063823Z` | host.sh's | installed | 9.72x (0.32) | 8,522/s over 897/s | 1.38, 1.49 ms | 1.25, 13.09 | 1.088, 1.582 ms | 3.183, 9.754 ms | 9.15x (0.25) |
+| `20261105T063912Z` | host.sh's | given | 10.62x (0.44) | 9,381/s over 914/s | 1.39, 1.48 ms | 1.27, 14.66 | 1.071, 1.503 ms | 2.951, 8.114 ms | 9.71x (0.42) |
+| `20261105T063958Z` | 4-15 | installed | 5.11x (0.09) | 7,485/s over 1,464/s | 0.82, 1.24 ms | 1.22, 9.61 | 0.625, 1.051 ms | 3.806, 9.892 ms | 5.57x (0.18) |
+| `20261105T064041Z` | 4-15 | given | 5.23x (0.11) | 7,856/s over 1,500/s | 0.87, 1.21 ms | 1.29, 9.57 | 0.658, 1.068 ms | 3.737, 9.351 ms | 4.88x (0.11) |
+
+- **The criterion is met as its text reads it, on the composed tree:** host.sh's pass on its own CPUs, in process,
+  best of 2, 8.39x at the installed descriptor limit (`20261105T062746Z`) and 9.72x at the given (`20261105T063023Z`).
+  Every round of the two best passes read 8.05x or more. Over the socket the best of 2 is 11.92x at the installed
+  limit and 6.52x at the given.
+- **One pass swings with where concurrency 1 runs:** on 4-31 a lone lifecycle ran at 0.83 to 1.71 ms of CPU, on a
+  P-core or an E-core and under the load of the moment, its pass's rate 694 to 1,437 a second, while concurrency 32's
+  ran 5,821 to 9,291; the second pair read 5.45x, and 5.40x in the killed pass's one round. The interleaved passes,
+  which meet the host as each pair finds it, read 9.72x and 10.62x on host.sh's CPUs, 9.15x and 9.71x over the socket.
+- **Beside it, the readings Ada is to choose among:** option 1 8.00x at the installed limit and 6.91x at the given;
+  4-15 alone 5.48x and 5.89x as written, 5.11x and 5.23x interleaved, the six cores' two threads each (the section
+  below). Step 6 alone, 2.29x to 2.98x (run 18).
+- **The composed tree ends more boxes by `cgroup.kill`:** 13 to 36 of each round's 10,000 in process (fdh44's two
+  passes, 46 to 71), where step 6 alone ends 0 to 2; each such box's cgroup is removed, not kept, and the next box
+  given a fresh one. Its cause is unread here: a question for the integration (step 7).
+
 ## What criterion 2 needs on 4-15, from these runs
 
 The ratio is the CPUs each concurrency keeps busy times the CPU a lifecycle costs, (busy32 / busy1) x (cpu1 / cpu32).
