@@ -1393,8 +1393,8 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
 /// root open, the parked init none); N2's init is the parked one, its `/proc` that proc's superblock, which the
 /// node holds no more; in N2 `/proc/self` is the reader's own pid and pid 1 the box's init; its mounts beneath
 /// `/proc` exactly K's, the read-only ones read-only; one hit counted. Then delete N2 (the next park's proc made for
-/// K; its slot removed with it) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its `/proc` a superblock
-/// the node never held, its mounts exactly K2's, one miss counted. Then delete N3 and release the idle cgroups:
+/// K; its slot removed with it) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its
+/// `/proc` its own, its mounts exactly K2's, which K's tree doesn't carry; one miss counted. Then delete N3 and release the idle cgroups:
 /// expect no proc held and no proc root open in this process, the parked init ended. Each proc no init attached (N3's
 /// miss, the last one released) is dropped by the node's dropper thread, never on a create's: its unmount waits on
 /// the host's `namespace_sem` and an RCU grace period. None failed to be made.
@@ -1615,7 +1615,6 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     ready(2);
     node.delete(&n2).unwrap();
     let before = node.cgroup_reuse().unwrap().parked;
-    let held = held_procs(&me);
     let parked = parked_inits(&root);
     assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
     let n3 = BoxId::new("parkproc-3").unwrap();
@@ -1635,10 +1634,9 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         "the missed proc dropped by the node's dropper",
     );
     node.start(&n3).unwrap();
-    assert!(
-        !held.contains(&proc_dev(&parked[0])),
-        "N3's /proc is its own, not the one made for K"
-    );
+    // N3's /proc is its own, not the one made for K: its mounts are exactly K2's, which K's tree doesn't carry. (Its
+    // `st_dev` says nothing here: a proc's is an anonymous device number, which the kernel hands out again once the
+    // missed tree's superblock is freed.)
     let (beneath, own_pidns) = seen(&n3);
     check("N3", &beneath, k2);
     assert_eq!(
