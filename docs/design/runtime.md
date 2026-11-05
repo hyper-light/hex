@@ -491,6 +491,41 @@ overlayfs.
 runtime doesn't make. Whether OciSpec boxes get the default seccomp profile (Hex compiles containers/common's)
 is a security posture for the person to choose.
 
+## Decision: SELinux mount labels and AppArmor profiles are applied, and refused where the module is off (goal 6, AC-T7.1.4)
+
+Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
+
+- `linux.mountLabel` goes on every filesystem the container's mounts make, as crun and runc label them
+  (research §1). Hex sets it as the `context` parameter of the filesystem's context (`fsconfig`), so an MLS
+  label's commas need no quoting. mqueue takes it as the `security.selinux` xattr on its root. proc, sysfs and
+  cgroup2 take none, and binds make no filesystem. That covers the spec's own mounts, `/dev`, and the tmpfs
+  that masks a directory, on the pruned path and the classic one alike. The node's ready-made `/dev`s, procs
+  and its one empty masking tmpfs were made with no label, so a labelled container takes none of them. Each
+  miss is counted as `Unpooled::MountLabel`.
+- `process.apparmorProfile` is written to `/proc/thread-self/attr/apparmor/exec`, or to `attr/exec` on a kernel
+  without the scoped file, as `exec <profile>`. When no_new_privs is set and the process is already confined,
+  Hex writes `stack <profile>`, as crun does (research §2). The write is part of `init::Becoming`, which every
+  path runs before `execve`: the pruned and classic init, the shim's init, `hex oci exec` and the
+  vfork-style exec clone. It comes before the uid change, while the task still owns its `/proc` files. The
+  file is checked to be on procfs first. An `ENOENT` from the write is refused as "profile not loaded".
+- Where the module isn't enabled, the spec is refused by name, never run without the label. crun skips the
+  label there (research §3), which CLAUDE.md §3 forbids. runc refuses, and Hex does as runc does. AppArmor
+  is tested through `/proc` alone, so the test holds in a container's init, `/sys` mounted there or not: its
+  scoped `current` attribute reads `EINVAL` where the module isn't active (`fs/proc/base.c:2915-2916`,
+  `security/security.c:3764-3774`). On a kernel without the scoped attributes, Hex reads
+  `/sys/module/apparmor/parameters/enabled` (crun's and runc's test). The AppArmor guest found the need: a
+  `/sys` read in an init with no `/sys` mounted took AppArmor for off. SELinux
+  is tested by the kernel itself: create asks it for a tmpfs with the label before anything is made, and the
+  kernel refuses the `context` key when SELinux isn't active (`fs/fs_context.c:137-148`). That test also works
+  in a container that has no selinuxfs mounted, where crun's `/proc/mounts` test gets it wrong.
+  A rootless agent may make no filesystem in its own namespace (`fsopen` is `EPERM` there), so it can't ask.
+  Its container's init, privileged in its own user namespace, then sets the label on each filesystem it
+  makes, and the kernel's refusal of the `context` key is refused by name there.
+- `process.selinuxLabel` is still refused by name: nothing in the suite checks it, and no step asks for it yet.
+- Falsified by a run in which a labelled container's tmpfs reads a label other than the spec's, or a
+  profiled container's `/proc/self/attr/current` names another profile, or a spec with either is run on a
+  host without the module.
+
 ## Open (STATUS.md)
 
 - The `process` box on macOS (QoS and limits) and Windows (job objects); today a typed refusal

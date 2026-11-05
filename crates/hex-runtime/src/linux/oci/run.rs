@@ -586,6 +586,25 @@ impl Runtime {
         let config = std::fs::read(bundle.join("config.json"))
             .map_err(|e| OciError::os("reading config.json", e))?;
         let spec = Spec::parse(&config)?;
+        // A label or profile the host can't apply is refused here, before anything is made (CLAUDE.md §3).
+        if let Some(label) = spec.mount_label() {
+            super::lsm::check_mount_label(label)?;
+        }
+        if let Some(process) = &spec.process
+            && let Some(profile) = process.apparmor_profile()
+        {
+            super::lsm::ProfileOnExec::of(profile, process.no_new_privileges)?;
+        }
+        // A labelled container takes nothing the node made ahead, which it made unlabelled: its init makes
+        // its own /dev, proc masks and masked-directory tmpfs, each with the label.
+        let dev_mounts = match dev_mounts {
+            Some(pool) if spec.mount_label().is_some() => {
+                pool.unpooled(hex_core::devfs::Unpooled::MountLabel)?;
+                pool.unpooled_proc(hex_core::devfs::Unpooled::MountLabel)?;
+                None
+            }
+            pools => pools,
+        };
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
         // Hex keeps the guarantee and shares one program per policy (devshare): a node's oci boxes' root
@@ -973,9 +992,21 @@ impl Runtime {
         };
         let rootfs = match plan.iter().find(|op| op.destination == "/") {
             Some(op) if !op.is_bind => if from_tree {
-                init::make_fs_namespace(&op.kind_source, &op.fstype, &op.data, op.flags)
+                init::make_fs_namespace(
+                    &op.kind_source,
+                    &op.fstype,
+                    &op.data,
+                    op.flags,
+                    spec.mount_label(),
+                )
             } else {
-                init::make_fs(&op.kind_source, &op.fstype, &op.data, op.flags)
+                init::make_fs(
+                    &op.kind_source,
+                    &op.fstype,
+                    &op.data,
+                    op.flags,
+                    spec.mount_label(),
+                )
             }
             .map_err(|_| ClassicReason::Source)?,
             Some(op) => tree(Path::new(&op.kind_source)).map_err(|_| ClassicReason::Source)?,

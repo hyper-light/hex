@@ -109,7 +109,7 @@ impl DevMounts for Devfs {
     }
 
     fn masked_directory(&self) -> Option<BorrowedFd<'_>> {
-        self.shared.sources.as_ref().map(ProcSources::empty)
+        self.shared.sources.as_ref().and_then(ProcSources::empty)
     }
 
     fn take_proc(&self, key: procmount::Key) -> Result<Option<PreparedProc>, OciError> {
