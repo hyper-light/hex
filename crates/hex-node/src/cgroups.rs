@@ -853,6 +853,9 @@ pub struct Choice<'a> {
     pub owner: Option<&'a BoxOwner>,
     pub bounds: &'a Bounds,
     made: Mutex<Option<Made>>,
+    /// Whether it handed the create an init parked in the cgroup, so one the create doesn't claim (a flag mismatch,
+    /// a refused claim) is counted ended unclaimed.
+    gave_parked: AtomicBool,
     /// A refusal its choosing met (the id taken since, the node full, a bound's controller missing),
     /// kept as it was so the create is refused by its type, not as the runtime's error that carried it.
     refused: Mutex<Option<Refusal>>,
@@ -877,6 +880,7 @@ impl<'a> Choice<'a> {
             owner,
             bounds,
             made: Mutex::new(None),
+            gave_parked: AtomicBool::new(false),
             refused: Mutex::new(None),
             #[cfg(debug_assertions)]
             crash_on_own: false,
@@ -1039,6 +1043,7 @@ impl Choose for Choice<'_> {
                         match self.ready_ahead(n, cg) {
                             Ok((cgroup, held)) => {
                                 self.record(Made::Slot(held))?;
+                                self.gave_parked.store(true, Ordering::Relaxed);
                                 return Ok(Chosen {
                                     cgroup,
                                     attached: false,
@@ -1099,6 +1104,7 @@ impl Choose for Choice<'_> {
                         held.policy = Some(policy);
                         held.park_proc_key = wants.proc_key.cloned();
                         self.record(Made::Slot(held))?;
+                        self.gave_parked.store(parked.is_some(), Ordering::Relaxed);
                         return Ok(Chosen {
                             cgroup,
                             attached: true,
@@ -1126,6 +1132,9 @@ impl Choose for Choice<'_> {
     fn init_made(&self, flags: u64, claimed: bool) {
         if claimed {
             self.cgroups.parking.claimed.fetch_add(1, Ordering::Relaxed);
+        } else if self.gave_parked.load(Ordering::Relaxed) {
+            // Handed one, but made with other namespaces than this create's, or its claim refused: ended.
+            self.cgroups.parking.ended.fetch_add(1, Ordering::Relaxed);
         }
         // A box of no owner's flags are those the cgroups made ahead park their inits with; the first known
         // starts the refill.
