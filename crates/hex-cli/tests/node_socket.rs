@@ -22,7 +22,9 @@
 //!   init cloned; inside its one record write; after it), its boxes' records durable and not, and
 //!   restart it: the box killed mid-create is cleaned up by what it left, the one made is taken back
 //!   and deletes, and nothing of either is left; and a box whose own spec names the crash point, on an
-//!   agent that armed none, is made whole, the agent living on.
+//!   agent that armed none, is made whole, the agent living on. A case made to fail on purpose after the kill,
+//!   its box's init alive at the exec FIFO: expect every process that was in its cgroups ended, the cgroups and
+//!   its container's state removed, as the case unwinds (CLAUDE.md §2).
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_box.rs; where neither
 //! is possible it prints SKIP and why rather than pass falsely.
@@ -37,6 +39,7 @@
 )]
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio as Std};
 use std::sync::{Arc, Mutex};
@@ -729,12 +732,71 @@ fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
             crash_at(lab, own, exe, kept, *at);
         }
     }
+    a_crash_case_that_fails_leaves_nothing_alive(lab, own, exe);
     #[cfg(debug_assertions)]
     a_box_cannot_arm_the_agents_crash_point(lab, own, exe);
 }
 
 fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
-    let name = format!("crash-{kept:?}-{at:?}").to_lowercase();
+    crash_case(lab, own, exe, kept, at, None);
+}
+
+/// The fifth crash case, the incident of 2026-11-05 on fedora (four inits left alive by rootless crash cases that
+/// failed partway, their state directories gone; CLAUDE.md §2): run the box-made case set to fail right after the
+/// kill, its box's init alive at the exec FIFO and the agent gone, holding a pidfd of each process in its cgroups.
+/// Expect: the case unwinds, and every one of them has ended, its cgroups and its container's state removed.
+fn a_crash_case_that_fails_leaves_nothing_alive(lab: &Lab, own: &Path, exe: &str) {
+    let kept = if lab.rootless {
+        Kept::Disk
+    } else {
+        Kept::Tmpfs
+    };
+    let mut held = Vec::new();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crash_case(lab, own, exe, kept, At::Made, Some(&mut held))
+    }));
+    assert!(failed.is_err(), "the case failed on purpose");
+    assert!(
+        !held.is_empty(),
+        "non-vacuity: the failed case's cgroups held its init at the failure"
+    );
+    let alive = held.iter().filter(|fd| !has_ended(fd)).count();
+    assert_eq!(alive, 0, "processes the failed case left alive");
+    let name = format!("crash-{kept:?}-{:?}-failed", At::Made).to_lowercase();
+    assert!(
+        !own.join(&name).exists(),
+        "the failed case's cgroups are left"
+    );
+    eprintln!(
+        "{name}: failed on purpose with {} processes in its cgroups; each ended, nothing left",
+        held.len()
+    );
+}
+
+/// Whether the process `fd` is a pidfd of has ended: it reads ready once it has.
+fn has_ended(fd: &OwnedFd) -> bool {
+    let mut fds = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
+    let now = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    rustix::event::poll(&mut fds, Some(&now)).is_ok_and(|n| n > 0)
+}
+
+/// A crash case, `fail` set to make it fail right after the kill (the box made, its init alive), with a pidfd of
+/// each process then in its cgroups pushed to it.
+fn crash_case(
+    lab: &Lab,
+    own: &Path,
+    exe: &str,
+    kept: Kept,
+    at: At,
+    fail: Option<&mut Vec<OwnedFd>>,
+) {
+    let name = match fail {
+        None => format!("crash-{kept:?}-{at:?}").to_lowercase(),
+        Some(_) => format!("crash-{kept:?}-{at:?}-failed").to_lowercase(),
+    };
     let dir = tempfile::Builder::new()
         .prefix(&format!("{name}-"))
         .tempdir_in(lab.bundles.path())
@@ -958,6 +1020,20 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         state_dir_made && !matches!(at, At::StateDir | At::Init | At::CreateContainer),
         "{name}: the container's state at the kill"
     );
+    if let Some(held) = fail {
+        held.extend(
+            processes_in(&own.join(&name))
+                .into_iter()
+                .filter_map(|pid| {
+                    rustix::process::pidfd_open(
+                        rustix::process::Pid::from_raw(pid)?,
+                        rustix::process::PidfdFlags::empty(),
+                    )
+                    .ok()
+                }),
+        );
+        panic!("{name}: failed on purpose after the kill");
+    }
     drop(agent);
     if matches!(at, At::Init | At::CreateContainer | At::StartContainer) {
         // The hook may outlive the agent it ran under; let it end. Released, a startContainer hook's init
@@ -1037,6 +1113,25 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             "cleaned up"
         }
     );
+}
+
+/// Every process in the cgroup `root` and those under it: a flat walk (CLAUDE.md §11).
+fn processes_in(root: &Path) -> Vec<i32> {
+    let (mut dirs, mut pids) = (vec![root.to_path_buf()], Vec::new());
+    while let Some(dir) = dirs.pop() {
+        if let Ok(procs) = std::fs::read_to_string(dir.join("cgroup.procs")) {
+            pids.extend(procs.lines().filter_map(|l| l.trim().parse::<i32>().ok()));
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            dirs.extend(
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    pids
 }
 
 fn crash_hook_script(hooked: &Path, go: &Path) -> String {
