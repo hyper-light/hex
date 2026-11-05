@@ -87,6 +87,7 @@ impl WinRuntime {
             },
             bounds: b.bounds(),
             adopted: false,
+            membership: None,
             // A process box has no init, so no container exit to report (HEX-RT-11).
             exit: None,
             abandoned: 0,
