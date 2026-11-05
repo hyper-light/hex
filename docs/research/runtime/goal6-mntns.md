@@ -245,13 +245,13 @@ probes never attached: the guest has no `awk`, which looked up `namespace_sem`'s
 
 | cell | span p50, us | p99 | write holds per create: all / the slowest 1% | blocked on the lock per create: all / the slowest 1%, us |
 |---|---|---|---|---|
-| C, 0 loops | 62 | 506 | 5.8 / 12.2 | 6.7 / 327 |
-| C, 12 loops | 73 | 3,046 | 5.1 / 8.6 | 31.9 / 2,346 |
+| C, 0 loops | 62 | 506 | 5.8 / 12.2 | 6.4 / 301 |
+| C, 12 loops | 73 | 3,046 | 5.1 / 8.6 | 31.9 / 1,959 |
 | A, 12 loops | 206 | 1,921 | 29.0 / 29.0 | 7.7 / 530 |
 
 Read:
 - The slowest 1% of creates spend most of their span asleep waiting for `namespace_sem` for write. With procs made
-  ahead at 12 loops, that's 2,346 of a mean 4,708 us. Each wait is in `mount_setattr` or `move_mount`, and each sleeper
+  ahead at 12 loops, that's 1,959 of a mean 4,708 us (2,347 blocked in all). Each wait is in `mount_setattr` or `move_mount`, and each sleeper
   is woken by the holder that releases the lock. The holders named are Hex's own processes: the node agent (`hex`), the
   `/dev` pool (`hex-devfs`) and the bench driver (`seam_oci`). The 1,169 us preempted between calls is the guest's 12
   loops, which §9 can't tell apart from the VM's own preemption.
