@@ -446,7 +446,9 @@ superblocks' teardown run 23 found spinning (`list_lru_destroy < deactivate_lock
   keep up. `synchronize_rcu_expedited` lets callers that wait at once share one grace period: one another task
   completed satisfies the rest (`exp_funnel_lock`, `kernel/rcu/tree_exp.h:295-301`, `:955-957`, retrieved
   2026-11-04, sha256 1fb29bc537c6b048). So inits exiting together waited out their grace periods side by side, where
-  one closer waits them one after another: the loop that function's comment advises against (`:912-915`).
+  one closer waits them one after another: the loop that function's comment advises against (`:912-915`). Reverted
+  on the step branch (0088603, the lead, 2026-11-05T00:12Z); the lever as built, with this finding, is kept on
+  `cp/t7-ext-s6-mntns` (0ac2da7).
 
 ## The containers' state directories under one parent (Linux v6.19, read 2026-11-04)
 
