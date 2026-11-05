@@ -8,6 +8,12 @@ a run leaves running holds CPU and memory past its run, under every later run's 
      Not an ExecStopPost: Linux 6.19 SIGKILLs a process cloned into a cgroup that was cgroup.kill'ed (fixed upstream,
      8e3599202166), and systemd starts ExecStopPost in the unit's cgroup, so after a SIGKILL it never ran.
   2. The same pass stopped (SIGTERM), with no reaper: host.sh's own trap removes its container.
+  3. bench/oci-validation's cgroups.sh, run.sh, smoke.sh and docker_lab.sh, each in a unit SIGKILLed (cgroup.kill)
+     once its first container runs: no container it started is left, and that one carried hex.bench.run=<unit>.
+     Their containers' own commands are a whole lab each, so a docker stand-in on PATH runs each `docker run` as the
+     script asks, labels and all, with its entrypoint a holder that sleeps and one label more, the check's own, by
+     which a container the script started is found though the script labels none; every other docker command is
+     docker's own.
 
 Each pass is real (docker, the lab image, oci_inside.sh), with a seam_oci that marks its start and then blocks, so
 the unit is ended mid-pass, once the pass's container runs. It needs Linux, docker, a systemd user manager and
@@ -64,6 +70,11 @@ def until(fact, what):
     raise AssertionError(f"{what} didn't happen in {DEADLINE_S} s")
 
 
+def ended(unit):
+    return quiet("systemctl", "--user", "is-active", unit).stdout.strip() not in ("active", "activating",
+                                                                                 "deactivating")
+
+
 def containers(*filters):
     args = ["docker", "ps", "-aq"]
     for f in filters:
@@ -105,10 +116,6 @@ class RunEnd(unittest.TestCase):
         self.assertEqual(len(running), 1, f"{name} isn't running mid-pass")
         return unit, name, labelled
 
-    def ended(self, unit):
-        return quiet("systemctl", "--user", "is-active", unit).stdout.strip() not in ("active", "activating",
-                                                                                     "deactivating")
-
     def clear(self, tmp, unit):
         quiet("systemctl", "--user", "kill", "-s", "SIGKILL", unit)
         quiet("systemctl", "--user", "reset-failed", unit)
@@ -128,7 +135,7 @@ class RunEnd(unittest.TestCase):
             cgroup = quiet("systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit).stdout.strip()
             with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
                 f.write("1")
-            until(lambda: self.ended(unit) and self.ended(f"reap-{unit}"), f"{unit} and its reaper ending")
+            until(lambda: ended(unit) and ended(f"reap-{unit}"), f"{unit} and its reaper ending")
             self.assertEqual(containers(f"name=^/{name}$"), [], f"{name} left running after {unit}'s SIGKILL")
         finally:
             quiet("docker", "rm", "-f", name)
@@ -140,10 +147,91 @@ class RunEnd(unittest.TestCase):
         unit, name, _ = self.pass_in_unit("term", reaper=False)
         try:
             quiet("systemctl", "--user", "stop", unit)
-            until(lambda: self.ended(unit), f"{unit} ending")
+            until(lambda: ended(unit), f"{unit} ending")
             self.assertEqual(containers(f"name=^/{name}$"), [], f"{name} left running after {unit}'s stop")
         finally:
             quiet("docker", "rm", "-f", name)
+
+
+# docker's stand-in for the oci-validation scripts: `docker run` with the check's label and a holder for its entrypoint,
+# so the container the script asks for runs until it's ended; anything else is docker's own.
+DOCKER = """#!/usr/bin/env bash
+if [ "$1" = run ]; then
+  shift
+  exec "$REAL_DOCKER" run --label "hexcheck.case=$HEXCHECK_CASE" -v "$HEXCHECK_HOLD:/opt/hexcheck-hold:ro" \\
+    --entrypoint /opt/hexcheck-hold "$@"
+fi
+exec "$REAL_DOCKER" "$@"
+"""
+
+
+@unittest.skipIf(why_not(), why_not() or "")
+class OciValidation(unittest.TestCase):
+    def killed(self, script, args):
+        base = os.path.join(os.path.expanduser("~/.cache"), "hex-bench-checks")
+        os.makedirs(base, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix="ocival.", dir=base)
+        case = f"{os.getpid()}-{script.split('.')[0]}"
+        unit = f"hexcheck-ocival-{case}"
+        self.addCleanup(self.clear, tmp, unit, case)
+        stubs = os.path.join(tmp, "stubs")
+        os.makedirs(stubs)
+        for path, text in ((os.path.join(stubs, "docker"), DOCKER),
+                           (os.path.join(tmp, "hold"), "#!/bin/sh\nexec sleep 600\n"),
+                           (os.path.join(tmp, "hex"), "#!/bin/sh\nexit 1\n")):
+            with open(path, "w") as f:
+                f.write(text)
+            os.chmod(path, 0o755)
+        env = {"PATH": stubs + os.pathsep + os.environ["PATH"], "REAL_DOCKER": shutil.which("docker"),
+               "HEXCHECK_CASE": case, "HEXCHECK_HOLD": os.path.join(tmp, "hold")}
+        cmd = ["systemd-run", "--user", "--quiet", f"--unit={unit}", "--collect", f"--working-directory={tmp}"]
+        cmd += [f"--setenv={k}={v}" for k, v in env.items()]
+        cmd += ["bash", os.path.join(os.path.dirname(HERE), "oci-validation", script)]
+        cmd += [a.replace("{tmp}", tmp) for a in args]
+        started = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        until(lambda: containers(f"label=hexcheck.case={case}", "status=running"),
+              f"{script}'s first container running")
+        labelled = containers(f"label=hexcheck.case={case}", f"label=hex.bench.run={unit}")
+        cgroup = quiet("systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit).stdout.strip()
+        with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
+            f.write("1")
+        until(lambda: ended(unit) and ended(f"reap-{unit}"), f"{unit} and its reaper ending")
+        self.assertEqual(containers(f"label=hexcheck.case={case}"), [],
+                         f"{script}'s containers left after its unit's SIGKILL")
+        self.assertNotEqual(labelled, [], f"{script}'s container carried no hex.bench.run={unit} label")
+
+    def clear(self, tmp, unit, case):
+        quiet("systemctl", "--user", "kill", "-s", "SIGKILL", unit)
+        quiet("systemctl", "--user", "reset-failed", unit)
+        quiet("systemctl", "--user", "stop", f"reap-{unit}")
+        for c in containers(f"label=hexcheck.case={case}"):
+            quiet("docker", "rm", "-f", c)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cgroups_sh(self):
+        # Do: cgroups.sh's unit SIGKILLed once its container runs. Expect: none of its containers left; labelled.
+        self.killed("cgroups.sh", ["{tmp}/hex", IMAGE])
+
+    def test_run_sh(self):
+        # Do: run.sh's unit SIGKILLed once its container runs. Expect: none of its containers left; labelled.
+        self.killed("run.sh", ["{tmp}", "{tmp}/hex", "{tmp}/out", IMAGE])
+
+    def test_smoke_sh(self):
+        # Do: smoke.sh's unit SIGKILLed once its container runs. Expect: none of its containers left; labelled.
+        self.killed("smoke.sh", ["{tmp}/hex", IMAGE, "{tmp}/work"])
+
+    def test_docker_lab_sh(self):
+        # Do: docker_lab.sh's unit (its source volume a commit's, kept if it was there before) SIGKILLed once its
+        # first container (the lab image's build, or the source's copy) runs. Expect: none of its containers left;
+        # labelled.
+        sha = quiet("git", "-C", HERE, "rev-parse", "--short", "HEAD").stdout.strip()
+        self.assertTrue(sha, "docker_lab.sh needs a git checkout of the repository")
+        volume = f"hexlab-src-{sha}"
+        had = quiet("docker", "volume", "inspect", volume).returncode == 0
+        if not had:
+            self.addCleanup(quiet, "docker", "volume", "rm", volume)
+        self.killed("docker_lab.sh", [sha, "oci_box"])
 
 
 if __name__ == "__main__":
