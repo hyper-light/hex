@@ -484,7 +484,10 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
   19's proc mount and masks off its path. It's off by default.
 - Its A/B of record (`bench/competitive/probes/parked_procs_ab.md` on cp/t7-g5-parkproc, "Of record at 2caebe2"): A off,
   B on, both with parked inits, 4 interleaved rounds at 6 and 12 loops, 2,000 creates at 8 in flight, on fedora's
-  host. Its gates and root lab ran at that tree in one unit, hex-g5tail-ppfull-20261105T154329Z.
+  host. Its gates and root lab ran at that tree in one unit, hex-g5tail-ppfull-20261105T154329Z. The failing-first
+  run is cp/t7-g5-parkproc-red dcde154, with only the proc's making filtered out (unit
+  hex-g5tail-ppred-20261105T154153Z): oci_reuse 2b fails at its hit assertion, and oci_box's parked-proc test times
+  out waiting for a parked init with its proc.
   - Part 19's p50: about 210 us → 35-38 us.
   - Part 19's p99: 1,018-2,132 us → 351-761 us. It's under 0.5 ms in 2 of the 8 B cells (475 and 351 us, both at 12
     loops) and over it in the other 6.
