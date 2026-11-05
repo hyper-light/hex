@@ -56,18 +56,22 @@ abdbfd0 and 0 of 60 at b1ddb89.
 
 ## Windows: Hex vs Process Governor
 
-Record: entry 7 of `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows` (7a06898), the
-Windows agent's run on jupiter (AMD Ryzen AI MAX+ 395, 32 CPUs, Windows 11 26200), commit e322d7b (this branch's
-abdbfd0 merged), 2026-11-05 10:02-10:04Z, load 58-82% CPU with 10 co-tenant cargo/rustc; n 500, warmup 50, two
-passes. The suite on jupiter: `windows_process_box` 9 of 9 at 1a2e1eb and at e322d7b.
+Record: entry 8 of `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows` (a905168), the
+Windows agent's run on jupiter (AMD Ryzen AI MAX+ 395, 32 logical CPUs, Windows NT 10.0.26200), built from a
+detached worktree of commit b1ddb89, 2026-11-05 11:04:00-11:09:25Z. Load 11-77% CPU with 3-12 co-tenant
+cargo/rustc. Process Governor 4.1.26190.22 (`procgov -q --maxjobmem 256M`, the GitHub release, sha256 recorded).
+Args 200 20 20, interleaved, 3 passes. Raw JSON on jupiter: `C:\Users\corph\.cache\hex-t7-windows\records\native_box-b1ddb89-20261105T110322Z\`.
+The suite on jupiter: `windows_process_box` 9 of 9 at 1a2e1eb and at e322d7b (entry 7).
 
-| ms | Hex (best of 2) | Process Governor (`procgov --maxjobmem`) |
-|---|---|---|
-| create p50 / p99 | 0.044 / 0.170 | none |
-| start p50 / p99 / max | 52.2 / 85.3 / 259.3 | not measured yet |
-| delete p50 / p99 | 1.49 / 4.87 | not measured yet |
-| bound held | 20/20, 6 MiB under (each program aborted on the commit its job refused) | not measured yet |
-| bound's end p50 | 248 | not measured yet |
+| ms, p50 | Hex | Process Governor | Hex ahead by |
+|---|---|---|---|
+| create | 0.028 (0.028-0.042) | none (its start is its create) | |
+| start | 21.9 (21.9-43.5) | 52.0 (52.0-58.5) | 2.4x |
+| delete | 0.866 (0.866-0.984) | 221.6 (221.6-268.9) | 256x |
+| bound held | 20/20 per pass, 6 MiB under | 20/20 per pass, 3 MiB under | equal |
+| bound's end | 186.8 (186.8-197.6) | 406.6 (406.6-438.4; one 6,239 ms outlier in pass 1) | 2.2x |
 
-Process Governor's passes failed: the driver read procgov's banner as the program's first line. procgov runs
-with `-q` from b1ddb89; its figure waits on that run on jupiter.
+Each climb under either ended `0xC0000409`: the program aborting on the commit its job refused. Hex's start fell
+from 43.5 to 21.9 ms as the load dropped from 77% to 33% CPU, so read the Windows start as load-sensitive. An
+earlier run at e322d7b (entry 7, n 500) gave Hex start 52.2 ms and delete 1.49 ms under 58-82% CPU; its procgov
+passes failed on procgov's banner, fixed with `-q` at b1ddb89.
