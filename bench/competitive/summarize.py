@@ -30,7 +30,28 @@ def dist(samples):
             "p99.9": pct(samples, 0.999), "max": max(samples) if samples else None}
 
 
+def crashed(run):
+    """crashed.txt (oci_inside.sh's): {file prefix: its lines}, each `<prefix> r<round> exited <status>`; a line of
+    any other shape under None, since it may stand for any runtime's round."""
+    out = {}
+    try:
+        with open(os.path.join(run, "crashed.txt"), errors="replace") as f:
+            lines = [line.strip() for line in f if line.strip()]
+    except FileNotFoundError:
+        return out
+    for line in lines:
+        parts = line.split()
+        known = len(parts) == 4 and re.fullmatch(r"r\d+", parts[1]) and parts[2] == "exited"
+        out.setdefault(parts[0] if known else None, []).append(line)
+    return out
+
+
 def rounds(run, prefix):
+    """A runtime's rounds by number. None of them when one crashed (or crashed.txt holds a line it can't read): a
+    best of N beside a crashed round would read the pass as whole."""
+    gone = crashed(run)
+    if prefix in gone or None in gone:
+        return {}
     out = {}
     for path in sorted(glob.glob(os.path.join(run, prefix + ".r*.json"))):
         m = re.search(r"\.r(\d+)\.json$", path)
@@ -481,9 +502,13 @@ def table(title, names, rows):
     return "\n".join(out) + "\n"
 
 
-def main():
-    run = sys.argv[1]
+def summary(run):
     parts = []
+    gone = crashed(run)
+    if gone:
+        parts.append("**Crashed rounds** (oci_inside.sh's crashed.txt): " + "; ".join(l for ls in gone.values() for l in ls)
+                     + ". No best of N is taken for their runtimes" + (", nor for any, since a line names no round"
+                                                                         if None in gone else "") + ".\n")
     names, rows, data = oci_section(run)
     if data:
         parts.append(table("OCI class (Hex `oci` against runc, crun, youki, gVisor runsc, crun+libkrun)" if "libcrun" not in names
@@ -521,8 +546,8 @@ def main():
         if lmethods:
             parts.append(table(title, lmethods, lrows))
             parts.append(lab_notes(lmethods, lrs))
-    print("\n".join(parts))
+    return "\n".join(parts)
 
 
 if __name__ == "__main__":
-    main()
+    print(summary(sys.argv[1]))
