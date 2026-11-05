@@ -213,6 +213,16 @@ pub trait Guest: Send + Sync {
 }
 ```
 
+**On Windows the stream must be Shards' overlapped AF_UNIX socket.** Hex's guest client reads on one thread while
+others write on the same connection, and a Winsock socket made without `WSA_FLAG_OVERLAPPED` (`socket2` 0.6's,
+`src/sys/windows.rs:253-265`) serializes them (Shards `crates/afunix/src/lib.rs:63`: "same connection, by any of
+its handles, 2.9-3.9 s in M207's runs, where an overlapped"). A receive timed out by `SO_RCVTIMEO` leaves the
+connection indeterminate (`:212`: "(PM M207): Winsock leaves a connection whose receive timed out in an
+indeterminate"), so timeouts poll first. Shards' own `shards_afunix::UnixStream` does both, so the real
+`Guest::connect` on Windows returns one behind `Stream`, whose timeouts are poll-based on every platform. Hex never
+names the type: it wraps the `Stream` as a `hex_client::guest::Duplex`. Found by Hex's Windows agent (kiln agent
+`01a1a9972b9970c8b057b99dbf6df870`), checked at `b3e5ca27`.
+
 **The simulator** (`shards_api::sim`): `SimGuests` boots a `SimGuest` whose "guest" is a closure the test gives,
 run on a thread, serving vsock ports over in-process socket pairs (`UnixStream::pair` on Unix, `shards_afunix`'s on
 Windows): `connect(port)` hands the closure the other end, refusing an unserved port as `Channel`; `stop` and the
