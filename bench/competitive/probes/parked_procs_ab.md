@@ -120,6 +120,41 @@ test binaries, the 7.2 guest lab 2 of 2. Body: `~/.cache/hex-t7/g5tail/ab-pp-202
 - So the parked proc takes about 0.2-0.4 ms and most of part 19's mount-lock holds off the create, and puts them
   on the delete.
 
+## The delete-cost pass: host.sh lifecycle, A against B (the lead's 14:53Z step 5)
+
+**Run.** One static-glibc build of cp/t7-g5-parkproc 35c5787, as host.sh's passes ship hex (hex sha256 06d7e93c59663441,
+seam_oci f6a6bf3fca9a12a3). 35c5787 is fbe1352's tree, plus host.sh handing seam_oci `HEXBENCH_PARKED_PROCS`.
+fbe1352 is gated: unit hex-g5tail-ppfull-20261105T155901Z, gates 7/7 exit 0, root lab 7 of 7, guest 2 of 2.
+- host.sh OCI passes: lifecycle and start_true, 2 rounds of 10,000 each, one owner with reuse on, so every delete parks
+  an init and, with B, makes its proc. Serial: one create at a time. host.sh's own bundles, whose proc has one
+  read-only path (`/proc/sys`), not Docker's paths. libcrun in process is the competitor.
+- Interleaved A B B A: A has `HEXBENCH_PARKED_PROCS` unset, B has it at 1. Each pass ran under the timed lock on CPUs
+  4-15. fedora, 2026-11-05 16:04:01Z-16:48:40Z. Load at each pass's start: 13.3, 36.6, 33.7, 40.2.
+- Body: `~/.cache/hex-t7/g5tail/del-pp-20261105T160258Z`. Out dirs: `~/.cache/hex-bench/out/` 20261105T160401Z (A),
+  20261105T161458Z (B), 20261105T162617Z (B), 20261105T163758Z (A).
+
+In process (seam_oci's in-process driver), ms, each pass's `table.md`:
+
+| pass | create p50 | create p99 | create p99.9 | delete p50 | delete p99 | delete p99.9 | delete max |
+|------|-----------:|-----------:|-------------:|-----------:|-----------:|-------------:|-----------:|
+| A 1 | 0.34 | 0.52 | 0.72 | 0.29 | 0.50 | 0.93 | 14.28 |
+| B 1 | 0.33 | 0.50 | 0.98 | 0.34 | 0.56 | 3.91 | 24.70 |
+| B 2 | 0.42 | 0.71 | 1.02 | 0.41 | 0.78 | 1.65 | 18.26 |
+| A 2 | 0.34 | 0.57 | 1.16 | 0.31 | 0.54 | 1.67 | 17.38 |
+
+Over the socket, delete p50 is 0.30, 0.34, 0.30, 0.31 and p99 is 0.54, 0.68, 0.53, 0.72, in the same order.
+
+- Every B lifecycle's create claimed its parked init with its proc: 10,099 hits of 10,099 claims a round, 0 misses,
+  0 dry, 0 failed. Every A round made no proc.
+- **The delete grows with B**: in process, p50 +0.03 to +0.12 ms (0.34 and 0.41 against A's 0.29 and 0.31), p99 up
+  to +0.28 ms. Over the socket the p50s overlap.
+- Serially and with one masked path, the create doesn't fall with B: p50 0.33 and 0.42 against A's 0.34 and 0.34.
+  Part 19's work in host.sh's bundle is small (one read-only path), so it has little to save. The mounts runs above,
+  with Docker's 15 paths at 8 in flight, are where it saves.
+- The four passes ran at different loads (13 to 40). The second B pass and the second A pass ran hottest, so
+  compare within the pairs, not across them.
+- Hex's delete stays 25-35x libcrun's at p50 in every pass (in process 34.88x, 30.39x, 25.22x, 33.44x).
+
 ## The 7.2 guest, indicative (NOT OF RECORD: a VM's numbers)
 
 **Run.** Fedora's kernel 7.2.15-200.fc44 in vm7_lab.sh's guest on fedora: 12 vCPUs on CPUs 4-15, 6G. 2026-11-05
