@@ -863,3 +863,24 @@ fn the_hard_filters_keep_every_placement_in_bounds() {
         "{sessions} sessions, {total:?}"
     );
 }
+
+/// G2 step 3 (`AC-T7.4.3`'s recorded kiln workload): read a trace kiln_trace.py made from an export
+/// shaped like kiln's `ci.runs.get` and replay it twice from one seed; expect the same trace hash,
+/// report and log, every leg done once, and the run correct by the specification. The trace is the
+/// converter's fixture until the recorded day is in bench/sched/.
+#[test]
+fn a_converted_kiln_trace_replays_the_same_twice() {
+    let text = include_str!("data/kiln_fixture.trace");
+    let cluster = hex_sim::replay::parse(text, &hex_sim::replay::Limits::default()).unwrap();
+    assert_eq!((cluster.nodes.len(), cluster.workloads.len()), (2, 200));
+    let config = Config::default();
+    let a = sim::run(&cluster, &config).unwrap();
+    let b = sim::run(&cluster, &config).unwrap();
+    assert!(same(&a.report, &b.report));
+    assert_eq!(a.store.log(), b.store.log());
+    let end = spec::check_end(&cluster, &a);
+    assert_eq!(end.lost_or_double(), 0, "{end:?}");
+    assert_eq!(end.complete, 200);
+    spec::check_log(&cluster.nodes, &a).unwrap();
+    assert_eq!(spec::check_filters(&cluster, &a).unwrap().violations(), 0);
+}
