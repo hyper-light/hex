@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dependencies]
 hex-health.workspace = true
+hyper-swim.workspace = true
+hyper-timing.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

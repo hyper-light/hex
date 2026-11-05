@@ -15,7 +15,10 @@
 //! - [`replay`]: a recorded workload read from text, for replaying a real day.
 //! - [`packing`]: stranded capacity at a load, the measure of `AC-T7.4.3`.
 //! - [`faults`]: the fault nemesis, each fault class against its detection and isolation bound (S8).
-//! - [`membership`]: SWIM with Lifeguard: crash detection and slow-member false positives (S8).
+//! - [`membership`]: SWIM with Lifeguard on memberlist's protocol, the competitor: crash detection and
+//!   slow-member false positives (S8).
+//! - [`swim`]: hyper-swim's own failure detector, the membership the design gives the node agent, vendored and
+//!   driven over a simulated LAN: the crash class's bound (S8, F1).
 
 #![cfg_attr(
     test,
@@ -41,6 +44,7 @@ pub mod rng;
 pub mod sim;
 pub mod spec;
 pub mod store;
+pub mod swim;
 pub mod trace;
 
 pub use error::SimError;

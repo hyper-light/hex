@@ -29,7 +29,7 @@ each named below.
 
 | Class | Injected | Detected when | Isolated when | Bound |
 |---|---|---|---|---|
-| Crash | a node stops answering | a member first suspects it (F1) | it is declared dead and its work is moved | suspicion ≤ 6 probe periods + probe timeout at p99 (F1's derivation), ≤ 2(n−1) periods + timeout at max; dead ≤ suspicion + suspicion max timeout + 1 period |
+| Crash | a node stops answering | a member's own probe first suspects it (F1) | a member condemns it (hyper-swim; memberlist: declares it dead) and its work is moved | hyper-swim: condemnation within the bound its condemner states, `(2(2m − 1) + 1)` periods + its measured wait (F1); memberlist, the competitor: suspicion ≤ 6 probe periods + probe timeout at p99, ≤ 2(n−1) periods + timeout at max, dead ≤ suspicion + suspicion max timeout + 1 period |
 | Gray / fail-slow | a node's work runs ≥ 2.5x slower than its peers' | `Suspect` (F2) | `Drain` | ≤ 2 windows (2 s) and ≤ 4 windows (4 s): under Panorama's 7 s (FI[4]) |
 | Disk stall | a node's probe write stops completing | `Suspect` (F3) | `Drain` | ≤ 1 timeout + 1 probe period and ≤ 3 timeouts + 1 period; the timeout is at least 1 s (1 s on a healthy fast disk) |
 | Antagonist | a co-tenant's CPU use doubles its neighbours' CPI | a victim with an antagonist correlated ≥ 0.35 (F4) | the antagonist capped | ≤ 3 CPI samples + 1 s (CPI²'s cadence: one a minute, so ≤ 181 s) |
@@ -49,20 +49,55 @@ And across classes (F6):
 
 ## Decisions
 
-### F1. Crash: SWIM with Lifeguard, on memberlist's constants
+### F1. Crash: hyper-swim's detector, with memberlist's SWIM and Lifeguard as the competitor
 
-**The choice.** Membership and crash detection are SWIM with Lifeguard (`PF[5]`, `PF[9]`). The crash
-class's bound is stated and measured on memberlist's LAN defaults (FI[2]), the reference
-implementation: a probe a second, a 500 ms probe timeout, 3
+**Which detector the node agent runs.** None yet: today's node agent (`hex-node`) runs no membership.
+The design gives it hyper-swim (S8, `scheduler-architecture.md`), hyper-raft's SWIM with Lifeguard's
+buddy system, nacks and local health, and so the crash class's bound is hyper-swim's, measured on
+hyper-swim's own `Detector`, vendored unchanged (`vendor/MANIFEST.toml` [projects.hyper-raft] at
+6a236ae, 0 recorded changes) and driven by hex-sim (`swim.rs`). It is not memberlist's: hyper-swim
+times each pair as an NFD-E detector from its measured round trips (an RFC 6298 timer of 1-60 s until
+an estimator configures), its period is what its probe needs or the owner's detection budget's share
+of one, and only a member's own probes condemn, never a gossiped suspicion.
+
+**hyper-swim's crash bound, derived.** A member's rounds probe each of the `m` members its view holds
+once, in a shuffled order, so its next probe of a crashed member is at most `2m − 1` periods away
+(SWIM §4.3, `PF[8]`); unanswered, it suspects. Its next probe of the suspect tells it so (Lifeguard's
+buddy system) and starts at most as far again; when that period ends unanswered the condemnation is
+pending. It is made once another member has answered, proof that this member's own network works: a
+wait nothing bounds in advance, which the member measures. So from the victim's last answer to its
+condemnation: at most `(2(2m − 1) + 1)` periods, each the longest this member's periods have run or an
+unanswered probe's deadlines allow, plus the measured wait. Each member states that bound itself
+(`Detector::detection_bound`, hyper-raft `crates/hyper-swim/src/detector.rs:1914-1930` and `bound_periods`, `:1950-1957`, at 6a236ae), so
+the bar is that every condemnation comes within the bound its condemner stated.
+
+**Measured** (hex-sim `tests/swim.rs`, 1,000 seeds at each pace of 8-128 members on a LAN of
+0.1-2 ms one-way, one member crashed after warm-up; fedora unit
+`hex-sched-g5-probe-swim3-20261105T124924Z`): every crash suspected and condemned, every condemnation
+within its stated bound, no live member condemned.
+
+| | first suspicion p99 / max | first condemnation p99 / max | stated bound p50 / max | probes per member-second |
+|---|---|---|---|---|
+| hyper-swim, periods at need (budget 0) | 0.69 / 1.09 s | 1.62 / 1.90 s | 320 / 656 s | ~47 |
+| hyper-swim, one probe a second (budget `(2(2m − 1) + 1)` s) | 5.49 / 7.99 s | 12.1 / 16.0 s | 365 / 1,090 s | ~1 |
+| memberlist SWIM + Lifeguard (the competitor, `membership.rs`) | 5.60 / 8.59 s | 13.4 / 15.7 s (dead) | | 1 |
+
+At memberlist's load, hyper-swim condemns as fast as memberlist declares dead, faster at the p99. Its
+stated bound is another matter: 50 to 100 times what it measured, because it is the round-robin worst
+case, `4m − 1` periods for `m` peers, times the longest period the member has run (the first periods,
+before an estimator configures, run to RFC 6298's initial second). It is not the 60 s RTO cap: no run
+here doubled a timer that far. A finding for hyper-swim's owner: the bound a member states is sound
+(no condemnation passed it) but too loose to plan an owner's failover budget on at a hundred members.
+
+**memberlist, the competitor.** The model (`membership.rs`) is memberlist's LAN defaults (FI[2]), the
+reference implementation of SWIM with Lifeguard: a probe a second, a 500 ms probe timeout, 3
 indirect probes, a suspicion timeout from `4 × max(1, log10 n)` periods up to 6 times that, shrinking as
 independent confirmations arrive (FI[3]), and Lifeguard's local health multiplier up to 8. A suspicion
 is a hint: the scheduler stops placing on a suspected node at once, and moves its work only once it is
-declared dead, through F6's caps. hex-sim models memberlist's protocol (`membership.rs`) and takes none of hyper-swim's
-code or constants. hyper-swim, the node agent's membership, times each pair from its measured round
-trips (NFD-E, RFC 6298's timer of 1-60 s) rather than memberlist's fixed second and 500 ms, so its
-crash bound is its own to measure, once hex-sim drives its detector through the vendored copy.
+declared dead, through F6's caps. It takes none of hyper-swim's code or constants; it is kept as
+the competitor, for Lifeguard's false-positive bar and memberlist's crash timing.
 
-**The crash bound, derived.** Each period every live member probes one other, so a given member goes
+**memberlist's crash bound, derived.** Each period every live member probes one other, so a given member goes
 unprobed in a period with probability about `(1 − 1/(n−1))^(n−1) ≈ e^−1` (`PF[8]` §3.1: the first
 probe comes `e/(e−1)` periods after a crash on average), and in `k` periods with about `e^−k`. Its
 prober suspects it when the indirect probes' wait ends, a period after its probe began (memberlist's
@@ -85,7 +120,7 @@ suspicion confirms only when its sender's local health multiplier was 0 as it se
 suspicion carries that bit): Lifeguard's own premise, that a member's LHM is its evidence of its own
 slowness (FI[1]), applied to the suspicions it gossips. hyper-swim goes further, and lets no
 gossiped suspicion condemn: "A gossiped suspicion is a hint: only a member's own probes condemn"
-(hyper-raft `crates/hyper-swim/src/detector.rs:43-44` at 6a236ae). The model keeps Lifeguard as
+(hyper-raft `crates/hyper-swim/src/detector.rs:44` at 6a236ae). The model keeps Lifeguard as
 published beside it as the competitor (`Config::health_gated_confirmations` off).
 
 **Evidence.** `membership.rs`'s tests: the crash bound over 1,000 seeds, unchanged by the gate (first

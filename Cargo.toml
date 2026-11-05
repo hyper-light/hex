@@ -25,6 +25,11 @@ hex-client = { path = "crates/hex-client", version = "0.1.0" }
 hex-sim = { path = "crates/hex-sim", version = "0.1.0" }
 hex-health = { path = "crates/hex-health", version = "0.1.0" }
 flate2 = "1.1.10"
+# hyper-swim's failure detector and the timing it runs on, for hex-sim's crash class (hyper-raft,
+# vendored at vendor/hyper-raft, vendor/MANIFEST.toml): by name, patched to that copy below, as kiln
+# patches the same names.
+hyper-swim = "0.1.0"
+hyper-timing = "0.1.0"
 libc = "0.2.190"
 rustix = { version = "1.1.5", features = ["fs", "process", "thread", "mount", "pipe", "pty", "net", "termios", "system", "event", "stdio"] }
 # OCI seccomp: compiles a profile to a BPF program and loads it in the container init. Vendored
@@ -85,3 +90,5 @@ inherits = "release"
 # workspace (excluded above); the patch points at the crate directory inside it.
 [patch.crates-io]
 seccompiler = { path = "vendor/seccompiler" }
+hyper-swim = { path = "vendor/hyper-raft/crates/hyper-swim" }
+hyper-timing = { path = "vendor/hyper-raft/crates/hyper-timing" }

@@ -247,9 +247,22 @@ name = "hex-sim"
 version = "0.1.0"
 dependencies = [
  "hex-health",
+ "hyper-swim",
+ "hyper-timing",
  "proptest",
  "thiserror",
 ]
+
+[[package]]
+name = "hyper-swim"
+version = "0.1.0"
+dependencies = [
+ "hyper-timing",
+]
+
+[[package]]
+name = "hyper-timing"
+version = "0.1.0"
 
 [[package]]
 name = "indexmap"
