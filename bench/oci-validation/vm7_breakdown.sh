@@ -21,7 +21,7 @@ rm -rf "${D:?}/lab"; cp -r "$COMP" "$D/lab"
 # Only what's set reaches the guest; an unset one stays unset there (HEXBENCH_PROCFS unset is its pool on).
 : > "$D/env"
 for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_PROCFS HEXBENCH_DEVFS HEXBENCH_OWNER \
-  HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS; do
+  HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS HEXBENCH_PARKED_PROCS HEXBENCH_AHEAD; do
   [ -n "${!v+x}" ] && printf 'export %s=%q\n' "$v" "${!v}" >> "$D/env"
 done
 printf 'export TRACE_TAG=vm7_%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" >> "$D/env"
