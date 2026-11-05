@@ -229,7 +229,10 @@ fn place(mut shard: Shard, sample: &Sample, start: &Barrier) -> Placed {
         };
         match shard.store.apply(0, write).unwrap() {
             Outcome::Applied { .. } => {}
-            other => panic!("the store refused the index's choice for {:?}: {other:?}", spec.id),
+            other => panic!(
+                "the store refused the index's choice for {:?}: {other:?}",
+                spec.id
+            ),
         }
         shard.index.take(best.node, &demand).unwrap();
         placed += 1;
@@ -264,7 +267,9 @@ fn check(p: &Placed) -> Result<(), String> {
 fn hex(runs: u32, shard_counts: &[usize]) {
     let sample = Sample::default();
     let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    println!("sched_kwok hex: {PODS} pending pods of {POD:?} on {NODES} nodes of {NODE:?}, {cpus} CPUs, {runs} runs each");
+    println!(
+        "sched_kwok hex: {PODS} pending pods of {POD:?} on {NODES} nodes of {NODE:?}, {cpus} CPUs, {runs} runs each"
+    );
     for &n in shard_counts {
         let mut best: Option<Duration> = None;
         for run in 0..runs {
@@ -310,7 +315,12 @@ fn hex(runs: u32, shard_counts: &[usize]) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: sched_kwok manifests <out-dir> <files> | hex <runs> <shards,...>";
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["manifests", out, files] => manifests(Path::new(out), files.parse().expect(usage)),
         ["hex", runs, shards] => hex(
             runs.parse().expect(usage),
