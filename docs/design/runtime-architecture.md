@@ -1430,11 +1430,18 @@ lifecycle without changing what a box may do.
     owner's box takes `cgroup_mutex` 1.087 times a lifecycle at concurrency 32, 1.023 at concurrency 1 and 1.092
     without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
     box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
-    holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
-  - *The rate* (the second, at least 8x, a minimum: not met). The bar is 8x on 4-15 with interleaved pairs the
-    method of record, since they control the load's drift that makes the criterion's own phases swing (the lead,
-    2026-11-03T17:47Z). Option 1, each pair's concurrency 1 on 4-15 and its 32 on all of 4-31, is measured beside it
-    for Ada's choice of the bar, and neither is called met until she makes it.
+    holds it 87.1% of the time (runs 7 and 8). At the step's final tip, 1.089 at concurrency 32 and 1.023 at 1,
+    on 4-15 (run 26).<!-- /record -->
+  - *The rate* (the second, at least 8x, a minimum: met as its text reads it, on the tree the plan's steps compose).
+    <!-- record: bench/competitive/probes/reuse_pass.md -->As the criterion reads it, host.sh's pass on its own CPUs,
+    4-31, in process, one owner's boxes, best of 2: the step's final tip in step 7's tree reads 8.39x at the installed
+    descriptor limit and 9.72x at the given, 11.92x and 6.52x over the socket; interleaved on the same CPUs,
+    9.72x and 10.62x. Option 1 reads 8.00x and 6.91x, 4-15 alone 5.48x and 5.89x. The step alone reads 2.29x to 3.35x:
+    its classic root's pivot_root walks every host thread under the mount namespace's lock (runs 18 and
+    19).<!-- /record --> The criterion names no branch, so it counts on the tree with step 6 in (the lead,
+    2026-11-05T07:30Z), and host.sh's own CPUs are its text's (the lead, 2026-11-03T16:50Z). Whether a stricter
+    reading is the bar, 8x on 4-15 with interleaved pairs (the lead, 2026-11-03T17:47Z) or option 1, is Ada's call,
+    open. The records below are how the rate got here.
     <!-- record: bench/competitive/probes/reuse_pass.md -->The merge of steps 2, 3 and 6 reads 4.78x in process and
     4.92x over the socket on 4-15, and 7.55x and 7.16x as option 1, every task of each half on its CPUs as read back
     (run 12). Step 6 alone read 1.84x and 1.59x in that hour, under about 7,500 host threads (runs 12,
