@@ -255,6 +255,7 @@ impl Node {
             Owner::Rootless { .. } => Pools {
                 netns: 0,
                 ipc_uts: 0,
+                devfs: false,
             },
         };
         let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools))?;
@@ -292,11 +293,7 @@ impl Node {
             netns,
             ipc_uts,
             pools,
-            devfs: Devfs::start(
-                owner == Owner::Root,
-                owner == Owner::Root,
-                owner == Owner::Root,
-            )?,
+            devfs: Devfs::start(pools.devfs, pools.devfs, pools.devfs)?,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,

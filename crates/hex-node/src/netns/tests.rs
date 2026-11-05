@@ -217,7 +217,11 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
                 current: Some(1 << 22),
                 maximum: Some(1 << 22),
             },
-            Pools { netns, ipc_uts },
+            Pools {
+                netns,
+                ipc_uts,
+                devfs: true,
+            },
         )
     };
     let none = at(0, 0);
@@ -262,7 +266,8 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     assert_eq!(
         under(Pools {
             netns: 4_096,
-            ipc_uts: 4_096
+            ipc_uts: 4_096,
+            devfs: true,
         }),
         10,
         "what the limit leaves past the pools, four a namespace"
@@ -271,6 +276,38 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
         under(Pools::ROOT),
         10 + (raised.own - root.own + 3) / FILES_A_KEPT
     );
+}
+
+/// Goal 5 of record, the files' bound past the node's own descriptors (CLAUDE.md §2; the lead, 2026-11-05T11:45Z):
+/// the mounts made ahead are the node's own too, step 3's prepared `/dev` pool and goal 6's prepared proc pool,
+/// with their mask sources. Do: bound the files under one soft limit with the namespace pools at a root node's
+/// bounds, with and without the mounts made ahead. Expect: the node's own grows by both pools held at their bounds
+/// (four keys of eight, one descriptor a `/dev`, two a proc: its pid namespace and its tree), the one maker's peak
+/// while it makes a proc (six), the two mask sources, and each call's takes of a `/dev` and a proc beside; a
+/// rootless node keeps none.
+#[test]
+fn the_files_bound_counts_the_mounts_made_ahead() {
+    use rustix::process::Rlimit;
+
+    let at = |devfs: bool| {
+        FilesBound::of(
+            &Rlimit {
+                current: Some(1 << 22),
+                maximum: Some(1 << 22),
+            },
+            Pools {
+                devfs,
+                ..Pools::ROOT
+            },
+        )
+    };
+    let n = |count: usize| u64::try_from(count).unwrap();
+    let held = n(hex_core::devfs::KEYS * hex_core::devfs::PER_KEY);
+    assert_eq!(
+        at(true).own - at(false).own,
+        held + 2 * held + 6 + 2 + 3 * n(crate::serve::WORKERS)
+    );
+    assert!(Pools::ROOT.devfs, "a root node keeps the mounts made ahead");
 }
 
 /// Goal 5 extended step 6, the bound on namespaces holding files (CLAUDE.md §2): a place under it is taken before a
