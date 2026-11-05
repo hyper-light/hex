@@ -364,3 +364,35 @@ Read:
   path is the lever that size.
 - Separately, a seed starting on a host with many threads holds the global mount lock ~1.2 ms in its `pivot_root`.
   That stalls every mount on the host, co-tenants included.
+
+## 12. The seed without a `pivot_root` per start: what isolates it on 6.19 (2026-11-05)
+
+§11 found each create seed's `prune` (`crates/hex-runtime/src/linux/oci/seed.rs:142-170`) holding the global mount lock
+~1.2 ms on a host with ~12,000 threads. `pivot_root` calls `chroot_fs_refs` (`fs/fs_struct.c:54-80`), which walks
+every thread on the host, before it gives the lock back (v6.19 `fs/namespace.c:4554`, `:4606`). The lead asked whether
+a chroot into the pruned tmpfs, after detaching the old root's mounts, isolates the seed as `pivot_root` does. From
+v6.19's source, it doesn't:
+- **The root mount can't be detached.** The submounts of the old root can be detached, but the namespace's own
+  root, the mount with no parent, is refused even with `MNT_DETACH` (`do_umount`, `fs/namespace.c:1940-1941`:
+  `if (!mnt_has_parent(mnt)) goto out;` with `-EINVAL`). So after a chroot the seed's namespace still has the host's
+  root filesystem as its root mount, reachable from any task whose root is moved back above the chroot.
+- **The inits can get back to it.** Every init copies the seed's namespace (`clone3` with `CLONE_NEWNS`). On 6.19's
+  copy path an init then `chroot`s into the container's root, and Docker's default capabilities include
+  `CAP_SYS_CHROOT`. A chroot doesn't confine a holder of `CAP_SYS_CHROOT`: chroot(2) says it "is not intended to be
+  used for any kind of security purpose" and that it can be escaped. After `pivot_root` the escape lands on the
+  pruned, empty, read-only tmpfs. After a chroot-only prune it would land on the host's root filesystem.
+- **Mounting the tmpfs beneath the root is refused on 6.19.** `MOVE_MOUNT_BENEATH` (Linux 6.5) would let the tmpfs
+  replace the root with no `pivot_root`, but `can_move_mount_beneath` refuses a target that is the caller's root or a
+  child of the namespace's root (`fs/namespace.c:3402-3426`: "Mounting beneath the rootfs only makes sense when the
+  semantics of pivot_root(".", ".") are used").
+
+What does isolate it without a `pivot_root` per seed: one `pivot_root` per node. Every later seed joins that pruned
+namespace with `setns`.
+- `setns(CLONE_NEWNS)` (`mntns_install`, `fs/namespace.c:6218-6258`) sets only the caller's root and working directory
+  to the namespace's root. It takes no mount lock and walks no other task.
+- It asks `CAP_SYS_ADMIN` over the namespace's owner and `CAP_SYS_CHROOT`, refuses an anonymous namespace, and needs
+  the caller's `fs_struct` unshared (`fs->users == 1`, as the single-threaded seed's is).
+- The namespace it joins is the one `prune` made: the empty read-only tmpfs as its root, the old root detached. So
+  each seed, and each init that copies it, sees what it sees today.
+- The node keeps that namespace by a descriptor for its life. At most one `pivot_root` happens per node start, before
+  any create, in place of one per seed start.
