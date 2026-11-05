@@ -1326,6 +1326,18 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
                 .next()
                 .expect("the box's init")
             );
+            if round == 0 {
+                // A fresh namespace's loopback request socket is freed after a grace period
+                // (net/netlink/af_netlink.c:794-796, :703-715), and it holds none after.
+                wait_for(
+                    || {
+                        std::fs::read_to_string(&sockstat)
+                            .unwrap()
+                            .starts_with("sockets: used 0\n")
+                    },
+                    "a fresh namespace's count down to none",
+                );
+            }
             wait_for(
                 || {
                     std::fs::read_to_string(&sockstat)
