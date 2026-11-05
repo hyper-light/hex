@@ -41,3 +41,27 @@ create_breakdown.sh's `docker run` passes `-e HEXBENCH_PARKED_PROCS`. Body and l
 
 **Not of record** for the whole create against libcrun: this run has no libcrun arm. Its create p99 is the A/B's own
 comparison.
+
+## The 7.2 guest, indicative (NOT OF RECORD: a VM's numbers)
+
+**Run.** Fedora's kernel 7.2.15-200.fc44 in vm7_lab.sh's guest on fedora: 12 vCPUs on CPUs 4-15, 6G. 2026-11-05
+14:47:42Z-14:51:31Z, under `fedora-timed.lock`. The same binaries (hex 65f6100e612bebd8, seam_oci d13c5005b54a2793).
+- Harness: g6's guest cell, vm7_breakdown.sh at a646981, with HEXBENCH_PARKED_PROCS added to the env it hands the
+  guest. Body: `~/.cache/hex-t7/g5tail/vm-pp-20261105T144742Z` on fedora.
+- The Copy way (`HEX_OCI_MNTNS=copy`), since this build parks on Copy only. Otherwise as on the host: 2,000 creates
+  at 8 in flight, 8,000 idle guest threads, Docker's paths, the /dev pool on, owner bundles with reuse on, 6 or 12
+  busy loops in the guest.
+- 2 rounds: AB, then BA. fedora's load rose from 25.7 to 52.6 over the run, with no core idle by its end.
+
+| L | arm | part 19 p50 | part 19 p99 | unpreempted p99 | create p99 (ms) | mount-lock waits a create |
+|---|-----|-------------|-------------|-----------------|-----------------|---------------------------|
+| 6 | A | 215, 226 | 1324, 2999 | 1014, 1515 | 7.082, 9.890 | 4.64, 3.89 |
+| 6 | B | 47, 44 | 4706, 998 | 2844, 656 | 15.288, 9.162 | 0.30, 0.59 |
+| 12 | A | 202, 220 | 1313, 2052 | 508, 1043 | 8.359, 7.071 | 1.66, 1.64 |
+| 12 | B | 43, 45 | 317, 1060 | 86, 226 | 8.278, 14.421 | 0.27, 0.20 |
+
+- Every B cell: 2,000 procs made, 1,992 hits, 0 misses, 0 dry, 0 failed. The init's holds are 28.9 a create off and
+  5.0 on; the node's are 3.0 a box off and 32.0 on.
+- Part 19's p50 falls about 5x, as on the host. Its p99 and the whole create's p99 don't fall consistently: B-L6-r1
+  and B-L12-r2 are the slowest cells of their L. With the host this loaded, the guest's tails mostly reflect the
+  host, so they settle nothing either way.
