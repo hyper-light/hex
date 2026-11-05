@@ -77,6 +77,7 @@ NAMES=()  # the bench's containers, removed however this script ends
 cleanup() { for n in "${NAMES[@]}"; do docker rm -f "$n" >/dev/null 2>&1 || true; done; }
 trap cleanup EXIT
 
+oci_rc=0  # the OCI pass's exit: non-zero when a round crashed (oci_inside.sh), read once the table is written
 if [[ " $PHASES " == *" oci "* ]]; then
   NAME="hexbench-oci-$$"; NAMES+=("$NAME")
   KRUN=()  # krun (crun's libkrun handler) runs only when RUNTIMES names it; its libraries mount beside it
@@ -118,7 +119,8 @@ if [[ " $PHASES " == *" oci "* ]]; then
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
     -e HEXBENCH_SUSTAINED -e HEXBENCH_INTERLEAVED -e HEXBENCH_INTERLEAVED_CPUS1 -e HEXBENCH_INTERLEAVED_CPUS32 -e HEXBENCH_OWNER \
-    -e HEXBENCH_REUSE -e NETNS -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log"
+    -e HEXBENCH_REUSE -e NETNS -e STANDIN "${SEAM_OCI_ENV[@]}" registry.fedoraproject.org/fedora:44 bash /opt/lab/oci_inside.sh 2>&1 | tee "$OUT/oci.log" \
+    || oci_rc=$?
 fi
 
 # The lab image (sandboxes/Dockerfile): Fedora 44 with each process sandbox pinned, codex at a pinned tag
@@ -186,3 +188,8 @@ fi
 echo "load at end: $(cat /proc/loadavg)" >> "$OUT/env.txt"
 python3 -I "$HERE/summarize.py" "$OUT" > "$OUT/table.md"
 echo "results: $OUT"
+# A pass with a crashed round refuses, after its table is written with the round marked (CLAUDE.md §3).
+if [ "$oci_rc" != 0 ]; then
+  echo "refusing: the OCI pass exited $oci_rc; the run's crashed rounds: $(paste -sd, "$OUT/crashed.txt" 2>/dev/null || echo "none named")" >&2
+  exit 6
+fi
