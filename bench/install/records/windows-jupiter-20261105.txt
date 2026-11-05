@@ -40,5 +40,20 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
        the_fixture_keeps_each_boxs_files_under_its_root.
    The Linux- and macOS-only test crates hold no tests on Windows (cfg). PHASE gates: PASS (exit 0).
 
+4. the installer lab's before phase at a745b54, 2026-11-05T08:27:08Z, load 20% CPU, as Jupiter\corph (no admin):
+   windows-before-a745b54-20261105T082708Z.txt
+   fresh of Hex: windows.ps1 check lists nothing ("nothing of Hex's is left").
+   the plan (install -DryRun), 4 lines and no feature, since both are on already:
+     folder C:\Program Files\Hex / file C:\Program Files\Hex\hex.exe / folder C:\ProgramData\Hex /
+     file C:\ProgramData\Hex\manifest
+   HEX-INST-2: "FEATURES: Containers on": a Windows image is past the feature check, refused by step 4's class for
+     its missing layer: Os { op: "reading the image's Windows build from its base layer", why: "The system cannot
+     find the file specified. (os error 2)" }; "FEATURES: HypervisorPlatform on": a Linux image is refused
+     Platform { what: "the oci class", platform: "windows", why: "a Linux image runs in a Shards guest through the
+     Windows Hypervisor Platform (native plan step 5), which this node doesn't boot yet" }.
+   PHASE before: PASS (exit 0). Windows PowerShell 5.1 shows each test's stderr as a NativeCommandError block
+   (cosmetic), and Tee-Object writes the plan as UTF-16 LE, which Get-Content reads back.
+
 Not run yet: step 4's oci suite on an image (needs oci_setup.ps1, which waits on Ada's yes), and the installer
-lab's before / installed / uninstalled phases (the install and uninstall need Ada at jupiter).
+lab's installed and uninstalled phases (the install and uninstall need Ada at jupiter: on jupiter they turn on no
+feature, so a UAC yes each and no reboot).
