@@ -6,13 +6,15 @@
 #   levers.sh [n]
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+. "$HERE/../containers.sh"
+bench_trap :
 N=${1:-2000}
 P=$HOME/.cache/hex-t7/levers-probe; mkdir -p "$P/disk"
 cp "$HERE/levers.c" "$P/levers.c"
 echo "levers.c sha256 $(sha256sum "$P/levers.c" | cut -c1-16); $(date -u +%FT%TZ); load $(cut -d' ' -f1-3 /proc/loadavg); kernel $(uname -r); host threads $(ps -eLf | wc -l)"
 up=$(docker ps --format '{{.Names}}' | grep hexbench- || true)
 [ -z "$up" ] || { echo "refusing: a bench container is up: $up" >&2; exit 3; }
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+docker run "${BENCH_LABELS[@]}" --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
   --tmpfs /run:rw,exec,size=256m -v "$P:/p" -e N="$N" hexbench/pass:44-860612303 bash -c '
     set -e; gcc -O2 -o /run/levers /p/levers.c
     mkdir -p /sys/fs/cgroup/levers /root/rec
