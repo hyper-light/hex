@@ -43,4 +43,4 @@ pub mod supervise;
 #[cfg(all(target_os = "linux", debug_assertions))]
 pub use node::CrashPoint;
 #[cfg(target_os = "linux")]
-pub use node::{Node, OCI_BOXES, RecoverySummary, records_dir};
+pub use node::{INITS_AHEAD, Node, OCI_BOXES, RecoverySummary, records_dir};

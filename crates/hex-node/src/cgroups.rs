@@ -748,6 +748,10 @@ pub struct Choice<'a> {
     /// A refusal its choosing met (the id taken since, the node full, a bound's controller missing),
     /// kept as it was so the create is refused by its type, not as the runtime's error that carried it.
     refused: Mutex<Option<Refusal>>,
+    /// A debug build's crash point: the node ends abruptly once a cgroup of the box's own is made, as it does
+    /// when it makes one itself (`CrashPoint::CgroupMade`), so recovery is tested on this path too.
+    #[cfg(debug_assertions)]
+    crash_on_own: bool,
 }
 
 impl<'a> Choice<'a> {
@@ -766,7 +770,23 @@ impl<'a> Choice<'a> {
             bounds,
             made: Mutex::new(None),
             refused: Mutex::new(None),
+            #[cfg(debug_assertions)]
+            crash_on_own: false,
         }
+    }
+
+    /// The choice, ending the node abruptly once it makes a cgroup of the box's own when `crash` (a debug build's
+    /// crash point).
+    #[cfg(debug_assertions)]
+    pub fn crashing_on_own(mut self, crash: bool) -> Self {
+        self.crash_on_own = crash;
+        self
+    }
+
+    /// A release build has no crash points: the choice as it is.
+    #[cfg(not(debug_assertions))]
+    pub fn crashing_on_own(self, _crash: bool) -> Self {
+        self
     }
 
     /// What it gave the box, once the runtime asked, and the refusal it met if one ended the create.
@@ -920,6 +940,13 @@ impl Choose for Choice<'_> {
                         .root
                         .create(self.id, self.bounds)
                         .map_err(|r| self.refuse_create(r))?;
+                    #[cfg(debug_assertions)]
+                    if self.crash_on_own {
+                        let _ = rustix::process::kill_process(
+                            rustix::process::getpid(),
+                            rustix::process::Signal::KILL,
+                        );
+                    }
                     self.record(Made::Own(reason))?;
                     return Ok(Chosen {
                         cgroup,

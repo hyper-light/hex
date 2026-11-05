@@ -52,7 +52,7 @@
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 //! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
-//! (decision 8, "The p99.9 that stayed"), [`AHEAD`] unless set; 0 makes none.
+//! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -96,11 +96,6 @@ mod linux {
     use hex_core::{netns, seeds};
     use hex_node::Node;
     use serde_json::{Map, Value, json};
-
-    /// The cgroups made ahead for boxes of no owner unless HEXBENCH_AHEAD says: one per box in flight in this
-    /// bench's throughput phase at concurrency 8 (`HEXBENCH_THROUGHPUT_CONC`), the most its timed phases run at
-    /// once but the sustained phase's 32, which finds them dry and is counted so.
-    const AHEAD: usize = 8;
 
     /// Each call's bound, as oci_bench.py's CALL_TIMEOUT_S.
     const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1148,14 +1143,16 @@ mod linux {
             let node = node
                 .with_prepared_dev_mounts(std::env::var("HEXBENCH_DEVFS").as_deref() != Ok("0"))
                 .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"));
-            // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): HEXBENCH_AHEAD of
-            // them, AHEAD unless set.
-            let ahead = std::env::var("HEXBENCH_AHEAD").map_or(AHEAD, |v| {
-                v.trim()
-                    .parse()
-                    .unwrap_or_else(|e| panic!("HEXBENCH_AHEAD={v:?}: {e}"))
-            });
-            let node = node.with_inits_ahead(ahead);
+            // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
+            // as it ships, unless HEXBENCH_AHEAD says.
+            let node = match std::env::var("HEXBENCH_AHEAD") {
+                Ok(v) => node.with_inits_ahead(
+                    v.trim()
+                        .parse()
+                        .unwrap_or_else(|e| panic!("HEXBENCH_AHEAD={v:?}: {e}")),
+                ),
+                Err(_) => node,
+            };
             let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
                 Ok("0") => node
                     .with_ipc_uts_bound(0)

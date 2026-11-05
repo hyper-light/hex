@@ -112,6 +112,13 @@ impl CrashPoint {
 /// box id starts with `.`, so it can't be a box's.
 pub const OCI_BOXES: &str = ".oci";
 
+/// The cgroups a node makes ahead for boxes of no owner unless [`Node::with_inits_ahead`] says, each with an init
+/// parked in it (decision 8, "The p99.9 that stayed"), about 262 KB each on fedora, so about 2.1 MB a node. Eight:
+/// one per box in flight at the seam bench's concurrency 8, and at the bar's concurrency 1 eight never ran dry but
+/// for each round's first create (1 in 10,100: bench/competitive/probes/create_tail.md, "The parked init, A/B
+/// against 60b2e38"). More in flight than this finds none ready and makes its own, counted dry.
+pub const INITS_AHEAD: usize = 8;
+
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
     /// The `process` boxes' cgroups, and the `oci` boxes' root among them ([`OCI_BOXES`]).
@@ -264,6 +271,7 @@ impl Node {
                 Refusal::Broken("the oci boxes' root holds the last slot a u64 numbers".to_owned())
             })?;
         let cgroups = Cgroups::start(first)?;
+        cgroups.set_ahead(INITS_AHEAD);
         Ok(Self {
             root,
             oci_boxes,
@@ -317,6 +325,18 @@ impl Node {
             self.store.crash_before_first_write();
         }
         self
+    }
+
+    /// Whether the node ends abruptly once a box's own cgroup is made (a debug build's crash point).
+    #[cfg(debug_assertions)]
+    fn crashes_at_cgroup_made(&self) -> bool {
+        self.crash_at == Some(CrashPoint::CgroupMade)
+    }
+
+    /// A release build has no crash points.
+    #[cfg(not(debug_assertions))]
+    fn crashes_at_cgroup_made(&self) -> bool {
+        false
     }
 
     /// Ends this process here as a kill would, when the caller armed `point`.
@@ -426,8 +446,9 @@ impl Node {
 
     /// The node keeps at most `bound` cgroups made ahead for boxes of no owner, each with an init parked in it
     /// (decision 8, "The p99.9 that stayed"), so such a box's create takes neither the cgroup's `mkdir` nor its
-    /// init's clone, nor their waits for the host-wide `cgroup_mutex`. 0, the default, keeps none: each such box
-    /// makes its own cgroup, named by its id. Each costs an idle cgroup and a parked process charged to it.
+    /// init's clone, nor their waits for the host-wide `cgroup_mutex`; [`INITS_AHEAD`] unless set. 0 keeps none:
+    /// each such box makes its own cgroup, named by its id. Each costs an idle cgroup and a parked process charged
+    /// to it.
     pub fn with_inits_ahead(self, bound: usize) -> Self {
         self.cgroups.set_ahead(bound);
         self
@@ -968,6 +989,7 @@ impl Node {
                 spec.owner.as_ref(),
                 &spec.bounds,
             )
+            .crashing_on_own(self.crashes_at_cgroup_made())
         });
         // A container that makes a network namespace of its own in the agent's user namespace joins one
         // the node made ahead, and the pool counts every container's (decision 4); a box that may share

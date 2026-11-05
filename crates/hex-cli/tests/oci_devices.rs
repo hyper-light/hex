@@ -228,9 +228,9 @@ fn each_box_is_decided_by_its_policy(lab: &Lab, own: &Path) -> String {
         (1, BPF_F_ALLOW_OVERRIDE),
         "the oci boxes' root: {root:?}"
     );
-    assert_eq!(attached(&oci.join("dev-default")).count, 0);
-    assert_eq!(attached(&oci.join("dev-all")).count, 1);
-    assert_eq!(attached(&oci.join("dev-kmsg")).count, 1);
+    assert_eq!(attached(&cgroup_of(&node, "dev-default")).count, 0);
+    assert_eq!(attached(&cgroup_of(&node, "dev-all")).count, 1);
+    assert_eq!(attached(&cgroup_of(&node, "dev-kmsg")).count, 1);
     assert_eq!(attached(&box_root).count, 0, "the box root carries none");
     assert_eq!(attached(&box_root.join("dev-process")).count, 0);
     let after = node.device_programs().unwrap();
@@ -316,7 +316,6 @@ fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path
     let state = tempfile::tempdir_in(lab.dir.path()).unwrap();
     let box_root = own.join("hex-dev-bound");
     sweep(&box_root);
-    let oci = box_root.join(OCI_BOXES);
     let node = lab
         .node(&box_root, state.path())
         .with_device_program_bound(2)
@@ -330,11 +329,15 @@ fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path
         (1, 4, 1),
         "one policy's program loaded once: {counts:?}"
     );
-    let program = attached(&oci.join("once-0")).ids;
+    let program = attached(&cgroup_of(&node, "once-0")).ids;
     assert_eq!(program.len(), 1);
     assert!(holds_program(program[0]), "the node holds the kmsg program");
     for id in &kmsg {
-        assert_eq!(attached(&oci.join(id.as_str())).ids, program, "{id}");
+        assert_eq!(
+            attached(&cgroup_of(&node, id.as_str())).ids,
+            program,
+            "{id}"
+        );
     }
 
     let fuse = make(&node, "bound-fuse", lab.bundle(Some(KMSG_FUSE), None));
@@ -351,7 +354,7 @@ fn a_policy_is_loaded_once_and_the_bound_closes_the_oldest(lab: &Lab, own: &Path
     );
     for id in &kmsg {
         assert_eq!(
-            attached(&oci.join(id.as_str())).ids,
+            attached(&cgroup_of(&node, id.as_str())).ids,
             program,
             "{id} keeps its program"
         );
@@ -585,6 +588,12 @@ fn parse_opens(text: &str) -> Vec<Open> {
             _ => panic!("an open's outcome: {l:?}"),
         })
         .collect()
+}
+
+/// Box `id`'s cgroup, as the node has it: one named by the id, or a slot made ahead (decision 8).
+fn cgroup_of(node: &Node, id: &str) -> PathBuf {
+    node.cgroup_dir(&BoxId::new(id).unwrap())
+        .unwrap_or_else(|| panic!("box {id} has a cgroup"))
 }
 
 /// The device programs attached to cgroup `dir` itself.
