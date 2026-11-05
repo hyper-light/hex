@@ -148,21 +148,28 @@ fn open_proc(path: &CStr, flags: OFlags) -> rustix::io::Result<rustix::fd::Owned
 
 /// Asks the kernel for a tmpfs labelled `label` and drops it: a refusal by name where SELinux isn't active
 /// (no module claims the `context` key, `fs/fs_context.c:137-148`) or the label isn't one it knows. Create
-/// runs this before it makes anything, so a spec with a mount label is never run unlabelled.
+/// runs this before it makes anything. A rootless agent may make no filesystem in its own namespace
+/// (fsopen(2): `EPERM` without CAP_SYS_ADMIN there), so it can't ask; its container's init, which holds the
+/// privilege in its own user namespace, sets the label on each filesystem it makes or is refused by name
+/// there ([`super::init::make_fs`]).
 pub(crate) fn check_mount_label(label: &str) -> Result<(), OciError> {
-    let refused = |step: &str, e: rustix::io::Errno| {
-        OciError::Config(format!(
-            "linux.mountLabel is set ({label:?}) but the kernel refused it as a tmpfs's context ({step}: \
-             {e}): SELinux isn't active here or the label isn't valid, and Hex refuses rather than run the \
-             container without it"
-        ))
+    let fs = match rustix::mount::fsopen("tmpfs", rustix::mount::FsOpenFlags::FSOPEN_CLOEXEC) {
+        Ok(fs) => fs,
+        Err(rustix::io::Errno::PERM) => return Ok(()),
+        Err(e) => return Err(OciError::os("fsopen", e)),
     };
-    let fs = rustix::mount::fsopen("tmpfs", rustix::mount::FsOpenFlags::FSOPEN_CLOEXEC)
-        .map_err(|e| OciError::os("fsopen", e))?;
     rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label)
-        .map_err(|e| refused("the context key", e))?;
-    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| refused("the filesystem", e))?;
+        .map_err(|e| refused_label(label, "tmpfs", e))?;
+    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| refused_label(label, "tmpfs", e))?;
     Ok(())
+}
+
+/// The refusal of a mount label the kernel wouldn't take as the context of a `fstype`.
+pub(crate) fn refused_label(label: &str, fstype: &str, e: rustix::io::Errno) -> OciError {
+    OciError::Config(format!(
+        "linux.mountLabel is set ({label:?}) but the kernel refused it as a {fstype}'s context ({e}): SELinux \
+         isn't active here or the label isn't valid, and Hex refuses rather than run the container without it"
+    ))
 }
 
 /// Labels a filesystem by the `security.selinux` xattr on its root ([`Labelling::Xattr`]): `mount` is its
@@ -174,14 +181,24 @@ pub(crate) fn label_root(mount: BorrowedFd<'_>, label: &str) -> Result<(), OciEr
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .map_err(|e| OciError::os("opening a filesystem's root to label it", e))?;
+    .map_err(|e| {
+        OciError::os(
+            "linux.mountLabel: opening a filesystem's root to label it",
+            e,
+        )
+    })?;
     rustix::fs::fsetxattr(
         &root,
         "security.selinux",
         label.as_bytes(),
         XattrFlags::empty(),
     )
-    .map_err(|e| OciError::os("labelling a filesystem's root (security.selinux)", e))
+    .map_err(|e| {
+        OciError::os(
+            "linux.mountLabel: labelling a filesystem's root (security.selinux)",
+            e,
+        )
+    })
 }
 
 #[cfg(test)]

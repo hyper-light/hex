@@ -45,6 +45,9 @@ fn oci_mount_label_is_applied_or_refused_by_name() {
             let label =
                 std::env::var("HEX_LSM_MOUNT_LABEL").unwrap_or_else(|_| DEFAULT_LABEL.to_owned());
             let field = format!(r#","mountLabel":"{label}""#);
+            if !control_runs(own, cache, exe) {
+                return;
+            }
             let outcome = run_probe(
                 own,
                 cache,
@@ -62,9 +65,6 @@ fn oci_mount_label_is_applied_or_refused_by_name() {
                         Exit::Code(42),
                         "every tmpfs should read the label {label}"
                     ),
-                    Err(e) if is_userns_refusal(&e) => {
-                        eprintln!("SKIP: rootless OCI unavailable here ({e})")
-                    }
                     Err(e) => panic!("the labelled container failed where SELinux is active: {e}"),
                 }
             } else {
@@ -98,6 +98,9 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
                 (_, false) => "hex-test-profile".to_owned(),
             };
             let field = format!(r#","apparmorProfile":"{name}""#);
+            if !control_runs(own, cache, exe) {
+                return;
+            }
             let outcome = run_probe(
                 own,
                 cache,
@@ -115,9 +118,6 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
                         Exit::Code(42),
                         "the first process should run under {name}"
                     ),
-                    Err(e) if is_userns_refusal(&e) => {
-                        eprintln!("SKIP: rootless OCI unavailable here ({e})")
-                    }
                     Err(e) => panic!("the profiled container failed where AppArmor is on: {e}"),
                 }
             } else {
@@ -130,6 +130,27 @@ fn oci_apparmor_profile_is_applied_or_refused_by_name() {
             }
         },
     );
+}
+
+/// Runs the same container with neither a label nor a profile, the control: true where it ran, so a failure of
+/// the labelled or profiled one is the label's or the profile's; false, with the reason printed, where this
+/// host can't run the container at all (an unprivileged user namespace refused), which the test then skips.
+fn control_runs(own: &Path, cache: &Path, exe: &str) -> bool {
+    match run_probe(own, cache, exe, "lsm-control", "", "", "exit 42", ("C", "")) {
+        Ok(code) => {
+            assert_eq!(
+                code,
+                Exit::Code(42),
+                "the control container should run its probe"
+            );
+            true
+        }
+        Err(e) if is_userns_refusal(&e) => {
+            eprintln!("SKIP: rootless OCI unavailable here ({e})");
+            false
+        }
+        Err(e) => panic!("the control container (no label, no profile) failed: {e}"),
+    }
 }
 
 /// Whether SELinux is active: its filesystem is mounted, as the host's own tools read it.

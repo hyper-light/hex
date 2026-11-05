@@ -514,6 +514,9 @@ Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
   is tested by the kernel itself: create asks it for a tmpfs with the label before anything is made, and the
   kernel refuses the `context` key when SELinux isn't active (`fs/fs_context.c:137-148`). That test also works
   in a container that has no selinuxfs mounted, where crun's `/proc/mounts` test gets it wrong.
+  A rootless agent may make no filesystem in its own namespace (`fsopen` is `EPERM` there), so it can't ask.
+  Its container's init, privileged in its own user namespace, then sets the label on each filesystem it
+  makes, and the kernel's refusal of the `context` key is refused by name there.
 - `process.selinuxLabel` is still refused by name: nothing in the suite checks it, and no step asks for it yet.
 - Falsified by a run in which a labelled container's tmpfs reads a label other than the spec's, or a
   profiled container's `/proc/self/attr/current` names another profile, or a spec with either is run on a

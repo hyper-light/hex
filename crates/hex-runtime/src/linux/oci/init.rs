@@ -1337,14 +1337,16 @@ fn fs_context(
     if let Some(label) = label
         && super::lsm::labelling(fstype) == super::lsm::Labelling::Context
     {
-        rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label).map_err(|e| {
-            OciError::os(
-                "linux.mountLabel",
-                format!("{fstype} context {label:?}: {e}"),
-            )
-        })?;
+        rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label)
+            .map_err(|e| super::lsm::refused_label(label, fstype, e))?;
     }
-    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| OciError::os("fsconfig create", e))?;
+    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| match label {
+        Some(label) => OciError::os(
+            "fsconfig create",
+            format!("with linux.mountLabel {label:?}: {e}"),
+        ),
+        None => OciError::os("fsconfig create", e),
+    })?;
     Ok(fs)
 }
 
