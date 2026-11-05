@@ -1458,7 +1458,8 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
             .map(|p| (*p).to_owned())
             .collect()
     };
-    // What a box sees beneath its proc, and whether `/proc/self` is the reader and pid 1 its init.
+    // What a box sees beneath its proc, and whether `/proc/self` is the reader (the shell opens it itself, by a
+    // redirection, so it names the shell) and pid 1 its init.
     let seen = |id: &BoxId| {
         let (_, mi) = run_in(&node, id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
         let beneath: BTreeSet<(String, bool)> = mountinfo(&mi)
@@ -1472,7 +1473,7 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
             &[
                 "/usr/bin/sh",
                 "-c",
-                r#"[ "$(readlink /proc/self)" = "$$" ] && [ "$(cat /proc/1/comm)" = hex ]"#,
+                r#"read -r me _ < /proc/self/stat && [ "$me" = "$$" ] && [ "$(cat /proc/1/comm)" = hex ]"#,
             ],
         );
         (beneath, own_pidns)
