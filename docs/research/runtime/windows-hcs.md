@@ -164,7 +164,10 @@ What only a Windows host can settle is marked **(probe)** and is measured on jup
   CtrlLogOff, CtrlShutdown); hcsshim maps TERM to `CtrlShutdown` and KILL to `HcsTerminateProcess`
   (`hcsshim/internal/signals/signal.go:191-195`), and Docker "fake[s] supporting regular stop and -9"
   (`moby/daemon/internal/libcontainerd/local/local_windows.go:713-749`). The `process` class already settled
-  Windows' signal rule: KILL and TERM end the box's job (`hex_core::job::ends_job`).
+  Windows' signal rule: KILL and TERM end the box's job (`hex_core::job::ends_job`). So TERM ends the class's init,
+  where Linux's PID-namespace init takes only KILL and STOP; the differential suite's oracle follows each class's
+  answer (`Fixture::term_ends_init`, true for this class; the lead's ruling, 2026-11-05). The OCI spec's `kill`
+  only asks that the signal be sent (`runtime-spec/runtime.md:131-136`), and `config-windows.md` defines no signals.
 - The container outlives its first program: hcsshim shuts it down itself when the init exits
   (`hcsshim/cmd/containerd-shim-runhcs-v1/task_hcs.go:641-654,695-757`).
 
