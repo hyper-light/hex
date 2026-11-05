@@ -2,7 +2,9 @@
 //! capacity, so every workload fits somewhere and GPU work is drawn only against a GPU node.
 
 use crate::error::SimError;
-use crate::model::{Cluster, Kind, NodeId, NodeSpec, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::model::{
+    Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId, WorkloadSpec,
+};
 use crate::rng::Rng;
 
 const GIB: u64 = 1 << 30;
@@ -112,9 +114,10 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             kind,
             arrives,
             runs_for,
+            tenancy: Tenancy::default(),
         });
     }
-    Ok(Cluster { nodes, workloads })
+    Ok(Cluster::single_owner(nodes, workloads))
 }
 
 /// Above 90% CPU from its background alone: `index::HOT_PER_MILLE`, as busy * 1000 > capacity * 900.

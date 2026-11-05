@@ -184,7 +184,7 @@ pub fn pack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Kind, NodeId, NodeSpec, WorkloadId, WorkloadSpec};
+    use crate::model::{Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
 
     fn res(cpu: u64, mem: u64) -> Resources {
         Resources {
@@ -195,15 +195,15 @@ mod tests {
     }
 
     fn cluster(nodes: u32, node: Resources, needs: &[Resources]) -> Cluster {
-        Cluster {
-            nodes: (0..nodes)
+        Cluster::single_owner(
+            (0..nodes)
                 .map(|i| NodeSpec {
                     id: NodeId(i),
                     capacity: node,
                     background_milli: 0,
                 })
                 .collect(),
-            workloads: needs
+            needs
                 .iter()
                 .zip(0u64..)
                 .map(|(&need, id)| WorkloadSpec {
@@ -212,9 +212,10 @@ mod tests {
                     kind: Kind::Plain,
                     arrives: id,
                     runs_for: None,
+                    tenancy: Tenancy::default(),
                 })
                 .collect(),
-        }
+        )
     }
 
     /// AC-T7.4.3's measure on a hand-made case: two nodes of (4 CPU, 4 mem); work of (3,1) and (1,3).
