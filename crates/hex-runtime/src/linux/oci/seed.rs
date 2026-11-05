@@ -662,7 +662,7 @@ fn serve_one(
                 pid_for,
             },
         ),
-        Ok(seed::Message::Park(park)) => serve_park(park, fds, socket),
+        Ok(seed::Message::Park(park)) => serve_park(park, fds, socket, pid_for),
         Err(fault) => refused(Failed::Request, fault.to_string()),
     }
 }
@@ -721,6 +721,7 @@ fn serve_park(
     park: seed::Park,
     fds: Vec<OwnedFd>,
     socket: &mut OwnedFd,
+    pid_for: &mut PidFor,
 ) -> (Answer, Option<OwnedFd>) {
     let mut fds = fds.into_iter();
     let (Some(cgroup), Some(claim)) = (fds.next(), fds.next()) else {
@@ -747,7 +748,7 @@ fn serve_park(
             if replaced.is_err() {
                 sys::exit_child(127);
             }
-            parked(claim, park.flags)
+            parked(claim, park.flags, pid_for)
         }
         Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
             drop((cgroup, claim));
@@ -788,7 +789,7 @@ fn parkable() -> u64 {
 /// freshly cloned init does, through the create's own path with [`How::Parked`]. A refusal goes back on the
 /// claim socket and the init ends; so does the agent closing the socket (an idle cgroup evicted, the node
 /// shutting down). It never returns.
-fn parked(claim: OwnedFd, flags: u64) -> ! {
+fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
     // While parked it exercises no capability: its effective set is emptied, and raised again from its
     // permitted set only once a create claims it (capabilities(7): "Effective: the set used by the kernel to
     // perform permission checks"; a capability dropped from the permitted set could never be regained, and the
@@ -842,24 +843,23 @@ fn parked(claim: OwnedFd, flags: u64) -> ! {
             )
             .0
         }
-        Ok(seed::Message::Create(create)) => match PidFor::open() {
-            // Its own pid namespace, which a create it can take never changes (a proc made ahead is refused).
-            Ok(mut pid_for) => {
-                serve_create(
-                    &create,
-                    fds,
-                    Begin {
-                        how: How::Parked {
-                            flags,
-                            claim: claim.as_fd(),
-                        },
-                        pid_for: &mut pid_for,
+        // The seed's PidFor, inherited through the fork: a root node's seed opened it before it pruned its mount
+        // namespace, which leaves no /proc to open another through. A create it can take never uses it (one
+        // carrying a proc made ahead is refused).
+        Ok(seed::Message::Create(create)) => {
+            serve_create(
+                &create,
+                fds,
+                Begin {
+                    how: How::Parked {
+                        flags,
+                        claim: claim.as_fd(),
                     },
-                )
-                .0
-            }
-            Err(e) => refused(Failed::Start, e.to_string()).0,
-        },
+                    pid_for,
+                },
+            )
+            .0
+        }
         Ok(_) => {
             refused(
                 Failed::Request,
