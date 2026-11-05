@@ -1259,7 +1259,11 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
         return;
     }
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let node = lab.node(&own.join("hex-oci-procs"), state.path());
+    // No inits parked ahead (decision 8): a parked init has its pid namespace already, so a create that claims one
+    // asks the proc pool nothing, and this case is the pool's own.
+    let node = lab
+        .node(&own.join("hex-oci-procs"), state.path())
+        .with_inits_ahead(0);
     let paths = r#","maskedPaths":["/proc/kcore","/proc/keys","/proc/timer_list","/proc/acpi","/proc/scsi","/proc/not-there"],"readonlyPaths":["/proc/sys","/proc/sysrq-trigger","/proc/bus"]"#;
     let dir = tempfile::Builder::new()
         .prefix("bundle-")
