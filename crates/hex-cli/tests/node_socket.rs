@@ -760,7 +760,10 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             return;
         }
     };
-    let id = BoxId::new(&name).unwrap();
+    // The box's id is this run's alone, the case's directory name: a rootless tmpfs case's oci root is the user's
+    // runtime directory's, which every run of this test under that user shares, so a fixed id counts another run's
+    // container state, left or under way, as this one's.
+    let id = BoxId::new(dir.path().file_name().and_then(|n| n.to_str()).unwrap()).unwrap();
     let state = dir.path().join("state");
     let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
     let rendered = state.join("bundles").join(id.as_str());
