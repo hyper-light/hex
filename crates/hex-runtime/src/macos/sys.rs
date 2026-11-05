@@ -415,8 +415,9 @@ pub enum Event {
     Timer,
     /// Another thread triggered it.
     User,
-    /// Process `pid`, watched with tag `tag`, forked.
-    Fork { pid: i32, tag: u64 },
+    /// Process `pid`, watched with tag `tag`, forked; `exited` when it has also ended since (the two
+    /// coalesce into one event until it is taken).
+    Fork { pid: i32, tag: u64, exited: bool },
     /// Process `pid`, watched with tag `tag`, ended.
     Exit { pid: i32, tag: u64 },
 }
@@ -547,7 +548,11 @@ impl Kqueue {
             let event = match e.filter {
                 libc::EVFILT_TIMER => Event::Timer,
                 libc::EVFILT_USER => Event::User,
-                libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork { pid, tag },
+                libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork {
+                    pid,
+                    tag,
+                    exited: e.fflags & libc::NOTE_EXIT != 0,
+                },
                 libc::EVFILT_PROC => Event::Exit { pid, tag },
                 _ => continue,
             };
