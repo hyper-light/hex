@@ -977,6 +977,38 @@ before the held files), `hex-netns` 2.2 and 2.4: 1,056.2 and 1,244.3 in all.
 - **The lock is mostly free:** held 13.7% of the busiest buckets' samples at concurrency 32, 18.4% without a network
   namespace, 1.9% at concurrency 1.
 
+## Run 27 (2026-11-05, fedora): lever 3's shards: the parent's `i_rwsem`, and where the given readings' gap goes
+
+- **Binaries:** `reuse_pass.md` run 20's A (`a12e526`, one parent) and B (`ce4924a`, 64 shards), one owner's boxes.
+- **Runs, 4-31 at the hard limit** (unit `hex-shards-gates-20261105T032331Z`, 07:39Z to 07:49Z, the load 5 to 27):
+  `create-serial-offcpu-20261105T073930Z` and `-074116Z`, `create-serial-locks-20261105T074253Z` and `-074626Z` (A
+  then B each). **On 4-15 at the given limit, A B B A** (unit `hex-shards-probe-20261105T103511Z`, 11:31Z to 12:15Z,
+  the load 22 to 37): `create-serial-oncpu-20261105T113113Z`, `-113219Z`, `-113429Z`, `-113831Z` and
+  `create-serial-offcpu-20261105T114108Z`, `-114457Z`, `-115919Z`, `-121258Z`.
+
+At 32 on 4-31, ms a lifecycle, A then B:
+
+| | A | B |
+|---|---|---|
+| off-CPU on a directory's `i_rwsem` | 0.034 | 0.024 |
+| `/run/hex-node`'s mkdirs and rmdirs a lifecycle, held (ms), waited for (ms) | 1.00 and 1.00, 0.019, 0.004 | none: each shard 0.01 to 0.02 of each, none waited for |
+| the bundle's rootfs mountpoints' `i_rwsem`, waited for | 10.920 (rootfs), 0.391 to 0.587 (usr, proc, dev) | 8.782, 0.298 to 0.528 |
+| lookups that missed the dcache | 18.05 | 20.06 |
+
+- **Lever 3 takes the one parent off the lock table:** `/run/hex-node` (tmpfs inode 57) held exclusively across a
+  mkdir and an rmdir every lifecycle in A, and in B no longer, its 64 shards each taking a 64th of them with no wait.
+  At 32 that's 0.019 ms held and 0.004 waited a lifecycle, less than run 25's 0.043 on a quieter host; it grows with
+  concurrency. The rootfs mountpoints' waits are mount work, which lever 3 doesn't touch. B's 2 more dcache misses a
+  lifecycle are its two stats of a new id's places (its shard, then the root itself), both absent.
+- **The given readings' gap, on 4-15** (`reuse_pass.md` run 20: B 3 to 8% behind in process at the given limit):
+  on-CPU at 1, B 1,298 and 1,359 us a lifecycle against A's 1,496 and 1,684; at 32, B 2,725 and 2,987 against 2,575
+  and 3,180. B makes 428.0 system calls a lifecycle at 1 against A's 425.3 and 426.7, its `statx` 9.0 us: the lever's
+  own cost. Off-CPU at 32, a directory's `i_rwsem` A 0.022 and 0.036, B 0.054 and 0.034; the mount namespace's lock A
+  9.5 and 9.6, B 13.8 and 13.3. That lock is the whole host's (`namespace_sem`), and crun, the same binary in every
+  run, fell as B's Hex did: sustained at 32, Hex A 1,914 and 1,951 a second, B 1,388 and 1,453; crun beside it A 1,105
+  and 1,081, B 758 and 914 (Hex over crun A 1.73 and 1.80, B 1.83 and 1.59). Under the on-CPU probe B's sustained
+  rate was the higher (1,993 and 1,658 against 1,529 and 1,612). So the gap is the host's, not the lever's.
+
 ## What the runs find
 
 - **At concurrency 32 Hex's rate is what `cgroup_mutex` admits, one lock for the whole host.** In run 2, under the
