@@ -50,6 +50,8 @@ pub struct Measured {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mutant {
     None,
+    /// The gray detector off: the grade's verdicts are never acted on.
+    NoDetector,
     /// The ejection cap ignored: every drain ejects.
     NoEjectionCap,
     /// The eviction rate ignored: every dead node's work moves at once.
@@ -75,6 +77,11 @@ fn noise(rng: &mut Rng) -> u64 {
 /// seeded onset one node's work runs `factor_milli` / 1000 times slower. Detected at its `Suspect`,
 /// isolated at its `Drain` taken by the ejector.
 pub fn gray(seed: u64) -> Result<(Measured, u64), FaultError> {
+    gray_with(seed, Mutant::None)
+}
+
+/// [`gray`] with a mutant switched on.
+pub fn gray_with(seed: u64, mutant: Mutant) -> Result<(Measured, u64), FaultError> {
     let mut rng = Rng::new(seed);
     let nodes = rng.range(4, 200);
     let bad = rng.range(0, nodes.saturating_sub(1));
@@ -97,6 +104,9 @@ pub fn gray(seed: u64) -> Result<(Measured, u64), FaultError> {
             }
             changes.clear();
             g.observe(n, at, slowdown, &mut changes)?;
+            if mutant == Mutant::NoDetector {
+                changes.clear();
+            }
             for c in &changes {
                 if c.node != bad || at < onset {
                     m.wrong_verdicts = m.wrong_verdicts.saturating_add(1);

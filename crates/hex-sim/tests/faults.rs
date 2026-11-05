@@ -194,6 +194,17 @@ fn a_correlated_fault_never_passes_the_cap_or_the_rate() {
     assert!(refused > 0);
 }
 
+/// Non-vacuity of F2: with the gray detector off, the same slow nodes are never suspected or drained,
+/// so the bound fails on every seed.
+#[test]
+fn without_the_detector_a_slow_node_is_never_caught() {
+    for seed in 0..100 {
+        let (m, _) = faults::gray_with(seed, Mutant::NoDetector).unwrap();
+        assert_eq!(m.detected_after_ns, None, "seed {seed}");
+        assert_eq!(m.isolated_after_ns, None, "seed {seed}");
+    }
+}
+
 /// Non-vacuity of F6: with the cap or the rate switched off, the same faults break them.
 #[test]
 fn without_the_cap_or_the_rate_a_correlated_fault_breaks_them() {
