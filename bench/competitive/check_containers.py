@@ -2,10 +2,12 @@
 """bench/competitive: a bench run's containers end with it, however it ends (CLAUDE.md sections 2 and 3: a container
 a run leaves running holds CPU and memory past its run, under every later run's timed parts; CP-T7.1's readings).
 
-  1. host.sh's OCI pass in a systemd unit whose ExecStopPost is reap.sh, its unit SIGKILLed mid-pass (as an OOM kill
-     or a full disk's end does): no container of the run is left, and while it ran its container was labelled with
-     the run (hex.bench.run=<unit>).
-  2. The same pass in a unit with no ExecStopPost, stopped (SIGTERM): host.sh's own trap removes its container.
+  1. host.sh's OCI pass in a systemd unit, every process of it SIGKILLed mid-pass (its cgroup.kill, as systemd's
+     SIGKILL and the kernel's OOM kill of a cgroup do): once the unit and its reaper (reap-<unit>) have ended, no
+     container of the run is left, and while it ran its container was labelled with the run (hex.bench.run=<unit>).
+     Not an ExecStopPost: Linux 6.19 SIGKILLs a process cloned into a cgroup that was cgroup.kill'ed (fixed upstream,
+     8e3599202166), and systemd starts ExecStopPost in the unit's cgroup, so after a SIGKILL it never ran.
+  2. The same pass stopped (SIGTERM), with no reaper: host.sh's own trap removes its container.
 
 Each pass is real (docker, the lab image, oci_inside.sh), with a seam_oci that marks its start and then blocks, so
 the unit is ended mid-pass, once the pass's container runs. It needs Linux, docker, a systemd user manager and
@@ -71,7 +73,7 @@ def containers(*filters):
 
 @unittest.skipIf(why_not(), why_not() or "")
 class RunEnd(unittest.TestCase):
-    def pass_in_unit(self, how, stop_post):
+    def pass_in_unit(self, how, reaper):
         base = os.path.join(os.path.expanduser("~/.cache"), "hex-bench-checks")
         os.makedirs(base, exist_ok=True)
         tmp = tempfile.mkdtemp(prefix="containers.", dir=base)
@@ -88,9 +90,9 @@ class RunEnd(unittest.TestCase):
                "PHASES": "oci", "RUNTIMES": " ", "STANDIN": "0", "ROUNDS": "1",
                "CPUSET": str(min(os.sched_getaffinity(0))), "HEX_BENCH": os.path.join(tmp, "base"), "OUT_DIR": out,
                "SEAM_OCI_BIN": os.path.join(tmp, "seam_oci"), "BENCH_MEMORY": "1g", "BENCH_OOM": "1000"}
+        if not reaper:
+            env["HEXBENCH_RUN"] = unit  # a run its caller names starts no reaper of its own: the trap alone
         cmd = ["systemd-run", "--user", "--quiet", f"--unit={unit}", "--collect"]
-        if stop_post:
-            cmd.append(f"--property=ExecStopPost=/usr/bin/bash {HERE}/reap.sh {unit}")
         cmd += [f"--setenv={k}={v}" for k, v in env.items()]
         cmd += ["bash", os.path.join(HERE, "host.sh"), os.path.join(tmp, "hex")]
         started = subprocess.run(cmd, capture_output=True, text=True)
@@ -110,6 +112,7 @@ class RunEnd(unittest.TestCase):
     def clear(self, tmp, unit):
         quiet("systemctl", "--user", "kill", "-s", "SIGKILL", unit)
         quiet("systemctl", "--user", "reset-failed", unit)
+        quiet("systemctl", "--user", "stop", f"reap-{unit}")
         for c in containers(f"label=hex.bench.run={unit}"):
             quiet("docker", "rm", "-f", c)
         # oci_inside.sh writes as root into the run's directory: cleared from a container of this check's own.
@@ -117,25 +120,24 @@ class RunEnd(unittest.TestCase):
               "find", "/t", "-mindepth", "1", "-delete")
         shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_a_sigkilled_units_containers_are_removed_by_its_stop_post(self):
-        # Do: SIGKILL every process of the unit at once mid-pass (its cgroup.kill, as the kernel's OOM kill of a
-        # unit's cgroup does; no trap of host.sh's runs). Expect: its ExecStopPost (reap.sh) leaves no container of
-        # the run, which was labelled with the run while it ran. (systemctl kill would race the ExecStopPost it
-        # starts, SIGKILLing that too.)
-        unit, name, labelled = self.pass_in_unit("kill", stop_post=True)
+    def test_a_sigkilled_units_containers_are_removed_by_its_reaper(self):
+        # Do: SIGKILL every process of the unit at once mid-pass (its cgroup.kill; no trap of host.sh's runs). Expect:
+        # once the unit and its reaper have ended, no container of the run is left, and it was labelled with the run.
+        unit, name, labelled = self.pass_in_unit("kill", reaper=True)
         try:
             cgroup = quiet("systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit).stdout.strip()
             with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
                 f.write("1")
-            until(lambda: self.ended(unit), f"{unit} ending")
+            until(lambda: self.ended(unit) and self.ended(f"reap-{unit}"), f"{unit} and its reaper ending")
             self.assertEqual(containers(f"name=^/{name}$"), [], f"{name} left running after {unit}'s SIGKILL")
         finally:
             quiet("docker", "rm", "-f", name)
         self.assertEqual(len(labelled), 1, f"{name} carried no hex.bench.run={unit} label")
 
     def test_a_stopped_units_containers_are_removed_by_the_scripts_trap(self):
-        # Do: stop the unit mid-pass (SIGTERM), no ExecStopPost. Expect: host.sh's trap leaves no container of it.
-        unit, name, _ = self.pass_in_unit("term", stop_post=False)
+        # Do: stop the unit mid-pass (SIGTERM), its run named so no reaper starts. Expect: host.sh's trap leaves no
+        # container of it.
+        unit, name, _ = self.pass_in_unit("term", reaper=False)
         try:
             quiet("systemctl", "--user", "stop", unit)
             until(lambda: self.ended(unit), f"{unit} ending")
