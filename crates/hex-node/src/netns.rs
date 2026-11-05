@@ -72,9 +72,8 @@ const FDS_A_KEPT: u64 = 2;
 /// The `/proc/net` files a kept namespace may hold besides ([`netcheck::Files`]): `sockstat`, `dev` and the two
 /// iptables files.
 const FILES_A_KEPT: u64 = 4;
-/// A live box's besides its kept namespace's: the supervisor's pidfd of its init, its cgroup's directory and its
-/// init's mount namespace, held past the init's exit (`supervise::HeldMount`).
-const FDS_A_BOX: u64 = 3;
+/// A live box's besides its kept namespace's: the supervisor's pidfd of its init and its cgroup's directory.
+const FDS_A_BOX: u64 = 2;
 /// A seed's: its socket and its pidfd.
 const FDS_A_SEED: u64 = 2;
 /// The most exec seeds a node keeps (`seed::default_budget`'s ceiling).
@@ -95,8 +94,7 @@ fn kept_at_most() -> u64 {
 }
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
-/// kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools; the
-/// mount namespaces waiting for the closer.
+/// kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools.
 fn descriptors_of_the_node() -> u64 {
     let connections = crate::serve::LIMITS.connections;
     [
@@ -106,7 +104,6 @@ fn descriptors_of_the_node() -> u64 {
         of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
         of(hex_core::seeds::SEEDS.get(), FDS_A_SEED),
         EXEC_SEEDS.saturating_mul(FDS_A_SEED),
-        of(crate::supervise::CLOSER_BOUND, 1),
         FDS_BESIDE,
     ]
     .into_iter()

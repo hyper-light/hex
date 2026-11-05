@@ -809,15 +809,6 @@ mod linux {
             }
         }
 
-        /// The `oci` boxes' mount namespaces the node held past their inits, in process; the socket
-        /// carries none.
-        fn mounts(&self) -> Option<hex_node::supervise::MountCounts> {
-            match self {
-                Self::InProcess(node) => Some(node.mounts()),
-                Self::Socket { .. } => None,
-            }
-        }
-
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -1064,7 +1055,6 @@ mod linux {
                 let seeds_before = driver.seeds()?;
                 let reuse_before = driver.reuse();
                 let netns_reuse_before = driver.netns_reuse();
-                let mounts_before = driver.mounts();
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -1092,19 +1082,6 @@ mod linux {
                     (Some(before), Some(after)) => Some(netns_reuse_rise(&before, &after)),
                     _ => None,
                 };
-                // The closer's lag over the phase: its namespaces' mean wait and the most of any since the
-                // node opened.
-                let mounts_rose = match (mounts_before, driver.mounts()) {
-                    (Some(b), Some(a)) => {
-                        let closed = a.closed - b.closed;
-                        Some(json!({"held": a.held - b.held, "unheld": a.unheld - b.unheld,
-                                    "closed": closed, "closed_inline": a.closed_inline - b.closed_inline,
-                                    "lag_us_mean": (a.lag_ns_sum - b.lag_ns_sum) as f64 / 1e3
-                                        / closed.max(1) as f64,
-                                    "lag_us_max_so_far": a.lag_ns_max as f64 / 1e3}))
-                    }
-                    _ => None,
-                };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
                     if let Some(seeds_rose) = seeds_rose {
@@ -1115,9 +1092,6 @@ mod linux {
                     }
                     if let Some(netns_reuse_rose) = netns_reuse_rose {
                         fields.insert("netns_reuse".to_owned(), netns_reuse_rose);
-                    }
-                    if let Some(mounts_rose) = mounts_rose {
-                        fields.insert("mounts".to_owned(), mounts_rose);
                     }
                     if owner.is_some() {
                         fields.insert(

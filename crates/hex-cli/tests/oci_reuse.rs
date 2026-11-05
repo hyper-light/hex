@@ -320,7 +320,6 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
     a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(&lab, own);
     a_node_past_its_files_bound_checks_by_entering_counted(&lab, own);
-    a_deleted_boxs_held_mount_namespace_leaves_its_bundle_and_volumes_free(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -1615,81 +1614,6 @@ fn new_route() -> Vec<u8> {
 }
 
 /// Waits for `cond`, a fact, at most [`PATIENCE`].
-/// Goal 5 extended step 6, the held mount namespace (the lead's conditions, 2026-11-04T09:18Z; T-T7.1.2): a box's
-/// mount namespace is held from its init's watch and let go by the node's closer once the init has ended, so its
-/// teardown isn't on the lifecycle's path, and its delete still leaves nothing a host operation needs. Do: twice,
-/// make a box from a bundle with a root and a volume of its own, delete it, and at once remove the bundle's
-/// directory, its root and the volume's source and make them again at the same paths; then wait for the closer.
-/// Expect: each removal and remaking done, the second create of the same id from the same bundle made; both boxes'
-/// namespaces held and both let go by the closer, none inline.
-fn a_deleted_boxs_held_mount_namespace_leaves_its_bundle_and_volumes_free(lab: &Lab, own: &Path) {
-    let (node, _state) = lab.node(&own.join("hex-mount-hold"));
-    let base = tempfile::Builder::new()
-        .prefix("mount-hold-")
-        .tempdir_in(lab.bundles.path())
-        .unwrap()
-        .keep();
-    let (rootfs, volume, bundle) = (
-        base.join("rootfs"),
-        base.join("volume"),
-        base.join("bundle"),
-    );
-    let make = || {
-        build_rootfs(&rootfs);
-        std::fs::create_dir_all(rootfs.join("data")).unwrap();
-        std::fs::create_dir_all(&volume).unwrap();
-        std::fs::write(volume.join("kept"), b"a box's volume").unwrap();
-        let config = std::fs::read_to_string(lab.bundle(Caps::Docker).join("config.json"))
-            .unwrap()
-            .replace(
-                &format!(r#""path": "{}""#, lab.rootfs.display()),
-                &format!(r#""path": "{}""#, rootfs.display()),
-            )
-            .replace(
-                r#"{"destination": "/tmp", "type": "tmpfs""#,
-                &format!(
-                    r#"{{"destination": "/data", "type": "bind", "source": "{}", "options": ["rbind","rw"]}},
-    {{"destination": "/tmp", "type": "tmpfs""#,
-                    volume.display()
-                ),
-            );
-        std::fs::create_dir_all(&bundle).unwrap();
-        std::fs::write(bundle.join("config.json"), config).unwrap();
-    };
-    let before = node.mounts();
-    for round in 0..2 {
-        make();
-        let id = BoxId::new("mount-hold").unwrap();
-        node.create(BoxSpec {
-            id: id.clone(),
-            bounds: Bounds::default(),
-            class: ClassSpec::Bundle(bundle.clone()),
-            owner: None,
-        })
-        .unwrap_or_else(|e| panic!("round {round}: the same id from the same bundle: {e}"));
-        node.start(&id).unwrap();
-        node.delete(&id).unwrap();
-        for dir in [&bundle, &rootfs, &volume] {
-            std::fs::remove_dir_all(dir).unwrap_or_else(|e| {
-                panic!("round {round}: {} right after delete: {e}", dir.display())
-            });
-        }
-    }
-    make();
-    let held = node.mounts().held - before.held;
-    assert_eq!(held, 2, "both boxes' namespaces held: {:?}", node.mounts());
-    wait_for(
-        || node.mounts().closed - before.closed == held,
-        "the closer letting both go",
-    );
-    assert_eq!(
-        node.mounts().closed_inline,
-        before.closed_inline,
-        "{:?}",
-        node.mounts()
-    );
-}
-
 /// This process's descriptor limit as it was, put back as this drops.
 struct LimitPutBack(rustix::process::Rlimit);
 

@@ -386,11 +386,6 @@ impl Node {
         self.netns.reuse_counts()
     }
 
-    /// The `oci` boxes' mount namespaces the node held past their inits, and how its closer let them go.
-    pub fn mounts(&self) -> crate::supervise::MountCounts {
-        self.supervisor.mounts()
-    }
-
     /// Box `id`'s cgroup: a slot's for a live box given one, else an `oci` box's under the oci boxes'
     /// root, else (a `process` box, or an `oci` box made before its node kept them apart) under the box
     /// root.

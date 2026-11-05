@@ -11,8 +11,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -69,114 +67,6 @@ fn owned() -> Result<MutexGuard<'static, BTreeSet<u32>>, Refusal> {
     OWNED.lock().map_err(poisoned)
 }
 
-/// How many ended inits' mount namespaces may wait for the closer at once ([`Closer`]); past it one is let go where
-/// its init ended, counted. A stated bound, not a tuning: each waits one teardown of a box's few mounts, a grace
-/// period and its superblocks (docs/research/runtime/goal5-cgroup-lock.md, "The box's mount teardown on its exit
-/// path"), so a full queue is a few tens of milliseconds behind.
-pub const CLOSER_BOUND: usize = 64;
-
-/// The mount namespaces the agent held past their inits, as the bench and the tests read them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MountCounts {
-    /// Inits whose mount namespace the agent held from the moment it watched them.
-    pub held: u64,
-    /// Inits whose namespace it didn't hold, the open refused or the namespace the agent's own: their exit tears it
-    /// down as before.
-    pub unheld: u64,
-    /// Namespaces the closer let go.
-    pub closed: u64,
-    /// Namespaces let go where their init ended, the closer's queue full or gone.
-    pub closed_inline: u64,
-    /// The closer's lag, from a namespace's hand-off to its close, summed and at its most, in nanoseconds.
-    pub lag_ns_sum: u64,
-    pub lag_ns_max: u64,
-}
-
-#[derive(Default)]
-struct Closing {
-    held: AtomicU64,
-    unheld: AtomicU64,
-    closed: AtomicU64,
-    closed_inline: AtomicU64,
-    lag_ns_sum: AtomicU64,
-    lag_ns_max: AtomicU64,
-}
-
-/// The thread that lets ended inits' mount namespaces go, off their lifecycles' path: an init's exit tears its mount
-/// namespace down before the agent hears it ended, unmounting under the host's mount lock and waiting out an
-/// expedited grace period (Linux v6.19 kernel/exit.c:970-971 before :983; fs/namespace.c:6031-6039, :1715), unless
-/// another reference holds it. The agent holds one from the init's watch ([`HeldMount`]) and hands it here once the
-/// init has ended, so the teardown runs on this thread. Its queue is bounded ([`CLOSER_BOUND`]); a full one closes
-/// the namespace where it ended, counted, never dropped unseen.
-struct Closer {
-    line: SyncSender<(OwnedFd, Instant)>,
-    counts: Arc<Closing>,
-}
-
-impl Closer {
-    fn start(bound: usize) -> Result<Arc<Self>, Refusal> {
-        let (line, queue) = std::sync::mpsc::sync_channel(bound);
-        let counts = Arc::new(Closing::default());
-        let closing = Arc::clone(&counts);
-        std::thread::Builder::new()
-            .name("hex-mnt-closer".to_owned())
-            .spawn(move || close_all(&queue, &closing))
-            .map_err(|e| Refusal::os("starting the mount namespaces' closer", e))?;
-        Ok(Arc::new(Self { line, counts }))
-    }
-
-    /// Lets `ns` go: to the closer, or here, counted, where its queue is full or it has ended.
-    fn let_go(&self, ns: OwnedFd) {
-        match self.line.try_send((ns, Instant::now())) {
-            Ok(()) => {}
-            Err(TrySendError::Full((ns, _)) | TrySendError::Disconnected((ns, _))) => {
-                drop(ns);
-                self.counts.closed_inline.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-    }
-
-    fn counts(&self) -> MountCounts {
-        let c = &self.counts;
-        MountCounts {
-            held: c.held.load(Ordering::Acquire),
-            unheld: c.unheld.load(Ordering::Acquire),
-            closed: c.closed.load(Ordering::Acquire),
-            closed_inline: c.closed_inline.load(Ordering::Acquire),
-            lag_ns_sum: c.lag_ns_sum.load(Ordering::Acquire),
-            lag_ns_max: c.lag_ns_max.load(Ordering::Acquire),
-        }
-    }
-}
-
-/// The closer's thread: closes each namespace handed to it, timing how long it waited, until every sender is gone.
-fn close_all(queue: &Receiver<(OwnedFd, Instant)>, counts: &Closing) {
-    for (ns, at) in queue {
-        drop(ns);
-        let lag = u64::try_from(at.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        counts.closed.fetch_add(1, Ordering::AcqRel);
-        counts.lag_ns_sum.fetch_add(lag, Ordering::AcqRel);
-        counts.lag_ns_max.fetch_max(lag, Ordering::AcqRel);
-    }
-}
-
-/// An init's mount namespace, held from its watch so its exit doesn't tear the namespace down on the lifecycle's
-/// path, and handed to the [`Closer`] as this drops: after the init has ended, on every path it leaves the
-/// supervisor by. Dropped while the init still runs, it gives up no more than this reference: the init's own holds
-/// the namespace until its exit, which then tears it down as before.
-struct HeldMount {
-    ns: Option<OwnedFd>,
-    closer: Arc<Closer>,
-}
-
-impl Drop for HeldMount {
-    fn drop(&mut self) {
-        if let Some(ns) = self.ns.take() {
-            self.closer.let_go(ns);
-        }
-    }
-}
-
 /// One `oci` box's init, watched through its pidfd.
 struct Init {
     pid: i32,
@@ -188,8 +78,6 @@ struct Init {
     exit: Option<Exit>,
     /// What an exec into the box needs of its container.
     container: Arc<Container>,
-    /// Its mount namespace, held past its exit ([`HeldMount`]).
-    mount: HeldMount,
 }
 
 /// What an exec into an `oci` box needs of its container that holds while its init lives: the bundle
@@ -241,10 +129,6 @@ pub struct Supervisor {
     /// reaped (decision 3); the caller's [`Proc`] usually reaps its program, but a delete beats it, so
     /// the agent reaps what is left and records each exit for the caller to read.
     programs: Mutex<BTreeMap<BoxId, Vec<Program>>>,
-    /// Where watched inits' mount namespaces go once they end.
-    closer: Arc<Closer>,
-    /// The agent's own mount namespace's inode, which an init sharing it isn't held for.
-    own_mount: Option<u64>,
 }
 
 /// An exec'd program the agent may reap on its box's delete: the agent's own duplicate of its pidfd,
@@ -285,10 +169,6 @@ impl Supervisor {
             store,
             fault: Mutex::new(None),
             programs: Mutex::new(BTreeMap::new()),
-            closer: Closer::start(CLOSER_BOUND)?,
-            own_mount: rustix::fs::stat("/proc/self/ns/mnt")
-                .ok()
-                .map(|st| st.st_ino),
         });
         let weak = Arc::downgrade(&supervisor);
         std::thread::Builder::new()
@@ -368,10 +248,6 @@ impl Supervisor {
                 stat.ppid, stat.start_ticks
             )));
         }
-        // Its mount namespace, held so its exit doesn't tear it down before the agent hears it ended
-        // ([`Closer`]): opened by the pid just checked as the agent's own unreaped child, which no later
-        // process can take.
-        let mount = self.hold_mount(pid);
         let mut inits = self.inits()?;
         let token = inits.next_token;
         inits.next_token = token
@@ -394,39 +270,11 @@ impl Supervisor {
                 pidfd: Some(pidfd),
                 exit: None,
                 container: Arc::new(container),
-                mount,
             },
         );
         inits.reserved = inits.reserved.saturating_sub(1);
         slot.held = false;
         Ok(())
-    }
-
-    /// Init `pid`'s mount namespace, held ([`HeldMount`]): none where the open is refused or the namespace is the
-    /// agent's own (an init that made none has nothing to move off its path), each counted.
-    fn hold_mount(&self, pid: i32) -> HeldMount {
-        let ns = rustix::fs::open(
-            format!("/proc/{pid}/ns/mnt"),
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .ok()
-        .filter(|ns| rustix::fs::fstat(ns).ok().map(|st| st.st_ino) != self.own_mount);
-        let counted = if ns.is_some() {
-            &self.closer.counts.held
-        } else {
-            &self.closer.counts.unheld
-        };
-        counted.fetch_add(1, Ordering::AcqRel);
-        HeldMount {
-            ns,
-            closer: Arc::clone(&self.closer),
-        }
-    }
-
-    /// The mount namespaces held past their inits, and how the closer has let them go.
-    pub fn mounts(&self) -> MountCounts {
-        self.closer.counts()
     }
 
     /// Box `id`'s init, if it is watched and runs: not yet reaped, and its pidfd not readable, as it is
@@ -479,13 +327,11 @@ impl Supervisor {
             epoll::delete(self.epoll.as_fd(), fd.as_fd())
                 .map_err(|e| Refusal::os("unwatching a deleted box's init", e))?;
         }
-        // Still owned while its pidfd is held: the delete reaps it ([`reap`]), which disowns it. Its mount
-        // namespace goes with it, let go as the delete drops it, once the init has ended.
+        // Still owned while its pidfd is held: the delete reaps it ([`reap`]), which disowns it.
         Ok(Some(Forgotten {
             pid: init.pid,
             pidfd,
             pid_namespace: init.container.pid_namespace,
-            _mount: init.mount,
         }))
     }
 
@@ -949,8 +795,6 @@ pub struct Forgotten {
     pidfd: Option<OwnedFd>,
     /// Whether ending it ends a pid namespace of its own ([`Container::pid_namespace`]).
     pub pid_namespace: bool,
-    /// Its mount namespace, handed to the closer as this drops ([`HeldMount`]).
-    _mount: HeldMount,
 }
 
 impl Forgotten {
@@ -1182,84 +1026,5 @@ mod tests {
             stat.ppid,
             rustix::process::getppid().unwrap().as_raw_nonzero().get()
         );
-    }
-
-    /// A pipe's read end, and its write end standing in for a mount namespace: the read end's end-of-file says the
-    /// stand-in was closed, whichever thread closed it.
-    fn stand_in() -> (OwnedFd, OwnedFd) {
-        rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap()
-    }
-
-    fn closed(read: &OwnedFd) -> bool {
-        let mut byte = [0u8; 1];
-        let mut fds = [PollFd::new(read, PollFlags::IN)];
-        rustix::event::poll(
-            &mut fds,
-            Some(&Timespec {
-                tv_sec: 10,
-                tv_nsec: 0,
-            }),
-        )
-        .unwrap();
-        rustix::io::read(read, &mut byte).unwrap() == 0
-    }
-
-    /// The lead's conditions for the held mount namespaces (2026-11-04T09:18Z; CLAUDE.md §2, §3): a namespace
-    /// handed to the closer is closed there, its lag timed. Do: hand the closer three stand-ins. Expect: each closed,
-    /// three counted closed, none inline, a lag recorded for them.
-    #[test]
-    fn a_namespace_handed_to_the_closer_is_closed_there_and_its_lag_timed() {
-        let closer = Closer::start(CLOSER_BOUND).unwrap();
-        let ends: Vec<OwnedFd> = (0..3)
-            .map(|_| {
-                let (read, write) = stand_in();
-                closer.let_go(write);
-                read
-            })
-            .collect();
-        for read in &ends {
-            assert!(closed(read), "the closer closed it");
-        }
-        let start = Instant::now();
-        while closer.counts().closed < 3 && start.elapsed() < Duration::from_secs(10) {
-            std::thread::yield_now();
-        }
-        let counts = closer.counts();
-        assert_eq!((counts.closed, counts.closed_inline), (3, 0), "{counts:?}");
-        assert!(counts.lag_ns_max <= counts.lag_ns_sum, "{counts:?}");
-    }
-
-    /// The closer's bound (CLAUDE.md §2, §3): its queue full, a namespace is closed where it ended, counted, never
-    /// dropped unseen. Do: a closer whose one-place queue nothing drains; hand it two stand-ins, then drain it.
-    /// Expect: the first waits in the queue, open; the second closed at once and counted inline; the first closed
-    /// when drained.
-    #[test]
-    fn a_full_closer_closes_where_it_ended_counted() {
-        let (line, queue) = std::sync::mpsc::sync_channel(1);
-        let closer = Closer {
-            line,
-            counts: Arc::new(Closing::default()),
-        };
-        let (first_read, first) = stand_in();
-        let (second_read, second) = stand_in();
-        closer.let_go(first);
-        closer.let_go(second);
-        assert!(closed(&second_read), "closed where it ended");
-        assert_eq!(closer.counts().closed_inline, 1);
-        let mut fds = [PollFd::new(&first_read, PollFlags::IN)];
-        assert_eq!(
-            rustix::event::poll(
-                &mut fds,
-                Some(&Timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0
-                })
-            )
-            .unwrap(),
-            0,
-            "the first still waits in the queue, open"
-        );
-        drop(queue.recv().unwrap());
-        assert!(closed(&first_read));
     }
 }
