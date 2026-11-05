@@ -207,6 +207,64 @@ filter fail the test.
 **What would falsify it.** A run whose replay counts a violation. A session refused everywhere while
 some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that.
 
+### H12. A modelled WAN, and hyper-swim's own coordinates learned over it
+
+**The choice.** `wan` models a WAN of eight regions whose round trips are Azure's published P50s
+between them (the larger of each pair's two directions), three zones a region with a term between two
+zones drawn below Azure's stated bound of about 2 ms, and an access height per node (25-250 µs,
+modelled). A probe sees the true round trip stretched by up to 10%. Every node runs hyper-swim's
+Vivaldi engine (`vivaldi`), probing 8 peers drawn from the whole membership a round, 64 rounds. The
+engine is hyper-swim's `coordinates.rs` copied whole, its tests with it, at hyper-raft 6a236ae: Hex
+reaches another product only through its `-api` crate (CLAUDE.md §9), hyper-raft has none, and a model
+of the engine would measure the model, not what Hex's nodes will carry. When hyper-raft publishes the
+engine behind a seam Hex can take, hex-sim drives that and the copy goes.
+
+**Sources.** Dabek, Cox, Kaashoek and Morris, *Vivaldi*, SIGCOMM 2004 (`PF[1]`); Ledlie, Gardner and
+Seltzer, *Network Coordinates in the Wild*, NSDI 2007 (`PF[2]`: real latencies violate the triangle
+inequality, which Azure's table also does in a few triples); hyper-swim (`PF[3][6]`); "Azure network
+round-trip latency statistics" (learn.microsoft.com/azure/networking/azure-network-latency, 2026-07-30:
+monthly P50s of backbone probes taken each minute); "What are Azure availability zones?",
+Inter-zone networking. Kiln research `01a1a9977b2273d0860ac510b8aa0a69`.
+
+**Evidence.** `wan::a_seed_names_one_set_of_coordinates`: one seed, the same coordinates bit for bit;
+another seed, others. `wan::coordinates_learn_the_wan`: on 1,000 nodes the median relative error over
+20,000 pairs is at most 25% and a node's own region is predicted nearer than another's in at least 95%
+of trials; `unconverged_coordinates_fail_the_same_measure` shows the measure fails coordinates that
+learned nothing. hyper-swim's own six tests pass on the copy.
+
+**What would falsify it.** hyper-swim's coordinates measured on a real WAN (the open gap `PF[6]`)
+predicting worse than they do here: then the model's jitter and heights are too kind, and hex-sim's
+proximity numbers (H13) are an upper bound until they are refit to the measurement.
+
+### H13. Proximity is measured against blind placement on the fast path's own sample
+
+**The choice.** `proximity` runs arrivals and completions over the fit index in virtual time. A
+workload talks to a home node, making its round trips to it in sequence, each after a step of compute,
+so it runs `round_trips × (step + true RTT)`; round trips are log-normal through TraceLab's p50 25 and
+p99 1,438 tool calls a session. Four policies choose from the same sampled window
+(`FitIndex::sampled_fit`): blind best fit; proximity, the least predicted RTT read as an upper bound
+`rtt × (1 + 2·mean error)` (Hyperscale's `K_SIGMA = 2` on a coordinate's error), best fit breaking
+ties, a soft score that never removes a candidate; proximity only among best fit's ties; and an oracle
+on the true RTT. Goodput is the workloads finished by the last arrival, per second; the tail is the
+p99 of arrival-to-end over every workload.
+
+**Sources.** Scheduler design S1 (goodput, not balance) and S4 (proximity a soft score, its falsifier);
+`agentic-workloads.md` §1 (TraceLab's tool calls a session, AW[5]; tool calls 30-85% of request latency,
+AW[34]); `proximity-and-failure-containment.md` §1.5 (Hyperscale's `rtt_ucb`, PF[33]). Kiln research
+`01a1a9977b2273d0860ac510b8aa0a69`.
+
+**Evidence.** `bench/sched/proximity.md`: on 60 studies of 1,000 nodes and 20,000 workloads (5 seeds,
+uniform and skewed homes, 50% and 90% load, 10 ms, 100 ms and 1 s steps), proximity raises goodput by
+0.9-18.6% and cuts the p99 by 5.7-93.7% against blind on every one, within 1% of the oracle's goodput.
+`proximity_beats_blind_on_every_seed` asserts the direction on 20 smaller studies, and fails with the
+proximity term scored as zero (mutant `no-proximity-term`). `every_policy_runs_every_job_deterministically`,
+`proximity_changes_decisions` and `the_oracle_bounds_the_coordinates` check the study itself.
+
+**What would falsify it.** A recorded kiln workload (G2 step 3's) whose sessions' round trips don't go
+to one place, or whose compute between them dwarfs the RTT: the gain falls toward the 1 s rows' (about
+1-2% goodput). A real WAN on which hyper-swim's error is far above 10% (H12). Bandwidth, unmodelled
+here, is A2's open gap.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue
@@ -221,7 +279,8 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 ## What it doesn't do yet
 
 Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
-loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
+loss, the agent-specific faults; goal 5), inter-node latency inside the control-plane loop `sim` (H12-H13
+measure proximity in a study of their own), provider
 quotas (A3), priorities and fair share (goal 4), sharded control planes, cells and regions (goals 6-7),
 heap accounting per workload (`AC-T7.11.4`; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`

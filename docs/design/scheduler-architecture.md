@@ -167,6 +167,12 @@ gap PF[6][7][34]). So this decision's benefit is **unproven until hex-sim measur
 models inter-node latency and the scheduler's proximity term, and reports the goodput and tail it buys,
 against placement that ignores proximity.
 
+**Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H12-H13).** On a modelled WAN of Azure's eight
+regions, hyper-swim's coordinates learned to a 9-10% median error, and proximity-scored placement beat
+proximity-blind best fit on all 60 studies: goodput +0.9% to +18.6%, p99 completion time 5.7% to 93.7%
+lower, the gain largest where round trips dominate a workload's steps. The falsifier below was not met,
+so proximity stays a soft score.
+
 **What would falsify it.** Proximity-aware placement not improving goodput or the latency tail over
 proximity-blind placement in hex-sim on a modelled WAN — in which case proximity drops to a tie-breaker.
 Or hyper-swim's coordinates proving too inaccurate on a real WAN (the open gap), in which case the score
@@ -293,8 +299,9 @@ measures its own rather than citing one:
   the p99; the p99.9 and max are recorded beside it).
 - **A2. Network proximity's benefit is unmeasured, and bandwidth has no model** (finding 9, S4):
   neither Consul nor Hyperscale reports how much latency-aware placement improves outcomes, and
-  hyper-swim's WAN accuracy is unknown; hex-sim measures the latency term's benefit, and until then
-  proximity can only help the ranking (S4). Bandwidth-aware placement is a further gap — Vivaldi models
+  hyper-swim's WAN accuracy is unknown; hex-sim measured the latency term's benefit on a modelled WAN
+  (G3, `bench/sched/proximity.md`: goodput +0.9-18.6%, p99 5.7-93.7% lower than blind on every
+  study), so it stays a soft score (S4); its accuracy on a real WAN remains open. Bandwidth-aware placement is a further gap — Vivaldi models
   latency only (`proximity-and-failure-containment.md` §1.6, PF[1][2]), so the objective's bandwidth
   term must come from topology and measured transfers, which no source read here evaluates; hex-sim
   models it and the design leaves it a soft score until measured.

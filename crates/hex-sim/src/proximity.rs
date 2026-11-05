@@ -565,6 +565,29 @@ mod tests {
         }
     }
 
+    /// S4, A2 (G3 step 3): do run blind and proximity-scored placement on five seeds, homes uniform
+    /// and skewed, at 50% and 90% load; expect proximity's goodput higher and its p99 completion time
+    /// lower on every one, the direction `bench/sched/proximity.md` records at full size. Mutant
+    /// `no-proximity-term` (proximity scored as 0) fails it.
+    #[test]
+    fn proximity_beats_blind_on_every_seed() {
+        for seed in 1..=5 {
+            for homes in [Homes::Uniform, Homes::Skewed] {
+                for load in [500, 900] {
+                    let study = Study::generate(&small(seed, load, homes)).unwrap();
+                    let blind = study.run(Policy::Blind).unwrap();
+                    let near = study.run(Policy::Proximity).unwrap();
+                    let at = format!("seed {seed} {homes:?} load {load}");
+                    assert!(near.goodput_per_s() > blind.goodput_per_s(), "{at}");
+                    assert!(
+                        near.completion.unwrap().p99 < blind.completion.unwrap().p99,
+                        "{at}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn hostile_configurations_are_refused() {
         for bad in [
