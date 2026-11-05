@@ -147,3 +147,79 @@ one after a quiet spell pays a whole grace period.
 
 With reuse off, the slowest 1%'s body is the kernel's teardown of Hex's own earlier boxes on the CPUs their successors
 run on: their cgroups' destroy work and their network namespaces' exit.
+
+## Runs 3 and 4 (2026-11-05, fedora): the holder named, not of record
+
+Same binaries, CPUs and lock as runs 1 and 2, N=10,000, 1 round each, no event dropped.
+- Run 3 (tail2): the probe at fe078ed adds every task's `cgroup_attach_task`, `cgroup_mkdir`, `cgroup_rmdir` and
+  `cgroup_release`.
+- Run 4 (tail3): it adds those events' kernel stacks, and kprobes on `rcu_sync_enter`'s entry and return. That is the
+  grace-period wait `percpu_down_write` makes (`kernel/locking/percpu-rwsem.c:235`, Linux v6.19).
+
+| run | reuse | create p50 / p99 / p99.9 / max (ms) | the slowest creates' wait on `cgroup_mutex` | released by, after its | its `rcu_sync_enter` |
+|---|---|---|---|---|---|
+| create-tail-20261105T045112Z | on | 0.460 / 0.742 / 1.187 / 18.968 | 18.345 and 8.340 ms, in `cgroup_css_set_fork` (the init's clone) | a co-tenant's `bash` and `podman`, each after its `cgroup_attach_task` | not traced in run 3 |
+| create-tail-20261105T045933Z | on | 0.559 / 0.819 / 1.127 / 10.532 | 9.794 ms, in `cgroup_css_set_fork` | `runc`, `cgroup_attach_task` < `__cgroup_procs_write` < `cgroup_procs_write` < `kernfs_fop_write_iter` < `vfs_write` | 10.238 ms |
+| create-tail-20261105T050316Z | off | 1.866 / 4.477 / 12.142 / 32.297 | 17.840, 11.613 and 7.808 ms, in the cgroup's `mkdir` | `runc`, `podman`, `runc`, each in `__cgroup_procs_write` | 18.005, 11.609 and 8.088 ms |
+
+Each holder wrote a task's pid to a `cgroup.procs` file: a migration. Its `rcu_sync_enter`, inside `cgroup_mutex`,
+waited out a grace period as long as the create's wait, to within half a millisecond. So the mode is a migration
+anywhere on the host, holding the lock that a create's `CLONE_INTO_CGROUP` clone, or its `mkdir`, needs.
+
+With that mode aside, run 4's reuse-on creates had a p99.9 of 1.127 ms. In run 4's reuse-off run (load 28 to 33), the
+slowest create, 32.3 ms, waited 29.8 ms as a new init before its first run, and the next, 17.5 ms, waited 17.5 ms
+woken and not yet run: the run queue of a loaded host.
+
+## The parked init, A/B against 60b2e38 (2026-11-05, fedora), not of record
+
+host.sh's OCI pass, lifecycle and start_true, 2 rounds of 10,000 after 100, best of 2, interleaved in unit
+hex-g5tail-abf-20261105T093459Z:
+- A is 60b2e38's binaries (hex sha256 5c2fc732d92a41ee, seam_oci decb8a6e69dc67e4).
+- B is this branch's working tree (hex sha256 87376c7d72da8737, static-pie, seam_oci 763bbad09e2ddd15): the init made
+  ahead in the handed-on idle slot (reuse on) and in up to 8 cgroups made ahead for boxes of no owner (reuse off,
+  `HEXBENCH_AHEAD` unset).
+- Setup: CPUs 4-15 under the shared lock, noisy, containers at 8 GB and oom-score-adj 1000. Loads were 13 to 59, with
+  kiln's CI burst pools and another agent's VM lab up beside them.
+
+Figures are Hex through the seam in process, against libcrun in process in the same pass, in ms.
+
+| run | side, reuse | load start, end | create p50 / p99.9 / max | create+start p50 / p99.9 / max | libcrun create / create+start p99.9 | p99.9 ratios | delete p50 / p99.9 / max |
+|---|---|---|---|---|---|---|---|
+| out/20261105T100043Z | A, on | 58.32, 41.09 | 0.41 / 0.88 / 15.35 | 0.40 / 0.97 / 19.54 | 6.84 / 7.59 | 0.129x, 0.128x | 0.17 / 1.28 / 1.99 |
+| out/20261105T101419Z | B, on | 53.66, 36.23 | 0.41 / 1.56 / 3.68 | 0.37 / 0.85 / 1.79 | 7.60 / 11.32 | 0.205x, 0.075x | 0.34 / 9.56 / 16.66 |
+| out/20261105T102802Z | A, off | 58.95, 39.56 | 0.57 / 17.75 / 52.81 | 0.56 / 4.94 / 21.99 | 7.43 / 8.47 | 2.389x, 0.583x | 0.24 / 12.64 / 112.01 |
+| out/20261105T104307Z | B, off | 49.53, 22.80 | 0.39 / 2.71 / 3.81 | 0.38 / 3.75 / 5.52 | 8.03 / 11.65 | 0.337x, 0.322x | 0.23 / 3.08 / 21.24 |
+| out/20261105T105705Z | B, on | 46.47, 23.18 | 0.34 / 1.40 / 2.84 | 0.34 / 1.12 / 3.87 | 9.98 / 7.56 | 0.140x, 0.148x | 0.33 / 3.62 / 85.34 |
+| out/20261105T111043Z | A, on | 45.06, 13.08 | 0.40 / 0.92 / 59.89 | 0.37 / 1.08 / 76.20 | 6.84 / 7.62 | 0.135x, 0.142x | 0.18 / 1.36 / 2.05 |
+
+The counts B wrote in every round:
+- Reuse on: 10,100 inits parked and 10,099 claimed in the lifecycle phase, 10,100 of 10,100 in start_true; none
+  failed or ended unclaimed.
+- Reuse off: 10,107 made ahead and 10,099 taken; 1 create found none ready (the first); 10,096 to 10,099 claimed.
+- What a park charged its cgroup, summed over a round: reuse on, 235-270 MB for 10,100, about 24.7 KB an init; reuse
+  off, 2.64 GB for 10,100 to 10,107, about 262 KB an init in a fresh cgroup.
+
+What it shows:
+- **The 10-20 ms mode is off create's path in process.** B's create max in process is 2.84-3.81 ms in every pass;
+  A's is 15.35-59.89. Over the socket, B's max is 3.27-4.68 ms in three passes and 52.54 in the reuse-off one, which
+  this run doesn't cut; A's is 22.50-126.18. The socket's node (`hex node`) keeps no cgroups ahead (the bound is 0
+  unless set), so its reuse-off column is the old path. The stall moved to the delete, which now clones the next init. B's delete p50 is 0.33
+  to 0.34 against A's 0.17 to 0.18, and its max reached 85.34 ms.
+- **Reuse on meets the bar in all four passes, A's as well.** The mode stayed under 0.1% of A's rounds this time, so it
+  set A's max, not its p99.9. B's create p99.9 (1.40 and 1.56) is above A's (0.88 and 0.92): see run 5.
+- **Reuse off is a large gain that still misses.** Create p99.9 17.75 → 2.71 ms and p50 0.57 → 0.39. Against libcrun,
+  0.337x for create and 0.322x for create+start, above the 0.25x bar.
+
+## Run 5 (2026-11-05, fedora): B, reuse on, create-tail-20261105T112335Z, not of record
+
+B's binaries, N=10,000, load 35.16 at start, no event dropped. Creates: p50 0.386, p90 0.483, p99 0.638, p99.9 1.228,
+max 3.816 ms. Every create claimed its parked init, and no create waited on `cgroup_mutex`: no `cgroup_css_set_fork`
+and no `cgroup_mkdir` is on any create's path.
+
+What the slowest 0.1% add over the middle band:
+- RCU callbacks run in softirq on the create's CPU, +0.866 ms;
+- longer runs of the init (+0.535) and the node (+0.315);
+- a preemption by an IO completion kworker (+0.135).
+
+That is finding 2's class: the kernel's work for earlier boxes, now including the delete's park clone, on the CPUs the
+next create runs on.
