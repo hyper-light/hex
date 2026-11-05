@@ -17,6 +17,7 @@ use hex_sim::fair::{self, Policy};
 use hex_sim::generate::{self, Day, Repo};
 use hex_sim::model::Resources;
 use hex_sim::sim::{self, Config};
+use hex_sim::spec;
 
 const GIB: u64 = 1 << 30;
 const HOUR: u64 = 3_600_000_000_000;
@@ -94,4 +95,64 @@ fn four_equal_weight_repositories_each_hold_a_quarter_under_contention() {
         worst[1] > 5_000,
         "FIFO met the bar too: the test can't fail"
     );
+}
+
+/// AC-T7.5.1 (matrix jobs admitted whole), G4 step 3, over a generated day: do the contended day of
+/// AC-T7.5.2 with a tenth of its legs made matrix gangs of 2 to 12 (most needing more than one node,
+/// and arriving while every node is busy, among single legs); expect no write to leave a gang part
+/// placed (check_gangs' partial = 0), every gang placed in one write, nothing lost or started
+/// twice, and (non-vacuity) hundreds of gangs that spanned nodes and waited for capacity placed.
+#[test]
+fn matrix_gangs_on_a_contended_day_are_placed_whole() {
+    let day = generate::gangs(generate::day(4, &four_repos()).unwrap(), 4, 100, 12);
+    let run = sim::run(
+        &day,
+        &Config {
+            workers: 4,
+            max_events: 1 << 22,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let end = spec::check_end(&day, &run);
+    assert_eq!(end.lost_or_double(), 0, "{end:?}");
+    assert_eq!(
+        end.complete + end.refused,
+        day.workloads.len() as u64,
+        "{end:?}"
+    );
+    let gangs = spec::check_gangs(&run);
+    assert_eq!(gangs.partial, 0, "{gangs:?}");
+    assert_eq!(gangs.placed, run.report.gangs);
+    let node = day.nodes.first().unwrap().capacity;
+    let index: std::collections::BTreeMap<_, _> = day
+        .workloads
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.id, i))
+        .collect();
+    let mut spanned_and_waited = 0u64;
+    for members in run.gangs.values() {
+        let mut need = Resources::default();
+        let mut waited = false;
+        for m in members {
+            let at = index[m];
+            let w = &day.workloads[at];
+            need = need.checked_add(&w.need).unwrap();
+            if let Some(r) = run.ran[at] {
+                waited |= r.started - w.arrives > 60_000_000_000;
+            }
+        }
+        spanned_and_waited += u64::from(!node.holds(&need) && waited);
+    }
+    eprintln!(
+        "AC-T7.5.1 day: legs {} gangs {} placed {} partial {} spanned_and_waited {} refused {}",
+        day.workloads.len(),
+        run.gangs.len(),
+        gangs.placed,
+        gangs.partial,
+        spanned_and_waited,
+        end.refused
+    );
+    assert!(spanned_and_waited > 200, "only {spanned_and_waited}");
 }

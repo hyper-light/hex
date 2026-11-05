@@ -80,3 +80,33 @@ largest share took every core that freed while the larger legs of the smallest s
 day (idle capacity while the first queue waits); then the falsifier is a reservation for the first
 queue's head (Borg-style) with backfill elsewhere, measured against the same bar. GPU work is the case to
 watch: a GPU leg at the lowest share holds CPU-only work back too.
+
+### F3. A gang is placed in one store write, all members or none
+
+**The choice.** A gang (a matrix job's legs) is submitted member by member but placed whole: the
+committer decides it when its first member's turn comes in its queue and every member is pending,
+choosing each member's node in order on the view, each taking its room before the next is sought
+(`sim::fit_whole`), and commits every member in one store write (`Store::apply_gang`), which applies
+all of them or none and is one write to the nemesis. A gang the empty cluster can't hold whole is
+refused at admission, with a typed refusal, not queued forever. A gang's last member arriving sends
+back a commit in flight in its own queue, since the gang may now hold ahead of it. The specification
+accepts a gang's placements only as one write, whole, at its first member's place in its queue.
+
+**Sources.** Kueue admits a workload's pods all or nothing ([KueueAoN]); Borg's and the scheduler
+research's gang placement (PA, CM) is the same rule: partial placement of a job that needs all its
+members wastes the capacity it holds and can deadlock two half-placed gangs.
+
+**Evidence.** `AC-T7.5.1`: `check_gangs` counts every write after which a gang has members placed
+and members not. Zero over: the crash sweep with gangs (`tests/sim.rs`
+`a_crash_at_every_control_plane_write_loses_and_doubles_nothing`, a crash before and after every
+write, gang writes included); 500 generated clusters with gangs of 2 to 8 among singles
+(`gangs_are_placed_whole_on_generated_clusters`, every log checked by the specification); and the
+contended day of F1 with a tenth of its legs in gangs of 2 to 12 (`tests/fair.rs`
+`matrix_gangs_on_a_contended_day_are_placed_whole`: 4,393 gangs placed, 1,214 of them needing more
+than one node and waiting over a minute for capacity, partial 0). The mutant committing members one by
+one is refused by the specification and counted (`the_oracle_refuses_a_gang_placed_member_by_member`).
+Measured 2026-11-05 on jupiter (Windows x86_64, release).
+
+**What would falsify it.** A write after which a gang is part placed, in any run; or gangs waiting
+behind singles so long that a recorded day's matrix jobs start later than their legs would one by
+one, which would call for a reservation for the gang at the head of its queue.

@@ -346,6 +346,9 @@ fn crash_sweep(cluster: &Cluster) {
     };
     let clean = sim::run(&cluster, &base).unwrap();
     assert_eq!(clean.report.crashes, 0);
+    // Non-vacuity: where the cluster has gangs, the sweep crashes around gang writes.
+    let has_gangs = cluster.workloads.iter().any(|w| w.tenancy.gang.is_some());
+    assert!(!has_gangs || clean.report.gangs > 0, "no gang placed");
     let writes = clean.report.writes;
     // A submit and a completion each, and a placement write per single or per gang.
     assert!(
