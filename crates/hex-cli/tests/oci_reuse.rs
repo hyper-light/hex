@@ -318,6 +318,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
     an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(&lab, own);
     a_parked_init_made_with_other_namespaces_is_ended_and_counted(&lab, own);
+    parked_procs_stop_at_their_bound_and_none_drops_inline(&lab, own);
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
@@ -757,7 +758,7 @@ fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
 /// takes the proc made for that init at A's delete, counted a hit (decision 8, parked procs).
 fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, own: &Path) {
     let (node, _state) = lab.node(&own.join("hex-reuse-parked"));
-    let node = node.with_parked_procs(true);
+    let node = node.with_parked_procs(true).unwrap();
     let o = BoxOwner::named("owner-p").unwrap();
     let a = BoxId::new("pa").unwrap();
     node.create(lab.oci("pa", Some(&o), Caps::Docker, Bounds::default()))
@@ -902,6 +903,65 @@ fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own:
     eprintln!("parked init made with other namespaces: ended, counted");
 }
 
+/// Decision 8, parked procs (AC-T7.1.3; the lead's 15:57Z): at most a bound of procs alive at once, held with parked
+/// inits or waiting for the dropper, whose queue holds as many, so a tree handed to it never finds it full. Root
+/// only. Do: on a node bounded at 2, four owners each create and delete a box, so four inits park. Expect 2 procs made
+/// and 2 parks capped, 2 alive. Then release the idle cgroups: expect the 2 trees queued to the dropper and dropped
+/// there, none inline, none alive. Then a fifth owner's delete: its proc made, the bound free again.
+fn parked_procs_stop_at_their_bound_and_none_drops_inline(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let (node, _state) = lab.node(&own.join("hex-reuse-procbound"));
+    let node = node.with_parked_procs_bound(2).unwrap();
+    let cycle = |owner: &str, id: &str| {
+        let o = BoxOwner::named(owner).unwrap();
+        node.create(lab.oci(id, Some(&o), Caps::Docker, Bounds::default()))
+            .unwrap();
+        node.delete(&BoxId::new(id).unwrap()).unwrap();
+    };
+    for n in 1..=4 {
+        cycle(&format!("owner-b{n}"), &format!("pb{n}"));
+    }
+    let full = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (
+            full.parked,
+            full.procs_made,
+            full.procs_capped,
+            full.procs_alive,
+            full.procs_held
+        ),
+        (4, 2, 2, 2, 2),
+        "two procs at the bound, two parks capped: {full:?}"
+    );
+    node.release_idle().unwrap();
+    wait_for(
+        || node.cgroup_reuse().unwrap().parked.procs_dropped == 2,
+        "the two trees dropped by the dropper",
+    );
+    let drained = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (
+            drained.procs_queued,
+            drained.procs_dropped_inline,
+            drained.procs_alive,
+            drained.procs_held
+        ),
+        (2, 0, 0, 0),
+        "at the bound, every tree went to the dropper, none inline: {drained:?}"
+    );
+    cycle("owner-b5", "pb5");
+    let again = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (again.procs_made, again.procs_capped, again.procs_alive),
+        (3, 2, 1),
+        "the bound free again: {again:?}"
+    );
+    node.release_idle().unwrap();
+    eprintln!("parked procs at their bound: 2 made, 2 capped, none dropped inline");
+}
+
 /// Each slot cgroup under `root` that holds a process, with its processes.
 fn populated_slots(root: &Path) -> Vec<(PathBuf, Vec<u32>)> {
     let mut out: Vec<(PathBuf, Vec<u32>)> = std::fs::read_dir(root)
@@ -1006,6 +1066,7 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
             .expect("open a node")
             .with_oci_helper(PathBuf::from(&lab.exe))
             .with_parked_procs(true)
+            .unwrap()
     };
     let node = open();
     let o = BoxOwner::named("owner-r").unwrap();
