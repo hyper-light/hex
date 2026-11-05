@@ -96,6 +96,8 @@ pub enum Seen {
     Ok(bool),
     Signalled(bool),
     StillRunning,
+    /// A step on a program whose exec was refused.
+    NeverStarted,
     Out(String),
     Listed(bool),
     Killed(bool),
@@ -298,7 +300,8 @@ struct Play<'a> {
     fx: &'a dyn Fixture,
     scenario: &'static str,
     patience: Duration,
-    started: Vec<Started>,
+    /// Each program the scenario exec'd, in order; `None` where the exec was refused.
+    started: Vec<Option<Started>>,
 }
 
 /// Plays `s` and returns what each step showed. With `want`, a step that reads a box reads again
@@ -368,10 +371,12 @@ impl Play<'_> {
         Ok(ids)
     }
 
-    fn started(&mut self, p: usize) -> Result<&mut Started, String> {
+    /// Program `p`, `None` where its exec was refused.
+    fn started(&mut self, p: usize) -> Result<Option<&mut Started>, String> {
         self.started
             .get_mut(p)
-            .ok_or_else(|| format!("program {p} was never started"))
+            .map(Option::as_mut)
+            .ok_or_else(|| format!("the scenario execs no program {p}"))
     }
 
     fn step(&mut self, step: &Step, want: Option<&Seen>) -> Result<Seen, String> {
@@ -402,18 +407,23 @@ impl Play<'_> {
                     Ok(proc) => {
                         // A program that reads no stdin gets its end at once.
                         let stdin = if *act == Act::Echo { Some(in_w) } else { None };
-                        self.started.push(Started {
+                        self.started.push(Some(Started {
                             proc,
                             stdin,
                             stdout: Some(out_r),
-                        });
+                        }));
                         Seen::Done
                     }
-                    Err(e) => Seen::Refused(kind(&e)),
+                    Err(e) => {
+                        self.started.push(None);
+                        Seen::Refused(kind(&e))
+                    }
                 }
             }
             Step::Feed(p, words) => {
-                let s = self.started(*p)?;
+                let Some(s) = self.started(*p)? else {
+                    return Ok(Seen::NeverStarted);
+                };
                 let mut w = s
                     .stdin
                     .take()
@@ -423,7 +433,9 @@ impl Play<'_> {
                 Seen::Done
             }
             Step::Wait(p, end) => {
-                let s = self.started(*p)?;
+                let Some(s) = self.started(*p)? else {
+                    return Ok(Seen::NeverStarted);
+                };
                 match s.proc.wait_for(patience).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
                     Some(exit) => match end {
@@ -434,7 +446,9 @@ impl Play<'_> {
                 }
             }
             Step::Read(p) => {
-                let s = self.started(*p)?;
+                let Some(s) = self.started(*p)? else {
+                    return Ok(Seen::NeverStarted);
+                };
                 let mut r = s
                     .stdout
                     .take()
@@ -445,7 +459,9 @@ impl Play<'_> {
                 Seen::Out(out)
             }
             Step::Running(p) => {
-                let s = self.started(*p)?;
+                let Some(s) = self.started(*p)? else {
+                    return Ok(Seen::NeverStarted);
+                };
                 match s.proc.wait_for(STILL_RUNNING).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
                     Some(exit) => Seen::Exit(exit),
@@ -529,6 +545,7 @@ mod tests {
     struct Liar {
         sim: SimRuntime,
         lie: Lie,
+        ran: std::sync::Mutex<Vec<BoxId>>,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -539,6 +556,8 @@ mod tests {
         KeepsDeleted,
         /// Inspect reports a box as running for good once anything ran in it.
         StuckRunning,
+        /// Exec is refused in a box whose programs have all ended (macOS's first class did this).
+        NoExecAfterEnd,
     }
 
     impl Runtime for Liar {
@@ -552,6 +571,14 @@ mod tests {
             self.sim.start(id)
         }
         fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+            let mut ran = self.ran.lock().unwrap();
+            if matches!(self.lie, Lie::NoExecAfterEnd)
+                && ran.contains(id)
+                && self.sim.inspect(id)?.state == BoxState::Empty
+            {
+                return Err(Refusal::os("spawning a program in a box", "EPERM"));
+            }
+            ran.push(id.clone());
             self.sim.exec(id, p, s)
         }
         fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
@@ -589,11 +616,17 @@ mod tests {
             (Lie::SignalsNothing, "HEX-DIFF-2", "at step 12 (Signal(0"),
             (Lie::KeepsDeleted, "HEX-DIFF-1", "at step 15 (Look(0)"),
             (Lie::StuckRunning, "HEX-DIFF-2", "at step 11 (Look(0)"),
+            (
+                Lie::NoExecAfterEnd,
+                "HEX-DIFF-1",
+                "at step 9 (Exec(0, Wait)",
+            ),
         ];
         for (lie, scenario, step) in cases {
             let liar = Liar {
                 sim: SimRuntime::new(),
                 lie,
+                ran: std::sync::Mutex::default(),
             };
             let s = SCENARIOS.iter().find(|s| s.id == scenario).unwrap();
             let quick = Duration::from_millis(50);
