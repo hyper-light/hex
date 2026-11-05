@@ -1392,7 +1392,7 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
 /// root open, the parked init none); N2's init is the parked one, its `/proc` that proc's superblock, which the
 /// node holds no more; in N2 `/proc/self` is the reader's own pid and pid 1 the box's init; its mounts beneath
 /// `/proc` exactly K's, the read-only ones read-only; one hit counted. Then delete N2 (the next park's proc made for
-/// K) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its `/proc` a superblock
+/// K; its slot removed with it) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its `/proc` a superblock
 /// the node never held, its mounts exactly K2's, one miss counted. Then delete N3 and release the idle cgroups:
 /// expect no proc held and no proc root open in this process, the parked init ended. None failed to be made.
 fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
@@ -1571,13 +1571,14 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         "N2's /proc shows its own pid namespace"
     );
 
-    // N2's create told the refill K; the next init parked ahead has its proc made for K.
+    // N2's create told the refill K; the next init parked ahead has its proc made for K. N2 goes first, its slot
+    // with it, so the only slot left holds the parked init.
     ready(2);
+    node.delete(&n2).unwrap();
     let before = node.cgroup_reuse().unwrap().parked;
     let held = held_procs(&me);
     let parked = parked_inits(&root);
     assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
-    node.delete(&n2).unwrap();
     let n3 = BoxId::new("parkproc-3").unwrap();
     create(&n3, &with_k2);
     let after = node.cgroup_reuse().unwrap().parked;
@@ -1603,13 +1604,14 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     );
 
     ready(3);
+    node.delete(&n3).unwrap();
     let parked = parked_inits(&root);
+    assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
     let last = rustix::process::pidfd_open(
         rustix::process::Pid::from_raw(parked[0].parse().unwrap()).unwrap(),
         rustix::process::PidfdFlags::empty(),
     )
     .unwrap();
-    node.delete(&n3).unwrap();
     node.release_idle().unwrap();
     let end = node.cgroup_reuse().unwrap().parked;
     assert_eq!(end.procs_held, 0, "released, no proc is held: {end:?}");
