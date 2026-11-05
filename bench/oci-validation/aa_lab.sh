@@ -16,6 +16,9 @@ TREE=$(realpath "${1:?repo tree}")
 RT=$(realpath "${2:?runtime-tools}")
 OUT=$(realpath -m "${3:?out dir}")
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+# Its containers carry the run's labels and go with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
+bench_trap :
 export VM_DIR=${VM_DIR:-$HOME/.cache/hex-t7/lsm/vm-aa}
 say() { echo "$(date -u +%FT%TZ) $*"; }
 [ ! -e "$OUT" ] || { echo "refusing: $OUT exists; each run gets a new dir" >&2; exit 2; }
@@ -25,7 +28,7 @@ TGT=$OUT/target
 bash "$HERE/vmaa_build.sh"
 
 say "build hex and oci_lsm for the guest (ubuntu:24.04)"
-docker run --rm --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" \
+docker run --rm "${BENCH_LABELS[@]}" --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" \
   -v "$TREE:/src:ro" -v "$TGT:$TGT" -v hexlsm-cargo:/cargo -v hexlsm-rustup:/rustup \
   -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR="$TGT/build" -e CARGO_BUILD_JOBS=4 \
   -e PATH=/cargo/bin:/usr/bin:/bin -e TGT="$TGT" -e OWNER="$(id -u):$(id -g)" -w /src ubuntu:24.04 bash -euo pipefail -c '

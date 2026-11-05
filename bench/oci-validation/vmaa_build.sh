@@ -12,13 +12,16 @@
 # Rebuilds only what's missing; FORCE=1 rebuilds it all.
 # Usage: vmaa_build.sh
 set -euo pipefail
+# Its containers carry the run's labels and go with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
+bench_trap :
 VM_DIR=${VM_DIR:-$HOME/.cache/hex-t7/lsm/vm-aa}
 say() { echo "$(date -u +%FT%TZ) $*"; }
 mkdir -p "$VM_DIR"
 [ "${FORCE:-0}" = 1 ] && rm -f "${VM_DIR:?}/vmlinuz" "${VM_DIR:?}/initramfs.img" "${VM_DIR:?}/rootfs.ext4"
 if [ ! -s "$VM_DIR/rootfs.ext4" ] || [ ! -s "$VM_DIR/initramfs.img" ] || [ ! -s "$VM_DIR/vmlinuz" ]; then
   say "guest root, initramfs and kernel (Ubuntu 24.04)"
-  docker run --rm --privileged --security-opt label=disable \
+  docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable \
     --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" \
     -v "$VM_DIR:/vm" ubuntu:24.04 bash -euc '
     export DEBIAN_FRONTEND=noninteractive
