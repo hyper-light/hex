@@ -371,9 +371,9 @@ fn overlay(
     for (i, layer) in layers.iter().enumerate().rev() {
         lower.push(option_path(layer, &format!("rootfs.layers[{i}]"))?);
     }
-    let rootfs = bundle.join(ROOTFS);
-    let upper = bundle.join(UPPER);
-    let work = bundle.join(WORK);
+    let rootfs = linux_join(bundle, ROOTFS);
+    let upper = linux_join(bundle, UPPER);
+    let work = linux_join(bundle, WORK);
     let mut options = vec![
         format!("lowerdir={}", lower.join(":")),
         format!(
@@ -402,6 +402,18 @@ fn overlay(
         options,
     };
     Ok((mount, vec![rootfs, upper, work]))
+}
+
+/// `dir/name` as the Linux that mounts it reads a path: joined by `/` on every host, since
+/// `Path::join` uses the host's (`\` on Windows), which overlayfs's options read as a separator.
+/// `dir` keeps its bytes as given.
+fn linux_join(dir: &Path, name: &str) -> PathBuf {
+    let mut path = dir.as_os_str().to_owned();
+    if dir.as_os_str().as_encoded_bytes().last() != Some(&b'/') {
+        path.push("/");
+    }
+    path.push(name);
+    PathBuf::from(path)
 }
 
 /// The mounts every container gets, Docker's (daemon/pkg/oci/defaults.go) with containerd's sized
