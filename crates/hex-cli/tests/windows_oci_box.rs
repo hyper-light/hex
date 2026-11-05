@@ -23,6 +23,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use hex_api::conformance::{self, Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_runtime::windows::WinRuntime;
 use serde_json::json;
@@ -130,6 +131,16 @@ impl Fixture for Lab {
     fn refused_forks_counted(&self) -> bool {
         false
     }
+
+    /// TERM ends the box, init included: Windows has no POSIX signals. HCS's ProcessSignal carries only
+    /// console controls (Virtualization-Documentation hcs/SchemaReference.md:796-808), hcsshim maps TERM to
+    /// a shutdown and KILL to terminate (internal/signals/signal.go:185-197), Docker ends the container on
+    /// either (libcontainerd/local/local_windows.go:713-750), and the OCI spec's Windows section defines no
+    /// signals (runtime-spec runtime.md:131-136 only asks that kill send one). The class ends its job
+    /// (docs/research/runtime/windows-hcs.md §4; HEX-DIFF-1, 2; the lead's ruling, 2026-11-05).
+    fn term_ends_init(&self) -> bool {
+        true
+    }
 }
 
 /// Runs `hex selftest-box <args>` in started box `id` and returns its exit and stdout.
@@ -168,9 +179,10 @@ fn made(rt: &WinRuntime, spec: BoxSpec) -> BoxId {
     id
 }
 
-/// AC-T7.1.1: the Windows `oci` class holds the runtime contract, HEX-RT-1..13.
+/// AC-T7.1.1: the Windows `oci` class holds the runtime contract, HEX-RT-1..13, and the differential
+/// suite holds it to the simulator's trace for a bundle-made box (HEX-DIFF-1..6, CLAUDE.md §8).
 fn contract(lab: &Lab) {
-    let failures = conformance::run(&lab.runtime(), lab);
+    let failures = differential::run(&lab.runtime(), lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 

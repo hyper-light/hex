@@ -585,7 +585,9 @@ Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
     `Processor.Maximum`/`Weight` from the bundle's `windows.resources`. A `ClassSpec::Oci` box's container is bounded
     at its box bound plus the silo's own measured baseline (note §9, probe 3). Neither bound is dropped: a bound the
     job can't hold is refused by name, as the `process` class refuses it.
-- **Signals and ends are the `process` class's:** KILL and TERM end the box's job; a member's exit reads as the
+- **Signals and ends are the `process` class's:** KILL and TERM end the box's job (HCS has only console controls,
+  hcsshim maps TERM to a shutdown and KILL to terminate, and Docker ends the container on either; note §4), so TERM
+  ends this class's init, and its fixture says so to the differential suite (`term_ends_init`, true); a member's exit reads as the
   signal; any other signal is refused by name. An init that has ended leaves the box `Empty` with its exit, and an
   exec into it is refused `NotRunning`. Delete ends the job, terminates the compute system, detaches the scratch and
   removes what the box made. Every HCS wait has a deadline, and a timed-out operation is cancelled, never abandoned
