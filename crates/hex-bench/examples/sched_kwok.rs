@@ -313,7 +313,13 @@ fn hex(runs: u32, shard_counts: &[usize]) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| {
+            a.into_string()
+                .unwrap_or_else(|a| panic!("an argument isn't Unicode: {a:?}"))
+        })
+        .collect();
     let usage = "usage: sched_kwok manifests <out-dir> <files> | hex <runs> <shards,...>";
     match args
         .iter()
