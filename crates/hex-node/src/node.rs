@@ -528,6 +528,13 @@ impl Node {
         self.cgroup(id).map(|cg| cg.dir().to_path_buf())
     }
 
+    /// A debug build's hold on the worker that makes parked inits' procs (decision 8, parked procs): while the guard
+    /// lives it makes none, so a test shows a delete returning, its init parked, before its proc is made.
+    #[cfg(debug_assertions)]
+    pub fn hold_parked_procs(&self) -> Result<std::sync::MutexGuard<'_, ()>, Refusal> {
+        self.cgroups.hold_parked_procs()
+    }
+
     /// What the node's pool of idle cgroups has done since it opened (goal 5 extended, step 6).
     pub fn cgroup_reuse(&self) -> Result<cgroups::Counts, Refusal> {
         self.cgroups.counts()
