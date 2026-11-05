@@ -520,6 +520,11 @@ mr17's second, at 4.62x, and concurrency 32 ran 9,137 to 9,428 a second in the t
 
 ## Run 17 (2026-11-04, fedora): the held mount namespace, A B B A in the three readings, at both descriptor limits
 
+**Correction (2026-11-05, found by the goal 5 record agent):** the socket driver's `hex node` raises its soft descriptor
+limit to the hard one as it starts (`raise_descriptor_limit`, `crates/hex-cli/src/node.rs:168`), undoing the inside
+script's `ulimit -Sn` (`HEXBENCH_NOFILE`, `oci_inside.sh:21-24`). So every "over the socket" figure in this run ran at
+the hard limit, the "given" rows included. Only the in-process figures compare the two limits.
+
 - **What it measures** (the lead, 2026-11-04): the held mount namespace (`337243d`: a box's mount namespace held by a
   descriptor past its init's exit, let go by a closer thread) against the same tree without it, A B B A, in each
   reading of criterion 2 Ada is to choose among: host.sh's own (concurrency 1 and 32 on 4-31), option 1 (1 on 4-15, 32
@@ -651,6 +656,11 @@ slows 32 (8,046/s to 7,369/s, its p99 9.36 to 11.04 ms; at the given limit 8,101
 
 ## Run 18 (2026-11-05, fedora): criterion 2 as written at the step's final tip, step 6 alone, the other readings beside it
 
+**Correction (2026-11-05, found by the goal 5 record agent):** the socket driver's `hex node` raises its soft descriptor
+limit to the hard one as it starts (`raise_descriptor_limit`, `crates/hex-cli/src/node.rs:168`), undoing the inside
+script's `ulimit -Sn` (`HEXBENCH_NOFILE`, `oci_inside.sh:21-24`). So every "over the socket" figure in this run ran at
+the hard limit, the "given" rows included. Only the in-process figures compare the two limits.
+
 - **What it measures** (the lead, 2026-11-05, the step's retry): the second criterion as its text reads it, "sustained
   lifecycles a second at concurrency 32 against throughput at concurrency 1 in the same OCI pass, one owner's boxes,
   at least 8x, measured by seam_oci's throughput and sustained phases through host.sh on fedora", at the step branch's
@@ -719,6 +729,11 @@ Interleaved, each run's 20 pairs pooled (mean ratio, bootstrap SE; each half's C
 
 ## Run 19 (2026-11-05, fedora): criterion 2 as written on the plan's composed tree, the step's final tip in step 7's
 
+**Correction (2026-11-05, found by the goal 5 record agent):** the socket driver's `hex node` raises its soft descriptor
+limit to the hard one as it starts (`raise_descriptor_limit`, `crates/hex-cli/src/node.rs:168`), undoing the inside
+script's `ulimit -Sn` (`HEXBENCH_NOFILE`, `oci_inside.sh:21-24`). So every "over the socket" figure in this run ran at
+the hard limit, the "given" rows included. Only the in-process figures compare the two limits.
+
 - **What it measures:** run 18's passes on mr20, the tree the plan's steps compose: step 7's integrated tree, 60b2e38
   (steps 1 to 5 in, step 6 through 11c0b6b, the hooks), with the step's final tip, a12e526, merged in for measurement
   only (8e10d04 on `cp/t7-ext-s6-mr20-wip`; its two conflicts resolved there: `Node::new` takes a12e526's
@@ -778,6 +793,11 @@ Interleaved:
   given a fresh one. Its cause is unread here: a question for the integration (step 7).
 
 ## Run 20 (2026-11-05, fedora): lever 3's state directories in shards, A B B A in the three readings, both limits
+
+**Correction (2026-11-05, found by the goal 5 record agent):** the socket driver's `hex node` raises its soft descriptor
+limit to the hard one as it starts (`raise_descriptor_limit`, `crates/hex-cli/src/node.rs:168`), undoing the inside
+script's `ulimit -Sn` (`HEXBENCH_NOFILE`, `oci_inside.sh:21-24`). So every "over the socket" figure in this run ran at
+the hard limit, the "given" rows included. Only the in-process figures compare the two limits.
 
 - **What it measures** (the lead, 2026-11-05): lever 3 (`3f3c1b9`: each container's state directory in one of 64
   shards of the state root, so a create's mkdir and a delete's rmdir no longer all hold one parent's `i_rwsem`)
