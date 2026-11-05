@@ -207,6 +207,32 @@ filter fail the test.
 **What would falsify it.** A run whose replay counts a violation. A session refused everywhere while
 some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that.
 
+### H10. The recorded kiln workload: what kiln measured, read through its API
+
+**The choice.** `AC-T7.4.3`'s recorded kiln workload is fourteen days of kiln's own CI
+(`bench/sched/kiln-ci-20261022-20261105.trace`), read from the running kiln's HTTP API by
+`bench/sched/kiln_export.py` and turned into the trace by `bench/sched/kiln_trace.py`. A leg's need is
+what kiln measured it using (mean cores and peak RSS), capped at the machine it ran on; a leg kiln
+didn't measure takes the median of its own job's measured legs. The nodes are the runners kiln has
+CPU and memory facts for that ran a leg. The trace's text is parsed by `replay::parse`, bounded and
+typed (`Limits`, `TraceError`).
+
+**Sources.** kiln's `GET /api/runs`, `/api/runs/:id` and `/api/agents` on adacachy, exported
+2026-11-05T21:39:09Z (`bench/sched/kiln_workload.md`, with the export beside it). kiln's jobs carry no
+declared need, so its measurements are the only need on record.
+
+**Evidence.** `a_recorded_kiln_workload_replays_the_same_twice`: 4,655 legs on 10 nodes, the same hash,
+report and log twice from one seed, every leg done once, `check_log` and `check_filters` clean.
+`kiln_trace.py` run again on the committed export gives the committed trace byte for byte. The parser's
+`malformed_traces_are_refused_by_line`, `traces_past_their_bounds_are_refused` and two proptests
+(`any_text_is_read_or_refused`, `any_trace_shaped_text_is_read_or_refused`) refuse malformed,
+oversized and out-of-order text with a typed error, and none panics.
+
+**What would falsify it.** kiln's measurements standing far from what legs used: 26 legs measured
+more CPU than their machine has and are capped, so some measurements are wrong. A sample of legs
+re-measured on their runner that differs systematically from kiln's record would mean the trace's needs
+aren't kiln's work.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue
