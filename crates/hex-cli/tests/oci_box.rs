@@ -1569,6 +1569,12 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         (1, 0, 1),
         "{before:?}"
     );
+    // A box of no owner's delete parks nothing: the hex-ahead refill parked this init and made its proc.
+    assert_eq!(
+        (before.procs_made_at_refill, before.procs_made_at_delete),
+        (1, 0),
+        "the refill made it: {before:?}"
+    );
     let held = held_procs(&me);
     assert_eq!(
         held.len(),

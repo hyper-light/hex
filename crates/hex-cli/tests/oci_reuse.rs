@@ -765,6 +765,21 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
     node.start(&a).unwrap();
     let slot = node.cgroup_dir(&a).expect("A's cgroup");
     node.delete(&a).unwrap();
+    // With parked procs (root only), A's delete made the init's proc itself, before it returned: the park's own
+    // thread, never a create's (the lead's 15:40Z).
+    if !lab.rootless {
+        let made = node.cgroup_reuse().unwrap().parked;
+        assert_eq!(
+            (
+                made.procs_made,
+                made.procs_made_at_delete,
+                made.procs_made_at_refill,
+                made.procs_held
+            ),
+            (1, 1, 0, 1),
+            "A's delete made the parked init's proc before it returned: {made:?}"
+        );
+    }
     let parked = populated_within(&slot, PATIENCE);
     assert_eq!(
         parked.len(),
