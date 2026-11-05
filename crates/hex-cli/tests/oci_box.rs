@@ -3153,9 +3153,14 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
     })
     .unwrap();
     let (mut out, w) = std::io::pipe().unwrap();
-    // stdout and stderr go before the FIFO opens (which blocks), so the orphan never holds the pipe
-    // the test reads to its end.
-    let script = format!("read x >/dev/null 2>&1 < {} & echo $!", fifo.display());
+    // The orphan's stdout and stderr go for good (`exec`) before the FIFO opens (which blocks), so it never
+    // holds the pipe the test reads to its end. A builtin's own redirections wouldn't do: dash keeps a copy
+    // of each fd they replace, to restore it after (dash 0.5.12 `src/eval.c:836-837`, `src/redir.c:134-155`,
+    // `:444-449`), so `read x >/dev/null < go &` holds the pipe while it waits.
+    let script = format!(
+        "(exec >/dev/null 2>&1; read x < {}) & echo $!",
+        fifo.display()
+    );
     let mut proc = node
         .exec(
             &id,
