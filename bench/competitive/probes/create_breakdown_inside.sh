@@ -229,7 +229,13 @@ mounts_trace() {
   # down_read, filtered to namespace_sem's address and to hex's processes, so each init's span counts its own holds
   # and the call it took each in. Every write hold is namespace_lock's down_write, every shared one down_read
   # (v6.19 fs/namespace.c:1723-1726, the namespace_shared guard at :97, the mount table's iterator at :1541).
-  nssem=$(awk '$3 == "namespace_sem" {print "0x" $1; exit}' /proc/kallsyms)
+  # Read by python3: the 7.2 guest has python3 but no awk (goal 6's first guest trace,
+  # hex-g6-mttimed-20261105T031100Z, lost both probes to "awk: command not found").
+  nssem=$(python3 -I -c 'import sys
+for l in open("/proc/kallsyms"):
+    f = l.split()
+    if len(f) > 2 and f[2] == "namespace_sem":
+        print("0x" + f[0]); sys.exit()')
   case $nssem in
     ""|0x0000000000000000) echo "namespace_sem's address isn't readable here: its holds go uncounted" >&2 ;;
     *) for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
