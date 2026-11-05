@@ -538,7 +538,12 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     which is exactly what the step-2 ledger layer catches. CPU is bounded by priority alone: a
     QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
     Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
-    the machine, and that purpose doesn't need it.
+    the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
+    reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there: each
+    turn of its exception loop (`Daemon::pump`) re-reads every box and ends one past its bound, whether a
+    crossing woke it or its timeout paced it, so a member unarmed in the fork window or a missed exception
+    is still caught (`docs/research/runtime/macos-box-user-and-ledger.md`). A node with no helper runs the
+    class as step 1's, and says so in its inspect (`BoxInfo.membership`).
 - **`oci`:**
   - Linux: as today.
   - Windows: Windows images run natively, process-isolated through HCS (the OCI spec's Windows section).
@@ -651,7 +656,11 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   mechanism"), and is the whole bound on a node with no helper. Step 1's single-member overshoot (0 MiB) and
   held watcher CPU (~0.1%) are met rootless by the `_ext` cap; the multi-member-tree bound at overcommit is
   step 2's.
-  Its box-user (membership a daemonizing member can't escape) follows.
+  **Step 2 (the box user, the helper, the kernel bound) is under way** (`cp/t7-native-s2`): the
+  apportionment core, the node↔helper protocol (`hex_core::helper`, hostile-input tested), its node client,
+  the helper daemon and the box-user backend are built; the root measurements on the Mac Studio (the
+  elastic bound's overshoot and CPU, the `EXC_RESOURCE` path, the box user's listing, `RLIMIT_NPROC` and
+  delete) need Ada.
 - The **Windows `process` class is built** (`hex_runtime::windows`, native plan step 3): a box is a job
   object, its limits the kernel's and hard (`hex_core::job`, `docs/research/runtime/windows-job-objects.md`,
   `bench/native/windows/RESULT.md`). A member is created suspended inside the job

@@ -85,6 +85,42 @@ fn macos_process_boxes_hold_the_contract() {
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
+/// AC-T7.1.1 for the box-user class: the same HEX-RT contract, against a `MacRuntime` in box-user mode
+/// talking to a live helper daemon. Ignored by default, since box-user mode needs a root daemon;
+/// `bench/native/macos/boxlab.sh` starts `hex __box-helper` as root, sets `HEX_BOX_HELPER_SOCK`, and runs
+/// this with `--ignored`. The first box's inspect must say `BoxUser`, so a stale helperless fallback to
+/// the process-group class can't pass this as box-user.
+#[test]
+#[ignore = "needs a root helper daemon; run by bench/native/macos/boxlab.sh via HEX_BOX_HELPER_SOCK"]
+fn box_user_boxes_hold_the_contract() {
+    let sock = std::env::var("HEX_BOX_HELPER_SOCK")
+        .expect("HEX_BOX_HELPER_SOCK, set by boxlab.sh to the running helper's socket");
+    let rt = MacRuntime::detect(
+        NonZeroU64::new(256 * GIB).unwrap(),
+        NonZeroU64::new(1_000_000).unwrap(),
+        std::path::Path::new(&sock),
+    )
+    .expect("a box-user macOS runtime");
+    // Confirm the helper answered and the runtime is in box-user mode, not a fallback to process-group.
+    let probe = BoxId::new("boxuser-probe").unwrap();
+    let _ = rt.delete(&probe);
+    let info = rt
+        .create(fixture().spec(probe.clone(), Bounds::default()))
+        .expect("create a box-user box");
+    assert_eq!(
+        info.membership,
+        Some(hex_api::Membership::BoxUser),
+        "the helper must be live, so the runtime is box-user"
+    );
+    rt.delete(&probe).expect("delete the probe box");
+
+    let failures = conformance::run(&rt, &fixture());
+    assert!(
+        failures.is_empty(),
+        "box-user conformance failures: {failures:#?}"
+    );
+}
+
 /// The step's scenario: a box allocating past its 256 MiB bound is ended, its end reported as memory with
 /// the footprint it reached, and a program in it exits by signal.
 #[test]

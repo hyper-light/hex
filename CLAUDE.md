@@ -116,8 +116,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, `posix_spawnattr_setjetsam_ext` to arm a
   fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
   member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
-  `proc_listpids(PROC_PGRP_ONLY)` lists the group and `proc_pid_rusage` reads each member's footprint,
-  start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
+  `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
+  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
   time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members;
@@ -129,6 +129,22 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   xnu's `bsd/sys/spawn_internal.h`, though libSystem exports the symbols). Rust can express none of these
   foreign calls, nor the raw `posix_spawnattr_t` the spawn-attribute setters write, safely, and macOS
   offers no safe wrapper.
+- `crates/hex-runtime/src/macos/helper_sys.rs`: the macOS box helper daemon's privileged syscalls (the
+  `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
+  as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
+  (`setgid`/`setuid`), opens a session for a leader (`setsid`), caps the user's processes
+  (`setrlimit(RLIMIT_NPROC)`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
+  (`getdtablesize` then `close`, there being no `closefrom` in libc) and `execve`s the program — every
+  call async-signal-safe, as the Linux runtime's `pre_exec` is, since between fork and exec a
+  multi-threaded process may touch no lock. It then arms each member: `task_for_pid` for the member's
+  task, `task_set_phys_footprint_limit` for its ledger limit, and
+  `task_set_exception_ports`(`EXC_MASK_RESOURCE`) to route a crossing to the daemon's port
+  (`mach_port_allocate`/`mach_port_insert_right`), so a crossing notifies rather than kills. The daemon
+  receives those crossings with `mach_msg` on that port and replies, freeing the thread and task send
+  rights the message carried with `mach_port_deallocate`, and re-apportions the box (the event-driven
+  rebalance, no polling). `posix_spawn` can't change uid, so the start is a fork, not a spawn; libc binds
+  the POSIX calls and the Mach routines are declared as `unsafe` foreign functions, macOS offering no safe
+  wrapper.
 - `crates/hex-runtime/src/windows/sys.rs`: the Windows `process` class, whose box is a job object nested
   under the node's. It creates the job (`CreateJobObjectW`), sets its hard limits
   (`SetInformationJobObject`: the commit cap, active-process cap, kill-on-close and no breakaway, the CPU

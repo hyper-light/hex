@@ -15,17 +15,17 @@ use super::sys::{Event, Kqueue};
 pub struct BoxProc {
     pid: i32,
     kq: Kqueue,
-    /// The box this program runs in, so reaping a kill at the fatal cap counts it on the box at once
+    /// The process box this program runs in (none for a box-user box, whose helper counts its ends), so reaping a kill at the fatal cap counts it on the box at once
     /// (native plan step 1's `_ext` backstop) — before a caller that waited on this reads the box's usage.
-    members: Members,
+    members: Option<Members>,
     exit: Option<Exit>,
     events: Vec<Event>,
 }
 
 impl BoxProc {
-    /// Watches child `pid` for its end, in box `members`. It must be this process's child and not yet
+    /// Watches child `pid` for its end, in process box `members` (none for a box-user box). It must be this process's child and not yet
     /// reaped, so its pid is this program's until [`BoxProc`] reaps it.
-    pub fn watch(pid: i32, members: Members) -> Result<Self, Refusal> {
+    pub fn watch(pid: i32, members: Option<Members>) -> Result<Self, Refusal> {
         let kq = Kqueue::new().map_err(|e| Refusal::os("making a program's kqueue", e))?;
         // Already gone (reaped by a box delete that beat this): its end is then read by `reap` below, or is
         // no longer knowable.
@@ -68,7 +68,9 @@ impl BoxProc {
                 // usage. The box ignores it unless the member was armed and it wasn't the box's own kill.
                 let sigkill = matches!(exit, Exit::Signal(s) if s == Signal::KILL.number());
                 self.exit = Some(exit);
-                self.members.ended(self.pid, sigkill)?;
+                if let Some(members) = &self.members {
+                    members.ended(self.pid, sigkill)?;
+                }
                 Ok(self.exit)
             }
             Ok(None) => Ok(None),

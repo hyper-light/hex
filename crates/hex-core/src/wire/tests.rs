@@ -63,6 +63,7 @@ fn oci_spec() -> BoxSpec {
 
 fn info() -> BoxInfo {
     BoxInfo {
+        membership: None,
         id: id("b-1"),
         class: Class::Oci,
         state: BoxState::Running,
@@ -203,6 +204,7 @@ fn answers() -> Vec<(u64, Answer)> {
                 infos: vec![
                     info(),
                     BoxInfo {
+                        membership: None,
                         id: id("p"),
                         class: Class::Process,
                         state: BoxState::Empty,
@@ -379,6 +381,7 @@ const GOLDEN_NETNS: &str = concat!(
 fn a_long_list_is_split_into_messages_within_the_bound() {
     let infos: Vec<BoxInfo> = (0..5_000)
         .map(|n| BoxInfo {
+            membership: None,
             id: id(&format!("box-{n:06}")),
             ..info()
         })
@@ -908,6 +911,7 @@ fn any_info() -> impl Strategy<Value = BoxInfo> {
     )
         .prop_map(
             |(id, oci, state, bounds, adopted, exit, abandoned)| BoxInfo {
+                membership: None,
                 id,
                 class: if oci { Class::Oci } else { Class::Process },
                 state: match state {
