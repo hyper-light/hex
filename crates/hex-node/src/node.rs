@@ -496,11 +496,22 @@ impl Node {
     /// made with it when `enabled`, with the masks and read-only paths of the spec it is parked for: a claim whose
     /// spec has the same key attaches it, mounting no proc of its own (decision 8, parked procs). Off unless set,
     /// until measured. Root nodes only, as [`Node::with_prepared_procs`]; set before the node's first create.
-    pub fn with_parked_procs(self, enabled: bool) -> Self {
-        if enabled && let Some(maker) = self.devfs.proc_maker() {
-            self.cgroups.set_parked_procs(maker);
+    pub fn with_parked_procs(self, enabled: bool) -> Result<Self, Refusal> {
+        if enabled {
+            self.with_parked_procs_bound(crate::cgroups::PROCS_ALIVE)
+        } else {
+            Ok(self)
         }
-        self
+    }
+
+    /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of
+    /// [`crate::cgroups::PROCS_ALIVE`]: the dropper's queue holds as many, so a tree handed to it never finds it full.
+    /// Refused when the dropper can't be started.
+    pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
+        if let Some(maker) = self.devfs.proc_maker() {
+            self.cgroups.set_parked_procs(maker, bound)?;
+        }
+        Ok(self)
     }
 
     /// Sets the most device programs the node holds open, one per policy, [`MAX_PROGRAMS`] unless set,

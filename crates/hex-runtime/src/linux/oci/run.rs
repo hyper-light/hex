@@ -498,20 +498,23 @@ pub struct ProcSink {
     queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
     queued: std::sync::Arc<AtomicU64>,
     inline: std::sync::Arc<AtomicU64>,
+    alive: std::sync::Arc<AtomicU64>,
 }
 
 impl ProcSink {
     /// A sink onto `queue`, counting in `queued` each tree handed to it and in `inline` each dropped where it was,
-    /// its queue full or closed.
+    /// its queue full or closed; `alive` counts the node's procs not yet dropped, which one dropped here leaves.
     pub fn new(
         queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
         queued: std::sync::Arc<AtomicU64>,
         inline: std::sync::Arc<AtomicU64>,
+        alive: std::sync::Arc<AtomicU64>,
     ) -> Self {
         Self {
             queue,
             queued,
             inline,
+            alive,
         }
     }
 
@@ -527,7 +530,22 @@ impl ProcSink {
             ) => {
                 self.inline.fetch_add(1, Ordering::Relaxed);
                 drop(proc);
+                let _ = self
+                    .alive
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_sub(1))
+                    });
             }
+        }
+    }
+}
+
+/// A create's proc taken from the init parked in its cgroup goes back to the node's dropper if the create ends before
+/// its claim hands it over: never dropped, and unmounted, on the create's thread (decision 8, parked procs).
+impl Drop for PrunedCreate {
+    fn drop(&mut self) {
+        if let (Some(sink), Some((_, proc))) = (self.proc_sink.take(), self.proc_mount.take()) {
+            sink.discard(proc);
         }
     }
 }
@@ -1515,6 +1533,10 @@ impl Runtime {
                 && let Some((_, proc)) = p.proc_mount.take()
             {
                 sink.discard(proc);
+            }
+            // Claimed, the init holds its own copies of the tree: these close as any descriptor, unmounting nothing.
+            if claimed.is_some() {
+                p.proc_sink = None;
             }
             if let Some(chooser) = chooser {
                 chooser.parked_proc(if claimed.is_some() {

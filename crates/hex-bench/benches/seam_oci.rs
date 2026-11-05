@@ -1216,7 +1216,8 @@ mod linux {
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
                 .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"))
-                .with_parked_procs(std::env::var("HEXBENCH_PARKED_PROCS").as_deref() == Ok("1"));
+                .with_parked_procs(std::env::var("HEXBENCH_PARKED_PROCS").as_deref() == Ok("1"))
+                .unwrap_or_else(|e| panic!("parked procs: {e}"));
             // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
             // as it ships, unless HEXBENCH_AHEAD says.
             let node = match std::env::var("HEXBENCH_AHEAD") {

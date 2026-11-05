@@ -94,6 +94,59 @@ Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T153245Z`.
 - With the proc made on the park's own thread (the delete, or the refill: 9e13b95 and 506a263, above), every claim
   was a hit, 1,992 of 1,992. This run is what falsifies one worker thread, not the parked proc.
 
+## The three arms, one interleaved A/B (the lead's 15:52Z): (i) on-park, (ii') after-reply, (ii) workers
+
+**Run.** One build of cp/t7-g5-parkproc-arms 1890f85, the arm chosen per cell by `HEXBENCH_PARKED_PROCS`: I is
+on-park (the tip's, 1e5e956), P is after-reply, W is workers (8 threads on one queue bounded at `PER_NODE`, parked-proc
+jobs only).
+- After-reply: a delete on a serving thread leaves its proc and makes it once the delete is answered. In process, the
+  bench's driver runs the node's after-reply hook once its delete returns, as the socket server does once it has
+  answered. So the delete's time excludes the proc, and the thread's lifecycle includes it.
+- Harness: cp/t7-g6 f8933bd by git archive. hex sha256 4683c89456c729bd, seam_oci 3bdede1ce64c5d53.
+- The mounts cell as above. 4 rounds, the order rotating I P W, P W I, W I P, I W P, at L6 and L12. fedora,
+  2026-11-05 18:06:49Z-18:19:55Z, under the timed lock; load rose from 19.9 to 50.8.
+- Body: `~/.cache/hex-t7/g5tail/arms-20261105T180601Z`.
+- Not gated at 1890f85 (an experiment's side branch). Clippy and check-production were clean on fedora.
+
+| L | arm | part 19 p50 / p99 / unpreempted p99 (µs) | create p50 / p99 (ms) | delete p50 / p99 (ms) | lifecycles a second | hits | dry | skipped / orphaned |
+|---|-----|------------------------------------------|-----------------------|-----------------------|---------------------|------|-----|--------------------|
+| 6 | I | 39/574/155, 43/564/257, 38/541/270, 40/1402/1033 | 0.951/3.305, 1.096/3.959, 0.817/2.360, 0.995/5.895 | 1.552/4.075, 2.056/6.184, 1.256/3.864, 1.719/10.652 | 2457, 2061, 3009, 2252 | 1992 each | 0 | 0 |
+| 6 | P | 43/1003/595, 49/1096/342, 45/1092/746, 44/1173/584 | 1.060/3.522, 1.178/4.127, 1.030/3.052, 1.059/3.521 | 1.242/3.511, 1.660/5.392, 1.247/4.079, 1.383/5.145 | 2547, 2082, 2562, 2383 | 1299, 1334, 1284, 1337 | 693, 658, 708, 655 | 144/549, 159/499, 141/567, 111/544 |
+| 6 | W | 213/1420/603, 239/1347/821, 223/1391/634, 234/1927/1539 | 1.112/3.516, 1.296/4.271, 1.195/3.341, 1.262/4.231 | 1.325/4.065, 1.830/6.733, 1.399/12.056, 1.438/5.282 | 2655, 2051, 2456, 2279 | 578, 587, 633, 562 | 1414, 1405, 1359, 1430 | 744/670, 739/666, 705/654, 717/713 |
+| 12 | I | 43/904/264, 42/823/63, 40/1156/850, 39/4279/1788 | 1.248/5.898, 1.388/6.344, 1.082/7.628, 1.319/6.916 | 3.814/17.649, 3.312/9.301, 3.211/17.065, 3.347/13.219 | 1077, 1433, 998, 1377 | 1992 each | 0 | 0 |
+| 12 | P | 42/1712/760, 43/1476/282, 42/1661/886, 42/3255/1937 | 1.495/6.262, 1.569/6.154, 1.335/7.537, 1.443/8.463 | 3.326/14.179, 3.001/8.613, 2.699/15.755, 2.733/10.520 | 1315, 1352, 1363, 1380 | 1532, 1544, 1503, 1505 | 460, 448, 489, 487 | 158/302, 166/282, 162/327, 168/319 |
+| 12 | W | 218/2540/1422, 227/1858/512, 209/2839/1128, 220/4786/2189 | 1.681/10.340, 1.627/9.025, 1.435/9.474, 1.581/9.199 | 3.877/17.725, 3.035/8.175, 2.795/18.997, 2.786/17.788 | 1064, 1375, 1134, 1366 | 762-903 | 1089-1230 | 738-817 / 337-413 |
+
+- **(ii') after-reply**, against (i) in the same round:
+  - delete p50 lower by 0.01-0.40 ms at L6 and 0.31-0.61 ms at L12;
+  - lifecycle rate higher in 3 of 4 rounds at each L;
+  - but 22-36% of its claims are dry, since the owner's next create often comes before the serving thread's
+    after-reply turn. So its create p50 is higher by 0.06-0.21 ms at L6 and 0.12-0.25 ms at L12, and its part 19 p99
+    is higher in 6 of 8 rounds (round 4 at each L is the exception).
+  - It keeps part of (i)'s create gain, not all of it.
+- **(ii) workers**: 28-45% hits, part 19 back at the off arm's numbers (209-239 µs p50). It keeps none of (i)'s gain.
+- **(i) on-park**: every claim a hit, the create's gain whole. It pays on the delete: here 1.26-2.06 ms at L6 against
+  (ii')'s 1.24-1.66.
+
+**The arms' host.sh passes (partial).** The same unit then ran host.sh lifecycle passes (serial lifecycle and
+start_true, then sustained at c32; 2 rounds of 10,000; one owner with reuse on), in the order I P W W P I. fedora was
+swamped by another tenant from about 18:55Z (15-minute load average 288), and the kernel's OOM killer killed the
+unit in its fourth pass, the second W (`oom-kill`, the unit's OOM score 1000). So each arm has one pass, at different
+loads: I at 44.2, P at 22.5, W at 25.5. These lean one way but don't settle anything. Out dirs:
+`~/.cache/hex-bench/out/` 20261105T182032Z (I), 20261105T183229Z (P), 20261105T184357Z (W).
+
+| arm | create p50 / p99 (ms) | delete p50 / p99 (ms) | sustained c32 (lifecycles a second) | serial hits | c32 hits / dry |
+|-----|-----------------------|-----------------------|-------------------------------------|-------------|----------------|
+| I | 0.31 / 0.60 | 0.34 / 0.70 | 7,941 | 100% | 9,837 and 9,767 of as many claims / 0 |
+| P | 0.25 / 0.45 | 0.27 / 0.46 | 8,599 | 100% | 6,128 and 6,212 of 9,871 and 9,879 / 3,776 and 3,697 |
+| W | 0.33 / 0.52 | 0.30 / 0.89 | 7,619 | 93-99% | 3,919 and 3,924 of 9,873 / 6,011 and 6,002 |
+
+- Serially, P's thread has made the proc before the same caller's next create, so every claim hits. At c32, 37% are
+  dry, as in the mounts cells.
+- I's sustained rounds show 132 and 202 misses: creates whose key or room didn't match. Not chased here.
+- In process only. These runs' socket figures don't use parked procs (the `hex node` agent isn't given the
+  setting).
+
 ## Of record at 1e5e956: the proc made by the park's own thread, counted by thread (the lead's 15:40Z option (1))
 
 **Run.** The same cell, at cp/t7-g5-parkproc 1e5e956. The harness is cp/t7-g6 f8933bd, taken by git archive with no

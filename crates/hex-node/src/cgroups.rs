@@ -43,9 +43,11 @@ pub const RESIDUAL: u64 = 16 << 20;
 /// ([`PER_NODE`]). Past it the caller removes the cgroup itself, as every delete did before.
 const REMOVALS: usize = PER_NODE;
 
-/// How many unattached procs may wait for the node's thread that drops them (decision 8, parked procs): every one
-/// held at once, one an init parked in an idle slot ([`PER_NODE`]). Past it a tree is dropped where it is, counted.
-const PROC_DROPS: usize = PER_NODE;
+/// The most procs the node keeps alive at once, held with parked inits or waiting for the dropper (decision 8,
+/// parked procs): one an idle slot ([`PER_NODE`]) unless [`Cgroups::set_parked_procs`] is given another. The
+/// dropper's queue holds as many, so a tree handed to it never finds it full: a proc past the bound isn't made,
+/// counted (`procs_capped`), and its init parks without one.
+pub const PROCS_ALIVE: usize = PER_NODE;
 
 /// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
 const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
@@ -134,6 +136,10 @@ pub struct ParkCounts {
     pub procs_queued: u64,
     pub procs_dropped: u64,
     pub procs_dropped_inline: u64,
+    /// Procs alive now (held, or waiting for the dropper), at most the bound; and parks that made none, the bound
+    /// reached.
+    pub procs_alive: u64,
+    pub procs_capped: u64,
 }
 
 /// What the cgroups made ahead for boxes of no owner did (decision 8, "The p99.9 that stayed"): made, each with an
@@ -239,6 +245,11 @@ struct Parking {
     queued: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     dropped_inline: Arc<AtomicU64>,
+    /// Procs alive and their bound ([`PROCS_ALIVE`]): a make reserves one first, and a drop or a claim's hit gives
+    /// it back.
+    alive: Arc<AtomicU64>,
+    bound: AtomicU64,
+    capped: AtomicU64,
 }
 
 impl Parking {
@@ -284,6 +295,8 @@ impl Parking {
             procs_queued: self.queued.load(Ordering::Relaxed),
             procs_dropped: self.dropped.load(Ordering::Relaxed),
             procs_dropped_inline: self.dropped_inline.load(Ordering::Relaxed),
+            procs_alive: self.alive.load(Ordering::Relaxed),
+            procs_capped: self.capped.load(Ordering::Relaxed),
         }
     }
 
@@ -293,6 +306,17 @@ impl Parking {
         let (Some(maker), Some(key), Some(sink)) = (self.procs.get(), key, self.drops.get()) else {
             return;
         };
+        let bound = self.bound.load(Ordering::Relaxed);
+        if self
+            .alive
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < bound).then(|| n.saturating_add(1))
+            })
+            .is_err()
+        {
+            self.capped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         match parked.pid_namespace().and_then(|ns| maker.make(ns, key)) {
             Ok(proc) => {
                 parked.set_proc(key.clone(), proc, sink.clone());
@@ -305,8 +329,18 @@ impl Parking {
             }
             Err(_) => {
                 self.procs_failed.fetch_add(1, Ordering::Relaxed);
+                self.release_alive();
             }
         }
+    }
+
+    /// One alive proc gone: dropped, or handed to the init that claimed it.
+    fn release_alive(&self) {
+        let _ = self
+            .alive
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            });
     }
 }
 
@@ -486,17 +520,6 @@ impl Cgroups {
             .spawn(move || remove_each(&queue, &theirs))
             .map_err(|e| Refusal::os("starting the cgroup remover", e))?;
         let parking = Parking::default();
-        let (drops, unattached) = mpsc::sync_channel(PROC_DROPS);
-        let dropped = Arc::clone(&parking.dropped);
-        std::thread::Builder::new()
-            .name("hex-proc-drop".to_owned())
-            .spawn(move || drop_each(&unattached, &dropped))
-            .map_err(|e| Refusal::os("starting the unattached procs' dropper", e))?;
-        let _ = parking.drops.set(ProcSink::new(
-            drops,
-            Arc::clone(&parking.queued),
-            Arc::clone(&parking.dropped_inline),
-        ));
         Ok(Self {
             pool: Arc::new(Mutex::new(Pool::new(PER_OWNER, PER_NODE, first))),
             held: Mutex::new(BTreeMap::new()),
@@ -546,9 +569,30 @@ impl Cgroups {
     }
 
     /// Each init parked from here on has the proc of its own pid namespace made with it, through `maker`, for its
-    /// owner's last spec (decision 8, parked procs). Set before the node's first create; unset, none is made.
-    pub fn set_parked_procs(&self, maker: ProcMaker) {
-        let _ = self.parking.procs.set(maker);
+    /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`PROCS_ALIVE`]), and the dropper
+    /// started with a queue of as many. Set before the node's first create; unset, none is made.
+    pub fn set_parked_procs(&self, maker: ProcMaker, bound: usize) -> Result<(), Refusal> {
+        if self.parking.drops.get().is_some() {
+            return Ok(());
+        }
+        let parking = &self.parking;
+        let (drops, unattached) = mpsc::sync_channel(bound);
+        let (dropped, alive) = (Arc::clone(&parking.dropped), Arc::clone(&parking.alive));
+        std::thread::Builder::new()
+            .name("hex-proc-drop".to_owned())
+            .spawn(move || drop_each(&unattached, &dropped, &alive))
+            .map_err(|e| Refusal::os("starting the unattached procs' dropper", e))?;
+        let _ = parking.drops.set(ProcSink::new(
+            drops,
+            Arc::clone(&parking.queued),
+            Arc::clone(&parking.dropped_inline),
+            Arc::clone(&parking.alive),
+        ));
+        parking
+            .bound
+            .store(u64::try_from(bound).unwrap_or(u64::MAX), Ordering::Relaxed);
+        let _ = parking.procs.set(maker);
+        Ok(())
     }
 
     /// Whether boxes of no owner take cgroups made ahead.
@@ -791,10 +835,13 @@ impl Drop for Cgroups {
 
 /// The dropper's thread: drops each unattached proc it's handed, so its unmount waits here, until the node's end
 /// closes its queue (every sink with it).
-fn drop_each(queue: &Receiver<PreparedProc>, dropped: &AtomicU64) {
+fn drop_each(queue: &Receiver<PreparedProc>, dropped: &AtomicU64, alive: &AtomicU64) {
     while let Ok(proc) = queue.recv() {
         drop(proc);
         dropped.fetch_add(1, Ordering::Relaxed);
+        let _ = alive.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            Some(n.saturating_sub(1))
+        });
     }
 }
 
@@ -1176,7 +1223,11 @@ impl Choose for Choice<'_> {
     fn parked_proc(&self, outcome: ParkedProc) {
         let parking = &self.cgroups.parking;
         let count = match outcome {
-            ParkedProc::Hit => &parking.proc_hits,
+            ParkedProc::Hit => {
+                // Handed to the init that claimed it: no longer the node's.
+                parking.release_alive();
+                &parking.proc_hits
+            }
             ParkedProc::Miss => &parking.proc_misses,
             // Dry only means something where the node makes them.
             ParkedProc::Dry if parking.procs.get().is_some() => &parking.proc_dry,
