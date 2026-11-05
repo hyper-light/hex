@@ -92,9 +92,9 @@ refused at admission, with a typed refusal, not queued forever. A gang's last me
 back a commit in flight in its own queue, since the gang may now hold ahead of it. The specification
 accepts a gang's placements only as one write, whole, at its first member's place in its queue.
 
-**Sources.** Kueue admits a workload's pods all or nothing ([KueueAoN]); Borg's and the scheduler
-research's gang placement (PA, CM) is the same rule: partial placement of a job that needs all its
-members wastes the capacity it holds and can deadlock two half-placed gangs.
+**Sources.** Kueue admits a workload's pods all or nothing ([KueueAoN]): a job that needs all its
+members and holds only some wastes what it holds, and two half-placed jobs can wait on each other
+for good.
 
 **Evidence.** `AC-T7.5.1`: `check_gangs` counts every write after which a gang has members placed
 and members not. Zero over: the crash sweep with gangs (`tests/sim.rs`
