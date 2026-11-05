@@ -1711,43 +1711,44 @@ research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs
 (`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
 (`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
 
-**Goal 5's create measured against its bar** (goal 5 extended step 7, 2026-11-04, the integrated tree 1714f72, fedora,
-CPUs 4-15, noisy; `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7"). The bar is Hex's create
-and create+start of `true` through the seam at most a quarter of libcrun's, at p50 and p99.9. host.sh's OCI pass, best
-of two rounds of ten thousand, against libcrun in the same run:
+**Goal 5's create measured against its bar** (goal 5 extended step 7, 2026-11-05, the final integrated tree f58a101,
+fedora, CPUs 4-15, noisy; `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7 again"). The bar is
+Hex's create and create+start of `true` through the seam at most a quarter of libcrun's, at p50 and p99.9. host.sh's
+OCI pass, best of two rounds of ten thousand, against libcrun in the same run, every round read whole:
 <!-- record: bench/competitive/probes/create_breakdown.md -->
 
 | run | reuse | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
 |---|---|---|---|---|---|
-| out/20261104T170413Z | on | 0.50 / 3.34 ms, 0.150x | 0.88 / 24.36 ms, 0.036x | 0.53 / 2.42 ms, 0.219x | 1.25 / 4.69 ms, 0.267x |
-| out/20261104T172313Z | off | 0.83 / 2.33 ms, 0.356x | 3.94 / 4.20 ms, 0.938x | 0.66 / 2.50 ms, 0.264x | 4.23 / 5.08 ms, 0.833x |
+| out/20261105T114658Z | on | 0.41 / 2.56 ms, 0.160x | 11.19 / 17.07 ms, 0.656x | 0.47 / 2.52 ms, 0.187x | 1.75 / 11.83 ms, 0.148x |
+| out/20261105T120118Z | off | 0.50 / 2.27 ms, 0.220x | 11.72 / 27.99 ms, 0.419x | 0.50 / 2.38 ms, 0.210x | 3.44 / 14.32 ms, 0.240x |
 
 <!-- /record -->
-With step 6's reuse on (every box one owner's), three of the four are under the bar. Create+start of `true` at p99.9
-is just over it. With reuse off, none is: create's tail is near libcrun's. The create breakdown (seed path, pruned)
-ran six times, three per reuse mode, best of N. Every run cut every create whole and lost no event. The parts' p50s
-summed, against create's p50 in the same run:
-<!-- record: bench/competitive/probes/create_breakdown.md -->105.1% (on, create-breakdown-20261104T174001Z), 102.5% (off,
--174116Z), 104.2% (on, -174221Z) and 103.3% (off, -174319Z) at loads of 16 to 32; 80.8% (on, -165844Z) and 86.8% (off,
--170123Z) at 31 to 106, where the parts' means still sum to the mean span exactly (2.381 and 2.257 ms)<!-- /record -->.
-Step 7's criterion, within 10%, is met by four runs. Under heavy load a sum of medians undercounts, because a few parts'
-tails grow (the init's clone, the handshake). What's left, part by part, pooled p50 in ms, in the runs closest to 100%
-(reuse on / off):
-<!-- record: bench/competitive/probes/create_breakdown.md -->the init's set-up 0.185 / 0.249, of it the init's clone
-0.056 / 0.096 and its root's mounts 0.065 / 0.085; the cgroup 0.106 / 0.168; the node's and the runtime's own work
-0.103 / 0.166; the seed's request 0.045 / 0.060; the box's record 0.024 / 0.031; the handshake 0.012 /
-0.018<!-- /record -->. At loads of 31 to 106 the same parts were
-<!-- record: bench/competitive/probes/create_breakdown.md -->0.555 / 0.527 for the init's clone and 0.138 / 0.511 for
-the handshake<!-- /record -->, the parts load stretches most. The
+Three of the four are under the bar in each mode; create's p99.9 in process is over it in both. The table takes the
+round with the better create p50, and in both passes that round carries create's tail: in the other round create's
+p99.9 is <!-- record: bench/competitive/probes/create_breakdown.md -->3.54 ms (reuse on) and 2.91 ms (reuse
+off)<!-- /record -->, and over the socket the table's own round reads
+<!-- record: bench/competitive/probes/create_breakdown.md -->0.99 and 3.48<!-- /record --> ms. So the tail is a few
+creates per ten thousand, at loads of 23 to 37. On 1714f72 (out/20261104T170413Z, out/20261104T172313Z) the same pass
+read 0.150x, 0.036x, 0.219x, 0.267x with reuse on and 0.356x, 0.938x, 0.264x, 0.833x with it off. Every box of both
+passes ended through its init, none by `cgroup.kill`, where 1714f72's reuse-off pass killed a few in `start_true`:
+a delete that read its box's record before forgetting its init missed an exit the supervisor collected between the
+two (fixed in this tree; `oci_reuse.rs` test 1's fifth case). The create breakdown (seed path, pruned) ran four times,
+alternating reuse on and off, best of N; every run cut every create whole and lost no event. The parts' p50s summed,
+against create's p50 in the same run:
+<!-- record: bench/competitive/probes/create_breakdown.md -->102.9% (on, create-breakdown-20261105T113309Z), 98.4%
+(off, -113700Z), 104.5% (on, -113940Z) and 100.5% (off, -114315Z) at loads of 23 to 42<!-- /record -->: step 7's
+criterion, within 10%, met by all four. What's left, part by part, pooled p50 in ms (reuse on / off):
+<!-- record: bench/competitive/probes/create_breakdown.md -->the init's set-up to the exec FIFO 0.188 / 0.192; the
+cgroup, made and bounded 0.104 / 0.135; the node's and the runtime's own work 0.102 / 0.124; the seed, the request and
+its clone's preparing 0.044 / 0.047; the box's record 0.021 / 0.025; the handshake 0.011 / 0.014<!-- /record -->. The
 levers that would take what's left, for Ada:
 - goal 6's 7.x namespace (`OPEN_TREE_NAMESPACE`, `CLONE_EMPTY_MNTNS`), which takes the mount namespace's copy out of
   the init's clone, the largest part;
 - the shared empty-directory masks (`cp/t7-g6`), which take mounts off the init's root;
 - the record's fsync on disk: zero here with `/run` on tmpfs, but on a `/run` on the container's overlay the record's
   two fsyncs are most of create (the hooks agent's `create_load-20261104.md` on `cp/t7-hooks`);
-- step 6's two levers, the init's pidfd end and the cgroup reused within one owner. Both are in this tree, and reuse
-  is what moves the pass from the second row to the first. What's left of the cgroup on reuse is the idle cgroup's
-  check, read file by file.
+- step 6's two levers, the init's pidfd end and the cgroup reused within one owner, both in this tree. What's left of
+  the cgroup on reuse is the idle cgroup's check, read file by file.
 
 **The spec a container is made from** (found 2026-11-04, AC-T7.1.1). The runtime reads a bundle's `config.json`,
 parses it and checks it: among the rest, `Spec::check` refuses a container in a user namespace holding CAP_SYS_ADMIN
@@ -1793,7 +1794,9 @@ measures). Each step's work, merged in one tree, each merge's resolutions in its
   borrowed network as CAP_SYS_ADMIN is, a box killed through a pidfd for each of its processes, a create or delete
   of a box being made waiting for it by the box's turn, in place of step 6's claim on its id (decision 1), a container
   made from the spec the runtime checked, never a later read of its bundle (above), and createContainer and
-  startContainer hooks run in the container at the spec's points (`docs/design/runtime.md`).
+  startContainer hooks run in the container at the spec's points (`docs/design/runtime.md`), the kept namespaces'
+  files bounded past what both pools of namespaces made ahead hold, and a delete that reads its box's record again
+  after forgetting the init, so an exit collected between the two ends the box through its init, not `cgroup.kill`.
 
 ### 6. Mount namespaces without copying, where the kernel has it
 
