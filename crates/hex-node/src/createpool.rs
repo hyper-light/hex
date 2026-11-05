@@ -32,9 +32,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
-use hex_core::seed::{Answer, Create, Failed, MountNamespace};
+use hex_core::seed::{Answer, Create, Failed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SeedId, Seeds, Stale};
-use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq};
+use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked};
 use hex_runtime::linux::oci::seed as rt_seed;
 use hex_runtime::linux::oci::{OciError, mntns};
 use rustix::event::{PollFd, PollFlags, Timespec};
@@ -246,70 +246,7 @@ impl CloneInit for CreatePool {
         let shared = &self.shared;
         let (id, proc) = shared.acquire()?;
         let pruned = req.pruned.is_some();
-        let create = Create {
-            bundle: req.bundle.to_string_lossy().into_owned(),
-            dir: req.dir.to_string_lossy().into_owned(),
-            cgroup: Some(req.cgroup.dir().to_string_lossy().into_owned()),
-            network: req.network.is_some(),
-            pruned,
-            binds: req
-                .pruned
-                .as_ref()
-                .map_or(0, |p| u32::try_from(p.binds.len()).unwrap_or(u32::MAX)),
-            dev_mount: req
-                .pruned
-                .as_ref()
-                .and_then(|p| p.dev_mount.as_ref().map(|d| d.mount)),
-            path_joins: req
-                .pruned
-                .as_ref()
-                .map_or(0, |p| u32::try_from(p.path_joins.len()).unwrap_or(u32::MAX)),
-            ipc_uts: req.pruned.as_ref().is_some_and(|p| p.ipc_uts.is_some()),
-            config: true,
-            mount_namespace: req
-                .pruned
-                .as_ref()
-                .map_or(MountNamespace::Copy, |p| p.mount_namespace),
-            proc_mount: req
-                .pruned
-                .as_ref()
-                .and_then(|p| p.proc_mount.as_ref().map(|(mount, _)| *mount)),
-            masked_directory: req
-                .pruned
-                .as_ref()
-                .is_some_and(|p| p.masked_directory.is_some()),
-        };
-        // The descriptors ride in the order the seed reads them (`serve_create`): the two pipes, a
-        // network namespace, then on the pruned path the four fixed descriptors and the bind trees, in
-        // `mount::plan`'s order (the order the init attaches them).
-        let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd(), req.map_r.as_fd()];
-        if let Some(network) = &req.network {
-            fds.push(network.as_fd());
-        }
-        if let Some(pruned) = &req.pruned {
-            fds.push(pruned.bundle_dir.as_fd());
-            fds.push(pruned.cgroup_dir.as_fd());
-            fds.push(pruned.container_dir.as_fd());
-            fds.push(pruned.rootfs.as_fd());
-            fds.extend(pruned.binds.iter().map(AsFd::as_fd));
-            fds.extend(pruned.path_joins.iter().map(AsFd::as_fd));
-            if let Some(dev) = &pruned.dev_mount {
-                fds.push(dev.tree.as_fd());
-            }
-            if let Some(pair) = &pruned.ipc_uts {
-                fds.push(pair.ipc.as_fd());
-                fds.push(pair.uts.as_fd());
-            }
-            if let Some((_, proc)) = &pruned.proc_mount {
-                fds.push(proc.pid_namespace.as_fd());
-                fds.push(proc.tree.as_fd());
-            }
-            if let Some(empty) = &pruned.masked_directory {
-                fds.push(empty.as_fd());
-            }
-        }
-        // Last, the spec the runtime checked, which the seed makes the container from (AC-T7.1.1).
-        fds.push(req.config);
+        let (create, fds) = message(&req);
         match round_trip(proc.socket.as_fd(), &create, &fds) {
             Ok((pid, pidfd, made)) => {
                 if pruned && let Some(count) = shared.made.get(usize::from(made.code())) {
@@ -335,6 +272,177 @@ impl CloneInit for CreatePool {
             }
         }
     }
+
+    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+        let pruned = req.pruned.is_some();
+        let Some((pid, pidfd, socket)) = parked.take() else {
+            return Err(OciError::Broken(
+                "a parked init was claimed twice".to_owned(),
+            ));
+        };
+        let (create, fds) = message(req);
+        // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for.
+        match round_trip(socket.as_fd(), &create, &fds) {
+            Ok(_) => {
+                if pruned {
+                    let _ =
+                        self.shared
+                            .pruned
+                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                                Some(n.saturating_add(1))
+                            });
+                }
+                Ok((pid, pidfd))
+            }
+            Err(Trip::Refused(e) | Trip::Broken(e)) => {
+                // Refused, the init ends itself; ended either way, and reaped, so none is left.
+                drop(socket);
+                let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::KILL);
+                let _ =
+                    rustix::process::waitid(WaitId::PidFd(pidfd.as_fd()), WaitIdOptions::EXITED);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl CreatePool {
+    /// A handle on the pool's seeds that parks inits ahead from another thread (decision 8, "The p99.9 that
+    /// stayed").
+    pub fn parker(&self) -> Parker {
+        Parker(Arc::clone(&self.shared))
+    }
+}
+
+/// A handle on a create pool's seeds that makes inits ahead ([`Parker::park`]).
+#[derive(Clone)]
+pub struct Parker(Arc<Shared>);
+
+impl Parker {
+    /// Has a seed clone an init into `cgroup` with the namespaces `flags`, where it waits to be claimed
+    /// (decision 8, "The p99.9 that stayed"). The clone, and its wait for the host-wide `cgroup_mutex`, are
+    /// here, off every create's path.
+    pub fn park(&self, cgroup: BorrowedFd<'_>, flags: u64) -> Result<Parked, OciError> {
+        let shared = &self.0;
+        let (id, proc) = shared.acquire()?;
+        let (ours, theirs) = rt_seed::socketpair()?;
+        let sent = rt_seed::send_park(
+            proc.socket.as_fd(),
+            &Park { flags },
+            [cgroup, theirs.as_fd()],
+        );
+        drop(theirs);
+        let answered = sent.and_then(|()| {
+            if readable(proc.socket.as_fd(), ANSWER_PATIENCE)? {
+                rt_seed::recv_answer(proc.socket.as_fd())
+            } else {
+                Err(OciError::Broken(format!(
+                    "a create seed did not answer a park within {ANSWER_PATIENCE:?}"
+                )))
+            }
+        });
+        match answered {
+            Ok((Answer::Started { pid }, Some(pidfd))) => {
+                shared.done(id, proc);
+                let pid = i32::try_from(pid)
+                    .map_err(|_| OciError::Broken("a parked init's pid out of range".to_owned()))?;
+                // Held from here, so ended and reaped if it never says it is parked.
+                let parked = Parked::new(pid, pidfd, ours, flags);
+                parked.wait_parked(ANSWER_PATIENCE)?;
+                Ok(parked)
+            }
+            Ok((Answer::Refused { failed, why }, _)) => {
+                if failed == Failed::Seed {
+                    shared.died(id, proc);
+                } else {
+                    shared.done(id, proc);
+                }
+                Err(OciError::Os {
+                    op: "parking an init",
+                    why,
+                })
+            }
+            Ok((Answer::Started { .. }, None)) => {
+                shared.died(id, proc);
+                Err(OciError::Broken(
+                    "a create seed said an init was parked but sent no pidfd".to_owned(),
+                ))
+            }
+            Err(e) => {
+                shared.died(id, proc);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// A create as the seed's message and its descriptors, in the order the seed reads them (`serve_create`):
+/// the two pipes, a network namespace, then on the pruned path the four fixed descriptors and the bind trees,
+/// in `mount::plan`'s order (the order the init attaches them), and last the spec the runtime checked.
+fn message<'r>(req: &'r CloneReq<'_>) -> (Create, Vec<BorrowedFd<'r>>) {
+    let pruned = req.pruned.is_some();
+    let create = Create {
+        bundle: req.bundle.to_string_lossy().into_owned(),
+        dir: req.dir.to_string_lossy().into_owned(),
+        cgroup: Some(req.cgroup.dir().to_string_lossy().into_owned()),
+        network: req.network.is_some(),
+        pruned,
+        binds: req
+            .pruned
+            .as_ref()
+            .map_or(0, |p| u32::try_from(p.binds.len()).unwrap_or(u32::MAX)),
+        dev_mount: req
+            .pruned
+            .as_ref()
+            .and_then(|p| p.dev_mount.as_ref().map(|d| d.mount)),
+        path_joins: req
+            .pruned
+            .as_ref()
+            .map_or(0, |p| u32::try_from(p.path_joins.len()).unwrap_or(u32::MAX)),
+        ipc_uts: req.pruned.as_ref().is_some_and(|p| p.ipc_uts.is_some()),
+        config: true,
+        mount_namespace: req
+            .pruned
+            .as_ref()
+            .map_or(MountNamespace::Copy, |p| p.mount_namespace),
+        proc_mount: req
+            .pruned
+            .as_ref()
+            .and_then(|p| p.proc_mount.as_ref().map(|(mount, _)| *mount)),
+        masked_directory: req
+            .pruned
+            .as_ref()
+            .is_some_and(|p| p.masked_directory.is_some()),
+    };
+    let mut fds: Vec<BorrowedFd<'_>> = vec![req.sync_w.as_fd(), req.map_r.as_fd()];
+    if let Some(network) = &req.network {
+        fds.push(network.as_fd());
+    }
+    if let Some(pruned) = &req.pruned {
+        fds.push(pruned.bundle_dir.as_fd());
+        fds.push(pruned.cgroup_dir.as_fd());
+        fds.push(pruned.container_dir.as_fd());
+        fds.push(pruned.rootfs.as_fd());
+        fds.extend(pruned.binds.iter().map(AsFd::as_fd));
+        fds.extend(pruned.path_joins.iter().map(AsFd::as_fd));
+        if let Some(dev) = &pruned.dev_mount {
+            fds.push(dev.tree.as_fd());
+        }
+        if let Some(pair) = &pruned.ipc_uts {
+            fds.push(pair.ipc.as_fd());
+            fds.push(pair.uts.as_fd());
+        }
+        if let Some((_, proc)) = &pruned.proc_mount {
+            fds.push(proc.pid_namespace.as_fd());
+            fds.push(proc.tree.as_fd());
+        }
+        if let Some(empty) = &pruned.masked_directory {
+            fds.push(empty.as_fd());
+        }
+    }
+    // Last, the spec the runtime checked, which the seed makes the container from (AC-T7.1.1).
+    fds.push(req.config);
+    (create, fds)
 }
 
 impl Drop for CreatePool {

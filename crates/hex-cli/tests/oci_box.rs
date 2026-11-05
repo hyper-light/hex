@@ -3026,6 +3026,17 @@ fn program_alone(lab: &Lab, own: &Path) {
         children.iter().any(|&c| cmdline_has(c, "__oci-seed")),
         "a create seed is up, having made the box"
     );
+    // The node makes inits ahead for boxes of no owner, each the agent's child (decision 8): their refill is
+    // waited out first, its queue full (or a make failed), so the diff is the exec's alone.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let ahead = node.cgroup_reuse().unwrap().ahead;
+        if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let children = children_of(agent);
     let before: std::collections::BTreeSet<u32> = children.into_iter().collect();
     let second = node
         .exec(
@@ -4388,11 +4399,22 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
         owner: None,
     })
     .expect("create through a seed");
+    // The inits the node then makes ahead for boxes of no owner go through its create seeds too (decision 8):
+    // their refill is waited out, its queue full (or a make failed), and they are taken out of the counts.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let ahead = node.cgroup_reuse().unwrap().ahead;
+        if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let parks = node.cgroup_reuse().unwrap().parked.parked;
     let after = node.create_seeds().unwrap();
     assert_eq!(
         (
-            after.handed - before.handed,
-            after.done - before.done,
+            after.handed - before.handed - parks,
+            after.done - before.done - parks,
             node.creates_through_shim()
         ),
         (1, 1, 0),
@@ -4509,7 +4531,11 @@ fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
 /// death and the create its death refused; the third create succeeds and the pool counts a restart.
 fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let node = lab.node(&own.join("hex-oci-seedcrash"), state.path());
+    // The seed path: a node that keeps no cgroups made ahead, whose creates each go to a seed (decision 8's
+    // dry path, which a node keeping them takes when none is ready).
+    let node = lab
+        .node(&own.join("hex-oci-seedcrash"), state.path())
+        .with_inits_ahead(0);
     let agent = std::process::id();
     let first = BoxId::new("crash-a").unwrap();
     node.create(lab.running(first.clone(), &Lab::act(&Act::Wait)))

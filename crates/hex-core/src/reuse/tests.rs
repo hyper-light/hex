@@ -362,6 +362,61 @@ fn clean() -> Files {
     }
 }
 
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): a slot made ahead takes the next fresh number, counted
+/// fresh, and is never one a box was given or will be.
+#[test]
+fn a_slot_made_ahead_takes_the_next_fresh_number() {
+    let mut pool: Pool<u8> = Pool::new(4, 8, 7);
+    let whose = Whose {
+        owner: Some("o"),
+        reuse: true,
+        privileged: false,
+    };
+    assert_eq!(pool.ahead(), Some(7));
+    assert_eq!(pool.take(whose, &1), Take::Fresh(8));
+    assert_eq!(pool.ahead(), Some(9));
+    assert_eq!(pool.counts().fresh, 3);
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): an idle cgroup an init was parked in is handed on with that
+/// one process in it and its charge set apart, and refused when it holds none (the init is gone) or when what is
+/// charged past the init's own goes over the threshold; every other guard holds as for an empty one. A cgroup
+/// with an init in it is refused by the plain check, so one is never handed on unseen.
+#[test]
+fn a_parked_inits_cgroup_is_checked_with_the_init_and_its_charge_set_apart() {
+    let parked = Files {
+        events: "populated 1\nfrozen 0\n".into(),
+        memory_current: Some(format!("{}\n", 544_768 + (3 << 20))),
+        ..clean()
+    };
+    assert_eq!(
+        check_parked(&parked, Some(64 << 20), 1 << 20, 3 << 20),
+        Ok(())
+    );
+    assert_eq!(
+        check(&parked, Some(64 << 20), 1 << 20),
+        Err(Refused::Populated)
+    );
+    assert_eq!(
+        check_parked(&clean(), Some(64 << 20), 1 << 20, 3 << 20),
+        Err(Refused::Populated),
+        "an idle cgroup whose parked init is gone"
+    );
+    assert_eq!(
+        check_parked(&parked, Some(64 << 20), 1 << 20, 1 << 20),
+        Err(Refused::Charged),
+        "more charged than the init's own and the threshold"
+    );
+    let frozen = Files {
+        freeze: "1\n".into(),
+        ..parked.clone()
+    };
+    assert_eq!(
+        check_parked(&frozen, Some(64 << 20), 1 << 20, 3 << 20),
+        Err(Refused::Frozen)
+    );
+}
+
 /// Each guard: a file that says the last box left something refuses the cgroup by that file's reason
 /// (research f27-f30, f61, f81); a cgroup whose files read clean is handed on.
 #[test]

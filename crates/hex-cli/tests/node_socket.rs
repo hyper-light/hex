@@ -562,7 +562,8 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             owner: None,
         })
         .unwrap();
-    let init = procs(&agent.box_root.join(OCI_BOXES), &oci);
+    let oci_cg = oci_cgroup(&agent.box_root.join(OCI_BOXES), &oci);
+    let init = procs_in(&oci_cg);
     assert_eq!(init.len(), 1, "the oci box holds its init alone: {init:?}");
     let caller = raw(&agent.socket);
     let mut pids = Vec::new();
@@ -593,8 +594,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         }
     }
     wait_for("each program to run in its box", || {
-        procs(&agent.box_root.join(OCI_BOXES), &oci).len() == 2
-            && procs(&agent.box_root, &process).len() == 1
+        procs_in(&oci_cg).len() == 2 && procs(&agent.box_root, &process).len() == 1
     });
     drop(caller);
     for id in [&oci, &process] {
@@ -603,8 +603,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         });
     }
     wait_for("the programs to be ended", || {
-        procs(&agent.box_root.join(OCI_BOXES), &oci) == init
-            && procs(&agent.box_root, &process).is_empty()
+        procs_in(&oci_cg) == init && procs(&agent.box_root, &process).is_empty()
     });
     for pid in &pids {
         wait_for(&format!("program {pid} to be reaped"), || {
@@ -932,22 +931,26 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         None
     };
     assert_eq!(written(), made, "{name}: the record at the kill");
-    // The container's state directory is made by every point but the two before it (the cgroup made,
-    // the bundle rendered); the record write that marks the box ready comes after it is all made.
+    // A box of no owner has its cgroup chosen once the runtime has read its spec, as an owner's has, since the
+    // node keeps cgroups made ahead for it (decision 8): the bundle is rendered, then the runtime makes the
+    // container's state directory, then the cgroup is made. So every point but the bundle rendered has the
+    // state directory, and every point past the state directory the cgroup; the record write that marks the
+    // box ready comes after it is all made.
     let state_dir_made = match at {
         #[cfg(debug_assertions)]
-        At::CgroupMade | At::BundleRendered => false,
+        At::BundleRendered => false,
         _ => true,
     };
+    let cgroup_made = state_dir_made && at != At::StateDir;
     assert_eq!(
         (containers().len(), cgroup.exists()),
-        (usize::from(state_dir_made), true),
+        (usize::from(state_dir_made), cgroup_made),
         "{name}: (container states, the cgroup) at the kill"
     );
     #[cfg(debug_assertions)]
     assert_eq!(
         rendered.exists(),
-        at == At::BundleRendered,
+        matches!(at, At::BundleRendered | At::CgroupMade),
         "{name}: the bundle at the kill"
     );
     let state_written = containers()
@@ -955,7 +958,9 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         .is_some_and(|c| c.join("state.json").exists());
     assert_eq!(
         state_written,
-        state_dir_made && !matches!(at, At::StateDir | At::Init | At::CreateContainer),
+        state_dir_made
+            && !matches!(at, At::StateDir | At::Init | At::CreateContainer)
+            && !at_cgroup_made(at),
         "{name}: the container's state at the kill"
     );
     drop(agent);
@@ -1152,6 +1157,22 @@ fn slots_under(oci: &Path) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// The slots under `oci` holding a process that isn't an init parked ahead (a fork of the create seed, `hex
+/// __oci-seed`, until claimed: decision 8): the slots boxes hold.
+fn box_slots(oci: &Path) -> std::collections::BTreeSet<String> {
+    let parked = |pid: &String| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|b| b.split(|&c| c == 0).any(|a| a == b"__oci-seed"))
+    };
+    slots_under(oci)
+        .into_iter()
+        .filter(|name| {
+            let p = procs_in(&oci.join(name));
+            !p.is_empty() && !p.iter().all(parked)
+        })
+        .collect()
+}
+
 /// Goal 5 extended, step 6 (T-T7.1.2). Do: over the socket, make and start boxes A and B of owner O and a
 /// box U of none, delete A (its slot goes idle), SIGKILL the agent, and start it again over the same
 /// state. Expect: the restarted agent removes A's idle slot and says so; takes B back in its recorded
@@ -1184,16 +1205,20 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
         client.start(&id(name)).unwrap();
     }
     let oci = box_root.join(OCI_BOXES);
-    let slots = slots_under(&oci);
+    // The slots a box holds: those with a process in them that isn't an init parked ahead (decision 8), whose
+    // slots made ahead are slots too.
+    let slots = box_slots(&oci);
     assert_eq!(slots.len(), 2, "A and B each hold a slot: {slots:?}");
     assert!(
         oci.join("crash-u").is_dir(),
         "U's cgroup is its own, named by its id"
     );
     client.delete(&id("crash-a")).unwrap();
-    assert_eq!(
-        slots_under(&oci),
-        slots,
+    let b_slot = box_slots(&oci);
+    assert_eq!(b_slot.len(), 1, "B's slot alone holds a box: {b_slot:?}");
+    let a_slot = slots.difference(&b_slot).next().unwrap().clone();
+    assert!(
+        oci.join(&a_slot).is_dir(),
         "A's slot is kept idle for its owner"
     );
     drop(client);
@@ -1211,9 +1236,8 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     );
     let left = slots_under(&oci);
     assert_eq!(
-        left.len(),
-        1,
-        "A's idle slot is removed, B's kept: {left:?}"
+        left, b_slot,
+        "A's idle slot is removed with every one made ahead, B's kept: {left:?}"
     );
     let client = again.client();
     for name in ["crash-b", "crash-u"] {
@@ -1248,6 +1272,16 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
             .collect::<Vec<_>>()
             .join("; ")
     );
+}
+
+/// Whether `at` is the point the box's own cgroup is made at, before its state is written (a debug build's).
+fn at_cgroup_made(at: At) -> bool {
+    #[cfg(debug_assertions)]
+    if at == At::CgroupMade {
+        return true;
+    }
+    let _ = at;
+    false
 }
 
 fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
@@ -1336,11 +1370,50 @@ fn answer(fd: &std::os::fd::OwnedFd) -> (wire::Header, Answer) {
 
 /// The processes in a box's cgroup (an ended one leaves it as it ends).
 fn procs(box_root: &Path, id: &BoxId) -> Vec<String> {
-    std::fs::read_to_string(box_root.join(id.as_str()).join("cgroup.procs"))
+    procs_in(&box_root.join(id.as_str()))
+}
+
+/// The processes in cgroup `dir`, by pid.
+fn procs_in(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("cgroup.procs"))
         .unwrap_or_default()
         .split_whitespace()
         .map(str::to_owned)
         .collect()
+}
+
+/// Started oci box `id`'s cgroup under the oci boxes' root `oci`: one named by its id, else the one slot holding a
+/// process that isn't an init parked ahead (a fork of the create seed, `hex __oci-seed`, until claimed; decision 8),
+/// the box's init having exec'd its program.
+fn oci_cgroup(oci: &Path, id: &BoxId) -> PathBuf {
+    let named = oci.join(id.as_str());
+    if named.exists() {
+        return named;
+    }
+    let parked = |pid: &String| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|b| b.split(|&c| c == 0).any(|a| a == b"__oci-seed"))
+    };
+    let found: Vec<PathBuf> = std::fs::read_dir(oci)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        })
+        .map(|e| e.path())
+        .filter(|dir| {
+            let p = procs_in(dir);
+            !p.is_empty() && !p.iter().all(parked)
+        })
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "box {id}'s cgroup, by its processes: {found:?}"
+    );
+    found.into_iter().next().unwrap()
 }
 
 /// The agent's children that have ended and aren't reaped.

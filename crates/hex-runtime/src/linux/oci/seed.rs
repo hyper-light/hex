@@ -97,7 +97,7 @@ fn serve() -> Result<(), OciError> {
     // only the workload's execve, which must not hold the agent's socket, closes it), and /dev/null put
     // on fd 0 in its place.
     let mut stdin = sys::own_fd(0)?;
-    let socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
+    let mut socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
         .map_err(|e| OciError::os("moving the seed's socket off its stdin", e))?;
     let null = rustix::fs::open(
         "/dev/null",
@@ -124,7 +124,8 @@ fn serve() -> Result<(), OciError> {
             // The agent closed the socket: nothing more will come, so the seed is done.
             Received::Closed => return Ok(()),
             Received::Message { size, stdio } => {
-                let (answer, pidfd) = serve_one(&buf, size, stdio, &mut pid_for, &mut specs);
+                let (answer, pidfd) =
+                    serve_one(&buf, size, stdio, &mut pid_for, &mut specs, &mut socket);
                 send_answer(socket.as_fd(), &answer, pidfd.as_ref().map(AsFd::as_fd))?;
             }
         }
@@ -648,13 +649,212 @@ fn serve_one(
     fds: Vec<OwnedFd>,
     pid_for: &mut PidFor,
     specs: &mut Specs,
+    socket: &mut OwnedFd,
 ) -> (Answer, Option<OwnedFd>) {
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     match seed::read_message(bytes, size, fds.len()) {
         Ok(seed::Message::Exec(req)) => serve_exec(req, fds, pid_for, specs),
-        Ok(seed::Message::Create(create)) => serve_create(&create, fds, pid_for),
+        Ok(seed::Message::Create(create)) => serve_create(&create, fds, How::Clone, pid_for),
+        Ok(seed::Message::Park(park)) => serve_park(park, fds, socket),
         Err(fault) => refused(Failed::Request, fault.to_string()),
     }
+}
+
+/// How a create's init comes to be: cloned by the seed now, or the init parked ahead that this process is
+/// (decision 8, "The p99.9 that stayed").
+#[derive(Clone, Copy)]
+enum How<'a> {
+    /// The seed clones the init into its cgroup and namespaces ([`sys::clone_sibling`]).
+    Clone,
+    /// This process is an init parked in its cgroup with the namespaces `flags` made, claimed on `claim`.
+    Parked { flags: u64, claim: BorrowedFd<'a> },
+}
+
+/// Where a create's init is cloned, or, for a parked init, the claim taken: the clone's outcome as
+/// [`sys::clone_sibling`] gives it. A parked init made with other namespaces than the create's `flags` is
+/// refused by type, never made into a container its spec didn't ask for (CLAUDE.md §3); one that takes the
+/// claim answers on its claim socket that it started, with a pidfd of its own, and goes on as the child.
+fn begin(
+    how: How<'_>,
+    cgroup: Option<BorrowedFd<'_>>,
+    flags: u64,
+) -> Result<Option<sys::Sibling>, OciError> {
+    match how {
+        How::Clone => sys::clone_sibling(cgroup, flags),
+        How::Parked { flags: made, claim } => {
+            if made != flags {
+                return Err(OciError::Broken(format!(
+                    "an init parked with namespaces {made:#x} was claimed by a create that makes {flags:#x}"
+                )));
+            }
+            let pidfd = rustix::process::pidfd_open(
+                rustix::process::getpid(),
+                rustix::process::PidfdFlags::empty(),
+            )
+            .map_err(|e| OciError::os("opening a parked init's own pidfd", e))?;
+            send_answer(claim, &Answer::Started { pid: 0 }, Some(pidfd.as_fd()))?;
+            Ok(Some(sys::Sibling::Child))
+        }
+    }
+}
+
+/// Makes an init ahead into an idle cgroup (decision 8, "The p99.9 that stayed"): `fds` are the cgroup and the
+/// init's end of its claim socket. The seed clones it into the cgroup with the park's namespaces, the agent's
+/// own child, and answers with its pid and pidfd. The init holds nothing of any box until a create claims it
+/// ([`parked`]); its copy of the seed's socket is replaced by an end of a pipe of its own, so the seed's
+/// requests reach the seed alone.
+fn serve_park(
+    park: seed::Park,
+    fds: Vec<OwnedFd>,
+    socket: &mut OwnedFd,
+) -> (Answer, Option<OwnedFd>) {
+    let mut fds = fds.into_iter();
+    let (Some(cgroup), Some(claim)) = (fds.next(), fds.next()) else {
+        return refused(
+            Failed::Request,
+            format!("a park carries {} descriptors", seed::PARK_FDS),
+        );
+    };
+    if park.flags & !parkable() != 0 {
+        return refused(
+            Failed::Request,
+            format!("a park's flags {:#x} name more than namespaces", park.flags),
+        );
+    }
+    match sys::clone_sibling(Some(cgroup.as_fd()), park.flags) {
+        Ok(None) => refused(
+            Failed::Unable,
+            "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
+        ),
+        Ok(Some(sys::Sibling::Child)) => {
+            drop(cgroup);
+            let replaced = rustix::pipe::pipe_with(PipeFlags::CLOEXEC)
+                .and_then(|(r, _w)| rustix::io::dup2(&r, socket));
+            if replaced.is_err() {
+                sys::exit_child(127);
+            }
+            parked(claim, park.flags)
+        }
+        Ok(Some(sys::Sibling::Parent { pid, pidfd })) => {
+            drop((cgroup, claim));
+            match u32::try_from(pid) {
+                Ok(pid) => (Answer::Started { pid }, Some(pidfd)),
+                Err(_) => {
+                    let _ =
+                        rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+                    refused(
+                        Failed::Start,
+                        "clone3 returned a pid out of range".to_owned(),
+                    )
+                }
+            }
+        }
+        Err(e) => refused(Failed::Start, e.to_string()),
+    }
+}
+
+/// The namespaces a park may make: `CLONE_NEW*` bits, nothing that shares or changes the clone otherwise. A user
+/// namespace's maps are written once the init is claimed, by the create's own handshake, as for a fresh clone.
+fn parkable() -> u64 {
+    [
+        libc::CLONE_NEWUSER,
+        libc::CLONE_NEWNS,
+        libc::CLONE_NEWPID,
+        libc::CLONE_NEWNET,
+        libc::CLONE_NEWIPC,
+        libc::CLONE_NEWUTS,
+    ]
+    .into_iter()
+    .filter_map(|f| u64::try_from(f).ok())
+    .fold(0, |all, f| all | f)
+}
+
+/// A parked init's life (decision 8): it empties its effective capabilities, says on `claim` that it is parked,
+/// and waits there for one create, then makes that container as a
+/// freshly cloned init does, through the create's own path with [`How::Parked`]. A refusal goes back on the
+/// claim socket and the init ends; so does the agent closing the socket (an idle cgroup evicted, the node
+/// shutting down). It never returns.
+fn parked(claim: OwnedFd, flags: u64) -> ! {
+    // While parked it exercises no capability: its effective set is emptied, and raised again from its
+    // permitted set only once a create claims it (capabilities(7): "Effective: the set used by the kernel to
+    // perform permission checks"; a capability dropped from the permitted set could never be regained, and the
+    // init must still build the container as root). One that can't empty it ends, never parked holding it.
+    let Ok(held) = rustix::thread::capabilities(None) else {
+        sys::exit_child(127);
+    };
+    let idle = rustix::thread::CapabilitySets {
+        effective: rustix::thread::CapabilitySet::empty(),
+        ..held
+    };
+    if rustix::thread::set_capabilities(None, idle).is_err() {
+        sys::exit_child(127);
+    }
+    // And non-dumpable while it waits, so no other process can ptrace it, read its memory or take its descriptors
+    // (its claim socket) without CAP_SYS_PTRACE (ptrace(2), "Ptrace access mode checking": a target that isn't
+    // dumpable refuses a caller without it; pidfd_getfd(2) checks PTRACE_MODE_ATTACH_REALCREDS). Restored once
+    // claimed: a rootless node writes the claimed init's user namespace maps through its /proc files.
+    let Ok(dumpable) = rustix::process::dumpable_behavior() else {
+        sys::exit_child(127);
+    };
+    if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .is_err()
+    {
+        sys::exit_child(127);
+    }
+    // Parked, said on its claim socket as a seed says a start, so the agent holds it only once it is so.
+    let said = rustix::process::pidfd_open(
+        rustix::process::getpid(),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .map_err(|e| OciError::os("opening a parked init's own pidfd", e))
+    .and_then(|me| send_answer(claim.as_fd(), &Answer::Started { pid: 0 }, Some(me.as_fd())));
+    if said.is_err() {
+        sys::exit_child(127);
+    }
+    let mut buf = vec![0u8; seed::MAX_REQUEST];
+    let (size, fds) = match recv_request(claim.as_fd(), &mut buf) {
+        Ok(Received::Message { size, stdio }) => (size, stdio),
+        Ok(Received::Closed) | Err(_) => sys::exit_child(0),
+    };
+    let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
+    let answer = match seed::read_message(bytes, size, fds.len()) {
+        Ok(seed::Message::Create(_))
+            if rustix::thread::set_capabilities(None, held).is_err()
+                || rustix::process::set_dumpable_behavior(dumpable).is_err() =>
+        {
+            refused(
+                Failed::Start,
+                "a parked init couldn't raise its capabilities again".to_owned(),
+            )
+            .0
+        }
+        Ok(seed::Message::Create(create)) => match PidFor::open() {
+            // Its own pid namespace, which a create it can take never changes (a proc made ahead is refused).
+            Ok(mut pid_for) => {
+                serve_create(
+                    &create,
+                    fds,
+                    How::Parked {
+                        flags,
+                        claim: claim.as_fd(),
+                    },
+                    &mut pid_for,
+                )
+                .0
+            }
+            Err(e) => refused(Failed::Start, e.to_string()).0,
+        },
+        Ok(_) => {
+            refused(
+                Failed::Request,
+                "a parked init takes a create and nothing else".to_owned(),
+            )
+            .0
+        }
+        Err(fault) => refused(Failed::Request, fault.to_string()).0,
+    };
+    let _ = send_answer(claim.as_fd(), &answer, None);
+    sys::exit_child(127)
 }
 
 /// Makes a container the agent asked for (decision 5, goal 5 plan step 4): the seed opens its cgroup and,
@@ -671,6 +871,7 @@ fn serve_one(
 fn serve_create(
     create: &seed::Create,
     fds: Vec<OwnedFd>,
+    how: How<'_>,
     pid_for: &mut PidFor,
 ) -> (Answer, Option<OwnedFd>) {
     // The spec the runtime checked rides last (`read_message` held the count to the create's), and the
@@ -701,7 +902,7 @@ fn serve_create(
     // exactly when the create says one does, then (on the pruned path) the root descriptors.
     let network = if create.network { fds.next() } else { None };
     if create.pruned {
-        return serve_create_pruned(create, &spec, fds, sync_w, map_r, network, pid_for);
+        return serve_create_pruned(create, &spec, fds, sync_w, map_r, network, how, pid_for);
     }
     // The runtime hands a seed no container that joins a pid or user namespace by path (it makes those
     // through the shim, `init::needs_shim`); one that came anyway is refused by type, never made in the
@@ -719,7 +920,7 @@ fn serve_create(
     };
     let made_ahead = network.is_some();
     let flags = init::fresh_clone_flags(&spec, made_ahead, false);
-    match sys::clone_sibling(cgroup.as_ref().map(AsFd::as_fd), flags) {
+    match begin(how, cgroup.as_ref().map(AsFd::as_fd), flags) {
         Ok(None) => refused(
             Failed::Unable,
             "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
@@ -776,6 +977,7 @@ fn serve_create_pruned(
     sync_w: OwnedFd,
     map_r: OwnedFd,
     network: Option<OwnedFd>,
+    how: How<'_>,
     pid_for: &mut PidFor,
 ) -> (Answer, Option<OwnedFd>) {
     let (Some(bundle_dir), Some(cgroup_dir), Some(container_dir), Some(rootfs)) =
@@ -900,28 +1102,53 @@ fn serve_create_pruned(
     // The map pipe carries only a user namespace's map ack, which the pruned path never asks for: the
     // seed's copy is dropped before the clone, so the init doesn't inherit it.
     drop(map_r);
-    // A proc made ahead shows a pid namespace made ahead (decision 6's update, part 2): the init is cloned
-    // into it, its pid 1, in place of a fresh one, and the seed's next children are its own again after.
-    if let Some((_, proc)) = &proc_mount {
-        if let Err(e) = pid_for.join(proc.pid_namespace.as_fd()) {
-            return refused(Failed::Start, e.to_string());
+    let (made, cloned) = match how {
+        How::Clone => {
+            // A proc made ahead shows a pid namespace made ahead (decision 6's update, part 2): the init is cloned
+            // into it, its pid 1, in place of a fresh one, and the seed's next children are its own again after.
+            if let Some((_, proc)) = &proc_mount {
+                if let Err(e) = pid_for.join(proc.pid_namespace.as_fd()) {
+                    return refused(Failed::Start, e.to_string());
+                }
+                flags &= !u64::try_from(libc::CLONE_NEWPID).unwrap_or(0);
+            }
+            let (made, cloned) = clone_pruned(cgroup_dir.as_fd(), flags, create.mount_namespace);
+            // The seed's next children are born in its own pid namespace again, whatever the clone did; a seed that
+            // can't set that back would bear them in another container's, so it is broken and the agent replaces
+            // it (with the init it just started ended). The clone's child doesn't: it is the init.
+            let reset = match &cloned {
+                Ok(Some(sys::Sibling::Child)) => Ok(()),
+                _ => pid_for.reset(),
+            };
+            if let Err(e) = reset {
+                if let Ok(Some(sys::Sibling::Parent { pidfd, .. })) = &cloned {
+                    let _ =
+                        rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
+                }
+                return refused(Failed::Seed, e.to_string());
+            }
+            (
+                made,
+                cloned.map_err(|e| OciError::os("clone3 the program into the container", e)),
+            )
         }
-        flags &= !u64::try_from(libc::CLONE_NEWPID).unwrap_or(0);
-    }
-    let (made, cloned) = clone_pruned(cgroup_dir.as_fd(), flags, create.mount_namespace);
-    // The seed's next children are born in its own pid namespace again, whatever the clone did; a seed that
-    // can't set that back would bear them in another container's, so it is broken and the agent replaces
-    // it (with the init it just started ended). The clone's child doesn't: it is the init.
-    let reset = match &cloned {
-        Ok(Some(sys::Sibling::Child)) => Ok(()),
-        _ => pid_for.reset(),
+        // An init parked ahead has its pid and mount namespaces already (decision 8): a create carrying a proc made
+        // ahead, or making its mount namespace another way (decision 6's update), isn't one it can take. The
+        // runtime sends it none such (run.rs, start_via_seed); one that came anyway is refused by type.
+        How::Parked { .. } => {
+            if proc_mount.is_some() || create.mount_namespace != MountNamespace::Copy {
+                return refused(
+                    Failed::Request,
+                    "a parked init was claimed by a create with a proc made ahead or a mount namespace made another way"
+                        .to_owned(),
+                );
+            }
+            (
+                MountNamespace::Copy,
+                begin(how, Some(cgroup_dir.as_fd()), flags),
+            )
+        }
     };
-    if let Err(e) = reset {
-        if let Ok(Some(sys::Sibling::Parent { pidfd, .. })) = &cloned {
-            let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::KILL);
-        }
-        return refused(Failed::Seed, e.to_string());
-    }
     match cloned {
         Ok(None) => refused(
             Failed::Unable,
@@ -976,10 +1203,7 @@ fn serve_create_pruned(
                 }
             }
         }
-        Err(e) => refused(
-            Failed::Start,
-            OciError::os("clone3 the program into the container", e).to_string(),
-        ),
+        Err(e) => refused(Failed::Start, e.to_string()),
     }
 }
 
@@ -1432,6 +1656,25 @@ pub fn send_create(
     if !control.push(SendAncillaryMessage::ScmRights(fds)) {
         return Err(OciError::os(
             "sending a create's descriptors",
+            "no room for the descriptors",
+        ));
+    }
+    send(socket, &bytes, &mut control)
+}
+
+/// Sends one park on `socket` (decision 8): the idle cgroup the init is cloned into, then the init's end of
+/// its claim socket, riding with it (`SCM_RIGHTS`).
+pub fn send_park(
+    socket: BorrowedFd<'_>,
+    park: &seed::Park,
+    fds: [BorrowedFd<'_>; seed::PARK_FDS],
+) -> Result<(), OciError> {
+    let bytes = seed::park(park).map_err(|f| OciError::Broken(format!("encoding a park: {f}")))?;
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(seed::PARK_FDS))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    if !control.push(SendAncillaryMessage::ScmRights(&fds)) {
+        return Err(OciError::os(
+            "sending a park's descriptors",
             "no room for the descriptors",
         ));
     }

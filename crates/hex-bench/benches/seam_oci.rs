@@ -51,6 +51,8 @@
 //! from one to another shows too.
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
+//! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
+//! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -1061,7 +1063,21 @@ mod linux {
                "removals_failed": after.0.removals_failed - before.0.removals_failed,
                "ended_through_init": after.1.through_init - before.1.through_init,
                "fell_back_to_cgroup_kill": after.1.fell_back - before.1.fell_back,
-               "cgroup_kill": after.1.cgroup_kill - before.1.cgroup_kill})
+               "cgroup_kill": after.1.cgroup_kill - before.1.cgroup_kill,
+               "parked": parked_rise(&before.0.parked, &after.0.parked),
+               "ahead": {"made": after.0.ahead.made - before.0.ahead.made,
+                         "taken": after.0.ahead.taken - before.0.ahead.taken,
+                         "dry": after.0.ahead.dry - before.0.ahead.dry,
+                         "failed": after.0.ahead.failed - before.0.ahead.failed,
+                         "ready": after.0.ahead.ready}})
+    }
+
+    /// What the inits made ahead in idle cgroups did over a phase (decision 8, "The p99.9 that stayed").
+    fn parked_rise(b: &hex_node::cgroups::ParkCounts, a: &hex_node::cgroups::ParkCounts) -> Value {
+        json!({"parked": a.parked - b.parked, "claimed": a.claimed - b.claimed,
+               "ended_unclaimed": a.ended_unclaimed - b.ended_unclaimed,
+               "failed": a.failed - b.failed,
+               "charged_bytes": a.charged_bytes - b.charged_bytes})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -1175,6 +1191,16 @@ mod linux {
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
                 .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
+            // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
+            // as it ships, unless HEXBENCH_AHEAD says.
+            let node = match std::env::var("HEXBENCH_AHEAD") {
+                Ok(v) => node.with_inits_ahead(
+                    v.trim()
+                        .parse()
+                        .unwrap_or_else(|e| panic!("HEXBENCH_AHEAD={v:?}: {e}")),
+                ),
+                Err(_) => node,
+            };
             let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
                 Ok("0") => node
                     .with_ipc_uts_bound(0)

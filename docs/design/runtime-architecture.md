@@ -1985,6 +1985,109 @@ could do instead. Decisions 1, 4 and 5 are how. Every phase is benchmarked at 10
 
 **What would falsify it.** Tails that stay after decisions 1, 4 and 5 land.
 
+**The p99.9 that stayed: the host-wide `cgroup_mutex`** (goal 5's tail, 2026-11-05;
+`bench/competitive/probes/create_tail.md`, sources in `docs/research/runtime/goal5-tails.md`). Decisions 1, 4 and 5 landed,
+and the tails stayed.
+- In host.sh's passes on the integrated tree, 0.05% to 0.26% of creates take 9 to 23 ms against a p50 of 0.5. When that
+  mode passes 0.1% of a round, it is the round's p99.9.
+  <!-- record: bench/competitive/probes/create_tail.md -->Reuse on, create+start of `true` p99.9 12.91 against libcrun's
+  17.50 ms (out/20261105T024612Z)<!-- /record -->.
+- A wake-up-chain walk of every traced create (`create_tail.py`) names the wait. A create takes `cgroup_mutex` once: for
+  the init's `CLONE_INTO_CGROUP` clone with reuse on, and for the cgroup's `mkdir` with reuse off. Each slow create
+  waited there.
+- Each holder was another tenant's task migration (Docker's `runc`, `podman`, a shell), released right after its
+  `cgroup_attach_task`. A migration write-locks `cgroup_threadgroup_rwsem` under `cgroup_mutex`, and that waits out an
+  RCU grace period (Linux v6.19 `kernel/cgroup/cgroup.c:2536-2546`, `kernel/rcu/sync.c:133`). Hex measured the wait on
+  this host at 10 to 12 ms p50 (`docs/design/runtime.md`, "Born in its cgroup").
+- So the tail is set by how often the host migrates a task, not by Hex. libcrun pays it too: crun also clones into the cgroup.
+
+**The choice, being prototyped: the init made ahead into its cgroup, reuse on.** An owner's box, deleted, leaves an idle
+cgroup that step 6 hands to the owner's next box. Before the pool can hand it to one, the delete has a create seed
+clone an init into it, with the namespaces the owner's last box was made with (`init::fresh_clone_flags`, as the
+runtime reports them to the node: `Choose::init_made`). It is the delete, not a thread after it, because creates come
+back to back: a park left to a thread after the delete was still under way at the next create in 511 of 519
+lifecycles (`seam_oci`, fedora, 2026-11-05), so the create waited out the clone it was meant to skip. The init does nothing but wait on
+its socket. The next create for that owner sends the parked init its create, the same message a seed takes today
+(`seed::send_create`), with the checked spec's sealed memfd and the trees and namespaces made for it. The init then
+builds the container as a freshly cloned one does. The `CLONE_INTO_CGROUP` clone, and its wait for `cgroup_mutex`,
+move to the delete, off create's path; the delete's cost is measured beside the create's. So does the clone's own cost, the largest part of a create under load
+(part 11 above).
+- **Precedent.** runc's init is a process parked before its program: it waits at the exec FIFO between create and start
+  (v1.5.2 `libcontainer/standard_init_linux.go:255`). Android's zygote and SOCK's zygotes fork from a process made
+  ahead ([OCI-12], [OCI-27] p.63). AFaaS keeps cgroups made ahead, and warns that a pool still jitters while another
+  tenant holds the cgroup lock ([OCI-35] p.511-512), which is what is measured here. A parked init holds that lock only when it is made.
+- **Reuse off.** A box of no owner gets a cgroup of its own, so the node makes cgroups ahead for such boxes
+  (`Node::with_inits_ahead`, a bound, 8 by default: below). Each is a fresh slot, with default bounds and an init parked in
+  it, refilled by a thread of the node's own (`hex-ahead`) off every create's path. A box of no owner takes the
+  oldest ready one, is given its own bounds there, and is the parked init. Its slot is removed with the box, never
+  kept: such a box could have left anything in it. The parked init's namespaces are those the last box of no owner was
+  made with. With none ready, the create makes its own cgroup named by its id and clones its init, as before.
+- **Each pool is bounded and counted.** The parked inits in idle slots are bounded by the idle slots
+  (`hex_core::reuse::PER_OWNER` 32, `PER_NODE` 256), one init each; those made ahead for boxes of no owner by the
+  node's bound. `cgroups::ParkCounts` counts inits made, claimed, ended unclaimed and failed, and the bytes charged
+  for them. `cgroups::AheadCounts` counts cgroups made ahead, taken, creates that found none ready (dry), failed
+  makes and those ready now. `seam_oci` writes both with its phase's cgroup counts.
+- **What a parked init costs.** One process and its pages, charged to the idle cgroup. The init is the claiming
+  box's pid 1, so its `pids.current` of 1 is the one the box would take at its clone anyway. The memory a park
+  charges is measured each time and counted (`ParkCounts::charged_bytes`; the idle check sets it apart:
+  `reuse::check_parked`). On fedora it was about 24.7 KB an init in a handed-on slot and about 262 KB in a fresh
+  one made ahead (`create_tail.md`, "The parked init, A/B against 60b2e38"). Reuse on, a delete pays the clone (and the init's
+  word that it is parked) the next create no longer pays. With reuse off, the clone and the cgroup's `mkdir` move
+  to the refill thread.
+- **What a dry pool costs.** Nothing more than today. A reuse-on create whose idle cgroup holds no parked init (the
+  park failed, counted) clones its init into it, as before. A reuse-off create that finds none ready makes its own
+  cgroup and clones its init, as before, counted dry.
+- **Security: "holds no spec, privileges or capabilities until a create claims it" (the lead's reading, 2026-11-05).**
+  The parked init keeps its permitted capabilities, since it must still build the container as root, and a
+  capability dropped from the permitted set can't be regained (capabilities(7), "Thread capability sets"). So the
+  criterion holds only if nothing but the node can make it use them. Each of these holds:
+  - *It exercises none.* Its effective set is empty from before it says it is parked (the set the kernel checks:
+    capabilities(7)). Test 2b reads `CapEff` 0 while it waits.
+  - *Nothing else can reach into it.* It is non-dumpable while it waits (`PR_SET_DUMPABLE` 0, prctl(2)). A target that
+    isn't dumpable refuses ptrace access to a caller without `CAP_SYS_PTRACE` in its user namespace (ptrace(2), "Ptrace
+    access mode checking", step 4). That covers attaching, `/proc/<pid>/mem`, `/proc/<pid>/fd` and `pidfd_getfd(2)`,
+    which checks `PTRACE_MODE_ATTACH_REALCREDS`. Test 2b has an unprivileged process of the same uid refused every one
+    of its descriptors. A process holding `CAP_SYS_PTRACE` can reach any process, the node's own included, so it is
+    outside this boundary as it is outside the node's.
+  - *It takes a spec only on the channel it inherited from the node.* Its claim socket is one end of a socketpair made
+    by the agent (`seed::socketpair`), handed to it over the seed's socket, with no name in the filesystem or the
+    abstract namespace, so no process can connect to it. The other end stays the agent's alone (`run::Parked`).
+  - *It runs no code but Hex's until claimed.* It is a fork of the create seed, the `hex` binary, which execs nothing
+    until the claimed container's program.
+  - Its dumpable state is restored once it is claimed: a rootless node writes the claimed init's user-namespace maps
+    through its `/proc` files.
+  If any of these stopped holding, its permitted set would go empty too, and the design would change. It also holds
+  nothing of the next box until it is claimed: no spec, no rootfs, no network, ipc or uts namespace, and its fresh pid
+  and mount namespaces are empty of the box's. A claim whose spec asks for other namespaces than it was made with is
+  refused by type: the init is ended and the create clones a fresh one (CLAUDE.md §3).
+- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` is 8: one per
+  box in flight at the seam bench's concurrency 8. At the bar's concurrency 1, eight never ran dry but for each round's
+  first create (1 in 10,100: the A/B below). That is about 2.1 MB a node at about 262 KB an init. It is a pool like
+  decision 4's network namespaces made ahead, on by default; `Node::with_inits_ahead(0)` keeps none. The socket's node
+  and the bench take the default.
+- **Recovery.** A parked init ends when the agent's end of its socket closes, so a node's crash ends every one. The
+  idle slots and those made ahead are named by no box's record, and recovery removes them, `cgroup.kill` first, as it
+  removes idle slots today.
+- **Not chosen: `favordynmods`.** It makes a migration take the thread group's own rwsem, not the grace period under the
+  global lock (`cgroup.c:2547-2549`). But it is a mount option of the whole hierarchy, and it adds a barrier and an atomic to every fork and
+  exit on the host. Once on, it can't be fully turned off without a reboot (`cgroup.c:1341-1356`). It is a
+  host decision for Ada, not Hex's.
+
+**What the A/B measured** (`create_tail.md`, "The parked init, A/B against 60b2e38", six interleaved passes, loads 13
+to 59, not of record):
+- In process, B's create max was 2.84 to 3.81 ms in every pass, against A's 15.35 to 59.89, and no B create waited
+  on `cgroup_mutex` (`create_tail.md`, run 5).
+- Reuse on, create p50 0.34 and 0.41 ms against A's 0.40 and 0.41. Both met the bar at p99.9 in these passes (B
+  0.140x-0.205x for create, 0.075x-0.148x for create+start), A's mode staying under 0.1%.
+- Reuse off, create p99.9 2.71 against 17.75 ms and p50 0.39 against 0.57, but 0.337x and 0.322x of libcrun: over the
+  bar. What is left there, and in reuse on's slowest 0.1%, is the kernel's work for earlier boxes on the creates'
+  CPUs (RCU callbacks, cgroup and network-namespace teardown).
+- The delete pays the clone: reuse on, its p50 rose from 0.17-0.18 to 0.33-0.34 ms, and its max reached 85.34.
+
+**What would falsify it.** A reuse-on create with a parked init that still blocks on `cgroup_mutex` in `create_tail`
+(some other call on its path takes it). Or a claim that costs more at p50 than the clone it saves. Or a parked init's
+memory charge pushing an owner's box past bounds the fresh path keeps.
+
 ## Axes that can't reach 4x, and why
 
 - **A1. Held memory and density per container or box.** A process in a cgroup of its own carries a kernel floor.

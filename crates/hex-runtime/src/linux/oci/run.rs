@@ -163,10 +163,13 @@ pub struct Held<'a> {
 }
 
 /// What a seed's create may take from the node once it knows its route.
-#[derive(Clone, Copy)]
 struct SeedPools<'a> {
     dev_mounts: Option<&'a dyn DevMounts>,
     ipc_uts: Option<&'a dyn IpcUtsAhead>,
+    /// The init parked in a handed-on cgroup, and the caller that chose it, told what the init was made with
+    /// (decision 8, "The p99.9 that stayed").
+    parked: Option<Parked>,
+    chooser: Option<&'a dyn Choose>,
 }
 
 /// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
@@ -222,6 +225,11 @@ pub trait CloneInit {
     /// writes). Returns the init's pid in this process's pid namespace and a pidfd for it, the caller's to
     /// own.
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
+
+    /// Hands the create `req` to the init `parked` in its cgroup (decision 8, "The p99.9 that stayed"), in place
+    /// of a clone: the same message a seed takes, on the init's own socket. Returns its pid and pidfd as
+    /// [`CloneInit::clone_init`] does, or the refusal, after which the parked init is gone and `req` unused.
+    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
 
     /// Whether this node's create seeds prune their mount namespace (goal 5 plan step 2): true on a root
     /// node, so a pruned-eligible container takes the pruned root path (no `pivot_root`) and the rest go
@@ -390,6 +398,19 @@ fn duplicate(fd: BorrowedFd<'_>) -> Result<OwnedFd, OciError> {
     rustix::io::fcntl_dupfd_cloexec(fd, 0).map_err(|e| OciError::os("duplicating a descriptor", e))
 }
 
+/// An init parked in the create's cgroup, if any, and the caller that chose the cgroup (decision 8, "The p99.9
+/// that stayed"). Dropped unused, the parked init is ended ([`Parked`]).
+struct Parking<'a> {
+    parked: Option<Parked>,
+    chooser: Option<&'a dyn Choose>,
+}
+
+/// Who starts a seed create's init: the node's create seeds, or the init parked in its cgroup ([`Parking`]).
+struct Via<'a> {
+    seeds: &'a dyn CloneInit,
+    parking: Parking<'a>,
+}
+
 /// Where a container's cgroup comes from.
 enum Cgroup<'a> {
     /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
@@ -420,6 +441,8 @@ pub struct Wants<'a> {
 pub struct Chosen {
     pub cgroup: BoxCgroup,
     pub attached: bool,
+    /// An init made ahead in the cgroup, waiting to be claimed (decision 8, "The p99.9 that stayed").
+    pub parked: Option<Parked>,
 }
 
 /// A caller that chooses a container's cgroup once its spec is read: the node agent, over the idle
@@ -427,6 +450,81 @@ pub struct Chosen {
 /// provided one is.
 pub trait Choose {
     fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError>;
+
+    /// The container's init was made with the namespaces `flags` (`clone3`'s `CLONE_NEW*` bits), by a
+    /// claim of the init parked in its cgroup when `claimed`, else by a clone: what the caller parks for the
+    /// owner's next box, and counts.
+    fn init_made(&self, flags: u64, claimed: bool);
+}
+
+/// An init made ahead in an idle cgroup (decision 8, "The p99.9 that stayed"): its pid in this process's pid
+/// namespace, its pidfd, this end of the socket its claim goes on, and the namespaces it was made with. One
+/// that isn't claimed is ended and reaped when dropped, so none is left running or a zombie.
+#[derive(Debug)]
+pub struct Parked {
+    held: Option<(i32, OwnedFd, OwnedFd)>,
+    pub flags: u64,
+}
+
+impl Parked {
+    pub fn new(pid: i32, pidfd: OwnedFd, socket: OwnedFd, flags: u64) -> Self {
+        Self {
+            held: Some((pid, pidfd, socket)),
+            flags,
+        }
+    }
+
+    /// The init's pid, if it is still held.
+    pub fn pid(&self) -> Option<i32> {
+        self.held.as_ref().map(|h| h.0)
+    }
+
+    /// Waits up to `patience` for the init to say on its socket that it is parked: its effective capabilities
+    /// emptied, waiting for its claim (`seed::parked`).
+    pub fn wait_parked(&self, patience: std::time::Duration) -> Result<(), OciError> {
+        let Some((_, _, socket)) = &self.held else {
+            return Err(OciError::Broken("a parked init no longer held".to_owned()));
+        };
+        let mut fds = [rustix::event::PollFd::new(
+            socket,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: i64::try_from(patience.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: patience.subsec_nanos().into(),
+        };
+        let ready = rustix::event::poll(&mut fds, Some(&timeout))
+            .map_err(|e| OciError::os("waiting for an init to park", e))?;
+        if ready == 0 {
+            return Err(OciError::Broken(format!(
+                "an init didn't say it was parked within {patience:?}"
+            )));
+        }
+        match super::seed::recv_answer(socket.as_fd())? {
+            (hex_core::seed::Answer::Started { .. }, Some(_)) => Ok(()),
+            _ => Err(OciError::Broken(
+                "an init said something other than that it was parked".to_owned(),
+            )),
+        }
+    }
+
+    /// The init's pid, pidfd and claim socket, the caller's from here.
+    pub fn take(mut self) -> Option<(i32, OwnedFd, OwnedFd)> {
+        self.held.take()
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        if let Some((_, pidfd, socket)) = self.held.take() {
+            drop(socket);
+            let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+            let _ = rustix::process::waitid(
+                rustix::process::WaitId::PidFd(pidfd.as_fd()),
+                rustix::process::WaitIdOptions::EXITED,
+            );
+        }
+    }
 }
 
 impl Runtime {
@@ -652,6 +750,8 @@ impl Runtime {
         // A caller-provided cgroup is already made and bounded, so only the spec's device program is
         // attached to it; one made from the spec takes the whole plan (its resource writes and device
         // program). The provided cgroup is the caller's to remove, so a failure here leaves it.
+        let mut parked = None;
+        let mut chosen_by: Option<&dyn Choose> = None;
         let (cgroup, caller_owns) = match cgroup {
             Cgroup::FromSpec => (make_cgroup(&spec, id, &plan, &self.root)?, false),
             Cgroup::Provided(cg) => {
@@ -680,6 +780,8 @@ impl Runtime {
                 {
                     held.attach_program(&chosen.cgroup, insns)?;
                 }
+                parked = chosen.parked;
+                chosen_by = Some(chooser);
                 (chosen.cgroup, true)
             }
         };
@@ -715,6 +817,8 @@ impl Runtime {
                 SeedPools {
                     dev_mounts,
                     ipc_uts,
+                    parked,
+                    chooser: chosen_by,
                 },
             ),
         });
@@ -857,8 +961,13 @@ impl Runtime {
         let SeedPools {
             dev_mounts,
             ipc_uts,
+            parked,
+            chooser,
         } = pools;
+        let parking = Parking { parked, chooser };
         if init::needs_shim(spec) {
+            // A parked init is ended before the shim's is cloned beside it in the cgroup.
+            drop(parking);
             seeds.classic(ClassicReason::NamespaceByPath);
             ipc_uts_on_path(spec, ipc_uts)?;
             let dev = shim_dev(spec, dev_mounts)?;
@@ -907,7 +1016,12 @@ impl Runtime {
                                 Err(reason) => pool.unpooled(reason)?,
                             }
                         }
-                        // A proc made ahead adds its pid namespace and its tree, within the same bound.
+                        // A proc made ahead adds its pid namespace and its tree, within the same bound. None is
+                        // taken where an init is parked in the cgroup and the namespace is made the old way: the
+                        // parked init, which has its pid namespace already, takes the create (decision 8), and a
+                        // proc taken would keep it from doing so.
+                        let parked_takes = parking.parked.is_some()
+                            && pruned.mount_namespace == super::mntns::MountNamespace::Copy;
                         let room = pruned
                             .binds
                             .len()
@@ -923,7 +1037,9 @@ impl Runtime {
                             })
                             .and_then(|n| n.checked_add(usize::from(pruned.dev_mount.is_some())))
                             .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
-                        if !room {
+                        if parked_takes {
+                            // Not asked, so neither a take nor a miss.
+                        } else if !room {
                             pool.unpooled_proc(hex_core::devfs::Unpooled::Capacity)?;
                         } else {
                             match super::procmount::eligible(spec, &plan) {
@@ -975,9 +1091,17 @@ impl Runtime {
                         .unwrap_or(usize::MAX);
                     let fits = pair_fits(pruned.binds.len(), pruned.path_joins.len(), ahead);
                     pruned.ipc_uts = ipc_uts_for(spec, ipc_uts, fits)?;
-                    self.start_via_seed(making, spec, cgroup, network, seeds, Some(pruned))
+                    self.start_via_seed(
+                        making,
+                        spec,
+                        cgroup,
+                        network,
+                        Some(pruned),
+                        Via { seeds, parking },
+                    )
                 }
                 Err(reason) => {
+                    drop(parking);
                     seeds.classic(reason);
                     ipc_uts_on_path(spec, ipc_uts)?;
                     let dev = shim_dev(spec, dev_mounts)?;
@@ -998,7 +1122,7 @@ impl Runtime {
         } else {
             seeds.classic(ClassicReason::Rootless);
             ipc_uts_on_path(spec, ipc_uts)?;
-            self.start_via_seed(making, spec, cgroup, network, seeds, None)
+            self.start_via_seed(making, spec, cgroup, network, None, Via { seeds, parking })
         }
     }
 
@@ -1166,9 +1290,10 @@ impl Runtime {
         spec: &Spec,
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
-        seeds: &dyn CloneInit,
         pruned: Option<PrunedCreate>,
+        via: Via<'_>,
     ) -> Result<State, OciError> {
+        let Via { seeds, parking } = via;
         // Two pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
         // seed hands the init's ends over `SCM_RIGHTS`, so they never need their close-on-exec cleared;
         // they close in the init only when it execs the container's program.
@@ -1176,7 +1301,15 @@ impl Runtime {
             || rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(|e| OciError::os("pipe", e));
         let (sync_r, sync_w) = pipe()?;
         let (map_r, map_w) = pipe()?;
-        let (pid, pidfd) = seeds.clone_init(CloneReq {
+        // The namespaces the init is made in, as the seed works them out (`seed::serve_create`): a parked init
+        // made with these takes the create, in place of a clone into the cgroup and its wait for the host-wide
+        // `cgroup_mutex` (decision 8, "The p99.9 that stayed"); one made with others is ended, never used.
+        let flags = init::fresh_clone_flags(
+            spec,
+            network.is_some(),
+            pruned.as_ref().is_some_and(|p| p.ipc_uts.is_some()),
+        );
+        let req = CloneReq {
             bundle: making.bundle,
             dir: making.dir.path(),
             cgroup,
@@ -1185,7 +1318,30 @@ impl Runtime {
             map_r,
             config: making.config,
             pruned,
-        })?;
+        };
+        let Parking { parked, chooser } = parking;
+        // A parked init was cloned with its own pid and mount namespaces: it can't take a create that carries a
+        // proc made ahead (whose pid namespace the init would be cloned into) or one whose mount namespace is
+        // made another way (decision 6's update), so such a create is cloned fresh and the parked init ended.
+        let takes_parked = req.pruned.as_ref().is_none_or(|p| {
+            p.proc_mount.is_none() && p.mount_namespace == super::mntns::MountNamespace::Copy
+        });
+        let claimed = match parked {
+            Some(p) if p.flags == flags && takes_parked => seeds.claim(p, &req).ok(),
+            _ => None,
+        };
+        if let Some(chooser) = chooser {
+            chooser.init_made(flags, claimed.is_some());
+        }
+        let (pid, pidfd) = match claimed {
+            Some(started) => {
+                // The init holds its ends of the pipes now; the runtime's copies go, as a seed's do once it has
+                // cloned, so the sync pipe reads its end when the init does.
+                drop(req);
+                started
+            }
+            None => seeds.clone_init(req)?,
+        };
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
         // the init's ends once it had cloned, so the init alone holds them now.
         let outcome = self
