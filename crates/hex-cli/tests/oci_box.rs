@@ -1387,8 +1387,9 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
 
 /// Decision 8, parked procs (AC-T7.1.3; T-T7.1.4): on a root node made with parked procs and one cgroup made ahead
 /// for boxes of no owner, procs made ahead off, so the only procs the node holds are its parked inits'. Do: create
-/// and delete N1, whose spec masks and makes read-only paths beneath `/proc` (key K), so the init parked next has a
-/// proc made for K; create N2 with K. Expect: before N2, the node alone holds that proc (this process has one proc
+/// and delete N0, which mounts no proc, so the init parked next has none; create N1 with key K: expect it to claim
+/// that init, counted dry. Delete N1, whose spec masks and makes read-only paths beneath `/proc` (key K), so the init parked next has a
+/// proc made for K. Create N2 with K. Expect: before N2, the node alone holds that proc (this process has one proc
 /// root open, the parked init none); N2's init is the parked one, its `/proc` that proc's superblock, which the
 /// node holds no more; in N2 `/proc/self` is the reader's own pid and pid 1 the box's init; its mounts beneath
 /// `/proc` exactly K's, the read-only ones read-only; one hit counted. Then delete N2 (the next park's proc made for
@@ -1440,6 +1441,26 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         dir
     };
     let (with_k, with_k2) = (bundle(k), bundle(k2));
+    // A box with no proc of its own: no proc made ahead can serve it.
+    let no_proc = {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = lab.config_ex(
+            &Lab::act(&Act::Wait),
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            "",
+            "",
+            "",
+            "",
+        );
+        let proc_mount = r#"{"destination": "/proc", "type": "proc", "source": "proc"},"#;
+        assert!(config.contains(proc_mount));
+        std::fs::write(dir.join("config.json"), config.replace(proc_mount, "")).unwrap();
+        dir
+    };
     let create = |id: &BoxId, dir: &Path| {
         node.create(BoxSpec {
             id: id.clone(),
@@ -1513,14 +1534,30 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
             .dev()
     };
 
-    let n1 = BoxId::new("parkproc-1").unwrap();
-    create(&n1, &with_k);
+    // N0 has no proc, so the init parked after it has none made; N1, with K, claims it: dry.
+    let n0 = BoxId::new("parkproc-0").unwrap();
+    create(&n0, &no_proc);
     let root = node
-        .cgroup_dir(&n1)
+        .cgroup_dir(&n0)
         .unwrap()
         .parent()
         .unwrap()
         .to_path_buf();
+    node.delete(&n0).unwrap();
+    ready(0);
+    let start = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        start.procs_made, 0,
+        "no proc made for a box with none: {start:?}"
+    );
+    let n1 = BoxId::new("parkproc-1").unwrap();
+    create(&n1, &with_k);
+    let dry = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (dry.claimed, dry.proc_dry, dry.proc_hits, dry.proc_misses),
+        (start.claimed + 1, start.proc_dry + 1, 0, 0),
+        "N1 claimed the parked init, which had no proc for K: {dry:?}"
+    );
     node.delete(&n1).unwrap();
     ready(1);
     let before = node.cgroup_reuse().unwrap().parked;
