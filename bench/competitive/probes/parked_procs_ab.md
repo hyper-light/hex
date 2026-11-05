@@ -115,7 +115,8 @@ and the 7.2 guest lab 2 of 2, in one unit.
 - Every B cell: 1,992 hits, 0 misses, 0 dry. All 2,000 of its procs were made at a delete (`procs_made_at_delete`), none
   at the refill. Every A cell made none.
 - Holds: the init's 31.0 a create off and 5.1 on; the node's 2.1-3.0 a box off and 30.4-34.0 on.
-- Part 19's p50 falls about 5.6x (240-257 to 42-47 µs). Its p99 falls in every pair (L6 549-867 against 1357-2366;
+- Part 19's p50 falls about 5.6x (240-257 to 42-47 µs). The under-load bar (part 19 p99 0.5 ms) is approached, not
+  met: B's p99 is 549-867 µs at L6 and 508-1,373 µs at L12. Its p99 falls in every pair (L6 549-867 against 1357-2366;
   L12 508-1373 against 1972-2332), and so does its unpreempted p99.
 - The create's p50 falls in every pair, by 0.10-0.40 ms.
 - The delete's p50 rises in 6 of 8 pairs, and its p99 reaches 33 ms in two L12 B cells. At this load the delete is
@@ -132,7 +133,8 @@ fedora, 2026-11-05 17:13:29Z-17:57:49Z. Load at each pass's start: 56.1, 26.7, 1
 `~/.cache/hex-bench/out/` 20261105T171329Z (A), 20261105T172511Z (B), 20261105T173557Z (B), 20261105T174629Z (A).
 Gate 6 at this tree: unit hex-g5tail-ppfull-20261105T170215Z.
 
-In process (seam_oci's in-process driver; over the socket in brackets), each pass's `table.md`:
+In process (seam_oci's in-process driver; over the socket in brackets, where both arms ran with parked procs off),
+each pass's `table.md`:
 
 | pass | create p50 / p99 (ms) | delete p50 / p99 / p99.9 (ms) | sustained c32 (lifecycles a second) |
 |------|-----------------------|-------------------------------|-------------------------------------|
@@ -144,9 +146,10 @@ In process (seam_oci's in-process driver; over the socket in brackets), each pas
 - Every B claim took its proc: 10,099 of 10,099 a lifecycle round, 10,100 of 10,100 a start_true round, and 9,772-9,872
   of the same number claimed in the sustained rounds. All B procs were made at a delete; no A round made one.
 - The delete, B against the A beside it (A 1 with B 1, B 2 with A 2): in process, p50 +0.06 ms and -0.01 ms, p99 +0.08
-  ms and -0.21 ms. Over the socket, p50 -0.01 and -0.02 ms. At this tree, serially, the delete doesn't grow
-  materially.
-- The sustained c32 rate, B against the A beside it: -0.9% and -3.0% in process, +0.3% and -2.8% over the socket.
+  ms and -0.21 ms. (The socket column is parked procs off in both arms: its `hex node` doesn't take the setting. See
+  the correction above.) At this tree, serially, the delete doesn't grow materially.
+- The sustained c32 rate, B against the A beside it: -0.9% and -3.0% in process. Over the socket, +0.3% and -2.8%,
+  but that is off against off.
   A 1 ran at load 56, so its pair is the weaker comparison.
 - In B's sustained phase in process, the network-namespace pool ran dry 19 and 12 times in 10,000 (0.2%, 0.1%); never
   in A's. That's the netns pool at c32, not the parked proc; recorded, not chased here.
@@ -223,12 +226,14 @@ In process (seam_oci's in-process driver), ms, each pass's `table.md`:
 | B 2 | 0.42 | 0.71 | 1.02 | 0.41 | 0.78 | 1.65 | 18.26 |
 | A 2 | 0.34 | 0.57 | 1.16 | 0.31 | 0.54 | 1.67 | 17.38 |
 
-Over the socket, delete p50 is 0.30, 0.34, 0.30, 0.31 and p99 is 0.54, 0.68, 0.53, 0.72, in the same order.
+Over the socket, delete p50 is 0.30, 0.34, 0.30, 0.31 and p99 is 0.54, 0.68, 0.53, 0.72, in the same order. **Correction
+(2026-11-05):** the socket driver's `hex node` is a process of its own, which seam_oci starts without parked procs, so
+every socket figure here is parked procs off in both arms. Only the in-process figures compare A with B.
 
 - Every B lifecycle's create claimed its parked init with its proc: 10,099 hits of 10,099 claims a round, 0 misses,
   0 dry, 0 failed. Every A round made no proc.
 - **The delete grows with B**: in process, p50 +0.03 to +0.12 ms (0.34 and 0.41 against A's 0.29 and 0.31), p99 up
-  to +0.28 ms. Over the socket the p50s overlap.
+  to +0.28 ms. (The socket figures are off against off; see the correction above.)
 - Serially and with one masked path, the create doesn't fall with B: p50 0.33 and 0.42 against A's 0.34 and 0.34.
   Part 19's work in host.sh's bundle is small (one read-only path), so it has little to save. The mounts runs above,
   with Docker's 15 paths at 8 in flight, are where it saves.
