@@ -310,6 +310,37 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
     const { assert!(Pools::ROOT.devfs, "a root node keeps the mounts made ahead") };
 }
 
+/// Goal 5 extended step 6, the files' bound past the node's own descriptors (CLAUDE.md §2; the lead, 2026-11-05T11:58Z):
+/// step 3's prepared `/dev` mounts are the node's own too. Do: bound the files under one soft limit with the namespace
+/// pools at a root node's bounds, with and without the mounts made ahead. Expect: the node's own grows by at least the
+/// `/dev` pool held at its bound (four keys of eight, one descriptor a `/dev`), its maker's peak (two: its context and
+/// its tree) and each call's take of a `/dev`; here the proc pool and mask sources are counted beside them
+/// ([`the_files_bound_counts_the_mounts_made_ahead`]), and the one maker's peak is a proc's.
+#[test]
+fn the_files_bound_counts_the_prepared_dev_mounts() {
+    use rustix::process::Rlimit;
+
+    let at = |devfs: bool| {
+        FilesBound::of(
+            &Rlimit {
+                current: Some(1 << 22),
+                maximum: Some(1 << 22),
+            },
+            Pools {
+                devfs,
+                ..Pools::ROOT
+            },
+        )
+    };
+    let n = |count: usize| u64::try_from(count).unwrap();
+    let dev = n(hex_core::devfs::KEYS * hex_core::devfs::PER_KEY) + 2 + n(crate::serve::WORKERS);
+    let grown = at(true).own - at(false).own;
+    assert!(
+        grown >= dev,
+        "the /dev pool's part ({dev}) is within the mounts made ahead's count ({grown})"
+    );
+}
+
 /// Goal 5 extended step 6, the bound on namespaces holding files (CLAUDE.md §2): a place under it is taken before a
 /// check opens files and given back as it drops. Do: take places under a bound of two until one is refused, drop one,
 /// take again. Expect: two taken, the third refused; one dropped frees one; the count back to none at the end.

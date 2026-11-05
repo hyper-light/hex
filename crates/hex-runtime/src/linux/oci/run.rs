@@ -2810,6 +2810,84 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         assert_ne!(flags & 0o2_000_000, 0, "O_CLOEXEC in {report}");
     }
 
+    /// The kernel rule [`stand_in_at`] works around (execve(2), ETXTBSY; AC-T7.1.4, CLAUDE.md §4). Do: write a
+    /// stand-in, have another process open it to write and keep it open, run the stand-in; then end that process and
+    /// run it again. Expect: refused with "Text file busy" while the other process holds it open to write, and run
+    /// once none does. A process another test forks while this one's descriptor is open holds it the same way until
+    /// its exec, which is how the namespace test failed when it wrote its stand-in itself (unit
+    /// hex-native-s7-gates-20261105T110236Z).
+    #[test]
+    fn a_file_another_process_holds_open_to_write_is_refused_to_run() {
+        use std::io::BufRead as _;
+
+        let lab = tempfile::tempdir().unwrap();
+        let path = lab.path().join("stand-in");
+        stand_in_at(&path, "#!/bin/sh\nexit 0\n");
+        let mut holder = Command::new("sh")
+            .args(["-c", "exec 3>>\"$0\" && echo ready && exec sleep 30"])
+            .arg(&path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(
+            ready.trim(),
+            "ready",
+            "the holder opened the stand-in to write"
+        );
+        let busy = Command::new(&path).status();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert_eq!(
+            busy.as_ref().err().and_then(std::io::Error::raw_os_error),
+            Some(libc::ETXTBSY),
+            "refused while another process holds it open to write: {busy:?}"
+        );
+        assert!(Command::new(&path).status().unwrap().success());
+    }
+
+    /// [`stand_in_at`] under the overlap that flaked (AC-T7.1.4, CLAUDE.md §4). Do: while another thread starts
+    /// processes without pause, as the other tests do, write a stand-in through [`stand_in_at`] and run it, 200
+    /// times. Expect: every one runs, none refused "Text file busy", and the other thread started processes
+    /// meanwhile (so the overlap was there to meet).
+    #[test]
+    fn a_stand_in_written_by_a_child_runs_while_other_threads_start_processes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+
+        let lab = tempfile::tempdir().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicU32::new(0));
+        let spawner = {
+            let (stop, started) = (Arc::clone(&stop), Arc::clone(&started));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = Command::new("true").status();
+                    started.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        let mut refused = Vec::new();
+        for i in 0..200 {
+            let path = lab.path().join(format!("stand-in-{i}"));
+            stand_in_at(&path, "#!/bin/sh\nexit 0\n");
+            match Command::new(&path).status() {
+                Ok(status) => assert!(status.success(), "stand-in {i}: {status}"),
+                Err(e) => refused.push((i, e)),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert!(refused.is_empty(), "stand-ins refused: {refused:?}");
+        assert!(
+            started.load(Ordering::Relaxed) > 0,
+            "the other thread started processes meanwhile"
+        );
+    }
+
     /// A process another of the agent's threads starts while a create starts its shim (another create's
     /// shim, an exec'd program, a hook) inherits none of the create's descriptors: the shim's pipes stay
     /// close-on-exec in the agent (CVE-2024-21626's class: runc v1.5.2 `libcontainer/container_linux.go:341-349`).
