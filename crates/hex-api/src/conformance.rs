@@ -47,6 +47,15 @@ pub trait Fixture {
     fn refused_forks_counted(&self) -> bool {
         true
     }
+    /// Whether TERM ends an `oci` box's init that has no handler for it. False for Linux: the kernel
+    /// gives a PID namespace's init only KILL and STOP from outside it (pid_namespaces(7)). True for a
+    /// class with no POSIX signals, which ends the container instead: HCS's ProcessSignal carries only
+    /// console control events, and hcsshim maps TERM to a shutdown and KILL to terminate
+    /// (internal/signals/signal.go:185-197), so Windows' `oci` class ends its job. Both are right for their platform, so the differential suite's oracle follows this answer
+    /// (the lead's ruling, 2026-11-05). The `process` class has no init, so it doesn't apply there.
+    fn term_ends_init(&self) -> bool {
+        false
+    }
 }
 
 /// One part of the contract.

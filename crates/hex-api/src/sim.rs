@@ -4,7 +4,8 @@
 //! `pids_max` a fork is refused and counted. An `oci` box has an init, made at create and waiting
 //! until start. From a [`ClassSpec::Oci`] it runs the spec's init program, so `fail N` ends it with N
 //! at start and `say` with 0; any other init, and a bundle's, runs until it is killed or the box is
-//! deleted: as the init of its PID namespace with no handler, it takes no other signal. Once the init has ended the box is empty and inspect reports how it ended, as the node
+//! deleted: as the init of its PID namespace with no handler, it takes no other signal (unless made
+//! [`SimRuntime::with_term_ending_init`], for a class that ends its init on TERM). Once the init has ended the box is empty and inspect reports how it ended, as the node
 //! agent does for a container whose init it reaped.
 
 use std::collections::BTreeMap;
@@ -29,6 +30,9 @@ pub const SIM_ECHO_BYTES: u64 = 1 << 20;
 #[derive(Default)]
 pub struct SimRuntime {
     boxes: Mutex<BTreeMap<BoxId, SimBox>>,
+    /// Whether TERM ends an `oci` box's init, as [`Fixture::term_ends_init`] says of the class it
+    /// stands for.
+    term_ends_init: bool,
 }
 
 struct SimBox {
@@ -71,6 +75,14 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 impl SimRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A simulator whose `oci` inits end on TERM when `ends`, as the class whose oracle it is does.
+    pub fn with_term_ending_init(ends: bool) -> Self {
+        Self {
+            term_ends_init: ends,
+            ..Self::default()
+        }
     }
 
     fn boxes(&self) -> Result<MutexGuard<'_, BTreeMap<BoxId, SimBox>>, Refusal> {
@@ -307,11 +319,12 @@ impl Runtime for SimRuntime {
             }
         }
         // An init is its PID namespace's init, which the kernel gives only KILL (and STOP) unless it has
-        // a handler for the signal (pid_namespaces(7)); the simulator's inits have none.
+        // a handler for the signal (pid_namespaces(7)); the simulator's inits have none. A class with no
+        // POSIX signals ends the init on TERM instead (Windows ends the container's job).
         if let Some(init) = &b.init
             && init.exit()?.is_none()
         {
-            if signal == Signal::KILL {
+            if signal == Signal::KILL || (signal == Signal::TERM && self.term_ends_init) {
                 init.end(Exit::Signal(signal.number()))?;
             }
             any = true;
@@ -492,6 +505,23 @@ mod tests {
             rt.signal(&id, Signal::TERM),
             Err(Refusal::NotRunning(..))
         ));
+    }
+
+    /// HEX-DIFF-1/2's oci half where the class ends its init on TERM (Windows has no POSIX signals, so
+    /// its oci class ends the container's job): a simulator told so ends the init on TERM.
+    #[test]
+    fn term_ends_the_init_where_the_class_says_it_does() {
+        let rt = SimRuntime::with_term_ending_init(true);
+        let id = BoxId::new("init").unwrap();
+        rt.create(SimFixture::Bundle.spec(id.clone(), Bounds::default()))
+            .unwrap();
+        rt.start(&id).unwrap();
+        rt.signal(&id, Signal::TERM).unwrap();
+        let info = rt.inspect(&id).unwrap();
+        assert_eq!(
+            (info.state, info.exit),
+            (BoxState::Empty, Some(Exit::Signal(15)))
+        );
     }
 
     #[test]
