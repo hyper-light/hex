@@ -9,6 +9,7 @@
 # The host's /usr is mounted read-only over the image's, so the runtimes and the suite run with the
 # host's own libraries (fedora runs it: the image is fedora too). SELinux labelling of the container
 # itself is off (label=disable): in spc_t, runc can't execute the memfd copy of itself it re-execs.
+# BENCH_MEMORY and BENCH_OOM bound the container (--memory, --oom-score-adj), as run_hex.sh's do.
 set -euo pipefail
 RT=$(realpath "${1:?runtime-tools checkout}")
 RUNTIME=$(realpath "${2:?runtime binary}")
@@ -17,5 +18,6 @@ IMAGE=${4:-registry.fedoraproject.org/fedora:44}
 mkdir -p "$OUT"
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+  ${BENCH_MEMORY:+--memory="$BENCH_MEMORY"} ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   -v /usr:/usr:ro -v "$RT:$RT:ro" -v "$OUT:$OUT" -v "$RUNTIME:/opt/runtime:ro" -v "$HERE:/opt/lab:ro" \
   -e RT="$RT" -e OUT="$OUT" "$IMAGE" bash /opt/lab/inside.sh
