@@ -40,6 +40,7 @@ implementation" and its numbers are established, before any design or code.
 | [`nofile-limit.md`](runtime/nofile-limit.md) | `RLIMIT_NOFILE` for the node: systemd's `LimitNOFILE=` and its user-manager ceiling, the kernel's `nr_open`, dockerd's and containerd's units, and what runc (through Go), crun and Docker give a container whose spec names none |
 | [`windows-hcs.md`](runtime/windows-hcs.md) | The Windows `oci` class: the OCI spec's Windows section over HCS v2, layers to a scratch volume (documented vs vmcompute), no suspended start, nested jobs, device grants, read-only mounts, host and image versions, the Containers feature and load-time linking |
 | [`differential-suite.md`](runtime/differential-suite.md) | One differential suite on every OS: differential testing (McKeeman et al., DEC), the simulator as the oracle, and what a comparison across OSes normalizes |
+| [`native-process-competitors.md`](runtime/native-process-competitors.md) | The `process` class's competitors on macOS (`taskpolicy -m`, launchd transient jobs) and Windows (Process Governor, HostProcess job containers), class for class |
 | [`matrix.md`](runtime/matrix.md) | The cross-system comparison: isolation, start latency, throughput, density, overhead — every cell cited |
 
 ### Scheduler (`scheduler/`)

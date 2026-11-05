@@ -61,6 +61,17 @@ account it as a memory end, the node must tell the two apart:
   before the member's own waiter reaps it) and watches `NOTE_FORK` so an unarmed child reverts the box to
   the polling pace at once.
 
+## The exit event comes before the zombie
+
+XNU's `proc_exit` posts a process's `NOTE_EXIT` (`proc_knote(p, NOTE_EXIT | ...)`,
+[`bsd/kern/kern_exit.c:2594-2595`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/xnu-12377.61.12/bsd/kern/kern_exit.c),
+xnu-12377.61.12, the Mac Studio's kernel) and only later in the same path marks it a zombie (`p->p_stat = SZOMB`, :2664);
+`waitid` reaps only a zombie (:2991). An `EVFILT_PROC` watch is edge-cleared, so the event fires once: a non-blocking
+reap taken on it can find nothing, and a wait for the next event then sleeps out its whole budget. Measured on
+adas-mac-studio-2 (outside kiln's pacing, as a launchd job, 2026-11-05): 7 of 60 and 3 of 60 programs killed at their
+bound reported at a 20 s wait's budget (test `a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget`), 3 of 60 at
+the native bench's 60 s (bench/native/macos/RESULT.md). After the event, the reap waits for the zombie: 0 of 180.
+
 ## Bearing on the design
 
 This makes step 1's single-member overshoot and held-box watcher CPU ~0 rootlessly, without the step-2
