@@ -2099,10 +2099,11 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   delete; for a box of no owner, the last such box's, set before its take wakes the refill, so the refill reads
   that box's, not the one before). A box `procmount::eligible` refuses (no pid namespace of its own, another mount at or beneath `/proc`, a
   `..`, or a `linux.mountLabel`: a labelled container takes nothing the node made ahead) parks with no proc. Once the init says it is
-  parked, the delete (reuse on) or the `hex-ahead` refill (reuse off) asks the node's worker,
-  `hex-parked-procs`, for its proc, through a queue bounded at `PER_NODE`. The worker makes the proc for the parked
-  init's pid namespace (`ProcMaker`, `init::prepare_proc_for`) and attaches it if the slot still holds that init;
-  otherwise it drops it unattached, counted (`procs_orphaned`), or makes none (`procs_skipped`, also a full queue): the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
+  parked, the thread that parked it makes the proc for the parked init's pid namespace (`ProcMaker`,
+  `init::prepare_proc_for`): the delete (reuse on) or the `hex-ahead` refill (reuse off), off every create's path.
+  One worker thread fed by the park was built and measured (195e86a, `parked_procs_ab.md`): at 8 creates in flight
+  it fell behind, and 67-80% of claims found no proc. So the delete pays for the proc, and the A/B reports the
+  delete's p50 and p99 beside the create's (the lead's 14:23Z: move it, or show the delete doesn't grow): the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
   and flags, `fsmount`, then the masks and read-only paths), with the same `ProcSources`. The parked slot keeps the
   init, its proc tree, the key, and the bytes charged.
 - **At claim.** A create whose `procmount::eligible` key equals the parked one is sent the tree in goal 6's
@@ -2129,7 +2130,7 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   one. A miss, the tree of a claim that failed, and the tree of an init ended unclaimed all go to the node's
   `hex-proc-drop` thread, by a queue bounded at `PER_NODE` (`run::ProcSink`). Past the bound a tree is dropped where
   it is, counted (`procs_dropped_inline`).
-- **Costs.** The proc's superblock is made off every request's path, by the worker, and so are the
+- **Costs.** The proc's superblock is made off every create's path, on the parking thread, and so are the
   `list_lrus` and shrinker registrations a new superblock takes (step 6's run 23, as the g6 agent cites it). One proc superblock per parked init, with its masks (each a clone of the shared empty tmpfs or of the
   host's `/dev/null`: no superblock each), bounded as the parked inits are (`PER_NODE` idle slots plus `INITS_AHEAD`),
   never reused: it ends with its init. The refill worker does the work beside the clone the delete already pays.
