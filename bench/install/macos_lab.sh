@@ -54,10 +54,13 @@ WATCHDOG_SECS=1800
 WATCHDOG_PID=$!
 
 as_user mkdir -p "$DIR" || exit 1
+# sudo may reset PATH, so the user's own toolchain is named outright where rustup put it.
+CARGO=$HOMEDIR/.cargo/bin/cargo
+[ -x "$CARGO" ] || CARGO=$(as_user bash -lc 'command -v cargo') || { echo "macos_lab: no cargo for $LABUSER" >&2; exit 1; }
 echo "macos_lab: building as $LABUSER (never root) into $TARGET"
-as_user env CARGO_TARGET_DIR="$TARGET" nice -n 10 cargo build -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --bin hex ||
+as_user env CARGO_TARGET_DIR="$TARGET" nice -n 10 "$CARGO" build -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --bin hex ||
   { echo "macos_lab: hex build failed" >&2; exit 1; }
-as_user env CARGO_TARGET_DIR="$TARGET" nice -n 10 cargo test -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --test macos_process_box --no-run ||
+as_user env CARGO_TARGET_DIR="$TARGET" nice -n 10 "$CARGO" test -q --manifest-path "$REPO/Cargo.toml" -p hex-cli --test macos_process_box --no-run ||
   { echo "macos_lab: test build failed" >&2; exit 1; }
 HEXBIN=$TARGET/debug/hex
 # The newest of the test's executables: the target keeps every earlier build's beside the one just made.
