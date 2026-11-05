@@ -2087,12 +2087,15 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   from the mounter's active pid namespace (`:153-159`). It doesn't care whether the namespace has processes. Goal 6's
   pool needs 7.1 only because it opens a namespace with none yet (`goal6-mntns.md` §7). So the proc and its masks can
   be made at park time, off create's path, on both kernels.
-- **Opening the namespace.** Through the parked init's pidfd only: `ioctl(PIDFD_GET_PID_NAMESPACE)`
-  (`include/uapi/linux/pidfd.h:111`; v6.19 `fs/pidfs.c:586-596`), `run::Parked::pid_namespace` over
-  `sys::pidfd_pid_namespace`. The kernel refuses with `ESRCH` once the init is gone or has exited (`:495-497`,
-  `:502-508`), so a reused pid can never hand the agent another process's namespace. The descriptor is close-on-exec
-  (`fs/nsfs.c:120`). The ioctl's `unsafe` block is in `oci/sys.rs`, which CLAUDE.md §12 lists already; its use
-  there is a new one, and §12's line for that file names it as a separate commit (Ada's to take).
+- **Opening the namespace.** By the parked init's pid, `/proc/<pid>/ns/pid`, then held to the init by its pidfd
+  (`run::Parked::pid_namespace`; the lead's 14:37Z ruling, so no new `unsafe`). The open comes first and the poll
+  second. A pidfd reads ready once its process has exited or been reaped (v6.19 `fs/pidfs.c:261-265`, `pidfd_poll`;
+  pidfd_open(2)), and a process that has ended doesn't run again. So a pidfd that reads not ready after the open
+  means the init was running at the open, and a running process's pid names that process alone (a pid is freed only
+  when its process is reaped, and the init is the agent's own child). One that reads ready is refused, whoever
+  reaped it. The proposal's `ioctl(PIDFD_GET_PID_NAMESPACE)` (`include/uapi/linux/pidfd.h:111`) gives the same
+  guarantee, but rustix 1.1.5 wraps it only through its `unsafe` generic `ioctl`, so it would add an `unsafe` use
+  to CLAUDE.md §12's list. Built that way (d8f49f3) and taken back out (its revert).
 - **At park.** The park job carries the proc key the owner's last box would have had (`procmount::Key`: the proc
   mount's data and flags and the masked and read-only paths beneath `/proc`, in the spec's order, from
   `procmount::eligible`; given in `Wants` when the box chooses its cgroup, so its slot keeps it for the park at its
