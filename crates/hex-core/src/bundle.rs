@@ -658,14 +658,16 @@ mod tests {
 
     /// AC-T7.1.1: the plan step's example, rootless: the overlay is the first mount, its lower
     /// directories top first, with `userxattr`; the user namespace maps the node to root; the
-    /// network namespace is the box's own; the bind is read-only and not recursive.
+    /// network namespace is the box's own; the bind is read-only and not recursive. The bundle's
+    /// directories are Linux paths, `/`-joined on every host (CLAUDE.md §12: the core renders a Linux
+    /// container's bundle the same on Windows, where `Path::join` would put `\` in them).
     #[test]
     fn layers_with_a_private_network_render_rootless_to_their_golden_config() {
         let b = render(&layered(), &at(ROOTLESS, &[])).unwrap();
         golden("layers-private-rootless.json", &b);
         assert_eq!(
             b.dirs,
-            ["rootfs", "upper", "work"].map(|d| Path::new(BUNDLE).join(d))
+            ["rootfs", "upper", "work"].map(|d| PathBuf::from(format!("{BUNDLE}/{d}")))
         );
     }
 
