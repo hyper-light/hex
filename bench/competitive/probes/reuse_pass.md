@@ -544,38 +544,38 @@ mr17's second, at 4.62x, and concurrency 32 ran 9,137 to 9,428 a second in the t
   From 20:45Z to 20:52Z load stood at 49 to 56 and CPU pressure at 25 to 33%: option 1's first two runs at the
   installed limit kept concurrency 1 to 0.49 and 0.69 CPUs.
 
-| run | reading | limit | binary | in process (SE) | rates, 32 over 1 | over the socket (SE) |
-|---|---|---|---|---|---|---|
-| `20261104T202901Z` | host.sh's | installed | A | 13.32x (0.50) | 6,844/s over 523/s | 10.98x (0.21) |
-| `20261104T203016Z` | host.sh's | installed | B | 8.61x (0.16) | 6,981/s over 816/s | 6.28x (0.12) |
-| `20261104T203116Z` | host.sh's | installed | B | 6.59x (0.17) | 3,117/s over 477/s | 6.02x (0.34) |
-| `20261104T203335Z` | host.sh's | installed | A | 12.48x (0.23) | 7,512/s over 603/s | 9.82x (0.13) |
-| `20261104T203439Z` | host.sh's | installed | g6 | 12.10x (0.22) | 7,049/s over 583/s | 9.76x (0.14) |
-| `20261104T203546Z` | host.sh's | given | A | 11.64x (0.22) | 7,140/s over 616/s | 9.87x (0.16) |
-| `20261104T203649Z` | host.sh's | given | B | 9.03x (0.12) | 6,703/s over 744/s | 5.74x (0.17) |
-| `20261104T203958Z` | host.sh's | given | B | 6.63x (0.15) | 5,444/s over 825/s | 4.85x (0.10) |
-| `20261104T204411Z` | host.sh's | given | A | 11.83x (0.31) | 7,148/s over 607/s | 9.87x (0.35) |
-| `20261104T204525Z` | host.sh's | given | g6 | 12.02x (0.82) | 4,819/s over 381/s | 12.43x (1.49) |
-| `20261104T204718Z` | option 1 | installed | A | 20.29x (1.45) | 4,067/s over 224/s | 22.76x (2.02) |
-| `20261104T205032Z` | option 1 | installed | B | 11.83x (0.50) | 4,065/s over 342/s | 12.17x (0.65) |
-| `20261104T205240Z` | option 1 | installed | B | 7.51x (0.11) | 12,529/s over 1,670/s | 7.21x (0.09) |
-| `20261104T205313Z` | option 1 | installed | A | 9.81x (0.17) | 12,193/s over 1,242/s | 8.73x (0.15) |
-| `20261104T205348Z` | option 1 | installed | g6 | 9.02x (0.16) | 12,300/s over 1,370/s | 8.53x (0.16) |
-| `20261104T205422Z` | option 1 | given | A | 7.24x (0.08) | 15,180/s over 2,100/s | 7.41x (0.13) |
-| `20261104T205448Z` | option 1 | given | B | 6.70x (0.27) | 5,615/s over 911/s | 6.42x (0.24) |
-| `20261104T205537Z` | option 1 | given | B | 6.63x (0.13) | 13,909/s over 2,094/s | 7.00x (0.20) |
-| `20261104T205606Z` | option 1 | given | A | 7.30x (0.11) | 14,829/s over 2,030/s | 7.33x (0.17) |
-| `20261104T205632Z` | option 1 | given | g6 | 7.16x (0.12) | 15,400/s over 2,152/s | 7.14x (0.11) |
-| `20261104T205658Z` | 4-15 | installed | A | 4.61x (0.09) | 8,227/s over 1,782/s | 4.53x (0.08) |
-| `20261104T205735Z` | 4-15 | installed | B | 3.68x (0.05) | 7,390/s over 2,011/s | 3.91x (0.08) |
-| `20261104T205814Z` | 4-15 | installed | B | 3.71x (0.05) | 7,348/s over 1,983/s | 4.02x (0.09) |
-| `20261104T205853Z` | 4-15 | installed | A | 5.26x (0.28) | 7,873/s over 1,496/s | 4.83x (0.13) |
-| `20261104T205933Z` | 4-15 | installed | g6 | 5.59x (0.20) | 7,748/s over 1,392/s | 5.85x (0.10) |
-| `20261104T210016Z` | 4-15 | given | A | 5.09x (0.09) | 8,387/s over 1,647/s | 5.11x (0.12) |
-| `20261104T210054Z` | 4-15 | given | B | 4.10x (0.09) | 7,600/s over 1,859/s | 4.46x (0.08) |
-| `20261104T210132Z` | 4-15 | given | B | 4.74x (0.13) | 7,082/s over 1,495/s | 5.28x (0.09) |
-| `20261104T210217Z` | 4-15 | given | A | 4.91x (0.18) | 7,834/s over 1,600/s | 4.93x (0.13) |
-| `20261104T210300Z` | 4-15 | given | g6 | 4.25x (0.07) | 8,182/s over 1,929/s | 4.33x (0.06) |
+| run | reading | limit | binary | in process (SE) | CPU a lifecycle at 1 | rates, 32 over 1 | over the socket (SE) |
+|---|---|---|---|---|---|---|---|
+| `20261104T202901Z` | host.sh's | installed | A | 13.32x (0.50) | 1.90 ms | 6,844/s over 523/s | 10.98x (0.21) |
+| `20261104T203016Z` | host.sh's | installed | B | 8.61x (0.16) | 1.61 ms | 6,981/s over 816/s | 6.28x (0.12) |
+| `20261104T203116Z` | host.sh's | installed | B | 6.59x (0.17) | 2.02 ms | 3,117/s over 477/s | 6.02x (0.34) |
+| `20261104T203335Z` | host.sh's | installed | A | 12.48x (0.23) | 1.76 ms | 7,512/s over 603/s | 9.82x (0.13) |
+| `20261104T203439Z` | host.sh's | installed | g6 | 12.10x (0.22) | 1.82 ms | 7,049/s over 583/s | 9.76x (0.14) |
+| `20261104T203546Z` | host.sh's | given | A | 11.64x (0.22) | 1.75 ms | 7,140/s over 616/s | 9.87x (0.16) |
+| `20261104T203649Z` | host.sh's | given | B | 9.03x (0.12) | 1.78 ms | 6,703/s over 744/s | 5.74x (0.17) |
+| `20261104T203958Z` | host.sh's | given | B | 6.63x (0.15) | 1.56 ms | 5,444/s over 825/s | 4.85x (0.10) |
+| `20261104T204411Z` | host.sh's | given | A | 11.83x (0.31) | 1.76 ms | 7,148/s over 607/s | 9.87x (0.35) |
+| `20261104T204525Z` | host.sh's | given | g6 | 12.02x (0.82) | 1.74 ms | 4,819/s over 381/s | 12.43x (1.49) |
+| `20261104T204718Z` | option 1 | installed | A | 20.29x (1.45) | 2.20 ms | 4,067/s over 224/s | 22.76x (2.02) |
+| `20261104T205032Z` | option 1 | installed | B | 11.83x (0.50) | 2.03 ms | 4,065/s over 342/s | 12.17x (0.65) |
+| `20261104T205240Z` | option 1 | installed | B | 7.51x (0.11) | 0.82 ms | 12,529/s over 1,670/s | 7.21x (0.09) |
+| `20261104T205313Z` | option 1 | installed | A | 9.81x (0.17) | 1.03 ms | 12,193/s over 1,242/s | 8.73x (0.15) |
+| `20261104T205348Z` | option 1 | installed | g6 | 9.02x (0.16) | 0.91 ms | 12,300/s over 1,370/s | 8.53x (0.16) |
+| `20261104T205422Z` | option 1 | given | A | 7.24x (0.08) | 0.61 ms | 15,180/s over 2,100/s | 7.41x (0.13) |
+| `20261104T205448Z` | option 1 | given | B | 6.70x (0.27) | 1.18 ms | 5,615/s over 911/s | 6.42x (0.24) |
+| `20261104T205537Z` | option 1 | given | B | 6.63x (0.13) | 0.64 ms | 13,909/s over 2,094/s | 7.00x (0.20) |
+| `20261104T205606Z` | option 1 | given | A | 7.30x (0.11) | 0.59 ms | 14,829/s over 2,030/s | 7.33x (0.17) |
+| `20261104T205632Z` | option 1 | given | g6 | 7.16x (0.12) | 0.57 ms | 15,400/s over 2,152/s | 7.14x (0.11) |
+| `20261104T205658Z` | 4-15 | installed | A | 4.61x (0.09) | 0.67 ms | 8,227/s over 1,782/s | 4.53x (0.08) |
+| `20261104T205735Z` | 4-15 | installed | B | 3.68x (0.05) | 0.68 ms | 7,390/s over 2,011/s | 3.91x (0.08) |
+| `20261104T205814Z` | 4-15 | installed | B | 3.71x (0.05) | 0.70 ms | 7,348/s over 1,983/s | 4.02x (0.09) |
+| `20261104T205853Z` | 4-15 | installed | A | 5.26x (0.28) | 0.84 ms | 7,873/s over 1,496/s | 4.83x (0.13) |
+| `20261104T205933Z` | 4-15 | installed | g6 | 5.59x (0.20) | 0.91 ms | 7,748/s over 1,392/s | 5.85x (0.10) |
+| `20261104T210016Z` | 4-15 | given | A | 5.09x (0.09) | 0.77 ms | 8,387/s over 1,647/s | 5.11x (0.12) |
+| `20261104T210054Z` | 4-15 | given | B | 4.10x (0.09) | 0.75 ms | 7,600/s over 1,859/s | 4.46x (0.08) |
+| `20261104T210132Z` | 4-15 | given | B | 4.74x (0.13) | 0.92 ms | 7,082/s over 1,495/s | 5.28x (0.09) |
+| `20261104T210217Z` | 4-15 | given | A | 4.91x (0.18) | 0.78 ms | 7,834/s over 1,600/s | 4.93x (0.13) |
+| `20261104T210300Z` | 4-15 | given | g6 | 4.25x (0.07) | 0.65 ms | 8,182/s over 1,929/s | 4.33x (0.06) |
 
 Pooled, A and B over their 40 pairs each, g6 over its run's 20 (the pairs' medians for CPU and wall; g6's seam_oci
 times no lifecycle):
