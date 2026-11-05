@@ -527,3 +527,43 @@ Read:
   - The whole create's p99 is mixed: B lower in 2 of 4 here, 5 of 6 above.
 - **The co-tenant's worst mount after the start** is 1.6-109 ms in both arms, from causes the trace doesn't name (it
   follows only Hex's processes off their CPUs).
+
+## 15. A parked init with its proc made ahead: goal 6's side of decision 8's proposal (2026-11-05, not built)
+
+The design is the tail agent's: decision 8's "Proposal, not built: a parked init with its proc made ahead"
+(`docs/design/runtime-architecture.md` on cp/t7-g5-tail, 12fd867 and 3355fd5). This agent reviewed it, owns the
+prepared proc it uses, and owns part 19's measurement of it. Here is goal 6's side.
+- **Why it reaches 6.19.** Goal 6's proc pool needs 7.1 only because it opens a pid namespace with no process in it
+  yet (§7), so on 6.19 the pool disables itself at its first refusal. A parked init is pid 1 of the fresh pid
+  namespace it was parked with. Proc's `pidns=` option mounts for any pid namespace given by descriptor. It's in Linux
+  6.18 and later, so 6.19 has it, and v6.17 has no `pidns` (v6.19 `fs/proc/root.c:48`, `:115-160`). It asks only for
+  `CAP_SYS_ADMIN` over the target namespace's user namespace and a target descended from the mounter's active pid
+  namespace (`:153-159`), not an empty namespace. So the proc and its masks can be made at park, off the create's
+  path, on 6.19 as on 7.x.
+- **The prepared proc, split.** `init::prepare_proc` becomes two parts:
+  - making the pid namespace: the 7.1 part, which the pool keeps;
+  - `prepare_proc_in(pid_namespace, key, sources)`: `fsopen("proc")`, `pidns=`, the key's options and flags,
+    `fsmount`, then the masks and read-only paths beneath the detached tree.
+  The pool and the parked inits share the second, one code path (CLAUDE.md §8). The worker opens the parked init's
+  namespace through the pidfd the node holds (`PIDFD_GET_PID_NAMESPACE`, Linux 6.11 and later), never by
+  `/proc/<pid>`, so a reused pid can't hand it another process's.
+- **The masks don't depend on the namespace's processes.** Docker's `/proc` paths are global entries, not per-pid.
+  The symlink refusal (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`) and the
+  `/dev/null` and empty-tmpfs clones behave the same. The key must stay the proc op's whole option string, as
+  `procmount::Key` has it, since `hidepid=` and `subset=` change what's visible.
+- **Off the create's path.** The proc's ~25 mounts with Docker's paths, their holds of the mount lock and the proc
+  superblock (with `list_lrus_mutex` and `shrinker_mutex`) are the refill worker's. A missed or unclaimed tree is
+  dropped by the worker too. Dropping a detached tree unmounts it under the mount lock and waits an expedited RCU
+  grace period (`namespace_unlock`, v6.19 `fs/namespace.c:1680-1720`), which must never be on a create's thread.
+- **Part 19's measurement (goal 6's).** The mounts trace's harness on fedora's host (6.19), the setting on against
+  off, both with parked inits, interleaved, under the bar's conditions: 8 in flight, 8,000 idle threads, 6 and 12
+  busy loops, Docker's paths, no priority change. It reports for each:
+  - part 19's p50, p99 and unpreempted p99;
+  - the whole create's p99;
+  - mount-lock holds a create, by holder (the init and the worker);
+  - the predicted key's hits and misses.
+  The 7.2 guest runs beside it, indicative only.
+- **What would falsify it for part 19.** Part 19's p99 not falling with the setting on. Or the whole create's p99
+  not falling. Or the worker's holds moving the tail onto the creates instead of off them, which the by-holder waits
+  would show.
+- Not built. It waits on the lead's go to the joint proposal.
