@@ -272,3 +272,22 @@ Read:
   made in a row.
   `open_tree_attr` doesn't merge a clone and its attributes into one hold (`goal5-mounts.md`, step 3's notes).
 - A guest's tail isn't the host's (§9). A reading of record waits on a 7.x bench host.
+
+The pools' own counts in both guest runs (each run's `phases.throughput.dev_mounts` and `.proc_mounts`; 2,000 creates
+a cell; the copy cell makes no proc ahead):
+
+| run | cell | proc pool dry | `/dev` pool dry |
+|---|---|---|---|
+| hex-g6-mttimed-20261105T031100Z | C, 0 loops | 198 | 7 |
+| | C, 12 loops | 18 | 5 |
+| | A, 12 loops | (disabled) | 0 |
+| hex-g6-mttimed2-20261105T084016Z | C, 0 loops | 64 | 0 |
+| | C, 12 loops | 5 | 1 |
+| | A, 12 loops | (disabled) | 1 |
+
+- At 0 loops the proc pool runs dry for 3-10% of creates, enough to fill the slowest 1% (20 creates). This matches
+  their extra `open_tree` holds.
+- At 12 loops, the cells the bar is about, it runs dry 5-18 times, fewer than or about the 20 in the slowest 1%. So
+  running dry doesn't explain the tail under load. Most of the tail's lock wait there is behind other creates' inits
+  (their command is still `hex` before `execve`), then the pools' maker (`hex-devfs`), then the agent (`seam_oci`,
+  the bench's node).
