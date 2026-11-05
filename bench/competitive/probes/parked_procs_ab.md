@@ -94,6 +94,64 @@ Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T153245Z`.
 - With the proc made on the park's own thread (the delete, or the refill: 9e13b95 and 506a263, above), every claim
   was a hit, 1,992 of 1,992. This run is what falsifies one worker thread, not the parked proc.
 
+## Of record at 1e5e956: the proc made by the park's own thread, counted by thread (the lead's 15:40Z option (1))
+
+**Run.** The same cell, at cp/t7-g5-parkproc 1e5e956. The harness is cp/t7-g6 f8933bd, taken by git archive with no
+patch: its create_breakdown.sh hands the bench `HEXBENCH_PARKED_PROCS` and `HEXBENCH_AHEAD`. Binaries: hex sha256
+9c93a282586eb89c, seam_oci c1c3520ce43272e7. fedora, 2026-11-05 17:05:26Z-17:12:32Z, under the timed lock. The 1-minute
+load was 43.0 at the start and 53.0 at the end, the host far busier than at 2caebe2. Body:
+`~/.cache/hex-t7/g5tail/ab-pp-20261105T170438Z`.
+
+**Gate 6 at this tree:** unit hex-g5tail-ppfull-20261105T170215Z: gates 7/7 exit 0, the root lab 7 of 7 test binaries,
+and the 7.2 guest lab 2 of 2, in one unit.
+
+| L | arm | part 19 p50 / p99 / unpreempted p99 (µs) | create p50 / p99 (ms) | delete p50 / p99 (ms) | lifecycles a second |
+|---|-----|------------------------------------------|-----------------------|-----------------------|---------------------|
+| 6 | A | 247/1357/660, 257/1391/682, 251/1847/612, 254/2366/1644 | 1.217/3.886, 1.484/7.334, 1.528/6.949, 1.416/5.995 | 2.567/6.300, 2.534/9.406, 2.131/7.789, 2.131/16.986 | 1861, 1560, 1715, 1654 |
+| 6 | B | 43/549/88, 45/841/69, 47/867/278, 44/552/75 | 1.114/4.346, 1.134/5.246, 1.303/5.128, 1.304/4.666 | 2.278/6.000, 2.880/9.320, 3.321/10.062, 2.118/5.574 | 1951, 1642, 1445, 1945 |
+| 12 | A | 240/2068/470, 250/2332/502, 247/2019/605, 248/1972/988 | 1.578/9.295, 1.749/8.425, 1.659/6.321, 1.687/7.448 | 4.503/11.016, 2.871/11.921, 2.630/8.182, 2.592/17.963 | 1126, 1377, 1397, 1411 |
+| 12 | B | 46/508/66, 45/917/84, 43/770/58, 42/1373/812 | 1.420/8.229, 1.353/9.425, 1.338/5.406, 1.395/7.528 | 4.914/10.482, 3.868/33.336, 3.173/32.943, 3.710/20.321 | 1099, 985, 1203, 1233 |
+
+- Every B cell: 1,992 hits, 0 misses, 0 dry. All 2,000 of its procs were made at a delete (`procs_made_at_delete`), none
+  at the refill. Every A cell made none.
+- Holds: the init's 31.0 a create off and 5.1 on; the node's 2.1-3.0 a box off and 30.4-34.0 on.
+- Part 19's p50 falls about 5.6x (240-257 to 42-47 µs). Its p99 falls in every pair (L6 549-867 against 1357-2366;
+  L12 508-1373 against 1972-2332), and so does its unpreempted p99.
+- The create's p50 falls in every pair, by 0.10-0.40 ms.
+- The delete's p50 rises in 6 of 8 pairs, and its p99 reaches 33 ms in two L12 B cells. At this load the delete is
+  noisy in both arms (A's own p99 reaches 18 ms).
+- The lifecycle rate is mixed: at L6, B is higher in 3 of 4 pairs; at L12, lower in all 4 (985-1,233 a second against
+  1,126-1,411). Against 2caebe2's run at a quarter of the load, this one says the same, more loudly.
+
+## The delete-cost pass of record at 1e5e956: host.sh lifecycle with the sustained c32 rate (the lead's 15:40Z)
+
+**Run.** One static-glibc build of 1e5e956 (hex sha256 52ec4855987fb7b7, seam_oci d13aad09db93301c), the same unit as the
+mounts run above, after it. host.sh OCI passes (lifecycle, start_true, and sustained at concurrency 32 for 10,000
+lifecycles; 2 rounds of 10,000), one owner with reuse on, interleaved A B B A, each under the timed lock on CPUs 4-15.
+fedora, 2026-11-05 17:13:29Z-17:57:49Z. Load at each pass's start: 56.1, 26.7, 18.6, 17.9. Out dirs:
+`~/.cache/hex-bench/out/` 20261105T171329Z (A), 20261105T172511Z (B), 20261105T173557Z (B), 20261105T174629Z (A).
+Gate 6 at this tree: unit hex-g5tail-ppfull-20261105T170215Z.
+
+In process (seam_oci's in-process driver; over the socket in brackets), each pass's `table.md`:
+
+| pass | create p50 / p99 (ms) | delete p50 / p99 / p99.9 (ms) | sustained c32 (lifecycles a second) |
+|------|-----------------------|-------------------------------|-------------------------------------|
+| A 1 | 0.32 / 0.53 | 0.28 / 0.53 / 1.29 (0.30 / 0.52) | 7,667 (6,825) |
+| B 1 | 0.33 / 0.59 | 0.34 / 0.61 / 1.17 (0.29 / 0.48) | 7,599 (6,845) |
+| B 2 | 0.28 / 0.43 | 0.32 / 0.51 / 0.83 (0.27 / 0.45) | 8,831 (7,798) |
+| A 2 | 0.32 / 0.86 | 0.33 / 0.72 / 1.03 (0.29 / 0.57) | 9,104 (8,025) |
+
+- Every B claim took its proc: 10,099 of 10,099 a lifecycle round, 10,100 of 10,100 a start_true round, and 9,772-9,872
+  of the same number claimed in the sustained rounds. All B procs were made at a delete; no A round made one.
+- The delete, B against the A beside it (A 1 with B 1, B 2 with A 2): in process, p50 +0.06 ms and -0.01 ms, p99 +0.08
+  ms and -0.21 ms. Over the socket, p50 -0.01 and -0.02 ms. At this tree, serially, the delete doesn't grow
+  materially.
+- The sustained c32 rate, B against the A beside it: -0.9% and -3.0% in process, +0.3% and -2.8% over the socket.
+  A 1 ran at load 56, so its pair is the weaker comparison.
+- In B's sustained phase in process, the network-namespace pool ran dry 19 and 12 times in 10,000 (0.2%, 0.1%); never
+  in A's. That's the netns pool at c32, not the parked proc; recorded, not chased here.
+- Hex's delete stays 30-36x libcrun's at p50 in process.
+
 ## Experiment: 8 workers making the procs (side branch cp/t7-g5-parkproc-workers 6dcd731; the lead's 15:09Z (b))
 
 **Run.** The same body and harness, at 6dcd731: the one-worker build (e9a6e66) on f15393c's tree, with `PROC_WORKERS` = 8
