@@ -142,7 +142,8 @@ jobs only).
 start_true, then sustained at c32; 2 rounds of 10,000; one owner with reuse on), in the order I P W W P I. fedora was
 swamped by another tenant from about 18:55Z (15-minute load average 288), and the kernel's OOM killer killed the
 unit in its fourth pass, the second W (`oom-kill`, the unit's OOM score 1000). So each arm has one pass, at different
-loads: I at 44.2, P at 22.5, W at 25.5. These lean one way but don't settle anything. Out dirs:
+loads: I at 44.2, P at 22.5, W at 25.5. **Indicative only** (the lead, 2026-11-05T19:29Z): one pass an arm, serial and
+c32, not the bar's conditions, so nothing in it can change the ruling, and it isn't rerun. Out dirs:
 `~/.cache/hex-bench/out/` 20261105T182032Z (I), 20261105T183229Z (P), 20261105T184357Z (W).
 
 | arm | create p50 / p99 (ms) | delete p50 / p99 (ms) | sustained c32 (lifecycles a second) | serial hits | c32 hits / dry |
@@ -170,6 +171,16 @@ load was 43.0 at the start and 53.0 at the end, the host far busier than at 2cae
 
 **Gate 6 at this tree:** unit hex-g5tail-ppfull-20261105T170215Z: gates 7/7 exit 0, the root lab 7 of 7 test binaries,
 and the 7.2 guest lab 2 of 2, in one unit.
+
+**Still the tree that ships (253641a and on).** fce1134 caps the procs alive (held or waiting for the dropper) at
+`PROCS_ALIVE` = `PER_NODE` = 256. At the bar's conditions the procs alive are at most the creates in flight, plus the
+cgroups made ahead, plus those queued to drop: far under 256 (every B cell ended holding 8). So the cap never binds
+there, every claim in these runs was a hit, and this A/B describes 253641a's tree and the tips after it as well.
+
+**Open, not chased: a load flake.** In unit hex-g5tail-ppfull-20261105T192117Z, at 253641a with fedora's 15-minute
+load near 230, the root lab's oci_box timed out "waiting for the dead seed's slot to be started again" (its
+seed-restart case, which runs no parked procs). The rerun at the same tree, hex-g5tail-ppfull-20261105T192457Z,
+passed 7 of 7.
 
 | L | arm | part 19 p50 / p99 / unpreempted p99 (µs) | create p50 / p99 (ms) | delete p50 / p99 (ms) | lifecycles a second |
 |---|-----|------------------------------------------|-----------------------|-----------------------|---------------------|
