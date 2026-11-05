@@ -492,6 +492,17 @@ impl Node {
         self
     }
 
+    /// Each init the node parks ahead (decision 8, "The p99.9 that stayed") has the proc of its own pid namespace
+    /// made with it when `enabled`, with the masks and read-only paths of the spec it is parked for: a claim whose
+    /// spec has the same key attaches it, mounting no proc of its own (decision 8, parked procs). Off unless set,
+    /// until measured. Root nodes only, as [`Node::with_prepared_procs`]; set before the node's first create.
+    pub fn with_parked_procs(self, enabled: bool) -> Self {
+        if enabled && let Some(maker) = self.devfs.proc_maker() {
+            self.cgroups.set_parked_procs(maker);
+        }
+        self
+    }
+
     /// Sets the most device programs the node holds open, one per policy, [`MAX_PROGRAMS`] unless set,
     /// in place of those it opened with, which it closes (each lives on in the cgroups it's attached to).
     /// A root node's oci boxes' root keeps its program.

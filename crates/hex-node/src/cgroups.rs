@@ -19,11 +19,13 @@ use hex_api::{Bounds, BoxId, BoxOwner, Refusal, Usage};
 use hex_core::cgroup::Baseline;
 use hex_core::reuse::{self, PER_NODE, PER_OWNER, Pool, Refused, Take, Whose};
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
-use hex_runtime::linux::oci::OciError;
+use hex_runtime::linux::oci::init::PreparedProc;
 use hex_runtime::linux::oci::resources::Insn;
-use hex_runtime::linux::oci::run::{Choose, Chosen, Parked, Wants};
+use hex_runtime::linux::oci::run::{Choose, Chosen, Parked, ParkedProc, ProcSink, Wants};
+use hex_runtime::linux::oci::{OciError, procmount};
 
 use crate::createpool::Parker;
+use crate::devfs::ProcMaker;
 
 /// Most memory an idle cgroup may still have charged to be handed on (research f27-f30), measured
 /// (bench/competitive/probes/reuse_residual.md). A box whose processes have all ended leaves the charge
@@ -40,6 +42,10 @@ pub const RESIDUAL: u64 = 16 << 20;
 /// How many cgroups may wait for the remover at once: every idle cgroup the pool can put out at one time
 /// ([`PER_NODE`]). Past it the caller removes the cgroup itself, as every delete did before.
 const REMOVALS: usize = PER_NODE;
+
+/// How many unattached procs may wait for the node's thread that drops them (decision 8, parked procs): every one
+/// held at once, one an init parked in an idle slot ([`PER_NODE`]). Past it a tree is dropped where it is, counted.
+const PROC_DROPS: usize = PER_NODE;
 
 /// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
 const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
@@ -67,6 +73,9 @@ pub struct Held {
     /// The namespaces the box's init was made with (`clone3`'s `CLONE_NEW*` bits), which an init made ahead
     /// for the owner's next box is made with (decision 8, "The p99.9 that stayed"); `None` until it is known.
     park_flags: Option<u64>,
+    /// Its spec's prepared-proc key, which the proc made for that init is made for (parked procs); `None` when
+    /// its spec has none or it isn't known.
+    park_proc_key: Option<procmount::Key>,
 }
 
 impl Held {
@@ -102,6 +111,29 @@ pub struct ParkCounts {
     pub failed: u64,
     /// The bytes charged to their cgroups for the inits made, summed: over `parked`, what one costs.
     pub charged_bytes: u64,
+    /// Procs made for parked inits' own pid namespaces (parked procs, off unless the node is made with them).
+    pub procs_made: u64,
+    /// Of those, the ones made by the thread that parked their init: a delete's (reuse on), or the `hex-ahead`
+    /// refill's (reuse off). Never a create's or a claim's.
+    pub procs_made_at_delete: u64,
+    pub procs_made_at_refill: u64,
+    /// Creates whose init's claim took the proc made for it: the init attached it, mounting none of its own.
+    pub proc_hits: u64,
+    /// Procs made for a parked init that its create didn't take (another key, no room for it, the claim
+    /// refused): each ended unused, its create's init mounting its own proc.
+    pub proc_misses: u64,
+    /// Creates that claimed a parked init with no proc made for it, which one could have served (its key unknown
+    /// at its park, or its make failed): each init mounted its own.
+    pub proc_dry: u64,
+    /// Procs that couldn't be made for an init parked (the init then parked without one, as before).
+    pub procs_failed: u64,
+    /// Procs held now with the inits they were made for, at most one an init parked.
+    pub procs_held: usize,
+    /// Unattached procs (misses, and those of inits ended unclaimed) handed to the node's thread for them, those it
+    /// has dropped, off every create's path, and those dropped where they were, its queue full.
+    pub procs_queued: u64,
+    pub procs_dropped: u64,
+    pub procs_dropped_inline: u64,
 }
 
 /// What the cgroups made ahead for boxes of no owner did (decision 8, "The p99.9 that stayed"): made, each with an
@@ -193,6 +225,20 @@ struct Parking {
     failed: AtomicU64,
     /// The bytes charged to their cgroups for every init made ahead, summed.
     charged: AtomicU64,
+    /// What makes each parked init's proc, when the node makes them ([`Cgroups::set_parked_procs`]).
+    procs: OnceLock<ProcMaker>,
+    procs_made: AtomicU64,
+    procs_made_at_delete: AtomicU64,
+    procs_made_at_refill: AtomicU64,
+    proc_hits: AtomicU64,
+    proc_misses: AtomicU64,
+    proc_dry: AtomicU64,
+    procs_failed: AtomicU64,
+    /// Where unattached procs go to be dropped, and what its thread dropped, once the node's cgroups start.
+    drops: OnceLock<ProcSink>,
+    queued: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+    dropped_inline: Arc<AtomicU64>,
 }
 
 impl Parking {
@@ -222,8 +268,54 @@ impl Parking {
             ended_unclaimed: self.ended.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             charged_bytes: self.charged.load(Ordering::Relaxed),
+            procs_made: self.procs_made.load(Ordering::Relaxed),
+            procs_made_at_delete: self.procs_made_at_delete.load(Ordering::Relaxed),
+            procs_made_at_refill: self.procs_made_at_refill.load(Ordering::Relaxed),
+            proc_hits: self.proc_hits.load(Ordering::Relaxed),
+            proc_misses: self.proc_misses.load(Ordering::Relaxed),
+            proc_dry: self.proc_dry.load(Ordering::Relaxed),
+            procs_failed: self.procs_failed.load(Ordering::Relaxed),
+            procs_held: self.slots().map_or(0, |slots| {
+                slots
+                    .values()
+                    .filter(|(p, _)| p.proc_key().is_some())
+                    .count()
+            }),
+            procs_queued: self.queued.load(Ordering::Relaxed),
+            procs_dropped: self.dropped.load(Ordering::Relaxed),
+            procs_dropped_inline: self.dropped_inline.load(Ordering::Relaxed),
         }
     }
+
+    /// The proc of `parked`'s own pid namespace made for `key` and held with it, when the node makes them and the
+    /// key is known; one that can't be made leaves the init parked without one, counted.
+    fn with_proc(&self, parked: &mut Parked, key: Option<&procmount::Key>, by: MadeBy) {
+        let (Some(maker), Some(key), Some(sink)) = (self.procs.get(), key, self.drops.get()) else {
+            return;
+        };
+        match parked.pid_namespace().and_then(|ns| maker.make(ns, key)) {
+            Ok(proc) => {
+                parked.set_proc(key.clone(), proc, sink.clone());
+                self.procs_made.fetch_add(1, Ordering::Relaxed);
+                match by {
+                    MadeBy::Delete => &self.procs_made_at_delete,
+                    MadeBy::Refill => &self.procs_made_at_refill,
+                }
+                .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                self.procs_failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Which thread parked an init and made its proc (decision 8, parked procs): the park's own, so the work scales with
+/// the deletes and refills that cause it (195e86a's and 6dcd731's A/Bs: workers fell behind).
+#[derive(Clone, Copy)]
+enum MadeBy {
+    Delete,
+    Refill,
 }
 
 /// The cgroups made ahead for boxes of no owner (decision 8, "The p99.9 that stayed"): a queue of at most `bound`
@@ -234,6 +326,9 @@ impl Parking {
 struct Ahead {
     bound: AtomicU64,
     flags: AtomicU64,
+    /// The prepared-proc key of the last box of no owner to choose its cgroup, which each init parked ahead has its
+    /// proc made for: set before that box takes one, so the refill its take wakes reads it.
+    proc_key: Mutex<Option<procmount::Key>>,
     ready: Mutex<VecDeque<(u64, BoxCgroup)>>,
     /// Signalled when a slot is taken, the flags are first known, or the node is going.
     want: Condvar,
@@ -296,6 +391,7 @@ fn refill_ahead(
             }
         };
         let Ok(_busy) = ahead.busy.lock() else { return };
+        let key = ahead.proc_key.lock().ok().and_then(|k| k.clone());
         let made = pool
             .lock()
             .ok()
@@ -308,7 +404,10 @@ fn refill_ahead(
                     .create_slot(n, &Bounds::default())
                     .map_err(|e| OciError::Broken(e.to_string()))?;
                 match park_counted(parking, parker, cg.dir(), flags) {
-                    Ok(p) => Ok((n, cg, p)),
+                    Ok(mut p) => {
+                        parking.with_proc(&mut p.0, key.as_ref(), MadeBy::Refill);
+                        Ok((n, cg, p))
+                    }
                     Err(e) => {
                         let _ = end_and_remove(&cg);
                         Err(e)
@@ -386,6 +485,18 @@ impl Cgroups {
             .name("hex-cgroup-remover".to_owned())
             .spawn(move || remove_each(&queue, &theirs))
             .map_err(|e| Refusal::os("starting the cgroup remover", e))?;
+        let parking = Parking::default();
+        let (drops, unattached) = mpsc::sync_channel(PROC_DROPS);
+        let dropped = Arc::clone(&parking.dropped);
+        std::thread::Builder::new()
+            .name("hex-proc-drop".to_owned())
+            .spawn(move || drop_each(&unattached, &dropped))
+            .map_err(|e| Refusal::os("starting the unattached procs' dropper", e))?;
+        let _ = parking.drops.set(ProcSink::new(
+            drops,
+            Arc::clone(&parking.queued),
+            Arc::clone(&parking.dropped_inline),
+        ));
         Ok(Self {
             pool: Arc::new(Mutex::new(Pool::new(PER_OWNER, PER_NODE, first))),
             held: Mutex::new(BTreeMap::new()),
@@ -396,7 +507,7 @@ impl Cgroups {
             cgroup_kill: AtomicU64::new(0),
             discarded_killed: AtomicU64::new(0),
             no_owner: AtomicU64::new(0),
-            parking: Arc::new(Parking::default()),
+            parking: Arc::new(parking),
             ahead: Arc::new(Ahead::default()),
             parker: OnceLock::new(),
         })
@@ -432,6 +543,12 @@ impl Cgroups {
         self.ahead
             .bound
             .store(u64::try_from(bound).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// Each init parked from here on has the proc of its own pid namespace made with it, through `maker`, for its
+    /// owner's last spec (decision 8, parked procs). Set before the node's first create; unset, none is made.
+    pub fn set_parked_procs(&self, maker: ProcMaker) {
+        let _ = self.parking.procs.set(maker);
     }
 
     /// Whether boxes of no owner take cgroups made ahead.
@@ -523,6 +640,7 @@ impl Cgroups {
                 policy: None,
                 killed: false,
                 park_flags: None,
+                park_proc_key: None,
             },
         )
     }
@@ -549,7 +667,12 @@ impl Cgroups {
         // idle and empty, as before, counted.
         if let (Some(flags), Some(parker)) = (held.park_flags, self.parker.get()) {
             match park_counted(&self.parking, parker, cg.dir(), flags) {
-                Ok(made) => {
+                Ok(mut made) => {
+                    self.parking.with_proc(
+                        &mut made.0,
+                        held.park_proc_key.as_ref(),
+                        MadeBy::Delete,
+                    );
                     self.parking.parked.fetch_add(1, Ordering::Relaxed);
                     self.parking.slots()?.insert(held.slot, made);
                 }
@@ -666,6 +789,15 @@ impl Drop for Cgroups {
     }
 }
 
+/// The dropper's thread: drops each unattached proc it's handed, so its unmount waits here, until the node's end
+/// closes its queue (every sink with it).
+fn drop_each(queue: &Receiver<PreparedProc>, dropped: &AtomicU64) {
+    while let Ok(proc) = queue.recv() {
+        drop(proc);
+        dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn remove_each(queue: &Receiver<BoxCgroup>, removal: &Removal) {
     while let Ok(cg) = queue.recv() {
         // Counted and kept as the last failure when it fails; recovery removes what's left.
@@ -745,6 +877,9 @@ pub struct Choice<'a> {
     pub owner: Option<&'a BoxOwner>,
     pub bounds: &'a Bounds,
     made: Mutex<Option<Made>>,
+    /// Whether it handed the create an init parked in the cgroup, so one the create doesn't claim (a flag mismatch,
+    /// a refused claim) is counted ended unclaimed.
+    gave_parked: AtomicBool,
     /// A refusal its choosing met (the id taken since, the node full, a bound's controller missing),
     /// kept as it was so the create is refused by its type, not as the runtime's error that carried it.
     refused: Mutex<Option<Refusal>>,
@@ -769,6 +904,7 @@ impl<'a> Choice<'a> {
             owner,
             bounds,
             made: Mutex::new(None),
+            gave_parked: AtomicBool::new(false),
             refused: Mutex::new(None),
             #[cfg(debug_assertions)]
             crash_on_own: false,
@@ -869,6 +1005,7 @@ impl<'a> Choice<'a> {
             policy: None,
             killed: false,
             park_flags: None,
+            park_proc_key: None,
         };
         Ok((cg, held, parked))
     }
@@ -895,6 +1032,7 @@ impl<'a> Choice<'a> {
             policy: None,
             killed: false,
             park_flags: None,
+            park_proc_key: None,
         };
         Ok((cg, held))
     }
@@ -903,6 +1041,11 @@ impl<'a> Choice<'a> {
 impl Choose for Choice<'_> {
     fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError> {
         let policy: Policy = wants.program.map(<[Insn]>::to_vec);
+        if self.owner.is_none()
+            && let Ok(mut key) = self.cgroups.ahead.proc_key.lock()
+        {
+            *key = wants.proc_key.cloned();
+        }
         let whose = Whose {
             owner: self.owner.map(|o| o.name.as_str()),
             reuse: self.owner.is_some_and(|o| o.reuse),
@@ -924,6 +1067,7 @@ impl Choose for Choice<'_> {
                         match self.ready_ahead(n, cg) {
                             Ok((cgroup, held)) => {
                                 self.record(Made::Slot(held))?;
+                                self.gave_parked.store(true, Ordering::Relaxed);
                                 return Ok(Chosen {
                                     cgroup,
                                     attached: false,
@@ -967,6 +1111,7 @@ impl Choose for Choice<'_> {
                         policy: Some(policy),
                         killed: false,
                         park_flags: None,
+                        park_proc_key: wants.proc_key.cloned(),
                     }))?;
                     return Ok(Chosen {
                         cgroup,
@@ -981,7 +1126,9 @@ impl Choose for Choice<'_> {
                             .map_err(|r| self.refuse_create(r))?
                             .hand_on();
                         held.policy = Some(policy);
+                        held.park_proc_key = wants.proc_key.cloned();
                         self.record(Made::Slot(held))?;
+                        self.gave_parked.store(parked.is_some(), Ordering::Relaxed);
                         return Ok(Chosen {
                             cgroup,
                             attached: true,
@@ -1009,6 +1156,9 @@ impl Choose for Choice<'_> {
     fn init_made(&self, flags: u64, claimed: bool) {
         if claimed {
             self.cgroups.parking.claimed.fetch_add(1, Ordering::Relaxed);
+        } else if self.gave_parked.load(Ordering::Relaxed) {
+            // Handed one, but made with other namespaces than this create's, or its claim refused: ended.
+            self.cgroups.parking.ended.fetch_add(1, Ordering::Relaxed);
         }
         // A box of no owner's flags are those the cgroups made ahead park their inits with; the first known
         // starts the refill.
@@ -1021,5 +1171,17 @@ impl Choose for Choice<'_> {
         {
             held.park_flags = Some(flags);
         }
+    }
+
+    fn parked_proc(&self, outcome: ParkedProc) {
+        let parking = &self.cgroups.parking;
+        let count = match outcome {
+            ParkedProc::Hit => &parking.proc_hits,
+            ParkedProc::Miss => &parking.proc_misses,
+            // Dry only means something where the node makes them.
+            ParkedProc::Dry if parking.procs.get().is_some() => &parking.proc_dry,
+            ParkedProc::Dry => return,
+        };
+        count.fetch_add(1, Ordering::Relaxed);
     }
 }

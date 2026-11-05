@@ -2095,6 +2095,83 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   exit on the host. Once on, it can't be fully turned off without a reboot (`cgroup.c:1341-1356`). It is a
   host decision for Ada, not Hex's.
 
+**Parked procs: a parked init with its proc made ahead (the tail agent's design, built behind a node setting, off by default
+until measured; the g6 agent reviews and owns part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
+That proc is made with a pid namespace of its own, which the seed clones the init into, and a parked init is pid 1 of
+the pid namespace it was parked in. So on 7.x with prepared procs on, every create clones fresh. On 6.19 there is no
+prepared proc at all: through 7.0 the kernel won't hand over a pid namespace with no process in it (`goal6-mntns.md`
+§7), so part 19's init makes its proc and masks on the path. With Docker's paths that is 28 write holds and 4
+superblocks a create (`goal5-mounts.md` §11, as decision 6's update cites it), and about 314 µs of the init's CPU: the
+proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `move_mount` (`goal6-mntns.md` §11).
+- **The fact it rests on.** A parked init's pid namespace has a process in it, and procfs mounts for any pid namespace
+  given by descriptor (`pidns=`). That option came in Linux 6.18, so 6.19 has it (v6.19 `fs/proc/root.c:48`,
+  `:115-160`), and it asks only for `CAP_SYS_ADMIN` over the target namespace's user namespace and a target descended
+  from the mounter's active pid namespace (`:153-159`). It doesn't care whether the namespace has processes. Goal 6's
+  pool needs 7.1 only because it opens a namespace with none yet (`goal6-mntns.md` §7). So the proc and its masks can
+  be made at park time, off create's path, on both kernels.
+- **Opening the namespace.** By the parked init's pid, `/proc/<pid>/ns/pid`, then held to the init by its pidfd
+  (`run::Parked::pid_namespace`; the lead's 14:37Z ruling, so no new `unsafe`). The open comes first and the poll
+  second. A pidfd reads ready once its process has exited or been reaped (v6.19 `fs/pidfs.c:261-265`, `pidfd_poll`;
+  pidfd_open(2)), and a process that has ended doesn't run again. So a pidfd that reads not ready after the open
+  means the init was running at the open, and a running process's pid names that process alone (a pid is freed only
+  when its process is reaped, and the init is the agent's own child). One that reads ready is refused, whoever
+  reaped it. The proposal's `ioctl(PIDFD_GET_PID_NAMESPACE)` (`include/uapi/linux/pidfd.h:111`) gives the same
+  guarantee, but rustix 1.1.5 wraps it only through its `unsafe` generic `ioctl`, so it would add an `unsafe` use
+  to CLAUDE.md §12's list. Built that way (d8f49f3) and taken back out (its revert).
+- **At park.** The park job carries the proc key the owner's last box would have had (`procmount::Key`: the proc
+  mount's data and flags and the masked and read-only paths beneath `/proc`, in the spec's order, from
+  `procmount::eligible`; given in `Wants` when the box chooses its cgroup, so its slot keeps it for the park at its
+  delete; for a box of no owner, the last such box's, set before its take wakes the refill, so the refill reads
+  that box's, not the one before). A box `procmount::eligible` refuses (no pid namespace of its own, another mount at or beneath `/proc`, a
+  `..`, or a `linux.mountLabel`: a labelled container takes nothing the node made ahead) parks with no proc. Once the init says it is
+  parked, the thread that parked it makes the proc for the parked init's pid namespace (`ProcMaker`,
+  `init::prepare_proc_for`): the delete (reuse on) or the `hex-ahead` refill (reuse off), off every create's path.
+  One worker thread fed by the park was built and measured (195e86a, `parked_procs_ab.md`): at 8 creates in flight
+  it fell behind, and 67-80% of claims found no proc. So the delete pays for the proc, and the A/B reports the
+  delete's p50 and p99 beside the create's (the lead's 14:23Z: move it, or show the delete doesn't grow): the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
+  and flags, `fsmount`, then the masks and read-only paths), with the same `ProcSources`. The parked slot keeps the
+  init, its proc tree, the key, and the bytes charged.
+- **At claim.** A create whose `procmount::eligible` key equals the parked one is sent the tree in goal 6's
+  prepared-proc place in the create message. The parked init attaches it with one `move_mount`, as part 19 attaches a
+  prepared proc, and checks first that the tree's pid namespace is its own. A proc's `self` names the reader's pid
+  in the namespace the proc shows (proc(5)), so `readlinkat(tree, "self")` reads `1` only in the init's own: anything
+  else is refused by type. A create with another
+  key still claims the parked init, which mounts its own proc as part 19 does now. The parked tree is dropped then,
+  counted a miss. A create no prepared proc can serve (`Unpooled`) claims the parked init as today.
+- **Mount namespaces.** One code path on both kernels; only the mount namespace's way differs. A park clones with
+  the flags its way's fresh init takes (`mntns::clone_flags`): Copy (6.19, and 7.x where chosen) with `CLONE_NEWNS`
+  as now; Empty (7.1) with `CLONE_EMPTY_MNTNS` in its place; from the tree (7.0) without either, the claimed init
+  joining the namespace the agent made from the rootfs with `setns(CLONE_NEWNS)` in its build, as a fresh one does.
+  A claim's flags are held to the parked ones, so a create of another way is refused by type and clones fresh. A
+  node asked for Empty on a kernel without it parks with the flag the kernel refuses: each park fails, counted, and
+  creates clone fresh.
+- **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
+  the creates no parked init is ready for: each create goes one way or the other, never both.
+- **A node setting, off by default.** `Node::with_parked_procs(bool)`, false until measured; the bench's
+  `HEXBENCH_PARKED_PROCS`. Off, nothing changes on either kernel.
+- **Dropped off the path (the g6 agent's review).** A detached tree dropped unattached is unmounted, masks and
+  all, on its last close. That takes the host's `namespace_sem` for write, then waits for an expedited RCU grace
+  period (`namespace_unlock`, v6.19 `fs/namespace.c:1680-1721`; the wait at `:1715`). So no create's thread drops
+  one. A miss, the tree of a claim that failed, and the tree of an init ended unclaimed all go to the node's
+  `hex-proc-drop` thread, by a queue bounded at `PER_NODE` (`run::ProcSink`). Past the bound a tree is dropped where
+  it is, counted (`procs_dropped_inline`).
+- **Costs.** The proc's superblock is made off every create's path, on the parking thread, and so are the
+  `list_lrus` and shrinker registrations a new superblock takes (step 6's run 23, as the g6 agent cites it). One proc superblock per parked init, with its masks (each a clone of the shared empty tmpfs or of the
+  host's `/dev/null`: no superblock each), bounded as the parked inits are (`PER_NODE` idle slots plus `INITS_AHEAD`),
+  never reused: it ends with its init. The refill worker does the work beside the clone the delete already pays.
+- **Counted** (`ParkCounts`). Made, hits (claimed with the key), misses (another key, no room, or the claim refused),
+  dry (a claimed init with no proc, for a create one could have served), failed makes, the procs held now, and
+  the unattached procs dropped (by the dropper, and inline).
+- **The A/B, of record, on fedora (6.19)**, under the under-load bar's conditions: 8 in flight, 8,000 idle threads,
+  6 and 12 busy loops, Docker's paths, no priority change. Interleaved, the setting on against off, both with parked
+  inits. Beside it: part 19's p50 and p99, the whole create's p50 and p99, mount holds a create (the mounts trace's
+  holds by holder and its unpreempted p99: cp/t7-g6 92443a8's reader), and the predicted key's hits and misses. The g6
+  agent owns part 19's harness and its numbers. The 7.2 guest (Fedora's 7.2.15 kernel, the image
+  `vm7_build.sh` made, driven by `bench/oci-validation/vm7_breakdown.sh` with the tree way) runs the same, indicative
+  only. There, goal 6's procs made ahead took part 19's p50 down about 3x.
+- **What would falsify it.** Part 19's p99 under the bar's conditions not falling with the setting on. Or the whole
+  create's p99 not falling. Or misses making the setting cost more than it saves.
+
 **What the A/B measured** (`create_tail.md`, "The parked init, A/B against 60b2e38", six interleaved passes, loads 13
 to 59, not of record):
 - In process, B's create max was 2.84 to 3.81 ms in every pass, against A's 15.35 to 59.89, and no B create waited

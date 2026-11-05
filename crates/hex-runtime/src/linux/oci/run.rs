@@ -336,6 +336,9 @@ pub struct PrunedCreate {
     pub ipc_uts: Option<super::ipcuts::Pair>,
     /// A proc made ahead, its index in the mount plan (decision 6's update, part 2).
     pub proc_mount: Option<(u32, init::PreparedProc)>,
+    /// Where `proc_mount` goes unattached when it is the one made for the init parked in the cgroup (decision 8,
+    /// parked procs): set only then, so only a claim of that init takes it.
+    pub proc_sink: Option<ProcSink>,
     /// The node's empty read-only tmpfs, which the init clones for each masked directory.
     pub masked_directory: Option<OwnedFd>,
     pub binds: Vec<OwnedFd>,
@@ -432,6 +435,20 @@ pub struct Wants<'a> {
     /// Whether its process could change its own cgroup or what is attached to it
     /// ([`Spec::could_change_its_cgroup`]), so the cgroup it leaves can't be handed on.
     pub privileged: bool,
+    /// The spec's prepared-proc key ([`super::procmount::eligible`]), `None` where no proc made ahead can serve it:
+    /// what the init parked for the owner's next box has its proc made for (decision 8, parked procs).
+    pub proc_key: Option<&'a super::procmount::Key>,
+}
+
+/// What came of the proc made for the init parked in a create's cgroup (decision 8, parked procs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedProc {
+    /// The claimed init attached it, mounting no proc of its own.
+    Hit,
+    /// It ended unused (another key, no room for it, the claim refused): the init mounted its own.
+    Miss,
+    /// The claimed init had none, for a create one could have served: it mounted its own.
+    Dry,
 }
 
 /// A cgroup a caller chose for a container: made or handed on, its bounds in force either way, and
@@ -451,19 +468,78 @@ pub struct Chosen {
 pub trait Choose {
     fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError>;
 
-    /// The container's init was made with the namespaces `flags` (`clone3`'s `CLONE_NEW*` bits), by a
-    /// claim of the init parked in its cgroup when `claimed`, else by a clone: what the caller parks for the
-    /// owner's next box, and counts.
+    /// The container's init was made with the namespaces `flags` (`clone3`'s `CLONE_NEW*` bits), by a claim of
+    /// the init parked in its cgroup when `claimed`, else by a clone: what the caller parks for the owner's next
+    /// box, and counts.
     fn init_made(&self, flags: u64, claimed: bool);
+
+    /// What came of the proc made for the init parked in the cgroup (decision 8, parked procs): counted.
+    fn parked_proc(&self, outcome: ParkedProc);
 }
 
 /// An init made ahead in an idle cgroup (decision 8, "The p99.9 that stayed"): its pid in this process's pid
 /// namespace, its pidfd, this end of the socket its claim goes on, and the namespaces it was made with. One
 /// that isn't claimed is ended and reaped when dropped, so none is left running or a zombie.
-#[derive(Debug)]
 pub struct Parked {
     held: Option<(i32, OwnedFd, OwnedFd)>,
     pub flags: u64,
+    /// The proc made for this init's own pid namespace and its key (decision 8, parked procs), held by the node alone
+    /// until a claim with the key takes it; it ends with the init otherwise.
+    proc: Option<(super::procmount::Key, init::PreparedProc, ProcSink)>,
+}
+
+/// Where a parked init's proc goes when no init attaches it (decision 8, parked procs): a thread of the node's, by a
+/// queue of a bound the node sets. A detached tree's last close unmounts it and its masks, which takes the host's
+/// `namespace_sem` for write and then waits for an expedited RCU grace period (`namespace_unlock`, v6.19
+/// `fs/namespace.c:1680-1721`; the wait at `:1715`), so that is never a create's to pay. Past the bound the tree is
+/// dropped where it is, counted.
+#[derive(Clone, Debug)]
+pub struct ProcSink {
+    queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+    queued: std::sync::Arc<AtomicU64>,
+    inline: std::sync::Arc<AtomicU64>,
+}
+
+impl ProcSink {
+    /// A sink onto `queue`, counting in `queued` each tree handed to it and in `inline` each dropped where it was,
+    /// its queue full or closed.
+    pub fn new(
+        queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+        queued: std::sync::Arc<AtomicU64>,
+        inline: std::sync::Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            queue,
+            queued,
+            inline,
+        }
+    }
+
+    /// `proc`, unattached, handed to the node's thread to drop.
+    pub fn discard(&self, proc: init::PreparedProc) {
+        match self.queue.try_send(proc) {
+            Ok(()) => {
+                self.queued.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(
+                std::sync::mpsc::TrySendError::Full(proc)
+                | std::sync::mpsc::TrySendError::Disconnected(proc),
+            ) => {
+                self.inline.fetch_add(1, Ordering::Relaxed);
+                drop(proc);
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Parked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Parked")
+            .field("pid", &self.pid())
+            .field("flags", &self.flags)
+            .field("proc", &self.proc.as_ref().map(|(k, ..)| k))
+            .finish()
+    }
 }
 
 impl Parked {
@@ -471,7 +547,63 @@ impl Parked {
         Self {
             held: Some((pid, pidfd, socket)),
             flags,
+            proc: None,
         }
+    }
+
+    /// The init's own pid namespace, opened by its pid in this process's `/proc` and then held to the init by its
+    /// pidfd (decision 8, parked procs: the lead's 14:37Z, no new `unsafe`). Opened first, polled second: a pidfd
+    /// reads ready once its process has exited or been reaped (v6.19 `fs/pidfs.c:261-265`; pidfd_open(2)), and a
+    /// process doesn't come back, so one that reads not ready after the open was running at the open, and its pid
+    /// (a running process's, never reused, the init being this process's child) named it. One that reads ready is
+    /// refused, whoever reaped it.
+    pub fn pid_namespace(&self) -> Result<OwnedFd, OciError> {
+        let Some((pid, pidfd, _)) = &self.held else {
+            return Err(OciError::Broken("a parked init no longer held".to_owned()));
+        };
+        let ns = rustix::fs::open(
+            format!("/proc/{pid}/ns/pid").as_str(),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening a parked init's pid namespace", e))?;
+        let mut fds = [rustix::event::PollFd::new(
+            pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        let now = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let ended = rustix::event::poll(&mut fds, Some(&now))
+            .map_err(|e| OciError::os("asking whether a parked init runs", e))?;
+        if ended != 0 {
+            return Err(OciError::Broken(
+                "a parked init ended before its pid namespace was opened".to_owned(),
+            ));
+        }
+        Ok(ns)
+    }
+
+    /// The proc made for this init's pid namespace, for `key`, held with it until a claim takes it; `sink` drops it
+    /// if none does.
+    pub fn set_proc(
+        &mut self,
+        key: super::procmount::Key,
+        proc: init::PreparedProc,
+        sink: ProcSink,
+    ) {
+        self.proc = Some((key, proc, sink));
+    }
+
+    /// The key this init's proc was made for, if one was.
+    pub fn proc_key(&self) -> Option<&super::procmount::Key> {
+        self.proc.as_ref().map(|(k, ..)| k)
+    }
+
+    /// This init's proc, the caller's from here: taken once, so no second init is ever handed it.
+    pub fn take_proc(&mut self) -> Option<(super::procmount::Key, init::PreparedProc, ProcSink)> {
+        self.proc.take()
     }
 
     /// The init's pid, if it is still held.
@@ -523,6 +655,10 @@ impl Drop for Parked {
                 rustix::process::WaitId::PidFd(pidfd.as_fd()),
                 rustix::process::WaitIdOptions::EXITED,
             );
+        }
+        // Its proc, if no create took it, goes to the node's thread to drop ([`ProcSink`]).
+        if let Some((_, proc, sink)) = self.proc.take() {
+            sink.discard(proc);
         }
     }
 }
@@ -771,9 +907,14 @@ impl Runtime {
                     )
                 })?;
                 let program = held.wants(&plan, spec.in_user_namespace())?;
+                let proc_key = super::mount::plan(&spec.mounts)
+                    .ok()
+                    .and_then(|mounts| super::procmount::eligible(&spec, &mounts).ok())
+                    .map(|(_, key)| key);
                 let chosen = chooser.choose(&Wants {
                     program: program.as_deref(),
                     privileged: spec.could_change_its_cgroup(),
+                    proc_key: proc_key.as_ref(),
                 })?;
                 if let Some(insns) = program
                     && !chosen.attached
@@ -964,7 +1105,7 @@ impl Runtime {
             parked,
             chooser,
         } = pools;
-        let parking = Parking { parked, chooser };
+        let mut parking = Parking { parked, chooser };
         if init::needs_shim(spec) {
             // A parked init is ended before the shim's is cloned beside it in the cgroup.
             drop(parking);
@@ -1017,11 +1158,17 @@ impl Runtime {
                             }
                         }
                         // A proc made ahead adds its pid namespace and its tree, within the same bound. None is
-                        // taken where an init is parked in the cgroup and the namespace is made the old way: the
-                        // parked init, which has its pid namespace already, takes the create (decision 8), and a
-                        // proc taken would keep it from doing so.
-                        let parked_takes = parking.parked.is_some()
-                            && pruned.mount_namespace == super::mntns::MountNamespace::Copy;
+                        // taken from the pool where an init is parked in the cgroup, whatever the way: the parked
+                        // init, which has its pid namespace already, takes the create (decision 8), and a pool's
+                        // proc would keep it from doing so: a create takes one or the other, never both. The proc made for that init's own pid
+                        // namespace, if the node made one (parked procs), is the create's when its key is the
+                        // spec's and it fits; otherwise it ends unused, a miss, and the init mounts its own.
+                        let parked_takes = parking.parked.is_some();
+                        let parked_proc = if parked_takes {
+                            parking.parked.as_mut().and_then(Parked::take_proc)
+                        } else {
+                            None
+                        };
                         let room = pruned
                             .binds
                             .len()
@@ -1038,7 +1185,27 @@ impl Runtime {
                             .and_then(|n| n.checked_add(usize::from(pruned.dev_mount.is_some())))
                             .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
                         if parked_takes {
-                            // Not asked, so neither a take nor a miss.
+                            let eligible = super::procmount::eligible(spec, &plan).ok();
+                            let outcome = match (parked_proc, eligible) {
+                                (Some((made, proc, sink)), Some((mount, key)))
+                                    if room && made == key =>
+                                {
+                                    pruned.proc_mount = Some((mount, proc));
+                                    pruned.proc_sink = Some(sink);
+                                    // Counted once the claim is known (start_via_seed).
+                                    None
+                                }
+                                (None, Some(_)) if room => Some(ParkedProc::Dry),
+                                // None made, for a create none could serve: neither.
+                                (None, _) => None,
+                                (Some((_, proc, sink)), _) => {
+                                    sink.discard(proc);
+                                    Some(ParkedProc::Miss)
+                                }
+                            };
+                            if let (Some(outcome), Some(chooser)) = (outcome, parking.chooser) {
+                                chooser.parked_proc(outcome);
+                            }
                         } else if !room {
                             pool.unpooled_proc(hex_core::devfs::Unpooled::Capacity)?;
                         } else {
@@ -1262,6 +1429,7 @@ impl Runtime {
         let cgroup_dir = open_cgroup_dir(cgroup.dir()).map_err(|_| ClassicReason::Source)?;
         let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
         Ok(PrunedCreate {
+            proc_sink: None,
             bundle_dir,
             cgroup_dir,
             container_dir,
@@ -1309,7 +1477,7 @@ impl Runtime {
             network.is_some(),
             pruned.as_ref().is_some_and(|p| p.ipc_uts.is_some()),
         );
-        let req = CloneReq {
+        let mut req = CloneReq {
             bundle: making.bundle,
             dir: making.dir.path(),
             cgroup,
@@ -1320,18 +1488,44 @@ impl Runtime {
             pruned,
         };
         let Parking { parked, chooser } = parking;
-        // A parked init was cloned with its own pid and mount namespaces: it can't take a create that carries a
-        // proc made ahead (whose pid namespace the init would be cloned into) or one whose mount namespace is
-        // made another way (decision 6's update), so such a create is cloned fresh and the parked init ended.
-        let takes_parked = req.pruned.as_ref().is_none_or(|p| {
-            p.proc_mount.is_none() && p.mount_namespace == super::mntns::MountNamespace::Copy
-        });
+        // A parked init was cloned with its own pid namespace: it can't take a create that carries a pool's proc
+        // made ahead (whose pid namespace the init would be cloned into), so such a create is cloned fresh and the
+        // parked init ended. The proc made for the parked init's own pid namespace is the one it takes.
+        let takes_parked = req
+            .pruned
+            .as_ref()
+            .is_none_or(|p| p.proc_mount.is_none() || p.proc_sink.is_some());
+        // Its mount namespace's way changes the flags it is cloned with, so a parked init is made, and held, to the
+        // way's (decision 6's update, decision 8).
+        let way = req
+            .pruned
+            .as_ref()
+            .map_or(super::mntns::MountNamespace::Copy, |p| p.mount_namespace);
+        let made_with = super::mntns::clone_flags(flags, way);
         let claimed = match parked {
-            Some(p) if p.flags == flags && takes_parked => seeds.claim(p, &req).ok(),
+            Some(p) if p.flags == made_with && takes_parked => seeds.claim(p, &req).ok(),
             _ => None,
         };
+        // A parked init's proc shows that init's pid namespace, so a create its init didn't take mounts its own:
+        // the proc goes unused, to the node's thread to drop, as the init it was made for has ended.
+        if let Some(p) = req.pruned.as_mut()
+            && let Some(sink) = &p.proc_sink
+        {
+            if claimed.is_none()
+                && let Some((_, proc)) = p.proc_mount.take()
+            {
+                sink.discard(proc);
+            }
+            if let Some(chooser) = chooser {
+                chooser.parked_proc(if claimed.is_some() {
+                    ParkedProc::Hit
+                } else {
+                    ParkedProc::Miss
+                });
+            }
+        }
         if let Some(chooser) = chooser {
-            chooser.init_made(flags, claimed.is_some());
+            chooser.init_made(made_with, claimed.is_some());
         }
         let (pid, pidfd) = match claimed {
             Some(started) => {

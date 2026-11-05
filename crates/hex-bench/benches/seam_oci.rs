@@ -53,6 +53,9 @@
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 //! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
 //! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
+//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it (decision 8, parked procs; the node's default is
+//! off), and the phase's `parked` counts say how many were made, taken by their create (hits), left (misses),
+//! wanted with none made (dry) or failed.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -398,7 +401,7 @@ mod linux {
         for conc in throughput_concurrency() {
             let per = (lifecycles / conc).max(1);
             let start = Barrier::new(conc + 1);
-            let (wall, cpu_s, errs, create_ms) = {
+            let (wall, cpu_s, errs, create_ms, delete_ms) = {
                 std::thread::scope(|s| {
                     let threads: Vec<_> = (0..conc)
                         .map(|w| {
@@ -406,27 +409,33 @@ mod linux {
                             s.spawn(move || {
                                 start.wait();
                                 let mut create_ms = Vec::with_capacity(per);
+                                let mut delete_ms = Vec::with_capacity(per);
                                 for j in 0..per {
-                                    let d = run_true_container_timed(
+                                    let (c, d) = run_true_container_timed(
                                         node,
                                         bundle,
                                         &format!("t{conc}-{w}-{j:06}"),
                                     )?;
-                                    create_ms.push(d.as_secs_f64() * 1e3);
+                                    create_ms.push(c.as_secs_f64() * 1e3);
+                                    delete_ms.push(d.as_secs_f64() * 1e3);
                                 }
-                                Ok::<_, String>(create_ms)
+                                Ok::<_, String>((create_ms, delete_ms))
                             })
                         })
                         .collect();
                     start.wait();
                     let (c0, t0) = (cpu_usec(own), Instant::now());
-                    let (mut errs, mut create_ms) = (Vec::new(), Vec::new());
+                    let (mut errs, mut create_ms, mut delete_ms) =
+                        (Vec::new(), Vec::new(), Vec::new());
                     for t in threads {
                         match t
                             .join()
                             .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
                         {
-                            Ok(samples) => create_ms.extend(samples),
+                            Ok((c, d)) => {
+                                create_ms.extend(c);
+                                delete_ms.extend(d);
+                            }
                             Err(e) => errs.push(e),
                         }
                     }
@@ -435,6 +444,7 @@ mod linux {
                         (cpu_usec(own) - c0) as f64 / 1e6,
                         errs,
                         create_ms,
+                        delete_ms,
                     )
                 })
             };
@@ -445,6 +455,7 @@ mod linux {
             out.insert(
                 conc.to_string(),
                 json!({"lifecycles": total, "wall_s": wall.as_secs_f64(), "create_ms": create_ms,
+                       "delete_ms": delete_ms,
                        "per_s": total as f64 / wall.as_secs_f64(),
                        "cpu_s_per_lifecycle": cpu_s / total as f64}),
             );
@@ -791,23 +802,26 @@ mod linux {
 
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
     fn run_true_container(node: &dyn Runtime, bundle: &Path, id: &str) -> Result<(), String> {
-        run_true_container_timed(node, bundle, id).map(|_| ())
+        run_true_container_timed(node, bundle, id).map(drop)
     }
 
-    /// The complete create is timed alongside part 19, under the same concurrency and host load.
+    /// The complete create is timed alongside part 19, under the same concurrency and host load, and so is the
+    /// delete, which pays for what a park does (decision 8).
     fn run_true_container_timed(
         node: &dyn Runtime,
         bundle: &Path,
         id: &str,
-    ) -> Result<Duration, String> {
+    ) -> Result<(Duration, Duration), String> {
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
         let spec = spec(&bid, bundle);
         let t = Instant::now();
         node.create(spec).map_err(|e| format!("create {id}: {e}"))?;
         let create = t.elapsed();
         let started = node.start(&bid).map_err(|e| format!("start {id}: {e}"));
+        let t = Instant::now();
         node.delete(&bid).map_err(|e| format!("delete {id}: {e}"))?;
-        started.map(|_| create)
+        let delete = t.elapsed();
+        started.map(|_| (create, delete))
     }
 
     /// Inspect of one running `sleep` container, `n` times after `warmup`, each timed alone: a call
@@ -1077,7 +1091,18 @@ mod linux {
         json!({"parked": a.parked - b.parked, "claimed": a.claimed - b.claimed,
                "ended_unclaimed": a.ended_unclaimed - b.ended_unclaimed,
                "failed": a.failed - b.failed,
-               "charged_bytes": a.charged_bytes - b.charged_bytes})
+               "charged_bytes": a.charged_bytes - b.charged_bytes,
+               "procs_made": a.procs_made - b.procs_made,
+               "procs_made_at_delete": a.procs_made_at_delete - b.procs_made_at_delete,
+               "procs_made_at_refill": a.procs_made_at_refill - b.procs_made_at_refill,
+               "proc_hits": a.proc_hits - b.proc_hits,
+               "proc_misses": a.proc_misses - b.proc_misses,
+               "proc_dry": a.proc_dry - b.proc_dry,
+               "procs_failed": a.procs_failed - b.procs_failed,
+               "procs_held": a.procs_held,
+               "procs_queued": a.procs_queued - b.procs_queued,
+               "procs_dropped": a.procs_dropped - b.procs_dropped,
+               "procs_dropped_inline": a.procs_dropped_inline - b.procs_dropped_inline})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -1190,7 +1215,8 @@ mod linux {
                 .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"))
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
+                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"))
+                .with_parked_procs(std::env::var("HEXBENCH_PARKED_PROCS").as_deref() == Ok("1"));
             // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
             // as it ships, unless HEXBENCH_AHEAD says.
             let node = match std::env::var("HEXBENCH_AHEAD") {

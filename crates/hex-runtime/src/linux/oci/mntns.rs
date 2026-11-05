@@ -65,6 +65,19 @@ pub fn probe() -> Result<OpenTreeNamespace, OciError> {
     classify(rustix::mount::open_tree(&not_a_dir, "probe", flags).map(drop))
 }
 
+/// The `clone3` namespace flags of an init whose mount namespace is made `way`, from the spec's `flags`, which hold
+/// `CLONE_NEWNS` (the seed's namespace copied): from its tree, the init is cloned without it and joins the namespace
+/// the agent made; empty, `CLONE_EMPTY_MNTNS` takes its place. What a fresh clone takes ([`super::seed`]'s
+/// `clone_pruned`), and so what an init parked for that way is cloned with and a claim is held to (decision 8).
+pub fn clone_flags(flags: u64, way: MountNamespace) -> u64 {
+    let newns = u64::try_from(libc::CLONE_NEWNS).unwrap_or(0);
+    match way {
+        MountNamespace::FromTree => flags & !newns,
+        MountNamespace::Empty => (flags & !newns) | CLONE_EMPTY_MNTNS,
+        MountNamespace::Copy => flags,
+    }
+}
+
 /// The way a node takes unless asked for another: from its tree where this process may make one, else the
 /// copy. `Empty` makes the same holds of the mount lock as the copy (`goal6-mntns.md` §4), so it isn't the
 /// default until a 7.1 host's record shows it faster.

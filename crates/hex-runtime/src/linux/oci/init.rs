@@ -2045,7 +2045,6 @@ pub fn prepare_proc(
     key: &super::procmount::Key,
     sources: &ProcSources,
 ) -> Result<PreparedProc, OciError> {
-    let null = sources.null.as_fd();
     let own = rustix::fs::open(
         "/proc/thread-self/ns/pid",
         OFlags::RDONLY | OFlags::CLOEXEC,
@@ -2060,8 +2059,19 @@ pub fn prepare_proc(
     )
     .map_err(|e| OciError::os(PID_NAMESPACE_AHEAD, e));
     sys::setns(own.as_fd(), libc::CLONE_NEWPID)?;
-    let pid_namespace = made?;
+    prepare_proc_for(made?, key, sources)
+}
 
+/// The proc for `pid_namespace`, with the masks and read-only paths `key` puts beneath `/proc` on it, as
+/// [`prepare_proc`] makes it for a pid namespace made ahead. Also for the live pid namespace of an init parked ahead
+/// (decision 8, "Proposal: a parked init with its proc made ahead"): `pidns=` takes any pid namespace the mounter
+/// may administer and descends from, whether or not a process is in it (v6.19 `fs/proc/root.c:115-160`).
+pub fn prepare_proc_for(
+    pid_namespace: OwnedFd,
+    key: &super::procmount::Key,
+    sources: &ProcSources,
+) -> Result<PreparedProc, OciError> {
+    let null = sources.null.as_fd();
     let fs = rustix::mount::fsopen("proc", FsOpenFlags::FSOPEN_CLOEXEC)
         .map_err(|e| OciError::os("fsopen", e))?;
     rustix::mount::fsconfig_set_string(fs.as_fd(), "source", "proc")
