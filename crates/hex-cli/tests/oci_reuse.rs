@@ -317,6 +317,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_delete_ends_a_box_through_its_inits_pidfd(&lab, own);
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
     an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(&lab, own);
+    a_parked_init_made_with_other_namespaces_is_ended_and_counted(&lab, own);
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
@@ -827,6 +828,63 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         "released, no idle cgroup nor parked init is left"
     );
     eprintln!("test 2b: B made by the init parked in A's slot (pid {parked:?})");
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): an init parked for an owner's next box with namespaces its spec
+/// doesn't ask for is never used. Do: A of O, which has an ipc namespace of its own, created and deleted, so its
+/// slot holds an init parked for one; B of O, whose spec makes no ipc namespace, created. Expect: B in A's slot,
+/// the parked init ended, not claimed, and counted ended unclaimed; B starts and runs a program.
+fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-parkflags"));
+    let o = BoxOwner::named("owner-f").unwrap();
+    let a = BoxId::new("fa").unwrap();
+    node.create(lab.oci("fa", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    let slot = node.cgroup_dir(&a).expect("A's cgroup");
+    node.delete(&a).unwrap();
+    let parked = populated_within(&slot, PATIENCE);
+    assert_eq!(
+        parked.len(),
+        1,
+        "A's idle slot holds a parked init: {parked:?}"
+    );
+    let init = pidfd(parked[0]);
+    // B's bundle: A's, its ipc namespace taken out (a pid namespace can't be: rootless, proc mounts only for a pid
+    // namespace of the container's own user namespace).
+    let bundle = lab.bundle(Caps::Docker);
+    let config = std::fs::read_to_string(bundle.join("config.json")).unwrap();
+    assert!(config.contains(r#"{"type":"ipc"},"#));
+    std::fs::write(
+        bundle.join("config.json"),
+        config.replace(r#"{"type":"ipc"},"#, ""),
+    )
+    .unwrap();
+    let before = node.cgroup_reuse().unwrap().parked;
+    let b = BoxId::new("fb").unwrap();
+    node.create(BoxSpec {
+        id: b.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+        owner: Some(o.clone()),
+    })
+    .unwrap();
+    let after = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        node.cgroup_dir(&b).as_deref(),
+        Some(slot.as_path()),
+        "B in A's slot"
+    );
+    assert_eq!(
+        (after.claimed, after.ended_unclaimed),
+        (before.claimed, before.ended_unclaimed + 1),
+        "the parked init, made for an ipc namespace B's spec doesn't ask for, ended unclaimed: {after:?}"
+    );
+    assert!(has_ended(&init), "the parked init has ended");
+    node.start(&b).unwrap();
+    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&b).unwrap();
+    node.release_idle().unwrap();
+    eprintln!("parked init made with other namespaces: ended, counted");
 }
 
 /// Each slot cgroup under `root` that holds a process, with its processes.
