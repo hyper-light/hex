@@ -396,3 +396,20 @@ namespace with `setns`.
   each seed, and each init that copies it, sees what it sees today.
 - The node keeps that namespace by a descriptor for its life. At most one `pivot_root` happens per node start, before
   any create, in place of one per seed start.
+
+## 13. Sizing the 6.19 levers on part 19's CPU time before building them (2026-11-05)
+
+- **(1) Targets resolved beneath one opened `/proc`.** `bench/competitive/probes/openat2_micro.c` times `openat2`
+  (`O_PATH`) of Docker's 14 `/proc` targets two ways: in the root (`RESOLVE_IN_ROOT` from `/`), and beneath one opened
+  `/proc` (`RESOLVE_BENEATH`, that one open counted). It ran on fedora (6.19), CPU 8, under the timed lock, load 22,
+  as unit hex-g6-micro-20261105T121049Z, 3 passes of 20,000 rounds each.
+  - In the root: 905, 806 and 663 ns a target.
+  - Beneath `/proc`: 638, 888 and 596 ns.
+  - The difference is under 0.3 us a target and changes sign between passes. With ~15 such targets a create, that's
+    at most ~4 us of part 19's 314, inside the noise. Not worth building.
+- **(3) Fewer page faults in the init.** §11's trace has 36,333 user faults inside part 19, 18 a create:
+  - 56% are instruction fetches of pages not present (`error_code` 0x14). `fork` doesn't copy the page-table
+    entries of file-backed code, so the init faults in each code page it runs.
+  - 34% are copy-on-write writes (0x7), and 10% reads (0x4).
+  - At ~0.5-1 us a minor fault, all 18 come to ≤ ~18 us a create. The code faults go only if the init runs less code
+    or doesn't fork. The writes go with fewer pages written after the clone.
