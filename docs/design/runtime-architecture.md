@@ -2125,8 +2125,19 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   creates clone fresh.
 - **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
   the creates no parked init is ready for: each create goes one way or the other, never both.
-- **A node setting, off by default.** `Node::with_parked_procs(bool)`, false until measured; the bench's
-  `HEXBENCH_PARKED_PROCS`. Off, nothing changes on either kernel.
+- **A node setting, off by default.** `Node::with_parked_procs(bool)`; the bench's `HEXBENCH_PARKED_PROCS`. Off,
+  nothing changes on either kernel.
+- **Decided (the lead, 2026-11-05T17:00Z, on the measurements in `parked_procs_ab.md`).** The proc is made on the
+  parking thread, and the setting stays off by default.
+  - On, part 19's p50 is about 5.6x faster and the create's p50 0.10-0.40 ms faster at 8 in flight (1e5e956), with
+    every claim a hit. The under-load bar's part 19 p99 (0.5 ms) is approached, not met.
+  - The cost moves to the delete: its p50 is up in 6 of 8 pairs at 8 in flight, and serially it is flat with the c32
+    rate 1-3% lower.
+  - One worker and eight workers both failed (195e86a, 6dcd731: 31-44% hits at best). The cost is the host-wide
+    `namespace_sem`, which more threads only share (a reading, not measured apart).
+  - The after-reply arm (1890f85) lowered the delete but left 22-37% of claims dry under concurrency. It was dropped.
+  - Whether it goes on by default (a faster create and part 19, against a slower delete) is Ada's call. Nothing
+    changes by default until she says.
 - **Dropped off the path (the g6 agent's review).** A detached tree dropped unattached is unmounted, masks and
   all, on its last close. That takes the host's `namespace_sem` for write, then waits for an expedited RCU grace
   period (`namespace_unlock`, v6.19 `fs/namespace.c:1680-1721`; the wait at `:1715`). So no create's thread drops

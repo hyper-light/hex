@@ -1,5 +1,10 @@
 # Parked procs: the A/B of record on fedora's host (decision 8, parked procs; AC-T7.1.3)
 
+**Decided (the lead, 2026-11-05T17:00Z):** the proc is made on the parking thread (the runs at 1e5e956 are of record),
+and `with_parked_procs` stays off by default; on by default is Ada's call. The worker arms (one, eight) are recorded
+below as negatives, as is the after-reply arm, dropped. The reading that the cost is the host-wide `namespace_sem`,
+which more threads only share, is not measured apart.
+
 **Run.** fedora (Linux 6.19.10), 2026-11-05 14:38:38Z-14:42:35Z, under `fedora-timed.lock`. One release build of
 cp/t7-g5-parkproc 9e13b95: hex sha256 65f6100e612bebd8, seam_oci d13c5005b54a2793 (each cell's `env.txt`). The
 harness is g6's ab4c cell (bench/competitive/probes/create_breakdown.sh and seedstart_extract.py at cp/t7-g6
