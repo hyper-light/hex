@@ -43,7 +43,10 @@ def main():
                 if int(e[1]) == NR_SETNS and int(e[2]) == 0 and len(a) > 1 and a[1] & CLONE_NEWNET:
                     open_at.setdefault(pid, ts)
             elif body.startswith("nsw:"):
-                holding[pid] = [ts, call.get(pid)]
+                # The node's own prune runs on its `hex-prune` thread, whose system calls the trace doesn't follow:
+                # its holds are counted by that thread's name.
+                prune = m["comm"].strip() == "hex-prune"
+                holding[pid] = [ts, NR_PIVOT_ROOT if prune else call.get(pid)]
             elif body.startswith("nsww:") and pid in holding:
                 holding[pid][0] = None
             elif body.startswith("nswwr:") and pid in holding and holding[pid][0] is None:
@@ -58,8 +61,10 @@ def main():
     pairs = []
     with open(cotenant) as f:
         for line in f:
-            t, d = line.split()
-            pairs.append((int(t), int(d)))
+            # The co-tenant is ended by a signal, so its last line may be cut short: only whole lines count.
+            fields = line.split()
+            if len(fields) == 2 and all(x.isdigit() for x in fields):
+                pairs.append((int(fields[0]), int(fields[1])))
     during = [d for t, d in pairs if first is not None and start_end is not None and first <= t <= start_end]
     after = [d for t, d in pairs if start_end is not None and t > start_end]
     summary = json.load(open(os.path.join(out, "mounts.c8.summary.json")))
