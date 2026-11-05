@@ -534,8 +534,8 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
 
     // The fifth, as the bench's throughput and sustained phases run them (the lead's finding 3(a),
     // 2026-11-05T07:50Z): one owner's boxes whose init ends at once, each deleted right after its start,
-    // from many threads, so some deletes find the init reaped while the kernel still counts it in its
-    // cgroup (its last switch, Linux v6.19 kernel/sched/core.c:5156).
+    // from many threads, so some deletes come as the supervisor collects the init's exit into the box's
+    // record (supervise.rs, collect).
     let o = BoxOwner::named("owner-ends").unwrap();
     let bundle = lab.bundle_running(Caps::Docker, &["/hex", "selftest-box", "fail", "0"]);
     let (threads, each) = (32, 64);
