@@ -309,3 +309,20 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         Some(Exit::Code(3))
     );
 }
+
+/// A box-user program runs as its pool user, which the unprivileged node may not signal, and XNU attaches
+/// `NOTE_EXITSTATUS` only for a parent or one that may (`kern_event.c:1116-1133`, `EACCES` else), so the
+/// node's watch of it asks for `NOTE_EXIT` alone (HEX-MAC-16, HEX-RT-3). launchd (pid 1) stands in for a
+/// process this one may not signal. Do watch it with the members' status watch, then for its end alone;
+/// expect the first refused (unless root) and the second taken, launchd not ended.
+#[test]
+fn a_process_this_one_may_not_signal_is_watched_for_its_end_alone() {
+    let kq = super::sys::Kqueue::new().expect("kqueue");
+    if !rustix::process::geteuid().is_root() {
+        let refused = kq
+            .watch(&[1], 0)
+            .expect_err("a status watch of launchd taken unprivileged");
+        assert_eq!(refused.raw_os_error(), Some(libc::EACCES));
+    }
+    assert!(!kq.watch_end(1).expect("an end watch of launchd"));
+}

@@ -162,10 +162,10 @@ impl UserProc {
     /// Watches `pid`, which the helper just started in `box_id`, for its end.
     pub fn watch(pid: i32, box_id: BoxId, helper: Arc<Helper>) -> Result<Self, Refusal> {
         let kq = Kqueue::new().map_err(|e| Refusal::os("making a program's kqueue", e))?;
+        // NOTE_EXIT alone: the node isn't its parent, and XNU refuses another's NOTE_EXITSTATUS.
         let exiting = kq
-            .watch(&[pid], 0)
-            .map_err(|e| Refusal::os("watching a program", e))?
-            .contains(&pid);
+            .watch_end(pid)
+            .map_err(|e| Refusal::os("watching a program", e))?;
         Ok(Self {
             pid,
             box_id,

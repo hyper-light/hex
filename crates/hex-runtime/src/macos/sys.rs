@@ -536,11 +536,26 @@ impl Kqueue {
     }
 
     /// Watches each of `pids` for its forks and its end with the end's wait status (`EVFILT_PROC` with
-    /// `NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS`; XNU attaches either to any process, its parent or not,
-    /// `bsd/kern/kern_event.c:1099-1155`), tagged `tag`. The status is valid for a process the watcher's
-    /// own process is the parent of (the box's members). Returns those that have ended already (`ESRCH`),
-    /// which can't be watched.
+    /// `NOTE_FORK | NOTE_EXIT | NOTE_EXITSTATUS`, `bsd/kern/kern_event.c:1099-1155`), tagged `tag`. XNU
+    /// attaches `NOTE_EXITSTATUS` only for the process's parent (`EACCES` otherwise, :1116-1133), so each
+    /// of `pids` must be this process's child (the box's members); [`Kqueue::watch_end`] watches another's.
+    /// Returns those that have ended already (`ESRCH`), which can't be watched.
     pub fn watch(&self, pids: &[i32], tag: u64) -> io::Result<Vec<i32>> {
+        self.watch_with(
+            pids,
+            tag,
+            libc::NOTE_FORK | libc::NOTE_EXIT | NOTE_EXITSTATUS,
+        )
+    }
+
+    /// Watches process `pid`, which needn't be this process's child (a box-user program is the helper's),
+    /// for its end alone (`NOTE_EXIT`, which XNU attaches to any process), tagged 0. True when it has ended
+    /// already (`ESRCH`), so no event will come.
+    pub fn watch_end(&self, pid: i32) -> io::Result<bool> {
+        Ok(self.watch_with(&[pid], 0, libc::NOTE_EXIT)?.contains(&pid))
+    }
+
+    fn watch_with(&self, pids: &[i32], tag: u64, fflags: u32) -> io::Result<Vec<i32>> {
         let mut gone = Vec::new();
         for chunk in pids.chunks(64) {
             let changes: Vec<libc::kevent> = chunk
@@ -551,7 +566,7 @@ impl Kqueue {
                         pid,
                         libc::EVFILT_PROC,
                         libc::EV_ADD | libc::EV_RECEIPT,
-                        libc::NOTE_FORK | libc::NOTE_EXIT | NOTE_EXITSTATUS,
+                        fflags,
                         0,
                         tag,
                     )
