@@ -30,10 +30,26 @@ installed node was refused `io`, unit `hex-native-s6-lab-20261104T085256Z`), as 
 
 ## Windows: built, not yet run (jupiter offline)
 
-`bench/install/windows_lab.ps1` runs as a standard user around an administrator's `windows.ps1 install` and
-`uninstall` (one UAC prompt and the reboot Windows asks for, each): `before`, `installed`, `uninstalled`. The
-Windows `oci` class itself is native plan steps 4 and 5, not built, so after install it is refused for that
-alone. Windows' part is open until steps 4 and 5 land: the step's "every class working" isn't narrowed, so the
-lab runs again then.
+This tree (`cp/t7-native-windows`) carries native step 4's `oci` class (merged from `cp/t7-native-s4` 0862d0e)
+beside step 6's feature check, so the lab checks every class there is. An `oci` box is routed by its image: a
+Windows image needs Containers and goes to step 4's HCS class; a Linux image (a bundle with no `windows` section)
+needs HypervisorPlatform and step 5's Shards guest. While what an image needs is off, it is refused naming the
+feature and the installer (`a_windows_image_is_refused_naming_containers_while_it_is_off`,
+`a_linux_image_is_refused_naming_what_its_guest_waits_on`, HEX-INST-2).
+
+`bench/install/jupiter.sh` runs it all from kiln on jupiter (Git Bash), a record per phase in `records/`:
+
+| Phase | Who | What it checks |
+|---|---|---|
+| `jupiter.sh build`, `jupiter.sh gates` | kiln | hex.exe and the test binaries build; fmt, clippy and the workspace's tests pass natively |
+| `bench/native/windows/oci_setup.ps1` | kiln, on Ada's yes (step 4's setup) | the image's layers for the oci suite (`layers.txt`) |
+| `jupiter.sh before` | kiln | fresh of Hex; the plan saved; each feature the plan turns on reads off, and its image is refused naming it |
+| `windows.ps1 install -Binary <hex.exe>` | Ada at jupiter: one UAC prompt, then the reboot | the one admin step |
+| `jupiter.sh installed` | kiln | every plan line present; no image refused for a feature; the process class's contract; the oci class's contract and step 4's criteria on the image; a Linux image refused only for the Shards guest |
+| `windows.ps1 uninstall` | Ada at jupiter: one UAC prompt, then the reboot | undoing it |
+| `jupiter.sh uninstalled` | kiln | none of the plan's lines left |
+
+Windows' part is open until step 5 lands too: the step's "every class working" isn't narrowed, so with step 5's
+guest the `installed` phase runs the oci suite in the guest in place of the Linux image's refusal.
 
 ## macOS: waits on native plan step 2 (the box users' pool and the privileged helper)
