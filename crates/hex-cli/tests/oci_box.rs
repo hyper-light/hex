@@ -1395,7 +1395,9 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
 /// `/proc` exactly K's, the read-only ones read-only; one hit counted. Then delete N2 (the next park's proc made for
 /// K; its slot removed with it) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its `/proc` a superblock
 /// the node never held, its mounts exactly K2's, one miss counted. Then delete N3 and release the idle cgroups:
-/// expect no proc held and no proc root open in this process, the parked init ended. None failed to be made.
+/// expect no proc held and no proc root open in this process, the parked init ended. Each proc no init attached (N3's
+/// miss, the last one released) is dropped by the node's dropper thread, never on a create's: its unmount waits on
+/// the host's `namespace_sem` and an RCU grace period. None failed to be made.
 fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     if lab.rootless {
         return;
@@ -1627,6 +1629,11 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
         "N3's key isn't K: {after:?}"
     );
     assert_eq!(after.proc_hits, before.proc_hits, "{after:?}");
+    // The missed tree goes to the node's dropper, never unmounted on N3's create.
+    wait_for(
+        || node.cgroup_reuse().unwrap().parked.procs_dropped == before.procs_dropped + 1,
+        "the missed proc dropped by the node's dropper",
+    );
     node.start(&n3).unwrap();
     assert!(
         !held.contains(&proc_dev(&parked[0])),
@@ -1650,8 +1657,20 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     )
     .unwrap();
     node.release_idle().unwrap();
+    // Every proc no init attached is dropped by the dropper, none where it was.
+    wait_for(
+        || {
+            let c = node.cgroup_reuse().unwrap().parked;
+            c.procs_dropped + c.procs_dropped_inline == c.procs_made - c.proc_hits
+        },
+        "every unattached proc dropped",
+    );
     let end = node.cgroup_reuse().unwrap().parked;
     assert_eq!(end.procs_held, 0, "released, no proc is held: {end:?}");
+    assert_eq!(
+        end.procs_dropped_inline, 0,
+        "none dropped on its caller's thread: {end:?}"
+    );
     assert_eq!(
         held_procs(&me),
         BTreeSet::new(),
