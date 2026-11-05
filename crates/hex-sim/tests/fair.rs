@@ -16,6 +16,8 @@
 use hex_sim::fair::{self, Policy};
 use hex_sim::generate::{self, Day, Repo};
 use hex_sim::model::Resources;
+use hex_sim::model::{Cluster, Kind};
+use hex_sim::replay;
 use hex_sim::sim::{self, Config};
 use hex_sim::spec;
 
@@ -155,4 +157,84 @@ fn matrix_gangs_on_a_contended_day_are_placed_whole() {
         end.refused
     );
     assert!(spanned_and_waited > 200, "only {spanned_and_waited}");
+}
+
+/// `cluster` written in the recorded-workload format (`replay.rs`), every leg with its tenancy.
+fn as_trace(cluster: &Cluster) -> String {
+    let mut out = String::from("# source: tests/fair.rs, a generated day\n");
+    for n in &cluster.nodes {
+        let c = n.capacity;
+        out += &format!(
+            "node,{},{},{},{}\n",
+            c.cpu_milli, c.mem_bytes, c.gpus, n.background_milli
+        );
+    }
+    for o in &cluster.owners {
+        out += &format!("owner,{}\n", o.weight);
+    }
+    for g in &cluster.groups {
+        out += &format!("group,{}\n", g.budget);
+    }
+    for w in &cluster.workloads {
+        let kind = match w.kind {
+            Kind::Plain => "plain",
+            Kind::Build => "build",
+            Kind::Benchmark => "benchmark",
+            Kind::Session => "session",
+        };
+        let t = w.tenancy;
+        let opt = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
+        out += &format!(
+            "leg,{},{},{},{},{},{kind},{},{},{},{}\n",
+            w.arrives,
+            w.runs_for.unwrap(),
+            w.need.cpu_milli,
+            w.need.mem_bytes,
+            w.need.gpus,
+            t.owner.0,
+            t.band,
+            opt(t.gang.map(|g| g.0)),
+            opt(t.group.map(|g| u64::from(g.0))),
+        );
+    }
+    out
+}
+
+/// AC-T7.5.2 over a recorded day: do hex-sim over the day in `HEX_SIM_RECORDED_DAY` (a recorded kiln
+/// CI day in `replay.rs`'s format, one owner per repository) when it is set; expect each owner's part
+/// of the held share under contention within 2% of an equal part. Without a recording, do the
+/// generated day of `four_equal_weight_...` written as a trace and read back; expect it to read as the
+/// same cluster and measure the same shares, so a recording runs through the same path unchanged.
+#[test]
+fn four_equal_weight_repositories_over_a_recorded_day() {
+    let config = Config {
+        workers: 4,
+        max_events: 1 << 22,
+        ..Config::default()
+    };
+    if let Ok(path) = std::env::var("HEX_SIM_RECORDED_DAY") {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let day = replay::parse(&text, &replay::Limits::default()).unwrap();
+        let run = sim::run(&day, &config).unwrap();
+        let shares = fair::measure(&day, &run.ran, run.report.end).unwrap();
+        let equal = 1_000_000 / shares.shares_ppm.len() as u64;
+        eprintln!(
+            "AC-T7.5.2 recorded {path}: legs {} owners {} contended {:.2} h shares_ppm {:?} worst {} ppm (bar {})",
+            day.workloads.len(),
+            day.owners.len(),
+            shares.contended_ns as f64 / HOUR as f64,
+            shares.shares_ppm,
+            shares.worst_from_equal_ppm(),
+            equal / 50
+        );
+        assert!(shares.contended_ns > 0, "no contention in the recording");
+        assert!(shares.worst_from_equal_ppm() <= equal / 50);
+        return;
+    }
+    let day = generate::day(4, &four_repos()).unwrap();
+    let read = replay::parse(&as_trace(&day), &replay::Limits::default()).unwrap();
+    assert_eq!(read, day);
+    let run = sim::run(&read, &config).unwrap();
+    let shares = fair::measure(&read, &run.ran, run.report.end).unwrap();
+    assert!(shares.worst_from_equal_ppm() <= 5_000, "{shares:?}");
 }
