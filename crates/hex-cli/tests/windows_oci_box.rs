@@ -23,6 +23,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use hex_api::conformance::{self, Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Stdio};
 use hex_runtime::windows::WinRuntime;
 use serde_json::json;
@@ -168,9 +169,10 @@ fn made(rt: &WinRuntime, spec: BoxSpec) -> BoxId {
     id
 }
 
-/// AC-T7.1.1: the Windows `oci` class holds the runtime contract, HEX-RT-1..13.
+/// AC-T7.1.1: the Windows `oci` class holds the runtime contract, HEX-RT-1..13, and the differential
+/// suite holds it to the simulator's trace for a bundle-made box (HEX-DIFF-1..6, CLAUDE.md §8).
 fn contract(lab: &Lab) {
-    let failures = conformance::run(&lab.runtime(), lab);
+    let failures = differential::run(&lab.runtime(), lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 
