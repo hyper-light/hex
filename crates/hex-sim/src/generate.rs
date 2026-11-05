@@ -200,6 +200,59 @@ pub fn burst(
     Ok(cluster)
 }
 
+/// `cluster` with a burst drawn from its own legs (`T-T7.5.1` on a recorded day): `legs` legs of
+/// `owner`'s (a new owner of weight 1 if the cluster has fewer), all arriving at `at`, each taking the
+/// need, run time and kind of one of the cluster's legs chosen uniformly, with replacement. The
+/// workloads are put back in arrival order and their ids made dense again, as [`burst`] does.
+pub fn burst_from(
+    mut cluster: Cluster,
+    seed: u64,
+    owner: OwnerId,
+    at: Time,
+    legs: u64,
+) -> Result<Cluster, SimError> {
+    let mut rng = Rng::new(seed ^ 0xb025_f0d1);
+    let n = u64::try_from(cluster.workloads.len()).map_err(|_| SimError::Config("legs"))?;
+    let last = n
+        .checked_sub(1)
+        .ok_or(SimError::Config("a burst drawn from no legs"))?;
+    let extra = usize::try_from(legs).map_err(|_| SimError::Config("burst legs"))?;
+    let mut drawn = Vec::new();
+    drawn
+        .try_reserve_exact(extra)
+        .map_err(|_| SimError::Config("no memory for the burst"))?;
+    for _ in 0..legs {
+        let i = usize::try_from(rng.range(0, last)).map_err(|_| SimError::Config("legs"))?;
+        let like = cluster
+            .workloads
+            .get(i)
+            .ok_or(SimError::Config("workload index"))?;
+        drawn.push(WorkloadSpec {
+            id: WorkloadId(u64::MAX),
+            arrives: at,
+            tenancy: Tenancy {
+                owner,
+                ..Tenancy::default()
+            },
+            ..*like
+        });
+    }
+    while usize::try_from(owner.0).is_ok_and(|o| o >= cluster.owners.len()) {
+        cluster.owners.push(Owner { weight: 1 });
+    }
+    cluster
+        .workloads
+        .try_reserve_exact(extra)
+        .map_err(|_| SimError::Config("no memory for the burst"))?;
+    cluster.workloads.extend(drawn);
+    // Stable: the burst stays after what arrived at `at` before it.
+    cluster.workloads.sort_by_key(|w| w.arrives);
+    for (id, w) in (0u64..).zip(cluster.workloads.iter_mut()) {
+        w.id = WorkloadId(id);
+    }
+    Ok(cluster)
+}
+
 /// `cluster` with `groups` disruption groups of budgets 1 to `max_budget`, each workload in one
 /// of them with probability `per_mille / 1000`.
 pub fn groups(

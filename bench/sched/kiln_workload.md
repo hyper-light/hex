@@ -119,3 +119,24 @@ commit latency, so there is no contention for a share to be measured over.
 On none of the fourteen days does the bar's precondition hold: four repositories each asking for
 more than a quarter of the cluster they ran on. The generated four-repository day of
 `tests/fair.rs` (worst 479 ppm under DRF, 133,982 under FIFO) is where it holds.
+
+### T-T7.5.1 on a recorded day (2026-11-05)
+
+`kiln-ci-20261030.trace`: 2026-10-30 as recorded, every repository an owner of weight 1 (focal 1 leg,
+hyperscale 6, kiln 148, slates 22), on the 10 real runners. The burst: 1,000 legs from a repository that
+ran nothing that day, all arriving at the start of the day's busiest hour (hour 16 from the day's first
+leg, 28 arrivals), each leg's need, run time and kind drawn uniformly, with replacement, from the day's
+177 legs (`generate::burst_from`, seed 7). `tests/recorded.rs`
+`a_burst_on_a_recorded_day_leaves_the_others_start_p95_as_it_was`. Leg-start p95, without and with the
+burst (focal, hyperscale, kiln, slates):
+
+| policy | without | with | holds |
+|---|---|---|---|
+| Hex: bands, weighted DRF, preemption (28 burst legs preempted) | 80, 160, 260, 380 us | 80, 160, 260, 400 us | no: slates +20 us |
+| plain DRF | 80, 160, 260, 380 us | 80 us, 160 us, 167 s, 87 s | no |
+| FIFO | 80, 160, 220, 420 us | 80 us, 160 us, 3.5 h, 1.5 h | no |
+
+Reading: Hex's policy takes the burst back by preemption, and the others start as before but for one
+slates leg 20 us later. That is one commit: the control plane has one commit in flight at a time, and
+that leg arrived during a burst leg's. Plain DRF waits the burst out (minutes) and FIFO queues behind it
+(hours).
