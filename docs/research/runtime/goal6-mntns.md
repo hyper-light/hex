@@ -567,3 +567,40 @@ prepared proc it uses, and owns part 19's measurement of it. Here is goal 6's si
   not falling. Or the worker's holds moving the tail onto the creates instead of off them, which the by-holder waits
   would show.
 - Not built. It waits on the lead's go to the joint proposal.
+
+### Settling the one-sided steady p99 (the lead's 14:15Z ask), 2026-11-05
+
+The lead asked for a trace of the inits' namespace copy, but in both arms the copy (`copy_mnt_ns` under the mount lock)
+runs in the seed's `clone3(CLONE_NEWNS)`, before the init exists, so it's outside part 19's span. What does differ
+inside the span is the root's attach point:
+- In B every init attaches its container's root on the one shared pruned tmpfs's root, the same dentry, from a copy
+  of the same namespace. In A each seed had a tmpfs of its own.
+- `lock_mount` takes the mountpoint inode's lock before the mount lock (v6.19 `fs/namespace.c:2723-2766`: `inode_lock`
+  at :2746, `namespace_lock` at :2747). So B's attaches queue on one inode lock, where A's were spread across the
+  seeds' own.
+- A namespace copy shares the same superblock and dentries, so a per-seed `unshare(CLONE_NEWNS)` (the lead's arm C)
+  wouldn't spread them.
+
+So the trace (a646981) names an init's wait on any other rwsem apart from the mount lock's.
+- The run: unit hex-g6-ab4c-20261105T141917Z, A = 34107da, B = 43eb4ab, harness a646981. 4 rounds alternating (AB, BA),
+  6 and 12 loops, no co-tenant. Timed 14:20:27-14:27:24Z under the lock, load 13-26; 16 of 16 cells exited 0.
+- Three cells show `pivot_root` holds beyond their arm's own, which is 8-9 for A and 5 for B (the prune thread's): A at
+  6 loops round 4 (12), B at 6 loops rounds 1 and 3 (18 and 24). Those are other Hex processes on the host, and those
+  cells hold the run's worst tails (part 19 p99 885-1,839 us). They're set aside.
+
+The five pairs neither side of which was hit:
+
+| L | round | part 19 p99 A / B, us | unpreempted p99 A / B, us | other-rwsem waits a create A / B | mount-lock waits a create A / B |
+|---|---|---|---|---|---|
+| 12 | 1 | 762 / 661 | 619 / 424 | 0.073 / 0.069 | 12.7 / 11.2 |
+| 12 | 2 | 639 / 664 | 500 / 530 | 0.059 / 0.066 | 11.9 / 10.7 |
+| 12 | 3 | 634 / 631 | 518 / 483 | 0.051 / 0.068 | 11.6 / 11.1 |
+| 12 | 4 | 717 / 599 | 510 / 475 | 0.047 / 0.089 | 10.3 / 11.9 |
+| 6 | 2 | 610 / 601 | 475 / 523 | 0.028 / 0.063 | 10.9 / 11.0 |
+
+Read:
+- **The one-sided p99 doesn't reproduce.** Part 19's p99 is lower with B in 4 of 5 pairs, with medians of 639 us (A)
+  and 631 us (B). So the earlier +15-85 us was the host's noise.
+- **The shared attach point shows, but too rarely to matter.** Waits on another rwsem are a little more frequent with
+  B (0.063-0.089 a create against 0.028-0.073), which fits the shared inode. They're rare and carry no p99 cost here.
+- **Lever (4) stands as built.** Arm C isn't needed.
