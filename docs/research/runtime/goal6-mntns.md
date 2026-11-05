@@ -502,9 +502,10 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
   - Serially (host.sh's lifecycle pass, cp/t7-g5-parkproc f15393c's record), the delete's in-process p50 rises
     0.03-0.12 ms, with every create a hit.
 - **Where the proc is made, decided (the lead, 2026-11-05 17:00Z): on the parking thread**, as built at
-  cp/t7-g5-parkproc f15393c. Its gated tip is now 06d4c28 (code tree 253641a; gates 7/7, with the root lab and the
-  guest lab in the same unit, hex-g5tail-ppfull-20261105T192457Z). That tree adds only fce1134, which caps the procs
-  alive at the dropper's queue (256). Under the bar's conditions far fewer are alive than that, so the cap never binds,
+  cp/t7-g5-parkproc f15393c. Its final gated tip is 8d3b677 (gates 7/7, the root lab 7 of 7 with gate 6 beside it, and
+  the guest lab 2 of 2 in one unit, hex-g5tail-ppfull-20261105T193245Z; the lead, 19:35Z). Its code is 253641a's
+  (gated before as 06d4c28 in hex-g5tail-ppfull-20261105T192457Z) plus the bench-reap commits. 253641a adds only
+  fce1134 to the measured tree, which caps the procs alive at the dropper's queue (256). Under the bar's conditions far fewer are alive than that, so the cap never binds,
   and the re-run at 1e5e956 below still describes the tree (an earlier gated tip, a4915c6, code tree 1e5e956, was
   gated in hex-g5tail-ppfull-20261105T170215Z). Both worker arms failed. A single worker couldn't keep pace (hits 409-663 of 1,992, part 19
   back at the off arm's numbers), and the workers were bound by the one shared mount lock all the procs' holds take.
