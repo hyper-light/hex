@@ -752,8 +752,9 @@ fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
 /// created, started and deleted; wait for the fact that A's idle slot holds one process; create B of O. Expect:
 /// the slot holds that one process, with no effective capability, before B's create and the same one after it,
 /// so B's init is the parked one; B starts and runs a program; the node counts one init claimed. Then delete B and release the idle
-/// cgroups: none is left, so a parked init is ended with its cgroup. With parked procs (root only), B's create
-/// takes the proc made for that init at A's delete, counted a hit (decision 8, parked procs).
+/// cgroups: none is left, so a parked init is ended with its cgroup. With parked procs (root only): with the procs'
+/// worker held, A's delete returns with its init parked and no proc made; let go, the worker makes it; B's create
+/// takes it, counted a hit (decision 8, parked procs; the g6 agent's review).
 fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, own: &Path) {
     let (node, _state) = lab.node(&own.join("hex-reuse-parked"));
     let node = node.with_parked_procs(true);
@@ -763,6 +764,9 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         .unwrap();
     node.start(&a).unwrap();
     let slot = node.cgroup_dir(&a).expect("A's cgroup");
+    // The proc is the worker's to make, never the delete's (the g6 agent's review): held, the delete returns with
+    // its init parked and no proc made; let go, the worker makes it.
+    let hold = (!lab.rootless).then(|| node.hold_parked_procs().unwrap());
     node.delete(&a).unwrap();
     let parked = populated_within(&slot, PATIENCE);
     assert_eq!(
@@ -771,6 +775,19 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         "A's idle slot holds one init made ahead for O's next box: {parked:?}, {:?}",
         node.cgroup_reuse().unwrap().parked
     );
+    if let Some(hold) = hold {
+        let held = node.cgroup_reuse().unwrap().parked;
+        assert_eq!(
+            (held.procs_made, held.procs_held),
+            (0, 0),
+            "the delete returned before the proc was made: {held:?}"
+        );
+        drop(hold);
+        wait_for(
+            || node.cgroup_reuse().unwrap().parked.procs_held == 1,
+            "the worker to make the parked init's proc",
+        );
+    }
     // Parked, it exercises no capability: its effective set is empty (proc(5), /proc/<pid>/status `CapEff`).
     let status = std::fs::read_to_string(format!("/proc/{}/status", parked[0])).unwrap();
     let eff = status
@@ -948,8 +965,10 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
         "A's idle slot holds a parked init: {parked:?}"
     );
     if !lab.rootless {
-        let held = node.cgroup_reuse().unwrap().parked;
-        assert_eq!(held.procs_held, 1, "its proc made with it: {held:?}");
+        wait_for(
+            || node.cgroup_reuse().unwrap().parked.procs_held == 1,
+            "its proc made by the worker",
+        );
     }
     let init = pidfd(parked[0]);
     let _abandoned = std::mem::ManuallyDrop::new(node);

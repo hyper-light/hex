@@ -1660,7 +1660,8 @@ fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
     wait_for(
         || {
             let c = node.cgroup_reuse().unwrap().parked;
-            c.procs_dropped + c.procs_dropped_inline == c.procs_made - c.proc_hits
+            c.procs_dropped + c.procs_dropped_inline
+                == c.procs_made + c.procs_orphaned - c.proc_hits
         },
         "every unattached proc dropped",
     );
