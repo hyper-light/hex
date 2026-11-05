@@ -513,6 +513,10 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
   - its unpreempted p99: 470-1,644 → 58-812 us;
   - every claim a hit.
   The serial delete-cost pass there reads the delete flat, and the 32-in-flight rate 1-3% lower.
+- **The 7.2 guest**, indicative only: parked_procs_ab.md's guest runs are at 9e13b95 (the copy way) and 8c35cf9 (the
+  tree way). Both already make the proc on the parking thread, as the final design does, so they aren't rerun at the
+  gated tip (the lead, 18:01Z). Both cut part 19's p50 about 5x, with every claim a hit; their tails mostly reflect the
+  loaded host.
 - So with parked procs on, the under-load bar is approached on 6.19, but not yet met. Part 19's p99 is 351-761 us in
   the A/B of record (under 0.5 ms in 2 of 8 cells), with a p50 of ~37 us, and 508-1,373 us in the heavier-loaded
   re-run at the gated tip.
