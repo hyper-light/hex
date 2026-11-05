@@ -19,10 +19,9 @@ bench_reap() {
   [ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1 || true
 }
 
-# bench_trap <cleanup>: on exit, the script's own cleanup, then its containers; INT and TERM end the script through it
-# (bash runs no EXIT trap for a signal it doesn't catch).
+# bench_trap <cleanup>: on exit, the script's own cleanup, then its containers. EXIT alone: bash runs it at once on a
+# fatal SIGTERM or SIGINT, where a trap of its own for one would wait for the foreground `docker run` to end, and that
+# one passes the signal to its container's PID 1, which ignores it, until the unit's stop times out and SIGKILLs all.
 bench_trap() {
   trap "$1; bench_reap" EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
 }
