@@ -240,12 +240,16 @@ impl ProviderHealth {
                 });
                 self.degraded.insert(*provider, now);
             }
-            if !now {
-                let healthy_peers = callers.saturating_sub(failing);
+            // A node's own path is charged only when its errors are its own: fewer than MIN_PEERS
+            // callers saw any error, and at least MIN_PEERS saw none. An outage's first window, when
+            // only some of its callers have failed half their calls yet, charges nobody.
+            let erring = window.nodes.values().filter(|c| c.errors > 0).count();
+            let clean = callers.saturating_sub(erring);
+            if !now && erring < MIN_PEERS && clean >= MIN_PEERS {
                 for (node, c) in &window.nodes {
                     let evidence = c.calls >= MIN_OBSERVATIONS;
                     let failing_path = c.errors.saturating_mul(2) >= c.calls && c.errors > 0;
-                    if evidence && failing_path && healthy_peers >= MIN_PEERS {
+                    if evidence && failing_path {
                         causes.push(Cause::NodePath {
                             node: *node,
                             provider: *provider,

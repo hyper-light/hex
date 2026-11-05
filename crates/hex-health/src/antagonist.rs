@@ -109,11 +109,11 @@ fn isqrt(v: u128) -> u128 {
     // Newton's method from above; at most 128 rounds for a u128.
     let mut x = v;
     let mut y = x.div_ceil(2).max(1);
-    let mut rounds = 0;
+    let mut rounds: u32 = 0;
     while y < x && rounds < 128 {
         x = y;
         y = x.saturating_add(v.checked_div(x).unwrap_or(0)) >> 1;
-        rounds += 1;
+        rounds = rounds.saturating_add(1);
     }
     x
 }
@@ -158,9 +158,33 @@ impl Antagonists {
         self.throttled.get(&task).is_some_and(|u| *u > now_ns)
     }
 
-    /// Take one sample; returns a new throttle when it made its task a victim whose antagonist was
-    /// found.
-    pub fn sample(&mut self, s: Sample) -> Result<Option<Throttle>, HealthError> {
+    /// Take one node's samples of one instant, as CPI²'s per-machine agent gathers every task's at
+    /// once (§3); returns a new throttle when one made its task a victim whose antagonist was found.
+    /// Every sample is recorded before a victim is judged, so its correlation sees its co-tenants'
+    /// samples of the same instant whatever order they come in.
+    pub fn sample(&mut self, samples: &[Sample]) -> Result<Option<Throttle>, HealthError> {
+        let mut victim = None;
+        for s in samples {
+            let flagged = self.record(*s)?;
+            if victim.is_none() {
+                victim = flagged.map(|threshold| (s.task, s.at_ns, threshold));
+            }
+        }
+        let Some((task, at_ns, threshold)) = victim else {
+            return Ok(None);
+        };
+        if self
+            .last_identify_ns
+            .is_some_and(|last| at_ns < last.saturating_add(IDENTIFY_GAP_NS))
+        {
+            return Ok(None);
+        }
+        self.last_identify_ns = Some(at_ns);
+        Ok(self.identify(task, at_ns, threshold))
+    }
+
+    /// Record one sample; returns the job's 2σ point when it made its task a victim.
+    fn record(&mut self, s: Sample) -> Result<Option<u64>, HealthError> {
         if !self.tasks.contains_key(&s.task) && self.tasks.len() >= self.max_tasks {
             return Err(HealthError::Full {
                 what: "sampled tasks",
@@ -214,17 +238,7 @@ impl Antagonists {
         if task.flags.len() < VICTIM_FLAGS {
             return Ok(None);
         }
-        if self
-            .last_identify_ns
-            .is_some_and(|last| s.at_ns < last.saturating_add(IDENTIFY_GAP_NS))
-        {
-            return Ok(None);
-        }
-        self.last_identify_ns = Some(s.at_ns);
-        let Some(threshold) = threshold else {
-            return Ok(None);
-        };
-        Ok(self.identify(s.task, s.at_ns, threshold))
+        Ok(threshold)
     }
 
     /// The job's 2σ point once it has enough tasks with enough samples each.
@@ -326,37 +340,52 @@ mod tests {
     /// once a minute (CPI²'s cadence) for `warm` minutes; from `onset` the batch task burns CPU and
     /// the victims' CPI doubles. Returns the first throttle and when.
     fn run(onset: Option<u64>, minutes: u64) -> Option<(u64, Throttle)> {
+        run_with(onset, minutes, (3000, 300), false)
+    }
+
+    /// `run`, the batch task using `cpu.0` while hot and `cpu.1` otherwise, its sample first in each
+    /// instant's batch when `antagonist_first`.
+    fn run_with(
+        onset: Option<u64>,
+        minutes: u64,
+        cpu: (u64, u64),
+        antagonist_first: bool,
+    ) -> Option<(u64, Throttle)> {
         let mut a = Antagonists::new(64);
         for m in 0..minutes {
             let t = m * MIN;
             let hot = onset.is_some_and(|o| t >= o) && !a.throttled(99, t);
-            for task in 0..6 {
-                let jitter = (m * 7 + task * 13) % 50;
-                let cpi = if hot { 2000 + jitter } else { 1000 + jitter };
-                let s = Sample {
-                    task,
-                    job: 1,
-                    node: 0,
-                    at_ns: t,
-                    cpi_milli: cpi,
-                    cpu_milli: 800,
-                    best_effort: false,
-                };
-                if let Some(th) = a.sample(s).unwrap() {
-                    return Some((t, th));
-                }
-            }
-            let cpu = if hot { 3000 } else { 300 };
-            let s = Sample {
+            let mut batch: Vec<Sample> = (0..6)
+                .map(|task| {
+                    let jitter = (m * 7 + task * 13) % 50;
+                    Sample {
+                        task,
+                        job: 1,
+                        node: 0,
+                        at_ns: t,
+                        cpi_milli: if hot { 2000 + jitter } else { 1000 + jitter },
+                        cpu_milli: 800,
+                        best_effort: false,
+                    }
+                })
+                .collect();
+            let antagonist = Sample {
                 task: 99,
                 job: 2,
                 node: 0,
                 at_ns: t,
                 cpi_milli: 1500,
-                cpu_milli: cpu,
+                cpu_milli: if hot { cpu.0 } else { cpu.1 },
                 best_effort: true,
             };
-            a.sample(s).unwrap();
+            if antagonist_first {
+                batch.insert(0, antagonist);
+            } else {
+                batch.push(antagonist);
+            }
+            if let Some(th) = a.sample(&batch).unwrap() {
+                return Some((t, th));
+            }
         }
         None
     }
@@ -376,6 +405,18 @@ mod tests {
             th.correlation_milli
         );
         assert!(at - onset <= 3 * MIN, "{}", (at - onset) / MIN);
+    }
+
+    /// S8 antagonist (F4): the order of one instant's samples doesn't change the verdict. An
+    /// antagonist at the class's least (its use tenfold, 4000 against 400; CPI doubled), sampled after
+    /// its victims, is capped at the same sample as when sampled before them, within three samples.
+    #[test]
+    fn the_order_of_an_instants_samples_does_not_change_the_verdict() {
+        let onset = 130 * MIN;
+        let last = run_with(Some(onset), 200, (4000, 400), false).unwrap();
+        let first = run_with(Some(onset), 200, (4000, 400), true).unwrap();
+        assert_eq!(last, first);
+        assert!(last.0 - onset <= 3 * MIN, "{}", (last.0 - onset) / MIN);
     }
 
     /// Non-vacuity: with no antagonist, nobody is throttled; before the spec is ready, nothing is.
@@ -410,13 +451,13 @@ mod tests {
             cpu_milli: u64::MAX,
             best_effort: false,
         };
-        a.sample(s).unwrap();
+        a.sample(&[s]).unwrap();
         assert!(matches!(
-            a.sample(Sample { at_ns: 5, ..s }),
+            a.sample(&[Sample { at_ns: 5, ..s }]),
             Err(HealthError::TimeBackwards { .. })
         ));
         assert_eq!(
-            a.sample(Sample { task: 2, ..s }),
+            a.sample(&[Sample { task: 2, ..s }]),
             Err(HealthError::Full {
                 what: "sampled tasks",
                 bound: 1

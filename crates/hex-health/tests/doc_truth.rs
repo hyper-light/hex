@@ -39,6 +39,10 @@ fn code() -> BTreeMap<&'static str, u128> {
             "grade::SLOW_FACTOR_MILLI",
             u128::from(grade::SLOW_FACTOR_MILLI),
         ),
+        (
+            "grade::STAY_FACTOR_MILLI",
+            u128::from(grade::STAY_FACTOR_MILLI),
+        ),
         ("grade::DRAIN_WINDOWS", u128::from(grade::DRAIN_WINDOWS)),
         (
             "penalty::BASE_EJECTION_NS",
@@ -136,10 +140,10 @@ fn code() -> BTreeMap<&'static str, u128> {
 
 /// The design's constants table, as name → value.
 fn doc() -> BTreeMap<String, u128> {
-    let start = DOC
-        .find("## Constants")
+    let (_, constants) = DOC
+        .split_once("## Constants")
         .expect("the design has a constants section");
-    DOC[start..]
+    constants
         .lines()
         .filter_map(|l| l.strip_prefix("| `"))
         .map(|l| {
@@ -158,6 +162,6 @@ fn the_designs_constants_are_the_codes() {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
     let doc = doc();
-    assert_eq!(doc.len(), 38, "the table lost or gained a row");
+    assert_eq!(doc.len(), 39, "the table lost or gained a row");
     assert_eq!(doc, code);
 }

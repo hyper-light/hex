@@ -6,6 +6,9 @@
 //!
 //! - Suspect (no new placements) on its first slow window.
 //! - Drain after [`DRAIN_WINDOWS`] slow windows in a row (CPI²'s 3 flags before acting, PF[16]).
+//! - Once suspected, a window is still slow at [`STAY_FACTOR_MILLI`] / 1000 times its peers': a
+//!   median is known only to the histogram's 25%, so a dip under the bar but within it is no evidence
+//!   of recovery, and resetting on it would put off the drain.
 //! - Healthy again on a window with evidence that isn't slow.
 //!
 //! A window with fewer than [`MIN_OBSERVATIONS`] for a node is no evidence about it, and with fewer
@@ -28,6 +31,8 @@ pub const MIN_OBSERVATIONS: u32 = 5;
 pub const MIN_PEERS: usize = 3;
 /// A node is slow when its median slowdown is at least twice its peers' median.
 pub const SLOW_FACTOR_MILLI: u64 = 2_000;
+/// The bar a suspected node stays slow at: [`SLOW_FACTOR_MILLI`] less the histogram's 25% resolution.
+pub const STAY_FACTOR_MILLI: u64 = 1_500;
 /// Slow windows in a row before a drain: CPI²'s "flagged as an outlier at least 3 times" (PF[16]).
 pub const DRAIN_WINDOWS: u32 = 3;
 
@@ -141,8 +146,13 @@ impl PeerGrade {
             let (Some(peers), Some(median), true) = (peers, median, evidence) else {
                 continue;
             };
+            let factor = if node.level == Level::Healthy {
+                SLOW_FACTOR_MILLI
+            } else {
+                STAY_FACTOR_MILLI
+            };
             let slow = peers
-                .checked_mul(SLOW_FACTOR_MILLI)
+                .checked_mul(factor)
                 .is_some_and(|bar| median.saturating_mul(1000) >= bar);
             let before = node.level;
             if slow {
@@ -221,6 +231,27 @@ mod tests {
         assert!(drain.0 - onset < 7 * S);
         assert!(changes.iter().all(|(_, c)| c.node == 0));
         assert_eq!(g.level(0), Level::Drain);
+    }
+
+    /// S8 gray/fail-slow (F2): a suspected node whose median dips for a window under the 2x bar but
+    /// within the histogram's resolution of it (1.75x) is still slow, and drains at its third window;
+    /// a healthy node at 1.75x is never suspected.
+    #[test]
+    fn a_dip_within_the_resolution_does_not_reset_a_suspect() {
+        let mut g = PeerGrade::new(64, 0);
+        feed(&mut g, 10, 0, 5, 10, 1000);
+        let mut changes = feed(&mut g, 10, 5 * S, 1, 10, 3000);
+        changes.extend(feed(&mut g, 10, 6 * S, 1, 10, 1750));
+        changes.extend(feed(&mut g, 10, 7 * S, 1, 10, 3000));
+        changes.extend(feed(&mut g, 10, 8 * S, 1, 10, 3000));
+        let drain = changes
+            .iter()
+            .find(|(_, c)| c.level == Level::Drain)
+            .unwrap();
+        assert!(drain.0 <= 8 * S, "{}", drain.0);
+        assert!(changes.iter().all(|(_, c)| c.level != Level::Healthy));
+        let mut g = PeerGrade::new(64, 0);
+        assert!(feed(&mut g, 10, 0, 8, 10, 1750).is_empty());
     }
 
     /// A cell-wide slowdown (every node 3x) suspects nobody: the peers moved with it.

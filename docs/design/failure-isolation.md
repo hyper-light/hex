@@ -74,7 +74,11 @@ members declared dead at more than 2% of SWIM's rate because of slow members.
 over what its class expects. Each 1 s window, a node with at least 5 observations whose median slowdown
 is at least twice the median of its peers' medians (at least 3 peers with evidence) is slow for the
 window: `Suspect` at once, `Drain` after 3 slow windows in a row (CPI²'s 3 flags, FI[9]), healthy again
-on a good window. Medians come from a fixed-size log histogram (4 buckets per power of two, so within 25%),
+on a good window. Once suspected, a node's window is still slow at 1.5x its peers': the 2x bar less the
+histogram's 25% resolution, so a window whose median dips under the bar but within what the histogram
+can tell from it is no evidence of recovery. Without it, a 2.5x node whose ten-odd pieces of work in a
+window happen to land low resets its count and drains a window or more late (the nemesis's seed 287:
+5.2 s). Medians come from a fixed-size log histogram (4 buckets per power of two, so within 25%),
 so a node's history costs 1 KiB however busy it is. The median and the 25% quantisation together mean a
 node 2.5x or more slower is always caught; one between 2x and 2.5x may be.
 
@@ -116,6 +120,14 @@ victim at 3 outliers in 5 minutes, at most one identification a second, the anta
 whose CPU use correlates best with the victim's CPI over 10 minutes by CPI²'s correlation, at least 0.35,
 capped at 0.01 CPU-sec/sec (best effort) or 0.1 for 5 minutes. The spec learns only from samples that
 aren't outliers, so interference doesn't teach the spec to accept it.
+A node's samples of one minute are taken together, as CPI²'s per-machine agent gathers them (§3), and
+a victim is judged only once all are in: judged at its own sample, it would correlate against its
+co-tenants' samples one minute short, and the cap would come a sample late (the nemesis's seed 12: 240 s).
+The bound is for the class the table states, CPI at least doubled: the correlation over CPI²'s 10
+minutes then passes 0.35 by the third sample after the onset. A weaker antagonist takes longer, as
+CPI²'s correlation says it must: over 1,000 seeds at 1.8-3x, every one at 1.915x or more was capped
+within the bound, and the 44 at 1.80-1.91x at the fourth or fifth sample after the onset (240-300 s;
+hex-sim, 2026-11-05, unit `hex-sched-g5-main-meas-20261105T081731Z`).
 
 **Evidence.** `hex-health` `antagonist` tests; `faults.rs` over 1,000 seeds.
 
@@ -132,8 +144,10 @@ aren't outliers, so interference doesn't teach the spec to accept it.
 - Quota shown as slowness: a provider's typed rate-limit or quota error holds the account (until its
   retry-after, or until a call succeeds) at the first error, and is never a node observation.
 - A partial provider outage: overload, server errors and timeouts on a majority of a provider's callers
-  (at least 3) in a window mark the provider degraded; on one node while at least 3 peers' calls to it
-  succeed, that node's path. Provider errors never feed F2.
+  (at least 3) in a window mark the provider degraded. Failing half or more of its calls (at least 5)
+  is charged to a node's own path only when fewer than 3 of the provider's callers saw any error and
+  at least 3 saw none, so an outage's first window, when only some callers have failed yet, charges
+  nobody. Provider errors never feed F2.
 
 **Sources.** FI[16]; FI[17] (typed 429s and 529s; overload "across all users").
 
@@ -196,6 +210,7 @@ holds this table to the code.
 | `grade::MIN_OBSERVATIONS` | 5 | chosen: the fewest a median of which one outlier can't move |
 | `grade::MIN_PEERS` | 3 | chosen: two nodes can't say which of them is slow |
 | `grade::SLOW_FACTOR_MILLI` | 2000 | chosen; falsified by a missed 2.5x node or a suspected healthy one |
+| `grade::STAY_FACTOR_MILLI` | 1500 | derived: `SLOW_FACTOR_MILLI` less the histogram's 25% resolution |
 | `grade::DRAIN_WINDOWS` | 3 | CPI²'s 3 flags (FI[9]) |
 | `penalty::BASE_EJECTION_NS` | 30000000000 | Envoy `base_ejection_time` (FI[10]) |
 | `penalty::MAX_EJECTION_NS` | 300000000000 | Envoy `max_ejection_time` (FI[10]) |
