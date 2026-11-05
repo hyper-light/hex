@@ -54,6 +54,13 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    PHASE before: PASS (exit 0). Windows PowerShell 5.1 shows each test's stderr as a NativeCommandError block
    (cosmetic), and Tee-Object writes the plan as UTF-16 LE, which Get-Content reads back.
 
+5. gates at 48c920d (step 4's 5fcdf98 merged: Windows oci term_ends_init = true), 2026-11-05T08:33:30Z:
+   windows-gates-48c920d-20261105T083330Z.txt
+   fmt, clippy -D warnings, cargo test --workspace --no-fail-fast: every crate 0 failed (hex-api 18, doc_truth 7,
+   cli 5, windows_oci_box 2 (its suite still SKIPs: no layers), windows_process_box 9, hex-core 115, hex-node 6).
+   PHASE gates: PASS (exit 0). The 7 gates on fedora at the same commit: exit 0, 271 tests
+   (unit hex-windows-gates-20261105T083326Z).
+
 Not run yet: step 4's oci suite on an image (needs oci_setup.ps1, which waits on Ada's yes), and the installer
 lab's installed and uninstalled phases (the install and uninstall need Ada at jupiter: on jupiter they turn on no
 feature, so a UAC yes each and no reboot).
