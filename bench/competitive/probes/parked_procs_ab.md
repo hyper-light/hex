@@ -85,6 +85,32 @@ Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T153245Z`.
 - With the proc made on the park's own thread (the delete, or the refill: 9e13b95 and 506a263, above), every claim
   was a hit, 1,992 of 1,992. This run is what falsifies one worker thread, not the parked proc.
 
+## Of record at 2caebe2: the proc made on the parking thread, with the delete timed (the lead's 14:23Z)
+
+**Run.** The same body and harness, at cp/t7-g5-parkproc 2caebe2. The proc is made on the parking thread again
+(fae7f43); the namespace is opened through the pidfd and unattached trees are dropped by `hex-proc-drop`. seam_oci
+(fc5dc85) times each delete beside each create (`delete_ms`). Binaries: hex sha256 5cfd361d02faf7e9, seam_oci
+97f5fcdd712cc7ae. fedora, 2026-11-05 15:45:20Z-15:49:04Z, under the timed lock; load rose from 5.8 to 16.3.
+Gates and labs at this tree in one unit, hex-g5tail-ppfull-20261105T154329Z: gates 7/7 exit 0, root lab 7 of 7
+test binaries, the 7.2 guest lab 2 of 2. Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T154447Z`.
+
+| L | arm | part 19 p50 / p99 / unpreempted p99 (µs) | create p50 / p99 (ms) | delete p50 / p99 (ms) | lifecycles a second |
+|---|-----|------------------------------------------|-----------------------|-----------------------|---------------------|
+| 6 | A | 210/1114/551, 214/1272/800, 215/1028/427, 215/1018/623 | 1.019/2.971, 1.055/3.232, 1.025/2.929, 1.106/3.055 | 1.059/3.548, 1.089/3.320, 1.062/6.321, 1.064/3.226 | 3050, 2992, 2879, 2961 |
+| 6 | B | 37/730/438, 36/529/334, 37/553/259, 38/517/253 | 0.864/3.105, 0.853/2.860, 0.841/2.611, 0.877/2.725 | 1.344/3.428, 1.403/3.596, 1.349/9.295, 1.414/3.546 | 2948, 2917, 2726, 2861 |
+| 12 | A | 204/1574/624, 215/1694/531, 211/1670/549, 208/2132/796 | 1.234/4.982, 1.328/5.079, 1.253/5.265, 1.291/6.447 | 2.317/6.589, 2.502/5.985, 2.562/5.853, 2.504/7.542 | 1848, 1708, 1741, 1678 |
+| 12 | B | 36/674/99, 35/761/189, 36/475/71, 37/351/72 | 1.051/3.972, 1.109/4.324, 0.952/4.065, 0.861/5.910 | 2.788/6.740, 2.859/6.923, 2.976/10.686, 3.041/12.604 | 1773, 1697, 1164, 1080 |
+
+- Hits: 1,992 of 1,992 in 7 cells. B-L12-r1 had 1,984 hits and 8 misses, with its ipc and uts pool dry 4 times.
+  No cell was dry and none failed.
+- Holds: the init's 31.0 a create off and 5.1-5.2 on; the node's 2.7-3.0 a box off and 32.4-34.0 on.
+- **The delete grows.** Its p50 is +0.29 to +0.35 ms at L6 and +0.36 to +0.54 ms at L12. Its p99 is higher in 7 of
+  8 pairs, by up to 5.1 ms (B-L12-r4). What the create saves, the delete pays and more: the create's p50 falls by
+  0.16-0.23 ms at L6 and 0.18-0.43 ms at L12. At L6 the lifecycle rate is 2.5-5.3% lower with B. At L12 two B rounds
+  (r3, r4) ran at 1,164 and 1,080 a second, against A's 1,678-1,848, as load rose; the other two match A.
+- So the parked proc takes about 0.2-0.4 ms and most of part 19's mount-lock holds off the create, and puts them
+  on the delete.
+
 ## The 7.2 guest, indicative (NOT OF RECORD: a VM's numbers)
 
 **Run.** Fedora's kernel 7.2.15-200.fc44 in vm7_lab.sh's guest on fedora: 12 vCPUs on CPUs 4-15, 6G. 2026-11-05
