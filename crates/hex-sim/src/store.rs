@@ -316,6 +316,7 @@ mod tests {
             kind: crate::model::Kind::Plain,
             arrives: 0,
             runs_for: None,
+            tenancy: crate::model::Tenancy::default(),
         }
     }
 

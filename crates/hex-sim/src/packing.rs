@@ -96,7 +96,7 @@ pub fn stranded_per_mille(r: &PackReport) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Kind, NodeId, NodeSpec, WorkloadId, WorkloadSpec};
+    use crate::model::{Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
 
     fn res(cpu: u64, mem: u64) -> Resources {
         Resources {
@@ -124,11 +124,12 @@ mod tests {
             kind: Kind::Plain,
             arrives: 0,
             runs_for: None,
+            tenancy: Tenancy::default(),
         };
-        let cluster = Cluster {
+        let cluster = Cluster::single_owner(
             nodes,
-            workloads: vec![w(0, res(3000, 1)), w(1, res(3000, 1)), w(2, res(1000, 3))],
-        };
+            vec![w(0, res(3000, 1)), w(1, res(3000, 1)), w(2, res(1000, 3))],
+        );
         let shapes = minimal_shapes(&cluster);
         assert_eq!(shapes.len(), 2);
         let r = pack(&cluster, &Sample::whole(), 1000).unwrap();

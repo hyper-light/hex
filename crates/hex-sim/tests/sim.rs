@@ -16,7 +16,9 @@
 use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
 use hex_sim::index::{Sample, Scorer, Shapes};
-use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
 use hex_sim::spec::{self, Violation};
@@ -294,6 +296,7 @@ fn work(id: u64, cpu: u64) -> WorkloadSpec {
         kind: Kind::Plain,
         arrives: 0,
         runs_for: None,
+        tenancy: Tenancy::default(),
     }
 }
 
@@ -370,10 +373,7 @@ fn the_oracle_refuses_work_left_pending_with_room() {
 #[test]
 fn the_end_check_counts_doubles_and_losses() {
     let nodes = two_nodes();
-    let cluster = Cluster {
-        nodes: nodes.clone(),
-        workloads: vec![work(0, 500), work(1, 500)],
-    };
+    let cluster = Cluster::single_owner(nodes.clone(), vec![work(0, 500), work(1, 500)]);
     let mut s = Store::new(&nodes, 4, 16).unwrap();
     s.apply(0, Write::Submit(work(0, 500))).unwrap();
     s.apply(

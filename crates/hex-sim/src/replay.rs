@@ -4,15 +4,23 @@
 //! ```text
 //! # source: <where and when it was recorded>
 //! node,<cpu_milli>,<mem_bytes>,<gpus>,<background_milli>
-//! leg,<arrive_ns>,<runs_for_ns>,<cpu_milli>,<mem_bytes>,<gpus>,<plain|build|benchmark|session>
+//! owner,<weight>
+//! group,<budget>
+//! leg,<arrive_ns>,<runs_for_ns>,<cpu_milli>,<mem_bytes>,<gpus>,<plain|build|benchmark|session>[,<owner>,<band>,<gang|->,<group|->]
 //! ```
 //!
-//! Lines starting `#` are comments, and blank lines are skipped. Every node comes before the first
-//! leg, and legs come in arrival order. Ids are given by position. The parser is a pure function
+//! Lines starting `#` are comments, and blank lines are skipped. Every node, owner and group comes
+//! before the first leg, and legs come in arrival order. Ids are given by position. A leg's tenancy
+//! (G4: its owner, priority band 0-255, gang and disruption group, `-` for none) is all four fields
+//! or none; a leg without them is owner 0's, band 0, alone and in no group, and a trace that names no
+//! owner has one, of weight 1, so a trace written before G4 reads as it did. The parser is a pure function
 //! over bounded input (CLAUDE.md §2): past [`Limits`], and at the first line it can't read, it refuses
 //! with a typed [`TraceError`] naming the line.
 
-use crate::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use crate::model::{
+    Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy,
+    WorkloadId, WorkloadSpec,
+};
 
 /// What a trace may hold. Past any bound the parse is refused, never truncated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +28,8 @@ pub struct Limits {
     pub max_bytes: usize,
     pub max_nodes: usize,
     pub max_legs: usize,
+    pub max_owners: usize,
+    pub max_groups: usize,
 }
 
 impl Default for Limits {
@@ -29,6 +39,8 @@ impl Default for Limits {
             max_bytes: 64 << 20,
             max_nodes: 100_000,
             max_legs: 1_000_000,
+            max_owners: 100_000,
+            max_groups: 1_000_000,
         }
     }
 }
@@ -43,6 +55,10 @@ pub enum TraceError {
     TooManyNodes(usize),
     #[error("more than {0} legs")]
     TooManyLegs(usize),
+    #[error("more than {0} owners")]
+    TooManyOwners(usize),
+    #[error("more than {0} groups")]
+    TooManyGroups(usize),
     #[error("the trace names no node")]
     NoNodes,
 }
@@ -57,6 +73,8 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
     }
     let mut nodes: Vec<NodeSpec> = Vec::new();
     let mut workloads: Vec<WorkloadSpec> = Vec::new();
+    let mut owners: Vec<Owner> = Vec::new();
+    let mut groups: Vec<Group> = Vec::new();
     for (at, raw) in text.lines().enumerate() {
         let line = at.saturating_add(1);
         let row = raw.trim();
@@ -92,6 +110,33 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                     background_milli,
                 });
             }
+            Some("owner") => {
+                if !workloads.is_empty() {
+                    return Err(bad(line, "an owner after the first leg"));
+                }
+                if owners.len() >= limits.max_owners {
+                    return Err(TraceError::TooManyOwners(limits.max_owners));
+                }
+                let weight = u32::try_from(number(&mut fields, line)?)
+                    .map_err(|_| bad(line, "a weight past u32"))?;
+                end(&mut fields, line)?;
+                if weight == 0 {
+                    return Err(bad(line, "an owner of weight 0"));
+                }
+                owners.push(Owner { weight });
+            }
+            Some("group") => {
+                if !workloads.is_empty() {
+                    return Err(bad(line, "a group after the first leg"));
+                }
+                if groups.len() >= limits.max_groups {
+                    return Err(TraceError::TooManyGroups(limits.max_groups));
+                }
+                let budget = u32::try_from(number(&mut fields, line)?)
+                    .map_err(|_| bad(line, "a budget past u32"))?;
+                end(&mut fields, line)?;
+                groups.push(Group { budget });
+            }
             Some("leg") => {
                 if workloads.len() >= limits.max_legs {
                     return Err(TraceError::TooManyLegs(limits.max_legs));
@@ -114,7 +159,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                     }
                     None => return Err(bad(line, "a missing field")),
                 };
-                end(&mut fields, line)?;
+                let tenancy = tenancy(&mut fields, line, owners.len().max(1), groups.len())?;
                 if workloads.last().is_some_and(|w| w.arrives > arrives) {
                     return Err(bad(line, "a leg arriving before the one above it"));
                 }
@@ -131,19 +176,75 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                     kind,
                     arrives,
                     runs_for: Some(runs_for),
+                    tenancy,
                 });
             }
-            Some(_) | None => return Err(bad(line, "a line that is neither node nor leg")),
+            Some(_) | None => {
+                return Err(bad(line, "a line that is not node, owner, group or leg"));
+            }
         }
     }
     if nodes.is_empty() {
         return Err(TraceError::NoNodes);
     }
-    Ok(Cluster { nodes, workloads })
+    if owners.is_empty() {
+        owners.push(Owner::default());
+    }
+    Ok(Cluster {
+        nodes,
+        workloads,
+        owners,
+        groups,
+    })
+}
+
+/// A leg's optional trailing tenancy: all four fields, or none. `owners` counts the owner a trace
+/// that names none has.
+fn tenancy<'a>(
+    fields: &mut impl Iterator<Item = &'a str>,
+    line: usize,
+    owners: usize,
+    groups: usize,
+) -> Result<Tenancy, TraceError> {
+    let Some(owner) = fields.next() else {
+        return Ok(Tenancy::default());
+    };
+    let owner = u32::try_from(whole(owner, line)?).map_err(|_| bad(line, "an owner past u32"))?;
+    if !usize::try_from(owner).is_ok_and(|o| o < owners) {
+        return Err(bad(line, "a leg naming an owner the trace doesn't"));
+    }
+    let band = u8::try_from(number(fields, line)?).map_err(|_| bad(line, "a band past 255"))?;
+    let gang = match fields.next() {
+        Some("-") => None,
+        Some(field) => Some(GangId(whole(field, line)?)),
+        None => return Err(bad(line, "a missing field")),
+    };
+    let group = match fields.next() {
+        Some("-") => None,
+        Some(field) => {
+            let group =
+                u32::try_from(whole(field, line)?).map_err(|_| bad(line, "a group past u32"))?;
+            if !usize::try_from(group).is_ok_and(|g| g < groups) {
+                return Err(bad(line, "a leg naming a group the trace doesn't"));
+            }
+            Some(GroupId(group))
+        }
+        None => return Err(bad(line, "a missing field")),
+    };
+    end(fields, line)?;
+    Ok(Tenancy {
+        owner: OwnerId(owner),
+        band,
+        gang,
+        group,
+    })
 }
 
 fn number<'a>(fields: &mut impl Iterator<Item = &'a str>, line: usize) -> Result<u64, TraceError> {
-    let field = fields.next().ok_or(bad(line, "a missing field"))?;
+    whole(fields.next().ok_or(bad(line, "a missing field"))?, line)
+}
+
+fn whole(field: &str, line: usize) -> Result<u64, TraceError> {
     if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad(line, "a field that is not a whole number"));
     }
@@ -211,12 +312,83 @@ mod tests {
         );
     }
 
+    const TENANTS: &str = "node,4000,1024,0,0\nowner,1\nowner,3\ngroup,2\nleg,0,1000,1000,1,0,build,1,2,7,0\nleg,5,1000,1000,1,0,build,1,2,7,-\nleg,9,1000,500,1,0,plain,0,0,-,-\n";
+
+    /// AC-T7.5.1 and AC-T7.5.2 (G4 step 1): owners, groups and each leg's owner, band, gang and group
+    /// read back; a trace without them reads as one owner of weight 1, every leg its default tenancy.
+    #[test]
+    fn a_trace_reads_its_owners_groups_and_tenancy() {
+        let c = parse(TENANTS, &Limits::default()).unwrap();
+        assert_eq!(c.owners, vec![Owner { weight: 1 }, Owner { weight: 3 }]);
+        assert_eq!(c.groups, vec![Group { budget: 2 }]);
+        assert_eq!(
+            c.workloads[0].tenancy,
+            Tenancy {
+                owner: OwnerId(1),
+                band: 2,
+                gang: Some(GangId(7)),
+                group: Some(GroupId(0)),
+            }
+        );
+        assert_eq!(c.workloads[1].tenancy.group, None);
+        assert_eq!(c.workloads[2].tenancy, Tenancy::default());
+        let old = parse(SMALL, &Limits::default()).unwrap();
+        assert_eq!(old.owners, vec![Owner::default()]);
+        assert!(old.groups.is_empty());
+        assert!(
+            old.workloads
+                .iter()
+                .all(|w| w.tenancy == Tenancy::default())
+        );
+    }
+
+    /// CLAUDE.md §6 (hostile input), G4 step 1: each malformed owner, group or tenancy field is
+    /// refused, typed, naming its line.
+    #[test]
+    fn malformed_tenancy_is_refused_by_line() {
+        let cases = [
+            ("node,1,1,0,0\nowner,0\n", 2),
+            ("node,1,1,0,0\nowner,4294967296\n", 2),
+            ("node,1,1,0,0\nowner,1,1\n", 2),
+            ("node,1,1,0,0\ngroup\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain\nowner,1\n", 3),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain\ngroup,1\n", 3),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,1,0,-,-\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,256,-,-\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,x,-\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,0\n", 2),
+            ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,-,9\n", 2),
+        ];
+        for (text, line) in cases {
+            match parse(text, &Limits::default()) {
+                Err(TraceError::Line { line: l, .. }) => assert_eq!(l, line, "{text:?}"),
+                other => panic!("{text:?}: {other:?}"),
+            }
+        }
+        let limits = Limits {
+            max_owners: 1,
+            max_groups: 1,
+            ..Limits::default()
+        };
+        assert_eq!(
+            parse("node,1,1,0,0\nowner,1\nowner,1\n", &limits),
+            Err(TraceError::TooManyOwners(1))
+        );
+        assert_eq!(
+            parse("node,1,1,0,0\ngroup,1\ngroup,1\n", &limits),
+            Err(TraceError::TooManyGroups(1))
+        );
+    }
+
     #[test]
     fn traces_past_their_bounds_are_refused() {
         let limits = Limits {
             max_bytes: 10,
             max_nodes: 1,
             max_legs: 1,
+            ..Limits::default()
         };
         assert_eq!(
             parse(SMALL, &limits),
@@ -241,7 +413,7 @@ mod tests {
         /// Hostile input shaped like a trace: lines of the right words and numbers in any order.
         #[test]
         fn any_trace_shaped_text_is_read_or_refused(
-            rows in proptest::collection::vec("(node|leg|#|x)(,[0-9]{0,22}){0,7}(,(plain|build|benchmark|session|zz))?", 0..40)
+            rows in proptest::collection::vec("(node|leg|owner|group|#|x)(,[0-9]{0,22}){0,7}(,(plain|build|benchmark|session|zz))?(,([0-9]{0,11}|-)){0,5}", 0..40)
         ) {
             let _ = parse(&rows.join("\n"), &Limits::default());
         }
