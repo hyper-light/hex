@@ -654,7 +654,14 @@ fn serve_one(
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     match seed::read_message(bytes, size, fds.len()) {
         Ok(seed::Message::Exec(req)) => serve_exec(req, fds, pid_for, specs),
-        Ok(seed::Message::Create(create)) => serve_create(&create, fds, How::Clone, pid_for),
+        Ok(seed::Message::Create(create)) => serve_create(
+            &create,
+            fds,
+            Begin {
+                how: How::Clone,
+                pid_for,
+            },
+        ),
         Ok(seed::Message::Park(park)) => serve_park(park, fds, socket),
         Err(fault) => refused(Failed::Request, fault.to_string()),
     }
@@ -668,6 +675,13 @@ enum How<'a> {
     Clone,
     /// This process is an init parked in its cgroup with the namespaces `flags` made, claimed on `claim`.
     Parked { flags: u64, claim: BorrowedFd<'a> },
+}
+
+/// How a create's init comes to be ([`How`]), and the pid namespace the seed's next children are born in, which a
+/// clone carrying a proc made ahead changes and sets back ([`PidFor`]).
+struct Begin<'a, 'p> {
+    how: How<'a>,
+    pid_for: &'p mut PidFor,
 }
 
 /// Where a create's init is cloned, or, for a parked init, the claim taken: the clone's outcome as
@@ -834,11 +848,13 @@ fn parked(claim: OwnedFd, flags: u64) -> ! {
                 serve_create(
                     &create,
                     fds,
-                    How::Parked {
-                        flags,
-                        claim: claim.as_fd(),
+                    Begin {
+                        how: How::Parked {
+                            flags,
+                            claim: claim.as_fd(),
+                        },
+                        pid_for: &mut pid_for,
                     },
-                    &mut pid_for,
                 )
                 .0
             }
@@ -871,8 +887,7 @@ fn parked(claim: OwnedFd, flags: u64) -> ! {
 fn serve_create(
     create: &seed::Create,
     fds: Vec<OwnedFd>,
-    how: How<'_>,
-    pid_for: &mut PidFor,
+    begun: Begin<'_, '_>,
 ) -> (Answer, Option<OwnedFd>) {
     // The spec the runtime checked rides last (`read_message` held the count to the create's), and the
     // container is made from its bytes alone, never from a read of the bundle, which may since hold a spec
@@ -902,7 +917,7 @@ fn serve_create(
     // exactly when the create says one does, then (on the pruned path) the root descriptors.
     let network = if create.network { fds.next() } else { None };
     if create.pruned {
-        return serve_create_pruned(create, &spec, fds, sync_w, map_r, network, how, pid_for);
+        return serve_create_pruned(create, &spec, fds, sync_w, map_r, network, begun);
     }
     // The runtime hands a seed no container that joins a pid or user namespace by path (it makes those
     // through the shim, `init::needs_shim`); one that came anyway is refused by type, never made in the
@@ -920,7 +935,7 @@ fn serve_create(
     };
     let made_ahead = network.is_some();
     let flags = init::fresh_clone_flags(&spec, made_ahead, false);
-    match begin(how, cgroup.as_ref().map(AsFd::as_fd), flags) {
+    match begin(begun.how, cgroup.as_ref().map(AsFd::as_fd), flags) {
         Ok(None) => refused(
             Failed::Unable,
             "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
@@ -977,9 +992,9 @@ fn serve_create_pruned(
     sync_w: OwnedFd,
     map_r: OwnedFd,
     network: Option<OwnedFd>,
-    how: How<'_>,
-    pid_for: &mut PidFor,
+    begun: Begin<'_, '_>,
 ) -> (Answer, Option<OwnedFd>) {
+    let Begin { how, pid_for } = begun;
     let (Some(bundle_dir), Some(cgroup_dir), Some(container_dir), Some(rootfs)) =
         (fds.next(), fds.next(), fds.next(), fds.next())
     else {

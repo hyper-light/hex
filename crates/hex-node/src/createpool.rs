@@ -283,14 +283,12 @@ impl CloneInit for CreatePool {
         let (create, fds) = message(req);
         // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for.
         match round_trip(socket.as_fd(), &create, &fds) {
-            Ok(_) => {
-                if pruned {
-                    let _ =
-                        self.shared
-                            .pruned
-                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                                Some(n.saturating_add(1))
-                            });
+            Ok((_, _, made)) => {
+                // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
+                if pruned && let Some(count) = self.shared.made.get(usize::from(made.code())) {
+                    let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_add(1))
+                    });
                 }
                 Ok((pid, pidfd))
             }
@@ -366,6 +364,13 @@ impl Parker {
                 shared.died(id, proc);
                 Err(OciError::Broken(
                     "a create seed said an init was parked but sent no pidfd".to_owned(),
+                ))
+            }
+            // A create's answer (decision 6's update), which no park is given.
+            Ok((Answer::StartedIn { .. }, _)) => {
+                shared.died(id, proc);
+                Err(OciError::Broken(
+                    "a create seed answered a park as a create".to_owned(),
                 ))
             }
             Err(e) => {
