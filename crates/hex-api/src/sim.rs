@@ -3,8 +3,8 @@
 //! enforced as the kernel would: past `memory_max` a program is killed and the kill counted; past
 //! `pids_max` a fork is refused and counted. An `oci` box has an init, made at create and waiting
 //! until start. From a [`ClassSpec::Oci`] it runs the spec's init program, so `fail N` ends it with N
-//! at start and `say` with 0; any other init, and a bundle's, runs until it is signalled or the box
-//! is deleted. Once the init has ended the box is empty and inspect reports how it ended, as the node
+//! at start and `say` with 0; any other init, and a bundle's, runs until it is killed or the box is
+//! deleted: as the init of its PID namespace with no handler, it takes no other signal. Once the init has ended the box is empty and inspect reports how it ended, as the node
 //! agent does for a container whose init it reaped.
 
 use std::collections::BTreeMap;
@@ -300,11 +300,21 @@ impl Runtime for SimRuntime {
             .get(id)
             .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         let mut any = false;
-        for p in b.procs.iter().chain(&b.init) {
+        for p in &b.procs {
             if p.exit()?.is_none() {
                 p.end(Exit::Signal(signal.number()))?;
                 any = true;
             }
+        }
+        // An init is its PID namespace's init, which the kernel gives only KILL (and STOP) unless it has
+        // a handler for the signal (pid_namespaces(7)); the simulator's inits have none.
+        if let Some(init) = &b.init
+            && init.exit()?.is_none()
+        {
+            if signal == Signal::KILL {
+                init.end(Exit::Signal(signal.number()))?;
+            }
+            any = true;
         }
         if any {
             Ok(())
@@ -452,6 +462,36 @@ mod tests {
             let failures = conformance::run(&SimRuntime::new(), &fixture);
             assert!(failures.is_empty(), "{fixture:?}: {failures:#?}");
         }
+    }
+
+    /// HEX-DIFF-1/2's oci half: signal TERM to an oci box ends its exec'd programs and leaves its init
+    /// running, as the kernel does for a PID namespace's init with no handler (pid_namespaces(7)); KILL
+    /// ends the init too.
+    #[test]
+    fn only_kill_ends_an_oci_boxs_init() {
+        let rt = SimRuntime::new();
+        let id = BoxId::new("init").unwrap();
+        rt.create(SimFixture::Bundle.spec(id.clone(), Bounds::default()))
+            .unwrap();
+        rt.start(&id).unwrap();
+        let mut p = rt
+            .exec(&id, SimFixture::Bundle.program(&Act::Wait), Stdio::null())
+            .unwrap();
+        rt.signal(&id, Signal::TERM).unwrap();
+        assert_eq!(p.try_wait().unwrap(), Some(Exit::Signal(15)));
+        let info = rt.inspect(&id).unwrap();
+        assert_eq!((info.state, info.exit), (BoxState::Running, None));
+        rt.signal(&id, Signal::TERM).unwrap();
+        rt.signal(&id, Signal::KILL).unwrap();
+        let info = rt.inspect(&id).unwrap();
+        assert_eq!(
+            (info.state, info.exit),
+            (BoxState::Empty, Some(Exit::Signal(9)))
+        );
+        assert!(matches!(
+            rt.signal(&id, Signal::TERM),
+            Err(Refusal::NotRunning(..))
+        ));
     }
 
     #[test]
