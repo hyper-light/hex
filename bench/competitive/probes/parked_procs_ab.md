@@ -4,8 +4,13 @@
 cp/t7-g5-parkproc 9e13b95: hex sha256 65f6100e612bebd8, seam_oci d13c5005b54a2793 (each cell's `env.txt`). The
 harness is g6's ab4c cell (bench/competitive/probes/create_breakdown.sh and seedstart_extract.py at cp/t7-g6
 a646981, exported without git, so `env.txt` names no harness commit), with one change:
-create_breakdown.sh's `docker run` passes `-e HEXBENCH_PARKED_PROCS`. Body and logs:
+create_breakdown.sh's `docker run` passes `-e HEXBENCH_PARKED_PROCS`, applied by hand. That is the line cp/t7-g6
+4c25532 adds to a646981 (with `HEXBENCH_AHEAD`); later runs build from 4c25532 by git archive. Body and logs:
 `~/.cache/hex-t7/g5tail/ab-pp-20261105T143755Z` on fedora; each cell's out dir is in its `exits`.
+
+**Gate 6 at this tree (9e13b95):** unit hex-g5tail-ppfull-20261105T143517Z, gates 7/7 exit 0 and the root lab 7 of 7
+test binaries, in one unit. The first 7.2 guest section below ran the same binaries.
+
 - A: parked procs off (`HEXBENCH_PARKED_PROCS` unset). B: on (`=1`). Both have parked inits on: owner bundles, reuse
   on.
 - The under-load bar's conditions: the mounts trace of part 19, 2,000 creates at 8 in flight, 8,000 idle threads,
@@ -49,6 +54,8 @@ the node's `hex-proc-drop` thread). fedora, 2026-11-05 15:02:19Z-15:07:53Z, unde
 32.7 to 141 during the run (another tenant's), so this host was far busier than the first run's. Body:
 `~/.cache/hex-t7/g5tail/ab-pp-20261105T150137Z`.
 
+**Gate 6 at this tree:** unit hex-g5tail-ppfull-20261105T150018Z, gates 7/7 exit 0 and the root lab 7 of 7 test binaries, in one unit.
+
 | L | arm | part 19 p50 | part 19 p99 | unpreempted p99 | create p99 (ms) | mount-lock waits a create |
 |---|-----|-------------|-------------|-----------------|-----------------|---------------------------|
 | 6 | A | 239, 252, 256, 254 | 1301, 1265, 1260, 1459 | 819, 628, 787, 620 | 3.519, 4.306, 3.812, 3.741 | 4.70, 5.01, 5.21, 4.97 |
@@ -69,6 +76,8 @@ the node's `hex-proc-drop` thread). fedora, 2026-11-05 15:02:19Z-15:07:53Z, unde
 node's one `hex-parked-procs` thread makes the proc (queue bound `PER_NODE`). seam_oci sha256 8fa181e71654f2f4.
 fedora, 2026-11-05 15:33:18Z-15:37:21Z, under the timed lock; load fell from 15.6 to 12.5.
 Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T153245Z`.
+
+**Gate 6 at this tree:** none. The nearest gated tree is cf0c831, which differs only in bench/'s two scripts: unit hex-g5tail-ppfull-20261105T153014Z, gates 7/7 exit 0, root lab 7 of 7, guest 2 of 2.
 
 | L | arm | part 19 p50 | part 19 p99 | create p99 (ms) | hits | dry | skipped | orphaned |
 |---|-----|-------------|-------------|-----------------|------|-----|---------|----------|
@@ -141,6 +150,8 @@ test binaries, the 7.2 guest lab 2 of 2. Body: `~/.cache/hex-t7/g5tail/ab-pp-202
 mount namespaces are made from the tree (`HEX_OCI_MNTNS=tree`, 7.x's default). Binaries: hex c2cb3634627c093e,
 seam_oci 9638d84d168ba926. 2026-11-05 15:18:50Z-15:22:13Z, under the timed lock; fedora's load fell from 30.2 to 25.0.
 Body: `~/.cache/hex-t7/g5tail/vm-pp-20261105T151759Z`.
+
+**Gate 6 at this tree:** unit hex-g5tail-ppfull-20261105T151557Z, gates 7/7 exit 0, root lab 7 of 7, the guest lab 2 of 2, in one unit.
 
 | L | arm | part 19 p50 | part 19 p99 | unpreempted p99 | create p99 (ms) | mount-lock waits a create |
 |---|-----|-------------|-------------|-----------------|-----------------|---------------------------|
