@@ -253,6 +253,14 @@ three different things (CLAUDE.md "Working here"):
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
   specification, one code path from a laptop to a region, and fast isolation of bad workloads and
   nodes, all measured in **hex-sim** (built first). Implementation open.
+- **Scheduler goal 5, failure detection and isolation (S8)** (`docs/design/failure-isolation.md`; built
+  on `cp/t7-sched-g5`, not merged): `hex-health`, the pure core of the detectors and penalties; hex-sim's
+  SWIM+Lifeguard model (memberlist's protocol) and fault nemesis, each fault class within its stated
+  bound over 1,000 seeds (gray drained ≤ 3.9 s; crash suspected ≤ 6 periods at p99; Lifeguard's false
+  positives 0.06% of SWIM's); the node's disk probe, and `AC-T7.10.3`'s dm-delay drill
+  (`bench/health/records/2026-11-05-dm-delay-drill.md`: drained 3.5 s after the stall, no work failed;
+  8 of 8 failed with the probe off). Open: the control plane acting on the verdicts (CP-T7.3), and
+  hex-sim driving hyper-swim's own detector rather than memberlist's.
 
 ## Next
 

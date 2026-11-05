@@ -218,10 +218,17 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 
 **Evidence.** `bounds_refuse_typed`: each bound, exceeded, returns its error.
 
+## Failure detection and isolation (goal 5)
+
+`membership.rs` models SWIM with Lifeguard on memberlist's protocol and constants (crash detection and
+slow-member false positives); `faults.rs` is the nemesis for the other classes (gray and fail-slow,
+disk stall, antagonist, the agent faults, dangerous signals, and correlated faults against the ejection
+cap and eviction rate), each driving `hex-health` and measured against its bound in
+`failure-isolation.md`. Both are functions of their seed (H1) and bounded with typed refusals (H5).
+
 ## What it doesn't do yet
 
-Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
-loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
+Each goes with the implementation goal that needs it: inter-node latency and Vivaldi coordinates (goal 3), provider
 quotas (A3), priorities and fair share (goal 4), sharded control planes, cells and regions (goals 6-7),
 heap accounting per workload (`AC-T7.11.4`; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`

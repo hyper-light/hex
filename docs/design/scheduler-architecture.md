@@ -341,7 +341,10 @@ bench) shows its number of record:
    antagonist throttling, retry budgets, the agent-specific faults, and the dangerous-workload move to a
    stronger runtime class. Done when hex-sim's nemesis states and meets a detection-and-isolation bound
    for each fault class (crash, gray/fail-slow, antagonist, agent-specific, dangerous) and `AC-T7.10.3`
-   (disk-stall drain) passes.
+   (disk-stall drain) passes. Built on `cp/t7-sched-g5` (`docs/design/failure-isolation.md`, F1-F8):
+   every bound met over 1,000 seeds and the drill drained before work failed. The crash class is
+   measured on memberlist's protocol, which hex-sim models; hyper-swim's own detector times its pairs
+   from measured round trips and is not yet driven in hex-sim.
 6. **Scale and shards (CP-T7.11):** done when `AC-T7.11.2` (1,000,000 on 10,000 in ≤120 s), `AC-T7.11.3`
    (≥10x kube-scheduler against kwok), `AC-T7.11.4` (≤4 KiB/workload) and `T-T7.11.1` (shard loss) pass.
 7. **Cells and regions (CP-T7.12, S7):** done when the differential suite passes on one node, one cell
