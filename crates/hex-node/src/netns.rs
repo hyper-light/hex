@@ -85,14 +85,17 @@ const FDS_BESIDE: u64 = 1_024;
 /// it is making.
 const FDS_A_REFILL: u64 = 2;
 
-/// The bounds of the node's two pools of namespaces made ahead: decision 4's network namespaces, one descriptor
-/// each, and step 4's ipc and uts pairs, two each.
+/// The bounds of the node's pools made ahead: decision 4's network namespaces, one descriptor each, and step 4's
+/// ipc and uts pairs, two each; and whether it keeps step 3's prepared `/dev` mounts ([`crate::devfs::Devfs`]), a
+/// root node's alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pools {
     /// The most network namespaces the pool holds.
     pub netns: usize,
     /// The most ipc and uts pairs the pool holds.
     pub ipc_uts: usize,
+    /// Whether the node keeps step 3's prepared `/dev` pool.
+    pub devfs: bool,
 }
 
 impl Pools {
@@ -100,6 +103,7 @@ impl Pools {
     pub const ROOT: Self = Self {
         netns: BOUND,
         ipc_uts: IPC_UTS_BOUND,
+        devfs: true,
     };
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every

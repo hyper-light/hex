@@ -251,6 +251,7 @@ impl Node {
             Owner::Rootless { .. } => Pools {
                 netns: 0,
                 ipc_uts: 0,
+                devfs: false,
             },
         };
         let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools))?;
@@ -287,7 +288,7 @@ impl Node {
             netns,
             ipc_uts,
             pools,
-            devfs: Devfs::start(owner == Owner::Root)?,
+            devfs: Devfs::start(pools.devfs)?,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
@@ -336,6 +337,9 @@ impl Node {
     /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
     pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
         self.devfs = Devfs::start(enabled && self.owner == Owner::Root)?;
+        self.pools.devfs = enabled && self.owner == Owner::Root;
+        // The kept namespaces' files are bounded past this pool too, as with_ipc_uts_bound's.
+        self.netns = Netns::start(self.pools.netns, crate::netns::FilesBound::now(self.pools))?;
         Ok(self)
     }
 
