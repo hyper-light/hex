@@ -1,7 +1,7 @@
 # Decision (proposed 2026-11-04): Linux images on macOS and Windows run in one Shards guest per node
 
-Native plan step 5 (kiln plan `01a194669ce477718e3b3b8c7be44138`). Status: **proposed; the seam (§2) waits on
-Shards' owner** (CLAUDE.md §9). Nothing here says Shards agreed until §2 cites its answer.
+Native plan step 5 (kiln plan `01a194669ce477718e3b3b8c7be44138`). Status: **proposed; the seam (§2) agreed with
+Shards' owner 2026-11-04** (CLAUDE.md §9), its crate to be drafted by Hex as a pull request Shards reviews.
 
 Sources: `docs/research/runtime/shards-guest.md` (what Shards offers, at `hyper-light/shards` `b3e5ca27`),
 `docs/research/runtime/native-platforms.md` §1 and §4 (why a Linux image needs a Linux kernel; Shards' backends),
@@ -55,8 +55,29 @@ pub trait Guest: Send + Sync {
 `Refusal` is typed (no backend, bounds, boot, channel, ended), not `shards-vmm`'s `String`s (CLAUDE.md §3).
 Hex takes `shards-api` by name and version, patched to its vendored copy (CLAUDE.md "Vendoring").
 
-**Agreement:** to record here, citing Shards' answer (asked 2026-11-04 08:29Z, kiln agent
-`01a148884a4770fdaf0111f3f792a248`).
+**Agreement** (Shards' lead, kiln agent `01a148884a4770fdaf0111f3f792a248`, answering on 2026-11-04, checked
+against `hyper-light/shards` `integrate` `b3e5ca27`):
+- No `-api` crate exists; what exists is a process interface: `shards run --kernel K [--init I] [--disk PATH[:ro]]…
+  [--vsock PATH]` (`crates/shards/src/vm_run.rs:355`: `"--kernel" => kernel = Some(...)`, `:216` `--vsock`,
+  `:359-365` `--cpus` and `--memory`). The guest's vsock is a host Unix socket at the `--vsock` path, Firecracker's
+  `CONNECT <port>` handshake. Lifecycle is the process: it ends when the guest powers off or is killed, its exit
+  code the guest's; bounds are refused before boot with a message and a non-zero exit; accounting is the OS's for
+  that process.
+- Backends: macOS arm64 (HVF), Linux x86_64 and arm64 (KVM) and Windows x86_64 (WHP, AF_UNIX there too) boot Linux
+  with vsock today; Windows arm64 is in progress (Shards' plan step 10); macOS x86_64 is out of scope, refused by
+  name.
+- **Constraint:** Shards is one binary, and on macOS its VM process runs in App Sandbox with the hypervisor
+  entitlement under Shards' own signing, so **Hex must not link Shards' VMM**. So `shards-api` is a thin client of
+  the `shards` binary: `boot` spawns `shards run --kernel … --vsock <private path>`, `connect` does the vsock
+  handshake on that socket, `wait_for`/`stop` are the process's (stop: SIGTERM, then kill at the deadline).
+- Shards owns `crates/api` (`shards-api`): that client, `SimGuests` (loopback streams) and the conformance suite,
+  run against both (the real one on Shards CI's KVM, HVF and WHP runners).
+- The trait shape is accepted with two changes: the root file system is `disks: Vec<Disk { path, read_only }>`, and
+  the vsock ports a guest may be reached on are an allowlist in the spec, which the client enforces.
+- Hex drafts it as a pull request to `hyper-light/shards`, branched off `gpu` once the current integration lands
+  (Shards' lead says when); it lands under Shards' rules (no panics, its 8-target lint, real-VM tests).
+
+So the host's `hex node` needs no hypervisor entitlement of its own: it starts Shards' signed binary.
 
 ## 3. The channel: the node's wire over a byte stream
 
@@ -126,14 +147,13 @@ Hex's tests of the channel, each citing its ID:
 
 ## Appendix A: the draft `shards-api`, ready to apply (not agreed)
 
-Drafted by Hex for Shards' owner to review, change or replace (CLAUDE.md §9). Nothing here is built against
-until the seam is agreed, or Ada waives that (asked through the lead, 2026-11-04 09:16Z).
+Drafted by Hex; the shape is agreed with Shards' owner (§2), and the crate lands in Shards through its review.
 
 **Where it lives.** A crate `shards-api` at `crates/api` in Shards' repository, owned by Shards. Hex takes it by
 name and version (`shards-api = "0.1"`), patched in Hex's `[patch.crates-io]` to its vendored copy.
 
-**The trait** (its real implementation in Shards, over `shards-vmm`'s `start`, `Handle::stop`, `Running::wait` and
-`VsockHost`, `shards-guest.md` §2-§3):
+**The trait** (its real implementation a client of the `shards` binary, as agreed in §2; not `shards-vmm`
+linked in):
 
 ```rust
 pub struct GuestSpec {
@@ -143,6 +163,8 @@ pub struct GuestSpec {
     pub vcpus: u32,
     pub memory_mib: u64,
     pub disks: Vec<Disk>,
+    /// The guest's vsock ports the host may connect to; any other is refused as `Channel`.
+    pub ports: Vec<u32>,
 }
 pub enum Init { Initrd(PathBuf), Executable(PathBuf) }      // shards-vmm's `initrd` / `init`
 pub struct Disk { pub path: PathBuf, pub read_only: bool }
@@ -209,5 +231,5 @@ refused as `Channel` within its patience; `stop` ends it as `Stopped` and every 
 - Shards' root `Cargo.toml` lists every crate as a member (`:3`) and excludes `vendor` (`:49`); with the rest
   excluded, a recorded patch trims its members to those kept, and Hex's workspace excludes `vendor/shards`.
 - On macOS the process that calls Hypervisor.framework must be signed with the hypervisor entitlement (Shards signs
-  `shards-vm` so, `docs/design/architecture.md:1979`); the host's `hex node` is signed with it, ad hoc on the Mac
-  Studio.
+  `shards-vm` so, `docs/design/architecture.md:1979`). As agreed (§2), that process is Shards' own binary, so Hex
+  vendors only `crates/api`'s client and needs no entitlement.
