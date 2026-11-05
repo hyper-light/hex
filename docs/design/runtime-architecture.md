@@ -2087,19 +2087,22 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   from the mounter's active pid namespace (`:153-159`). It doesn't care whether the namespace has processes. Goal 6's
   pool needs 7.1 only because it opens a namespace with none yet (`goal6-mntns.md` §7). So the proc and its masks can
   be made at park time, off create's path, on both kernels.
-- **Opening the namespace (as built).** The agent opens `/proc/<pid>/ns/pid` of the parked init, then asks the
-  pidfd it holds whether the init has ended (a pidfd reads ready once it has, pidfd_open(2)); one that has is
-  refused. The init is the agent's own child, so its pid names it until it ends, and a pidfd still not ready after
-  the open says the open found it. This takes no `unsafe`, which the proposal's `ioctl(PIDFD_GET_PID_NAMESPACE)`
-  would (rustix 1.1.5 wraps no `PIDFD_GET_*` ioctl, and its generic `ioctl` is `unsafe`; CLAUDE.md §12).
+- **Opening the namespace.** Through the parked init's pidfd only: `ioctl(PIDFD_GET_PID_NAMESPACE)`
+  (`include/uapi/linux/pidfd.h:111`; v6.19 `fs/pidfs.c:586-596`), `run::Parked::pid_namespace` over
+  `sys::pidfd_pid_namespace`. The kernel refuses with `ESRCH` once the init is gone or has exited (`:495-497`,
+  `:502-508`), so a reused pid can never hand the agent another process's namespace. The descriptor is close-on-exec
+  (`fs/nsfs.c:120`). The ioctl's `unsafe` block is in `oci/sys.rs`, which CLAUDE.md §12 lists already; its use
+  there is a new one, and §12's line for that file names it as a separate commit (Ada's to take).
 - **At park.** The park job carries the proc key the owner's last box would have had (`procmount::Key`: the proc
   mount's data and flags and the masked and read-only paths beneath `/proc`, in the spec's order, from
   `procmount::eligible`; given in `Wants` when the box chooses its cgroup, so its slot keeps it for the park at its
   delete; for a box of no owner, the last such box's, set before its take wakes the refill, so the refill reads
   that box's, not the one before). A box `procmount::eligible` refuses (no pid namespace of its own, another mount at or beneath `/proc`, a
   `..`, or a `linux.mountLabel`: a labelled container takes nothing the node made ahead) parks with no proc. Once the init says it is
-  parked, the thread that parked it (the delete, reuse on; the `hex-ahead` refill, reuse off) makes the proc for
-  the parked init's pid namespace (`ProcMaker`, `init::prepare_proc_for`): the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
+  parked, the delete (reuse on) or the `hex-ahead` refill (reuse off) asks the node's worker,
+  `hex-parked-procs`, for its proc, through a queue bounded at `PER_NODE`. The worker makes the proc for the parked
+  init's pid namespace (`ProcMaker`, `init::prepare_proc_for`) and attaches it if the slot still holds that init;
+  otherwise it drops it unattached, counted (`procs_orphaned`), or makes none (`procs_skipped`, also a full queue): the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
   and flags, `fsmount`, then the masks and read-only paths), with the same `ProcSources`. The parked slot keeps the
   init, its proc tree, the key, and the bytes charged.
 - **At claim.** A create whose `procmount::eligible` key equals the parked one is sent the tree in goal 6's
@@ -2126,7 +2129,7 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   one. A miss, the tree of a claim that failed, and the tree of an init ended unclaimed all go to the node's
   `hex-proc-drop` thread, by a queue bounded at `PER_NODE` (`run::ProcSink`). Past the bound a tree is dropped where
   it is, counted (`procs_dropped_inline`).
-- **Costs.** The proc's superblock is made off every create's path, on the thread that parked its init, so are the
+- **Costs.** The proc's superblock is made off every request's path, by the worker, and so are the
   `list_lrus` and shrinker registrations a new superblock takes (step 6's run 23, as the g6 agent cites it). One proc superblock per parked init, with its masks (each a clone of the shared empty tmpfs or of the
   host's `/dev/null`: no superblock each), bounded as the parked inits are (`PER_NODE` idle slots plus `INITS_AHEAD`),
   never reused: it ends with its init. The refill worker does the work beside the clone the delete already pays.
