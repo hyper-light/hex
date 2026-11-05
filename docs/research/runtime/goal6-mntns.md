@@ -472,8 +472,12 @@ loop during seed start, which this A/B didn't have.
 
 ## 14. Where the under-load bar stands on 6.19, in plain words (2026-11-05)
 
-On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6 and 12 busy loops, 8 in flight,
-8,000 idle threads, Docker's paths, no priority change) can't be reached by Hex's own code.
+On fedora's Linux 6.19, with the levers measured so far, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6
+and 12 busy loops, 8 in flight, 8,000 idle threads, Docker's paths, no priority change) can't be reached by Hex's own
+code. One lever is still under review, not yet evaluated: the tail agent's design for a parked init whose proc and
+masks the node's refill worker makes ahead, through proc's `pidns=` option, which 6.19 has (decision 8, "Proposal, not
+built", cp/t7-g5-tail 12fd867 and 3355fd5). It would take part 19's proc mount and masks off the create's path on 6.19
+too, for the creates that claim a parked init with a matching key.
 - §11 measured the tail. It's the init being preempted by the busy loops (about half of the slowest creates' time),
   plus the init's own CPU time; the mount lock is about a tenth. The creates that are never preempted already have a
   p99 of about 0.5 ms.
