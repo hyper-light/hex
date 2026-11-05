@@ -502,6 +502,7 @@ fn make(node: &Node, id: &str, bundle: PathBuf) -> BoxId {
 /// oci runtime (`hex __oci-exec`, which joins the container's cgroup, so its device programs decide),
 /// over the node's container state, so a box a restarted node took back is asked the same way.
 fn opens_in(node: &Node, lab: &Lab, id: &BoxId) -> Vec<Open> {
+    let dir = node.container_dir(id);
     let oci = OciRuntime::with_helper(node.oci_root().to_owned(), PathBuf::from(&lab.exe));
     let mut args: Vec<String> = ["/hex", "selftest-box", "open"]
         .iter()
