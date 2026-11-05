@@ -18,7 +18,8 @@ use std::io::Read;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{self, Act, Fixture};
+use hex_api::conformance::{Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
 use hex_runtime::windows::WinRuntime;
 
@@ -84,8 +85,6 @@ fn fixture() -> BinFixture {
     }
 }
 
-/// AC-T7.1.1: the Windows `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
-/// class's, which this one has nothing to check).
 /// The refusal of an `oci` box made from the bundle `config` (a `config.json`), and the runtime, which
 /// must hold no box after it.
 fn refused_bundle(config: &serde_json::Value) -> hex_api::Refusal {
@@ -167,9 +166,12 @@ fn a_linux_image_is_refused_naming_what_its_guest_waits_on() {
     }
 }
 
+/// AC-T7.1.1: the Windows `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
+/// class's, which this one has nothing to check), and the differential suite holds it to the simulator's
+/// trace (HEX-DIFF-1..6, CLAUDE.md §8).
 #[test]
 fn windows_process_boxes_hold_the_contract() {
-    let failures = conformance::run(&runtime(), &fixture());
+    let failures = differential::run(&runtime(), &fixture());
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 

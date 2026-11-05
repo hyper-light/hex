@@ -12,9 +12,10 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use crate::conformance::{Act, Fixture};
 use crate::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, Proc, Program, Refusal, Runtime,
-    Signal, Stdio, Usage,
+    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Exit, Network, OciSpec, Proc,
+    Program, Refusal, Rootfs, Runtime, Signal, Stdio, Usage,
 };
 
 /// Most boxes a [`SimRuntime`] holds; past it `create` is refused with [`Refusal::Full`].
@@ -383,67 +384,67 @@ impl Proc for SimHandle {
     }
 }
 
+/// The simulator's programs, in boxes of either class; an `oci` box made from a bundle or from
+/// the structured spec. The conformance suite's fixture for the simulator, and the oracle's in
+/// [`crate::differential`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimFixture {
+    Process,
+    Bundle,
+    Spec,
+}
+
+impl SimFixture {
+    fn oci(&self, act: &Act) -> ClassSpec {
+        ClassSpec::Oci(Box::new(OciSpec {
+            rootfs: Rootfs::Dir("/rootfs".into()),
+            init: self.program(act),
+            mounts: Vec::new(),
+            hostname: None,
+            network: Network::Private,
+            hosts: Vec::new(),
+        }))
+    }
+}
+
+impl Fixture for SimFixture {
+    fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
+        BoxSpec {
+            id,
+            bounds,
+            class: match self {
+                Self::Process => ClassSpec::Process,
+                Self::Bundle => ClassSpec::Bundle("/bundle".into()),
+                Self::Spec => self.oci(&Act::Wait),
+            },
+        }
+    }
+    fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
+        BoxSpec {
+            id,
+            bounds: Bounds::default(),
+            class: match self {
+                Self::Process => ClassSpec::Process,
+                Self::Bundle | Self::Spec => self.oci(act),
+            },
+        }
+    }
+    fn program(&self, act: &Act) -> Program {
+        match act {
+            Act::Say(words) => Program::of(&["say", words]),
+            Act::Fail(code) => Program::of(&["fail", &code.to_string()]),
+            Act::Wait => Program::of(&["wait"]),
+            Act::Hog(bytes) => Program::of(&["hog", &bytes.to_string()]),
+            Act::Spawn(n) => Program::of(&["spawn", &n.to_string()]),
+            Act::Echo => Program::of(&["echo"]),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conformance::{self, Act, Fixture};
-    use crate::{Bounds, Network, OciSpec, Rootfs};
-
-    /// The simulator's programs, in boxes of either class; an `oci` box made from a bundle or from
-    /// the structured spec.
-    #[derive(Debug, Clone, Copy)]
-    enum SimFixture {
-        Process,
-        Bundle,
-        Spec,
-    }
-
-    impl SimFixture {
-        fn oci(&self, act: &Act) -> ClassSpec {
-            ClassSpec::Oci(Box::new(OciSpec {
-                rootfs: Rootfs::Dir("/rootfs".into()),
-                init: self.program(act),
-                mounts: Vec::new(),
-                hostname: None,
-                network: Network::Private,
-                hosts: Vec::new(),
-            }))
-        }
-    }
-
-    impl Fixture for SimFixture {
-        fn spec(&self, id: BoxId, bounds: Bounds) -> BoxSpec {
-            BoxSpec {
-                id,
-                bounds,
-                class: match self {
-                    Self::Process => ClassSpec::Process,
-                    Self::Bundle => ClassSpec::Bundle("/bundle".into()),
-                    Self::Spec => self.oci(&Act::Wait),
-                },
-            }
-        }
-        fn init(&self, id: BoxId, act: &Act) -> BoxSpec {
-            BoxSpec {
-                id,
-                bounds: Bounds::default(),
-                class: match self {
-                    Self::Process => ClassSpec::Process,
-                    Self::Bundle | Self::Spec => self.oci(act),
-                },
-            }
-        }
-        fn program(&self, act: &Act) -> Program {
-            match act {
-                Act::Say(words) => Program::of(&["say", words]),
-                Act::Fail(code) => Program::of(&["fail", &code.to_string()]),
-                Act::Wait => Program::of(&["wait"]),
-                Act::Hog(bytes) => Program::of(&["hog", &bytes.to_string()]),
-                Act::Spawn(n) => Program::of(&["spawn", &n.to_string()]),
-                Act::Echo => Program::of(&["echo"]),
-            }
-        }
-    }
+    use crate::conformance;
 
     #[test]
     fn the_simulator_passes_the_conformance_suite() {
