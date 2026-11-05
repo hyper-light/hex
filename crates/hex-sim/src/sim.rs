@@ -157,7 +157,14 @@ pub struct Run {
     pub ran: Vec<Option<Ran>>,
     /// The sampling the run's deciders used, for its serial specification.
     pub sample: Sample,
+    /// What the control plane held in memory as the run ended, one per slice.
+    pub planes: Vec<ControlPlane>,
 }
+
+/// A slice's control plane as the run left it: what it holds in memory, kept so its cost can be
+/// measured (`AC-T7.11.4`).
+#[derive(Debug, Clone)]
+pub struct ControlPlane(Plane);
 
 /// One run of a workload on a node, as its node agent saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,6 +445,7 @@ pub fn run(cluster: &Cluster, config: &Config) -> Result<Run, SimError> {
         refused: sim.refused,
         ran: sim.ran,
         sample: sim.config.sample,
+        planes: vec![ControlPlane(sim.plane)],
     })
 }
 

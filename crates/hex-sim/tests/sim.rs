@@ -306,6 +306,7 @@ fn run_of(store: Store, n: usize) -> Run {
         refused: vec![false; n],
         ran: vec![None; n],
         sample: Sample::default(),
+        planes: Vec::new(),
     }
 }
 
