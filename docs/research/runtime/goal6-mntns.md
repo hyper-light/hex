@@ -463,3 +463,26 @@ Read:
 - **The unpreempted p99** falls from a median of 547 us to 503 us, lower in 5 of 6 pairs.
 - **Part 19's p50 and p99 don't change** beyond the host's noise. p99 is lower in 3 of 6 pairs, at medians of 696 and
   723 us, and still above the 0.5 ms bar, as §11 predicts: the steady tail is preemption and the init's own length.
+
+Co-tenants at bench start: the same 12 traces probe every process's write waits on the mount lock. In each cell's
+first 50 ms (the seeds' start), no process outside Hex waited on it, in either arm. Co-tenants weren't mounting then,
+so these runs can't show (4)'s effect on them either way. What they do show is the hold (4) removes: 4-5 holds of
+~1.2-1.4 ms each in A against the node's one in B. Showing the stall a co-tenant would see needs one that mounts in a
+loop during seed start, which this A/B didn't have.
+
+## 14. Where the under-load bar stands on 6.19, in plain words (2026-11-05)
+
+On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6 and 12 busy loops, 8 in flight,
+8,000 idle threads, Docker's paths, no priority change) can't be reached by Hex's own code.
+- §11 measured the tail. It's the init being preempted by the busy loops (about half of the slowest creates' time),
+  plus the init's own CPU time; the mount lock is about a tenth. The creates that are never preempted already have a
+  p99 of about 0.5 ms.
+- §13 sized every 6.19 lever on the init's CPU time. Their best case together is about 20%, which would put part 19's
+  p99 at about 580 us.
+- Lever (4), built and measured above, removes the seeds' startup holds and improves the whole create's p99, but it
+  doesn't move part 19's steady p99.
+
+What can reach the bar is goal 6's 7.x path: the namespace made from a tree, with procs made ahead.
+- In the Linux 7.2 guest, part 19's p50 is about a third of 6.19's (56-80 us against about 250, §9-§10). Both the
+  unpreempted tail and the chance of being preempted shrink with it.
+- A reading of record needs a bench host on Linux 7.1 or later. Whether fedora moves to 7.x is Ada's decision.
