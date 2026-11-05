@@ -25,10 +25,18 @@ Legs: each job kiln ran (it has started_at and finished_at, unix seconds), in ar
     build and test code, changing the host as a build does.
 A job kiln never ran is counted, not traced. An export it can't read is refused, naming what, and
 nothing is written.
+
+Options (G4, AC-T7.5.2), each off by default, so the trace without them is as before:
+  --day YYYY-MM-DD   only legs arriving that UTC day; the rest are counted, not traced.
+  --repos a,b,...    only these repositories' legs, in this order; the rest are counted, not traced.
+  --owners           an owner per repository, each of weight 1 (in --repos order, else by name),
+                     and each leg's tenancy: its repository's owner, band 0, no gang, no group.
 """
 
 import argparse
 import collections
+import datetime
+import gzip
 import json
 import statistics
 import sys
@@ -51,7 +59,7 @@ def kind(run, job):
     return "benchmark" if any("bench" in n.lower() for n in names) else "build"
 
 
-def convert(export):
+def convert(export, day=None, repos=None, owners=False):
     runs = export.get("runs")
     if not runs:
         raise Refused("the export holds no run")
@@ -66,6 +74,7 @@ def convert(export):
         raise Refused("no runner that ran a leg has CPU and memory facts")
     largest = max(nodes.values())[:2]
     count = collections.Counter()
+    capped = set()
 
     def measured(j):
         if j.get("cpu_seconds") is None or j.get("peak_rss") is None:
@@ -75,7 +84,7 @@ def convert(export):
         cpu = round(j["cpu_seconds"] / dur * 1000)
         mem = int(j["peak_rss"])
         if cpu > cpu_cap or mem > mem_cap:
-            count["capped at their runner"] += 1
+            capped.add(j["id"])
         return min(cpu, cpu_cap), min(mem, mem_cap)
 
     needs, by_job, by_key = {}, collections.defaultdict(list), collections.defaultdict(list)
@@ -89,8 +98,20 @@ def convert(export):
     def median(ms):
         return (round(statistics.median(c for c, _ in ms)), round(statistics.median(m for _, m in ms)))
 
+    since = until = None
+    if day is not None:
+        start = datetime.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+        since = int(start.timestamp())
+        until = since + 86400
     legs = []
     for r, j in ran:
+        q0 = min(j.get("queued_at") or j["started_at"], j["started_at"])
+        if since is not None and not since <= q0 < until:
+            count[f"arriving outside {day}, left out"] += 1
+            continue
+        if repos is not None and r.get("repo_name") not in repos:
+            count[f"repo {r.get('repo_name')} not chosen, left out"] += 1
+            continue
         need = needs[j["id"]]
         if need is None:
             same_job = by_job.get((r.get("repo_name"), r.get("pipeline"), j.get("key")))
@@ -105,6 +126,8 @@ def convert(export):
             count[why] += 1
         else:
             count["measured"] += 1
+            if j["id"] in capped:
+                count["capped at their runner"] += 1
         q, s, f = j.get("queued_at"), j["started_at"], j["finished_at"]
         if f < s:
             raise Refused(f"run {r.get('id')!r} job {j.get('id')!r}: finished before it started")
@@ -122,16 +145,24 @@ def convert(export):
     legs.sort()
     t0 = legs[0][0]
     names = sorted(nodes)
+    order = list(repos) if repos is not None else sorted({leg[1] for leg in legs})
     out = [f"# source: {export.get('source', 'unstated')}",
            f"# made by bench/sched/kiln_trace.py from {len(runs)} runs and {jobs} jobs: {len(ran)} ran, "
            f"{jobs - len(ran)} never ran (not traced), {len(legs)} legs traced",
            *(f"# {n}: {count[n]}" for n in sorted(count)),
            "# nodes in runner-name order: " + " ".join(names)]
+    if day is not None:
+        out.insert(1, f"# day: {day} UTC, arrivals from its first leg's")
+    if owners:
+        out.append("# owners in order, weight 1 each: " + " ".join(order))
     for n in names:
         cpu, mem, gpus = nodes[n]
         out.append(f"node,{cpu},{mem},{gpus},0")
-    for q, _repo, _num, _key, _id, runs_for, cpu, mem, gpus, k in legs:
-        out.append(f"leg,{(q - t0) * NS},{runs_for},{cpu},{mem},{gpus},{k}")
+    if owners:
+        out.extend("owner,1" for _ in order)
+    for q, repo, _num, _key, _id, runs_for, cpu, mem, gpus, k in legs:
+        tenancy = f",{order.index(repo)},0,-,-" if owners else ""
+        out.append(f"leg,{(q - t0) * NS},{runs_for},{cpu},{mem},{gpus},{k}{tenancy}")
     return "\n".join(out) + "\n"
 
 
@@ -139,10 +170,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("export")
     ap.add_argument("out")
+    ap.add_argument("--day")
+    ap.add_argument("--repos", type=lambda v: v.split(","))
+    ap.add_argument("--owners", action="store_true")
     a = ap.parse_args()
     try:
-        with open(a.export) as fh:
-            text = convert(json.load(fh))
+        opener = gzip.open if a.export.endswith(".gz") else open
+        with opener(a.export, "rt") as fh:
+            text = convert(json.load(fh), a.day, a.repos, a.owners)
     except (Refused, KeyError, ValueError, TypeError) as e:
         print(f"kiln_trace: refused: {type(e).__name__}: {e}", file=sys.stderr)
         return 1

@@ -60,3 +60,22 @@ The trace stands for kiln's CI if kiln's measurements are right. A leg whose CPU
 kiln mis-measured carries that error into its need; the 26 legs capped on CPU show some do. If kiln's
 measured needs were systematically low (a cgroup that missed child processes, say), packing on this
 trace would look better than on the hardware.
+
+## One recorded day for G4's fair-share bar (AC-T7.5.2)
+
+`kiln-ci-20261025-four-repos.trace` is the 2026-10-25 UTC day of the export above, made by
+`kiln_trace.py kiln-ci-20261022-20261105.export.json.gz kiln-ci-20261025-four-repos.trace --day 2026-10-25
+--repos hyper-light/kiln,hyper-light/slates,hyper-light/hyperscale,hyper-light/hyper-raft --owners`
+(2026-11-05): 599 legs, an owner per repository, each of weight 1, on the same 10 runners.
+
+Why that day: AC-T7.5.2's bar is four equal-weight repositories. Of the fourteen days it is the only one
+where four repositories each ran 20 legs or more: kiln 286, slates 262, hyperscale 31, hyper-raft 20.
+Those four are the bar's four. focal's and hex's one leg each are left out and counted in its header.
+On every other day the third and fourth repositories ran under 20 legs, or only two repositories were busy.
+
+What it showed (hex-sim, `tests/fair.rs` `four_equal_weight_repositories_over_a_recorded_day`,
+`HEX_SIM_RECORDED_DAY` set to it, 2026-11-05 on jupiter): no contention. Replayed on its runners, the
+four were never all waiting at once (0.00 contended hours), so there are no shares under contention to
+hold to 2% of 25%, and the test refuses it ("no contention in the recording"). No day of the fourteen has
+four repositories each asking for more than a quarter of the cluster: kiln and slates ask for nearly all
+of it, and the rest ask for little.
