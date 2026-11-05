@@ -85,6 +85,18 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
 /// descriptor limit is checked at the node's start against all it may hold, raised to that, and where it can't be
 /// the refusal names the shortfall. Do: ask of limits that hold it, and of limits under it. Expect: nothing asked of
 /// the first; the soft limit raised, and a hard one under it too; the shortfall in the refusal's words.
+/// Goal 6 (`goal6-mntns.md` §12): a root node holds its create seeds' one pruned mount namespace for its life, so
+/// it is in all the node may hold. Do: read the node's named descriptor bounds. Expect the pruned namespace among
+/// them, one descriptor.
+#[test]
+fn the_seeds_pruned_namespace_is_counted_in_what_a_node_may_hold() {
+    let bounds = descriptor_bounds();
+    assert!(
+        bounds.contains(&("the create seeds' pruned mount namespace", 1)),
+        "{bounds:?}"
+    );
+}
+
 #[test]
 fn the_descriptor_limit_is_raised_to_all_a_node_may_hold_or_the_shortfall_refused() {
     use rustix::process::Rlimit;

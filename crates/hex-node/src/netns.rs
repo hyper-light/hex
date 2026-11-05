@@ -73,13 +73,16 @@ const FDS_A_BOX: u64 = 2;
 const FDS_A_SEED: u64 = 2;
 /// The most exec seeds a node keeps (`seed::default_budget`'s ceiling).
 const EXEC_SEEDS: u64 = 128;
+/// A root node's create seeds' one pruned mount namespace, held for the node's life (`goal6-mntns.md` §12).
+const FDS_PRUNED: u64 = 1;
 /// What the agent holds open past those bounds, its listener, its polls and what its threads open for a moment:
 /// a margin, stated rather than measured, well past the few dozen it is.
 const FDS_BESIDE: u64 = 1_024;
 
-/// The descriptors this node may hold at once, each by its bound: kept namespaces idle, on the checkers' line and
-/// one for each live box; each live box's own; a connection and the programs it watches; the seeds of both pools.
-fn descriptors_a_node_may_hold() -> u64 {
+/// The descriptors this node may hold at once, each by its bound and named: kept namespaces idle, on the
+/// checkers' line and one for each live box; each live box's own; a connection and the programs it watches; the
+/// seeds of both pools and the create seeds' pruned namespace.
+fn descriptor_bounds() -> [(&'static str, u64); 9] {
     let of = |count: usize, each: u64| {
         u64::try_from(count)
             .unwrap_or(u64::MAX)
@@ -88,17 +91,24 @@ fn descriptors_a_node_may_hold() -> u64 {
     let boxes = hex_runtime::linux::cgroup::MAX_BOXES;
     let connections = crate::serve::LIMITS.connections;
     [
-        of(netns_reuse::PER_NODE, FDS_A_KEPT),
-        of(netns_reuse::PER_NODE, FDS_A_KEPT),
-        of(boxes, FDS_A_KEPT.saturating_add(FDS_A_BOX)),
-        of(connections, 1),
-        of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
-        of(hex_core::seeds::SEEDS.get(), FDS_A_SEED),
-        EXEC_SEEDS.saturating_mul(FDS_A_SEED),
-        FDS_BESIDE,
+        ("kept namespaces idle", of(netns_reuse::PER_NODE, FDS_A_KEPT)),
+        ("kept namespaces on the checkers' line", of(netns_reuse::PER_NODE, FDS_A_KEPT)),
+        ("live boxes", of(boxes, FDS_A_KEPT.saturating_add(FDS_A_BOX))),
+        ("connections", of(connections, 1)),
+        ("programs watched", of(connections.saturating_mul(crate::serve::LIMITS.programs), 1)),
+        ("create seeds", of(hex_core::seeds::SEEDS.get(), FDS_A_SEED)),
+        ("exec seeds", EXEC_SEEDS.saturating_mul(FDS_A_SEED)),
+        ("the create seeds' pruned mount namespace", FDS_PRUNED),
+        ("beside those", FDS_BESIDE),
     ]
-    .into_iter()
-    .fold(0, u64::saturating_add)
+}
+
+/// All the descriptors this node may hold at once ([`descriptor_bounds`]).
+fn descriptors_a_node_may_hold() -> u64 {
+    descriptor_bounds()
+        .into_iter()
+        .map(|(_, n)| n)
+        .fold(0, u64::saturating_add)
 }
 
 /// The descriptor limit a node that may hold `needs` must have, from the one it has: `None` where that holds

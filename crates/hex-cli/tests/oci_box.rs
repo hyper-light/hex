@@ -424,6 +424,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     mount_namespaces_made_each_way(&lab, own);
     procs_made_ahead_carry_their_masks(&lab, own);
     masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
+    create_seeds_share_the_nodes_one_pruned_namespace(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
     an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
@@ -1407,6 +1408,94 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
         );
     }
     eprintln!("masked directories: {masked} across 4 boxes, on {devs:?}");
+}
+
+/// Goal 6, the seed without a `pivot_root` per start (`goal6-mntns.md` §12, AC-T7.1.4's under-load bar): a node
+/// prunes one mount namespace and every create seed joins it by `setns`, so a seed started after the first never
+/// pivots (each `pivot_root` walks every thread on the host under the mount lock, §11). Do: make six boxes at once
+/// across the node's seeds, then read each live create seed's mount namespace from this process's `/proc`. Expect
+/// at least two create seeds, every one in the same mount namespace and not this process's, and that namespace
+/// holding the pruned two mounts after the creates as before them: no seed or init ever mutates it.
+fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-seedns"), state.path());
+    // A create seed is a child of this process re-exec'd as `__oci-seed` that prunes (before goal 6's change)
+    // or joins (after it) a pruned namespace, as its environment says; an exec seed does neither.
+    let create_seeds = || -> Vec<u32> {
+        let me = std::process::id().to_string();
+        let mut seeds = Vec::new();
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let ppid = stat.rsplit(") ").next().and_then(|r| r.split(' ').nth(1));
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+            let has = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+            if ppid == Some(me.as_str())
+                && has(&cmdline, b"__oci-seed")
+                && (has(&environ, b"HEX_OCI_SEED_PRUNE=") || has(&environ, b"HEX_OCI_SEED_JOIN="))
+            {
+                seeds.push(pid);
+            }
+        }
+        seeds
+    };
+    let namespace = |pid: u32| std::fs::metadata(format!("/proc/{pid}/ns/mnt")).map(|m| m.ino()).ok();
+    let mounts = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/mountinfo"))
+            .map(|t| t.lines().count())
+            .ok()
+    };
+    let before = create_seeds()
+        .into_iter()
+        .find_map(mounts)
+        .expect("a create seed's mount table before any create");
+    let ids: Vec<BoxId> = (0..6)
+        .map(|n| BoxId::new(&format!("seedns-{n}")).unwrap())
+        .collect();
+    std::thread::scope(|s| {
+        for id in &ids {
+            let node = &node;
+            s.spawn(move || {
+                let dir = tempfile::Builder::new()
+                    .prefix("bundle-")
+                    .tempdir_in(lab.bundles.path())
+                    .unwrap()
+                    .keep();
+                std::fs::write(
+                    dir.join("config.json"),
+                    lab.config(&Lab::act(&Act::Wait), false),
+                )
+                .unwrap();
+                node.create(BoxSpec {
+                    id: id.clone(),
+                    bounds: Bounds::default(),
+                    class: ClassSpec::Bundle(dir),
+                    owner: None,
+                })
+                .expect("create a box through a seed");
+            });
+        }
+    });
+    let seeds = create_seeds();
+    let spaces: BTreeSet<u64> = seeds.iter().filter_map(|&p| namespace(p)).collect();
+    let tables: BTreeSet<usize> = seeds.iter().filter_map(|&p| mounts(p)).collect();
+    for id in &ids {
+        node.delete(id).expect("delete");
+    }
+    assert!(seeds.len() >= 2, "several create seeds to compare: {seeds:?}");
+    assert_eq!(spaces.len(), 1, "every create seed in one mount namespace: {spaces:?}");
+    let own_space = std::fs::metadata("/proc/self/ns/mnt").unwrap().ino();
+    assert!(!spaces.contains(&own_space), "the seeds' namespace is pruned, not the node's own");
+    assert_eq!(tables, BTreeSet::from([before]), "the pruned namespace unchanged by the creates");
+    assert!(before <= 2, "the pruned namespace holds its tmpfs root and no more: {before} mounts");
+    eprintln!("create seeds: {} in one pruned namespace of {before} mounts", seeds.len());
 }
 
 /// Whether `open_tree(OPEN_TREE_CLONE)` clones a mount outside the caller's namespace, a detached tmpfs's: Linux

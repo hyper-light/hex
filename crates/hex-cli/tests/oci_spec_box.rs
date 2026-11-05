@@ -204,9 +204,10 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
 /// task's root: v6.19 `show_mountinfo` (fs/proc_namespace.c:150-151, "mountpoints outside of chroot jail
 /// will give SEQ_SKIP on this") skips what `seq_path_root` can't name (fs/seq_file.c:517-519), and
 /// `__d_path` names nothing unreachable from the root (fs/d_path.c:211-223). The node runs in this process
-/// and its create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_PRUNE` set, so the seed is
-/// found among this process's children by that environment entry (an exec seed, unpruned, has none), and
-/// its mountinfo and root read. Run only as root, where the seeds prune.
+/// and its create pool spawns `hex __oci-seed` children with `HEX_OCI_SEED_JOIN` set, each joining the node's
+/// one pruned namespace (`goal6-mntns.md` §12), so the seed is found among this process's children by that
+/// environment entry (an exec seed, unpruned, has none), and its mountinfo and root read. Run only as root,
+/// where the node prunes.
 fn pruned_seed_lists_its_read_only_root_tmpfs_alone() {
     let me = std::process::id();
     let mut seed = None;
@@ -235,7 +236,7 @@ fn pruned_seed_lists_its_read_only_root_tmpfs_alone() {
         let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
         if environ
             .split(|&b| b == 0)
-            .any(|e| e.starts_with(b"HEX_OCI_SEED_PRUNE="))
+            .any(|e| e.starts_with(b"HEX_OCI_SEED_JOIN="))
         {
             seed = Some(pid);
             break;
