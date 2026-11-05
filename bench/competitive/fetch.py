@@ -105,9 +105,16 @@ CRUN_SRC = ("1.30.1", "99d036d95113552b6df66c7c879432835504bf0e525fc0372745071df
 
 def crun_src(base, bindir):
     tag, want = CRUN_SRC
+    d = os.path.join(base, "src")
+    held = os.path.join(d, f"crun-{tag}.tar.gz")
+    # The pinned sha256 names the bytes, so a tarball already holding them needs no request: every pass that runs
+    # libcrun asks for it, and GitHub refuses an unauthenticated host past its hourly budget (fedora, 2026-11-05).
+    if os.path.isfile(held) and sha256(held) == want:
+        return {"tag": tag, "sha256": want, "verified": True, "path": held,
+                "note": "the pinned sha256, held in <base>/src from an earlier fetch that the release's CHECKSUMS "
+                        "also listed; no request made"}
     rel = json.loads(get(f"https://api.github.com/repos/containers/crun/releases/tags/{tag}"))
     a = asset(rel, rf"crun-{re.escape(tag)}\.tar\.gz")
-    d = os.path.join(base, "src")
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, a["name"])
     get(a["browser_download_url"], path)
