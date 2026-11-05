@@ -677,3 +677,36 @@ fn an_exec_naming_its_state_directory_appends_only_in_its_new_kind() {
     ));
     assert_eq!(hex(&old), GOLDEN_FULL);
 }
+
+/// HEX-SEED-4 (decision 8, "The p99.9 that stayed"; AC-T7.1.3): a park reads back as written, with its two
+/// descriptors and no other count; its bytes are the ones recorded here (append-only); every truncation of it
+/// and a byte past its end are refused by type.
+#[test]
+fn a_park_reads_back_as_written_and_its_bytes_are_recorded() {
+    // CLONE_NEWNS | CLONE_NEWPID, the namespaces an owner's box on the pruned path makes fresh.
+    let want = Park { flags: 0x2002_0000 };
+    let bytes = park(&want).unwrap();
+    assert_eq!(hex(&bytes), "48455853020007000000022000000000");
+    assert_eq!(
+        read_message(&bytes, bytes.len(), PARK_FDS).unwrap(),
+        Message::Park(want)
+    );
+    for got in [0, 1, 3] {
+        assert!(
+            matches!(
+                read_message(&bytes, bytes.len(), got),
+                Err(Fault::Descriptors { .. })
+            ),
+            "a park with {got} descriptors"
+        );
+    }
+    for n in 0..bytes.len() {
+        assert!(
+            read_message(&bytes[..n], n, PARK_FDS).is_err(),
+            "{n} bytes read"
+        );
+    }
+    let mut long = bytes.clone();
+    long.push(0);
+    assert!(read_message(&long, long.len(), PARK_FDS).is_err());
+}

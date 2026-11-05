@@ -84,6 +84,10 @@ pub const CONFIG_FDS: usize = 1;
 /// ([`Create::ipc_uts`]).
 pub const IPC_UTS_FDS: usize = 2;
 
+/// A park's descriptors: the idle cgroup the init is cloned into, then the init's end of the socket its
+/// claim comes on.
+pub const PARK_FDS: usize = 2;
+
 /// The kinds of version 1.
 mod kind {
     pub const EXEC: u16 = 0x0001;
@@ -92,6 +96,7 @@ mod kind {
     pub const CREATE_AHEAD: u16 = 0x0004;
     pub const CREATE_CONFIG: u16 = 0x0005;
     pub const EXEC_CHECKED: u16 = 0x0006;
+    pub const PARK: u16 = 0x0007;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
 }
@@ -199,11 +204,31 @@ impl Create {
     }
 }
 
-/// A request a seed reads: an exec into a container, or a container to make.
+/// An init to make ahead into an idle cgroup (decision 8, "The p99.9 that stayed"): the seed clones it into the
+/// cgroup with `flags`, the namespaces the owner's last box made fresh, as the agent's own child, and the init
+/// waits on its socket for the [`Create`] of the box that claims it, which it then makes as a freshly cloned
+/// init does, or refuses by type when the create asks for other namespaces. The kind is added (append-only):
+/// readers without it refuse it explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Park {
+    /// The `clone3` flags of the namespaces the init is made in: `CLONE_NEW*` bits only.
+    pub flags: u64,
+}
+
+/// A request a seed reads: an exec into a container, a container to make, or an init to make ahead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Exec(Request),
     Create(Create),
+    Park(Park),
+}
+
+/// A park as a message.
+pub fn park(park: &Park) -> Result<Vec<u8>, Fault> {
+    let mut w = Writer::new(MAX_REQUEST);
+    header(&mut w, kind::PARK);
+    w.u64(park.flags);
+    w.done()
 }
 
 /// What failed when a seed refuses, so the agent reports a typed refusal and knows whether to replace
@@ -466,11 +491,22 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
             let want = create.fds();
             (Message::Create(create), want)
         }
+        kind::PARK => {
+            if size > MAX_REQUEST {
+                return Err(Fault::Oversized {
+                    bytes: size,
+                    bound: MAX_REQUEST,
+                });
+            }
+            let flags = r.u64()?;
+            r.end(kind, version)?;
+            (Message::Park(Park { flags }), PARK_FDS)
+        }
         _ => {
             return Err(Fault::Kind {
                 kind,
                 version,
-                expected: "an exec or a create",
+                expected: "an exec, a create or a park",
             });
         }
     };
