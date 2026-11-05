@@ -319,6 +319,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
     a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
     a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(&lab, own);
+    a_node_past_its_files_bound_checks_by_entering_counted(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -990,7 +991,8 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
 }
 
 /// Goal 5 extended, step 6 (a kept namespace's `/proc/net` files, so a later check needn't enter it; the lead's
-/// conditions: closed on every path, counted; CLAUDE.md §2). Do: keep one owner's namespace, reuse it, leave an
+/// conditions: closed on every path, counted; CLAUDE.md §2). Do: give the node a soft descriptor limit with room for
+/// the namespaces it keeps, as an installer would, keep one owner's namespace, reuse it, leave an
 /// address in it, a socket in the next, release what's idle, give one past the owner's bound, take and give back
 /// each of the bound's again, then let the node go with a box's namespace held and recover over its state, counting
 /// the files open in this process by the names their links show, and all its descriptors at the end. Expect: the
@@ -1004,6 +1006,15 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
         eprintln!("SKIP held files: a rootless node keeps no network namespaces");
         return;
     }
+    // The node holds files within the soft limit it is given, never raising it; a lab's container starts at
+    // dockerd's 1024, which holds none, so this test gives it room for the namespaces it keeps, as an installer would.
+    let room = u64::try_from(4 * (2 * hex_core::netns_reuse::PER_OWNER + 8)).unwrap();
+    let Some(_limit) = soft_limit(hex_node::netns::FilesBound::now().own + room) else {
+        eprintln!(
+            "SKIP held files: the hard descriptor limit leaves no room for them past the node's own"
+        );
+        return;
+    };
     // Its sockstat and dev, and each iptables file its host's modules make.
     let files = 2 + ["ip_tables_names", "ip6_tables_names"]
         .iter()
@@ -1219,6 +1230,148 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     );
     eprintln!(
         "netns: a kept namespace's files held across a reuse, closed when refused, released, put out or let go"
+    );
+}
+
+/// Goal 5 extended step 6, the held files' bound (the lead, 2026-11-03T23:07Z and 2026-11-04T09:15Z; CLAUDE.md §2,
+/// §3): a node holds kept namespaces' files for at most what the soft descriptor limit it was given leaves past its
+/// own descriptors at its bounds, four a namespace, and never raises the limit. Do: lower this process's soft limit to
+/// the node's own and room for two namespaces' files, open a node, give back four boxes' namespaces of one owner,
+/// take and give back all four again, release them, and let the node go; then put the limit back. Expect: the node's
+/// bound two, the limit as it was set; two namespaces hold their files and two don't, whose checks entered, counted;
+/// in the second round two checks through files and two more entered, counted; none failed; after the release no
+/// file held; and every descriptor back to the count before the node.
+fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path) {
+    use rustix::process::{Resource, getrlimit};
+
+    if lab.rootless {
+        eprintln!("SKIP held files' bound: a rootless node keeps no network namespaces");
+        return;
+    }
+    let files = 2 + ["ip_tables_names", "ip6_tables_names"]
+        .iter()
+        .filter(|table| Path::new("/proc/net").join(table).exists())
+        .count();
+    let held = || {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .filter(|link| {
+                let link = link.to_string_lossy();
+                let link = link.strip_suffix(" (deleted)").unwrap_or(&link);
+                ["sockstat", "dev", "ip_tables_names", "ip6_tables_names"]
+                    .iter()
+                    .any(|name| link.ends_with(&format!("/net/{name}")))
+            })
+            .count()
+    };
+    let open_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let box_root = own.join("hex-reuse-files-bound");
+    let (first_node, _first_state) = lab.node(&box_root);
+    drop(first_node);
+    let soft = hex_node::netns::FilesBound::now().own + 2 * 4 + 3;
+    let Some(_limit) = soft_limit(soft) else {
+        eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
+        return;
+    };
+    let before_all = open_fds();
+    let (node, _state) = lab.node(&box_root);
+    let o = BoxOwner::named("owner-files-bound").unwrap();
+    let wait = ["/hex", "selftest-box", "wait"];
+    let make = |id: &str| BoxSpec {
+        id: BoxId::new(id).unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),
+        owner: Some(o.clone()),
+    };
+    let counts = || {
+        node.netns_reuse()
+            .unwrap()
+            .expect("a root node keeps namespaces")
+    };
+    let ruled = || {
+        wait_for(
+            || {
+                let c = counts();
+                c.checked + c.unchecked == c.given_back
+            },
+            "the checker's ruling on every namespace given back",
+        );
+        counts()
+    };
+    let start = counts();
+    let bound = start.files_bound.expect("a root node's bound");
+    assert_eq!(bound.namespaces, 2, "{bound:?}");
+    assert_eq!(
+        bound.soft,
+        Some(soft),
+        "the limit as it was set, never raised"
+    );
+    assert_eq!(getrlimit(Resource::Nofile).current, Some(soft));
+    let ids: Vec<String> = (0..4).map(|n| format!("files-bound-{n}")).collect();
+    for round in 0..2 {
+        // Each namespace's count settled before its check: a fresh one's (round 0) at none once its loopback
+        // request's socket is freed after a grace period (net/netlink/af_netlink.c:794-796, :703-715), a kept one's
+        // (round 1) at the check's own socket. Each check then reads `sockstat`'s count alone.
+        let settled = if round == 0 {
+            "sockets: used 0\n"
+        } else {
+            "sockets: used 1\n"
+        };
+        for id in &ids {
+            node.create(make(id)).unwrap();
+        }
+        for id in &ids {
+            let sockstat = format!(
+                "/proc/{}/net/sockstat",
+                std::fs::read_to_string(
+                    node.cgroup_dir(&BoxId::new(id).unwrap())
+                        .unwrap()
+                        .join("cgroup.procs")
+                )
+                .unwrap()
+                .lines()
+                .next()
+                .expect("the box's init")
+            );
+            wait_for(
+                || {
+                    std::fs::read_to_string(&sockstat)
+                        .unwrap()
+                        .starts_with(settled)
+                },
+                "the namespace's count settled",
+            );
+        }
+        let before = ruled();
+        for id in &ids {
+            node.delete(&BoxId::new(id).unwrap()).unwrap();
+        }
+        let after = ruled();
+        assert_eq!(after.files_held, 2, "round {round}: {after:?}");
+        assert_eq!(held(), 2 * files, "round {round}: {after:?}");
+        assert_eq!(
+            after.files_bounded,
+            before.files_bounded + 2,
+            "round {round}: two past the bound entered, counted: {after:?}"
+        );
+        assert_eq!(
+            after.through_files,
+            before.through_files + if round == 0 { 0 } else { 2 },
+            "round {round}: {after:?}"
+        );
+        assert_eq!(after.files_failed, 0, "{after:?}");
+    }
+    node.release_idle().unwrap();
+    wait_for(
+        || held() == 0,
+        "the namespaces released closing their files",
+    );
+    assert_eq!(counts().files_held, 0);
+    drop(node);
+    wait_for(
+        || open_fds() <= before_all,
+        "every descriptor the node held let go",
     );
 }
 
@@ -1469,6 +1622,36 @@ fn new_route() -> Vec<u8> {
 }
 
 /// Waits for `cond`, a fact, at most [`PATIENCE`].
+/// This process's descriptor limit as it was, put back as this drops.
+struct LimitPutBack(rustix::process::Rlimit);
+
+impl Drop for LimitPutBack {
+    fn drop(&mut self) {
+        let _ = rustix::process::setrlimit(rustix::process::Resource::Nofile, self.0);
+    }
+}
+
+/// Sets this process's soft descriptor limit to `soft` for a node a test opens after, as an installer sets the one a
+/// node is given (the node never changes it), and puts it back as the guard drops; `None` where the hard limit is
+/// under `soft`.
+fn soft_limit(soft: u64) -> Option<LimitPutBack> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+
+    let given = getrlimit(Resource::Nofile);
+    if given.maximum.is_some_and(|hard| hard < soft) {
+        return None;
+    }
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(soft),
+            maximum: given.maximum,
+        },
+    )
+    .ok()?;
+    Some(LimitPutBack(given))
+}
+
 fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {

@@ -35,7 +35,7 @@ NAME=hexbench-serial-$$
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 timeout 2400 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --tmpfs /run:rw,exec,nosuid,size=4g \
-  -e SUSTAINED -e MODE -e HEXBENCH_OWNER -e CPUSET="${CPUSET:-4-31}" -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
+  -e SUSTAINED -e MODE -e HEXBENCH_OWNER -e HEXBENCH_NOFILE -e CPUSET="${CPUSET:-4-31}" -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   registry.fedoraproject.org/fedora:44 \
   bash -c 'bash /opt/lab/probes/create_serial_inside.sh; cp /run/bt.*.txt /run/bt.*.err /run/dirs.*.txt /run/maps.*.txt /run/syms.*.txt /run/*.log /run/out.*.json /opt/out/ 2>/dev/null' \
   2>&1 | tee "$OUT/probe.out"

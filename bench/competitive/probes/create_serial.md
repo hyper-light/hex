@@ -871,7 +871,8 @@ On-CPU time a lifecycle in the runtime's threads: 1,333.1 us at 1 (`hex` 587.6, 
 - **Binary:** the final merge (`cp/t7-ext-s6-x-s3-final` ca6dc80; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91),
   one owner's boxes, the probe container on 4-15, the unit `hex-g5x-s6-fdh25-20261104T054328Z` after `reuse_pass.md` run
   16: oncpu 05:50:33Z to 05:55:23Z (load 26.3 falling to 5.4), locks 05:55:23Z to 05:58:36Z (load 5.4 to 6.4), about
-  6,800 to 6,900 host threads, kiln's pool beside it. Both programs run on every system call or context switch on the
+  6,800 to 6,900 host threads, kiln's pool beside it, and the session-lab agent's kiln gate unit, pinned to 16-31 then
+  (`reuse_pass.md` run 16). Both programs run on every system call or context switch on the
   host, so their absolute times carry that cost; the split is what the runs read.
 - **Runs:** `create-serial-oncpu-20261104T055033Z` (concurrency 1 over 5,020 lifecycles, 32 over 20,000 sustained),
   `create-serial-locks-20261104T055523Z`.
@@ -915,7 +916,8 @@ times at 183 us and blocked 0.029 times at 89 us).
 
 - **Binary:** the final merge (ca6dc80; `hex` a7706c0bf68bad85, `seam_oci` 55d4dd6ab5f6ae91), one owner's boxes, the
   probe container on 4-31, the unit `hex-g5x-s6-fdh28-20261104T061914Z`, 06:19:14Z to 06:21:36Z, load 1.7 to 6.7, CPU
-  pressure under 1%; beside it a build's LLVM thread (`opt cgu.13`) and kiln's services.
+  pressure under 1%; beside it, on 16-31, the session-lab agent's kiln gate unit (`kiln-gate-9c245a2959aa-1793770896`,
+  CPUWeight 1, Nice 19), whose build is the LLVM thread (`opt cgu.13`), and kiln's services.
 - **Runs:** `create-serial-offcpu-20261104T061914Z` (sustained at 32: 16,345 a second, 1.29 ms of CPU a lifecycle),
   `create-serial-threads-20261104T062058Z`.
 

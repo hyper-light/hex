@@ -242,14 +242,15 @@ impl Node {
         let supervisor = Supervisor::start(root.dir(), store.clone())?;
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
-        // user namespace of their own (decision 4).
-        if owner == Owner::Root {
-            crate::netns::room_for_the_node()?;
-        }
-        let netns = Netns::start(match owner {
-            Owner::Root => netns::BOUND,
-            Owner::Rootless { .. } => 0,
-        })?;
+        // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
+        // limit the node was given, never raised.
+        let netns = Netns::start(
+            match owner {
+                Owner::Root => netns::BOUND,
+                Owner::Rootless { .. } => 0,
+            },
+            crate::netns::FilesBound::now(),
+        )?;
         let ipc_uts = IpcUtsPool::start(match owner {
             Owner::Root => netns::IPC_UTS_BOUND,
             Owner::Rootless { .. } => 0,
@@ -404,7 +405,7 @@ impl Node {
                 ),
             });
         }
-        self.netns = Netns::start(bound)?;
+        self.netns = Netns::start(bound, crate::netns::FilesBound::now())?;
         Ok(self)
     }
 

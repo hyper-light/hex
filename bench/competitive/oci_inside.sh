@@ -15,6 +15,15 @@ set -uo pipefail
 RUNTIMES=${RUNTIMES:-"hex runc crun youki runsc libcrun"}; ROUNDS=${ROUNDS:-3}; ROUND_FIRST=${ROUND_FIRST:-1}; N=${N:-10000}; WARMUP=${WARMUP:-100}
 LIFECYCLES=${LIFECYCLES:-2000}; CAP=${CAP:-1000}; BUDGET_MIB=${BUDGET_MIB:-8192}; N_OVERRIDE=${N_OVERRIDE:-}
 OUT=/opt/out; mkdir -p /run/err
+# The soft descriptor limit everything here runs with (HEXBENCH_NOFILE): `hard` for the hard limit the container was
+# given, as Hex's installer sets a node's (the lead, 2026-11-04), a number for that, unset for the container's own
+# (dockerd's 1024), at which a Hex node holds no /proc/net files. Said here and in nofile.txt.
+case "${HEXBENCH_NOFILE:-given}" in
+  given) ;;
+  hard) ulimit -Sn "$(ulimit -Hn)" ;;
+  *) ulimit -Sn "$HEXBENCH_NOFILE" ;;
+esac
+echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given})" | tee "$OUT/nofile.txt"
 
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
 [ "${NETNS:-1}" = 0 ] && ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]'
