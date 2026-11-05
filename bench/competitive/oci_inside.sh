@@ -111,13 +111,18 @@ mkdir -p /run/standin && ln -sfn /usr/bin/true /run/standin/crun
 # running box, whose difference between the drivers is the socket's cost per call); around each, seam_oci reads
 # the node's network namespace counts (decision 4), so the sustained phase says how often its creates found the
 # namespace pool dry.
+# A round that exits non-zero crashed: it's said in the log and named in crashed.txt (`<file> r<round> exited
+# <status>`), which summarize.py marks, taking no best of N beside it, and once every round has run this pass
+# exits non-zero naming each, so host.sh's caller never reads a crashed pass as a whole one (CLAUDE.md §3).
+CRASHED=()
+crashed() { echo "$1 round $2 exited $3"; echo "$1 r$2 exited $3" >> "$OUT/crashed.txt"; CRASHED+=("$1 r$2 exited $3"); }
 SEAM=""; [ -n "${SEAM_OCI:-}" ] && [ -x "$SEAM_OCI" ] && SEAM="hex-seam hex-seam-socket"
 for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
   for rt in $(printf '%s\n' $ok_runtimes $([ "${STANDIN:-1}" = 1 ] && echo standin) $SEAM | shuf); do
     if [ "$rt" = standin ]; then
       echo "round $round: the stand-in (/usr/bin/true as crun)"
       HEXBENCH_BIN=/run/standin HEXBENCH_PHASES=throughput python3 /opt/lab/oci_bench.py crun "$OUT/ceiling.standin.r$round.json" \
-        1 0 "$LIFECYCLES" 0 64
+        1 0 "$LIFECYCLES" 0 64 || crashed ceiling.standin "$round" $?
       continue
     fi
     if [ "$rt" = hex-seam ] || [ "$rt" = hex-seam-socket ]; then
@@ -125,12 +130,14 @@ for round in $(seq "$ROUND_FIRST" $((ROUND_FIRST + ROUNDS - 1))); do
       echo "round $round: the oci class through the Runtime seam (seam_oci, $driver)"
       HEXBENCH_DRIVER=$driver "$SEAM_OCI" "$OUT/$file.r$round.json" "$N" "$WARMUP" "$LIFECYCLES" /opt/bin/hex \
         /run/bundle-sleep /run/bundle-true /run/bundle-sleep-nonet 2>&1 | tee -a "$OUT/$file.log" \
-        || echo "$file round $round exited $?"
+        || crashed "$file" "$round" $?
       continue
     fi
     n=$N; for o in $N_OVERRIDE; do [ "${o%%:*}" = "$rt" ] && n=${o#*:}; done
     echo "round $round: $rt (n=$n)"
-    python3 /opt/lab/oci_bench.py "$rt" "$OUT/$rt.r$round.json" "$n" "$WARMUP" "$LIFECYCLES" "$CAP" "$BUDGET_MIB"
+    python3 /opt/lab/oci_bench.py "$rt" "$OUT/$rt.r$round.json" "$n" "$WARMUP" "$LIFECYCLES" "$CAP" "$BUDGET_MIB" \
+      || crashed "$rt" "$round" $?
   done
 done
 echo done > $OUT/oci.done
+[ ${#CRASHED[@]} = 0 ] || { printf 'crashed round: %s\n' "${CRASHED[@]}" >&2; exit 1; }
