@@ -29,7 +29,7 @@ each named below.
 
 | Class | Injected | Detected when | Isolated when | Bound |
 |---|---|---|---|---|
-| Crash | a node stops answering | a member first suspects it (F1) | it is declared dead and its work is moved | suspicion ≤ 5 probe periods + probe timeout at p99, ≤ 2(n−1) periods + timeout at max; dead ≤ suspicion + suspicion max timeout + 1 period |
+| Crash | a node stops answering | a member first suspects it (F1) | it is declared dead and its work is moved | suspicion ≤ 6 probe periods + probe timeout at p99 (F1's derivation), ≤ 2(n−1) periods + timeout at max; dead ≤ suspicion + suspicion max timeout + 1 period |
 | Gray / fail-slow | a node's work runs ≥ 2.5x slower than its peers' | `Suspect` (F2) | `Drain` | ≤ 2 windows (2 s) and ≤ 4 windows (4 s): under Panorama's 7 s (FI[4]) |
 | Disk stall | a node's probe write stops completing | `Suspect` (F3) | `Drain` | ≤ 1 timeout + 1 probe period and ≤ 3 timeouts + 1 period; the timeout is at least 1 s (1 s on a healthy fast disk) |
 | Antagonist | a co-tenant's CPU use doubles its neighbours' CPI | a victim with an antagonist correlated ≥ 0.35 (F4) | the antagonist capped | ≤ 3 CPI samples + 1 s (CPI²'s cadence: one a minute, so ≤ 181 s) |
@@ -51,19 +51,40 @@ And across classes (F6):
 
 ### F1. Crash: SWIM with Lifeguard, on memberlist's constants
 
-**The choice.** Membership and crash detection are SWIM with Lifeguard, as hyper-swim runs them
-(`PF[5]`, `PF[9]`), on memberlist's LAN defaults (FI[2]): a probe a second, a 500 ms probe timeout, 3
+**The choice.** Membership and crash detection are SWIM with Lifeguard (`PF[5]`, `PF[9]`). The crash
+class's bound is stated and measured on memberlist's LAN defaults (FI[2]), the reference
+implementation: a probe a second, a 500 ms probe timeout, 3
 indirect probes, a suspicion timeout from `4 × max(1, log10 n)` periods up to 6 times that, shrinking as
 independent confirmations arrive (FI[3]), and Lifeguard's local health multiplier up to 8. A suspicion
 is a hint: the scheduler stops placing on a suspected node at once, and moves its work only once it is
-declared dead, through F6's caps. hex-sim models the protocol (`membership.rs`) rather than linking
-hyper-swim, so the crash class is measured beside the rest; the node agent's membership is hyper-swim's.
+declared dead, through F6's caps. hex-sim models memberlist's protocol (`membership.rs`) and takes none of hyper-swim's
+code or constants. hyper-swim, the node agent's membership, times each pair from its measured round
+trips (NFD-E, RFC 6298's timer of 1-60 s) rather than memberlist's fixed second and 500 ms, so its
+crash bound is its own to measure, once hex-sim drives its detector through the vendored copy.
+
+**The crash bound, derived.** Each period every live member probes one other, so a given member goes
+unprobed in a period with probability about `(1 − 1/(n−1))^(n−1) ≈ e^−1` (`PF[8]` §3.1: the first
+probe comes `e/(e−1)` periods after a crash on average), and in `k` periods with about `e^−k`. Its
+prober suspects it when the indirect probes' wait ends, a period after its probe began (memberlist's
+`probeNode`). The p99 of the first suspicion is then `ln(100) + 1 ≈ 5.6` periods: at most 6 periods and
+the probe timeout. hex-sim measured 5.60 s over 1,000 seeds of 8-128 members, with Lifeguard and
+without. The bound was 5 periods until 2026-11-05: that left out the period from the probe to the
+suspicion, so no SWIM on memberlist's protocol could meet it. A target selection that probes every
+member every period (a shared ring per period) would bound it at 2 periods; that is hyper-swim's
+protocol, not Hex's, and a possible later improvement for its owner.
 
 **Sources.** SWIM's deterministic bound from round-robin probing (`PF[8]`); Lifeguard's 50-100x fewer
 false positives at a cost of about 1 s at p99 (FI[1]); memberlist's constants (FI[2], FI[3]).
 
 **Evidence.** `membership.rs`'s tests: the crash bound over 1,000 seeds, and with 4% of members slow,
-Lifeguard's false positives under 2% of SWIM's on the same seeds.
+Lifeguard's false positives under 2% of SWIM's on the same seeds (11 against 17,297, 0.06%). With one
+slow member, delayed 1-30 s, Lifeguard declares no healthy member dead (SWIM: thousands). Every
+declaration against a healthy member is a slow member's own, made before it hears the refutation, and
+Lifeguard's suspicion starts past any such delay. The 4% case's 11 each had exactly one confirmation,
+from another slow member: dynamic suspicion takes several slow members' suspicions of one healthy
+member as independent and shrinks the timeout past the refutation (traced 2026-11-05, unit
+`hex-sched-g5-probe-chk1-20261105T113256Z`). Counting a confirmation only from a member in good local
+health would close it; that is hyper-swim's protocol, a possible later improvement for its owner.
 
 **What would falsify it.** A crash suspected or declared dead past its bound; or with Lifeguard on, healthy
 members declared dead at more than 2% of SWIM's rate because of slow members.

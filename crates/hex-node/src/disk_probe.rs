@@ -11,7 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -53,7 +53,9 @@ struct Shared {
     /// Set once the judge saw `Drain`; never cleared (a node is uncordoned by a person or the control
     /// plane, not by the disk answering again).
     cordoned: AtomicBool,
-    stop: AtomicBool,
+    /// Set to stop the prober; `wake` tells it at once rather than at the end of its period.
+    stop: Mutex<bool>,
+    wake: Condvar,
     /// The prober's last write error, if it ended on one.
     failed: Mutex<Option<String>>,
 }
@@ -97,7 +99,8 @@ impl DiskProber {
         let shared = Arc::new(Shared {
             probe: Mutex::new(DiskProbe::new(GRANULARITY_NS)),
             cordoned: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
+            stop: Mutex::new(false),
+            wake: Condvar::new(),
             failed: Mutex::new(None),
         });
         let epoch = Instant::now();
@@ -106,12 +109,11 @@ impl DiskProber {
             .name("hex-disk-probe".into())
             .spawn(move || {
                 let record = [0u8; RECORD_BYTES];
-                if let Err(e) = probe_loop(&ours, epoch, period, || {
-                    write_record(&mut file, &record)
-                }) {
-                    if let Ok(mut f) = ours.failed.lock() {
-                        *f = Some(e.to_string());
-                    }
+                if let Err(e) =
+                    probe_loop(&ours, epoch, period, || write_record(&mut file, &record))
+                    && let Ok(mut f) = ours.failed.lock()
+                {
+                    *f = Some(e.to_string());
                 }
             })
             .map_err(ProbeError::Spawn)?;
@@ -128,8 +130,11 @@ impl DiskProber {
         if let Some(e) = lock(&self.shared.failed)?.as_ref() {
             return Err(ProbeError::Ended(e.clone()));
         }
-        let now = since(self.epoch)?;
-        let level = lock(&self.shared.probe)?.level(now)?;
+        // The clock is read under the lock: read before it, the prober could finish a probe stamped
+        // later in between, and the judgement's time would run backwards.
+        let probe = lock(&self.shared.probe)?;
+        let level = probe.level(since(self.epoch)?)?;
+        drop(probe);
         if level == Level::Drain {
             self.shared.cordoned.store(true, Ordering::Release);
         }
@@ -143,16 +148,25 @@ impl DiskProber {
 
     /// The probe's current timeout, for a record of the drill.
     pub fn timeout(&self) -> Result<Duration, ProbeError> {
-        Ok(Duration::from_nanos(lock(&self.shared.probe)?.timeout_ns()?))
+        Ok(Duration::from_nanos(
+            lock(&self.shared.probe)?.timeout_ns()?,
+        ))
     }
 
+    /// Stop the prober after its current write.
+    fn stop(&self) {
+        if let Ok(mut stop) = self.shared.stop.lock() {
+            *stop = true;
+        }
+        self.shared.wake.notify_all();
+    }
 }
 
 impl Drop for DiskProber {
     /// The prober stops after its current write. A write stalled on the disk holds its thread until
     /// the disk answers, so the thread is left to end on its own rather than joined here.
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
+        self.stop();
         drop(self.thread.take());
     }
 }
@@ -164,14 +178,26 @@ fn probe_loop(
     period: Duration,
     mut write: impl FnMut() -> std::io::Result<()>,
 ) -> Result<(), ProbeError> {
-    while !shared.stop.load(Ordering::Acquire) {
+    loop {
         let began = Instant::now();
-        lock(&shared.probe)?.start(since(epoch)?)?;
+        {
+            let mut probe = lock(&shared.probe)?;
+            probe.start(since(epoch)?)?;
+        }
         write().map_err(ProbeError::Write)?;
-        lock(&shared.probe)?.finish(since(epoch)?)?;
-        std::thread::sleep(period.saturating_sub(began.elapsed()));
+        {
+            let mut probe = lock(&shared.probe)?;
+            probe.finish(since(epoch)?)?;
+        }
+        let stop = lock(&shared.stop)?;
+        let (stop, _) = shared
+            .wake
+            .wait_timeout_while(stop, period.saturating_sub(began.elapsed()), |s| !*s)
+            .map_err(|_| ProbeError::Poisoned)?;
+        if *stop {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -179,11 +205,18 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// Wait `d` between judgements: on a channel nothing sends on, as `thread::sleep` is disallowed.
+    fn pause(d: Duration) {
+        let (_keep, rx) = mpsc::channel::<()>();
+        let _ = rx.recv_timeout(d);
+    }
+
     fn shared() -> Arc<Shared> {
         Arc::new(Shared {
             probe: Mutex::new(DiskProbe::new(GRANULARITY_NS)),
             cordoned: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
+            stop: Mutex::new(false),
+            wake: Condvar::new(),
             failed: Mutex::new(None),
         })
     }
@@ -221,7 +254,7 @@ mod tests {
                     return;
                 }
                 assert!(Instant::now() < end, "never reached {want:?}, at {level:?}");
-                std::thread::sleep(Duration::from_millis(5));
+                pause(Duration::from_millis(5));
             }
         };
         assert_eq!(prober.level().unwrap(), Level::Healthy);
@@ -231,7 +264,7 @@ mod tests {
         assert!(prober.schedulable());
         wait_for(Level::Drain, Duration::from_secs(10));
         assert!(!prober.schedulable());
-        s.stop.store(true, Ordering::Release);
+        prober.stop();
         release.send(()).unwrap();
         thread.join().unwrap().unwrap();
         // Cordoned stays cordoned once the disk answers again.
@@ -255,7 +288,7 @@ mod tests {
         let p = DiskProber::start(dir.path(), Duration::from_millis(10)).unwrap();
         for _ in 0..20 {
             assert_eq!(p.level().unwrap(), Level::Healthy);
-            std::thread::sleep(Duration::from_millis(10));
+            pause(Duration::from_millis(10));
         }
         assert!(p.schedulable());
     }

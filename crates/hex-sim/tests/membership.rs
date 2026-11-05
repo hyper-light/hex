@@ -31,9 +31,10 @@ fn crash_case(seed: u64) -> (u32, u32, u64) {
 
 /// S8 (crash detection, implementation goal 5): do 1,000 seeds of 8 to 128 members with one member
 /// crashed after warm-up, with Lifeguard and as the SWIM baseline; expect the first suspicion within
-/// 6 probe periods at the p99 and within SWIM's round-robin bound of 2·(n−1) periods + the timeout at
-/// the max, the first death within the first suspicion + the suspicion's
-/// max timeout + one period, and (non-vacuity) every crash detected and dead at every live member.
+/// 6 probe periods at the p99 (F1's derivation, ln(100) + 1, agreeing with the measured p99) and
+/// within SWIM's round-robin bound of 2·(n−1) periods + the timeout at the max, the first death within
+/// the first suspicion + the suspicion's max timeout + one period, and (non-vacuity) every crash
+/// detected and dead at every live member.
 #[test]
 fn a_crashed_member_is_suspected_and_declared_dead_within_its_bound() {
     for lifeguard in [true, false] {
@@ -90,16 +91,19 @@ fn a_crashed_member_is_suspected_and_declared_dead_within_its_bound() {
             ms(all_dead.p99),
             ms(all_dead.max),
         );
-        // The n − 1 live members probe the crashed one about once a period between them, so no probe
-        // reaches it in k periods with probability about e^-k (SWIM §3.1: e/(e−1) periods to the first
-        // probe on average), and the prober suspects it a whole period after its probe began, when the
-        // ping-reqs' wait ends (memberlist's probeNode). The p99 is then ln(100) + 1 = 5.6 periods,
-        // within 6; 5 periods + the probe timeout (5.5) is below it, measured 5.60 s.
-        let config = Config::lan(8, lifeguard);
+        // F1's derivation (docs/design/failure-isolation.md): a member goes unprobed in a period with
+        // probability about e^-1 (SWIM §3.1), so in k periods with about e^-k, and its prober suspects
+        // it a period after its probe began, when the ping-reqs' wait ends (memberlist's probeNode).
+        // The p99 is then ln(100) + 1 periods. Do expect the measured p99 within the 6-period bound,
+        // at most the derivation, and within half a period of it (the derivation isn't loose).
+        let period_ns = Config::lan(8, lifeguard).probe_interval_ns;
+        let period = period_ns as f64;
+        let derived = (100f64.ln() + 1.0) * period;
+        let p99 = suspected.p99 as f64;
+        assert!(suspected.p99 <= 6 * period_ns);
         assert!(
-            suspected.p99 <= 6 * config.probe_interval_ns,
-            "p99 first suspicion {} ns",
-            suspected.p99
+            p99 <= derived && derived - p99 <= period / 2.0,
+            "p99 first suspicion {p99} ns against the derived {derived} ns"
         );
     }
 }
@@ -166,12 +170,13 @@ fn lifeguard_cuts_false_positives_from_slow_members_to_under_two_percent_of_swim
 }
 
 /// S8, step 3's case (Lifeguard's, PF[9]): do 200 seeds of 32 to 128 members with one member slow
-/// from 2 s, its delay drawn from 1 s up to half Lifeguard's suspicion max timeout; expect no healthy
-/// member declared dead with Lifeguard, and some with it off (non-vacuity). Every declaration against
-/// a healthy member is the slow member's own: its suspicion is refuted only once its gossip reached
-/// the target and the refutation came back, each processed a delay late, so it holds a false
-/// suspicion only past 2·delay. Under half the max timeout, Lifeguard's dynamic suspicion outwaits
-/// that; SWIM's fixed timeout (its min, 6.0-8.4 s) doesn't from 3-4.2 s on.
+/// from 2 s, its delay drawn in 1-30 s as in the 4% case; expect no healthy member declared dead with
+/// Lifeguard, and some with it off (non-vacuity). Every declaration against a healthy member is the
+/// slow member's own: its timers fire on time but it hears the refutation a delay late. Lifeguard's
+/// suspicion starts at its maximum (36.1-50.6 s here), past any such delay, and only independent
+/// confirmations shrink it; with one slow member there are none. SWIM's fixed timeout, its minimum
+/// (6.0-8.4 s), doesn't outwait it. (With several slow members, they confirm each other's false
+/// suspicions: the 11 of the 4% case below, each with one confirmation, from another slow member.)
 #[test]
 fn a_slow_member_makes_lifeguard_declare_no_healthy_member_dead() {
     let (mut swim, mut lifeguard) = (0u64, 0u64);
@@ -179,8 +184,7 @@ fn a_slow_member_makes_lifeguard_declare_no_healthy_member_dead() {
         let mut r = Rng::new(seed ^ 0x51_0e01);
         let n = u32::try_from(r.range(32, 128)).unwrap();
         let slow = u32::try_from(r.range(0, u64::from(n) - 1)).unwrap();
-        let (_, max) = Config::lan(n, true).suspicion_bounds().unwrap();
-        let delay_ns = r.range(SECOND, max / 2);
+        let delay_ns = r.range(SECOND, 30 * SECOND);
         for on in [false, true] {
             let mut config = Config::lan(n, on);
             config.end_ns = 120 * SECOND;
@@ -198,7 +202,7 @@ fn a_slow_member_makes_lifeguard_declare_no_healthy_member_dead() {
             }
         }
     }
-    println!("one slow member, delay under half the max timeout: SWIM {swim}, Lifeguard {lifeguard}");
+    println!("one slow member, delay 1-30 s: SWIM {swim}, Lifeguard {lifeguard}");
     assert!(swim > 0, "the SWIM baseline made no false positives");
     assert_eq!(lifeguard, 0);
 }

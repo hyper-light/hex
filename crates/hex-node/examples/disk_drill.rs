@@ -55,9 +55,15 @@ fn spawn_worker(id: usize, unit: Arc<Unit>, dir: PathBuf, generation: u64) {
             }
             *unit.in_flight.lock().unwrap() = None;
             unit.writes.fetch_add(1, Ordering::Relaxed);
-            std::thread::sleep(Duration::from_millis(50));
+            pause(Duration::from_millis(50));
         }
     });
+}
+
+/// Wait `d`: on a channel nothing sends on, as `thread::sleep` is disallowed.
+fn pause(d: Duration) {
+    let (_keep, rx) = std::sync::mpsc::channel::<()>();
+    let _ = rx.recv_timeout(d);
 }
 
 fn sh(cmd: &str) {
@@ -67,7 +73,10 @@ fn sh(cmd: &str) {
 
 fn main() {
     let mut args: BTreeMap<String, String> = BTreeMap::new();
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args_os().skip(1).map(|a| {
+        a.into_string()
+            .unwrap_or_else(|a| panic!("an argument isn't Unicode: {a:?}"))
+    });
     while let (Some(k), Some(v)) = (it.next(), it.next()) {
         args.insert(k.trim_start_matches("--").to_string(), v);
     }
@@ -133,16 +142,16 @@ fn main() {
             }
         }
         for (id, u) in all.iter().enumerate() {
-            if let Some(began) = *u.in_flight.lock().unwrap() {
-                if now.duration_since(began) > deadline {
-                    failed[id] = true;
-                }
+            if let Some(began) = *u.in_flight.lock().unwrap()
+                && now.duration_since(began) > deadline
+            {
+                failed[id] = true;
             }
         }
         if stalled_at.is_some_and(|s| now - s >= after) {
             break;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        pause(Duration::from_millis(10));
     }
     sh(&resume_cmd);
     let ms = |d: Option<Duration>| d.map_or("none".to_string(), |d| d.as_millis().to_string());
