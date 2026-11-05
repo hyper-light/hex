@@ -91,11 +91,23 @@ fn descriptor_bounds() -> [(&'static str, u64); 9] {
     let boxes = hex_runtime::linux::cgroup::MAX_BOXES;
     let connections = crate::serve::LIMITS.connections;
     [
-        ("kept namespaces idle", of(netns_reuse::PER_NODE, FDS_A_KEPT)),
-        ("kept namespaces on the checkers' line", of(netns_reuse::PER_NODE, FDS_A_KEPT)),
-        ("live boxes", of(boxes, FDS_A_KEPT.saturating_add(FDS_A_BOX))),
+        (
+            "kept namespaces idle",
+            of(netns_reuse::PER_NODE, FDS_A_KEPT),
+        ),
+        (
+            "kept namespaces on the checkers' line",
+            of(netns_reuse::PER_NODE, FDS_A_KEPT),
+        ),
+        (
+            "live boxes",
+            of(boxes, FDS_A_KEPT.saturating_add(FDS_A_BOX)),
+        ),
         ("connections", of(connections, 1)),
-        ("programs watched", of(connections.saturating_mul(crate::serve::LIMITS.programs), 1)),
+        (
+            "programs watched",
+            of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
+        ),
         ("create seeds", of(hex_core::seeds::SEEDS.get(), FDS_A_SEED)),
         ("exec seeds", EXEC_SEEDS.saturating_mul(FDS_A_SEED)),
         ("the create seeds' pruned mount namespace", FDS_PRUNED),

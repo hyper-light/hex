@@ -1424,7 +1424,9 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-seedns"), state.path());
     // A create seed is a child of this process re-exec'd as `__oci-seed` that prunes (before goal 6's change)
-    // or joins (after it) a pruned namespace, as its environment says; an exec seed does neither.
+    // or joins (after it) a pruned namespace, as its environment says; an exec seed does neither. A box's init
+    // made and not yet started is a child of this process too (cloned with `CLONE_PARENT`) and still the seed's
+    // image, but in its box's pid namespace: its `NSpid` names two pids, a seed's one (proc_pid_status(5)).
     let create_seeds = || -> Vec<u32> {
         let me = std::process::id().to_string();
         let mut seeds = Vec::new();
@@ -1437,7 +1439,13 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
             let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
             let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
             let has = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).any(|w| w == needle);
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+            let in_our_pid_namespace = status
+                .lines()
+                .find_map(|l| l.strip_prefix("NSpid:"))
+                .is_some_and(|pids| pids.split_whitespace().count() == 1);
             if ppid == Some(me.as_str())
+                && in_our_pid_namespace
                 && has(&cmdline, b"__oci-seed")
                 && (has(&environ, b"HEX_OCI_SEED_PRUNE=") || has(&environ, b"HEX_OCI_SEED_JOIN="))
             {
@@ -1446,7 +1454,11 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
         }
         seeds
     };
-    let namespace = |pid: u32| std::fs::metadata(format!("/proc/{pid}/ns/mnt")).map(|m| m.ino()).ok();
+    let namespace = |pid: u32| {
+        std::fs::metadata(format!("/proc/{pid}/ns/mnt"))
+            .map(|m| m.ino())
+            .ok()
+    };
     let mounts = |pid: u32| {
         std::fs::read_to_string(format!("/proc/{pid}/mountinfo"))
             .map(|t| t.lines().count())
@@ -1492,13 +1504,33 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
     for id in &ids {
         node.delete(id).expect("delete");
     }
-    assert!(seeds.len() >= 2, "several create seeds to compare: {seeds:?}");
-    assert_eq!(spaces.len(), 1, "every create seed in one mount namespace: {spaces:?}");
+    assert!(
+        seeds.len() >= 2,
+        "several create seeds to compare: {seeds:?}"
+    );
+    assert_eq!(
+        spaces.len(),
+        1,
+        "every create seed in one mount namespace: {spaces:?}"
+    );
     let own_space = std::fs::metadata("/proc/self/ns/mnt").unwrap().ino();
-    assert!(!spaces.contains(&own_space), "the seeds' namespace is pruned, not the node's own");
-    assert_eq!(tables, BTreeSet::from([before]), "the pruned namespace unchanged by the creates");
-    assert!(before <= 2, "the pruned namespace holds its tmpfs root and no more: {before} mounts");
-    eprintln!("create seeds: {} in one pruned namespace of {before} mounts", seeds.len());
+    assert!(
+        !spaces.contains(&own_space),
+        "the seeds' namespace is pruned, not the node's own"
+    );
+    assert_eq!(
+        tables,
+        BTreeSet::from([before]),
+        "the pruned namespace unchanged by the creates"
+    );
+    assert!(
+        before <= 2,
+        "the pruned namespace holds its tmpfs root and no more: {before} mounts"
+    );
+    eprintln!(
+        "create seeds: {} in one pruned namespace of {before} mounts",
+        seeds.len()
+    );
 }
 
 /// Whether `open_tree(OPEN_TREE_CLONE)` clones a mount outside the caller's namespace, a detached tmpfs's: Linux

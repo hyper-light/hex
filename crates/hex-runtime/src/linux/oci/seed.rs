@@ -170,7 +170,8 @@ pub fn prune_namespace(mountpoint: &Path) -> Result<OwnedFd, OciError> {
         Some(c"size=64k,mode=755"),
     )
     .map_err(|e| OciError::os("the pruned namespace's root tmpfs", e))?;
-    rustix::process::chdir(mountpoint).map_err(|e| OciError::os("chdir the pruned namespace's root", e))?;
+    rustix::process::chdir(mountpoint)
+        .map_err(|e| OciError::os("chdir the pruned namespace's root", e))?;
     rustix::process::pivot_root(c".", c".")
         .map_err(|e| OciError::os("the pruned namespace's pivot_root", e))?;
     rustix::mount::unmount(".", UnmountFlags::DETACH)
