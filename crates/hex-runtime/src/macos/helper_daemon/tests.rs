@@ -184,6 +184,50 @@ fn the_daemon_serves_a_box_end_to_end() {
     assert!(daemon.ops.inner.lock().unwrap().arm_calls >= 2);
 }
 
+/// HEX-DIFF-1, HEX-DIFF-2 in box-user mode: once every member of a box has ended, a signal is refused as
+/// not running (as every class refuses it), and the box still takes a program, which joins its user.
+#[test]
+fn a_box_with_no_live_member_refuses_a_signal_and_takes_a_program() {
+    let (client, server) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .expect("socketpair");
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
+    let handle = thread::spawn(move || {
+        let daemon = Daemon::new(Sim::default(), vec![7000], 64);
+        let _ = daemon.serve(server.as_fd());
+    });
+
+    let client = Helper::over(client, VERSION);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client
+        .start(&b1, &prog(), nulls().each_ref().map(|f| f.as_fd()), true)
+        .unwrap();
+
+    // KILL ends every member; the box stays, with none live.
+    client.signal(&b1, 9).unwrap();
+    assert_eq!(client.inspect(&b1).unwrap().members, 0);
+    assert!(matches!(
+        client.signal(&b1, 15),
+        Err(hex_api::Refusal::NotRunning(_, "signal"))
+    ));
+
+    // The next program starts as the box's user, and a signal reaches it again.
+    client
+        .start(&b1, &prog(), nulls().each_ref().map(|f| f.as_fd()), false)
+        .unwrap();
+    assert_eq!(client.inspect(&b1).unwrap().members, 1);
+    client.signal(&b1, 15).unwrap();
+
+    drop(client);
+    handle.join().expect("daemon thread");
+}
+
 /// A few sleeping children of this process, killed when dropped.
 struct Sleepers(Vec<Child>);
 

@@ -526,7 +526,17 @@ impl<P: Privileged> Daemon<P> {
                 None => return Answer::Refused(Refused::UnknownBox(box_id.clone())),
             }
         };
+        // Refused as not running when the user has no live member (an ended one awaiting reap is not
+        // one), as every class refuses it (HEX-DIFF-2).
+        match self.ops.list(uid) {
+            Ok(live) if live.is_empty() => {
+                return Answer::Refused(Refused::NotRunning(box_id.clone()));
+            }
+            Ok(_) => {}
+            Err(e) => return os("reading a box's members", &e),
+        }
         match self.ops.kill(uid, signal) {
+            Ok(0) => Answer::Refused(Refused::NotRunning(box_id.clone())),
             Ok(_) => Answer::Signalled,
             Err(e) => os("signalling a box", &e),
         }

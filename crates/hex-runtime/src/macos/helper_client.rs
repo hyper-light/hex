@@ -212,6 +212,7 @@ impl Helper {
 fn refusal(r: Refused) -> Refusal {
     match r {
         Refused::UnknownBox(b) => Refusal::NoSuchBox(b),
+        Refused::NotRunning(b) => Refusal::NotRunning(b, "signal"),
         Refused::AlreadyAcquired(b) => Refusal::Exists(b),
         Refused::NoFreeUser => Refusal::Os {
             op: "acquire a box user from the helper",

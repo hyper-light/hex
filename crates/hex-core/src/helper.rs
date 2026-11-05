@@ -83,7 +83,7 @@ pub enum Request {
     Inspect { box_id: BoxId },
     /// Send a signal to every member of the box (the node can't signal another user's processes itself).
     /// `signal` is the Linux signal number, as the rest of Hex carries it; the helper maps it to macOS's
-    /// (`hex_core::darwin`), as the process class does.
+    /// (`hex_core::darwin`), as the process class does. Refused as not running when no member is live.
     Signal { box_id: BoxId, signal: i32 },
 }
 
@@ -132,6 +132,8 @@ pub enum Refused {
     NotPermitted(String),
     #[error("the request was malformed: {0}")]
     Malformed(String),
+    #[error("the box {0} has no live member")]
+    NotRunning(BoxId),
 }
 
 impl Request {
@@ -172,6 +174,7 @@ fn refused_tag(r: &Refused) -> u8 {
         Refused::StartFailed(_) => 3,
         Refused::NotPermitted(_) => 4,
         Refused::Malformed(_) => 5,
+        Refused::NotRunning(_) => 6,
     }
 }
 
@@ -238,7 +241,9 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
         Answer::Refused(r) => {
             w.u8(refused_tag(r));
             match r {
-                Refused::UnknownBox(b) | Refused::AlreadyAcquired(b) => w.string(b.as_str())?,
+                Refused::UnknownBox(b) | Refused::AlreadyAcquired(b) | Refused::NotRunning(b) => {
+                    w.string(b.as_str())?
+                }
                 Refused::StartFailed(m) | Refused::NotPermitted(m) | Refused::Malformed(m) => {
                     w.string(m)?
                 }
@@ -368,6 +373,7 @@ fn read_refused(r: &mut Reader<'_>) -> Result<Refused, Fault> {
         3 => Refused::StartFailed(r.string("reason")?),
         4 => Refused::NotPermitted(r.string("reason")?),
         5 => Refused::Malformed(r.string("reason")?),
+        6 => Refused::NotRunning(wire::box_id(r)?),
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }

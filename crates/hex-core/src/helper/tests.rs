@@ -94,6 +94,7 @@ fn answers_round_trip() {
         Answer::Refused(Refused::StartFailed("ENOENT".to_owned())),
         Answer::Refused(Refused::NotPermitted("exec arbitrary".to_owned())),
         Answer::Refused(Refused::Malformed("bad id".to_owned())),
+        Answer::Refused(Refused::NotRunning(box_id("b9"))),
     ];
     for ans in &answers {
         let bytes = encode_answer(VERSION, 9, ans).expect("encode");
