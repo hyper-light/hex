@@ -502,8 +502,11 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
   - Serially (host.sh's lifecycle pass, cp/t7-g5-parkproc f15393c's record), the delete's in-process p50 rises
     0.03-0.12 ms, with every create a hit.
 - **Where the proc is made, decided (the lead, 2026-11-05 17:00Z): on the parking thread**, as built at
-  cp/t7-g5-parkproc f15393c, and at its gated tip a4915c6 (code tree 1e5e956; gates 7/7, root lab 7 of 7 and the
-  guest lab 2 of 2 in one unit, hex-g5tail-ppfull-20261105T170215Z). Both worker arms failed. A single worker couldn't keep pace (hits 409-663 of 1,992, part 19
+  cp/t7-g5-parkproc f15393c. Its gated tip is now 06d4c28 (code tree 253641a; gates 7/7, with the root lab and the
+  guest lab in the same unit, hex-g5tail-ppfull-20261105T192457Z). That tree adds only fce1134, which caps the procs
+  alive at the dropper's queue (256). Under the bar's conditions far fewer are alive than that, so the cap never binds,
+  and the re-run at 1e5e956 below still describes the tree (an earlier gated tip, a4915c6, code tree 1e5e956, was
+  gated in hex-g5tail-ppfull-20261105T170215Z). Both worker arms failed. A single worker couldn't keep pace (hits 409-663 of 1,992, part 19
   back at the off arm's numbers), and the workers were bound by the one shared mount lock all the procs' holds take.
 - **It's opt-in:** `Node::with_parked_procs`, off by default. Whether it goes on by default is Ada's call.
 - **The re-run at that tree** (parked_procs_ab.md, "at 1e5e956"; harness cp/t7-g6 f8933bd by git archive; 17:05-17:12Z,
@@ -514,6 +517,12 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
   - its unpreempted p99: 470-1,644 → 58-812 us;
   - every claim a hit.
   The serial delete-cost pass there reads the delete flat, and the 32-in-flight rate 1-3% lower.
+- **The three arms** (record ea704cf, at 1890f85; the lead ruled on them at 19:30Z: (i) stays):
+  - (i), the proc made on the parking thread: kept.
+  - After the delete has replied: it keeps part 19's p50 (42-49 us), but 22-36% of its claims are dry at 8 in flight.
+    Its part 19 p99 is higher than (i)'s in 6 of 8 rounds (541-1,402 us at 6 loops, 823-4,279 us at 12), and its
+    create p50 is 0.06-0.25 ms worse.
+  - 8 workers keep none of the gain: their holds sit on the same shared mount lock.
 - **The 7.2 guest**, indicative only: parked_procs_ab.md's guest runs are at 9e13b95 (the copy way) and 8c35cf9 (the
   tree way). Both already make the proc on the parking thread, as the final design does, so they aren't rerun at the
   gated tip (the lead, 18:01Z). Both cut part 19's p50 about 5x, with every claim a hit; their tails mostly reflect the
