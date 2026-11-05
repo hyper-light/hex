@@ -67,11 +67,15 @@ The suite on jupiter: `windows_process_box` 9 of 9 at 1a2e1eb and at e322d7b (en
 |---|---|---|---|
 | create | 0.028 (0.028-0.042) | none (its start is its create) | |
 | start | 21.9 (21.9-43.5) | 52.0 (52.0-58.5) | 2.4x |
+| start p99 | 39.6 (39.6-61.5) | 70.1 (70.1-100.0) | 1.77x |
 | delete | 0.866 (0.866-0.984) | 221.6 (221.6-268.9) | 256x |
+| delete p99 | 1.26 (1.26-1.95) | 313.7 (313.7-327.2) | 249x |
 | bound held | 20/20 per pass, 6 MiB under | 20/20 per pass, 3 MiB under | equal |
 | bound's end | 186.8 (186.8-197.6) | 406.6 (406.6-438.4; one 6,239 ms outlier in pass 1) | 2.2x |
 
-Each climb under either ended `0xC0000409`: the program aborting on the commit its job refused. Hex's start fell
+Each climb under either ended `0xC0000409`: the program aborting on the commit its job refused. The bench doesn't
+check for a member outliving a delete (procgov's is `taskkill /T /F`); after the run no `hex.exe` or `procgov.exe`
+was left on jupiter (tasklist, 11:40Z), and every program in it was a `hex.exe`. Hex's start fell
 from 43.5 to 21.9 ms as the load dropped from 77% to 33% CPU, so read the Windows start as load-sensitive. An
 earlier run at e322d7b (entry 7, n 500) gave Hex start 52.2 ms and delete 1.49 ms under 58-82% CPU; its procgov
 passes failed on procgov's banner, fixed with `-q` at b1ddb89.
