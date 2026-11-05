@@ -74,6 +74,11 @@ pub struct Config {
     pub members: u32,
     /// Lifeguard's LHM, nacks, buddy system and dynamic suspicion; off is the SWIM baseline.
     pub lifeguard: bool,
+    /// With Lifeguard, a gossiped suspicion confirms one already held only when its sender was in good
+    /// local health (LHM 0) as it sent it. Off is Lifeguard as published, where any other member's
+    /// suspicion counts: slow members, each suspecting healthy peers on its own, then confirm each
+    /// other's false suspicions and shrink the timeout past the refutation.
+    pub health_gated_confirmations: bool,
     pub probe_interval_ns: Time,
     pub probe_timeout_ns: Time,
     pub indirect_checks: u32,
@@ -102,6 +107,7 @@ impl Config {
         Self {
             members,
             lifeguard,
+            health_gated_confirmations: false,
             probe_interval_ns: 1_000_000_000,
             probe_timeout_ns: 500_000_000,
             indirect_checks: 3,
@@ -248,14 +254,37 @@ struct Member {
 
 #[derive(Debug, Clone, Copy)]
 enum Msg {
-    Ping { seq: u64, buddy: Option<u64> },
-    Ack { seq: u64 },
-    PingReq { seq: u64, target: u32 },
-    IndirectAck { seq: u64 },
-    Nack { seq: u64 },
-    Suspect { target: u32, incarnation: u64 },
-    Alive { target: u32, incarnation: u64 },
-    Dead { target: u32, incarnation: u64 },
+    Ping {
+        seq: u64,
+        buddy: Option<u64>,
+    },
+    Ack {
+        seq: u64,
+    },
+    PingReq {
+        seq: u64,
+        target: u32,
+    },
+    IndirectAck {
+        seq: u64,
+    },
+    Nack {
+        seq: u64,
+    },
+    /// `healthy`: the sender's LHM was 0 as it sent it.
+    Suspect {
+        target: u32,
+        incarnation: u64,
+        healthy: bool,
+    },
+    Alive {
+        target: u32,
+        incarnation: u64,
+    },
+    Dead {
+        target: u32,
+        incarnation: u64,
+    },
 }
 
 impl Msg {
@@ -274,7 +303,8 @@ impl Msg {
             Self::Suspect {
                 target,
                 incarnation,
-            } => [6, u64::from(target), incarnation, 0],
+                healthy,
+            } => [6, u64::from(target), incarnation, u64::from(healthy)],
             Self::Alive {
                 target,
                 incarnation,
@@ -869,26 +899,29 @@ impl Sim<'_> {
         }
         bump(&mut self.report.suspicions)?;
         let incarnation = self.entry(member, probe.target)?.incarnation;
-        if self.suspect(member, probe.target, incarnation, member)? {
+        let healthy = self.member(member)?.lhm == 0;
+        if self.suspect(member, probe.target, incarnation, member, healthy)? {
             self.broadcast(
                 member,
                 Msg::Suspect {
                     target: probe.target,
                     incarnation,
+                    healthy,
                 },
             )?;
         }
         Ok(())
     }
 
-    /// `observer` hears (or concludes) that `from` suspects `target` at `incarnation`. True when it
-    /// starts a suspicion or counts a new confirmation.
+    /// `observer` hears (or concludes) that `from` suspects `target` at `incarnation`, `from` in good
+    /// local health or not. True when it starts a suspicion or counts a new confirmation.
     fn suspect(
         &mut self,
         observer: u32,
         target: u32,
         incarnation: u64,
         from: u32,
+        from_healthy: bool,
     ) -> Result<bool, SimError> {
         let entry = self.entry(observer, target)?;
         if incarnation < entry.incarnation || entry.state == State::Dead {
@@ -897,7 +930,7 @@ impl Sim<'_> {
         let now = self.now;
         let k = self.k;
         let deadline = if entry.state == State::Suspect {
-            if !self.config.lifeguard {
+            if !self.config.lifeguard || (self.config.health_gated_confirmations && !from_healthy) {
                 return Ok(false);
             }
             self.generation = self
@@ -1186,6 +1219,7 @@ impl Sim<'_> {
             Msg::Suspect {
                 target,
                 incarnation,
+                healthy,
             } => {
                 if target == to {
                     if incarnation >= self.entry(to, to)?.incarnation {
@@ -1193,7 +1227,8 @@ impl Sim<'_> {
                     }
                     return Ok(());
                 }
-                self.suspect(to, target, incarnation, from).map(|_| ())
+                self.suspect(to, target, incarnation, from, healthy)
+                    .map(|_| ())
             }
             Msg::Alive {
                 target,

@@ -43,6 +43,7 @@ fn a_crashed_member_is_suspected_and_declared_dead_within_its_bound() {
             let (n, member, at_ns) = crash_case(seed);
             let fault = Fault::Crash { member, at_ns };
             let mut config = Config::lan(n, lifeguard);
+            config.health_gated_confirmations = lifeguard;
             let (_, max) = config.suspicion_bounds().unwrap();
             let period = config.probe_interval_ns;
             let timeout = config.probe_timeout_ns;
@@ -136,37 +137,54 @@ fn slow_case(seed: u64, lifeguard: bool) -> (Config, Vec<Fault>, u64) {
     (config, faults, delay_ns)
 }
 
-/// S8 (Lifeguard cuts slow-member false positives 50-100x, PF[9]): do 100 seeds of 32 to 128
-/// members with 4% slow, as the SWIM baseline and with Lifeguard; expect SWIM's false positives
-/// (healthy members declared dead) above zero (non-vacuity) and Lifeguard's at most 2% of SWIM's.
-#[test]
-fn lifeguard_cuts_false_positives_from_slow_members_to_under_two_percent_of_swim() {
-    let (mut swim, mut lifeguard) = (0u64, 0u64);
-    let (mut swim_members, mut lifeguard_members) = (0u64, 0u64);
-    let mut by_delay = [[0u64; 2]; 3];
-    for seed in 0..100 {
-        for on in [false, true] {
-            let (config, faults, delay) = slow_case(seed, on);
-            let report = membership::run(&config, &faults, seed).unwrap();
-            by_delay[usize::try_from((delay / (10 * SECOND)).min(2)).unwrap()][usize::from(on)] +=
-                report.false_positives;
-            if on {
-                lifeguard += report.false_positives;
-                lifeguard_members += report.false_positive_members;
-            } else {
-                swim += report.false_positives;
-                swim_members += report.false_positive_members;
-            }
+/// The 4% case over `seeds` seeds: false positives (healthy members declared dead) as the SWIM
+/// baseline, with Lifeguard as published, and with its confirmations gated on the sender's health.
+fn four_percent_slow(seeds: u64) -> [u64; 3] {
+    let mut out = [0u64; 3];
+    for seed in 0..seeds {
+        for (k, (lifeguard, gated)) in [(false, false), (true, false), (true, true)]
+            .into_iter()
+            .enumerate()
+        {
+            let (mut config, faults, _) = slow_case(seed, lifeguard);
+            config.health_gated_confirmations = gated;
+            out[k] += membership::run(&config, &faults, seed)
+                .unwrap()
+                .false_positives;
         }
     }
     println!(
-        "false positives: SWIM {swim} ({swim_members} members), Lifeguard {lifeguard} ({lifeguard_members} members); by 10 s delay bucket [swim, lifeguard]: {by_delay:?}"
+        "4% slow over {seeds} seeds: SWIM {}, Lifeguard as published {}, health-gated {}",
+        out[0], out[1], out[2]
     );
+    out
+}
+
+/// S8 (Lifeguard cuts slow-member false positives 50-100x, PF[9]), step 3's test: do 100 seeds of 32
+/// to 128 members with 4% slow; expect SWIM's false positives above zero (non-vacuity), Lifeguard as
+/// published (the competitor) at most 2% of SWIM's, and with confirmations counted only from members
+/// in good local health, no healthy member declared dead by anyone. Lifeguard as published declares
+/// a few: slow members, each suspecting healthy peers on its own, confirm each other's suspicions,
+/// which shrinks the timeout past the refutation (F1).
+#[test]
+fn lifeguard_cuts_false_positives_and_health_gated_confirmations_end_them() {
+    let [swim, published, gated] = four_percent_slow(100);
     assert!(swim > 0, "the SWIM baseline made no false positives");
     assert!(
-        lifeguard * 50 <= swim,
-        "Lifeguard {lifeguard} is more than 2% of SWIM's {swim}"
+        published * 50 <= swim,
+        "Lifeguard {published} is more than 2% of SWIM's {swim}"
     );
+    assert_eq!(gated, 0);
+}
+
+/// The same over 1,000 seeds, in release (`cargo test -p hex-sim --release --test membership --
+/// --ignored`): the record run of F1's evidence.
+#[test]
+#[ignore = "1,000 seeds: the record run, in release"]
+fn health_gated_confirmations_end_false_positives_over_1000_seeds() {
+    let [swim, published, gated] = four_percent_slow(1_000);
+    assert!(swim > 0 && published * 50 <= swim);
+    assert_eq!(gated, 0);
 }
 
 /// S8, step 3's case (Lifeguard's, PF[9]): do 200 seeds of 32 to 128 members with one member slow
@@ -176,7 +194,7 @@ fn lifeguard_cuts_false_positives_from_slow_members_to_under_two_percent_of_swim
 /// suspicion starts at its maximum (36.1-50.6 s here), past any such delay, and only independent
 /// confirmations shrink it; with one slow member there are none. SWIM's fixed timeout, its minimum
 /// (6.0-8.4 s), doesn't outwait it. (With several slow members, they confirm each other's false
-/// suspicions: the 11 of the 4% case below, each with one confirmation, from another slow member.)
+/// suspicions: the 4% case above.)
 #[test]
 fn a_slow_member_makes_lifeguard_declare_no_healthy_member_dead() {
     let (mut swim, mut lifeguard) = (0u64, 0u64);

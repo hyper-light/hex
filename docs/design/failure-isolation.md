@@ -76,18 +76,30 @@ protocol, not Hex's, and a possible later improvement for its owner.
 **Sources.** SWIM's deterministic bound from round-robin probing (`PF[8]`); Lifeguard's 50-100x fewer
 false positives at a cost of about 1 s at p99 (FI[1]); memberlist's constants (FI[2], FI[3]).
 
-**Evidence.** `membership.rs`'s tests: the crash bound over 1,000 seeds, and with 4% of members slow,
-Lifeguard's false positives under 2% of SWIM's on the same seeds (11 against 17,297, 0.06%). With one
-slow member, delayed 1-30 s, Lifeguard declares no healthy member dead (SWIM: thousands). Every
-declaration against a healthy member is a slow member's own, made before it hears the refutation, and
-Lifeguard's suspicion starts past any such delay. The 4% case's 11 each had exactly one confirmation,
-from another slow member: dynamic suspicion takes several slow members' suspicions of one healthy
-member as independent and shrinks the timeout past the refutation (traced 2026-11-05, unit
-`hex-sched-g5-probe-chk1-20261105T113256Z`). Counting a confirmation only from a member in good local
-health would close it; that is hyper-swim's protocol, a possible later improvement for its owner.
+**Confirmations count only from members in good local health.** Lifeguard's dynamic suspicion
+shortens a suspicion's timeout with each other member's suspicion of the same target, as if each
+were independent evidence (FI[3]). They aren't when they come from slow members: each slow member
+suspects healthy peers on its own probes and gossips it, the others take that as a confirmation,
+and the shortened timeout runs out before the slow member hears the refutation. So a gossiped
+suspicion confirms only when its sender's local health multiplier was 0 as it sent it (the
+suspicion carries that bit): Lifeguard's own premise, that a member's LHM is its evidence of its own
+slowness (FI[1]), applied to the suspicions it gossips. hyper-swim goes further, and lets no
+gossiped suspicion condemn: "A gossiped suspicion is a hint: only a member's own probes condemn"
+(hyper-raft `crates/hyper-swim/src/detector.rs:43-44` at 6a236ae). The model keeps Lifeguard as
+published beside it as the competitor (`Config::health_gated_confirmations` off).
 
-**What would falsify it.** A crash suspected or declared dead past its bound; or with Lifeguard on, healthy
-members declared dead at more than 2% of SWIM's rate because of slow members.
+**Evidence.** `membership.rs`'s tests: the crash bound over 1,000 seeds, unchanged by the gate (first
+suspicion p99 5.60 s, first dead p99 13.4 s). With 4% of members slow, over 1,000 seeds of 32-128
+members, healthy members declared dead: SWIM 190,359; Lifeguard as published 103 (0.05% of SWIM's,
+under its 2% bar); with confirmations health-gated, 0 (fedora unit
+`hex-sched-g5-probe-gate1-20261105T123854Z`). Before the gate, a trace of the published variant's
+false positives (unit `hex-sched-g5-probe-chk1-20261105T113256Z`) found each declared by a slow
+member, with exactly one confirmation, from another slow member. With one slow member delayed
+1-30 s, no false positives with Lifeguard either way (SWIM: 16,388), since nobody confirms.
+
+**What would falsify it.** A crash suspected or declared dead past its bound; with confirmations
+health-gated, any healthy member declared dead because of slow members; or Lifeguard as published
+above 2% of SWIM's rate.
 
 ### F2. Gray and fail-slow: requesters' observations compared across peers
 
