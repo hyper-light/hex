@@ -38,5 +38,7 @@ pub mod sim;
 pub mod spec;
 pub mod store;
 pub mod trace;
+pub mod vivaldi;
+pub mod wan;
 
 pub use error::SimError;
