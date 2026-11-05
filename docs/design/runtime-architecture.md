@@ -2118,11 +2118,19 @@ proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `mov
   the creates no parked init is ready for: each create goes one way or the other, never both.
 - **A node setting, off by default.** `Node::with_parked_procs(bool)`, false until measured; the bench's
   `HEXBENCH_PARKED_PROCS`. Off, nothing changes on either kernel.
-- **Costs.** One proc superblock per parked init, with its masks (each a clone of the shared empty tmpfs or of the
+- **Dropped off the path (the g6 agent's review).** A detached tree dropped unattached is unmounted, masks and
+  all, on its last close. That takes the host's `namespace_sem` for write, then waits for an expedited RCU grace
+  period (`namespace_unlock`, v6.19 `fs/namespace.c:1680-1721`; the wait at `:1715`). So no create's thread drops
+  one. A miss, the tree of a claim that failed, and the tree of an init ended unclaimed all go to the node's
+  `hex-proc-drop` thread, by a queue bounded at `PER_NODE` (`run::ProcSink`). Past the bound a tree is dropped where
+  it is, counted (`procs_dropped_inline`).
+- **Costs.** The proc's superblock is made off every create's path, on the thread that parked its init, so are the
+  `list_lrus` and shrinker registrations a new superblock takes (step 6's run 23, as the g6 agent cites it). One proc superblock per parked init, with its masks (each a clone of the shared empty tmpfs or of the
   host's `/dev/null`: no superblock each), bounded as the parked inits are (`PER_NODE` idle slots plus `INITS_AHEAD`),
   never reused: it ends with its init. The refill worker does the work beside the clone the delete already pays.
 - **Counted** (`ParkCounts`). Made, hits (claimed with the key), misses (another key, no room, or the claim refused),
-  dry (a claimed init with no proc, for a create one could have served), failed makes, and the procs held now.
+  dry (a claimed init with no proc, for a create one could have served), failed makes, the procs held now, and
+  the unattached procs dropped (by the dropper, and inline).
 - **The A/B, of record, on fedora (6.19)**, under the under-load bar's conditions: 8 in flight, 8,000 idle threads,
   6 and 12 busy loops, Docker's paths, no priority change. Interleaved, the setting on against off, both with parked
   inits. Beside it: part 19's p50 and p99, the whole create's p50 and p99, mount holds a create (the mounts trace's
