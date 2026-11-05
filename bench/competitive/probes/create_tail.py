@@ -70,6 +70,7 @@ def parse(lines):
     each CPU's work too, as "work <function>"."""
     tasks = {}
     irqs, irq_open = collections.defaultdict(list), {}
+    cgops = collections.defaultdict(list)  # pid -> [(ts, cgroup event)], every task's
     calls, open_ = [], {}
     last_out = {}  # cpu -> the blocking switch out whose stack the next stack lines are
 
@@ -120,6 +121,8 @@ def parse(lines):
             g = (SOFTIRQ if ev == "softirq_entry" else HARDIRQ).search(rest)
             irq_open[(int(cpu), ev[:4])] = (ts, ("softirq " + g["a"]) if ev == "softirq_entry" and g
                                             else ("irq " + g["n"]) if g else ev)
+        elif ev.startswith("cgroup_"):
+            cgops[int(m["pid"])].append((ts, ev[len("cgroup_"):]))
         elif ev == "workqueue_execute_start":
             g = WORK.search(rest)
             irq_open[(int(cpu), "work")] = (ts, "work " + (g["f"] if g else "?"))
@@ -143,6 +146,7 @@ def parse(lines):
                 calls.append((k["op"], k["id"], b, ts, pid, int(k["ns"] or 0)))
     for v in irqs.values():
         v.sort()
+    irqs["cgops"] = cgops
     return tasks, calls, irqs
 
 
@@ -262,6 +266,11 @@ def walk(tasks, irqs, b, e, pid):
         by = "an interrupt" if irq else who(waker_comm)
         if who(waker_comm) == "kworker":
             by += doing(irqs, w_cpu, w_ts - 1e-6, w_ts + 1e-6)
+        if not irq:
+            # the cgroup operation the waker did last while this task waited: what it held a cgroup lock for
+            op = last_le(irqs.get("cgops", {}).get(waker, []), w_ts, key=lambda x: x[0])
+            if op is not None and op[0] >= s_out:
+                by += f" after its {op[1]}"
         out.append((f"blocked: {stack_name(stack)}, woken by {by}", w_ts - max(s_out, b)))
         t = s_out
     return out
@@ -343,6 +352,7 @@ def selftest():
         " => cgroup_mkdir+0x5",
         " => kernfs_iop_mkdir+0x6",
         "kworker/6:0-98 [006] ..... 1.002000: workqueue_execute_start: work struct 0001: function css_free_rwork_fn",
+        "kworker/6:0-98 [006] ..... 1.002500: cgroup_release: root=0 id=7 level=1 path=/x",
         wk.format(c="kworker/6:0", p=98, cpu=6, ts="1.003000", wc="hex", wp=20),
         "kworker/6:0-98 [006] ..... 1.003050: workqueue_execute_end: work struct 0001: function css_free_rwork_fn",
         "kworker/6:0-98 [006] d..2. 1.003100: sched_switch: prev_comm=kworker/6:0 prev_pid=98 prev_prio=120 prev_state=I ==> next_comm=hex next_pid=20 next_prio=120",
@@ -369,7 +379,7 @@ def selftest():
     want = {"run: seam_oci": 400 - 50 + 200 + 500, "softirq RCU": 50,
             "runq: woken, not yet run": 100 + 100 + 200,
             "run: hex": 400 + 100 + 100,
-            "blocked: cgroup_mkdir < kernfs_iop_mkdir, woken by kworker (work css_free_rwork_fn)": 1500,
+            "blocked: cgroup_mkdir < kernfs_iop_mkdir, woken by kworker (work css_free_rwork_fn) after its release": 1500,
             "runq: new task hex, before its first run": 200,
             "runq: preempted by kworker (work css_killed_work_fn)": 200}
     assert dict(got) == want, (dict(got), want)

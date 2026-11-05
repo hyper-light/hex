@@ -48,7 +48,8 @@ untrace() {
   echo '!stacktrace' > "$I/events/sched/sched_switch/trigger" 2>/dev/null
   for ev in sched/sched_switch sched/sched_waking sched/sched_wakeup_new sched/sched_process_fork \
             sched/sched_process_exit irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
-            workqueue/workqueue_execute_start workqueue/workqueue_execute_end; do
+            workqueue/workqueue_execute_start workqueue/workqueue_execute_end cgroup/cgroup_attach_task \
+            cgroup/cgroup_mkdir cgroup/cgroup_rmdir cgroup/cgroup_release; do
     echo 0 > "$I/events/$ev/enable" 2>/dev/null
   done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
@@ -74,9 +75,11 @@ echo 'stacktrace if (prev_comm == "seam_oci" || prev_comm ~ "hex*") && prev_stat
 for ev in sched_switch sched_waking sched_wakeup_new sched_process_fork sched_process_exit; do
   echo 1 > "$I/events/sched/$ev/enable" || { echo "refusing: sched/$ev wasn't enabled" >&2; exit 4; }
 done
-# Every CPU's interrupt work and kworkers' work items, unfiltered: what a run's time hides, and what preempts it.
+# Every CPU's interrupt work and kworkers' work items, unfiltered: what a run's time hides, and what preempts it;
+# and every task's cgroup operations, so a waker that held a cgroup lock is named by what it did under it.
 for ev in irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
-          workqueue/workqueue_execute_start workqueue/workqueue_execute_end; do
+          workqueue/workqueue_execute_start workqueue/workqueue_execute_end \
+          cgroup/cgroup_attach_task cgroup/cgroup_mkdir cgroup/cgroup_rmdir cgroup/cgroup_release; do
   echo 1 > "$I/events/$ev/enable" || { echo "refusing: $ev wasn't enabled" >&2; exit 4; }
 done
 # seam_oci's markers into the instance, with tracing_on a plain file so its toggles leave the instance on.
