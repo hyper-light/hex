@@ -1,9 +1,11 @@
 # Parked procs: the A/B of record on fedora's host (decision 8, parked procs; AC-T7.1.3)
 
-**Decided (the lead, 2026-11-05T17:00Z):** the proc is made on the parking thread (the runs at 1e5e956 are of record),
-and `with_parked_procs` stays off by default; on by default is Ada's call. The worker arms (one, eight) are recorded
-below as negatives, as is the after-reply arm, dropped. The reading that the cost is the host-wide `namespace_sem`,
-which more threads only share, is not measured apart.
+**Decided (the lead, 2026-11-05T17:00Z, and on the three arms at 19:19Z):** the proc is made on the parking thread (the
+runs at 1e5e956 are of record), and `with_parked_procs` stays off by default; on by default is Ada's call.
+- The worker arms (one thread, eight) are recorded below as negatives. The reading that the cost is the host-wide
+  `namespace_sem`, which more threads only share, is not measured apart.
+- The after-reply arm is a measured trade, not merged ("The three arms" below). It keeps part 19's p50 and falls short
+  only at its dry claims.
 
 **Run.** fedora (Linux 6.19.10), 2026-11-05 14:38:38Z-14:42:35Z, under `fedora-timed.lock`. One release build of
 cp/t7-g5-parkproc 9e13b95: hex sha256 65f6100e612bebd8, seam_oci d13c5005b54a2793 (each cell's `env.txt`). The
@@ -128,7 +130,10 @@ jobs only).
   - but 22-36% of its claims are dry, since the owner's next create often comes before the serving thread's
     after-reply turn. So its create p50 is higher by 0.06-0.21 ms at L6 and 0.12-0.25 ms at L12, and its part 19 p99
     is higher in 6 of 8 rounds (round 4 at each L is the exception).
-  - It keeps part of (i)'s create gain, not all of it.
+  - It keeps part of (i)'s create gain, not all of it. **It does not fail as the workers do** (the lead,
+    2026-11-05T19:19Z, correcting his 17:00Z reason): it keeps part 19's p50 (42-49 µs), where W loses it. It falls
+    short only at its dry claims, the same caller's next create arriving before its after-reply turn. A measured trade,
+    not merged: cp/t7-g5-parkproc-arms 1890f85 stays beside the worker branches.
 - **(ii) workers**: 28-45% hits, part 19 back at the off arm's numbers (209-239 µs p50). It keeps none of (i)'s gain.
 - **(i) on-park**: every claim a hit, the create's gain whole. It pays on the delete: here 1.26-2.06 ms at L6 against
   (ii')'s 1.24-1.66.
@@ -151,6 +156,9 @@ loads: I at 44.2, P at 22.5, W at 25.5. These lean one way but don't settle anyt
 - I's sustained rounds show 132 and 202 misses: creates whose key or room didn't match. Not chased here.
 - In process only. These runs' socket figures don't use parked procs (the `hex node` agent isn't given the
   setting).
+- I and P are the serial view (the lead, 2026-11-05T19:19Z). The lead's stop before W's pass came after the unit was
+  already gone (OOM-killed in its fourth pass). W's one pass had finished at 18:56Z and stands as recorded; W is out
+  on hits already, so it doesn't bear on the ruling.
 
 ## Of record at 1e5e956: the proc made by the park's own thread, counted by thread (the lead's 15:40Z option (1))
 
