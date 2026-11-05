@@ -8,6 +8,7 @@
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
@@ -33,15 +34,14 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
 NAME=hexbench-tail-$$; READER=hexbench-tail-reader-$$
 untag() {
   docker rm -f "$NAME" "$READER" >/dev/null 2>&1 || true
-  docker run --rm --label hex.bench=competitive --privileged --security-opt label=disable --network=none \
+  docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable --network=none \
     -v /usr:/usr:ro -v "$LAB:/opt/lab:ro" -e TRACE_TAG -e UNTRACE_ONLY=1 \
     registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_tail_inside.sh >/dev/null 2>&1 \
     || echo "the run's trace instance (tag $TRACE_TAG) couldn't be checked gone" >&2
 }
-trap untag EXIT
-trap 'exit 143' TERM INT
+bench_trap untag
 # The reader: waits for the instance, says it's reading, streams it to the run's end marker, says it's done.
-docker run -d --name "$READER" --label hex.bench=competitive --cpuset-cpus="${READER_CPUS:-16-31}" --memory=1g \
+docker run -d --name "$READER" "${BENCH_LABELS[@]}" --cpuset-cpus="${READER_CPUS:-16-31}" --memory=1g \
   ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} --privileged --security-opt label=disable --network=none \
   -v /usr:/usr:ro -v "$OUT:/opt/out" registry.fedoraproject.org/fedora:44 bash -c '
     T=/sys/kernel/tracing; mountpoint -q $T || mount -t tracefs nodev $T
@@ -49,7 +49,7 @@ docker run -d --name "$READER" --label hex.bench=competitive --cpuset-cpus="${RE
     I=$(cat /opt/out/instance) || exit 5
     exec 3< "$I/trace_pipe"; touch /opt/out/reading
     awk "{print} /hexbd D/{exit}" <&3 > /opt/out/trace.txt; touch /opt/out/read' >/dev/null
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-15}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-15}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e TRACE_TAG -e HEXBENCH_OWNER \

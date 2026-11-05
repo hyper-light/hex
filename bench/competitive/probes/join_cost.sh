@@ -7,13 +7,14 @@
 #   join_cost.sh <out dir> <hex release binary>
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+. "$HERE/../containers.sh"
 OUT=$(realpath "${1:?out dir}"); HEX=$(realpath "${2:?hex release binary}")
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
 mkdir -p "$OUT"
 C="hexbench-joincost-$$"
 cleanup() { docker rm -f "$C" > /dev/null 2>&1 || true; }
-trap cleanup EXIT
-docker run --rm --name "$C" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" \
+bench_trap cleanup
+docker run --rm --name "$C" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" -v "$HEX:/opt/hex:ro" -v "$HERE:/opt/probe:ro" -v "$OUT:/opt/out" \
   registry.fedoraproject.org/fedora:44 bash -euo pipefail -c '

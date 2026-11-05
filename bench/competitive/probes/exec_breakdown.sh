@@ -10,6 +10,7 @@
 # another host, as host.sh takes it.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
@@ -53,14 +54,13 @@ NAME=hexbench-execbd-$$
 # trap ran. It touches this run's tag alone, never another run's.
 untag() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
-  docker run --rm --label hex.bench=competitive --privileged --security-opt label=disable --network=none \
+  docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable --network=none \
     -v /usr:/usr:ro -v "$LAB:/opt/lab:ro" -e TRACE_TAG -e UNTRACE_ONLY=1 \
     registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/exec_breakdown_inside.sh >/dev/null 2>&1 \
     || echo "the run's trace instance (tag $TRACE_TAG) couldn't be checked gone" >&2
 }
-trap untag EXIT
-trap 'exit 143' TERM INT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+bench_trap untag
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e FLOOR_N -e FLOOR_WARMUP -e CHECK -e TRACE_TAG \
