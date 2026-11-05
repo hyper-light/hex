@@ -154,3 +154,37 @@ release).
 **What would falsify it.** Any run whose log the specification refuses for a budget or an inversion; or,
 on a recorded day, preemption churn (work preempted and placed again) costing more goodput than the
 bands gain, which would call for a minimum run time before a workload can be preempted.
+
+### F5. A burst is taken back by preemption, not waited out
+
+**The choice.** Hex's policy for CI is F1 with F4 on: bands, weighted DRF, and preemption of
+over-share work in the band. A repository that bursts holds no more than the room others leave it:
+when another repository's leg arrives and no node holds it, the burst's legs (their owner over the
+arriving leg's owner's share) are preempted for it, newest first, and run again later.
+
+**Sources.** DRF's sharing incentive and strategy-proofness ([DRF] §3) bound what an owner gets from
+asking for more, but DRF without preemption only orders the next free room: a burst that fills the
+cluster holds it until its legs end. Kueue's cohorts lend idle quota and take it back by preemption
+(`reclaimWithinCohort`, [KueuePre]), which is the behaviour measured here.
+
+**Evidence.** `T-T7.5.1`: `tests/burst.rs` `a_burst_leaves_the_other_repositories_start_p95_as_it_was`.
+Three repositories' usual day (16 nodes of 16 cores and 64 GiB; each asks 20% of the cluster in the
+busy hours; 6,240 legs), then the same day with 1,000 legs of 1 to 8 cores from a fourth at noon.
+Each policy is judged against itself, as the Kueue model is serial and has no decision or commit
+time. Leg-start p95 of the three, without the burst and with it, measured 2026-11-05 on jupiter
+(Windows x86_64, release; hex-sim is deterministic, so the numbers are the same on any machine):
+
+| policy | without (each of the three) | with | holds |
+|---|---|---|---|
+| Hex: bands, weighted DRF, preemption | 80 µs, 80 µs, 80 µs | 80 µs, 80 µs, 80 µs | yes |
+| plain DRF, no preemption | 80 µs, 80 µs, 80 µs | 11.7 s, 28.5 s, 24.5 s | no |
+| submit order (FIFO) | 80 µs, 80 µs, 80 µs | 1,145 s, 8,975 s, 6,448 s | no |
+| Kueue cohort model (`baseline.rs`), serial | 0, 0, 0 | 0, 0, 0 | yes |
+
+80 µs is the control plane's decide, commit and feed time (`Config::default`); preemption adds none
+to it, as a leg no node holds goes straight to a preemption commit. Hex preempted 1,205 burst legs to do it
+(counted by the test, which requires more than none).
+
+**What would falsify it.** On a recorded kiln day, another repository's start p95 rising with a burst;
+or the burst's own legs preempted so often that its goodput falls below what plain DRF gives it, which
+would call for a minimum run before a leg can be preempted (F4's falsifier).

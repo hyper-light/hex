@@ -147,6 +147,59 @@ pub fn tenants(
     Ok(cluster)
 }
 
+/// `cluster` with a burst (`T-T7.5.1`): `legs` legs of `owner`'s, all arriving at `at`, each of
+/// 1 to `max_cores` cores and 2 GiB a core, running 1 minute to `2 * mean_run` less a minute. The
+/// workloads are put back in arrival order (the burst after what arrived at `at` before it) and their
+/// ids made dense again.
+pub fn burst(
+    mut cluster: Cluster,
+    seed: u64,
+    owner: OwnerId,
+    at: Time,
+    legs: u64,
+    max_cores: u64,
+    mean_run: Time,
+) -> Result<Cluster, SimError> {
+    let mut rng = Rng::new(seed ^ 0xb025_7b25);
+    let minute: Time = 60_000_000_000;
+    let longest = mean_run
+        .checked_mul(2)
+        .and_then(|x| x.checked_sub(minute))
+        .ok_or(SimError::TimeOverflow)?;
+    let extra = usize::try_from(legs).map_err(|_| SimError::Config("burst legs"))?;
+    cluster
+        .workloads
+        .try_reserve_exact(extra)
+        .map_err(|_| SimError::Config("no memory for the burst"))?;
+    for _ in 0..legs {
+        let cores = rng.range(1, max_cores.max(1));
+        cluster.workloads.push(WorkloadSpec {
+            id: WorkloadId(u64::MAX),
+            need: Resources {
+                cpu_milli: cores.checked_mul(1000).ok_or(SimError::Config("cores"))?,
+                mem_bytes: cores
+                    .checked_mul(2)
+                    .and_then(|g| g.checked_mul(GIB))
+                    .ok_or(SimError::Config("memory"))?,
+                gpus: 0,
+            },
+            kind: Kind::Build,
+            arrives: at,
+            runs_for: Some(rng.range(minute, longest)),
+            tenancy: Tenancy {
+                owner,
+                ..Tenancy::default()
+            },
+        });
+    }
+    // Stable: the burst stays after what arrived at `at` before it.
+    cluster.workloads.sort_by_key(|w| w.arrives);
+    for (id, w) in (0u64..).zip(cluster.workloads.iter_mut()) {
+        w.id = WorkloadId(id);
+    }
+    Ok(cluster)
+}
+
 /// `cluster` with `groups` disruption groups of budgets 1 to `max_budget`, each workload in one
 /// of them with probability `per_mille / 1000`.
 pub fn groups(
