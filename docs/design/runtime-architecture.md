@@ -1728,7 +1728,9 @@ round with the better create p50, and in both passes that round carries create's
 p99.9 is <!-- record: bench/competitive/probes/create_breakdown.md -->3.54 ms (reuse on) and 2.91 ms (reuse
 off)<!-- /record -->, and over the socket the table's own round reads
 <!-- record: bench/competitive/probes/create_breakdown.md -->0.99 and 3.48<!-- /record --> ms. So the tail is a few
-creates per ten thousand, at loads of 23 to 37. On 1714f72 (out/20261104T170413Z, out/20261104T172313Z) the same pass
+creates per ten thousand, at loads of 23 to 37. The host's clock (`host_clock.sh`) wasn't read for these runs. It
+guards against an idle host clocking short bursts down, and at loads of 23 to 37 the host wasn't idle, so that effect
+doesn't apply to them. On 1714f72 (out/20261104T170413Z, out/20261104T172313Z) the same pass
 read 0.150x, 0.036x, 0.219x, 0.267x with reuse on and 0.356x, 0.938x, 0.264x, 0.833x with it off. Every box of both
 passes ended through its init, none by `cgroup.kill`, where 1714f72's reuse-off pass killed a few in `start_true`:
 a delete that read its box's record before forgetting its init missed an exit the supervisor collected between the
@@ -1740,8 +1742,13 @@ against create's p50 in the same run:
 criterion, within 10%, met by all four. What's left, part by part, pooled p50 in ms (reuse on / off):
 <!-- record: bench/competitive/probes/create_breakdown.md -->the init's set-up to the exec FIFO 0.188 / 0.192; the
 cgroup, made and bounded 0.104 / 0.135; the node's and the runtime's own work 0.102 / 0.124; the seed, the request and
-its clone's preparing 0.044 / 0.047; the box's record 0.021 / 0.025; the handshake 0.011 / 0.014<!-- /record -->. The
-levers that would take what's left, for Ada:
+its clone's preparing 0.044 / 0.047; the box's record 0.021 / 0.025; the handshake 0.011 / 0.014<!-- /record -->. What's over the bar, part by part:
+- create's p99.9 in process, in both reuse modes, from the round the table takes, which has 14 or 15 creates over 5 ms
+  in ten thousand. The next lever is the tail agent's parked inits (`cp/t7-g5-tail` 8998ab5), which take the
+  `cgroup_mutex` holds behind that tail off create's path and land through the goal 5 record tree;
+- with reuse off, each box's teardown runs on the CPUs its creates use: what reuse within one owner takes away.
+
+The levers that would take what's left of the parts, for Ada:
 - goal 6's 7.x namespace (`OPEN_TREE_NAMESPACE`, `CLONE_EMPTY_MNTNS`), which takes the mount namespace's copy out of
   the init's clone, the largest part;
 - the shared empty-directory masks (`cp/t7-g6`), which take mounts off the init's root;
