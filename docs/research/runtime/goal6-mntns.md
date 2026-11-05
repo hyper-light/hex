@@ -426,3 +426,40 @@ node's descriptor bound counts it (`netns.rs`, `descriptor_bounds`).
 - Passing at 43eb4ab (hex-g6-seedns-20261105T134306Z): 7 create seeds in one pruned namespace, which lists 1 mount
   (the read-only tmpfs root; the namespace's root beneath it isn't listed, as `oci_spec_box`'s AC-f says), the same
   after six creates at once as after the first. `oci_box` 3/3 and `oci_spec_box` pass, and all 7 gates exit 0.
+
+### Lever (4)'s A/B of record on fedora's host (6.19), 2026-11-05
+
+A is 68be241 (a `pivot_root` per seed start), B is 92443a8 (one per node, every seed joining by `setns`). The harness
+is 92443a8's for both. Unit hex-g6-ab4-20261105T134612Z, timed 13:55:57-13:58:55Z under the lock, load 14-20.
+- Each cell is a fresh node whose seeds start in it, running the mounts trace of part 19 under the bar's
+  conditions: 2,000 creates at 8 in flight, 8,000 idle threads, 6 or 12 busy loops on CPUs 4-15 at nice 0, owner
+  bundles with reuse on, Docker's paths, the `/dev` pool on.
+- Three rounds were interleaved, each round's order the last's reversed. All 12 cells exited 0.
+- Records are under `~/.cache/hex-bench/out/create-breakdown-20261105T1355*` to `T1358*`, named in the unit's
+  `exits` file.
+
+| L | round | arm | part 19 p50 / p99, us | unpreempted p99, us | whole create p99, ms | first 20 creates' max, ms | longest hold |
+|---|---|---|---|---|---|---|---|
+| 6 | 1 | A | 251 / 838 | 568 | 2.229 | 10.448 | `pivot_root` 1,349 us (5 in the top 5) |
+| 6 | 1 | B | 244 / 631 | 498 | 1.977 | 2.904 | the node's prune 1,088 us |
+| 6 | 2 | A | 262 / 727 | 467 | 2.267 | 10.390 | `pivot_root` 1,222 us (5) |
+| 6 | 2 | B | 435 / 1,379 | 1,367 | 3.196 | 2.081 | a co-tenant (`systemd-hostnamed`) 1,371 us |
+| 6 | 3 | A | 238 / 659 | 513 | 2.246 | 2.345 | `pivot_root` 1,156 us (5) |
+| 6 | 3 | B | 241 / 591 | 498 | 1.741 | 2.597 | the node's prune 1,071 us |
+| 12 | 1 | A | 260 / 903 | 646 | 2.625 | 6.387 | `pivot_root` 1,429 us (4) |
+| 12 | 1 | B | 253 / 776 | 551 | 2.429 | 2.811 | `seam_oci` 1,332 us |
+| 12 | 2 | A | 239 / 643 | 530 | 2.311 | 9.804 | `pivot_root` 1,243 us (5) |
+| 12 | 2 | B | 254 / 669 | 507 | 1.954 | 1.579 | the node's prune 1,085 us |
+| 12 | 3 | A | 243 / 665 | 564 | 2.256 | 10.690 | `pivot_root` 1,441 us (5) |
+| 12 | 3 | B | 244 / 770 | 486 | 1.737 | 1.897 | the node's prune 1,088 us |
+
+Read:
+- **Fewer long holds.** B's seeds make no `pivot_root`. The node's one prune, ~1.08 ms, is B's only `pivot_root`, against
+  4-5 per cell in A's top five holds.
+- **The first creates.** Their worst create falls from 2.3-10.7 ms (median ~10.4) to 1.6-2.9 ms (median ~2.1), lower
+  in 5 of 6 pairs.
+- **The whole create's p99** falls from a median of 2.26 ms to 1.97 ms, lower in 5 of 6 pairs. The pair it isn't is
+  B's 6-loop round 2, where a co-tenant held the global mount lock 1.37 ms.
+- **The unpreempted p99** falls from a median of 547 us to 503 us, lower in 5 of 6 pairs.
+- **Part 19's p50 and p99 don't change** beyond the host's noise. p99 is lower in 3 of 6 pairs, at medians of 696 and
+  723 us, and still above the 0.5 ms bar, as §11 predicts: the steady tail is preemption and the init's own length.
