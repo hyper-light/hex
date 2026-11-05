@@ -92,13 +92,21 @@ pub enum Scorer {
     /// The least free capacity first ([`Key`]'s order): best fit, the baseline (Borg's, S1).
     #[default]
     BestFit,
+    /// Best fit across resources: the node most allocated once the need is placed, CPU and memory
+    /// each as a share of the node's and weighted alike, as Kubernetes' `MostAllocated` bin-packing
+    /// score is; then [`Key`]'s order. [`Scorer::BestFit`] ranks by free CPU first, which on a
+    /// memory-bound workload stops packing the resource that binds.
+    MostAllocated,
     /// Tetris's alignment (Grandl et al., SIGCOMM 2014): the largest dot product of the need and the
     /// node's free capacity, each resource taken as a share of the node's capacity, ties by
     /// [`Key`]'s order.
     Align,
     /// Least stranded: the node whose leftover after placing the need is either nothing or still
-    /// fits one of the sample's [`Shapes`], so no CPU is left that no workload can use; then
-    /// [`Scorer::Align`]; then [`Key`]'s order.
+    /// fits one of the sample's [`Shapes`], so no CPU or memory is left that no workload can use;
+    /// then the node least allocated once the need is placed (Kubernetes' `LeastAllocated`), so
+    /// work spreads over leftovers that stay usable rather than spending one node's memory beside
+    /// its idle CPU; then [`Key`]'s order. On the recorded kiln workload it strands less than
+    /// either best fit at 90% load and passes over fewer arrivals on the way (hex-sim.md H11).
     Fragment,
 }
 
@@ -169,6 +177,14 @@ fn kind_word(kind: Kind) -> u64 {
         Kind::Benchmark => 2,
         Kind::Session => 3,
     }
+}
+
+/// `part` as a share of `whole` in millionths; 0 of a whole of 0, and past u64 saturates.
+fn millionths(part: u64, whole: u64) -> u64 {
+    u128::from(part)
+        .checked_mul(1_000_000)
+        .and_then(|x| x.checked_div(u128::from(whole)))
+        .map_or(0, |x| u64::try_from(x).unwrap_or(u64::MAX))
 }
 
 /// Nodes a scan passed over because a filter refused them though they had the room, by filter.
@@ -244,14 +260,8 @@ impl Slot {
     /// GPUs of (need / capacity) * (free / capacity), each share in millionths, so each term is at
     /// most 10^12 and the sum fits u64. A resource the node has none of adds nothing.
     fn alignment(&self, need: &Resources) -> u64 {
-        let share = |part: u64, whole: u64| -> u64 {
-            u128::from(part)
-                .checked_mul(1_000_000)
-                .and_then(|x| x.checked_div(u128::from(whole)))
-                .and_then(|x| u64::try_from(x).ok())
-                .unwrap_or(0)
-        };
-        let term = |n: u64, f: u64, c: u64| share(n, c).checked_mul(share(f, c)).unwrap_or(0);
+        let term =
+            |n: u64, f: u64, c: u64| millionths(n, c).checked_mul(millionths(f, c)).unwrap_or(0);
         let (c, f) = (&self.capacity, &self.free);
         [
             term(need.cpu_milli, f.cpu_milli, c.cpu_milli),
@@ -262,17 +272,30 @@ impl Slot {
         .fold(0u64, u64::saturating_add)
     }
 
-    /// The CPU placing `need` here would leave that no shape can use: the leftover's CPU when it
-    /// isn't empty and fits no shape, else nothing.
+    /// What placing `need` here would leave that no shape can use: when the leftover fits no shape,
+    /// its CPU and its memory, each as a share of the node's in millionths, summed; else nothing.
     fn stranded_after(&self, need: &Resources, shapes: &Shapes) -> u64 {
         let Some(left) = self.free.checked_sub(need) else {
             return u64::MAX;
         };
-        if left.cpu_milli == 0 || shapes.usable(&left) {
+        if shapes.usable(&left) {
             0
         } else {
-            left.cpu_milli
+            let c = &self.capacity;
+            millionths(left.cpu_milli, c.cpu_milli)
+                .saturating_add(millionths(left.mem_bytes, c.mem_bytes))
         }
+    }
+
+    /// The node's CPU and memory allocated once `need` is placed, each as a share of the node's in
+    /// millionths, summed: Kubernetes' `MostAllocated` score with equal weights, and the inverse of
+    /// its `LeastAllocated`.
+    fn allocated_after(&self, need: &Resources) -> u64 {
+        let (c, f) = (&self.capacity, &self.free);
+        let used = |cap: u64, free: u64, more: u64| cap.saturating_sub(free).saturating_add(more);
+        millionths(used(c.cpu_milli, f.cpu_milli, need.cpu_milli), c.cpu_milli).saturating_add(
+            millionths(used(c.mem_bytes, f.mem_bytes, need.mem_bytes), c.mem_bytes),
+        )
     }
 
     /// CPU in use, background and placed, above 90% of the node's CPU. Compared as
@@ -388,15 +411,16 @@ impl FitIndex {
             let key = Key::of(NodeId(id), &slot.free);
             let score = match sample.scorer {
                 Scorer::BestFit => 0,
+                Scorer::MostAllocated => u128::from(slot.allocated_after(&demand.need)),
                 Scorer::Align => u128::from(slot.alignment(&demand.need)),
                 Scorer::Fragment => {
-                    // Lexicographic in one number: least stranded CPU in the high word, then
-                    // alignment in the low word.
+                    // Lexicographic in one number: least stranded capacity in the high word, then
+                    // least allocated in the low word.
                     let stranded = slot.stranded_after(&demand.need, &sample.shapes);
                     u128::from(u64::MAX.saturating_sub(stranded))
                         .checked_mul(1 << 64)
                         .unwrap_or(0)
-                        | u128::from(slot.alignment(&demand.need))
+                        | u128::from(u64::MAX.saturating_sub(slot.allocated_after(&demand.need)))
                 }
             };
             // A higher score wins; between equal scores, the least key.

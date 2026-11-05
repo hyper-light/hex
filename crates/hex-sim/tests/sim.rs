@@ -17,6 +17,7 @@ use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
 use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::packing;
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
 use hex_sim::spec::{self, Violation};
@@ -686,4 +687,48 @@ fn a_recorded_kiln_workload_replays_the_same_twice() {
     assert_eq!(end.complete, 4_655);
     spec::check_log(&cluster.nodes, &a).unwrap();
     assert_eq!(spec::check_filters(&cluster, &a).unwrap().violations(), 0);
+}
+
+/// AC-T7.4.3 (G2 step 4): pack the recorded kiln workload, as the requests its legs would declare,
+/// to 90% load from 16 starting arrivals spread over the recording, under best fit alone (by free CPU
+/// first, and across resources as Kubernetes' `MostAllocated` does) and under Hex's scorer; expect
+/// Hex's stranded capacity at least 30% below each best fit's on every seed. Non-vacuity: best fit
+/// strands something on every seed. Not bought by refusing work: Hex's scorer reaches 90% on every
+/// seed and passes over fewer arrivals on the way than either best fit.
+#[test]
+fn the_recorded_kiln_workload_strands_at_least_30_percent_less_than_best_fit() {
+    let text = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
+    let recorded = hex_sim::replay::parse(text, &hex_sim::replay::Limits::default()).unwrap();
+    let cluster = packing::declared(&recorded).unwrap();
+    let sample = Sample {
+        shapes: Shapes::of(packing::minimal_shapes(&cluster)),
+        ..Sample::default()
+    };
+    let pack =
+        |scorer, from| packing::pack(&cluster, &Sample { scorer, ..sample }, 900, from).unwrap();
+    let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
+    for seed in 0..16 {
+        let from = seed * cluster.workloads.len() / 16;
+        let hex = pack(Scorer::Fragment, from);
+        assert!(hex.reached, "seed {seed}: {hex:?}");
+        for base in [
+            pack(Scorer::BestFit, from),
+            pack(Scorer::MostAllocated, from),
+        ] {
+            assert!(base.stranded_per_mille() > 0, "seed {seed}: {base:?}");
+            assert!(
+                hex.stranded_per_mille() * 10 <= base.stranded_per_mille() * 7,
+                "seed {seed}: Hex strands {} per-mille, best fit {}",
+                hex.stranded_per_mille(),
+                base.stranded_per_mille()
+            );
+        }
+        passed_hex += hex.passed_over;
+        passed_best += pack(Scorer::BestFit, from).passed_over;
+        passed_most += pack(Scorer::MostAllocated, from).passed_over;
+    }
+    assert!(
+        passed_hex < passed_best.min(passed_most),
+        "{passed_hex} {passed_best} {passed_most}"
+    );
 }

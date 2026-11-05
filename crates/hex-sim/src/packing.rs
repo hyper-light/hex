@@ -1,31 +1,87 @@
 //! Stranded capacity (`AC-T7.4.3`): what a placement policy leaves free that no workload can use.
 //!
-//! [`pack`] places a workload's arrivals in order, with no completions, through the fast path's
-//! sampled choice ([`FitIndex::sampled_fit`]), passing over one no node admits, until the placed CPU
-//! reaches the load asked for (90% for `AC-T7.4.3`). It then measures stranded capacity: the free CPU
-//! on each node where no shape of the workload's needs fits what is free. One shape set stands for
-//! all of them: a node's free capacity can host some need exactly when it can host a Pareto-minimal
-//! one. Borg judges policy by what a workload leaves usable rather than by average utilization (cell
-//! compaction, EuroSys 2015 §5.1); this is that question asked of one cell at one load.
+//! [`declared`] turns a recorded workload's measured needs into the requests a scheduler places by,
+//! at the granularity kiln's own workflows declare. [`pack`] places arrivals in order from one of
+//! them, with no completions, through the fast path's sampled choice ([`FitIndex::sampled_fit`]),
+//! passing over one no node admits, until the load reaches what is asked (90% for `AC-T7.4.3`). The
+//! load is the dominant share of what is placed: the larger of placed CPU over all CPU and placed
+//! memory over all memory, as Dominant Resource Fairness measures a share, so a workload that runs
+//! out of memory first is loaded by its memory.
+//!
+//! It then measures stranded capacity: on each node where no shape of the workload's requests fits
+//! what is free, that node's free CPU and free memory, which nothing can use because another
+//! resource there is spent. One shape set stands for all of them: a node's free capacity can host
+//! some request exactly when it can host a Pareto-minimal one. This is Borg's stranding, resources
+//! "that cannot be used because another resource on the machine is fully allocated" (EuroSys 2015
+//! §3.2), asked of one cell at one load. A policy that leaves every node part-free strands nothing at
+//! a load it never has to pack tightly at, so [`PackReport::first_full_per_mille`] records the load
+//! at the first arrival that found no node with room: spreading shows there as an earlier refusal.
 
 use std::collections::BTreeSet;
 
 use crate::error::SimError;
-use crate::index::{FitIndex, Sample};
+use crate::index::{FitIndex, Refusals, Sample};
 use crate::model::{Cluster, Resources};
+
+/// A GiB, the unit kiln's workflows declare memory in.
+pub const GIB: u64 = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PackReport {
     pub total_cpu_milli: u64,
+    pub total_mem_bytes: u64,
     pub placed_cpu_milli: u64,
+    pub placed_mem_bytes: u64,
     pub free_cpu_milli: u64,
-    /// Free CPU on nodes where no workload shape fits what is free.
+    pub free_mem_bytes: u64,
+    /// Free CPU and memory on nodes where no workload shape fits what is free.
     pub stranded_cpu_milli: u64,
+    pub stranded_mem_bytes: u64,
     pub placements: u64,
     /// Arrivals no node admitted when they came.
     pub passed_over: u64,
-    /// Whether the placed CPU reached the load asked for before the arrivals ran out.
+    /// Whether the load reached what was asked before the arrivals ran out.
     pub reached: bool,
+    /// The load when the first arrival found no node with room (none refused it by a filter alone).
+    pub first_full_per_mille: Option<u64>,
+}
+
+impl PackReport {
+    /// The dominant share placed, in per-mille: the larger of placed CPU over all CPU and placed
+    /// memory over all memory.
+    pub fn load_per_mille(&self) -> u64 {
+        per_mille(self.placed_cpu_milli, self.total_cpu_milli)
+            .max(per_mille(self.placed_mem_bytes, self.total_mem_bytes))
+    }
+
+    /// Stranded capacity in per-mille: the stranded share of CPU and of memory, summed.
+    pub fn stranded_per_mille(&self) -> u64 {
+        per_mille(self.stranded_cpu_milli, self.total_cpu_milli)
+            .saturating_add(per_mille(self.stranded_mem_bytes, self.total_mem_bytes))
+    }
+}
+
+/// `part` as a share of `whole` in per-mille; 0 of a whole of 0, and past u64 saturates.
+fn per_mille(part: u64, whole: u64) -> u64 {
+    u128::from(part)
+        .checked_mul(1000)
+        .and_then(|x| x.checked_div(u128::from(whole)))
+        .map_or(0, |x| u64::try_from(x).unwrap_or(u64::MAX))
+}
+
+/// The requests a recorded workload's legs would declare: each need rounded up to a whole core and a
+/// whole GiB, at least one of each. kiln's workflows declare whole cores and GiB, the smallest one
+/// core and 1 GiB (kiln `.kiln/ci.yaml:107`, `resources: { cpu: "1", memory: 1Gi }`), and a scheduler
+/// places by what is declared, not by what was measured.
+pub fn declared(cluster: &Cluster) -> Result<Cluster, SimError> {
+    let mut out = cluster.clone();
+    for w in &mut out.workloads {
+        let cores = w.need.cpu_milli.div_ceil(1000).max(1);
+        let gib = w.need.mem_bytes.div_ceil(GIB).max(1);
+        w.need.cpu_milli = cores.checked_mul(1000).ok_or(SimError::Need(w.id))?;
+        w.need.mem_bytes = gib.checked_mul(GIB).ok_or(SimError::Need(w.id))?;
+    }
+    Ok(out)
 }
 
 /// The Pareto-minimal needs: no other need is at most it in every resource. A capacity that holds
@@ -39,10 +95,13 @@ pub fn minimal_shapes(cluster: &Cluster) -> Vec<Resources> {
         .collect()
 }
 
+/// Packs `cluster`'s arrivals from the `from`th on (none past the last) to `load_per_mille`, then
+/// measures what is stranded.
 pub fn pack(
     cluster: &Cluster,
     sample: &Sample,
     load_per_mille: u64,
+    from: usize,
 ) -> Result<PackReport, SimError> {
     let mut index = FitIndex::new(&cluster.nodes)?;
     let mut r = PackReport::default();
@@ -51,23 +110,31 @@ pub fn pack(
             .total_cpu_milli
             .checked_add(node.capacity.cpu_milli)
             .ok_or(SimError::Resources(node.id))?;
+        r.total_mem_bytes = r
+            .total_mem_bytes
+            .checked_add(node.capacity.mem_bytes)
+            .ok_or(SimError::Resources(node.id))?;
     }
-    let target = u128::from(r.total_cpu_milli).saturating_mul(u128::from(load_per_mille));
-    for w in &cluster.workloads {
-        if u128::from(r.placed_cpu_milli).saturating_mul(1000) >= target {
+    for w in cluster.workloads.get(from..).unwrap_or_default() {
+        if r.load_per_mille() >= load_per_mille {
             r.reached = true;
             break;
         }
         let demand = w.demand();
-        let Some(key) = index.sampled_fit(&demand, sample).best else {
+        let sampled = index.sampled_fit(&demand, sample);
+        let Some(key) = sampled.best else {
             r.passed_over = r.passed_over.saturating_add(1);
+            if r.first_full_per_mille.is_none() && sampled.refused == Refusals::default() {
+                r.first_full_per_mille = Some(r.load_per_mille());
+            }
             continue;
         };
         index.take(key.node, &demand)?;
         r.placed_cpu_milli = r.placed_cpu_milli.saturating_add(w.need.cpu_milli);
+        r.placed_mem_bytes = r.placed_mem_bytes.saturating_add(w.need.mem_bytes);
         r.placements = r.placements.saturating_add(1);
     }
-    r.reached = r.reached || u128::from(r.placed_cpu_milli).saturating_mul(1000) >= target;
+    r.reached = r.reached || r.load_per_mille() >= load_per_mille;
     let shapes = minimal_shapes(cluster);
     for node in &cluster.nodes {
         let free = index.key(node.id)?;
@@ -77,20 +144,13 @@ pub fn pack(
             gpus: free.gpus,
         };
         r.free_cpu_milli = r.free_cpu_milli.saturating_add(free.cpu_milli);
+        r.free_mem_bytes = r.free_mem_bytes.saturating_add(free.mem_bytes);
         if !shapes.iter().any(|s| free.holds(s)) {
             r.stranded_cpu_milli = r.stranded_cpu_milli.saturating_add(free.cpu_milli);
+            r.stranded_mem_bytes = r.stranded_mem_bytes.saturating_add(free.mem_bytes);
         }
     }
     Ok(r)
-}
-
-/// Stranded CPU as a share of all CPU, in per-mille.
-pub fn stranded_per_mille(r: &PackReport) -> u64 {
-    u128::from(r.stranded_cpu_milli)
-        .checked_mul(1000)
-        .and_then(|x| x.checked_div(u128::from(r.total_cpu_milli)))
-        .and_then(|x| u64::try_from(x).ok())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -106,34 +166,82 @@ mod tests {
         }
     }
 
+    fn cluster(nodes: u32, node: Resources, needs: &[Resources]) -> Cluster {
+        Cluster {
+            nodes: (0..nodes)
+                .map(|i| NodeSpec {
+                    id: NodeId(i),
+                    capacity: node,
+                    background_milli: 0,
+                })
+                .collect(),
+            workloads: needs
+                .iter()
+                .zip(0u64..)
+                .map(|(&need, id)| WorkloadSpec {
+                    id: WorkloadId(id),
+                    need,
+                    kind: Kind::Plain,
+                    arrives: id,
+                    runs_for: None,
+                })
+                .collect(),
+        }
+    }
+
     /// AC-T7.4.3's measure on a hand-made case: two nodes of (4 CPU, 4 mem); work of (3,1) and (1,3).
     /// Placing the two (3,1)s on separate nodes leaves (1,3) free on each, which a (1,3) uses; that is
     /// no stranding. The free capacity a shape can't use is counted.
     #[test]
-    fn stranded_is_free_cpu_no_shape_fits() {
-        let nodes = (0..2)
-            .map(|i| NodeSpec {
-                id: NodeId(i),
-                capacity: res(4000, 4),
-                background_milli: 0,
-            })
-            .collect();
-        let w = |id, need| WorkloadSpec {
-            id: WorkloadId(id),
-            need,
-            kind: Kind::Plain,
-            arrives: 0,
-            runs_for: None,
-        };
-        let cluster = Cluster {
-            nodes,
-            workloads: vec![w(0, res(3000, 1)), w(1, res(3000, 1)), w(2, res(1000, 3))],
-        };
-        let shapes = minimal_shapes(&cluster);
-        assert_eq!(shapes.len(), 2);
-        let r = pack(&cluster, &Sample::whole(), 1000).unwrap();
+    fn stranded_is_free_capacity_no_shape_fits() {
+        let c = cluster(2, res(4000, 4), &[res(3000, 1), res(3000, 1), res(1000, 3)]);
+        assert_eq!(minimal_shapes(&c).len(), 2);
+        let r = pack(&c, &Sample::whole(), 1000, 0).unwrap();
         assert_eq!((r.placements, r.passed_over), (3, 0));
         // After all three: one node holds (3,1)+(1,3) = full; the other (3,1), free (1,3), which (1,3) fits.
-        assert_eq!(r.stranded_cpu_milli, 0);
+        assert_eq!((r.stranded_cpu_milli, r.stranded_mem_bytes), (0, 0));
+    }
+
+    /// Do a memory-bound workload; expect its load to be its memory's share, the CPU left on a node
+    /// whose memory is spent counted as stranded, and the first refusal's load recorded.
+    #[test]
+    fn a_memory_bound_load_strands_the_cpu_beside_spent_memory() {
+        let c = cluster(1, res(8000, 4), &[res(1000, 3), res(1000, 2)]);
+        let r = pack(&c, &Sample::whole(), 1000, 0).unwrap();
+        assert_eq!((r.placements, r.passed_over), (1, 1));
+        assert_eq!(r.load_per_mille(), 750);
+        assert_eq!(r.first_full_per_mille, Some(750));
+        // Free (7000, 1): the (1000, 2) shape doesn't fit, so all of it is stranded.
+        assert_eq!((r.stranded_cpu_milli, r.stranded_mem_bytes), (7000, 1));
+        assert_eq!(r.stranded_per_mille(), 875 + 250);
+    }
+
+    /// Do a pack from a later arrival; expect the arrivals before it left out.
+    #[test]
+    fn a_pack_starts_at_its_arrival() {
+        let c = cluster(1, res(8000, 8), &[res(8000, 8), res(1000, 1)]);
+        let r = pack(&c, &Sample::whole(), 1000, 1).unwrap();
+        assert_eq!((r.placements, r.placed_cpu_milli), (1, 1000));
+        let past = pack(&c, &Sample::whole(), 1000, 9).unwrap();
+        assert_eq!(past.placements, 0);
+    }
+
+    /// Do declared() on measured needs; expect whole cores and GiB, at least one of each, and an
+    /// overflow refused typed.
+    #[test]
+    fn declared_requests_are_whole_cores_and_gib() {
+        let c = cluster(
+            1,
+            res(8000, 8),
+            &[res(0, 0), res(1001, GIB + 1), res(2000, 2 * GIB)],
+        );
+        let d = declared(&c).unwrap();
+        let needs: Vec<_> = d.workloads.iter().map(|w| w.need).collect();
+        assert_eq!(
+            needs,
+            vec![res(1000, GIB), res(2000, 2 * GIB), res(2000, 2 * GIB)]
+        );
+        let huge = cluster(1, res(8000, 8), &[res(u64::MAX, 1)]);
+        assert_eq!(declared(&huge), Err(SimError::Need(WorkloadId(0))));
     }
 }
