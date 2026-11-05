@@ -40,3 +40,14 @@ it at a step either breaks the contract or shows the model wrong, and the design
 - A member's own refused fork: Windows keeps no §3-clean count
   (docs/research/runtime/windows-pids-refused.md), so the process bound stays in the conformance suite's
   HEX-RT-6 with its per-platform rule and out of the scenarios.
+
+## 4. A container's init and the signals it takes
+
+pid_namespaces(7) (Linux man-pages 6.19, 2026-05-13, https://man7.org/linux/man-pages/man7/pid_namespaces.7.html,
+accessed 2026-11-05), `DESIGN`: a process in an ancestor namespace can "send signals to the "init" process
+of a child PID namespace only if the "init" process" "has established a handler for that signal", and
+"SIGKILL or SIGSTOP are treated exceptionally": "these signals are forcibly delivered when sent from an
+ancestor PID namespace." `hex selftest-box wait` installs no handler (crates/hex-cli/src/selftest.rs:51-53,
+it parks), so a TERM sent to an `oci` box ends its exec'd programs and not its init. The suite's first
+fedora run showed it (HEX-DIFF-1 and 2 over the node's socket: the box stayed Running with no exit after
+TERM, where the simulator showed it Empty with Signal(15)), and the simulator now models the rule.

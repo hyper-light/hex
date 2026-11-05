@@ -574,9 +574,14 @@ simulator, and compares what each step shows (`docs/research/runtime/differentia
   list shows a box, whether a memory kill is counted.
 - **A reading waits for the fact:** a step that reads a box reads again until it shows the oracle's
   answer or `PATIENCE` passes, so a late report passes and a missing one fails (CLAUDE.md §4).
-- **A divergence is fixed where the contract says.** The first it found: a Windows box with nothing
-  running took a signal, where the simulator, Linux and macOS refuse it as `NotRunning`; Windows now
-  refuses it (HEX-DIFF-2).
+- **A divergence is fixed where the contract says.** The first two it found:
+  - A Windows box with nothing running took a signal, where the simulator, Linux and macOS refuse it as
+    `NotRunning`; Windows now refuses it (HEX-DIFF-2).
+  - An `oci` box signalled TERM kept its init running on fedora, where the simulator ended it. The kernel
+    is right: a PID namespace's init takes from an ancestor namespace only the signals it has a handler
+    for, and KILL and STOP, which are forced (pid_namespaces(7), man-pages 6.19); Docker's stop waits out
+    the same rule before it kills. The simulator was wrong, and now models it: a signal other than KILL
+    ends a box's exec'd programs and leaves its init running (HEX-DIFF-1, HEX-DIFF-2).
 - **Non-vacuity:** runtimes that are the simulator but for one lie (a signal of nothing taken, a deleted
   box kept, a box stuck running) each fail the scenario that shows it, at the step named; one that reports
   a box late passes (`crates/hex-api/src/differential.rs` tests).
