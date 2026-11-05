@@ -1929,8 +1929,15 @@ pub const PID_NAMESPACE_AHEAD: &str = "opening a pid namespace made ahead";
 /// The empty tmpfs is kept only where the kernel clones a detached mount. Before Linux 6.15 `open_tree` refuses a
 /// mount outside the caller's namespace with `EINVAL` (v6.8 `fs/namespace.c:2588`; v6.19's `may_copy_tree`,
 /// `:2928-2948`, admits an anonymous namespace's), so there every masked directory gets a tmpfs of its own.
+///
+/// Where it does, `/dev/null` is kept the same way: one detached clone of the host's, made private once. A clone
+/// takes its source's peer group and master and nothing else (v7.1 `fs/namespace.c:1253-1256`, `:1264-1265`,
+/// `:1276-1283`), so each masked file's clone of a private one is private already, one mount-lock hold fewer than
+/// cloning the host's (shared under systemd) and making each clone private (`goal6-mntns.md` §10).
 pub struct ProcSources {
     null: OwnedFd,
+    /// Whether `null` is the private detached clone, whose clones need no propagation change.
+    null_private: bool,
     empty: Option<OwnedFd>,
 }
 
@@ -1956,7 +1963,36 @@ impl ProcSources {
             Err(rustix::io::Errno::INVAL) => None,
             Err(e) => return Err(OciError::os("cloning the empty tmpfs", e)),
         };
-        Ok(Self { null, empty })
+        if empty.is_none() {
+            return Ok(Self {
+                null,
+                null_private: false,
+                empty,
+            });
+        }
+        let clone = rustix::mount::open_tree(
+            &null,
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::AT_EMPTY_PATH
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+        )
+        .map_err(|e| OciError::os("cloning /dev/null for the prepared procs", e))?;
+        sys::mount_setattr(
+            clone.as_fd(),
+            false,
+            &sys::MountAttrs {
+                set: 0,
+                clr: 0,
+                propagation: sys::MS_PRIVATE,
+            },
+        )
+        .map_err(|e| OciError::os("making the prepared procs' /dev/null private", e))?;
+        Ok(Self {
+            null: clone,
+            null_private: true,
+            empty,
+        })
     }
 }
 
@@ -1978,9 +2014,9 @@ pub struct PreparedProc {
 /// - Each mask and read-only path as the pruned init makes it ([`mask_path_pruned`],
 ///   [`readonly_path_pruned`]), on the detached proc: a missing one skipped as there, a directory masked by a
 ///   clone of the one empty read-only tmpfs the node keeps ([`ProcSources`]), so no mask makes a superblock, a
-///   file by the host's `/dev/null` (made private here, as runc and crun bind it), a read-only path by its own
-///   clone made read-only. A target reached through a symbolic link is
-///   refused, so the create keeps ordinary construction, which resolves it in the container's root.
+///   file by `/dev/null` as runc and crun bind it (a clone of the node's private one, else of the host's made
+///   private here), a read-only path by its own clone made read-only. A target reached through a symbolic link
+///   is refused, so the create keeps ordinary construction, which resolves it in the container's root.
 pub fn prepare_proc(
     key: &super::procmount::Key,
     sources: &ProcSources,
@@ -2071,16 +2107,18 @@ pub fn prepare_proc(
                     | OpenTreeFlags::OPEN_TREE_CLOEXEC,
             )
             .map_err(|e| OciError::os("masking a file", format!("{rel}: {e}")))?;
-            sys::mount_setattr(
-                clone.as_fd(),
-                false,
-                &sys::MountAttrs {
-                    set: 0,
-                    clr: 0,
-                    propagation: sys::MS_PRIVATE,
-                },
-            )
-            .map_err(|e| OciError::os("masking a file", format!("{rel}: {e}")))?;
+            if !sources.null_private {
+                sys::mount_setattr(
+                    clone.as_fd(),
+                    false,
+                    &sys::MountAttrs {
+                        set: 0,
+                        clr: 0,
+                        propagation: sys::MS_PRIVATE,
+                    },
+                )
+                .map_err(|e| OciError::os("masking a file", format!("{rel}: {e}")))?;
+            }
             clone
         };
         rustix::mount::move_mount(mount.as_fd(), "", target.as_fd(), "", FD_TO_FD)
