@@ -271,8 +271,8 @@ fn differ(
     s: &Scenario,
     patience: Duration,
 ) -> Result<(), String> {
-    let want = play(&SimRuntime::new(), oracle, s, None, patience)
-        .map_err(|e| format!("the oracle: {e}"))?;
+    let sim = SimRuntime::with_term_ending_init(fx.term_ends_init());
+    let want = play(&sim, oracle, s, None, patience).map_err(|e| format!("the oracle: {e}"))?;
     let got = play(rt, fx, s, Some(&want), patience)?;
     let mut steps = s.steps.iter().enumerate().zip(want.iter().zip(&got));
     match steps.find(|(_, (w, g))| w != g) {
@@ -634,6 +634,40 @@ mod tests {
                 differ(&liar, &SimFixture::Process, &SimFixture::Process, s, quick).unwrap_err();
             assert!(why.contains(step), "{lie:?}: {why}");
         }
+    }
+
+    /// A fixture of the simulator's whose class ends an init on TERM, as Windows' oci class does.
+    struct TermEnds;
+
+    impl Fixture for TermEnds {
+        fn spec(&self, id: BoxId, bounds: crate::Bounds) -> crate::BoxSpec {
+            SimFixture::Bundle.spec(id, bounds)
+        }
+        fn init(&self, id: BoxId, act: &Act) -> crate::BoxSpec {
+            SimFixture::Bundle.init(id, act)
+        }
+        fn program(&self, act: &Act) -> Program {
+            SimFixture::Bundle.program(act)
+        }
+        fn term_ends_init(&self) -> bool {
+            true
+        }
+    }
+
+    /// HEX-DIFF-1, 2 (the lead's 2026-11-05 ruling: what TERM does to an init is the class's): do a
+    /// runtime whose init ends on TERM, expect the suite to pass when its fixture says so, and to fail
+    /// at the first look at the box when the fixture says the init ignores TERM (Linux's rule).
+    #[test]
+    fn what_term_does_to_an_init_follows_the_fixture() {
+        let ends = SimRuntime::with_term_ending_init(true);
+        assert_eq!(run(&ends, &TermEnds), Vec::new());
+        let failures = run(&ends, &SimFixture::Bundle);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.case == "HEX-DIFF-2" && f.why.contains("at step 11 (Look(0)")),
+            "{failures:#?}"
+        );
     }
 
     /// Do a scenario whose box the runtime shows late; expect it to pass, since a reading waits for the
