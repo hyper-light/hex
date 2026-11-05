@@ -1093,6 +1093,8 @@ mod linux {
                "failed": a.failed - b.failed,
                "charged_bytes": a.charged_bytes - b.charged_bytes,
                "procs_made": a.procs_made - b.procs_made,
+               "procs_made_at_delete": a.procs_made_at_delete - b.procs_made_at_delete,
+               "procs_made_at_refill": a.procs_made_at_refill - b.procs_made_at_refill,
                "proc_hits": a.proc_hits - b.proc_hits,
                "proc_misses": a.proc_misses - b.proc_misses,
                "proc_dry": a.proc_dry - b.proc_dry,

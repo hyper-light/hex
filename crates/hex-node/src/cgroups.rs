@@ -113,6 +113,10 @@ pub struct ParkCounts {
     pub charged_bytes: u64,
     /// Procs made for parked inits' own pid namespaces (parked procs, off unless the node is made with them).
     pub procs_made: u64,
+    /// Of those, the ones made by the thread that parked their init: a delete's (reuse on), or the `hex-ahead`
+    /// refill's (reuse off). Never a create's or a claim's.
+    pub procs_made_at_delete: u64,
+    pub procs_made_at_refill: u64,
     /// Creates whose init's claim took the proc made for it: the init attached it, mounting none of its own.
     pub proc_hits: u64,
     /// Procs made for a parked init that its create didn't take (another key, no room for it, the claim
@@ -224,6 +228,8 @@ struct Parking {
     /// What makes each parked init's proc, when the node makes them ([`Cgroups::set_parked_procs`]).
     procs: OnceLock<ProcMaker>,
     procs_made: AtomicU64,
+    procs_made_at_delete: AtomicU64,
+    procs_made_at_refill: AtomicU64,
     proc_hits: AtomicU64,
     proc_misses: AtomicU64,
     proc_dry: AtomicU64,
@@ -263,6 +269,8 @@ impl Parking {
             failed: self.failed.load(Ordering::Relaxed),
             charged_bytes: self.charged.load(Ordering::Relaxed),
             procs_made: self.procs_made.load(Ordering::Relaxed),
+            procs_made_at_delete: self.procs_made_at_delete.load(Ordering::Relaxed),
+            procs_made_at_refill: self.procs_made_at_refill.load(Ordering::Relaxed),
             proc_hits: self.proc_hits.load(Ordering::Relaxed),
             proc_misses: self.proc_misses.load(Ordering::Relaxed),
             proc_dry: self.proc_dry.load(Ordering::Relaxed),
@@ -281,7 +289,7 @@ impl Parking {
 
     /// The proc of `parked`'s own pid namespace made for `key` and held with it, when the node makes them and the
     /// key is known; one that can't be made leaves the init parked without one, counted.
-    fn with_proc(&self, parked: &mut Parked, key: Option<&procmount::Key>) {
+    fn with_proc(&self, parked: &mut Parked, key: Option<&procmount::Key>, by: MadeBy) {
         let (Some(maker), Some(key), Some(sink)) = (self.procs.get(), key, self.drops.get()) else {
             return;
         };
@@ -289,12 +297,25 @@ impl Parking {
             Ok(proc) => {
                 parked.set_proc(key.clone(), proc, sink.clone());
                 self.procs_made.fetch_add(1, Ordering::Relaxed);
+                match by {
+                    MadeBy::Delete => &self.procs_made_at_delete,
+                    MadeBy::Refill => &self.procs_made_at_refill,
+                }
+                .fetch_add(1, Ordering::Relaxed);
             }
             Err(_) => {
                 self.procs_failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
+}
+
+/// Which thread parked an init and made its proc (decision 8, parked procs): the park's own, so the work scales with
+/// the deletes and refills that cause it (195e86a's and 6dcd731's A/Bs: workers fell behind).
+#[derive(Clone, Copy)]
+enum MadeBy {
+    Delete,
+    Refill,
 }
 
 /// The cgroups made ahead for boxes of no owner (decision 8, "The p99.9 that stayed"): a queue of at most `bound`
@@ -384,7 +405,7 @@ fn refill_ahead(
                     .map_err(|e| OciError::Broken(e.to_string()))?;
                 match park_counted(parking, parker, cg.dir(), flags) {
                     Ok(mut p) => {
-                        parking.with_proc(&mut p.0, key.as_ref());
+                        parking.with_proc(&mut p.0, key.as_ref(), MadeBy::Refill);
                         Ok((n, cg, p))
                     }
                     Err(e) => {
@@ -647,8 +668,11 @@ impl Cgroups {
         if let (Some(flags), Some(parker)) = (held.park_flags, self.parker.get()) {
             match park_counted(&self.parking, parker, cg.dir(), flags) {
                 Ok(mut made) => {
-                    self.parking
-                        .with_proc(&mut made.0, held.park_proc_key.as_ref());
+                    self.parking.with_proc(
+                        &mut made.0,
+                        held.park_proc_key.as_ref(),
+                        MadeBy::Delete,
+                    );
                     self.parking.parked.fetch_add(1, Ordering::Relaxed);
                     self.parking.slots()?.insert(held.slot, made);
                 }
