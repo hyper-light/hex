@@ -687,11 +687,13 @@ struct Begin<'a, 'p> {
 /// Where a create's init is cloned, or, for a parked init, the claim taken: the clone's outcome as
 /// [`sys::clone_sibling`] gives it. A parked init made with other namespaces than the create's `flags` is
 /// refused by type, never made into a container its spec didn't ask for (CLAUDE.md §3); one that takes the
-/// claim answers on its claim socket that it started, with a pidfd of its own, and goes on as the child.
+/// claim answers on its claim socket that it started, its mount namespace made `way` (as a fresh clone's answer
+/// says how it made its, so the agent counts both alike), with a pidfd of its own, and goes on as the child.
 fn begin(
     how: How<'_>,
     cgroup: Option<BorrowedFd<'_>>,
     flags: u64,
+    way: MountNamespace,
 ) -> Result<Option<sys::Sibling>, OciError> {
     match how {
         How::Clone => sys::clone_sibling(cgroup, flags),
@@ -706,7 +708,14 @@ fn begin(
                 rustix::process::PidfdFlags::empty(),
             )
             .map_err(|e| OciError::os("opening a parked init's own pidfd", e))?;
-            send_answer(claim, &Answer::Started { pid: 0 }, Some(pidfd.as_fd()))?;
+            send_answer(
+                claim,
+                &Answer::StartedIn {
+                    pid: 0,
+                    mount_namespace: way,
+                },
+                Some(pidfd.as_fd()),
+            )?;
             Ok(Some(sys::Sibling::Child))
         }
     }
@@ -936,7 +945,12 @@ fn serve_create(
     };
     let made_ahead = network.is_some();
     let flags = init::fresh_clone_flags(&spec, made_ahead, false);
-    match begin(begun.how, cgroup.as_ref().map(AsFd::as_fd), flags) {
+    match begin(
+        begun.how,
+        cgroup.as_ref().map(AsFd::as_fd),
+        flags,
+        MountNamespace::Copy,
+    ) {
         Ok(None) => refused(
             Failed::Unable,
             "this kernel or sandbox has no clone3 into a cgroup".to_owned(),
@@ -1172,6 +1186,7 @@ fn serve_create_pruned(
                     how,
                     Some(cgroup_dir.as_fd()),
                     super::mntns::clone_flags(flags, create.mount_namespace),
+                    create.mount_namespace,
                 ),
             )
         }
