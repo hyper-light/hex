@@ -255,8 +255,9 @@ impl ProcessBox {
     }
 
     /// Spawns `program` into the box: the first into a new process group it leads, each later one into that
-    /// group, so every member and everything it forks is in the box from its first instruction. Returns
-    /// its pid.
+    /// group, so every member and everything it forks is in the box from its first instruction. Once every
+    /// member has ended the group is gone and none can join it, so the next program leads a new one, as a
+    /// box on any other OS takes a program after its last ended (HEX-DIFF-1). Returns its pid.
     pub fn exec(&self, spawn: sys::Spawn) -> Result<i32, Refusal> {
         if self.state.stop.load(Ordering::SeqCst) {
             return Err(Refusal::NoSuchBox(self.state.id.clone()));
@@ -266,11 +267,14 @@ impl ProcessBox {
             .pgid
             .lock()
             .map_err(|_| poisoned("a box's group"))?;
-        let group = pgid.unwrap_or(0);
+        let group = match *pgid {
+            Some(g) if live(g)? => g,
+            _ => 0,
+        };
         let carries_cap = spawn.jetsam_mib.is_some();
         let pid = sys::spawn(&spawn, group, self.state.clamp)
             .map_err(|e| Refusal::os("spawning a program in a box", e))?;
-        if pgid.is_none() {
+        if group == 0 {
             *pgid = Some(pid);
         }
         drop(pgid);
@@ -295,16 +299,15 @@ impl ProcessBox {
     /// Whether the box has a live member right now, read live (not from the watcher's last poll, which
     /// lags), as the Linux class reads its cgroup's population for inspect.
     pub fn running_now(&self) -> Result<bool, Refusal> {
-        let Some(pgid) = *self
+        match *self
             .state
             .pgid
             .lock()
             .map_err(|_| poisoned("a box's group"))?
-        else {
-            return Ok(false);
-        };
-        let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
-        Ok(alive_in(pgid, &mut pids)? > 0)
+        {
+            Some(pgid) => live(pgid),
+            None => Ok(false),
+        }
     }
 
     /// What the box has used and holds now, as a [`Usage`].
@@ -324,20 +327,28 @@ impl ProcessBox {
         })
     }
 
-    /// Sends `signal` to every member (killpg). KILL is the rule's own end; any other is passed on.
+    /// Sends `signal` to every member (killpg). KILL is the rule's own end; any other is passed on. Refused
+    /// as not running when no member is alive, as every class refuses it (HEX-DIFF-2).
     pub fn signal(&self, signal: Signal) -> Result<(), Refusal> {
         let macos = hex_core::darwin::signal_to_macos(signal.number()).ok_or(Refusal::Invalid {
             what: "signal",
             why: format!("signal {} has no macOS number", signal.number()),
         })?;
+        let not_running = || Refusal::NotRunning(self.state.id.clone(), "signal");
         match *self
             .state
             .pgid
             .lock()
             .map_err(|_| poisoned("a box's group"))?
         {
-            Some(pgid) => killpg(pgid, macos),
-            None => Err(Refusal::NotRunning(self.state.id.clone(), "signal")),
+            Some(pgid) if live(pgid)? => {
+                if killpg(pgid, macos)? {
+                    Ok(())
+                } else {
+                    Err(not_running())
+                }
+            }
+            _ => Err(not_running()),
         }
     }
 
@@ -391,6 +402,12 @@ impl Drop for ProcessBox {
     fn drop(&mut self) {
         let _ = self.delete();
     }
+}
+
+/// Whether process group `pgid` has a member alive (not a zombie).
+fn live(pgid: i32) -> Result<bool, Refusal> {
+    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    Ok(alive_in(pgid, &mut pids)? > 0)
 }
 
 /// How many of process group `pgid`'s members are alive (not a zombie), by reading each one's rusage.
@@ -744,7 +761,8 @@ fn poisoned(what: &str) -> Refusal {
     Refusal::Broken(format!("{what} lock is poisoned"))
 }
 
-fn killpg(pgid: i32, signal: i32) -> Result<(), Refusal> {
+/// Signals process group `pgid`; false when the group has no member left (ESRCH).
+fn killpg(pgid: i32, signal: i32) -> Result<bool, Refusal> {
     let sig = rustix::process::Signal::from_named_raw(signal).ok_or(Refusal::Invalid {
         what: "signal",
         why: format!("{signal} isn't a signal this kernel names"),
@@ -754,7 +772,8 @@ fn killpg(pgid: i32, signal: i32) -> Result<(), Refusal> {
         why: format!("{pgid} isn't a process group"),
     })?;
     match rustix::process::kill_process_group(pid, sig) {
-        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
         Err(e) => Err(Refusal::os("killpg", e)),
     }
 }
