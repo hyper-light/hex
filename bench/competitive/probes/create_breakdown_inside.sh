@@ -249,6 +249,15 @@ for l in open("/proc/kallsyms"):
        if { echo "p:hexcb/nsww rwsem_down_write_slowpath sem=%di:x64" >> "$T/kprobe_events" \
             && echo "p:hexcb/nsrw rwsem_down_read_slowpath sem=%di:x64" >> "$T/kprobe_events"; } 2>/dev/null; then
          MT="$MT hexcb/nsww hexcb/nsrw"
+         # Each write hold timed (goal 6, the lead's 10:47Z ask): up_write ends it, and the write slowpath's return
+         # grants a contended one (v6.19 kernel/locking/rwsem.c); create_breakdown.py times it from its grant.
+         for ev in nsu nswwr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+         if { echo "p:hexcb/nsu up_write sem=%di:x64" >> "$T/kprobe_events" \
+              && echo "r:hexcb/nswwr rwsem_down_write_slowpath" >> "$T/kprobe_events"; } 2>/dev/null; then
+           MT="$MT hexcb/nsu hexcb/nswwr"
+         else
+           echo "the mount lock's releases can't be probed here: its holds go untimed" >&2
+         fi
        else
          echo "the mount lock's slowpaths can't be probed here: its waits go uncounted" >&2
        fi ;;
@@ -257,10 +266,15 @@ for l in open("/proc/kallsyms"):
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $MT; do
     case $ev in
-      # The holds by the pools' maker and the node too, which a span's wait can be behind (goal6-mntns.md §10).
-      hexcb/nsw|hexcb/nsr) f="sem == $nssem && (comm == \"hex\" || comm == \"hex-devfs\" || comm == \"seam_oci\")" ;;
+      # Every write hold, whoever holds it: a span's wait can be behind the pools' maker, the node or a co-tenant
+      # as much as another init (goal6-mntns.md §10). The slowpath's return carries no address: the reader takes
+      # it only for a pid whose write wait on the lock it saw begin.
+      hexcb/nsw|hexcb/nsww|hexcb/nsu) f="sem == $nssem" ;;
+      hexcb/nswwr) f="common_pid > 0" ;;
+      hexcb/nsr) f="sem == $nssem && (comm == \"hex\" || comm == \"hex-devfs\" || comm == \"seam_oci\")" ;;
       hexcb/*) f="sem == $nssem && comm == \"hex\"" ;;
-      sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
+      # Hex's holders off their CPU mid-hold: the inits, the pools' maker and the node.
+      sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex" || prev_comm == "hex-devfs" || next_comm == "hex-devfs" || prev_comm == "seam_oci" || next_comm == "seam_oci"' ;;
       sched/sched_process_fork) f='parent_comm == "hex"' ;;
       sched/sched_waking) f='comm == "hex"' ;;
       irq/*) f='comm ~ "ksoftirqd*" || comm == "hex"' ;;
@@ -284,7 +298,7 @@ for l in open("/proc/kallsyms"):
   for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
   for ev in $MT; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   untrace
-  for ev in nsw nsr nsww nsrw; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+  for ev in nsw nsr nsww nsrw nsu nswwr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
 

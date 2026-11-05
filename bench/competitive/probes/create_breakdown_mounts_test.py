@@ -137,6 +137,68 @@ def root_trace():
     ])
 
 
+def holders_timed_trace():
+    """Goal 6 (the lead's 10:47Z ask): each write hold of the mount lock timed from its grant to its up_write, by
+    holder. Init 1000 holds 30 us, 10 of them preempted by a busy loop. Init 1001 waits in the slowpath, is woken
+    by 1000 as 1000 releases, and holds 17 us from its grant. The pools' maker holds 5 us, a co-tenant's mount 50."""
+    t = 1_000_000
+    sem = "sem=0xffffffff92c64b40"
+    return lines_of([
+        (t, 1000, "hex", "sys_enter: NR 308 (3, 40000000)"),
+        (t + 5, 1000, "hex", "sys_exit: NR 308 = 0"),
+        (t + 6, 1001, "hex", "sys_enter: NR 308 (3, 40000000)"),
+        (t + 8, 1001, "hex", "sys_exit: NR 308 = 0"),
+        (t + 10, 1000, "hex", "sys_enter: NR 429 (5, 0, 6, 0, 104)"),
+        (t + 20, 1000, "hex", f"nsw: (down_write+0x4/0x60) {sem}"),
+        (t + 25, 1000, "hex", "sched_switch: prev_comm=hex prev_pid=1000 prev_prio=120 prev_state=R+ ==> "
+                              "next_comm=bash next_pid=77 next_prio=120"),
+        (t + 28, 1001, "hex", "sys_enter: NR 429 (5, 0, 6, 0, 104)"),
+        (t + 29, 1001, "hex", f"nsw: (down_write+0x4/0x60) {sem}"),
+        (t + 30, 1001, "hex", f"nsww: (rwsem_down_write_slowpath+0x0/0x600) {sem}"),
+        (t + 31, 1001, "hex", "sched_switch: prev_comm=hex prev_pid=1001 prev_prio=120 prev_state=D ==> "
+                              "next_comm=swapper/5 next_pid=0 next_prio=120"),
+        (t + 35, 77, "bash", "sched_switch: prev_comm=bash prev_pid=77 prev_prio=120 prev_state=R ==> "
+                             "next_comm=hex next_pid=1000 next_prio=120"),
+        (t + 49, 1000, "hex", "sched_waking: comm=hex pid=1001 prio=120 target_cpu=005"),
+        (t + 50, 1000, "hex", f"nsu: (up_write+0x0/0x60) {sem}"),
+        (t + 51, 1000, "hex", "sys_exit: NR 429 = 0"),
+        (t + 52, 0, "<idle>", "sched_switch: prev_comm=swapper/5 prev_pid=0 prev_prio=120 prev_state=R ==> "
+                              "next_comm=hex next_pid=1001 next_prio=120"),
+        (t + 53, 1001, "hex", "nswwr: (down_write+0x30/0x60 <- rwsem_down_write_slowpath) arg1=0xffffffff92c64b40"),
+        (t + 60, 1000, "hex", "sys_enter: NR 80 (1)"),
+        (t + 70, 1001, "hex", f"nsu: (up_write+0x0/0x60) {sem}"),
+        (t + 75, 1001, "hex", "sys_exit: NR 429 = 0"),
+        (t + 80, 1001, "hex", "sys_enter: NR 80 (1)"),
+        (t + 100, 3000, "hex-devfs", f"nsw: (down_write+0x4/0x60) {sem}"),
+        (t + 105, 3000, "hex-devfs", f"nsu: (up_write+0x0/0x60) {sem}"),
+        (t + 200, 4000, "mount", f"nsw: (down_write+0x4/0x60) {sem}"),
+        (t + 250, 4000, "mount", f"nsu: (up_write+0x0/0x60) {sem}"),
+    ])
+
+
+class HoldsTimed(unittest.TestCase):
+    def test_each_hold_is_timed_by_holder_with_its_preemption(self):
+        """Do two inits, the maker and a co-tenant holding the lock, expect each holder's holds timed from their
+        grant, an init's preemption inside its hold counted, and a co-tenant's off-CPU time said to be untraced."""
+        rc, summary, report = run(holders_timed_trace(), span="root")
+        self.assertEqual(rc, 0)
+        by = summary["nssem_holds_by_holder"]
+        self.assertEqual(by["an init"], {"holds": 2, "mean_us": 23.5, "max_us": 30, "preempted_us_per_hold": 5.0,
+                                         "blocked_us_per_hold": 0.0})
+        self.assertEqual(by["hex-devfs"]["holds"], 1)
+        self.assertEqual(by["hex-devfs"]["mean_us"], 5.0)
+        self.assertEqual(by["mount"], {"holds": 1, "mean_us": 50.0, "max_us": 50, "preempted_us_per_hold": None,
+                                       "blocked_us_per_hold": None})
+        self.assertIn("| an init | 2 | 23.5 | 30 | 5.0 | 0.0 |", report)
+        self.assertIn("| mount | 1 | 50.0 | 50 | untraced | untraced |", report)
+
+    def test_a_wait_woken_by_another_init_says_so(self):
+        """Do an init woken from the slowpath by another init's release, expect the wait charged to another init."""
+        rc, _, report = run(holders_timed_trace(), span="root")
+        self.assertEqual(rc, 0)
+        self.assertIn("move_mount, woken by another init, waiting for the mount lock (write) 10.5", report)
+
+
 class RootInPlace(unittest.TestCase):
     def test_root_span_ends_at_the_chdir_and_counts_the_mount_namespace_join(self):
         """T-T7.1 goal 6 (indicative): do the root-in-place cut, expect each init's span from its network join to

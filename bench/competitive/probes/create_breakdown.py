@@ -838,6 +838,13 @@ NSSEM = re.compile(r"^(?P<kind>nsw|nsr): \(")
 # have the lock at once (kernel/locking/rwsem.c, rwsem_down_write_slowpath and rwsem_down_read_slowpath), on the same
 # address. And who woke a hex process (sched_waking, recorded on the waker), so a blocked wait names what ended it.
 NSWAIT = re.compile(r"^(?P<kind>nsww|nsrw): \(")
+# A write hold's end and a contended one's grant (goal 6, the lead's 10:47Z ask): up_write on namespace_sem, and the
+# write slowpath's return, after which the waiter holds the lock (v6.19 kernel/locking/rwsem.c,
+# rwsem_down_write_slowpath). Each hold is timed from its grant to its release, by holder.
+NSU = re.compile(r"^nsu: \(")
+NSWWR = re.compile(r"^nswwr: \(")
+# The holders whose off-CPU time the trace sees (mounts_trace filters sched_switch to them); a co-tenant's isn't.
+HEX_COMMS = ("hex", "hex-devfs", "seam_oci")
 WAKING = re.compile(r"^sched_waking: comm=.*? pid=(?P<pid>\d+) prio=")
 
 
@@ -905,6 +912,10 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
     joins, woke, waits = {}, {}, {}
     # outside: the mount lock's write holds by a traced process outside any span, by its command.
     outside = {}
+    # holding: a write hold under way by pid ([granted at, or None while it waits], its command, preempted us, blocked
+    # us); held_off: a holder off its CPU mid-hold (since, how); hold_times: each ended (pid, command, us, preempted,
+    # blocked); a hold taken in an init's span is "an init"'s, any other by its command.
+    holding, held_off, hold_times = {}, {}, []
     ends = (NR_CHDIR,) if span == "root" else (NR_CHROOT, NR_PIVOT_ROOT)
 
     def charge(table, label, d):
@@ -927,6 +938,21 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
             read += 1
             ts, pid, body = int(m["s"]) * 1_000_000 + int(m["us"]), int(m["pid"]), m["body"]
             cpu = int(m["cpu"])
+            if (e := SWITCH.match(body)):
+                prev, nxt = int(e["prev"]), int(e["next"])
+                if (h := holding.get(prev)) is not None and h[0] is not None:
+                    held_off[prev] = (ts, 2 if e["state"].startswith("R") else 3)
+                if (o := held_off.pop(nxt, None)) is not None and nxt in holding:
+                    holding[nxt][o[1]] += ts - o[0]
+            elif NSU.match(body):
+                if (h := holding.pop(pid, None)) is not None and h[0] is not None:
+                    hold_times.append((pid, h[1], ts - h[0], h[2], h[3]))
+                held_off.pop(pid, None)
+                continue
+            elif NSWWR.match(body):
+                if (h := holding.get(pid)) is not None and h[0] is None:
+                    h[0] = ts
+                continue
             if (e := SOFTIRQ.match(body)) or (e := WORK.match(body)):
                 kind = "softirq" if "action" in e.re.groupindex else "work"
                 label = f"softirq {e['action']}" if kind == "softirq" else f"work {e['function']}"
@@ -1010,8 +1036,10 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
             elif (e := WAKING.match(body)):
                 woken = int(e["pid"])
                 if woken in off and off[woken][1] == "blocked":
-                    woke[woken] = m["comm"].split("/")[0]
+                    woke[woken] = "another init" if pid in window else m["comm"].split("/")[0]
             elif (e := NSWAIT.match(body)):
+                if e["kind"] == "nsww" and (h := holding.get(pid)) is not None:
+                    h[0] = None  # it waits: its hold starts at the slowpath's return
                 if pid in window:
                     waits[pid] = "write" if e["kind"] == "nsww" else "shared"
                     window[pid]["lock_waits"] = window[pid].get("lock_waits", 0) + 1
@@ -1023,6 +1051,8 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                     window[pid]["pending"] += 1
             elif (e := NSSEM.match(body)):
                 probed = True
+                if e["kind"] == "nsw":
+                    holding[pid] = [ts, "an init" if pid in window else m["comm"].split("/")[0], 0, 0]
                 if (w := window.get(pid)) is not None:
                     c = cur.get(pid)
                     at = name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "between calls"
@@ -1153,6 +1183,26 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
         + ["", "### Each of them", ""] + each(tail)))
     n = len(creates)
     with open(os.path.splitext(trace)[0] + ".summary.json", "w") as f:
+        timed = {}
+        for _, who, us, p_us, b_us in hold_times:
+            timed.setdefault(who, []).append((us, p_us, b_us))
+        holders = {}
+        for who, hs in timed.items():
+            seen = who in HEX_COMMS or who == "an init"
+            holders[who] = {"holds": len(hs), "mean_us": round(sum(h[0] for h in hs) / len(hs), 1),
+                            "max_us": max(h[0] for h in hs),
+                            "preempted_us_per_hold": round(sum(h[1] for h in hs) / len(hs), 1) if seen else None,
+                            "blocked_us_per_hold": round(sum(h[2] for h in hs) / len(hs), 1) if seen else None}
+        if hold_times:
+            print("\n## The mount lock's write holds, by holder\n")
+            print("Each timed from its grant (down_write, or the write slowpath's return) to its up_write; off the CPU "
+                  "inside it only for Hex's processes, whose switches are traced.\n")
+            print("| holder | holds | mean us | max us | preempted in it, us per hold | blocked in it, us per hold |")
+            print("|---|---|---|---|---|---|")
+            for who, v in sorted(holders.items(), key=lambda kv: -kv[1]["holds"] * kv[1]["mean_us"]):
+                fmt = lambda x: "untraced" if x is None else f"{x:.1f}"
+                print(f"| {who} | {v['holds']} | {v['mean_us']:.1f} | {v['max_us']} | "
+                      f"{fmt(v['preempted_us_per_hold'])} | {fmt(v['blocked_us_per_hold'])} |")
         by_holder = ", ".join(f"{c} {k / n:.1f}" for c, k in sorted(outside.items(), key=lambda kv: (-kv[1], kv[0])))
         if probed:
             print("\n## Outside the spans\n")
@@ -1168,6 +1218,7 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                    "nssem_read_per_create": holds(creates, "nsr")[0] if probed else None,
                    "nssem_waits_per_create": sum(w.get("lock_waits", 0) for w in creates) / n,
                    "nssem_write_outside_per_create": by_holder if probed else None,
+                   "nssem_holds_by_holder": holders if hold_times else None,
                    "span": span}, f, indent=1)
     if n_lost:
         print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)
