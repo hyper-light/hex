@@ -1,36 +1,38 @@
 #!/usr/bin/env python3
-"""Turn an export of kiln CI legs into hex-sim's trace text (crates/hex-sim/src/replay.rs), for
-G2 step 3's recorded kiln workload (AC-T7.4.3).
+"""Turn kiln_export.py's export of kiln CI legs into hex-sim's trace text
+(crates/hex-sim/src/replay.rs), for G2 step 3's recorded kiln workload (AC-T7.4.3).
 
-Input, one JSON file:
-  {"source": "<where and when it was exported>",
-   "runners": [{"name": str, "cpu_milli": int, "mem_bytes": int, "gpus": int}, ...],
-   "runs": [<kiln ci.runs.get answers, each with its "legs">, ...]}
+Every rule below is counted in the trace's header, so nothing is changed or left out unsaid.
 
-Each leg kiln ran (it has started_at and finished_at, in unix seconds) becomes one `leg` line:
-  - arrives: queued_at less the earliest queued_at in the export, in ns; runs for finished_at less
-    started_at, in ns, at least 1 s, kiln's own resolution.
-  - need: the leg's declared requirements (cpu as Kubernetes CPU, memory as a Kubernetes quantity,
-    gpu a count). A leg that declared none takes --undeclared CPU_MILLI,MEM_BYTES, which the trace's
-    source line records; without the flag such a leg is refused.
-  - kind: `benchmark` if its job name holds "bench", `build` if it holds build, test, gate, clippy,
-    check or lint, else `plain`.
-Each runner becomes one `node` line, with no background load. A leg kiln never ran (no start or no
-end) is counted in the trace's header, never silently dropped. Anything else the script can't read is
-refused, naming the run and the leg, and nothing is written.
+Nodes: each runner kiln knows the CPU threads and memory of that ran at least one leg of the export,
+in name order: threads x 1000 millicores, its memory, its GPUs that have memory of their own (an
+Apple GPU shares the machine's and reports none), and no background load. Kubernetes pods have no
+facts, so the legs they ran are work here but the pods are not nodes. hex-sim's nodes carry no OS, so
+a leg may land on a runner of another OS.
+
+Legs: each job kiln ran (it has started_at and finished_at, unix seconds), in arrival order.
+  - arrives: the earlier of queued_at and started_at (a job queued after it started was queued again
+    for an attempt), less the earliest arrival in the export, in ns.
+  - runs for: finished_at less started_at, at least 1 s, kiln's resolution.
+  - need, measured: kiln's CPU seconds over the time it ran (mean cores) and its peak RSS, each
+    capped at what the runner it ran on has (for a pod or no runner, the node with the most
+    threads, then memory, so it fits a real one): a leg can't use more than its machine, so a
+    measurement past it is counted as capped.
+  - need, unmeasured: the median of the measured legs of the same repository, pipeline and job; else
+    of the same repository and job; else the leg is left out and counted.
+  - GPUs: 1 if a label names a GPU, else 0.
+  - kind: `benchmark` if a label, the pipeline or the job names "bench"; else `build`: kiln's CI legs
+    build and test code, changing the host as a build does.
+A job kiln never ran is counted, not traced. An export it can't read is refused, naming what, and
+nothing is written.
 """
 
 import argparse
+import collections
 import json
-import re
+import statistics
 import sys
 
-KIND_BENCH = re.compile(r"bench", re.I)
-KIND_BUILD = re.compile(r"build|test|gate|clippy|check|lint", re.I)
-CPU = re.compile(r"^(\d+)(?:\.(\d{1,3}))?(m?)$")
-MEM = re.compile(r"^(\d+)(Ki|Mi|Gi|Ti|k|M|G|T)?$")
-MEM_UNIT = {None: 1, "k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12,
-            "Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40}
 NS = 10**9
 
 
@@ -38,78 +40,97 @@ class Refused(Exception):
     pass
 
 
-def cpu_milli(text):
-    m = CPU.match(str(text).strip())
-    if not m:
-        raise Refused(f"cpu {text!r} is not a Kubernetes CPU quantity")
-    whole, frac, milli = m.groups()
-    if milli:
-        if frac:
-            raise Refused(f"cpu {text!r}: a fraction of a millicore")
-        return int(whole)
-    return int(whole) * 1000 + int((frac or "").ljust(3, "0"))
+def node_of(r):
+    gpus = sum(1 for g in r.get("gpus") or [] if (g.get("memory") or 0) > 0)
+    return int(r["threads"]) * 1000, int(r["mem_total"]), gpus
 
 
-def mem_bytes(text):
-    m = MEM.match(str(text).strip())
-    if not m:
-        raise Refused(f"memory {text!r} is not a Kubernetes quantity")
-    return int(m.group(1)) * MEM_UNIT[m.group(2)]
+def kind(run, job):
+    names = [run.get("pipeline") or "", job.get("key") or "", job.get("display") or ""]
+    names += job.get("labels") or []
+    return "benchmark" if any("bench" in n.lower() for n in names) else "build"
 
 
-def kind(job):
-    if KIND_BENCH.search(job):
-        return "benchmark"
-    if KIND_BUILD.search(job):
-        return "build"
-    return "plain"
+def convert(export):
+    runs = export.get("runs")
+    if not runs:
+        raise Refused("the export holds no run")
+    ran = [(r, j) for r in runs for j in r.get("jobs") or [] if j.get("started_at") and j.get("finished_at")]
+    jobs = sum(len(r.get("jobs") or []) for r in runs)
+    if not ran:
+        raise Refused("the export holds no job kiln ran")
+    used = {j.get("agent") for _, j in ran}
+    nodes = {r["name"]: node_of(r) for r in export.get("runners") or []
+             if r.get("name") in used and r.get("threads") and r.get("mem_total")}
+    if not nodes:
+        raise Refused("no runner that ran a leg has CPU and memory facts")
+    largest = max(nodes.values())[:2]
+    count = collections.Counter()
 
+    def measured(j):
+        if j.get("cpu_seconds") is None or j.get("peak_rss") is None:
+            return None
+        dur = max(j["finished_at"] - j["started_at"], 1)
+        cpu_cap, mem_cap = nodes[j["agent"]][:2] if j.get("agent") in nodes else largest
+        cpu = round(j["cpu_seconds"] / dur * 1000)
+        mem = int(j["peak_rss"])
+        if cpu > cpu_cap or mem > mem_cap:
+            count["capped at their runner"] += 1
+        return min(cpu, cpu_cap), min(mem, mem_cap)
 
-def convert(export, undeclared):
-    runners = export.get("runners") or []
-    if not runners:
-        raise Refused("the export names no runner")
-    names = sorted(r["name"] for r in runners)
-    if len(set(names)) != len(names):
-        raise Refused("a runner named twice")
-    by_name = {r["name"]: r for r in runners}
-    legs, not_run, defaulted = [], 0, 0
-    for run in export.get("runs") or []:
-        for leg in run.get("legs") or []:
-            where = f"run {run.get('id')!r} leg {leg.get('key')!r}"
-            q, s, f = leg.get("queued_at"), leg.get("started_at"), leg.get("finished_at")
-            if s is None or f is None:
-                not_run += 1
-                continue
-            if q is None or not (q <= s <= f):
-                raise Refused(f"{where}: queued, started and finished out of order")
-            if leg.get("runner") not in by_name:
-                raise Refused(f"{where}: runner {leg.get('runner')!r} is not in the export's runners")
-            req = leg.get("requirements") or {}
-            if "cpu" in req and "memory" in req:
-                cpu, mem = cpu_milli(req["cpu"]), mem_bytes(req["memory"])
-            elif undeclared is None:
-                raise Refused(f"{where}: declares no cpu and memory, and --undeclared was not given")
+    needs, by_job, by_key = {}, collections.defaultdict(list), collections.defaultdict(list)
+    for r, j in ran:
+        m = measured(j)
+        needs[j["id"]] = m
+        if m is not None:
+            by_job[(r.get("repo_name"), r.get("pipeline"), j.get("key"))].append(m)
+            by_key[(r.get("repo_name"), j.get("key"))].append(m)
+
+    def median(ms):
+        return (round(statistics.median(c for c, _ in ms)), round(statistics.median(m for _, m in ms)))
+
+    legs = []
+    for r, j in ran:
+        need = needs[j["id"]]
+        if need is None:
+            same_job = by_job.get((r.get("repo_name"), r.get("pipeline"), j.get("key")))
+            same_key = by_key.get((r.get("repo_name"), j.get("key")))
+            if same_job:
+                need, why = median(same_job), "unmeasured, the median of the same job"
+            elif same_key:
+                need, why = median(same_key), "unmeasured, the median of the same repository and job"
             else:
-                cpu = cpu_milli(req["cpu"]) if "cpu" in req else undeclared[0]
-                mem = mem_bytes(req["memory"]) if "memory" in req else undeclared[1]
-                defaulted += 1
-            gpus = int(req.get("gpu", 0))
-            legs.append((q, str(run.get("id")), str(leg.get("key")),
-                         max(f - s, 1) * NS, cpu, mem, gpus, kind(str(leg.get("job", "")))))
+                count["unmeasured with nothing to take from, left out"] += 1
+                continue
+            count[why] += 1
+        else:
+            count["measured"] += 1
+        q, s, f = j.get("queued_at"), j["started_at"], j["finished_at"]
+        if f < s:
+            raise Refused(f"run {r.get('id')!r} job {j.get('id')!r}: finished before it started")
+        if q is None or q > s:
+            count["queued after they started or never, arriving at their start"] += 1
+            q = s
+        if f == s:
+            count["ran 0 s, traced as 1 s"] += 1
+        gpus = 1 if any("gpu" in l.lower() for l in j.get("labels") or []) else 0
+        count[f"repo {r.get('repo_name')}"] += 1
+        legs.append((q, r.get("repo_name") or "", r.get("number") or 0, j.get("key") or "", j["id"],
+                     max(f - s, 1) * NS, need[0], need[1], gpus, kind(r, j)))
     if not legs:
-        raise Refused("the export holds no leg kiln ran")
+        raise Refused("no leg could be traced")
     legs.sort()
     t0 = legs[0][0]
+    names = sorted(nodes)
     out = [f"# source: {export.get('source', 'unstated')}",
-           f"# legs: {len(legs)} ran; {not_run} never ran (not in the trace); "
-           f"{defaulted} declared no cpu or memory"
-           + (f" and took {undeclared[0]} millicores, {undeclared[1]} bytes" if defaulted else ""),
+           f"# made by bench/sched/kiln_trace.py from {len(runs)} runs and {jobs} jobs: {len(ran)} ran, "
+           f"{jobs - len(ran)} never ran (not traced), {len(legs)} legs traced",
+           *(f"# {n}: {count[n]}" for n in sorted(count)),
            "# nodes in runner-name order: " + " ".join(names)]
     for n in names:
-        r = by_name[n]
-        out.append(f"node,{int(r['cpu_milli'])},{int(r['mem_bytes'])},{int(r.get('gpus', 0))},0")
-    for q, _run, _key, runs_for, cpu, mem, gpus, k in legs:
+        cpu, mem, gpus = nodes[n]
+        out.append(f"node,{cpu},{mem},{gpus},0")
+    for q, _repo, _num, _key, _id, runs_for, cpu, mem, gpus, k in legs:
         out.append(f"leg,{(q - t0) * NS},{runs_for},{cpu},{mem},{gpus},{k}")
     return "\n".join(out) + "\n"
 
@@ -118,17 +139,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("export")
     ap.add_argument("out")
-    ap.add_argument("--undeclared", help="CPU_MILLI,MEM_BYTES for a leg that declared none")
     a = ap.parse_args()
-    undeclared = None
-    if a.undeclared:
-        c, m = a.undeclared.split(",")
-        undeclared = (int(c), int(m))
     try:
         with open(a.export) as fh:
-            text = convert(json.load(fh), undeclared)
+            text = convert(json.load(fh))
     except (Refused, KeyError, ValueError, TypeError) as e:
-        print(f"kiln_trace: refused: {e}", file=sys.stderr)
+        print(f"kiln_trace: refused: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     with open(a.out, "w") as fh:
         fh.write(text)
