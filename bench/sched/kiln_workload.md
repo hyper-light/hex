@@ -1,0 +1,62 @@
+# The recorded kiln workload (G2 step 3, AC-T7.4.3)
+
+`kiln-ci-20261022-20261105.trace` is fourteen days of kiln's own CI, as hex-sim replays it: every leg
+kiln ran for runs created from 2026-10-22T00:00:00Z up to 2026-11-05T00:00:00Z, on the runners that
+ran them. `AC-T7.4.3` measures packing "by hex-sim with a recorded kiln workload"; this is that
+workload, and `a_recorded_kiln_workload_replays_the_same_twice` (crates/hex-sim/tests/sim.rs) replays
+it.
+
+## Where and when it was recorded
+
+- Source: the production kiln on adacachy (`http://127.0.0.1:7070`, public `http://adacachy:7070`),
+  read-only through its HTTP API: `GET /api/runs` (paged on `created_at`), `GET /api/runs/:id` (each
+  run's jobs) and `GET /api/agents` (each runner's facts). No database was opened and nothing was
+  written to kiln. The token came from `kiln token` and was never printed or stored.
+- Exported: 2026-11-05T21:39:09Z, by `bench/sched/kiln_export.py --since 2026-10-22T00:00:00Z
+  --until 2026-11-05T00:00:00Z`.
+- Why that API: kiln's newer `ci.runs.*` operations read only the CI engine's runs, and every one of
+  these ran on kiln's older pipeline path, whose own read endpoints still serve them.
+- `kiln-ci-20261022-20261105.export.json.gz` is the export itself (runs and jobs trimmed to the fields
+  below, no commit messages or authors). `bench/sched/kiln_trace.py` turns it into the trace, and
+  running it again on the export gives the committed trace byte for byte.
+
+## What it holds
+
+1,488 runs and 6,116 jobs. 4,655 jobs ran (they have a start and an end) and are the trace's legs;
+1,461 never ran (cancelled or skipped before starting) and are counted, not traced.
+
+| repository | legs |
+|---|---:|
+| hyper-light/kiln | 2,463 |
+| hyper-light/slates | 1,777 |
+| hyper-light/hyper-raft | 184 |
+| hyper-light/hyperscale | 128 |
+| hyper-light/mantle | 56 |
+| hyper-light/hex | 15 |
+| hyper-light/quiver | 14 |
+| hyper-light/focal | 13 |
+| hyper-light/amphora | 5 |
+
+Each leg's arrival is its queue time, its run time its start to its end, and its need what kiln
+measured it using: mean cores (CPU seconds over its run time) and peak RSS. 3,750 legs were measured.
+905 were not (kiln recorded no CPU seconds or peak RSS for them) and take the median of the measured
+legs of the same repository, pipeline and job; every one had such legs. 26 measured more CPU than
+their runner has (CPU seconds past their run time times its threads; 10 failed, 10 timed out, 1 was
+cancelled and 5 succeeded) and are capped at their runner; none measured more memory than it has.
+59 were queued again after they started (a new attempt) and arrive at their start. 178 ran under
+kiln's 1 s resolution and run for 1 s. Legs naming "bench" in a label, their pipeline or their job
+are benchmarks; the rest build and test code and are builds. No leg asked for a GPU.
+
+The nodes are the 10 runners with CPU and memory facts that ran at least one leg: adacachy (32
+threads, 123 GiB, one NVIDIA GPU), jupiter (32, 124 GiB), fedora (32, 63 GiB) and seven Macs, Mac
+Studios and MacBook Pros (14-32 threads, 36-128 GiB), each at its threads and memory. 2,682 legs ran
+on Kubernetes pods, which kiln keeps no facts for: they are work here, but the pods are not nodes.
+hex-sim's nodes carry no OS, so a replayed leg may land on a runner of another OS than the one it ran
+on.
+
+## What would make it wrong
+
+The trace stands for kiln's CI if kiln's measurements are right. A leg whose CPU seconds or peak RSS
+kiln mis-measured carries that error into its need; the 26 legs capped on CPU show some do. If kiln's
+measured needs were systematically low (a cgroup that missed child processes, say), packing on this
+trace would look better than on the hardware.
