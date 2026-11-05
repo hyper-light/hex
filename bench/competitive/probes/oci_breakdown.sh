@@ -7,6 +7,7 @@
 # commit whose oci_bench.py step 5 also runs, right after this tree's, to compare the two drivers' ceilings.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex release binary}")
 # Another host only by name (BENCH_HOST_OK=<its hostname>), as host.sh allows: the "fedora" runner's box is
 # now hostname kiln-a094a12d after a reprovision, and Ada's call runs these on adacachy.
@@ -30,8 +31,8 @@ if [ -n "${OLD_DRIVER_REV:-}" ]; then
   echo "old driver: $OLD_DRIVER_REV" >> "$OUT/versions.txt"
 fi
 NAME=hexbench-breakdown-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" -v "$HEX:/opt/bin/hex:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e LIFECYCLES -e RUNTIMES -e STEPS \

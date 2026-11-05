@@ -21,6 +21,7 @@
 # host.sh takes it.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
@@ -109,14 +110,13 @@ fi
 untag() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   [ -n "$HELPER" ] && kill "$HELPER" 2>/dev/null || true
-  docker run --rm --label hex.bench=competitive --privileged --security-opt label=disable --network=none \
+  docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable --network=none \
     -v /usr:/usr:ro -v "$LAB:/opt/lab:ro" -e TRACE_TAG -e UNTRACE_ONLY=1 \
     registry.fedoraproject.org/fedora:44 bash /opt/lab/probes/create_breakdown_inside.sh >/dev/null 2>&1 \
     || echo "the run's tracer state (tag $TRACE_TAG) couldn't be checked gone" >&2
 }
-trap untag EXIT
-trap 'exit 143' TERM INT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
+bench_trap untag
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e PROBE_ONLY -e TRACE_TAG -e EXTRA_MOUNTS -e AC_E -e IDLE_AB -e MOUNTS -e MOUNTS_CONC -e MOUNTS_PATH -e CLASSIC -e HEXBENCH_DEVFS -e AC_E_MOUNTS -e HEXBENCH_OWNER -e HEXBENCH_REUSE -e HEXBENCH_DOCKER_PATHS -e IPCUTS_AB -e HEX_OCI_MNTNS -e HEXBENCH_PROCFS \

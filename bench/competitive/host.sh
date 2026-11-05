@@ -19,6 +19,7 @@
 # (HEXBENCH_PHASES=density), whose held memory doesn't depend on load. env.txt records which, and the load.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+. "$HERE/containers.sh"
 HEX=$(realpath "${1:?hex release binary}")
 case "$(hostname)" in
   fedora*) ;;
@@ -76,7 +77,7 @@ fi
 
 NAMES=()  # the bench's containers, removed however this script ends
 cleanup() { for n in "${NAMES[@]}"; do docker rm -f "$n" >/dev/null 2>&1 || true; done; }
-trap cleanup EXIT
+bench_trap cleanup
 
 oci_rc=0  # the OCI pass's exit: non-zero when a round crashed (oci_inside.sh), read once the table is written
 if [[ " $PHASES " == *" oci "* ]]; then
@@ -115,7 +116,7 @@ if [[ " $PHASES " == *" oci "* ]]; then
   # it compares unlike setups; a ratio within one pass compares like ones.
   SEAM_OCI_ENV=(); [ -x "$BASE/bin/seam_oci" ] && SEAM_OCI_ENV=(-e "SEAM_OCI=/opt/bin/seam_oci")
   echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state" >> "$OUT/env.txt"
-  timeout 36000 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
+  timeout 36000 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
     --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
     -v /usr:/usr:ro -v "$BASE/bin:/opt/bin:ro" "${KRUN[@]}" -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" \
     -e RUNTIMES -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e N_OVERRIDE -e LIFECYCLES -e CAP -e BUDGET_MIB -e HEXBENCH_PHASES \
@@ -144,7 +145,7 @@ lab_image() {
 lab() {
   local pass=$1; shift
   NAMES+=("hexbench-$pass-$$")
-  timeout 36000 docker run --rm --name "hexbench-$pass-$$" --label hex.bench=competitive --cpuset-cpus="$CPUSET" \
+  timeout 36000 docker run --rm --name "hexbench-$pass-$$" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" \
     --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} --privileged --security-opt label=disable --cgroupns=private --network=none \
     -v "$HERE:/opt/lab:ro" -v "$OUT:/opt/out" "$@" \
     -e ROUNDS -e ROUND_FIRST -e N -e WARMUP -e LIFECYCLES -e CAP -e BUDGET_MIB="$BOX_BUDGET_MIB" -e METHODS \

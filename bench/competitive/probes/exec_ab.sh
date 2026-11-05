@@ -9,6 +9,7 @@
 # as host.sh takes it. No load gate: the comparisons are within the run, as exec_breakdown.sh's LOAD_GATE=0.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 [ $# -ge 1 ] || { echo "usage: exec_ab.sh <name>=<hex>:<seam_oci> ..." >&2; exit 2; }
 case "$(hostname)" in fedora*|"${BENCH_HOST_OK:-__none__}") ;; *) echo "refusing: the bench host is fedora, not $(hostname) (BENCH_HOST_OK=$(hostname) runs it here)" >&2; exit 2 ;; esac
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
@@ -36,8 +37,8 @@ done
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
 } > "$OUT/env.txt"
 NAME=hexbench-execab-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 7200 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e TRACE -e TRACE_N -e BUILDS="${NAMES[*]}" \

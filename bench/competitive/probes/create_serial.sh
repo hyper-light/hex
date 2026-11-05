@@ -15,6 +15,7 @@
 # BENCH_MEMORY and BENCH_OOM set the container's --memory (40g) and --oom-score-adj (none) on a shared host.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 BASE=${HEX_BENCH:-$HOME/.cache/hex-bench}
 [ -x "$BASE/bin/libcrun-driver" ] || { echo "refusing: no $BASE/bin/libcrun-driver (host.sh builds it)" >&2; exit 4; }
@@ -32,8 +33,8 @@ cp "$HEX" "$OUT/bin/hex"; cp "$SEAM" "$OUT/bin/seam_oci"; cp "$BASE/bin/libcrun-
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
 } > "$OUT/env.txt"
 NAME=hexbench-serial-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 2400 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+timeout 2400 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --tmpfs /run:rw,exec,nosuid,size=4g \
   -e SUSTAINED -e MODE -e HEXBENCH_OWNER -e HEXBENCH_NOFILE -e CPUSET="${CPUSET:-4-31}" -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   registry.fedoraproject.org/fedora:44 \

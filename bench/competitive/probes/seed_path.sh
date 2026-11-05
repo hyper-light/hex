@@ -11,6 +11,7 @@
 # shows in it only as their share of the cores it runs on.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
+. "$HERE/../containers.sh"
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
 STRACE=${STRACE:-$HOME/.cache/hex-t7/strace}
 [ -x "$STRACE/usr/bin/strace" ] || { echo "refusing: no $STRACE/usr/bin/strace" >&2; exit 4; }
@@ -28,8 +29,8 @@ containers() { docker ps --format '{{.Names}} ({{.Image}}, {{.Status}})' 2>&1 | 
   echo "harness: bench/competitive at $(git -C "$LAB" rev-parse --short HEAD)$(git -C "$LAB" diff --quiet HEAD -- . || echo ' with uncommitted changes')"
 } > "$OUT/env.txt"
 NAME=hexbench-seedpath-$$
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-timeout 3600 docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+timeout 3600 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$STRACE:/opt/strace:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e EXECS -e MEMORY_N -e SUSTAINED \

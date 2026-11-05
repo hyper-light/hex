@@ -16,6 +16,7 @@ COMMIT=${1:?commit}; RESULTS=${2:?results dir}
 # A Windows shell (Git Bash) is told to leave the containers' paths alone, and hands git a path git.exe reads.
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 HERE=$(cd "$(dirname "$0")" && { pwd -W 2>/dev/null || pwd; })
+. "$HERE/containers.sh"
 REPO=$(git -C "$HERE" rev-parse --show-toplevel)
 SHA=$(git -C "$REPO" rev-parse --short "$COMMIT")
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -28,7 +29,7 @@ SKIP=$((NCPU / 8)); [ "$SKIP" -ge 2 ] || SKIP=2
 CPUSET=${CPUSET:-$SKIP-$((NCPU - 1))}
 SRC=hexpass-src-$SHA; BIN=hexpass-bin-$SHA; OUTV=hexpass-out-$STAMP; NAME=hexpass-$STAMP
 mkdir -p "$RESULTS"
-trap 'docker rm -f "$NAME" "$NAME-image" >/dev/null 2>&1 || true' EXIT
+bench_trap 'docker rm -f "$NAME" "$NAME-image" >/dev/null 2>&1 || true'
 say() { echo "$(date -u +%FT%TZ) $*"; }
 
 # The image is made by a container and a commit, not a build, so a machine's builder busy with other work
@@ -36,7 +37,7 @@ say() { echo "$(date -u +%FT%TZ) $*"; }
 say "image $IMG"
 if ! docker image inspect "$IMG" > /dev/null 2>&1; then
   docker rm -f "$NAME-image" > /dev/null 2>&1 || true
-  docker run --name "$NAME-image" registry.fedoraproject.org/fedora:44 \
+  docker run "${BENCH_LABELS[@]}" --name "$NAME-image" registry.fedoraproject.org/fedora:44 \
     sh -c "dnf -y -q install --setopt=install_weak_deps=False $PACKAGES && dnf clean all" > /dev/null
   docker commit "$NAME-image" "$IMG" > /dev/null
   docker rm "$NAME-image" > /dev/null
@@ -44,11 +45,11 @@ fi
 
 say "source $SHA into volume $SRC"
 docker volume create "$SRC" > /dev/null
-git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -C /src'
+git -C "$REPO" -c core.autocrlf=false -c core.eol=lf archive "$SHA" | docker run "${BENCH_LABELS[@]}" -i --rm -v "$SRC:/src" "$IMG" sh -c 'find /src -mindepth 1 -delete && tar -x -C /src'
 
 say "build hex, seam_oci and the libcrun driver into volume $BIN"
 docker volume create "$BIN" > /dev/null
-docker run --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexpass-target:/target \
+docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexpass-target:/target \
   -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 \
   -e PATH=/cargo/bin:/usr/bin:/bin -e CRUN_VERSION="$CRUN_VERSION" -w /src "$IMG" bash -euo pipefail -c '
     [ -x /cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
@@ -65,7 +66,7 @@ docker run --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexp
 
 say "pass: RUNTIMES=${RUNTIMES:-libcrun} HEXBENCH_PHASES=${HEXBENCH_PHASES:-lifecycle} ROUNDS=${ROUNDS:-2} N=${N:-1000} on CPUs $CPUSET"
 docker volume create "$OUTV" > /dev/null
-docker run --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" -e HOST_CPU="${HOST_CPU:-}" -e SHA="$SHA" \
+docker run "${BENCH_LABELS[@]}" --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" -e HOST_CPU="${HOST_CPU:-}" -e SHA="$SHA" \
   -e CPUSET="$CPUSET" -e NCPU="$NCPU" -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e N="${N:-1000}" \
   -e WARMUP="${WARMUP:-100}" -e HEXBENCH_PHASES="${HEXBENCH_PHASES:-lifecycle}" -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" \
   "$IMG" bash -c '
@@ -85,7 +86,7 @@ docker run --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" 
 # root Hex node's /run/hex-node), as host.sh gives its own: the image's /run is the container's overlayfs. From goal
 # 5 plan step 2 on; passes before it kept every runtime's state on overlayfs, so ratios across it compare unlike
 # setups.
-docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPUSET" --memory="${MEMORY:-16g}" \
+docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" --memory="${MEMORY:-16g}" \
   --privileged --security-opt label=disable --cgroupns=private --network=none --tmpfs /run:rw,exec,nosuid,size=1g \
   -v "$BIN:/opt/bin:ro" -v "$SRC:/src:ro" -v "$OUTV:/opt/out" \
   -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e ROUND_FIRST=1 -e N="${N:-1000}" -e WARMUP="${WARMUP:-100}" \
@@ -93,8 +94,8 @@ docker run --rm --name "$NAME" --label hex.bench=competitive --cpuset-cpus="$CPU
   -e BUDGET_MIB="${BUDGET_MIB:-8192}" -e HEXBENCH_PHASES="${HEXBENCH_PHASES:-lifecycle}" \
   -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" -e SEAM_OCI=/opt/bin/seam_oci \
   "$IMG" bash -c 'ln -s /src/bench/competitive /opt/lab && bash /opt/lab/oci_inside.sh' 2>&1 | tee "$RESULTS/oci.log"
-docker run --rm -v "$SRC:/src:ro" -v "$OUTV:/opt/out" "$IMG" bash -c \
+docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$OUTV:/opt/out" "$IMG" bash -c \
   'echo "load at end: $(cat /proc/loadavg)" >> /opt/out/env.txt && python3 -I /src/bench/competitive/summarize.py /opt/out > /opt/out/table.md'
-docker run --rm -v "$OUTV:/opt/out:ro" "$IMG" tar -C /opt/out -cz . | tar -xz -C "$RESULTS"
+docker run "${BENCH_LABELS[@]}" --rm -v "$OUTV:/opt/out:ro" "$IMG" tar -C /opt/out -cz . | tar -xz -C "$RESULTS"
 docker volume rm "$OUTV" > /dev/null
 say "results: $RESULTS"
