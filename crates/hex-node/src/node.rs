@@ -1429,14 +1429,20 @@ impl Runtime for Node {
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
-        // An `oci` box whose init the supervisor reaped already, its exit in the record, has no init to
-        // forget: it ended on its own (`true` does).
-        let ended = record
-            .as_ref()
-            .is_some_and(|r| r.spec.class.class() == Class::Oci && r.exit.is_some());
         // Unwatched first, so the supervisor stops collecting the init; an exit it's recording as it's
         // unwatched goes into this box's record alone, which the scrub removes.
         let init = self.supervisor.forget(id)?;
+        // An `oci` box whose init the supervisor reaped already, its exit in the record, has no init to
+        // forget: it ended on its own (`true` does). The supervisor writes the exit before it stops
+        // watching the init, so with none watched the record is read again: one read before the forget
+        // may predate the exit.
+        let record = match (&init, record) {
+            (None, Some(_)) => self.record(id)?,
+            (_, record) => record,
+        };
+        let ended = record
+            .as_ref()
+            .is_some_and(|r| r.spec.class.class() == Class::Oci && r.exit.is_some());
         if let Some(mut record) = record {
             record.phase = Phase::Deleting;
             self.store.put(&record)?;
