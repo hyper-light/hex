@@ -509,7 +509,8 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
 - **The re-run at that tree** (parked_procs_ab.md, "at 1e5e956"; harness cp/t7-g6 f8933bd by git archive; 17:05-17:12Z,
   under heavier load, 43-53):
   - part 19's p50: 240-257 us → 42-47 us;
-  - its p99: 1,357-2,366 → 549-867 us at 6 loops, and 1,972-2,332 → 508-1,373 us at 12;
+  - its p99: 1,357-2,366 → 549-867 us at 6 loops, and 1,972-2,332 → 508-1,373 us at 12, so none of the 8 cells is
+    under 0.5 ms at that load;
   - its unpreempted p99: 470-1,644 → 58-812 us;
   - every claim a hit.
   The serial delete-cost pass there reads the delete flat, and the 32-in-flight rate 1-3% lower.
