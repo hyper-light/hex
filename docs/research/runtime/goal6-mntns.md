@@ -472,19 +472,33 @@ loop during seed start, which this A/B didn't have.
 
 ## 14. Where the under-load bar stands on 6.19, in plain words (2026-11-05)
 
-On fedora's Linux 6.19, with the levers measured so far, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6
-and 12 busy loops, 8 in flight, 8,000 idle threads, Docker's paths, no priority change) can't be reached by Hex's own
-code. One lever is still under review, not yet evaluated: the tail agent's design for a parked init whose proc and
-masks the node's refill worker makes ahead, through proc's `pidns=` option, which 6.19 has (decision 8, "Proposal, not
-built", cp/t7-g5-tail 12fd867 and 3355fd5). It would take part 19's proc mount and masks off the create's path on 6.19
-too, for the creates that claim a parked init with a matching key.
-- §11 measured the tail. It's the init being preempted by the busy loops (about half of the slowest creates' time),
-  plus the init's own CPU time; the mount lock is about a tenth. The creates that are never preempted already have a
-  p99 of about 0.5 ms.
-- §13 sized every 6.19 lever on the init's CPU time. Their best case together is about 20%, which would put part 19's
-  p99 at about 580 us.
-- Lever (4), built and measured above, removes the seeds' startup holds and improves the whole create's p99, but it
+On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6 and 12 busy loops, 8 in flight,
+8,000 idle threads, Docker's paths, no priority change) is approached, but not yet met.
+- Goal 6's own levers on 6.19 can't reach it. §11 measured the tail as mostly the init being preempted, plus the
+  init's own CPU time; the mount lock is about a tenth. §13 sized the levers on the init's CPU time at about 20% at
+  best, about 580 us at p99. Lever (4) removes the seeds' startup holds and improves the whole create's p99, but
   doesn't move part 19's steady p99.
+- **Parked procs come closest** (decision 8, "parked procs", cp/t7-g5-parkproc; the tail agent's design, built by it
+  and reviewed here). A parked init carries a proc made for its own pid namespace, with its masks, on the parking
+  thread, through proc's `pidns=` (Linux 6.18 and later). So a create that claims one with a matching key takes part
+  19's proc mount and masks off its path. It's off by default.
+- Its A/B of record (`bench/competitive/probes/parked_procs_ab.md` on cp/t7-g5-parkproc, "Of record at 2caebe2"): A off,
+  B on, both with parked inits, 4 interleaved rounds at 6 and 12 loops, 2,000 creates at 8 in flight, on fedora's
+  host. Its gates and root lab ran at that tree in one unit, hex-g5tail-ppfull-20261105T154329Z.
+  - Part 19's p50: about 210 us → 35-38 us.
+  - Part 19's p99: 1,018-2,132 us → 351-761 us. It's under 0.5 ms in 2 of the 8 B cells (475 and 351 us, both at 12
+    loops) and over it in the other 6.
+  - Part 19's unpreempted p99: 427-800 us → 71-438 us.
+  - The init's mount-lock holds: 31 → about 5 a create. They move to the node's park (about 3 → 32-34 a box); they
+    aren't removed.
+  - The predicted key: 1,992 of 1,992 hits in 7 of 8 cells. The eighth had 8 misses, from the ipc/uts pair pool
+    running dry.
+- **The cost is on the delete.** The create's p50 falls 0.16-0.43 ms. The delete's p50 rises 0.29-0.54 ms, and its
+  p99 is higher in 7 of 8 pairs. At 6 loops the lifecycle rate is 2.5-5.3% lower. Whether the delete can carry that is
+  the open question. If it can't, the fallback is several workers sized to the deletes in flight (one worker was
+  measured and couldn't keep up: hits 409-663 of 1,992).
+- So the bar is approached with parked procs on, but not met: the p99 is above 0.5 ms in 6 of 8 cells. It isn't
+  landed, and the setting stays off by default.
 
 What can reach the bar is goal 6's 7.x path: the namespace made from a tree, with procs made ahead.
 - In the Linux 7.2 guest, part 19's p50 is about a third of 6.19's (56-80 us against about 250, §9-§10). Both the
