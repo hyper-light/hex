@@ -848,7 +848,8 @@ mod linux {
     }
 
     /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; killed when
-    /// dropped.
+    /// dropped. It takes HEX_OCI_MNTNS alone: HEXBENCH_DEVFS, _PROCFS, _AHEAD, _IPCUTS and _PARKED_PROCS set only the
+    /// in-process node, so an A/B of one of them reads the in-process figures, never the socket's.
     struct Agent(Child);
 
     impl Agent {
