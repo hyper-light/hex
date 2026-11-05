@@ -673,10 +673,9 @@ slows 32 (8,046/s to 7,369/s, its p99 9.36 to 11.04 ms; at the given limit 8,101
   05:49:03Z. There host.sh refused four passes before measuring, exit 4, twice (`20261105T055112Z` to `055315Z`, and
   `060212Z` to `060213Z`): fetch.py's request for crun's pinned source timed out in its TLS handshake, then GitHub
   answered "rate limit exceeded", its unauthenticated hourly budget spent by the host's passes. 270bd4f has fetch.py
-  use the pinned tarball fedora holds; the four were started again on that harness in
-  `hex-g5x-s6-fdh48-20261105T070501Z`, and fedora left kiln (from 07:13Z) before their results could be read: they
-  aren't in this record.
-- **Host:** run noisy: the passes began at 1-minute loads of 26.9 to 52.4, with 4,300 to 5,700 host threads, a kind
+  use the pinned tarball fedora holds; the four ran on that harness in `hex-g5x-s6-fdh48-20261105T070501Z` from
+  07:22:56Z, the first of them as a third stall eased (its 1-minute load 236.16 at the start).
+- **Host:** run noisy: the passes began at 1-minute loads of 26.9 to 236.2, with 4,300 to 5,700 host threads, a kind
   cluster and its registry, three buildkit builders, a minio, the kiln agents' crate builds and other Hex agents'
   units beside them; each run's `env.txt` holds its load at the start and the end.
 
@@ -689,6 +688,8 @@ table's, in brackets):
 | `20261105T051055Z` | 4-31 | given | 2.79x, 2.29x (2.29x) | 2.21, 1.69 ms | 1,417/s over 619/s | 2.96x, 3.35x (3.35x) |
 | `20261105T051333Z` | 4-15 | installed | 2.43x, 2.38x (2.43x) | 1.45, 1.62 ms | 1,764/s over 727/s | 2.54x, 2.19x (2.54x) |
 | `20261105T051602Z` | 4-15 | given | 2.26x, 2.58x (2.40x) | 1.70, 1.80 ms | 1,522/s over 635/s | 2.48x, 2.70x (2.60x) |
+| `20261105T072649Z` | 4-31 | installed | 3.13x, 3.22x (3.13x) | 1.93, 2.01 ms | 1,636/s over 522/s | 3.77x, 3.14x (3.14x) |
+| `20261105T072920Z` | 4-31 | given | 3.24x, 3.35x (3.35x) | 1.99, 1.91 ms | 1,861/s over 556/s | 3.19x, 3.72x (3.44x) |
 
 Interleaved, each run's 20 pairs pooled (mean ratio, bootstrap SE; each half's CPU and wall, the pairs' medians):
 
@@ -698,15 +699,17 @@ Interleaved, each run's 20 pairs pooled (mean ratio, bootstrap SE; each half's C
 | `20261105T052134Z` | option 1 | given | 2.59x (0.10) | 836/s over 320/s | 2.69, 4.38 ms | 0.84, 3.78 | 2.696, 8.567 ms | 36.221, 79.077 ms | 2.78x (0.05) |
 | `20261105T052519Z` | host.sh's | installed | 2.84x (0.03) | 1,172/s over 413/s | 2.51, 4.68 ms | 1.06, 5.50 | 2.348, 2.965 ms | 27.616, 45.571 ms | 3.14x (0.04) |
 | `20261105T054903Z` | host.sh's | given | 3.94x (0.06) | 2,051/s over 521/s | 1.96, 3.60 ms | 1.03, 7.48 | 1.888, 2.362 ms | 15.619, 23.886 ms | 4.53x (0.11) |
+| `20261105T072256Z` | 4-15 | installed | 2.56x (0.05) | 1,757/s over 687/s | 1.51, 2.89 ms | 1.04, 5.05 | 1.410, 2.054 ms | 18.269, 29.302 ms | 2.68x (0.02) |
+| `20261105T072500Z` | 4-15 | given | 2.35x (0.06) | 2,010/s over 854/s | 1.18, 2.71 ms | 1.06, 5.53 | 1.065, 1.647 ms | 15.750, 25.233 ms | 2.35x (0.03) |
 
 `20261105T052828Z` (host.sh's, given) was killed in its first in-process round; its one socket round of 10 pairs read
 3.89x (0.21).
 
-- **Step 6 alone falls far short of the criterion on this host:** 2.29x to 2.98x in process as written on host.sh's
-  CPUs, about 2.4x on 4-15, under 4x by every method and reading. Concurrency 32 stays at 836 to 2,051 a second
-  whatever CPUs it has, 4-15's 12 or 4-31's 28; interleaved, each lifecycle's p50 at concurrency 32 is 15.619 to
-  36.221 ms and its CPU 3.60 to 4.80 ms, against 1.76 to 2.69 at concurrency 1: its lifecycles queue on one lock for
-  the whole host.
+- **Step 6 alone falls far short of the criterion on this host:** 2.29x to 3.35x in process as written on host.sh's
+  CPUs, best of 2 3.13x at the installed limit and 3.35x at the given, about 2.4x on 4-15; under 4x in process by
+  every method, at most 4.53x over the socket. Concurrency 32 stays at 836 to 2,051 a second whatever CPUs it has,
+  4-15's 12 or 4-31's 28; interleaved, each lifecycle's p50 at concurrency 32 is 15.619 to 36.221 ms and its CPU 2.71
+  to 4.80 ms, against 1.18 to 2.69 at concurrency 1: its lifecycles queue on one lock for the whole host.
 - **The cause is the step's classic root, not its cgroups:** the step's branch makes each container's root with
   pivot_root, whose walk of every thread on the host runs under the mount namespace's lock (`create_serial.md` run
   22), and the host had 4,300 to 5,700 threads; run 10's 8.29x was at about 3,000 (its `env.txt`). The step's own lock
@@ -726,10 +729,10 @@ Interleaved, each run's 20 pairs pooled (mean ratio, bootstrap SE; each half's C
   unit `hex-g5x-s6-fdh44-20261105T051744Z`): `hex` 5a15b18914395e1e, `seam_oci` 6a1231b246810b57.
 - **Method:** run 18's, on the harness at 270bd4f, in the unit `hex-g5x-s6-fdh47-20261105T061741Z` from 06:27Z; a
   second out-of-memory stall at about 06:45Z (another tenant's process holding 53 GB) killed `20261105T064315Z` after
-  its first round; `hex-g5x-s6-fdh48-20261105T070501Z` was started to run it again, and fedora left kiln before its
-  result could be read. Two 4-15 passes on mr20's own harness, at 05:55Z and 05:57Z in fdh44, before host.sh refused
-  the rest at crun's source, stand below the table's others.
-- **Host:** run noisy: the passes began at 1-minute loads of 9.2 to 51.6, with 4,100 to 5,800 host threads, the same
+  its first round, and `hex-g5x-s6-fdh48-20261105T070501Z` ran it again from 07:06Z, into a third stall (its 1-minute
+  load 61.73 at the start and 236.16 at the end). Two 4-15 passes on mr20's own harness, at 05:55Z and 05:57Z in
+  fdh44, before host.sh refused the rest at crun's source, stand below the table's others.
+- **Host:** run noisy: the passes began at 1-minute loads of 9.2 to 61.7, with 4,100 to 5,800 host threads, the same
   tenants as run 18's beside them.
 
 As the criterion reads it:
@@ -740,6 +743,7 @@ As the criterion reads it:
 | `20261105T063023Z` | 4-31 | given | 9.74x, 8.34x (9.72x) | 1.35, 1.35 ms | 9,291/s over 956/s | 7.29x, 6.42x (6.52x) |
 | `20261105T064125Z` | 4-31 | installed | 7.07x, 5.45x (5.45x) | 1.23, 0.83 ms | 7,825/s over 1,437/s | 5.05x, 5.29x (5.05x) |
 | `20261105T064315Z` | 4-31 | given | 5.40x, killed (5.40x) | 0.99 ms | 6,758/s over 1,251/s | 5.86x (5.86x) |
+| `20261105T070622Z` | 4-31 | given | 12.48x, 5.99x (5.99x) | 1.83, 1.42 ms | 5,147/s over 860/s | 14.02x, 4.45x (4.45x) |
 | `20261105T063225Z` | 4-15 | installed | 5.24x, 5.84x (5.48x) | 0.90, 0.95 ms | 7,706/s over 1,407/s | 5.68x, 5.49x (5.49x) |
 | `20261105T063425Z` | 4-15 | given | 5.89x, 13.49x (5.89x) | 0.98, 1.89 ms | 7,657/s over 1,300/s | 5.48x, 6.25x (5.48x) |
 | `20261105T055519Z` | 4-15 | installed | 4.48x, 4.74x (4.48x) | 0.67, 0.70 ms | 8,569/s over 1,911/s | 4.24x, 3.90x (3.91x) |
@@ -762,11 +766,13 @@ Interleaved:
   limit and 6.52x at the given.
 - **One pass swings with where concurrency 1 runs:** on 4-31 a lone lifecycle ran at 0.83 to 1.71 ms of CPU, on a
   P-core or an E-core and under the load of the moment, its pass's rate 694 to 1,437 a second, while concurrency 32's
-  ran 5,821 to 9,291; the second pair read 5.45x, and 5.40x in the killed pass's one round. The interleaved passes,
-  which meet the host as each pair finds it, read 9.72x and 10.62x on host.sh's CPUs, 9.15x and 9.71x over the socket.
+  ran 5,821 to 9,291; the second pair read 5.45x and 5.99x (5.40x in the killed pass's one round), the given limit's
+  second pass 12.48x in its first round, its concurrency 1 starved to 224 a second in the stall. The interleaved
+  passes, which meet the host as each pair finds it, read 9.72x and 10.62x on host.sh's CPUs, 9.15x and 9.71x over the
+  socket.
 - **Beside it, the readings Ada is to choose among:** option 1 8.00x at the installed limit and 6.91x at the given;
   4-15 alone 5.48x and 5.89x as written, 5.11x and 5.23x interleaved, the six cores' two threads each (the section
-  below). Step 6 alone, 2.29x to 2.98x (run 18).
+  below). Step 6 alone, 2.29x to 3.35x (run 18).
 - **The composed tree ends more boxes by `cgroup.kill`:** 13 to 36 of each round's 10,000 in process (fdh44's two
   passes, 46 to 71), where step 6 alone ends 0 to 2; each such box's cgroup is removed, not kept, and the next box
   given a fresh one. Its cause is unread here: a question for the integration (step 7).

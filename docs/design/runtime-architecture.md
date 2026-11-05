@@ -1419,7 +1419,7 @@ lifecycle without changing what a box may do.
     <!-- record: bench/competitive/probes/reuse_pass.md -->As the criterion reads it, host.sh's pass on its own CPUs,
     4-31, in process, one owner's boxes, best of 2: the step's final tip in step 7's tree reads 8.39x at the installed
     descriptor limit and 9.72x at the given, 11.92x and 6.52x over the socket; interleaved on the same CPUs,
-    9.72x and 10.62x. Option 1 reads 8.00x and 6.91x, 4-15 alone 5.48x and 5.89x. The step alone reads 2.29x to 2.98x:
+    9.72x and 10.62x. Option 1 reads 8.00x and 6.91x, 4-15 alone 5.48x and 5.89x. The step alone reads 2.29x to 3.35x:
     its classic root's pivot_root walks every host thread under the mount namespace's lock (runs 18 and
     19).<!-- /record --> The criterion names no branch, so it counts on the tree with step 6 in (the lead,
     2026-11-05T07:30Z), and host.sh's own CPUs are its text's (the lead, 2026-11-03T16:50Z). Whether a stricter
