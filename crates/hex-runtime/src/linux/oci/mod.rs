@@ -20,6 +20,7 @@ pub mod escape;
 pub mod exec;
 pub mod init;
 pub mod inroot;
+pub(crate) mod lsm;
 pub mod mntns;
 pub mod mount;
 pub mod net;

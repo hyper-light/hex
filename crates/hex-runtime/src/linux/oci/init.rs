@@ -493,8 +493,8 @@ pub(crate) fn container(
     exec(&process)
 }
 
-/// Becomes the container's process as its spec gives it: its OOM score, limits, seccomp filter,
-/// capabilities, user, no_new_privs and umask. The container's first process does this before
+/// Becomes the container's process as its spec gives it: its OOM score, limits, AppArmor profile, seccomp
+/// filter, capabilities, user, no_new_privs and umask. The container's first process does this before
 /// `start`, and each one `hex oci exec` runs does it before it execs ([`Becoming`]).
 pub(crate) fn become_process(process: &Process, seccomp: Option<&Seccomp>) -> Result<(), OciError> {
     Ok(Becoming::of(process, seccomp)?.apply()?)
@@ -520,6 +520,7 @@ pub(crate) struct Becoming {
     gid: rustix::process::Gid,
     groups: Vec<rustix::process::Gid>,
     umask: Option<Mode>,
+    profile: Option<super::lsm::ProfileOnExec>,
 }
 
 impl Becoming {
@@ -575,6 +576,10 @@ impl Becoming {
                 .map(|g| rustix::process::Gid::from_raw(*g))
                 .collect(),
             umask: process.user.umask.map(Mode::from_bits_truncate),
+            profile: process
+                .apparmor_profile()
+                .map(|p| super::lsm::ProfileOnExec::of(p, process.no_new_privileges))
+                .transpose()?,
         })
     }
 
@@ -596,6 +601,11 @@ impl Becoming {
         }
         for (resource, limit) in &self.rlimits {
             rustix::process::setrlimit(*resource, *limit).map_err(Failure::of("setrlimit"))?;
+        }
+        // The AppArmor profile, for the execve: before the uid changes, while the task still owns its /proc
+        // files, and before a filter goes on, as crun orders it (src/libcrun/container.c:1455-1468).
+        if let Some(profile) = &self.profile {
+            profile.apply()?;
         }
         if !self.no_new_privileges
             && let Some(filter) = &self.filter
@@ -849,7 +859,7 @@ fn setup_rootfs(
             .filter(|_| root.without_symlinks(&op.destination));
         match prepared {
             Some(d) => attach_prepared_dev(&root, op, &d.tree)?,
-            None => do_mount(&root, op)?,
+            None => do_mount(&root, op, spec.mount_label())?,
         }
         ready |= prepared.is_some();
         if inroot::is_root(&op.destination) {
@@ -861,7 +871,7 @@ fn setup_rootfs(
         make_dev(&root, spec, in_userns)?;
     }
     for path in &spec.linux.masked_paths {
-        mask_path(&root, path, masked_directory)?;
+        mask_path(&root, path, masked_directory, spec.mount_label())?;
     }
     for path in &spec.linux.readonly_paths {
         readonly_path(&root, path)?;
@@ -1024,7 +1034,7 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
             .as_ref()
             .filter(|(mount, _)| usize::try_from(*mount).ok() == Some(index))
             .map(|(_, p)| &p.tree);
-        do_mount_pruned(&root, op, &mut binds, prepared.or(proc))?;
+        do_mount_pruned(&root, op, &mut binds, prepared.or(proc), spec.mount_label())?;
     }
     if binds.next().is_some() {
         return Err(OciError::Broken(
@@ -1041,7 +1051,13 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
         |path: &str| sources.proc_mount.is_some() && super::procmount::beneath_proc(path).is_some();
     let mut null = None;
     for path in spec.linux.masked_paths.iter().filter(|p| !carried(p)) {
-        mask_path_pruned(&root, path, &mut null, sources.masked_directory.as_ref())?;
+        mask_path_pruned(
+            &root,
+            path,
+            &mut null,
+            sources.masked_directory.as_ref(),
+            spec.mount_label(),
+        )?;
     }
     for path in spec.linux.readonly_paths.iter().filter(|p| !carried(p)) {
         readonly_path_pruned(&root, path)?;
@@ -1102,6 +1118,7 @@ fn do_mount_pruned<'a>(
     op: &crate::linux::oci::mount::Op,
     binds: &mut impl Iterator<Item = &'a OwnedFd>,
     prepared: Option<&OwnedFd>,
+    label: Option<&str>,
 ) -> Result<(), OciError> {
     let at = || format!("{} at {}", op.kind_source, op.destination);
     let fs;
@@ -1158,12 +1175,14 @@ fn do_mount_pruned<'a>(
         let filesystem = match prepared {
             Some(tree) => tree,
             None => {
-                fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
-                    OciError::os(
-                        "making a filesystem",
-                        format!("{} at {}: {e}", op.fstype, op.destination),
-                    )
-                })?;
+                fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags, label).map_err(
+                    |e| {
+                        OciError::os(
+                            "making a filesystem",
+                            format!("{} at {}: {e}", op.fstype, op.destination),
+                        )
+                    },
+                )?;
                 &fs
             }
         };
@@ -1212,10 +1231,18 @@ pub(crate) fn make_fs(
     fstype: &str,
     data: &str,
     flags: MountFlags,
+    label: Option<&str>,
 ) -> Result<OwnedFd, OciError> {
-    let fs = fs_context(source, fstype, data, flags)?;
-    rustix::mount::fsmount(fs.as_fd(), FsMountFlags::FSMOUNT_CLOEXEC, attr_flags(flags))
-        .map_err(|e| OciError::os("fsmount", e))
+    let fs = fs_context(source, fstype, data, flags, label)?;
+    let mount =
+        rustix::mount::fsmount(fs.as_fd(), FsMountFlags::FSMOUNT_CLOEXEC, attr_flags(flags))
+            .map_err(|e| OciError::os("fsmount", e))?;
+    if let Some(label) = label
+        && super::lsm::labelling(fstype) == super::lsm::Labelling::Xattr
+    {
+        super::lsm::label_root(mount.as_fd(), label)?;
+    }
+    Ok(mount)
 }
 
 /// A filesystem made as [`make_fs`] makes it, as the tree of a new mount namespace (decision 6's update):
@@ -1228,8 +1255,16 @@ pub(crate) fn make_fs_namespace(
     fstype: &str,
     data: &str,
     flags: MountFlags,
+    label: Option<&str>,
 ) -> Result<OwnedFd, OciError> {
-    let fs = fs_context(source, fstype, data, flags)?;
+    // A namespace's root is labelled by its context alone: one labelled by an xattr isn't a root.
+    if label.is_some() && super::lsm::labelling(fstype) == super::lsm::Labelling::Xattr {
+        return Err(OciError::Config(format!(
+            "linux.mountLabel is set and the root is a {fstype}, which takes the label by an xattr: Hex \
+             makes no namespace of one"
+        )));
+    }
+    let fs = fs_context(source, fstype, data, flags, label)?;
     let namespace = FsMountFlags::from_bits_retain(
         FsMountFlags::FSMOUNT_CLOEXEC.bits() | super::mntns::FSMOUNT_NAMESPACE,
     );
@@ -1271,6 +1306,7 @@ fn fs_context(
     fstype: &str,
     data: &str,
     flags: MountFlags,
+    label: Option<&str>,
 ) -> Result<OwnedFd, OciError> {
     // The refill worker runs concurrently with helper execs: the context must not leak through
     // a seed/shim exec while this function is between fsopen and fsmount.
@@ -1297,6 +1333,17 @@ fn fs_context(
                 .map_err(|e| OciError::os("a filesystem flag", format!("{opt}: {e}")))?,
         }
     }
+    // The mount label as a parameter of its own, which an MLS label's commas can't break (research §1).
+    if let Some(label) = label
+        && super::lsm::labelling(fstype) == super::lsm::Labelling::Context
+    {
+        rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label).map_err(|e| {
+            OciError::os(
+                "linux.mountLabel",
+                format!("{fstype} context {label:?}: {e}"),
+            )
+        })?;
+    }
     rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| OciError::os("fsconfig create", e))?;
     Ok(fs)
 }
@@ -1310,6 +1357,7 @@ fn mask_path_pruned(
     path: &str,
     null: &mut Option<OwnedFd>,
     masked_directory: Option<&OwnedFd>,
+    label: Option<&str>,
 ) -> Result<(), OciError> {
     let Some(target_fd) = root.open(path, Make::Nothing)? else {
         return Ok(());
@@ -1322,7 +1370,7 @@ fn mask_path_pruned(
             Some(empty) => clone_masked_directory(empty.as_fd(), target_fd.as_fd())
                 .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
             None => {
-                let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
+                let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY, label)
                     .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
                 rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
                     .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
@@ -1469,7 +1517,11 @@ fn propagation(name: &str) -> Option<MountPropagationFlags> {
     Some(f)
 }
 
-fn do_mount(root: &inroot::Root<'_>, op: &crate::linux::oci::mount::Op) -> Result<(), OciError> {
+fn do_mount(
+    root: &inroot::Root<'_>,
+    op: &crate::linux::oci::mount::Op,
+    label: Option<&str>,
+) -> Result<(), OciError> {
     // Which mount failed, and of what, with why.
     let failed = |e: rustix::io::Errno| {
         format!(
@@ -1522,7 +1574,7 @@ fn do_mount(root: &inroot::Root<'_>, op: &crate::linux::oci::mount::Op) -> Resul
         // `mount(2)` takes too, without `mount(2)`'s walk of `/proc/self/fd` to name the target (goal 5
         // extended step 3, `goal5-mounts.md` §12). Its propagation is set on it through its own
         // descriptor, as on the pruned path.
-        let fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags).map_err(|e| {
+        let fs = make_fs(&op.kind_source, &op.fstype, &op.data, op.flags, label).map_err(|e| {
             OciError::os("mount", format!("{} at {}: {e}", op.fstype, op.destination))
         })?;
         rustix::mount::move_mount(fs.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
@@ -1885,7 +1937,7 @@ impl ProcSources {
     pub fn open() -> Result<Self, OciError> {
         let null = rustix::fs::open("/dev/null", OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| OciError::os("opening /dev/null for the prepared procs", e))?;
-        let empty = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)?;
+        let empty = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY, None)?;
         Ok(Self { null, empty })
     }
 }
@@ -2047,7 +2099,7 @@ pub fn prepare_proc(
 /// Makes a fresh detached tmpfs `/dev` with defaults, before any create can see it. Each node gets
 /// its exact mode through chmod: the worker must never change the multi-threaded agent's umask.
 pub fn prepare_dev(source: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
-    let tree = make_fs(source, "tmpfs", data, flags)?;
+    let tree = make_fs(source, "tmpfs", data, flags, None)?;
     for &(name, major, minor, mode) in &DEFAULT_DEVICES {
         make_node(
             &tree,
@@ -2258,6 +2310,7 @@ fn mask_path(
     root: &inroot::Root<'_>,
     path: &str,
     masked_directory: Option<&OwnedFd>,
+    label: Option<&str>,
 ) -> Result<(), OciError> {
     let Some(target) = root.open(path, Make::Nothing)? else {
         return Ok(());
@@ -2271,8 +2324,10 @@ fn mask_path(
             Some(empty) => clone_masked_directory(empty.as_fd(), target.as_fd())
                 .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
             None => {
-                rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(c"size=0k"))
-                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?
+                let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY, label)
+                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+                rustix::mount::move_mount(mount.as_fd(), "", target.as_fd(), "", FD_TO_FD)
+                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
             }
         }
     } else {
