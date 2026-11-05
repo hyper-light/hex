@@ -46,7 +46,7 @@ fn loopback_up_in(ns: &OwnedFd) -> bool {
 /// and is counted too.
 #[test]
 fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
-    let pool = Netns::start(2, FilesBound::now()).unwrap();
+    let pool = Netns::start(2, FilesBound::now(Pools::ROOT)).unwrap();
     wait_for("first make", || {
         let c = pool.counts().unwrap();
         c.made_ahead + c.failed > 0
@@ -102,7 +102,7 @@ fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
         through_files: AtomicU64::new(0),
         files_failed: AtomicU64::new(0),
         files_bounded: AtomicU64::new(0),
-        files_bound: FilesBound::now(),
+        files_bound: FilesBound::now(Pools::ROOT),
         files_held: Arc::new(AtomicU64::new(0)),
         check_ns: AtomicU64::new(0),
     });
@@ -165,10 +165,13 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
     use rustix::process::Rlimit;
 
     let at = |soft: Option<u64>| {
-        FilesBound::of(&Rlimit {
-            current: soft,
-            maximum: soft,
-        })
+        FilesBound::of(
+            &Rlimit {
+                current: soft,
+                maximum: soft,
+            },
+            Pools::ROOT,
+        )
     };
     let own = at(Some(1_024)).own;
     assert!(
@@ -195,6 +198,78 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
         at(Some(u64::MAX)).namespaces,
         unlimited.namespaces,
         "never more than there may be namespaces"
+    );
+}
+
+/// Goal 5 extended step 6, the files' bound past the node's own descriptors (CLAUDE.md §2; the lead's finding of
+/// 2026-11-05T07:50Z on the composed tree): decision 4's network namespaces and step 4's ipc and uts pairs made ahead
+/// are the node's own too. Do: bound the files under one soft limit with no pools, with each pool alone, with both at
+/// a root node's bounds, and with each pool's bound raised. Expect: the node's own grows by each pool's held
+/// descriptors, one a network namespace and two a pair, with its refill thread's and each call's takes beside, and
+/// the namespaces holding files fall to what that leaves.
+#[test]
+fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
+    use rustix::process::Rlimit;
+
+    let at = |netns: usize, ipc_uts: usize| {
+        FilesBound::of(
+            &Rlimit {
+                current: Some(1 << 22),
+                maximum: Some(1 << 22),
+            },
+            Pools { netns, ipc_uts },
+        )
+    };
+    let none = at(0, 0);
+    let n = |count: usize| u64::try_from(count).unwrap();
+    let workers = n(crate::serve::WORKERS);
+    assert_eq!(at(BOUND, 0).own - none.own, n(BOUND) + 2 + workers);
+    assert_eq!(
+        at(0, IPC_UTS_BOUND).own - none.own,
+        2 * (n(IPC_UTS_BOUND) + 2) + 2 * workers
+    );
+    let root = at(BOUND, IPC_UTS_BOUND);
+    assert_eq!(
+        root.own - none.own,
+        n(BOUND) + 2 + 2 * (n(IPC_UTS_BOUND) + 2) + 3 * workers
+    );
+    assert_eq!(
+        root,
+        FilesBound::of(
+            &Rlimit {
+                current: Some(1 << 22),
+                maximum: Some(1 << 22)
+            },
+            Pools::ROOT
+        )
+    );
+    let raised = at(4_096, 4_096);
+    assert_eq!(
+        raised.own - root.own,
+        (4_096 - n(BOUND)) + 2 * (4_096 - n(IPC_UTS_BOUND))
+    );
+    let soft = raised.own + 10 * FILES_A_KEPT + 3;
+    let under = |pools| {
+        FilesBound::of(
+            &Rlimit {
+                current: Some(soft),
+                maximum: Some(soft),
+            },
+            pools,
+        )
+        .namespaces
+    };
+    assert_eq!(
+        under(Pools {
+            netns: 4_096,
+            ipc_uts: 4_096
+        }),
+        10,
+        "what the limit leaves past the pools, four a namespace"
+    );
+    assert_eq!(
+        under(Pools::ROOT),
+        10 + (raised.own - root.own + 3) / FILES_A_KEPT
     );
 }
 

@@ -45,7 +45,7 @@ use crate::cgroups::{self, Cgroups, Choice, Made};
 use crate::createpool::CreatePool;
 use crate::devfs::Devfs;
 use crate::ipcuts::IpcUtsPool;
-use crate::netns::Netns;
+use crate::netns::{Netns, Pools};
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
@@ -179,6 +179,8 @@ pub struct Node {
     crash_at: Option<CrashPoint>,
     /// The ipc and uts namespaces it makes ahead (goal 5 extended, step 4; [`Node::ipc_uts`]).
     ipc_uts: IpcUtsPool,
+    /// Both pools' bounds, which the kept namespaces' files are bounded past ([`crate::netns::FilesBound`]).
+    pools: Pools,
     devfs: Devfs,
 }
 
@@ -243,18 +245,16 @@ impl Node {
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
         // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
-        // limit the node was given, never raised.
-        let netns = Netns::start(
-            match owner {
-                Owner::Root => netns::BOUND,
-                Owner::Rootless { .. } => 0,
+        // limit the node was given, never raised, past what both pools hold.
+        let pools = match owner {
+            Owner::Root => Pools::ROOT,
+            Owner::Rootless { .. } => Pools {
+                netns: 0,
+                ipc_uts: 0,
             },
-            crate::netns::FilesBound::now(),
-        )?;
-        let ipc_uts = IpcUtsPool::start(match owner {
-            Owner::Root => netns::IPC_UTS_BOUND,
-            Owner::Rootless { .. } => 0,
-        })?;
+        };
+        let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools))?;
+        let ipc_uts = IpcUtsPool::start(pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
@@ -286,6 +286,7 @@ impl Node {
             specs: Mutex::new(Specs::default()),
             netns,
             ipc_uts,
+            pools,
             devfs: Devfs::start(owner == Owner::Root)?,
             null: rustix::fs::open(
                 "/dev/null",
@@ -405,7 +406,8 @@ impl Node {
                 ),
             });
         }
-        self.netns = Netns::start(bound, crate::netns::FilesBound::now())?;
+        self.pools.netns = bound;
+        self.netns = Netns::start(bound, crate::netns::FilesBound::now(self.pools))?;
         Ok(self)
     }
 
@@ -422,6 +424,10 @@ impl Node {
             });
         }
         self.ipc_uts = IpcUtsPool::start(bound)?;
+        self.pools.ipc_uts = bound;
+        // The kept namespaces' files are bounded past this pool too, so the network-namespace pool starts again
+        // with the bound they leave.
+        self.netns = Netns::start(self.pools.netns, crate::netns::FilesBound::now(self.pools))?;
         Ok(self)
     }
 

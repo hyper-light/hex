@@ -24,7 +24,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{Counts, Pool, Take};
+use hex_core::netns::{BOUND, Counts, IPC_UTS_BOUND, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
@@ -81,6 +81,45 @@ const EXEC_SEEDS: u64 = 128;
 /// What the agent holds open past those bounds, its listener, its polls and what its threads open for a moment:
 /// a margin, stated rather than measured, well past the few dozen it is.
 const FDS_BESIDE: u64 = 1_024;
+/// A pool's descriptors past what it holds: its refill thread's own namespace, which it goes back to, and the one
+/// it is making.
+const FDS_A_REFILL: u64 = 2;
+
+/// The bounds of the node's two pools of namespaces made ahead: decision 4's network namespaces, one descriptor
+/// each, and step 4's ipc and uts pairs, two each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pools {
+    /// The most network namespaces the pool holds.
+    pub netns: usize,
+    /// The most ipc and uts pairs the pool holds.
+    pub ipc_uts: usize,
+}
+
+impl Pools {
+    /// A root node's, each pool at its bound unless set.
+    pub const ROOT: Self = Self {
+        netns: BOUND,
+        ipc_uts: IPC_UTS_BOUND,
+    };
+
+    /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
+    /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
+    /// none has no thread.
+    fn descriptors(self) -> u64 {
+        let pool = |bound: usize, each: u64| {
+            if bound == 0 {
+                0
+            } else {
+                of(bound, each).saturating_add(FDS_A_REFILL.saturating_mul(each))
+            }
+        };
+        let takes =
+            u64::from(self.netns > 0).saturating_add(u64::from(self.ipc_uts > 0).saturating_mul(2));
+        pool(self.netns, 1)
+            .saturating_add(pool(self.ipc_uts, 2))
+            .saturating_add(of(crate::serve::WORKERS, takes))
+    }
+}
 
 fn of(count: usize, each: u64) -> u64 {
     u64::try_from(count)
@@ -94,10 +133,12 @@ fn kept_at_most() -> u64 {
 }
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
-/// kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools.
-fn descriptors_of_the_node() -> u64 {
+/// kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools; the
+/// namespaces made ahead under `pools`.
+fn descriptors_of_the_node(pools: Pools) -> u64 {
     let connections = crate::serve::LIMITS.connections;
     [
+        pools.descriptors(),
         kept_at_most().saturating_mul(FDS_A_KEPT),
         of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         of(connections, 1),
@@ -127,9 +168,10 @@ pub struct FilesBound {
 }
 
 impl FilesBound {
-    /// The bound under `limit`, an unlimited one holding them for every namespace there may be.
-    pub fn of(limit: &rustix::process::Rlimit) -> Self {
-        let own = descriptors_of_the_node();
+    /// The bound under `limit` for a node whose pools are `pools`, an unlimited one holding them for every
+    /// namespace there may be.
+    pub fn of(limit: &rustix::process::Rlimit, pools: Pools) -> Self {
+        let own = descriptors_of_the_node(pools);
         let namespaces = match limit.current {
             None => kept_at_most(),
             Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most()),
@@ -141,11 +183,12 @@ impl FilesBound {
         }
     }
 
-    /// The bound under this process's descriptor limit now.
-    pub fn now() -> Self {
-        Self::of(&rustix::process::getrlimit(
-            rustix::process::Resource::Nofile,
-        ))
+    /// The bound under this process's descriptor limit now, for a node whose pools are `pools`.
+    pub fn now(pools: Pools) -> Self {
+        Self::of(
+            &rustix::process::getrlimit(rustix::process::Resource::Nofile),
+            pools,
+        )
     }
 }
 
