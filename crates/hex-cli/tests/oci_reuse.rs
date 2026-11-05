@@ -1310,6 +1310,14 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     assert_eq!(getrlimit(Resource::Nofile).current, Some(soft));
     let ids: Vec<String> = (0..4).map(|n| format!("files-bound-{n}")).collect();
     for round in 0..2 {
+        // Each namespace's count settled before its check: a fresh one's (round 0) at none once its loopback
+        // request's socket is freed after a grace period (net/netlink/af_netlink.c:794-796, :703-715), a kept one's
+        // (round 1) at the check's own socket. Each check then reads `sockstat`'s count alone.
+        let settled = if round == 0 {
+            "sockets: used 0\n"
+        } else {
+            "sockets: used 1\n"
+        };
         for id in &ids {
             node.create(make(id)).unwrap();
         }
@@ -1326,25 +1334,13 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
                 .next()
                 .expect("the box's init")
             );
-            if round == 0 {
-                // A fresh namespace's loopback request socket is freed after a grace period
-                // (net/netlink/af_netlink.c:794-796, :703-715), and it holds none after.
-                wait_for(
-                    || {
-                        std::fs::read_to_string(&sockstat)
-                            .unwrap()
-                            .starts_with("sockets: used 0\n")
-                    },
-                    "a fresh namespace's count down to none",
-                );
-            }
             wait_for(
                 || {
                     std::fs::read_to_string(&sockstat)
                         .unwrap()
-                        .starts_with("sockets: used 1\n")
+                        .starts_with(settled)
                 },
-                "the namespace's count down to the check's own socket",
+                "the namespace's count settled",
             );
         }
         let before = ruled();
