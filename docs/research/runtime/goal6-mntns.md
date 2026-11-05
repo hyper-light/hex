@@ -413,3 +413,16 @@ namespace with `setns`.
   - 34% are copy-on-write writes (0x7), and 10% reads (0x4).
   - At ~0.5-1 us a minor fault, all 18 come to ≤ ~18 us a create. The code faults go only if the init runs less code
     or doesn't fork. The writes go with fewer pages written after the clone.
+
+Built at 3c8b121 (tests fixed at 1e8908d and 43eb4ab), on the lead's word. The create pool prunes once as it opens, in
+a thread of its own (`createpool.rs`, `prune_once`, `seed::prune_namespace`), and holds the namespace by a
+descriptor. Each create seed joins it as its socket's first record (`seed::send_namespace`, `join_pruned`). The
+node's descriptor bound counts it (`netns.rs`, `descriptor_bounds`).
+- Failing first, the tests alone on scratch trees, on fedora (6.19, as root):
+  - `create_seeds_share_the_nodes_one_pruned_namespace` at b3d5c3c: 5 create seeds in 5 mount namespaces
+    (hex-g6-seedns-20261105T134306Z).
+  - `the_seeds_pruned_namespace_is_counted_in_what_a_node_may_hold` at eae6b46: the bound without it
+    (hex-g6-seedns-20261105T134054Z).
+- Passing at 43eb4ab (hex-g6-seedns-20261105T134306Z): 7 create seeds in one pruned namespace, which lists 1 mount
+  (the read-only tmpfs root; the namespace's root beneath it isn't listed, as `oci_spec_box`'s AC-f says), the same
+  after six creates at once as after the first. `oci_box` 3/3 and `oci_spec_box` pass, and all 7 gates exit 0.
