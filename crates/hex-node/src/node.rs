@@ -37,7 +37,7 @@ use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
 use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
-use hex_runtime::linux::oci::state::{Status, start_time};
+use hex_runtime::linux::oci::state::{self, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
@@ -541,9 +541,8 @@ impl Node {
     /// whose record names `<state>/oci/<id>`, is found there and managed as any other (T-T7.1.2 across
     /// the upgrade). `None` for a record that names no directory: a `process` box's.
     fn container_of(&self, record: &BoxRecord) -> Option<(OciRuntime, String)> {
-        let dir = record.dirs.first()?;
-        let name = dir.file_name()?.to_str()?.to_owned();
-        Some((self.oci_in(dir.parent()?.to_path_buf()), name))
+        let (root, name) = state::root_of(record.dirs.first()?)?;
+        Some((self.oci_in(root), name))
     }
 
     /// Box `id`'s container's name under the node's oci root ([`container_name`]).
@@ -551,10 +550,24 @@ impl Node {
         container_name(&self.key, id)
     }
 
-    /// Where box `id`'s container keeps its state, its `state.json` and exec FIFO: on tmpfs, under the
-    /// runtime directory ([`oci_root`]).
+    /// Where box `id`'s container keeps its state, its `state.json` and exec FIFO: on tmpfs, in its shard of
+    /// the runtime directory ([`oci_root`], [`state::shard`]; goal 5 extended, step 6).
     pub fn container_dir(&self, id: &BoxId) -> PathBuf {
-        self.oci_root.join(self.container(id))
+        state::Dir::new(&self.oci_root, &self.container(id))
+            .path()
+            .to_path_buf()
+    }
+
+    /// Where a node before the shards kept box `id`'s container state: in the runtime directory itself.
+    fn unsharded_container_dir(&self, id: &BoxId) -> PathBuf {
+        state::Dir::unsharded(&self.oci_root, &self.container(id))
+            .path()
+            .to_path_buf()
+    }
+
+    /// The runtime directory the node keeps its containers' state in ([`oci_root`]).
+    pub fn oci_root(&self) -> &Path {
+        &self.oci_root
     }
 
     /// What the node's record store has fsynced since it opened ([`crate::store::Syncs`]).
@@ -726,9 +739,14 @@ impl Node {
                 seen.entry(id).or_default();
             }
         }
-        // This node's containers, `<key>-<id>` among every node's under the runtime directory, and its
+        // This node's containers, `<key>-<id>` among every node's in the runtime directory's shards and, where
+        // a node before the shards kept them, in the runtime directory itself (goal 5 extended, step 6); and its
         // rendered bundles, `<id>` under its bundles directory.
-        let state_dirs = ids_in(&self.oci_root, &format!("{}-", self.key))?;
+        let prefix = format!("{}-", self.key);
+        let mut state_dirs = ids_in(&self.oci_root, &prefix)?;
+        for n in 0..state::SHARDS {
+            state_dirs.extend(ids_in(&self.oci_root.join(format!("{n:02x}")), &prefix)?);
+        }
         let bundles = ids_in(&self.bundles, "")?;
         for id in state_dirs.iter().chain(&bundles) {
             seen.entry(id.clone()).or_default();
@@ -843,10 +861,15 @@ impl Node {
         }
         // The directories the box owns: those its record names (a box made before its node kept
         // container state under the runtime directory names `<state>/oci/<id>`), or, with no record to
-        // read, those at the paths its id fixes, which a box caught mid-create left.
+        // read, those at the paths its id fixes, which a box caught mid-create left: its container's in its
+        // shard or, made by a node before the shards, in the runtime directory itself.
         let dirs = match record {
             Some(r) => r.dirs,
-            None => vec![self.container_dir(id), self.bundles.join(id.as_str())],
+            None => vec![
+                self.container_dir(id),
+                self.unsharded_container_dir(id),
+                self.bundles.join(id.as_str()),
+            ],
         };
         for dir in &dirs {
             remove_tree(dir, REMOVE_PATIENCE)?;

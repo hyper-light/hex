@@ -739,7 +739,7 @@ fn nothing_left(node: &Node, id: &BoxId, box_root: &Path, state: &Path) {
         !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
         "{id}'s cgroup is left"
     );
-    let runtime = node.container_dir(id).parent().unwrap().to_owned();
+    let runtime = node.oci_root().to_owned();
     for record in [
         state.join(format!("{id}.json")),
         hex_node::store::runtime_record(&records_dir(&runtime, state).unwrap(), id),

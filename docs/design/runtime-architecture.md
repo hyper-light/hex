@@ -89,7 +89,7 @@ over 64 subdirectories by the box's id so the boxes made and deleted at once rar
 (goal 5 extended, step 6; recovery moves a record an older node left in the directory itself to its shard). Until the
 record is written, each part a create makes lies at a path the box's id fixes: its cgroup (`<box root>/.oci/<id>`,
 or `<box root>/<id>` for a process box), its rendered bundle (`<state>/bundles/<id>`) and its container's state
-directory (`<node key>-<id>` under the runtime directory), the init inside the cgroup. So recovery
+directory (`<node key>-<id>` in its shard of the runtime directory, below), the init inside the cgroup. So recovery
 finds a box caught mid-create by listing those places, and removes what it left, naming the parts it found; it
 still removes a box whose record says it was being made, as nodes before the step marked one before making it, and
 moves a record such a node left in the state directory to its place. The oci runtime hands the node the state it
@@ -111,6 +111,20 @@ integrated tree the turn replaces it (the lead's call, 2026-11-04): the second c
 made, or goes ahead if the first failed, and a delete waits too, which the set never covered. A second create of an
 owned box being made takes no second slot (`oci_box.rs`,
 `a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot`).
+
+A container's state directory is kept in one of 64 shards of its state root, `<root>/<shard>/<id>`, the shard two hex
+digits of FNV-1a over the container's id (goal 5 extended, step 6, lever 3). A create's mkdir and a delete's rmdir of
+it hold its parent's `i_rwsem` exclusively (Linux v6.19 `fs/namei.c:2860-2873`, `:4888`, `:5293`), so under one parent
+every create and delete waited on every other's: 0.043 ms a lifecycle at concurrency 32, none at 1 (`create_serial.md`
+run 25). The records' shards took the same wait away in run 20. The layout is the oci runtime's, so `hex oci --root`
+and the node find each other's containers. A runtime before the shards kept a container directly under the root: one
+there, and not in its shard, is read and removed where it is, and a create over it is refused as over any other;
+recovery lists both places, adopting or removing what each holds (T-T7.1.2, `oci_box`'s upgrade test). The shard
+directories are made as their first container needs them and never removed. An old-layout container whose id is
+itself two hex digits shares its name with a shard; the node's containers are named `<node key>-<id>`, so none of its
+own can. Records and the wire are unchanged. **What would falsify it:** the `i_rwsem` wait on the state root not
+falling at concurrency 32, or a lifecycle's p50 or p99 at 1 or 32 rising against the one parent
+(`docs/research/runtime/goal5-cgroup-lock.md`).
 
 The Linux record store opens its two directories once, retaining two close-on-exec descriptors
 shared by its clones. Each write opens only `.<id>.tmp` relative to its directory and renames that

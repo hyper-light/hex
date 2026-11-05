@@ -1248,10 +1248,13 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
 }
 
 fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(oci_root) else {
-        return Vec::new();
-    };
-    entries
+    // In the runtime directory's shards, or in the directory itself where a node before them kept them (goal 5
+    // extended, step 6).
+    (0..hex_runtime::linux::oci::state::SHARDS)
+        .map(|n| oci_root.join(format!("{n:02x}")))
+        .chain([oci_root.to_path_buf()])
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
