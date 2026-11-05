@@ -830,6 +830,12 @@ fn crash_case(
     let state = dir.path().join("state");
     let cgroup = own.join(&name).join(OCI_BOXES).join(id.as_str());
     let rendered = state.join("bundles").join(id.as_str());
+    // Ends what the case made as it ends, passed or failed: declared before the agents, so it drops after them.
+    let _made = CaseMade {
+        boxes: own.join(&name),
+        oci_root: oci_root.clone(),
+        id: id.clone(),
+    };
     let (hooked, go) = (dir.path().join("hooked"), dir.path().join("go"));
     // Keep a writer open until the case ends, including unwinding: an orphaned hook reads EOF
     // after an assertion failure. A polled release file can disappear with the TempDir before
@@ -1113,6 +1119,50 @@ fn crash_case(
             "cleaned up"
         }
     );
+}
+
+/// What a crash case makes outside its temporary directory: its boxes' cgroups under `boxes` and its container's
+/// state under `oci_root`. Dropped, as the case ends or unwinds from a failed assertion, it ends every process in
+/// those cgroups through `cgroup.kill`, waits for them to empty (bounded by the conformance suite's patience) and
+/// removes them, deepest first, and the container's state: a case that fails leaves nothing alive (CLAUDE.md §2).
+/// A case that passed has ended its boxes, so the drop finds their cgroups empty and removes them.
+struct CaseMade {
+    boxes: PathBuf,
+    oci_root: PathBuf,
+    id: BoxId,
+}
+
+impl Drop for CaseMade {
+    fn drop(&mut self) {
+        if self.boxes.exists() {
+            let _ = std::fs::write(self.boxes.join("cgroup.kill"), "1");
+            let deadline = Instant::now() + conformance::PATIENCE;
+            while Instant::now() < deadline
+                && std::fs::read_to_string(self.boxes.join("cgroup.events"))
+                    .is_ok_and(|events| events.lines().any(|l| l == "populated 1"))
+            {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+            let (mut walk, mut dirs) = (vec![self.boxes.clone()], Vec::new());
+            while let Some(dir) = walk.pop() {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    walk.extend(
+                        entries
+                            .flatten()
+                            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                            .map(|e| e.path()),
+                    );
+                }
+                dirs.push(dir);
+            }
+            for dir in dirs.iter().rev() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+        for state in containers_of(&self.oci_root, &self.id) {
+            let _ = std::fs::remove_dir_all(state);
+        }
+    }
 }
 
 /// Every process in the cgroup `root` and those under it: a flat walk (CLAUDE.md §11).
