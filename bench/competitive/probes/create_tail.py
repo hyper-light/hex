@@ -70,9 +70,10 @@ def parse(lines):
     each CPU's work too, as "work <function>"."""
     tasks = {}
     irqs, irq_open = collections.defaultdict(list), {}
-    cgops = collections.defaultdict(list)  # pid -> [(ts, cgroup event)], every task's
+    cgops = collections.defaultdict(list)  # pid -> [(ts, cgroup event, its stack)], every task's
+    syncs, sync_open = collections.defaultdict(list), {}  # pid -> [(entry, return)] of rcu_sync_enter
     calls, open_ = [], {}
-    last_out = {}  # cpu -> the blocking switch out whose stack the next stack lines are
+    last_out = {}  # cpu -> the frames list of the event (a blocking switch out, a cgroup op) the next stack is of
 
     def task(pid, comm):
         t = tasks.get(pid)
@@ -88,8 +89,7 @@ def parse(lines):
             continue
         h = STACK.match(raw)
         if h:
-            o = last_out.get(h["cpu"])
-            stack_of = o[3] if o is not None else None
+            stack_of = last_out.pop(h["cpu"], None)
             continue
         m = LINE.match(raw)
         if not m:
@@ -105,7 +105,7 @@ def parse(lines):
             if ours(s["pc"]):
                 o = (ts, s["st"], s["nc"], [], int(cpu))
                 task(pp, s["pc"]).outs.append(o)
-                last_out[cpu] = o
+                last_out[cpu] = o[3]
             if ours(s["nc"]):
                 task(np_, s["nc"]).ins.append((ts, int(cpu)))
         elif ev in ("sched_waking", "sched_wakeup_new"):
@@ -122,7 +122,15 @@ def parse(lines):
             irq_open[(int(cpu), ev[:4])] = (ts, ("softirq " + g["a"]) if ev == "softirq_entry" and g
                                             else ("irq " + g["n"]) if g else ev)
         elif ev.startswith("cgroup_"):
-            cgops[int(m["pid"])].append((ts, ev[len("cgroup_"):]))
+            op = (ts, ev[len("cgroup_"):], [])
+            cgops[int(m["pid"])].append(op)
+            last_out[cpu] = op[2]
+        elif ev == "rse":
+            sync_open[int(m["pid"])] = ts
+        elif ev == "rsx":
+            t0 = sync_open.pop(int(m["pid"]), None)
+            if t0 is not None:
+                syncs[int(m["pid"])].append((t0, ts))
         elif ev == "workqueue_execute_start":
             g = WORK.search(rest)
             irq_open[(int(cpu), "work")] = (ts, "work " + (g["f"] if g else "?"))
@@ -146,7 +154,7 @@ def parse(lines):
                 calls.append((k["op"], k["id"], b, ts, pid, int(k["ns"] or 0)))
     for v in irqs.values():
         v.sort()
-    irqs["cgops"] = cgops
+    irqs["cgops"], irqs["syncs"], irqs["holders"] = cgops, syncs, []
     return tasks, calls, irqs
 
 
@@ -271,6 +279,12 @@ def walk(tasks, irqs, b, e, pid):
             op = last_le(irqs.get("cgops", {}).get(waker, []), w_ts, key=lambda x: x[0])
             if op is not None and op[0] >= s_out:
                 by += f" after its {op[1]}"
+                sy = last_le(irqs.get("syncs", {}).get(waker, []), w_ts, key=lambda x: x[0])
+                gp = sy[1] - sy[0] if sy is not None and sy[1] >= s_out else None
+                if gp is not None and gp >= 1e-3:
+                    by += ", having waited 1 ms or more in rcu_sync_enter"
+                irqs["holders"].append((w_ts, who(waker_comm), w_ts - max(s_out, b), op[1],
+                                        " < ".join(f.split("+")[0] for f in op[2][:8]) or "(no stack)", gp))
         out.append((f"blocked: {stack_name(stack)}, woken by {by}", w_ts - max(s_out, b)))
         t = s_out
     return out
@@ -313,6 +327,13 @@ def report(tasks, calls, irqs, w=sys.stdout.write):
             if max(a, b1, c) < 0.005:
                 continue
             w(f"| {k} | {a:.3f} | {b1:.3f} | {c:.3f} | {c - a:+.3f} |\n")
+        holders = sorted({h for h in irqs.get("holders", []) if h[2] >= 1e-3}, key=lambda h: -h[2])
+        if holders:
+            w("\nEvery block of 1 ms or more whose waker did a cgroup operation meanwhile (each once): the waker, the "
+              "wait, its last cgroup operation, that operation's stack, and its last rcu_sync_enter's time:\n\n")
+            for h in holders[:20]:
+                gp = f"{h[5] * 1e3:.3f} ms" if h[5] is not None else "none traced"
+                w(f"- {h[1]}: {h[2] * 1e3:.3f} ms; {h[3]}; {h[4]}; rcu_sync_enter {gp}\n")
         w(f"\nThe slowest {min(10, n)} calls, each charge of at least 0.05 ms:\n\n")
         for i in range(n - 1, max(-1, n - 11), -1):
             agg = collections.Counter()
@@ -352,7 +373,12 @@ def selftest():
         " => cgroup_mkdir+0x5",
         " => kernfs_iop_mkdir+0x6",
         "kworker/6:0-98 [006] ..... 1.002000: workqueue_execute_start: work struct 0001: function css_free_rwork_fn",
+        "kworker/6:0-98 [006] ..... 1.001600: rse: (rcu_sync_enter+0x0/0x60)",
+        "kworker/6:0-98 [006] ..... 1.002400: rsx: (percpu_down_write+0x20/0x100 <- rcu_sync_enter)",
         "kworker/6:0-98 [006] ..... 1.002500: cgroup_release: root=0 id=7 level=1 path=/x",
+        "kworker/6:0-98 [006] ..... 1.002500: <stack trace>",
+        " => cgroup_migrate_execute+0x1",
+        " => cgroup_attach_task+0x2",
         wk.format(c="kworker/6:0", p=98, cpu=6, ts="1.003000", wc="hex", wp=20),
         "kworker/6:0-98 [006] ..... 1.003050: workqueue_execute_end: work struct 0001: function css_free_rwork_fn",
         "kworker/6:0-98 [006] d..2. 1.003100: sched_switch: prev_comm=kworker/6:0 prev_pid=98 prev_prio=120 prev_state=I ==> next_comm=hex next_pid=20 next_prio=120",
@@ -383,6 +409,10 @@ def selftest():
             "runq: new task hex, before its first run": 200,
             "runq: preempted by kworker (work css_killed_work_fn)": 200}
     assert dict(got) == want, (dict(got), want)
+    # The kworker that woke the init is recorded as a holder: its wait, its release's stack, its rcu_sync_enter.
+    (h,) = irqs["holders"]
+    assert h[1:2] + h[3:5] == ("kworker", "release", "cgroup_migrate_execute < cgroup_attach_task"), h
+    assert abs(h[2] - 0.0015) < 1e-9 and abs(h[5] - 0.0008) < 1e-9, h
     print("selftest: ok")
 
 

@@ -14,6 +14,8 @@ OUT=/opt/out; TAG=${TRACE_TAG:?TRACE_TAG}
 T=/sys/kernel/tracing
 mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T" >&2; exit 4; }
 I="$T/instances/hextail-$TAG"
+KG="hextail_$TAG"  # this run's kprobes: rcu_sync_enter's entry (rse) and return (rsx), every task's
+CGEV="cgroup/cgroup_attach_task cgroup/cgroup_mkdir cgroup/cgroup_rmdir cgroup/cgroup_release"
 
 # The OCI pass's bundles, as create_breakdown_inside.sh makes them (an owner's: Docker's default capabilities and
 # /proc/sys read-only, so a box's cgroup and network namespace may be handed to the owner's next box).
@@ -46,6 +48,8 @@ untrace() {
   [ -d "$I" ] || return 0
   echo 0 > "$I/tracing_on" 2>/dev/null
   echo '!stacktrace' > "$I/events/sched/sched_switch/trigger" 2>/dev/null
+  for ev in $CGEV; do echo '!stacktrace' > "$I/events/$ev/trigger" 2>/dev/null; done
+  for ev in rse rsx; do echo 0 > "$I/events/$KG/$ev/enable" 2>/dev/null; done
   for ev in sched/sched_switch sched/sched_waking sched/sched_wakeup_new sched/sched_process_fork \
             sched/sched_process_exit irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
             workqueue/workqueue_execute_start workqueue/workqueue_execute_end cgroup/cgroup_attach_task \
@@ -53,6 +57,7 @@ untrace() {
     echo 0 > "$I/events/$ev/enable" 2>/dev/null
   done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
+  for ev in rse rsx; do echo "-:$KG/$ev" >> "$T/kprobe_events" 2>/dev/null; done
 }
 trap untrace EXIT
 [ "${UNTRACE_ONLY:-0}" = 1 ] && exit 0
@@ -76,10 +81,15 @@ for ev in sched_switch sched_waking sched_wakeup_new sched_process_fork sched_pr
   echo 1 > "$I/events/sched/$ev/enable" || { echo "refusing: sched/$ev wasn't enabled" >&2; exit 4; }
 done
 # Every CPU's interrupt work and kworkers' work items, unfiltered: what a run's time hides, and what preempts it;
-# and every task's cgroup operations, so a waker that held a cgroup lock is named by what it did under it.
+# and every task's cgroup operations with their stacks, and its rcu_sync_enter's entry and return, so a waker that
+# held a cgroup lock is named by what it did under it and whether it waited out a grace period there
+# (percpu_down_write's rcu_sync_enter, kernel/locking/percpu-rwsem.c:235, Linux v6.19).
+{ echo "p:$KG/rse rcu_sync_enter" >> "$T/kprobe_events" && echo "r:$KG/rsx rcu_sync_enter" >> "$T/kprobe_events"; } \
+  || { echo "refusing: rcu_sync_enter's kprobes weren't taken" >&2; exit 4; }
+for ev in $CGEV; do echo stacktrace > "$I/events/$ev/trigger" || { echo "refusing: $ev's stacktrace trigger" >&2; exit 4; }; done
 for ev in irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
           workqueue/workqueue_execute_start workqueue/workqueue_execute_end \
-          cgroup/cgroup_attach_task cgroup/cgroup_mkdir cgroup/cgroup_rmdir cgroup/cgroup_release; do
+          $CGEV $KG/rse $KG/rsx; do
   echo 1 > "$I/events/$ev/enable" || { echo "refusing: $ev wasn't enabled" >&2; exit 4; }
 done
 # seam_oci's markers into the instance, with tracing_on a plain file so its toggles leave the instance on.
