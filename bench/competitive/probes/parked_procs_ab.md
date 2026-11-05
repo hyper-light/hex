@@ -128,6 +128,25 @@ jobs only).
 - **(i) on-park**: every claim a hit, the create's gain whole. It pays on the delete: here 1.26-2.06 ms at L6 against
   (ii')'s 1.24-1.66.
 
+**The arms' host.sh passes (partial).** The same unit then ran host.sh lifecycle passes (serial lifecycle and
+start_true, then sustained at c32; 2 rounds of 10,000; one owner with reuse on), in the order I P W W P I. fedora was
+swamped by another tenant from about 18:55Z (15-minute load average 288), and the kernel's OOM killer killed the
+unit in its fourth pass, the second W (`oom-kill`, the unit's OOM score 1000). So each arm has one pass, at different
+loads: I at 44.2, P at 22.5, W at 25.5. These lean one way but don't settle anything. Out dirs:
+`~/.cache/hex-bench/out/` 20261105T182032Z (I), 20261105T183229Z (P), 20261105T184357Z (W).
+
+| arm | create p50 / p99 (ms) | delete p50 / p99 (ms) | sustained c32 (lifecycles a second) | serial hits | c32 hits / dry |
+|-----|-----------------------|-----------------------|-------------------------------------|-------------|----------------|
+| I | 0.31 / 0.60 | 0.34 / 0.70 | 7,941 | 100% | 9,837 and 9,767 of as many claims / 0 |
+| P | 0.25 / 0.45 | 0.27 / 0.46 | 8,599 | 100% | 6,128 and 6,212 of 9,871 and 9,879 / 3,776 and 3,697 |
+| W | 0.33 / 0.52 | 0.30 / 0.89 | 7,619 | 93-99% | 3,919 and 3,924 of 9,873 / 6,011 and 6,002 |
+
+- Serially, P's thread has made the proc before the same caller's next create, so every claim hits. At c32, 37% are
+  dry, as in the mounts cells.
+- I's sustained rounds show 132 and 202 misses: creates whose key or room didn't match. Not chased here.
+- In process only. These runs' socket figures don't use parked procs (the `hex node` agent isn't given the
+  setting).
+
 ## Of record at 1e5e956: the proc made by the park's own thread, counted by thread (the lead's 15:40Z option (1))
 
 **Run.** The same cell, at cp/t7-g5-parkproc 1e5e956. The harness is cp/t7-g6 f8933bd, taken by git archive with no
