@@ -251,7 +251,10 @@ for l in open("/proc/kallsyms"):
          MT="$MT hexcb/nsww hexcb/nsrw"
          # Each write hold timed (goal 6, the lead's 10:47Z ask): up_write ends it, and the write slowpath's return
          # grants a contended one (v6.19 kernel/locking/rwsem.c); create_breakdown.py times it from its grant.
-         for ev in nsu nswwr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+         for ev in nsu nswwr rww; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+         # Any other rwsem's write slowpath an init enters (goal 6, lever (4)): the mountpoint inode's lock among them.
+         echo "p:hexcb/rww rwsem_down_write_slowpath sem=%di:x64" >> "$T/kprobe_events" 2>/dev/null \
+           && MT="$MT hexcb/rww"
          if { echo "p:hexcb/nsu up_write sem=%di:x64" >> "$T/kprobe_events" \
               && echo "r:hexcb/nswwr rwsem_down_write_slowpath" >> "$T/kprobe_events"; } 2>/dev/null; then
            MT="$MT hexcb/nsu hexcb/nswwr"
@@ -271,6 +274,7 @@ for l in open("/proc/kallsyms"):
       # it only for a pid whose write wait on the lock it saw begin.
       hexcb/nsw|hexcb/nsww|hexcb/nsu) f="sem == $nssem" ;;
       hexcb/nswwr) f="common_pid > 0" ;;
+      hexcb/rww) f="sem != $nssem && comm == \"hex\"" ;;
       hexcb/nsr) f="sem == $nssem && (comm == \"hex\" || comm == \"hex-devfs\" || comm == \"seam_oci\")" ;;
       hexcb/*) f="sem == $nssem && comm == \"hex\"" ;;
       # Hex's holders off their CPU mid-hold: the inits, the pools' maker and the node.
@@ -298,7 +302,7 @@ for l in open("/proc/kallsyms"):
   for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > "$OUT/$name.stats"
   for ev in $MT; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   untrace
-  for ev in nsw nsr nsww nsrw nsu nswwr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
+  for ev in nsw nsr nsww nsrw nsu nswwr rww; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
 

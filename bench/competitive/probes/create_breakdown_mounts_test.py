@@ -208,6 +208,24 @@ class HoldsTimed(unittest.TestCase):
         self.assertIn("move_mount, woken by another init, waiting for the mount lock (write) 10.5", report)
 
 
+def other_rwsem_trace():
+    """root_trace() with init 1001's move_mount waiting in the write slowpath of another rwsem, not the mount lock: the
+    mountpoint inode's lock, which lock_mount takes before the mount lock (v6.19 fs/namespace.c:2723-2766)."""
+    return root_trace().replace("nsww: (rwsem_down_write_slowpath+0x0/0x600) sem=0xffffffff92c64b40",
+                                "rww: (rwsem_down_write_slowpath+0x0/0x600) sem=0xffff888100000000")
+
+
+class OtherRwsem(unittest.TestCase):
+    def test_a_wait_on_another_rwsem_is_named_apart_from_the_mount_lock(self):
+        """Goal 6, lever (4)'s steady p99 (goal6-mntns.md §12): do a span whose move_mount sleeps in another rwsem's
+        write slowpath, expect it charged as a wait for another rwsem, counted apart from the mount lock's waits."""
+        rc, summary, report = run(other_rwsem_trace(), span="root")
+        self.assertEqual(rc, 0)
+        self.assertIn("move_mount, woken by hex, waiting for another rwsem (write) 20.0", report)
+        self.assertEqual(summary["nssem_waits_per_create"], 0.0)
+        self.assertEqual(summary["other_rwsem_waits_per_create"], 0.5)
+
+
 class RootInPlace(unittest.TestCase):
     def test_root_span_ends_at_the_chdir_and_counts_the_mount_namespace_join(self):
         """T-T7.1 goal 6 (indicative): do the root-in-place cut, expect each init's span from its network join to

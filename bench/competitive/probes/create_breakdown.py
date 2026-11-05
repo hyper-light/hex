@@ -842,6 +842,9 @@ NSWAIT = re.compile(r"^(?P<kind>nsww|nsrw): \(")
 # write slowpath's return, after which the waiter holds the lock (v6.19 kernel/locking/rwsem.c,
 # rwsem_down_write_slowpath). Each hold is timed from its grant to its release, by holder.
 NSU = re.compile(r"^nsu: \(")
+# A wait in the write slowpath of any other rwsem (goal 6, lever (4)'s steady p99): in a mount call, the mountpoint
+# inode's lock, which lock_mount takes before the mount lock (v6.19 fs/namespace.c:2723-2766).
+RWW = re.compile(r"^rww: \(")
 NSWWR = re.compile(r"^nswwr: \(")
 # The holders whose off-CPU time the trace sees (mounts_trace filters sched_switch to them); a co-tenant's isn't.
 HEX_COMMS = ("hex", "hex-devfs", "seam_oci")
@@ -1031,12 +1034,17 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                         at = name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "between calls"
                         lock = waits.pop(nxt, None)
                         label = (f"{at}, woken by {woke.pop(nxt, 'nothing traced')}"
-                                 + (f", waiting for the mount lock ({lock})" if lock else ""))
+                                 + (", waiting for another rwsem (write)" if lock == "another rwsem"
+                                    else f", waiting for the mount lock ({lock})" if lock else ""))
                         charge(window[nxt].setdefault("blk", {}), label, ts - t0)
             elif (e := WAKING.match(body)):
                 woken = int(e["pid"])
                 if woken in off and off[woken][1] == "blocked":
                     woke[woken] = "another init" if pid in window else m["comm"].split("/")[0]
+            elif RWW.match(body):
+                if pid in window:
+                    waits[pid] = "another rwsem"
+                    window[pid]["rwsem_waits"] = window[pid].get("rwsem_waits", 0) + 1
             elif (e := NSWAIT.match(body)):
                 if e["kind"] == "nsww" and (h := holding.get(pid)) is not None:
                     h[0] = None  # it waits: its hold starts at the slowpath's return
@@ -1226,6 +1234,7 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                    "nssem_write_by_call": holds(creates, "nsw")[1] if probed else None,
                    "nssem_read_per_create": holds(creates, "nsr")[0] if probed else None,
                    "nssem_waits_per_create": sum(w.get("lock_waits", 0) for w in creates) / n,
+                   "other_rwsem_waits_per_create": sum(w.get("rwsem_waits", 0) for w in creates) / n,
                    "nssem_write_outside_per_create": by_holder if probed else None,
                    "nssem_holds_by_holder": holders if hold_times else None,
                    "span": span}, f, indent=1)
