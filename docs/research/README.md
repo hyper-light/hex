@@ -38,6 +38,7 @@ implementation" and its numbers are established, before any design or code.
 | [`native-platforms.md`](runtime/native-platforms.md) | Boxes on macOS and Windows natively: why a Linux image needs a Linux kernel (WSL 1→2, Apple's Containerization), Windows containers and job objects, macOS App Sandbox inheritance and its missing tree caps (XNU, the SDK), Linux guests through Shards |
 | [`installer-per-os.md`](runtime/installer-per-os.md) | The installer's one admin step per OS: systemd's cgroup delegation (`Delegate=`, `DelegateSubgroup=`, user@.service's defaults, linger), Windows optional features (Containers, HypervisorPlatform, DISM, elevation, unprivileged detection), Nix's build users and launchd daemon, `SMAppService` |
 | [`nofile-limit.md`](runtime/nofile-limit.md) | `RLIMIT_NOFILE` for the node: systemd's `LimitNOFILE=` and its user-manager ceiling, the kernel's `nr_open`, dockerd's and containerd's units, and what runc (through Go), crun and Docker give a container whose spec names none |
+| [`windows-hcs.md`](runtime/windows-hcs.md) | The Windows `oci` class: the OCI spec's Windows section over HCS v2, layers to a scratch volume (documented vs vmcompute), no suspended start, nested jobs, device grants, read-only mounts, host and image versions, the Containers feature and load-time linking |
 | [`matrix.md`](runtime/matrix.md) | The cross-system comparison: isolation, start latency, throughput, density, overhead — every cell cited |
 
 ### Scheduler (`scheduler/`)

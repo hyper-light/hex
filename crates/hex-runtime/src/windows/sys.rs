@@ -83,11 +83,17 @@ impl Handle {
         self.0
     }
 
+    /// The handle borrowed, for a call that takes a `BorrowedHandle`.
+    pub fn borrowed(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        // SAFETY: self owns a valid handle for at least the borrow's life (Handle's invariant).
+        unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(self.0) }
+    }
+
     /// Takes ownership of a raw handle this process owns.
     ///
     /// # Safety
     /// `h` must be a valid handle this process owns and no other `Handle` owns.
-    unsafe fn own(h: HANDLE) -> Handle {
+    pub(crate) unsafe fn own(h: HANDLE) -> Handle {
         Handle(h)
     }
 }
@@ -151,6 +157,11 @@ impl Job {
         }
         // SAFETY: h is a job handle this process just created and nothing else owns.
         Ok(Job(unsafe { Handle::own(h) }))
+    }
+
+    /// The job's handle, borrowed.
+    pub fn borrowed(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        self.0.borrowed()
     }
 
     pub fn raw(&self) -> HANDLE {

@@ -128,23 +128,37 @@ impl JobBox {
             // (`ERROR_NOT_ENOUGH_QUOTA`). This refusal Hex sees directly, so it is counted exactly
             // (unlike a member's own fork, whose refusal only reaches the box as an async notification);
             // refused by name (docs/research/runtime/windows-pids-refused.md).
-            Err(e) if sys::is_process_limit(&e) => {
-                let mut c = self.state.counts()?;
-                c.pids_refused = c.pids_refused.saturating_add(1);
-                let bound = self
-                    .state
-                    .bounds
-                    .pids_max
-                    .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
-                return Err(Refusal::Exhausted {
-                    what: "processes",
-                    bound,
-                });
-            }
+            Err(e) if sys::is_process_limit(&e) => return Err(self.refused()?),
             Err(e) => return Err(Refusal::os("starting a program in a box", e)),
         };
         sys::resume(&started.thread).map_err(|e| Refusal::os("resuming a program in a box", e))?;
         Ok(started)
+    }
+
+    /// Counts a start refused at the box's process bound, seen synchronously (the node's own `exec`, or
+    /// an `oci` box's launcher replying that the job is full), and returns the refusal to give for it.
+    pub fn refused(&self) -> Result<Refusal, Refusal> {
+        let mut c = self.state.counts()?;
+        c.pids_refused = c.pids_refused.saturating_add(1);
+        let bound = self
+            .state
+            .bounds
+            .pids_max
+            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+        Ok(Refusal::Exhausted {
+            what: "processes",
+            bound,
+        })
+    }
+
+    /// The box's job, for an `oci` box's launcher to start a member in (`super::oci::launch`).
+    pub fn job(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        self.state.job.borrowed()
+    }
+
+    /// Whether the box is being deleted, so no member is started in it.
+    pub fn stopping(&self) -> bool {
+        self.state.stopping.load(Ordering::SeqCst)
     }
 
     /// Whether a member runs in the box now, from the job's live process-id list (not its accounting,

@@ -631,6 +631,76 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   so a logged-in user needed a further step (the lab's user's manager runs before install to show it); a
   Windows feature whose state an unprivileged node can't read; a box user macOS lets a member drop.
 
+## Decision: the Windows `oci` class is an HCS silo holding a Hex job (native plan step 4, 2026-11-04)
+
+The native plan's step 4 builds the `oci` class for Windows images on Windows: process isolation through the Host
+Compute Service, as the OCI runtime spec's Windows section defines it. Sources:
+`docs/research/runtime/windows-hcs.md` (cited below as §n of that note).
+
+- **A box is an HCS compute system, process-isolated, with a job of Hex's nested inside it.** Hex creates the
+  container through HCS v2 (`computecore.dll`, schema 2.1, no hosting system, `ShouldTerminateOnLastHandleClosed` so
+  a node agent that dies takes its containers with it; note §2). Every program Hex runs in the box — its init and
+  each exec — is created *suspended inside a job object Hex owns* and then resumed, as a `process` box's member is
+  (`hex_core::job`, step 3). That job nests under the container's silo (`nested-jobs.md:27,43`, note §5), so the box's
+  `memory_max`, `pids_max` and CPU bound hold on its members by the `process` class's own measured rule, while the
+  container's ~20 system processes (note §5) stay outside the box's count.
+  - **Why not the silo's own job:** HEX-RT-6 bounds a box to 8 processes, and the silo holds more than 20 of its own;
+    the silo's job is reachable only by an implementation-detail name, as SYSTEM, through an unbound NT call (note §5).
+  - **Why a launcher:** HCS can't create a process suspended (note §4), and a member it starts runs at once, so a job
+    assigned afterward races the member's forks. Hex's own `hex` binary is mapped read-only into each box at a fixed
+    path, and HCS starts it as a launcher. The node opens the launcher by pid and duplicates into it the box's job
+    (with only `JOB_OBJECT_ASSIGN_PROCESS`) and the caller's three standard handles (`DuplicateHandle`, note §4).
+    The launcher reads one bounded request on its stdin and creates the member suspended in the job with only those
+    three handles inheritable. It resumes the member, replies with the member's pid, and holds the member's handle
+    until the node has opened it, so the pid can't be reused in between. Then the launcher exits. The node waits on
+    the member's own handle, reads its exit as a `process` box's (`hex_core::job::exit`), and the member reads and
+    writes the caller's pipes directly, with no copier thread. The request and reply are a sans-IO wire in
+    `hex_core::hcs`, bounded, and every malformed one is refused by name.
+  - **The container as a whole** is bounded too, by HCS, as the spec's Windows section says: `Memory.SizeInMB` and
+    `Processor.Maximum`/`Weight` from the bundle's `windows.resources`. A `ClassSpec::Oci` box's container is bounded
+    at its box bound plus the silo's own measured baseline (note §9, probe 3). Neither bound is dropped: a bound the
+    job can't hold is refused by name, as the `process` class refuses it.
+- **Signals and ends are the `process` class's:** KILL and TERM end the box's job; a member's exit reads as the
+  signal; any other signal is refused by name. An init that has ended leaves the box `Empty` with its exit, and an
+  exec into it is refused `NotRunning`. Delete ends the job, terminates the compute system, detaches the scratch and
+  removes what the box made. Every HCS wait has a deadline, and a timed-out operation is cancelled, never abandoned
+  (note §2).
+- **Layers by the documented storage calls**, not the `vmcompute.dll` exports hcsshim uses (undocumented, unbound,
+  wrapped in a timed retry and a global lock; note §3). The box's scratch VHD is a copy of the base layer's
+  `blank.vhdx`, attached with no drive letter. Its volume comes from `HcsGetLayerVhdMountPath`, then
+  `HcsInitializeWritableLayer` and `HcsAttachLayerStorageFilter` run over the read-only layers, and the volume is the
+  container's `Storage.Path`. No source runs this sequence end to end, so which steps a `blank.vhdx` copy needs is
+  jupiter's to settle (note §9, probe 1). If the documented calls can't make a scratch, the alternative is the
+  `vmcompute.dll` exports resolved at run time — a change brought back to this decision first, not taken silently.
+- **The spec, as the OCI Windows section defines it:** a `ClassSpec::Bundle` reads `config.json`'s `windows` section
+  (`layerFolders` topmost first with the scratch last, `devices`, `resources`) and its mounts. A `ClassSpec::Oci` box
+  renders the same, its `Rootfs::Layers` lowest first. Devices are granted only by interface class, with `class` and
+  `vpci-class-guid` both meaning one. A mount is read-only where its options say `ro`, and nested destinations are
+  refused. A field Hex doesn't render is refused by its name (`hyperv`, which is a Hyper-V container, not this class;
+  `credentialSpec`; `servicing`; `network.endpointList` until Hex holds HNS endpoints; a uid/gid `user`; a
+  `root.readonly` of true; a `Rootfs::Dir`, which a Windows container can't run from). A spec isn't half-applied.
+- **Versions, refused by name before HCS is asked:** the host's build and kind come from `RtlGetVersion`, and the
+  image's build from its base layer's `Files\Windows\System32\ntdll.dll`. Microsoft's table decides (note §7): a
+  Windows Server host runs its own build, and a Server 2025 host runs Server 2022 images too. A Windows 11 host runs
+  Server 2022 images, and Server 2025 images from 24H2 (26100) on. A Windows 10 host runs none process-isolated. Any
+  other pair is refused, naming both builds. HCS's own mismatch code (0x80370101, or 0xC0370101) maps to the same
+  refusal. Production is Windows Server's; Windows 10 and 11 hosts are for development (`hyperv-container.md:76`).
+- **The Containers feature, refused by name:** Hex resolves the HCS, storage and virtual-disk calls at run time
+  (`LoadLibraryExW` from System32, `GetProcAddress`), because windows-sys links them at load time and a missing
+  `computecore.dll` would stop the whole node from starting (note §7). A missing module or export means the class is
+  refused, saying the Containers feature is off and Hex's installer turns it on. `classes()` lists `oci` only where
+  HCS loads.
+- **Unsafe:** the HCS, storage, virtual-disk, process-handle and version calls sit in one file,
+  `crates/hex-runtime/src/windows/oci/sys.rs`, proposed for CLAUDE.md §12 in a commit of its own, held for Ada.
+- **What would falsify it:** a job handed into the silo that doesn't nest, or that the member escapes; the
+  launcher being unopenable for `PROCESS_DUP_HANDLE` from the elevated node; the documented storage calls unable to
+  make a scratch HCS starts; HCS refusing an image the table allows on jupiter, or starting one it forbids (each a
+  probe in note §9, run on jupiter before the class claims it).
+- **Done when (the step's criteria):** HEX-RT-1..9 pass for this class on jupiter with a matching nanoserver or
+  servercore image. A device not granted isn't visible, a read-only mount refuses writes, and every gate passes.
+  Create, start and delete through the seam are measured against Docker's and containerd's (runhcs) on jupiter, with
+  the same image in the same run, and recorded in `bench/`.
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is

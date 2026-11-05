@@ -90,7 +90,39 @@ pub fn run(argv: &[String]) -> Option<u8> {
         // prints its process id, then waits — so a box delete can be shown to end the grandchild too.
         #[cfg(windows)]
         "win-grandchild" => Some(win_grandchild()),
+        // win-devices <class GUID>: prints how many present devices implement that interface class
+        // where this runs, exits 0 — inside an oci box, a class not granted lists none.
+        #[cfg(windows)]
+        "win-devices" => Some(
+            match hex_runtime::windows::oci::devices(args.first().map(String::as_str).unwrap_or(""))
+            {
+                Ok(n) => u8::from(
+                    write_all(&mut std::io::stdout(), format!("{n}\n").as_bytes()).is_err(),
+                ),
+                Err(e) => {
+                    let _ = write_all(&mut std::io::stderr(), format!("{e}\n").as_bytes());
+                    2
+                }
+            },
+        ),
+        // write <path>: creates `path` and writes to it; prints "wrote", or "refused <os error>" and exits
+        // 1 — a read-only mount refuses it.
+        "write" => Some(write_probe(args.first().map(String::as_str).unwrap_or(""))),
         _ => None,
+    }
+}
+
+/// Creates `path` and writes a line to it: 0 and "wrote" when it could, 1 and "refused <os error code>"
+/// when it couldn't (a read-only mount's refusal).
+fn write_probe(path: &str) -> u8 {
+    let wrote = std::fs::File::create(path).and_then(|mut f| f.write_all(b"written in a box\n"));
+    match wrote {
+        Ok(()) => u8::from(write_all(&mut std::io::stdout(), b"wrote\n").is_err()),
+        Err(e) => {
+            let line = format!("refused {}\n", e.raw_os_error().unwrap_or(-1));
+            let _ = write_all(&mut std::io::stdout(), line.as_bytes());
+            1
+        }
     }
 }
 
