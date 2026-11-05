@@ -3170,8 +3170,22 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
         proc.wait_for(conformance::PATIENCE).unwrap(),
         Some(Exit::Code(0))
     );
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut out, &mut text).unwrap();
+    // Read to the pipe's end on a thread of its own, within the patience: an orphan still holding the pipe
+    // fails the test by name rather than hang it.
+    let (got, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = got.send(std::io::Read::read_to_string(&mut out, &mut text).map(|_| text));
+    });
+    let text = read
+        .recv_timeout(conformance::PATIENCE)
+        .unwrap_or_else(|_| {
+            panic!(
+                "the program's stdout didn't end within {:?}: the orphan holds the pipe the test reads",
+                conformance::PATIENCE
+            )
+        })
+        .unwrap();
     let orphan: i32 = text.trim().parse().unwrap();
     assert_eq!(
         parent_of(orphan),
