@@ -103,11 +103,27 @@ pub enum Scorer {
     Align,
     /// Least stranded: the node whose leftover after placing the need is either nothing or still
     /// fits one of the sample's [`Shapes`], so no CPU or memory is left that no workload can use;
-    /// then the node least allocated once the need is placed (Kubernetes' `LeastAllocated`), so
-    /// work spreads over leftovers that stay usable rather than spending one node's memory beside
-    /// its idle CPU; then [`Key`]'s order. On the recorded kiln workload it strands less than
-    /// either best fit at 90% load and passes over fewer arrivals on the way (hex-sim.md H11).
-    Fragment,
+    /// then the [`Tie`]; then [`Key`]'s order. [`Scorer::HEX`] is Hex's packing score.
+    Fragment(Tie),
+}
+
+impl Scorer {
+    /// Hex's packing score: least stranded, then least allocated, so work spreads over leftovers that
+    /// stay usable rather than spending one node's memory beside its idle CPU. On the recorded kiln
+    /// workload it strands less than either best fit at 90% load on every seed, where the plan's
+    /// alignment tie and a most-allocated tie don't (hex-sim.md H11).
+    pub const HEX: Self = Self::Fragment(Tie::LeastAllocated);
+}
+
+/// What ranks the nodes [`Scorer::Fragment`] finds equally stranded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tie {
+    /// Tetris's alignment ([`Scorer::Align`]): the plan's alignment score with a fragmentation term.
+    Align,
+    /// The node least allocated once the need is placed (Kubernetes' `LeastAllocated`).
+    LeastAllocated,
+    /// The node most allocated once the need is placed (Kubernetes' `MostAllocated`).
+    MostAllocated,
 }
 
 impl Default for Sample {
@@ -413,14 +429,21 @@ impl FitIndex {
                 Scorer::BestFit => 0,
                 Scorer::MostAllocated => u128::from(slot.allocated_after(&demand.need)),
                 Scorer::Align => u128::from(slot.alignment(&demand.need)),
-                Scorer::Fragment => {
+                Scorer::Fragment(tie) => {
                     // Lexicographic in one number: least stranded capacity in the high word, then
-                    // least allocated in the low word.
+                    // the tie in the low word.
                     let stranded = slot.stranded_after(&demand.need, &sample.shapes);
+                    let then = match tie {
+                        Tie::Align => slot.alignment(&demand.need),
+                        Tie::LeastAllocated => {
+                            u64::MAX.saturating_sub(slot.allocated_after(&demand.need))
+                        }
+                        Tie::MostAllocated => slot.allocated_after(&demand.need),
+                    };
                     u128::from(u64::MAX.saturating_sub(stranded))
                         .checked_mul(1 << 64)
                         .unwrap_or(0)
-                        | u128::from(u64::MAX.saturating_sub(slot.allocated_after(&demand.need)))
+                        | u128::from(then)
                 }
             };
             // A higher score wins; between equal scores, the least key.

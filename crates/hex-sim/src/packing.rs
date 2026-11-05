@@ -1,7 +1,7 @@
 //! Stranded capacity (`AC-T7.4.3`): what a placement policy leaves free that no workload can use.
 //!
-//! [`declared`] turns a recorded workload's measured needs into the requests a scheduler places by,
-//! at the granularity kiln's own workflows declare. [`pack`] places arrivals in order from one of
+//! [`whole_requests`] turns a recorded workload's measured needs into the requests a scheduler places
+//! by, at the granularity kiln's own workflows declare. [`pack`] places arrivals in order from one of
 //! them, with no completions, through the fast path's sampled choice ([`FitIndex::sampled_fit`]),
 //! passing over one no node admits, until the load reaches what is asked (90% for `AC-T7.4.3`). The
 //! load is the dominant share of what is placed: the larger of placed CPU over all CPU and placed
@@ -44,6 +44,23 @@ pub struct PackReport {
     pub reached: bool,
     /// The load when the first arrival found no node with room (none refused it by a filter alone).
     pub first_full_per_mille: Option<u64>,
+    /// Arrivals passed over while the load was below half, for room or by a filter.
+    pub early_passed_over: u64,
+    /// The first [`EARLY_KEPT`] of them; the rest are counted only.
+    pub early: [Option<Refusal>; EARLY_KEPT],
+}
+
+/// How many arrivals passed over below half load a [`PackReport`] keeps.
+pub const EARLY_KEPT: usize = 8;
+
+/// An arrival no node admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Refusal {
+    /// The load when it came, in per-mille.
+    pub load_per_mille: u64,
+    pub need: Resources,
+    /// No node had room for it; else a filter refused it where there was room.
+    pub for_room: bool,
 }
 
 impl PackReport {
@@ -73,7 +90,7 @@ fn per_mille(part: u64, whole: u64) -> u64 {
 /// whole GiB, at least one of each. kiln's workflows declare whole cores and GiB, the smallest one
 /// core and 1 GiB (kiln `.kiln/ci.yaml:107`, `resources: { cpu: "1", memory: 1Gi }`), and a scheduler
 /// places by what is declared, not by what was measured.
-pub fn declared(cluster: &Cluster) -> Result<Cluster, SimError> {
+pub fn whole_requests(cluster: &Cluster) -> Result<Cluster, SimError> {
     let mut out = cluster.clone();
     for w in &mut out.workloads {
         let cores = w.need.cpu_milli.div_ceil(1000).max(1);
@@ -123,9 +140,20 @@ pub fn pack(
         let demand = w.demand();
         let sampled = index.sampled_fit(&demand, sample);
         let Some(key) = sampled.best else {
+            let refusal = Refusal {
+                load_per_mille: r.load_per_mille(),
+                need: w.need,
+                for_room: sampled.refused == Refusals::default(),
+            };
             r.passed_over = r.passed_over.saturating_add(1);
-            if r.first_full_per_mille.is_none() && sampled.refused == Refusals::default() {
-                r.first_full_per_mille = Some(r.load_per_mille());
+            if r.first_full_per_mille.is_none() && refusal.for_room {
+                r.first_full_per_mille = Some(refusal.load_per_mille);
+            }
+            if refusal.load_per_mille < 500 {
+                if let Some(slot) = r.early.iter_mut().find(|e| e.is_none()) {
+                    *slot = Some(refusal);
+                }
+                r.early_passed_over = r.early_passed_over.saturating_add(1);
             }
             continue;
         };
@@ -216,6 +244,26 @@ mod tests {
         assert_eq!(r.stranded_per_mille(), 875 + 250);
     }
 
+    /// Do an arrival no node has room for while the cluster is mostly idle; expect it kept as an early
+    /// refusal with its need and load, and arrivals past the kept count counted only.
+    #[test]
+    fn refusals_below_half_load_are_kept_with_their_needs() {
+        let mut needs = vec![res(1000, 1)];
+        needs.extend(std::iter::repeat_n(res(9000, 1), EARLY_KEPT + 2));
+        let c = cluster(1, res(8000, 8), &needs);
+        let r = pack(&c, &Sample::whole(), 1000, 0).unwrap();
+        assert_eq!(r.early_passed_over, u64::try_from(EARLY_KEPT).unwrap() + 2);
+        assert_eq!(
+            r.early[0],
+            Some(Refusal {
+                load_per_mille: 125,
+                need: res(9000, 1),
+                for_room: true
+            })
+        );
+        assert!(r.early.iter().all(Option::is_some));
+    }
+
     /// Do a pack from a later arrival; expect the arrivals before it left out.
     #[test]
     fn a_pack_starts_at_its_arrival() {
@@ -226,22 +274,22 @@ mod tests {
         assert_eq!(past.placements, 0);
     }
 
-    /// Do declared() on measured needs; expect whole cores and GiB, at least one of each, and an
-    /// overflow refused typed.
+    /// Do whole_requests() on measured needs; expect whole cores and GiB, at least one of each, and
+    /// an overflow refused typed.
     #[test]
-    fn declared_requests_are_whole_cores_and_gib() {
+    fn whole_requests_are_whole_cores_and_gib() {
         let c = cluster(
             1,
             res(8000, 8),
             &[res(0, 0), res(1001, GIB + 1), res(2000, 2 * GIB)],
         );
-        let d = declared(&c).unwrap();
+        let d = whole_requests(&c).unwrap();
         let needs: Vec<_> = d.workloads.iter().map(|w| w.need).collect();
         assert_eq!(
             needs,
             vec![res(1000, GIB), res(2000, 2 * GIB), res(2000, 2 * GIB)]
         );
         let huge = cluster(1, res(8000, 8), &[res(u64::MAX, 1)]);
-        assert_eq!(declared(&huge), Err(SimError::Need(WorkloadId(0))));
+        assert_eq!(whole_requests(&huge), Err(SimError::Need(WorkloadId(0))));
     }
 }

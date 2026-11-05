@@ -1,15 +1,16 @@
 //! AC-T7.4.3's measure: stranded capacity at 90% load, Hex's scorer against best fit alone (G2 step 4).
 //!
-//!   cargo bench -p hex-bench --bench sched_packing -- [trace-file]
+//!   cargo bench -p hex-bench --bench sched_packing
 //!
-//! It packs a recorded workload (`hex_sim::replay`'s format; by default the recorded kiln workload,
-//! bench/sched/kiln-ci-20261022-20261105.trace) as the requests its legs would declare
-//! (`hex_sim::packing::declared`), from 16 starting arrivals spread evenly over the recording (the
-//! seeds), each to 90% load through the fast path's sampled choice (`hex_sim::packing::pack`). For
-//! each seed and scorer it prints the stranded capacity, the arrivals passed over on the way, the load
-//! at the first refusal for room, and Hex's scorer's reduction against each best fit: by free CPU
-//! first (`BestFit`) and across resources (`MostAllocated`). It is deterministic: the same trace
-//! gives the same table.
+//! It packs the recorded kiln workload (bench/sched/kiln-ci-20261022-20261105.trace) as the requests its
+//! legs would declare (`hex_sim::packing::whole_requests`), from 16 starting arrivals spread evenly over
+//! the recording (the seeds), each to 90% load through the fast path's sampled choice
+//! (`hex_sim::packing::pack`), under each arm: best fit by free CPU first (`BestFit`) and across
+//! resources (`MostAllocated`), Tetris's alignment (`Align`), and least stranded then a tie: Tetris's
+//! alignment (the plan's), least allocated (Hex's, `Scorer::HEX`) or most allocated. For each arm and
+//! seed it prints the stranded capacity, the arrivals passed over on the way, the load at the first
+//! refusal for room, and the arrivals passed over below half load with their needs; then each arm's
+//! reduction against both best fits. It is deterministic: the same trace gives the same tables.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -22,92 +23,114 @@
     clippy::cast_precision_loss
 )]
 
-use hex_sim::index::{Sample, Scorer, Shapes};
-use hex_sim::packing::{PackReport, declared, minimal_shapes, pack};
+use hex_sim::index::{Sample, Scorer, Shapes, Tie};
+use hex_sim::packing::{GIB, PackReport, minimal_shapes, pack, whole_requests};
 
 const SEEDS: usize = 16;
-const SCORERS: [Scorer; 4] = [
-    Scorer::BestFit,
-    Scorer::MostAllocated,
-    Scorer::Align,
-    Scorer::Fragment,
+const ARMS: [(&str, Scorer); 6] = [
+    ("best_fit", Scorer::BestFit),
+    ("most_allocated", Scorer::MostAllocated),
+    ("align", Scorer::Align),
+    ("stranded_then_align", Scorer::Fragment(Tie::Align)),
+    ("stranded_then_least (Hex)", Scorer::HEX),
+    ("stranded_then_most", Scorer::Fragment(Tie::MostAllocated)),
 ];
 
-fn cut(hex: &PackReport, base: &PackReport) -> f64 {
+fn cut(arm: &PackReport, base: &PackReport) -> f64 {
     let base = base.stranded_per_mille();
     if base == 0 {
         0.0
     } else {
-        100.0 * (1.0 - hex.stranded_per_mille() as f64 / base as f64)
+        100.0 * (1.0 - arm.stranded_per_mille() as f64 / base as f64)
     }
 }
 
-fn main() {
-    let path = std::env::args_os()
-        .skip(1)
-        .filter_map(|a| a.into_string().ok())
-        .find(|a| a != "--bench")
-        .unwrap_or_else(|| {
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../bench/sched/kiln-ci-20261022-20261105.trace"
+fn early(p: &PackReport) -> String {
+    let kept: Vec<String> = p
+        .early
+        .iter()
+        .flatten()
+        .map(|e| {
+            format!(
+                "{}c/{}G@{}{}",
+                e.need.cpu_milli / 1000,
+                e.need.mem_bytes / GIB,
+                e.load_per_mille,
+                if e.for_room { "" } else { "f" }
             )
-            .to_string()
-        });
-    let text = std::fs::read_to_string(&path).unwrap();
+        })
+        .collect();
+    format!("{} [{}]", p.early_passed_over, kept.join(" "))
+}
+
+fn main() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/sched/kiln-ci-20261022-20261105.trace"
+    );
+    let text = std::fs::read_to_string(path).unwrap();
     let recorded = hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap();
-    let cluster = declared(&recorded).unwrap();
+    let cluster = whole_requests(&recorded).unwrap();
     let shapes = minimal_shapes(&cluster);
     let sample = Sample {
         shapes: Shapes::of(shapes.clone()),
         ..Sample::default()
     };
     println!(
-        "{path}: {} nodes, {} legs, minimal shapes {:?}",
+        "{path}: {} nodes, {} legs, minimal shapes {shapes:?}",
         cluster.nodes.len(),
-        cluster.workloads.len(),
-        shapes
+        cluster.workloads.len()
     );
     println!(
-        "seed from | stranded per-mille (arrivals passed over, load per-mille at the first refusal for room): best_fit most_allocated align fragment | fragment's cut vs best_fit, vs most_allocated"
+        "seed from arm | stranded per-mille (* = 90% load not reached) | passed over | first refusal for room at load per-mille | passed over below half load [cores/GiB@load; f = by a filter]"
     );
-    let (mut min_best, mut min_most) = (f64::INFINITY, f64::INFINITY);
-    let mut passed = [0u64; SCORERS.len()];
-    for seed in 0..SEEDS {
+    let runs: Vec<Vec<PackReport>> = (0..SEEDS)
+        .map(|seed| {
+            let from = seed * cluster.workloads.len() / SEEDS;
+            ARMS.iter()
+                .map(|&(_, scorer)| {
+                    pack(&cluster, &Sample { scorer, ..sample }, 900, from).unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    for (seed, arms) in runs.iter().enumerate() {
         let from = seed * cluster.workloads.len() / SEEDS;
-        let r: Vec<PackReport> = SCORERS
-            .iter()
-            .map(|&scorer| pack(&cluster, &Sample { scorer, ..sample }, 900, from).unwrap())
-            .collect();
-        let show = |p: &PackReport| {
-            format!(
-                "{}{} ({}, {})",
+        for ((name, _), p) in ARMS.iter().zip(arms) {
+            println!(
+                "{seed:>4} {from:>5} {name} | {}{} | {} | {} | {}",
                 p.stranded_per_mille(),
                 if p.reached { "" } else { "*" },
                 p.passed_over,
                 p.first_full_per_mille
-                    .map_or_else(|| "-".to_string(), |l| l.to_string())
-            )
-        };
-        for (total, p) in passed.iter_mut().zip(&r) {
-            *total += p.passed_over;
+                    .map_or_else(|| "-".to_string(), |l| l.to_string()),
+                early(p)
+            );
         }
-        let (vs_best, vs_most) = (cut(&r[3], &r[0]), cut(&r[3], &r[1]));
-        min_best = min_best.min(vs_best);
-        min_most = min_most.min(vs_most);
-        println!(
-            "{seed:>4} {from:>5} | {} {} {} {} | {vs_best:.1}% {vs_most:.1}%",
-            show(&r[0]),
-            show(&r[1]),
-            show(&r[2]),
-            show(&r[3])
-        );
     }
     println!(
-        "fragment's least cut over {SEEDS} seeds: {min_best:.1}% vs best_fit, {min_most:.1}% vs most_allocated (AC-T7.4.3 asks >= 30%; * = 90% load not reached)"
+        "arm | seeds at least 30% below both best fits | least cut vs best_fit, vs most_allocated | passed over | earliest first refusal for room | passed over below half load"
     );
-    println!(
-        "arrivals passed over on the way, all seeds: best_fit {} most_allocated {} align {} fragment {}",
-        passed[0], passed[1], passed[2], passed[3]
-    );
+    for (i, (name, _)) in ARMS.iter().enumerate() {
+        let cuts: Vec<(f64, f64)> = runs
+            .iter()
+            .map(|arms| (cut(&arms[i], &arms[0]), cut(&arms[i], &arms[1])))
+            .collect();
+        let meets = cuts
+            .iter()
+            .filter(|(b, m)| *b >= 30.0 && *m >= 30.0)
+            .count();
+        let least_best = cuts.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let least_most = cuts.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let passed: u64 = runs.iter().map(|arms| arms[i].passed_over).sum();
+        let first = runs
+            .iter()
+            .filter_map(|arms| arms[i].first_full_per_mille)
+            .min();
+        let early: u64 = runs.iter().map(|arms| arms[i].early_passed_over).sum();
+        println!(
+            "{name} | {meets}/{SEEDS} | {least_best:.1}%, {least_most:.1}% | {passed} | {} | {early}",
+            first.map_or_else(|| "-".to_string(), |l| l.to_string())
+        );
+    }
 }

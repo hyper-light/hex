@@ -235,16 +235,17 @@ aren't kiln's work.
 
 ### H11. Hex packs by least stranded leftover, then least allocated
 
-**The choice.** `Scorer::Fragment`, Hex's packing score: among the nodes a sample admits, the one whose
-leftover after placing the request still fits some request shape (or is empty), so no CPU or memory is left
-that nothing can use; between those, the node least allocated once the request is placed (Kubernetes'
-`LeastAllocated`); then the node's key. `AC-T7.4.3` is measured by `packing::pack` on the recorded kiln
-workload (H10) as the requests its legs would declare (`packing::declared`: measured use rounded up to whole
-cores and GiB, at least one of each), packed in arrival order with no completions to 90% load, the load being
-the dominant share placed (the larger of CPU's and memory's). Stranded capacity is then the free CPU and memory
-on nodes where no request shape fits, each as a share of the cluster's, summed (`PackReport::stranded_per_mille`).
-The seeds are 16 starting arrivals spread evenly over the recording. Best fit alone is measured two ways: by
-free CPU first (`Scorer::BestFit`) and across resources (`Scorer::MostAllocated`, Kubernetes' bin packing).
+**The choice.** `Scorer::HEX`, which is `Scorer::Fragment(Tie::LeastAllocated)`: among the nodes a sample
+admits, the one whose leftover after placing the request still fits some request shape (or is empty), so no
+CPU or memory is left that nothing can use; between those, the node least allocated once the request is placed
+(Kubernetes' `LeastAllocated`); then the node's key. `AC-T7.4.3` is measured by `packing::pack` on the
+recorded kiln workload (H10) as the requests its legs would declare (`packing::whole_requests`: measured use
+rounded up to whole cores and GiB, at least one of each), packed in arrival order with no completions to 90%
+load, the load being the dominant share placed (the larger of CPU's and memory's). Stranded capacity is then
+the free CPU and memory on nodes where no request shape fits, each as a share of the cluster's, summed
+(`PackReport::stranded_per_mille`). The seeds are 16 starting arrivals spread evenly over the recording. Best
+fit alone is measured two ways: by free CPU first (`Scorer::BestFit`) and across resources
+(`Scorer::MostAllocated`, Kubernetes' bin packing).
 
 **Sources.** Borg's stranding, resources "that cannot be used because another resource on the machine is fully
 allocated", and its hybrid of best fit and worst fit, which packs "about 3-5% better" than best fit
@@ -257,16 +258,20 @@ allocated", and its hybrid of best fit and worst fit, which packs "about 3-5% be
 `bench/sched/packing.md`: on every one of the 16 seeds, Hex's scorer strands at least 63.2% less than best fit
 by CPU and 51.4% less than `MostAllocated` at 90% load. It reaches 90% on every seed, where best fit stalls
 short of it on 5. On the way it passes over 152 arrivals across the seeds, against best fit's 8,597 and
-`MostAllocated`'s 2,267. Choices tried and dropped, in the bench's model of the same packing: least stranded
-then Tetris's alignment (the first prototype) stranded more than a best fit on 4 seeds; least stranded then
-most allocated missed the 30% against best fit on 8 seeds; pure `LeastAllocated` stranded more than a best
-fit on 2.
+`MostAllocated`'s 2,267. The bench measures the arms not taken beside it (`packing.md`, the arms). The plan's
+score, least stranded then Tetris's alignment (`Fragment(Tie::Align)`), strands more than a best fit on 4
+seeds and meets the bar on 12 of 16. Least stranded then most allocated (`Fragment(Tie::MostAllocated)`) keeps
+best fit's empty nodes, refusing nothing below half load, but meets the bar on only 8 of 16. Tetris's
+alignment alone meets it on 7.
 
 **What would falsify it.** A recorded workload on which Hex's scorer strands no less than best fit, or passes
-over more arrivals on the way to the same load. The known cost: spreading uses the big holes best fit keeps
-empty, so on 9 of the 16 seeds the first arrival refused for room came at a lower load than under best fit (as
-early as 13.8% on one), even though far fewer arrivals were refused overall. A workload whose large legs matter
-more than its count of legs would weigh that against it.
+over more arrivals on the way to the same load. The known cost: spreading spends the empty nodes best fit
+keeps, so arrivals are refused while the cluster is mostly idle. There are 37 below half load across the
+seeds, against none under either best fit. 8 are for room, all whole-machine legs of 32 cores, one at 13.8%
+load; 29 are by the benchmark-beside-build filter, the largest being kiln's 42-GiB `quic-transport`
+benchmarks. In a schedule those legs wait for a node to empty rather than being passed over. A workload whose
+large legs matter more than its count of legs would weigh that against Hex's score. Holding room for them, or
+preempting for them, is G4's.
 
 ### H5. Bounded everywhere, no recursion
 

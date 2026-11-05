@@ -58,7 +58,7 @@ fn sample(r: &mut Rng) -> Sample {
         seed: r.next_u64(),
         min_feasible: u32::try_from(r.range(1, 8)).unwrap(),
         per_mille: u32::try_from(r.range(0, 300)).unwrap(),
-        scorer: [Scorer::BestFit, Scorer::Align, Scorer::Fragment]
+        scorer: [Scorer::BestFit, Scorer::Align, Scorer::HEX]
             [usize::try_from(r.range(0, 2)).unwrap()],
         shapes: Shapes::of(vec![
             Resources {
@@ -699,7 +699,7 @@ fn a_recorded_kiln_workload_replays_the_same_twice() {
 fn the_recorded_kiln_workload_strands_at_least_30_percent_less_than_best_fit() {
     let text = include_str!("../../../bench/sched/kiln-ci-20261022-20261105.trace");
     let recorded = hex_sim::replay::parse(text, &hex_sim::replay::Limits::default()).unwrap();
-    let cluster = packing::declared(&recorded).unwrap();
+    let cluster = packing::whole_requests(&recorded).unwrap();
     let sample = Sample {
         shapes: Shapes::of(packing::minimal_shapes(&cluster)),
         ..Sample::default()
@@ -709,7 +709,7 @@ fn the_recorded_kiln_workload_strands_at_least_30_percent_less_than_best_fit() {
     let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
     for seed in 0..16 {
         let from = seed * cluster.workloads.len() / 16;
-        let hex = pack(Scorer::Fragment, from);
+        let hex = pack(Scorer::HEX, from);
         assert!(hex.reached, "seed {seed}: {hex:?}");
         for base in [
             pack(Scorer::BestFit, from),
