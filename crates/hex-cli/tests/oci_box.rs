@@ -475,6 +475,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     escapes_are_contained(&lab, own);
     mount_namespaces_made_each_way(&lab, own);
     procs_made_ahead_carry_their_masks(&lab, own);
+    a_parked_inits_proc_is_its_own_and_taken_once(&lab, own);
     masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
@@ -1382,6 +1383,292 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
         "procs made ahead: taken {}, made {}, the masks and read-only paths as ordinary setup's",
         after.taken, after.made
     );
+}
+
+/// Decision 8, parked procs (AC-T7.1.3; T-T7.1.4): on a root node made with parked procs and one cgroup made ahead
+/// for boxes of no owner, procs made ahead off, so the only procs the node holds are its parked inits'. Do: create
+/// and delete N1, whose spec masks and makes read-only paths beneath `/proc` (key K), so the init parked next has a
+/// proc made for K; create N2 with K. Expect: before N2, the node alone holds that proc (this process has one proc
+/// root open, the parked init none); N2's init is the parked one, its `/proc` that proc's superblock, which the
+/// node holds no more; in N2 `/proc/self` is the reader's own pid and pid 1 the box's init; its mounts beneath
+/// `/proc` exactly K's, the read-only ones read-only; one hit counted. Then delete N2 (the next park's proc made for
+/// K) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its `/proc` a superblock
+/// the node never held, its mounts exactly K2's, one miss counted. Then delete N3 and release the idle cgroups:
+/// expect no proc held and no proc root open in this process, the parked init ended. None failed to be made.
+fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab
+        .node(&own.join("hex-oci-parkproc"), state.path())
+        .with_prepared_procs(false)
+        .unwrap()
+        .with_inits_ahead(1)
+        .with_parked_procs(true);
+    let k = (
+        &[
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/timer_list",
+            "/proc/acpi",
+            "/proc/not-there",
+        ][..],
+        &["/proc/sys", "/proc/sysrq-trigger", "/proc/bus"][..],
+    );
+    let k2 = (&["/proc/kcore", "/proc/keys"][..], &["/proc/sys"][..]);
+    let bundle = |(masked, readonly): (&[&str], &[&str])| {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let paths = format!(r#","maskedPaths":{masked:?},"readonlyPaths":{readonly:?}"#);
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                "",
+                "",
+                &paths,
+            ),
+        )
+        .unwrap();
+        dir
+    };
+    let (with_k, with_k2) = (bundle(k), bundle(k2));
+    let create = |id: &BoxId, dir: &Path| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.to_path_buf()),
+            owner: None,
+        })
+        .expect("create a box of no owner with masks beneath /proc");
+    };
+    // The mounts a key's box has beneath `/proc`: each path the kernel makes, read-only where it says so.
+    let expected = |(masked, readonly): (&[&str], &[&str])| -> BTreeSet<String> {
+        masked
+            .iter()
+            .chain(readonly)
+            .filter(|p| Path::new(p).exists())
+            .map(|p| (*p).to_owned())
+            .collect()
+    };
+    // What a box sees beneath its proc, and whether `/proc/self` is the reader and pid 1 its init.
+    let seen = |id: &BoxId| {
+        let (_, mi) = run_in(&node, id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let beneath: BTreeSet<(String, bool)> = mountinfo(&mi)
+            .into_iter()
+            .filter(|(point, ..)| point.starts_with("/proc/"))
+            .map(|(point, opts, ..)| (point, opts.split(',').any(|o| o == "ro")))
+            .collect();
+        let own_pidns = exit_in(
+            &node,
+            id,
+            &[
+                "/usr/bin/sh",
+                "-c",
+                r#"[ "$(readlink /proc/self)" = "$$" ] && [ "$(cat /proc/1/comm)" = hex ]"#,
+            ],
+        );
+        (beneath, own_pidns)
+    };
+    let check = |which: &str, beneath: &BTreeSet<(String, bool)>, key: (&[&str], &[&str])| {
+        let points: BTreeSet<String> = beneath.iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(
+            points,
+            expected(key),
+            "{which}: its mounts beneath /proc are its key's"
+        );
+        for point in key.1.iter().filter(|p| Path::new(p).exists()) {
+            assert!(
+                beneath.contains(&((*point).to_owned(), true)),
+                "{which}: {point} is read-only: {beneath:?}"
+            );
+        }
+    };
+    let ready = |made: u64| {
+        wait_for(
+            || {
+                let c = node.cgroup_reuse().unwrap();
+                c.ahead.ready == 1 && c.parked.procs_made + c.parked.procs_failed >= made
+            },
+            "an init parked ahead with its proc",
+        );
+    };
+    let me = std::process::id().to_string();
+    let init_of = |id: &BoxId| {
+        let procs =
+            std::fs::read_to_string(node.cgroup_dir(id).unwrap().join("cgroup.procs")).unwrap();
+        procs.lines().next().unwrap().trim().to_owned()
+    };
+    let proc_dev = |pid: &str| {
+        std::fs::metadata(format!("/proc/{pid}/root/proc"))
+            .unwrap()
+            .dev()
+    };
+
+    let n1 = BoxId::new("parkproc-1").unwrap();
+    create(&n1, &with_k);
+    let root = node
+        .cgroup_dir(&n1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n1).unwrap();
+    ready(1);
+    let before = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (before.procs_made, before.procs_failed, before.procs_held),
+        (1, 0, 1),
+        "{before:?}"
+    );
+    let held = held_procs(&me);
+    assert_eq!(
+        held.len(),
+        1,
+        "the node holds the parked init's proc: {held:?}"
+    );
+    let parked = parked_inits(&root);
+    assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
+    assert_eq!(
+        held_procs(&parked[0]),
+        BTreeSet::new(),
+        "the parked init holds no proc of its own before its claim"
+    );
+
+    let n2 = BoxId::new("parkproc-2").unwrap();
+    create(&n2, &with_k);
+    let after = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(init_of(&n2), parked[0], "N2's init is the parked one");
+    assert_eq!(after.claimed, before.claimed + 1, "{after:?}");
+    assert_eq!(
+        after.proc_hits,
+        before.proc_hits + 1,
+        "N2 took the parked proc: {after:?}"
+    );
+    assert_eq!(after.proc_misses, before.proc_misses, "{after:?}");
+    node.start(&n2).unwrap();
+    assert!(
+        held.contains(&proc_dev(&parked[0])),
+        "N2's /proc is the proc made for its parked init"
+    );
+    assert!(
+        !held_procs(&me).iter().any(|d| held.contains(d)),
+        "the node holds that proc no more: it was handed to one init"
+    );
+    let (beneath, own_pidns) = seen(&n2);
+    check("N2", &beneath, k);
+    assert_eq!(
+        own_pidns,
+        Exit::Code(0),
+        "N2's /proc shows its own pid namespace"
+    );
+
+    // N2's create told the refill K; the next init parked ahead has its proc made for K.
+    ready(2);
+    let before = node.cgroup_reuse().unwrap().parked;
+    let held = held_procs(&me);
+    let parked = parked_inits(&root);
+    assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
+    node.delete(&n2).unwrap();
+    let n3 = BoxId::new("parkproc-3").unwrap();
+    create(&n3, &with_k2);
+    let after = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(init_of(&n3), parked[0], "N3's init is the parked one");
+    assert_eq!(after.claimed, before.claimed + 1, "{after:?}");
+    assert_eq!(
+        after.proc_misses,
+        before.proc_misses + 1,
+        "N3's key isn't K: {after:?}"
+    );
+    assert_eq!(after.proc_hits, before.proc_hits, "{after:?}");
+    node.start(&n3).unwrap();
+    assert!(
+        !held.contains(&proc_dev(&parked[0])),
+        "N3's /proc is its own, not the one made for K"
+    );
+    let (beneath, own_pidns) = seen(&n3);
+    check("N3", &beneath, k2);
+    assert_eq!(
+        own_pidns,
+        Exit::Code(0),
+        "N3's /proc shows its own pid namespace"
+    );
+
+    ready(3);
+    let parked = parked_inits(&root);
+    let last = rustix::process::pidfd_open(
+        rustix::process::Pid::from_raw(parked[0].parse().unwrap()).unwrap(),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .unwrap();
+    node.delete(&n3).unwrap();
+    node.release_idle().unwrap();
+    let end = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(end.procs_held, 0, "released, no proc is held: {end:?}");
+    assert_eq!(
+        held_procs(&me),
+        BTreeSet::new(),
+        "no proc root is open in the node"
+    );
+    wait_for(
+        || {
+            let mut fds = [rustix::event::PollFd::new(
+                &last,
+                rustix::event::PollFlags::IN,
+            )];
+            let now = rustix::event::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            rustix::event::poll(&mut fds, Some(&now)).unwrap() > 0
+        },
+        "the last parked init to end",
+    );
+    assert_eq!(end.procs_failed, 0, "{end:?}");
+    eprintln!(
+        "parked procs: made {}, hits {}, misses {}, held after release {}",
+        end.procs_made, end.proc_hits, end.proc_misses, end.procs_held
+    );
+}
+
+/// The proc superblocks (`st_dev`) whose root process `pid` holds a descriptor to, read through `/proc/<pid>/fd`:
+/// each link followed to what it names, a proc root (`PROC_SUPER_MAGIC`, proc(5); its root inode 1).
+fn held_procs(pid: &str) -> BTreeSet<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let path = e.path();
+            let fs = rustix::fs::statfs(&path).ok()?;
+            let meta = std::fs::metadata(&path).ok()?;
+            (u64::try_from(fs.f_type).ok() == Some(0x9fa0) && meta.ino() == 1).then(|| meta.dev())
+        })
+        .collect()
+}
+
+/// The processes of the slot cgroups under `root`: the inits parked in those made ahead.
+fn parked_inits(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap().filter_map(Result::ok) {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        {
+            let procs =
+                std::fs::read_to_string(entry.path().join("cgroup.procs")).unwrap_or_default();
+            out.extend(procs.lines().map(|l| l.trim().to_owned()));
+        }
+    }
+    out
 }
 
 /// HEX-MNTNS-8 (decision 6's update; T-T7.1.4): on a root node, make two boxes on the pruned path and two through

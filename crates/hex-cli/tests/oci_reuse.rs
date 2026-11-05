@@ -752,9 +752,11 @@ fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
 /// created, started and deleted; wait for the fact that A's idle slot holds one process; create B of O. Expect:
 /// the slot holds that one process, with no effective capability, before B's create and the same one after it,
 /// so B's init is the parked one; B starts and runs a program; the node counts one init claimed. Then delete B and release the idle
-/// cgroups: none is left, so a parked init is ended with its cgroup.
+/// cgroups: none is left, so a parked init is ended with its cgroup. With parked procs (root only), B's create
+/// takes the proc made for that init at A's delete, counted a hit (decision 8, parked procs).
 fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, own: &Path) {
     let (node, _state) = lab.node(&own.join("hex-reuse-parked"));
+    let node = node.with_parked_procs(true);
     let o = BoxOwner::named("owner-p").unwrap();
     let a = BoxId::new("pa").unwrap();
     node.create(lab.oci("pa", Some(&o), Caps::Docker, Bounds::default()))
@@ -808,6 +810,14 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         "B's init is the one parked in the slot, not a clone of B's create"
     );
     assert_eq!(after.parked.claimed, before.parked.claimed + 1, "{after:?}");
+    if !lab.rootless {
+        assert_eq!(
+            (after.parked.proc_hits, after.parked.proc_misses),
+            (before.parked.proc_hits + 1, before.parked.proc_misses),
+            "B took the proc made at A's delete: {:?}",
+            after.parked
+        );
+    }
     node.start(&b).unwrap();
     assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
     node.delete(&b).unwrap();
@@ -913,7 +923,8 @@ fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab,
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
 /// deleted, so A's idle slot holds a parked init; the node abandoned as a crash leaves it (none of its teardown
 /// runs: `ManuallyDrop`); a node opened again over the same box root and state, and its recovery run. Expect: the
-/// idle slot is gone and the parked init has ended.
+/// idle slot is gone and the parked init has ended. With parked procs (root only), the init's proc was made at A's
+/// delete; its tree is the crashed node's descriptor, gone with that process, and its pid namespace with the init.
 fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path) {
     let box_root = own.join("hex-reuse-recover");
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
@@ -921,6 +932,7 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
         Node::open(&box_root, state.path(), state.path())
             .expect("open a node")
             .with_oci_helper(PathBuf::from(&lab.exe))
+            .with_parked_procs(true)
     };
     let node = open();
     let o = BoxOwner::named("owner-r").unwrap();
@@ -935,6 +947,10 @@ fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path)
         1,
         "A's idle slot holds a parked init: {parked:?}"
     );
+    if !lab.rootless {
+        let held = node.cgroup_reuse().unwrap().parked;
+        assert_eq!(held.procs_held, 1, "its proc made with it: {held:?}");
+    }
     let init = pidfd(parked[0]);
     let _abandoned = std::mem::ManuallyDrop::new(node);
     let node = open();
