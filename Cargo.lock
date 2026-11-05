@@ -244,6 +244,7 @@ dependencies = [
 name = "hex-sim"
 version = "0.1.0"
 dependencies = [
+ "hex-health",
  "proptest",
  "thiserror",
 ]

@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+hex-health.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

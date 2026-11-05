@@ -14,6 +14,8 @@
 //! - [`generate`]: generated clusters and workloads from a seed.
 //! - [`replay`]: a recorded workload read from text, for replaying a real day.
 //! - [`packing`]: stranded capacity at a load, the measure of `AC-T7.4.3`.
+//! - [`faults`]: the fault nemesis, each fault class against its detection and isolation bound (S8).
+//! - [`membership`]: SWIM with Lifeguard: crash detection and slow-member false positives (S8).
 
 #![cfg_attr(
     test,
@@ -28,8 +30,10 @@
 )]
 
 pub mod error;
+pub mod faults;
 pub mod generate;
 pub mod index;
+pub mod membership;
 pub mod model;
 pub mod packing;
 pub mod replay;
