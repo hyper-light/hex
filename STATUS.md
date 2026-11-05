@@ -128,14 +128,19 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   and createContainer and startContainer hooks run in the container (cp/t7-hooks a4e0261). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
   seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
   lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
-  - goal 5x step 7, goal 5's create against its bar on this tree (1714f72, fedora, 2026-11-04, noisy;
-    `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7"; decision 5). host.sh's OCI pass, best of 2,
-    Hex over libcrun: reuse on (out/20261104T170413Z) create p50 0.150x, p99.9 0.036x, create+start of `true` p50 0.219x,
-    p99.9 0.267x (just over 0.25x); reuse off (out/20261104T172313Z) 0.356x, 0.938x, 0.264x, 0.833x. The breakdown, six
-    runs best of N: the parts' p50s summed are 102.5% to 105.1% of create's p50 in the four at loads 16-32 (step 7's 10%
-    met), and 80.8% and 86.8% in the two at loads 31-106, where the parts' means sum to the mean span exactly (a sum of
-    medians undercounts under load). Over the bar, so the levers are named for Ada:
-    goal 6's 7.x namespace, the shared empty-directory masks (cp/t7-g6), the record's fsync on disk, step 6's reuse.
+  - goal 5x step 7, goal 5's create against its bar on the final tree (f58a101, fedora, 2026-11-05, noisy;
+    `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7 again"; decision 5). host.sh's OCI pass,
+    best of 2, Hex over libcrun, every round read whole: reuse on (out/20261105T114658Z) create p50 0.160x, p99.9
+    0.656x, create+start of `true` p50 0.187x, p99.9 0.148x; reuse off (out/20261105T120118Z) 0.220x, 0.419x, 0.210x,
+    0.240x. Create's p99.9 in process is the one over the bar, in the round the table takes; the other round reads 3.54
+    and 2.91 ms, and the socket 0.99 and 3.48. Every box ended through its init, none by `cgroup.kill`. The breakdown,
+    four runs: the parts' p50s summed are 98.4% to 104.5% of create's p50 (step 7's 10% met by all four). The levers
+    for what's left are named for Ada: goal 6's 7.x namespace, the shared empty-directory masks (cp/t7-g6), the
+    record's fsync on disk, step 6's reuse.
+  - the tree since 1714f72: step 6's final code (a12e526) and records (e943880), the held files' bound counting both
+    pools of namespaces made ahead (e31256b), a delete reading its box's record again after forgetting the init
+    (3428ddc; 758afc9's Ended-path wait reverted by 2a4a806 on an A/B), host.sh's fetch from the pinned tarball and its
+    refusal of a pass with a crashed round. Gates 7 of 7, root lab 8 of 8 at f58a101.
   - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at
     c32; cp/t7-ext-s4 209cea4.
   - goal 5x step 3: closed on its written bars by Ada's ruling (2026-11-03), with the under-load bar moved to goal 6;

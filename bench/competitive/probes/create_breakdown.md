@@ -1216,3 +1216,47 @@ no idle threads; create-breakdown-20261104T145958Z A, 150010Z B, none lost). Per
 - What would falsify it: a pair-for-pair rerun at a lower load with B's part 19 p99 not lower in most pairs. One A/B at
   load 50-70 holds what the 6.19 change is meant for (the p50, by the superblocks) and suggests the tail; the create's
   own gain needs a quieter host or many more rounds.
+
+## Goal 5 extended step 7 again, on the final integrated tree f58a101 (2026-11-05)
+
+Fedora (kiln-a094a12d, i9-14900HX, Linux 6.19.10), the integrated tree at f58a101: 1714f72's, with step 6's final code
+(a12e526) and records (e943880), the held files' bound counting both pools (e31256b), a delete reading its box's record
+again after forgetting the init (3428ddc), and host.sh refusing a pass with a crashed round (f58a101). Static-glibc hex
+sha256 9a060daf025a003b, seam_oci 6853dca004bd6b60, libcrun 1.30.1 in process. Every timed part ran on CPUs 4-15 under
+the shared lock, --tmpfs /run, containers at 8 GB and oom-score-adj 1000, noisy (LOAD_GATE=0), one after another in
+unit hex-integrate-measure-20261105T113116Z, after the gates (7 of 7), the root lab (8 of 8) and oci_reuse's test 1 as
+root passed at f58a101 in unit hex-integrate-final-20261105T100839Z. The host's clock wasn't read this time.
+
+### host.sh's OCI pass: lifecycle and start_true, 2 rounds of 10,000, best of 2
+
+| run | reuse | load at start, end | Hex create p50 / libcrun | ratio | Hex create p99.9 / libcrun | ratio | Hex create+start of `true` p50 / libcrun | ratio | Hex create+start of `true` p99.9 / libcrun | ratio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| out/20261105T114658Z | on | 37.03, 37.50 | 0.41 / 2.56 ms | 0.160x | 11.19 / 17.07 ms | 0.656x | 0.47 / 2.52 ms | 0.187x | 1.75 / 11.83 ms | 0.148x |
+| out/20261105T120118Z | off | 23.75, 22.83 | 0.50 / 2.27 ms | 0.220x | 11.72 / 27.99 ms | 0.419x | 0.50 / 2.38 ms | 0.210x | 3.44 / 14.32 ms | 0.240x |
+
+The ratios are Hex's figure over libcrun's as table.md prints them (ms to two places). Every round of both passes,
+libcrun's and the seam's in process and over the socket, read whole: n 10,000 and no errors in its JSON, and no log
+naming a panic or a 101 (the lead's check, 2026-11-05T09:00Z). Every box of both passes ended through its init:
+ended_through_init 10,100 of 10,100 in each phase of each round, 0 fell back and 0 cgroup.kill, where 1714f72's
+reuse-off pass killed 4 and 2 in start_true (finding 3(a)'s cause, 3428ddc). The reuse-on pass handed on 10,099 and
+10,100 cgroups a round. Over the socket (hex-seam-socket), reuse on: create p50 0.41, p99.9 0.99 ms; create+start of
+`true` p50 0.44, p99.9 1.64. Reuse off: create p50 0.52, p99.9 3.48; create+start of `true` p50 0.52, p99.9 3.19.
+
+The table takes the round with the better create p50 and prints its percentiles. In both passes that round carries
+create's tail in process: 15 and 14 creates over 5 ms, against 5 and 2 in the other round, whose create p99.9 is 3.54
+ms (reuse on) and 2.91 ms (reuse off), read from its JSON's samples by rank.
+
+### The create breakdown, seed path (pruned), N=1000, 3 rounds, four runs alternating
+
+| run | reuse | load at start, end | Hex create p50 (seam, pooled) | libcrun's | ratio | parts' p50s summed | over the creates between (p50) | events lost |
+|---|---|---|---|---|---|---|---|---|
+| create-breakdown-20261105T113309Z | on | 33.10, 26.48 | 0.424 | 2.416 | 0.175x | 0.470 | 1.029 (0.457) | 0 |
+| create-breakdown-20261105T113700Z | off | 23.15, 24.13 | 0.505 | 2.243 | 0.225x | 0.537 | 0.984 (0.545) | 0 |
+| create-breakdown-20261105T113940Z | on | 41.98, 36.35 | 0.527 | 2.774 | 0.190x | 0.581 | 1.045 (0.556) | 0 |
+| create-breakdown-20261105T114315Z | off | 41.74, 39.59 | 0.575 | 2.485 | 0.231x | 0.581 | 1.005 (0.578) | 0 |
+
+The parts' p50s summed are 102.9%, 98.4%, 104.5% and 100.5% of create's p50 in the same run: step 7's 10% met by all
+four, at loads of 23 to 42. The parts by group, pooled p50 (ms), in the first run of each mode (reuse on / off): the
+box's record 0.021 / 0.025; the cgroup, made and bounded 0.104 / 0.135; the seed, the request and its clone's
+preparing 0.044 / 0.047; the init's set-up to the exec FIFO 0.188 / 0.192; the handshake 0.011 / 0.014; the node's and
+the runtime's own work 0.102 / 0.124.
