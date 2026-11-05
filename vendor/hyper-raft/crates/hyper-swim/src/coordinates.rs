@@ -1,9 +1,3 @@
-//! hyper-swim's Vivaldi engine, copied whole from hyper-raft (github.com/hyper-light/hyper-raft) at
-//! 6a236ae, `crates/hyper-swim/src/coordinates.rs`, its tests with it, so hex-sim scores placement with
-//! the coordinates Hex's nodes will carry (scheduler-architecture.md S4) rather than a model of them.
-//! hyper-raft has no `-api` crate for Hex to reach it through (CLAUDE.md §9); `hex-sim.md` H12 says why
-//! a copy and what replaces it. Below this paragraph the file is the source's, unchanged.
-//!
 //! Vivaldi network coordinates (§4.8 cluster plane): a decentralized synthetic coordinate system that
 //! lets a node predict the round-trip time to a peer from coordinates it learns and round trips it
 //! measures, without an all-pairs matrix. Dabek, Cox, Kaashoek and Morris, *Vivaldi: A

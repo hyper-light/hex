@@ -39,6 +39,9 @@ pub mod sim;
 pub mod spec;
 pub mod store;
 pub mod trace;
+/// hyper-swim's Vivaldi engine, vendored unchanged from hyper-raft (`vendor/MANIFEST.toml`,
+/// `docs/design/hex-sim.md` H12): `scripts/vendor.py check` proves it is upstream's, byte for byte.
+#[path = "../../../vendor/hyper-raft/crates/hyper-swim/src/coordinates.rs"]
 pub mod vivaldi;
 pub mod wan;
 

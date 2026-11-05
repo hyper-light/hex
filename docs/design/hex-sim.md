@@ -214,10 +214,17 @@ between them (the larger of each pair's two directions), three zones a region wi
 zones drawn below Azure's stated bound of about 2 ms, and an access height per node (25-250 µs,
 modelled). A probe sees the true round trip stretched by up to 10%. Every node runs hyper-swim's
 Vivaldi engine (`vivaldi`), probing 8 peers drawn from the whole membership a round, 64 rounds. The
-engine is hyper-swim's `coordinates.rs` copied whole, its tests with it, at hyper-raft 6a236ae: Hex
-reaches another product only through its `-api` crate (CLAUDE.md §9), hyper-raft has none, and a model
-of the engine would measure the model, not what Hex's nodes will carry. When hyper-raft publishes the
-engine behind a seam Hex can take, hex-sim drives that and the copy goes.
+engine is hyper-swim's `coordinates.rs`, its tests with it, vendored through `scripts/vendor.py` at
+hyper-raft `6a236ae4c73e` (`vendor/MANIFEST.toml` `[projects.hyper-raft]`, `take` naming only the files
+hex-sim compiles) and included unchanged by path (`crates/hex-sim/src/lib.rs`, `#[path]`), so
+`vendor.py check`, one of the gates, proves the bytes are upstream's; `vendor/hyper-raft/UPSTREAM.md`
+records no changes. Why not the alternatives: Hex reaches another product only through its `-api`
+crate (CLAUDE.md §9) and hyper-raft has none; a model of the engine would measure the model, not what
+Hex's nodes will carry; and a pasted copy has nothing holding it to upstream. hex-sim's SWIM timing
+(implementation goal 5) takes its hyper-swim files through the same entry, so hyper-raft is vendored
+once. **What replaces it:** when hyper-raft publishes the engine behind an `-api` crate, hex-sim
+depends on that by name and version (patched to kiln's copy in `[patch.crates-io]`, CLAUDE.md
+Vendoring), and the `hyper-raft` entry and its `#[path]` include go.
 
 **Sources.** Dabek, Cox, Kaashoek and Morris, *Vivaldi*, SIGCOMM 2004 (`PF[1]`); Ledlie, Gardner and
 Seltzer, *Network Coordinates in the Wild*, NSDI 2007 (`PF[2]`: real latencies violate the triangle
@@ -230,7 +237,7 @@ Inter-zone networking. Kiln research `01a1a9977b2273d0860ac510b8aa0a69`.
 another seed, others. `wan::coordinates_learn_the_wan`: on 1,000 nodes the median relative error over
 20,000 pairs is at most 25% and a node's own region is predicted nearer than another's in at least 95%
 of trials; `unconverged_coordinates_fail_the_same_measure` shows the measure fails coordinates that
-learned nothing. hyper-swim's own six tests pass on the copy.
+learned nothing. hyper-swim's own six tests pass on the vendored file.
 
 **What would falsify it.** hyper-swim's coordinates measured on a real WAN (the open gap `PF[6]`)
 predicting worse than they do here: then the model's jitter and heights are too kind, and hex-sim's
