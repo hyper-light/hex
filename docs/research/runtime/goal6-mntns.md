@@ -320,3 +320,5 @@ Read:
   known.
 - Whatever the arm, the maker holds the mount lock about 5 times as often as an init does: 23-29 holds a create
   against 5-6. Nearly all of them are the masks and read-only paths it puts on each proc.
+- **Falsified and reverted** (dc6ec80, on the lead's word, 2026-11-05): fewer holds with a higher p99 in 6 of 6
+  pairs is no lever. 6faee83 stays reachable in the branch's history, its A/B above.
