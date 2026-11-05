@@ -53,6 +53,9 @@
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
 //! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
 //! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
+//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it (decision 8, parked procs; the node's default is
+//! off), and the phase's `parked` counts say how many were made, taken by their create (hits), left (misses) or
+//! failed.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -1077,7 +1080,12 @@ mod linux {
         json!({"parked": a.parked - b.parked, "claimed": a.claimed - b.claimed,
                "ended_unclaimed": a.ended_unclaimed - b.ended_unclaimed,
                "failed": a.failed - b.failed,
-               "charged_bytes": a.charged_bytes - b.charged_bytes})
+               "charged_bytes": a.charged_bytes - b.charged_bytes,
+               "procs_made": a.procs_made - b.procs_made,
+               "proc_hits": a.proc_hits - b.proc_hits,
+               "proc_misses": a.proc_misses - b.proc_misses,
+               "procs_failed": a.procs_failed - b.procs_failed,
+               "procs_held": a.procs_held})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -1190,7 +1198,8 @@ mod linux {
                 .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"))
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
+                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"))
+                .with_parked_procs(std::env::var("HEXBENCH_PARKED_PROCS").as_deref() == Ok("1"));
             // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
             // as it ships, unless HEXBENCH_AHEAD says.
             let node = match std::env::var("HEXBENCH_AHEAD") {

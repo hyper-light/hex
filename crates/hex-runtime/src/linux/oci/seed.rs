@@ -844,8 +844,8 @@ fn parked(claim: OwnedFd, flags: u64, pid_for: &mut PidFor) -> ! {
             .0
         }
         // The seed's PidFor, inherited through the fork: a root node's seed opened it before it pruned its mount
-        // namespace, which leaves no /proc to open another through. A create it can take never uses it (one
-        // carrying a proc made ahead is refused).
+        // namespace, which leaves no /proc to open another through. A create it can take never uses it: the only
+        // proc made ahead it takes shows its own pid namespace, which it is in already.
         Ok(seed::Message::Create(create)) => {
             serve_create(
                 &create,
@@ -1147,14 +1147,26 @@ fn serve_create_pruned(
                 cloned.map_err(|e| OciError::os("clone3 the program into the container", e)),
             )
         }
-        // An init parked ahead has its pid and mount namespaces already (decision 8): a create carrying a proc made
-        // ahead, or making its mount namespace another way (decision 6's update), isn't one it can take. The
-        // runtime sends it none such (run.rs, start_via_seed); one that came anyway is refused by type.
+        // An init parked ahead has its pid and mount namespaces already (decision 8): a create making its mount
+        // namespace another way (decision 6's update) isn't one it can take, nor one carrying a proc of another pid
+        // namespace than its own. The proc the node made for it (parked procs) shows this init as its pid 1, its
+        // `self` reading "1" (proc(5), /proc/self; the pid as the mount's pid namespace numbers it), and only that
+        // proc is taken. The runtime sends it no other (run.rs, start_via_seed); one that came anyway is refused by
+        // type.
         How::Parked { .. } => {
-            if proc_mount.is_some() || create.mount_namespace != MountNamespace::Copy {
+            if create.mount_namespace != MountNamespace::Copy {
                 return refused(
                     Failed::Request,
-                    "a parked init was claimed by a create with a proc made ahead or a mount namespace made another way"
+                    "a parked init was claimed by a create with a mount namespace made another way"
+                        .to_owned(),
+                );
+            }
+            if let Some((_, proc)) = &proc_mount
+                && !shows_self_as_one(proc.tree.as_fd())
+            {
+                return refused(
+                    Failed::Request,
+                    "a parked init was claimed with a proc of another pid namespace than its own"
                         .to_owned(),
                 );
             }
@@ -1220,6 +1232,13 @@ fn serve_create_pruned(
         }
         Err(e) => refused(Failed::Start, e.to_string()),
     }
+}
+
+/// Whether the proc `tree` names the calling process pid 1: its `self` link, which proc reads as the caller's pid
+/// in the mount's pid namespace (v6.19 `fs/proc/self.c:11-28`), reads "1". A process not in that namespace has no
+/// pid there, and the link fails with `ENOENT` (`:19-20`).
+fn shows_self_as_one(tree: BorrowedFd<'_>) -> bool {
+    rustix::fs::readlinkat(tree, "self", Vec::new()).is_ok_and(|link| link.as_bytes() == b"1")
 }
 
 /// Whether this seed's kernel refused `CLONE_EMPTY_MNTNS` once (Linux 7.1): learned from its first such
