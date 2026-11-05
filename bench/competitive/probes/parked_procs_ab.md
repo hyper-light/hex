@@ -42,6 +42,27 @@ create_breakdown.sh's `docker run` passes `-e HEXBENCH_PARKED_PROCS`. Body and l
 **Not of record** for the whole create against libcrun: this run has no libcrun arm. Its create p99 is the A/B's own
 comparison.
 
+## Again at 506a263 (the review's off-path drop)
+
+**Run.** The same body and harness, at cp/t7-g5-parkproc 506a263 (adds `ProcSink`, an unattached tree dropped by
+the node's `hex-proc-drop` thread). fedora, 2026-11-05 15:02:19Z-15:07:53Z, under the timed lock. Load rose from
+32.7 to 141 during the run (another tenant's), so this host was far busier than the first run's. Body:
+`~/.cache/hex-t7/g5tail/ab-pp-20261105T150137Z`.
+
+| L | arm | part 19 p50 | part 19 p99 | unpreempted p99 | create p99 (ms) | mount-lock waits a create |
+|---|-----|-------------|-------------|-----------------|-----------------|---------------------------|
+| 6 | A | 239, 252, 256, 254 | 1301, 1265, 1260, 1459 | 819, 628, 787, 620 | 3.519, 4.306, 3.812, 3.741 | 4.70, 5.01, 5.21, 4.97 |
+| 6 | B | 40, 42, 42, 45 | 405, 401, 523, 1133 | 197, 116, 254, 895 | 3.278, 3.482, 4.857, 4.204 | 0.69, 0.66, 0.60, 1.35 |
+| 12 | A | 229, 242, 239, 245 | 1698, 1741, 2380, 2312 | 842, 443, 754, 855 | 7.037, 8.107, 6.913, 11.033 | 2.54, 2.13, 2.40, 2.70 |
+| 12 | B | 42, 44, 41, 42 | 1440, 788, 775, 883 | 275, 176, 149, 274 | 6.643, 6.000, 5.818, 5.111 | 0.48, 0.49, 0.43, 0.47 |
+
+- Every B cell: 1,992 hits, 0 misses, 0 dry, 0 failed. The phase's `procs_dropped` is 0: its 8 held procs are
+  dropped after the phase, with the node.
+- Holds as before: the init's are 31.0 a create off and 5.1 on; the node's are 1.8-3.0 a box off and 34.0 on.
+- Part 19's p50 falls about 6x and its p99 falls in every L12 cell. At L6, B's create p99 is under A's in 2 of 4
+  rounds: at this load the whole create's p99 at L6 doesn't separate the arms. At L12 every B cell is under every A
+  cell.
+
 ## The 7.2 guest, indicative (NOT OF RECORD: a VM's numbers)
 
 **Run.** Fedora's kernel 7.2.15-200.fc44 in vm7_lab.sh's guest on fedora: 12 vCPUs on CPUs 4-15, 6G. 2026-11-05
