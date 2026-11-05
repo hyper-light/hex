@@ -218,12 +218,185 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 
 **Evidence.** `bounds_refuse_typed`: each bound, exceeded, returns its error.
 
+### H10. The control plane as shards: a Plane per node slice, one code path
+
+Implementation goal 6 (CP-T7.11). Sources for H10-H13 are cited by path and line in
+`docs/research/`. `SS[n]` refers to `docs/research/scheduler/scale-and-shards.md`.
+
+**The choice.** The nodes are split into `slices` contiguous ranges of node ids. Each slice is a
+`Plane`: today's plane over that slice's nodes, with its own view, queue, deciders and in-order
+committer (H3, H8). A workload is routed to a slice by a pure function of its spec and the cluster:
+start at slice `id mod slices` and take the first slice, in order, holding a node that would admit the
+workload when empty (its capacity and hard filters, H9, not its current use). So routing needs no
+shared state and never changes once made. A shard is a control-plane process holding one or more
+slices. Every plane commits to the one store by compare-and-set, as now (S6). Slices share no nodes,
+so two planes never contend for a node. The serial specification (H4) applies per slice, in the
+store's order of that slice's workloads. With `slices = 1`, routing sends every workload to the one
+plane, which is today's plane: one code path (CLAUDE.md §8), with no sharded variant beside it.
+
+**Sources.** Gödel's dispatcher "partitions the nodes among shards", each shard checking "its own
+node partition first", with one binder detecting conflicts
+(`docs/research/scheduler/placement-algorithms-and-fairness.md:288,292`). Twine partitions its scheduler
+shards by entitlement, and "a job must fit in one shard" (largest ~170K machines; planned 50K per shard,
+20 per million: `docs/research/scheduler/cluster-managers-at-scale.md:479-482`). Shard Manager's
+control plane is non-overlapping partitions of thousands of servers, each owned by a mini-SM
+(`cluster-managers-at-scale.md:646-647,667-668`). Hydra shards placement into sub-clusters of 2-3
+thousand nodes to pass one RM's ~1k decisions/s (`placement-algorithms-and-fairness.md:1315-1316`).
+
+**Evidence.** The per-slice plane is the plane H1-H9 already hold, by the same tests. At 1,000,000
+workloads on 10,000 nodes, eight slices give 1,250 nodes and 125,000 workloads per plane, inside every
+measured partition above. Step 2 (`crates/hex-sim/tests/shards.rs`) shows the rest: placements equal the
+per-slice serial specification at 1-8 slices; `slices = 1` gives today's hash; and nothing is lost or
+doubled under H6's nemesis with sharded planes.
+
+**What would falsify it.** A sharded run whose log the per-slice specification refuses, or one losing or
+doubling a workload. Or routing that strands work: a count of workloads pending on their slice while
+another slice could hold them, above 1% of the 1,000,000 at H13's bench. That would make the partition's
+lost goodput the cost Hydra's falsifier names (`placement-algorithms-and-fairness.md:1335-1336`), and
+routing would then take free capacity into account.
+
+### H11. Shard loss and lease takeover: detection plus rebuild within 5 s
+
+**The choice.** A shard holds each of its slices under a lease in the store: a record naming the
+holder, an epoch, and the expiry. The shard renews every 100 ms. The lease lapses when `lease_ns`
+(1 s) passes without a renewal. A live shard then takes the slice by compare-and-set on the lease
+record, bumping its epoch, and rebuilds the slice's plane from the store with `Plane::rebuild` (H7):
+placed workloads count as running and pending ones queue again. Every placement write names its slice's
+epoch, and the store refuses a write from an older epoch. A lost shard that comes back and writes is
+refused (a conflict), never a second start. Node agents and the store outlive the shard (H7): agents keep
+running what they run and keep resending completions until recorded. The store holds the one clock that
+decides a lapse, as Chubby's master holds the authoritative lease timer. In hex-sim that clock is virtual
+time (H1).
+
+The bound, from `T-T7.11.1`'s 5 s: takeover = detection + rebuild. Detection is at most `lease_ns` after
+the last renewal, so 1 s. That leaves 4 s for the rebuild of the lost shard's slices.
+
+**Sources.**
+- The detection terms are Raft's defaults: etcd heartbeats every 100 ms and starts an election after
+  1,000 ms of silence, a timeout "at least 10 times the round-trip time"
+  (`docs/research/scheduler/scale-and-shards.md:35-37`, SS[11] `tuning.md:14,16,20`).
+- Coarser leases cost minutes, not seconds. Chubby's default session extension is 12 s
+  (`scale-and-shards.md:38-39`), and its master elections took 4-30 s (`scale-and-shards.md:26-27`).
+  kube-scheduler's leader lease is 15 s, renew 10 s, retry 2 s: the competitor's failover
+  (`scale-and-shards.md:33-34`). Borg's takeover is 10 s to a minute, because in-memory state has to
+  be reconstructed (`cluster-managers-at-scale.md:277-278`).
+- A lease is a time-bounded right; a successor waits out the holder's term; leases depend on clocks of
+  bounded drift (Gray and Cheriton, `scale-and-shards.md:14-19`).
+- The epoch that fences the old holder is Chubby's client epoch and lock generation number
+  (`scale-and-shards.md:20-25`).
+- Rebuilding from the durable record while clients ride out the fail-over is Chubby's §2.9 and Borg's
+  running tasks (`scale-and-shards.md:28-31`, H7).
+
+**Evidence.** The rebuild path is H7's, held by its tests over 10,000 crash seeds: a rebuilt plane
+leaves running work running. The rebuild's cost is not cited but measured, by step 2:
+`Plane::rebuild` wall-clock at 125,000 records (one of eight slices at 1,000,000), on fedora CPUs 4-15,
+recorded in `bench/`. The same step's test kills a shard at 1,000,000 workloads and checks two things:
+its workloads keep running (`spec::check_kept_running`), and a live shard commits on the lost slices
+within `lease_ns` plus the measured rebuild, in virtual time.
+
+**What would falsify it.** A measured detection plus rebuild over 5 s at 1,000,000 workloads. Or a
+lost shard's write accepted after its slice was taken (a fencing defect). Or a workload lost, doubled
+or disturbed by a takeover. The first is fixed by making the rebuild faster or the slices smaller,
+never by moving the bar (CLAUDE.md §4).
+
+### H12. Control-plane memory: a counting allocator over the store and the planes
+
+**The choice.** `AC-T7.11.4`'s bytes per workload are measured, not computed from layouts
+(`Store::record_bytes` is the layout alone). The test binary `crates/hex-sim/tests/memory.rs`
+registers a counting `GlobalAlloc` that forwards to `System` and keeps live bytes (allocated minus
+freed) in an atomic counter. It runs 1,000,000 workloads on 10,000 nodes to H13's end state. It then
+drops the run's store and planes (`Run.store`, `Run.planes`) and reads the counter before and after. The
+difference, divided by the workloads, is the bytes per workload, against 4 KiB.
+
+The store's history log is counted with it. In production, the store is Amphora's and the log is its
+own, so counting both is conservative: a pass with them is a pass without. The counter sees the bytes
+requested from the allocator, not the allocator's own per-chunk overhead.
+
+The `unsafe impl GlobalAlloc` is test code. The workspace denies `unsafe_code` (`Cargo.toml`), so the
+file opts in at its top with a `// SAFETY:` comment on each block. Naming it in CLAUDE.md §12's list
+goes to Ada with the step that adds it.
+
+**Sources.** `GlobalAlloc` is "A memory allocator that can be registered as the standard library's
+default", and `#[global_allocator]` routes "all default allocation requests to a custom object". The
+trait is `unsafe`, and std's own example forwards to `System` (`scale-and-shards.md:40-46`, SS[4]
+`global.rs:7,189`, SS[5] `alloc.rs:12-14,21-32` at Rust 1.99.1, Hex's toolchain). No competitor
+publishes control-plane memory per workload. The nearest are whole-process figures: Twine's 80 GB shard
+for ~170K machines, Shard Manager's 64 GB mini-SM at ~38%, and a busy Borgmaster's 50 GiB
+(`scale-and-shards.md:68-70`, `cluster-managers-at-scale.md:272,479-480,646-647`).
+
+**Evidence.** Step 3 measures it and records the number. The counter's own non-vacuity: allocating a
+known buffer moves it by exactly that buffer's bytes, and dropping the run gives back what building it
+took.
+
+**What would falsify it.** A count that misses heap the planes or store hold: for example, a structure
+whose growth with workloads the counter doesn't show when the workload count doubles. Or the process's
+resident memory growing by more than 4 KiB per workload while the count stays under. That would mean the
+allocator's overhead matters, and the bar would be re-measured at resident memory.
+
+### H13. The 1,000,000-placement bench and the kwok comparison
+
+**The choice.** One cluster shape serves both benches, so the comparison is class for class
+(CLAUDE.md §7). The pod is `scheduler_perf`'s pause pod: 100m CPU and 500Mi. The node is
+`scheduler_perf`'s node sized to hold its own 110-pod limit of that pod: 11 CPU and 55 GiB, 110 pods.
+10,000 such nodes have 1,100,000 slots, so 1,000,000 fill them to 91%.
+
+- **`AC-T7.11.2`, 1,000,000 on 10,000** (step 4, `crates/hex-bench/benches/sched_million.rs`,
+  record `bench/sched/million.md`):
+  - All 1,000,000 workloads are submitted pending before the clock starts, and none ends while it runs.
+  - The time runs from the first decision to the 1,000,000th commit, wall-clock, on a release build.
+  - It runs at `slices` 1 and 8, on fedora CPUs 4-15 under the timed lock, on a noisy host whose load
+    is recorded. Best of 5, as `bench/sched/fast_path.md`.
+  - A second row draws needs from hex-sim's generator into the same 1,100,000-slot budget, so a
+    one-class best case (H8 decides one class once) never stands alone.
+- **`AC-T7.11.3`, against kube-scheduler on kwok** (step 5, `bench/sched/kube_scheduler_kwok.md`):
+  - The cluster: 10,000 kwok nodes of the shape above, under the `kwokctl` binary runtime, with
+    kube-scheduler v1.37.1.
+  - The load: 50,000 pause pods (`scheduler_perf`'s `5000Nodes_50000Pods` count), all created before
+    the scheduler starts, so creation doesn't cap it.
+  - The scheduler runs twice: at its defaults (QPS 50, burst 100) and raised to QPS 5,000, burst
+    10,000.
+  - Throughput is pods bound from first bind to last. Best of 3 for each setting.
+  - hex-sim places the same 50,000 on the same 10,000 nodes, and the bar is Hex's rate at least 10x
+    kube-scheduler's raised rate, the stronger of its two.
+
+**Sources.** The shapes and the method:
+- `scheduler_perf`'s node is 4 CPU, 32 GiB, 110 pods, and its pod 100m/500Mi
+  (`scale-and-shards.md:55-57`, SS[7] `node-default.yaml:7-10`, SS[8] `pod-default.yaml:11-17`).
+- Its floors are 790 and 680 pods/s, each the minimum average of 250 runs (`scale-and-shards.md:57-59`,
+  `cluster-managers-at-scale.md:183`). It pins runs to CPUs and repeats them (`scale-and-shards.md:59-61`).
+
+The QPS settings:
+- The scheduler's own default is 50/100 (`scale-and-shards.md:47-49`, SS[6] `defaults.go:149-154`).
+- YuniKorn's KWOK runs measured a flat 50.5 pods/s, consistent with that cap
+  (`cluster-managers-at-scale.md:189-193`). So a default-only comparison would measure the client
+  limit, not the scheduler.
+- Gödel's benchmark raised QPS and burst to 10,000 on 30,000 KWOK nodes and got ~300 pods/s
+  (`placement-algorithms-and-fairness.md:311-316`).
+
+kwok's own claims: 1k nodes and 100k pods "reliably", and 20 creates/s (`deterministic-simulation.md:331-332`, CL). Pre-creating the pods keeps that rate out of the measured window.
+
+**Evidence.** The bars' arithmetic: `AC-T7.11.2`'s 120 s is 8,333/s, or 120 µs per placement on one
+plane. The fast path decides and commits single-threaded at p50 50.8-54.2 µs and p99 81-92 µs
+(`bench/sched/fast_path.md`), inside 120 µs, but at 85% fill with one workload in flight, not 1,000,000
+pending. Steps 4 and 5 record the measured runs. The ratio needs kube-scheduler measured on fedora beside
+Hex, which no cited floor replaces (`scale-and-shards.md:71-72`).
+
+**What would falsify it.**
+- kube-scheduler at the raised setting within 10x of Hex on the same cluster: the bar is missed and stated so.
+- kwok failing to hold 10,000 nodes beyond its claimed 1k: then the same shapes run on `scheduler_perf`
+  in-process, and the record says why.
+- A best-of-N whose runs spread by more than the margin to the bar: the record then reports every run,
+  not the best.
+
+Hex's side commits to an in-process store and kube-scheduler's to an API server and etcd. When Hex's
+store is Amphora over its seam, the comparison is run again.
+
 ## What it doesn't do yet
 
 Each goes with the implementation goal that needs it: the nemesis's faults other than crashes (gray, fail-slow, mass
 loss, the agent-specific faults; goal 5), inter-node latency and Vivaldi coordinates (goal 3), provider
-quotas (A3), priorities and fair share (goal 4), sharded control planes, cells and regions (goals 6-7),
-heap accounting per workload (`AC-T7.11.4`; `Store::record_bytes` is the record's layout only), and
+quotas (A3), priorities and fair share (goal 4), sharded control planes (decided in H10-H13, built by goal 6), cells and regions (goal 7),
+heap accounting per workload (`AC-T7.11.4`, H12; `Store::record_bytes` is the record's layout only), and
 wall-clock throughput and tail of the real fast path (goal 2). The virtual costs in `Config::default`
 are chosen for tests, not measured; goal 2 sets them from the measured fast path.
 

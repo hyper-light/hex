@@ -236,6 +236,16 @@ nodes for GKE experimental (CM[4][38]); `AC-T7.11.2` (1,000,000 workloads on 10,
 sharded cell's reach by these, and `T-T7.11.1` (losing a shard at 1,000,000 workloads, its share taken
 over within 5 s) is the shard-failure bound.
 
+The cell's sharding, its shard-loss takeover, its memory accounting and its scale benches are decided in
+`hex-sim.md`:
+- H10: shards as one Plane per contiguous node slice, with workloads routed by a pure function of
+  spec and cluster; `slices = 1` is today's plane.
+- H11: lease takeover. `lease_ns` is 1 s, renewed every 100 ms, from etcd's defaults; the rebuild from
+  the store is measured within `T-T7.11.1`'s 5 s.
+- H12: a counting allocator over the store and the planes (`AC-T7.11.4`).
+- H13: the 1,000,000-placement bench and the kwok comparison method, with kube-scheduler at its default
+  and raised QPS, on the same node and pod shapes (`AC-T7.11.2`, `AC-T7.11.3`).
+
 **What would falsify it.** The differential suite diverging across one node, one cell and three regions
 (`AC-T7.12.3`), or a cell's control-plane loss disturbing another cell's workloads (`AC-T7.12.2`, the
 cell-loss drill) — either breaks the failure-domain guarantee.
