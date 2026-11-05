@@ -54,6 +54,8 @@ pub enum Op {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry {
     pub at: Time,
+    /// The applied write it is part of, counted from 0: a gang's placements share one.
+    pub write: u64,
     pub op: Op,
 }
 
@@ -82,6 +84,13 @@ pub enum Outcome {
     Conflict(Conflict),
 }
 
+/// A gang's write: every member placed, with its new version in the order given, or none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GangOutcome {
+    Applied { versions: Vec<u64> },
+    Conflict(WorkloadId, Conflict),
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     capacity: Vec<Resources>,
@@ -89,6 +98,8 @@ pub struct Store {
     records: BTreeMap<WorkloadId, Record>,
     next_seq: u64,
     log: Vec<Entry>,
+    /// Writes applied so far.
+    writes: u64,
     max_records: usize,
     max_log: usize,
 }
@@ -108,6 +119,7 @@ impl Store {
             records: BTreeMap::new(),
             next_seq: 0,
             log: Vec::new(),
+            writes: 0,
             max_records,
             max_log,
         })
@@ -134,9 +146,97 @@ impl Store {
                     bound: self.max_log,
                 });
             }
-            self.log.push(Entry { at, op });
+            self.log.push(Entry {
+                at,
+                write: self.writes,
+                op,
+            });
+            self.writes = self.writes.checked_add(1).ok_or(SimError::Full {
+                what: "the store's writes",
+                bound: usize::MAX,
+            })?;
         }
         Ok(outcome)
+    }
+
+    /// Places every member of a gang in one write, or none (`AC-T7.5.1`, Kueue's all-or-nothing
+    /// admission): each must be pending at the version its writer read, and its node must hold it
+    /// beside everything else the write puts there.
+    pub fn apply_gang(
+        &mut self,
+        at: Time,
+        members: &[(WorkloadId, NodeId, u64)],
+    ) -> Result<GangOutcome, SimError> {
+        if self.log.len().saturating_add(members.len()) > self.max_log {
+            return Err(SimError::Full {
+                what: "the store's log",
+                bound: self.max_log,
+            });
+        }
+        let mut adds: BTreeMap<usize, Resources> = BTreeMap::new();
+        for (i, &(workload, node, read)) in members.iter().enumerate() {
+            let at = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+            let Some(record) = self.records.get(&workload) else {
+                return Ok(GangOutcome::Conflict(workload, Conflict::Missing));
+            };
+            if record.version != read {
+                return Ok(GangOutcome::Conflict(
+                    workload,
+                    Conflict::Version {
+                        read,
+                        found: record.version,
+                    },
+                ));
+            }
+            if record.state != State::Pending || members.iter().take(i).any(|m| m.0 == workload) {
+                return Ok(GangOutcome::Conflict(
+                    workload,
+                    Conflict::State(record.state),
+                ));
+            }
+            let add = adds.entry(at).or_default();
+            *add = add
+                .checked_add(&record.spec.need)
+                .ok_or(SimError::Resources(node))?;
+            let capacity = self.capacity.get(at).ok_or(SimError::UnknownNode(node))?;
+            let after = self
+                .used
+                .get(at)
+                .ok_or(SimError::UnknownNode(node))?
+                .checked_add(add)
+                .ok_or(SimError::Resources(node))?;
+            if !capacity.holds(&after) {
+                return Ok(GangOutcome::Conflict(workload, Conflict::NodeFull));
+            }
+        }
+        let mut versions = Vec::with_capacity(members.len());
+        for &(workload, node, _) in members {
+            let at_node = usize::try_from(node.0).map_err(|_| SimError::UnknownNode(node))?;
+            let record = self
+                .records
+                .get_mut(&workload)
+                .ok_or(SimError::UnknownWorkload(workload))?;
+            let used = self
+                .used
+                .get_mut(at_node)
+                .ok_or(SimError::UnknownNode(node))?;
+            *used = used
+                .checked_add(&record.spec.need)
+                .ok_or(SimError::Resources(node))?;
+            record.version = bump(record.version)?;
+            record.state = State::Placed(node);
+            versions.push(record.version);
+            self.log.push(Entry {
+                at,
+                write: self.writes,
+                op: Op::Place { workload, node },
+            });
+        }
+        self.writes = self.writes.checked_add(1).ok_or(SimError::Full {
+            what: "the store's writes",
+            bound: usize::MAX,
+        })?;
+        Ok(GangOutcome::Applied { versions })
     }
 
     fn submit(&mut self, spec: WorkloadSpec) -> Result<Outcome, SimError> {
@@ -372,6 +472,59 @@ mod tests {
         assert_eq!(
             s.record(WorkloadId(1)).unwrap().state,
             State::Complete(NodeId(0))
+        );
+    }
+
+    /// AC-T7.5.1 (gangs whole): a gang the node can't hold together is refused and changes nothing;
+    /// one it can is placed in one write, every member's log entry under that write.
+    #[test]
+    fn a_gang_is_placed_whole_or_not_at_all() {
+        let mut s = store();
+        for id in 0..3 {
+            s.apply(0, Write::Submit(spec(id, 400))).unwrap();
+        }
+        let gang = |ids: &[u64]| -> Vec<(WorkloadId, NodeId, u64)> {
+            ids.iter().map(|&i| (WorkloadId(i), NodeId(0), 1)).collect()
+        };
+        assert_eq!(
+            s.apply_gang(1, &gang(&[0, 1, 2])).unwrap(),
+            GangOutcome::Conflict(WorkloadId(2), Conflict::NodeFull)
+        );
+        assert!(s.records().all(|r| r.state == State::Pending));
+        assert_eq!(s.log().len(), 3);
+        assert_eq!(
+            s.apply_gang(1, &gang(&[0, 0])).unwrap(),
+            GangOutcome::Conflict(WorkloadId(0), Conflict::State(State::Pending))
+        );
+        assert_eq!(
+            s.apply_gang(2, &gang(&[0, 1])).unwrap(),
+            GangOutcome::Applied {
+                versions: vec![2, 2]
+            }
+        );
+        let placed: Vec<_> = s.log()[3..].iter().map(|e| (e.write, e.op)).collect();
+        assert_eq!(
+            placed,
+            vec![
+                (
+                    3,
+                    Op::Place {
+                        workload: WorkloadId(0),
+                        node: NodeId(0)
+                    }
+                ),
+                (
+                    3,
+                    Op::Place {
+                        workload: WorkloadId(1),
+                        node: NodeId(0)
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            s.apply_gang(3, &gang(&[2])).unwrap(),
+            GangOutcome::Conflict(WorkloadId(2), Conflict::NodeFull)
         );
     }
 

@@ -11,6 +11,7 @@
 //! - [`spec`]: the serial specification (one scheduler, one cycle) as the oracle a run's log is
 //!   checked against (`T-T7.4.1`), and the end-state check that nothing was lost or started twice
 //!   (`AC-T7.3.3`).
+//! - [`fair`]: the order between owners' queues (bands, weighted DRF) and the shares a run gave them.
 //! - [`generate`]: generated clusters and workloads from a seed.
 //! - [`replay`]: a recorded workload read from text, for replaying a real day.
 //! - [`packing`]: stranded capacity at a load, the measure of `AC-T7.4.3`.
@@ -28,6 +29,7 @@
 )]
 
 pub mod error;
+pub mod fair;
 pub mod generate;
 pub mod index;
 pub mod model;

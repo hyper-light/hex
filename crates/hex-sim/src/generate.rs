@@ -3,7 +3,8 @@
 
 use crate::error::SimError;
 use crate::model::{
-    Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId, WorkloadSpec,
+    Cluster, GangId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy, Time, WorkloadId,
+    WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -118,6 +119,192 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
         });
     }
     Ok(Cluster::single_owner(nodes, workloads))
+}
+
+/// `cluster` with its workloads spread over `owners` owners of weight 1 to 4 and bands `0..bands`,
+/// drawn from `seed`: the model-based test's multi-owner clusters.
+pub fn tenants(
+    mut cluster: Cluster,
+    seed: u64,
+    owners: u32,
+    bands: u8,
+) -> Result<Cluster, SimError> {
+    if owners == 0 || bands == 0 {
+        return Err(SimError::Config("at least one owner and one band"));
+    }
+    let mut rng = Rng::new(seed ^ 0x7e4a_4c15);
+    cluster.owners = (0..owners)
+        .map(|_| Owner {
+            weight: u32::try_from(rng.range(1, 4)).unwrap_or(1),
+        })
+        .collect();
+    let top_owner = u64::from(owners.saturating_sub(1));
+    let top_band = u64::from(bands.saturating_sub(1));
+    for w in &mut cluster.workloads {
+        w.tenancy.owner = OwnerId(u32::try_from(rng.range(0, top_owner)).unwrap_or(0));
+        w.tenancy.band = u8::try_from(rng.range(0, top_band)).unwrap_or(0);
+    }
+    Ok(cluster)
+}
+
+/// `cluster` with runs of 2 to `max_size` consecutive workloads made gangs (a matrix job's legs),
+/// starting one at a workload with probability `per_mille / 1000`: each member takes the first's
+/// arrival, owner, band and group, so a gang is submitted at once into one queue.
+pub fn gangs(mut cluster: Cluster, seed: u64, per_mille: u64, max_size: u64) -> Cluster {
+    let mut rng = Rng::new(seed ^ 0x6a46_9a46);
+    let mut next = 0u64;
+    let mut at = 0usize;
+    while let Some(first) = cluster.workloads.get(at).copied() {
+        if !rng.chance(per_mille) {
+            at = at.saturating_add(1);
+            continue;
+        }
+        let size = usize::try_from(rng.range(2, max_size.max(2))).unwrap_or(2);
+        let gang = Some(GangId(next));
+        next = next.saturating_add(1);
+        for w in cluster.workloads.iter_mut().skip(at).take(size) {
+            w.arrives = first.arrives;
+            w.tenancy = Tenancy {
+                gang,
+                ..first.tenancy
+            };
+        }
+        at = at.saturating_add(size);
+    }
+    cluster
+}
+
+/// One repository's CI over a [`Day`]: its legs' sizes, and how much of the cluster's capacity its
+/// legs ask for, in parts per million, in the busy hours and out of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Repo {
+    pub weight: u32,
+    pub cores: (u64, u64),
+    pub gib: (u64, u64),
+    pub busy_ppm: u64,
+    pub quiet_ppm: u64,
+}
+
+/// A day of CI on identical nodes: each repository's legs arrive at its rate, more in the busy
+/// hours `busy.0..busy.1`, and run for a minute to `2 * mean_run` less a minute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Day {
+    pub nodes: u32,
+    pub node: Resources,
+    pub repos: Vec<Repo>,
+    pub length: Time,
+    pub busy: (Time, Time),
+    pub mean_run: Time,
+    /// Past this many legs the day is refused, not cut short.
+    pub max_legs: usize,
+}
+
+/// A generated day of CI ([`Day`]): every repository an owner, every leg a build.
+pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
+    if day.nodes == 0 || day.repos.is_empty() {
+        return Err(SimError::Config("a day has nodes and repositories"));
+    }
+    let nodes: Vec<NodeSpec> = (0..day.nodes)
+        .map(|id| NodeSpec {
+            id: NodeId(id),
+            capacity: day.node,
+            background_milli: 0,
+        })
+        .collect();
+    let total_cpu = day
+        .node
+        .cpu_milli
+        .checked_mul(u64::from(day.nodes))
+        .ok_or(SimError::Config("cluster CPU"))?;
+    let total_mem = day
+        .node
+        .mem_bytes
+        .checked_mul(u64::from(day.nodes))
+        .ok_or(SimError::Config("cluster memory"))?;
+    let mut rng = Rng::new(seed);
+    let mut legs: Vec<(Time, u32, Resources, Time)> = Vec::new();
+    for (owner, repo) in (0u32..).zip(&day.repos) {
+        let mut t: Time = 0;
+        while t < day.length {
+            if legs.len() >= day.max_legs {
+                return Err(SimError::Full {
+                    what: "the day's legs",
+                    bound: day.max_legs,
+                });
+            }
+            let cores = rng.range(repo.cores.0, repo.cores.1);
+            let need = Resources {
+                cpu_milli: cores.checked_mul(1000).ok_or(SimError::Config("cores"))?,
+                mem_bytes: rng
+                    .range(repo.gib.0, repo.gib.1)
+                    .checked_mul(GIB)
+                    .ok_or(SimError::Config("memory"))?,
+                gpus: 0,
+            };
+            // The leg's dominant share of the cluster, in parts per million.
+            let ppm = |n: u64, of: u64| {
+                n.checked_mul(1_000_000)
+                    .and_then(|x| x.checked_div(of))
+                    .unwrap_or(0)
+            };
+            let leg_ppm = ppm(need.cpu_milli, total_cpu).max(ppm(need.mem_bytes, total_mem));
+            let rate = if (day.busy.0..day.busy.1).contains(&t) {
+                repo.busy_ppm
+            } else {
+                repo.quiet_ppm
+            };
+            // Mean gap = run time * leg share / the share asked for, so the legs in flight ask for
+            // `rate` of the cluster.
+            let mean_gap = day
+                .mean_run
+                .checked_mul(leg_ppm)
+                .and_then(|x| x.checked_div(rate.max(1)))
+                .ok_or(SimError::TimeOverflow)?
+                .max(1);
+            t = t
+                .checked_add(rng.range(1, mean_gap.checked_mul(2).ok_or(SimError::TimeOverflow)?))
+                .ok_or(SimError::TimeOverflow)?;
+            let minute: Time = 60_000_000_000;
+            let runs_for = rng.range(
+                minute,
+                day.mean_run
+                    .checked_mul(2)
+                    .and_then(|x| x.checked_sub(minute))
+                    .ok_or(SimError::TimeOverflow)?,
+            );
+            if t < day.length {
+                legs.push((t, owner, need, runs_for));
+            }
+        }
+    }
+    legs.sort_unstable_by_key(|&(t, owner, _, _)| (t, owner));
+    let mut workloads = Vec::new();
+    workloads
+        .try_reserve_exact(legs.len())
+        .map_err(|_| SimError::Config("no memory for the legs"))?;
+    for (id, (arrives, owner, need, runs_for)) in (0u64..).zip(legs) {
+        workloads.push(WorkloadSpec {
+            id: WorkloadId(id),
+            need,
+            kind: Kind::Build,
+            arrives,
+            runs_for: Some(runs_for),
+            tenancy: Tenancy {
+                owner: OwnerId(owner),
+                ..Tenancy::default()
+            },
+        });
+    }
+    Ok(Cluster {
+        nodes,
+        workloads,
+        owners: day
+            .repos
+            .iter()
+            .map(|r| Owner { weight: r.weight })
+            .collect(),
+        groups: Vec::new(),
+    })
 }
 
 /// Above 90% CPU from its background alone: `index::HOT_PER_MILLE`, as busy * 1000 > capacity * 900.

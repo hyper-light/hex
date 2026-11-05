@@ -14,10 +14,12 @@
 )]
 
 use hex_sim::SimError;
+use hex_sim::fair::Policy;
 use hex_sim::generate::{self, Shape};
 use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::{
-    Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+    Cluster, GangId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy, WorkloadId,
+    WorkloadSpec,
 };
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
@@ -105,6 +107,171 @@ fn placements_equal_the_serial_specification_on_generated_clusters() {
     assert!(waited > 0, "no run left work waiting for room");
 }
 
+/// T-T7.4.1 under G4's order (AC-T7.5.2): do 500 generated clusters with their workloads spread over 1
+/// to 5 owners of weights 1 to 4 and 1 to 3 bands; expect every run's log to be one the serial
+/// specification (bands, then weighted DRF, then submit order) makes and nothing lost or started
+/// twice, and (non-vacuity) the order to have placed differently from submit order in some runs.
+#[test]
+fn placements_equal_the_serial_specification_with_owners_and_bands() {
+    let (mut reordered, mut placements) = (0u64, 0u64);
+    for seed in 0..500 {
+        let mut r = Rng::new(seed ^ 0x6a4e);
+        let owners = u32::try_from(r.range(1, 5)).unwrap();
+        let bands = u8::try_from(r.range(1, 3)).unwrap();
+        let cluster = generate::tenants(
+            generate::cluster(seed, &small(seed)).unwrap(),
+            seed,
+            owners,
+            bands,
+        )
+        .unwrap();
+        let config = config(seed);
+        let run = sim::run(&cluster, &config).unwrap();
+        let log =
+            spec::check_log(&cluster.nodes, &run).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+        let end = spec::check_end(&cluster, &run);
+        assert_eq!(end.lost_or_double(), 0, "seed {seed}: {end:?}");
+        placements += log.placements;
+        let fifo = sim::run(
+            &cluster,
+            &Config {
+                policy: Policy::Fifo,
+                ..config
+            },
+        )
+        .unwrap();
+        spec::check_log(&cluster.nodes, &fifo).unwrap_or_else(|v| panic!("seed {seed} fifo: {v}"));
+        reordered += u64::from(run.store.log() != fifo.store.log());
+    }
+    assert!(placements > 20_000, "{placements} placements");
+    assert!(
+        reordered > 50,
+        "the order changed only {reordered} of 500 runs"
+    );
+}
+
+/// AC-T7.5.1 (matrix jobs admitted whole), G4 step 3: do 500 generated clusters over 1 to 5 owners
+/// and 1 to 3 bands with a quarter of their workloads in gangs of 2 to 8 (a gang's whole need often
+/// more than any one node's room); expect every run's log to be one the specification makes, every
+/// gang placed in one write (partial gangs = 0), nothing lost or started twice, and (non-vacuity)
+/// gangs placed.
+#[test]
+fn gangs_are_placed_whole_on_generated_clusters() {
+    let (mut placed, mut members) = (0u64, 0u64);
+    for seed in 0..500 {
+        let mut r = Rng::new(seed ^ 0x9a46);
+        let owners = u32::try_from(r.range(1, 5)).unwrap();
+        let bands = u8::try_from(r.range(1, 3)).unwrap();
+        let cluster = generate::gangs(
+            generate::tenants(
+                generate::cluster(seed, &small(seed)).unwrap(),
+                seed,
+                owners,
+                bands,
+            )
+            .unwrap(),
+            seed,
+            120,
+            8,
+        );
+        let run = sim::run(&cluster, &config(seed)).unwrap();
+        spec::check_log(&cluster.nodes, &run).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
+        let end = spec::check_end(&cluster, &run);
+        assert_eq!(end.lost_or_double(), 0, "seed {seed}: {end:?}");
+        let gangs = spec::check_gangs(&run);
+        assert_eq!(gangs.partial, 0, "seed {seed}: {gangs:?}");
+        assert_eq!(gangs.placed, run.report.gangs, "seed {seed}");
+        placed += gangs.placed;
+        members += run.gangs.values().map(|m| m.len() as u64).sum::<u64>();
+    }
+    assert!(placed > 500, "only {placed} gangs placed");
+    assert!(members > 5_000, "only {members} gang members");
+}
+
+/// The oracle catches a gang placed member by member (the mutant AC-T7.5.1 guards against): two
+/// members in two writes is a partial gang, refused, and the write that left it part placed counted.
+#[test]
+fn the_oracle_refuses_a_gang_placed_member_by_member() {
+    let nodes = two_nodes();
+    let mut s = Store::new(&nodes, 4, 16).unwrap();
+    let g = |id| WorkloadSpec {
+        tenancy: Tenancy {
+            gang: Some(GangId(0)),
+            ..Tenancy::default()
+        },
+        ..work(id, 500)
+    };
+    s.apply(0, Write::Submit(g(0))).unwrap();
+    s.apply(0, Write::Submit(g(1))).unwrap();
+    for id in 0..2 {
+        s.apply(
+            1,
+            Write::Place {
+                workload: WorkloadId(id),
+                node: NodeId(0),
+                version: 1,
+            },
+        )
+        .unwrap();
+    }
+    let mut run = run_of(s, 2);
+    run.gangs = [(GangId(0), vec![WorkloadId(0), WorkloadId(1)])].into();
+    assert_eq!(
+        spec::check_log(&nodes, &run),
+        Err(Violation::PartialGang(WorkloadId(0)))
+    );
+    assert_eq!(spec::check_gangs(&run).partial, 1);
+}
+
+/// The oracle refuses a placement that jumped a queue the policy puts first (G4, AC-T7.5.2): two
+/// owners, owner 0 already holding half the cluster (node 0's memory); owner 1's workload, submitted
+/// later, must go before owner 0's second. Under submit order the same log is correct: the second
+/// takes node 1, and owner 1's then holds nowhere.
+#[test]
+fn the_oracle_refuses_a_placement_that_jumps_a_lower_share() {
+    let nodes = two_nodes();
+    let mut s = Store::new(&nodes, 4, 16).unwrap();
+    let w = |id, owner| WorkloadSpec {
+        tenancy: Tenancy {
+            owner: OwnerId(owner),
+            ..Tenancy::default()
+        },
+        ..work(id, 500)
+    };
+    s.apply(0, Write::Submit(w(0, 0))).unwrap();
+    s.apply(
+        1,
+        Write::Place {
+            workload: WorkloadId(0),
+            node: NodeId(0),
+            version: 1,
+        },
+    )
+    .unwrap();
+    s.apply(2, Write::Submit(w(1, 0))).unwrap();
+    s.apply(3, Write::Submit(w(2, 1))).unwrap();
+    s.apply(
+        4,
+        Write::Place {
+            workload: WorkloadId(1),
+            node: NodeId(1),
+            version: 1,
+        },
+    )
+    .unwrap();
+    let mut run = run_of(s, 3);
+    run.owners = vec![Owner::default(); 2];
+    assert_eq!(
+        spec::check_log(&nodes, &run),
+        Err(Violation::JumpedQueue {
+            placed: WorkloadId(1),
+            ahead: WorkloadId(2),
+        })
+    );
+    run.policy = Policy::Fifo;
+    assert!(spec::check_log(&nodes, &run).is_ok());
+}
+
 /// T-T7.4.1, directly: do a cluster whose workloads never end; expect each workload on exactly the
 /// node the specification run serially puts it on.
 #[test]
@@ -158,9 +325,21 @@ fn crash_cluster() -> Cluster {
 /// the control plane before that write and again after it; expect each run's log to satisfy the
 /// specification and nothing lost or started twice, and (non-vacuity) exactly one crash per run and
 /// crashes injected before writes == writes seen and crashes injected after writes == writes seen.
+/// G4 (AC-T7.5.2): the same with the workloads spread over three owners and two bands.
 #[test]
 fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
-    let cluster = crash_cluster();
+    crash_sweep(&crash_cluster());
+    crash_sweep(&generate::tenants(crash_cluster(), 11, 3, 2).unwrap());
+    crash_sweep(&generate::gangs(
+        generate::tenants(crash_cluster(), 11, 3, 2).unwrap(),
+        11,
+        250,
+        4,
+    ));
+}
+
+fn crash_sweep(cluster: &Cluster) {
+    let cluster = cluster.clone();
     let base = Config {
         workers: 3,
         ..Config::default()
@@ -168,10 +347,12 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
     let clean = sim::run(&cluster, &base).unwrap();
     assert_eq!(clean.report.crashes, 0);
     let writes = clean.report.writes;
+    // A submit and a completion each, and a placement write per single or per gang.
     assert!(
-        writes >= 3 * u64::try_from(cluster.workloads.len()).unwrap(),
+        writes >= 2 * u64::try_from(cluster.workloads.len()).unwrap() + clean.report.gangs,
         "{writes} writes"
     );
+    let clean_end = spec::check_end(&cluster, &clean);
     let (mut before, mut after, mut changed_history) = (0u64, 0u64, 0u64);
     for write in 0..writes {
         for when in [When::Before, When::After] {
@@ -191,11 +372,19 @@ fn a_crash_at_every_control_plane_write_loses_and_doubles_nothing() {
                 .unwrap_or_else(|v| panic!("write {write} {when:?}: {v}"));
             let end = spec::check_end(&cluster, &run);
             assert_eq!(end.lost_or_double(), 0, "write {write} {when:?}: {end:?}");
+            // Every workload completes but those admission refuses (a gang the empty cluster
+            // can't hold whole), the same ones as without the crash.
             assert_eq!(
-                end.complete,
+                end.refused, clean_end.refused,
+                "write {write} {when:?}: {end:?}"
+            );
+            assert_eq!(
+                end.complete + end.refused,
                 u64::try_from(cluster.workloads.len()).unwrap(),
                 "write {write} {when:?}: {end:?}"
             );
+            let gangs = spec::check_gangs(&run);
+            assert_eq!(gangs.partial, 0, "write {write} {when:?}: {gangs:?}");
             let kept = spec::check_kept_running(&cluster, &run);
             assert_eq!(kept.disturbed, 0, "write {write} {when:?}: {kept:?}");
             if run.store.log() != clean.store.log() {
@@ -309,6 +498,9 @@ fn run_of(store: Store, n: usize) -> Run {
         refused: vec![false; n],
         ran: vec![None; n],
         sample: Sample::default(),
+        policy: Policy::default(),
+        owners: vec![Owner::default()],
+        gangs: Default::default(),
     }
 }
 

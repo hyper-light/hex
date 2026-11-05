@@ -1,7 +1,8 @@
 //! The scheduler's serial specification (`scheduler-architecture.md` S6): one scheduler, one cycle.
-//! Workloads queue in the order the store accepted them; whenever state changes, the scheduler takes
-//! the queue in order and puts each workload on the best fit its class's sample finds
-//! ([`FitIndex::sampled_fit`], the fast path's own choice), passing over one no node holds now. A placement is correct when this specification could have made it.
+//! Workloads queue in the order the store accepted them, one queue per band and owner; whenever state
+//! changes, the scheduler takes the first queue in policy order ([`crate::fair`]: band, then weighted
+//! dominant share, then owner) in order, and puts each workload on the best fit its class's sample finds
+//! ([`FitIndex::sampled_fit`], the fast path's own choice), passing over one no node holds now and placing nothing past that queue when none of its work holds. A placement is correct when this specification could have made it.
 //!
 //! [`serial_place`] runs the specification directly on a cluster whose capacity only shrinks.
 //! [`check_log`] replays a run's store log and refuses the first write the specification couldn't
@@ -15,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::SimError;
+use crate::fair::{Queue, Shares};
 use crate::index::{FitIndex, Sample};
 use crate::model::{Cluster, Demand, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
 use crate::sim::Run;
@@ -30,7 +32,7 @@ pub enum Violation {
     #[error("{0:?} was placed while not pending")]
     NotPending(WorkloadId),
     #[error(
-        "{placed:?} was placed while {ahead:?}, ahead of it in the queue, had a node that held it"
+        "{placed:?} was placed while {ahead:?}, ahead of it in policy order, waited for a node"
     )]
     JumpedQueue {
         placed: WorkloadId,
@@ -46,6 +48,8 @@ pub enum Violation {
     CompletedElsewhere(WorkloadId),
     #[error("{0:?} was left pending while a node held it")]
     LeftPending(WorkloadId),
+    #[error("{0:?} was placed apart from the rest of its gang")]
+    PartialGang(WorkloadId),
     #[error("the replay itself failed: {0}")]
     Replay(SimError),
 }
@@ -84,79 +88,215 @@ pub struct LogReport {
 }
 
 /// Replays `run`'s store log against the specification. Each placement must be the best fit at that
-/// point, no earlier-queued pending workload may have had a node, and nothing may be left pending
-/// that a node holds at the end. Its cost is each placement times the pending workloads ahead of it
-/// times the node count: an oracle for test-sized runs.
+/// point, nothing may wait in a queue ahead of it in policy order, no earlier workload of its own
+/// queue may have had a node, and nothing may be left pending at the end that a node holds unless a
+/// queue ahead of it waits. A gang is placed in one write, whole, at its first member's place in its
+/// queue, each member on the best fit left by those before it. Its cost is each placement times the
+/// pending workloads ahead of it times the node count: an oracle for test-sized runs.
 pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> {
     let mut index = FitIndex::new(nodes)?;
-    let mut pending: BTreeMap<u64, (WorkloadId, Demand)> = BTreeMap::new();
+    let mut shares = Shares::new(nodes, run.owners.iter().map(|o| o.weight).collect())?;
+    let mut pending: Pending = BTreeMap::new();
     let mut seq_of: BTreeMap<WorkloadId, u64> = BTreeMap::new();
     let mut placed: BTreeMap<WorkloadId, NodeId> = BTreeMap::new();
     let mut report = LogReport::default();
-    for entry in run.store.log() {
+    let log = run.store.log();
+    let mut at = 0usize;
+    while let Some(entry) = log.get(at) {
+        at = at.saturating_add(1);
         match entry.op {
             Op::Submit { workload, seq } => {
-                let need = run
-                    .store
-                    .record(workload)
-                    .ok_or(Violation::NotSubmitted(workload))?
-                    .spec
-                    .demand();
+                let spec = spec_of(run, workload)?;
                 if seq_of.insert(workload, seq).is_some() {
                     return Err(Violation::SubmittedTwice(workload));
                 }
-                pending.insert(seq, (workload, need));
+                pending.insert(seq, (workload, spec.demand(), run.policy.queue(&spec)));
                 report.submits = report.submits.saturating_add(1);
             }
             Op::Place { workload, node } => {
-                let seq = *seq_of
-                    .get(&workload)
-                    .ok_or(Violation::NotSubmitted(workload))?;
-                let (_, need) = *pending.get(&seq).ok_or(Violation::NotPending(workload))?;
-                if let Some((_, (ahead, _))) = pending
-                    .range(..seq)
-                    .find(|(_, (_, d))| index.admitted_anywhere(d))
-                {
-                    return Err(Violation::JumpedQueue {
-                        placed: workload,
-                        ahead: *ahead,
-                    });
+                // The write's placements: one, or a gang's.
+                let mut write = vec![(workload, node)];
+                while let Some(next) = log.get(at).filter(|e| e.write == entry.write) {
+                    let Op::Place { workload, node } = next.op else {
+                        break;
+                    };
+                    write.push((workload, node));
+                    at = at.saturating_add(1);
                 }
-                let spec = index.sampled_fit(&need, &run.sample).best.map(|k| k.node);
-                if spec != Some(node) {
-                    return Err(Violation::NotSerialChoice {
-                        workload,
-                        chose: node,
-                        spec,
-                    });
+                let gang = spec_of(run, workload)?.tenancy.gang;
+                let members: Vec<WorkloadId> = match gang {
+                    Some(g) => run
+                        .gangs
+                        .get(&g)
+                        .cloned()
+                        .ok_or(Violation::PartialGang(workload))?,
+                    None => vec![workload],
+                };
+                if write.iter().map(|(w, _)| *w).collect::<Vec<_>>() != members {
+                    return Err(Violation::PartialGang(workload));
                 }
-                index.take(node, &need)?;
-                pending.remove(&seq);
-                placed.insert(workload, node);
-                report.placements = report.placements.saturating_add(1);
+                let mut seqs = Vec::with_capacity(write.len());
+                for (w, _) in &write {
+                    let seq = *seq_of.get(w).ok_or(Violation::NotSubmitted(*w))?;
+                    if !pending.contains_key(&seq) {
+                        return Err(Violation::NotPending(*w));
+                    }
+                    seqs.push(seq);
+                }
+                let first = seqs.iter().copied().min().unwrap_or(u64::MAX);
+                let (_, _, queue) = *pending.get(&first).ok_or(Violation::NotPending(workload))?;
+                // Ahead: anything in a queue the policy puts first (whether or not it holds, as
+                // allocation stops at that queue), or earlier in its own queue and holding.
+                let rank = shares.rank(run.policy, queue);
+                let earlier: Vec<(u64, WorkloadId, Demand, Queue)> = pending
+                    .iter()
+                    .filter(|(s, (_, _, q))| {
+                        shares.rank(run.policy, *q) < rank || (*q == queue && **s < first)
+                    })
+                    .map(|(s, (w, d, q))| (*s, *w, *d, *q))
+                    .collect();
+                for (_, ahead, d, q) in earlier {
+                    if q != queue || holds(&mut index, run, &pending, ahead, &d)? {
+                        return Err(Violation::JumpedQueue {
+                            placed: workload,
+                            ahead,
+                        });
+                    }
+                }
+                let mut demands = Vec::with_capacity(write.len());
+                for (w, _) in &write {
+                    demands.push(spec_of(run, *w)?.demand());
+                }
+                let chosen = crate::sim::fit_whole(&mut index, &demands, &run.sample)?;
+                for (i, ((w, node), need)) in write.iter().zip(&demands).enumerate() {
+                    let spec = chosen.as_ref().and_then(|c| c.get(i)).copied();
+                    if spec != Some(*node) {
+                        return Err(Violation::NotSerialChoice {
+                            workload: *w,
+                            chose: *node,
+                            spec,
+                        });
+                    }
+                    index.take(*node, need)?;
+                    shares.take(owner_of(run, *w)?, &need.need)?;
+                    placed.insert(*w, *node);
+                    report.placements = report.placements.saturating_add(1);
+                }
+                for seq in seqs {
+                    pending.remove(&seq);
+                }
             }
             Op::Complete { workload, node } => {
                 if placed.remove(&workload) != Some(node) {
                     return Err(Violation::CompletedElsewhere(workload));
                 }
-                let need = run
-                    .store
-                    .record(workload)
-                    .ok_or(Violation::NotSubmitted(workload))?
-                    .spec
-                    .demand();
+                let need = spec_of(run, workload)?.demand();
                 index.give(node, &need)?;
+                shares.give(owner_of(run, workload)?, &need.need)?;
                 report.completions = report.completions.saturating_add(1);
             }
         }
     }
-    for (workload, need) in pending.values() {
-        if index.admitted_anywhere(need) {
-            return Err(Violation::LeftPending(*workload));
+    let left: Vec<(WorkloadId, Demand, Queue)> = pending.values().copied().collect();
+    for (workload, need, queue) in left {
+        let rank = shares.rank(run.policy, queue);
+        let blocked = pending
+            .values()
+            .any(|(_, _, q)| shares.rank(run.policy, *q) < rank);
+        if !blocked && holds(&mut index, run, &pending, workload, &need)? {
+            return Err(Violation::LeftPending(workload));
         }
         report.waiting = report.waiting.saturating_add(1);
     }
     Ok(report)
+}
+
+/// Pending workloads by submit sequence: each one's id, class and queue.
+type Pending = BTreeMap<u64, (WorkloadId, Demand, Queue)>;
+
+/// Whether a node holds `workload` now: alone, or, in a gang, with every member pending and the
+/// whole gang placed member by member.
+fn holds(
+    index: &mut FitIndex,
+    run: &Run,
+    pending: &Pending,
+    workload: WorkloadId,
+    need: &Demand,
+) -> Result<bool, Violation> {
+    let Some(gang) = spec_of(run, workload)?.tenancy.gang else {
+        return Ok(index.admitted_anywhere(need));
+    };
+    let members = run
+        .gangs
+        .get(&gang)
+        .ok_or(Violation::PartialGang(workload))?;
+    let mut demands = Vec::with_capacity(members.len());
+    for m in members {
+        let Some(record) = run.store.record(*m) else {
+            return Ok(false);
+        };
+        if !pending.contains_key(&record.seq) {
+            return Ok(false);
+        }
+        demands.push(record.spec.demand());
+    }
+    Ok(crate::sim::fit_whole(index, &demands, &run.sample)?.is_some())
+}
+
+fn spec_of(run: &Run, workload: WorkloadId) -> Result<crate::model::WorkloadSpec, Violation> {
+    run.store
+        .record(workload)
+        .map(|r| r.spec)
+        .ok_or(Violation::NotSubmitted(workload))
+}
+
+/// What `AC-T7.5.1`'s gangs come to over a run's log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GangReport {
+    /// Gangs placed.
+    pub placed: u64,
+    /// Writes after which some gang had members placed and members not: zero when gangs are whole.
+    pub partial: u64,
+}
+
+/// Counts gangs placed, and every write that left a gang part placed.
+pub fn check_gangs(run: &Run) -> GangReport {
+    let mut placed_members: BTreeMap<crate::model::GangId, u64> = BTreeMap::new();
+    let mut report = GangReport::default();
+    let log = run.store.log();
+    let mut at = 0usize;
+    while let Some(entry) = log.get(at) {
+        let mut touched = Vec::new();
+        while let Some(e) = log.get(at).filter(|e| e.write == entry.write) {
+            at = at.saturating_add(1);
+            if let Op::Place { workload, .. } = e.op
+                && let Some(g) = run.store.record(workload).and_then(|r| r.spec.tenancy.gang)
+            {
+                let n = placed_members.entry(g).or_default();
+                *n = n.saturating_add(1);
+                touched.push(g);
+            }
+        }
+        touched.dedup();
+        for g in touched {
+            let size = run
+                .gangs
+                .get(&g)
+                .map_or(0, |m| u64::try_from(m.len()).unwrap_or(u64::MAX));
+            match placed_members.get(&g).copied().unwrap_or(0) {
+                n if n == size => report.placed = report.placed.saturating_add(1),
+                _ => report.partial = report.partial.saturating_add(1),
+            }
+        }
+    }
+    report
+}
+
+fn owner_of(run: &Run, workload: WorkloadId) -> Result<crate::model::OwnerId, Violation> {
+    run.store
+        .record(workload)
+        .map(|r| r.spec.tenancy.owner)
+        .ok_or(Violation::NotSubmitted(workload))
 }
 
 /// What `AC-T7.3.3` counts, over every workload of the run.
