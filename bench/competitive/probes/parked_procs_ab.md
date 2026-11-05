@@ -209,8 +209,9 @@ each pass's `table.md`:
 - The sustained c32 rate, B against the A beside it: -0.9% and -3.0% in process. Over the socket, +0.3% and -2.8%,
   but that is off against off.
   A 1 ran at load 56, so its pair is the weaker comparison.
-- In B's sustained phase in process, the network-namespace pool ran dry 19 and 12 times in 10,000 (0.2%, 0.1%); never
-  in A's. That's the netns pool at c32, not the parked proc; recorded, not chased here.
+- **Open, not chased:** in B's sustained phase in process, the network-namespace pool ran dry 19 and 12 times in 10,000
+  (0.2%, 0.1%); never in A's. It may be B's faster creates draining decision 4's pool at c32, but that is measured
+  nowhere, so nothing is sized from it (the lead, 2026-11-05T18:00Z).
 - Hex's delete stays 30-36x libcrun's at p50 in process.
 
 ## Experiment: 8 workers making the procs (side branch cp/t7-g5-parkproc-workers 6dcd731; the lead's 15:09Z (b))
