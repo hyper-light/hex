@@ -1316,7 +1316,9 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
 /// HEX-MNTNS-8 (decision 6's update; T-T7.1.4): on a root node, make two boxes on the pruned path and two through
 /// the shim (a createRuntime hook), each masking Docker's directories beneath `/proc`, with procs made ahead off
 /// so each init masks them itself. Expect every masked directory of all four boxes on one filesystem, the node's
-/// one empty read-only tmpfs, as crun binds one empty directory: no superblock made per masked directory.
+/// one empty read-only tmpfs, as crun binds one empty directory: no superblock made per masked directory. Where
+/// the kernel won't clone a detached mount (before Linux 6.15, v6.8 `fs/namespace.c:2588`), expect each box made
+/// all the same, each masked directory an empty read-only tmpfs of its own.
 fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) {
     if lab.rootless {
         return;
@@ -1379,18 +1381,58 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
             if let (Some(dev), Some(point)) = (fields.get(2), fields.get(4))
                 && ["/proc/acpi", "/proc/asound", "/proc/scsi"].contains(point)
             {
+                // The fields after " - ": the filesystem's type, its source, its superblock's options.
+                let fs = line.split(" - ").nth(1).unwrap_or_default();
+                assert!(
+                    fs.starts_with("tmpfs ") && fields.get(5).is_some_and(|o| o.starts_with("ro")),
+                    "{point} in box {n} is masked by a read-only tmpfs: {line}"
+                );
                 devs.insert((*dev).to_owned());
                 masked += 1;
             }
         }
     }
     assert!(masked >= 4, "masked directories to compare: {masked}");
-    assert_eq!(
-        devs.len(),
-        1,
-        "one empty filesystem for every masked directory of every box: {devs:?}"
-    );
-    eprintln!("masked directories: {masked} across 4 boxes, all on {devs:?}");
+    if kernel_clones_a_detached_mount() {
+        assert_eq!(
+            devs.len(),
+            1,
+            "one empty filesystem for every masked directory of every box: {devs:?}"
+        );
+    } else {
+        assert_eq!(
+            devs.len(),
+            masked,
+            "a tmpfs of its own for every masked directory: {devs:?}"
+        );
+    }
+    eprintln!("masked directories: {masked} across 4 boxes, on {devs:?}");
+}
+
+/// Whether `open_tree(OPEN_TREE_CLONE)` clones a mount outside the caller's namespace, a detached tmpfs's: Linux
+/// 6.15's `may_copy_tree` admits it (v6.19 `fs/namespace.c:2928-2948`), v6.8 refuses it with `EINVAL` (`:2588`).
+fn kernel_clones_a_detached_mount() -> bool {
+    use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, OpenTreeFlags};
+    use std::os::fd::AsFd;
+    let fs = rustix::mount::fsopen("tmpfs", FsOpenFlags::FSOPEN_CLOEXEC).expect("fsopen tmpfs");
+    rustix::mount::fsconfig_create(fs.as_fd()).expect("make the tmpfs");
+    let mount = rustix::mount::fsmount(
+        fs.as_fd(),
+        FsMountFlags::FSMOUNT_CLOEXEC,
+        MountAttrFlags::empty(),
+    )
+    .expect("mount the tmpfs, detached");
+    match rustix::mount::open_tree(
+        &mount,
+        "",
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::AT_EMPTY_PATH
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+    ) {
+        Ok(_) => true,
+        Err(rustix::io::Errno::INVAL) => false,
+        Err(e) => panic!("cloning a detached tmpfs: {e}"),
+    }
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4): a spec binding `/usr` read-only and a volume. Both are in the
