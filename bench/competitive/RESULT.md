@@ -580,6 +580,28 @@ Best of 2, ms (Hex over libcrun in the same pass):
   `probes/create_tail.md`, "Reuse off after the cut"): the cgroup's css work items preempting creates on their CPUs.
   Reuse within one owner takes it away, which is the gap between the passes.
 
+**What the slowest 0.1% of no-owner creates wait on** (the lead, 2026-11-05T14:20Z; not of record: the tracer costs
+each switch some). The tail agent's `probes/create_tail.sh` on this pass's own binaries (hex 2c9e4b58aa55c980, seam_oci
+d6330e7307fafb75), no owner, N=10000, 2 rounds, CPUs 4-15 under the lock, load 6.93 to 7.08: unit
+hex-g5rec-tailattr-20261105T144322Z, fedora `~/.cache/hex-bench/out/create-tail-20261105T144322Z`, 10,000 creates traced,
+each one's charges summing to its span. Traced creates p50 0.316, p99 1.039, p99.9 1.670, max 2.771 ms (the quieter
+host than the pass's). `create_tail_attr.py`'s grouping, the top 0.1% over the middle band (p45-p55), ms:
+
+| kind | top 1% over mid | top 0.1% over mid |
+|---|---|---|
+| preemption by the cgroup teardown work items (`css_*_work_fn`) | +0.557 | +0.786 |
+| other: the runtime blocked in `ppoll` until its init said it was ready | +0.221 | +0.552 |
+| the run queue, woken and not yet run | +0.127 | +0.315 |
+| the runtime's own runs | +0.047 | +0.048 |
+| RCU softirq | +0.027 | +0.040 |
+
+Of the ten slowest creates (1.670 to 2.771 ms), five were preempted on their CPU by `css_killed_work_fn` for 1.240 to
+1.940 ms, three waited 1.419 to 2.059 ms on their init (its own delay, seen from the runtime), and two sat 1.452 and
+1.700 ms on the run queue. The runtime's own work is about 0.3 ms in every band (0.286 mid, 0.334 in the top 0.1%).
+The slowest starts are the same: their top 0.1% is +0.414 and +0.210 ms of `css_killed_work_fn` preemption. So what
+holds the no-owner p99.9 is the teardown of the boxes deleted before, run on the CPUs the next creates use; with
+reuse within one owner no cgroup is torn down, and the pass with it reads under a millisecond.
+
 The host's clock (`probes/host_clock.sh`) before: load 16.50, a short burst's p50 0.096 ms on the P-cores and 0.159 on
 the E-cores at rest, 0.107 and 0.172 held awake; after: load 11.27, 0.131 and 0.230 at rest, 0.120 and 0.171 held.
 
