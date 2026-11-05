@@ -780,6 +780,18 @@ fn parked(claim: OwnedFd, flags: u64) -> ! {
     if rustix::thread::set_capabilities(None, idle).is_err() {
         sys::exit_child(127);
     }
+    // And non-dumpable while it waits, so no other process can ptrace it, read its memory or take its descriptors
+    // (its claim socket) without CAP_SYS_PTRACE (ptrace(2), "Ptrace access mode checking": a target that isn't
+    // dumpable refuses a caller without it; pidfd_getfd(2) checks PTRACE_MODE_ATTACH_REALCREDS). Restored once
+    // claimed: a rootless node writes the claimed init's user namespace maps through its /proc files.
+    let Ok(dumpable) = rustix::process::dumpable_behavior() else {
+        sys::exit_child(127);
+    };
+    if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .is_err()
+    {
+        sys::exit_child(127);
+    }
     // Parked, said on its claim socket as a seed says a start, so the agent holds it only once it is so.
     let said = rustix::process::pidfd_open(
         rustix::process::getpid(),
@@ -797,7 +809,10 @@ fn parked(claim: OwnedFd, flags: u64) -> ! {
     };
     let bytes = buf.get(..size.min(buf.len())).unwrap_or_default();
     let answer = match seed::read_message(bytes, size, fds.len()) {
-        Ok(seed::Message::Create(_)) if rustix::thread::set_capabilities(None, held).is_err() => {
+        Ok(seed::Message::Create(_))
+            if rustix::thread::set_capabilities(None, held).is_err()
+                || rustix::process::set_dumpable_behavior(dumpable).is_err() =>
+        {
             refused(
                 Failed::Start,
                 "a parked init couldn't raise its capabilities again".to_owned(),

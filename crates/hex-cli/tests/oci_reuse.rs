@@ -736,6 +736,21 @@ fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, o
         0,
         "a parked init holds no effective capability"
     );
+    // Nor can another process take its claim socket or any descriptor of its: it is non-dumpable, so a caller
+    // without CAP_SYS_PTRACE is refused pidfd_getfd (ptrace(2), "Ptrace access mode checking"). This process is
+    // one when rootless; as root it holds CAP_SYS_PTRACE, which reaches any process, the node's own included.
+    if lab.rootless {
+        let init = pidfd(parked[0]);
+        for fd in 0..64 {
+            assert_eq!(
+                rustix::process::pidfd_getfd(&init, fd, rustix::process::PidfdGetfdFlags::empty())
+                    .map(drop)
+                    .map_err(|e| e == rustix::io::Errno::PERM),
+                Err(true),
+                "another process took descriptor {fd} of a parked init"
+            );
+        }
+    }
     let before = node.cgroup_reuse().unwrap();
     let b = BoxId::new("pb").unwrap();
     node.create(lab.oci("pb", Some(&o), Caps::Docker, Bounds::default()))
