@@ -122,9 +122,22 @@ fn root(rootfs: &Path) -> Result<OwnedFd, OciError> {
 
 /// How many times [`in_root`] tries a path Linux refuses with EAGAIN: a rename or a mount anywhere on the
 /// host crossing a `..` in the walk, where it can't then say the `..` stayed in the root, and leaves the
-/// retry to the caller (openat2(2)). libpathrs's budget, as runc v1.5.2 cites it
-/// (`internal/pathrs/retry.go`), where the longest wait measured under heavy rename load was about 800 us.
+/// retry to the caller (openat2(2); fs/namei.c v6.19 :2195-2206). libpathrs's budget (src/syscalls.rs:864-873),
+/// as runc v1.5.2 cites it (`internal/pathrs/retry.go`). Measured on fedora under 16 mount and 16 rename loops,
+/// no resolve needed more than 5 (unit hex-inroot-storm-20261105T130241Z;
+/// docs/research/runtime/inroot-eagain.md).
 const IN_ROOT_TRIES: u32 = 128;
+
+thread_local! {
+    /// The EAGAIN refusals [`in_root`] tried again past, on this thread: the init's count, as it is
+    /// single-threaded (a non-vacuity counter the tests read; the init has no channel to the agent's metrics).
+    static RETRIED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The EAGAIN refusals [`in_root`] has tried again past on this thread.
+pub fn retried() -> u64 {
+    RETRIED.with(std::cell::Cell::get)
+}
 
 /// `path` opened in `root` as though `root` were `/`; magic links (`/proc/<pid>/root`) refused, as
 /// openat2(2) advises asking for explicitly.
@@ -140,18 +153,25 @@ fn in_root(root: &OwnedFd, path: &str) -> Result<OwnedFd, Errno> {
     };
     for _ in 1..IN_ROOT_TRIES {
         match open() {
-            Err(Errno::AGAIN) => {}
+            Err(Errno::AGAIN) => RETRIED.with(|n| n.set(n.get().saturating_add(1))),
             done => return done,
         }
     }
     open()
 }
 
+/// A path the resolver refused, naming it and the component it was refused at. An EAGAIN past
+/// [`IN_ROOT_TRIES`] says so: Linux couldn't vouch for a `..` in any of the tries.
 fn failed(dest: &str, at: &str, e: Errno) -> OciError {
-    OciError::os(
-        "resolving a path in the container's root",
-        format!("{dest} ({at}): {e}"),
-    )
+    let why = if e == Errno::AGAIN {
+        format!(
+            "{dest} ({at}): Linux couldn't vouch for its `..` in {IN_ROOT_TRIES} tries, a rename or mount \
+             elsewhere crossing each (EAGAIN)"
+        )
+    } else {
+        format!("{dest} ({at}): {e}")
+    };
+    OciError::os("resolving a path in the container's root", why)
 }
 
 #[cfg(test)]
@@ -214,8 +234,9 @@ mod tests {
     /// A mount anywhere on the host, in any mount namespace, bumps the kernel's one `mount_lock` seqcount, and a
     /// scoped walk that crossed a `..` meanwhile is refused with EAGAIN (fs/namei.c v6.19 :2195-2206, :2637-2638;
     /// openat2(2)), as a node's own concurrent creates' mounts do to each other (AC-T7.1.4, CLAUDE.md §2, §4). Do:
-    /// resolve a link climbing out 2,000 times while a process in a user and mount namespace of its own mounts and
-    /// unmounts a tmpfs without pause. Expect: each resolves, none refused for what the other process did.
+    /// resolve a link climbing out at least 2,000 times while a process in a user and mount namespace of its own mounts
+    /// and unmounts a tmpfs without pause, on until the resolver has tried again past an EAGAIN. Expect: each
+    /// resolves, none refused for what the other process did, and the race was met (the retry counter rose).
     #[test]
     fn a_mount_elsewhere_doesnt_refuse_a_path_with_a_dotdot() {
         use std::io::BufRead as _;
@@ -245,18 +266,44 @@ mod tests {
             "ready",
             "the nemesis mounts in a namespace of its own (unprivileged user namespaces allowed)"
         );
-        let refused: Vec<OciError> = (0..2000)
-            .filter_map(|_| open(root.path(), "/up/made/here", Make::Dir).err())
-            .collect();
+        // At least 2,000 resolves, and on until one was tried again past an EAGAIN (the nemesis met), at most
+        // 50,000: one mount loop crosses a resolve's `..` a few times in 2,000 on fedora.
+        let before = retried();
+        let mut refused = Vec::new();
+        for i in 0..50_000 {
+            if i >= 2000 && retried() > before {
+                break;
+            }
+            if let Err(e) = open(root.path(), "/up/made/here", Make::Dir) {
+                refused.push(e);
+            }
+        }
         let was_alive = nemesis.try_wait().unwrap().is_none();
         let _ = nemesis.kill();
         let _ = nemesis.wait();
         assert!(was_alive, "the nemesis mounted throughout");
         assert!(
             refused.is_empty(),
-            "{} of 2000 refused: {:?}",
+            "{} refused: {:?}",
             refused.len(),
             refused.first()
+        );
+        assert!(
+            retried() > before,
+            "the nemesis crossed a resolve's `..` and the resolver tried again past it"
+        );
+    }
+
+    /// CLAUDE.md §3: past its budget the resolver's refusal names the path, the component and the budget, never a
+    /// bare EAGAIN. Do: the refusal for an EAGAIN. Expect: all three named.
+    #[test]
+    fn an_eagain_past_the_budget_is_refused_naming_the_path_and_the_tries() {
+        let e = failed("/up/made/here", "up/made", Errno::AGAIN).to_string();
+        assert!(
+            e.contains("/up/made/here (up/made)")
+                && e.contains("in 128 tries")
+                && e.contains("EAGAIN"),
+            "{e}"
         );
     }
 
