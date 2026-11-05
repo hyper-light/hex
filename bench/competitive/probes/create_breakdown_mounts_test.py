@@ -42,6 +42,15 @@ def trace(probed=True):
     return "".join(lines)
 
 
+def holders_trace():
+    """trace()'s two inits, and holds outside any span: three for write by the pools' maker, one by the node."""
+    lines = [trace()]
+    for i, (comm, pid) in enumerate((("hex-devfs", 3000),) * 3 + (("seam_oci", 3001),)):
+        lines.append(f"{comm}-{pid} [005] d..2 1.{900000 + i:06d}: nsw: (down_write+0x4/0x60) "
+                     "sem=0xffffffff92c64b40\n")
+    return "".join(lines)
+
+
 def run(text, span="switch"):
     with tempfile.TemporaryDirectory() as d:
         paths = {name: os.path.join(d, name) for name in ("mounts.txt", "mounts.stats", "unistd_64.h")}
@@ -65,6 +74,15 @@ class MountLockHolds(unittest.TestCase):
         self.assertEqual(summary["nssem_write_by_call"], "move_mount 1.0, open_tree 1.0")
         self.assertIn("2.0 held for write (by call: move_mount 1.0, open_tree 1.0), 1.0 shared "
                       "(by call: between calls 1.0)", report)
+
+    def test_holds_outside_the_spans_are_counted_by_their_holder(self):
+        """Goal 6 (AC-T7.1.4's under-load bar, goal6-mntns.md §10): the pools' maker and the node hold the lock
+        outside any init's span. Expect them per create by command, the stray init's hold among them as `hex`."""
+        rc, summary, report = run(holders_trace())
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["nssem_write_outside_per_create"], "hex-devfs 1.5, hex 0.5, seam_oci 0.5")
+        self.assertIn("The mount lock held for write outside the spans, per create, by holder: hex-devfs 1.5, hex 0.5, "
+                      "seam_oci 0.5.", report)
 
     def test_a_trace_without_the_probes_says_so(self):
         rc, summary, report = run(trace(probed=False))

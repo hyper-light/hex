@@ -903,6 +903,8 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
     # joins: a mount namespace's join before the span opened, by pid; woke: who woke each blocked init; waits: a
     # mount lock slowpath taken since the init last slept, by pid.
     joins, woke, waits = {}, {}, {}
+    # outside: the mount lock's write holds by a traced process outside any span, by its command.
+    outside = {}
     ends = (NR_CHDIR,) if span == "root" else (NR_CHROOT, NR_PIVOT_ROOT)
 
     def charge(table, label, d):
@@ -1026,6 +1028,10 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                     at = name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "between calls"
                     held = w.setdefault("holds", {}).setdefault(e["kind"], {})
                     held[at] = held.get(at, 0) + 1
+                elif e["kind"] == "nsw":
+                    # Outside every span: the pools' maker, the node, an init before or after its part 19 (goal 6,
+                    # goal6-mntns.md §10). A span's wait is behind these as much as behind another span's holds.
+                    charge(outside, m["comm"].split("/")[0], 1)
             else:
                 unread += 1
     n_lost = eb.lost(stats)
@@ -1147,6 +1153,10 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
         + ["", "### Each of them", ""] + each(tail)))
     n = len(creates)
     with open(os.path.splitext(trace)[0] + ".summary.json", "w") as f:
+        by_holder = ", ".join(f"{c} {k / n:.1f}" for c, k in sorted(outside.items(), key=lambda kv: (-kv[1], kv[0])))
+        if probed:
+            print("\n## Outside the spans\n")
+            print(f"- The mount lock held for write outside the spans, per create, by holder: {by_holder or 'none'}.")
         json.dump({"creates": n, "span_p50_us": eb.pct(spans, 0.5), "span_p99_us": eb.pct(spans, 0.99),
                    "span_max_us": spans[-1], "lost": n_lost, "unread": unread,
                    "calls_per_create": sum(len(w["calls"]) for w in creates) / n,
@@ -1157,6 +1167,7 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                    "nssem_write_by_call": holds(creates, "nsw")[1] if probed else None,
                    "nssem_read_per_create": holds(creates, "nsr")[0] if probed else None,
                    "nssem_waits_per_create": sum(w.get("lock_waits", 0) for w in creates) / n,
+                   "nssem_write_outside_per_create": by_holder if probed else None,
                    "span": span}, f, indent=1)
     if n_lost:
         print(f"refusing: the trace lost {n_lost} events", file=sys.stderr)

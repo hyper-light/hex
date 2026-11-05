@@ -257,6 +257,8 @@ for l in open("/proc/kallsyms"):
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $MT; do
     case $ev in
+      # The holds by the pools' maker and the node too, which a span's wait can be behind (goal6-mntns.md §10).
+      hexcb/nsw|hexcb/nsr) f="sem == $nssem && (comm == \"hex\" || comm == \"hex-devfs\" || comm == \"seam_oci\")" ;;
       hexcb/*) f="sem == $nssem && comm == \"hex\"" ;;
       sched/sched_switch) f='prev_comm == "hex" || next_comm == "hex"' ;;
       sched/sched_process_fork) f='parent_comm == "hex"' ;;
