@@ -368,8 +368,8 @@ wait's budget (XNU posts the exit event before the zombie), fixed at abdbfd0.
 
 Each OS's `process` class against its competitors, recorded in `bench/native/RESULT.md`: Linux start 11.1x and
 delete 14.7x a systemd scope's, both holding the bound; macOS start 1.87x `taskpolicy -m`'s, delete 0.90x, both
-holding the bound, and a launchd job's limit holds none. Open: Process Governor's figure on jupiter (Hex's is
-recorded), the Windows `oci` suite (waits on Ada's yes to `oci_setup.ps1`), and the macOS `oci` class through a Shards guest when native step 5 lands.
+holding the bound, and a launchd job's limit holds none; Windows start 2.4x and delete 256x Process Governor's,
+both holding the bound. Open: the Windows `oci` suite (waits on Ada's yes to `oci_setup.ps1`), and the macOS `oci` class through a Shards guest when native step 5 lands.
 
 ## Next
 
