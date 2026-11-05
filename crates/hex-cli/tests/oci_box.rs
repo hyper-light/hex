@@ -603,11 +603,12 @@ fn budget(lab: &Lab, own: &Path) {
 }
 
 /// AC-T7.1.1: the `oci` class through the node holds the runtime contract, HEX-RT-11 and 12 (the
-/// init's exit) included.
+/// init's exit) included, and the differential suite holds it to the simulator's trace (HEX-DIFF-1..6,
+/// CLAUDE.md §8).
 fn conformance_on_oci(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-conf"), state.path());
-    let failures = conformance::run(&node, lab);
+    let failures = hex_api::differential::run(&node, lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 

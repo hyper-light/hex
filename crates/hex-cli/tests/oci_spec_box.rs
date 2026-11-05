@@ -441,10 +441,11 @@ fn links_in_a_layer_stay_in_the_box(lab: &Lab, own: &Path) {
 }
 
 /// AC-T7.1.1: the hex-api conformance suite holds for boxes made from OciSpecs, HEX-RT-13 (an
-/// unrenderable spec refused by name) included.
+/// unrenderable spec refused by name) included, and the differential suite holds them to the
+/// simulator's trace (HEX-DIFF-1..6, CLAUDE.md §8).
 fn conformance_on_specs(lab: &Lab, own: &Path) {
     let (node, _, _) = lab.node(own, "conformance");
-    let failures = conformance::run(&node, lab);
+    let failures = hex_api::differential::run(&node, lab);
     assert!(failures.is_empty(), "conformance failures: {failures:#?}");
 }
 

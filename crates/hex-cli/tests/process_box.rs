@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use hex_api::conformance::{self, Act, Fixture};
+use hex_api::conformance::{Act, Fixture};
+use hex_api::differential;
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Signal, Stdio};
 use hex_node::Node;
 
@@ -238,7 +239,8 @@ fn exercise_clone_into_cgroup(own: &Path) {
     std::fs::remove_dir(root.dir()).unwrap();
 }
 
-/// AC-T7.1.1: the `process` class holds the runtime contract on real cgroups and processes.
+/// AC-T7.1.1: the `process` class holds the runtime contract on real cgroups and processes, and the
+/// differential suite holds it to the simulator's trace (HEX-DIFF-1..6, CLAUDE.md §8).
 fn exercise_conformance(own: &Path, cache: &Path, exe: &str) {
     let state = tempfile::Builder::new()
         .prefix("conf-")
@@ -246,7 +248,7 @@ fn exercise_conformance(own: &Path, cache: &Path, exe: &str) {
         .expect("state dir");
     let node =
         Node::open(&own.join("hex-boxes-conf"), state.path(), state.path()).expect("open a node");
-    let failures = conformance::run(
+    let failures = differential::run(
         &node,
         &BinFixture {
             exe: exe.to_owned(),

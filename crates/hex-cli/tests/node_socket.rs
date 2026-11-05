@@ -322,13 +322,13 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         return;
     }
     namespaces_counted(&lab, &client);
-    let failures = conformance::run(&client, &OciBoxes(&lab, false));
+    let failures = hex_api::differential::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
         "oci boxes over the socket: {failures:#?}"
     );
     conformance_with_namespaces(&lab, &client);
-    let failures = conformance::run(&client, &ProcessBoxes(exe));
+    let failures = hex_api::differential::run(&client, &ProcessBoxes(exe));
     assert!(
         failures.is_empty(),
         "process boxes over the socket: {failures:#?}"
@@ -437,7 +437,7 @@ fn conformance_with_namespaces(lab: &Lab, client: &Client) {
         });
     }
     let before = client.netns().unwrap();
-    let failures = conformance::run(client, &OciBoxes(lab, true));
+    let failures = hex_api::differential::run(client, &OciBoxes(lab, true));
     assert!(
         failures.is_empty(),
         "oci boxes with network namespaces of their own over the socket: {failures:#?}"
