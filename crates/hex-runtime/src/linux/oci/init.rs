@@ -1925,21 +1925,37 @@ pub const PID_NAMESPACE_AHEAD: &str = "opening a pid namespace made ahead";
 /// empty directory for every masked directory alike (1.30.1 `src/libcrun/linux.c:1181-1210`, `:1266`): a
 /// clone makes no superblock, so none takes `list_lrus_mutex` or `shrinker_mutex` (step 6,
 /// `create_serial.md` runs 23-24).
+///
+/// The empty tmpfs is kept only where the kernel clones a detached mount. Before Linux 6.15 `open_tree` refuses a
+/// mount outside the caller's namespace with `EINVAL` (v6.8 `fs/namespace.c:2588`; v6.19's `may_copy_tree`,
+/// `:2928-2948`, admits an anonymous namespace's), so there every masked directory gets a tmpfs of its own.
 pub struct ProcSources {
     null: OwnedFd,
-    empty: OwnedFd,
+    empty: Option<OwnedFd>,
 }
 
 impl ProcSources {
-    /// The empty read-only tmpfs, which an init clones for each masked directory.
-    pub fn empty(&self) -> BorrowedFd<'_> {
-        self.empty.as_fd()
+    /// The empty read-only tmpfs, which an init clones for each masked directory, where the kernel clones it.
+    pub fn empty(&self) -> Option<BorrowedFd<'_>> {
+        self.empty.as_ref().map(AsFd::as_fd)
     }
 
     pub fn open() -> Result<Self, OciError> {
         let null = rustix::fs::open("/dev/null", OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| OciError::os("opening /dev/null for the prepared procs", e))?;
         let empty = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY, None)?;
+        // One clone, dropped at once, asks the kernel whether it clones a detached mount.
+        let empty = match rustix::mount::open_tree(
+            &empty,
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::AT_EMPTY_PATH
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+        ) {
+            Ok(_) => Some(empty),
+            Err(rustix::io::Errno::INVAL) => None,
+            Err(e) => return Err(OciError::os("cloning the empty tmpfs", e)),
+        };
         Ok(Self { null, empty })
     }
 }
@@ -2034,14 +2050,18 @@ pub fn prepare_proc(
             .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
             .map_err(|e| OciError::os("masking a path", format!("{rel}: {e}")))?;
         let mount = if is_dir {
-            rustix::mount::open_tree(
-                &sources.empty,
-                "",
-                OpenTreeFlags::OPEN_TREE_CLONE
-                    | OpenTreeFlags::AT_EMPTY_PATH
-                    | OpenTreeFlags::OPEN_TREE_CLOEXEC,
-            )
-            .map_err(|e| OciError::os("masking a directory", format!("{rel}: {e}")))?
+            match &sources.empty {
+                Some(empty) => rustix::mount::open_tree(
+                    empty,
+                    "",
+                    OpenTreeFlags::OPEN_TREE_CLONE
+                        | OpenTreeFlags::AT_EMPTY_PATH
+                        | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+                )
+                .map_err(|e| OciError::os("masking a directory", format!("{rel}: {e}")))?,
+                None => make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY, None)
+                    .map_err(|e| OciError::os("masking a directory", format!("{rel}: {e}")))?,
+            }
         } else {
             let clone = rustix::mount::open_tree(
                 null,
