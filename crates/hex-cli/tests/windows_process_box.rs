@@ -86,20 +86,68 @@ fn fixture() -> BinFixture {
 
 /// AC-T7.1.1: the Windows `process` class holds the runtime contract (HEX-RT-1..9; 10..13 are the oci
 /// class's, which this one has nothing to check).
-/// HEX-INST-2 (native plan step 6): an `oci` box on Windows is refused by name, and the refusal comes
-/// from the features' state the node read without elevation (no read error): it names each of the
-/// installer's features that's off and says the installer turns it on, or, with both on, what the class
-/// still waits on. The installer's lab runs this before install and after, and prints which.
-#[test]
-fn an_oci_box_is_refused_naming_the_features_that_are_off() {
+/// The refusal of an `oci` box made from the bundle `config` (a `config.json`), and the runtime, which
+/// must hold no box after it.
+fn refused_bundle(config: &serde_json::Value) -> hex_api::Refusal {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("config.json"), config.to_string()).unwrap();
     let rt = runtime();
     let refused = rt
         .create(BoxSpec {
             id: BoxId::new("oci-on-windows").unwrap(),
             bounds: Bounds::default(),
-            class: ClassSpec::Bundle(std::path::PathBuf::from(r"C:\nowhere")),
+            class: ClassSpec::Bundle(root.path().to_path_buf()),
         })
         .unwrap_err();
+    assert!(rt.list().unwrap().is_empty(), "the refused box is left");
+    refused
+}
+
+/// HEX-INST-2 (native plan step 6): a Windows image's `oci` box needs Windows' Containers feature
+/// alone. While it is off the box is refused by name, from the features' state the node read without
+/// elevation, naming Containers and saying the installer turns it on; once it is on, no feature is
+/// named and the box goes on to the HCS class (native plan step 4), which here refuses its missing
+/// layer for what it is. The installer's lab runs this before install and after, and prints which.
+#[test]
+fn a_windows_image_is_refused_naming_containers_while_it_is_off() {
+    let refused = refused_bundle(&serde_json::json!({
+        "ociVersion": "1.2.0",
+        "process": {"args": ["cmd.exe", "/c", "exit 0"], "cwd": "C:\\"},
+        "windows": {"layerFolders": ["C:\\hex-no-such-layer", "C:\\hex-no-such-scratch"]},
+    }));
+    eprintln!("the oci class, a Windows image: {refused:?}");
+    match &refused {
+        hex_api::Refusal::Platform {
+            what,
+            platform,
+            why,
+        } if why.contains("Hex's installer turns") => {
+            assert_eq!((*what, *platform), ("the oci class", "windows"));
+            assert!(why.contains("Containers"), "{why}");
+            assert!(!why.contains("HypervisorPlatform"), "{why}");
+            eprintln!("FEATURES: Containers off");
+        }
+        other => {
+            let text = format!("{other:?}");
+            assert!(!text.contains("Hex's installer turns"), "{text}");
+            eprintln!("FEATURES: Containers on");
+        }
+    }
+}
+
+/// HEX-INST-2 (native plan steps 5 and 6): a Linux image (a bundle with no `windows` section) runs in
+/// a Shards guest, which needs the Windows Hypervisor Platform. It is always refused by name here: while
+/// HypervisorPlatform is off, naming it and saying the installer turns it on; once it is on, naming the
+/// Shards guest it waits on, and never as a malformed Windows spec.
+#[test]
+fn a_linux_image_is_refused_naming_what_its_guest_waits_on() {
+    let refused = refused_bundle(&serde_json::json!({
+        "ociVersion": "1.2.0",
+        "process": {"args": ["/bin/true"], "cwd": "/"},
+        "root": {"path": "rootfs"},
+        "linux": {},
+    }));
+    eprintln!("the oci class, a Linux image: {refused:?}");
     let hex_api::Refusal::Platform {
         what,
         platform,
@@ -109,12 +157,14 @@ fn an_oci_box_is_refused_naming_the_features_that_are_off() {
         panic!("not refused by name: {refused:?}");
     };
     assert_eq!((*what, *platform), ("the oci class", "windows"));
-    eprintln!("the oci class: {why}");
-    assert!(
-        why.contains("Hex's installer turns") || why.contains("neither is built yet"),
-        "{why}"
-    );
-    assert!(rt.list().unwrap().is_empty(), "the query's box is left");
+    assert!(!why.contains("Containers"), "{why}");
+    if why.contains("Hex's installer turns") {
+        assert!(why.contains("HypervisorPlatform"), "{why}");
+        eprintln!("FEATURES: HypervisorPlatform off");
+    } else {
+        assert!(why.contains("Shards guest"), "{why}");
+        eprintln!("FEATURES: HypervisorPlatform on");
+    }
 }
 
 #[test]
