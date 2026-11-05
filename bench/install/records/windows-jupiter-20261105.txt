@@ -1,0 +1,44 @@
+jupiter, the first native Windows runs of native plan steps 3, 4, 6 and 7 together (bench/install/jupiter.sh)
+
+Host: jupiter (Windows 11, Microsoft Windows NT 10.0.26200.0, AMD Ryzen AI MAX+ 395, 32 CPUs), rustc 1.99.1.
+Windows features before any install by Hex: Containers 1, HypervisorPlatform 1 (Win32_OptionalFeature
+InstallState, both Enabled already). Co-tenant: Amphora's cargo/rustc were running at the same time (one rustc
+at 3.6 GB). CARGO_BUILD_JOBS=8; one job at a time; every run under a kiln time limit. The raw records
+(jupiter.sh's tee of each phase) are on jupiter at C:\Users\corph\.cache\hex-t7-windows\records\. The repository
+copy there shows ~20 bench scripts as modified: line endings from the sync, no content change.
+
+1. build at 563ebff, 2026-11-05T08:17:31Z, load 9% CPU: windows-build-563ebff-20261105T081731Z.txt
+   hex.exe and the windows_process_box and windows_oci_box test binaries built. PHASE build: PASS (exit 0).
+
+2. gates at 563ebff, 2026-11-05T08:18:05Z: windows-gates-563ebff-20261105T081805Z.txt
+   cargo fmt --all --check: pass. cargo clippy --workspace --all-targets --locked -- -D warnings: pass.
+   cargo test --workspace --locked: FAILED in hex-core --lib, 111 passed, 4 failed (cargo stopped there):
+     bundle::tests::layers_with_a_private_network_render_rootless_to_their_golden_config
+     bundle::tests::layers_with_a_private_network_render_as_root_to_their_golden_config
+     bundle::tests::layers_at_overlayfs_bounds_render
+     bundle::tests::hostile_values_are_refused_by_name
+   each: Invalid { what: "oci spec", why: "the box's writable layer \"/var/lib/hex/bundles/box-1\\upper\" holds
+   '\\', which overlayfs reads as a separator" } (the bundle core joined a Linux path with the host's separator).
+   Exit 101. Fixed by b2d855a (test) and 4a6676b (fix): hex-core --lib 115 passed, 0 failed on jupiter.
+
+3. gates at 1a2e1eb (the fix, and --no-fail-fast), 2026-11-05T08:22:47Z, load 19% CPU:
+   windows-gates-1a2e1eb-20261105T082247Z.txt
+   cargo fmt --all --check: pass. cargo clippy --workspace --all-targets --locked -- -D warnings: pass.
+   cargo test --workspace --locked --no-fail-fast: every crate passes, 0 failed:
+     hex-api 18 (differential::tests incl. what_term_does_to_an_init_follows_the_fixture), doc_truth 7, cli 5,
+     hex-core 115, hex-node 6,
+     windows_process_box 9: windows_process_boxes_hold_the_contract (HEX-RT-1..9 and step 7's HEX-DIFF-1..6 on
+       the Windows process class), a_box_past_its_bound_is_refused_at_the_bound,
+       a_member_asking_to_break_away_is_refused, delete_ends_a_boxs_grandchildren,
+       a_box_under_its_bound_runs_and_reports_its_exit, a_box_takes_a_named_signal,
+       a_node_started_process_past_the_bound_is_refused_and_counted,
+       a_windows_image_is_refused_naming_containers_while_it_is_off (HEX-INST-2: Containers on, so no feature
+       named), a_linux_image_is_refused_naming_what_its_guest_waits_on (HEX-INST-2: HypervisorPlatform on, so
+       refused for the Shards guest),
+     windows_oci_box 2: windows_oci_boxes_hold_the_contract_and_the_steps_criteria passed BY SKIPPING (no
+       HEX_WINDOWS_LAYERS: step 4's oci_setup.ps1 hasn't run, so no image's layers), and
+       the_fixture_keeps_each_boxs_files_under_its_root.
+   The Linux- and macOS-only test crates hold no tests on Windows (cfg). PHASE gates: PASS (exit 0).
+
+Not run yet: step 4's oci suite on an image (needs oci_setup.ps1, which waits on Ada's yes), and the installer
+lab's before / installed / uninstalled phases (the install and uninstall need Ada at jupiter).
