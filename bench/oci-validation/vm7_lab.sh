@@ -20,6 +20,8 @@ set -euo pipefail
 TGT=$(realpath "${1:?target dir}"); shift
 [ "$#" -gt 0 ] || { echo "usage: vm7_lab.sh <target dir> <test binary>..." >&2; exit 2; }
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+# Its container carries the run's labels and goes with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
 VM_DIR=${VM_DIR:-$HOME/.cache/hex-t7/g6/vm}
 IMG=hexlab-vm7:44
 for f in vmlinuz initramfs.img rootfs.ext4 KERNEL; do
@@ -37,9 +39,9 @@ printf '%s\n' "${VM7_MODE:-seam}" > "$JOB/mode"
 echo "vm7 lab run $RUN"
 cat "$VM_DIR/KERNEL"
 NAME=hexlab-vm7-$RUN
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
+bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
 set +e
-docker run --rm --init --name "$NAME" --device /dev/kvm --security-opt label=disable --network=none \
+docker run --rm --init --name "$NAME" "${BENCH_LABELS[@]}" --device /dev/kvm --security-opt label=disable --network=none \
   --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" \
   -v "$VM_DIR:/vm:ro" -v "$HERE:/opt/lab:ro" -v "$JOB:/job" -v "$TGT:$TGT" "$IMG" \
   timeout "${VM_TIMEOUT:-3600}" qemu-system-x86_64 -machine q35,accel=kvm -cpu host \

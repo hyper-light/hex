@@ -9,9 +9,12 @@ HEX=$(realpath "${2:?hex binary}")
 OUT=$(realpath -m "${3:?out dir}")
 IMAGE=${4:-registry.fedoraproject.org/fedora:44}
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+# Its container carries the run's labels and goes with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
+bench_trap :
 mkdir -p "$OUT"
 printf '#!/bin/sh\nexec /opt/hex oci "$@"\n' > "$OUT/hex-oci"; chmod +x "$OUT/hex-oci"
-docker run --rm --privileged --security-opt label=disable --cgroupns=private --network=none \
+docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable --cgroupns=private --network=none \
   ${BENCH_MEMORY:+--memory="$BENCH_MEMORY"} ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   -v /usr:/usr:ro -v "$RT:$RT:ro" -v "$OUT:$OUT" -v "$HEX:/opt/hex:ro" -v "$HERE:/opt/lab:ro" \
   -e RT="$RT" -e OUT="$OUT" -e RUNTIME="$OUT/hex-oci" -e HEX_OCI_ROOT=/run/hex-oci \

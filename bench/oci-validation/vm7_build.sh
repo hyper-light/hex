@@ -13,6 +13,9 @@
 # Rebuilds only what's missing; FORCE=1 rebuilds it all.
 # Usage: vm7_build.sh
 set -euo pipefail
+# Its containers carry the run's labels and go with the run, however it ends (containers.sh).
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../competitive/containers.sh"
+bench_trap :
 KVER=${KVER:-7.2.15-200.fc44.x86_64}
 VM_DIR=${VM_DIR:-$HOME/.cache/hex-t7/g6/vm}
 IMG=hexlab-vm7:44
@@ -23,8 +26,8 @@ mkdir -p "$VM_DIR/rpms"
 
 say "image $IMG"
 if ! docker image inspect "$IMG" > /dev/null 2>&1; then
-  NAME=hexlab-vm7-image-$$; trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
-  docker run --name "$NAME" --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" \
+  NAME=hexlab-vm7-image-$$; bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
+  docker run --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" \
     --oom-score-adj "${BENCH_OOM:-1000}" registry.fedoraproject.org/fedora:44 sh -c \
     "dnf -y -q install --setopt=install_weak_deps=False qemu-system-x86-core qemu-img e2fsprogs rpm cpio && dnf clean all" > /dev/null
   docker commit --change "CMD [\"bash\"]" "$NAME" "$IMG" > /dev/null
@@ -42,7 +45,7 @@ done
 if [ ! -s "$VM_DIR/rootfs.ext4" ] || [ ! -s "$VM_DIR/initramfs.img" ] || [ ! -s "$VM_DIR/vmlinuz" ]; then
   say "guest root, initramfs and kernel for $KVER"
   # Privileged for the chroot's /proc, which dracut reads; the build's root is a directory in the container.
-  docker run --rm --privileged --security-opt label=disable \
+  docker run --rm "${BENCH_LABELS[@]}" --privileged --security-opt label=disable \
     --cpuset-cpus "${VM_CPUS:-16-31}" --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" -v "$VM_DIR:/vm" -e KVER="$KVER" "$IMG" bash -euc '
     rpm -K /vm/rpms/kernel-*.rpm  # koji builds are unsigned: digests checked, KERNEL keeps the sha256
     R=/build/root; mkdir -p $R
