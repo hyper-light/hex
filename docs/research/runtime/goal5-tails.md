@@ -133,3 +133,9 @@ no work for one it doesn't.**
   `create_tail`'s top-1% preemption by `css_*_work_fn` doesn't fall in proportion.
 - The network namespace's share (fragment queues, `cleanup_net`) isn't cut by it. A namespace of a box of no owner is
   never handed on, since what it keeps can't be reset (`docs/research/runtime/goal5-netns-reuse.md`).
+
+**Measured, not built** (`bench/competitive/probes/create_tail.md`, "Reuse off after the cut"). A box's css teardown
+takes about 0.795 ms of kworker time. Memory's offline is 0.388 ms of it, and every other controller's callbacks
+together are under 0.01 ms; the rest is each css work item's own cost, about 0.08 ms a css. Leaving io out spares
+about 10%, about 0.1 ms off a reuse-off create's p99.9 of about 2.36 ms: still over the bar. So the lever doesn't reach
+the bar, and memory, the part that does cost, stays on every box.

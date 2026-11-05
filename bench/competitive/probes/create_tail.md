@@ -223,3 +223,39 @@ What the slowest 0.1% add over the middle band:
 
 That is finding 2's class: the kernel's work for earlier boxes, now including the delete's park clone, on the CPUs the
 next create runs on.
+
+## Reuse off after the cut: what the slowest 1% wait on, and what each controller's teardown costs (2026-11-05, not of record)
+
+Two probes, both on B's binaries (hex 87376c7d72da8737, seam_oci 763bbad09e2ddd15), boxes of no owner, CPUs 4-15
+under the lock.
+- **create_tail, run 6** (create-tail-20261105T132045Z, load 19.48 at start, 22.92 at end): creates p50 0.390, p99
+  1.557, p99.9 2.361, max 2.829 ms. Charged by kind of work (`create_tail_attr.py`'s grouping over `create_tail.py`'s walk), the
+  slowest 1% add over the middle band:
+  - preemption by the cgroup teardown work items (`css_*_work_fn`), +0.938 ms;
+  - other waits, +0.253;
+  - the run queue, +0.140;
+  - the runtime's own runs, +0.108;
+  - RCU softirq, +0.032;
+  - `fqdir_work_fn` and `cleanup_net`, none.
+
+  The three runs on A's binaries (runs 2-4's reuse-off traces) show the same: css work +0.73 to +1.53 ms, fqdir +0.01
+  to +0.03, `cleanup_net` none. The network namespace's teardown is not the share.
+- **css_cost** (`css_cost.sh`: css-cost-20261105T132631Z, N=2000, load 30.20 at start): kprobes on each controller's
+  css callbacks, and every work item by function. Per box made and deleted, the cgroup teardown's work items took
+  0.795 ms: `css_killed_work_fn` 0.504 (5.05 per box), `css_release_work_fn` 0.240 (6.03), `css_free_rwork_fn`
+  0.051 (6.00). Of that, each controller's own callbacks, per box:
+  - memory: offline 0.388 ms (mean 0.384, max 1.805), free 0.010, released 0.001;
+  - cpu: free 0.0057, released 0.0005, offline 0.0004;
+  - io: free 0.0013, offline 0.0006;
+  - pids: free 0.0003.
+
+  So memory's offline is about half the teardown, and the rest is the work items' own cost per css, about 0.08 ms for
+  each css a box's cgroup carries.
+
+**The lever proposed (a box's cgroup with the controllers its bounds use) is not built.** Leaving io out would spare a
+box about one css's work, about 0.08 ms of 0.795 (about 10%). On run 6's slowest 1% that is about 0.1 ms, so p99.9
+goes from about 2.36 to about 2.26 ms, about 0.32x of the A/B's libcrun: still over the 0.25x bar. Memory's offline,
+the largest single part, can't be left out: every box's memory usage is reported, and most specs bound it. The
+falsifier needed no build: the css count can't fall by enough to move p99.9 under the bar.
+(The work-item list also holds the host's own: `btrfs_work_helper` and the write-back items are other tenants' IO, not
+Hex's.)
