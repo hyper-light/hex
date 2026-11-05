@@ -192,6 +192,15 @@ class HoldsTimed(unittest.TestCase):
         self.assertIn("| an init | 2 | 23.5 | 30 | 5.0 | 0.0 |", report)
         self.assertIn("| mount | 1 | 50.0 | 50 | untraced | untraced |", report)
 
+    def test_the_longest_holds_and_the_unpreempted_tail_are_named(self):
+        """Do the same trace, expect the longest holds by holder and call (a co-tenant's call untraced, `?`), and
+        part 19's p99 over the creates never preempted in it: 1001's 72 us, as 1000 was preempted."""
+        rc, summary, _ = run(holders_timed_trace(), span="root")
+        self.assertEqual(rc, 0)
+        self.assertEqual(summary["nssem_longest_holds"][:2], [[50, "mount", "?"], [30, "an init", "move_mount"]])
+        self.assertEqual(summary["creates_unpreempted"], 1)
+        self.assertEqual(summary["span_unpreempted_p99_us"], 72)
+
     def test_a_wait_woken_by_another_init_says_so(self):
         """Do an init woken from the slowpath by another init's release, expect the wait charged to another init."""
         rc, _, report = run(holders_timed_trace(), span="root")

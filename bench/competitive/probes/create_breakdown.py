@@ -946,7 +946,7 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
                     holding[nxt][o[1]] += ts - o[0]
             elif NSU.match(body):
                 if (h := holding.pop(pid, None)) is not None and h[0] is not None:
-                    hold_times.append((pid, h[1], ts - h[0], h[2], h[3]))
+                    hold_times.append((pid, h[1], ts - h[0], h[2], h[3], h[4]))
                 held_off.pop(pid, None)
                 continue
             elif NSWWR.match(body):
@@ -1052,7 +1052,9 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
             elif (e := NSSEM.match(body)):
                 probed = True
                 if e["kind"] == "nsw":
-                    holding[pid] = [ts, "an init" if pid in window else m["comm"].split("/")[0], 0, 0]
+                    c = cur.get(pid)
+                    holding[pid] = [ts, "an init" if pid in window else m["comm"].split("/")[0], 0, 0,
+                                    name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "?"]
                 if (w := window.get(pid)) is not None:
                     c = cur.get(pid)
                     at = name((c["nr"], kind_of(c["nr"], c["args"]))) if c else "between calls"
@@ -1184,7 +1186,7 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
     n = len(creates)
     with open(os.path.splitext(trace)[0] + ".summary.json", "w") as f:
         timed = {}
-        for _, who, us, p_us, b_us in hold_times:
+        for _, who, us, p_us, b_us, _ in hold_times:
             timed.setdefault(who, []).append((us, p_us, b_us))
         holders = {}
         for who, hs in timed.items():
@@ -1207,7 +1209,14 @@ def mounts(trace, stats, header, path="pruned", span="switch"):
         if probed:
             print("\n## Outside the spans\n")
             print(f"- The mount lock held for write outside the spans, per create, by holder: {by_holder or 'none'}.")
+        # Part 19's tail without the CPU taken from it (goal6-mntns.md §11): the creates preempted nowhere in it.
+        unpreempted = sorted(w["span"] for w in creates if w["sys_run"] + w["user_run"] == 0)
+        longest = [[us, who, call] for _, who, us, _, _, call in
+                   sorted(hold_times, key=lambda h: -h[2])[:5]]
         json.dump({"creates": n, "span_p50_us": eb.pct(spans, 0.5), "span_p99_us": eb.pct(spans, 0.99),
+                   "creates_unpreempted": len(unpreempted),
+                   "span_unpreempted_p99_us": eb.pct(unpreempted, 0.99) if unpreempted else None,
+                   "nssem_longest_holds": longest if hold_times else None,
                    "span_max_us": spans[-1], "lost": n_lost, "unread": unread,
                    "calls_per_create": sum(len(w["calls"]) for w in creates) / n,
                    "in_calls_us_per_create": sum(w["sys"] for w in creates) / n,
