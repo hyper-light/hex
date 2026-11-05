@@ -1091,7 +1091,7 @@ fn mount_namespaces_made_each_way(lab: &Lab, own: &Path) {
                 None
             },
         ),
-        ("default", Some(mntns::default_way(probe))),
+        ("default", Some(mntns::default_way(probe).unwrap())),
     ] {
         let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
         let node = Node::open(
