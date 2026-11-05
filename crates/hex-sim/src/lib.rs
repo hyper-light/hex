@@ -32,6 +32,7 @@ pub mod generate;
 pub mod index;
 pub mod model;
 pub mod packing;
+pub mod proximity;
 pub mod replay;
 pub mod rng;
 pub mod sim;

@@ -213,12 +213,7 @@ impl Wan {
     }
 }
 
-fn set(
-    terms: &mut [[u64; ZONES]; ZONES],
-    a: usize,
-    b: usize,
-    term: u64,
-) -> Result<(), SimError> {
+fn set(terms: &mut [[u64; ZONES]; ZONES], a: usize, b: usize, term: u64) -> Result<(), SimError> {
     let cell = terms
         .get_mut(a)
         .and_then(|row| row.get_mut(b))
@@ -243,7 +238,9 @@ impl Coordinates {
             return Err(SimError::Config("a round is 1 to MAX_PROBES probes"));
         }
         if config.rounds > MAX_ROUNDS {
-            return Err(SimError::Config("a convergence is at most MAX_ROUNDS rounds"));
+            return Err(SimError::Config(
+                "a convergence is at most MAX_ROUNDS rounds",
+            ));
         }
         let n = wan.len();
         let last = u64::try_from(n)
@@ -482,7 +479,10 @@ mod tests {
         assert_eq!(a.hash(), b.hash());
         assert_ne!(a.hash(), c.hash());
         assert_eq!(a.offered, 1_000 * 8 * 16);
-        assert_eq!(a.taken, a.offered, "every probe of a distinct live peer is a sample");
+        assert_eq!(
+            a.taken, a.offered,
+            "every probe of a distinct live peer is a sample"
+        );
     }
 
     /// S4, A2 (G3 step 1): do converge hyper-swim's coordinates on a 1,000-node 8-region WAN;
@@ -494,6 +494,7 @@ mod tests {
         let (wan, coordinates) = converged(&config);
         let mut rng = Rng::new(99);
         let accuracy = Accuracy::measure(&wan, &coordinates, 20_000, &mut rng).unwrap();
+        eprintln!("G3 coordinates: {accuracy:?}");
         assert!(accuracy.pairs > 19_000);
         assert!(
             accuracy.median_relative_error <= 0.25,
