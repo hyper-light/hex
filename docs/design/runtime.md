@@ -510,7 +510,11 @@ Sources and evidence: `docs/research/runtime/goal6-lsm.md`.
   file is checked to be on procfs first. An `ENOENT` from the write is refused as "profile not loaded".
 - Where the module isn't enabled, the spec is refused by name, never run without the label. crun skips the
   label there (research §3), which CLAUDE.md §3 forbids. runc refuses, and Hex does as runc does. AppArmor
-  counts as enabled when `/sys/module/apparmor/parameters/enabled` reads `Y` (crun's and runc's test). SELinux
+  is tested through `/proc` alone, so the test holds in a container's init, `/sys` mounted there or not: its
+  scoped `current` attribute reads `EINVAL` where the module isn't active (`fs/proc/base.c:2915-2916`,
+  `security/security.c:3764-3774`). On a kernel without the scoped attributes, Hex reads
+  `/sys/module/apparmor/parameters/enabled` (crun's and runc's test). The AppArmor guest found the need: a
+  `/sys` read in an init with no `/sys` mounted took AppArmor for off. SELinux
   is tested by the kernel itself: create asks it for a tmpfs with the label before anything is made, and the
   kernel refuses the `context` key when SELinux isn't active (`fs/fs_context.c:137-148`). That test also works
   in a container that has no selinuxfs mounted, where crun's `/proc/mounts` test gets it wrong.

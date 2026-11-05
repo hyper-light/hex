@@ -79,30 +79,44 @@ pub(crate) struct ProfileOnExec {
 }
 
 impl ProfileOnExec {
-    /// `profile` made ready, or a refusal by name where AppArmor isn't on here.
+    /// `profile` made ready, or a refusal by name where AppArmor isn't on here. The kernel answers that through
+    /// `/proc` alone, so it holds in a container's init as on the host, `/sys` mounted there or not: a kernel
+    /// built with AppArmor has the scoped attributes (v6.19 `fs/proc/base.c:2915-2916`), and their `current`
+    /// reads `EINVAL` where AppArmor isn't active, no module answering for it (`security/security.c:3764-3774`).
+    /// A kernel without them (before 5.1) is asked through the parameter crun and runc read (research §3).
     pub(crate) fn of(profile: &str, no_new_privileges: bool) -> Result<Self, OciError> {
-        let on = match std::fs::read(APPARMOR_ENABLED) {
-            Ok(bytes) => apparmor_enabled(&bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(OciError::os("reading the AppArmor parameter", e)),
+        let off = |why: &str| {
+            OciError::Config(format!(
+                "process.apparmorProfile is set ({profile:?}) but AppArmor isn't enabled on this host ({why}): \
+                 Hex refuses rather than run the container without it"
+            ))
         };
-        if !on {
-            return Err(OciError::Config(format!(
-                "process.apparmorProfile is set ({profile:?}) but AppArmor isn't enabled on this host \
-                 ({APPARMOR_ENABLED} doesn't read Y): Hex refuses rather than run the container without it"
-            )));
-        }
         let scoped = rustix::fs::access(SCOPED, rustix::fs::Access::EXISTS).is_ok();
         let (attr, current) = if scoped {
             (SCOPED_EXEC, SCOPED_CURRENT)
         } else {
+            let on = match std::fs::read(APPARMOR_ENABLED) {
+                Ok(bytes) => apparmor_enabled(&bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => return Err(OciError::os("reading the AppArmor parameter", e)),
+            };
+            if !on {
+                return Err(off(&format!("{APPARMOR_ENABLED} doesn't read Y")));
+            }
             (LEGACY_EXEC, LEGACY_CURRENT)
         };
         let fd = open_proc(current, OFlags::RDONLY)
             .map_err(|e| OciError::os("opening the AppArmor current attribute", e))?;
         let mut buf = [0u8; CURRENT_BYTES];
-        let n = rustix::io::read(&fd, &mut buf)
-            .map_err(|e| OciError::os("reading the AppArmor current attribute", e))?;
+        let n = match rustix::io::read(&fd, &mut buf) {
+            Ok(n) => n,
+            Err(rustix::io::Errno::INVAL) if scoped => {
+                return Err(off(
+                    "its current attribute reads EINVAL: the module isn't active",
+                ));
+            }
+            Err(e) => return Err(OciError::os("reading the AppArmor current attribute", e)),
+        };
         let read = buf.get(..n).unwrap_or_default();
         Ok(Self {
             attr,
