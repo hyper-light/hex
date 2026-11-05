@@ -54,8 +54,8 @@
 //! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
 //! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
 //! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it (decision 8, parked procs; the node's default is
-//! off), and the phase's `parked` counts say how many were made, taken by their create (hits), left (misses) or
-//! failed.
+//! off), and the phase's `parked` counts say how many were made, taken by their create (hits), left (misses),
+//! wanted with none made (dry) or failed.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -1084,6 +1084,7 @@ mod linux {
                "procs_made": a.procs_made - b.procs_made,
                "proc_hits": a.proc_hits - b.proc_hits,
                "proc_misses": a.proc_misses - b.proc_misses,
+               "proc_dry": a.proc_dry - b.proc_dry,
                "procs_failed": a.procs_failed - b.procs_failed,
                "procs_held": a.procs_held})
     }

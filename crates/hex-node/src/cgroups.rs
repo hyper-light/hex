@@ -20,7 +20,7 @@ use hex_core::cgroup::Baseline;
 use hex_core::reuse::{self, PER_NODE, PER_OWNER, Pool, Refused, Take, Whose};
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
 use hex_runtime::linux::oci::resources::Insn;
-use hex_runtime::linux::oci::run::{Choose, Chosen, Parked, Wants};
+use hex_runtime::linux::oci::run::{Choose, Chosen, Parked, ParkedProc, Wants};
 use hex_runtime::linux::oci::{OciError, procmount};
 
 use crate::createpool::Parker;
@@ -113,6 +113,9 @@ pub struct ParkCounts {
     /// Procs made for a parked init that its create didn't take (another key, no room for it, the claim
     /// refused): each ended unused, its create's init mounting its own proc.
     pub proc_misses: u64,
+    /// Creates that claimed a parked init with no proc made for it, which one could have served (its key unknown
+    /// at its park, or its make failed): each init mounted its own.
+    pub proc_dry: u64,
     /// Procs that couldn't be made for an init parked (the init then parked without one, as before).
     pub procs_failed: u64,
     /// Procs held now with the inits they were made for, at most one an init parked.
@@ -213,6 +216,7 @@ struct Parking {
     procs_made: AtomicU64,
     proc_hits: AtomicU64,
     proc_misses: AtomicU64,
+    proc_dry: AtomicU64,
     procs_failed: AtomicU64,
 }
 
@@ -246,6 +250,7 @@ impl Parking {
             procs_made: self.procs_made.load(Ordering::Relaxed),
             proc_hits: self.proc_hits.load(Ordering::Relaxed),
             proc_misses: self.proc_misses.load(Ordering::Relaxed),
+            proc_dry: self.proc_dry.load(Ordering::Relaxed),
             procs_failed: self.procs_failed.load(Ordering::Relaxed),
             procs_held: self.slots().map_or(0, |slots| {
                 slots
@@ -282,7 +287,8 @@ impl Parking {
 struct Ahead {
     bound: AtomicU64,
     flags: AtomicU64,
-    /// The prepared-proc key of the last box of no owner, which each init parked ahead has its proc made for.
+    /// The prepared-proc key of the last box of no owner to choose its cgroup, which each init parked ahead has its
+    /// proc made for: set before that box takes one, so the refill its take wakes reads it.
     proc_key: Mutex<Option<procmount::Key>>,
     ready: Mutex<VecDeque<(u64, BoxCgroup)>>,
     /// Signalled when a slot is taken, the flags are first known, or the node is going.
@@ -968,6 +974,11 @@ impl<'a> Choice<'a> {
 impl Choose for Choice<'_> {
     fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError> {
         let policy: Policy = wants.program.map(<[Insn]>::to_vec);
+        if self.owner.is_none()
+            && let Ok(mut key) = self.cgroups.ahead.proc_key.lock()
+        {
+            *key = wants.proc_key.cloned();
+        }
         let whose = Whose {
             owner: self.owner.map(|o| o.name.as_str()),
             reuse: self.owner.is_some_and(|o| o.reuse),
@@ -1032,7 +1043,7 @@ impl Choose for Choice<'_> {
                         policy: Some(policy),
                         killed: false,
                         park_flags: None,
-                        park_proc_key: None,
+                        park_proc_key: wants.proc_key.cloned(),
                     }))?;
                     return Ok(Chosen {
                         cgroup,
@@ -1047,6 +1058,7 @@ impl Choose for Choice<'_> {
                             .map_err(|r| self.refuse_create(r))?
                             .hand_on();
                         held.policy = Some(policy);
+                        held.park_proc_key = wants.proc_key.cloned();
                         self.record(Made::Slot(held))?;
                         return Ok(Chosen {
                             cgroup,
@@ -1072,33 +1084,31 @@ impl Choose for Choice<'_> {
         )))
     }
 
-    fn init_made(&self, flags: u64, proc_key: Option<procmount::Key>, claimed: bool) {
+    fn init_made(&self, flags: u64, claimed: bool) {
         if claimed {
             self.cgroups.parking.claimed.fetch_add(1, Ordering::Relaxed);
         }
-        // A box of no owner's flags and proc key are those the cgroups made ahead park their inits with; the
-        // first flags known start the refill.
-        if self.owner.is_none() {
-            if let Ok(mut key) = self.cgroups.ahead.proc_key.lock() {
-                key.clone_from(&proc_key);
-            }
-            if self.cgroups.ahead.flags.swap(flags, Ordering::Relaxed) != flags {
-                self.cgroups.ahead.want.notify_all();
-            }
+        // A box of no owner's flags are those the cgroups made ahead park their inits with; the first known
+        // starts the refill.
+        if self.owner.is_none() && self.cgroups.ahead.flags.swap(flags, Ordering::Relaxed) != flags
+        {
+            self.cgroups.ahead.want.notify_all();
         }
         if let Ok(mut made) = self.made.lock()
             && let Some(Made::Slot(held)) = made.as_mut()
         {
             held.park_flags = Some(flags);
-            held.park_proc_key = proc_key;
         }
     }
 
-    fn parked_proc(&self, hit: bool) {
-        let count = if hit {
-            &self.cgroups.parking.proc_hits
-        } else {
-            &self.cgroups.parking.proc_misses
+    fn parked_proc(&self, outcome: ParkedProc) {
+        let parking = &self.cgroups.parking;
+        let count = match outcome {
+            ParkedProc::Hit => &parking.proc_hits,
+            ParkedProc::Miss => &parking.proc_misses,
+            // Dry only means something where the node makes them.
+            ParkedProc::Dry if parking.procs.get().is_some() => &parking.proc_dry,
+            ParkedProc::Dry => return,
         };
         count.fetch_add(1, Ordering::Relaxed);
     }

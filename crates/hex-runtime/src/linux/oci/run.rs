@@ -339,9 +339,6 @@ pub struct PrunedCreate {
     /// Whether `proc_mount` is the one made for the init parked in the cgroup (decision 8, parked procs), so only a
     /// claim of that init takes it.
     pub proc_from_parked: bool,
-    /// The spec's prepared-proc key, when `procmount::eligible` gives one: what the next init parked for its owner
-    /// has its proc made for.
-    pub proc_key: Option<super::procmount::Key>,
     /// The node's empty read-only tmpfs, which the init clones for each masked directory.
     pub masked_directory: Option<OwnedFd>,
     pub binds: Vec<OwnedFd>,
@@ -438,6 +435,20 @@ pub struct Wants<'a> {
     /// Whether its process could change its own cgroup or what is attached to it
     /// ([`Spec::could_change_its_cgroup`]), so the cgroup it leaves can't be handed on.
     pub privileged: bool,
+    /// The spec's prepared-proc key ([`super::procmount::eligible`]), `None` where no proc made ahead can serve it:
+    /// what the init parked for the owner's next box has its proc made for (decision 8, parked procs).
+    pub proc_key: Option<&'a super::procmount::Key>,
+}
+
+/// What came of the proc made for the init parked in a create's cgroup (decision 8, parked procs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedProc {
+    /// The claimed init attached it, mounting no proc of its own.
+    Hit,
+    /// It ended unused (another key, no room for it, the claim refused): the init mounted its own.
+    Miss,
+    /// The claimed init had none, for a create one could have served: it mounted its own.
+    Dry,
 }
 
 /// A cgroup a caller chose for a container: made or handed on, its bounds in force either way, and
@@ -457,14 +468,13 @@ pub struct Chosen {
 pub trait Choose {
     fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError>;
 
-    /// The container's init was made with the namespaces `flags` (`clone3`'s `CLONE_NEW*` bits), by a claim of the
-    /// init parked in its cgroup when `claimed`, else by a clone, for a spec whose prepared-proc key is `proc_key`,
-    /// if it has one: what the caller parks for the owner's next box, the proc it makes for it, and counts.
-    fn init_made(&self, flags: u64, proc_key: Option<super::procmount::Key>, claimed: bool);
+    /// The container's init was made with the namespaces `flags` (`clone3`'s `CLONE_NEW*` bits), by a claim of
+    /// the init parked in its cgroup when `claimed`, else by a clone: what the caller parks for the owner's next
+    /// box, and counts.
+    fn init_made(&self, flags: u64, claimed: bool);
 
-    /// The proc made for the init parked in the cgroup (decision 8, parked procs) was taken by the create when
-    /// `hit`, else left for its key or its room: counted.
-    fn parked_proc(&self, hit: bool);
+    /// What came of the proc made for the init parked in the cgroup (decision 8, parked procs): counted.
+    fn parked_proc(&self, outcome: ParkedProc);
 }
 
 /// An init made ahead in an idle cgroup (decision 8, "The p99.9 that stayed"): its pid in this process's pid
@@ -840,9 +850,14 @@ impl Runtime {
                     )
                 })?;
                 let program = held.wants(&plan, spec.in_user_namespace())?;
+                let proc_key = super::mount::plan(&spec.mounts)
+                    .ok()
+                    .and_then(|mounts| super::procmount::eligible(&spec, &mounts).ok())
+                    .map(|(_, key)| key);
                 let chosen = chooser.choose(&Wants {
                     program: program.as_deref(),
                     privileged: spec.could_change_its_cgroup(),
+                    proc_key: proc_key.as_ref(),
                 })?;
                 if let Some(insns) = program
                     && !chosen.attached
@@ -1115,26 +1130,26 @@ impl Runtime {
                             .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
                         if parked_takes {
                             let eligible = super::procmount::eligible(spec, &plan).ok();
-                            pruned.proc_key = eligible.as_ref().map(|(_, key)| key.clone());
-                            match (parked_proc, eligible) {
+                            let outcome = match (parked_proc, eligible) {
                                 (Some((made, proc)), Some((mount, key))) if room && made == key => {
                                     pruned.proc_mount = Some((mount, proc));
                                     pruned.proc_from_parked = true;
+                                    // Counted once the claim is known (start_via_seed).
+                                    None
                                 }
-                                // None made, so neither a take nor a miss.
-                                (None, _) => {}
-                                (Some(_), _) => {
-                                    if let Some(chooser) = parking.chooser {
-                                        chooser.parked_proc(false);
-                                    }
-                                }
+                                (None, Some(_)) if room => Some(ParkedProc::Dry),
+                                // None made, for a create none could serve: neither.
+                                (None, _) => None,
+                                (Some(_), _) => Some(ParkedProc::Miss),
+                            };
+                            if let (Some(outcome), Some(chooser)) = (outcome, parking.chooser) {
+                                chooser.parked_proc(outcome);
                             }
                         } else if !room {
                             pool.unpooled_proc(hex_core::devfs::Unpooled::Capacity)?;
                         } else {
                             match super::procmount::eligible(spec, &plan) {
                                 Ok((mount, key)) => {
-                                    pruned.proc_key = Some(key.clone());
                                     if let Some(proc) = pool.take_proc(key)? {
                                         pruned.proc_mount = Some((mount, proc));
                                     }
@@ -1354,7 +1369,6 @@ impl Runtime {
         let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
         Ok(PrunedCreate {
             proc_from_parked: false,
-            proc_key: None,
             bundle_dir,
             cgroup_dir,
             container_dir,
@@ -1421,7 +1435,6 @@ impl Runtime {
             (p.proc_mount.is_none() || p.proc_from_parked)
                 && p.mount_namespace == super::mntns::MountNamespace::Copy
         });
-        let proc_key = req.pruned.as_ref().and_then(|p| p.proc_key.clone());
         let claimed = match parked {
             Some(p) if p.flags == flags && takes_parked => seeds.claim(p, &req).ok(),
             _ => None,
@@ -1435,11 +1448,15 @@ impl Runtime {
                 p.proc_mount = None;
             }
             if let Some(chooser) = chooser {
-                chooser.parked_proc(claimed.is_some());
+                chooser.parked_proc(if claimed.is_some() {
+                    ParkedProc::Hit
+                } else {
+                    ParkedProc::Miss
+                });
             }
         }
         if let Some(chooser) = chooser {
-            chooser.init_made(flags, proc_key, claimed.is_some());
+            chooser.init_made(flags, claimed.is_some());
         }
         let (pid, pidfd) = match claimed {
             Some(started) => {
