@@ -46,8 +46,10 @@ untrace() {
   [ -d "$I" ] || return 0
   echo 0 > "$I/tracing_on" 2>/dev/null
   echo '!stacktrace' > "$I/events/sched/sched_switch/trigger" 2>/dev/null
-  for ev in sched_switch sched_waking sched_wakeup_new sched_process_fork sched_process_exit; do
-    echo 0 > "$I/events/sched/$ev/enable" 2>/dev/null
+  for ev in sched/sched_switch sched/sched_waking sched/sched_wakeup_new sched/sched_process_fork \
+            sched/sched_process_exit irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
+            workqueue/workqueue_execute_start workqueue/workqueue_execute_end; do
+    echo 0 > "$I/events/$ev/enable" 2>/dev/null
   done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
@@ -56,7 +58,7 @@ trap untrace EXIT
 
 mkdir "$I" || { echo "refusing: no trace instance $I" >&2; exit 4; }
 echo 0 > "$I/tracing_on"
-echo 4096 > "$I/buffer_size_kb"
+echo 8192 > "$I/buffer_size_kb"
 OURS='comm == "seam_oci" || comm ~ "hex*"'
 echo "prev_comm == \"seam_oci\" || prev_comm ~ \"hex*\" || next_comm == \"seam_oci\" || next_comm ~ \"hex*\"" \
   > "$I/events/sched/sched_switch/filter"
@@ -71,6 +73,11 @@ echo 'stacktrace if (prev_comm == "seam_oci" || prev_comm ~ "hex*") && prev_stat
   > "$I/events/sched/sched_switch/trigger" || { echo "refusing: the stacktrace trigger wasn't taken" >&2; exit 4; }
 for ev in sched_switch sched_waking sched_wakeup_new sched_process_fork sched_process_exit; do
   echo 1 > "$I/events/sched/$ev/enable" || { echo "refusing: sched/$ev wasn't enabled" >&2; exit 4; }
+done
+# Every CPU's interrupt work and kworkers' work items, unfiltered: what a run's time hides, and what preempts it.
+for ev in irq/softirq_entry irq/softirq_exit irq/irq_handler_entry irq/irq_handler_exit \
+          workqueue/workqueue_execute_start workqueue/workqueue_execute_end; do
+  echo 1 > "$I/events/$ev/enable" || { echo "refusing: $ev wasn't enabled" >&2; exit 4; }
 done
 # seam_oci's markers into the instance, with tracing_on a plain file so its toggles leave the instance on.
 mkdir -p /run/tailmark; : > /run/tailmark/tracing_on; ln -sfn "$I/trace_marker" /run/tailmark/trace_marker
