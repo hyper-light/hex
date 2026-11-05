@@ -32,6 +32,10 @@ harness = false
 name = "sched_packing"
 harness = false
 
+[[bench]]
+name = "sched_million"
+harness = false
+
 [dependencies]
 hex-sim.workspace = true
 
