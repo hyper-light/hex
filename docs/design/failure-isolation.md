@@ -1,0 +1,227 @@
+# Failure detection and isolation: a bound per fault class
+
+Scheduler implementation goal 5 (`scheduler-architecture.md` S8): how Hex finds bad nodes and
+workloads, how fast, and how it isolates them without letting a wrong verdict, or a right one about
+many nodes at once, take a cell down. Each decision has its sources, evidence and falsifier (CLAUDE.md
+§5). Sources are `docs/research/scheduler/failure-isolation.md` (`FI[n]`) and
+`proximity-and-failure-containment.md` (`PF[n]`).
+
+## What it is
+
+- `crates/hex-health`, a pure core (CLAUDE.md §9): every detector and penalty, fed observations stamped
+  with the caller's own time. It has no clock and no I/O, so hex-sim drives it in virtual time and a node
+  agent drives it with real probes, on one code path (§8).
+- `crates/hex-sim/src/membership.rs`: SWIM with Lifeguard, modelled, for the crash class and Lifeguard's
+  false-positive bar.
+- `crates/hex-sim/src/faults.rs`: the nemesis that injects each fault class into a simulated cell driving
+  hex-health, and measures each fault's detection and isolation time against its bound below.
+- The node's disk probe and drain, shown by a dm-delay drill (`AC-T7.10.3`).
+
+One graded level per node (`hex_health::Level`): `Suspect` stops new placements, `Drain` moves work
+off. Every verdict goes through the penalties (F6), which cap how much of a cell it may take.
+
+## The bounds
+
+Detection is the first instant the scheduler acts on the fault (stops placing on the node, holds the
+account, stops the session); isolation is the instant the fault can do no more (work moved, antagonist
+capped, session or workload stopped). Times are from the fault's start, in the model's own parameters,
+each named below.
+
+| Class | Injected | Detected when | Isolated when | Bound |
+|---|---|---|---|---|
+| Crash | a node stops answering | a member first suspects it (F1) | it is declared dead and its work is moved | suspicion ≤ 5 probe periods + probe timeout at p99, ≤ 2(n−1) periods + timeout at max; dead ≤ suspicion + suspicion max timeout + 1 period |
+| Gray / fail-slow | a node's work runs ≥ 2.5x slower than its peers' | `Suspect` (F2) | `Drain` | ≤ 2 windows (2 s) and ≤ 4 windows (4 s): under Panorama's 7 s (FI[4]) |
+| Disk stall | a node's probe write stops completing | `Suspect` (F3) | `Drain` | ≤ 1 timeout + 1 probe period and ≤ 3 timeouts + 1 period; the timeout is at least 1 s (1 s on a healthy fast disk) |
+| Antagonist | a co-tenant's CPU use doubles its neighbours' CPI | a victim with an antagonist correlated ≥ 0.35 (F4) | the antagonist capped | ≤ 3 CPI samples + 1 s (CPI²'s cadence: one a minute, so ≤ 181 s) |
+| Stuck tool loop | a session repeats a call without progress | the third identical call (F5) | the session stopped at it | at the 3rd call: 0 after it |
+| Quota shown as slowness | a provider answers rate limit or quota exhausted | the first typed error (F5) | the account held | at the first error; node suspicions = 0 |
+| Partial provider outage | a provider fails for most of its callers | the provider marked degraded (F5) | no work needing it placed | ≤ 2 windows (2 s); node suspicions = 0 |
+| Dangerous | a seccomp kill, ungranted egress or refused privilege gain | the signal (F7) | stopped, and restarted only in a stronger class, or refused | at the signal: 0 after it |
+
+And across classes (F6):
+
+| Bound | Value |
+|---|---|
+| nodes ejected or draining at once in a cell | ≤ max(1, ⌊10% of the cell⌋) for a cell of 2 or more; 0 for a cell of 1 |
+| nodes whose work is moved after failure | ≤ 0.1/s; ≤ 0.01/s when 55% (and at least 3) are down in a cell over 50 nodes; 0 when that happens in a cell of 50 or fewer |
+| load growth from retries | ≤ 1.1x the requests, ≤ 3 attempts each |
+| a crash-looping workload's restart delay | 10 s doubling to 300 s, reset after 10 minutes running |
+
+## Decisions
+
+### F1. Crash: SWIM with Lifeguard, on memberlist's constants
+
+**The choice.** Membership and crash detection are SWIM with Lifeguard, as hyper-swim runs them
+(`PF[5]`, `PF[9]`), on memberlist's LAN defaults (FI[2]): a probe a second, a 500 ms probe timeout, 3
+indirect probes, a suspicion timeout from `4 × max(1, log10 n)` periods up to 6 times that, shrinking as
+independent confirmations arrive (FI[3]), and Lifeguard's local health multiplier up to 8. A suspicion
+is a hint: the scheduler stops placing on a suspected node at once, and moves its work only once it is
+declared dead, through F6's caps. hex-sim models the protocol (`membership.rs`) rather than linking
+hyper-swim, so the crash class is measured beside the rest; the node agent's membership is hyper-swim's.
+
+**Sources.** SWIM's deterministic bound from round-robin probing (`PF[8]`); Lifeguard's 50-100x fewer
+false positives at a cost of about 1 s at p99 (FI[1]); memberlist's constants (FI[2], FI[3]).
+
+**Evidence.** `membership.rs`'s tests: the crash bound over 1,000 seeds, and with 4% of members slow,
+Lifeguard's false positives under 2% of SWIM's on the same seeds.
+
+**What would falsify it.** A crash suspected or declared dead past its bound; or with Lifeguard on, healthy
+members declared dead at more than 2% of SWIM's rate because of slow members.
+
+### F2. Gray and fail-slow: requesters' observations compared across peers
+
+**The choice.** Every piece of work a node does is reported by its requester as a slowdown: its time
+over what its class expects. Each 1 s window, a node with at least 5 observations whose median slowdown
+is at least twice the median of its peers' medians (at least 3 peers with evidence) is slow for the
+window: `Suspect` at once, `Drain` after 3 slow windows in a row (CPI²'s 3 flags, FI[9]), healthy again
+on a good window. Medians come from a fixed-size log histogram (4 buckets per power of two, so within 25%),
+so a node's history costs 1 KiB however busy it is. The median and the 25% quantisation together mean a
+node 2.5x or more slower is always caught; one between 2x and 2.5x may be.
+
+**Sources.** Gray failure is what requesters see and heartbeats don't (`PF[10]`, `PF[12]`); IASO and
+Perseus compare peers (FI[7], `PF[14]`); a graded verdict each consumer thresholds (FI[5]).
+
+**Evidence.** `hex-health` `grade` tests: a 3x-slow node suspected within 2 windows and drained within
+4; a cell-wide slowdown suspects nobody; too little evidence decides nothing. `faults.rs` measures it over
+1,000 seeds.
+
+**What would falsify it.** A ≥ 2.5x-slow node with evidence not suspected within 2 s or drained within 4
+s; or a healthy node suspected when the slowdown is cell-wide.
+
+### F3. Disk stall: the node's own write-and-flush probe, timed as RFC 6298 times a segment
+
+**The choice.** The node agent writes and flushes a record on its state disk every probe period. The
+write's timeout is RFC 6298's `SRTT + max(G, 4·RTTVAR)` over the probe's own completed latencies, at
+least 1 s and at most 60 s (FI[8]); a probe that outlived its timeout is no sample (Karn). The node is
+`Suspect` when the outstanding write outlives one timeout and `Drain` at the timer's second expiry, the
+first doubled (three timeouts), or after 3 completed probes in a row each slower than the timeout. A
+node that can't write its own disk stops being trusted as a crashed one does (hyper-raft's heartbeat
+after flush, `PF[26]`).
+
+**Sources.** FI[8]; `PF[26]`; FI[6] for why waiting for a human doesn't do (fail-slow found in hours to
+months).
+
+**Evidence.** `hex-health` `probe` tests, and `AC-T7.10.3`'s dm-delay drill (`bench/health/`), which
+stalls the node's disk under running work and records when it was marked, drained, and whether any work
+failed.
+
+**What would falsify it.** A drill in which work fails before the node is drained, or a healthy disk's
+ordinary flush latency suspected.
+
+### F4. Antagonists: CPI² as written
+
+**The choice.** CPI² (FI[9]) unchanged: a job's CPI spec from its tasks' samples (no management under 5
+tasks or 100 samples a task; tasks under 0.25 CPU-sec/sec ignored), an outlier above the 2σ point, a
+victim at 3 outliers in 5 minutes, at most one identification a second, the antagonist the co-tenant
+whose CPU use correlates best with the victim's CPI over 10 minutes by CPI²'s correlation, at least 0.35,
+capped at 0.01 CPU-sec/sec (best effort) or 0.1 for 5 minutes. The spec learns only from samples that
+aren't outliers, so interference doesn't teach the spec to accept it.
+
+**Evidence.** `hex-health` `antagonist` tests; `faults.rs` over 1,000 seeds.
+
+**What would falsify it.** An antagonist not capped within 3 samples and a second, or a bystander capped
+(correlated below 0.35 or not on the victim's node).
+
+### F5. Agent faults are charged to what caused them, never to the node
+
+**The choice.**
+- A stuck tool loop: a session that makes the same call (its tool and arguments, hashed) a third time
+  with no progress between is stopped, as is one that makes 256 different calls with none (the memory
+  bound, and itself a verdict). The repeat limit is chosen, not measured: MAST names step repetition and
+  its share (FI[16]) but gives no threshold, and kiln's recorded agent traces are what would set it (A4).
+- Quota shown as slowness: a provider's typed rate-limit or quota error holds the account (until its
+  retry-after, or until a call succeeds) at the first error, and is never a node observation.
+- A partial provider outage: overload, server errors and timeouts on a majority of a provider's callers
+  (at least 3) in a window mark the provider degraded; on one node while at least 3 peers' calls to it
+  succeed, that node's path. Provider errors never feed F2.
+
+**Sources.** FI[16]; FI[17] (typed 429s and 529s; overload "across all users").
+
+**Evidence.** `hex-health` `agent` tests; `faults.rs` injects each over 1,000 seeds and counts node
+suspicions from quota and outages, which must be 0.
+
+**What would falsify it.** A healthy session's trace with a third identical call and no progress; a node
+suspected for its provider's or account's fault; a provider outage not marked within 2 windows.
+
+### F6. Penalties escalate, forgive and are capped
+
+**The choice.**
+- A node's `Drain` ejects it from placement for 30 s times its consecutive ejections, up to 300 s,
+  forgiven one multiple per 30 s healthy; never past 10% of the cell, at least one in a cell of two or
+  more (Envoy's defaults and `always_eject_one_host`, FI[10]). A refused ejection leaves the node
+  `Suspect`: no new work, its running work kept.
+- Moving work off failed nodes is rate-limited: 0.1 nodes/s, 0.01/s once 55% (and at least 3) of a cell
+  over 50 nodes are down, none when that happens in a smaller cell (Kubernetes' defaults, FI[11]),
+  because a mass failure can't be told from a partition (Borg, FI[12]).
+- A crash-looping workload restarts after 10 s doubling to 300 s, reset after 10 minutes running
+  (FI[13]).
+- Retries: at most 3 attempts a request, and a client retries only while its retries in the last two
+  minutes are under 10% of its requests: load grows at most 1.1x (FI[14]).
+
+**Evidence.** `hex-health` `penalty` and `retry` tests; `faults.rs`'s correlated faults (a cell-wide
+gray fault, a partition losing most of a cell) never exceed the cap or the rate.
+
+**What would falsify it.** A run in which a cell has more nodes ejected or draining than the cap, or
+moves work faster than the rate; retries growing load past 1.1x.
+
+### F7. Dangerous workloads move to a stronger class or are refused
+
+**The choice.** A workload that trips a runtime security signal is stopped at once, and starts again
+only in the weakest class the cell offers that isolates more strongly than the one it tripped in
+(process, then OCI, then microVM), or is refused, typed. What trips: a seccomp kill, an egress attempt no
+grant names, a refused privilege gain. A call failed with an errno doesn't: profiles answer calls they
+don't support that way, and programs fall back.
+
+**Sources.** seccomp's typed actions (FI[18]); containers share the host kernel and microVMs don't
+(FI[19]). Which signals should trip is unresearched (FI §8): this is Hex's own choice.
+
+**Evidence.** `hex-health` `danger` tests; `faults.rs` measures each signal's isolation.
+
+**What would falsify it.** A tripped workload started again in its own class or a weaker one; a benign
+workload refused for errno'd calls.
+
+## Constants
+
+Each constant in hex-health, with its value and source; `doc_truth` in `crates/hex-health/tests/`
+holds this table to the code.
+
+| Constant | Value | Source |
+|---|---|---|
+| `probe::INITIAL_TIMEOUT_NS` | 1000000000 | RFC 6298 §2.1 (FI[8]) |
+| `probe::MIN_TIMEOUT_NS` | 1000000000 | RFC 6298 §2.4 (FI[8]) |
+| `probe::MAX_TIMEOUT_NS` | 60000000000 | RFC 6298 §2.5 (FI[8]) |
+| `probe::DRAIN_TIMEOUTS` | 3 | RFC 6298 §5.5, the timer doubled once (FI[8]) |
+| `probe::SLOW_STREAK` | 3 | CPI²'s 3 flags (FI[9]) |
+| `grade::WINDOW_NS` | 1000000000 | chosen: 2 and 4 windows fit Panorama's 7 s (FI[4]) |
+| `grade::MIN_OBSERVATIONS` | 5 | chosen: the fewest a median of which one outlier can't move |
+| `grade::MIN_PEERS` | 3 | chosen: two nodes can't say which of them is slow |
+| `grade::SLOW_FACTOR_MILLI` | 2000 | chosen; falsified by a missed 2.5x node or a suspected healthy one |
+| `grade::DRAIN_WINDOWS` | 3 | CPI²'s 3 flags (FI[9]) |
+| `penalty::BASE_EJECTION_NS` | 30000000000 | Envoy `base_ejection_time` (FI[10]) |
+| `penalty::MAX_EJECTION_NS` | 300000000000 | Envoy `max_ejection_time` (FI[10]) |
+| `penalty::MAX_EJECTION_PER_MILLE` | 100 | Envoy `max_ejection_percent` (FI[10]) |
+| `penalty::EVICTION_MILLI_PER_S` | 100 | Kubernetes `--node-eviction-rate` (FI[11]) |
+| `penalty::SECONDARY_EVICTION_MILLI_PER_S` | 10 | Kubernetes `--secondary-node-eviction-rate` (FI[11]) |
+| `penalty::UNHEALTHY_PER_MILLE` | 550 | Kubernetes `--unhealthy-zone-threshold` (FI[11]) |
+| `penalty::UNHEALTHY_MIN_NODES` | 3 | Kubernetes `--unhealthy-zone-threshold` "minimum 3" (FI[11]) |
+| `penalty::LARGE_CELL_NODES` | 50 | Kubernetes `--large-cluster-size-threshold` (FI[11]) |
+| `penalty::BACKOFF_BASE_NS` | 10000000000 | Kubernetes CrashLoopBackOff (FI[13]) |
+| `penalty::BACKOFF_CAP_NS` | 300000000000 | Kubernetes CrashLoopBackOff (FI[13]) |
+| `penalty::BACKOFF_RESET_NS` | 600000000000 | Kubernetes CrashLoopBackOff (FI[13]) |
+| `retry::MAX_ATTEMPTS` | 3 | SRE ch. 21 (FI[14]) |
+| `retry::RETRY_PER_MILLE` | 100 | SRE ch. 21 (FI[14]) |
+| `retry::BUCKET_NS` | 10000000000 | chosen: 12 buckets make SRE ch. 21's two minutes (FI[14]) |
+| `antagonist::MIN_JOB_TASKS` | 5 | CPI² §3 (FI[9]) |
+| `antagonist::MIN_TASK_SAMPLES` | 100 | CPI² §3 (FI[9]) |
+| `antagonist::MIN_CPU_MILLI` | 250 | CPI² §3 (FI[9]) |
+| `antagonist::SIGMAS` | 2 | CPI² §3 (FI[9]) |
+| `antagonist::VICTIM_FLAGS` | 3 | CPI² §3 (FI[9]) |
+| `antagonist::FLAG_WINDOW_NS` | 300000000000 | CPI² §3 (FI[9]) |
+| `antagonist::CORRELATION_WINDOW_NS` | 600000000000 | CPI² §4.1 (FI[9]) |
+| `antagonist::MIN_CORRELATION_MILLI` | 350 | CPI² §4.1 (FI[9]) |
+| `antagonist::IDENTIFY_GAP_NS` | 1000000000 | CPI² §4.2 (FI[9]) |
+| `antagonist::BEST_EFFORT_CAP_MILLI` | 10 | CPI² §4.2 (FI[9]) |
+| `antagonist::CAP_MILLI` | 100 | CPI² §4.2 (FI[9]) |
+| `antagonist::THROTTLE_NS` | 300000000000 | CPI² §4.2 (FI[9]) |
+| `agent::REPEAT_LIMIT` | 3 | chosen, to be set from kiln's agent traces (A4; FI §8) |
+| `agent::MAX_DISTINCT_CALLS` | 256 | the memory bound per session |
