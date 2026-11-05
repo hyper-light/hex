@@ -1795,6 +1795,121 @@ container-creation throughput (`oci-runtimes-and-fast-start.md` §4.2, S12, S13)
 
 **What would falsify it.** The mount setup measured at under a tenth of create on a 7.x host.
 
+**The update (goal 6, 2026-11-04).** Read from the kernel at v7.0 and v7.1 (`goal6-mntns.md`), the two calls do less
+for Hex than crun's figures suggest. crun's 0.343 to 0.044 ms is `unshare` plus `pivot_root` against the call, and goal
+5's pruned seed already took both off create's path on 6.19. What they still take is mount-lock holds, and the seed's
+pruning. Per create, for the root (`goal6-mntns.md` §4): the pruned path takes 5 write holds of `namespace_sem` a
+lifecycle, one in the init's part 19. `CLONE_EMPTY_MNTNS` also takes 5, copying one mount where the pruned copy takes
+two. `OPEN_TREE_NAMESPACE` made from the rootfs's own path takes 3, still one in part 19 (the propagation change the
+copy needs, §1). A layered root through `fsmount(FSMOUNT_NAMESPACE)` (7.1) takes 1, none in part 19. So the change is
+made in two parts.
+
+- **Part 1: the namespace from the tree, detected at runtime.** On a root node, a create the pruned seed can serve
+  gets its mount namespace one of three ways, chosen once per node:
+  - **From its tree** (`MountNamespace::OpenTree`, Linux 7.0 and later). The agent makes the namespace in its own
+    mount namespace, where the host's paths are reachable. A directory root uses `open_tree(path, OPEN_TREE_NAMESPACE |
+    AT_RECURSIVE)` on the rootfs's path. A layered root's overlay uses `fsmount(FSMOUNT_NAMESPACE)` where the kernel
+    has it (7.1), else `OPEN_TREE_NAMESPACE` on the `fsmount`'s mount. It hands the namespace to the seed in place of
+    the rootfs's tree. The seed clones the init without `CLONE_NEWNS`, and the init joins the namespace with
+    `setns(CLONE_NEWNS)`, which takes no lock and leaves it at the container's root with only nullfs beneath
+    (`goal6-mntns.md` §1). Its first act on a directory root is the rootfs's propagation: recursively slave or
+    private, as the agent sets it on the pruned path's clone today, before anything is mounted beneath. Then it builds
+    the spec's mounts as the pruned init does, on descriptors. It needs no `chroot`: `setns` set its root.
+  - **Empty** (`MountNamespace::Empty`, Linux 7.1 and later). The seed clones the init with `CLONE_EMPTY_MNTNS` in
+    place of `CLONE_NEWNS`. Everything else is the pruned path's: the init attaches the agent's rootfs tree on the
+    namespace's nullfs root and `chroot`s into it. The seed learns the kernel lacks the flag from its first such
+    clone's `EINVAL` (§6), takes `CLONE_NEWNS` from then on, and the create goes on: one refused `clone3` per seed's
+    life, counted.
+  - **Pruned** (`MountNamespace::Pruned`), goal 5's, on every kernel. Every create that took the classic path before
+    still takes it (`ClassicReason`): this changes how a pruned-eligible create's namespace is made, not which creates
+    are eligible.
+
+  The node probes for `OPEN_TREE_NAMESPACE` once at start with an `open_tree` that makes nothing (an empty path at
+  descriptor -1: `EBADF` where the call is there, `EINVAL` where it isn't, `EPERM` where the agent may not;
+  `goal6-mntns.md` §6). The default is the path the record shows fastest. Until a 7.x host has measured them, it is
+  `OpenTree` where the probe finds it, by the hold count above. A node's owner may ask for another (`HEX_OCI_MNTNS`:
+  `copy`, `empty` or `tree`, the bench's A/B). A namespace from its tree asked where the probe doesn't find it is
+  refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
+  create is counted under the way its seed answers it was made (`Node::mount_namespaces_made`), so that fallback
+  shows, beside `ClassicReason`'s counts.
+- **Part 2: the namespace built whole, for the under-load bar.** Part 19 with Docker's default masked and read-only
+  paths is 119 calls, 28 write holds and 4 superblocks a create. Its p99 is 1.08-2.31 ms at 6 and 12 busy loops
+  (`goal5-mounts.md` §11). Part 1 takes at most one of those holds. Cutting holds alone was tried on 6.19 and
+  falsified (L1, §10), and moving superblocks to the seed during the create didn't help the whole create (§13). Under
+  another tenant's load, the tail is the init's CPU work and every point where it blocks. So the lever is to take the
+  work out of the init, not to move it beside the init.
+  - `setns` into a namespace takes no lock. Everything a namespace can hold before the init's clone can be made off
+    the create's path: the kernel filesystems with their masks and read-only paths, for namespaces made ahead.
+  - The network namespace is made ahead already (decision 4), and so are ipc and uts (goal 5 extended step 4).
+    A pid namespace can be made before its init: `unshare(CLONE_NEWPID)` changes only the caller's children's
+    namespace, and the seed already enters a pid namespace for its children by `setns`. Proc mounts for it by
+    `pidns=`, and from Linux 7.1 the namespace can be opened before its init exists (`goal6-mntns.md` §7).
+  - So a pool, like the `/dev` pool (`goal5-mounts.md` §6), prepares per entry a pid namespace and the trees that
+    depend on the namespaces made ahead:
+    - its proc, with the spec's masks and read-only paths already on it;
+    - sysfs for the pooled network namespace, with its masks;
+    - the `/dev` it already makes.
+  - At create, the init joins the pid namespace through the seed's clone and attaches each prepared tree with one
+    `move_mount`: about 5 holds and no superblock in part 19, in place of 28 and 4.
+  - The pool is the `/dev` pool's core (`hex_core::devfs::Pool`: four keys, eight fresh entries each, nothing reused),
+    filled by the same worker. A spec is served (`procmount::eligible`) when it makes a pid namespace of its own and
+    has one proc at `/proc` with no other mount at or beneath it, and no mask or read-only path of `/proc` itself or
+    reached through `..`. Each miss is counted by a fixed reason (`PidNamespace` and `Beneath` join the `/dev` pool's),
+    and the create makes its own.
+  - The worker makes the pid namespace by `unshare(CLONE_NEWPID)` on its own thread, which changes only that
+    thread's children's namespace, then sets it back. It mounts proc for it by `pidns=`, then puts the masks and
+    read-only paths on the detached proc as the pruned init does.
+    - One difference: a file's mask binds the host's `/dev/null`, made private, as runc and crun bind it. The pruned
+      init binds the container's own, which doesn't exist before the create.
+    - A target reached through a symbolic link fails the make, so the create keeps ordinary construction.
+  - The seed joins the pid namespace (`setns(CLONE_NEWPID)`), clones the init without `CLONE_NEWPID`, so the init is
+    its pid 1, and sets its children's namespace back to its own. A seed that can't set it back ends the init and is
+    replaced.
+  - The descriptors (the namespace and the tree) ride in the create's kind 0x0004, within `SCM_MAX_FD`.
+  - It needs Linux 7.1. Through 7.0 the kernel won't hand over a pid namespace with no process in it
+    (`goal6-mntns.md` §7), so the worker's first make fails. The pool then stops for good, counted
+    (`MakeFailure::Namespace`), and creates keep ordinary construction. On 7.1 and later it serves the pruned path
+    whichever way the namespace is made.
+
+- **Masked directories without a superblock each, on every kernel.** A root node keeps one empty read-only tmpfs for
+  its life. Every init clones it for each masked directory, in place of a tmpfs of its own, as crun binds one empty
+  directory (`goal6-mntns.md` §8). On the pruned path it rides with the create as one descriptor more (kind 0x0004).
+  Through the shim it is named to the init by its descriptor's path, as the prepared `/dev` is. Procs made ahead
+  clone the same one.
+  - With Docker's paths on fedora that takes 3 superblocks a create off the path. Each superblock takes
+    `list_lrus_mutex` and `shrinker_mutex` host-wide (step 6, `create_serial.md` run 23: 7.27% + 1.09% + 1.45% of
+    samples at c32).
+  - The trade: a clone takes the mount lock once, where `fsmount` takes none, so a masked directory's two holds
+    replace one hold and a superblock.
+  - A container with a user namespace of its own keeps a tmpfs per mask, made in its namespace. So does a create
+    with no room left for the descriptor.
+
+**The tests** (Hex's IDs):
+- HEX-MNTNS-1, the probe: each refusal the kernel gives maps to the support it means (unit).
+- HEX-MNTNS-2, from its tree: on a root node with the call, a pruned-eligible create is counted `OpenTree`. Its
+  init's root is the rootfs with nullfs beneath, and the agent's mount table is unchanged during and after
+  (`oci_box`, as root, in the 7.x lab).
+- HEX-MNTNS-3, empty: likewise `Empty` on 7.1. On a kernel without the flag, the create succeeds with the seed's copy,
+  and the fallback is counted.
+- HEX-MNTNS-4, containment: `escapes_are_contained` and the shared-source leak test pass on each way.
+- HEX-MNTNS-5, the bench: goal 0's seam driver shows create p50 on the new path below the classic path's in the same
+  run, on a host with Linux 7.0 or later.
+- HEX-MNTNS-6, the proc made ahead: a spec's masks and read-only paths beneath `/proc` come with it, as ordinary
+  construction makes them; the init is its namespace's pid 1; each ineligible spec is counted by its reason (unit and
+  `oci_box`).
+- HEX-MNTNS-8, masked directories: every masked directory of every box on a root node is one filesystem, the
+  node's, on the pruned path and through the shim (`oci_box`, as root, on 6.19 and 7.2).
+- HEX-MNTNS-7, Ada's under-load bar: part 19's p99 at most 0.5 ms at 8 in flight with 8,000 idle threads, at 6 and 12
+  busy loops at nice 0 on the same cores, with Docker's default paths, and the whole create's p99 lower with it; no
+  priority, nice, RT or slice change.
+
+**What would falsify the update.**
+- `OpenTree`'s create p50 not below the pruned path's in an interleaved A/B on a 7.x host would make the pruned path
+  (or `Empty`) the default.
+- A shared source's mount reaching the agent from a container on either new way would falsify their containment.
+- For part 2: part 19's p99 under 6 and 12 loops not falling below the bar with the prepared trees, or the whole
+  create's p99 not falling with it. Either would falsify the claim that the tail is the init's own work.
+
 ### 7. The process class: no wrapper per box
 
 **The choice.** Through the `Runtime` seam, the node agent's helper clones a box's program straight into its

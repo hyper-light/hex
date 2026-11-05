@@ -1,28 +1,51 @@
-//! The worker around the bounded pure `/dev` pool. Each prepared tmpfs is detached and owned by one
-//! create; nothing is cloned or returned after use (goal 5 extended step 3).
+//! The worker around the bounded pure pools of mounts made ahead: `/dev` tmpfs (goal 5 extended step 3) and
+//! proc with its masks and read-only paths, for a pid namespace made ahead (decision 6's update, part 2).
+//! Each prepared mount is detached and owned by one create; nothing is cloned or returned after use.
 use hex_api::Refusal;
 use hex_core::devfs::{Counts, MakeFailure, Pool};
+use hex_runtime::linux::oci::init::{PreparedProc, ProcSources};
 use hex_runtime::linux::oci::run::DevMounts;
-use hex_runtime::linux::oci::{OciError, devmount::Key, init};
-use std::os::fd::OwnedFd;
+use hex_runtime::linux::oci::{OciError, devmount::Key, init, procmount};
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 pub struct Devfs {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
+    /// Whether each pool makes ahead, as started: `/dev`'s and the procs'.
+    enabled: (bool, bool),
+    /// Whether this is a root node's, which keeps the mask sources.
+    root: bool,
 }
 struct Shared {
     pool: Mutex<Pool<Key, OwnedFd>>,
+    procs: Mutex<Pool<procmount::Key, PreparedProc>>,
+    /// What masks bind, opened once for the node's life on a root node (a rootless one can't make the empty
+    /// tmpfs): a prepared proc's masks, and every init's masked directories ([`DevMounts::masked_directory`]).
+    sources: Option<ProcSources>,
     wake: Condvar,
 }
 impl Devfs {
-    pub fn start(enabled: bool) -> Result<Self, Refusal> {
+    /// The worker for the `/dev` pool, made ahead where `dev`, and the proc pool where `procs`; a disabled
+    /// pool counts every take a disabled miss. A `root` node keeps the mask sources whether or not either pool
+    /// makes ahead, since every init's masked directories clone its empty tmpfs.
+    pub fn start(dev: bool, procs: bool, root: bool) -> Result<Self, Refusal> {
+        let sources = if root {
+            Some(
+                ProcSources::open()
+                    .map_err(|e| Refusal::os("opening the prepared procs' mask sources", e))?,
+            )
+        } else {
+            None
+        };
         let shared = Arc::new(Shared {
-            pool: Mutex::new(Pool::new(enabled)),
+            pool: Mutex::new(Pool::new(dev)),
+            procs: Mutex::new(Pool::new(procs)),
+            sources,
             wake: Condvar::new(),
         });
-        let worker = if enabled {
+        let worker = if dev || procs {
             let s = Arc::clone(&shared);
             Some(
                 std::thread::Builder::new()
@@ -33,7 +56,12 @@ impl Devfs {
         } else {
             None
         };
-        Ok(Self { shared, worker })
+        Ok(Self {
+            shared,
+            worker,
+            enabled: (dev, procs),
+            root,
+        })
     }
     pub fn counts(&self) -> Result<Counts, Refusal> {
         self.shared
@@ -41,6 +69,20 @@ impl Devfs {
             .lock()
             .map(|p| p.counts())
             .map_err(|_| Refusal::Broken("the prepared /dev pool lock was poisoned".to_owned()))
+    }
+
+    /// Whether the `/dev` pool and the proc pool make ahead, as started, and whether the node is root's.
+    pub fn enabled(&self) -> (bool, bool, bool) {
+        (self.enabled.0, self.enabled.1, self.root)
+    }
+
+    /// What the prepared proc pool has done (decision 6's update, part 2).
+    pub fn proc_counts(&self) -> Result<Counts, Refusal> {
+        self.shared
+            .procs
+            .lock()
+            .map(|p| p.counts())
+            .map_err(|_| Refusal::Broken("the prepared proc pool lock was poisoned".to_owned()))
     }
 }
 impl DevMounts for Devfs {
@@ -65,57 +107,156 @@ impl DevMounts for Devfs {
         self.shared.wake.notify_one();
         Ok(taken)
     }
+
+    fn masked_directory(&self) -> Option<BorrowedFd<'_>> {
+        self.shared.sources.as_ref().map(ProcSources::empty)
+    }
+
+    fn take_proc(&self, key: procmount::Key) -> Result<Option<PreparedProc>, OciError> {
+        let (taken, discarded) = self
+            .shared
+            .procs
+            .lock()
+            .map_err(|_| OciError::Broken("the prepared proc pool lock was poisoned".to_owned()))?
+            .take(key)
+            .map_err(|e| OciError::Broken(e.to_string()))?;
+        drop(discarded);
+        // The worker checks this pool holding `/dev`'s lock, the condition's, so taking that lock before
+        // the wake means the wake can't fall between its check and its wait.
+        drop(self.shared.pool.lock());
+        self.shared.wake.notify_one();
+        Ok(taken)
+    }
+
+    fn unpooled_proc(&self, reason: hex_core::devfs::Unpooled) -> Result<(), OciError> {
+        self.shared
+            .procs
+            .lock()
+            .map_err(|_| OciError::Broken("the prepared proc pool lock was poisoned".to_owned()))?
+            .unpooled(reason)
+            .map_err(|e| OciError::Broken(e.to_string()))
+    }
 }
 impl Drop for Devfs {
     fn drop(&mut self) {
         let held = self.shared.pool.lock().map(|mut p| p.shut_down());
         drop(held);
+        let procs = self.shared.procs.lock().map(|mut p| p.shut_down());
+        drop(procs);
         self.shared.wake.notify_all();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 }
+/// One job at a time, `/dev`'s first, then the procs'. Each pool's lock is held only to take a job and
+/// to hand back what it made.
 fn refill(shared: &Shared) {
     loop {
-        let Ok(mut pool) = shared.pool.lock() else {
-            return;
-        };
-        while !pool.closed() && !pool.wants_work() {
-            pool = match shared.wake.wait(pool) {
-                Ok(p) => p,
-                Err(_) => return,
+        if let Some(job) = match wait_for_work(shared) {
+            Work::Dev(job) => Some(job),
+            Work::Proc(job) => {
+                let made = match &shared.sources {
+                    Some(sources) => init::prepare_proc(job.key(), sources),
+                    None => Err(OciError::Broken(
+                        "a proc job on a node whose proc pool is disabled".to_owned(),
+                    )),
+                };
+                // A failure is an optimization miss, counted, as `/dev`'s: the create makes its own. A
+                // kernel that won't hand over a pid namespace with no process in it yet (below Linux 7.1,
+                // `goal6-mntns.md` §7) can make none: the pool stops for good rather than fail each take.
+                let unsupported = matches!(
+                    &made,
+                    Err(OciError::Os {
+                        op: init::PID_NAMESPACE_AHEAD,
+                        ..
+                    })
+                );
+                let Ok(mut procs) = shared.procs.lock() else {
+                    return;
+                };
+                let discarded = procs.complete(
+                    job,
+                    made.map_err(|_| {
+                        if unsupported {
+                            MakeFailure::Namespace
+                        } else {
+                            MakeFailure::Filesystem
+                        }
+                    }),
+                );
+                let held = if unsupported {
+                    procs.disable()
+                } else {
+                    Vec::new()
+                };
+                drop(procs);
+                drop((discarded, held));
+                None
+            }
+            Work::Done => return,
+        } {
+            let k = job.key();
+            let made = init::prepare_dev(&k.source, &k.data, k.flags);
+            // A preparation failure is an optimization miss: counted, with no retry until a new take.
+            // The requesting create always runs ordinary setup when dry, preserving its typed refusal.
+            let Ok(mut pool) = shared.pool.lock() else {
+                return;
             };
+            let discarded = pool.complete(
+                job,
+                made.map_err(|e| match e {
+                    OciError::Os {
+                        op: "making a device" | "setting a device's mode",
+                        ..
+                    } => MakeFailure::Device,
+                    OciError::Os {
+                        op: "preparing a /dev link",
+                        ..
+                    } => MakeFailure::Link,
+                    _ => MakeFailure::Filesystem,
+                }),
+            );
+            drop(pool);
+            drop(discarded);
         }
+    }
+}
+
+enum Work {
+    Dev(hex_core::devfs::Job<Key>),
+    Proc(hex_core::devfs::Job<procmount::Key>),
+    Done,
+}
+
+/// Waits until either pool wants a make, or both are shut, and reserves the job. The wait is on `/dev`'s
+/// lock, which every take and shutdown notifies after.
+fn wait_for_work(shared: &Shared) -> Work {
+    let Ok(mut pool) = shared.pool.lock() else {
+        return Work::Done;
+    };
+    loop {
         if pool.closed() {
-            return;
+            return Work::Done;
         }
-        let Some(job) = pool.next_job() else {
-            continue;
+        if pool.wants_work()
+            && let Some(job) = pool.next_job()
+        {
+            return Work::Dev(job);
+        }
+        match shared.procs.lock() {
+            Ok(mut procs) => {
+                if procs.wants_work()
+                    && let Some(job) = procs.next_job()
+                {
+                    return Work::Proc(job);
+                }
+            }
+            Err(_) => return Work::Done,
+        }
+        pool = match shared.wake.wait(pool) {
+            Ok(p) => p,
+            Err(_) => return Work::Done,
         };
-        drop(pool);
-        let k = job.key();
-        let made = init::prepare_dev(&k.source, &k.data, k.flags);
-        // A preparation failure is an optimization miss: counted, with no retry until a new take.
-        // The requesting create always runs ordinary setup when dry, preserving its typed refusal.
-        let Ok(mut pool) = shared.pool.lock() else {
-            return;
-        };
-        let discarded = pool.complete(
-            job,
-            made.map_err(|e| match e {
-                OciError::Os {
-                    op: "making a device" | "setting a device's mode",
-                    ..
-                } => MakeFailure::Device,
-                OciError::Os {
-                    op: "preparing a /dev link",
-                    ..
-                } => MakeFailure::Link,
-                _ => MakeFailure::Filesystem,
-            }),
-        );
-        drop(pool);
-        drop(discarded);
     }
 }

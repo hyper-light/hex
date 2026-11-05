@@ -911,6 +911,24 @@ mod linux {
             }
         }
 
+        /// The prepared proc pool's counters and the creates by how their mount namespace was made
+        /// (decision 6's update), in process only, as `/dev`'s.
+        fn proc_mounts(&self) -> Result<Option<(hex_core::devfs::Counts, [u64; 3])>, String> {
+            use hex_runtime::linux::oci::mntns::MountNamespace as W;
+            match self {
+                Self::InProcess(node) => node
+                    .proc_mounts()
+                    .map(|c| {
+                        Some((
+                            c,
+                            [W::Copy, W::Empty, W::FromTree].map(|w| node.mount_namespaces_made(w)),
+                        ))
+                    })
+                    .map_err(|e| e.to_string()),
+                Self::Socket { .. } => Ok(None),
+            }
+        }
+
         /// The node's network namespace counts: a node method in process, a call over the socket.
         fn netns(&self) -> Result<netns::Counts, String> {
             match self {
@@ -1122,11 +1140,20 @@ mod linux {
                         "the node agent (box root {}; the oci pass runs this as root in its privileged container): {e}",
                         root.display()
                     )
-                })
-                .with_oci_helper(PathBuf::from(hex));
+                });
+            // HEX_OCI_MNTNS: the way a pruned create's mount namespace is made, for decision 6's A/B;
+            // unset, the node's default.
+            let node = match std::env::var(hex_runtime::linux::oci::mntns::ENV_WAY) {
+                Ok(way) => node.with_mount_namespace(&way),
+                Err(_) => node,
+            }
+            .with_oci_helper(PathBuf::from(hex));
             let node = node
                 .with_prepared_dev_mounts(std::env::var("HEXBENCH_DEVFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"));
+                .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"))
+                // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
+                .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
+                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
             let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
                 Ok("0") => node
                     .with_ipc_uts_bound(0)
@@ -1165,6 +1192,7 @@ mod linux {
                 let netns_reuse_before = driver.netns_reuse();
                 let dev_before = driver.dev_mounts()?;
                 let ipc_uts_before = driver.ipc_uts()?;
+                let proc_before = driver.proc_mounts()?;
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
                     "lifecycle_nonet" => match &nonet_bundle {
@@ -1218,6 +1246,30 @@ mod linux {
                             "failed_device":after.failed_device-before.failed_device,
                             "failed_link":after.failed_link-before.failed_link,
                             "held_after":after.made-after.taken-after.discarded,
+                        }));
+                    }
+                    if let (Some((before, ways_before)), Some((after, ways))) =
+                        (proc_before, driver.proc_mounts()?)
+                    {
+                        fields.insert("proc_mounts".to_owned(), json!({
+                            "made":after.made-before.made, "taken":after.taken-before.taken,
+                            "on_path":after.on_path-before.on_path, "discarded":after.discarded-before.discarded,
+                            "failed":after.failed-before.failed, "cold":after.cold-before.cold,
+                            "dry":after.dry-before.dry, "disabled":after.disabled-before.disabled,
+                            "after_failure":after.after_failure-before.after_failure,
+                            "unpooled_missing":after.unpooled_missing-before.unpooled_missing,
+                            "unpooled_kind":after.unpooled_kind-before.unpooled_kind,
+                            "unpooled_key_bytes":after.unpooled_key_bytes-before.unpooled_key_bytes,
+                            "unpooled_capacity":after.unpooled_capacity-before.unpooled_capacity,
+                            "unpooled_pid_namespace":after.unpooled_pid_namespace-before.unpooled_pid_namespace,
+                            "unpooled_beneath":after.unpooled_beneath-before.unpooled_beneath,
+                            "failed_filesystem":after.failed_filesystem-before.failed_filesystem,
+                            "failed_namespace":after.failed_namespace-before.failed_namespace,
+                            "held_after":after.made-after.taken-after.discarded,
+                        }));
+                        fields.insert("mount_namespaces".to_owned(), json!({
+                            "copy":ways[0]-ways_before[0], "empty":ways[1]-ways_before[1],
+                            "tree":ways[2]-ways_before[2],
                         }));
                     }
                     if let Some(seeds_rose) = seeds_rose {

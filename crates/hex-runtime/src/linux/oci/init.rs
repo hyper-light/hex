@@ -49,6 +49,10 @@ pub const ENV_DEV_MOUNT: &str = "HEX_OCI_DEV_MOUNT";
 /// descriptor for it (`/proc/<pid>/fd/<n>`), which stays close-on-exec: the shim makes the container from it, never
 /// from the bundle's `config.json`, which may since hold a spec nobody checked (AC-T7.1.1).
 pub const ENV_CONFIG: &str = "HEX_OCI_CONFIG";
+/// The node's one empty read-only tmpfs (decision 6's update), by the path of the runtime's descriptor for it,
+/// which the shim opens as it opens the `/dev` made ahead: the container clones it for each masked directory in
+/// place of a tmpfs of its own.
+pub const ENV_MASKED_DIRECTORY: &str = "HEX_OCI_MASKED_DIRECTORY";
 
 /// The default device nodes a runtime makes in `/dev` (OCI spec §Default Devices), as
 /// (name in `/dev`, major, minor, mode); all character devices.
@@ -144,6 +148,17 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     // A `/dev` made ahead, opened by its path while this process's /proc is the runtime's, as the network
     // namespace is.
     let dev = prepared_dev()?;
+    let masked_directory = match std::env::var_os(ENV_MASKED_DIRECTORY) {
+        Some(path) => Some(
+            rustix::fs::open(
+                Path::new(&path),
+                OFlags::PATH | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|e| OciError::os("opening the masked directories' empty tmpfs", e))?,
+        ),
+        None => None,
+    };
 
     // The map pipe's end is read for a user namespace's maps, here, and for the hooks' state, by the
     // container; the shim closes it before the fork where the container has no hooks to stop for.
@@ -195,7 +210,11 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
                     sync,
                     procs,
                     made_ahead,
-                    Root::Classic(dev.as_ref(), map),
+                    Root::Classic {
+                        dev: dev.as_ref(),
+                        masked_directory: masked_directory.as_ref(),
+                        map,
+                    },
                 )
             }) {
                 Ok(()) => 0,
@@ -259,7 +278,11 @@ pub(crate) fn clone_child(
         sync,
         None,
         made_ahead,
-        Root::Classic(None, map.filter(|_| spec.hooks.sync_init())),
+        Root::Classic {
+            dev: None,
+            masked_directory: None,
+            map: map.filter(|_| spec.hooks.sync_init()),
+        },
     )
 }
 
@@ -276,12 +299,25 @@ pub(crate) fn clone_child_pruned(
     spec: &Spec,
     bundle: &str,
     fifo_dir: OwnedFd,
-    sources: PrunedSources,
+    mut sources: PrunedSources,
     sync: BorrowedFd<'_>,
     network: Option<OwnedFd>,
     ipc_uts: Option<Pair>,
 ) -> Result<(), OciError> {
     lead_session()?;
+    // A namespace made from the rootfs's tree is joined first, before anything else the init does, so
+    // nothing happens in the seed's namespace, which the init shares until then (cloned without
+    // `CLONE_NEWNS`). `setns` takes no mount lock and sets the init's root and working directory to the
+    // namespace's topmost mount, the rootfs (`goal6-mntns.md` §1), whose root it then holds.
+    if sources.from_tree {
+        sys::setns(sources.rootfs.as_fd(), libc::CLONE_NEWNS)?;
+        sources.rootfs = rustix::fs::open(
+            "/",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening the joined namespace's root", e))?;
+    }
     // Join each network, ipc, uts or cgroup namespace the spec names by path, by the descriptor the
     // agent opened, in the spec's namespace order (the order the agent opened them). The pruned init
     // can't open the host path itself; a pid, user or mount namespace by path never reaches here.
@@ -352,7 +388,13 @@ impl FifoDir<'_> {
 /// in a copy of the seed's two-mount namespace and ends with `chroot`, with no `pivot_root` walk of the
 /// host's threads.
 pub(crate) enum Root<'a> {
-    Classic(Option<&'a super::run::PreparedDev>, Option<OwnedFd>),
+    Classic {
+        dev: Option<&'a super::run::PreparedDev>,
+        /// The node's empty read-only tmpfs, cloned for each masked directory where the shim was handed it.
+        masked_directory: Option<&'a OwnedFd>,
+        /// The map pipe's read end, held where the spec names create- or start-time hooks.
+        map: Option<OwnedFd>,
+    },
     Pruned(&'a PrunedSources),
 }
 
@@ -442,13 +484,17 @@ pub(crate) fn container(
     // container with no mount namespace of its own has no switch, and runs them once its world is made.
     let mut hooked = None;
     match root {
-        Root::Classic(dev, map) => {
+        Root::Classic {
+            dev,
+            masked_directory,
+            map,
+        } => {
             let mut before_switch = || {
                 hooked = create_hooks(spec, sync, map.as_ref())?;
                 Ok(())
             };
             if spec.makes_namespace("mount") {
-                setup_rootfs(spec, bundle, dev, &mut before_switch)?;
+                setup_rootfs(spec, bundle, dev, masked_directory, &mut before_switch)?;
             } else {
                 before_switch()?;
             }
@@ -862,6 +908,7 @@ fn setup_rootfs(
     spec: &Spec,
     bundle: &str,
     dev: Option<&super::run::PreparedDev>,
+    masked_directory: Option<&OwnedFd>,
     before_switch: &mut dyn FnMut() -> Result<(), OciError>,
 ) -> Result<(), OciError> {
     let rootfs = {
@@ -928,7 +975,7 @@ fn setup_rootfs(
     // write the root and reach the host's paths.
     before_switch()?;
     for path in &spec.linux.masked_paths {
-        mask_path(&root, path)?;
+        mask_path(&root, path, masked_directory)?;
     }
     for path in &spec.linux.readonly_paths {
         readonly_path(&root, path)?;
@@ -960,13 +1007,49 @@ fn setup_rootfs(
 /// step 2): the rootfs and one detached tree per bind mount, in the order the spec lists its bind
 /// mounts. The clone child attaches them with `move_mount`, so nothing of the host is read by path.
 pub(crate) struct PrunedSources {
+    /// The rootfs's detached tree; or, where `from_tree`, the mount namespace the agent made from it,
+    /// which the init joins and then holds the root of here.
     pub rootfs: OwnedFd,
+    /// Whether the agent made the container's mount namespace from the rootfs's tree (decision 6's
+    /// update, `OPEN_TREE_NAMESPACE`): the init joins it by `setns`, its root already the container's.
+    pub from_tree: bool,
     pub dev_mount: Option<super::run::PreparedDev>,
     pub binds: Vec<OwnedFd>,
     /// One descriptor per network, ipc, uts or cgroup namespace the spec joins by path, in the spec's
     /// namespace order: the agent opened them (the pruned init can't reach the host path), and the init
     /// joins each by `setns`, deriving its kind from the spec in the same order.
     pub path_joins: Vec<OwnedFd>,
+    /// A proc made ahead and its index in the mount plan (decision 6's update, part 2): the init was
+    /// cloned into its pid namespace, attaches it whole, and makes none of the masks and read-only paths
+    /// beneath `/proc`, which it carries.
+    pub proc_mount: Option<(u32, PreparedProc)>,
+    /// The node's empty read-only tmpfs, cloned for each masked directory; `None` where none rode.
+    pub masked_directory: Option<OwnedFd>,
+}
+
+/// Masks the directory `target` with a clone of the node's one empty read-only tmpfs `empty`, as crun binds one
+/// empty directory for every masked directory (1.30.1 `src/libcrun/linux.c:1181-1210`, `:1266`): a clone makes
+/// no superblock, so none takes `list_lrus_mutex` or `shrinker_mutex` (step 6, `create_serial.md` runs 23-24).
+/// A fresh tmpfs's mount has no peer group, nor has its clone.
+fn clone_masked_directory(empty: BorrowedFd<'_>, target: BorrowedFd<'_>) -> rustix::io::Result<()> {
+    let clone = rustix::mount::open_tree(
+        empty,
+        "",
+        OpenTreeFlags::OPEN_TREE_CLONE
+            | OpenTreeFlags::AT_EMPTY_PATH
+            | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+    )?;
+    rustix::mount::move_mount(clone.as_fd(), "", target, "", FD_TO_FD)
+}
+
+/// The propagation a pruned create's rootfs takes before anything is mounted beneath it, so it leaves its
+/// source's peer group (`goal5-root.md` §9): slave where the spec asks for a slave or shared root (a slave
+/// keeps incoming host events; a final shared root gets a new peer group afterward), private otherwise.
+pub(crate) fn isolating_propagation(spec: &Spec) -> u64 {
+    match spec.linux.rootfs_propagation.as_deref() {
+        Some("slave" | "shared") => sys::MS_SLAVE,
+        _ => sys::MS_PRIVATE,
+    }
 }
 
 /// `move_mount` from one descriptor to another, each named by the descriptor itself (empty paths).
@@ -988,17 +1071,36 @@ const FD_TO_FD: MoveMountFlags =
 /// the host's namespace, because nothing of the host lies beneath the root (`goal5-root.md` §3): the
 /// escapes it opens there (E2, E3, a user-namespaced root) are closed.
 fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciError> {
-    rustix::mount::move_mount(
-        sources.rootfs.as_fd(),
-        "",
-        rustix::fs::CWD,
-        "/",
-        MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
-    )
-    .map_err(|e| OciError::os("attaching the rootfs", e))?;
+    let plan = crate::linux::oci::mount::plan(&spec.mounts)?;
+    if sources.from_tree {
+        // The namespace's tree is a copy of the rootfs's source, which keeps a shared source's peer
+        // group (`goal6-mntns.md` §1): it leaves the host's before anything is mounted beneath, as the
+        // agent sets the pruned path's clone (`run.rs`, `pruned_create`). A layered root's overlay is a
+        // fresh filesystem with no peer group, so it needs none.
+        if !plan.iter().any(|op| op.destination == "/" && !op.is_bind) {
+            sys::mount_setattr(
+                sources.rootfs.as_fd(),
+                true,
+                &sys::MountAttrs {
+                    set: 0,
+                    clr: 0,
+                    propagation: isolating_propagation(spec),
+                },
+            )
+            .map_err(|e| OciError::os("isolating the rootfs's propagation", e))?;
+        }
+    } else {
+        rustix::mount::move_mount(
+            sources.rootfs.as_fd(),
+            "",
+            rustix::fs::CWD,
+            "/",
+            MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH,
+        )
+        .map_err(|e| OciError::os("attaching the rootfs", e))?;
+    }
     let root = inroot::Root::new(sources.rootfs.as_fd());
 
-    let plan = crate::linux::oci::mount::plan(&spec.mounts)?;
     if let Some(dev) = &sources.dev_mount
         && !super::devmount::eligible(spec, &plan).is_ok_and(|(i, _)| i == dev.mount)
     {
@@ -1030,8 +1132,13 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
             .filter(|d| usize::try_from(d.mount).ok() == Some(index))
             .filter(|_| root.without_symlinks(&op.destination))
             .map(|d| &d.tree);
-        do_mount_pruned(&root, op, &mut binds, prepared)?;
         ready |= prepared.is_some();
+        let proc = sources
+            .proc_mount
+            .as_ref()
+            .filter(|(mount, _)| usize::try_from(*mount).ok() == Some(index))
+            .map(|(_, p)| &p.tree);
+        do_mount_pruned(&root, op, &mut binds, prepared.or(proc))?;
     }
     if binds.next().is_some() {
         return Err(OciError::Broken(
@@ -1043,11 +1150,14 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
     if !ready {
         make_dev(&root, spec, false)?;
     }
+    // A prepared proc carries the masks and read-only paths beneath `/proc` already.
+    let carried =
+        |path: &str| sources.proc_mount.is_some() && super::procmount::beneath_proc(path).is_some();
     let mut null = None;
-    for path in &spec.linux.masked_paths {
-        mask_path_pruned(&root, path, &mut null)?;
+    for path in spec.linux.masked_paths.iter().filter(|p| !carried(p)) {
+        mask_path_pruned(&root, path, &mut null, sources.masked_directory.as_ref())?;
     }
-    for path in &spec.linux.readonly_paths {
+    for path in spec.linux.readonly_paths.iter().filter(|p| !carried(p)) {
         readonly_path_pruned(&root, path)?;
     }
     if spec.root.readonly {
@@ -1076,9 +1186,12 @@ fn setup_rootfs_pruned(spec: &Spec, sources: &PrunedSources) -> Result<(), OciEr
         sys::exit_child(70);
     }
 
-    // The root switch, with no pivot_root: into the rootfs, then chroot there.
-    rustix::process::fchdir(&sources.rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
-    rustix::process::chroot(".").map_err(|e| OciError::os("chroot into the root", e))?;
+    // The root switch, with no pivot_root: into the rootfs, then chroot there. A joined namespace's
+    // `setns` made the rootfs the init's root already.
+    if !sources.from_tree {
+        rustix::process::fchdir(&sources.rootfs).map_err(|e| OciError::os("chdir rootfs", e))?;
+        rustix::process::chroot(".").map_err(|e| OciError::os("chroot into the root", e))?;
+    }
     rustix::process::chdir("/").map_err(|e| OciError::os("chdir /", e))?;
     if let Some(prop) = spec
         .linux
@@ -1214,6 +1327,65 @@ pub(crate) fn make_fs(
     data: &str,
     flags: MountFlags,
 ) -> Result<OwnedFd, OciError> {
+    let fs = fs_context(source, fstype, data, flags)?;
+    rustix::mount::fsmount(fs.as_fd(), FsMountFlags::FSMOUNT_CLOEXEC, attr_flags(flags))
+        .map_err(|e| OciError::os("fsmount", e))
+}
+
+/// A filesystem made as [`make_fs`] makes it, as the tree of a new mount namespace (decision 6's update):
+/// by `fsmount(FSMOUNT_NAMESPACE)` where the kernel has it (Linux 7.1), one hold of the mount lock and no
+/// detached mount left to dissolve (`goal6-mntns.md` §3); else the detached mount made a namespace by
+/// `open_tree(OPEN_TREE_NAMESPACE)` (7.0), whose mount then dissolves with its descriptor. A fresh
+/// filesystem's mount has no peer group, so the namespace's tree needs no propagation changed.
+pub(crate) fn make_fs_namespace(
+    source: &str,
+    fstype: &str,
+    data: &str,
+    flags: MountFlags,
+) -> Result<OwnedFd, OciError> {
+    let fs = fs_context(source, fstype, data, flags)?;
+    let namespace = FsMountFlags::from_bits_retain(
+        FsMountFlags::FSMOUNT_CLOEXEC.bits() | super::mntns::FSMOUNT_NAMESPACE,
+    );
+    match rustix::mount::fsmount(fs.as_fd(), namespace, attr_flags(flags)) {
+        Ok(ns) => Ok(ns),
+        // Below 7.1 fsmount refuses the flag before it makes anything (v7.0 `fs/namespace.c`, its flag
+        // check), so the context still waits for its mount.
+        Err(rustix::io::Errno::INVAL) => {
+            let mount = rustix::mount::fsmount(
+                fs.as_fd(),
+                FsMountFlags::FSMOUNT_CLOEXEC,
+                attr_flags(flags),
+            )
+            .map_err(|e| OciError::os("fsmount", e))?;
+            namespace_of(mount.as_fd(), Path::new(""))
+        }
+        Err(e) => Err(OciError::os("fsmount a namespace", e)),
+    }
+}
+
+/// A new mount namespace whose tree is a recursive copy of the tree at `path` beneath `dir` (empty: `dir`
+/// itself), by `open_tree(OPEN_TREE_NAMESPACE | AT_RECURSIVE)` (Linux 7.0, `goal6-mntns.md` §1): one hold
+/// of the mount lock, owned by this process's user namespace. The copy keeps a shared source's peer
+/// group; the init changes its propagation before it mounts anything beneath.
+pub(crate) fn namespace_of(dir: BorrowedFd<'_>, path: &Path) -> Result<OwnedFd, OciError> {
+    let mut flags = OpenTreeFlags::from_bits_retain(super::mntns::OPEN_TREE_NAMESPACE)
+        | OpenTreeFlags::AT_RECURSIVE
+        | OpenTreeFlags::OPEN_TREE_CLOEXEC;
+    if path.as_os_str().is_empty() {
+        flags |= OpenTreeFlags::AT_EMPTY_PATH;
+    }
+    rustix::mount::open_tree(dir, path, flags)
+        .map_err(|e| OciError::os("open_tree(OPEN_TREE_NAMESPACE)", e))
+}
+
+/// The filesystem context [`make_fs`] mounts: opened, its source, flags and options set, and created.
+fn fs_context(
+    source: &str,
+    fstype: &str,
+    data: &str,
+    flags: MountFlags,
+) -> Result<OwnedFd, OciError> {
     // The refill worker runs concurrently with helper execs: the context must not leak through
     // a seed/shim exec while this function is between fsopen and fsmount.
     let fs = rustix::mount::fsopen(fstype, FsOpenFlags::FSOPEN_CLOEXEC)
@@ -1240,8 +1412,7 @@ pub(crate) fn make_fs(
         }
     }
     rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| OciError::os("fsconfig create", e))?;
-    rustix::mount::fsmount(fs.as_fd(), FsMountFlags::FSMOUNT_CLOEXEC, attr_flags(flags))
-        .map_err(|e| OciError::os("fsmount", e))
+    Ok(fs)
 }
 
 /// Masks a path on the pruned path (goal 5 plan step 2): a directory with a read-only empty tmpfs, a
@@ -1252,6 +1423,7 @@ fn mask_path_pruned(
     root: &inroot::Root<'_>,
     path: &str,
     null: &mut Option<OwnedFd>,
+    masked_directory: Option<&OwnedFd>,
 ) -> Result<(), OciError> {
     let Some(target_fd) = root.open(path, Make::Nothing)? else {
         return Ok(());
@@ -1260,10 +1432,16 @@ fn mask_path_pruned(
         .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
         .map_err(|e| OciError::os("masking a path", format!("{path}: {e}")))?;
     if is_dir {
-        let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
-            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
-        rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
-            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+        match masked_directory {
+            Some(empty) => clone_masked_directory(empty.as_fd(), target_fd.as_fd())
+                .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
+            None => {
+                let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
+                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+                rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
+                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+            }
+        }
     } else {
         let null = match null {
             Some(fd) => fd,
@@ -1797,6 +1975,189 @@ fn unescape_mountpoint(field: &str) -> String {
         .replace("\\134", "\\")
 }
 
+/// [`prepare_proc`]'s failure to open the pid namespace it made, which a kernel below Linux 7.1 refuses while
+/// the namespace has no process (`pidns_for_children_get`, v6.19 `kernel/pid_namespace.c:372-379`; v7.1
+/// `:361-373` dropped the check): the node's worker reads it as a kernel that can make no proc ahead.
+pub const PID_NAMESPACE_AHEAD: &str = "opening a pid namespace made ahead";
+
+/// What every proc made ahead binds its masks from, opened once for the node's life: the host's `/dev/null`
+/// for a masked file, and one empty read-only tmpfs, detached, cloned for each masked directory. crun binds one
+/// empty directory for every masked directory alike (1.30.1 `src/libcrun/linux.c:1181-1210`, `:1266`): a
+/// clone makes no superblock, so none takes `list_lrus_mutex` or `shrinker_mutex` (step 6,
+/// `create_serial.md` runs 23-24).
+pub struct ProcSources {
+    null: OwnedFd,
+    empty: OwnedFd,
+}
+
+impl ProcSources {
+    /// The empty read-only tmpfs, which an init clones for each masked directory.
+    pub fn empty(&self) -> BorrowedFd<'_> {
+        self.empty.as_fd()
+    }
+
+    pub fn open() -> Result<Self, OciError> {
+        let null = rustix::fs::open("/dev/null", OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|e| OciError::os("opening /dev/null for the prepared procs", e))?;
+        let empty = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)?;
+        Ok(Self { null, empty })
+    }
+}
+
+/// A container's proc made ahead (decision 6's update, part 2): the pid namespace it shows and the detached
+/// proc tree, its masks and read-only paths on it.
+pub struct PreparedProc {
+    pub pid_namespace: OwnedFd,
+    pub tree: OwnedFd,
+}
+
+/// Makes a pid namespace and its proc ahead of a create, on the node's refill worker, with the masks and
+/// read-only paths `key` puts beneath `/proc` already on it, so the init attaches the whole with one
+/// `move_mount` and makes no superblock (`goal6-mntns.md` §7).
+/// - The pid namespace: `unshare(CLONE_NEWPID)` changes only this thread's children's namespace
+///   (`copy_pid_ns`, v7.1 `kernel/pid_namespace.c:175-183`), which is opened and then set back to the
+///   thread's own, so no other thread's and no later child's changes. It is empty until the init is cloned
+///   into it, its pid 1.
+/// - Proc for it by `pidns=` (`fs/proc/root.c:48`, `:115-160`), with the spec's options and flags.
+/// - Each mask and read-only path as the pruned init makes it ([`mask_path_pruned`],
+///   [`readonly_path_pruned`]), on the detached proc: a missing one skipped as there, a directory masked by a
+///   clone of the one empty read-only tmpfs the node keeps ([`ProcSources`]), so no mask makes a superblock, a
+///   file by the host's `/dev/null` (made private here, as runc and crun bind it), a read-only path by its own
+///   clone made read-only. A target reached through a symbolic link is
+///   refused, so the create keeps ordinary construction, which resolves it in the container's root.
+pub fn prepare_proc(
+    key: &super::procmount::Key,
+    sources: &ProcSources,
+) -> Result<PreparedProc, OciError> {
+    let null = sources.null.as_fd();
+    let own = rustix::fs::open(
+        "/proc/thread-self/ns/pid",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os("opening the worker's pid namespace", e))?;
+    sys::unshare(UnshareFlags::NEWPID)?;
+    let made = rustix::fs::open(
+        "/proc/thread-self/ns/pid_for_children",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| OciError::os(PID_NAMESPACE_AHEAD, e));
+    sys::setns(own.as_fd(), libc::CLONE_NEWPID)?;
+    let pid_namespace = made?;
+
+    let fs = rustix::mount::fsopen("proc", FsOpenFlags::FSOPEN_CLOEXEC)
+        .map_err(|e| OciError::os("fsopen", e))?;
+    rustix::mount::fsconfig_set_string(fs.as_fd(), "source", "proc")
+        .map_err(|e| OciError::os("a filesystem's source", e))?;
+    rustix::mount::fsconfig_set_fd(fs.as_fd(), "pidns", pid_namespace.as_fd())
+        .map_err(|e| OciError::os("proc's pid namespace", e))?;
+    for opt in key.data.split(',').filter(|s| !s.is_empty()) {
+        match opt.split_once('=') {
+            Some((k, v)) => rustix::mount::fsconfig_set_string(fs.as_fd(), k, v)
+                .map_err(|e| OciError::os("a filesystem option", format!("{opt}: {e}")))?,
+            None => rustix::mount::fsconfig_set_flag(fs.as_fd(), opt)
+                .map_err(|e| OciError::os("a filesystem flag", format!("{opt}: {e}")))?,
+        }
+    }
+    rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| OciError::os("fsconfig create", e))?;
+    let tree = rustix::mount::fsmount(
+        fs.as_fd(),
+        FsMountFlags::FSMOUNT_CLOEXEC,
+        attr_flags(key.flags),
+    )
+    .map_err(|e| OciError::os("fsmount", e))?;
+
+    let within = |rel: &str| -> Result<Option<OwnedFd>, OciError> {
+        match rustix::fs::openat2(
+            &tree,
+            rel,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            rustix::fs::ResolveFlags::BENEATH
+                | rustix::fs::ResolveFlags::NO_SYMLINKS
+                | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+        ) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(rustix::io::Errno::NOENT) => Ok(None),
+            Err(e) => Err(OciError::os(
+                "a prepared proc's target",
+                format!("{rel}: {e}"),
+            )),
+        }
+    };
+    for rel in &key.masked {
+        let Some(target) = within(rel)? else {
+            continue;
+        };
+        let is_dir = rustix::fs::fstat(&target)
+            .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir())
+            .map_err(|e| OciError::os("masking a path", format!("{rel}: {e}")))?;
+        let mount = if is_dir {
+            rustix::mount::open_tree(
+                &sources.empty,
+                "",
+                OpenTreeFlags::OPEN_TREE_CLONE
+                    | OpenTreeFlags::AT_EMPTY_PATH
+                    | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+            )
+            .map_err(|e| OciError::os("masking a directory", format!("{rel}: {e}")))?
+        } else {
+            let clone = rustix::mount::open_tree(
+                null,
+                "",
+                OpenTreeFlags::OPEN_TREE_CLONE
+                    | OpenTreeFlags::AT_EMPTY_PATH
+                    | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+            )
+            .map_err(|e| OciError::os("masking a file", format!("{rel}: {e}")))?;
+            sys::mount_setattr(
+                clone.as_fd(),
+                false,
+                &sys::MountAttrs {
+                    set: 0,
+                    clr: 0,
+                    propagation: sys::MS_PRIVATE,
+                },
+            )
+            .map_err(|e| OciError::os("masking a file", format!("{rel}: {e}")))?;
+            clone
+        };
+        rustix::mount::move_mount(mount.as_fd(), "", target.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("masking a path", format!("{rel}: {e}")))?;
+    }
+    for rel in &key.readonly {
+        let Some(target) = within(rel)? else {
+            continue;
+        };
+        let clone = rustix::mount::open_tree(
+            target.as_fd(),
+            "",
+            OpenTreeFlags::OPEN_TREE_CLONE
+                | OpenTreeFlags::AT_EMPTY_PATH
+                | OpenTreeFlags::AT_RECURSIVE
+                | OpenTreeFlags::OPEN_TREE_CLOEXEC,
+        )
+        .map_err(|e| OciError::os("a read-only path", format!("{rel}: {e}")))?;
+        sys::mount_setattr(
+            clone.as_fd(),
+            true,
+            &sys::MountAttrs {
+                set: sys::MOUNT_ATTR_RDONLY,
+                clr: 0,
+                propagation: 0,
+            },
+        )
+        .map_err(|e| OciError::os("a read-only path", format!("{rel}: {e}")))?;
+        rustix::mount::move_mount(clone.as_fd(), "", target.as_fd(), "", FD_TO_FD)
+            .map_err(|e| OciError::os("a read-only path", format!("{rel}: {e}")))?;
+    }
+    Ok(PreparedProc {
+        pid_namespace,
+        tree,
+    })
+}
+
 /// Makes a fresh detached tmpfs `/dev` with defaults, before any create can see it. Each node gets
 /// its exact mode through chmod: the worker must never change the multi-threaded agent's umask.
 pub fn prepare_dev(source: &str, data: &str, flags: MountFlags) -> Result<OwnedFd, OciError> {
@@ -2007,7 +2368,11 @@ fn make_default_links(root: &inroot::Root<'_>, dev: &OwnedFd) -> Result<(), OciE
 }
 
 /// A masked path is hidden: a directory gets a read-only empty tmpfs, a file a bind of /dev/null.
-fn mask_path(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
+fn mask_path(
+    root: &inroot::Root<'_>,
+    path: &str,
+    masked_directory: Option<&OwnedFd>,
+) -> Result<(), OciError> {
     let Some(target) = root.open(path, Make::Nothing)? else {
         return Ok(());
     };
@@ -2016,8 +2381,14 @@ fn mask_path(root: &inroot::Root<'_>, path: &str) -> Result<(), OciError> {
         .map_err(|e| OciError::os("masking a path", format!("{path}: {e}")))?;
     let at = inroot::fd_path(&target);
     if dir {
-        rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(c"size=0k"))
-            .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
+        match masked_directory {
+            Some(empty) => clone_masked_directory(empty.as_fd(), target.as_fd())
+                .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
+            None => {
+                rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(c"size=0k"))
+                    .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?
+            }
+        }
     } else {
         rustix::mount::mount_bind("/dev/null", &at)
             .map_err(|e| OciError::os("masking a file", format!("{path}: {e}")))?;

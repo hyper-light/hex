@@ -100,6 +100,12 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         None => Node::beside_self(&args.state, &args.state),
     }
     .map_err(failed)?;
+    // The way a pruned create's mount namespace is made, where its owner asks for one (decision 6's
+    // update); unset, the node's default.
+    let node = match std::env::var(hex_runtime::linux::oci::mntns::ENV_WAY) {
+        Ok(way) => node.with_mount_namespace(&way),
+        Err(_) => node,
+    };
     #[cfg(debug_assertions)]
     let node = match args.crash_at {
         Some(point) => node.with_crash_point(point),

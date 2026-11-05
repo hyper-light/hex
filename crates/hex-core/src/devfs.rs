@@ -32,10 +32,13 @@ pub struct Counts {
     pub unpooled_key_bytes: u64,
     pub unpooled_capacity: u64,
     pub unpooled_user_namespace: u64,
+    pub unpooled_pid_namespace: u64,
+    pub unpooled_beneath: u64,
     /// Fixed preparation stages; their sum is `failed`.
     pub failed_filesystem: u64,
     pub failed_device: u64,
     pub failed_link: u64,
+    pub failed_namespace: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -52,6 +55,8 @@ pub enum MakeFailure {
     Filesystem,
     Device,
     Link,
+    /// A prepared proc's pid namespace, which the kernel wouldn't hand over (decision 6's update, part 2).
+    Namespace,
 }
 
 /// Fixed reasons ordinary construction is required before a key can be requested. These are
@@ -69,6 +74,12 @@ pub enum Unpooled {
     /// A container with a user namespace of its own, made through the shim: the node's default nodes
     /// can't serve it, so it binds the host's in (goal 5 extended, step 3).
     UserNamespace,
+    /// A prepared proc (decision 6's update, part 2): the container has no pid namespace of its own for
+    /// one to be made ahead for.
+    PidNamespace,
+    /// A prepared proc: another mount at or beneath `/proc`, or a mask or read-only path of `/proc` itself
+    /// or reached through `..`, which ordinary construction orders against the proc.
+    Beneath,
 }
 
 #[derive(Clone, Copy)]
@@ -205,6 +216,8 @@ impl<K: Clone + Eq, T> Pool<K, T> {
             Unpooled::KeyBytes => &mut self.counts.unpooled_key_bytes,
             Unpooled::Capacity => &mut self.counts.unpooled_capacity,
             Unpooled::UserNamespace => &mut self.counts.unpooled_user_namespace,
+            Unpooled::PidNamespace => &mut self.counts.unpooled_pid_namespace,
+            Unpooled::Beneath => &mut self.counts.unpooled_beneath,
         };
         *count = count.saturating_add(1);
         Ok(())
@@ -263,6 +276,7 @@ impl<K: Clone + Eq, T> Pool<K, T> {
                     MakeFailure::Filesystem => &mut self.counts.failed_filesystem,
                     MakeFailure::Device => &mut self.counts.failed_device,
                     MakeFailure::Link => &mut self.counts.failed_link,
+                    MakeFailure::Namespace => &mut self.counts.failed_namespace,
                 };
                 *counter = counter.saturating_add(1);
                 if let Some(e) = e {
@@ -271,6 +285,19 @@ impl<K: Clone + Eq, T> Pool<K, T> {
                 None
             }
         }
+    }
+
+    /// Stops making for good, where the kernel can make none (decision 6's update, part 2: a pid namespace
+    /// made ahead can't be opened below Linux 7.1). What is held is handed back to drop, counted discarded;
+    /// every later take is a disabled miss and asks for nothing.
+    pub fn disable(&mut self) -> Vec<T> {
+        self.enabled = false;
+        let held: Vec<T> = self.entries.drain(..).flat_map(|e| e.ready).collect();
+        self.counts.discarded = self
+            .counts
+            .discarded
+            .saturating_add(u64::try_from(held.len()).unwrap_or(u64::MAX));
+        held
     }
 
     pub fn shut_down(&mut self) -> Vec<T> {
@@ -327,6 +354,26 @@ mod tests {
         let _ = p.shut_down();
         assert_eq!(p.held(), 0);
         assert_eq!(p.counts().made, p.counts().taken + p.counts().discarded);
+    }
+
+    /// HEX-MNTNS-6: take two keys, make one, then disable the pool as a kernel that can make none would.
+    /// Expect the held one handed back and counted discarded, no job asked for after, and each later take a
+    /// disabled miss that retains no key.
+    #[test]
+    fn a_disabled_pool_hands_back_what_it_held_and_asks_for_nothing() {
+        let mut p = Pool::<usize, usize>::new(true);
+        let _ = p.take(1).unwrap();
+        let _ = p.take(2).unwrap();
+        let j = p.next_job().unwrap();
+        assert!(p.complete(j, Ok(7)).is_none());
+        assert_eq!(p.disable(), vec![7]);
+        assert!(!p.wants_work());
+        assert!(p.next_job().is_none());
+        assert!(p.take(1).unwrap().0.is_none());
+        assert!(!p.wants_work());
+        let c = p.counts();
+        assert_eq!((c.made, c.discarded, c.disabled, c.cold), (1, 1, 1, 2));
+        assert_eq!(p.held(), 0);
     }
 
     /// AC-T7.1.4: make fails, key is evicted/recreated mid-make, then shutdown races completion.

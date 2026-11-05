@@ -431,6 +431,9 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     a_bundle_joining_a_namespace_by_path_runs_through_the_seam(&lab, own);
     a_box_root_counts_its_boxes_without_listing(&lab, own);
     escapes_are_contained(&lab, own);
+    mount_namespaces_made_each_way(&lab, own);
+    procs_made_ahead_carry_their_masks(&lab, own);
+    masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
     create_and_start_container_hooks_run_in_the_containers_namespaces(&lab, own);
@@ -1021,13 +1024,29 @@ fn escapes_are_contained(lab: &Lab, own: &Path) {
     }
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-escape"), state.path());
+    escapes_held_on(lab, &node, "esc");
+    // The pruned path served every escape box: none fell back to the shim (all eligible).
+    assert_eq!(
+        node.creates_through_shim(),
+        0,
+        "the escape boxes take the pruned path"
+    );
+    eprintln!(
+        "escapes contained: e0 userns allowed, e1/e2 marker unreached, e3 nested proc refused"
+    );
+}
+
+/// Runs each escape box (`hex selftest-box escape`, e0-e3) on `node`, ids prefixed `tag`, and holds each
+/// to exiting 0: e0 a nested user namespace allowed, e1 and e2 a root-only marker beside the rootfs
+/// unreached, e3 a nested proc past a mask refused.
+fn escapes_held_on(lab: &Lab, node: &Node, tag: &str) {
     // A marker only root can read, a sibling of the rootfs and so outside any box's root: a box that
     // opens it has reached the host.
     let marker = lab.bundles.path().join("escape-marker");
     std::fs::write(&marker, "hex-escape-marker").unwrap();
     let marker = marker.to_string_lossy().into_owned();
     for mode in ["e0", "e1", "e2", "e3"] {
-        let id = BoxId::new(&format!("esc-{mode}")).unwrap();
+        let id = BoxId::new(&format!("{tag}-{mode}")).unwrap();
         let spec = lab.running(
             id.clone(),
             &[
@@ -1052,23 +1071,351 @@ fn escapes_are_contained(lab: &Lab, own: &Path) {
         std::fs::write(bundle.join("config.json"), config).unwrap();
         node.create(spec).expect("create the escape box");
         node.start(&id).expect("start the escape box");
-        let info = wait_exit(&node, &id);
+        let info = wait_exit(node, &id);
         assert_eq!(
             info.exit,
             Some(Exit::Code(0)),
-            "escape {mode} is contained (the box held)"
+            "escape {mode} is contained on {tag} (the box held)"
         );
         node.delete(&id).expect("delete the escape box");
     }
-    // The pruned path served every escape box: none fell back to the shim (all eligible).
+}
+
+/// HEX-MNTNS-2, HEX-MNTNS-3, HEX-MNTNS-4 (decision 6's update, T-T7.1.4): ask a root node for each way of
+/// making a pruned create's mount namespace (copy, empty, from its tree, and none), make a box with a
+/// read-only `/usr` bind and run it, then the escape boxes. Expect each box counted under the way its seed
+/// made the namespace: from its tree where the probe finds the call (Linux 7.0) and the asked node refuses
+/// the create by type where it doesn't; empty on Linux 7.1 and the seed's copy below it (the seed's
+/// fallback, counted as made); the default the probe's. Expect `/usr` read-only and the root writable in
+/// each box, every escape held, no create through the shim, and the agent's own mount table the same
+/// after as before.
+fn mount_namespaces_made_each_way(lab: &Lab, own: &Path) {
+    use hex_runtime::linux::oci::mntns::{self, MountNamespace, OpenTreeNamespace};
+    if lab.rootless {
+        return;
+    }
+    let probe = mntns::probe().expect("probe open_tree(OPEN_TREE_NAMESPACE)");
+    let empty_here = kernel_at_least(7, 1);
+    eprintln!("probe {probe:?}");
+    let agent_before = agent_mount_points();
+    for (asked, want) in [
+        ("copy", Some(MountNamespace::Copy)),
+        (
+            "empty",
+            Some(if empty_here {
+                MountNamespace::Empty
+            } else {
+                MountNamespace::Copy
+            }),
+        ),
+        (
+            "tree",
+            if probe == OpenTreeNamespace::Available {
+                Some(MountNamespace::FromTree)
+            } else {
+                None
+            },
+        ),
+        ("default", Some(mntns::default_way(probe))),
+    ] {
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let node = Node::open(
+            &own.join(format!("hex-oci-mntns-{asked}")),
+            state.path(),
+            state.path(),
+        )
+        .expect("open a node");
+        let node = if asked == "default" {
+            node
+        } else {
+            node.with_mount_namespace(asked)
+        }
+        .with_oci_helper(PathBuf::from(&lab.exe));
+        let id = BoxId::new(&format!("mntns-{asked}")).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_with(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                "",
+            ),
+        )
+        .unwrap();
+        let made = node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        });
+        let Some(want) = want else {
+            assert!(
+                made.is_err(),
+                "a namespace from its tree asked where it can't be made is refused ({probe:?})"
+            );
+            continue;
+        };
+        made.unwrap_or_else(|e| panic!("create a box with its namespace made {asked}: {e}"));
+        node.start(&id).expect("start");
+        let (mi_exit, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let root_write = exit_in(&node, &id, &["/usr/bin/touch", "/written"]);
+        node.delete(&id).expect("delete");
+        assert_eq!(
+            node.mount_namespaces_made(want),
+            1,
+            "asked {asked}, the box's namespace was made {want:?}"
+        );
+        assert_eq!(node.creates_through_shim(), 0, "asked {asked}: no shim");
+        assert_eq!(mi_exit, Exit::Code(0), "read the box's mountinfo: {mi}");
+        let mounts = mountinfo(&mi);
+        let usr = mounts
+            .iter()
+            .rev()
+            .find(|(point, ..)| point == "/usr")
+            .unwrap_or_else(|| panic!("/usr in the box made {asked}: {mi}"));
+        assert!(
+            usr.1.split(',').any(|o| o == "ro"),
+            "/usr read-only: {usr:?}"
+        );
+        assert_eq!(
+            root_write,
+            Exit::Code(0),
+            "asked {asked}: the root is writable"
+        );
+        escapes_held_on(lab, &node, &format!("esc-{asked}"));
+        assert_eq!(
+            node.creates_through_shim(),
+            0,
+            "asked {asked}: escapes made pruned"
+        );
+        assert_eq!(
+            node.mount_namespaces_made(want),
+            5,
+            "asked {asked}: the escape boxes' namespaces were made {want:?} too"
+        );
+        eprintln!("mount namespace asked {asked}: made {want:?}, escapes held");
+    }
     assert_eq!(
-        node.creates_through_shim(),
-        0,
-        "the escape boxes take the pruned path"
+        agent_mount_points(),
+        agent_before,
+        "the agent's mount table is unchanged by every way"
+    );
+}
+
+/// HEX-MNTNS-6 (decision 6's update, part 2; T-T7.1.4): on a root node, make two boxes whose spec masks and
+/// makes read-only paths beneath `/proc`, the second once the node has made a proc ahead. Expect the second's
+/// proc taken from the pool (counted), its init pid 1 of the pid namespace that proc shows, and each box to
+/// see the same: every mask and read-only path at the same point with the same read-only flag, a masked
+/// file empty, a masked directory empty, a read-only path refusing a write, a missing path skipped.
+fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-procs"), state.path());
+    let paths = r#","maskedPaths":["/proc/kcore","/proc/keys","/proc/timer_list","/proc/acpi","/proc/scsi","/proc/not-there"],"readonlyPaths":["/proc/sys","/proc/sysrq-trigger","/proc/bus"]"#;
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(
+        dir.join("config.json"),
+        lab.config_ex(
+            &Lab::act(&Act::Wait),
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            "",
+            "",
+            "",
+            paths,
+        ),
+    )
+    .unwrap();
+    // What a box sees of its proc: each mount beneath it with whether it is read-only, a masked file's
+    // size, whether a masked directory lists anything, whether a read-only path takes a write, and its
+    // pid 1's command line.
+    let view = |id: &BoxId| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.clone()),
+            owner: None,
+        })
+        .expect("create a box with masks beneath /proc");
+        node.start(id).expect("start");
+        let (_, mi) = run_in(&node, id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let (_, kcore) = run_in(&node, id, &["/usr/bin/wc", "-c", "/proc/kcore"]);
+        let (_, acpi) = run_in(&node, id, &["/usr/bin/ls", "-A", "/proc/acpi"]);
+        let sysrq = exit_in(
+            &node,
+            id,
+            &["/usr/bin/sh", "-c", "echo h > /proc/sysrq-trigger"],
+        );
+        let (_, init) = run_in(&node, id, &["/usr/bin/cat", "/proc/1/cmdline"]);
+        node.delete(id).expect("delete");
+        let beneath: BTreeSet<(String, bool)> = mountinfo(&mi)
+            .into_iter()
+            .filter(|(point, ..)| point.starts_with("/proc/"))
+            .map(|(point, opts, ..)| (point, opts.split(',').any(|o| o == "ro")))
+            .collect();
+        (beneath, kcore, acpi, sysrq, init)
+    };
+    // Below Linux 7.1 the kernel won't hand over a pid namespace with no process in it, so the node makes
+    // none ahead: its pool stops at its first try, and both boxes are made the ordinary way.
+    let ahead = kernel_at_least(7, 1);
+    let before = node.proc_mounts().unwrap();
+    let first = view(&BoxId::new("procs-a").unwrap());
+    wait_for(
+        || {
+            let c = node.proc_mounts().unwrap();
+            if ahead {
+                c.made > before.made
+            } else {
+                c.failed_namespace > before.failed_namespace
+            }
+        },
+        "the node's first try at a proc made ahead",
+    );
+    let taken = node.proc_mounts().unwrap().taken;
+    let second = view(&BoxId::new("procs-b").unwrap());
+    let after = node.proc_mounts().unwrap();
+    if ahead {
+        assert_eq!(
+            after.taken,
+            taken + 1,
+            "the second box's proc was made ahead"
+        );
+    } else {
+        assert_eq!(after.taken, taken, "no proc made ahead below 7.1");
+        assert_eq!(
+            after.disabled,
+            before.disabled + 1,
+            "the second create counted disabled"
+        );
+    }
+    assert_eq!(node.creates_through_shim(), 0, "both boxes made pruned");
+    for (which, (beneath, kcore, acpi, sysrq, init)) in [("first", &first), ("second", &second)] {
+        for point in ["/proc/kcore", "/proc/keys", "/proc/timer_list"] {
+            assert!(
+                beneath.iter().any(|(p, _)| p == point),
+                "{which}: {point} is masked: {beneath:?}"
+            );
+        }
+        for point in ["/proc/sys", "/proc/sysrq-trigger", "/proc/bus"] {
+            assert!(
+                beneath.contains(&(point.to_owned(), true)),
+                "{which}: {point} is read-only: {beneath:?}"
+            );
+        }
+        assert!(
+            !beneath.iter().any(|(p, _)| p == "/proc/not-there"),
+            "{which}: a missing path is skipped"
+        );
+        assert_eq!(kcore.split_whitespace().next(), Some("0"), "{which}: kcore");
+        assert_eq!(acpi.trim(), "", "{which}: a masked directory is empty");
+        assert_ne!(
+            *sysrq,
+            Exit::Code(0),
+            "{which}: a read-only path refuses a write"
+        );
+        assert!(
+            init.contains("selftest-box"),
+            "{which}: pid 1 is the box's init: {init:?}"
+        );
+    }
+    assert_eq!(
+        first.0, second.0,
+        "the made-ahead proc's mounts are the ordinary one's"
     );
     eprintln!(
-        "escapes contained: e0 userns allowed, e1/e2 marker unreached, e3 nested proc refused"
+        "procs made ahead: taken {}, made {}, the masks and read-only paths as ordinary setup's",
+        after.taken, after.made
     );
+}
+
+/// HEX-MNTNS-8 (decision 6's update; T-T7.1.4): on a root node, make two boxes on the pruned path and two through
+/// the shim (a createRuntime hook), each masking Docker's directories beneath `/proc`, with procs made ahead off
+/// so each init masks them itself. Expect every masked directory of all four boxes on one filesystem, the node's
+/// one empty read-only tmpfs, as crun binds one empty directory: no superblock made per masked directory.
+fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab
+        .node(&own.join("hex-oci-maskdirs"), state.path())
+        .with_prepared_procs(false)
+        .expect("procs made ahead off");
+    let paths = r#","maskedPaths":["/proc/acpi","/proc/asound","/proc/scsi","/proc/kcore"]"#;
+    let hooks = r#","hooks":{"createRuntime":[{"path":"/usr/bin/true","args":["true"]}]}"#;
+    let mut devs = BTreeSet::new();
+    let mut masked = 0;
+    for (n, (path, hook)) in [
+        ("pruned", ""),
+        ("pruned", ""),
+        ("shim", hooks),
+        ("shim", hooks),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                "",
+                hook,
+                paths,
+            ),
+        )
+        .unwrap();
+        let id = BoxId::new(&format!("maskdirs-{n}")).unwrap();
+        let shim = node.creates_through_shim();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+        .expect("create a box masking directories");
+        assert_eq!(
+            node.creates_through_shim() - shim,
+            u64::from(path == "shim"),
+            "box {n} made {path}"
+        );
+        node.start(&id).expect("start");
+        let (_, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        node.delete(&id).expect("delete");
+        // proc_pid_mountinfo(5): the third field is the filesystem's major:minor, the fifth the mount point.
+        for line in mi.lines() {
+            let fields: Vec<&str> = line.split(' ').collect();
+            if let (Some(dev), Some(point)) = (fields.get(2), fields.get(4))
+                && ["/proc/acpi", "/proc/asound", "/proc/scsi"].contains(point)
+            {
+                devs.insert((*dev).to_owned());
+                masked += 1;
+            }
+        }
+    }
+    assert!(masked >= 4, "masked directories to compare: {masked}");
+    assert_eq!(
+        devs.len(),
+        1,
+        "one empty filesystem for every masked directory of every box: {devs:?}"
+    );
+    eprintln!("masked directories: {masked} across 4 boxes, all on {devs:?}");
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4): a spec binding `/usr` read-only and a volume. Both are in the
@@ -1164,6 +1511,18 @@ fn a_bind_and_a_volume_are_present_the_host_unreachable(lab: &Lab, own: &Path) {
     eprintln!(
         "bind+volume: /usr read-only and /vol read-write are in the box; config.json and the state dir are unreachable"
     );
+}
+
+/// Whether this kernel's release is at least `major.minor`, read from `/proc/sys/kernel/osrelease`, and said.
+fn kernel_at_least(major: u32, minor: u32) -> bool {
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
+    let mut v = release
+        .trim()
+        .split(['.', '-'])
+        .map(|p| p.parse::<u32>().unwrap_or(0));
+    let here = (v.next().unwrap(), v.next().unwrap());
+    eprintln!("kernel {}", release.trim());
+    here >= (major, minor)
 }
 
 /// `argv` in box `id` through the seam, its exit and stdout once it ends.

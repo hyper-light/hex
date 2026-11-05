@@ -145,6 +145,43 @@ class SwitchEvidence(unittest.TestCase):
                     files["trace"] = "\n".join(line for line in files["trace"].splitlines() if not line.startswith("hex-1000 "))
                 self.assertEqual(run(files)[0], 1)
 
+    def test_root_in_place_reads_alike_on_a_copied_and_a_joined_namespace(self):
+        """Goal 6 (T-T7.1.4, decision 6's update): an init on a namespace made from its tree joins it by
+        setns(CLONE_NEWNS) before its network and makes no chroot. Do: one init each way, a seed that
+        pivots. Expect the root's span from part 19's start to the first chdir after it, the namespace's
+        join added where it came first, the seed left out, and the copied way's part 19 unchanged."""
+        def line(pid, ts, body):
+            sec, us = divmod(ts, 1_000_000)
+            return f"hex-{pid} [004] d..2 {sec}.{us:06d}: {body}\n"
+        trace = "".join([
+            # The copied way: network joined at +20, chroot at +120, chdir("/") at +125.
+            line(1, 1_000_000, "sys_clone3 -> 0x0"),
+            line(1, 1_000_010, "sys_setns(fd: 0x3, flags: 0x40000000)"),
+            line(1, 1_000_020, "sys_setns -> 0x0"),
+            line(1, 1_000_120, "sys_chroot(filename: 0x1)"),
+            line(1, 1_000_121, "sys_chroot -> 0x0"),
+            line(1, 1_000_125, "sys_chdir(filename: 0x1)"),
+            # The joined way: the mount namespace's join takes 7 us, then the network, then chdir 60 us on.
+            line(2, 2_000_000, "sys_clone3 -> 0x0"),
+            line(2, 2_000_002, "sys_setns(fd: 0x3, flags: 0x20000)"),
+            line(2, 2_000_009, "sys_setns -> 0x0"),
+            line(2, 2_000_010, "sys_setns(fd: 0x4, flags: 0x40000000)"),
+            line(2, 2_000_020, "sys_setns -> 0x0"),
+            line(2, 2_000_080, "sys_chdir(filename: 0x1)"),
+            # A seed: cloned, pivots, chdirs; never an init.
+            line(3, 3_000_000, "sys_clone3 -> 0x0"),
+            line(3, 3_000_005, "sys_pivot_root(new_root: 0x1)"),
+            line(3, 3_000_900, "sys_chdir(filename: 0x1)"),
+        ])
+        files = {"trace": trace, "stats": "overrun: 0\n"}
+        _, result, _ = run(files, scope="switch", seam=False)
+        self.assertEqual(result["root_spans"], 2)
+        self.assertEqual(result["root_mntns_joins"], 1)
+        self.assertEqual(result["root_max_ms"], 0.105)
+        self.assertEqual(result["root_p50_ms"], 0.067)
+        self.assertEqual(result["mounts_p50_ms"], 0.1)
+        self.assertEqual(result["root_unended"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -164,6 +164,10 @@ pub struct Node {
     /// release builds (CLAUDE.md §6).
     #[cfg(debug_assertions)]
     inject: Option<String>,
+    /// The way a pruned create's mount namespace is made, as its owner asked by
+    /// [`hex_runtime::linux::oci::mntns::ENV_WAY`]'s words ([`Node::with_mount_namespace`]); `None` takes
+    /// the node's default (decision 6's update).
+    mount_namespace: Option<String>,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
@@ -282,10 +286,15 @@ impl Node {
             create_seeds: OnceLock::new(),
             #[cfg(debug_assertions)]
             inject: None,
+            mount_namespace: None,
             specs: Mutex::new(Specs::default()),
             netns,
             ipc_uts,
-            devfs: Devfs::start(owner == Owner::Root)?,
+            devfs: Devfs::start(
+                owner == Owner::Root,
+                owner == Owner::Root,
+                owner == Owner::Root,
+            )?,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
@@ -333,7 +342,16 @@ impl Node {
     /// Enables or disables fresh prepared `/dev` mounts; disabled creates use ordinary setup.
     /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
     pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
-        self.devfs = Devfs::start(enabled && self.owner == Owner::Root)?;
+        let (_, procs, root) = self.devfs.enabled();
+        self.devfs = Devfs::start(enabled && root, procs, root)?;
+        Ok(self)
+    }
+
+    /// Enables or disables procs made ahead (decision 6's update, part 2), apart from `/dev`'s pool, for
+    /// the bench's A/B; disabled creates mount their own proc. Root nodes only, as `/dev`'s.
+    pub fn with_prepared_procs(mut self, enabled: bool) -> Result<Self, Refusal> {
+        let (dev, _, root) = self.devfs.enabled();
+        self.devfs = Devfs::start(dev, enabled && root, root)?;
         Ok(self)
     }
 
@@ -341,6 +359,12 @@ impl Node {
     /// every preparation failure, so a speed measurement cannot hide a dry or disabled pool.
     pub fn dev_mounts(&self) -> Result<hex_core::devfs::Counts, Refusal> {
         self.devfs.counts()
+    }
+
+    /// What the node's prepared proc pool has done (decision 6's update, part 2): the bench and the lab read
+    /// its takes and misses around a phase, as [`Node::dev_mounts`]'s.
+    pub fn proc_mounts(&self) -> Result<hex_core::devfs::Counts, Refusal> {
+        self.devfs.proc_counts()
     }
 
     /// Sets how many `oci` boxes' inits the node watches at once, [`supervise::INIT_BUDGET`] unless
@@ -360,6 +384,15 @@ impl Node {
         self
     }
 
+    /// Asks for a way of making a pruned create's mount namespace (decision 6's update): `copy`, `empty` or
+    /// `tree`, the words of [`hex_runtime::linux::oci::mntns::ENV_WAY`], for the bench's A/B and the lab.
+    /// Must come before [`Node::with_oci_helper`], which builds the seed pool. A way this node can't take is
+    /// refused by type at its first create.
+    pub fn with_mount_namespace(mut self, way: &str) -> Self {
+        self.mount_namespace = Some(way.to_owned());
+        self
+    }
+
     /// Names the `hex` binary the `oci` class re-execs for a container's init and `exec` helper, for
     /// a node whose own binary isn't `hex` (the bench, a node linked into another program).
     pub fn with_oci_helper(mut self, hex_binary: PathBuf) -> Self {
@@ -369,6 +402,7 @@ impl Node {
         if let Ok(pool) = CreatePool::new(
             hex_binary.clone(),
             self.seed_prune(),
+            self.mount_namespace.as_deref(),
             #[cfg(debug_assertions)]
             self.inject.clone(),
         ) {
@@ -1214,6 +1248,7 @@ impl Node {
         let _ = self.create_seeds.set(CreatePool::new(
             exe,
             self.seed_prune(),
+            self.mount_namespace.as_deref(),
             #[cfg(debug_assertions)]
             self.inject.clone(),
         )?);
@@ -1258,6 +1293,19 @@ impl Node {
         self.create_seeds
             .get()
             .map_or(0, CreatePool::pruned_creates)
+    }
+
+    /// How many of the node's pruned creates had their mount namespace made `way` since its seed pool
+    /// opened (decision 6's update), as the seed answered: a create asked to be made empty on a kernel
+    /// without `CLONE_EMPTY_MNTNS` is counted as copied. Kept in memory, as
+    /// [`Node::classic_creates_for`]'s counts are.
+    pub fn mount_namespaces_made(
+        &self,
+        way: hex_runtime::linux::oci::mntns::MountNamespace,
+    ) -> u64 {
+        self.create_seeds
+            .get()
+            .map_or(0, |pool| pool.mount_namespaces_made(way))
     }
 }
 
