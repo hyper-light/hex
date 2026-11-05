@@ -87,30 +87,62 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
     match prepare_cgroup(&cache) {
         Ok(own) => exercise(&own, &cache, &exe),
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
-            let has_systemd = Command::new("systemd-run")
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
-                return;
-            }
-            let status = Command::new("systemd-run")
-                .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes"])
-                .arg(std::env::current_exe().expect("test binary path"))
-                .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
-                .env("HEX_DELEGATED", "1")
-                .status()
-                .expect("run the test in a delegated scope");
-            assert!(status.success(), "the delegated re-run failed");
+            rerun_delegated(TEST, &direct)
         }
         Err(direct) => {
             eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
         }
     }
+}
+
+/// How long a delegated re-run may take: it runs this suite once more, each wait of its own already bounded
+/// (conformance's PATIENCE), and the suite took 5.57 s as root and 4.70 s in the gates on fedora at 5e0082e
+/// (hex-g5rec-gates-20261105T113718Z), so past this it is stuck, not slow. As oci_lsm's and oci_seccomp's
+/// (cp/t7-g6-lsm 1cadab7).
+const RERUN_BOUND: Duration = Duration::from_secs(300);
+
+/// Re-runs the test `name` in a transient systemd --user scope with `Delegate=yes`, so it gets a cgroup of its
+/// own to subdivide. Only where a user manager answers (its `$XDG_RUNTIME_DIR/systemd/private` socket is
+/// there): a `systemd-run` binary with no manager running, as in a guest whose PID 1 isn't systemd, would wait
+/// on a manager that never comes. Prints the reason and returns where there's none. The re-run is waited on
+/// for at most [`RERUN_BOUND`], then killed and failed by name.
+fn rerun_delegated(name: &str, direct: &str) {
+    let manager = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|d| Path::new(&d).join("systemd/private"))
+        .is_some_and(|p| p.exists());
+    if !manager {
+        eprintln!(
+            "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user manager answers for a private scope"
+        );
+        return;
+    }
+    let test_bin = std::env::current_exe().expect("test binary path");
+    let mut child = Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes"])
+        .arg(&test_bin)
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env("HEX_DELEGATED", "1")
+        .spawn()
+        .expect("run the test in a delegated scope");
+    // The wait runs on a thread that sends the status when the child ends, so the test waits on that fact
+    // for at most RERUN_BOUND, and a hung re-run is killed by its pid.
+    let pid = child.id();
+    let (sent, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(child.wait());
+    });
+    let status = match ended.recv_timeout(RERUN_BOUND) {
+        Ok(status) => status.expect("wait on the delegated re-run"),
+        Err(_) => {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+            panic!(
+                "the delegated re-run of {name} was still running after {RERUN_BOUND:?}, so it was killed"
+            );
+        }
+    };
+    assert!(status.success(), "the delegated re-run failed");
 }
 
 /// AC-T7.1.4, goal 5 step 3: run the prepared-/dev ordering and isolation oracle independently of
