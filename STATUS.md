@@ -355,7 +355,7 @@ real class held to the simulator's trace), runs as each OS's own tests. Where it
 | Linux arm64 | Not run: no Linux arm64 machine in the lab. Built for it by no gate yet | As `process` |
 | macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, not merged into the native line |
 | macOS amd64 (Intel) | Built and linted for `x86_64-apple-darwin` (clippy `-D warnings` and build exit 0, 1aa735c); not run, no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
-| Windows amd64 (jupiter) | Built (native step 3, job objects; HEX-RT-1..9 7/7 there, r1128) and linted with the suite. The suite's run waits on jupiter, offline | Windows images through HCS: native step 4, built, not merged, not run |
+| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | Windows images through HCS: native step 4, built, not merged, not run |
 | Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
 
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
@@ -367,9 +367,9 @@ fixed. The competitor bench found one more: a macOS program killed at its bound 
 wait's budget (XNU posts the exit event before the zombie), fixed at abdbfd0.
 
 Each OS's `process` class against its competitors, recorded in `bench/native/RESULT.md`: Linux start 11.1x and
-delete 14.7x a systemd scope's, both holding the bound; macOS start 1.85x `taskpolicy -m`'s, delete 0.89x, both
-holding the bound, and a launchd job's limit holds none. Open: the suite and bench on jupiter (Windows `process`,
-and `oci` when native step 4 lands), and the macOS `oci` class through a Shards guest when native step 5 lands.
+delete 14.7x a systemd scope's, both holding the bound; macOS start 1.87x `taskpolicy -m`'s, delete 0.90x, both
+holding the bound, and a launchd job's limit holds none. Open: Process Governor's figure on jupiter (Hex's is
+recorded), the Windows `oci` suite (waits on Ada's yes to `oci_setup.ps1`), and the macOS `oci` class through a Shards guest when native step 5 lands.
 
 ## Next
 

@@ -28,18 +28,19 @@ with 7 containers running (noisy, as recorded).
 
 ## macOS: Hex vs `taskpolicy -m` and a launchd job
 
-Record `records/native-box-macos-abdbfd0-20261105T095826Z.txt`: adas-mac-studio-2 (Apple M4 Max, macOS 26.2),
-commit abdbfd0, 2026-11-05 09:58-09:59Z, a one-shot launchd job outside kiln's runs (whose headroom guard
-pauses them), load 5.7-7.0.
+Record `records/native-box-macos-b1ddb89-20261105T110227Z.txt`: adas-mac-studio-2 (Apple M4 Max, macOS 26.2),
+commit b1ddb89, 2026-11-05 11:02-11:03Z, a one-shot launchd job outside kiln's runs, load 2.2-4.7. kiln's headroom
+guard there had learned a 0.0068-core budget, but it stopped only kiln-run pids: the bench's processes, sampled
+every 0.5 s, were never stopped.
 
 | ms | Hex | `taskpolicy -m 256` | launchd job (`ResidentSetSize`) | Hex ahead of the best by |
 |---|---|---|---|---|
-| create p50 | 0.009 (0.009-0.010) | none | none | |
-| start p50 | 0.852 (0.852-0.853) | 1.579 (1.579-1.606) | 26.736 (26.736-27.535) | 1.85x; 1.84x counting create |
-| start p99 | 0.960 (0.960-1.265) | 1.702 (1.702-2.113) | 36.146 | 1.77x |
-| delete p50 | 0.147 (0.147-0.152) | 0.131 (0.131-0.132) | 9.138 | 0.89x (taskpolicy's delete kills one process; Hex's ends a box) |
+| create p50 | 0.010 (0.010) | none | none | |
+| start p50 | 0.850 (0.850-0.854) | 1.591 (1.591-1.626) | 24.522 (24.522-25.648) | 1.87x; 1.85x counting create |
+| start p99 | 0.924 (0.924-1.249) | 1.722 (1.722-2.098) | 34.942 | 1.86x |
+| delete p50 | 0.147 (0.147-0.151) | 0.132 (0.132-0.135) | 5.590 | 0.90x (taskpolicy's delete kills one process; Hex's ends a box) |
 | bound held | 20/20 per pass, 3 MiB under | 20/20 per pass, 3 MiB under | **0/20: ran to 1 GiB, 768 MiB past** | equal with taskpolicy |
-| bound's end p50 | 56.7 (56.7-56.8) | 57.5 (57.5-58.0) | not ended by it | 1.01x |
+| bound's end p50 | 56.2 (56.2-56.4) | 57.1 (57.1-59.0) | not ended by it | 1.02x |
 
 launchd's `HardResourceLimits` `ResidentSetSize` is advisory (`man launchd.plist`: "the system will prefer to
 take memory from processes that are exceeding"), and here it ended none: a user's launchd job is no memory bound. `taskpolicy -m` arms the same fatal jetsam cap Hex arms on each member, so the two hold the bound
@@ -50,8 +51,23 @@ The same bench at commit 1aa735c (2026-11-05 08:54-08:58Z, raw JSON on the Mac i
 `~/.cache/hex-t7/native-s7/bench-20261105T085409Z/`) found a bug: 3 of Hex's 60 bound ends were reported at the
 bench's 60 s wait budget, though each program was killed at 253 MiB like the rest. XNU posts the exit event
 before the zombie can be reaped; fixed at abdbfd0
-(`docs/research/runtime/macos-spawn-jetsam-cap.md`, "The exit event comes before the zombie"). At abdbfd0: 0 of 60.
+(`docs/research/runtime/macos-spawn-jetsam-cap.md`, "The exit event comes before the zombie"). Since: 0 of 60 at
+abdbfd0 and 0 of 60 at b1ddb89.
 
 ## Windows: Hex vs Process Governor
 
-Not run yet: jupiter is offline. The bench's `procgov` driver is built and linted for `x86_64-pc-windows-msvc`.
+Record: entry 7 of `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows` (7a06898), the
+Windows agent's run on jupiter (AMD Ryzen AI MAX+ 395, 32 CPUs, Windows 11 26200), commit e322d7b (this branch's
+abdbfd0 merged), 2026-11-05 10:02-10:04Z, load 58-82% CPU with 10 co-tenant cargo/rustc; n 500, warmup 50, two
+passes. The suite on jupiter: `windows_process_box` 9 of 9 at 1a2e1eb and at e322d7b.
+
+| ms | Hex (best of 2) | Process Governor (`procgov --maxjobmem`) |
+|---|---|---|
+| create p50 / p99 | 0.044 / 0.170 | none |
+| start p50 / p99 / max | 52.2 / 85.3 / 259.3 | not measured yet |
+| delete p50 / p99 | 1.49 / 4.87 | not measured yet |
+| bound held | 20/20, 6 MiB under (each program aborted on the commit its job refused) | not measured yet |
+| bound's end p50 | 248 | not measured yet |
+
+Process Governor's passes failed: the driver read procgov's banner as the program's first line. procgov runs
+with `-q` from b1ddb89; its figure waits on that run on jupiter.
