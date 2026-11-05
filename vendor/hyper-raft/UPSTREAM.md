@@ -8,5 +8,8 @@ these, byte for byte.
 | Files | Change | Why | Patch |
 | --- | --- | --- | --- |
 
-None: hex-sim includes `crates/hyper-swim/src/coordinates.rs` unchanged (`crates/hex-sim/src/lib.rs`,
-`#[path]`), so its scores use the engine hyper-swim ships (`docs/design/hex-sim.md` H12).
+None. hex-sim depends on hyper-swim and hyper-timing unchanged, by name, patched to this copy
+(`Cargo.toml` [patch.crates-io]), so its crash class runs the detector hyper-swim ships
+(`docs/design/failure-isolation.md` F1); and with G3's branch it includes
+`crates/hyper-swim/src/coordinates.rs` unchanged (`crates/hex-sim/src/lib.rs`, `#[path]`), so its
+scores use the engine hyper-swim ships (`docs/design/hex-sim.md` H12).

@@ -255,12 +255,14 @@ three different things (CLAUDE.md "Working here"):
   nodes, all measured in **hex-sim** (built first). Implementation open.
 - **Scheduler goal 5, failure detection and isolation (S8)** (`docs/design/failure-isolation.md`; built
   on `cp/t7-sched-g5`, not merged): `hex-health`, the pure core of the detectors and penalties; hex-sim's
-  SWIM+Lifeguard model (memberlist's protocol) and fault nemesis, each fault class within its stated
-  bound over 1,000 seeds (gray drained ≤ 3.9 s; crash suspected ≤ 6 periods at p99; Lifeguard's false
-  positives 0.06% of SWIM's); the node's disk probe, and `AC-T7.10.3`'s dm-delay drill
+  fault nemesis, each fault class within its stated bound over 1,000 seeds (gray drained ≤ 3.9 s);
+  the crash class on hyper-swim's own detector, vendored (every crash condemned within the bound its
+  condemner stated; at one probe a second, p99 12.1 s, though the stated bound runs to 1,090 s, a
+  finding for hyper-swim's owner), memberlist's SWIM+Lifeguard beside it as the competitor, its
+  slow-member false positives ended by health-gated confirmations; the node's disk probe, and `AC-T7.10.3`'s dm-delay drill
   (`bench/health/records/2026-11-05-dm-delay-drill.md`: drained 3.5 s after the stall, no work failed;
-  8 of 8 failed with the probe off). Open: the control plane acting on the verdicts (CP-T7.3), and
-  hex-sim driving hyper-swim's own detector rather than memberlist's.
+  8 of 8 failed with the probe off). Open: the node agent running hyper-swim (it runs no membership
+  yet), and the control plane acting on the verdicts (CP-T7.3).
 
 ## Next
 

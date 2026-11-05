@@ -220,8 +220,9 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 
 ## Failure detection and isolation (goal 5)
 
-`membership.rs` models SWIM with Lifeguard on memberlist's protocol and constants (crash detection and
-slow-member false positives); `faults.rs` is the nemesis for the other classes (gray and fail-slow,
+`swim.rs` drives hyper-swim's own failure detector, vendored unchanged (`vendor/MANIFEST.toml`), over a
+seeded LAN: the crash class's bound. `membership.rs` models SWIM with Lifeguard on memberlist's
+protocol and constants as the competitor (crash timing and slow-member false positives); `faults.rs` is the nemesis for the other classes (gray and fail-slow,
 disk stall, antagonist, the agent faults, dangerous signals, and correlated faults against the ejection
 cap and eviction rate), each driving `hex-health` and measured against its bound in
 `failure-isolation.md`. Both are functions of their seed (H1) and bounded with typed refusals (H5).
