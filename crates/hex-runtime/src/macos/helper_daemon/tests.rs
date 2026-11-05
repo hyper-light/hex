@@ -5,10 +5,11 @@
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use hex_api::{BoxId, Program};
+use hex_api::{BoxId, Exit, Proc, Program};
 use hex_core::helper::{START_FDS, VERSION};
 use rustix::net::{AddressFamily, SocketFlags, SocketType};
 
@@ -59,7 +60,7 @@ fn reapportion_arms_the_changed_and_ends_when_over() {
 /// end-to-end over a real socket without root or side effects. The real backend is `helper_sys` (§12).
 #[derive(Default)]
 struct Sim {
-    inner: Mutex<SimState>,
+    inner: Arc<Mutex<SimState>>,
 }
 
 #[derive(Default)]
@@ -67,6 +68,33 @@ struct SimState {
     next_pid: i32,
     members: Vec<Member>,
     arm_calls: u32,
+    /// Programs whose end a watch read (the stand-in's reap).
+    reaped: u32,
+}
+
+/// The stand-in's watch: a program has ended (by KILL, the stand-in's only end) once it is no member.
+struct SimProc {
+    pid: i32,
+    state: Arc<Mutex<SimState>>,
+}
+
+impl Proc for SimProc {
+    fn pid(&self) -> u32 {
+        u32::try_from(self.pid).unwrap_or(0)
+    }
+
+    fn try_wait(&mut self) -> Result<Option<Exit>, hex_api::Refusal> {
+        let mut s = self.state.lock().expect("sim lock");
+        if s.members.iter().any(|m| m.pid == self.pid) {
+            return Ok(None);
+        }
+        s.reaped += 1;
+        Ok(Some(Exit::Signal(9)))
+    }
+
+    fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, hex_api::Refusal> {
+        self.try_wait()
+    }
 }
 
 impl Privileged for Sim {
@@ -85,6 +113,13 @@ impl Privileged for Sim {
         let pid = 1000 + s.next_pid;
         s.members.push(Member { pid, footprint: 0 });
         Ok(pid)
+    }
+
+    fn watch(&self, pid: i32) -> std::io::Result<Box<dyn Proc>> {
+        Ok(Box::new(SimProc {
+            pid,
+            state: Arc::clone(&self.inner),
+        }))
     }
 
     fn arm(&self, _pid: i32, _cap_mib: u32) -> std::io::Result<()> {
@@ -224,6 +259,89 @@ fn a_box_with_no_live_member_refuses_a_signal_and_takes_a_program() {
     assert_eq!(client.inspect(&b1).unwrap().members, 1);
     client.signal(&b1, 15).unwrap();
 
+    drop(client);
+    handle.join().expect("daemon thread");
+}
+
+/// A connected client to a daemon over the stand-in, with `pool` users and `nproc` programs a box, the
+/// daemon serving on its own thread until the client closes.
+fn served(pool: Vec<u32>, nproc: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>>) {
+    let (client, server) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .expect("socketpair");
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
+    let handle = thread::spawn(move || {
+        let daemon = Daemon::new(Sim::default(), pool, nproc);
+        let _ = daemon.serve(server.as_fd());
+        daemon
+    });
+    (Helper::over(client, VERSION), handle)
+}
+
+fn start(client: &Helper, b: &BoxId, leader: bool) -> i32 {
+    client
+        .start(b, &prog(), nulls().each_ref().map(|f| f.as_fd()), leader)
+        .unwrap()
+}
+
+/// HEX-MAC-15, HEX-RT-3 (box-user mode): do start two programs and end one; expect a wait on the running
+/// one to answer it runs, a wait on the ended one its end, and a second wait on it Unknown (an end is
+/// read once, so the helper holds no end the node has read).
+#[test]
+fn the_helper_reaps_a_program_and_answers_its_end_once() {
+    let (client, handle) = served(vec![7000], 64);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let pid1 = start(&client, &b1, true);
+    assert_eq!(client.wait(&b1, pid1).unwrap(), None);
+    client.signal(&b1, 9).unwrap();
+    assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Signal(9)));
+    assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Unknown));
+    drop(client);
+    let daemon = handle.join().expect("daemon thread");
+    assert_eq!(daemon.ops.inner.lock().unwrap().reaped, 1);
+}
+
+/// HEX-MAC-15, HEX-RT-3 (box-user mode): do delete a box with two programs running; expect both reaped
+/// by the delete (no zombie left under its user) and each one's end still answered after it, as a
+/// deleted box's program ends by the delete's kill on every class.
+#[test]
+fn a_deleted_boxs_programs_are_reaped_and_their_ends_kept() {
+    let (client, handle) = served(vec![7000], 64);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let pid1 = start(&client, &b1, true);
+    let pid2 = start(&client, &b1, false);
+    client.end(&b1).unwrap();
+    assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Signal(9)));
+    assert_eq!(client.wait(&b1, pid2).unwrap(), Some(Exit::Signal(9)));
+    drop(client);
+    let daemon = handle.join().expect("daemon thread");
+    assert_eq!(daemon.ops.inner.lock().unwrap().reaped, 2);
+}
+
+/// CLAUDE.md §2 (the helper's programs are bounded): do start `nproc` programs in a box at `nproc` 2;
+/// expect a third refused by name while both run, and taken once they have ended (the oldest unread end
+/// is dropped for it, and reads Unknown).
+#[test]
+fn a_box_holds_at_most_its_process_cap_of_programs() {
+    let (client, handle) = served(vec![7000], 2);
+    let b1 = BoxId::new("b1").expect("box id");
+    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let pid1 = start(&client, &b1, true);
+    let _pid2 = start(&client, &b1, false);
+    assert!(matches!(
+        client.start(&b1, &prog(), nulls().each_ref().map(|f| f.as_fd()), false),
+        Err(hex_api::Refusal::Os { .. })
+    ));
+    client.signal(&b1, 9).unwrap();
+    let _pid3 = start(&client, &b1, false);
+    assert_eq!(client.wait(&b1, pid1).unwrap(), Some(Exit::Unknown));
     drop(client);
     handle.join().expect("daemon thread");
 }

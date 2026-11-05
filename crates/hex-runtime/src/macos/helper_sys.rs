@@ -32,7 +32,7 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use hex_api::Program;
+use hex_api::{Proc, Program};
 
 use super::helper_daemon::Privileged;
 use super::sys::Spawn;
@@ -232,6 +232,13 @@ impl Privileged for RealPriv {
             )));
         }
         Ok(())
+    }
+
+    /// The daemon forked `pid`, so it is its parent: the process class's own watch and reap serve it.
+    fn watch(&self, pid: i32) -> io::Result<Box<dyn Proc>> {
+        super::proc::BoxProc::watch(pid)
+            .map(|p| Box::new(p) as Box<dyn Proc>)
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 
     /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` on the daemon's port; `Ok(true)` when one

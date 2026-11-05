@@ -52,6 +52,7 @@ fn responder(fd: OwnedFd) {
             Request::Start { .. } => Answer::Started { pid: 1234 },
             Request::End { .. } => Answer::Ended,
             Request::Signal { .. } => Answer::Signalled,
+            Request::Wait { .. } => Answer::Waited(Some(Exit::Code(3))),
             Request::Inspect { .. } => Answer::State(State {
                 members: u32::try_from(got_fds).unwrap_or(0),
                 footprint: 200 << 20,
@@ -85,6 +86,7 @@ fn pair() -> (Helper, thread::JoinHandle<()>) {
         version: VERSION,
         next_id: AtomicU64::new(1),
         path: PathBuf::from("<test>"),
+        turn: std::sync::Mutex::new(()),
     };
     (helper, handle)
 }
@@ -116,6 +118,11 @@ fn the_client_round_trips_every_call() {
     let state = helper.inspect(&box_id("b1")).unwrap();
     assert_eq!(state.members, 0);
     assert_eq!(state.footprint, 200 << 20);
+
+    assert_eq!(
+        helper.wait(&box_id("b1"), pid).unwrap(),
+        Some(Exit::Code(3))
+    );
 
     helper.end(&box_id("b1")).unwrap();
 

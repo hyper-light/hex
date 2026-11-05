@@ -536,6 +536,14 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
       each turn of its exception loop (`Daemon::pump`) re-reads every box and ends one past its bound,
       whether a crossing woke it (the ledger's event) or its timeout paced it (the poll), so a box the
       kernel ledger didn't hold — a member unarmed in the fork window, a missed exception — is still caught.
+    - **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no
+      one else (`docs/research/runtime/native-platforms.md` §3, "A box user's program ends where only the
+      helper can see how"). The helper watches each program it starts from its start and reaps it, in its
+      sweep or when asked, holding each end until the node reads it once: at most `RLIMIT_NPROC` programs a
+      box (a start past that drops the box's oldest unread end, or is refused while all still run), and a
+      deleted box's ends for as many boxes as the pool has users. The node waits on the program's `NOTE_EXIT`
+      on a kqueue of its own and then asks for its end (`Wait`), so a wait is the fact, never a poll, and no
+      end is made up as `Unknown` because the node couldn't reap a program it doesn't parent.
 
     CPU is bounded by priority alone: a QoS class, and background priority where the box's weight is low. A
     box that asks for confinement gets App Sandbox's, which every child inherits (§3). A node with no helper

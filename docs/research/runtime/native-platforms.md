@@ -140,6 +140,29 @@ parent, as build servers do (Gradle's, Bazel's, sccache's).
   are. Starting a program as another user takes privilege, so the node needs a privileged helper there. A box
   without one is tracked by its process group, and a member that daemonizes leaves it.
 
+### A box user's program ends where only the helper can see how
+
+The helper starts a box user's programs (`fork`, then `setuid`), so it is their parent and the node isn't. Read at
+apple-oss-distributions/xnu main `f6217f891ac0` (2026-11-05):
+
+- Only the parent reaps. `waitid_nocancel` walks the caller's own children (`bsd/kern/kern_exit.c:3194`,
+  `PCHILDREN_FOREACH(q, p)`) and, finding none that matches, returns `ECHILD` (:3359-3361); `wait4_nocancel` does
+  the same (:2926, :3082). So the node can't collect a box user's program's end, and the helper must reap each one
+  it starts, or it stays a zombie under the box's user.
+- Anyone may watch the exit. `filt_procattach` (`bsd/kern/kern_event.c:1099`) checks the caller only when it asks
+  for `NOTE_EXIT | NOTE_EXITSTATUS` together (:1116-1133: the parent, a ptrace parent, or `cansignal(..., SIGKILL)`,
+  else `EACCES`), so a plain `NOTE_EXIT` watch of another user's process is allowed, and a process `proc_find`
+  can't resolve is refused `ESRCH` (:1110-1112).
+- No exit falls between the two. `proc_prepareexit` moves the exiting process to the zombie list and sets
+  `P_REF_DEAD` ("will not be visible via proc_find", :2127-2129) before `proc_exit` (:2159) posts `NOTE_EXIT`
+  (:2561), and `proc_find` takes no reference on a `P_REF_DEAD` process (`bsd/kern/kern_proc.c:811-812`). So a
+  watch attached after the event is refused `ESRCH`, never left waiting for an event already sent.
+- So the node watches a box user's program's `NOTE_EXIT` on a kqueue of its own, and on it (or on `ESRCH`) asks
+  the helper for the end, which the helper reaps as parent, waiting for the zombie as the process class does
+  (`NOTE_EXIT` comes before `SZOMB`, `kern_exit.c:2561` then :2631).
+- Falsified if a `NOTE_EXIT` watch of another user's process is refused unprivileged on a shipping macOS, or a box
+  user's program's wait reads `Exit::Unknown` while it runs (the root lab's conformance run, `boxlab.sh`).
+
 ## 4. Linux images on macOS and Windows: a guest that Shards boots
 
 Shards boots Linux guests through each OS's own hypervisor (`README.md:424-425`: "Shards uses `/dev/kvm` on Linux,
