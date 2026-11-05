@@ -1413,9 +1413,9 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
 /// Goal 6, the seed without a `pivot_root` per start (`goal6-mntns.md` §12, AC-T7.1.4's under-load bar): a node
 /// prunes one mount namespace and every create seed joins it by `setns`, so a seed started after the first never
 /// pivots (each `pivot_root` walks every thread on the host under the mount lock, §11). Do: make six boxes at once
-/// across the node's seeds, then read each live create seed's mount namespace from this process's `/proc`. Expect
+/// across the node's seeds after a first, then read each live create seed's mount namespace from this process's `/proc`. Expect
 /// at least two create seeds, every one in the same mount namespace and not this process's, and that namespace
-/// holding the pruned two mounts after the creates as before them: no seed or init ever mutates it.
+/// holding the pruned two mounts after the six creates as after the first: no seed or init ever mutates it.
 fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
     use std::os::unix::fs::MetadataExt;
     if lab.rootless {
@@ -1452,35 +1452,38 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
             .map(|t| t.lines().count())
             .ok()
     };
+    let create = |id: &BoxId| {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config(&Lab::act(&Act::Wait), false),
+        )
+        .unwrap();
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+        .expect("create a box through a seed");
+    };
+    let ids: Vec<BoxId> = (0..7)
+        .map(|n| BoxId::new(&format!("seedns-{n}")).unwrap())
+        .collect();
+    let (first, rest) = ids.split_first().unwrap();
+    // The first create is answered by a live seed, so one is up to read the namespace of before the rest.
+    create(first);
     let before = create_seeds()
         .into_iter()
         .find_map(mounts)
-        .expect("a create seed's mount table before any create");
-    let ids: Vec<BoxId> = (0..6)
-        .map(|n| BoxId::new(&format!("seedns-{n}")).unwrap())
-        .collect();
+        .expect("a create seed's mount table after the first create");
     std::thread::scope(|s| {
-        for id in &ids {
-            let node = &node;
-            s.spawn(move || {
-                let dir = tempfile::Builder::new()
-                    .prefix("bundle-")
-                    .tempdir_in(lab.bundles.path())
-                    .unwrap()
-                    .keep();
-                std::fs::write(
-                    dir.join("config.json"),
-                    lab.config(&Lab::act(&Act::Wait), false),
-                )
-                .unwrap();
-                node.create(BoxSpec {
-                    id: id.clone(),
-                    bounds: Bounds::default(),
-                    class: ClassSpec::Bundle(dir),
-                    owner: None,
-                })
-                .expect("create a box through a seed");
-            });
+        for id in rest {
+            s.spawn(|| create(id));
         }
     });
     let seeds = create_seeds();
