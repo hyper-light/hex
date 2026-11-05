@@ -211,6 +211,55 @@ mod tests {
         assert!(refused.is_none(), "{refused:?}");
     }
 
+    /// A mount anywhere on the host, in any mount namespace, bumps the kernel's one `mount_lock` seqcount, and a
+    /// scoped walk that crossed a `..` meanwhile is refused with EAGAIN (fs/namei.c v6.19 :2195-2206, :2637-2638;
+    /// openat2(2)), as a node's own concurrent creates' mounts do to each other (AC-T7.1.4, CLAUDE.md §2, §4). Do:
+    /// resolve a link climbing out 2,000 times while a process in a user and mount namespace of its own mounts and
+    /// unmounts a tmpfs without pause. Expect: each resolves, none refused for what the other process did.
+    #[test]
+    fn a_mount_elsewhere_doesnt_refuse_a_path_with_a_dotdot() {
+        use std::io::BufRead as _;
+
+        let host = tempfile::tempdir().unwrap();
+        let root = root_with_links(host.path());
+        let point = host.path().join("point");
+        std::fs::create_dir(&point).unwrap();
+        // The nemesis: unprivileged, in a user and mount namespace of its own, so it needs no root. It says
+        // `ready` once its first mount stands, so the resolves meet a storm already under way.
+        let mut nemesis = std::process::Command::new("unshare")
+            .args(["-Urm", "sh", "-c"])
+            .arg(
+                "mount -t tmpfs none \"$0\" && umount \"$0\" && echo ready && \
+                 while :; do mount -t tmpfs none \"$0\"; umount \"$0\"; done",
+            )
+            .arg(&point)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(nemesis.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(
+            ready.trim(),
+            "ready",
+            "the nemesis mounts in a namespace of its own (unprivileged user namespaces allowed)"
+        );
+        let refused: Vec<OciError> = (0..2000)
+            .filter_map(|_| open(root.path(), "/up/made/here", Make::Dir).err())
+            .collect();
+        let was_alive = nemesis.try_wait().unwrap().is_none();
+        let _ = nemesis.kill();
+        let _ = nemesis.wait();
+        assert!(was_alive, "the nemesis mounted throughout");
+        assert!(
+            refused.is_empty(),
+            "{} of 2000 refused: {:?}",
+            refused.len(),
+            refused.first()
+        );
+    }
+
     /// A relative link climbing out stops at the root, as `..` does at `/`: what's made lands inside.
     #[test]
     fn a_link_climbing_out_stays_at_the_root() {
