@@ -63,6 +63,28 @@ the node's `hex-proc-drop` thread). fedora, 2026-11-05 15:02:19Z-15:07:53Z, unde
   rounds: at this load the whole create's p99 at L6 doesn't separate the arms. At L12 every B cell is under every A
   cell.
 
+## Again at 195e86a: the proc made by one worker thread, after the park (the lead's 14:15Z (b))
+
+**Run.** The same body and harness, at cp/t7-g5-parkproc 195e86a. The delete or refill only queues a job, and the
+node's one `hex-parked-procs` thread makes the proc (queue bound `PER_NODE`). seam_oci sha256 8fa181e71654f2f4.
+fedora, 2026-11-05 15:33:18Z-15:37:21Z, under the timed lock; load fell from 15.6 to 12.5.
+Body: `~/.cache/hex-t7/g5tail/ab-pp-20261105T153245Z`.
+
+| L | arm | part 19 p50 | part 19 p99 | create p99 (ms) | hits | dry | skipped | orphaned |
+|---|-----|-------------|-------------|-----------------|------|-----|---------|----------|
+| 6 | A | 214, 214, 216, 234 | 1177, 1135, 1173, 1276 | 3.116, 3.191, 2.894, 3.275 | - | - | - | - |
+| 6 | B | 212, 217, 219, 220 | 1200, 1187, 1069, 1296 | 2.942, 3.651, 2.928, 3.471 | 427, 428, 440, 409 | 1565, 1564, 1552, 1583 | 956, 901, 852, 930 | 609, 663, 700, 653 |
+| 12 | A | 202, 203, 203, 198 | 1208, 1566, 1860, 757 | 4.000, 4.770, 7.554, 3.377 | - | - | - | - |
+| 12 | B | 194, 198, 200, 199 | 1941, 1828, 1487, 2207 | 4.643, 5.180, 4.450, 5.060 | 663, 659, 602, 637 | 1329, 1333, 1390, 1355 | 909, 941, 994, 918 | 420, 392, 396, 437 |
+
+- The one worker doesn't keep up with 8 creates in flight. Each cell skipped about 900 parks, its queue full, and
+  made about 400-700 procs only after their init was claimed (orphaned, then dropped). So 67-80% of claims found no
+  proc (dry): the init mounted its own, and part 19 is A's again. B's init holds a create are 22.4-25.7, against 5.1
+  with the proc made on the park's own thread (506a263).
+- No misses and no failures.
+- With the proc made on the park's own thread (the delete, or the refill: 9e13b95 and 506a263, above), every claim
+  was a hit, 1,992 of 1,992. This run is what falsifies one worker thread, not the parked proc.
+
 ## The 7.2 guest, indicative (NOT OF RECORD: a VM's numbers)
 
 **Run.** Fedora's kernel 7.2.15-200.fc44 in vm7_lab.sh's guest on fedora: 12 vCPUs on CPUs 4-15, 6G. 2026-11-05
