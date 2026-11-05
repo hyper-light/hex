@@ -482,8 +482,9 @@ pub enum Event {
     Timer,
     /// Another thread triggered it.
     User,
-    /// Process `pid`, watched with tag `tag`, forked.
-    Fork { pid: i32, tag: u64 },
+    /// Process `pid`, watched with tag `tag`, forked; `exited` when it has also ended since (the two
+    /// coalesce into one event until it is taken).
+    Fork { pid: i32, tag: u64, exited: bool },
     /// Process `pid`, watched with tag `tag`, ended with wait `status` (`NOTE_EXITSTATUS`). The node is
     /// the member's parent, so the kernel delivers the status in the event: the watcher reads a member's
     /// death — a jetsam fatal-cap `SIGKILL` among them — without racing the member's own reaper.
@@ -622,7 +623,11 @@ impl Kqueue {
             let event = match e.filter {
                 libc::EVFILT_TIMER => Event::Timer,
                 libc::EVFILT_USER => Event::User,
-                libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork { pid, tag },
+                libc::EVFILT_PROC if e.fflags & libc::NOTE_FORK != 0 => Event::Fork {
+                    pid,
+                    tag,
+                    exited: e.fflags & libc::NOTE_EXIT != 0,
+                },
                 // The wait status rides in `data` (NOTE_EXITSTATUS); the terminating signal is its low 7
                 // bits, so a jetsam fatal-cap SIGKILL is told apart here without reading the zombie.
                 libc::EVFILT_PROC => Event::Exit {
