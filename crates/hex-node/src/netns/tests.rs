@@ -307,7 +307,7 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
         at(true).own - at(false).own,
         held + 2 * held + 6 + 2 + 3 * n(crate::serve::WORKERS)
     );
-    assert!(Pools::ROOT.devfs, "a root node keeps the mounts made ahead");
+    const { assert!(Pools::ROOT.devfs, "a root node keeps the mounts made ahead") };
 }
 
 /// Goal 5 extended step 6, the bound on namespaces holding files (CLAUDE.md §2): a place under it is taken before a
