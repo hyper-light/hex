@@ -243,7 +243,6 @@ mod tests {
 
         let host = tempfile::tempdir().unwrap();
         let root = root_with_links(host.path());
-        let fd = open_root(root.path()).unwrap();
         let point = host.path().join("point");
         std::fs::create_dir(&point).unwrap();
         // The nemesis: unprivileged, in a user and mount namespace of its own, so it needs no root. It says
@@ -275,7 +274,7 @@ mod tests {
             if i >= 2000 && retried() > before {
                 break;
             }
-            if let Err(e) = Root::new(fd.as_fd()).open("/up/made/here", Make::Dir) {
+            if let Err(e) = open(root.path(), "/up/made/here", Make::Dir) {
                 refused.push(e);
             }
         }
