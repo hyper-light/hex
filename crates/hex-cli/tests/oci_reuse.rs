@@ -7,7 +7,9 @@
 //!   `cgroup.kill` (an inotify watch on the file sees none), its cgroup gone and the program reaped, its
 //!   end read as SIGKILL. A box with a process from outside its namespace moved into its cgroup: expect
 //!   the delete to fall back to `cgroup.kill` (the watch sees the write), counted, and the outsider
-//!   killed. A `process` box: expect `cgroup.kill` (the watch sees it), counted;
+//!   killed. A `process` box: expect `cgroup.kill` (the watch sees it), counted. A box whose init ended
+//!   before its delete, read first, and 2,048 of one owner whose inits end at once, each deleted right after
+//!   its start from 32 threads: expect each ended through its init, none by `cgroup.kill`;
 //! - test 2, a cgroup reused within one owner: box A of owner O burns CPU, holds 64 MiB, has a program
 //!   OOM-killed and forks refused, and is deleted; box B of owner O is created: expect B in A's slot, B's
 //!   reported CPU under 1% of A's, its peak under A's and its event counts its own (0) while the cgroup's
@@ -529,6 +531,48 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     );
     assert!(!cg.exists(), "the box's cgroup is gone");
     eprintln!("test 1, init ended before the delete: no kill, no cgroup.kill write");
+
+    // The fifth, as the bench's throughput and sustained phases run them (the lead's finding 3(a),
+    // 2026-11-05T07:50Z): one owner's boxes whose init ends at once, each deleted right after its start,
+    // from many threads, so some deletes find the init reaped while the kernel still counts it in its
+    // cgroup (its last switch, Linux v6.19 kernel/sched/core.c:5156).
+    let o = BoxOwner::named("owner-ends").unwrap();
+    let bundle = lab.bundle_running(Caps::Docker, &["/hex", "selftest-box", "fail", "0"]);
+    let (threads, each) = (32, 64);
+    let before = node.kills();
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let (node, bundle, o) = (&node, &bundle, &o);
+            s.spawn(move || {
+                for n in 0..each {
+                    let id = BoxId::new(&format!("ends-{t}-{n}")).unwrap();
+                    node.create(BoxSpec {
+                        id: id.clone(),
+                        bounds: Bounds::default(),
+                        class: ClassSpec::Bundle(bundle.clone()),
+                        owner: Some(o.clone()),
+                    })
+                    .unwrap();
+                    node.start(&id).unwrap();
+                    node.delete(&id).unwrap();
+                }
+            });
+        }
+    });
+    let after = node.kills();
+    assert_eq!(
+        (after.through_init, after.fell_back, after.cgroup_kill),
+        (
+            before.through_init + threads * each,
+            before.fell_back,
+            before.cgroup_kill
+        ),
+        "every box whose init ended at once was ended without a kill: {before:?} -> {after:?}"
+    );
+    eprintln!(
+        "test 1, {} inits ending at their deletes: no kill",
+        threads * each
+    );
 }
 
 /// A cgroup file's value, trimmed.
