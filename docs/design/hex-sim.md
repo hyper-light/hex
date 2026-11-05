@@ -273,6 +273,11 @@ benchmarks. In a schedule those legs wait for a node to empty rather than being 
 large legs matter more than its count of legs would weigh that against Hex's score. Holding room for them, or
 preempting for them, is G4's.
 
+**Open, not built.** Spreading's low-load cost is whole-machine legs and benchmarks finding no clean machine
+(37 refusals below half load, 29 of them by the benchmark-beside-build filter). A load-aware tie (pack while
+the load is under half, spread above it) or a filter-aware one (keep build-free machines for benchmarks) might
+keep both the stranding gain and the empty machines; the next scheduler goal measures them.
+
 ### H5. Bounded everywhere, no recursion
 
 **The choice.** The store holds at most the run's workloads and three log entries each; the event queue
