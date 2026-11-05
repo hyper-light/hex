@@ -291,3 +291,32 @@ a cell; the copy cell makes no proc ahead):
   running dry doesn't explain the tail under load. Most of the tail's lock wait there is behind other creates' inits
   (their command is still `hex` before `execve`), then the pools' maker (`hex-devfs`), then the agent (`seam_oci`,
   the bench's node).
+
+### The prepared procs' private `/dev/null`, A/B in one guest run: indicative, NOT of record (2026-11-05)
+
+A is a4be9dc. B is 6faee83, which masks each file of a prepared proc with a clone of the node's one private detached
+`/dev/null`, 2 holds where A takes 3. The harness is a4be9dc's, which counts the lock's write holds outside the
+inits' spans by holder. Both arms ran in the same Linux 7.2.15 guest as above, with the tree and procs made ahead,
+at 0, 6 and 12 loops. The two rounds were interleaved, A then B in the first and B then A in the second. Unit
+hex-g6-abtimed-20261105T095058Z, timed 09:51:19-09:58:09Z under the lock, fedora load 33-63; binaries built by
+hex-g6-abbuild-20261105T093048Z, whose `oci_box` passed 3/3 as root in the 7.2 guest at B.
+
+| L | arm | part 19 p50, us (r1, r2) | p99, us | init's holds | maker's holds a create | proc pool dry |
+|---|---|---|---|---|---|---|
+| 0 | A | 71, 82 | 622, 1,261 | 5.8, 5.5 | 28.1, 28.6 | 68, 37 |
+| 0 | B | 80, 87 | 1,119, 1,952 | 5.7, 5.5 | 23.4, 23.6 | 53, 41 |
+| 6 | A | 81, 76 | 1,492, 1,355 | 5.6, 5.7 | 28.4, 28.2 | 51, 59 |
+| 6 | B | 83, 75 | 1,661, 1,813 | 5.5, 5.6 | 23.6, 23.5 | 37, 50 |
+| 12 | A | 80, 78 | 3,078, 1,010 | 5.4, 5.1 | 28.6, 29.0 | 32, 8 |
+| 12 | B | 86, 79 | 3,376, 2,584 | 5.1, 5.1 | 24.0, 24.0 | 8, 8 |
+
+The node (`seam_oci`) held the lock 2.0 times a create in every run.
+
+Read:
+- B does the work it was built to do. The pools' maker takes 4.6-5.0 fewer write holds a create, 16-18%, which is
+  one per masked file under `/proc` with Docker's paths. The init's own holds and the dry counts don't change.
+- It doesn't make part 19 faster. Its p99 is higher than A's in all 6 pairs (by 0.17-1.57 ms), and its p50 in 5 of
+  6. In a guest this noisy, that's no proof B is slower, but it does falsify B as a lever on the tail. The cause isn't
+  known.
+- Whatever the arm, the maker holds the mount lock about 5 times as often as an init does: 23-29 holds a create
+  against 5-6. Nearly all of them are the masks and read-only paths it puts on each proc.
