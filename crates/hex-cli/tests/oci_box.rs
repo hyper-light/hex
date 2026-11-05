@@ -67,6 +67,9 @@ const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 const PREPARED_DEV_ENV: &str = "HEX_OCI_BOX_PREPARED_DEV";
 const PREPARED_DEV_PASS: &str = "prepared /dev oracle completed with actual pooled takes";
 const PROPAGATION_ENV: &str = "HEX_OCI_BOX_SHARED_SOURCES";
+/// Set by hand to run HEX-MNTNS-8's case alone, as root: a focused run on a kernel that differs (a guest's lab),
+/// where a refusal's own text is the record.
+const MASKED_DIRS_ENV: &str = "HEX_OCI_BOX_MASKED_DIRS";
 const PROPAGATION_PASS: &str =
     "shared-source propagation oracle completed with four pruned creates";
 /// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
@@ -430,6 +433,11 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         assert!(!lab.rootless, "the prepared /dev oracle needs root");
         prepared_devs_preserve_order_and_are_never_shared(&lab, own);
         eprintln!("{PREPARED_DEV_PASS}");
+        return;
+    }
+    if std::env::var_os(MASKED_DIRS_ENV).is_some() {
+        assert!(!lab.rootless, "HEX-MNTNS-8's case needs root");
+        masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
         return;
     }
     // First, while this process is no node's and so no subreaper; it also finds out whether a
