@@ -331,6 +331,33 @@ three different things (CLAUDE.md "Working here"):
   specification, one code path from a laptop to a region, and fast isolation of bad workloads and
   nodes, all measured in **hex-sim** (built first). Implementation open.
 
+## What works where (native plan step 7; `docs/design/runtime.md`, decision "one differential suite")
+
+One suite, `hex_api::differential` (the conformance cases HEX-RT-1..13 and the scenarios HEX-DIFF-1..6, each
+real class held to the simulator's trace), runs as each OS's own tests. Where it has passed, and on what:
+
+| | `process` | `oci` |
+|---|---|---|
+| Linux amd64 (fedora) | **Passes** (cgroup v2; `process_box.rs`, and over the node's socket) | **Passes** (bundles and specs, rootless; `oci_box.rs`, `oci_spec_box.rs`, over the socket) |
+| Linux arm64 | Not run: no Linux arm64 machine in the lab. Built for it by no gate yet | As `process` |
+| macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, not merged into the native line |
+| macOS amd64 (Intel) | Built and linted for `x86_64-apple-darwin` (clippy `-D warnings` and build exit 0, 1aa735c); not run, no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
+| Windows amd64 (jupiter) | Built (native step 3, job objects; HEX-RT-1..9 7/7 there, r1128) and linted with the suite. The suite's run waits on jupiter, offline | Windows images through HCS: native step 4, built, not merged, not run |
+| Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
+
+The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
+signal the others refuse (`NotRunning`), now refused; the simulator ended an `oci` box's init on TERM, which
+Linux doesn't (a PID namespace's init takes only KILL and STOP unless it handles the signal), now modelled, and
+what TERM does to an init is the class's (`Fixture::term_ends_init`: Windows' `oci` class ends the job, set by
+native step 4); a macOS box refused a program after its last ended and took a signal with none alive, both
+fixed. The competitor bench found one more: a macOS program killed at its bound was sometimes reported at its
+wait's budget (XNU posts the exit event before the zombie), fixed at abdbfd0.
+
+Each OS's `process` class against its competitors, recorded in `bench/native/RESULT.md`: Linux start 11.1x and
+delete 14.7x a systemd scope's, both holding the bound; macOS start 1.85x `taskpolicy -m`'s, delete 0.89x, both
+holding the bound, and a launchd job's limit holds none. Open: the suite and bench on jupiter (Windows `process`,
+and `oci` when native step 4 lands), and the macOS `oci` class through a Shards guest when native step 5 lands.
+
 ## Next
 
 - **CP-T7.2**: The `firecracker` and `shards` classes, with snapshot templates and warm pools.
