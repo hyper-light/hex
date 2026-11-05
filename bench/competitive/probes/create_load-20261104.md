@@ -156,3 +156,21 @@ From cp/t7-hooks f5c1a9d exec_ab.sh caps its container by BENCH_MEMORY and BENCH
 score) and with their state ON THE OVERLAY, so their Hex creates and deletes paid the record's two fsyncs:
 exec-ab-20261104T142957Z and exec-ab-20261104T143943Z (hooks-conditions-20261104.txt §7), and exec-ab-20261104T161801Z
 above, (X). Of the runs above, only (Y), exec-ab-20261104T162449Z, had a tmpfs /run: a scratch copy, capped.
+
+## At the final tree, cp/t7-g5x-integrate 1714f72 (its own reader, 0b2e18b)
+
+The same pair on 1714f72's static release binaries (hex abd26da6ceabcf5b), the tree's own bench/competitive, which cuts
+the seed's read of the sealed spec (5bc0a2c, 62475d8). Unit hex-hooks-finalpair-20261105T070225Z through hex-slot, each
+run under the timed lock. N=1000 WARMUP=100 ROUNDS=3, CPUs 4-15, 8g / OOM 1000, HEXBENCH_DEVFS=1, root, the pruned path.
+Every probe and traced create was cut whole. Pooled, ms:
+
+| run | the node's state | load, start → end | Hex create p50 / p99 | libcrun p50 / p99 | part 22 / part 24 p50 | parts summed |
+|---|---|---|---|---|---|---|
+| create-breakdown-20261105T070354Z | tmpfs `/run` | 83.5 → 64.1 | 0.808 / 2.874 | 3.327 / 22.206 | 0 / 0 | 0.757 |
+| create-breakdown-20261105T073144Z | the overlay | 29.2 → 24.5 | 6.350 / 17.536 | 2.571 / 4.421 | 2.746 / 2.766 | 6.500 |
+
+The record's two fsyncs are 5.512 of the disk run's 6.500 ms (84.8%), and 0 on tmpfs. The tmpfs run, at nearly three times
+the load, stays under 1 ms and at 0.24x libcrun's create. Part 5, now holding create's write of `checked.json` (62475d8),
+is 0.056 ms on tmpfs and 0.120 on the overlay, with no sync of its own. The fsyncs cost less here than on 2026-11-04
+(2.7 against 4.1-5.1 ms p50), as the host's I/O was quieter (I/O stall 0.30% at the disk run's end). The finding holds
+at the final tree.
