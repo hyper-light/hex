@@ -61,6 +61,15 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    PHASE gates: PASS (exit 0). The 7 gates on fedora at the same commit: exit 0, 271 tests
    (unit hex-windows-gates-20261105T083326Z).
 
+6. the installer lab's before phase again at 21cb432 (48c920d plus this record), 2026-11-05T08:45:55Z:
+   windows-before-21cb432-20261105T084555Z.txt. The same as entry 4: fresh of Hex, the same 4-line plan,
+   "FEATURES: Containers on" and "FEATURES: HypervisorPlatform on", both refusals as there. PHASE before: PASS.
+
+What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
+and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
+skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
+with an image.
+
 Not run yet: step 4's oci suite on an image (needs oci_setup.ps1, which waits on Ada's yes), and the installer
 lab's installed and uninstalled phases (the install and uninstall need Ada at jupiter: on jupiter they turn on no
 feature, so a UAC yes each and no reboot).
