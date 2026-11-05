@@ -314,11 +314,15 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     }
     a_delete_ends_a_box_through_its_inits_pidfd(&lab, own);
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
+    an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(&lab, own);
+    a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
     a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
     a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(&lab, own);
+    // Last: the node it abandons leaves its seeds running in this process.
+    recovery_removes_an_init_parked_by_a_node_that_crashed(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -664,6 +668,227 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     assert!(!slot.exists(), "released, no idle cgroup is left");
+}
+
+/// The processes in a cgroup, by pid, sorted.
+fn procs(cg: &Path) -> Vec<u32> {
+    let mut pids: Vec<u32> = read(cg, "cgroup.procs")
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// The processes in cgroup `cg` once it holds any, waiting on the fact through `cgroup.events`, which the kernel
+/// marks changed (`POLLPRI`) when the cgroup is populated (cgroup-v2.rst, "cgroup.events"); whatever it holds
+/// at `patience`'s end, perhaps none.
+fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + patience;
+    loop {
+        // Opened before the read, so a change after the read is seen by the poll.
+        let events = std::fs::File::open(cg.join("cgroup.events")).unwrap();
+        let now = procs(cg);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !now.is_empty() || left.is_zero() {
+            return now;
+        }
+        let mut fds = [PollFd::new(&events, PollFlags::PRI)];
+        let timeout = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap(),
+            tv_nsec: left.subsec_nanos().into(),
+        };
+        let _ = rustix::event::poll(&mut fds, Some(&timeout));
+    }
+}
+
+/// Goal 5's p99.9 tail (decision 8, "The p99.9 that stayed"; AC-T7.1.3): an owner's idle cgroup holds an init
+/// made ahead, so the owner's next create clones nothing into a cgroup and takes no `cgroup_mutex`. Do: A of O
+/// created, started and deleted; wait for the fact that A's idle slot holds one process; create B of O. Expect:
+/// the slot holds that one process, with no effective capability, before B's create and the same one after it,
+/// so B's init is the parked one; B starts and runs a program; the node counts one init claimed. Then delete B and release the idle
+/// cgroups: none is left, so a parked init is ended with its cgroup.
+fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-parked"));
+    let o = BoxOwner::named("owner-p").unwrap();
+    let a = BoxId::new("pa").unwrap();
+    node.create(lab.oci("pa", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    node.start(&a).unwrap();
+    let slot = node.cgroup_dir(&a).expect("A's cgroup");
+    node.delete(&a).unwrap();
+    let parked = populated_within(&slot, PATIENCE);
+    assert_eq!(
+        parked.len(),
+        1,
+        "A's idle slot holds one init made ahead for O's next box: {parked:?}, {:?}",
+        node.cgroup_reuse().unwrap().parked
+    );
+    // Parked, it exercises no capability: its effective set is empty (proc(5), /proc/<pid>/status `CapEff`).
+    let status = std::fs::read_to_string(format!("/proc/{}/status", parked[0])).unwrap();
+    let eff = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .map(str::trim)
+        .unwrap();
+    assert_eq!(
+        u64::from_str_radix(eff, 16).unwrap(),
+        0,
+        "a parked init holds no effective capability"
+    );
+    let before = node.cgroup_reuse().unwrap();
+    let b = BoxId::new("pb").unwrap();
+    node.create(lab.oci("pb", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    let after = node.cgroup_reuse().unwrap();
+    assert_eq!(node.cgroup_dir(&b).as_deref(), Some(slot.as_path()));
+    assert_eq!(
+        procs(&slot),
+        parked,
+        "B's init is the one parked in the slot, not a clone of B's create"
+    );
+    assert_eq!(after.parked.claimed, before.parked.claimed + 1, "{after:?}");
+    node.start(&b).unwrap();
+    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&b).unwrap();
+    node.release_idle().unwrap();
+    assert!(
+        !slot.exists(),
+        "released, no idle cgroup nor parked init is left"
+    );
+    eprintln!("test 2b: B made by the init parked in A's slot (pid {parked:?})");
+}
+
+/// Each slot cgroup under `root` that holds a process, with its processes.
+fn populated_slots(root: &Path) -> Vec<(PathBuf, Vec<u32>)> {
+    let mut out: Vec<(PathBuf, Vec<u32>)> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        })
+        .map(|e| (e.path(), procs(&e.path())))
+        .filter(|(_, p)| !p.is_empty())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3), reuse off: a node keeps cgroups made ahead for boxes of no
+/// owner, each with an init parked in it. Do: on a node keeping one, create and delete box N1 of no owner (which
+/// finds none ready, and says the namespaces its init was made with); wait for the fact that one is ready; create
+/// N2 of no owner. Expect: N2's cgroup is the slot made ahead and its init the one parked there; it starts and runs
+/// a program; one taken and one claimed counted, N1's create counted dry. Then delete N2 and release the idle
+/// cgroups: N2's slot is removed with it, never kept, and nothing made ahead is left.
+fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-ahead"));
+    let node = node.with_inits_ahead(1);
+    let n1 = BoxId::new("n1").unwrap();
+    node.create(lab.oci("n1", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let root = node
+        .cgroup_dir(&n1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n1).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while node.cgroup_reuse().unwrap().ahead.ready == 0 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let before = node.cgroup_reuse().unwrap();
+    assert_eq!(
+        before.ahead.ready, 1,
+        "one cgroup made ahead: {:?}",
+        before.ahead
+    );
+    assert!(
+        before.ahead.dry >= 1,
+        "N1 found none ready: {:?}",
+        before.ahead
+    );
+    let ready = populated_slots(&root);
+    assert_eq!(
+        ready.len(),
+        1,
+        "the one made ahead holds its parked init: {ready:?}"
+    );
+    let n2 = BoxId::new("n2").unwrap();
+    node.create(lab.oci("n2", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let after = node.cgroup_reuse().unwrap();
+    let slot = node.cgroup_dir(&n2).unwrap();
+    assert_eq!(
+        (slot.clone(), procs(&slot)),
+        ready[0].clone(),
+        "N2 is made in the cgroup made ahead, by the init parked there"
+    );
+    assert_eq!(
+        after.ahead.taken,
+        before.ahead.taken + 1,
+        "{:?}",
+        after.ahead
+    );
+    assert_eq!(
+        after.parked.claimed,
+        before.parked.claimed + 1,
+        "{:?}",
+        after.parked
+    );
+    node.start(&n2).unwrap();
+    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&n2).unwrap();
+    assert!(
+        !slot.exists(),
+        "a box of no owner's slot is removed with it, never kept"
+    );
+    node.release_idle().unwrap();
+    assert_eq!(populated_slots(&root), vec![], "nothing made ahead is left");
+    eprintln!("test 2c: N2 made by the init parked in {}", slot.display());
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
+/// deleted, so A's idle slot holds a parked init; the node abandoned as a crash leaves it (none of its teardown
+/// runs: `ManuallyDrop`); a node opened again over the same box root and state, and its recovery run. Expect: the
+/// idle slot is gone and the parked init has ended.
+fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path) {
+    let box_root = own.join("hex-reuse-recover");
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let open = || {
+        Node::open(&box_root, state.path(), state.path())
+            .expect("open a node")
+            .with_oci_helper(PathBuf::from(&lab.exe))
+    };
+    let node = open();
+    let o = BoxOwner::named("owner-r").unwrap();
+    let a = BoxId::new("ra").unwrap();
+    node.create(lab.oci("ra", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    let slot = node.cgroup_dir(&a).unwrap();
+    node.delete(&a).unwrap();
+    let parked = populated_within(&slot, PATIENCE);
+    assert_eq!(
+        parked.len(),
+        1,
+        "A's idle slot holds a parked init: {parked:?}"
+    );
+    let init = pidfd(parked[0]);
+    let _abandoned = std::mem::ManuallyDrop::new(node);
+    let node = open();
+    node.recover().unwrap();
+    assert!(!slot.exists(), "recovery removed the idle slot");
+    let mut fds = [PollFd::new(&init, PollFlags::IN)];
+    let patience = Timespec {
+        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
+        tv_nsec: 0,
+    };
+    let _ = rustix::event::poll(&mut fds, Some(&patience));
+    assert!(has_ended(&init), "recovery ended the parked init");
+    node.release_idle().unwrap();
+    eprintln!("test 2d: recovery removed the slot and ended the init parked in it");
 }
 
 /// With test 2, the lead's ruling on `cpu.max` (2026-11-03T01:19Z): a reused cgroup's `cpu.max` is
