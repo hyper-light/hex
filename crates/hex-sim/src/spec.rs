@@ -7,6 +7,8 @@
 //! [`check_log`] replays a run's store log and refuses the first write the specification couldn't
 //! have made: the model-based oracle of `T-T7.4.1`, in the shape of QuickCheck's state-machine model
 //! checked at every step (DS[10], DS[11] in `docs/research/scheduler/deterministic-simulation.md`).
+//! [`check_slices`] does the same for each slice of a sharded control plane (H10), on the slice's own
+//! nodes and the workloads routed to it.
 //! [`check_end`] counts what `AC-T7.3.3` holds to zero: workloads lost or started twice.
 //!
 //! Counters here saturate: each counts a run's workloads or writes, bounded by the store far below
@@ -17,7 +19,7 @@ use std::collections::BTreeMap;
 use crate::error::SimError;
 use crate::index::{FitIndex, Sample};
 use crate::model::{Cluster, Demand, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
-use crate::sim::Run;
+use crate::sim::{Layout, Run};
 use crate::store::{Op, State};
 
 /// A write the serial specification couldn't have made.
@@ -46,6 +48,12 @@ pub enum Violation {
     CompletedElsewhere(WorkloadId),
     #[error("{0:?} was left pending while a node held it")]
     LeftPending(WorkloadId),
+    #[error("{workload:?} was routed to slice {slice} and written on {node:?}, outside it")]
+    OutsideSlice {
+        workload: WorkloadId,
+        node: NodeId,
+        slice: usize,
+    },
     #[error("the replay itself failed: {0}")]
     Replay(SimError),
 }
@@ -88,13 +96,74 @@ pub struct LogReport {
 /// that a node holds at the end. Its cost is each placement times the pending workloads ahead of it
 /// times the node count: an oracle for test-sized runs.
 pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> {
+    check_ops(nodes, run, run.store.log().iter().map(|e| Ok(e.op)))
+}
+
+/// [`check_log`] for each of the run's slices: the log's writes of the workloads routed to it, its
+/// nodes by their ids within it. A write on a node outside its workload's slice is refused.
+pub fn check_slices(cluster: &Cluster, run: &Run) -> Result<Vec<LogReport>, Violation> {
+    let shards = u32::try_from(run.planes.len()).map_err(|_| SimError::Config("shards"))?;
+    let layout = Layout::new(&cluster.nodes, shards)?;
+    let mut reports = Vec::with_capacity(layout.len());
+    for s in 0..layout.len() {
+        let nodes = layout.nodes(s).ok_or(SimError::Config("slice index"))?;
+        let ops = run
+            .store
+            .log()
+            .iter()
+            .filter_map(|e| in_slice(&layout, run, s, e.op).transpose());
+        reports.push(check_ops(nodes, run, ops)?);
+    }
+    Ok(reports)
+}
+
+/// `op` in slice `s`'s node ids, if its workload was routed there.
+fn in_slice(layout: &Layout, run: &Run, s: usize, op: Op) -> Result<Option<Op>, Violation> {
+    let workload = match op {
+        Op::Submit { workload, .. }
+        | Op::Place { workload, .. }
+        | Op::Complete { workload, .. } => workload,
+    };
+    let spec = run
+        .store
+        .record(workload)
+        .ok_or(Violation::NotSubmitted(workload))?
+        .spec;
+    if layout.route(&spec) != Some(s) {
+        return Ok(None);
+    }
+    let local = |node: NodeId| {
+        layout.local(s, node).ok_or(Violation::OutsideSlice {
+            workload,
+            node,
+            slice: s,
+        })
+    };
+    Ok(Some(match op {
+        Op::Submit { .. } => op,
+        Op::Place { workload, node } => Op::Place {
+            workload,
+            node: local(node)?,
+        },
+        Op::Complete { workload, node } => Op::Complete {
+            workload,
+            node: local(node)?,
+        },
+    }))
+}
+
+fn check_ops(
+    nodes: &[NodeSpec],
+    run: &Run,
+    ops: impl Iterator<Item = Result<Op, Violation>>,
+) -> Result<LogReport, Violation> {
     let mut index = FitIndex::new(nodes)?;
     let mut pending: BTreeMap<u64, (WorkloadId, Demand)> = BTreeMap::new();
     let mut seq_of: BTreeMap<WorkloadId, u64> = BTreeMap::new();
     let mut placed: BTreeMap<WorkloadId, NodeId> = BTreeMap::new();
     let mut report = LogReport::default();
-    for entry in run.store.log() {
-        match entry.op {
+    for op in ops {
+        match op? {
             Op::Submit { workload, seq } => {
                 let need = run
                     .store
