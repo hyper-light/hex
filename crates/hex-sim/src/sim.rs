@@ -76,9 +76,11 @@ pub enum Nemesis {
     },
 }
 
-/// A takeover's rebuild, per record read. Provisional, not yet measured: `tests/shards.rs`'s
-/// `rebuild_cost` measures it on fedora.
-pub const REBUILD_NS_PER_RECORD: Time = 1_000;
+/// A takeover's rebuild, per record read. Measured: unit hex-sched-g6s2-measure-20261105T042030Z,
+/// 2026-11-05, fedora 4-15, best of 5: 130 ns a record over rebuilds of 125,000 of 1,000,000 records,
+/// release, load 37.9, by `tests/shards.rs`'s `rebuild_cost`; recorded in
+/// `bench/sched/takeover_rebuild.md`.
+pub const REBUILD_NS_PER_RECORD: Time = 130;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {

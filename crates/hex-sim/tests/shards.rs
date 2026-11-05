@@ -92,6 +92,13 @@ fn check_takeover(cluster: &Cluster, config: &Config, run: &Run) {
     assert_eq!(kept.disturbed, 0, "{kept:?}");
     let slices = spec::check_slices(cluster, run).unwrap();
     assert_eq!(slices.len(), 8);
+    // A run that kept no planes is checked against the layout it was made on, to the same verdicts.
+    let layout = Layout::new(&cluster.nodes, config.shards).unwrap();
+    let bare = Run {
+        planes: Vec::new(),
+        ..run.clone()
+    };
+    assert_eq!(spec::check_layout(&layout, &bare).unwrap(), slices);
     assert!(slices.iter().all(|s| s.placements > 100_000), "{slices:?}");
     assert!(run.planes.iter().all(|p| p.pending() == 0));
 

@@ -103,7 +103,11 @@ pub fn check_log(nodes: &[NodeSpec], run: &Run) -> Result<LogReport, Violation> 
 /// nodes by their ids within it. A write on a node outside its workload's slice is refused.
 pub fn check_slices(cluster: &Cluster, run: &Run) -> Result<Vec<LogReport>, Violation> {
     let shards = u32::try_from(run.planes.len()).map_err(|_| SimError::Config("shards"))?;
-    let layout = Layout::new(&cluster.nodes, shards)?;
+    check_layout(&Layout::new(&cluster.nodes, shards)?, run)
+}
+
+/// [`check_slices`] over a given layout, for a run that kept no planes (a bench's own store).
+pub fn check_layout(layout: &Layout, run: &Run) -> Result<Vec<LogReport>, Violation> {
     let mut reports = Vec::with_capacity(layout.len());
     for s in 0..layout.len() {
         let nodes = layout.nodes(s).ok_or(SimError::Config("slice index"))?;
@@ -111,7 +115,7 @@ pub fn check_slices(cluster: &Cluster, run: &Run) -> Result<Vec<LogReport>, Viol
             .store
             .log()
             .iter()
-            .filter_map(|e| in_slice(&layout, run, s, e.op).transpose());
+            .filter_map(|e| in_slice(layout, run, s, e.op).transpose());
         reports.push(check_ops(nodes, run, ops)?);
     }
     Ok(reports)
