@@ -119,6 +119,19 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   `docs/research/runtime/goal5-mounts.md` §11). The masked directories' tmpfs made ahead was built and measured: part 19's p50
   about 15% lower with Docker's paths, no gain on either p99 or the whole create, so it stays on `cp/t7-ext-s3-maskpool` (§13).
 
+- **Goal 5 of record, its pass on fedora** (2026-11-05, `cp/t7-g5-record` 70376d7, not merged; `bench/competitive/
+  RESULT.md`, "Goal 5 of record"; decision 5). The tree: goal 5 extended's integrated one, goal 6, the state directories
+  in shards and the tail cut (inits parked ahead, decision 8), gates 7/7 and the root lab 8/8. host.sh's OCI pass, best
+  of 2, Hex over libcrun in process (over the socket), every round read whole, none crashed, noisy (load 11 to 17):
+  - reuse on (out/20261105T135855Z): create p50 0.152x (0.157x), p99.9 0.060x (0.060x); create+start of `true` p50
+    0.133x (0.156x), p99.9 0.064x (0.069x). **Met in both columns**, Hex's create p99.9 under 1 ms in each round, so it
+    holds against a quiet libcrun too (libcrun's create p99.9 here 15.38 ms).
+  - no owner (out/20261105T134534Z), host.sh's default and so the bar as written: 0.189x (0.200x), 0.463x (0.421x),
+    0.160x (0.199x), 0.406x (0.445x). **Not met**: both p99.9 over, Hex's about 2.3 ms against a quiet libcrun's 5.03
+    and 5.69. What holds it is the teardown of the box before (cgroup css work preempting creates), which reuse within
+    one owner removes.
+  - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19. The pass on
+    the Mac Studio (`docker_pass.sh`) waits on that and on its Docker Desktop. Goal 5 lands from this tree on her word.
 - **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
   extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
   FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete

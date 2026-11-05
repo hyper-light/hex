@@ -536,6 +536,61 @@ and 0.114 ms on the P-cores and 0.501 and 0.163 ms on the E-cores at rest (the i
 the pass, not after), 0.114 and 0.102, 0.165 and 0.181 held awake. No phase recorded an error. A pass begun at 00:42:58Z
 (`20261030T004258Z`) was stopped before any phase, since step 1's breakdown was measuring then; it is marked `ABORTED`.
 
+## Goal 5 of record (plan step 6): create and create+start of `true` against a quarter of libcrun's (2026-11-05, fedora)
+
+The bar (runtime design goal 5, decision 5): Hex's create p50 and create+start-of-`true` p50, and both p99.9, through
+the seam at most 0.25x libcrun's in-process ones in the same run, by host.sh's OCI pass (`PHASES=oci RUNTIMES=libcrun
+SEAM_OCI_BIN=...`), best of 2. The seam is both its columns, in process and over the node agent's socket, so a cell
+holds only where both are under (the lead, 2026-11-05T03:51Z); in process is the binding one. host.sh's pass runs with
+no owner unless `HEXBENCH_OWNER` names one, so the bar as written is the pass with none: no box's cgroup or network
+namespace is handed on (decision 5, step 6's reuse within one owner). The pass with an owner beside it.
+
+The tree: `cp/t7-g5-record` 70376d7, goal 5 extended's integrated tree (cp/t7-g5x-integrate b22a981) with goal 6
+(cp/t7-g6 fde0ec1), the state directories in shards (cp/t7-ext-s6-shards 7179907) and the tail cut, inits parked
+ahead in their cgroups so a create takes no `cgroup_mutex` (cp/t7-g5-tail 6b95c65, decision 8), with the merges' fixes.
+Gates 7/7, 360 tests, and the root lab 8/8 there (unit hex-g5rec-gates-20261105T133811Z). Unit
+hex-g5rec-pass-20261105T134425Z built hex (static-glibc, sha256 2c9e4b58aa55c980) and seam_oci (d6330e7307fafb75) at
+it; libcrun 1.30.1 in process. N=10000 after 100, phases `lifecycle start_true`, CPUs 4-15 under the shared timed lock,
+noisy (no load gate; about 23 containers of kiln CI beside it), `/run` a tmpfs. Every round's file holds its 10,000 in
+each phase with no error, and no round crashed (no `crashed.txt`; host.sh's crashed-round check, 0892f3c).
+
+Best of 2, ms (Hex over libcrun in the same pass):
+
+| pass | | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| no owner, out/20261105T134534Z (load 16.30 to 16.82) | Hex in process | 0.36, 0.189x | 2.33, 0.463x | 0.33, 0.160x | 2.31, 0.406x |
+| | Hex over the socket | 0.38, 0.200x | 2.12, 0.421x | 0.41, 0.199x | 2.53, 0.445x |
+| | libcrun | 1.90 | 5.03 | 2.06 | 5.69 |
+| reuse on, `HEXBENCH_OWNER=g5rec-owner`, out/20261105T135855Z (load 14.03 to 11.38) | Hex in process | 0.30, 0.152x | 0.92, 0.060x | 0.28, 0.133x | 0.85, 0.064x |
+| | Hex over the socket | 0.31, 0.157x | 0.92, 0.060x | 0.33, 0.156x | 0.92, 0.069x |
+| | libcrun | 1.98 | 15.38 | 2.11 | 13.36 |
+
+- **With reuse on, every cell is under the bar in both columns.** Hex's own create p99.9 is under a millisecond in
+  each round (0.93 and 0.71 in process, 0.86 and 0.92 over the socket, read from each round's file at sample
+  floor(0.999 n)), so it holds against a quiet libcrun too: against the no-owner pass's 5.03 it would be 0.185x.
+  libcrun's tail in this pass was the noisier (create p99.9 18.07 and 6.03 by round).
+- **With no owner, the bar as written: both p50s are under in both columns, every p99.9 is over** (0.406x to 0.463x),
+  Hex's at about 2.3 ms against a quiet libcrun's 5.03 and 5.69. Not met.
+- **The tail cut is in every create.** In process, 10,099 of 10,107 and 10,098 of 10,106 lifecycle creates took an
+  init parked ahead (none failed, none ended unclaimed), and 10,100 of 10,100 in `start_true`; with reuse on, 10,099 of
+  10,100 in each round. No in-process create of either pass took over 8 ms, and the no-owner create's max fell to 3.08
+  ms (r1 3.00, r2 3.08), where at 15a3323, before the cut, it was 18.78; there, with reuse on, 7 and 19 creates a
+  round in process took over 8 ms (as 9 and 7 did at 2a91371), and none did here.
+- **What holds the no-owner p99.9 is the teardown of the box before it, not the lock** (decision 8; the tail agent's
+  `probes/create_tail.md`, "Reuse off after the cut"): the cgroup's css work items preempting creates on their CPUs.
+  Reuse within one owner takes it away, which is the gap between the passes.
+
+The host's clock (`probes/host_clock.sh`) before: load 16.50, a short burst's p50 0.096 ms on the P-cores and 0.159 on
+the E-cores at rest, 0.107 and 0.172 held awake; after: load 11.27, 0.131 and 0.230 at rest, 0.120 and 0.171 held.
+
+The passes before it, on the way (same method, fedora, noisy; each round read whole): at 6eb38bd (goal 6 merged) no
+owner out/20261105T030924Z 0.286x, 0.191x, 0.255x, 0.251x (libcrun create p99.9 22.15) and reuse on
+out/20261105T034248Z 0.187x, 0.071x, 0.160x, 0.035x (the socket's create p99.9 0.898x); at 2a91371 no owner
+out/20261105T082351Z 0.219x, 0.043x, 0.236x, 0.126x (libcrun 65.19) and reuse on out/20261105T084842Z 0.212x, 0.369x,
+0.150x, 0.136x; at 15a3323 (the shards) no owner out/20261105T124235Z 0.245x, 0.502x, 0.221x, 0.635x (libcrun 5.62)
+and reuse on out/20261105T125319Z 0.190x, 3.20x, 0.166x, 0.659x. Each in the column order above, in process. The
+p99.9 ratios move with libcrun's own tail (5 to 65 ms across them) while Hex's held at 2 to 4 ms until the tail cut.
+
 ## What the run shows
 
 - **OCI class: Hex misses the bar, and crun is the competitor to beat.**

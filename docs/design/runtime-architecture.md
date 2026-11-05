@@ -1777,6 +1777,28 @@ The levers that would take what's left of the parts, for Ada:
 - step 6's two levers, the init's pidfd end and the cgroup reused within one owner, both in this tree. What's left of
   the cgroup on reuse is the idle cgroup's check, read file by file.
 
+**Goal 5 of record** (plan step 6, 2026-11-05, fedora, CPUs 4-15, noisy; `bench/competitive/RESULT.md`, "Goal 5
+of record"). The record tree `cp/t7-g5-record` 70376d7 holds goal 5 extended's integrated tree, goal 6, the state
+directories in shards and the tail cut (decision 8: an init parked ahead in each idle cgroup, so a create claims it
+and takes no `cgroup_mutex`). host.sh's OCI pass, best of two rounds of ten thousand, every round read whole and none
+crashed, Hex over libcrun in the same pass, in process (over the socket):
+<!-- record: bench/competitive/RESULT.md -->
+
+| pass | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|
+| no owner, out/20261105T134534Z | 0.189x (0.200x) | 0.463x (0.421x) | 0.160x (0.199x) | 0.406x (0.445x) |
+| reuse on, out/20261105T135855Z | 0.152x (0.157x) | 0.060x (0.060x) | 0.133x (0.156x) | 0.064x (0.069x) |
+
+<!-- /record -->
+With reuse on, every cell is under the bar in both columns, and Hex's own create p99.9 is under a millisecond in each
+round (<!-- record: bench/competitive/RESULT.md -->0.93 and 0.71<!-- /record --> ms in process), so it holds against a quiet libcrun too.
+With no owner, host.sh's default and so the bar as written, both p50s are under and every p99.9 is over, Hex's at about
+<!-- record: bench/competitive/RESULT.md -->2.33<!-- /record --> ms against libcrun's <!-- record: bench/competitive/RESULT.md -->5.03<!-- /record -->: not met. The
+tail cut is in every create (no in-process create over 8 ms in either pass); what holds the no-owner p99.9 is the
+teardown of the box before it, the cgroup's css work items preempting creates on their CPUs (decision 8), which reuse
+within one owner takes away. Whether the bar is counted with an owner, met by reuse across boxes of no owner, or left
+unmet on 6.19 is Ada's to decide. Until she does, goal 5 is not done as written.
+
 **The spec a container is made from** (found 2026-11-04, AC-T7.1.1). The runtime reads a bundle's `config.json`,
 parses it and checks it: among the rest, `Spec::check` refuses a container in a user namespace holding CAP_SYS_ADMIN
 without a network namespace of its own. The create seed then read `config.json` again, by path on a rootless node
