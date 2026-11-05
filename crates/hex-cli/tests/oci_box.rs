@@ -1116,7 +1116,7 @@ fn held_record_write(lab: &Lab, own: &Path) {
         ),
         "the held write, let go, failed at its fsync: {held_made:?}"
     );
-    if on_tmpfs(node.container_dir(&held).parent().unwrap()) {
+    if on_tmpfs(node.oci_root()) {
         assert_eq!(
             synced_beside, synced,
             "the 31 boxes' records, their container state on tmpfs alone, were not synced"
@@ -1161,7 +1161,7 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
         .expect("create in b");
     let (in_a, in_b) = (a.container_dir(&id), b.container_dir(&id));
     assert_ne!(in_a.file_name(), in_b.file_name(), "two containers' names");
-    if in_a.parent() != in_b.parent() {
+    if a.oci_root() != b.oci_root() {
         eprintln!(
             "two_nodes_one_box_id: no runtime directory here, so each node keeps its containers in its state directory"
         );
@@ -1202,7 +1202,7 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
     let (on_tmpfs_live, on_tmpfs_ended, on_disk) =
         (id("on-tmpfs-live"), id("on-tmpfs-ended"), id("on-disk"));
     let node = lab.node(&box_root, state.path());
-    let runtime = node.container_dir(&on_disk).parent().unwrap().to_owned();
+    let runtime = node.oci_root().to_owned();
     if !on_tmpfs(&runtime) {
         eprintln!(
             "SKIP records_in_both_places_are_found_after_a_restart: the runtime directory {} isn't tmpfs here",
@@ -1406,6 +1406,7 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         .create(lab.running(new_live.clone(), &Lab::act(&Act::Wait)))
         .expect("create at the new place");
     let container = first.container_dir(&old_live);
+    let containers = first.oci_root().to_owned();
     drop(first);
     let oci_boxes = BoxRoot::open(&oci_dir, disks::under(state.path()).unwrap()).unwrap();
     let _new = Killing(&oci_boxes, new_live.clone());
@@ -1415,10 +1416,7 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
     let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
     let _old = Killing(&root, old_live.clone());
     let bundle = lab.bundle(&Lab::act(&Act::Wait));
-    let runtime = OciRuntime::with_helper(
-        container.parent().unwrap().to_owned(),
-        PathBuf::from(&lab.exe),
-    );
+    let runtime = OciRuntime::with_helper(containers, PathBuf::from(&lab.exe));
     let name = container.file_name().unwrap().to_str().unwrap();
     let cgroup = root.create(&old_live, &Bounds::default()).unwrap();
     runtime

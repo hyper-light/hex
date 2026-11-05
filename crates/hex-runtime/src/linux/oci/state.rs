@@ -101,6 +101,43 @@ impl State {
     }
 }
 
+/// How many shards a state root's containers are spread over by their id: 64, each named by two hex digits of
+/// [`SHARD_MASK`]. A create's mkdir and a delete's rmdir of a container's directory hold its parent's `i_rwsem`
+/// exclusively (Linux v6.19 `fs/namei.c:2860-2873`, through `start_dirop`, `:4888` and `:5293`), so under one
+/// parent every create and delete waits on every other's; `create_serial` run 25 measured that wait at 0.043 ms a
+/// lifecycle at concurrency 32. 64 is the node's record shards' count (`hex_node::store::SHARDS`), whose waits
+/// went at that concurrency in run 20 (docs/research/runtime/goal5-cgroup-lock.md).
+pub const SHARDS: usize = 64;
+/// The bits of a container id's hash that name its shard, [`SHARDS`] of them.
+const SHARD_MASK: u64 = 0x3f;
+
+/// Container `id`'s shard of its state root: two hex digits of FNV-1a over its id, the same in every run of every
+/// build, so the CLI (`hex oci --root`) and the node find a container where the other put it.
+pub fn shard(id: &str) -> String {
+    format!("{:02x}", fnv1a(id.as_bytes()) & SHARD_MASK)
+}
+
+/// FNV-1a, 64-bit (draft-eastlake-fnv, "FNV Basics" and "FNV Constants"): its arithmetic is modulo 2^64 by
+/// definition, so the multiply wraps.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// The state root `dir`, a container's directory, is under, and the container's id: its shard's parent when its
+/// parent is its shard ([`Dir::new`]), else its parent, where a runtime before the shards kept it
+/// ([`Dir::unsharded`]). `None` for a path with no parent or a name that isn't UTF-8.
+pub fn root_of(dir: &Path) -> Option<(PathBuf, String)> {
+    let id = dir.file_name()?.to_str()?.to_owned();
+    let parent = dir.parent()?;
+    let root = match parent.file_name().and_then(|n| n.to_str()) {
+        Some(n) if n == shard(&id) => parent.parent()?,
+        _ => parent,
+    };
+    Some((root.to_path_buf(), id))
+}
+
 /// A container's directory: its `state.json` and its `exec.fifo`.
 #[derive(Debug, Clone)]
 pub struct Dir {
@@ -108,8 +145,17 @@ pub struct Dir {
 }
 
 impl Dir {
-    /// The directory for container `id` under `root` (the runtime's per-user state root).
+    /// The directory for container `id` under `root` (the runtime's per-user state root): in its shard
+    /// ([`shard`]), made with it if it isn't there yet and never removed.
     pub fn new(root: &Path, id: &str) -> Self {
+        Self {
+            dir: root.join(shard(id)).join(id),
+        }
+    }
+
+    /// Where a runtime before the shards kept container `id`'s directory: under `root` itself (goal 5 extended,
+    /// step 6). Read there for as long as it lasts, so a container made before an upgrade is managed as any other.
+    pub fn unsharded(root: &Path, id: &str) -> Self {
         Self { dir: root.join(id) }
     }
 

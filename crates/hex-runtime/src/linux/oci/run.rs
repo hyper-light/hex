@@ -261,9 +261,17 @@ impl Runtime {
         PathBuf::from("/run/hex-oci")
     }
 
+    /// Container `id`'s directory: in its shard of the root, unless a runtime before the shards left it in the
+    /// root itself and it isn't in its shard (goal 5 extended, step 6), so a create is refused over one made
+    /// before an upgrade as over one made after it.
     fn dir(&self, id: &str) -> Result<Dir, OciError> {
         check_id(id)?;
-        Ok(Dir::new(&self.root, id))
+        let dir = Dir::new(&self.root, id);
+        if dir.path().exists() {
+            return Ok(dir);
+        }
+        let before = Dir::unsharded(&self.root, id);
+        Ok(if before.exists() { before } else { dir })
     }
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
