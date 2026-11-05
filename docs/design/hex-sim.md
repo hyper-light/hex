@@ -303,26 +303,33 @@ never by moving the bar (CLAUDE.md §4).
 
 **The choice.** `AC-T7.11.4`'s bytes per workload are measured, not computed from layouts
 (`Store::record_bytes` is the layout alone). The test binary `crates/hex-sim/tests/memory.rs`
-registers a counting `GlobalAlloc` that forwards to `System` and keeps live bytes (allocated minus
-freed) in an atomic counter. It runs 1,000,000 workloads on 10,000 nodes to H13's end state. It then
-drops the run's store and planes (`Run.store`, `Run.planes`) and reads the counter before and after. The
-difference, divided by the workloads, is the bytes per workload, against 4 KiB.
+registers a counting global allocator over `System` that keeps live bytes (allocated minus freed). It
+runs 1,000,000 workloads on 10,000 nodes to H13's end state. It then drops the run's store and planes
+(`Run.store`, `Run.planes`) and reads the count before and after. The difference, divided by the
+workloads, is the bytes per workload, against 4 KiB.
+
+The counter is a crate with a safe API, a dev-dependency of `hex-sim`: `cap`
+(`static A: Cap<System> = Cap::new(System, usize::MAX)`, read by `A.allocated()`) or `stats_alloc`
+(`&INSTRUMENTED_SYSTEM`, read by a `Region`'s `change()`). Step 3 takes whichever passes clippy clean
+on Linux, macOS and windows-msvc. The `unsafe impl GlobalAlloc` stays inside the crate, so Hex's code
+gains no `unsafe`: the test carries no `#![allow(unsafe_code)]` and CLAUDE.md §12's list is
+unchanged.
 
 The store's history log is counted with it. In production, the store is Amphora's and the log is its
 own, so counting both is conservative: a pass with them is a pass without. The counter sees the bytes
 requested from the allocator, not the allocator's own per-chunk overhead.
 
-The `unsafe impl GlobalAlloc` is test code. The workspace denies `unsafe_code` (`Cargo.toml`), so the
-file opts in at its top with a `// SAFETY:` comment on each block. Naming it in CLAUDE.md §12's list
-goes to Ada with the step that adds it.
-
 **Sources.** `GlobalAlloc` is "A memory allocator that can be registered as the standard library's
 default", and `#[global_allocator]` routes "all default allocation requests to a custom object". The
 trait is `unsafe`, and std's own example forwards to `System` (`scale-and-shards.md:40-46`, SS[4]
-`global.rs:7,189`, SS[5] `alloc.rs:12-14,21-32` at Rust 1.99.1, Hex's toolchain). No competitor
-publishes control-plane memory per workload. The nearest are whole-process figures: Twine's 80 GB shard
-for ~170K machines, Shard Manager's 64 GB mini-SM at ~38%, and a busy Borgmaster's 50 GiB
-(`scale-and-shards.md:68-70`, `cluster-managers-at-scale.md:272,479-480,646-647`).
+`global.rs:7,189`, SS[5] `alloc.rs:12-14,21-32` at Rust 1.99.1, Hex's toolchain). `cap` 0.1.2
+(https://docs.rs/cap/0.1.2/cap/) and `stats_alloc` 0.1.10
+(https://docs.rs/stats_alloc/0.1.10/stats_alloc/) each wrap `System` behind a safe registration and
+reader, with the `unsafe impl` inside (`scale-and-shards.md:46-52`, SS[12] `lib.rs:5,15-16,22,138,179`,
+SS[13] `lib.rs:14-15,18-20,80-82,233,251`). No competitor publishes control-plane memory per workload.
+The nearest are whole-process figures: Twine's 80 GB shard for ~170K machines, Shard Manager's 64 GB
+mini-SM at ~38%, and a busy Borgmaster's 50 GiB (`scale-and-shards.md:74-76`,
+`cluster-managers-at-scale.md:272,479-480,646-647`).
 
 **Evidence.** Step 3 measures it and records the number. The counter's own non-vacuity: allocating a
 known buffer moves it by exactly that buffer's bytes, and dropping the run gives back what building it
@@ -361,12 +368,12 @@ allocator's overhead matters, and the bar would be re-measured at resident memor
 
 **Sources.** The shapes and the method:
 - `scheduler_perf`'s node is 4 CPU, 32 GiB, 110 pods, and its pod 100m/500Mi
-  (`scale-and-shards.md:55-57`, SS[7] `node-default.yaml:7-10`, SS[8] `pod-default.yaml:11-17`).
-- Its floors are 790 and 680 pods/s, each the minimum average of 250 runs (`scale-and-shards.md:57-59`,
-  `cluster-managers-at-scale.md:183`). It pins runs to CPUs and repeats them (`scale-and-shards.md:59-61`).
+  (`scale-and-shards.md:61-63`, SS[7] `node-default.yaml:7-10`, SS[8] `pod-default.yaml:11-17`).
+- Its floors are 790 and 680 pods/s, each the minimum average of 250 runs (`scale-and-shards.md:63-65`,
+  `cluster-managers-at-scale.md:183`). It pins runs to CPUs and repeats them (`scale-and-shards.md:65-67`).
 
 The QPS settings:
-- The scheduler's own default is 50/100 (`scale-and-shards.md:47-49`, SS[6] `defaults.go:149-154`).
+- The scheduler's own default is 50/100 (`scale-and-shards.md:53-55`, SS[6] `defaults.go:149-154`).
 - YuniKorn's KWOK runs measured a flat 50.5 pods/s, consistent with that cap
   (`cluster-managers-at-scale.md:189-193`). So a default-only comparison would measure the client
   limit, not the scheduler.
@@ -379,7 +386,7 @@ kwok's own claims: 1k nodes and 100k pods "reliably", and 20 creates/s (`determi
 plane. The fast path decides and commits single-threaded at p50 50.8-54.2 µs and p99 81-92 µs
 (`bench/sched/fast_path.md`), inside 120 µs, but at 85% fill with one workload in flight, not 1,000,000
 pending. Steps 4 and 5 record the measured runs. The ratio needs kube-scheduler measured on fedora beside
-Hex, which no cited floor replaces (`scale-and-shards.md:71-72`).
+Hex, which no cited floor replaces (`scale-and-shards.md:77-78`).
 
 **What would falsify it.**
 - kube-scheduler at the raised setting within 10x of Hex on the same cluster: the bar is missed and stated so.

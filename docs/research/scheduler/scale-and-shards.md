@@ -43,7 +43,13 @@ Sharding facts (Twine, Shard Manager, Gödel, Hydra, Borg) are already in
    (DE). The trait is `pub unsafe trait GlobalAlloc` SS[4] `:189`, with `alloc`, `dealloc`,
    `alloc_zeroed` and `realloc` SS[4] `:223,238,261,331`; std's own example forwards to `System`
    inside an `unsafe impl` SS[5] `:21-32` (DE). So the counter sees every allocation of the process,
-   and implementing it is `unsafe` code.
+   and implementing it is `unsafe` code. Two crates keep that `unsafe impl` inside them behind a safe
+   API. `cap` wraps an allocator "tracking memory usage", registered as
+   `static ALLOCATOR: Cap<alloc::System> = Cap::new(alloc::System, usize::max_value())` and read with
+   `allocated()` SS[12] `lib.rs:5,15-16,22,138` (DE). `stats_alloc` registers
+   `&INSTRUMENTED_SYSTEM` and reads a `Region`'s `change()` in `bytes_allocated` and
+   `bytes_deallocated` SS[13] `lib.rs:14-15,18-20,80-82` (DE). The `unsafe impl`s are at SS[12]
+   `lib.rs:179` and SS[13] `lib.rs:233,251`.
 6. **kube-scheduler's binding rate is capped by its API client unless raised.** The scheduler "has an
    opinion about QPS/Burst": 50 QPS and burst 100 unless set SS[6] `:149-154` (DE), the same as
    component-base's generic default SS[3] `:69-73`. Every bind is an API call
@@ -150,3 +156,22 @@ Kind: DE.
 - `:14`: "By default, etcd uses a `100ms` heartbeat interval."
 - `:16`: "This timeout is how long a follower node will go without hearing a heartbeat before attempting to become leader itself. By default, etcd uses a `1000ms` election timeout."
 - `:20`: "Election timeouts must be at least 10 times the round-trip time so it can account for variance in the network."
+
+[SS12] A. Mocatta, `cap` 0.1.2 (MIT OR Apache-2.0), `src/lib.rs` from the crates.io package
+https://static.crates.io/crates/cap/cap-0.1.2.crate ; docs https://docs.rs/cap/0.1.2/cap/ ; repository
+https://github.com/alecmocatta/cap . Kind: DE.
+- `:5`: "This crate provides a generic allocator that wraps another allocator, tracking memory usage and enabling limits to be set."
+- `:15-16`: `#[global_allocator]` / `static ALLOCATOR: Cap<alloc::System> = Cap::new(alloc::System, usize::max_value());`
+- `:22`: `println!("Currently allocated: {}B", ALLOCATOR.allocated());`
+- `:137-138`: "Return the number of bytes allocated. Always less than the limit." `pub fn allocated(&self) -> usize`
+- `:179`: `unsafe impl<H> GlobalAlloc for Cap<H>`
+
+[SS13] M. Griep, `stats_alloc` 0.1.10 (MIT), `src/lib.rs` from the crates.io package
+https://static.crates.io/crates/stats_alloc/stats_alloc-0.1.10.crate ; docs
+https://docs.rs/stats_alloc/0.1.10/stats_alloc/ ; repository https://github.com/neoeinstein/stats_alloc .
+Kind: DE.
+- `:2-4`: "An instrumenting middleware for global allocators in Rust, useful in testing for validating assumptions regarding allocation patterns"
+- `:14-15`: `#[global_allocator]` / `static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;`
+- `:18-20`: `let reg = Region::new(&GLOBAL);` ... `reg.change()`
+- `:80-82`: `pub bytes_allocated: usize`, `pub bytes_deallocated: usize` (fields of `Stats`)
+- `:233`, `:251`: `unsafe impl ... GlobalAlloc for &'a StatsAlloc<T>` and `for StatsAlloc<T>`
