@@ -496,12 +496,17 @@ On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms wit
     aren't removed.
   - The predicted key: 1,992 of 1,992 hits in 7 of 8 cells. The eighth had 8 misses, from the ipc/uts pair pool
     running dry.
-- **The cost is on the delete.** The create's p50 falls 0.16-0.43 ms. The delete's p50 rises 0.29-0.54 ms, and its
-  p99 is higher in 7 of 8 pairs. At 6 loops the lifecycle rate is 2.5-5.3% lower. Whether the delete can carry that is
-  the open question. If it can't, the fallback is several workers sized to the deletes in flight (one worker was
-  measured and couldn't keep up: hits 409-663 of 1,992).
-- So the bar is approached with parked procs on, but not met: the p99 is above 0.5 ms in 6 of 8 cells. It isn't
-  landed, and the setting stays off by default.
+- **The cost is on the delete.** The create's p50 falls 0.16-0.43 ms.
+  - At 8 in flight (the A/B above), the delete's p50 rises 0.29-0.54 ms, and its p99 is higher in 7 of 8 pairs. At 6
+    loops the lifecycle rate is 2.5-5.3% lower.
+  - Serially (host.sh's lifecycle pass, cp/t7-g5-parkproc f15393c's record), the delete's in-process p50 rises
+    0.03-0.12 ms, with every create a hit.
+- **Where the proc is made, decided (the lead, 2026-11-05 17:00Z): on the parking thread**, as built at
+  cp/t7-g5-parkproc f15393c. Both worker arms failed. A single worker couldn't keep pace (hits 409-663 of 1,992, part 19
+  back at the off arm's numbers), and the workers were bound by the one shared mount lock all the procs' holds take.
+- **It's opt-in:** `Node::with_parked_procs`, off by default. Whether it goes on by default is Ada's call.
+- So with parked procs on, the under-load bar is approached on 6.19, but not yet met: part 19's p99 is 351-761 us
+  against 0.5 ms, under it in 2 of 8 cells, with a p50 of ~37 us.
 
 What can reach the bar is goal 6's 7.x path: the namespace made from a tree, with procs made ahead.
 - In the Linux 7.2 guest, part 19's p50 is about a third of 6.19's (56-80 us against about 250, §9-§10). Both the
