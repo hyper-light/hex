@@ -101,8 +101,8 @@ pub fn available() -> Result<(), Refusal> {
     sys::available().map_err(|missing| hcs::containers_off(&missing))
 }
 
-/// The container a bundle at `dir` asks for (its `config.json`, read at most [`MAX_CONFIG`] bytes).
-pub fn bundle(dir: &Path) -> Result<Container, Refusal> {
+/// A bundle's `config.json` at `dir`, read at most [`MAX_CONFIG`] bytes and parsed.
+pub fn bundle_config(dir: &Path) -> Result<serde_json::Value, Refusal> {
     let path = dir.join("config.json");
     let mut text = String::new();
     std::fs::File::open(&path)
@@ -117,11 +117,10 @@ pub fn bundle(dir: &Path) -> Result<Container, Refusal> {
             why: format!("config.json is past {MAX_CONFIG} bytes"),
         });
     }
-    let config: serde_json::Value = serde_json::from_str(&text).map_err(|e| Refusal::Invalid {
+    serde_json::from_str(&text).map_err(|e| Refusal::Invalid {
         what: "oci spec",
         why: format!("config.json isn't JSON: {e}"),
-    })?;
-    hcs::from_bundle(&config)
+    })
 }
 
 impl OciBox {

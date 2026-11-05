@@ -36,6 +36,10 @@ enum Held {
     Oci(Arc<OciBox>),
 }
 
+/// What a Linux image waits on once the Windows Hypervisor Platform is on: the Shards guest that carries
+/// it (native plan step 5; docs/design/shards-guest.md), which this node doesn't boot yet.
+const LINUX_IN_GUEST: &str = "a Linux image runs in a Shards guest through the Windows Hypervisor Platform (native plan step 5), which this node doesn't boot yet";
+
 /// The Windows node's runtime, its boxes held in memory, keyed by id.
 pub struct WinRuntime {
     /// The machine's logical processors, the CPU hard cap's denominator (read once at node start).
@@ -78,6 +82,26 @@ impl WinRuntime {
         }
         let off = features::off(self.processors)?;
         Ok(self.features_off.get_or_init(|| off))
+    }
+
+    /// The `oci` class refused for an image that needs `feature`: naming it while it is off, else saying
+    /// what the image still waits on (`waits`).
+    fn refused(&self, feature: WindowsFeature, waits: &str) -> Result<Refusal, Refusal> {
+        let off: BTreeSet<WindowsFeature> = self
+            .features_off()?
+            .iter()
+            .copied()
+            .filter(|f| *f == feature)
+            .collect();
+        Ok(setup::windows_oci(&off, waits))
+    }
+
+    /// `Ok` while `feature` is on, else the class refused naming it.
+    fn refused_without(&self, feature: WindowsFeature) -> Result<(), Refusal> {
+        if self.features_off()?.contains(&feature) {
+            return Err(self.refused(feature, "")?);
+        }
+        Ok(())
     }
 
     /// This runtime with `oci` boxes' launcher taken from `dir` (which holds `hex.exe`), not the node's
@@ -131,9 +155,17 @@ impl WinRuntime {
     fn create_oci(&self, spec: &BoxSpec) -> Result<OciBox, Refusal> {
         let container = match &spec.class {
             ClassSpec::Oci(o) => {
+                self.refused_without(WindowsFeature::Containers)?;
                 hex_core::hcs::from_spec(o, &oci::scratch_folder(&self.scratch_root, &spec.id)?)?
             }
-            ClassSpec::Bundle(dir) => oci::bundle(dir)?,
+            ClassSpec::Bundle(dir) => {
+                let config = oci::bundle_config(dir)?;
+                if config.get("windows").is_none() {
+                    return Err(self.refused(WindowsFeature::HypervisorPlatform, LINUX_IN_GUEST)?);
+                }
+                self.refused_without(WindowsFeature::Containers)?;
+                hex_core::hcs::from_bundle(&config)?
+            }
             ClassSpec::Process => {
                 return Err(Refusal::Broken(
                     "a process spec reached the oci class".to_owned(),
@@ -174,12 +206,6 @@ impl Runtime for WinRuntime {
 
     fn create(&self, spec: BoxSpec) -> Result<BoxInfo, Refusal> {
         spec.bounds.check()?;
-        if let ClassSpec::Oci(_) | ClassSpec::Bundle(_) = spec.class {
-            let off = self.features_off()?;
-            if off.contains(&WindowsFeature::Containers) {
-                return Err(setup::windows_oci(&[WindowsFeature::Containers].into(), ""));
-            }
-        }
         if self.boxes()?.contains_key(&spec.id) {
             return Err(Refusal::Exists(spec.id));
         }
