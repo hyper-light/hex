@@ -4,7 +4,7 @@
 //! through no symbolic link, openat2(2)), so a stream that names its way out, or through a link it
 //! made, is refused, never followed; and every count is bounded by the core's [`Limits`].
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -318,8 +318,8 @@ fn remove_at(staged: &OwnedFd, id: &BoxId, budget: usize) -> Result<(), Refusal>
         // A directory may be read-only (its staged mode, or the container's): the relay empties it.
         rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
             .map_err(os("opening a staged directory to removal"))?;
-        let mut reader = Dir::read_from(&fd).map_err(os("listing a staged directory"))?;
-        while let Some(entry) = reader.next() {
+        let reader = Dir::read_from(&fd).map_err(os("listing a staged directory"))?;
+        for entry in reader {
             let entry = entry.map_err(os("listing a staged directory"))?;
             let name = entry.file_name();
             if name == c"." || name == c".." {

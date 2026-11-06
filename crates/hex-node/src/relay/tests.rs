@@ -346,7 +346,7 @@ fn a_staged_tree_lands_as_it_was_and_goes_when_removed() {
         },
     ];
     let link = lab.link();
-    stage(link.as_ref(), &id, &items, &LIMITS).unwrap();
+    stage(link.as_ref(), &id, &items, &hf::LIMITS).unwrap();
     let copy = staged.join("box-1");
     let mode = |p: &str| {
         std::fs::symlink_metadata(copy.join(p))
@@ -367,7 +367,7 @@ fn a_staged_tree_lands_as_it_was_and_goes_when_removed() {
     assert_eq!(std::fs::read(copy.join("config.json")).unwrap(), b"{}");
     // A box id staged already is refused, its copy untouched.
     assert_eq!(
-        stage(link.as_ref(), &id, &items, &LIMITS),
+        stage(link.as_ref(), &id, &items, &hf::LIMITS),
         Err(Refusal::Exists(id.clone()))
     );
     assert!(copy.join("root/bin/sh").exists());
@@ -427,24 +427,11 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
 fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     let (lab, staged) = staged_lab();
     let mut device = hf::open(hf::Op::Stage, "b").unwrap();
-    device.extend([
-        4u8,
-        0,
-        0o644 & 0xff,
-        0o644 >> 8,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]);
+    // A head of kind 4, mode 0644, a one-byte path and no size, then its path.
+    device.extend([4u8, 0]);
+    device.extend(0o644u16.to_le_bytes());
+    device.extend(1u16.to_le_bytes());
+    device.extend([0u8; 10]);
     device.push(b'd');
     let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &device) else {
         panic!("expected a refusal");

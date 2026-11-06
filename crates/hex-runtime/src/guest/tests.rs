@@ -4,6 +4,7 @@
 //! name (HEX-GUEST-12); and where Shards has no backend, the class refused by name before anything
 //! boots, and one guest booted for every create after (HEX-GUEST-13).
 
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -86,7 +87,6 @@ fn the_default_roots_are_docker_desktops_never_the_hosts_root() {
 
 /// HEX-GUEST-12: map sources under nested shares: expect each under the deepest share that holds it,
 /// and a source escaping by `..`, or under no share, under none.
-#[cfg(unix)]
 #[test]
 fn a_source_maps_under_the_deepest_share_that_holds_it() {
     let shared = [share(0, "/Users", false), share(1, "/Users/ada/data", true)];
@@ -133,7 +133,6 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
 /// bind: expect its root named by the staged copy and staged from the host path, each bind's source
 /// its path under its share (writable binds pass), and a bind under no share refused naming it and the
 /// shared roots.
-#[cfg(unix)]
 #[test]
 fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     let shared = [share(0, "/Users", false), share(1, "/etc", false)];
