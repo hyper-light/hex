@@ -66,12 +66,15 @@ Remove-Item -ErrorAction SilentlyContinue "$Root\dockerd.pid.engine"
 $d = Start-Process -PassThru -WindowStyle Hidden -FilePath "$Root\docker\dockerd.exe" `
     -ArgumentList "--data-root", "$Root\docker-data", "--exec-root", "$Root\docker-exec", "-H", $Dock, `
     "--pidfile", "$Root\dockerd.pid.engine", "--exec-opt", "isolation=process" `
-    -RedirectStandardError "$Root\dockerd.log"
+    -RedirectStandardError "$Root\dockerd.log" -RedirectStandardOutput "$Root\dockerd.out.log"
 $d.Id | Set-Content "$Root\dockerd.pid"
 # The pipe, not `docker version`: a redirected native error is terminating under ErrorActionPreference Stop.
 $DockPipe = "\\.\pipe\hex-native-s4-docker"
-for ($i = 0; $i -lt 60 -and -not (Test-Path $DockPipe); $i++) { Start-Sleep -Seconds 1 }
-if (-not (Test-Path $DockPipe)) { throw "dockerd made no pipe in 60 s: see $Root\dockerd.log" }
+# dockerd restores HNS's networks before it listens (22 s on jupiter, 2026-11-06, longer after an abrupt
+# end), so the wait is on its pipe or its exit, bounded at 300 s.
+for ($i = 0; $i -lt 300 -and -not (Test-Path $DockPipe) -and -not $d.HasExited; $i++) { Start-Sleep -Seconds 1 }
+if ($d.HasExited) { throw "dockerd exited $($d.ExitCode) before listening: see $Root\dockerd.log and dockerd.out.log" }
+if (-not (Test-Path $DockPipe)) { throw "dockerd made no pipe in 300 s: see $Root\dockerd.log and dockerd.out.log" }
 & "$Root\docker\docker.exe" -H $Dock version | Add-Content $versions
 Must "docker version"
 
