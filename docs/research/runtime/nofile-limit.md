@@ -216,41 +216,31 @@ Falsifiers: `/proc/<hex-node>/limits` after a fresh install shows a soft limit u
 user-manager unit gets a hard limit above its manager's; or `setrlimit` of `RLIMIT_NOFILE` hard
 1,048,576 fails with `EPERM` on a kernel whose `fs.nr_open` is the default.
 
-## 6. macOS: how a box's program gets a limit of its own
+## 6. macOS: which boxes get the default, and why plain ones don't
 
-Ada's call (2026-11-06, native plan step 6): every box whose spec names no `RLIMIT_NOFILE` gets Docker 29's
-1024:524288 (§3), capped at the node's hard limit (`hex_core::limits`). On Linux the class sets it in the
-child before `execve` (`clone3`/`pre_exec`). The macOS `process` class starts its members with
-`posix_spawn` for the attributes only it carries (process group, signals, QoS clamp, the fatal memory cap
-of step 1's `_ext` backstop), and XNU's `posix_spawn` sets no rlimit. Sources: XNU `main` at
-`f6217f891ac0` (github.com/apple-oss-distributions/xnu), `bsd/kern/kern_exec.c` and
-`bsd/kern/kern_descrip.c`.
+Ada's call (2026-11-06, native plan step 6): a box whose spec names no `RLIMIT_NOFILE` gets Docker 29's
+1024:524288, capped at the node's hard limit (`hex_core::limits`).
 
-- **No spawn attribute is an rlimit.** The only `RLIMIT_NOFILE` read in `posix_spawn()` sizes its
-  file-actions buffer (`kern_exec.c:3838`, `PSF_ACTIONS_SIZE(proc_limitgetcur_nofile(p))`).
-  `posix_spawnattr_set_filedesclimit_ext` sets `psa_filedesc_soft_limit`/`hard_limit`, applied by
-  `proc_set_filedesc_limits` (`kern_exec.c:4719-4720`). That is a separate count of open descriptors:
-  crossing it sends a notification and sets a resource AST (`kern_descrip.c:1142-1148`, called from
-  `fdalloc` at `:1212` after the descriptor is already allocated), while `EMFILE` comes only from the
-  rlimit (`kern_descrip.c:1184`, `:1222`). So it is not `RLIMIT_NOFILE`'s behaviour, and Hex doesn't use it.
-- **So the limit is set in the member's own process, before its image.** The class forks; the child
-  calls `setrlimit(RLIMIT_NOFILE)` and then `posix_spawn` with `POSIX_SPAWN_SETEXEC`, which replaces the
-  child's image in place (`kern_exec.c:4045`: only a spawn without `SETEXEC` forks, `spawn_no_exec =
-  TRUE` at `:4178`; with it, `cloneproc(..., CLONEPROC_EXEC)` at `:4189`).
-- **Every other attribute still applies on that path.** The process group is set after image activation
-  "because of POSIX_SPAWN_SETEXEC" (`kern_exec.c:4481-4485`), the fatal memory limit under
-  `POSIX_SPAWN_JETSAM_SET` (`:4644`, `memorystatus_set_memlimits` at `:4677`), and the QoS clamp through
-  `exec_handle_spawnattr_policy` (`:4823`). None of the three tests `spawn_no_exec`. The program keeps the
-  forked pid, so the node stays its parent (its reap, `NOTE_EXITSTATUS`). A failed spawn's errno returns
-  to the node over a close-on-exec pipe, which the successful spawn's exec closes.
-- **Rejected:** a `/bin/sh -c 'ulimit …; exec "$@"'` trampoline, where a program that can't be started
-  would exit 127 instead of being refused at spawn (the runtime contract's refusal); and lowering the
-  node's own soft limit around each spawn, which would give the node's other threads `EMFILE` in that
-  window (CLAUDE.md §3).
-- The box helper's forked child (box-user mode) sets the same default beside its `RLIMIT_NPROC`, under
-  the helper's own hard limit.
+- **Box-user boxes get it.** The privileged helper starts each program from a forked child that calls
+  only async-signal-safe libc before `execve`; it sets `RLIMIT_NOFILE` there beside `RLIMIT_NPROC`, capped
+  at the helper's own hard limit (`crates/hex-runtime/src/macos/helper_sys.rs`, `fork_exec_as`). The root
+  lab's `box_user_boxes_hold_the_contract` checks it (HEX-INST-6).
+- **Plain (process-group) boxes keep the embedding process's limit.** There is no macOS `hex node`
+  (`crates/hex-cli/src/lib.rs:23-24`: Linux only), and the installer installs only the helper, so a
+  process box's members inherit whatever process embeds `MacRuntime`. Hex raises no limit on macOS. Measured
+  on adas-mac-studio-2 (macOS 26.2, 2026-11-06), a shell started by kiln's runner: soft 10,240, hard
+  unlimited, with `kern.maxfilesperproc` 138,240 bounding any process's descriptors below 524,288. Not
+  measured: a launchd-started process's (launchd's `maxfiles`).
+- **Why the default isn't applied there.** XNU's `posix_spawn`, which the class uses for its group,
+  signals, QoS clamp and fatal memory cap, has no rlimit attribute (`bsd/kern/kern_exec.c`, `posix_spawn()`;
+  `posix_spawnattr_set_filedesclimit_ext` is a separate descriptor count that notifies, not
+  `RLIMIT_NOFILE`, `bsd/kern/kern_descrip.c` `fd_check_limit_exceeded`; XNU `main` f6217f891ac0). Setting it
+  in a forked child before the spawn means calling `posix_spawn` after a fork of the multi-threaded node,
+  which isn't async-signal-safe (it may take a malloc or libc lock another thread held at the fork): a
+  deadlock hazard (CLAUDE.md §3), so not done (the lead, 2026-11-06). Lowering the node's own limit
+  around a spawn would give its other threads `EMFILE`.
+- **The safe route, if plain boxes must have it:** move their spawn into a single-threaded helper process,
+  as box-user mode does, whose child can call `setrlimit` before `execve`. Not built; the lead's call.
 
-Falsifiers: a member spawned this way shows a soft limit other than `min(1024, hard)` or a hard limit other
-than `min(524288, node hard)` (the class's test `a_box_naming_no_nofile_gets_dockers_default`); a member
-spawned with `SETEXEC` loses its fatal memory cap (step 1's overshoot record would rise above 0 MiB) or its
-process group (the class's contract tests).
+Falsifiers: a box-user program shows other than `min(1024, hard)`:`min(524288, helper hard)`; a macOS
+`hex node` appears that raises its own limit (then plain boxes would inherit the raised one).

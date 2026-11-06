@@ -199,10 +199,16 @@ impl Privileged for RealPriv {
             // A fork and execve, not posix_spawn, so no spawn-time jetsam cap: the daemon arms the
             // member's ledger limit itself (`arm`).
             jetsam_mib: None,
-            // The default under the helper's own hard limit, as a process box's is under its node's.
-            nofile: Some(super::default_nofile()),
         };
-        fork_exec_as(uid, &spawn, leader, nproc)
+        // A box naming no descriptor limit gets Docker 29's, capped at this helper's own hard limit
+        // (`hex_core::limits`, native plan step 6), set in the child as RLIMIT_NPROC is.
+        let own = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+        let nofile = hex_core::limits::default_nofile(own);
+        let nofile = libc::rlimit {
+            rlim_cur: nofile.soft,
+            rlim_max: nofile.hard,
+        };
+        fork_exec_as(uid, &spawn, leader, nproc, nofile)
     }
 
     fn arm(&self, pid: i32, cap_mib: u32) -> io::Result<()> {
@@ -312,12 +318,18 @@ impl Privileged for RealPriv {
 }
 
 /// Forks and, in the child, drops to user `uid`, caps the user's processes at `nproc` and the program's
-/// descriptors at `spawn`'s limit, puts `fds` on 0/1/2, opens a session when `leader`, and execs
-/// `spawn`'s program (its first resolvable path). Returns
-/// the child's pid. Every call in the child is async-signal-safe (raw libc), and the child allocates
-/// nothing: a multi-threaded process may hold a lock in another thread across the fork, so the child uses
-/// only what was prepared before it (`spawn`, `fds`), exactly as the Linux runtime's `pre_exec` does.
-fn fork_exec_as(uid: u32, spawn: &Spawn, leader: bool, nproc: u32) -> io::Result<i32> {
+/// descriptors at `nofile`, puts `fds` on 0/1/2, opens a session when `leader`, and execs `spawn`'s
+/// program (its first resolvable path). Returns the child's pid. Every call in the child is
+/// async-signal-safe (raw libc), and the child allocates nothing: a multi-threaded process may hold a lock
+/// in another thread across the fork, so the child uses only what was prepared before it (`spawn`, `fds`,
+/// the limits), exactly as the Linux runtime's `pre_exec` does.
+fn fork_exec_as(
+    uid: u32,
+    spawn: &Spawn,
+    leader: bool,
+    nproc: u32,
+    nofile: libc::rlimit,
+) -> io::Result<i32> {
     let argv = nul_terminated(&spawn.argv);
     let envp = nul_terminated(&spawn.envp);
     let stdio = [
@@ -326,10 +338,6 @@ fn fork_exec_as(uid: u32, spawn: &Spawn, leader: bool, nproc: u32) -> io::Result
         spawn.stdio[2].as_raw_fd(),
     ];
     let cwd = spawn.cwd.clone();
-    let nofile = spawn.nofile.map(|n| libc::rlimit {
-        rlim_cur: n.soft,
-        rlim_max: n.hard,
-    });
     // SAFETY: fork in a process that re-execs its child at once; the child calls only async-signal-safe
     // libc functions on the argv/envp/paths/fds prepared above, and _exit on any failure, so it never
     // runs Rust destructors or touches a lock another thread may hold.
@@ -348,11 +356,8 @@ fn fork_exec_as(uid: u32, spawn: &Spawn, leader: bool, nproc: u32) -> io::Result
                 rlim_cur: u64::from(nproc),
                 rlim_max: u64::from(nproc),
             };
-            if libc::setrlimit(libc::RLIMIT_NPROC, &raw const rl) < 0 {
-                libc::_exit(127);
-            }
-            if let Some(limit) = &nofile
-                && libc::setrlimit(libc::RLIMIT_NOFILE, limit) < 0
+            if libc::setrlimit(libc::RLIMIT_NPROC, &raw const rl) < 0
+                || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const nofile) < 0
             {
                 libc::_exit(127);
             }
