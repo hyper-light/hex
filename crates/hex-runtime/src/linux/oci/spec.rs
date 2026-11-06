@@ -466,6 +466,24 @@ impl Spec {
         if self.oci_version.is_empty() {
             return Err(OciError::Config("ociVersion is empty".to_owned()));
         }
+        // The init's arguments and environment, counted as execve counts them and held to this kernel's
+        // bound before anything is made, so no box is left whose init can't start (HEX-RT-14).
+        if let Some(p) = &self.process {
+            let init = hex_api::Program {
+                args: p.args.clone(),
+                env: p
+                    .env
+                    .iter()
+                    .map(|e| {
+                        let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                        (k.to_owned(), v.to_owned())
+                    })
+                    .collect(),
+                ..hex_api::Program::default()
+            };
+            init.fits(&crate::linux::process::exec_limit())
+                .map_err(|e| OciError::Config(format!("process: {e}")))?;
+        }
         if self.root.path.is_empty() {
             return Err(OciError::Config("root.path is empty".to_owned()));
         }
