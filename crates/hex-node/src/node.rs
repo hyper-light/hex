@@ -32,7 +32,8 @@ use hex_core::patience::{Patience, RFC_6298};
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
-use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES};
+use hex_core::wire;
+use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES, MAX_SWEEP_CGROUPS};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
@@ -874,13 +875,11 @@ impl Node {
                 cg.kill()?;
                 let (emptied, patience) = wait_empty(&cg)?;
                 if !emptied {
-                    return Err(Refusal::Os {
-                        op: "removing an idle cgroup",
-                        why: format!(
-                            "slot {n} still holds processes {patience:?} after cgroup.kill:{}",
-                            survivors(&cg)
-                        ),
-                    });
+                    let op = "removing an idle cgroup";
+                    let mut why =
+                        format!("slot {n} still holds processes {patience:?} after cgroup.kill:");
+                    why.push_str(&survivors(&cg, why_room(op, &why)));
+                    return Err(Refusal::Os { op, why });
                 }
                 cg.remove()?;
             }
@@ -1027,13 +1026,10 @@ impl Node {
         self.supervisor.reap_programs(id, empty_patience())?;
         let (emptied, patience) = wait_empty(cg)?;
         if !emptied {
-            return Err(Refusal::Os {
-                op: "emptying a box",
-                why: format!(
-                    "box {id} still holds processes {patience:?} after cgroup.kill:{}",
-                    survivors(cg)
-                ),
-            });
+            let op = "emptying a box";
+            let mut why = format!("box {id} still holds processes {patience:?} after cgroup.kill:");
+            why.push_str(&survivors(cg, why_room(op, &why)));
+            return Err(Refusal::Os { op, why });
         }
         Ok(true)
     }
@@ -1645,20 +1641,34 @@ impl crate::serve::Host for Node {
     }
 }
 
+/// What a refusal named `op` may say past `said`, its reason so far, for the answer carrying it to fit
+/// one message of the node's socket: [`wire::MAX_MESSAGE`] less the header ([`wire::HEADER_BYTES`]),
+/// the refusal's tag byte and its two strings' `u32` lengths (`hex_core::wire`'s encoding of
+/// [`Refusal::Os`]), `op` and `said`. Past it the socket would answer the call's refusal with another,
+/// losing what it named (CLAUDE.md §3).
+fn why_room(op: &str, said: &str) -> usize {
+    let _ = (op, said);
+    wire::MAX_MESSAGE
+}
+
 /// What a box still holds when a delete can't empty it: each surviving process with its command,
-/// state and parent, so the refusal names what is stuck, not only that something is (§3). Bounded to a
-/// few: enough to see what it is. A descendant cgroup's are named under its path. `cgroup.procs`
-/// leaves out a process whose leader has ended while another of its threads hasn't (Linux v6.19,
-/// `kernel/cgroup/cgroup.c:5112-5121`), so with no process listed the box's threads are named
-/// instead, each with its process, state and where it waits.
-fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
+/// state and parent, so the refusal names what is stuck, not only that something is (§3). As many as
+/// fit in `room` bytes ([`why_room`]), so the refusal reaches its caller whole. A descendant cgroup's are
+/// named under its path. `cgroup.procs` leaves out a process whose leader has ended while another of its
+/// threads hasn't (Linux v6.19, `kernel/cgroup/cgroup.c:5112-5121`), so with no process listed the box's
+/// threads are named instead, each with its process, state and where it waits.
+fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup, room: usize) -> String {
+    const NO_PROCESS: &str = " (no process listed, only threads:)";
     let root = cg.dir().to_path_buf();
     let (mut out, mut threads) = (String::new(), String::new());
+    let thread_room = room.saturating_sub(NO_PROCESS.len());
     let mut queue = vec![root.clone()];
     let mut dirs_seen = 0usize;
-    // A flat walk of the box's cgroup subtree (CLAUDE.md §11), bounded in cgroups and pids (§2).
+    // A flat walk of the box's cgroup subtree (CLAUDE.md §11), bounded in cgroups as the kill sweep is
+    // (hex-runtime's `MAX_SWEEP_CGROUPS`, past which a delete is refused anyway) and in what the text holds
+    // (§2).
     while let Some(dir) = queue.pop() {
-        if dirs_seen >= 256 {
+        if dirs_seen >= MAX_SWEEP_CGROUPS || (out.len() >= room && threads.len() >= thread_room) {
             break;
         }
         dirs_seen = dirs_seen.saturating_add(1);
@@ -1669,11 +1679,7 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| ".".to_owned());
         if let Ok(text) = fs::read_to_string(dir.join("cgroup.procs")) {
-            for pid in text
-                .lines()
-                .filter_map(|l| l.trim().parse::<u32>().ok())
-                .take(16)
-            {
+            for pid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
                 let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                     .map(|s| s.trim().to_owned())
                     .unwrap_or_default();
@@ -1685,17 +1691,15 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
                         Some((f.next()?.to_owned(), f.next()?.to_owned()))
                     })
                     .unwrap_or_default();
-                out.push_str(&format!(
-                    " [{rel}/{pid} {comm:?} state {state} ppid {ppid}]"
-                ));
+                let named = format!(" [{rel}/{pid} {comm:?} state {state} ppid {ppid}]");
+                if out.len().saturating_add(named.len()) > room {
+                    break;
+                }
+                out.push_str(&named);
             }
         }
         if let Ok(text) = fs::read_to_string(dir.join("cgroup.threads")) {
-            for tid in text
-                .lines()
-                .filter_map(|l| l.trim().parse::<u32>().ok())
-                .take(16)
-            {
+            for tid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
                 let status = fs::read_to_string(format!("/proc/{tid}/status")).unwrap_or_default();
                 let field = |name: &str| {
                     status
@@ -1707,16 +1711,23 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
                 let wchan = fs::read_to_string(format!("/proc/{tid}/wchan"))
                     .map(|s| s.trim().to_owned())
                     .unwrap_or_default();
-                threads.push_str(&format!(
+                let named = format!(
                     " [{rel}/{tid} of {} {:?} state {} wchan {wchan}]",
                     field("Tgid:"),
                     field("Name:"),
                     field("State:")
-                ));
+                );
+                if threads.len().saturating_add(named.len()) > thread_room {
+                    break;
+                }
+                threads.push_str(&named);
             }
         }
         if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten().take(256) {
+            for entry in entries.flatten() {
+                if dirs_seen.saturating_add(queue.len()) >= MAX_SWEEP_CGROUPS {
+                    break;
+                }
                 let path = entry.path();
                 if path.is_dir() {
                     queue.push(path);
@@ -1769,22 +1780,35 @@ fn slots_in(root: &BoxRoot) -> Result<Vec<u64>, Refusal> {
     Ok(slots)
 }
 
-/// Most cgroups and threads [`outsiders`] reads: past either, it says there are, so the box is ended by
-/// `cgroup.kill` as before.
-const OUTSIDERS_DIRS: usize = 256;
-const OUTSIDERS_THREADS: usize = 4096;
+/// The threads there may be on the host: the kernel's `pid_max` (Documentation/admin-guide/sysctl/kernel.rst,
+/// "pid_max"), read at runtime, since every thread holds a pid. [`outsiders`] reads at most this many, so its
+/// walk ends by what the box holds, never by a picked count; `None` where it can't be read, and then the walk
+/// takes the box for holding outsiders, ending it by `cgroup.kill` as before.
+fn pid_max() -> Option<usize> {
+    static PID_MAX: OnceLock<Option<usize>> = OnceLock::new();
+    *PID_MAX.get_or_init(|| {
+        fs::read_to_string("/proc/sys/kernel/pid_max")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    })
+}
 
 /// Whether `cg`'s subtree holds a thread of a live process other than `init`, whose own threads may
 /// stay listed until each is gone: once a pid namespace's init has ended, the namespace's processes
 /// have all been released (Linux v6.19, kernel/pid_namespace.c:263-265), so such a thread is outside it
 /// (research f47). A listed thread whose process is gone from /proc is on its way out. A flat walk,
-/// bounded in cgroups and threads (CLAUDE.md §11, §2).
+/// bounded in cgroups and threads (CLAUDE.md §11, §2): in cgroups as the kill sweep is (hex-runtime's
+/// `MAX_SWEEP_CGROUPS`, past which a delete is refused anyway), in threads by the pids the host has
+/// ([`pid_max`]). Past either it says there are, so the box is ended by `cgroup.kill` as before.
 fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
+    let Some(most_threads) = pid_max() else {
+        return true;
+    };
     let mut queue = vec![cg.dir().to_path_buf()];
     let (mut dirs, mut threads) = (0usize, 0usize);
     while let Some(dir) = queue.pop() {
         dirs = dirs.saturating_add(1);
-        if dirs > OUTSIDERS_DIRS {
+        if dirs > MAX_SWEEP_CGROUPS {
             return true;
         }
         let Ok(text) = fs::read_to_string(dir.join("cgroup.threads")) else {
@@ -1792,7 +1816,7 @@ fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
         };
         for tid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
             threads = threads.saturating_add(1);
-            if threads > OUTSIDERS_THREADS {
+            if threads > most_threads {
                 return true;
             }
             let tgid = fs::read_to_string(format!("/proc/{tid}/status"))
@@ -2050,6 +2074,23 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CLAUDE.md §3 (Ada's 2026-11-06 rule): what a refusal names of a box's survivors is bounded by the wire,
+    /// derived, not picked. Do: fill a delete's refusal to its room past what it says first, then one byte past
+    /// it. Expect: the first answer is one message of the node's socket; the second is refused as oversized.
+    #[test]
+    fn a_refusal_filled_to_its_room_fits_one_message() {
+        let op = "emptying a box";
+        let said = "box b still holds processes 1s after cgroup.kill:";
+        let room = why_room(op, said);
+        let fits = |n: usize| {
+            let why = format!("{said}{}", "x".repeat(n));
+            let refused = wire::Answer::Refused(Refusal::Os { op, why });
+            wire::answer(wire::FIRST, u64::MAX, &refused, wire::MAX_MESSAGE).is_ok()
+        };
+        assert!(fits(room), "a refusal filled to its room of {room} fits");
+        assert!(!fits(room + 1), "one byte past its room doesn't");
+    }
 
     /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): a recovery's listing teaches the next its wait. Do: list a
     /// directory holding two boxes' parts and a file. Expect: the two ids, and the listings' timer holding an
