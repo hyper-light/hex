@@ -38,9 +38,9 @@ is a typed refusal.
 | `grade::WINDOW_NS` | 1 s | `crates/hex-health/src/grade.rs:26` | (d) picked to fit Panorama's 7 s | (a): the time a node's requesters take to report `MIN_OBSERVATIONS`, at each node's learned report rate. |
 | `grade::MIN_OBSERVATIONS` | 5 | `grade.rs:28` | (d) picked | (b)/(a): the sample size at which a window's median separates a node at the slow bar from its peers at the owner's error rate, from the learned spread of healthy medians. |
 | `grade::MIN_PEERS` | 3 | `grade.rs:31` | (c) logic: the fewest nodes in which a majority can single one out | — |
-| `grade::SLOW_FACTOR_MILLI` | 2× | `grade.rs:33` | (d) picked | (a): a node is slow when its window is outside the learned distribution of healthy nodes' window medians at the owner's error rate (a robust z-score over the cell's history). |
+| `grade::SLOW_FACTOR_MILLI` | 2× | `grade.rs:33` | (d) picked | **Stays (d), to the lead.** The cost form was tried (`bench/health/records/2026-11-06-grade-cost-rule.md`): with no recorded gray incidents its Jeffreys prior makes waiting near free, and no gray node drained within 4 windows at either price (today's rule: all within 4, no wrong verdict), with 122 false drains at 2 ms. It wants the fleet's record of gray incidents (how often, how slow); none exists. |
 | `grade::STAY_FACTOR_MILLI` | 1.5× | `grade.rs:35` | derived from the slow bar and the histogram's resolution | Moves with `SLOW_FACTOR_MILLI`. |
-| `grade::DRAIN_WINDOWS` | 3 | `grade.rs:37` | (d) CPI²'s 3 flags | As `DRAIN_TIMEOUTS`, with `p` the learned false-slow rate per window. |
+| `grade::DRAIN_WINDOWS` | 3 | `grade.rs:37` | (d) CPI²'s 3 flags | **Stays (d), to the lead**, with `SLOW_FACTOR_MILLI`: the cost form chooses the bar and the run length together, and needs the same record. |
 | `histogram` 4 sub-buckets per power of two | 25% resolution | `crates/hex-health/src/histogram.rs:8` | (d) picked | Derived from what must be told apart (the slow bar against the healthy spread). Memory only: Ada's rule says take the finer resolution if a test shows it helps detection. |
 | `penalty::BASE_EJECTION_NS` | 30 s | `crates/hex-health/src/penalty.rs:20` | (d) Envoy | (a): the cell's learned time from a node's drain to its healthy return. |
 | `penalty::MAX_EJECTION_NS` | 300 s | `penalty.rs:22` | (d) Envoy | (a): as above, its learned high quantile. |
@@ -57,10 +57,10 @@ is a typed refusal.
 | `retry::BUCKET_NS`, `BUCKETS` | 10 s × 12 | `retry.rs:15-16` | (d) the SRE book's 2 minutes | (a): the window over which the learned request rate gives enough requests to hold 10%. |
 | `antagonist::MIN_JOB_TASKS`, `MIN_TASK_SAMPLES` | 5, 100 | `crates/hex-health/src/antagonist.rs:25-26` | (d) CPI² | (b)/(a): the samples at which the learned spec's 2σ point is stable to the owner's error. |
 | `antagonist::MIN_CPU_MILLI` | 0.25 CPU | `antagonist.rs:28` | (d) CPI² | (a): below the CPU at which a task's CPI is learned to be noise. |
-| `antagonist::SIGMAS` | 2 | `antagonist.rs:30` | (d) CPI² | (a): the outlier point at the owner's false-flag rate, from the learned spec. |
-| `antagonist::VICTIM_FLAGS`, `FLAG_WINDOW_NS` | 3 in 5 min | `antagonist.rs:32-33` | (d) CPI² | As `DRAIN_TIMEOUTS`. |
+| `antagonist::SIGMAS` | 2 | `antagonist.rs:30` | (d) CPI² | **Stays (d), to the lead.** The cost form needs a CPI record (healthy tasks' CPI by job, and antagonist incidents) and Hex records no CPI yet: no counters are read on any host class. It is the grade's case with less data. |
+| `antagonist::VICTIM_FLAGS`, `FLAG_WINDOW_NS` | 3 in 5 min | `antagonist.rs:32-33` | (d) CPI² | **Stays (d)**, with `SIGMAS`. |
 | `antagonist::CORRELATION_WINDOW_NS` | 10 min | `antagonist.rs:35` | (d) CPI² | (a): the window that holds the learned samples the correlation needs. |
-| `antagonist::MIN_CORRELATION_MILLI` | 0.35 | `antagonist.rs:37` | (d) CPI² | (a): above the learned null distribution of bystanders' correlations. |
+| `antagonist::MIN_CORRELATION_MILLI` | 0.35 | `antagonist.rs:37` | (d) CPI² | **Stays (d)**, with `SIGMAS`: its null distribution is the bystanders' correlations in a CPI record. |
 | `antagonist::IDENTIFY_GAP_NS` | 1 s | `antagonist.rs:39` | (d) CPI² | Bound on the identifications' CPU; (b) from their measured cost. |
 | `antagonist::BEST_EFFORT_CAP_MILLI`, `CAP_MILLI` | 0.01, 0.1 CPU | `antagonist.rs:42-43` | (d) CPI² | (a): the cap that brings the victims' CPI back under their spec, learned per throttle. |
 | `antagonist::THROTTLE_NS` | 5 min | `antagonist.rs:44` | (d) CPI² | (a): until the victims' CPI is back under spec. |
