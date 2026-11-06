@@ -9,7 +9,8 @@
 # Env (defaults): RUNTIMES (libcrun), HEXBENCH_PHASES (lifecycle), ROUNDS (2), N (1000), WARMUP (100), LIFECYCLES
 # (2000), HEXBENCH_SUSTAINED (10000, the sustained phase's lifecycles), CAP (1000), BUDGET_MIB (8192), MEMORY (16g),
 # CPUSET (the VM's CPUs past an eighth of them, at least 2: fedora's 4-31 of 32), HOST_CPU (the machine's processor,
-# for env.txt). The VM's load is recorded at the pass's start and end, as host.sh records the host's, and so are
+# for env.txt), HEXBENCH_OWNER and HEXBENCH_REUSE (unset: boxes of no owner; as host.sh passes them). The VM's load
+# is recorded at the pass's start and end, as host.sh records the host's, and so are
 # the pass's parameters as it ran them.
 set -euo pipefail
 COMMIT=${1:?commit}; RESULTS=${2:?results dir}
@@ -69,7 +70,7 @@ docker volume create "$OUTV" > /dev/null
 docker run "${BENCH_LABELS[@]}" --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -e HOST="$(hostname)" -e HOST_CPU="${HOST_CPU:-}" -e SHA="$SHA" \
   -e CPUSET="$CPUSET" -e NCPU="$NCPU" -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e N="${N:-1000}" \
   -e WARMUP="${WARMUP:-100}" -e HEXBENCH_PHASES="${HEXBENCH_PHASES:-lifecycle}" -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" \
-  "$IMG" bash -c '
+  -e HEXBENCH_OWNER -e HEXBENCH_REUSE "$IMG" bash -c '
   { echo "--- pass started $(date -u +%FT%TZ): PHASES=oci RUNTIMES=$RUNTIMES (docker_pass.sh)"
     echo "host: $HOST, its containers in a Linux VM (kernel $(uname -r), $(uname -m), $NCPU cpus)"
     echo "date: $(date -u +%FT%TZ)"; echo "kernel: $(uname -r)"
@@ -79,7 +80,7 @@ docker run "${BENCH_LABELS[@]}" --rm -v "$BIN:/opt/bin:ro" -v "$OUTV:/opt/out" -
     echo "hex: $SHA $(cat /opt/bin/hex.version) ($(sha256sum /opt/bin/hex | cut -c1-16)), static-glibc, $(uname -m)"
     echo "seam_oci: $SHA ($(sha256sum /opt/bin/seam_oci | cut -c1-16))"
     echo "libcrun: crun-'"$CRUN_VERSION"'.tar.gz ($(cat /opt/bin/crun-src.sha256)), driver $(sha256sum /opt/bin/libcrun-driver | cut -c1-16)"
-    echo "params: ROUNDS=$ROUNDS N=$N WARMUP=$WARMUP HEXBENCH_PHASES=$HEXBENCH_PHASES HEXBENCH_SUSTAINED=$HEXBENCH_SUSTAINED"
+    echo "params: ROUNDS=$ROUNDS N=$N WARMUP=$WARMUP HEXBENCH_PHASES=$HEXBENCH_PHASES HEXBENCH_SUSTAINED=$HEXBENCH_SUSTAINED HEXBENCH_OWNER=${HEXBENCH_OWNER:-none} HEXBENCH_REUSE=${HEXBENCH_REUSE:-}"
     echo "oci pass: /run a tmpfs (size 1g), where the runtimes keep their state"
   } > /opt/out/env.txt'
 # The pass's /run is a tmpfs, as a host's is, where the runtimes keep their state (runc's and crun's, libcrun's, a
@@ -92,7 +93,7 @@ docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="$CPUSET" --me
   -e RUNTIMES="${RUNTIMES:-libcrun}" -e ROUNDS="${ROUNDS:-2}" -e ROUND_FIRST=1 -e N="${N:-1000}" -e WARMUP="${WARMUP:-100}" \
   -e N_OVERRIDE="${N_OVERRIDE:-runsc:3000}" -e LIFECYCLES="${LIFECYCLES:-2000}" -e CAP="${CAP:-1000}" \
   -e BUDGET_MIB="${BUDGET_MIB:-8192}" -e HEXBENCH_PHASES="${HEXBENCH_PHASES:-lifecycle}" \
-  -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" -e SEAM_OCI=/opt/bin/seam_oci \
+  -e HEXBENCH_SUSTAINED="${HEXBENCH_SUSTAINED:-10000}" -e SEAM_OCI=/opt/bin/seam_oci -e HEXBENCH_OWNER -e HEXBENCH_REUSE \
   "$IMG" bash -c 'ln -s /src/bench/competitive /opt/lab && bash /opt/lab/oci_inside.sh' 2>&1 | tee "$RESULTS/oci.log"
 docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$OUTV:/opt/out" "$IMG" bash -c \
   'echo "load at end: $(cat /proc/loadavg)" >> /opt/out/env.txt && python3 -I /src/bench/competitive/summarize.py /opt/out > /opt/out/table.md'
