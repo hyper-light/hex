@@ -326,3 +326,13 @@ fn a_process_this_one_may_not_signal_is_watched_for_its_end_alone() {
     }
     assert!(!kq.watch_end(1).expect("an end watch of launchd"));
 }
+
+/// The box helper's default process cap is the platform's per-uid ceiling, read at run time (Ada's rule,
+/// 2026-11-06: no picked defaults; `kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`). Do read it;
+/// expect a positive count no larger than the kernel's whole process table (`kern.maxproc`).
+#[test]
+fn the_per_uid_process_ceiling_is_read_from_the_kernel() {
+    let per_uid = super::sys::max_processes_per_uid().expect("kern.maxprocperuid");
+    let all = super::sys::max_processes().expect("kern.maxproc");
+    assert!(per_uid > 0 && per_uid <= all, "{per_uid} of {all}");
+}

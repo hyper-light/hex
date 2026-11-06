@@ -70,6 +70,8 @@ struct SimState {
     arm_calls: u32,
     /// Programs whose end a watch read (the stand-in's reap).
     reaped: u32,
+    /// The process cap each spawn was asked to set (`RLIMIT_NPROC` of the box's user), in order.
+    nprocs: Vec<u32>,
 }
 
 /// The stand-in's watch: a program has ended (by KILL, the stand-in's only end) once it is no member.
@@ -105,10 +107,11 @@ impl Privileged for Sim {
         fds: [OwnedFd; START_FDS],
         _leader: bool,
         _cap_mib: u32,
-        _nproc: u32,
+        nproc: u32,
     ) -> std::io::Result<i32> {
         drop(fds); // the stdio descriptors rode across; a real spawn would dup2 them.
         let mut s = self.inner.lock().expect("sim lock");
+        s.nprocs.push(nproc);
         s.next_pid += 1;
         let pid = 1000 + s.next_pid;
         s.members.push(Member { pid, footprint: 0 });
@@ -184,10 +187,10 @@ fn the_daemon_serves_a_box_end_to_end() {
     let b1 = BoxId::new("b1").expect("box id");
 
     // Acquire takes a pool user (the last pushed, 7001).
-    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap(), 7001);
+    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(), 7001);
     // A box already acquired is refused by name.
     assert!(matches!(
-        client.acquire(&b1, 256 * MIB, 16 * MIB),
+        client.acquire(&b1, 256 * MIB, 16 * MIB, None),
         Err(hex_api::Refusal::Exists(_))
     ));
 
@@ -211,7 +214,7 @@ fn the_daemon_serves_a_box_end_to_end() {
         client.inspect(&b1),
         Err(hex_api::Refusal::NoSuchBox(_))
     ));
-    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap(), 7001);
+    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(), 7001);
 
     drop(client);
     let daemon = handle.join().expect("daemon thread");
@@ -239,7 +242,7 @@ fn a_box_with_no_live_member_refuses_a_signal_and_takes_a_program() {
 
     let client = Helper::over(client, VERSION);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     client
         .start(&b1, &prog(), nulls().each_ref().map(|f| f.as_fd()), true)
         .unwrap();
@@ -263,9 +266,9 @@ fn a_box_with_no_live_member_refuses_a_signal_and_takes_a_program() {
     handle.join().expect("daemon thread");
 }
 
-/// A connected client to a daemon over the stand-in, with `pool` users and `nproc` programs a box, the
-/// daemon serving on its own thread until the client closes.
-fn served(pool: Vec<u32>, nproc: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>>) {
+/// A connected client to a daemon over the stand-in, with `pool` users under a per-uid process ceiling
+/// `per_uid`, the daemon serving on its own thread until the client closes.
+fn served(pool: Vec<u32>, per_uid: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>>) {
     let (client, server) = rustix::net::socketpair(
         AddressFamily::UNIX,
         SocketType::STREAM,
@@ -276,7 +279,7 @@ fn served(pool: Vec<u32>, nproc: u32) -> (Helper, thread::JoinHandle<Daemon<Sim>
     let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
     let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
     let handle = thread::spawn(move || {
-        let daemon = Daemon::new(Sim::default(), pool, nproc);
+        let daemon = Daemon::new(Sim::default(), pool, per_uid);
         let _ = daemon.serve(server.as_fd());
         daemon
     });
@@ -296,7 +299,7 @@ fn start(client: &Helper, b: &BoxId, leader: bool) -> i32 {
 fn the_helper_reaps_a_program_and_answers_its_end_once() {
     let (client, handle) = served(vec![7000], 64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     let pid1 = start(&client, &b1, true);
     assert_eq!(client.wait(&b1, pid1).unwrap(), None);
     client.signal(&b1, 9).unwrap();
@@ -314,7 +317,7 @@ fn the_helper_reaps_a_program_and_answers_its_end_once() {
 fn a_deleted_boxs_programs_are_reaped_and_their_ends_kept() {
     let (client, handle) = served(vec![7000], 64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap();
     let pid1 = start(&client, &b1, true);
     let pid2 = start(&client, &b1, false);
     client.end(&b1).unwrap();
@@ -325,14 +328,15 @@ fn a_deleted_boxs_programs_are_reaped_and_their_ends_kept() {
     assert_eq!(daemon.ops.inner.lock().unwrap().reaped, 2);
 }
 
-/// CLAUDE.md §2 (the helper's programs are bounded): do start `nproc` programs in a box at `nproc` 2;
+/// CLAUDE.md §2 (the helper's programs are bounded): do start `nproc` programs in a box whose spec names
+/// `pids_max` 2;
 /// expect a third refused by name while both run, and taken once they have ended (the oldest unread end
 /// is dropped for it, and reads Unknown).
 #[test]
 fn a_box_holds_at_most_its_process_cap_of_programs() {
-    let (client, handle) = served(vec![7000], 2);
+    let (client, handle) = served(vec![7000], 64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    client.acquire(&b1, 256 * MIB, 16 * MIB, Some(2)).unwrap();
     let pid1 = start(&client, &b1, true);
     let _pid2 = start(&client, &b1, false);
     assert!(matches!(
@@ -397,4 +401,24 @@ fn members_lists_the_users_live_processes() {
     // This process itself is one of its user's processes.
     let me = rustix::process::getpid().as_raw_nonzero().get();
     assert!(pids.contains(&me), "the listing holds this process {me}");
+}
+
+/// Ada's rule (2026-11-06): no picked defaults. A box's process cap is its spec's `pids_max` when it names
+/// one, else the platform's per-uid ceiling (`kern.maxprocperuid`, which the helper reads at start): each
+/// box has a uid of its own, and XNU's fork counts a uid's processes against its `RLIMIT_NPROC`
+/// (`bsd/kern/kern_fork.c:269-283`). Linux's class sets no default either (`pids.max` only from
+/// `pids_max`). Do start a program in a box naming none and in one naming 5, under a ceiling of 64;
+/// expect the spawns asked for 64 and 5.
+#[test]
+fn a_box_naming_no_process_limit_gets_the_per_uid_ceiling() {
+    let (client, handle) = served(vec![7000, 7001], 64);
+    let plain = BoxId::new("plain").expect("box id");
+    let limited = BoxId::new("limited").expect("box id");
+    client.acquire(&plain, 256 * MIB, 16 * MIB, None).unwrap();
+    client.acquire(&limited, 256 * MIB, 16 * MIB, Some(5)).unwrap();
+    start(&client, &plain, true);
+    start(&client, &limited, true);
+    drop(client);
+    let daemon = handle.join().expect("daemon thread");
+    assert_eq!(daemon.ops.inner.lock().unwrap().nprocs, vec![64, 5]);
 }

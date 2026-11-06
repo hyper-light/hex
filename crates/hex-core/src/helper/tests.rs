@@ -35,6 +35,13 @@ fn requests_round_trip() {
             box_id: box_id("b1"),
             bound: 256 << 20,
             reserve: 16 << 20,
+            pids_max: None,
+        },
+        Request::Acquire {
+            box_id: box_id("b1"),
+            bound: 256 << 20,
+            reserve: 16 << 20,
+            pids_max: Some(4096),
         },
         Request::Start {
             box_id: box_id("b1"),
@@ -73,6 +80,35 @@ fn requests_round_trip() {
         assert_eq!(id, 7);
         assert_eq!(&got, req);
     }
+}
+
+/// The wire changes append-only (CLAUDE.md, Working here): an acquire naming no process limit encodes
+/// as the first version's kind with the same bytes, so a helper that predates the limit still reads it;
+/// one naming a limit (the box's `pids_max`, HEX-MAC-10) is a kind of its own, which that helper refuses
+/// by kind rather than misreading. Do encode both; expect kinds 0x0002 and 0x0008, and the first's body
+/// exactly box id, bound and reserve.
+#[test]
+fn an_acquire_with_a_process_limit_is_a_kind_of_its_own() {
+    let plain = Request::Acquire {
+        box_id: box_id("b1"),
+        bound: 256 << 20,
+        reserve: 16 << 20,
+        pids_max: None,
+    };
+    let limited = Request::Acquire {
+        box_id: box_id("b1"),
+        bound: 256 << 20,
+        reserve: 16 << 20,
+        pids_max: Some(64),
+    };
+    let kind_of = |bytes: &[u8]| u16::from_le_bytes([bytes[6], bytes[7]]);
+    let plain_bytes = encode_request(VERSION, 1, &plain).expect("encode");
+    let limited_bytes = encode_request(VERSION, 1, &limited).expect("encode");
+    assert_eq!(kind_of(&plain_bytes), 0x0002);
+    assert_eq!(kind_of(&limited_bytes), 0x0008);
+    // Header, then the box id (u32 length and its bytes), bound and reserve: nothing more.
+    assert_eq!(plain_bytes.len(), HEADER_BYTES + 4 + 2 + 8 + 8);
+    assert_eq!(limited_bytes.len(), plain_bytes.len() + 4);
 }
 
 /// Every answer round-trips.

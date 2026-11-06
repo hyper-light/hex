@@ -97,7 +97,7 @@ fn pair() -> (Helper, thread::JoinHandle<()>) {
 fn the_client_round_trips_every_call() {
     let (helper, handle) = pair();
     assert_eq!(
-        helper.acquire(&box_id("b1"), 256 << 20, 16 << 20).unwrap(),
+        helper.acquire(&box_id("b1"), 256 << 20, 16 << 20, None).unwrap(),
         7000
     );
 
@@ -134,7 +134,7 @@ fn the_client_round_trips_every_call() {
 #[test]
 fn a_refusal_maps_by_name() {
     let (helper, handle) = pair();
-    match helper.acquire(&box_id("gone"), 1 << 20, 0) {
+    match helper.acquire(&box_id("gone"), 1 << 20, 0, None) {
         Err(Refusal::NoSuchBox(b)) => assert_eq!(b.as_str(), "gone"),
         other => panic!("expected NoSuchBox, got {other:?}"),
     }
