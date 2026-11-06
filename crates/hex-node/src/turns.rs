@@ -175,7 +175,12 @@ mod tests {
     /// `Exhausted` naming the bound, then the third's turn given.
     #[test]
     fn turns_past_the_bound_are_refused_by_type() {
-        let turns = Turns::new("op", "turns under way", 2, Patience::measuring("test.turns"));
+        let turns = Turns::new(
+            "op",
+            "turns under way",
+            2,
+            Patience::measuring("test.turns"),
+        );
         let a = turns.take(&id("a")).unwrap();
         let _b = turns.take(&id("b")).unwrap();
         assert_eq!(
@@ -222,7 +227,12 @@ mod tests {
     /// least twice the hold.
     #[test]
     fn a_measuring_wait_lasts_until_the_turn_is_let_go_and_the_hold_arms_it() {
-        let turns = Turns::new("op", "turns under way", 2, Patience::measuring("test.turns"));
+        let turns = Turns::new(
+            "op",
+            "turns under way",
+            2,
+            Patience::measuring("test.turns"),
+        );
         assert_eq!(turns.patience(), None);
         let held = turns.take(&id("a")).unwrap();
         let took = Instant::now();

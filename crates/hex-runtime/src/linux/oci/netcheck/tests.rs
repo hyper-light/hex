@@ -464,7 +464,12 @@ fn a_dumps_reads_are_bounded_by_its_bytes() {
     rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
     let mut scratch = Scratch::default();
     assert_eq!(
-        ask(&ours, &[0; NLMSG_HDR], &mut scratch, &Patience::measuring("test")),
+        ask(
+            &ours,
+            &[0; NLMSG_HDR],
+            &mut scratch,
+            &Patience::measuring("test")
+        ),
         Ok(())
     );
     assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());

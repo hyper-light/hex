@@ -96,9 +96,9 @@ const EVENTS: usize = 256;
 const BACKLOG: i32 = 64;
 /// How long a list's worker waits for its client to read one part before it sends the next: twice the slowest
 /// such read this process has seen (decision 9; the lead's failure-bound rule); past it the client has stopped
-/// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: no record times a
-/// client's read of a list's part; the record to come is seam_oci's list phase timing each part's drain, its max on
-/// fedora, which then seeds it. Until then the first part waited for is waited out.
+/// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: the record to come is
+/// `bench/competitive/probes/waits_census.md`'s `serve.reads` row, which then seeds it. Until then the first part
+/// waited for is waited out.
 static READS: Patience = Patience::measuring("serve.reads");
 
 /// The epoll tokens of the listener and the stop eventfd; connections and programs take the rest.

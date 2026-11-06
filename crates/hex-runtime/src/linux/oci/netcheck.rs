@@ -72,11 +72,12 @@ const READ_BYTES: usize = 8 << 10;
 /// clears that once it gets RTNL (:4194, :4107-4121), then puts in its host route (:6283) and tells
 /// `RTNLGRP_IPV6_IFADDR` (:4320, :5621). So how long it takes is how long the host's RTNL is held by others: the
 /// host's, so the process's to record, not one checker's. MEASURING: no record of the settle's distribution yet
-/// (`bench/competitive/probes/input_census.md` records the dumps' sizes, not their times); the lead's pass that
-/// times it on fedora seeds it. Until then it is unarmed until the first settle this process sees.
+/// (`bench/competitive/probes/input_census.md` records the dumps' sizes, not their times); the record to come is
+/// `bench/competitive/probes/waits_census.md`'s `netcheck.settles` row. Until then it is unarmed until the first
+/// settle this process sees.
 static SETTLES: Patience = Patience::measuring("netcheck.settles");
 /// How long one read of a dump's answer takes, learned in this process ([`Patience`]). MEASURING, as [`SETTLES`]:
-/// the record to come is the same pass's, timing each read of the five dumps.
+/// the record to come is `waits_census.md`'s `netcheck.answers` row.
 static ANSWERS: Patience = Patience::measuring("netcheck.answers");
 
 /// `bound` as `SO_RCVTIMEO` takes it: in whole microseconds, a `struct timeval`, rounded up, since one of zero

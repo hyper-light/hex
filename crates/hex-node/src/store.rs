@@ -135,9 +135,9 @@ impl Store {
             // A change waits for the change of the same box before it: that one's write and its fsyncs.
             // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
             // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
-            // no other path. MEASURING: `bench/competitive/probes/levers.md` times a record-sized write and
-            // rename but not its fsyncs, and gives no max; the record to come is that probe's write mode with
-            // the file's and directory's fsyncs, its max on fedora's btrfs, which then seeds it.
+            // no other path. MEASURING: `bench/competitive/probes/levers.md` times a record write and rename but
+            // not its fsyncs, and gives no max; the record to come is `waits_census.md`'s `store.turns` row, its
+            // slower place's max (tmpfs and fedora's btrfs), which then seeds it.
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",

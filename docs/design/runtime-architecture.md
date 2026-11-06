@@ -2340,6 +2340,13 @@ RFC's floor and constants are TCP's clocks'; a calibration read leaves the first
 | a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | MEASURING: to come, seam_oci's socket phases, each call kind's max |
 | the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | MEASURING: `input_census.md` records the dumps' sizes, not their times; to come, a pass timing them on fedora |
 
+Each MEASURING row's record is `bench/competitive/probes/waits_census.md`'s row of the same wait name, from the
+waits' own timing points (`hex_node::census`); the exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
+seeded from the clone record as the create seeds' are; and a create no seed came free for (line full, wait ended) is
+declined as `OciError::NoSeed` and made through the shim, counted under `ClassicReason::NoSeed`, rather than failed.
+A parked init that doesn't answer a claim already falls back to a seed's clone: the claim borrows the request, whose
+descriptors stay the runtime's.
+
 **What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
 answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the
 node's, and the evidence is the answer times around the refusal. The seed record is fedora's; another host class

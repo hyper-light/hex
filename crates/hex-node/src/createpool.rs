@@ -1039,7 +1039,9 @@ mod tests {
             pool.counts().unwrap().start_failed > 0
         });
         let Err(OciError::NoSeed(why)) = pool.shared.acquire() else {
-            panic!("a pool with no seed declines its create by type, for the runtime to make it another way");
+            panic!(
+                "a pool with no seed declines its create by type, for the runtime to make it another way"
+            );
         };
         assert!(
             why.contains("the last create seed start failed: starting a create seed"),

@@ -34,7 +34,6 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 /// of a full pool is a burst that drains in milliseconds, not a wedge.
 pub const WAITERS: usize = 4_096;
 
-
 /// The exec seeds' wait's name, as the waits census records it.
 const ANSWERS: &str = "exec_seeds.answers";
 

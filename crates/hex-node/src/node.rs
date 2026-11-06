@@ -65,8 +65,8 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
 /// emptying waits on, share the wait. MEASURING: no record times a box's emptying from its kill (the delete
 /// records, `bench/competitive/probes/oci_breakdown.md`'s among them, time the whole delete); the record to come is
-/// the lead's delete pass timing each kill to `populated 0`, its max on fedora, which then seeds this. Until then a
-/// node's first emptying is waited out, and arms the bound.
+/// `bench/competitive/probes/waits_census.md`'s `node.emptying` row, which then seeds this. Until then a node's
+/// first emptying is waited out, and arms the bound.
 static EMPTYING: Patience = Patience::measuring("node.emptying");
 
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
@@ -98,8 +98,8 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
 /// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
 /// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). MEASURING:
-/// no record times a listing per entry; the record to come is a recovery pass timing the state and runtime
-/// directories' listings per entry, its max on fedora. Until then recovery's first listing, the state
+/// no record times a listing per entry; the record to come is `bench/competitive/probes/waits_census.md`'s
+/// `node.listing` row. Until then recovery's first listing, the state
 /// directory's, is bounded by its entries, which are finite, not by time, and its time per entry arms the bound.
 static LISTING: Patience = Patience::measuring("node.listing");
 
@@ -348,8 +348,8 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
-                // MEASURING: no record of how long a create or delete holds its turn; the record to come is
-                // seam_oci's create and delete phases with each call's max on fedora, which then seeds it.
+                // MEASURING: the record to come is `bench/competitive/probes/waits_census.md`'s `node.turns`
+                // row, which then seeds it.
                 Patience::measuring("node.turns"),
             ),
             #[cfg(debug_assertions)]
