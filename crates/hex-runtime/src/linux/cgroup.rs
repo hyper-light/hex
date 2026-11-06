@@ -3,6 +3,7 @@
 //! to every box; cgroup v2's no-internal-processes rule means neither may hold a process itself, so
 //! the node agent runs beside the root, never in it.
 
+use std::cell::Cell;
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
@@ -31,6 +32,24 @@ pub const MAX_SIGNALLED: usize = 1 << 20;
 /// bounds the walk (its pending queue included) well above any real box (CLAUDE.md §2). Past it the
 /// sweep refuses ([`Refusal::Full`]) rather than stop silently (§3).
 pub const MAX_SWEEP_CGROUPS: usize = 4_096;
+
+thread_local! {
+    /// This thread's cgroupfs lookups so far ([`lookups_on_this_thread`]).
+    static LOOKUPS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many cgroupfs lookups this thread has made through this module: each open, stat, mkdir or rmdir of a cgroup's
+/// file or directory by name. Each takes the hierarchy's kernfs root lock to read (`kernfs_iop_lookup`,
+/// `kernfs_dop_revalidate`), so it queues behind any writer waiting on it, another box's `mkdir` among them
+/// (bench/competitive/probes/goal16_ab.md, "Whose work the no-owner tail waits on"). Tests read it.
+pub fn lookups_on_this_thread() -> u64 {
+    LOOKUPS.with(Cell::get)
+}
+
+/// One more cgroupfs lookup on this thread.
+fn looked_up() {
+    LOOKUPS.with(|n| n.set(n.get().saturating_add(1)));
+}
 
 /// The cgroup this process is in, as a path under [`CGROUP_ROOT`].
 pub fn own_cgroup() -> Result<PathBuf, Refusal> {
@@ -182,6 +201,7 @@ impl BoxRoot {
             return Err(Refusal::Full(MAX_BOXES));
         }
         let dir = self.dir.join(name);
+        looked_up();
         match rustix::fs::mkdirat(self.fd.as_fd(), name, Mode::from_raw_mode(0o777)) {
             Ok(()) => {}
             Err(rustix::io::Errno::EXIST) => return Err(exists()),
@@ -277,6 +297,7 @@ impl BoxRoot {
 
     /// The cgroup `name` under the root, when it's there, opened relative to the root.
     fn child(&self, name: &str) -> Option<BoxCgroup> {
+        looked_up();
         let fd = rustix::fs::openat(
             self.fd.as_fd(),
             name,
@@ -348,6 +369,7 @@ impl BoxCgroup {
     /// The cgroup's file `file`, opened with `flags` (close-on-exec): relative to its directory where it's
     /// held open, else by its path.
     fn open_file(&self, file: &str, flags: OFlags) -> rustix::io::Result<OwnedFd> {
+        looked_up();
         match &self.fd {
             Some(fd) => {
                 rustix::fs::openat(fd.as_fd(), file, flags | OFlags::CLOEXEC, Mode::empty())
@@ -358,6 +380,7 @@ impl BoxCgroup {
 
     /// Whether the cgroup has the file `file`: a controller not handed down has none of its files.
     fn has(&self, file: &str) -> bool {
+        looked_up();
         match &self.fd {
             Some(fd) => rustix::fs::statat(fd.as_fd(), file, AtFlags::empty()).is_ok(),
             None => self.dir.join(file).exists(),
@@ -522,6 +545,7 @@ impl BoxCgroup {
 
     /// Removes the box's cgroup: it must be empty. Absent already is removed.
     pub fn remove(&self) -> Result<(), Refusal> {
+        looked_up();
         match fs::remove_dir(&self.dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),

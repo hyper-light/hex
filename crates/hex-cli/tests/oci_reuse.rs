@@ -321,6 +321,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     parked_procs_stop_at_their_bound_and_none_drops_inline(&lab, own);
     parked_procs_are_on_unless_turned_off_and_a_rootless_node_makes_none(&lab, own);
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
+    a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
@@ -1083,6 +1084,51 @@ fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab,
     node.release_idle().unwrap();
     assert_eq!(populated_slots(&root), vec![], "nothing made ahead is left");
     eprintln!("test 2c: N2 made by the init parked in {}", slot.display());
+}
+
+/// Goal 16 (AC-T7.1.3; bench/competitive/probes/goal16_ab.md, "Whose work the no-owner tail waits on"): the slowest
+/// no-owner creates waited on their own cgroup file lookups, queued behind the refill's `mkdir` of the next cgroup made
+/// ahead. Do: on a node keeping one cgroup ahead, N1 of no owner created and deleted (so the refill starts), the fact
+/// waited for that one is ready, then N2 of no owner created on this thread. Expect: N2 in the cgroup made ahead, and
+/// no cgroupfs lookup on this thread across N2's create (its files opened by the refill, its id's absence known
+/// without one). Then N2 runs a program and is deleted, nothing made ahead left once released.
+fn a_box_of_no_owner_made_ahead_looks_up_nothing_in_cgroupfs(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-nolookup"));
+    let node = node.with_inits_ahead(1);
+    let n1 = BoxId::new("q1").unwrap();
+    node.create(lab.oci("q1", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    node.delete(&n1).unwrap();
+    wait_for(
+        || node.cgroup_reuse().unwrap().ahead.ready >= 1,
+        "a cgroup made ahead",
+    );
+    let taken = node.cgroup_reuse().unwrap().ahead.taken;
+    let spec = lab.oci(
+        "q2",
+        None,
+        Caps::Docker,
+        Bounds {
+            memory_max: Some(256 << 20),
+            pids_max: Some(256),
+            ..Bounds::default()
+        },
+    );
+    let before = hex_runtime::linux::cgroup::lookups_on_this_thread();
+    node.create(spec).unwrap();
+    let lookups = hex_runtime::linux::cgroup::lookups_on_this_thread() - before;
+    assert_eq!(
+        node.cgroup_reuse().unwrap().ahead.taken,
+        taken + 1,
+        "N2 took the cgroup made ahead"
+    );
+    assert_eq!(lookups, 0, "N2's create looked up {lookups} cgroupfs names");
+    let n2 = BoxId::new("q2").unwrap();
+    node.start(&n2).unwrap();
+    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&n2).unwrap();
+    node.release_idle().unwrap();
+    eprintln!("test 2f: a create in a cgroup made ahead, no cgroupfs lookup on its thread");
 }
 
 /// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
