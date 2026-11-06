@@ -606,7 +606,8 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   spec names no `RLIMIT_NOFILE` gets Docker 29's 1024:524288, not the node's own (Ada, 2026-11-06;
   `hex_core::limits`, capped at the node's hard limit, which an unprivileged process can't raise): the `oci`
   init and every program exec'd into a container add it where the spec names none, and the Linux `process`
-  class (and `hex box run`) sets it in the child before `execve` (HEX-INST-6). On macOS only box-user
+  class sets it in the child before `execve` (HEX-INST-6). `hex box run` isn't the node but wraps a program
+  for its caller, so its program keeps the caller's limit (the lead, 2026-11-06). On macOS only box-user
   boxes get it (the helper's child sets it before `execve`); plain boxes keep the embedding process's, since
   posix_spawn sets no rlimit and a fork in the threaded node isn't safe (`docs/research/runtime/nofile-limit.md`
   §6). Rootless `oci` boxes need

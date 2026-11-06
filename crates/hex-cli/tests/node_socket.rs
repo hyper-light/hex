@@ -124,6 +124,29 @@ fn nofile_by_default(lab: &Lab, client: &Client) {
     }
 }
 
+/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's,
+/// 2048:4096 here (under the node's hard limit, which a rootless init can't raise), not the default.
+fn nofile_named(lab: &Lab, client: &Client) {
+    let bundle = lab.bundle(&Lab::act(&Act::Wait));
+    let config = bundle.join("config.json");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let named = text.replacen(
+        r#""noNewPrivileges": true"#,
+        r#""noNewPrivileges": true, "rlimits": [{"type": "RLIMIT_NOFILE", "soft": 2048, "hard": 4096}]"#,
+        1,
+    );
+    assert_ne!(
+        named, text,
+        "the bundle's process has no noNewPrivileges to name the limit beside"
+    );
+    std::fs::write(&config, named).unwrap();
+    assert_eq!(
+        nofile_seen(client, ClassSpec::Bundle(bundle)),
+        "2048:4096",
+        "oci box"
+    );
+}
+
 /// The soft and hard descriptor limits a program sees in a box made from `class`, as `soft:hard`.
 fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     let id = BoxId::new("nofile").unwrap();
@@ -416,6 +439,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         "process boxes over the socket: {failures:#?}"
     );
     nofile_by_default(&lab, &client);
+    nofile_named(&lab, &client);
     disconnect(&lab, &agent, &client);
     crash_at_each_record_write(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
