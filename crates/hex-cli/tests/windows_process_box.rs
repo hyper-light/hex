@@ -234,13 +234,19 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
         "a Windows image booted the guest"
     );
 
+    // A Linux image's root as a tarball: on Windows a directory root is refused by name, NTFS keeping
+    // neither its modes nor its links' texts (docs/design/shards-guest.md §4a).
+    let linux_root = root.path().join("linux-rootfs.tar");
+    tar::Builder::new(std::fs::File::create(&linux_root).unwrap())
+        .into_inner()
+        .unwrap();
     let linux = node
         .create(bundle(
             "linux-image",
             serde_json::json!({
                 "ociVersion": "1.2.0",
                 "process": {"args": ["/bin/true"], "cwd": "/"},
-                "root": {"path": "rootfs"},
+                "root": {"path": linux_root.to_str().unwrap()},
                 "linux": {},
             }),
         ))
