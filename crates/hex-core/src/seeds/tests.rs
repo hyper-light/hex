@@ -908,3 +908,29 @@ fn a_late_or_out_of_order_report_is_refused_by_type() {
     assert_eq!(pool.create(ms(2)), Ok(Admit::Seed(new)));
     assert_eq!(pool.claim(Ticket(7), ms(2)), Err(Stale::Ticket(Ticket(7))));
 }
+
+/// HEX-SEEDS-1 under Ada's rule of 2026-11-06 (AC-T7.1.3): `SEEDS`' 32 was the bench's width and fedora's cores; a
+/// node's seeds now start at its parallelism and grow with the creates that find none free, up to the bound derived
+/// from its memory. Do: a pool of 1 slot at first, at most 3, and four creates, each seed started as the pool asks.
+/// Expect: the second and third creates each add a slot to start, so each is handed a seed of its own; the fourth,
+/// past the bound, waits and adds none; the slots never pass the bound.
+#[test]
+fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bound() {
+    let mut pool = Seeds::growing(limits(3, 8, 1_000, 10_000), 1);
+    assert_eq!(pool.wanted(), 1);
+    up(&mut pool, ms(0));
+    assert!(matches!(pool.create(ms(1)), Ok(Admit::Seed(_))));
+    for n in 2..=3 {
+        let Ok(Admit::Wait { ticket, .. }) = pool.create(ms(n)) else {
+            panic!("create {n} found a seed idle");
+        };
+        assert_eq!(pool.wanted(), 1, "create {n} added a slot to start");
+        let seed = pool.start().unwrap();
+        assert_eq!(pool.started(seed, ms(n)), Ok(Some(ticket)));
+        assert!(matches!(pool.claim(ticket, ms(n)), Ok(Claim::Seed(s)) if s == seed));
+    }
+    assert!(matches!(pool.create(ms(4)), Ok(Admit::Wait { .. })));
+    assert_eq!(pool.wanted(), 0, "past the bound no slot is added");
+    assert_eq!(pool.handed().len(), 3);
+    assert_eq!(pool.counts().waited, 3, "each create that found none free is counted");
+}
