@@ -1,5 +1,5 @@
 # A copy of Shards' draft `shards-api` (crates/api) and the crates it needs (afunix on Windows, testdir
-# for its tests), at hyper-light/shards hex/shards-api d325030e (local, task A of native plan step 5),
+# for its tests), at hyper-light/shards hex/shards-api-constants e72c551b (local, task A of native plan step 5),
 # so Hex builds against it on every machine before Shards lands it. It moves to vendor/shards, recorded
 # in vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own
 # workspace, Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.

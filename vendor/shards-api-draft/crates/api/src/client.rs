@@ -622,9 +622,13 @@ impl Guest for ShardsGuest {
         if state.exited {
             return Ok(());
         }
+        let grace = STOP_GRACE.map_err(|pending| Refusal::Unsupported {
+            what: "stop",
+            why: pending.to_string(),
+        })?;
         state.stopping = true;
         self.signal(&state, false);
-        let deadline = Instant::now().checked_add(STOP_GRACE);
+        let deadline = Instant::now().checked_add(grace);
         while !state.exited {
             let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
             if left.is_zero() {
@@ -865,6 +869,22 @@ mod tests {
             }
         });
         (dir, guest, dials)
+    }
+
+    /// Where this host class has no record of a stop, `stop` is refused naming the record
+    /// it waits on, and sends nothing: no grace borrowed from another class (Hex
+    /// HEX-GUEST-9).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_stop_without_this_classs_record_is_refused_by_name() {
+        let (_dir, guest, _) = listening_after(0);
+        match guest.stop() {
+            Err(Refusal::Unsupported { what: "stop", why }) => {
+                assert!(why.contains(crate::record::CLASS), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(guest.wait_for(Duration::ZERO).unwrap(), None);
     }
 
     /// A patience of zero is one dial, its answer awaited, and no other (Hex HEX-GUEST-9).
