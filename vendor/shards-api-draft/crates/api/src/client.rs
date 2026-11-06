@@ -501,15 +501,22 @@ fn said(what: &str, said: &str) -> String {
     }
 }
 
-/// The wait before dialing again, learned from what each dial shows: `sqrt(2 c w)`, where
-/// `c` is what the last refused dial took and `w` how long this connect has waited. Waiting
-/// `p` between dials costs `c w / p` of dialing over a wait like the one so far and `p / 2`
-/// of lateness on average once the guest listens; both are seconds, of this thread and of
-/// its caller, and this `p` makes their sum least. So a few dials go out early, fewer as the
-/// wait grows, and a guest that starts to listen is reached within a pause of it: with a
-/// dial of 5 µs (a socket not bound yet) after 150 ms, 1.2 ms, which dialing holds 0.4% of.
-/// A dial to a VM that listens waits for the guest's own answer, so the guest paces it. At
-/// most `left`.
+/// The wait before dialing again, `p = sqrt(2 c w)`: pacing that balances one dial's cost `c`
+/// against the waiting so far `w`, both measured as this connect runs.
+///
+/// - `c` is the time the last refused dial took, measured each dial: on HVF 5.5 µs at p50 to
+///   a socket not bound yet and 44 µs to a guest that does not listen yet
+///   (`docs/research/platform-measurements.md` M464).
+/// - `w` is how long this connect has waited so far, and stands for the wait still to come.
+/// - Pausing `p` between dials, a wait of `w` takes `w / p` dials, `c w / p` of dialing; and a
+///   guest that starts to listen at a uniform moment within a pause is reached `p / 2` late on
+///   average. Both are seconds, of this thread and of its caller.
+/// - Their sum `f(p) = c w / p + p / 2` is least where `f'(p) = -c w / p² + 1 / 2 = 0`, that
+///   is `p² = 2 c w`: `p = sqrt(2 c w)`.
+///
+/// So a few dials go out early and fewer as the wait grows: at 150 ms waited, 1.3 ms with a
+/// 5.5 µs dial and 3.6 ms with a 44 µs one, which dialing holds 0.4% and 1.2% of. A dial to a
+/// VM that listens waits for the guest's own answer, so the guest paces it. At most `left`.
 fn pause(dialed: Duration, waited: Duration, left: Duration) -> Duration {
     let product = dialed
         .as_nanos()
@@ -950,6 +957,64 @@ mod tests {
         let (_dir, guest, dials) = listening_after(3);
         assert!(guest.connect(1024, Duration::MAX).is_ok());
         assert_eq!(dials.load(Ordering::SeqCst), 4);
+    }
+
+    /// Measures `c` of `pause`: what one refused dial takes, `SHARDS_API_DIALS_N` (default
+    /// 1000) of each kind, printed as n, p50, p90, p99 and max
+    /// (docs/research/measurements/shards-api-waits/run.sh): to a socket not bound yet
+    /// (refused by this host's kernel), and, where `SHARDS_API_REAL=1` boots a real guest as
+    /// tests/real.rs does, to a port it does not serve (refused by the guest).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a measurement, run by its harness"]
+    fn the_cost_of_a_refused_dial() {
+        let n: usize = std::env::var("SHARDS_API_DIALS_N")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1000);
+        let timed = |path: &Path| -> Vec<Duration> {
+            let mut d: Vec<Duration> = (0..n)
+                .map(|_| {
+                    let start = Instant::now();
+                    assert!(matches!(handshake(path, 1236, None), Err(Attempt::Again(_))));
+                    start.elapsed()
+                })
+                .collect();
+            d.sort();
+            d
+        };
+        let dir = PrivateDir::new().unwrap();
+        let mut kinds = vec![("a socket not bound yet", timed(&dir.0.join("v")))];
+        let real = std::env::var_os("SHARDS_API_REAL").is_some_and(|v| v == "1");
+        let guest = real.then(|| {
+            let var = |k: &str| PathBuf::from(std::env::var_os(k).unwrap());
+            start(&GuestSpec {
+                kernel: var("SHARDS_API_KERNEL"),
+                init: Init::Executable(var("SHARDS_API_INIT")),
+                cmdline: "console=ttyS0 quiet shards_test=echo".into(),
+                vcpus: 1,
+                memory_mib: crate::min_memory_mib(std::env::consts::ARCH).max(256),
+                disks: vec![],
+                shares: vec![],
+                ports: vec![1234, 1236],
+                binary: None,
+            })
+            .unwrap()
+        });
+        if let Some(guest) = &guest {
+            drop(guest.connect(1234, Duration::MAX).unwrap());
+            kinds.push(("a real guest's port it does not serve", timed(&guest.vsock)));
+        }
+        for (what, d) in kinds {
+            let q = |p: usize| d[(n - 1) * p / 100];
+            println!(
+                "dial {what}: n={n} p50={:?} p90={:?} p99={:?} max={:?}",
+                q(50),
+                q(90),
+                q(99),
+                d[n - 1]
+            );
+        }
     }
 
     /// The wait between dials is `sqrt(2 c w)` of the last dial's time and the wait so far,
