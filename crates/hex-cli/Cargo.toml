@@ -24,6 +24,8 @@ hex-core.workspace = true
 hex-node.workspace = true
 hex-runtime.workspace = true
 rustix.workspace = true
+# `hex selftest-box tree`'s file hashes (HEX-GUEST-21, selftest/tree.rs).
+sha2.workspace = true
 socket2.workspace = true
 
 [dev-dependencies]
