@@ -18,10 +18,9 @@ use super::process::JobBox;
 use super::sys::Started;
 use super::{build_spawn, proc};
 
-/// The longest the query may take before its box is ended and the read refused by name: a bound on a
-/// wait (CLAUDE.md §2), well past PowerShell's start and one WMI read, which take about a second (to be
-/// measured on jupiter, STATUS.md).
-const PATIENCE: Duration = Duration::from_secs(30);
+/// The longest the query may take before its box is ended and the read refused by name: twice its slowest
+/// recorded run ([`setup::FEATURE_QUERY_PATIENCE`]), a bound on a wait (CLAUDE.md §2).
+const PATIENCE: Duration = setup::FEATURE_QUERY_PATIENCE;
 
 /// The environment PowerShell and WMI read, taken from the node's own where it has them: the box gives
 /// a program nothing it isn't given.

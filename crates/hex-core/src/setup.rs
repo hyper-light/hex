@@ -141,6 +141,15 @@ const fn line_size(f: WindowsFeature) -> usize {
     f.name().len().saturating_add(LINE_TAIL)
 }
 
+/// The slowest recorded run of [`FEATURE_QUERY`]: 1,683 ms of jupiter's 20 at 79% CPU (2026-11-06,
+/// bench/install/records/windows-feature-query-jupiter-20261106.txt). Measured, not picked.
+pub const FEATURE_QUERY_SLOWEST: std::time::Duration = std::time::Duration::from_millis(1_683);
+
+/// The longest the node waits for [`FEATURE_QUERY`] before ending it and refusing by name: the swarm's
+/// failure-bound rule, twice the slowest recorded run, the factor being the false-alarm margin (the Hex
+/// lead, 2026-11-06). A slower machine is a new record, not a longer guess.
+pub const FEATURE_QUERY_PATIENCE: std::time::Duration = FEATURE_QUERY_SLOWEST.saturating_mul(2);
+
 /// The query an unprivileged node runs (PowerShell) for the installer's features' state:
 /// `Win32_OptionalFeature`, one `<name> <InstallState>` line per feature Windows lists.
 pub const FEATURE_QUERY: &str = "Get-CimInstance -ClassName Win32_OptionalFeature -Filter \"Name='Containers' OR Name='HypervisorPlatform'\" | ForEach-Object { '{0} {1}' -f $_.Name, $_.InstallState }";
