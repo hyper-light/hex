@@ -375,6 +375,15 @@ fi
 if [ "${MOUNTS:-0}" -gt 0 ]; then
   rc=0
   for conc in ${MOUNTS_CONC:-1 8}; do
+    # MOUNTS_UNTRACED=1 (goal 6's record, mntns_record.sh): the same phase once untraced first, so its create p50 is
+    # free of the trace's cost; part 19 still comes from the traced phase after it.
+    if [ "${MOUNTS_UNTRACED:-0}" = 1 ]; then
+      untraced_true=/run/bundle-true
+      [ "${MOUNTS_PATH:-pruned}" = classic ] && untraced_true=/run/bundle-true-classic
+      HEXBENCH_PHASES=throughput HEXBENCH_THROUGHPUT_CONC=$conc /opt/bin/seam_oci "$OUT/untraced.c$conc.json" 0 0 \
+        "$MOUNTS" /opt/bin/hex /run/bundle-sleep "$untraced_true" >> "$OUT/mounts.log" 2>&1 \
+        || { echo "refusing: the untraced phase at $conc failed ($OUT/mounts.log)" >&2; rc=8; continue; }
+    fi
     echo "mounts: every call traced, $conc in flight, $MOUNTS lifecycles, load $(cut -d' ' -f1-3 /proc/loadavg)"
     mounts_trace "mounts.c$conc" "$MOUNTS" "$conc" \
       || { echo "refusing: the mounts trace at $conc failed ($OUT/mounts.log)" >&2; rc=6; continue; }
