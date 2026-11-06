@@ -281,7 +281,7 @@ impl Node {
         // crate::sizes).
         let keeper = Keeper::open(state_dir)?;
         let sizes = Sizes::learned(&keeper.base())?;
-        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.descriptors)?;
+        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.inits)?;
         let pools = match owner {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
@@ -420,8 +420,7 @@ impl Node {
         self.devfs.proc_counts()
     }
 
-    /// Sets how many `oci` boxes' inits the node watches at once, the node's hard `RLIMIT_NOFILE` unless set
-    /// ([`Sizes::descriptors`]): past it `create` of an `oci` box is refused with [`Refusal::Exhausted`]. A test
+    /// Sets how many `oci` boxes' inits the node watches at once, [`Sizes::inits`] unless set: past it `create` of an `oci` box is refused with [`Refusal::Exhausted`]. A test
     /// control, with no production caller: the budget-exhausted test needs a budget it can reach.
     pub fn with_init_budget(self, budget: usize) -> Result<Self, Refusal> {
         self.supervisor.set_budget(budget)?;
@@ -593,7 +592,7 @@ impl Node {
 
     /// What the pools have learned now, and each memory pool's takes in this start, as [`hex_core::demand::Peaks`]
     /// keeps them: idle cgroups, cgroups made ahead, idle network namespaces, network namespaces made ahead, seeds,
-    /// and ipc and uts pairs. A pool whose lock was poisoned reads as having learned nothing more.
+    /// ipc and uts pairs, and device programs loaded. A pool whose lock was poisoned reads as having learned nothing more.
     fn peaks_now(&self) -> hex_core::demand::Peaks {
         let (owner_cgroups, ahead) = self.cgroups.learned().unwrap_or((0, 0));
         let (netns, owner_netns) = self.netns.learned().unwrap_or((0, 0));
@@ -632,6 +631,8 @@ impl Node {
                 made.map_or(0, |c| c.taken.saturating_add(c.made_on_path)),
                 served,
                 ipc.map_or(0, |c| c.taken.saturating_add(c.made_on_path)),
+                // The device programs' demand: those loaded, one per new policy a create used.
+                self.devices.counts().map_or(0, |c| c.loaded),
             ],
         }
     }

@@ -44,7 +44,7 @@ pub const PROGRAM_BYTES: u64 = 5_325;
 
 /// The pools that hold the node's memory, by their items' cost, in the order [`Peaks::takes`] keeps their takes:
 /// idle cgroups, cgroups made ahead, idle network namespaces, network namespaces made ahead (decision 4), seeds,
-/// and ipc and uts pairs.
+/// ipc and uts pairs, and device programs held (their takes the programs loaded, one per new policy).
 const COSTS: [u64; MEMORY_POOLS] = [
     IDLE_CGROUP_BYTES,
     AHEAD_BYTES,
@@ -52,6 +52,7 @@ const COSTS: [u64; MEMORY_POOLS] = [
     NETNS_BYTES,
     SEED_BYTES,
     IPC_UTS_BYTES,
+    PROGRAM_BYTES,
 ];
 
 /// What the node reads of its host as it starts.
@@ -174,13 +175,20 @@ pub struct Sizes {
     /// The most descriptors the node may hold ([`Host::descriptors`]): the most connections its socket admits, each
     /// one, the kernel refusing past what remains of them.
     pub descriptors: usize,
+    /// The most inits the node watches at once, a pidfd each (the supervisor's budget, and the programs the socket
+    /// watches): one per live `oci` box, so at most the node's boxes ([`hex_runtime::MAX_BOXES`]), and within the
+    /// descriptors it may hold, its hard `RLIMIT_NOFILE` read at run time (getrlimit(2)). It was `INIT_BUDGET`,
+    /// 65,536, systemd's figure copied (Ada's 2026-11-06 constants rule).
+    pub inits: usize,
     /// The most device programs the node holds loaded, one per device policy a create used, past which the one used
-    /// longest ago is closed (`devshare::Programs`; it lives on in the cgroups it's attached to). Each holds a
-    /// descriptor and [`PROGRAM_BYTES`], so the least of [`Host::descriptors`] and the node's memory over that cost,
-    /// never under the host's parallelism. Held only as policies are seen, a program per new policy (grown on a
-    /// miss), so what they hold is what their policies' count makes it; none is made ahead, a policy being known only
-    /// at its first create, so no peak is kept for a next start. It was a fixed 64 (`devshare::MAX_PROGRAMS`, Ada's
-    /// 2026-11-06 constants rule).
+    /// longest ago is closed (`devshare::Programs`; it lives on in the cgroups it's attached to). A memory pool as the
+    /// others are: what fits of [`PROGRAM_BYTES`] each in its demand-weighted share ([`weighted`], its takes the
+    /// programs loaded), never under the host's parallelism, and within [`Host::descriptors`], a descriptor each.
+    /// Grown on a miss, a program loaded per new policy. At most one per box the node holds
+    /// ([`hex_runtime::MAX_BOXES`]): no more policies are in use at once, and each held is a descriptor of the
+    /// node's, counted among its own (`netns::FilesBound`). No peak is kept for a next start: nothing is made ahead, a
+    /// policy being known only at its first create, so a start has nothing to begin from but its first create's
+    /// load. It was a fixed 64 (`devshare::MAX_PROGRAMS`, Ada's 2026-11-06 constants rule).
     pub programs: usize,
 }
 
@@ -225,7 +233,10 @@ impl Sizes {
             ipc_uts: fit(5, peaks.ipc_uts).min(seeds.get().max(peaks.ipc_uts)),
             workers: to_usize(host.threads).max(1),
             descriptors: to_usize(host.descriptors),
-            programs: to_usize((host.memory / PROGRAM_BYTES).min(host.descriptors)).max(start),
+            inits: to_usize(host.descriptors).min(hex_runtime::MAX_BOXES),
+            programs: fit(6, 0)
+                .min(to_usize(host.descriptors))
+                .min(hex_runtime::MAX_BOXES),
         }
     }
 
@@ -256,6 +267,7 @@ impl Sizes {
             of(self.netns, NETNS_BYTES),
             of(self.seeds.get(), SEED_BYTES),
             of(self.ipc_uts, IPC_UTS_BYTES),
+            of(self.programs, PROGRAM_BYTES),
         ]
         .into_iter()
         .fold(0, u64::saturating_add)

@@ -191,6 +191,9 @@ fn descriptors_of_the_node(pools: Pools, beside: u64) -> u64 {
         kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
         of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         of(crate::serve::limits(&pools.sizes).programs, 1),
+        // The device programs held, a descriptor each at their bound. A rootless node loads none, so its count is an
+        // over-bound there, and harmless: it keeps no namespaces whose files this bounds.
+        of(pools.sizes.programs, 1),
         of(pools.sizes.seeds.get(), FDS_A_SEED),
         of(crate::seed::most(&pools.sizes), FDS_A_SEED),
         beside,

@@ -208,7 +208,7 @@ pub fn share(memory: u64, sharers: usize, each: u64) -> usize {
 }
 
 /// How many of a node's pools hold its memory, whose shares follow their demand ([`weighted`]).
-pub const MEMORY_POOLS: usize = 6;
+pub const MEMORY_POOLS: usize = 7;
 
 /// What a node learned, kept in its state so its next start begins there and takes no cold miss the last one had
 /// learned past (the lead's call, 2026-11-06): each learned size's peak, the seeds' spare, and the takes of each pool
@@ -262,6 +262,7 @@ const KEYS: [&str; 9 + MEMORY_POOLS] = [
     "takes-3",
     "takes-4",
     "takes-5",
+    "takes-6",
 ];
 
 impl Peaks {
@@ -279,7 +280,7 @@ impl Peaks {
 
     fn values(&self) -> [u64; KEYS.len()] {
         let u = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        let [t0, t1, t2, t3, t4, t5] = self.takes;
+        let [t0, t1, t2, t3, t4, t5, t6] = self.takes;
         [
             u(self.owner_cgroups),
             u(self.owner_netns),
@@ -296,6 +297,7 @@ impl Peaks {
             t3,
             t4,
             t5,
+            t6,
         ]
     }
 
@@ -352,7 +354,7 @@ impl Peaks {
             devfs_per_key: z(6),
             seeds: z(7),
             spare: z(8),
-            takes: [v(9), v(10), v(11), v(12), v(13), v(14)],
+            takes: [v(9), v(10), v(11), v(12), v(13), v(14), v(15)],
         })
     }
 }

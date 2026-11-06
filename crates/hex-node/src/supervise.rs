@@ -139,9 +139,9 @@ impl Supervisor {
     /// Makes this process a child subreaper and starts the supervising thread. `box_root` is the
     /// node's box root under the cgroup root; records of reaped inits go to `store`. `budget` is the most
     /// inits whose pidfds it holds, one fd per live `oci` box, past which `create` refuses with
-    /// [`Refusal::Exhausted`] before making anything: the node's hard `RLIMIT_NOFILE`, read at run time
-    /// ([`crate::sizes::Sizes::descriptors`], getrlimit(2)), which the agent raises its soft limit to. It was
-    /// 65,536, systemd's figure copied (Ada's 2026-11-06 constants rule).
+    /// [`Refusal::Exhausted`] before making anything ([`crate::sizes::Sizes::inits`]: at most the node's boxes, within
+    /// its hard `RLIMIT_NOFILE` read at run time, getrlimit(2)). It was 65,536, systemd's figure copied (Ada's
+    /// 2026-11-06 constants rule).
     pub fn start(box_root: &Path, store: Store, budget: usize) -> Result<Arc<Self>, Refusal> {
         rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
             .map_err(|e| Refusal::os("making the node agent a child subreaper", e))?;

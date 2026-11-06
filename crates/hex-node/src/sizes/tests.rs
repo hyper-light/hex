@@ -169,7 +169,7 @@ fn peaks_kept_in_the_state_are_read_back_and_a_bad_record_is_a_first_start() {
     let peaks = Peaks {
         seeds: 77,
         spare: 4,
-        takes: [1, 2, 3, 4, 5, 6],
+        takes: [1, 2, 3, 4, 5, 6, 7],
         ..Peaks::default()
     };
     write_peaks(dir.path(), &peaks).unwrap();
@@ -236,19 +236,29 @@ fn the_keeper_keeps_the_larger_of_each_peak_and_sums_the_takes() {
 }
 
 /// The device programs a node holds, one per policy a create used (Ada's 2026-11-06 constants rule; AC-T7.1.5,
-/// CLAUDE.md §2): bounded by what its host lets it hold, a descriptor and [`PROGRAM_BYTES`] each, never under the
-/// host's parallelism; no longer a fixed 64. Do: size a node on fedora's figures, on a host of 1 GiB and 4 threads,
-/// on one whose descriptors are few, and on one with no memory to spare. Expect: the least of the descriptors and
-/// the memory over a program's cost, and the parallelism at the least.
+/// CLAUDE.md §2): a memory pool as the others are, what fits of [`PROGRAM_BYTES`] each in its demand-weighted share,
+/// within the descriptors, never under the host's parallelism; no longer a fixed 64. Do: size a node on fedora's
+/// figures and on a host of 1 GiB and 4 threads, a first start's (an even share of seven pools); then after a start
+/// that loaded programs and took nothing else; on a host whose descriptors are few; and on one with no memory to
+/// spare. Expect: the even share over a program's cost; all the memory's worth after the start that took only
+/// programs; the descriptors where they are fewer; and the parallelism at the least.
 #[test]
-fn the_programs_held_are_bounded_by_the_hosts_descriptors_and_memory() {
-    let fedora = first(host(7_500 << 20, 32));
-    assert_eq!(fedora.programs, 524_288, "fedora's descriptors bound it");
-    let small = first(host(1 << 30, 4));
+fn the_programs_held_are_bounded_by_their_memory_share_and_the_descriptors() {
+    let share = |memory: u64| usize::try_from(memory / 7 / PROGRAM_BYTES).unwrap();
     assert_eq!(
-        small.programs,
-        usize::try_from((1u64 << 30) / PROGRAM_BYTES).unwrap(),
-        "a 1 GiB host's memory bounds it"
+        first(host(7_500 << 20, 32)).programs,
+        hex_runtime::MAX_BOXES,
+        "fedora's share holds 210,981, past a policy for each box the node may hold"
+    );
+    assert_eq!(first(host(1 << 30, 4)).programs, share(1 << 30));
+    let only_programs = Peaks {
+        takes: [0, 0, 0, 0, 0, 0, 9],
+        ..Peaks::default()
+    };
+    assert_eq!(
+        Sizes::of(host(256 << 20, 4), &only_programs).programs,
+        usize::try_from((256u64 << 20) / PROGRAM_BYTES).unwrap(),
+        "the programs' demand takes the whole memory"
     );
     let few = first(Host {
         descriptors: 1_000,

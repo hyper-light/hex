@@ -215,8 +215,8 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
   - **Watching each init.** `create` opens the init's pidfd and checks that the process is the agent's child
     with the start time `create` recorded (`/proc/<pid>/stat` fields 4 and 22), so a recycled pid is never
     taken for it.
-  - **The budget.** The pidfds are held within a budget: the node's hard `RLIMIT_NOFILE`, read at run time
-    (getrlimit(2); `/proc/sys/fs/nr_open` where it is unlimited). It was `INIT_BUDGET`, 65,536, systemd's figure
+  - **The budget.** The pidfds are held within a budget: a pidfd per box the node may hold (`MAX_BOXES`), within
+    its hard `RLIMIT_NOFILE` read at run time (getrlimit(2); `/proc/sys/fs/nr_open` where it is unlimited). It was `INIT_BUDGET`, 65,536, systemd's figure
     copied, until Ada's 2026-11-06 constants rule.
     Past it, `create` refuses with `Refusal::Exhausted` naming the budget before anything is made, so no
     init is left unwatched.
@@ -1909,8 +1909,9 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
 
   The pools a create takes an item from (network namespaces and ipc/uts pairs made ahead, cgroups made ahead, and the
   `/dev` and proc mounts, in all and by key) are bounded besides by the seeds' bound: a create holds a seed while it
-  takes them. Fedora as its bench units run the node (about 7.5 GiB, 32 threads) gets, on a first start, 738 idle
-  cgroups, 1,679 idle namespaces and 514 seeds, against 256, 256 and 32. The removal queue and the checkers' line hold the node's idle
+  takes them. Fedora as its bench units run the node (about 7.5 GiB, 32 threads) gets, on a first start, 633 idle
+  cgroups, 1,439 idle namespaces and 440 seeds, against 256, 256 and 32, the memory split seven ways with the device
+  programs held (5.20 KiB each, at most one per box the node may hold) among the pools. The removal queue and the checkers' line hold the node's idle
   bound; procs alive one a parked init.
 - **The socket: node-wide budgets from the platform, none split among connections** (kind (c); the lead,
   2026-11-06: the node's clients are its own control plane, so no fairness between them is owed). Each is refused by
@@ -1919,8 +1920,8 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
     have (the least of `RLIMIT_NPROC`, getrlimit(2), and `/proc/sys/kernel/threads-max`, proc(5)). Workers start as
     calls find none idle and are kept, so an admitted call has a worker that can exist. `Sizes::workers` is the one
     accessor (the seeds' line of waiting creates is set by it).
-  - programs watched, by every connection together: the supervisor's pidfd budget, the node's hard `RLIMIT_NOFILE`
-    read at run time (getrlimit(2)), as the connections' is.
+  - programs watched, by every connection together: the supervisor's pidfd budget, a pidfd per box the node may
+    hold, within its hard `RLIMIT_NOFILE` read at run time (getrlimit(2); `Sizes::inits`).
   - connections: the node's hard `RLIMIT_NOFILE` (or `/proc/sys/fs/nr_open` where that is unlimited), one descriptor
     each; the kernel refuses an accept past what remains (`EMFILE`), and the socket pauses accepting until one closes.
   `wire::Limits`' `in_flight` and `programs` name node-wide budgets from here on, a bound no stricter for a client to
@@ -1934,9 +1935,9 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
   its id's hash over the count, so a count that changed with the host would lose the records a restart must find.
 - **What the bounds cost.** The descriptors counted at these bounds (`FilesBound`'s `own`): the learned pools at their
   bounds, each create a seed serves holding a take of each, and the programs' pidfds at their budget; the socket's
-  connections are what remains, which the kernel bounds. On fedora's figures at a first start 342,886 where the old
-  constants gave 331,086 (64 connections then among them); a soft limit past that lets kept namespaces hold their
-  files, four each, 618,462 for every one there may be (595,278 before). A later start's own follows its peaks. A larger `/dev` and proc pool holds more
+  connections are what remains, which the kernel bounds. On fedora's figures at a first start 406,026, the device programs held now
+  among them (342,634 without them, at six memory pools; the old constants gave 331,086, 64 connections then among
+  them); a soft limit past that lets kept namespaces hold their files, four each, 679,682 for every one there may be. A later start's own follows its peaks. A larger `/dev` and proc pool holds more
   superblocks, each two memcg-aware `list_lru`s a memory offline walks (goal 16's finding); it holds them only for the
   keys and depth demand reached.
 - **What would falsify it**: a cold take counted (reuse `missed`/`Owner`, netns_reuse `fresh`, `made_on_path`,

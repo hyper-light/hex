@@ -821,12 +821,12 @@ fn programs_watched_are_bounded_for_the_node_not_each_connection() {
     assert_eq!(first.wait_for(PATIENCE).unwrap(), Some(Exit::Signal(9)));
 }
 
-/// The init budget and the socket's programs-watched bound are the node's hard `RLIMIT_NOFILE`, read at run time
-/// (getrlimit(2)): one pidfd each, within what the node may hold, never a figure copied from systemd's default
-/// (Ada's 2026-11-06 constants rule; CLAUDE.md §2). Do: read the node's sizes and its socket's limits on this host.
-/// Expect: the programs bound is the hard limit, or `/proc/sys/fs/nr_open` where the hard limit is unlimited.
+/// The init budget and the socket's programs-watched bound are a pidfd per box the node may hold, within its hard
+/// `RLIMIT_NOFILE` read at run time (getrlimit(2)), never a figure copied from systemd's default (Ada's 2026-11-06
+/// constants rule; CLAUDE.md §2). Do: read the node's sizes and its socket's limits on this host. Expect: the
+/// programs bound is the least of the boxes' bound and the hard limit (`/proc/sys/fs/nr_open` where unlimited).
 #[test]
-fn the_programs_bound_is_the_hard_descriptor_limit() {
+fn the_programs_bound_is_the_boxes_within_the_hard_descriptor_limit() {
     let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile)
         .maximum
         .or_else(|| {
@@ -838,6 +838,6 @@ fn the_programs_bound_is_the_hard_descriptor_limit() {
     let sizes = crate::sizes::Sizes::now().unwrap();
     assert_eq!(
         u64::try_from(super::limits(&sizes).programs).unwrap(),
-        hard.min(u64::try_from(usize::MAX).unwrap())
+        hard.min(u64::try_from(hex_runtime::MAX_BOXES).unwrap())
     );
 }

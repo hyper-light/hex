@@ -72,14 +72,14 @@ pub use hex_core::wire::Limits;
 /// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
 /// - calls in flight: the socket's workers ([`crate::sizes::Sizes::workers`], the thread limit), so a call admitted
 ///   has a worker that can exist;
-/// - programs watched: the descriptors the node may hold, as the supervisor's pidfd budget is (its hard
-///   `RLIMIT_NOFILE`, getrlimit(2)), one pidfd each.
+/// - programs watched: the supervisor's pidfd budget ([`crate::sizes::Sizes::inits`]: a pidfd per live box, at most
+///   the node's boxes, within its hard `RLIMIT_NOFILE`, getrlimit(2)).
 pub fn limits(sizes: &crate::sizes::Sizes) -> Limits {
     Limits {
         connections: sizes.descriptors,
         message_bytes: wire::MAX_MESSAGE,
         in_flight: sizes.workers,
-        programs: sizes.descriptors,
+        programs: sizes.inits,
     }
 }
 

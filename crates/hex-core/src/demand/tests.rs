@@ -194,7 +194,7 @@ fn peaks_outlive_a_node_and_a_bad_record_is_a_first_start() {
         devfs_per_key: 33,
         seeds: 48,
         spare: 3,
-        takes: [1, 2, 3, 4, 5, u64::MAX],
+        takes: [1, 2, 3, 4, 5, 6, u64::MAX],
     };
     let text = p.encode();
     assert!(text.len() <= Peaks::most_bytes(), "{}", text.len());

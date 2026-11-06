@@ -35,10 +35,11 @@ fn bench() -> Sizes {
 
 /// Ada's rule and the lead's calls, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a
 /// root node holds at its learned pools' bounds on fedora's figures, a first start's. Do: bound the files under no
-/// limit at the bench host's sizes, nothing held beside its bounds. Expect: the node's own 342,634 (331,086 at the
-/// old constants, the socket's connections then among them; 342,886 with the stated 1,024 beside and 128 exec
-/// seeds, which are now counted, and the exec seeds' 514 that fit in the seeds' share), and every kept namespace
-/// there may be holding its files four each past that, 618,210 in all.
+/// limit at the bench host's sizes, nothing held beside its bounds. Expect: the node's own 406,026 (342,634 with six
+/// memory pools and the device programs uncounted; 331,086 at the old constants, the socket's connections then among
+/// them): the pools' shares a seventh each with the device programs among them (440 seeds, 1,439 idle namespaces),
+/// and the programs held, 65,536 at their bound, now counted; and every kept namespace there may be holding its files
+/// four each past that, 679,682 in all.
 #[test]
 fn the_nodes_own_descriptors_on_fedoras_figures() {
     let unlimited = rustix::process::Rlimit {
@@ -46,8 +47,8 @@ fn the_nodes_own_descriptors_on_fedoras_figures() {
         maximum: None,
     };
     let b = FilesBound::of(&unlimited, root_pools(), 0);
-    assert_eq!(b.own, 342_634, "{:?}", bench());
-    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 618_210);
+    assert_eq!(b.own, 406_026, "{:?}", bench());
+    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 679_682);
 }
 
 /// A root node's pools on the bench host.
