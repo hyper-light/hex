@@ -27,7 +27,7 @@ fn m(pid: i32, footprint: u64) -> Member {
 #[test]
 fn reapportion_arms_the_changed_and_ends_when_over() {
     // 256 MiB bound, 16 MiB reserve → 240 MiB apportioned.
-    let mut t = Tracked::new(7000, 256 * MIB, 16 * MIB);
+    let mut t = Tracked::new(7000, 256 * MIB, 16 * MIB, 64);
 
     // Two idle members: both armed at 120 MiB (240 / 2).
     let plan = t.reapportion(&[m(10, 0), m(11, 0)]);
@@ -187,7 +187,10 @@ fn the_daemon_serves_a_box_end_to_end() {
     let b1 = BoxId::new("b1").expect("box id");
 
     // Acquire takes a pool user (the last pushed, 7001).
-    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(), 7001);
+    assert_eq!(
+        client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(),
+        7001
+    );
     // A box already acquired is refused by name.
     assert!(matches!(
         client.acquire(&b1, 256 * MIB, 16 * MIB, None),
@@ -214,7 +217,10 @@ fn the_daemon_serves_a_box_end_to_end() {
         client.inspect(&b1),
         Err(hex_api::Refusal::NoSuchBox(_))
     ));
-    assert_eq!(client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(), 7001);
+    assert_eq!(
+        client.acquire(&b1, 256 * MIB, 16 * MIB, None).unwrap(),
+        7001
+    );
 
     drop(client);
     let daemon = handle.join().expect("daemon thread");
@@ -415,7 +421,9 @@ fn a_box_naming_no_process_limit_gets_the_per_uid_ceiling() {
     let plain = BoxId::new("plain").expect("box id");
     let limited = BoxId::new("limited").expect("box id");
     client.acquire(&plain, 256 * MIB, 16 * MIB, None).unwrap();
-    client.acquire(&limited, 256 * MIB, 16 * MIB, Some(5)).unwrap();
+    client
+        .acquire(&limited, 256 * MIB, 16 * MIB, Some(5))
+        .unwrap();
     start(&client, &plain, true);
     start(&client, &limited, true);
     drop(client);

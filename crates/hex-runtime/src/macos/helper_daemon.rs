@@ -119,12 +119,14 @@ pub struct Tracked {
     peak: u64,
     crossings: u64,
     ended_over: bool,
+    /// Its processes' cap (`RLIMIT_NPROC` of its user), set when each program starts.
+    nproc: u32,
 }
 
 impl Tracked {
     /// A box on pool user `uid`, bounded at `bound` bytes with `reserve` bytes held back for the fork
-    /// arming window (`hex_core::boxuser::Bound`).
-    pub fn new(uid: u32, bound: u64, reserve: u64) -> Self {
+    /// arming window (`hex_core::boxuser::Bound`), its processes capped at `nproc`.
+    pub fn new(uid: u32, bound: u64, reserve: u64, nproc: u32) -> Self {
         Self {
             uid,
             bound: Bound {
@@ -135,6 +137,7 @@ impl Tracked {
             peak: 0,
             crossings: 0,
             ended_over: false,
+            nproc,
         }
     }
 
@@ -257,22 +260,24 @@ pub struct Daemon<P: Privileged> {
     boxes: Mutex<BTreeMap<BoxId, Tracked>>,
     /// The programs the daemon started, until the node reads each one's end ([`kids`]).
     kids: Mutex<Kids>,
-    nproc: u32,
+    /// The platform's per-uid process ceiling (`kern.maxprocperuid`, read at start): a box's process cap
+    /// when its spec names no `pids_max`. Each box has a uid of its own, and XNU's fork counts a uid's
+    /// processes against its `RLIMIT_NPROC` (`bsd/kern/kern_fork.c:269-283`).
+    per_uid: u32,
 }
 
 impl<P: Privileged> Daemon<P> {
-    /// A daemon over `ops`, with the free `pool` users and a per-user process cap `nproc`.
-    /// A box holds at most `nproc` programs the daemon started (its user can run no more), and the unread
-    /// ends of as many ended boxes as the pool has users.
-    pub fn new(ops: P, pool: Vec<u32>, nproc: u32) -> Self {
-        let cap = usize::try_from(nproc).unwrap_or(usize::MAX).max(1);
+    /// A daemon over `ops`, with the free `pool` users under the platform's per-uid process ceiling
+    /// `per_uid`. A box holds at most its process cap of programs the daemon started (its user can run no
+    /// more), and the unread ends of as many ended boxes as the pool has users.
+    pub fn new(ops: P, pool: Vec<u32>, per_uid: u32) -> Self {
         let graves = pool.len().max(1);
         Self {
             ops,
             pool: Mutex::new(pool),
             boxes: Mutex::new(BTreeMap::new()),
-            kids: Mutex::new(Kids::new(cap, graves)),
-            nproc,
+            kids: Mutex::new(Kids::new(graves)),
+            per_uid,
         }
     }
 
@@ -366,7 +371,8 @@ impl<P: Privileged> Daemon<P> {
                 box_id,
                 bound,
                 reserve,
-            } => self.acquire(box_id, bound, reserve),
+                pids_max,
+            } => self.acquire(box_id, bound, reserve, pids_max),
             Request::Start {
                 box_id,
                 program,
@@ -391,7 +397,7 @@ impl<P: Privileged> Daemon<P> {
             .map_err(|_| Refusal::Broken("the daemon's programs lock is poisoned".to_owned()))
     }
 
-    fn acquire(&self, box_id: BoxId, bound: u64, reserve: u64) -> Answer {
+    fn acquire(&self, box_id: BoxId, bound: u64, reserve: u64, pids_max: Option<u32>) -> Answer {
         let mut boxes = match self.boxes() {
             Ok(b) => b,
             Err(a) => return a,
@@ -406,11 +412,13 @@ impl<P: Privileged> Daemon<P> {
             return Answer::Refused(Refused::NoFreeUser);
         };
         drop(pool);
+        // The box's own limit, never past the platform's per-uid ceiling, which the kernel would hold it to.
+        let nproc = pids_max.map_or(self.per_uid, |p| p.min(self.per_uid));
         match self.kids() {
-            Ok(mut k) => k.open(&box_id),
+            Ok(mut k) => k.open(&box_id, usize::try_from(nproc).unwrap_or(usize::MAX)),
             Err(_) => return poisoned("the daemon's programs"),
         }
-        boxes.insert(box_id, Tracked::new(uid, bound, reserve));
+        boxes.insert(box_id, Tracked::new(uid, bound, reserve, nproc));
         Answer::Acquired { uid }
     }
 
@@ -420,13 +428,13 @@ impl<P: Privileged> Daemon<P> {
                 "a start without its three stdio descriptors".to_owned(),
             ));
         };
-        let (uid, cap_mib) = {
+        let (uid, cap_mib, nproc) = {
             let boxes = match self.boxes() {
                 Ok(b) => b,
                 Err(a) => return a,
             };
             match boxes.get(box_id) {
-                Some(t) => (t.uid(), t.provisional_cap_mib()),
+                Some(t) => (t.uid(), t.provisional_cap_mib(), t.nproc),
                 None => return Answer::Refused(Refused::UnknownBox(box_id.clone())),
             }
         };
@@ -448,7 +456,7 @@ impl<P: Privileged> Daemon<P> {
             [stdin, stdout, stderr],
             leader,
             cap_mib,
-            self.nproc,
+            nproc,
         ) {
             Ok(pid) => pid,
             Err(e) => return Answer::Refused(Refused::StartFailed(e.to_string())),

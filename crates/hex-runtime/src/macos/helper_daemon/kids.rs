@@ -3,7 +3,8 @@
 //! ([`super::Privileged::watch`]), reaped by the daemon's sweep or by a node's [`Request::Wait`]
 //! (`hex_core::helper`), and its end held until the node reads it once.
 //!
-//! Bounds (CLAUDE.md §2): a box holds at most `cap` programs, live or ended and unread. A start past
+//! Bounds (CLAUDE.md §2): a box holds at most its `cap` programs (its process cap, given when it is
+//! opened), live or ended and unread. A start past
 //! that drops the box's oldest unread end first (a later wait on it reads [`Exit::Unknown`], as an end
 //! no one collected), and is refused when all `cap` still run. An ended box's unread ends are kept for
 //! the node's waits on them (a delete's programs end by its kill), at most `graves` boxes' worth, the
@@ -15,8 +16,9 @@ use std::time::{Duration, Instant};
 use hex_api::{BoxId, Exit, Proc};
 
 /// One box's programs.
-#[derive(Default)]
 struct Started {
+    /// The most programs it holds: its process cap.
+    cap: usize,
     live: BTreeMap<i32, Box<dyn Proc>>,
     /// Ended programs whose end the node hasn't read, oldest first.
     ended: VecDeque<(i32, Exit)>,
@@ -64,32 +66,38 @@ pub struct Kids {
     boxes: BTreeMap<BoxId, Started>,
     /// Ended boxes, oldest first; their unread ends stay until a wait reads them or they are dropped.
     graves: VecDeque<BoxId>,
-    cap: usize,
     graves_max: usize,
 }
 
 impl Kids {
-    /// At most `cap` programs a box, and `graves_max` ended boxes' unread ends.
-    pub fn new(cap: usize, graves_max: usize) -> Self {
+    /// At most `graves_max` ended boxes' unread ends; each box's own cap is given when it is opened.
+    pub fn new(graves_max: usize) -> Self {
         Self {
             boxes: BTreeMap::new(),
             graves: VecDeque::new(),
-            cap,
             graves_max,
         }
     }
 
-    /// A box acquired: a fresh entry (an ended box of the same id is dropped).
-    pub fn open(&mut self, id: &BoxId) {
+    /// A box acquired, holding at most `cap` programs: a fresh entry (an ended box of the same id is
+    /// dropped).
+    pub fn open(&mut self, id: &BoxId, cap: usize) {
         self.graves.retain(|g| g != id);
-        self.boxes.insert(id.clone(), Started::default());
+        self.boxes.insert(
+            id.clone(),
+            Started {
+                cap,
+                live: BTreeMap::new(),
+                ended: VecDeque::new(),
+            },
+        );
     }
 
     /// Room for one more program in box `id`: drops its oldest unread end when it holds `cap`; refused
     /// when all `cap` still run.
     pub fn room(&mut self, id: &BoxId) -> Result<(), Full> {
-        let cap = self.cap;
         let b = self.boxes.get_mut(id).ok_or(Full::NoBox)?;
+        let cap = b.cap;
         b.sweep();
         while b.held() >= cap {
             if b.ended.pop_front().is_none() {

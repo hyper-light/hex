@@ -148,7 +148,8 @@ impl BoxUser {
         }
         let bound = spec.bounds.memory_max.unwrap_or(u64::MAX);
         let reserve = RESERVE_BYTES.min(bound / 4);
-        self.helper.acquire(&spec.id, bound, reserve)?;
+        self.helper
+            .acquire(&spec.id, bound, reserve, spec.bounds.pids_max)?;
         boxes.insert(
             spec.id.clone(),
             UserBox {

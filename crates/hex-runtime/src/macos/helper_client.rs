@@ -96,13 +96,21 @@ impl Helper {
         }
     }
 
-    /// Takes a pool user for `box_id` with memory bound and reserve in bytes; returns the user's id.
-    pub fn acquire(&self, box_id: &BoxId, bound: u64, reserve: u64) -> Result<u32, Refusal> {
+    /// Takes a pool user for `box_id` with memory bound and reserve in bytes, its processes capped at
+    /// `pids_max` (else the platform's per-uid ceiling); returns the user's id.
+    pub fn acquire(
+        &self,
+        box_id: &BoxId,
+        bound: u64,
+        reserve: u64,
+        pids_max: Option<u32>,
+    ) -> Result<u32, Refusal> {
         match self.rpc(
             &Request::Acquire {
                 box_id: box_id.clone(),
                 bound,
                 reserve,
+                pids_max,
             },
             &[],
         )? {

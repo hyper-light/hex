@@ -44,6 +44,9 @@ mod kind {
     pub const INSPECT: u16 = 0x0005;
     pub const SIGNAL: u16 = 0x0006;
     pub const WAIT: u16 = 0x0007;
+    /// An acquire naming the box's process limit: appended after the first version's kinds, so a helper
+    /// that predates it refuses it by kind.
+    pub const ACQUIRE_PIDS: u16 = 0x0008;
 
     pub const ANSWER: u16 = 0x8000;
     pub const A_HELLO: u16 = ANSWER | HELLO;
@@ -63,12 +66,14 @@ pub enum Request {
     /// Settle the version both sides speak, before anything else.
     Hello { version: u16 },
     /// Take a free pool user for a box with this memory bound and reserve (both in bytes); the helper binds
-    /// the user to the box and arms its exception handling. Refused when the box already has one, or the
-    /// pool is empty.
+    /// the user to the box and arms its exception handling. Its processes are capped at `pids_max` when the
+    /// box's spec names one, else at the platform's per-uid ceiling. Refused when the box already has one,
+    /// or the pool is empty. Encoded as [`kind::ACQUIRE`] without a limit, [`kind::ACQUIRE_PIDS`] with one.
     Acquire {
         box_id: BoxId,
         bound: u64,
         reserve: u64,
+        pids_max: Option<u32>,
     },
     /// Start `program` as the box's pool user, armed at its apportioned ledger limit, its three stdio
     /// descriptors riding with the message. `leader` is the box's first program (a new session); a later
@@ -156,7 +161,10 @@ impl Request {
     fn kind(&self) -> u16 {
         match self {
             Request::Hello { .. } => kind::HELLO,
-            Request::Acquire { .. } => kind::ACQUIRE,
+            Request::Acquire { pids_max: None, .. } => kind::ACQUIRE,
+            Request::Acquire {
+                pids_max: Some(_), ..
+            } => kind::ACQUIRE_PIDS,
             Request::Start { .. } => kind::START,
             Request::End { .. } => kind::END,
             Request::Inspect { .. } => kind::INSPECT,
@@ -206,10 +214,14 @@ pub fn encode_request(version: u16, id: u64, request: &Request) -> Result<Vec<u8
             box_id,
             bound,
             reserve,
+            pids_max,
         } => {
             w.string(box_id.as_str())?;
             w.u64(*bound);
             w.u64(*reserve);
+            if let Some(n) = pids_max {
+                w.u32(*n);
+            }
         }
         Request::Start {
             box_id,
@@ -316,6 +328,13 @@ pub fn read_request(bytes: &[u8], descriptors: usize) -> Result<(u16, u64, Reque
             box_id: wire::box_id(&mut r)?,
             bound: r.u64()?,
             reserve: r.u64()?,
+            pids_max: None,
+        },
+        kind::ACQUIRE_PIDS => Request::Acquire {
+            box_id: wire::box_id(&mut r)?,
+            bound: r.u64()?,
+            reserve: r.u64()?,
+            pids_max: Some(r.u32()?),
         },
         kind::START => Request::Start {
             box_id: wire::box_id(&mut r)?,

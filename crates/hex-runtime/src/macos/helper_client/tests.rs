@@ -97,7 +97,9 @@ fn pair() -> (Helper, thread::JoinHandle<()>) {
 fn the_client_round_trips_every_call() {
     let (helper, handle) = pair();
     assert_eq!(
-        helper.acquire(&box_id("b1"), 256 << 20, 16 << 20, None).unwrap(),
+        helper
+            .acquire(&box_id("b1"), 256 << 20, 16 << 20, None)
+            .unwrap(),
         7000
     );
 

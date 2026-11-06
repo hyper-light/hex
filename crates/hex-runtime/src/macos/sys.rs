@@ -188,13 +188,24 @@ pub fn loadavg() -> Option<f64> {
 
 /// The most processes this kernel holds at once (`kern.maxproc`): no box can list more members.
 pub fn max_processes() -> io::Result<usize> {
+    sysctl_count(c"kern.maxproc")
+}
+
+/// The most processes one uid may hold (`kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`): a
+/// box-user box's process cap when its spec names none, each box having a uid of its own.
+pub fn max_processes_per_uid() -> io::Result<usize> {
+    sysctl_count(c"kern.maxprocperuid")
+}
+
+/// A kernel count read by name (an `int` sysctl), as read now: an administrator may change it.
+fn sysctl_count(name: &std::ffi::CStr) -> io::Result<usize> {
     let mut v: c_int = 0;
     let mut len = size_of::<c_int>();
     // SAFETY: sysctlbyname reads the NUL-terminated name and writes at most `len` bytes, one c_int, into `v`,
     // and the new length into `len`; all three outlive the call, and nothing is set (newp null).
     let r = unsafe {
         libc::sysctlbyname(
-            c"kern.maxproc".as_ptr(),
+            name.as_ptr(),
             (&raw mut v).cast::<c_void>(),
             &raw mut len,
             std::ptr::null_mut(),
@@ -204,7 +215,8 @@ pub fn max_processes() -> io::Result<usize> {
     if r != 0 {
         return Err(io::Error::last_os_error());
     }
-    usize::try_from(v).map_err(|_| io::Error::other(format!("kern.maxproc reads {v}")))
+    usize::try_from(v)
+        .map_err(|_| io::Error::other(format!("{} reads {v}", name.to_string_lossy())))
 }
 
 /// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,
