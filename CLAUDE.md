@@ -150,17 +150,18 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   and calls HCS's operation, compute-system and process calls (`HcsCreateOperation`,
   `HcsWaitForOperationResult[AndProcessInfo]`, `HcsCancelOperation`, `HcsCloseOperation`,
   `HcsCreateComputeSystem`, `HcsStartComputeSystem`, `HcsTerminateComputeSystem`, `HcsCloseComputeSystem`,
-  `HcsCreateProcess`, `HcsCloseProcess`, `HcsGetServiceProperties`), its storage calls
-  (`HcsGetLayerVhdMountPath`, `HcsInitializeWritableLayer`, `HcsAttachLayerStorageFilter`,
-  `HcsDetachLayerStorageFilter`) and the virtual-disk calls that attach a box's scratch with no drive letter
-  (`OpenVirtualDisk`, `AttachVirtualDisk`), freeing HCS's strings (`LocalFree`) — resolved rather than linked,
-  because windows-sys links them at load time and a host without the Containers feature would then not start
-  the node at all. It opens a box's launcher and members by pid (`OpenProcess`), hands the launcher the box's
+  `HcsCreateProcess`, `HcsCloseProcess`, `HcsGetServiceProperties`), freeing HCS's strings (`LocalFree`), and
+  vmcompute's layer calls that make and remove a box's scratch as hcsshim and runhcs do (`ActivateLayer`,
+  `PrepareLayer`, `GetLayerMountPath`, `UnprepareLayer`, `DeactivateLayer`: undocumented; the documented
+  storage calls made a scratch no container finished starting on, decision record) — resolved rather than
+  linked, because windows-sys links HCS's at load time (and binds none of vmcompute's), and a host without
+  the Containers feature would then not start the node at all. It opens a box's launcher and members by pid (`OpenProcess`), hands the launcher the box's
   job and the caller's standard handles (`DuplicateHandle`), ends a launcher that never replied
   (`TerminateProcess`), checks a member's job (`IsProcessInJob`), adopts in the launcher the handle values
   the node gave it, and reads the host's build and kind (`RtlGetVersion`), an image's build from its base
   layer's `ntdll.dll` (`GetFileVersionInfoW`, `VerQueryValueW`), and a device interface class's members
-  (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`). Rust can express none of these
+  (`CM_Get_Device_Interface_List_SizeW`, `CM_Get_Device_Interface_ListW`) and whether each opens from where
+  it runs (`CreateFileW`, a query open). Rust can express none of these
   foreign calls, the function pointers resolved at run time, nor a handle value crossing processes, safely.
 
 ## 13. Lean code
