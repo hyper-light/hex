@@ -11,7 +11,10 @@ Every constant `cp/t7-sched-g5` adds or relies on, by kind:
 - **(d)** anything else: picked, or another system's default. A published number counts as (d): citing
   it isn't deriving it.
 
-Each (d) has its way out: how it becomes (a)-(c), or why it can't yet. "Requirement" marks a number
+Each (d) has its way out: how it becomes (a)-(c), or why it can't yet. Many wait on one requirement
+from Ada: how often Hex may wrongly stop placing on, or drain, a healthy node. The thresholds that
+decide a verdict (drain counts, the slow bar, CPI²'s 2σ and 0.35, the probe's warm-up) are each the
+point at which a healthy node is wrongly flagged at that rate, computed from what the system learns. "Requirement" marks a number
 that is the bar being met, not a tuning; "bound" marks a resource bound (CLAUDE.md §2), whose overflow
 is a typed refusal.
 
@@ -27,7 +30,7 @@ is a typed refusal.
 | Name | Value | File:line | Kind | Way out |
 |---|---|---|---|---|
 | `probe::INITIAL_TIMEOUT_NS` | 1 s | `crates/hex-health/src/probe.rs:21` | (d) RFC 6298 §2.1, TCP's prior | A prior is needed before the first sample. (a) at cell level: the cell's measured disk latencies as the prior, once the control plane carries them. |
-| `probe::MIN_TIMEOUT_NS` | 1 s | `probe.rs:23` | (d) RFC 6298 §2.4, made for TCP's delayed ACKs | (a): floor at the prober's own learned wake lateness `G` (hyper-timing's `Wakes`, as hyper-swim floors its timers). Needs a healthy-disk false-suspect test on a real disk under load, then the drill re-run. Next. |
+| `probe::MIN_TIMEOUT_NS` | 1 s | `probe.rs:23` | (d) RFC 6298 §2.4, made for TCP's delayed ACKs | (a): floor at the longest probe the disk has completed without a drain. Replayed on a recorded healthy trace (`bench/health/records/2026-11-06-probe-floor-apfs.md`): the floor removed drains a healthy disk 5 times in 10 minutes; learned, a stall is suspected at 30 ms and drained at 89 ms, 30x faster, with one warm-up false drain. The warm-up's length follows from the tolerated false-drain rate: **waits on Ada's rate.** |
 | `probe::MAX_TIMEOUT_NS` | 60 s | `probe.rs:25` | (d) RFC 6298 §2.5 "MAY" | (a): no cap; the timeout is what the disk's measured latencies say. A cap only bounds a stall's detection, and the stall is detected by age anyway. |
 | `probe::DRAIN_TIMEOUTS` | 3 | `probe.rs:28` | (d) RFC 6298 §5.5 doubling | (a): the count `k` with `p^k` under the owner's tolerated false-drain rate, `p` the learned rate of a healthy disk's probes outliving one timeout. |
 | `probe::SLOW_STREAK` | 3 | `probe.rs:31` | (d) CPI²'s 3 flags | Same as `DRAIN_TIMEOUTS`. |
@@ -72,7 +75,7 @@ is a typed refusal.
 |---|---|---|---|---|
 | memberlist's LAN config (probe 1 s, timeout 500 ms, 3 indirect, mult 4 and 6, awareness 8) | | `crates/hex-sim/src/membership.rs:112-117` | the competitor's shipped configuration | The model is memberlist; it must run memberlist's numbers. Not Hex's tuning. |
 | Lifeguard's nack point | 80% | `membership.rs:118` | the competitor's (Lifeguard §IV) | Same. |
-| LAN one-way delay | 0.1-2 ms | `membership.rs:119-120`, `crates/hex-sim/src/swim.rs:81-82` | (d) picked | (b): from measured round trips between the lab's hosts. Next. |
+| LAN one-way delay | 0.1-2 ms | `membership.rs:119-120`, `crates/hex-sim/src/swim.rs:81-82` | (d) picked | (b), not yet: measured adacachy → fedora (`bench/health/records/2026-11-06-lan-rtt.md`) with both hosts at load 57-70, so the tail is host delay, which the models keep as their own fault. Wants two wired hosts at rest, or a cell's own hyper-swim's learned round trips, recorded. |
 | `swim` crash time, run end | 60 s, 1 h | `swim.rs:84-85` | test bounds | The run ends at the condemnation; the end is a step budget. |
 | `max_events`, `max_steps`, `max_relayed`, `MAX_MEMBERS`, `MAX_SUSPICION_MULT` | 2²², 2³², 64, 2,048, 64 | `membership.rs:63,67,123-125`, `swim.rs:86-88` | bounds | Typed refusals past them; sized to the runs. |
 | `swim` paces: budget 0, and `(2(2m−1)+1)` s | | `crates/hex-sim/tests/swim.rs` | 0 is hyper-swim's "at need"; the other matches memberlist's one probe a second | Requirement (a like-for-like load). |
