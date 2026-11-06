@@ -266,12 +266,16 @@ fn open_in(root: &OwnedFd, path: &str) -> Result<OwnedFd, Refusal> {
         ) {
             Ok(fd) => return Ok(fd),
             Err(Errno::AGAIN) if tries < RESOLVE_TRIES => tries = tries.saturating_add(1),
-            Err(Errno::LOOP | Errno::XDEV) => {
+            Err(Errno::XDEV) => {
                 return Err(Refusal::Invalid {
                     what: "staged files",
-                    why: format!("{path:?} leads through a symbolic link or a mount"),
+                    why: format!("{path:?} leads through a mount"),
                 });
             }
+            // A symbolic link in the way is `ELOOP` from openat2's RESOLVE_NO_SYMLINKS, but the
+            // last component's, opened O_DIRECTORY|O_NOFOLLOW, is `ENOTDIR` on Linux 6.19 (as a
+            // file in the way is): which is read from the component itself.
+            Err(e @ (Errno::LOOP | Errno::NOTDIR)) => return Err(in_the_way(root, path, e)),
             Err(e) => {
                 return Err(Refusal::Os {
                     op: "opening a staged directory",
@@ -279,6 +283,34 @@ fn open_in(root: &OwnedFd, path: &str) -> Result<OwnedFd, Refusal> {
                 });
             }
         }
+    }
+}
+
+/// Why `path` under `root` isn't a directory to open, `err` being the open's: its first component that
+/// is a symbolic link or not a directory, read without following it, each prefix before it a directory
+/// already (so each read passes through directories alone). At most the path's components are read.
+fn in_the_way(root: &OwnedFd, path: &str, err: Errno) -> Refusal {
+    let mut end: usize = 0;
+    for part in path.split('/') {
+        end = end.saturating_add(part.len());
+        let prefix = path.get(..end).unwrap_or(path);
+        end = end.saturating_add(1);
+        let kind = rustix::fs::statat(root, prefix, AtFlags::SYMLINK_NOFOLLOW)
+            .map(|st| FileType::from_raw_mode(st.st_mode));
+        let why = match kind {
+            Ok(FileType::Directory) => continue,
+            Ok(FileType::Symlink) => format!("{path:?} leads through a symbolic link, {prefix:?}"),
+            Ok(_) => format!("{path:?} leads through {prefix:?}, which isn't a directory"),
+            Err(_) => break,
+        };
+        return Refusal::Invalid {
+            what: "staged files",
+            why,
+        };
+    }
+    Refusal::Os {
+        op: "opening a staged directory",
+        why: format!("{path:?}: {err}"),
     }
 }
 
