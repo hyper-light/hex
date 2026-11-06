@@ -168,13 +168,18 @@ gap PF[6][7][34]). So this decision's benefit is **unproven until hex-sim measur
 models inter-node latency and the scheduler's proximity term, and reports the goodput and tail it buys,
 against placement that ignores proximity.
 
-**Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H20-H21).** On a modelled WAN of Azure's eight
-regions, hyper-swim's coordinates learned to a 9-10% median error. Proximity-scored placement of Hex's
-three kinds (OCI containers, Firecracker microVMs and Shards microVMs, kinds by G2's owner rule, on
-both of H10's node models) beat proximity-blind best fit on all 120 studies, overall and for each kind:
-goodput +0.9% to +18.5%, p99 completion time 7.0% to 93.9% lower, the gain largest where round trips
-dominate a workload's steps. Shards' overhead in that run is a 5 MiB stand-in. The falsifier below was
-not met, so proximity stays a soft score.
+**Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H20-H21).** G2's recorded day was run as it
+is, 25,295 launches of Hex's three kinds (OCI containers, Firecracker microVMs and Shards microVMs), on
+both of H10's node models. The WAN was Azure's inter-region table with every zone pair at Azure's 2 ms
+bound, and hyper-swim's coordinates were learned on its own probe schedule. On 118 studies (59 seeds
+for each node model, the number the claim "at least 95% of seeds, at 95% confidence" needs),
+proximity-scored placement beat proximity-blind best fit on the latency tail for every launch and for
+each kind. The p99 completion time was at least 5.1% lower over all launches, and the p50 at least 91%
+lower. Goodput did not move: at the day's own load nothing queues, so every launch finishes within the
+day under either policy. The falsifier below was not met, so proximity stays a soft score: the plain
+predicted RTT, with no widening and no tie-break policy (H21 gives the measured reasons). The claim
+covers inter-region and inter-zone structure and the recorded load. Shards' overhead in that run is a
+5 MiB stand-in.
 
 **What would falsify it.** Proximity-aware placement not improving goodput or the latency tail over
 proximity-blind placement in hex-sim on a modelled WAN — in which case proximity drops to a tie-breaker.
