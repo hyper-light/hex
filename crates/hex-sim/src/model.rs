@@ -74,6 +74,16 @@ impl Class {
     pub fn takes_gpus(self) -> bool {
         matches!(self, Class::Oci)
     }
+
+    /// Its place among the three, as reports and per-class arrays give them: OCI containers,
+    /// Firecracker microVMs, Shards microVMs.
+    pub fn index(self) -> usize {
+        match self {
+            Class::Oci => 0,
+            Class::Firecracker => 1,
+            Class::Shards => 2,
+        }
+    }
 }
 
 /// The classes a node can run, a bit each.
@@ -123,7 +133,7 @@ pub enum Overhead {
     /// The same for every workload of the class.
     Flat(u64),
     /// By the workload's own memory, where it was measured by guest size: (its memory, the overhead),
-    /// ascending, at most [`Overhead::MAX_SIZES`].
+    /// ascending. A trace's rows bound it (`replay::Limits`).
     BySize(Vec<(u64, u64)>),
 }
 
@@ -133,15 +143,11 @@ impl Default for Overhead {
     }
 }
 
-impl Overhead {
-    pub const MAX_SIZES: usize = 64;
-}
-
 impl Overheads {
     /// A workload's overhead, `class`'s for its own memory `mem`; none where the class's overhead goes
     /// by size and names no row for `mem`.
     pub fn of(&self, class: Class, mem: u64) -> Option<u64> {
-        match self.0.get(Self::at(class))? {
+        match self.0.get(class.index())? {
             Overhead::Flat(bytes) => Some(*bytes),
             Overhead::BySize(sizes) => sizes
                 .binary_search_by_key(&mem, |&(m, _)| m)
@@ -153,7 +159,7 @@ impl Overheads {
 
     /// A workload's own memory, from its need as `class`: what [`Overheads::of`] added taken off.
     pub fn own(&self, class: Class, need: u64) -> Option<u64> {
-        match self.0.get(Self::at(class))? {
+        match self.0.get(class.index())? {
             Overhead::Flat(bytes) => need.checked_sub(*bytes),
             Overhead::BySize(sizes) => sizes
                 .iter()
@@ -163,17 +169,17 @@ impl Overheads {
     }
 
     pub fn set(&mut self, class: Class, bytes: u64) {
-        if let Some(slot) = self.0.get_mut(Self::at(class)) {
+        if let Some(slot) = self.0.get_mut(class.index()) {
             *slot = Overhead::Flat(bytes);
         }
     }
 
     /// Adds `class`'s overhead for workloads whose own memory is `mem`, making its overhead go by size;
-    /// refused, with why, where `mem` has one already or the class has [`Overhead::MAX_SIZES`].
+    /// refused, with why, where `mem` has one already.
     pub fn set_size(&mut self, class: Class, mem: u64, bytes: u64) -> Result<(), &'static str> {
         let slot = self
             .0
-            .get_mut(Self::at(class))
+            .get_mut(class.index())
             .ok_or("a class with no slot")?;
         if let Overhead::Flat(_) = slot {
             *slot = Overhead::BySize(Vec::new());
@@ -181,23 +187,12 @@ impl Overheads {
         let Overhead::BySize(sizes) = slot else {
             return Err("a class's overhead not by size");
         };
-        if sizes.len() >= Overhead::MAX_SIZES {
-            return Err("more overhead sizes for a class than Overhead::MAX_SIZES");
-        }
         match sizes.binary_search_by_key(&mem, |&(m, _)| m) {
             Ok(_) => Err("a class's overhead given twice for one size"),
             Err(at) => {
                 sizes.insert(at, (mem, bytes));
                 Ok(())
             }
-        }
-    }
-
-    fn at(class: Class) -> usize {
-        match class {
-            Class::Oci => 0,
-            Class::Firecracker => 1,
-            Class::Shards => 2,
         }
     }
 }

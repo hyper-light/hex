@@ -25,6 +25,7 @@
 //! over bounded input (CLAUDE.md §2): past [`Limits`], and at the first line it can't read, it refuses
 //! with a typed [`TraceError`] naming the line.
 
+use crate::census;
 use crate::model::{
     Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Overheads, Owner,
     OwnerId, Resources, Tenancy, WorkloadId, WorkloadSpec,
@@ -38,18 +39,25 @@ pub struct Limits {
     pub max_legs: usize,
     pub max_owners: usize,
     pub max_groups: usize,
+    pub max_overheads: usize,
+}
+
+impl Limits {
+    /// The input-bound rule ([`crate::census`]): twice the most any committed trace holds, of each.
+    pub const RECORDED: Self = Self {
+        max_bytes: census::BYTES * census::INPUT_MARGIN,
+        max_nodes: census::NODES * census::INPUT_MARGIN,
+        max_legs: census::LEGS * census::INPUT_MARGIN,
+        max_owners: census::OWNERS * census::INPUT_MARGIN,
+        max_groups: census::GROUPS * census::INPUT_MARGIN,
+        max_overheads: census::OVERHEADS * census::INPUT_MARGIN,
+    };
 }
 
 impl Default for Limits {
-    /// A recorded day with room to spare: the day of record is 25,295 launches on 50 nodes.
+    /// [`Limits::RECORDED`].
     fn default() -> Self {
-        Self {
-            max_bytes: 64 << 20,
-            max_nodes: 100_000,
-            max_legs: 1_000_000,
-            max_owners: 100_000,
-            max_groups: 1_000_000,
-        }
+        Self::RECORDED
     }
 }
 
@@ -67,6 +75,8 @@ pub enum TraceError {
     TooManyOwners(usize),
     #[error("more than {0} groups")]
     TooManyGroups(usize),
+    #[error("more than {0} overhead rows")]
+    TooManyOverheads(usize),
     #[error("the trace names no node")]
     NoNodes,
 }
@@ -86,6 +96,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
     let mut overheads = Overheads::default();
     let mut overheads_seen = Classes::NONE;
     let mut overheads_by_size = Classes::NONE;
+    let mut overhead_rows = 0usize;
     for (at, raw) in text.lines().enumerate() {
         let line = at.saturating_add(1);
         let row = raw.trim();
@@ -145,6 +156,10 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                 if !workloads.is_empty() {
                     return Err(bad(line, "an overhead after the first leg"));
                 }
+                if overhead_rows >= limits.max_overheads {
+                    return Err(TraceError::TooManyOverheads(limits.max_overheads));
+                }
+                overhead_rows = overhead_rows.saturating_add(1);
                 let class = class(fields.next().ok_or(bad(line, "a missing field"))?, line)?;
                 let bytes = number(&mut fields, line)?;
                 match fields.next() {
@@ -479,7 +494,15 @@ leg,0,1,1,11,0,plain,0,0,-,-,shards
     /// read back; a trace without them reads as one owner of weight 1, every leg its default tenancy.
     #[test]
     fn a_trace_reads_its_owners_groups_and_tenancy() {
-        let c = parse(TENANTS, &Limits::default()).unwrap();
+        // Its one group: no committed trace names one, so the default bound is none.
+        let c = parse(
+            TENANTS,
+            &Limits {
+                max_groups: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
         assert_eq!(c.owners, vec![Owner { weight: 1 }, Owner { weight: 3 }]);
         assert_eq!(c.groups, vec![Group { budget: 2 }]);
         assert_eq!(
@@ -522,8 +545,13 @@ leg,0,1,1,11,0,plain,0,0,-,-,shards
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,0\n", 2),
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,-,9\n", 2),
         ];
+        // Room for each case's one group, so each is refused for its line.
+        let room = Limits {
+            max_groups: 1,
+            ..Limits::default()
+        };
         for (text, line) in cases {
-            match parse(text, &Limits::default()) {
+            match parse(text, &room) {
                 Err(TraceError::Line { line: l, .. }) => assert_eq!(l, line, "{text:?}"),
                 other => panic!("{text:?}: {other:?}"),
             }
@@ -562,16 +590,17 @@ leg,0,1,1,11,0,plain,0,0,-,-,shards
         assert_eq!(parse(SMALL, &limits), Err(TraceError::TooManyNodes(1)));
         let one_node = "node,1,1,0,0\nleg,0,1,1,1,0,plain\nleg,0,1,1,1,0,plain\n";
         assert_eq!(parse(one_node, &limits), Err(TraceError::TooManyLegs(1)));
+        // The input-bound rule's: twice the census's most overhead rows.
+        let most = crate::census::OVERHEADS * crate::census::INPUT_MARGIN;
         let mut sizes = String::from("node,1,1,0,0\n");
-        for size in 0..=crate::model::Overhead::MAX_SIZES {
+        for size in 0..most {
             sizes.push_str(&format!("overhead,shards,1,{size}\n"));
         }
+        assert!(parse(&sizes, &Limits::default()).is_ok());
+        sizes.push_str(&format!("overhead,shards,1,{most}\n"));
         assert_eq!(
             parse(&sizes, &Limits::default()),
-            Err(TraceError::Line {
-                line: crate::model::Overhead::MAX_SIZES + 2,
-                why: "more overhead sizes for a class than Overhead::MAX_SIZES"
-            })
+            Err(TraceError::TooManyOverheads(most))
         );
     }
 

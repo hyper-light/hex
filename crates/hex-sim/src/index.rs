@@ -7,6 +7,7 @@
 //! GPUs, then lowest id: one total order ([`Key`]), so the scheduler and its serial specification
 //! can't disagree on a tie. Best fit is the baseline the design scores against (Borg's, S1, CM[1]).
 
+use crate::census;
 use crate::error::SimError;
 use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
 use crate::trace::TraceHash;
@@ -53,9 +54,9 @@ pub struct Sample {
 }
 
 /// At most [`Shapes::MAX`] workload shapes, each with the class that asks it, kept in a fixed array
-/// so a [`Sample`] stays a plain value. Past the bound, [`Shapes::of`] keeps the smallest (by CPU,
-/// then memory, then GPUs, then class): a free capacity a larger shape fits, a smaller one fits too,
-/// so the smallest are what decide whether a leftover can still be used.
+/// so a [`Sample`] stays a plain value. More is refused, typed: the shapes a sample keeps are
+/// Pareto-minimal, none fitting wherever another does, so dropping one could leave a leftover only it
+/// fits read as stranded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Shapes {
     len: usize,
@@ -63,17 +64,27 @@ pub struct Shapes {
 }
 
 impl Shapes {
-    pub const MAX: usize = 16;
+    /// The input-bound rule ([`crate::census`]): twice the most minimal shapes a committed trace's
+    /// workload has.
+    pub const MAX: usize = census::SHAPES * census::INPUT_MARGIN;
 
-    pub fn of(mut shapes: Vec<(Resources, Class)>) -> Self {
+    /// `shapes`, each once, in order (by CPU, then memory, then GPUs, then class); more than
+    /// [`Shapes::MAX`] distinct ones refused.
+    pub fn of(mut shapes: Vec<(Resources, Class)>) -> Result<Self, SimError> {
         shapes.sort_unstable();
         shapes.dedup();
+        if shapes.len() > Self::MAX {
+            return Err(SimError::Full {
+                what: "a sample's workload shapes",
+                bound: Self::MAX,
+            });
+        }
         let mut out = Self::default();
         for (slot, shape) in out.items.iter_mut().zip(shapes) {
             *slot = shape;
             out.len = out.len.saturating_add(1);
         }
-        out
+        Ok(out)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &(Resources, Class)> {
@@ -462,7 +473,7 @@ impl FitIndex {
                         Tie::MostAllocated => slot.allocated_after(&demand.need),
                         // Fewer classes in the high bits; the allocation (at most 2,000,000) below.
                         Tie::Narrowest => {
-                            u64::from(3u32.saturating_sub(slot.classes.count()))
+                            u64::from(Classes::ALL.count().saturating_sub(slot.classes.count()))
                                 .checked_shl(32)
                                 .unwrap_or(0)
                                 | slot.allocated_after(&demand.need)
@@ -747,6 +758,31 @@ mod tests {
         assert!(s.covers(first, 4));
         let none = index.sampled_fit(&plain(res(1, 100, 0)), &one);
         assert_eq!((none.best, none.span), (None, 4));
+    }
+
+    /// CLAUDE.md §3: do give `Shapes::of` as many incomparable shapes as its bound, then one more;
+    /// expect the first taken whole and the second refused, typed, never cut to its smallest: none of
+    /// them fits wherever another does, so a dropped one could leave a usable leftover read as
+    /// stranded.
+    #[test]
+    fn more_shapes_than_the_bound_are_refused_never_cut() {
+        let incomparable = |n: u64| -> Vec<(Resources, Class)> {
+            (0..n)
+                .map(|i| (res(1 + i, 100 - i, 0), Class::Oci))
+                .collect()
+        };
+        let bound = u64::try_from(Shapes::MAX).unwrap();
+        assert_eq!(
+            Shapes::of(incomparable(bound)).unwrap().iter().count(),
+            Shapes::MAX
+        );
+        assert_eq!(
+            Shapes::of(incomparable(bound + 1)),
+            Err(SimError::Full {
+                what: "a sample's workload shapes",
+                bound: Shapes::MAX
+            })
+        );
     }
 
     #[test]

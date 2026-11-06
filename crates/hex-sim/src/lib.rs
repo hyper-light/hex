@@ -3,6 +3,7 @@
 //! seed, virtual time and a single-threaded event loop decide everything, so a run is reproducible
 //! and a regression is a changed number, not noise.
 //!
+//! - [`census`]: the most the recorded inputs hold, and the input-bound rule that bounds inputs by it.
 //! - [`model`]: nodes, workloads and their resources.
 //! - [`index`]: the best-fit index both the scheduler and its serial specification place with.
 //! - [`store`]: the control plane's durable records, committed by compare-and-set (S6).
@@ -27,6 +28,7 @@
     )
 )]
 
+pub mod census;
 pub mod error;
 pub mod generate;
 pub mod index;

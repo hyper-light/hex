@@ -7,23 +7,25 @@
 //! run every class (huawei-r5-day30.trace, the main one) and Hex's fleet's host types five times
 //! over, each running the classes its OS runs (huawei-r5-day30.fleet.trace); and, as context, on the
 //! fleet as it is, one of each host. On each, it packs the mix and each class alone
-//! (`hex_sim::packing::alone`), from 16 starting arrivals spread evenly over the day (the seeds), to
-//! 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), three ways: with no
-//! completions, so lifetimes don't enter; and with completions, once with lifetimes as recorded and
-//! once with Huawei's one-minute keep-alive added (the `.keepalive.trace` beside each).
-//! At the recorded speed the day never loads the nodes to 90%, so arrivals come faster: for each
-//! set and trace, the slowest speed of [`LADDER`] at which Hex and both best fits reach 90% on every
-//! seed, so lifetimes enter as far as the nodes allow. It prints the ladder first, each speed's seeds reaching 90% by arm, its fewest completions on the
-//! way, the seeds on which Hex meets the bar, and the seeds on which a best fit strands nothing (so
-//! none can be cut).
+//! (`hex_sim::packing::alone`), from `hex_sim::packing::SEEDS` starting arrivals drawn uniformly from
+//! the day (`hex_sim::packing::start`), to 90% load through the fast path's sampled choice
+//! (`hex_sim::packing::pack`), three ways: with no completions, so lifetimes don't enter; and with
+//! completions, once with lifetimes as recorded and once with Huawei's one-minute keep-alive added
+//! (the `.keepalive.trace` beside each).
+//! At the recorded speed the day never loads the nodes to 90%, so arrivals come faster: for each set
+//! and trace, the slowest whole speed at which Hex and both best fits reach 90% on every seed, so
+//! lifetimes enter as far as the nodes allow: doubling from the recorded speed finds one at which
+//! they do, and every speed below it is packed. It prints each speed it tries: the seeds reaching
+//! 90% by arm, the fewest completions on the way, the seeds on which Hex meets the bar, and the seeds
+//! on which a best fit strands nothing (so none can be cut).
 //!
 //! Each clock runs under each arm: best fit by free CPU first (`BestFit`) and across resources
 //! (`MostAllocated`), Tetris's alignment (`Align`), and least stranded then a tie: Tetris's
 //! alignment (the plan's), least allocated, most allocated, or the fewest classes then most
 //! allocated (Hex's, `Scorer::HEX`). For each arm and seed it prints the stranded capacity, the
-//! arrivals passed over on the way, the completions, the load at the first refusal for room, and the
-//! arrivals passed over below half load with their needs; then each arm's reduction against both
-//! best fits. It is deterministic: the same trace gives the same tables.
+//! arrivals passed over on the way and of what kind, the completions, and the load at the first
+//! refusal and at the first refusal for room; then each arm's reduction against both best fits. It
+//! is deterministic: the same trace gives the same tables.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -37,14 +39,11 @@
 )]
 
 use hex_sim::index::{Sample, Scorer, Shapes, Tie};
-use hex_sim::model::{Class, Cluster, Time};
-use hex_sim::packing::{Clock, PackReport, alone, minimal_shapes, pack};
+use hex_sim::model::{Class, Cluster, NodeId, NodeSpec, Time};
+use hex_sim::packing::{
+    Clock, LOAD_PER_MILLE, PackReport, SEEDS, alone, minimal_shapes, pack, start,
+};
 
-const SEEDS: usize = 16;
-/// The speeds tried, as multiples of the recorded arrival rate.
-const LADDER: [Time; 14] = [
-    10, 20, 30, 40, 50, 60, 75, 100, 150, 200, 300, 500, 1_000, 2_000,
-];
 const ARMS: [(&str, Scorer); 7] = [
     ("best_fit", Scorer::BestFit),
     ("most_allocated", Scorer::MostAllocated),
@@ -64,22 +63,8 @@ fn cut(arm: &PackReport, base: &PackReport) -> f64 {
     }
 }
 
-fn early(p: &PackReport) -> String {
-    let kept: Vec<String> = p
-        .early
-        .iter()
-        .flatten()
-        .map(|e| {
-            format!(
-                "{}m/{}Mi@{}{}",
-                e.need.cpu_milli,
-                e.need.mem_bytes >> 20,
-                e.load_per_mille,
-                if e.for_room { "" } else { "f" }
-            )
-        })
-        .collect();
-    format!("{} [{}]", p.early_passed_over, kept.join(" "))
+fn load_at(at: Option<u64>) -> String {
+    at.map_or_else(|| "-".to_string(), |l| l.to_string())
 }
 
 fn trace(name: &str) -> Cluster {
@@ -89,6 +74,24 @@ fn trace(name: &str) -> Cluster {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .filter_map(|a| a.into_string().ok())
+        .filter(|a| a != "--bench")
+        .collect();
+    match args.split_first() {
+        Some((mode, sizes)) if mode == "floors" => {
+            for size in sizes {
+                let (model, copies) = size.split_once(':').expect("MODEL:COPIES");
+                floors(model, copies.parse().expect("copies, a whole number"));
+            }
+        }
+        _ => record(),
+    }
+}
+
+/// The record: each node model's sets and clocks, measured under every arm.
+fn record() {
     for (model, name, hosts) in [
         ("m5d.metal", "huawei-r5-day30", None),
         ("fleet", "huawei-r5-day30.fleet", None),
@@ -122,8 +125,10 @@ fn main() {
                 ("lifetimes as recorded", &recorded),
                 ("with the keep-alive", &kept_alive),
             ] {
-                let Some(speed) = slowest(&set, lives, day) else {
-                    println!("{set}, {lives}: no speed on the ladder reaches 90% on every seed");
+                let Some(speed) = slowest(&set, lives, day, sample(day)) else {
+                    println!(
+                        "{set}, {lives}: no speed reaches 90% on every seed: with no completions, some seed doesn't"
+                    );
                     continue;
                 };
                 measure(
@@ -139,49 +144,92 @@ fn main() {
 
 fn sample(cluster: &Cluster) -> Sample {
     Sample {
-        shapes: Shapes::of(minimal_shapes(cluster)),
+        shapes: Shapes::of(minimal_shapes(cluster)).unwrap(),
         ..Sample::default()
     }
 }
 
-/// Walks [`LADDER`], printing each speed's row, and returns the slowest speed at which Hex and both
-/// best fits reach 90% on every seed.
-fn slowest(set: &str, lives: &str, cluster: &Cluster) -> Option<Time> {
-    println!(
-        "ladder, {set}, {lives}: speed | seeds reaching 90% (Hex, best_fit, most_allocated) | fewest completions | seeds where Hex meets the bar | seeds where a best fit strands nothing, so none can be cut"
-    );
-    let sample = sample(cluster);
-    let mut found = None;
-    for speed in LADDER {
-        let mut reached = [0usize; 3];
-        let mut done = [u64::MAX; 3];
-        let mut meets = 0;
-        let mut nothing = 0;
-        for seed in 0..SEEDS {
-            let from = seed * cluster.workloads.len() / SEEDS;
-            let runs = [Scorer::HEX, Scorer::BestFit, Scorer::MostAllocated].map(|scorer| {
-                pack(
-                    cluster,
-                    &Sample { scorer, ..sample },
-                    900,
-                    from,
-                    Clock::Compressed(speed),
-                )
-                .unwrap()
-            });
-            for (i, p) in runs.iter().enumerate() {
-                reached[i] += usize::from(p.reached);
-                done[i] = done[i].min(p.completions);
-            }
-            meets += usize::from(runs[1..].iter().all(|b| cut(&runs[0], b) >= 30.0));
-            nothing += usize::from(runs[1..].iter().any(|b| b.stranded_per_mille() == 0));
+/// `f` of every seed, in seed order, the seeds spread over the host's threads: a pack is a function
+/// of its seed alone, so the tables don't depend on how they're spread.
+fn per_seed<T: Send>(f: impl Fn(u64) -> T + Sync) -> Vec<T> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let seeds: Vec<u64> = (0..SEEDS).collect();
+    let f = &f;
+    std::thread::scope(|s| {
+        let parts: Vec<_> = seeds
+            .chunks(seeds.len().div_ceil(threads))
+            .map(|part| s.spawn(move || part.iter().map(|&seed| f(seed)).collect::<Vec<T>>()))
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|part| part.join().unwrap())
+            .collect()
+    })
+}
+
+/// Each seed packed at `clock` under Hex and both best fits, in that order.
+fn hex_and_best_fits(cluster: &Cluster, sample: Sample, clock: Clock) -> Vec<[PackReport; 3]> {
+    per_seed(|seed| {
+        let from = start(seed, cluster.workloads.len());
+        [Scorer::HEX, Scorer::BestFit, Scorer::MostAllocated].map(|scorer| {
+            pack(
+                cluster,
+                &Sample { scorer, ..sample },
+                LOAD_PER_MILLE,
+                from,
+                clock,
+            )
+            .unwrap()
+        })
+    })
+}
+
+/// Packs every seed at `clock` under Hex and both best fits and prints the row: the seeds reaching
+/// 90% by arm, the fewest completions by arm, the seeds on which Hex meets the bar, and the seeds on
+/// which a best fit strands nothing. Whether every seed reached 90% under all three.
+fn probe(cluster: &Cluster, sample: Sample, clock: Clock) -> bool {
+    let mut reached = [0u64; 3];
+    let mut done = [u64::MAX; 3];
+    let (mut meets, mut nothing) = (0, 0);
+    for runs in hex_and_best_fits(cluster, sample, clock) {
+        for (i, p) in runs.iter().enumerate() {
+            reached[i] += u64::from(p.reached);
+            done[i] = done[i].min(p.completions);
         }
-        println!("{speed:>5}x | {reached:?} | {done:?} | {meets}/{SEEDS} | {nothing}");
-        if found.is_none() && reached == [SEEDS; 3] {
-            found = Some(speed);
-        }
+        meets += u64::from(runs[1..].iter().all(|b| cut(&runs[0], b) >= 30.0));
+        nothing += u64::from(runs[1..].iter().any(|b| b.stranded_per_mille() == 0));
     }
-    found
+    let speed = match clock {
+        Clock::Held => "held".to_string(),
+        Clock::Compressed(speed) => format!("{speed}x"),
+    };
+    println!("{speed:>6} | {reached:?} | {done:?} | {meets}/{SEEDS} | {nothing}");
+    reached == [SEEDS; 3]
+}
+
+/// The slowest whole speed at which Hex and both best fits reach 90% on every seed, so lifetimes
+/// enter as far as the nodes allow. None if they don't with no completions at all, which every
+/// speed comes to once the day's arrivals fall within a nanosecond. Else doubling from the recorded
+/// speed finds one at which they do, and every speed below it is packed: the first at which they do
+/// is the slowest, with no assumption that reaching 90% gets easier as the speed rises (it doesn't
+/// always: a seed of one arm can reach it at one speed and miss it at the next). Each speed tried
+/// prints its row.
+fn slowest(set: &str, lives: &str, cluster: &Cluster, sample: Sample) -> Option<Time> {
+    println!(
+        "speeds, {set}, {lives}: speed | seeds reaching 90% (Hex, best_fit, most_allocated) | fewest completions | seeds where Hex meets the bar | seeds where a best fit strands nothing, so none can be cut"
+    );
+    if !probe(cluster, sample, Clock::Held) {
+        return None;
+    }
+    let mut reaches: Time = 1;
+    while !probe(cluster, sample, Clock::Compressed(reaches)) {
+        reaches = reaches.checked_mul(2)?;
+    }
+    // The doubling's speeds below `reaches` fell short already.
+    (1..reaches)
+        .filter(|speed| !speed.is_power_of_two())
+        .find(|&speed| probe(cluster, sample, Clock::Compressed(speed)))
+        .or(Some(reaches))
 }
 
 fn measure(set: &str, name: &str, cluster: &Cluster, clock: Clock) {
@@ -193,35 +241,40 @@ fn measure(set: &str, name: &str, cluster: &Cluster, clock: Clock) {
         cluster.workloads.len()
     );
     println!(
-        "seed from arm | stranded per-mille (* = 90% load not reached) | passed over | completions | first refusal for room at load per-mille | passed over below half load [millicores/MiB@load; f = by a filter]"
+        "seed from arm | stranded per-mille (* = 90% load not reached) | passed over: all [oci, firecracker, shards] | completions | first refusal at load per-mille | first refusal for room"
     );
-    let runs: Vec<Vec<PackReport>> = (0..SEEDS)
-        .map(|seed| {
-            let from = seed * cluster.workloads.len() / SEEDS;
-            ARMS.iter()
-                .map(|&(_, scorer)| {
-                    pack(cluster, &Sample { scorer, ..sample }, 900, from, clock).unwrap()
-                })
-                .collect()
-        })
-        .collect();
-    for (seed, arms) in runs.iter().enumerate() {
-        let from = seed * cluster.workloads.len() / SEEDS;
+    let runs: Vec<Vec<PackReport>> = per_seed(|seed| {
+        let from = start(seed, cluster.workloads.len());
+        ARMS.iter()
+            .map(|&(_, scorer)| {
+                pack(
+                    cluster,
+                    &Sample { scorer, ..sample },
+                    LOAD_PER_MILLE,
+                    from,
+                    clock,
+                )
+                .unwrap()
+            })
+            .collect()
+    });
+    for (seed, arms) in (0..SEEDS).zip(&runs) {
+        let from = start(seed, cluster.workloads.len());
         for ((arm, _), p) in ARMS.iter().zip(arms) {
             println!(
-                "{seed:>4} {from:>5} {arm} | {}{} | {} | {} | {} | {}",
+                "{seed:>4} {from:>5} {arm} | {}{} | {} {:?} | {} | {} | {}",
                 p.stranded_per_mille(),
                 if p.reached { "" } else { "*" },
                 p.passed_over,
+                p.passed_over_by_class,
                 p.completions,
-                p.first_full_per_mille
-                    .map_or_else(|| "-".to_string(), |l| l.to_string()),
-                early(p)
+                load_at(p.first_refusal_per_mille),
+                load_at(p.first_full_per_mille)
             );
         }
     }
     println!(
-        "arm | seeds at least 30% below both best fits | least cut vs best_fit, vs most_allocated | passed over | earliest first refusal for room | passed over below half load"
+        "arm | seeds at least 30% below both best fits | least cut vs best_fit, vs most_allocated | passed over: all [oci, firecracker, shards] | earliest first refusal | earliest first refusal for room"
     );
     for (i, (arm, _)) in ARMS.iter().enumerate() {
         let cuts: Vec<(f64, f64)> = runs
@@ -235,14 +288,149 @@ fn measure(set: &str, name: &str, cluster: &Cluster, clock: Clock) {
         let least_best = cuts.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let least_most = cuts.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
         let passed: u64 = runs.iter().map(|arms| arms[i].passed_over).sum();
+        let mut by_class = [0u64; 3];
+        for arms in &runs {
+            for (all, n) in by_class.iter_mut().zip(arms[i].passed_over_by_class) {
+                *all += n;
+            }
+        }
         let first = runs
+            .iter()
+            .filter_map(|arms| arms[i].first_refusal_per_mille)
+            .min();
+        let first_full = runs
             .iter()
             .filter_map(|arms| arms[i].first_full_per_mille)
             .min();
-        let early: u64 = runs.iter().map(|arms| arms[i].early_passed_over).sum();
         println!(
-            "{set}, {name}: {arm} | {meets}/{SEEDS} | {least_best:.1}%, {least_most:.1}% | {passed} | {} | {early}",
-            first.map_or_else(|| "-".to_string(), |l| l.to_string())
+            "{set}, {name}: {arm} | {meets}/{SEEDS} | {least_best:.1}%, {least_most:.1}% | {passed} {by_class:?} | {} | {}",
+            load_at(first),
+            load_at(first_full)
         );
     }
+}
+
+/// The sample's floor from data (Ada's rule, 2026-11-06; the lead, 17:14Z): on `copies` copies of a
+/// node model's hosts (one of each: m5d.metal's one, the fleet's ten), the fewest admitting nodes a
+/// decision can sample with Hex still meeting `AC-T7.4.3`'s bar on every seed, set and clock, at that
+/// sample and every larger one. Each set runs at its slowest speeds with every node scanned. From the
+/// whole cluster down, it prints each sample's least cut against the two best fits sampled alike and
+/// the most Hex strands, until a sample misses; the fewest is the one above it.
+fn floors(model: &str, copies: usize) {
+    let (name, hosts) = match model {
+        "m5d.metal" => ("huawei-r5-day30", 1),
+        "fleet" => ("huawei-r5-day30.fleet", 10),
+        _ => panic!("{model}: m5d.metal or fleet"),
+    };
+    let grow = |mut day: Cluster| {
+        let one: Vec<NodeSpec> = day.nodes.iter().take(hosts).copied().collect();
+        day.nodes = (0..copies)
+            .flat_map(|_| one.iter().copied())
+            .zip(0u32..)
+            .map(|(node, id)| NodeSpec {
+                id: NodeId(id),
+                ..node
+            })
+            .collect();
+        day
+    };
+    let (recorded, kept_alive) = (
+        grow(trace(&format!("{name}.trace"))),
+        grow(trace(&format!("{name}.keepalive.trace"))),
+    );
+    let nodes = recorded.nodes.len();
+    let whole = |day: &Cluster| Sample {
+        min_feasible: u32::try_from(nodes).unwrap(),
+        per_mille: 0,
+        ..sample(day)
+    };
+    // Each set's three runs: no completions, and its slowest speeds, every node scanned.
+    let mut runs: Vec<(String, Cluster, Clock)> = Vec::new();
+    for (set, class) in [
+        ("mix", None),
+        ("oci", Some(Class::Oci)),
+        ("firecracker", Some(Class::Firecracker)),
+        ("shards", Some(Class::Shards)),
+    ] {
+        let set = format!("{model} x{copies} {set}");
+        let as_set = |day: &Cluster| match class {
+            None => day.clone(),
+            Some(class) => alone(day, class).unwrap(),
+        };
+        let (recorded, kept_alive) = (as_set(&recorded), as_set(&kept_alive));
+        runs.push((
+            format!("{set}, no completions"),
+            recorded.clone(),
+            Clock::Held,
+        ));
+        for (lives, day) in [
+            ("lifetimes as recorded", recorded),
+            ("with the keep-alive", kept_alive),
+        ] {
+            let speed = slowest(&set, lives, &day, whole(&day)).expect("a speed reaching 90%");
+            runs.push((
+                format!("{set}, {speed}x, {lives}"),
+                day,
+                Clock::Compressed(speed),
+            ));
+        }
+    }
+    println!(
+        "floors, {model} x{copies}, {nodes} nodes: sample | least cut vs best_fit and most_allocated, any set, clock and seed | most Hex strands, per-mille | misses"
+    );
+    for want in (1..=nodes).rev() {
+        let (mut least, mut most, mut misses) = (f64::INFINITY, 0u64, Vec::new());
+        for (run, day, clock) in &runs {
+            let sampled = Sample {
+                min_feasible: u32::try_from(want).unwrap(),
+                ..whole(day)
+            };
+            for (seed, [hex, best, most_allocated]) in
+                (0..SEEDS).zip(hex_and_best_fits(day, sampled, *clock))
+            {
+                most = most.max(hex.stranded_per_mille());
+                let ended = |p: &PackReport| *clock == Clock::Held || p.completions > 0;
+                for base in [&best, &most_allocated] {
+                    least = least.min(cut(&hex, base));
+                    let why = if !(hex.reached && base.reached) {
+                        "90% not reached"
+                    } else if !(ended(&hex) && ended(base)) {
+                        "no completions"
+                    } else if base.stranded_per_mille() == 0 {
+                        "a best fit strands nothing"
+                    } else if cut(&hex, base) < 30.0 {
+                        "under 30%"
+                    } else {
+                        continue;
+                    };
+                    misses.push(format!("{run} seed {seed}: {why}"));
+                }
+            }
+        }
+        println!(
+            "{want:>6} | {least:.1}% | {most} | {}",
+            if misses.is_empty() {
+                "none".to_string()
+            } else {
+                format!(
+                    "{}: {}",
+                    misses.len(),
+                    misses
+                        .iter()
+                        .take(4)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            }
+        );
+        if !misses.is_empty() {
+            println!(
+                "floors, {model} x{copies}, {nodes} nodes: the fewest is {}",
+                want + 1
+            );
+            return;
+        }
+    }
+    println!("floors, {model} x{copies}, {nodes} nodes: the fewest is 1");
 }

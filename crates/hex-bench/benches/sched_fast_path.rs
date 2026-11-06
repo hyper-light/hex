@@ -7,17 +7,17 @@
 //! the node index (`FitIndex::sampled_fit` with `Scorer::HEX`, kube-scheduler's floors of 100 nodes
 //! or 5%), the commit by compare-and-set to the store (`Store::apply`), and the index update. The
 //! launches are the recorded workload's (bench/sched/huawei_workload.md), each an OCI container, a
-//! Firecracker microVM or a Shards microVM, their shapes and classes in arrival order, from a
-//! different place in the day for each run and repeated as needed, timed as the mix and as each
+//! Firecracker microVM or a Shards microVM, their shapes and classes in arrival order, from a start
+//! drawn from the day for each run (`packing::start`) and repeated as needed, timed as the mix and as each
 //! class alone, on each node model: the 10,000 nodes repeat the hosts of huawei-r5-day30.trace (EC2
 //! m5d.metal, each running every class; the main one) or of huawei-r5-day30.fleet.trace (Hex's
 //! fleet's host types in their proportions, each running the classes its OS runs). Arrivals are
 //! open-loop, one every 100 us by the
 //! wall clock. A launch's latency runs from its scheduled arrival to its commit, so time spent queued
 //! behind a slow decision counts. The nodes that can run the set's classes are first filled until
-//! about 85% of their CPU is placed, untimed. Each timed arrival then retires the oldest running
-//! launch (its completion written and its capacity given back) before it is placed, so the load
-//! holds steady. Single-threaded: the in-order committer is the fast path's serial point
+//! 90% of their CPU is placed, untimed: the load `AC-T7.4.3` holds the scheduler to
+//! (`packing::LOAD_PER_MILLE`). Each timed arrival then retires the oldest running launch (its
+//! completion written and its capacity given back) before it is placed, so the load holds steady. Single-threaded: the in-order committer is the fast path's serial point
 //! (`docs/design/hex-sim.md` H3), so its cost per placement is what bounds throughput.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
@@ -39,12 +39,12 @@ use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
 use hex_sim::model::{
     Class, Classes, Cluster, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec,
 };
-use hex_sim::packing::{alone, minimal_shapes};
+use hex_sim::packing::{LOAD_PER_MILLE, alone, minimal_shapes, start};
 use hex_sim::store::{Outcome, Store, Write};
 
+// `AC-T7.4.2`'s nodes and rate.
 const NODES: u32 = 10_000;
 const RATE_PER_S: u64 = 10_000;
-const FILL_PER_MILLE: u64 = 850;
 
 struct Live {
     spec: WorkloadSpec,
@@ -52,11 +52,27 @@ struct Live {
     version: u64,
 }
 
+/// The CPU of the nodes that can run some class `recorded` asks: what the fill counts.
+fn usable_cpu(nodes: &[NodeSpec], recorded: &Cluster) -> u64 {
+    let asked = recorded
+        .workloads
+        .iter()
+        .fold(Classes::NONE, |all, w| all.with(w.class));
+    nodes
+        .iter()
+        .filter(|n| n.classes.meets(asked))
+        .map(|n| n.capacity.cpu_milli)
+        .sum()
+}
+
 /// 10,000 nodes that repeat the recorded workload's hosts in order (Hex's fleet's host types in their
-/// proportions), and enough of its launches, each with its class, for the fill and the timed
-/// placements: in arrival order from `seed`'s place in the day, repeated as needed. The fill counts
-/// only the nodes that can run some class here.
-fn cluster(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> Cluster {
+/// proportions), and the launches a run takes, each with its class: the recorded day's in arrival
+/// order from `seed`'s start (`packing::start`), cycled. The fill takes as many as place
+/// `LOAD_PER_MILLE` of the usable CPU, those refused on the way among them: found by filling once on
+/// the index alone, which places as the timed run's fill does, so the run has exactly the launches
+/// it takes and its store exactly their records. A whole day's launches that find no node before the
+/// fill ends would find none after: the index doesn't change while they're refused.
+fn cluster(recorded: &Cluster, sample: &Sample, seed: u64, placements: usize) -> Cluster {
     let nodes: Vec<NodeSpec> = (0..NODES)
         .map(|i| {
             let host = recorded.nodes[i as usize % recorded.nodes.len()];
@@ -66,66 +82,60 @@ fn cluster(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> Clust
             }
         })
         .collect();
-    let asked = recorded
-        .workloads
-        .iter()
-        .fold(Classes::NONE, |all, w| all.with(w.class));
-    let usable_cpu: u64 = nodes
-        .iter()
-        .filter(|n| n.classes.meets(asked))
-        .map(|n| n.capacity.cpu_milli)
-        .sum();
-    let mean_cpu = recorded
-        .workloads
-        .iter()
-        .map(|w| w.need.cpu_milli)
-        .sum::<u64>()
-        / recorded.workloads.len() as u64;
-    let fill = (usable_cpu * FILL_PER_MILLE / 1000 / mean_cpu) as usize;
-    // A quarter to spare for arrivals refused on the way.
-    let total = (fill + placements) * 5 / 4;
-    let from = (seed * recorded.workloads.len() as u64 / runs) as usize;
-    let workloads = (0..total)
-        .map(|i| {
-            let w = &recorded.workloads[(from + i) % recorded.workloads.len()];
-            WorkloadSpec {
-                id: WorkloadId(i as u64),
-                need: w.need,
-                kind: Kind::Plain,
-                arrives: i as u64,
-                runs_for: None,
-                tenancy: Tenancy::default(),
-                class: w.class,
+    let day = recorded.workloads.len();
+    let from = start(seed, day);
+    let launch = |i: usize| {
+        let w = &recorded.workloads[(from + i) % day];
+        WorkloadSpec {
+            id: WorkloadId(i as u64),
+            need: w.need,
+            kind: Kind::Plain,
+            arrives: i as u64,
+            runs_for: None,
+            tenancy: Tenancy::default(),
+            class: w.class,
+        }
+    };
+    let usable = usable_cpu(&nodes, recorded);
+    let mut index = FitIndex::new(&nodes).unwrap();
+    let (mut placed, mut fill, mut since_placed) = (0u64, 0usize, 0usize);
+    while placed * 1000 < usable * LOAD_PER_MILLE {
+        let w = launch(fill);
+        fill += 1;
+        match index.sampled_fit(&w.demand(), sample).best {
+            Some(best) => {
+                index.take(best.node, &w.demand()).unwrap();
+                placed += w.need.cpu_milli;
+                since_placed = 0;
             }
-        })
-        .collect();
-    Cluster::single_owner(nodes, workloads)
+            None => {
+                since_placed += 1;
+                assert!(
+                    since_placed < day,
+                    "a whole day of launches found no node before the fill"
+                );
+            }
+        }
+    }
+    Cluster::single_owner(nodes, (0..fill + placements).map(launch).collect())
 }
 
-fn run(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> (Vec<Duration>, usize) {
-    let cluster = cluster(recorded, seed, runs, placements);
+fn run(recorded: &Cluster, seed: u64, placements: usize) -> (Vec<Duration>, usize) {
+    let sample = Sample {
+        scorer: Scorer::HEX,
+        shapes: Shapes::of(minimal_shapes(recorded)).unwrap(),
+        ..Sample::default()
+    };
+    let cluster = cluster(recorded, &sample, seed, placements);
     let mut index = FitIndex::new(&cluster.nodes).unwrap();
+    // A submit, a placement and a completion a launch: the log's most.
     let mut store = Store::new(
         &cluster.nodes,
         cluster.workloads.len(),
         cluster.workloads.len() * 3,
     )
     .unwrap();
-    let sample = Sample {
-        scorer: Scorer::HEX,
-        shapes: Shapes::of(minimal_shapes(recorded)),
-        ..Sample::default()
-    };
-    let asked = cluster
-        .workloads
-        .iter()
-        .fold(Classes::NONE, |all, w| all.with(w.class));
-    let total_cpu: u64 = cluster
-        .nodes
-        .iter()
-        .filter(|n| n.classes.meets(asked))
-        .map(|n| n.capacity.cpu_milli)
-        .sum();
+    let total_cpu = usable_cpu(&cluster.nodes, recorded);
     let mut placed_cpu = 0u64;
     let mut live: VecDeque<Live> = VecDeque::new();
     let mut work = cluster.workloads.iter();
@@ -171,8 +181,8 @@ fn run(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> (Vec<Dura
     };
 
     // Fill, untimed.
-    while placed_cpu * 1000 < total_cpu * FILL_PER_MILLE {
-        let spec = work.next().expect("enough workloads to fill");
+    while placed_cpu * 1000 < total_cpu * LOAD_PER_MILLE {
+        let spec = work.next().expect("the launches the fill takes");
         match place(spec, &mut index, &mut store) {
             Some(l) => {
                 placed_cpu += l.spec.need.cpu_milli;
@@ -194,7 +204,7 @@ fn run(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> (Vec<Dura
         if let Some(old) = live.pop_front() {
             retire(old, &mut index, &mut store);
         }
-        let spec = work.next().expect("enough workloads");
+        let spec = work.next().expect("a launch for each timed placement");
         match place(spec, &mut index, &mut store) {
             Some(l) => live.push_back(l),
             None => refused += 1,
@@ -255,7 +265,7 @@ fn sets(model: &str, recorded: &Cluster, runs: u64, placements: usize) -> bool {
         };
         let mut best: Option<(Duration, String)> = None;
         for seed in 0..runs {
-            let (mut l, refused) = run(&day, seed, runs, placements);
+            let (mut l, refused) = run(&day, seed, placements);
             l.sort_unstable();
             let us = |d: Duration| d.as_secs_f64() * 1e6;
             let (p50, p99, p999, max) = (

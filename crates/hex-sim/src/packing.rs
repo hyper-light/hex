@@ -13,7 +13,8 @@
 //! "that cannot be used because another resource on the machine is fully allocated" (EuroSys 2015
 //! §3.2), asked of one cell at one load. A policy that leaves every node part-free strands nothing at
 //! a load it never has to pack tightly at, so [`PackReport::first_full_per_mille`] records the load
-//! at the first arrival that found no node with room: spreading shows there as an earlier refusal.
+//! at the first arrival that found no node with room, and every arrival passed over is counted by its
+//! kind: spreading shows there as an earlier refusal.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
@@ -21,6 +22,22 @@ use std::collections::{BTreeSet, BinaryHeap};
 use crate::error::SimError;
 use crate::index::{FitIndex, Refusals, Sample};
 use crate::model::{Class, Classes, Cluster, NodeId, Resources, Time, WorkloadId, WorkloadSpec};
+use crate::rng::Rng;
+
+/// The load `AC-T7.4.3` measures stranded capacity at, per mille: 90%.
+pub const LOAD_PER_MILLE: u64 = 900;
+
+/// How many starts a packing measure runs from: as many as the claim "at least 95% of starts meet
+/// the bar, at 95% confidence" needs when every one does, the least `n` with `0.95^n < 0.05` (the
+/// claim rule G3's seeds carry, hex-sim.md).
+pub const SEEDS: u64 = 59;
+
+/// Seed `seed`'s starting arrival among `arrivals`, drawn uniformly: the starts are a random sample
+/// of the day, as [`SEEDS`]' claim takes them to be.
+pub fn start(seed: u64, arrivals: usize) -> usize {
+    let last = u64::try_from(arrivals.saturating_sub(1)).unwrap_or(u64::MAX);
+    usize::try_from(Rng::new(seed).range(0, last)).unwrap_or(0)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PackReport {
@@ -39,27 +56,15 @@ pub struct PackReport {
     pub completions: u64,
     /// Arrivals no node admitted when they came.
     pub passed_over: u64,
+    /// Of them, by kind, in [`Class::index`]'s order: OCI containers, Firecracker microVMs, Shards
+    /// microVMs.
+    pub passed_over_by_class: [u64; 3],
     /// Whether the load reached what was asked before the arrivals ran out.
     pub reached: bool,
+    /// The load when the first arrival was passed over, for room or by a filter.
+    pub first_refusal_per_mille: Option<u64>,
     /// The load when the first arrival found no node with room (none refused it by a filter alone).
     pub first_full_per_mille: Option<u64>,
-    /// Arrivals passed over while the load was below half, for room or by a filter.
-    pub early_passed_over: u64,
-    /// The first [`EARLY_KEPT`] of them; the rest are counted only.
-    pub early: [Option<Refusal>; EARLY_KEPT],
-}
-
-/// How many arrivals passed over below half load a [`PackReport`] keeps.
-pub const EARLY_KEPT: usize = 8;
-
-/// An arrival no node admitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Refusal {
-    /// The load when it came, in per-mille.
-    pub load_per_mille: u64,
-    pub need: Resources,
-    /// No node had room for it; else a filter refused it where there was room.
-    pub for_room: bool,
 }
 
 impl PackReport {
@@ -204,20 +209,14 @@ pub fn pack(
         let demand = w.demand();
         let sampled = index.sampled_fit(&demand, sample);
         let Some(key) = sampled.best else {
-            let refusal = Refusal {
-                load_per_mille: r.load_per_mille(),
-                need: w.need,
-                for_room: sampled.refused == Refusals::default(),
-            };
+            let load = r.load_per_mille();
             r.passed_over = r.passed_over.saturating_add(1);
-            if r.first_full_per_mille.is_none() && refusal.for_room {
-                r.first_full_per_mille = Some(refusal.load_per_mille);
+            if let Some(n) = r.passed_over_by_class.get_mut(w.class.index()) {
+                *n = n.saturating_add(1);
             }
-            if refusal.load_per_mille < 500 {
-                if let Some(slot) = r.early.iter_mut().find(|e| e.is_none()) {
-                    *slot = Some(refusal);
-                }
-                r.early_passed_over = r.early_passed_over.saturating_add(1);
+            r.first_refusal_per_mille.get_or_insert(load);
+            if r.first_full_per_mille.is_none() && sampled.refused == Refusals::default() {
+                r.first_full_per_mille = Some(load);
             }
             continue;
         };
@@ -317,24 +316,20 @@ mod tests {
         assert_eq!(r.stranded_per_mille(), 875 + 250);
     }
 
-    /// Do an arrival no node has room for while the cluster is mostly idle; expect it kept as an early
-    /// refusal with its need and load, and arrivals past the kept count counted only.
+    /// Do arrivals no node has room for, two OCI containers and a Shards microVM, while the cluster is
+    /// mostly idle; expect each counted by its kind and the load at the first recorded, whatever that
+    /// load: no count of them kept and no load chosen to call one early.
     #[test]
-    fn refusals_below_half_load_are_kept_with_their_needs() {
+    fn every_refusal_is_counted_by_kind_with_the_load_at_the_first() {
         let mut needs = vec![res(1000, 1)];
-        needs.extend(std::iter::repeat_n(res(9000, 1), EARLY_KEPT + 2));
-        let c = cluster(1, res(8000, 8), &needs);
+        needs.extend([res(9000, 1); 3]);
+        let mut c = cluster(1, res(8000, 8), &needs);
+        c.workloads[3].class = Class::Shards;
         let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
-        assert_eq!(r.early_passed_over, u64::try_from(EARLY_KEPT).unwrap() + 2);
-        assert_eq!(
-            r.early[0],
-            Some(Refusal {
-                load_per_mille: 125,
-                need: res(9000, 1),
-                for_room: true
-            })
-        );
-        assert!(r.early.iter().all(Option::is_some));
+        assert_eq!(r.passed_over, 3);
+        assert_eq!(r.passed_over_by_class, [2, 0, 1]);
+        assert_eq!(r.first_refusal_per_mille, Some(125));
+        assert_eq!(r.first_full_per_mille, Some(125));
     }
 
     /// Do two arrivals that each fill the node, the first ending before the second comes; expect a held
@@ -405,6 +400,33 @@ mod tests {
             (4000, 1, true)
         );
         assert_eq!(r.stranded_per_mille(), 0);
+    }
+
+    /// Do the claim's count: the least `n` whose `n` passing starts leave a start failing at least 5%
+    /// of the time under 5% likely. Expect [`SEEDS`].
+    #[test]
+    fn the_seeds_are_what_the_claim_needs() {
+        let (mut n, mut all_pass) = (0u64, 1.0f64);
+        while all_pass >= 0.05 {
+            all_pass *= 0.95;
+            n += 1;
+        }
+        assert_eq!(n, SEEDS);
+    }
+
+    /// Do each seed's start over a day of 25,295 arrivals and of one; expect it inside the day, one
+    /// seed one start, and the 59 not all alike.
+    #[test]
+    fn a_seed_names_one_start_inside_the_day() {
+        let starts: Vec<usize> = (0..SEEDS).map(|s| start(s, 25_295)).collect();
+        assert!(starts.iter().all(|&a| a < 25_295));
+        assert_eq!(
+            starts,
+            (0..SEEDS).map(|s| start(s, 25_295)).collect::<Vec<_>>()
+        );
+        assert!(starts.windows(2).any(|p| p[0] != p[1]));
+        assert_eq!(start(7, 1), 0);
+        assert_eq!(start(7, 0), 0);
     }
 
     /// Do a pack from a later arrival; expect the arrivals before it left out.
