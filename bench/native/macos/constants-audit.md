@@ -79,3 +79,11 @@ asm-generic.
 | Loop and case counts | 60 programs; proptest 512/2048/4096 cases; spin budget 100,000 | macos_process_box.rs:339; watch/ledger/boxuser/helper tests; helper_daemon/tests.rs:380 | (d) | 60 is (b): the bench's 3-of-60 failure. Proptest case counts: to the count giving a stated miss probability. The spin budget: to a wait on the fact |
 | Test bounds and footprints | 256 MiB, 128 MiB, 2 GiB hogs, nproc 64/2 | tests across the line | Test inputs, not limits | Kept |
 | launchd one-shot limits | 2 h, 1 h | outside the repo (run scripts) | (d) | To (b) from recorded run times |
+
+## CLAUDE.md §12 lines on this branch
+
+| Commit | Line | State |
+|---|---|---|
+| caa6e9f | helper_sys.rs: the box helper's child sets `RLIMIT_NOFILE` beside `RLIMIT_NPROC` | Approved by Ada, 2026-11-06, as written (git note on caa6e9f) |
+| 1c701ed | sys.rs: `sysctlbyname` also reads `kern.maxprocperuid` (a box-user box's default process cap) | HELD FOR ADA, sent to the lead |
+| b0cfaae | sys.rs fork for a plain box's descriptor limit | Never landed: reverted at 1c8309f on the lead's call |
