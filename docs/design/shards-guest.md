@@ -176,6 +176,20 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   `hex_core::stream` (CLAUDE.md §9), with hostile-input tests (§6). A container's root is the guest's own copy, as
   a Linux host's is its own disk: a root over virtio-fs would put every exec's page cache and the overlay's upper
   layer across the share. The host rewrites `root.path` (or `Rootfs`) to the copy; the copy is deleted with its box.
+- **A root may be a tarball** (`.tar`, `.tar.gz` or `.tgz`; amended 2026-11-06): a bundle's `root.path`, a
+  `Rootfs::Dir` or a layer naming one is staged from the archive's own entries, each with its Linux mode and a
+  symbolic link's target text exactly as written. A Linux root unpacked into a Windows directory can't be staged
+  faithfully: unpacking the OCI validation lab's Alpine root (§6a) with Git Bash's tar on jupiter turned its 322
+  absolute links into Windows ones (`bin/ls` → `C:\Program Files\Git\usr\bin\busybox`, MSYS's translation of
+  `/usr/bin/busybox`), and NTFS keeps no Unix modes at all, so the copy would hold broken links and guessed modes, a
+  silent corruption (CLAUDE.md §3). So on Windows a directory root is refused by name (`Refusal::Platform`), pointing
+  at the tarball form; on macOS and Linux, whose file systems keep both, a directory stays a root. OCI image layers
+  are tarballs to begin with. The archive is read flat, one entry at a time, within the stage's bounds (entries,
+  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, an entry before its
+  directory, a corrupt or truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending
+  mid-entry) are refused by name. A hard link is refused by name too: none of the lab's inputs or runtime-tools holds
+  one (`tar -tv` on each, 2026-11-06), so nothing needs it; falsified, and staged as a copy of an earlier entry, when
+  a root that must run does.
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 
