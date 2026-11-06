@@ -1,0 +1,43 @@
+# adas-mac-studio-2 (Mac16,9, macOS 26.2), launchd hex.ns5.dsplit.20261106T210120Z, 2026-11-06 21:07Z, load 9.28-9.33,
+# Hex f581970 (image initramfs sha256 34702fe8f6fa114e..., hex 14,409,256 bytes, release with debuginfo), Shards a0cced87 debug.
+RECORD class=macOS-HVF n=40
+RECORD 1 boot_ready_us=277218 stop_us=1410 end=Some(Stopped) stamps_ns=31751541 53398707 53958707 54124874
+RECORD 2 boot_ready_us=247662 stop_us=2704 end=Some(Stopped) stamps_ns=29607874 39331207 39881499 40020582
+RECORD 3 boot_ready_us=181943 stop_us=1348 end=Some(Stopped) stamps_ns=33273541 44413249 45049707 45211416
+RECORD 4 boot_ready_us=248636 stop_us=3741 end=Some(Stopped) stamps_ns=25275375 46371208 46942916 47061500
+RECORD 5 boot_ready_us=263865 stop_us=4228 end=Some(Stopped) stamps_ns=28972208 44428416 44959458 45102791
+RECORD 6 boot_ready_us=268459 stop_us=3710 end=Some(Stopped) stamps_ns=28678458 50412999 50960041 51120416
+RECORD 7 boot_ready_us=240094 stop_us=2336 end=Some(Stopped) stamps_ns=24480374 45369208 45952291 46094708
+RECORD 8 boot_ready_us=194888 stop_us=1413 end=Some(Stopped) stamps_ns=29472083 54397958 54957625 55150833
+RECORD 9 boot_ready_us=155186 stop_us=1654 end=Some(Stopped) stamps_ns=31671374 52368416 52913249 53026041
+RECORD 10 boot_ready_us=148745 stop_us=1268 end=Some(Stopped) stamps_ns=28214541 49429874 50084124 50210791
+RECORD 11 boot_ready_us=145538 stop_us=1330 end=Some(Stopped) stamps_ns=29996416 51429874 52029124 52200957
+RECORD 12 boot_ready_us=152030 stop_us=1505 end=Some(Stopped) stamps_ns=30606999 52434999 53215041 53373749
+RECORD 13 boot_ready_us=151743 stop_us=1460 end=Some(Stopped) stamps_ns=25830624 36377041 36836249 36954083
+RECORD 14 boot_ready_us=261617 stop_us=2833 end=Some(Stopped) stamps_ns=28371499 49350957 49866749 49975707
+RECORD 15 boot_ready_us=266662 stop_us=2217 end=Some(Stopped) stamps_ns=27951416 49402832 49960457 50157832
+RECORD 16 boot_ready_us=276106 stop_us=3135 end=Some(Stopped) stamps_ns=28388082 49357332 49866249 49994874
+RECORD 17 boot_ready_us=158282 stop_us=1320 end=Some(Stopped) stamps_ns=28135083 49397541 49933041 50117208
+RECORD 18 boot_ready_us=136473 stop_us=1132 end=Some(Stopped) stamps_ns=28103083 49378291 49849416 49964291
+RECORD 19 boot_ready_us=273928 stop_us=8276 end=Some(Stopped) stamps_ns=27762957 41313332 41779791 41890874
+RECORD 20 boot_ready_us=152572 stop_us=1143 end=Some(Stopped) stamps_ns=24596166 45375332 45923874 46095291
+RECORD 21 boot_ready_us=147373 stop_us=1210 end=Some(Stopped) stamps_ns=28334457 49343374 49955624 50084916
+RECORD 22 boot_ready_us=106588 stop_us=1205 end=Some(Stopped) stamps_ns=28430958 49374124 49941083 50072083
+RECORD 23 boot_ready_us=148118 stop_us=1495 end=Some(Stopped) stamps_ns=28127249 49388499 49988124 50128999
+RECORD 24 boot_ready_us=88842 stop_us=1648 end=Some(Stopped) stamps_ns=28079333 39330083 39838416 39968166
+RECORD 25 boot_ready_us=146120 stop_us=1672 end=Some(Stopped) stamps_ns=28544916 42449583 43245666 43357833
+RECORD 26 boot_ready_us=189415 stop_us=1331 end=Some(Stopped) stamps_ns=24816666 39351291 39932041 40066750
+RECORD 27 boot_ready_us=99447 stop_us=1128 end=Some(Stopped) stamps_ns=26859416 36324833 36824958 36939375
+RECORD 28 boot_ready_us=142696 stop_us=1582 end=Some(Stopped) stamps_ns=27814458 53351083 53897166 54040833
+RECORD 29 boot_ready_us=109858 stop_us=1460 end=Some(Stopped) stamps_ns=23902916 45404875 45962500 46138125
+RECORD 30 boot_ready_us=107400 stop_us=1193 end=Some(Stopped) stamps_ns=27907416 43377166 43959791 44132332
+RECORD 31 boot_ready_us=97589 stop_us=1658 end=Some(Stopped) stamps_ns=23746499 45403666 45934291 46079124
+RECORD 32 boot_ready_us=266680 stop_us=3478 end=Some(Stopped) stamps_ns=29301791 39334500 39882333 40012333
+RECORD 33 boot_ready_us=162627 stop_us=1369 end=Some(Stopped) stamps_ns=29344291 44406875 45048125 45221375
+RECORD 34 boot_ready_us=140337 stop_us=2020 end=Some(Stopped) stamps_ns=29750500 40432375 41018375 41138791
+RECORD 35 boot_ready_us=105843 stop_us=1172 end=Some(Stopped) stamps_ns=24756958 46443833 47198416 47334958
+RECORD 36 boot_ready_us=145596 stop_us=1300 end=Some(Stopped) stamps_ns=28835250 49395791 49961958 50108833
+RECORD 37 boot_ready_us=140989 stop_us=1381 end=Some(Stopped) stamps_ns=29887999 51351958 51966541 52207333
+RECORD 38 boot_ready_us=202147 stop_us=1425 end=Some(Stopped) stamps_ns=30054499 43351999 44046416 44366666
+RECORD 39 boot_ready_us=180308 stop_us=1442 end=Some(Stopped) stamps_ns=32090541 53356124 53988541 54183541
+RECORD 40 boot_ready_us=151228 stop_us=1111 end=Some(Stopped) stamps_ns=25065125 50375833 50884916 51021750

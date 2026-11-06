@@ -9,8 +9,13 @@ added, and its load is recorded.
 
 ## HVF (macOS aarch64)
 
-The class's slowest: **0.265 s** (adas-mac-studio-2.local's second run, its first boot), so the seed is 2 × 0.265 = 0.530 s
-(`hex_runtime::guest::RECORDED_BOOT`).
+**Since the strip (2026-11-06 21:11Z): 0.191 s**, the slowest of the stripped image's run
+(bench/native/guest/boot-split/RECORD.md, launchd hex.ns5.dsplit2.20261106T211043Z, adas-mac-studio-2, load 14.5,
+N=40: 84-191 ms, p50 91 ms). The seed falls with the cut; the runs below are of the unstripped image, kept as
+its history.
+
+
+Before the strip, the unstripped image's slowest was 0.265 s (adas-mac-studio-2's second run, its first boot).
 
 ### adas-mac-studio.local-2
 
