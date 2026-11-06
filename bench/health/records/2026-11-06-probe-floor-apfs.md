@@ -43,3 +43,25 @@ rfc-clamped       false suspects      0  false drains    0  a stall at the end: 
 
 The record supplies what the learned floor lacked, a prior and so a warm-up: no false drain, and a
 stall drained 10x sooner than under RFC 6298's floor.
+
+## Ada's cost-based drain, replayed (2026-11-06)
+
+Third run, the record (2026-11-06T18:31-18:41Z, adas-mac-studio-2, load 5.8 → 4.8, heavier): 23,764
+probes, p50 8.2 ms, p90 18.0, p99 32.3, p99.9 67.8, p99.99 259, max 586.1 ms (`apfs-trace-3.txt`).
+
+The second run's trace replayed with the third as the record (`replay_probe.py <trace> <record max>
+<record trace>`). The cost rule drains at the age T minimizing the expected loss per probe, (1 - pi) *
+S(T) * C + pi * L * T: S from the record's and the node's healthy answers (a Jeffreys half-count past the
+slowest), pi the Jeffreys posterior of a stall per probe, C/L the measured re-placement time per
+workload (an OCI start, ~2 ms; Shards' measured boot p99, 194 ms):
+
+```
+rfc-clamped       false suspects      0  false drains    0  a stall at the end: suspected at   1000.0 ms, drained at   3000.0 ms
+recorded-2x (seed 586.1 ms) false suspects      0  false drains    0  a stall at the end: suspected at    586.1 ms, drained at   1172.2 ms
+cost rule (re-placement 2 ms/workload, record 23764 answers): false drains    2  a stall at the end drained at     69.5 ms
+cost rule (re-placement 194 ms/workload, record 23764 answers): false drains    0  a stall at the end drained at    275.2 ms
+```
+
+The cost rule prices what the learned-wait rule's 2x fixes: dear re-placement waits longer and drains
+nothing healthy; cheap re-placement drains a stall 17x sooner and accepts two false drains, each a 2 ms
+restart.
