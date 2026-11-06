@@ -172,12 +172,17 @@ const BOX_ROOT: &str = "/sys/fs/cgroup/hex";
 /// children.
 const CONTROLLERS: &str = "+cpu +io +memory +pids";
 
+/// `init`'s arguments: the state disk, if one is given.
+fn init_args(args: &[String]) -> Result<Option<PathBuf>, String> {
+    match args {
+        [] => Ok(None),
+        [flag, device] if flag == "--state-disk" => Ok(Some(PathBuf::from(device))),
+        _ => Err(USAGE.to_owned()),
+    }
+}
+
 fn init(args: &[String]) -> Result<(), (u8, String)> {
-    let state_disk = match args {
-        [] => None,
-        [flag, device] if flag == "--state-disk" => Some(PathBuf::from(device)),
-        _ => return Err((2, USAGE.to_owned())),
-    };
+    let state_disk = init_args(args).map_err(|why| (2, why))?;
     let fail = |why: String| (1, why);
     mount_all(state_disk.as_deref()).map_err(fail)?;
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
@@ -225,48 +230,67 @@ fn init(args: &[String]) -> Result<(), (u8, String)> {
         .map_err(|e| fail(format!("powering off: {e}")))
 }
 
-/// Mounts what the node needs, each on a directory made for it.
-fn mount_all(state_disk: Option<&Path>) -> Result<(), String> {
-    use rustix::mount::{MountFlags, mount};
+/// One file system `init` mounts: its source, target, type and flags.
+struct Mount {
+    source: PathBuf,
+    target: &'static str,
+    fs: &'static str,
+    flags: rustix::mount::MountFlags,
+}
+
+/// What `init` mounts, in order.
+fn mounts(state_disk: Option<&Path>) -> [Mount; 7] {
+    use rustix::mount::MountFlags;
     let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
+    let mount = |source: &Path, target, fs, flags| Mount {
+        source: source.to_owned(),
+        target,
+        fs,
+        flags,
+    };
     let state_fs = if state_disk.is_some() {
         "ext4"
     } else {
         "tmpfs"
     };
     let state_source = state_disk.unwrap_or(Path::new("tmpfs"));
-    let mounts: [(&Path, &str, &str, MountFlags); 7] = [
-        (Path::new("proc"), "/proc", "proc", quiet),
-        (Path::new("sysfs"), "/sys", "sysfs", quiet),
-        (Path::new("cgroup2"), "/sys/fs/cgroup", "cgroup2", quiet),
-        (
+    [
+        mount(Path::new("proc"), "/proc", "proc", quiet),
+        mount(Path::new("sysfs"), "/sys", "sysfs", quiet),
+        mount(Path::new("cgroup2"), "/sys/fs/cgroup", "cgroup2", quiet),
+        mount(
             Path::new("devtmpfs"),
             "/dev",
             "devtmpfs",
             MountFlags::NOSUID,
         ),
-        (
+        mount(
             Path::new("tmpfs"),
             "/run",
             "tmpfs",
             MountFlags::NOSUID | MountFlags::NODEV,
         ),
-        (
+        mount(
             Path::new("tmpfs"),
             "/tmp",
             "tmpfs",
             MountFlags::NOSUID | MountFlags::NODEV,
         ),
-        (
+        mount(
             state_source,
             STATE,
             state_fs,
             MountFlags::NOSUID | MountFlags::NODEV,
         ),
-    ];
-    for (source, target, fs, flags) in mounts {
+    ]
+}
+
+/// Mounts what the node needs, each on a directory made for it.
+fn mount_all(state_disk: Option<&Path>) -> Result<(), String> {
+    for m in mounts(state_disk) {
+        let (target, fs) = (m.target, m.fs);
         std::fs::create_dir_all(target).map_err(|e| format!("making {target}: {e}"))?;
-        mount(source, target, fs, flags, None)
+        rustix::mount::mount(&m.source, target, fs, m.flags, None)
             .map_err(|e| format!("mounting {fs} on {target}: {e}"))?;
     }
     for dir in [RUN, BOX_ROOT] {
@@ -320,6 +344,58 @@ fn reap(node: u32, relay: u32) -> String {
             Ok(None) => {}
             Err(rustix::io::Errno::INTR) => {}
             Err(e) => return format!("waiting for the guest's processes: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustix::mount::MountFlags;
+
+    /// HEX-GUEST-9 (docs/design/shards-guest.md §4, amended 2026-11-06): `init` mounts `/proc`, `/sys`,
+    /// cgroup2, `devtmpfs` and a tmpfs `/run`, and the node's state lives on that tmpfs, never a disk;
+    /// `/run` may run programs, since the staged bundles under it are containers' roots.
+    #[test]
+    fn init_mounts_section_4s_file_systems_and_keeps_state_on_tmpfs() {
+        let all = mounts(None);
+        for (target, fs) in [
+            ("/proc", "proc"),
+            ("/sys", "sysfs"),
+            ("/sys/fs/cgroup", "cgroup2"),
+            ("/dev", "devtmpfs"),
+            ("/run", "tmpfs"),
+        ] {
+            assert!(
+                all.iter().any(|m| m.target == target && m.fs == fs),
+                "{fs} on {target} is missing"
+            );
+        }
+        let run = all.iter().find(|m| m.target == "/run").unwrap();
+        assert!(!run.flags.contains(MountFlags::NOEXEC));
+        for m in &all {
+            assert!(
+                ["proc", "sysfs", "cgroup2", "devtmpfs", "tmpfs"].contains(&m.fs),
+                "{} on {} is a disk's file system",
+                m.fs,
+                m.target
+            );
+        }
+        assert!(Path::new(STATE).starts_with(RUN), "the state is at {STATE}");
+    }
+
+    /// HEX-GUEST-9: a guest has no disk (§4, amended), so `init` takes no state disk, and refuses any
+    /// argument as its usage.
+    #[test]
+    fn init_refuses_a_state_disk() {
+        assert!(init_args(&[]).is_ok());
+        for args in [
+            &["--state-disk", "/dev/vda"][..],
+            &["--state-disk"][..],
+            &["relay"][..],
+        ] {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            assert_eq!(init_args(&args).err().as_deref(), Some(USAGE), "{args:?}");
         }
     }
 }
