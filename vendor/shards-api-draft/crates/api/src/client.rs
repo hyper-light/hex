@@ -618,30 +618,10 @@ impl Guest for ShardsGuest {
     }
 
     fn stop(&self) -> Result<(), Refusal> {
-        let mut state = lock(&self.shared.state);
-        if state.exited {
-            return Ok(());
-        }
-        let grace = STOP_GRACE.map_err(|pending| Refusal::Unsupported {
-            what: "stop",
-            why: pending.to_string(),
-        })?;
-        state.stopping = true;
-        self.signal(&state, false);
-        let deadline = Instant::now().checked_add(grace);
-        while !state.exited {
-            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                self.signal(&state, true);
-                break;
-            }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
+        // No record of a stop on this host class: no grace, killed at once. A guest's state
+        // is tmpfs and goes with it, so a kill loses nothing a graceful stop would keep;
+        // and a stop is never refused, which would leave the VM running.
+        self.stop_within(STOP_GRACE.ok());
         Ok(())
     }
 
@@ -668,6 +648,37 @@ impl Guest for ShardsGuest {
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner),
             };
+        }
+    }
+}
+
+impl ShardsGuest {
+    /// Ends it: SIGTERM, then the kill once `grace` is out; with no grace, the kill at once
+    /// (on Windows, the process's end either way, as `signal` ends it).
+    fn stop_within(&self, grace: Option<Duration>) {
+        let mut state = lock(&self.shared.state);
+        if state.exited {
+            return;
+        }
+        state.stopping = true;
+        let Some(grace) = grace else {
+            self.signal(&state, true);
+            return;
+        };
+        self.signal(&state, false);
+        let deadline = Instant::now().checked_add(grace);
+        while !state.exited {
+            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
+            if left.is_zero() {
+                self.signal(&state, true);
+                break;
+            }
+            state = self
+                .shared
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 }
@@ -871,20 +882,47 @@ mod tests {
         (dir, guest, dials)
     }
 
-    /// Where this host class has no record of a stop, `stop` is refused naming the record
-    /// it waits on, and sends nothing: no grace borrowed from another class (Hex
-    /// HEX-GUEST-9).
+    /// A stand-in for shards that ignores SIGTERM, booted, once it does.
+    #[cfg(unix)]
+    fn deaf() -> (shards_testdir::TempDir, ShardsGuest) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = shards_testdir::TempDir::new("api-deaf-unit").unwrap();
+        let (bin, deaf) = (dir.path().join("shards"), dir.path().join("deaf"));
+        assert!(Command::new("mkfifo").arg(&deaf).status().unwrap().success());
+        let body = format!(
+            "#!/bin/sh\ntrap '' TERM; echo > '{}'; while :; do sleep 1; done\n",
+            deaf.display()
+        );
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guest = start(&GuestSpec {
+            binary: Some(bin),
+            ..spec()
+        })
+        .unwrap();
+        std::fs::read(&deaf).unwrap();
+        (dir, guest)
+    }
+
+    /// With no grace (a host class with no stop record), a stop kills at once, and the guest
+    /// ends `Stopped`, though it ignores SIGTERM: a stop is never refused (Hex HEX-GUEST-9).
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_with_no_grace_kills_at_once() {
+        let (_dir, guest) = deaf();
+        guest.stop_within(None);
+        assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
+    }
+
+    /// Where this host class has no stop record, `stop` kills at once and returns `Ok`, and
+    /// the guest ends `Stopped`: no grace, no number borrowed from another class, and no
+    /// refusal, which would leave the VM running (Hex HEX-GUEST-9).
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn a_stop_without_this_classs_record_is_refused_by_name() {
-        let (_dir, guest, _) = listening_after(0);
-        match guest.stop() {
-            Err(Refusal::Unsupported { what: "stop", why }) => {
-                assert!(why.contains(crate::record::CLASS), "{why}")
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(guest.wait_for(Duration::ZERO).unwrap(), None);
+    fn a_stop_without_this_classs_record_kills_at_once() {
+        let (_dir, guest) = deaf();
+        guest.stop().unwrap();
+        assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
     }
 
     /// A patience of zero is one dial, its answer awaited, and no other (Hex HEX-GUEST-9).

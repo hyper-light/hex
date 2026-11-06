@@ -14,7 +14,7 @@ Two more outcomes appear below. **fact**: the clock or bound is gone, and the wa
 The audit before conversion is commit 015d32c (Hex `cp/t7-native-s5-route` `2660759`, Shards `hex/shards-api`
 `a0cced87`). This revision is the conversion:
 - task D's rows at Hex `cp/t7-native-s5-consts`, with line numbers at its tip;
-- Shards' `crates/api` at `hex/shards-api-constants` `e72c551b` (local, not pushed, off the pushed `a0cced87`;
+- Shards' `crates/api` at `hex/shards-api-constants` `dd158704` (local, not pushed, off the pushed `a0cced87`;
   Hex's `vendor/shards-api-draft` carries it on this branch only).
 
 The rows in agent C's files are marked **C** and are merged from C's branch:
@@ -163,15 +163,15 @@ Behaviour fixed on the way:
 | `EXAMPLES` 5, `most_common(10)` | — | bench/native/tarball-census/census.py:13, :83 | input | Report sizes, not bounds: the census counts everything |
 | `BENCH_MEMORY` / `BENCH_OOM` | 8g / 1000 | bench/oci-validation/run_hex.sh:5 | c | the operator's, as above |
 
-## Shards' `crates/api` (hex/shards-api-constants e72c551b)
+## Shards' `crates/api` (hex/shards-api-constants dd158704)
 
-Every recorded bound is keyed by host class at compile time (`shards_api::record`). macOS-HVF uses its record. Linux-KVM and Windows-WHP get `record::Pending`, which names the record to take: `stop()` is refused by name there, and the clocked tests fail by name. PM M462/M463 are in Shards' docs/research/platform-measurements.md.
+Every recorded bound is keyed by host class at compile time (`shards_api::record`). macOS-HVF uses its record. Linux-KVM and Windows-WHP get `record::Pending`, which names the record to take: `stop()` is never refused: with no record there is no grace, and the VM is killed at once (its state is tmpfs, so a hard kill loses nothing a graceful stop would keep). The clocked tests fail by name. PM M462/M463 are in Shards' docs/research/platform-measurements.md.
 
 
 | name | value | file:line | kind | source or record |
 |---|---|---|---|---|
 | `TAIL` | 59 + 4096×6 + 1 = 24,636 | crates/api/src/client.rs:50 | c | The longest report shards writes as it ends: a reset's console page (`serial.rs:57`) escaped at most 6× (`vm_run.rs:2730-2737`) |
-| `STOP_GRACE` | HVF 2 × 13 ms; KVM/WHP pending | lib.rs:155 | b | Twice (the margin) the slowest stop on record: Hex bench/native/guest/stop/RECORD.md; shards-api's own stop() in PM M463 peaked at 6.6 ms |
+| `STOP_GRACE` | HVF 2 × 13 ms; KVM/WHP: no record, no grace, killed at once | lib.rs:155, client.rs:658 | b | Twice (the margin) the slowest stop on record (Hex bench/native/guest/stop/RECORD.md; shards-api's own stop() peaked at 6.6 ms in PM M463). A class with no record isn't given a borrowed number: it skips the grace and kills |
 | `DRAIN_GRACE` | gone | — | fact | an end mark written after shards exits; the drain reads to it |
 | `FIRST_BACKOFF` / `LAST_BACKOFF` | gone: pause √(2·c·w) | client.rs | a | c = the last refused dial's cost, w = the wait so far. It paces retries; the deadline is the caller's. Whether the lead's timeout rule covers a pacing rule is with the lead |
 | `ANSWER` | 14 | client.rs:57 | c | Firecracker docs/vsock.md; Shards' conn.rs:372 |
