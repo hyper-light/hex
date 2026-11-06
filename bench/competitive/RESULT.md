@@ -589,6 +589,17 @@ Best of 2, ms (Hex over libcrun in the same pass):
   itself waiting on the host-wide cgroup-notification work; then the teardown of the pass's own boxes (0.3 to 0.85
   ms). Reuse within one owner makes no cgroup on the create's path and tears none down, which is the gap between the
   passes. This line read "the teardown of the box before it" until 2026-11-06 (superseded: below).
+- **That lock wait is gone, and what holds the tail now is the kernel's teardown of the pass's own earlier boxes**
+  (`probes/goal16_ab.md`, "No cgroupfs lookup on a no-owner create's path"; cp/t7-g16-prefetch 1190a2c, merged here at
+  309e62b). The refill now opens the slot's files when it makes the cgroup ahead, so a no-owner create looks up
+  nothing in cgroupfs (oci_reuse counted 20 lookups on the creating thread before, 0 after), and nothing a box sees
+  changes. Its A/B at the bar's conditions (host.sh, no owner, 2 rounds of 10,000, A B B A, fedora, noisy) moved
+  Hex's create p99.9 from a mean of 1.735 to 1.705 ms (2%) and create+start's from 2.54 to 2.45 (3.5%), both within
+  the passes' spread: 0.36x and 0.40x of libcrun's 4.50 and 4.58 ms in the fixed arm's passes, not 0.25x. Traced, the
+  fixed tree's slowest 0.1% have no cgroupfs lock wait; 1.40 ms of their mean is `css_killed_work_fn` preempting the
+  create to tear down the run's own boxes (1.26 ms in the unfixed arm's trace), the rest Hex running (0.53) and RCU.
+  So the bar as written stays unmet on fedora; that is now the kernel's teardown cost, 1.3 to 1.4 ms of the slowest
+  0.1%, which only fewer cgroups torn down (reuse) removes. No pass of record followed the fix.
 
 **What the slowest 0.1% of no-owner creates wait on: the first reading, superseded** (the lead, 2026-11-05T14:20Z;
 not of record: the tracer costs each switch some). Its figures stand; its conclusion doesn't. `create_tail_attr.py`

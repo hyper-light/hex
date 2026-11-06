@@ -131,7 +131,9 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
     and 5.69. What holds it is mostly Hex's own lock: the create's cgroupfs lookups queued behind Hex's own refill's
     `mkdir` (1.377 ms of the slowest 0.1%), then the teardown of the pass's own boxes (0.3-0.85 ms), no other tenant's
     (`probes/goal16_ab.md`, cp/t7-g16-memslot acf45f9). Reuse within one owner removes both. (The first reading, the
-    teardown alone, is superseded.)
+    teardown alone, is superseded.) The lock wait is now gone (cp/t7-g16-prefetch 1190a2c, merged at 309e62b: a
+    no-owner create looks up nothing in cgroupfs); it moved the no-owner p99.9 about 2% (0.36x and 0.40x in its A/B),
+    so what holds the tail is the kernel's teardown of the pass's own earlier boxes, 1.3-1.4 ms of the slowest 0.1%.
   - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
     **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
     (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
