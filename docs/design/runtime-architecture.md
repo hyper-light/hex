@@ -248,8 +248,9 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
     Goal 5's extension (its step 1) took the load off the create, with the node agent as the holder that
     outlives its containers (`oci/programs.rs`; research `01a190c51f137042a9697949c8fe2c7a` f40-f61, notes
     `docs/research/runtime/goal5-cgroup-lock.md`):
-    - **The node holds each policy's program.** Once loaded, it stays open, at most 64 (`MAX_PROGRAMS`);
-      past that the one used longest ago is closed, and it lives on in the cgroups it's attached to (f53). A
+    - **The node holds each policy's program.** Once loaded, it stays open, at most `Sizes::programs`: the least of
+      the node's descriptors and its memory over a loaded program's 5.20 KiB (`PROGRAM_BYTES`, bench/competitive/
+      RESULT.md), never under the host's parallelism (a fixed 64 until Ada's 2026-11-06 constants rule); past that the one used longest ago is closed, and it lives on in the cgroups it's attached to (f53). A
       program is found by Hex's own digest of its instructions (64-bit FNV-1a) and proven by the instructions
       themselves, so nothing need be loaded to find it, as a kernel tag would need. A create attaches the
       program held for its policy and loads only a policy the node holds none for (f60).

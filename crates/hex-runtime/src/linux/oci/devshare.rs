@@ -26,10 +26,11 @@ use super::sys::{BPF_PROG_TYPE_CGROUP_DEVICE, ProgramIdentity};
 /// The hints file, in the runtime's state root.
 pub const HINTS_FILE: &str = ".device-programs.json";
 
-/// The most programs the hints name, and the most a node agent holds open (CLAUDE.md §2): one per
-/// distinct device policy in use, past which the one used longest ago goes. The default policy is one,
-/// and a node runs few others.
-pub const MAX_PROGRAMS: usize = 64;
+/// The most programs the command line's hints file names (CLAUDE.md §2): one per distinct device policy it
+/// loaded, past which the one remembered longest ago goes. The file is read whole by every `hex oci create`, so its
+/// bound is a read's size ([`MAX_HINT_BYTES`]), not a node's; a node agent's held programs are bounded by its host
+/// (`hex_node::sizes::Sizes::programs`).
+pub const MAX_HINTS: usize = 64;
 
 /// The most bytes of the hints file read: 64 programs take under 3 KiB, so a larger file isn't one
 /// this module wrote, and is read as no hints.
@@ -69,7 +70,7 @@ impl Hints {
     /// the file whole.
     pub fn parse(bytes: &[u8]) -> Self {
         let mut hints = serde_json::from_slice::<Self>(bytes).unwrap_or_default();
-        hints.programs.truncate(MAX_PROGRAMS);
+        hints.programs.truncate(MAX_HINTS);
         hints
     }
 
@@ -83,12 +84,12 @@ impl Hints {
     }
 
     /// Remembers program `id` for the policy with `digest` first, in place of any earlier one for it,
-    /// keeping at most [`MAX_PROGRAMS`].
+    /// keeping at most [`MAX_HINTS`].
     pub fn remember(&mut self, digest: u64, id: u32) {
         let digest = hex(digest);
         self.programs.retain(|h| h.digest != digest);
         self.programs.insert(0, Hint { digest, id });
-        self.programs.truncate(MAX_PROGRAMS);
+        self.programs.truncate(MAX_HINTS);
     }
 
     /// The hints as the file holds them.
@@ -289,10 +290,10 @@ mod tests {
     #[test]
     fn past_the_bound_the_oldest_hint_is_dropped() {
         let mut h = Hints::default();
-        for n in 0..=MAX_PROGRAMS {
+        for n in 0..=MAX_HINTS {
             h.remember(u64::try_from(n).unwrap(), u32::try_from(n).unwrap());
         }
-        assert_eq!(h.programs.len(), MAX_PROGRAMS);
+        assert_eq!(h.programs.len(), MAX_HINTS);
         assert_eq!(h.candidate(0), None, "the oldest is dropped");
         assert_eq!(h.candidate(1), Some(1));
     }
@@ -328,7 +329,7 @@ mod tests {
         };
         assert_eq!(
             Hints::parse(&long.to_bytes().unwrap()).programs.len(),
-            MAX_PROGRAMS
+            MAX_HINTS
         );
     }
 

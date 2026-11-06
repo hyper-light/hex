@@ -36,6 +36,11 @@ pub const SEED_BYTES: u64 = 2_547_712;
 /// An ipc and uts namespace pair made ahead, the most the host's Slab rose for one: 14.1 KiB on fedora
 /// (bench/competitive/probes/netns_pool.md, goal 5 extended step 4).
 pub const IPC_UTS_BYTES: u64 = 14_438;
+/// A device program a node holds loaded, what a loaded program charged its loader's cgroup: one vmalloc'd page and
+/// 1.20 KiB of per-CPU `stats` and `active`, 5.20 KiB, the same in every round of bench/competitive/RESULT.md's
+/// per-container attribution (adacachy, `20261027T033009Z`, `kernel/bpf/core.c:102-118,149-159`), and gone once one
+/// program was shared (`20261027T034522Z`).
+pub const PROGRAM_BYTES: u64 = 5_325;
 
 /// The pools that hold the node's memory, by their items' cost, in the order [`Peaks::takes`] keeps their takes:
 /// idle cgroups, cgroups made ahead, idle network namespaces, network namespaces made ahead (decision 4), seeds,
@@ -169,6 +174,14 @@ pub struct Sizes {
     /// The most descriptors the node may hold ([`Host::descriptors`]): the most connections its socket admits, each
     /// one, the kernel refusing past what remains of them.
     pub descriptors: usize,
+    /// The most device programs the node holds loaded, one per device policy a create used, past which the one used
+    /// longest ago is closed (`devshare::Programs`; it lives on in the cgroups it's attached to). Each holds a
+    /// descriptor and [`PROGRAM_BYTES`], so the least of [`Host::descriptors`] and the node's memory over that cost,
+    /// never under the host's parallelism. Held only as policies are seen, a program per new policy (grown on a
+    /// miss), so what they hold is what their policies' count makes it; none is made ahead, a policy being known only
+    /// at its first create, so no peak is kept for a next start. It was a fixed 64 (`devshare::MAX_PROGRAMS`, Ada's
+    /// 2026-11-06 constants rule).
+    pub programs: usize,
 }
 
 impl Sizes {
@@ -212,6 +225,7 @@ impl Sizes {
             ipc_uts: fit(5, peaks.ipc_uts).min(seeds.get().max(peaks.ipc_uts)),
             workers: to_usize(host.threads).max(1),
             descriptors: to_usize(host.descriptors),
+            programs: to_usize((host.memory / PROGRAM_BYTES).min(host.descriptors)).max(start),
         }
     }
 

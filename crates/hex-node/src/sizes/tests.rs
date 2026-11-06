@@ -234,3 +234,26 @@ fn the_keeper_keeps_the_larger_of_each_peak_and_sums_the_takes() {
     assert_eq!(keeper.base(), Peaks::default());
     assert!(keeper.unread().is_some(), "a first start, with why");
 }
+
+/// The device programs a node holds, one per policy a create used (Ada's 2026-11-06 constants rule; AC-T7.1.5,
+/// CLAUDE.md §2): bounded by what its host lets it hold, a descriptor and [`PROGRAM_BYTES`] each, never under the
+/// host's parallelism; no longer a fixed 64. Do: size a node on fedora's figures, on a host of 1 GiB and 4 threads,
+/// on one whose descriptors are few, and on one with no memory to spare. Expect: the least of the descriptors and
+/// the memory over a program's cost, and the parallelism at the least.
+#[test]
+fn the_programs_held_are_bounded_by_the_hosts_descriptors_and_memory() {
+    let fedora = first(host(7_500 << 20, 32));
+    assert_eq!(fedora.programs, 524_288, "fedora's descriptors bound it");
+    let small = first(host(1 << 30, 4));
+    assert_eq!(
+        small.programs,
+        usize::try_from((1u64 << 30) / PROGRAM_BYTES).unwrap(),
+        "a 1 GiB host's memory bounds it"
+    );
+    let few = first(Host {
+        descriptors: 1_000,
+        ..host(7_500 << 20, 32)
+    });
+    assert_eq!(few.programs, 1_000);
+    assert_eq!(first(host(0, 4)).programs, 4, "never under the parallelism");
+}

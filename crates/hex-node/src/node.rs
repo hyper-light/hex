@@ -35,7 +35,6 @@ use hex_core::reuse;
 use hex_core::wire;
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES};
 use hex_runtime::linux::oci::OciError;
-use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
 use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
@@ -291,7 +290,7 @@ impl Node {
         let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools)?, sizes)?;
         let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
-        let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
+        let devices = device_programs(owner, &oci_boxes, sizes.programs)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
         let first = slots_in(&oci_boxes)?
             .last()
@@ -572,9 +571,10 @@ impl Node {
         self.park_procs(bound)
     }
 
-    /// Sets the most device programs the node holds open, one per policy, [`MAX_PROGRAMS`] unless set,
-    /// in place of those it opened with, which it closes (each lives on in the cgroups it's attached to).
-    /// A root node's oci boxes' root keeps its program.
+    /// A test control, with no production caller: the most device programs the node holds open, one per policy,
+    /// set to `bound` in place of [`Sizes::programs`], derived from the host and so past a test's reach (the eviction
+    /// test, oci_devices.rs, needs it reached with a few policies), replacing those it opened with, which it closes
+    /// (each lives on in the cgroups it's attached to). A root node's oci boxes' root keeps its program.
     pub fn with_device_program_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         self.devices = device_programs(self.owner, &self.oci_boxes, bound)?;
         Ok(self)
