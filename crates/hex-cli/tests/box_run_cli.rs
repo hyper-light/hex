@@ -103,27 +103,28 @@ fn box_run_boxes_a_program_and_passes_its_status() {
 
 /// HEX-INST-6's other side (native plan step 6; the lead, 2026-11-06): `hex box run` wraps a program
 /// for its caller, so the program keeps the caller's descriptor limit, not the default a box the node
-/// starts gets (1024:524288). Under `prlimit --nofile=2048:4096` its program sees 2048:4096.
+/// starts gets (1024:524288). Under a caller's limit of one less than the default's soft limit, soft, and
+/// the default's soft limit, hard (1023:1024: below the default in both, a lowering any caller may make),
+/// its program sees exactly that.
 #[test]
 fn box_run_keeps_its_callers_descriptor_limit() {
     if !have_systemd() {
         eprintln!("SKIP: no systemd --user for a delegated scope; run on a cgroup-v2 host");
         return;
     }
+    let hard = hex_core::limits::NOFILE_SOFT;
+    let soft = hard - 1;
     let out = Command::new("systemd-run")
         .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes", "--"])
-        .args([
-            "prlimit",
-            "--nofile=2048:4096",
-            "--",
-            HEX,
-            "box",
-            "run",
-            "--",
-        ])
+        .arg("prlimit")
+        .arg(format!("--nofile={soft}:{hard}"))
+        .args(["--", HEX, "box", "run", "--"])
         .args(["/bin/sh", "-c", "echo $(ulimit -Sn):$(ulimit -Hn)"])
         .output()
         .expect("run hex box run under prlimit in a scope");
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2048:4096");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("{soft}:{hard}")
+    );
 }

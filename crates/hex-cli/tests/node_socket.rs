@@ -124,15 +124,20 @@ fn nofile_by_default(lab: &Lab, client: &Client) {
     }
 }
 
-/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's,
-/// 2048:4096 here (under the node's hard limit, which a rootless init can't raise), not the default.
+/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's, not the
+/// default: here one less than the default's soft limit, soft, and the default's soft limit, hard
+/// (1023:1024), below the default in both and a lowering a rootless init may make under any node.
 fn nofile_named(lab: &Lab, client: &Client) {
+    let hard = hex_core::limits::NOFILE_SOFT;
+    let soft = hard - 1;
     let bundle = lab.bundle(&Lab::act(&Act::Wait));
     let config = bundle.join("config.json");
     let text = std::fs::read_to_string(&config).unwrap();
     let named = text.replacen(
         r#""noNewPrivileges": true"#,
-        r#""noNewPrivileges": true, "rlimits": [{"type": "RLIMIT_NOFILE", "soft": 2048, "hard": 4096}]"#,
+        &format!(
+            r#""noNewPrivileges": true, "rlimits": [{{"type": "RLIMIT_NOFILE", "soft": {soft}, "hard": {hard}}}]"#
+        ),
         1,
     );
     assert_ne!(
@@ -142,7 +147,7 @@ fn nofile_named(lab: &Lab, client: &Client) {
     std::fs::write(&config, named).unwrap();
     assert_eq!(
         nofile_seen(client, ClassSpec::Bundle(bundle)),
-        "2048:4096",
+        format!("{soft}:{hard}"),
         "oci box"
     );
 }
