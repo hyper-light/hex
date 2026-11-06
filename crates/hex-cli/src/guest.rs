@@ -331,6 +331,21 @@ fn root_fs(mountinfo: &str) -> Option<&str> {
         .next_back()
 }
 
+/// One of Shards' shares (docs/design/shards-guest.md §4a): whether the guest mounts it read-only.
+#[derive(Debug, PartialEq, Eq)]
+struct Share {
+    read_only: bool,
+}
+
+/// The most shares a guest mounts: a bound of Hex's own, as the node shares a handful of roots (by
+/// default one, `/`); a longer list is refused by name.
+const MAX_SHARES: usize = 32;
+
+/// The shares the kernel's command line names, in tag order.
+fn shares(_cmdline: &str) -> Result<Vec<Share>, String> {
+    Ok(Vec::new())
+}
+
 /// Mounts what the node needs, each on a directory made for it.
 fn mount_all() -> Result<(), String> {
     for m in mounts() {
@@ -454,6 +469,39 @@ mod tests {
             assert_eq!(root_fs(hostile), None, "{hostile:?}");
         }
         assert_eq!(root_fs("1 1 0:2 / / rw - \n"), Some(""));
+    }
+
+    /// HEX-GUEST-11 (§4a): `hex.shares=` on the kernel's command line names Shards' shares in tag order,
+    /// `rw` or `ro` each, which init mounts at /run/hex/shares/<i>; none named is none; a bad mode, an
+    /// empty one, the parameter twice or past its bound is refused by name; init's own arguments after
+    /// `--` are not the kernel's.
+    #[test]
+    fn shares_are_read_from_the_kernel_command_line() {
+        let (rw, ro) = (Share { read_only: false }, Share { read_only: true });
+        assert_eq!(shares("console=ttyS0 panic=-1 -- guest init"), Ok(vec![]));
+        assert_eq!(
+            shares("console=ttyS0 hex.shares=rw,ro,rw -- guest init\n"),
+            Ok(vec![rw, ro, Share { read_only: false }])
+        );
+        assert_eq!(shares("hex.shares=ro"), Ok(vec![Share { read_only: true }]));
+        assert_eq!(shares("-- hex.shares=rw"), Ok(vec![]));
+        let past = vec!["rw"; MAX_SHARES + 1].join(",");
+        let at = vec!["rw"; MAX_SHARES].join(",");
+        assert_eq!(
+            shares(&format!("hex.shares={at}")).map(|s| s.len()),
+            Ok(MAX_SHARES)
+        );
+        for bad in [
+            "hex.shares=".to_owned(),
+            "hex.shares=rw,,ro".to_owned(),
+            "hex.shares=rx".to_owned(),
+            "hex.shares=RW".to_owned(),
+            "hex.shares=rw hex.shares=ro".to_owned(),
+            format!("hex.shares={past}"),
+        ] {
+            let why = shares(&bad).unwrap_err();
+            assert!(why.contains("hex.shares"), "{bad:?}: {why}");
+        }
     }
 
     /// HEX-GUEST-9: a guest has no disk (§4, amended), so `init` takes no state disk, and refuses any
