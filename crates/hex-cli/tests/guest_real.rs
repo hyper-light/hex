@@ -2,7 +2,7 @@
 //! every case, through a real Shards guest booted by `shards_api::Shards` from this host, the path a macOS
 //! or Windows node takes: `hex_runtime::guest::WithGuest` boots one guest, stages each box's root into it
 //! and forwards every call to the Linux node agent inside. "Boot the guest, run every case, expect each to
-//! pass and the guest booted once."
+//! pass and the guest booted once" (its boots counted at the `shards_api::Guests` the node is given).
 //!
 //! It needs a guest, so it runs only where one is given, and says SKIP and why elsewhere:
 //! - `HEX_GUEST_KERNEL`: the guest's kernel (Shards' pinned 6.18; an arm64 `Image` or x86_64 `vmlinux`);
@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Network, OciSpec, Program, Rootfs, Runtime};
@@ -115,14 +116,44 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         shares: shares::from_env().unwrap(),
         staged: hex_client::guest::stage::STAGED.to_owned(),
     };
-    let guests = Arc::new(shards_api::Shards::new());
-    let node = GuestRuntime::new(guests, config);
+    let guests = Arc::new(Counted {
+        shards: shards_api::Shards::new(),
+        boots: AtomicUsize::new(0),
+    });
+    let node = GuestRuntime::new(guests.clone(), config);
     let failures = conformance::run(&node, &OciBoxes(rootfs));
     assert!(
         failures.is_empty(),
         "oci boxes through a real Shards guest: {failures:#?}"
     );
     assert!(node.list().unwrap().is_empty(), "a box is left");
+    // One guest per node (docs/design/shards-guest.md §1): every box of the suite went to the one guest
+    // its first create booted.
+    assert_eq!(
+        guests.boots.load(Ordering::SeqCst),
+        1,
+        "the node booted its guest more than once"
+    );
+}
+
+/// Shards, counting each guest it is asked to boot.
+struct Counted {
+    shards: shards_api::Shards,
+    boots: AtomicUsize,
+}
+
+impl shards_api::Guests for Counted {
+    fn backend(&self) -> Result<shards_api::Backend, shards_api::Refusal> {
+        self.shards.backend()
+    }
+
+    fn boot(
+        &self,
+        spec: &shards_api::GuestSpec,
+    ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
+        self.boots.fetch_add(1, Ordering::SeqCst);
+        self.shards.boot(spec)
+    }
 }
 
 #[cfg(unix)]

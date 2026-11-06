@@ -289,8 +289,8 @@ fn config() -> GuestConfig {
     }
 }
 
-/// HEX-GUEST-17: create an oci box where Shards has no backend (macOS x86_64's refusal): expect the
-/// class refused as the platform's, naming the OS, arch and Shards, and no boot asked for; a process
+/// HEX-GUEST-17: create an oci box, its root an absolute path on this host, where Shards has no backend
+/// (macOS x86_64's refusal): expect the class refused as the platform's, naming the OS, arch and Shards, and no boot asked for; a process
 /// box refused as the host's; and a call about a box before any boot NoSuchBox, with nothing booted.
 #[test]
 fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
@@ -302,10 +302,12 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
         boots: AtomicUsize::new(0),
     });
     let runtime = GuestRuntime::new(guests.clone(), config());
-    let Err(Refusal::Platform { platform, why, .. }) =
-        runtime.create(oci(Rootfs::Dir(PathBuf::from("/r")), vec![]))
-    else {
-        panic!("expected the platform's refusal");
+    // An absolute path on this host (a drive's on Windows): the spec's own check passes it, so the
+    // refusal that comes is the platform's.
+    let host = tempfile::tempdir().unwrap();
+    let got = runtime.create(oci(Rootfs::Dir(host.path().join("rootfs")), vec![]));
+    let Err(Refusal::Platform { platform, why, .. }) = got else {
+        panic!("expected the platform's refusal, got {got:?}");
     };
     assert_eq!(platform, "macos");
     assert!(why.contains("x86_64") && why.contains("Shards"), "{why}");
