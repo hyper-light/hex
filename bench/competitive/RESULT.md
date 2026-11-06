@@ -553,6 +553,9 @@ hex-g5rec-pass-20261105T134425Z built hex (static-glibc, sha256 2c9e4b58aa55c980
 it; libcrun 1.30.1 in process. N=10000 after 100, phases `lifecycle start_true`, CPUs 4-15 under the shared timed lock,
 noisy (no load gate; about 23 containers of kiln CI beside it), `/run` a tmpfs. Every round's file holds its 10,000 in
 each phase with no error, and no round crashed (no `crashed.txt`; host.sh's crashed-round check, 0892f3c).
+Every pass in this section (fedora's, the Mac Studio's and jupiter's) ran at 70376d7, built before procs made ahead
+for parked inits came into this tree (off by default at c6a3ac4, on by default for a root node at the merge of
+cp/t7-g5-parkproc-default 3402c55): no node of these passes had them, so none of its figures rests on that setting.
 The two columns differ in one setting: with `HEXBENCH_NOFILE` unset, the in-process node runs at the container's
 soft descriptor limit, dockerd's 1,024, where it holds no `/proc/net` files (`oci_inside.sh:18-24`), while the
 socket's `hex node` raises its own to the hard limit as it starts (`raise_descriptor_limit`,

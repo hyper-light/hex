@@ -113,7 +113,7 @@ pub struct ParkCounts {
     pub failed: u64,
     /// The bytes charged to their cgroups for the inits made, summed: over `parked`, what one costs.
     pub charged_bytes: u64,
-    /// Procs made for parked inits' own pid namespaces (parked procs, off unless the node is made with them).
+    /// Procs made for parked inits' own pid namespaces (parked procs: a root node's default, unless turned off).
     pub procs_made: u64,
     /// Of those, the ones made by the thread that parked their init: a delete's (reuse on), or the `hex-ahead`
     /// refill's (reuse off). Never a create's or a claim's.
@@ -231,8 +231,10 @@ struct Parking {
     failed: AtomicU64,
     /// The bytes charged to their cgroups for every init made ahead, summed.
     charged: AtomicU64,
-    /// What makes each parked init's proc, when the node makes them ([`Cgroups::set_parked_procs`]).
+    /// What makes each parked init's proc, when the node makes them ([`Cgroups::set_parked_procs`]), and whether
+    /// it does now ([`Cgroups::stop_parked_procs`] turns it off; the maker and the dropper stay).
     procs: OnceLock<ProcMaker>,
+    on: AtomicBool,
     procs_made: AtomicU64,
     procs_made_at_delete: AtomicU64,
     procs_made_at_refill: AtomicU64,
@@ -249,10 +251,17 @@ struct Parking {
     /// it back.
     alive: Arc<AtomicU64>,
     bound: AtomicU64,
+    /// The dropper's queue's capacity, the highest `bound` may be.
+    capacity: AtomicU64,
     capped: AtomicU64,
 }
 
 impl Parking {
+    /// Whether the node makes parked inits' procs now.
+    fn makes_procs(&self) -> bool {
+        self.procs.get().is_some() && self.on.load(Ordering::Relaxed)
+    }
+
     fn slots(&self) -> Result<MutexGuard<'_, Slots>, Refusal> {
         self.slots
             .lock()
@@ -303,6 +312,9 @@ impl Parking {
     /// The proc of `parked`'s own pid namespace made for `key` and held with it, when the node makes them and the
     /// key is known; one that can't be made leaves the init parked without one, counted.
     fn with_proc(&self, parked: &mut Parked, key: Option<&procmount::Key>, by: MadeBy) {
+        if !self.makes_procs() {
+            return;
+        }
         let (Some(maker), Some(key), Some(sink)) = (self.procs.get(), key, self.drops.get()) else {
             return;
         };
@@ -570,13 +582,27 @@ impl Cgroups {
 
     /// Each init parked from here on has the proc of its own pid namespace made with it, through `maker`, for its
     /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`PROCS_ALIVE`]), and the dropper
-    /// started with a queue of as many. Set before the node's first create; unset, none is made.
+    /// started with a queue of as many. Set before the node's first create; unset, none is made. Set again once the
+    /// dropper runs, it turns them on with `bound`, refused past the dropper's queue (so a tree handed to it never
+    /// finds it full).
     pub fn set_parked_procs(&self, maker: ProcMaker, bound: usize) -> Result<(), Refusal> {
-        if self.parking.drops.get().is_some() {
+        let parking = &self.parking;
+        let bound = u64::try_from(bound).unwrap_or(u64::MAX);
+        if parking.drops.get().is_some() {
+            let capacity = parking.capacity.load(Ordering::Relaxed);
+            if bound > capacity {
+                return Err(Refusal::Invalid {
+                    what: "parked procs' bound",
+                    why: format!(
+                        "{bound} alive is past the dropper's queue of {capacity}, started already"
+                    ),
+                });
+            }
+            parking.bound.store(bound, Ordering::Relaxed);
+            parking.on.store(true, Ordering::Relaxed);
             return Ok(());
         }
-        let parking = &self.parking;
-        let (drops, unattached) = mpsc::sync_channel(bound);
+        let (drops, unattached) = mpsc::sync_channel(usize::try_from(bound).unwrap_or(usize::MAX));
         let (dropped, alive) = (Arc::clone(&parking.dropped), Arc::clone(&parking.alive));
         std::thread::Builder::new()
             .name("hex-proc-drop".to_owned())
@@ -588,11 +614,22 @@ impl Cgroups {
             Arc::clone(&parking.dropped_inline),
             Arc::clone(&parking.alive),
         ));
-        parking
-            .bound
-            .store(u64::try_from(bound).unwrap_or(u64::MAX), Ordering::Relaxed);
+        parking.bound.store(bound, Ordering::Relaxed);
+        parking.capacity.store(bound, Ordering::Relaxed);
         let _ = parking.procs.set(maker);
+        parking.on.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Parks from here on make no proc (decision 8, parked procs, turned off); those made already stay with their
+    /// inits, and the dropper still takes the unattached.
+    pub fn stop_parked_procs(&self) {
+        self.parking.on.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether parks make procs now.
+    pub fn makes_parked_procs(&self) -> bool {
+        self.parking.makes_procs()
     }
 
     /// Whether boxes of no owner take cgroups made ahead.
@@ -1230,7 +1267,7 @@ impl Choose for Choice<'_> {
             }
             ParkedProc::Miss => &parking.proc_misses,
             // Dry only means something where the node makes them.
-            ParkedProc::Dry if parking.procs.get().is_some() => &parking.proc_dry,
+            ParkedProc::Dry if parking.makes_procs() => &parking.proc_dry,
             ParkedProc::Dry => return,
         };
         count.fetch_add(1, Ordering::Relaxed);

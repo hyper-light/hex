@@ -319,6 +319,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(&lab, own);
     a_parked_init_made_with_other_namespaces_is_ended_and_counted(&lab, own);
     parked_procs_stop_at_their_bound_and_none_drops_inline(&lab, own);
+    parked_procs_are_on_unless_turned_off_and_a_rootless_node_makes_none(&lab, own);
     a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
@@ -908,6 +909,37 @@ fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own:
 /// only. Do: on a node bounded at 2, four owners each create and delete a box, so four inits park. Expect 2 procs made
 /// and 2 parks capped, 2 alive. Then release the idle cgroups: expect the 2 trees queued to the dropper and dropped
 /// there, none inline, none alive. Then a fifth owner's delete: its proc made, the bound free again.
+/// Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: in a
+/// node opened with no setting, A of O created, started and deleted; then the same in a node opened with
+/// `with_parked_procs(false)`. Expect: as root, the first node's delete made the parked init's proc (one made, at
+/// the delete), the second's made none; rootless, neither made one (a rootless node parks no proc).
+fn parked_procs_are_on_unless_turned_off_and_a_rootless_node_makes_none(lab: &Lab, own: &Path) {
+    let made_by = |node: &Node, tag: &str| {
+        let o = BoxOwner::named(&format!("owner-{tag}")).unwrap();
+        let a = BoxId::new(tag).unwrap();
+        node.create(lab.oci(tag, Some(&o), Caps::Docker, Bounds::default()))
+            .unwrap();
+        node.start(&a).unwrap();
+        node.delete(&a).unwrap();
+        let parked = node.cgroup_reuse().unwrap().parked;
+        node.release_idle().unwrap();
+        (parked.procs_made, parked.procs_made_at_delete)
+    };
+    let (node, _state) = lab.node(&own.join("hex-reuse-ppdefault"));
+    let by_default = made_by(&node, "ppd");
+    drop(node);
+    let (node, _state_off) = lab.node(&own.join("hex-reuse-ppoff"));
+    let node = node.with_parked_procs(false).unwrap();
+    let turned_off = made_by(&node, "ppo");
+    let want = if lab.rootless { (0, 0) } else { (1, 1) };
+    assert_eq!(
+        (by_default, turned_off),
+        (want, (0, 0)),
+        "procs made (in all, at the delete): by default, then turned off (rootless {})",
+        lab.rootless
+    );
+}
+
 fn parked_procs_stop_at_their_bound_and_none_drops_inline(lab: &Lab, own: &Path) {
     if lab.rootless {
         return;
