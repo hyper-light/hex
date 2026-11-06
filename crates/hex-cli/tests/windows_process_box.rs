@@ -192,8 +192,11 @@ fn a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest() {
         binary: root.path().join("no-shards.exe"),
         kernel: root.path().join("no-kernel"),
         initrd: root.path().join("no-initrd"),
+        // The simulated guest reads neither: Shards' own minimums, the smallest guest it boots (Shards
+        // a0cced87 crates/vmm/src/vm/runtime.rs:1061 "at least one vCPU is required",
+        // crates/vmm/src/vm/x86_64.rs:28 MIN_MEMORY_MIB = 128, an even number of MiB).
         vcpus: 1,
-        memory_mib: 256,
+        memory_mib: 128,
         shares: vec![Share {
             dir: root.path().to_path_buf(),
             read_only: false,
