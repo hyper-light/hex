@@ -3,14 +3,15 @@
 //! of calls on several boxes and programs at once, played on the class under test and on the
 //! simulator, whose trace is the oracle. A real class passes a scenario when what it shows at each
 //! step (a refusal's kind, a box's state and exit, a program's end and output) is what the simulator
-//! shows for the same class. A step that reads a box waits up to [`PATIENCE`] for the oracle's answer,
+//! shows for the same class. A step that reads a box waits up to the suite's learned patience
+//! ([`conformance::patience`]) for the oracle's answer,
 //! so a runtime that reports a fact late passes and one that never reports it fails (§4: the wait is on
 //! the fact, bounded). Each scenario cites `HEX-DIFF-n`.
 
 use std::io::{PipeReader, PipeWriter, Read, Write};
 use std::time::{Duration, Instant};
 
-use crate::conformance::{self, Act, Failure, Fixture, PATIENCE, STILL_RUNNING};
+use crate::conformance::{self, Act, Failure, Fixture};
 use crate::sim::{SimFixture, SimRuntime};
 use crate::{
     Bounds, BoxId, BoxState, Class, ClassSpec, Exit, Proc, Refusal, Runtime, Signal, Stdio,
@@ -65,11 +66,12 @@ pub enum Step {
     Exec(usize, Act),
     /// Write these words and a newline to program `p`'s stdin, then close it.
     Feed(usize, &'static str),
-    /// Wait up to [`PATIENCE`] (in a suite run) for program `p` to end, and read its end so.
+    /// Wait up to the suite's learned patience ([`conformance::patience`]) for program `p` to end, and read
+    /// its end so.
     Wait(usize, End),
     /// Read all program `p` wrote to stdout (after it ended).
     Read(usize),
-    /// Watch program `p` for [`STILL_RUNNING`].
+    /// Watch program `p` for the suite's learned watch ([`conformance::still_running`]).
     Running(usize),
     /// Signal box `b`.
     Signal(usize, Signal),
@@ -245,7 +247,7 @@ pub fn run(rt: &dyn Runtime, fx: &dyn Fixture) -> Vec<Failure> {
         }
     };
     for s in SCENARIOS {
-        if let Err(why) = differ(rt, fx, &oracle, s, PATIENCE) {
+        if let Err(why) = differ(rt, fx, &oracle, s, conformance::patience()) {
             failures.push(Failure { case: s.id, why });
         }
     }
@@ -437,13 +439,17 @@ impl Play<'_> {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
+                let asked = Instant::now();
                 match s.proc.wait_for(patience).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
-                    Some(exit) => match end {
-                        End::Exact => Seen::Exit(exit),
-                        End::Ok => Seen::Ok(exit == Exit::Code(0)),
-                        End::Signalled => Seen::Signalled(matches!(exit, Exit::Signal(_))),
-                    },
+                    Some(exit) => {
+                        conformance::ENDS.saw(asked.elapsed());
+                        match end {
+                            End::Exact => Seen::Exit(exit),
+                            End::Ok => Seen::Ok(exit == Exit::Code(0)),
+                            End::Signalled => Seen::Signalled(matches!(exit, Exit::Signal(_))),
+                        }
+                    }
                 }
             }
             Step::Read(p) => {
@@ -463,7 +469,7 @@ impl Play<'_> {
                 let Some(s) = self.started(*p)? else {
                     return Ok(Seen::NeverStarted);
                 };
-                match s.proc.wait_for(STILL_RUNNING).map_err(|e| e.to_string())? {
+                match s.proc.wait_for(conformance::still_running()).map_err(|e| e.to_string())? {
                     None => Seen::StillRunning,
                     Some(exit) => Seen::Exit(exit),
                 }
@@ -497,13 +503,19 @@ impl Play<'_> {
 /// state has no event to wait on, so it is read again after waiting as long as the last read took: at most
 /// half the time reading, at whatever a read costs on this platform.
 fn until(want: Option<&Seen>, patience: Duration, mut look: impl FnMut() -> Seen) -> Seen {
-    let deadline = Instant::now().checked_add(patience);
+    let asked = Instant::now();
+    let deadline = asked.checked_add(patience);
     loop {
         let read = Instant::now();
         let seen = look();
         let took = read.elapsed();
+        if want.is_some_and(|w| *w == seen) {
+            // The answer came: it teaches the suite's learned wait how long a box's answer takes.
+            conformance::ENDS.saw(asked.elapsed());
+            return seen;
+        }
         let late = deadline.is_none_or(|d| Instant::now() >= d);
-        if want.is_none_or(|w| *w == seen) || late {
+        if want.is_none() || late {
             return seen;
         }
         conformance::rest(took);
@@ -684,6 +696,22 @@ mod tests {
         );
     }
 
+    /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
+    /// then twice the slowest of the record and what it has seen; and it only rises. Do: seed one at
+    /// 100 ms, see 30 ms, then 300 ms, then 50 ms. Expect 200 ms, 200 ms, 600 ms, 600 ms.
+    #[test]
+    fn a_learned_wait_starts_at_twice_its_record_and_only_rises() {
+        let ms = Duration::from_millis;
+        let wait = conformance::LearnedWait::new(ms(100));
+        assert_eq!(wait.bound(), ms(200));
+        wait.saw(ms(30));
+        assert_eq!(wait.bound(), ms(200));
+        wait.saw(ms(300));
+        assert_eq!(wait.bound(), ms(600));
+        wait.saw(ms(50));
+        assert_eq!(wait.bound(), ms(600));
+    }
+
     /// Do: read with a look that takes a measurable time and never shows the oracle's answer, for a
     /// patience. Expect: each re-read waits at least as long as the read before it took, so reading holds
     /// at most half the time, at whatever a read costs on this platform (no picked interval).
@@ -859,7 +887,7 @@ mod tests {
             &SimFixture::Process,
             &SimFixture::Process,
             s,
-            PATIENCE,
+            conformance::PATIENCE,
         )
         .unwrap();
         // HEX-DIFF-2 reads the box twice; the second read waited out two lagging readings.

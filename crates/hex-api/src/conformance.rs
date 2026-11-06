@@ -4,6 +4,7 @@
 //! own programs. Each case reads "do X, expect Y"; [`run`] returns the cases that failed and why.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::{
@@ -90,6 +91,51 @@ pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
 /// on adalundhe-macbook-pro at load 21, 2026-11-06), so the watch is twice that, the x2 the same
 /// false-alarm margin. Each such watch costs that long; the suite has a handful per class.
 pub const STILL_RUNNING: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
+
+/// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
+/// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
+/// node slower than the record is waited for, and no first wait is unbounded.
+pub struct LearnedWait {
+    record: Duration,
+    seen_nanos: AtomicU64,
+}
+
+impl LearnedWait {
+    /// A wait seeded from `record`, the slowest answer on its record.
+    pub const fn new(record: Duration) -> Self {
+        Self {
+            record,
+            seen_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Learns from an answer that came after `answered`.
+    pub fn saw(&self, answered: Duration) {
+        let nanos = u64::try_from(answered.as_nanos()).unwrap_or(u64::MAX);
+        self.seen_nanos.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Its bound now: twice the slowest of its record and what it has seen.
+    pub fn bound(&self) -> Duration {
+        let seen = Duration::from_nanos(self.seen_nanos.load(Ordering::Relaxed));
+        self.record.max(seen).saturating_mul(2)
+    }
+}
+
+/// The suite's waits for a program's end or a box's answer, seeded from [`SLOWEST_RECORDED_END`]; each wait
+/// that gets its answer teaches it. [`PATIENCE`] and [`STILL_RUNNING`] are its bound before any sample.
+pub static ENDS: LearnedWait = LearnedWait::new(SLOWEST_RECORDED_END);
+
+/// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
+pub fn patience() -> Duration {
+    ENDS.bound()
+}
+
+/// How long a case watches now a program it expects to keep running: [`ENDS`]' bound, since an end may
+/// come as late as the slowest seen.
+pub fn still_running() -> Duration {
+    ENDS.bound()
+}
 
 /// Every case, in order.
 pub const CASES: &[Case] = &[
@@ -196,9 +242,14 @@ fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Resul
 }
 
 fn ended(p: &mut Box<dyn crate::Proc>) -> Result<Exit, String> {
-    p.wait_for(PATIENCE)
+    let patience = patience();
+    let asked = std::time::Instant::now();
+    let exit = p
+        .wait_for(patience)
         .map_err(|e| format!("wait: {e}"))?
-        .ok_or_else(|| format!("still running after {PATIENCE:?}"))
+        .ok_or_else(|| format!("still running after {patience:?}"))?;
+    ENDS.saw(asked.elapsed());
+    Ok(exit)
 }
 
 fn piped() -> Result<(std::io::PipeReader, std::io::PipeWriter), String> {
@@ -267,7 +318,7 @@ fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         .div_ceil(2)
         .max(1);
     let mut n = 0usize;
-    while program.exec_size() <= limit.block {
+    while limit.size(&program) <= limit.block {
         program
             .env
             .push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
@@ -302,7 +353,7 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut p = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = p.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    let early = p.wait_for(still_running()).map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;
@@ -504,16 +555,19 @@ pub(crate) fn rest(d: Duration) {
 /// wait on, never a guessed delay. A box's state has no event to wait on, so it is read again after
 /// waiting as long as the last read took: at most half the time reading, at this platform's cost.
 fn exit_of(rt: &dyn Runtime, id: &BoxId) -> Result<crate::BoxInfo, String> {
-    let deadline = std::time::Instant::now().checked_add(PATIENCE);
+    let patience = patience();
+    let asked = std::time::Instant::now();
+    let deadline = asked.checked_add(patience);
     loop {
         let read = std::time::Instant::now();
         let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
         let took = read.elapsed();
         if info.exit.is_some() {
+            ENDS.saw(asked.elapsed());
             return Ok(info);
         }
         if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
-            return Err(format!("no exit reported after {PATIENCE:?}: {info:?}"));
+            return Err(format!("no exit reported after {patience:?}: {info:?}"));
         }
         rest(took);
     }

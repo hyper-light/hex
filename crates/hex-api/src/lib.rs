@@ -31,6 +31,6 @@ pub use bounds::{Bounds, IoRates, MIN_CPU_MILLI, MIN_MEMORY};
 pub use id::BoxId;
 pub use runtime::{BoxInfo, BoxState, Exit, Proc, Refusal, Runtime, Signal, Usage};
 pub use spec::{
-    BoxSpec, Class, ClassSpec, ExecLimit, Mount, Network, OciSpec, Program, Rootfs, Stdio,
-    StringUnit, User, drive_absolute,
+    BlockCount, BoxSpec, Class, ClassSpec, ExecLimit, Mount, Network, OciSpec, Program, Rootfs,
+    Stdio, StringUnit, User, drive_absolute,
 };
