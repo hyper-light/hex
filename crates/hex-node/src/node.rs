@@ -1647,8 +1647,13 @@ impl crate::serve::Host for Node {
 /// [`Refusal::Os`]), `op` and `said`. Past it the socket would answer the call's refusal with another,
 /// losing what it named (CLAUDE.md §3).
 fn why_room(op: &str, said: &str) -> usize {
-    let _ = (op, said);
+    // A tag byte and two u32 lengths.
+    const TAG_AND_LENGTHS: usize = 9;
     wire::MAX_MESSAGE
+        .saturating_sub(wire::HEADER_BYTES)
+        .saturating_sub(TAG_AND_LENGTHS)
+        .saturating_sub(op.len())
+        .saturating_sub(said.len())
 }
 
 /// What a box still holds when a delete can't empty it: each surviving process with its command,
