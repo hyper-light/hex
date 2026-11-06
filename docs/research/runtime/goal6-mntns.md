@@ -498,9 +498,24 @@ threads, Docker's paths, the whole create's p99 improving with it, and no priori
   namespaces hold their `/proc/net` files. An in-process node at the container's 1,024 holds none, and enters each
   namespace to check it.
 
-**In process, it isn't met yet**: part 19's p99 was 351-761 us at 2caebe2 and 508-1,373 us at 1e5e956 (below). A
-confirming in-process A/B at the shipped node's limit (`HEXBENCH_NOFILE=hard`) is below this section, recorded either
-way. If the gap is the limit, both readings meet the bar for the node as it ships.
+**In process, at the container's descriptor limit (1,024), it isn't met**: part 19's p99 was 351-761 us at 2caebe2
+and 508-1,373 us at 1e5e956 (below). **At the shipped node's limit it is, in process too**, so the gap was the limit,
+and both readings meet the bar for the node as it ships:
+- The run: cp/t7-g6 0e09a57 (parked procs on by default merged in), unit hex-g6-nofileab-20261106T092741Z.
+  - The unit first ran all 7 gates, every one exit 0, then the root lab as root: oci_box, oci_spec_box, oci_lsm and
+    oci_seccomp all pass.
+  - Then, timed 09:29:51-09:32:15Z under the lock, at load 16-28: one release binary, in process, at
+    `HEXBENCH_NOFILE=hard` (soft 524,288, as the installer sets a node's; each cell's `nofile.txt` says it).
+  - Parked procs off (A) against on (B), 4 interleaved rounds at 6 and 12 loops, 2,000 creates at 8 in flight,
+    8,000 idle threads, owner bundles with reuse on, Docker's paths, the `/dev` pool on.
+- Part 19's p99: **175-263 us in all 8 B cells** (off: 468-583). Its p50: 32-35 us (off: 194-212). Its unpreempted p99:
+  79-225 us (off: 335-476).
+- The create's p99 is lower in 6 of 8 pairs (1.108-1.704 ms on, 1.251-1.878 off).
+- The delete's p50 is about 40% higher (0.655-0.700 ms on; off 0.451-0.520, one cell 0.873).
+- Every B cell: 1,992 hits, 0 misses, 0 dry.
+- Why the limit matters: at 1,024 an in-process node's kept network namespaces hold no `/proc/net` files, and every
+  check enters its namespace instead. Even the off arm's p99 here (468-583 us) is well under the earlier in-process
+  runs' 1,018-2,132.
 
 The run of record is still the 7.2 host's, after Ada's upgrade (`mntns_record.sh host`, with parked procs and the
 faster mount way as defaults). What follows is the record as it stood before the socket A/B.
