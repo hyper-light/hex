@@ -4,6 +4,7 @@
 //! walks the host's files, flat and counted (CLAUDE.md §2, §11), and refuses by name what is never
 //! staged: a device node, a FIFO, a socket, a name that isn't UTF-8.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::net::Shutdown;
@@ -65,7 +66,14 @@ pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Re
     // The relay answers even when it refused part way, and its answer says why better than a broken
     // pipe: read it first.
     let _ = conn.shutdown(Shutdown::Write);
-    match (answer(conn.as_mut()), sent) {
+    // The answer is read first, so the relay has removed a partial copy before this returns. Its
+    // answer names a stream cut short when the packer refused part way; the packer's own refusal names
+    // the entry, and is the one returned, unless it was only the connection failing.
+    let answered = answer(conn.as_mut());
+    match (answered, sent) {
+        (_, Err(why)) if !matches!(&why, Refusal::Os { op, .. } if op.starts_with("sending")) => {
+            Err(why)
+        }
         (Ok(()), Ok(())) => Ok(()),
         (Err(why), _) | (Ok(()), Err(why)) => Err(why),
     }
@@ -380,6 +388,57 @@ fn copy(out: &mut dyn Write, path: &Path, size: u64) -> Result<(), Refusal> {
 /// one this much longer is refused rather than read without end (CLAUDE.md §2).
 const TRAILING: u64 = 1 << 20;
 
+/// The most bytes of one PAX record read: it carries a path and a link target (each at most the path bound,
+/// 4,095 bytes) and times, ids and names, so 64 KiB holds any a root needs eight times over; one longer is
+/// refused (CLAUDE.md §2).
+const PAX_RECORD: usize = 64 << 10;
+
+/// An extension record's whole text, at most `bound` bytes; `None` past it.
+fn record(entry: &mut dyn Read, bound: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut text = Vec::new();
+    entry
+        .take(u64::try_from(bound).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut text)?;
+    if text.len() > bound {
+        return Ok(None);
+    }
+    Ok(Some(text))
+}
+
+/// A PAX record's `path` and `linkpath`, each when it names one.
+type PaxNames = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// A PAX record's `path` and `linkpath`, refusing by name what staging can't honour: a `size` (a file past
+/// the 8 GiB a header's size field holds) and GNU's sparse keys; the rest (times, ids, names) staging
+/// doesn't carry.
+fn pax_keys(
+    text: &[u8],
+    bad: &dyn Fn(&str, &dyn std::fmt::Display) -> Refusal,
+) -> Result<PaxNames, Refusal> {
+    let (mut path, mut link) = (None, None);
+    for ext in tar::PaxExtensions::new(text) {
+        let ext = ext.map_err(|e| bad("a PAX record", &e))?;
+        match ext.key_bytes() {
+            b"path" => path = Some(ext.value_bytes().to_vec()),
+            b"linkpath" => link = Some(ext.value_bytes().to_vec()),
+            b"size" => {
+                return Err(bad(
+                    "a PAX record",
+                    &"a PAX size (a file past 8 GiB) is never staged",
+                ));
+            }
+            key if key.starts_with(b"GNU.sparse.") => {
+                return Err(bad(
+                    "a PAX record",
+                    &"a sparse entry is never staged (none of the roots it serves holds one, §4a)",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok((path, link))
+}
+
 /// A tarball's bytes, counted as they're read, so its end is checked against its last entry's.
 struct Counted<R> {
     inner: R,
@@ -430,12 +489,85 @@ fn tarball(
     };
     out.write_all(&files::head(&root, limits).map_err(refused)?)
         .map_err(|e| Refusal::os("sending staged files", e))?;
-    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    // The archive's own symbolic links: an entry written through one is refused, wherever it points.
+    let mut links: BTreeSet<String> = BTreeSet::new();
     // Where the last entry's data ends: the archive must go on past it to its end-of-archive block.
     let mut end: u64 = 0;
-    for entry in archive.entries().map_err(|e| bad("reading it", &e))? {
+    // The extension records before an entry (GNU long name and link, PAX), each read within its bound:
+    // the crate's own reading of them holds a record whole, however long (tar 0.4.46 `archive.rs:418-440`),
+    // so it reads raw entries and Hex reads the records.
+    let mut long_name: Option<Vec<u8>> = None;
+    let mut long_link: Option<Vec<u8>> = None;
+    let mut pax: Option<Vec<u8>> = None;
+    let entries = archive
+        .entries()
+        .map_err(|e| bad("reading it", &e))?
+        .raw(true);
+    for entry in entries {
         let mut entry = entry.map_err(|e| bad("reading an entry", &e))?;
-        let raw = entry.path_bytes().into_owned();
+        let kind = entry.header().entry_type();
+        let size = entry.size();
+        end = entry
+            .raw_file_position()
+            .checked_add(size.div_ceil(512).saturating_mul(512))
+            .ok_or_else(|| bad("an entry", &"its size is past any archive's"))?;
+        match kind {
+            tar::EntryType::GNULongName | tar::EntryType::GNULongLink => {
+                let slot = if kind == tar::EntryType::GNULongName {
+                    &mut long_name
+                } else {
+                    &mut long_link
+                };
+                if slot.is_some() {
+                    return Err(bad("a long-name record", &"two describe one entry"));
+                }
+                // Its text and a NUL, at most the path bound.
+                let mut text = record(&mut entry, limits.path.saturating_add(1))
+                    .map_err(|e| bad("a long-name record", &e))?
+                    .ok_or_else(|| bad("a long-name record", &"its name is past the path bound"))?;
+                while text.last() == Some(&0) {
+                    text.pop();
+                }
+                *slot = Some(text);
+                continue;
+            }
+            tar::EntryType::XHeader | tar::EntryType::XGlobalHeader => {
+                let text = record(&mut entry, PAX_RECORD)
+                    .map_err(|e| bad("a PAX record", &e))?
+                    .ok_or_else(|| {
+                        bad("a PAX record", &format!("it is past {PAX_RECORD} bytes"))
+                    })?;
+                if kind == tar::EntryType::XHeader {
+                    if pax.is_some() {
+                        return Err(bad("a PAX record", &"two describe one entry"));
+                    }
+                    pax = Some(text);
+                } else {
+                    // A global record's keys apply to every entry; only those staging can't honour matter.
+                    pax_keys(&text, &bad)?;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let (pax_path, pax_link) = match pax.take() {
+            Some(text) => pax_keys(&text, &bad)?,
+            None => (None, None),
+        };
+        let raw = match long_name.take().or(pax_path) {
+            Some(name) => name,
+            None => entry.header().path_bytes().into_owned(),
+        };
+        let link = long_link.take().or(pax_link).or_else(|| {
+            entry
+                .header()
+                .link_name_bytes()
+                .map(std::borrow::Cow::into_owned)
+        });
+        if raw.len() > limits.path {
+            return Err(bad("an entry", &"its name is past the path bound"));
+        }
         let shown = String::from_utf8_lossy(&raw).into_owned();
         let text = std::str::from_utf8(&raw).map_err(|_| bad(&shown, &"its name isn't UTF-8"))?;
         if text.starts_with('/') {
@@ -448,13 +580,22 @@ fn tarball(
         if rel.split('/').any(|part| part == "..") {
             return Err(bad(&shown, &"its name has a '..' component"));
         }
-        let size = entry.size();
-        end = entry
-            .raw_file_position()
-            .checked_add(size.div_ceil(512).saturating_mul(512))
-            .ok_or_else(|| bad(&shown, &"its size is past any archive's"))?;
         if rel.is_empty() || rel == "." {
             continue;
+        }
+        // Written through one of the archive's own links: refused whatever the link's text, which stays
+        // legal itself (a root's absolute links resolve inside it when used).
+        let mut prefix_end: usize = 0;
+        for part in rel.split('/') {
+            prefix_end = prefix_end.saturating_add(part.len());
+            let prefix = rel.get(..prefix_end).unwrap_or(rel);
+            if prefix.len() < rel.len() && links.contains(prefix) {
+                return Err(bad(
+                    &shown,
+                    &format!("it's written through the symbolic link {prefix:?}"),
+                ));
+            }
+            prefix_end = prefix_end.saturating_add(1);
         }
         let parent = rel.rsplit_once('/').map_or("", |(p, _)| p);
         if !parent.is_empty() && !dirs.contains(parent) {
@@ -469,13 +610,21 @@ fn tarball(
             tar::EntryType::Directory => What::Dir,
             tar::EntryType::Regular | tar::EntryType::Continuous => What::File { size },
             tar::EntryType::Symlink => {
-                let target = entry
-                    .link_name_bytes()
-                    .ok_or_else(|| bad(&shown, &"a symbolic link with no target"))?
-                    .into_owned();
+                let target = link
+                    .clone()
+                    .ok_or_else(|| bad(&shown, &"a symbolic link with no target"))?;
+                if target.len() > limits.path {
+                    return Err(bad(&shown, &"its target is past the path bound"));
+                }
                 let target = String::from_utf8(target)
                     .map_err(|_| bad(&shown, &"its target isn't UTF-8"))?;
                 What::Symlink { target }
+            }
+            tar::EntryType::GNUSparse => {
+                return Err(bad(
+                    &shown,
+                    &"a sparse entry is never staged (none of the roots it serves holds one, §4a)",
+                ));
             }
             tar::EntryType::Char | tar::EntryType::Block => {
                 return Err(bad(&shown, &"a device node is never staged"));
@@ -505,6 +654,9 @@ fn tarball(
             What::Dir => {
                 dirs.insert(rel.to_owned());
             }
+            What::Symlink { .. } => {
+                links.insert(rel.to_owned());
+            }
             What::File { size } if size > 0 => {
                 let sent =
                     io::copy(&mut (&mut entry).take(size), out).map_err(|e| bad(&shown, &e))?;
@@ -512,8 +664,11 @@ fn tarball(
                     return Err(bad(&shown, &"the archive ends inside it"));
                 }
             }
-            What::File { .. } | What::Symlink { .. } => {}
+            What::File { .. } => {}
         }
+    }
+    if long_name.is_some() || long_link.is_some() || pax.is_some() {
+        return Err(bad("its end", &"an extension record has no entry after it"));
     }
     let mut counted = archive.into_inner();
     if counted.read < end.saturating_add(512) {
