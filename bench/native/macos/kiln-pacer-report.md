@@ -50,7 +50,13 @@ remote runners for production's delay on adacachy, and paces those runners (SIGS
 budget. The Macs' work never runs on adacachy, so pacing them can't relieve it.
 
 The pacer's own record of the pids it stopped is `~/.local/share/kiln/agent/headroom/paced/*.json` on each
-Mac. It has not been read for this report, because the Macs were unreachable.
+Mac, and it holds nothing for these runs:
+- On adas-mac-studio.local-2 the folder is empty, and was itself made at 08:16Z on 2026-11-06, after the
+  failing kiln runs there (~05:50-06:30Z). So the record can neither confirm nor deny which pids were
+  stopped then.
+- studio-2's copy couldn't be read: it didn't answer kiln.
+
+The A/B above is the evidence. That the pacer keeps no record of what it stopped is a gap of its own.
 
 ## Ask
 
