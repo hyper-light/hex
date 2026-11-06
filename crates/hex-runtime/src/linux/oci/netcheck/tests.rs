@@ -463,38 +463,60 @@ fn a_dumps_reads_are_bounded_by_its_bytes() {
     let done = msg(NLMSG_DONE, 1, &[0, 0, 0, 0]);
     rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
     let mut scratch = Scratch::default();
-    assert_eq!(ask(&ours, &[0; NLMSG_HDR], &mut scratch), Ok(()));
+    assert_eq!(
+        ask(&ours, &[0; NLMSG_HDR], &mut scratch, &Slowest::new()),
+        Ok(())
+    );
     assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
 }
 
-/// Ada's 2026-11-06 rule (no picked constants): a wait on the kernel's answer has its deadline learned from the
-/// answer times seen, by RFC 6298's estimator. Do: ask its deadline before any sample, after a first sample of
-/// 8 ms, after a second of 16 ms, then after a wait that passed it, and after enough of those. Expect: 1 s before
-/// any (2.1); 8 + 4 x 4 = 24 ms after the first (2.2); SRTT 9 ms and RTTVAR 3/4 x 4 + 1/4 x 8 = 5 ms, so 29 ms, after
-/// the second (2.3); doubled to 58 ms past it (5.5); and never past 60 s (2.5).
+/// Ada's 2026-11-06 rule, the lead's failure bound of the same day: a wait on the kernel's answer is bounded by twice
+/// the slowest answer this process has recorded, and by nothing before it has recorded one. Do: ask the bound before
+/// any answer, after answers of 3 ms and 1 ms, and after one of 5 ms. Expect: none (a calibration read comes
+/// first), then 6 ms, then 10 ms.
 #[test]
-fn a_waits_deadline_is_learned_from_the_answer_times_seen() {
+fn a_waits_bound_is_twice_the_slowest_answer_recorded() {
     let ms = Duration::from_millis;
-    let mut rto = Rto::new();
-    assert_eq!(rto.deadline(), Duration::from_secs(1));
-    rto.sample(ms(8));
-    assert_eq!(rto.deadline(), ms(24));
-    rto.sample(ms(16));
-    assert_eq!(rto.deadline(), ms(29));
-    rto.expired();
-    assert_eq!(rto.deadline(), ms(58));
-    for _ in 0..64 {
-        rto.expired();
-    }
-    assert_eq!(rto.deadline(), Duration::from_secs(60));
+    let slowest = Slowest::new();
+    assert_eq!(slowest.bound(), None);
+    slowest.record(ms(3));
+    slowest.record(ms(1));
+    assert_eq!(slowest.bound(), Some(ms(6)));
+    slowest.record(ms(5));
+    assert_eq!(slowest.bound(), Some(ms(10)));
 }
 
-/// Ada's 2026-11-06 rule: a check's reads of a dump wait as long as its thread has learned answers take, and one
-/// that passes that is refused and doubles it (RFC 6298 (5.5)), not held for a second picked. Do: learn a 1 ms
-/// answer time, then dump through a socket pair whose other end never answers. Expect: refused as unreadable, at
-/// once rather than for good, and the deadline doubled from 3 ms to 6 ms.
+/// The lead's failure bound (2026-11-06): with no answer recorded, a dump is the calibration read, waited for with no
+/// bound, and its answers' times arm it. Do: dump, with nothing recorded, through a socket pair whose other end has
+/// answered each of the five dumps with its end. Expect: the dumps read, and the bound armed.
 #[test]
-fn a_dump_unanswered_past_its_learned_deadline_is_refused_and_the_deadline_doubled() {
+fn an_uncalibrated_dump_is_waited_for_and_arms_the_bound() {
+    let (ours, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    for seq in 1..=5 {
+        let done = msg(NLMSG_DONE, seq, &[0, 0, 0, 0]);
+        rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
+    }
+    let slowest = Slowest::new();
+    let mut scratch = Scratch::default();
+    assert_eq!(
+        dumps(&ours, &mut scratch, &slowest),
+        Ok(vec![Vec::new(); DUMPS.len()])
+    );
+    assert!(slowest.bound().is_some());
+}
+
+/// The lead's failure bound (2026-11-06): a read unanswered past twice the slowest answer recorded is refused, and
+/// counts as an answer at least that slow, so the next wait is twice it. Do: record a 1 ms answer, then dump through
+/// a socket pair whose other end never answers. Expect: refused as unreadable once 2 ms have passed, not held for
+/// good, and the bound now 4 ms.
+#[test]
+fn a_dump_unanswered_past_its_bound_is_refused_and_counted_that_slow() {
     let (ours, _theirs) = rustix::net::socketpair(
         AddressFamily::UNIX,
         SocketType::SEQPACKET,
@@ -502,9 +524,12 @@ fn a_dump_unanswered_past_its_learned_deadline_is_refused_and_the_deadline_doubl
         None,
     )
     .unwrap();
+    let slowest = Slowest::new();
+    slowest.record(Duration::from_millis(1));
     let mut scratch = Scratch::default();
-    scratch.answers.sample(Duration::from_millis(1));
-    assert_eq!(scratch.answers.deadline(), Duration::from_millis(3));
-    assert_eq!(dumps(&ours, &mut scratch), Err(Refused::Unreadable));
-    assert_eq!(scratch.answers.deadline(), Duration::from_millis(6));
+    assert_eq!(
+        dumps(&ours, &mut scratch, &slowest),
+        Err(Refused::Unreadable)
+    );
+    assert_eq!(slowest.bound(), Some(Duration::from_millis(4)));
 }
