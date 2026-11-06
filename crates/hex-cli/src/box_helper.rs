@@ -1,8 +1,7 @@
-//! `hex __box-helper --socket <path> --users <uid,…> --nproc <n>`: the macOS box helper daemon (native
+//! `hex __box-helper --socket <path> --users <uid,…>`: the macOS box helper daemon (native
 //! plan step 2). Run as root — by launchd from the installer, or by hand in the lab — it serves the node
 //! over the Unix socket at `--socket`, starting each box's programs as one of the pool `--users` and
-//! capping each box's processes at `--nproc` (`RLIMIT_NPROC`; by default `kern.maxprocperuid`, what macOS
-//! lets any user hold). macOS only; the node reaches it through
+//! capping each box's processes (`RLIMIT_NPROC`) at `kern.maxprocperuid`, what macOS lets any user hold. macOS only; the node reaches it through
 //! [`hex_runtime::macos::helper_client`]. It does one job and refuses every other request by name
 //! ([`hex_core::helper`]).
 
@@ -18,7 +17,6 @@ use hex_runtime::macos::sys;
 pub fn main(args: &[String]) -> u8 {
     let mut socket: Option<String> = None;
     let mut users: Vec<u32> = Vec::new();
-    let mut nproc: Option<u32> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -41,16 +39,6 @@ pub fn main(args: &[String]) -> u8 {
                     }
                 }
             }
-            "--nproc" => match it.next().and_then(|s| s.parse::<u32>().ok()) {
-                Some(n) => nproc = Some(n),
-                None => {
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "hex __box-helper: --nproc takes a process count"
-                    );
-                    return 2;
-                }
-            },
             other => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -74,12 +62,8 @@ pub fn main(args: &[String]) -> u8 {
         );
         return 2;
     }
-    // A box's user may hold what macOS lets any user hold, unless the installer names another cap.
-    let per_uid = match nproc {
-        Some(n) => Ok(Ok(n)),
-        None => sys::max_processes_per_uid().map(u32::try_from),
-    };
-    let nproc = match per_uid {
+    // A box's user may hold what macOS lets any user hold.
+    let nproc = match sys::max_processes_per_uid().map(u32::try_from) {
         Ok(Ok(n)) => n,
         Ok(Err(_)) => u32::MAX,
         Err(e) => {

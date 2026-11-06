@@ -52,7 +52,7 @@ fn main() -> ExitCode {
             return ExitCode::from(hex_cli::box_run::main(&box_args));
         }
     }
-    // The macOS box helper daemon (`hex __box-helper --socket … --users … --nproc …`); macOS only.
+    // The macOS box helper daemon (`hex __box-helper --socket … --users …`); macOS only.
     #[cfg(target_os = "macos")]
     if let [Some(first), rest @ ..] = args.as_slice()
         && first == "__box-helper"
