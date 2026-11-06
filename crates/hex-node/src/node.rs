@@ -96,7 +96,6 @@ pub(crate) fn wait_empty(cg: &BoxCgroup) -> Result<(bool, Duration), Refusal> {
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
-
 /// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
 /// runtime directory is shared with every node of this user on the host, so its entries are theirs as
 /// well as this node's. RFC 6298's timer over the listings before it (decision 9; Ada's 2026-11-06 rule):
@@ -1887,7 +1886,11 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(e) => return Err(listing(e)),
     };
-    let learned = || LISTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let learned = || {
+        LISTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
     let patience = learned().deadline();
     let began = Instant::now();
     let deadline = began.checked_add(patience);

@@ -127,8 +127,9 @@ impl Turns {
         self.waited.load(Ordering::Relaxed)
     }
 
-    /// How long a wait for a turn lasts now, as learned.
-    pub fn patience(&self) -> Duration {
+    /// How long a wait for a turn lasts now, as learned: what the tests read.
+    #[cfg(test)]
+    fn patience(&self) -> Duration {
         self.held
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

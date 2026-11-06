@@ -192,7 +192,10 @@ fn the_descriptors_beside_the_bounds_are_counted() {
 fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace() {
     use rustix::process::Rlimit;
 
-    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
 
     let at = |soft: Option<u64>| {
         FilesBound::of(
@@ -243,7 +246,10 @@ fn the_files_bound_is_what_the_soft_limit_leaves_past_the_node_four_a_namespace(
 fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     use rustix::process::Rlimit;
 
-    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
 
     let at = |netns: usize, ipc_uts: usize| {
         FilesBound::of(
@@ -326,7 +332,10 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
 fn the_files_bound_counts_the_mounts_made_ahead() {
     use rustix::process::Rlimit;
 
-    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
 
     let at = |devfs: bool| {
         FilesBound::of(
@@ -360,7 +369,10 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
 fn the_files_bound_counts_the_prepared_dev_mounts() {
     use rustix::process::Rlimit;
 
-    let beside = open_descriptors(&rustix::process::getrlimit(rustix::process::Resource::Nofile)).unwrap();
+    let beside = open_descriptors(&rustix::process::getrlimit(
+        rustix::process::Resource::Nofile,
+    ))
+    .unwrap();
 
     let at = |devfs: bool| {
         FilesBound::of(

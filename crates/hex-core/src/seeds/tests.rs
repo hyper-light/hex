@@ -105,7 +105,6 @@ enum Phase {
 /// nothing itself: it takes the pool's seeds and tickets once the test has checked each is new, and the pool's choice
 /// of slot or seed once the test has checked the design allows it.
 struct Oracle {
-    limits: Limits,
     seeds: Vec<Option<(SeedId, Phase)>>,
     up_before: Vec<bool>,
     line: Vec<(Ticket, Duration, Duration)>,
@@ -124,7 +123,6 @@ impl Oracle {
     fn new(limits: Limits) -> Self {
         let slots = limits.seeds.get();
         Self {
-            limits,
             seeds: vec![None; slots],
             up_before: vec![false; slots],
             line: Vec::new(),

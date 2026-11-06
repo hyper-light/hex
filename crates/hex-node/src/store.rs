@@ -35,7 +35,6 @@ use std::sync::Arc;
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::RFC_6298;

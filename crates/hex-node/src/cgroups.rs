@@ -13,7 +13,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxOwner, Refusal, Usage};
 use hex_core::cgroup::Baseline;
@@ -48,7 +47,6 @@ const REMOVALS: usize = PER_NODE;
 /// dropper's queue holds as many, so a tree handed to it never finds it full: a proc past the bound isn't made,
 /// counted (`procs_capped`), and its init parks without one.
 pub const PROCS_ALIVE: usize = PER_NODE;
-
 
 /// The device policy a cgroup's own program is under: `None` when it carries none.
 type Policy = Option<Vec<Insn>>;

@@ -151,7 +151,10 @@ fn a_later_answer_smooths_rttvar_first() {
     p.answered(ms(200));
     assert_eq!(
         p.smoothed(),
-        Some((Duration::from_micros(112_500), Duration::from_micros(62_500)))
+        Some((
+            Duration::from_micros(112_500),
+            Duration::from_micros(62_500)
+        ))
     );
     assert_eq!(p.deadline(), Duration::from_micros(362_500));
 }
