@@ -34,6 +34,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use hex_api::{Proc, Program};
 
+use super::directory::Directory;
 use super::helper_daemon::Privileged;
 use super::sys::Spawn;
 
@@ -153,6 +154,8 @@ struct ExcReply {
 pub struct RealPriv {
     /// The daemon's exception receive port.
     recv: MachPort,
+    /// Where the pool grows, when it does (the installed helper); `None` for a fixed pool (the lab's).
+    directory: Option<Directory>,
 }
 
 impl RealPriv {
@@ -172,11 +175,59 @@ impl RealPriv {
         if kr != KERN_SUCCESS {
             return Err(io::Error::other(format!("mach_port_insert_right: {kr}")));
         }
-        Ok(Self { recv })
+        Ok(Self {
+            recv,
+            directory: None,
+        })
+    }
+
+    /// The same backend, growing its pool through `directory`.
+    #[must_use]
+    pub fn with_directory(mut self, directory: Directory) -> Self {
+        self.directory = Some(directory);
+        self
+    }
+
+    fn directory(&self) -> io::Result<&Directory> {
+        self.directory.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this helper serves a fixed pool (--users) and makes no box users",
+            )
+        })
     }
 }
 
 impl Privileged for RealPriv {
+    fn pool_users(&self) -> io::Result<Vec<(String, u32)>> {
+        match &self.directory {
+            Some(d) => d.pool_users(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn taken_ids(&self) -> io::Result<std::collections::BTreeSet<u32>> {
+        self.directory()?.taken_ids()
+    }
+
+    fn make_user(&self, account: &hex_core::pool::Account) -> io::Result<()> {
+        self.directory()?.make_user(account)
+    }
+
+    fn peak(&self) -> io::Result<u32> {
+        match &self.directory {
+            Some(d) => d.peak(),
+            None => Ok(0),
+        }
+    }
+
+    fn keep_peak(&self, peak: u32) -> io::Result<()> {
+        match &self.directory {
+            Some(d) => d.keep_peak(peak),
+            None => Ok(()),
+        }
+    }
+
     fn spawn(
         &self,
         uid: u32,

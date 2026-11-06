@@ -1,14 +1,18 @@
-//! `hex __box-helper --socket <path> --users <uid,…>`: the macOS box helper daemon (native plan step 2).
-//! Run as root — by launchd from the installer, or by hand in the lab — it serves the node over the Unix
-//! socket at `--socket`, starting each box's programs as one of the pool `--users` and capping each box's
+//! `hex __box-helper --socket <path> (--users <uid,…> | --pool-group <name> --pool-gid <gid> --manifest
+//! <path> --peak-file <path>)`: the macOS box helper daemon (native plan step 2). Run as root — by launchd
+//! from the installer, or by hand in the lab — it serves the node over the Unix socket at `--socket`,
+//! starting each box's programs as a pool user: the fixed `--users` (the lab's), or a pool it grows on
+//! demand in the `--pool-group`, recording each account it makes in the installer's `--manifest` and the
+//! peak of concurrent boxes in `--peak-file` (the installer's, the lead's call 2026-11-06). It caps each box's
 //! processes (`RLIMIT_NPROC`) at its spec's `pids_max`, else at the platform's per-uid ceiling
 //! (`kern.maxprocperuid`, read at start). macOS only; the node reaches it through
 //! [`hex_runtime::macos::helper_client`]. It does one job and refuses every other request by name
 //! ([`hex_core::helper`]).
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use hex_runtime::macos::directory::Directory;
 use hex_runtime::macos::helper_daemon::Daemon;
 use hex_runtime::macos::helper_sys::RealPriv;
 use hex_runtime::macos::sys;
@@ -18,6 +22,10 @@ use hex_runtime::macos::sys;
 pub fn main(args: &[String]) -> u8 {
     let mut socket: Option<String> = None;
     let mut users: Vec<u32> = Vec::new();
+    let mut group: Option<String> = None;
+    let mut gid: Option<u32> = None;
+    let mut manifest: Option<PathBuf> = None;
+    let mut peak_file: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -27,6 +35,10 @@ pub fn main(args: &[String]) -> u8 {
                     v.split(',').filter_map(|u| u.parse::<u32>().ok()).collect()
                 });
             }
+            "--pool-group" => group = it.next().cloned(),
+            "--pool-gid" => gid = it.next().and_then(|g| g.parse().ok()),
+            "--manifest" => manifest = it.next().map(PathBuf::from),
+            "--peak-file" => peak_file = it.next().map(PathBuf::from),
             other => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
@@ -43,13 +55,25 @@ pub fn main(args: &[String]) -> u8 {
         );
         return 2;
     };
-    if users.is_empty() {
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "hex __box-helper: --users <uid,…> is required (the installer's pool)"
-        );
-        return 2;
-    }
+    let directory = match (group, gid, manifest, peak_file) {
+        (Some(group), Some(gid), Some(manifest), Some(peak_file)) if users.is_empty() => {
+            Some(Directory {
+                group,
+                gid,
+                manifest,
+                peak_file,
+            })
+        }
+        (None, None, None, None) if !users.is_empty() => None,
+        _ => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "hex __box-helper: give --users <uid,…> (a fixed pool), or --pool-group, --pool-gid, \
+                 --manifest and --peak-file (a pool grown on demand), not both"
+            );
+            return 2;
+        }
+    };
     let per_uid = match sys::max_processes_per_uid().map(u32::try_from) {
         Ok(Ok(n)) => n,
         Ok(Err(_)) => u32::MAX,
@@ -71,7 +95,17 @@ pub fn main(args: &[String]) -> u8 {
             return 1;
         }
     };
-    let daemon = std::sync::Arc::new(Daemon::new(ops, users, per_uid));
+    let daemon = match directory {
+        None => Daemon::new(ops, users, per_uid),
+        Some(directory) => match Daemon::growing(ops.with_directory(directory), per_uid) {
+            Ok(daemon) => daemon,
+            Err(e) => {
+                let _ = writeln!(std::io::stderr().lock(), "hex __box-helper: {e}");
+                return 1;
+            }
+        },
+    };
+    let daemon = std::sync::Arc::new(daemon);
     // Rebalance on EXC_RESOURCE crossings on a thread beside the socket (event-driven, no polling).
     let pumper = std::sync::Arc::clone(&daemon);
     std::thread::spawn(move || {

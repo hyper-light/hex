@@ -155,6 +155,9 @@ pub enum Refused {
     Malformed(String),
     #[error("the box {0} has no live member")]
     NotRunning(BoxId),
+    /// Growing the pool by an account failed: the directory read or write that did, named.
+    #[error("growing the box users' pool failed: {0}")]
+    GrowFailed(String),
 }
 
 impl Request {
@@ -200,6 +203,7 @@ fn refused_tag(r: &Refused) -> u8 {
         Refused::NotPermitted(_) => 4,
         Refused::Malformed(_) => 5,
         Refused::NotRunning(_) => 6,
+        Refused::GrowFailed(_) => 7,
     }
 }
 
@@ -279,9 +283,10 @@ pub fn encode_answer(version: u16, id: u64, answer: &Answer) -> Result<Vec<u8>, 
                 Refused::UnknownBox(b) | Refused::AlreadyAcquired(b) | Refused::NotRunning(b) => {
                     w.string(b.as_str())?
                 }
-                Refused::StartFailed(m) | Refused::NotPermitted(m) | Refused::Malformed(m) => {
-                    w.string(m)?
-                }
+                Refused::StartFailed(m)
+                | Refused::NotPermitted(m)
+                | Refused::Malformed(m)
+                | Refused::GrowFailed(m) => w.string(m)?,
                 Refused::NoFreeUser => {}
             }
         }
@@ -448,6 +453,7 @@ fn read_refused(r: &mut Reader<'_>) -> Result<Refused, Fault> {
         4 => Refused::NotPermitted(r.string("reason")?),
         5 => Refused::Malformed(r.string("reason")?),
         6 => Refused::NotRunning(wire::box_id(r)?),
+        7 => Refused::GrowFailed(r.string("reason")?),
         t => return Err(Fault::value("refusal", format!("variant {t}"))),
     })
 }

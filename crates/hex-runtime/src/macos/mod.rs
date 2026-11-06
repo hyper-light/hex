@@ -5,6 +5,7 @@
 //! recovery and socket that wrap it on Linux (`hex-node`) are not yet cross-OS, so this holds its boxes
 //! in memory and is driven in process.
 
+pub mod directory;
 pub mod helper_client;
 pub mod helper_daemon;
 pub mod helper_sys;

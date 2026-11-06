@@ -260,6 +260,10 @@ fn refusal(r: Refused) -> Refusal {
             what: "helper request",
             why,
         },
+        Refused::GrowFailed(why) => Refusal::Os {
+            op: "grow the box users' pool through the helper",
+            why,
+        },
         Refused::Malformed(why) => {
             Refusal::Broken(format!("the helper rejected a message as malformed: {why}"))
         }

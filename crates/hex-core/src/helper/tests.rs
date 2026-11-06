@@ -135,6 +135,7 @@ fn answers_round_trip() {
         Answer::Refused(Refused::NotPermitted("exec arbitrary".to_owned())),
         Answer::Refused(Refused::Malformed("bad id".to_owned())),
         Answer::Refused(Refused::NotRunning(box_id("b9"))),
+        Answer::Refused(Refused::GrowFailed("dscl: eDSPermissionError".to_owned())),
         Answer::Waited(None),
         Answer::Waited(Some(Exit::Code(3))),
         Answer::Waited(Some(Exit::Signal(9))),

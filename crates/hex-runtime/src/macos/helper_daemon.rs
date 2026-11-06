@@ -23,6 +23,7 @@ use hex_api::{BoxId, Exit, Proc, Program, Refusal, Signal};
 use hex_core::boxuser::{self, Bound, Use};
 use hex_core::darwin;
 use hex_core::helper::{self, Answer, Refused, Request, START_FDS, State};
+use hex_core::pool::{Account, ROLE_UIDS, next_account};
 
 use super::helper_client::{recv_framed, send_framed};
 use super::sys;
@@ -247,6 +248,36 @@ pub trait Privileged {
     fn next_crossing(&self, _timeout_ms: u32) -> io::Result<bool> {
         Ok(false)
     }
+
+    /// The pool's users now, each name and uid, as the directory lists them: the users named by
+    /// [`hex_core::pool::pool_index`] in the pool's group (default: none, a fixed pool).
+    fn pool_users(&self) -> io::Result<Vec<(String, u32)>> {
+        Ok(Vec::new())
+    }
+
+    /// Every id held now: users' uids, groups' gids and running processes' uids (default: none).
+    fn taken_ids(&self) -> io::Result<BTreeSet<u32>> {
+        Ok(BTreeSet::new())
+    }
+
+    /// Makes `account` from the helper's fixed template (hidden, no shell, no home, no password, in the pool's
+    /// group) and records it for uninstall (default: refused, a backend that makes no accounts).
+    fn make_user(&self, account: &Account) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("this backend makes no box users ({})", account.name),
+        ))
+    }
+
+    /// The peak of concurrent box-user boxes kept across restarts (default: 0).
+    fn peak(&self) -> io::Result<u32> {
+        Ok(0)
+    }
+
+    /// Keeps a new peak of concurrent box-user boxes across restarts (default: kept nowhere).
+    fn keep_peak(&self, _peak: u32) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The macOS box helper daemon over a [`Privileged`] backend: a pool of box users, the boxes it manages,
@@ -260,10 +291,24 @@ pub struct Daemon<P: Privileged> {
     boxes: Mutex<BTreeMap<BoxId, Tracked>>,
     /// The programs the daemon started, until the node reads each one's end ([`kids`]).
     kids: Mutex<Kids>,
+    /// The pool users' names, every one it holds, busy or free: the next account follows the highest
+    /// (`hex_core::pool`). `None` for a fixed pool, which never grows.
+    names: Option<Mutex<Vec<String>>>,
+    /// The most box-user boxes held at once, kept across restarts through [`Privileged::keep_peak`].
+    peak: Mutex<u32>,
     /// The platform's per-uid process ceiling (`kern.maxprocperuid`, read at start): a box's process cap
     /// when its spec names no `pids_max`. Each box has a uid of its own, and XNU's fork counts a uid's
     /// processes against its `RLIMIT_NPROC` (`bsd/kern/kern_fork.c:269-283`).
     per_uid: u32,
+}
+
+/// How many users a daemon's pool holds now, busy or free.
+fn listed_len<P: Privileged>(daemon: &Daemon<P>) -> usize {
+    daemon
+        .names
+        .as_ref()
+        .and_then(|n| n.lock().ok().map(|n| n.len()))
+        .unwrap_or(0)
 }
 
 impl<P: Privileged> Daemon<P> {
@@ -277,7 +322,85 @@ impl<P: Privileged> Daemon<P> {
             pool: Mutex::new(pool),
             boxes: Mutex::new(BTreeMap::new()),
             kids: Mutex::new(Kids::new(graves)),
+            names: None,
+            peak: Mutex::new(0),
             per_uid,
+        }
+    }
+
+    /// A daemon whose pool grows on demand (the lead's call, 2026-11-06): its users are read from the
+    /// directory, and accounts are made up to the kept peak of concurrent boxes, so a restart doesn't make
+    /// boxes wait on account creation. Ended boxes' unread ends are kept for as many boxes as the role range
+    /// holds users.
+    pub fn growing(ops: P, per_uid: u32) -> Result<Self, Refusal> {
+        let listed = ops
+            .pool_users()
+            .map_err(|e| Refusal::os("listing the box users' pool", e))?;
+        let peak = ops
+            .peak()
+            .map_err(|e| Refusal::os("reading the box users' kept peak", e))?;
+        let graves = ROLE_UIDS.clone().count();
+        let daemon = Self {
+            ops,
+            pool: Mutex::new(listed.iter().map(|(_, uid)| *uid).collect()),
+            boxes: Mutex::new(BTreeMap::new()),
+            kids: Mutex::new(Kids::new(graves)),
+            names: Some(Mutex::new(listed.into_iter().map(|(n, _)| n).collect())),
+            peak: Mutex::new(peak),
+            per_uid,
+        };
+        // Counted to the kept peak; a full role range stops it short (the next box is refused by name).
+        for _ in listed_len(&daemon)..usize::try_from(peak).unwrap_or(0) {
+            let uid = match daemon.grow() {
+                Ok(uid) => uid,
+                Err(Refused::NoFreeUser) => break,
+                Err(r) => {
+                    return Err(Refusal::Broken(format!(
+                        "growing the pool to its kept peak: {r}"
+                    )));
+                }
+            };
+            daemon
+                .pool
+                .lock()
+                .map_err(|_| Refusal::Broken("the daemon's pool lock is poisoned".to_owned()))?
+                .push(uid);
+        }
+        Ok(daemon)
+    }
+
+    /// Makes one more pool user, from `hex_core::pool` alone (no name or attribute from any caller), at an id
+    /// read free just before: another installer may have taken it since install. Refused by name when the
+    /// role range is full or the directory refuses.
+    fn grow(&self) -> Result<u32, Refused> {
+        let Some(names) = &self.names else {
+            return Err(Refused::NoFreeUser);
+        };
+        let mut names = names.lock().map_err(|_| {
+            Refused::GrowFailed("the daemon's pool names lock is poisoned".to_owned())
+        })?;
+        let taken = self
+            .ops
+            .taken_ids()
+            .map_err(|e| Refused::GrowFailed(format!("reading the ids held: {e}")))?;
+        let account = next_account(&names, &taken).ok_or(Refused::NoFreeUser)?;
+        self.ops
+            .make_user(&account)
+            .map_err(|e| Refused::GrowFailed(format!("making {}: {e}", account.name)))?;
+        names.push(account.name);
+        Ok(account.uid)
+    }
+
+    /// Keeps a new peak when `held` box-user boxes are held at once.
+    fn note_held(&self, held: usize) {
+        let Ok(held) = u32::try_from(held) else {
+            return;
+        };
+        if let Ok(mut peak) = self.peak.lock()
+            && held > *peak
+            && self.ops.keep_peak(held).is_ok()
+        {
+            *peak = held;
         }
     }
 
@@ -408,10 +531,16 @@ impl<P: Privileged> Daemon<P> {
         let Ok(mut pool) = self.pool.lock() else {
             return poisoned("the daemon's pool");
         };
-        let Some(uid) = pool.pop() else {
-            return Answer::Refused(Refused::NoFreeUser);
-        };
+        let popped = pool.pop();
         drop(pool);
+        // No free user: the pool grows by one account, made for this box.
+        let uid = match popped {
+            Some(uid) => uid,
+            None => match self.grow() {
+                Ok(uid) => uid,
+                Err(r) => return Answer::Refused(r),
+            },
+        };
         // The box's own limit, never past the platform's per-uid ceiling, which the kernel would hold it to.
         let nproc = pids_max.map_or(self.per_uid, |p| p.min(self.per_uid));
         match self.kids() {
@@ -419,6 +548,7 @@ impl<P: Privileged> Daemon<P> {
             Err(_) => return poisoned("the daemon's programs"),
         }
         boxes.insert(box_id, Tracked::new(uid, bound, reserve, nproc));
+        self.note_held(boxes.len());
         Answer::Acquired { uid }
     }
 
