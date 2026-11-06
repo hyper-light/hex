@@ -1,0 +1,72 @@
+commit e9d8842 (e9d8842 runs with the tip's lab scripts, bench only)
+ 17:58:53 up 1 day,  5:36,  0 users,  load average: 30.11, 31.68, 28.90
+fs.inotify.max_user_instances 8192
+co-tenant containers 6
+
+when: 2026-11-06T01:55:04Z on fedora, kernel 6.19.10-300.fc44.x86_64, up up 1 day, 5 hours, 32 minutes
+ordered by: the Hex lead, 2026-11-06T01:52Z, on Ada's 01:45Z word
+old fs.inotify.max_user_instances: 128
+command: docker run --rm --privileged --network=none registry.fedoraproject.org/fedora:44 sh -c 'echo 8192 > /proc/sys/fs/inotify/max_user_instances'
+command exit: 0
+new fs.inotify.max_user_instances: 8192
+unchanged: max_user_watches 510332, max_queued_events 16384
+note: not persistent; a reboot restores 128
+
+
+## the machine: 2026-11-06T01:58:58Z, systemd 259 (259.9-1.fc44), kernel 6.19.10-300.fc44.x86_64
+systemd: degraded
+Created symlink '/etc/systemd/system/dbus.service' → '/usr/lib/systemd/system/dbus-broker.service'.
+Created symlink '/etc/systemd/user/dbus.service' → '/usr/lib/systemd/user/dbus-broker.service'.
+Created symlink '/etc/systemd/user/sockets.target.wants/dbus.socket' → '/usr/lib/systemd/user/dbus.socket'.
+DelegateControllers=cpu memory pids
+user manager: running
+
+## fresh of Hex: the installer's check lists nothing
+nothing of Hex's is left
+
+## HEX-INST-1: before install, a node in a delegated unit of the user's is refused both classes by name
+/: controllers [cpuset cpu io memory hugetlb pids rdma misc dmem], enabled [cpu memory pids]
+/user.slice: controllers [cpu memory pids], enabled [cpu memory pids]
+/user.slice/user-1000.slice: controllers [cpu memory pids], enabled [cpu memory pids]
+/user.slice/user-1000.slice/user@1000.service: controllers [cpu memory pids], enabled [cpu memory pids]
+/user.slice/user-1000.slice/user@1000.service/app.slice: controllers [cpu memory pids], enabled [memory pids]
+exit 1: hex node: the box root of the process and oci classes isn't available on linux: the io controller isn't delegated to /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/run-p504-i47766618.service (it has cpu memory pids); Hex's installer sets the delegation up: sudo bash scripts/install/linux.sh install
+PASS: refused by name
+
+## the plan (install --dry-run)
+folder /usr/local/bin
+folder /etc/systemd/user/default.target.wants
+file /usr/local/bin/hex
+file /etc/systemd/system/user@.service.d/50-hex-delegate.conf
+file /etc/systemd/user/hex-node.service
+link /etc/systemd/user/default.target.wants/hex-node.service
+service hexlab
+dir /home/hexlab/.local/state/hex
+dir /run/user/1000/hex
+dir /run/user/1000/hex-node
+cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-node.service
+folder /var/lib/hex-install
+file /var/lib/hex-install/manifest
+
+## install: the one admin step
+Created symlink '/etc/systemd/user/default.target.wants/hex-node.service' → '/etc/systemd/user/hex-node.service'.
+hexlab's node serves /run/user/1000/hex/node.sock
+installed; uninstall with: sudo bash /opt/install/linux.sh uninstall
+DelegateControllers=cpu io memory pids
+left: folder /usr/local/bin
+left: folder /etc/systemd/user/default.target.wants
+left: file /usr/local/bin/hex
+left: file /etc/systemd/system/user@.service.d/50-hex-delegate.conf
+left: file /etc/systemd/user/hex-node.service
+left: link /etc/systemd/user/default.target.wants/hex-node.service
+left: service hexlab
+left: dir /home/hexlab/.local/state/hex
+left: dir /run/user/1000/hex
+left: dir /run/user/1000/hex-node
+left: cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/hex-node.service
+left: folder /var/lib/hex-install
+left: file /var/lib/hex-install/manifest
+
+## HEX-INST-5: the installed node's soft descriptor limit covers its own and every kept namespace's files
+Max open files            524288               524288               files
+FAIL: soft 524288 < 594304
