@@ -71,6 +71,10 @@ trap untrace EXIT
 
 mkdir "$I" || { echo "refusing: no trace instance $I" >&2; exit 4; }
 echo 0 > "$I/tracing_on"
+# 8,192 KiB a CPU: the reader container streams the instance as it records, and at this size no event was lost in
+# create_tail.md's runs 1, 2 and 5 (create-tail-20261105T032219Z, 3,208,594 lines; 20261105T035431Z, 4,784,275;
+# 20261105T112335Z, N=10,000), each "none dropped". A run that loses any says how many in env.txt's dropped line; the
+# reader's handshake makes a rerun at a larger size a new run, not a retry here (tracebuf.sh's way).
 echo 8192 > "$I/buffer_size_kb"
 OURS='comm == "seam_oci" || comm == "sleep" || comm == "true" || comm ~ "hex*"'
 echo "prev_comm == \"seam_oci\" || prev_comm == \"sleep\" || prev_comm == \"true\" || prev_comm ~ \"hex*\" || next_comm == \"seam_oci\" || next_comm == \"sleep\" || next_comm == \"true\" || next_comm ~ \"hex*\"" \

@@ -24,6 +24,7 @@
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-3}
 OUT=/opt/out; mkdir -p /run/err
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 
 # The OCI pass's bundles (oci_inside.sh): the `sleep` container seam_oci's lifecycle creates, and the `true` one
 # its command line names.
@@ -164,10 +165,10 @@ trap unprobe EXIT
 # traced <out name> <n> <warmup> [detail|-] [bin dir]: seam_oci's lifecycle phase with the tracer on around create,
 # its trace in <out name>.txt and the instance's per-CPU counts in <out name>.stats (create_breakdown.py refuses a
 # trace that lost events); `detail` adds the opens' entries; the binaries are the bin dir's (/opt/bin unless named).
-traced() {
+traced_once() {
   local name=$1 n=$2 warmup=$3 events=$EVENTS rc=0 bin=${5:-/opt/bin}
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $events $PROBES; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
@@ -185,6 +186,8 @@ traced() {
   untrace
   return $rc
 }
+# Its buffer starts at 4,096 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+traced() { grown 4096 "$OUT/$1.stats" traced_once "$@"; }
 
 # switch <out name> <lifecycles>: goal 5 plan step 2's AC-e. A throughput phase pinned to 8 creates in flight
 # (seam_oci's HEXBENCH_THROUGHPUT_CONC) with the root's parts' events on — setns (the net-ns join that opens the
@@ -192,10 +195,10 @@ traced() {
 # whole phase. It passes no HEXBENCH_TRACE, so seam_oci never toggles tracing_on; this turns it on once and leaves
 # it, so every init's events are caught however they interleave. create_breakdown.py switch reads <out name>.txt
 # against <out name>.stats (its per-CPU counts).
-switch() {
+switch_once() {
   local name=$1 lc=$2 rc=0
   local SW="syscalls/sys_exit_clone3 syscalls/sys_enter_setns syscalls/sys_exit_setns syscalls/sys_enter_chroot syscalls/sys_exit_chroot syscalls/sys_enter_pivot_root syscalls/sys_exit_pivot_root syscalls/sys_enter_chdir"
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 8192 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $SW; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
@@ -215,6 +218,8 @@ switch() {
   untrace
   return $rc
 }
+# Its buffer starts at 8,192 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+switch() { grown 8192 "$OUT/$1.stats" switch_once "$@"; }
 
 # mounts_trace <out name> <lifecycles> <concurrency>: goal 5 plan step 3's per-call trace of the init's mounts. A
 # throughput phase at <concurrency> creates in flight with every system call the hex processes make traced by
@@ -227,7 +232,7 @@ switch() {
 # are traced too, so an init preempted while either ran on its CPU has its wait charged to the softirq or the work
 # function (the fedora traces of goal 5 step 3 found ksoftirqd and the kworkers first to the CPU in the tail), and so
 # are the softirqs run on a hex process as an interrupt returns, which take its CPU without a switch.
-mounts_trace() {
+mounts_trace_once() {
   local name=$1 lc=$2 conc=$3 rc=0 ev f nssem
   local MT="raw_syscalls/sys_enter raw_syscalls/sys_exit sched/sched_switch sched/sched_process_fork
     irq/softirq_entry irq/softirq_exit workqueue/workqueue_execute_start workqueue/workqueue_execute_end"
@@ -245,7 +250,7 @@ mounts_trace() {
          || { echo "the namespace_sem probes couldn't be made" >&2; return 1; }
        MT="$MT hexcb/nsw hexcb/nsr" ;;
   esac
-  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 16384 > "$I/buffer_size_kb" \
+  mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo "${TRACE_KB:?}" > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
   for ev in $MT; do
     case $ev in
@@ -276,6 +281,8 @@ mounts_trace() {
   for ev in nsw nsr; do echo "-:hexcb/$ev" >> "$T/kprobe_events" 2>/dev/null; done
   return $rc
 }
+# Its buffer starts at 16,384 KiB a CPU, the runs of record's, and grows while the trace lost events (tracebuf.sh).
+mounts_trace() { grown 16384 "$OUT/$1.stats" mounts_trace_once "$@"; }
 
 # Where the node's records and the containers' state go (seam_oci keeps them under $HOME/.cache/hex-t7/ociseam, as
 # in the OCI pass): their filesystem decides what an fsync costs.

@@ -27,6 +27,7 @@
 set -uo pipefail
 N=${N:-300}; WARMUP=${WARMUP:-20}; EXECS=${EXECS:-50}; MEMORY_N=${MEMORY_N:-400}; SUSTAINED=${SUSTAINED:-10000}
 OUT=/opt/out; mkdir -p /run/err
+. "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/tracebuf.sh"
 ALL_NS='[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]'
 bundle() { # bundle <dir> <args json>
   local B=$1; mkdir -p "$B/rootfs"/{usr,proc,dev,tmp}
@@ -55,15 +56,23 @@ seam() { # seam <out json> <n> <warmup> [wrapper...]: seam_oci's lifecycle phase
   T=/sys/kernel/tracing
   mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracefs at $T"; exit 4; }
   I="$T/instances/hexseed-$$"; mkdir "$I" || { echo "refusing: no trace instance at $I"; exit 4; }
-  echo mono > "$I/trace_clock"; echo 32768 > "$I/buffer_size_kb"; echo 0 > "$I/tracing_on"
+  echo mono > "$I/trace_clock"; echo 0 > "$I/tracing_on"
   for ev in sched/sched_process_fork sched/sched_waking; do
     echo 'comm == "hex"' > "$I/events/$ev/filter"; echo 1 > "$I/events/$ev/enable"
   done
   echo 'next_comm == "hex"' > "$I/events/sched/sched_switch/filter"; echo 1 > "$I/events/sched/sched_switch/enable"
-  echo 1 > "$I/tracing_on"
-  seam /run/out.clone.json "$N" "$WARMUP" > /run/clone.log 2>&1 || echo "the clone's run failed: $(tail -3 /run/clone.log)"
-  echo 0 > "$I/tracing_on"; cat "$I/trace" > "$OUT/trace.txt"
-  echo "clone: trace overruns $(grep -h overrun "$I"/per_cpu/cpu*/stats | awk -F': ' '{s+=$2} END{print s+0}'), $((N + WARMUP)) creates"
+  # The run is read from the buffer once it ends, so the buffer holds all of it: 32,768 KiB a CPU to start, the runs
+  # of record's, and the run is made again at twice it while the trace lost events (tracebuf.sh).
+  clone_run() {
+    echo "${TRACE_KB:?}" > "$I/buffer_size_kb" || { echo "a buffer of $TRACE_KB KiB a CPU wasn't taken"; return 1; }
+    : > "$I/trace"
+    echo 1 > "$I/tracing_on"
+    seam /run/out.clone.json "$N" "$WARMUP" > /run/clone.log 2>&1 || echo "the clone's run failed: $(tail -3 /run/clone.log)"
+    echo 0 > "$I/tracing_on"; cat "$I/trace" > "$OUT/trace.txt"
+    for c in "$I"/per_cpu/cpu*; do echo "== ${c##*/}"; cat "$c/stats"; done > /run/clone.stats
+  }
+  grown 32768 /run/clone.stats clone_run || echo "the clone's trace lost events at every buffer the kernel took"
+  echo "clone: trace overruns $(lost_in /run/clone.stats), $((N + WARMUP)) creates"
   python3 -I /opt/lab/probes/seed_path.py "$OUT/trace.txt"
   rmdir "$I" 2>/dev/null || true
   # The execs.
