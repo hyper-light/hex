@@ -150,6 +150,17 @@ pub struct Capabilities {
     pub ambient: Vec<String>,
 }
 
+impl Process {
+    /// The stack limit this process runs under: its own RLIMIT_STACK soft limit where the spec sets one,
+    /// else the node's, which it inherits.
+    pub fn stack(&self) -> u64 {
+        self.rlimits
+            .iter()
+            .find(|r| r.kind == "RLIMIT_STACK")
+            .map_or_else(crate::linux::process::node_stack, |r| r.soft)
+    }
+}
+
 /// A resource limit (`setrlimit`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -466,22 +477,11 @@ impl Spec {
         if self.oci_version.is_empty() {
             return Err(OciError::Config("ociVersion is empty".to_owned()));
         }
-        // The init's arguments and environment, counted as execve counts them and held to this kernel's
-        // bound before anything is made, so no box is left whose init can't start (HEX-RT-14).
+        // The init's arguments and environment, counted as execve counts them and held to the bound of the
+        // box's own stack (its RLIMIT_STACK, else the node's) before anything is made, so no box is left whose
+        // init can't start (HEX-RT-14).
         if let Some(p) = &self.process {
-            let init = hex_api::Program {
-                args: p.args.clone(),
-                env: p
-                    .env
-                    .iter()
-                    .map(|e| {
-                        let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
-                        (k.to_owned(), v.to_owned())
-                    })
-                    .collect(),
-                ..hex_api::Program::default()
-            };
-            init.fits(&crate::linux::process::exec_limit())
+            crate::linux::process::fits_process(&p.args, &p.env, p.stack())
                 .map_err(|e| OciError::Config(format!("process: {e}")))?;
         }
         if self.root.path.is_empty() {

@@ -218,6 +218,10 @@ fn prepare(req: &Request, init: OwnedFd, specs: &mut Specs) -> Result<Prepared, 
         seam: true,
     };
     let process = exec::process_for(spec.process.clone().unwrap_or_default(), &request);
+    // The program as it will run, the container's environment with the request's over it, held to the
+    // bound of the box's own stack before anything is cloned (HEX-RT-14).
+    crate::linux::process::fits_process(&process.args, &process.env, process.stack())
+        .map_err(|e| OciError::Program(e.to_string()))?;
     Ok(Prepared {
         becoming: init::Becoming::of(&process, spec.linux.seccomp.as_ref())?,
         launch: Launch::of(&process)?,
@@ -451,13 +455,15 @@ pub fn exec_direct(
     cgroup: Option<BorrowedFd<'_>>,
     specs: &mut Specs,
 ) -> Result<Direct, OciError> {
+    // Prepared first, whichever way the program then starts: a program past its box's exec bound is refused
+    // here, by name, before a seed is asked (HEX-RT-14).
+    let p = prepare(req, init, specs)?;
     if UNSURE.with(std::cell::Cell::get) {
-        return Ok(Direct::Unable(init));
+        return Ok(Direct::Unable(p.init));
     }
     let Some(cgroup) = cgroup else {
-        return Ok(Direct::Unable(init));
+        return Ok(Direct::Unable(p.init));
     };
-    let p = prepare(req, init, specs)?;
     let blocked = sys::block_signals()?;
     let set = p.joins.contains(Ns::PROCESS_ID);
     if set {

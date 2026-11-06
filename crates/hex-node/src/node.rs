@@ -631,7 +631,6 @@ impl Node {
         stdio: Stdio,
     ) -> Result<Box<dyn Proc>, Refusal> {
         program.check()?;
-        program.fits(&process::exec_limit())?;
         let env = program
             .env
             .iter()

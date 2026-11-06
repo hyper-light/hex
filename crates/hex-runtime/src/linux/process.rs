@@ -7,6 +7,7 @@ use std::ffi::CString;
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Command, Stdio as StdStdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hex_api::{ExecLimit, Program, Refusal, Stdio};
 use rustix::fs::{Mode, OFlags};
@@ -15,19 +16,77 @@ use super::cgroup::BoxCgroup;
 use super::proc::PidfdProc;
 use super::sys;
 
-/// The bound Linux's execve puts on a program's arguments and environment, read now, kind (a)
-/// (docs/research/runtime/exec-size-bounds.md): the strings may take a quarter of the stack's soft limit,
-/// capped at three quarters of `_STK_LIM` and never under `ARG_MAX` (`fs/exec.c:410-416`, v6.19), and
-/// any one string `MAX_ARG_STRLEN`, 32 pages (`include/uapi/linux/binfmts.h:15`). glibc's
-/// `sysconf(_SC_ARG_MAX)` skips the kernel's cap, so the kernel's own formula is read here.
+/// The node's own RLIMIT_STACK soft limit, read once (0 until then; `u64::MAX` for none) and again only when
+/// the kernel answers E2BIG past the bound Hex held a program to (learned).
+static NODE_STACK: AtomicU64 = AtomicU64::new(0);
+/// How many times the node's stack limit was read, so a test can tell no exec reads it.
+static STACK_READS: AtomicU64 = AtomicU64::new(0);
+
+fn read_stack() -> u64 {
+    STACK_READS.fetch_add(1, Ordering::Relaxed);
+    rustix::process::getrlimit(rustix::process::Resource::Stack)
+        .current
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+/// The node's RLIMIT_STACK soft limit: read on first use, then kept.
+pub fn node_stack() -> u64 {
+    match NODE_STACK.load(Ordering::Relaxed) {
+        0 => {
+            let stack = read_stack();
+            NODE_STACK.store(stack, Ordering::Relaxed);
+            stack
+        }
+        stack => stack,
+    }
+}
+
+/// Reads the node's stack limit again, after the kernel refused what its last reading admitted.
+pub fn relearn_stack() {
+    NODE_STACK.store(read_stack(), Ordering::Relaxed);
+}
+
+/// How many times the node's stack limit has been read.
+pub fn stack_reads() -> u64 {
+    STACK_READS.load(Ordering::Relaxed)
+}
+
+/// The bound a box's programs are held to: [`exec_limit_for`] the node's own stack limit, read once.
 pub fn exec_limit() -> ExecLimit {
+    exec_limit_for(node_stack())
+}
+
+/// Holds a spec's process (its arguments and `KEY=VALUE` environment, as execve takes them) to the bound
+/// of a box whose stack limit is `stack`.
+pub fn fits_process(args: &[String], env: &[String], stack: u64) -> Result<(), Refusal> {
+    let program = Program {
+        args: args.to_vec(),
+        env: env
+            .iter()
+            .map(|e| {
+                let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                (k.to_owned(), v.to_owned())
+            })
+            .collect(),
+        ..Program::default()
+    };
+    program.fits(&exec_limit_for(stack))
+}
+
+/// The bound Linux's execve puts on a program's arguments and environment in a process whose RLIMIT_STACK
+/// soft limit is `stack`, kind (a) (docs/research/runtime/exec-size-bounds.md): the strings may take a
+/// quarter of the stack, capped at three quarters of `_STK_LIM` and never under `ARG_MAX`
+/// (`fs/exec.c:410-416`, v6.19), and any one string `MAX_ARG_STRLEN`, 32 pages
+/// (`include/uapi/linux/binfmts.h:15`). glibc's `sysconf(_SC_ARG_MAX)` skips the kernel's cap, so the
+/// kernel's own formula is used. No system call: the page size is the auxiliary vector's.
+pub fn exec_limit_for(stack: u64) -> ExecLimit {
     // `_STK_LIM`, include/uapi/linux/resource.h:66, and `ARG_MAX`, include/uapi/linux/limits.h:8 (v6.19).
     const STK_LIM: u64 = 8 << 20;
     const ARG_MAX: u64 = 131_072;
     // `MAX_ARG_STRLEN` is this many pages, include/uapi/linux/binfmts.h:15.
     const MAX_ARG_STRLEN_PAGES: usize = 32;
-    let stack = rustix::process::getrlimit(rustix::process::Resource::Stack).current;
-    let quarter = stack.map_or(u64::MAX, |s| s.checked_div(4).unwrap_or(0));
+    let quarter = stack.checked_div(4).unwrap_or(0);
     let cap = STK_LIM.checked_div(4).unwrap_or(0).saturating_mul(3);
     let block = cap.min(quarter).max(ARG_MAX);
     ExecLimit {
@@ -35,7 +94,7 @@ pub fn exec_limit() -> ExecLimit {
         counts: hex_api::BlockCount::Execve,
         string: Some(rustix::param::page_size().saturating_mul(MAX_ARG_STRLEN_PAGES)),
         unit: hex_api::StringUnit::Bytes,
-        source: "Linux's execve (a quarter of RLIMIT_STACK, fs/exec.c)",
+        source: "Linux's execve (a quarter of the box's RLIMIT_STACK, fs/exec.c)",
     }
 }
 
@@ -53,9 +112,21 @@ pub fn exec(cg: &BoxCgroup, program: &Program, stdio: Stdio) -> Result<PidfdProc
         what: "program",
         why: "no arguments".to_owned(),
     })?;
-    let failed = |e: std::io::Error| Refusal::Os {
-        op: "starting a program in a box",
-        why: format!("{first}: {e}"),
+    let failed = |e: std::io::Error| {
+        if e.raw_os_error() == Some(rustix::io::Errno::TOOBIG.raw_os_error()) {
+            // The kernel refused what the bound admitted: its stack limit changed. Learn it again.
+            relearn_stack();
+            return Refusal::Invalid {
+                what: "program",
+                why: format!(
+                    "{first}: the kernel refused its arguments and environment (E2BIG); the node's stack limit is read again"
+                ),
+            };
+        }
+        Refusal::Os {
+            op: "starting a program in a box",
+            why: format!("{first}: {e}"),
+        }
     };
     let stdio = [
         stdio
