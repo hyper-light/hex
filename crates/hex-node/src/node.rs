@@ -919,6 +919,9 @@ impl Node {
             }
             if slot.is_none() {
                 cg.remove()?;
+                // Gone from either root, so a later create of this id needs no lookup to find it absent.
+                self.oci_boxes.forget(id.as_str());
+                self.root.forget(id.as_str());
             }
         }
         // The directories the box owns: those its record names (a box made before its node kept
