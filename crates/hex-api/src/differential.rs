@@ -688,12 +688,13 @@ mod tests {
     fn a_reread_waits_as_long_as_the_last_read_took() {
         let reads = std::cell::RefCell::new(Vec::new());
         let want = Seen::Listed(true);
-        until(Some(&want), Duration::from_millis(300), || {
+        until(Some(&want), Duration::from_millis(600), || {
             let start = Instant::now();
-            // A read that costs longer than any fixed re-read interval the suite had (10 ms): the relation
-            // tested holds for any cost, and this one keeps the test under a second.
+            // A read that costs five times the fixed re-read interval the suite had (10 ms), so a fixed
+            // interval fails even where the OS's timer oversleeps it (macOS under load did, at 20 ms):
+            // the relation tested holds for any cost, and the patience fits at least three reads.
             let mut x = 0u64;
-            while start.elapsed() < Duration::from_millis(20) {
+            while start.elapsed() < Duration::from_millis(50) {
                 x = std::hint::black_box(x.wrapping_add(1));
             }
             reads.borrow_mut().push((start, Instant::now()));
