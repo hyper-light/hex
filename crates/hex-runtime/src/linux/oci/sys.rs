@@ -364,7 +364,7 @@ impl Drop for ChildStack {
 }
 
 /// The size of a page.
-fn page_size() -> Result<usize, OciError> {
+pub(crate) fn page_size() -> Result<usize, OciError> {
     // SAFETY: sysconf(3) takes a constant and reads nothing of ours.
     let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     usize::try_from(n).map_err(|_| OciError::os("the page size", "sysconf gave none"))

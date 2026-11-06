@@ -1712,20 +1712,42 @@ fn target(root: &inroot::Root<'_>, dest: &str, make: Make) -> Result<OwnedFd, Oc
         .ok_or_else(|| OciError::Config(format!("{dest} isn't in the container's root")))
 }
 
-/// Most cgroup filesystems a recursive read-only bind is expected to carry: cgroup v2 has one
-/// (`/sys/fs/cgroup`), and a box is refused rather than left part-done past this (CLAUDE.md §2, §3).
-const MAX_CGROUP_SUBMOUNTS: usize = 256;
+/// The most mounts one mount namespace holds, `fs.mount-max` (Documentation/admin-guide/sysctl/fs.rst:126-130), to
+/// which the kernel holds every namespace (fs/namespace.c, `count_mounts`). It bounds every walk here of a
+/// namespace's mounts, the kernel's listing of a bind's submounts and the mount table's lines alike, and so the
+/// cgroup filesystems found among them (CLAUDE.md §2): past it a recursive read-only bind is refused, by name,
+/// rather than its cgroup filesystems left unchecked. Read once a process, when a walk first goes past what one
+/// listing or one read holds (a usual bind's never does), and kept; a create seed reads it before its prune leaves
+/// it no `/proc` ([`super::seed`]), so every init it clones has it.
+static MOUNT_MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
-/// The init's mount table is read into a buffer this large to begin with, so a table that fits is read
-/// in one call and an end-of-file: the kernel makes the table's text anew for each read, so a buffer that
-/// starts small and grows, as `read_to_string`'s does, read a 14-mount table in 9 calls and 65 us in goal
-/// 5 plan step 3's trace (`goal5-mounts.md` §4). 64 KiB holds about 400 lines of about 150 bytes.
-const MOUNTINFO_FIRST_READ: usize = 64 * 1024;
+/// [`MOUNT_MAX`], read from `/proc/sys/fs/mount-max` where this process hasn't yet.
+pub(crate) fn mount_max() -> Result<u64, OciError> {
+    use std::io::Read;
+    const WHAT: &str = "reading fs.mount-max";
+    if let Some(&n) = MOUNT_MAX.get() {
+        return Ok(n);
+    }
+    // An `unsigned int` (fs/namespace.c:42), written in at most 10 digits and a newline.
+    let mut text = String::new();
+    fs::File::open("/proc/sys/fs/mount-max")
+        .and_then(|f| f.take(11).read_to_string(&mut text))
+        .map_err(|e| OciError::os(WHAT, e))?;
+    let n = text
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| OciError::os(WHAT, format!("{text:?}: {e}")))?;
+    Ok(*MOUNT_MAX.get_or_init(|| n))
+}
 
-/// The most of the mount table read: past it a recursive read-only bind is refused, by name, rather
-/// than its cgroup filesystems left unchecked or the table read without end (CLAUDE.md §2, §3). 16 MiB
-/// holds about 100,000 lines.
-const MAX_MOUNTINFO: u64 = 16 * 1024 * 1024;
+/// The refusal of the recursive bind at `destination`, whose walk of the namespace's mounts went past the
+/// namespace's own cap, `max` ([`MOUNT_MAX`]): the mounts changed under the walk faster than it read them.
+fn past_mount_max(destination: &str, max: u64) -> OciError {
+    OciError::Config(format!(
+        "the recursive bind at {destination} carries over fs.mount-max ({max}) mounts to look at for \
+         cgroup filesystems"
+    ))
+}
 
 /// Each cgroup filesystem a recursive read-only bind carries, remounted read-only. A `mount(2)`
 /// remount changes one mount, not the submounts a recursive bind brought with it, so remounting the
@@ -1733,8 +1755,8 @@ const MAX_MOUNTINFO: u64 = 16 * 1024 * 1024;
 /// cgroup filesystem, which stays writable beneath the box's own cgroup mounts over it; this makes it
 /// read-only, so a box holding `CAP_SYS_ADMIN` that unmounts its own cgroup mounts off reaches a
 /// read-only host tree, not a writable one. They are asked of the kernel ([`cgroupfs_listed`]), or
-/// found in the mount table where the kernel can't answer ([`cgroupfs_in_table`]); at most
-/// [`MAX_CGROUP_SUBMOUNTS`] (§2).
+/// found in the mount table where the kernel can't answer ([`cgroupfs_in_table`]); at most as many as the
+/// namespace holds mounts ([`MOUNT_MAX`], §2).
 fn remount_cgroupfs_readonly(
     root: &inroot::Root<'_>,
     destination: &str,
@@ -1761,12 +1783,11 @@ fn remount_cgroupfs_readonly(
     Ok(())
 }
 
-/// Most mounts beneath a recursive read-only bind looked at for its cgroup filesystems: past it the bind
-/// is refused, by name, rather than its cgroup filesystems left unchecked (CLAUDE.md §2, §3). As many as
-/// the mount table's bound, [`MAX_MOUNTINFO`], holds lines.
-const MAX_SUBMOUNTS_LISTED: usize = 100_000;
-
-/// Mount ids `listmount` writes per call.
+/// Mount ids `listmount` writes per call. Not learned or derived: an init lives for one create, so it has no
+/// listing before its own to learn from, and the namespace's cap ([`MOUNT_MAX`], 100,000 by default) would make a
+/// buffer of 800 KB on every create's path, whose pages the init touches (goal5-mounts.md §5 counts each page a
+/// fault in the init's set-up). A usual bind's submounts fit one call (`/sys` carries about ten); a larger one
+/// takes one call more per this many. Unmeasured: a record of its calls against its pages would set it.
 const LISTMOUNT_BATCH: usize = 64;
 
 // `statmount(2)`'s fields this reads and the bits that ask for its strings (v6.19
@@ -1781,18 +1802,20 @@ const STATMOUNT_MNT_POINT_AT: usize = 108;
 const STATMOUNT_FIXED: usize = 512;
 /// `statmount`'s buffer to begin with: the fixed part and 1.5 KiB of strings, a filesystem type and a
 /// mount point of any usual length. Each page of a larger one the init zeroes is a page fault in its
-/// set-up (goal5-mounts.md §5: 4.2 per create at 8.5 KiB), so it grows only when the kernel says the
-/// strings don't fit (`EOVERFLOW`).
+/// set-up: this 2 KiB start (5cccb60) took 2 of the init's faults per create against the 8.5 KiB of
+/// [`STATMOUNT_BUF`], 27.1 against 29.1, and 4.3 us against 9.3 before its `statmount` (fedora, runs
+/// 20261102T052422Z against 052432Z, traced; goal5-mounts.md §5), so it grows only when the kernel says the
+/// strings don't fit (`EOVERFLOW`). The 1.5 KiB within it is unmeasured: the record compares 2 KiB with 8.5.
 const STATMOUNT_FIRST: usize = STATMOUNT_FIXED + 1536;
 /// The most `statmount`'s buffer grows to: the fixed part, then a filesystem type and a mount point,
-/// each at most `PATH_MAX` (4096) with its NUL. A longer one is refused (`EOVERFLOW`), not cut.
-const STATMOUNT_BUF: usize = STATMOUNT_FIXED + 2 * 4096;
+/// each at most [`PATH_MAX`] with its NUL. A longer one is refused (`EOVERFLOW`), not cut.
+const STATMOUNT_BUF: usize = STATMOUNT_FIXED + 2 * PATH_MAX;
 
 /// The cgroup filesystems beneath the bind open as `top_fd`, each as its path under the bind's top,
 /// asked of the kernel (Linux 6.8, `docs/research/runtime/goal5-mounts.md` §2): the bind's unique mount
 /// id (`statx`'s `STATX_MNT_ID_UNIQUE`) and its mount point (`statmount`), the ids of every mount
-/// beneath it (`listmount`), and each one's type and point. Flat: listed in batches, at most
-/// [`MAX_SUBMOUNTS_LISTED`] looked at (§2, §11). `None` where the kernel has no answer (before 6.8: no
+/// beneath it (`listmount`), and each one's type and point. Flat: listed in batches, at most as many looked
+/// at as the namespace holds mounts ([`MOUNT_MAX`], read only for a second batch; §2, §11). `None` where the kernel has no answer (before 6.8: no
 /// unique id, `ENOSYS`), for the table to give instead.
 fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<String>>, OciError> {
     let unique = rustix::fs::StatxFlags::from_bits_retain(libc::STATX_MNT_ID_UNIQUE);
@@ -1808,7 +1831,7 @@ fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<Str
     let top = Path::new(&top);
     let mut found = Vec::new();
     let mut ids = [0u64; LISTMOUNT_BATCH];
-    let (mut last, mut budget) = (0u64, MAX_SUBMOUNTS_LISTED);
+    let (mut last, mut looked) = (0u64, 0u64);
     loop {
         let n = match sys::listmount(stx.stx_mnt_id, last, &mut ids) {
             Ok(n) => n,
@@ -1822,12 +1845,9 @@ fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<Str
             )
         })?;
         for &id in listed {
-            budget = budget.checked_sub(1).ok_or_else(|| {
-                OciError::Config(format!(
-                    "the recursive bind at {destination} carries over {MAX_SUBMOUNTS_LISTED} mounts \
-                     to look at for cgroup filesystems"
-                ))
-            })?;
+            looked = looked
+                .checked_add(1)
+                .ok_or_else(|| past_mount_max(destination, u64::MAX))?;
             let Some((fstype, point)) =
                 mount_info(id, STATMOUNT_FS_TYPE | STATMOUNT_MNT_POINT, &mut buf)?
             else {
@@ -1837,11 +1857,17 @@ fn cgroupfs_listed(top_fd: &OwnedFd, destination: &str) -> Result<Option<Vec<Str
                 continue;
             }
             if let Some(under) = beneath_top(&point, top) {
-                found_one(&mut found, under, destination)?;
+                found.push(under);
             }
         }
         match listed.last() {
-            Some(&id) if n == ids.len() => last = id,
+            Some(&id) if n == ids.len() => {
+                let max = mount_max()?;
+                if looked > max {
+                    return Err(past_mount_max(destination, max));
+                }
+                last = id;
+            }
             _ => break,
         }
     }
@@ -1913,21 +1939,8 @@ fn beneath_top(point: &str, top: &Path) -> Option<String> {
     (!under.is_empty()).then(|| under.into_owned())
 }
 
-/// One more cgroup filesystem found beneath the bind at `destination`, refused past
-/// [`MAX_CGROUP_SUBMOUNTS`].
-fn found_one(found: &mut Vec<String>, under: String, destination: &str) -> Result<(), OciError> {
-    if found.len() >= MAX_CGROUP_SUBMOUNTS {
-        return Err(OciError::Config(format!(
-            "the recursive bind at {destination} carries over {MAX_CGROUP_SUBMOUNTS} cgroup \
-             filesystems to make read-only"
-        )));
-    }
-    found.push(under);
-    Ok(())
-}
-
 /// The cgroup filesystems beneath the bind open as `top_fd`, found in this process's mount table, where
-/// the kernel has no `listmount` (before 6.8). Flat: one bounded pass over the table (§11).
+/// the kernel has no `listmount` (before 6.8). Flat: one bounded pass over the table (§11), read a page at a time.
 fn cgroupfs_in_table(top_fd: &OwnedFd, destination: &str) -> Result<Vec<String>, OciError> {
     let top_real = std::fs::read_link(inroot::fd_path(top_fd))
         .map_err(|e| OciError::os("reading the bind's path", e))?;
@@ -1936,50 +1949,145 @@ fn cgroupfs_in_table(top_fd: &OwnedFd, destination: &str) -> Result<Vec<String>,
     cgroupfs_in_mountinfo(file, &top_real, destination)
 }
 
+/// `PATH_MAX`, the longest path the kernel takes, its NUL included (include/uapi/linux/limits.h:13).
+const PATH_MAX: usize = 4096;
+
+/// The longest mount point the table's walk keeps, as the table writes it: a point a remount can reach is a path
+/// `openat2` takes, under [`PATH_MAX`] with its NUL, and the table writes each of its bytes as at most four (a
+/// space, tab, newline or backslash as `\ooo`, fs/proc_namespace.c:151).
+const MAX_POINT_WRITTEN: usize = 4 * PATH_MAX;
+
 /// The cgroup filesystems beneath `top` in the mount table `table` (proc_pid_mountinfo(5)), for the recursive bind
-/// at `destination`.
+/// at `destination`. One pass, a page at a time, keeping of each line only its mount point and filesystem type:
+/// the kernel hands a reader at most its seq_file's buffer a call, a page unless one line needed more
+/// (fs/seq_file.c:211, :246), so a larger buffer saves no call. Bounded by the kernel's own limits alone: lines by
+/// the namespace's mount cap ([`MOUNT_MAX`], read only when the table runs past its first page), a line by the
+/// most one seq_file record holds, `MAX_RW_COUNT` (`INT_MAX` rounded down to a page; fs/seq_file.c:36,
+/// include/linux/fs.h:2453), and what's kept of a line by [`MAX_POINT_WRITTEN`]. A cgroup filesystem whose point is
+/// past `PATH_MAX` is refused by name: no remount could reach it.
 fn cgroupfs_in_mountinfo(
     table: impl std::io::Read,
     top: &Path,
     destination: &str,
 ) -> Result<Vec<String>, OciError> {
-    let mountinfo = read_mountinfo(table, destination)?;
+    use std::io::BufRead;
+    const WHAT: &str = "reading the mount table";
+    let page = sys::page_size()?;
+    let max_record = u64::try_from(i32::MAX)
+        .ok()
+        .zip(u64::try_from(page).ok())
+        .map(|(max, page)| max & !page.saturating_sub(1))
+        .ok_or_else(|| OciError::os(WHAT, "a page size past 64 bits"))?;
+    let mut table = std::io::BufReader::with_capacity(page, table);
     let mut found = Vec::new();
-    for line in mountinfo.lines() {
-        // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
-        // then the filesystem type.
-        let Some((left, right)) = line.split_once(" - ") else {
-            continue;
-        };
-        if !matches!(right.split(' ').next(), Some("cgroup2") | Some("cgroup")) {
-            continue;
+    let mut line = MountLine::default();
+    let (mut lines, mut reads, mut max) = (0u64, 0u64, None);
+    loop {
+        let chunk = table.fill_buf().map_err(|e| OciError::os(WHAT, e))?;
+        if chunk.is_empty() {
+            break;
         }
-        let Some(point) = left.split(' ').nth(4) else {
-            continue;
-        };
-        if let Some(under) = beneath_top(&unescape_mountpoint(point), top) {
-            found_one(&mut found, under, destination)?;
+        reads = reads.checked_add(1).ok_or_else(|| OciError::os(WHAT, "reads past u64"))?;
+        if reads > 1 && max.is_none() {
+            max = Some(mount_max()?);
         }
+        for &b in chunk {
+            line.bytes = line
+                .bytes
+                .checked_add(1)
+                .filter(|&n| n <= max_record)
+                .ok_or_else(|| OciError::os(WHAT, format!("a line past {max_record} bytes")))?;
+            if b != b'\n' {
+                line.take(b);
+                continue;
+            }
+            lines = lines
+                .checked_add(1)
+                .ok_or_else(|| OciError::os(WHAT, "lines past u64"))?;
+            if let Some(max) = max.filter(|&max| lines > max) {
+                return Err(past_mount_max(destination, max));
+            }
+            line.finish(top, destination, &mut found)?;
+            line = MountLine::default();
+        }
+        let n = chunk.len();
+        table.consume(n);
+    }
+    if line.bytes > 0 {
+        line.finish(top, destination, &mut found)?;
     }
     Ok(found)
 }
 
-/// A mount table, `file`, read whole and bounded ([`MOUNTINFO_FIRST_READ`], [`MAX_MOUNTINFO`]), for the recursive
-/// bind at `destination`.
-fn read_mountinfo(file: impl std::io::Read, destination: &str) -> Result<String, OciError> {
-    use std::io::Read;
-    let mut bytes = Vec::with_capacity(MOUNTINFO_FIRST_READ);
-    file.take(MAX_MOUNTINFO)
-        .read_to_end(&mut bytes)
-        .map_err(|e| OciError::os("reading the mount table", e))?;
-    if !u64::try_from(bytes.len()).is_ok_and(|n| n < MAX_MOUNTINFO) {
-        return Err(OciError::Config(format!(
-            "the recursive bind at {destination} needs the mount table read, and it is over \
-             {MAX_MOUNTINFO} bytes"
-        )));
+/// What [`cgroupfs_in_mountinfo`] keeps of one mount table line as it reads it: which field it is in, the mount
+/// point (field 5) and the filesystem type (the field after the lone `-` that ends the optional fields).
+#[derive(Default)]
+struct MountLine {
+    bytes: u64,
+    field: usize,
+    /// The field so far is `-` alone.
+    dash: bool,
+    /// The field so far holds a byte.
+    begun: bool,
+    /// The type's field, once the `-` before it is read.
+    type_field: Option<usize>,
+    point: Vec<u8>,
+    point_long: bool,
+    fstype: Vec<u8>,
+}
+
+impl MountLine {
+    /// One more byte of the line, its newline excepted.
+    fn take(&mut self, b: u8) {
+        if b == b' ' {
+            if self.type_field.is_none() && self.field > 5 && self.dash {
+                self.type_field = self.field.checked_add(1);
+            }
+            // A line's fields are fewer than its bytes, which `max_record` bounds far below `usize::MAX`.
+            self.field = self.field.saturating_add(1);
+            (self.dash, self.begun) = (false, false);
+            return;
+        }
+        self.dash = !self.begun && b == b'-';
+        self.begun = true;
+        if self.field == 4 {
+            if self.point.len() < MAX_POINT_WRITTEN {
+                self.point.push(b);
+            } else {
+                self.point_long = true;
+            }
+        } else if Some(self.field) == self.type_field && self.fstype.len() <= "cgroup2".len() {
+            // One byte past the longest name sought is enough to say it is neither.
+            self.fstype.push(b);
+        }
     }
-    String::from_utf8(bytes)
-        .map_err(|e| OciError::os("reading the mount table", format!("not UTF-8: {e}")))
+
+    /// The line read whole: its point under `top` added to `found` where it is a cgroup filesystem's, and refused,
+    /// naming the bind at `destination`, where that point is past what a remount can reach. A point cut at
+    /// [`MAX_POINT_WRITTEN`] is judged beneath `top` or not by what was kept of it, which starts as it does.
+    fn finish(&self, top: &Path, destination: &str, found: &mut Vec<String>) -> Result<(), OciError> {
+        if !matches!(self.fstype.as_slice(), b"cgroup2" | b"cgroup") {
+            return Ok(());
+        }
+        let point = unescape_mountpoint(&String::from_utf8_lossy(&self.point));
+        let Some(under) = beneath_top(&point, top) else {
+            return Ok(());
+        };
+        if self.point_long || point.len() >= PATH_MAX {
+            return Err(OciError::Config(format!(
+                "the recursive bind at {destination} carries a cgroup filesystem whose mount point is \
+                 past PATH_MAX, which no remount can reach"
+            )));
+        }
+        if std::str::from_utf8(&self.point).is_err() {
+            return Err(OciError::os(
+                "reading the mount table",
+                "a cgroup filesystem's mount point not UTF-8",
+            ));
+        }
+        found.push(under);
+        Ok(())
+    }
 }
 
 /// A `/proc/self/mountinfo` mount point with its escapes (space `\040`, tab `\011`, newline `\012`,
@@ -2770,6 +2878,19 @@ mod tests {
         assert!(table.len() > 17 << 20);
         let found = cgroupfs_in_mountinfo(table.as_bytes(), top, "/sys").unwrap();
         assert_eq!(found, ["fs/cgroup"]);
+    }
+
+    /// Ada's 2026-11-06 rule (T-T7.1.4): do read the namespace's mount cap twice; expect this host's
+    /// `fs.mount-max` both times, the bound learned from the kernel, not picked.
+    #[test]
+    fn the_mount_cap_is_the_hosts_own() {
+        let host: u64 = std::fs::read_to_string("/proc/sys/fs/mount-max")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(mount_max().unwrap(), host);
+        assert_eq!(mount_max().unwrap(), host);
     }
 
     /// CLAUDE.md §2, §3: do read a mount table whose cgroup filesystem beneath the bind has a mount point past what

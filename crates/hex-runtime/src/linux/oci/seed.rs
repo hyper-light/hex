@@ -116,6 +116,9 @@ fn serve() -> Result<(), OciError> {
     // A create seed on a root node prunes its mount namespace once, here, off every create's path, so
     // every init it clones copies a two-mount namespace holding nothing of the host (goal 5 plan step 2).
     if let Some(mountpoint) = std::env::var_os(ENV_PRUNE) {
+        // The namespace's mount cap, read while there is a `/proc` to read it from, for every init this seed
+        // clones to bound its walks of the namespace's mounts by (init::MOUNT_MAX).
+        init::mount_max()?;
         prune(Path::new(&mountpoint))?;
     }
     let mut specs = Specs::default();
