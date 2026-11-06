@@ -3,16 +3,18 @@
 //!   cargo bench -p hex-bench --bench sched_packing
 //!
 //! It packs the recorded workload (bench/sched/huawei_workload.md), each launch an OCI container, a
-//! Firecracker microVM or a Shards microVM, as the mix and as each class alone
-//! (`hex_sim::packing::alone`), from 16 starting arrivals spread evenly over the day (the seeds), to
-//! 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), three ways: with no
-//! completions, so lifetimes don't enter; and with completions, once with lifetimes as recorded
-//! (huawei-r5-day30.trace) and once with Huawei's one-minute keep-alive added
-//! (huawei-r5-day30.keepalive.trace). At the recorded speed the day never loads the fleet to 90%,
-//! so arrivals come faster: for each set and trace, the slowest speed of [`LADDER`] at which Hex
-//! and both best fits reach 90% on every seed, so lifetimes enter as far as the fleet allows. It
-//! prints the ladder first, each speed's seeds reaching 90% by arm, its fewest completions on the
-//! way, and the seeds on which Hex meets the bar.
+//! Firecracker microVM or a Shards microVM, on each of its two node models: EC2 m5d.metal hosts that
+//! run every class (huawei-r5-day30.trace, the main one) and Hex's fleet's host types, each running
+//! the classes its OS runs (huawei-r5-day30.fleet.trace). On each, it packs the mix and each class
+//! alone (`hex_sim::packing::alone`), from 16 starting arrivals spread evenly over the day (the
+//! seeds), to 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), three ways:
+//! with no completions, so lifetimes don't enter; and with completions, once with lifetimes as
+//! recorded and once with Huawei's one-minute keep-alive added (the `.keepalive.trace` beside each).
+//! At the recorded speed the day never loads the nodes to 90%, so arrivals come faster: for each
+//! set and trace, the slowest speed of [`LADDER`] at which Hex and both best fits reach 90% on every
+//! seed, so lifetimes enter as far as the nodes allow. It prints the ladder first, each speed's seeds reaching 90% by arm, its fewest completions on the
+//! way, the seeds on which Hex meets the bar, and the seeds on which a best fit strands nothing (so
+//! none can be cut).
 //!
 //! Each clock runs under each arm: best fit by free CPU first (`BestFit`) and across resources
 //! (`MostAllocated`), Tetris's alignment (`Align`), and least stranded then a tie: Tetris's
@@ -86,34 +88,40 @@ fn trace(name: &str) -> Cluster {
 }
 
 fn main() {
-    let recorded = trace("huawei-r5-day30.trace");
-    let kept_alive = trace("huawei-r5-day30.keepalive.trace");
-    for (set, class) in [
-        ("mix", None),
-        ("oci", Some(Class::Oci)),
-        ("firecracker", Some(Class::Firecracker)),
-        ("shards", Some(Class::Shards)),
+    for (model, name) in [
+        ("m5d.metal", "huawei-r5-day30"),
+        ("fleet", "huawei-r5-day30.fleet"),
     ] {
-        let as_set = |day: &Cluster| match class {
-            None => day.clone(),
-            Some(class) => alone(day, class).unwrap(),
-        };
-        let (recorded, kept_alive) = (as_set(&recorded), as_set(&kept_alive));
-        measure(set, "no completions", &recorded, Clock::Held);
-        for (lives, day) in [
-            ("lifetimes as recorded", &recorded),
-            ("with the keep-alive", &kept_alive),
+        let recorded = trace(&format!("{name}.trace"));
+        let kept_alive = trace(&format!("{name}.keepalive.trace"));
+        for (set, class) in [
+            ("mix", None),
+            ("oci", Some(Class::Oci)),
+            ("firecracker", Some(Class::Firecracker)),
+            ("shards", Some(Class::Shards)),
         ] {
-            let Some(speed) = slowest(set, lives, day) else {
-                println!("{set}, {lives}: no speed on the ladder reaches 90% on every seed");
-                continue;
+            let set = format!("{model} {set}");
+            let as_set = |day: &Cluster| match class {
+                None => day.clone(),
+                Some(class) => alone(day, class).unwrap(),
             };
-            measure(
-                set,
-                &format!("completions at {speed}x, {lives}"),
-                day,
-                Clock::Compressed(speed),
-            );
+            let (recorded, kept_alive) = (as_set(&recorded), as_set(&kept_alive));
+            measure(&set, "no completions", &recorded, Clock::Held);
+            for (lives, day) in [
+                ("lifetimes as recorded", &recorded),
+                ("with the keep-alive", &kept_alive),
+            ] {
+                let Some(speed) = slowest(&set, lives, day) else {
+                    println!("{set}, {lives}: no speed on the ladder reaches 90% on every seed");
+                    continue;
+                };
+                measure(
+                    &set,
+                    &format!("completions at {speed}x, {lives}"),
+                    day,
+                    Clock::Compressed(speed),
+                );
+            }
         }
     }
 }
@@ -129,7 +137,7 @@ fn sample(cluster: &Cluster) -> Sample {
 /// best fits reach 90% on every seed.
 fn slowest(set: &str, lives: &str, cluster: &Cluster) -> Option<Time> {
     println!(
-        "ladder, {set}, {lives}: speed | seeds reaching 90% (Hex, best_fit, most_allocated) | fewest completions | seeds where Hex meets the bar"
+        "ladder, {set}, {lives}: speed | seeds reaching 90% (Hex, best_fit, most_allocated) | fewest completions | seeds where Hex meets the bar | seeds where a best fit strands nothing, so none can be cut"
     );
     let sample = sample(cluster);
     let mut found = None;
@@ -137,6 +145,7 @@ fn slowest(set: &str, lives: &str, cluster: &Cluster) -> Option<Time> {
         let mut reached = [0usize; 3];
         let mut done = [u64::MAX; 3];
         let mut meets = 0;
+        let mut nothing = 0;
         for seed in 0..SEEDS {
             let from = seed * cluster.workloads.len() / SEEDS;
             let runs = [Scorer::HEX, Scorer::BestFit, Scorer::MostAllocated].map(|scorer| {
@@ -154,8 +163,9 @@ fn slowest(set: &str, lives: &str, cluster: &Cluster) -> Option<Time> {
                 done[i] = done[i].min(p.completions);
             }
             meets += usize::from(runs[1..].iter().all(|b| cut(&runs[0], b) >= 30.0));
+            nothing += usize::from(runs[1..].iter().any(|b| b.stranded_per_mille() == 0));
         }
-        println!("{speed:>5}x | {reached:?} | {done:?} | {meets}/{SEEDS}");
+        println!("{speed:>5}x | {reached:?} | {done:?} | {meets}/{SEEDS} | {nothing}");
         if found.is_none() && reached == [SEEDS; 3] {
             found = Some(speed);
         }

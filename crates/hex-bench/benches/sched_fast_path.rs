@@ -6,11 +6,13 @@
 //! What it times is hex-sim's own fast path, for real: for each launch, Hex's sampled choice over
 //! the node index (`FitIndex::sampled_fit` with `Scorer::HEX`, kube-scheduler's floors of 100 nodes
 //! or 5%), the commit by compare-and-set to the store (`Store::apply`), and the index update. The
-//! launches are the recorded workload's (bench/sched/huawei-r5-day30.trace), each an OCI container, a
+//! launches are the recorded workload's (bench/sched/huawei_workload.md), each an OCI container, a
 //! Firecracker microVM or a Shards microVM, their shapes and classes in arrival order, from a
 //! different place in the day for each run and repeated as needed, timed as the mix and as each
-//! class alone; the 10,000 nodes repeat the trace's hosts, Hex's fleet's host types in their
-//! proportions, each running the classes its OS runs. Arrivals are open-loop, one every 100 us by the
+//! class alone, on each node model: the 10,000 nodes repeat the hosts of huawei-r5-day30.trace (EC2
+//! m5d.metal, each running every class; the main one) or of huawei-r5-day30.fleet.trace (Hex's
+//! fleet's host types in their proportions, each running the classes its OS runs). Arrivals are
+//! open-loop, one every 100 us by the
 //! wall clock. A launch's latency runs from its scheduled arrival to its commit, so time spent queued
 //! behind a slow decision counts. The nodes that can run the set's classes are first filled until
 //! about 85% of their CPU is placed, untimed. Each timed arrival then retires the oldest running
@@ -215,16 +217,30 @@ fn main() {
         .collect();
     let runs: u64 = args.first().and_then(|a| a.parse().ok()).unwrap_or(5);
     let placements: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100_000);
-    let text = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../bench/sched/huawei-r5-day30.trace"
-    ))
-    .unwrap();
-    let recorded = hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap();
+    let mut met = true;
+    for (model, name) in [
+        ("m5d.metal", "huawei-r5-day30.trace"),
+        ("fleet", "huawei-r5-day30.fleet.trace"),
+    ] {
+        let path = format!("{}/../../bench/sched/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(path).unwrap();
+        let recorded = hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap();
+        println!(
+            "sched_fast_path: {NODES} nodes repeating {name}'s {} ({model}), its {} launches, {RATE_PER_S}/s open-loop, {placements} timed placements per run, {runs} runs per set",
+            recorded.nodes.len(),
+            recorded.workloads.len()
+        );
+        met &= sets(model, &recorded, runs, placements);
+    }
     println!(
-        "sched_fast_path: {NODES} nodes of Hex's fleet's host types, the recorded workload's {} launches, {RATE_PER_S}/s open-loop, {placements} timed placements per run, {runs} runs per set",
-        recorded.workloads.len()
+        "AC-T7.4.2 bar p99 <= 10 ms on both node models, the mix and each class alone: {}",
+        if met { "MET" } else { "NOT MET" }
     );
+}
+
+/// Times the mix and each class alone on `recorded`'s node model; whether each set's best p99 met
+/// the bar.
+fn sets(model: &str, recorded: &Cluster, runs: u64, placements: usize) -> bool {
     let mut met = true;
     for (set, class) in [
         ("mix", None),
@@ -232,9 +248,10 @@ fn main() {
         ("firecracker", Some(Class::Firecracker)),
         ("shards", Some(Class::Shards)),
     ] {
+        let set = format!("{model} {set}");
         let day = match class {
             None => recorded.clone(),
-            Some(class) => alone(&recorded, class).unwrap(),
+            Some(class) => alone(recorded, class).unwrap(),
         };
         let mut best: Option<(Duration, String)> = None;
         for seed in 0..runs {
@@ -264,8 +281,5 @@ fn main() {
         met &= p99 <= Duration::from_millis(10);
         println!("{set} best-of-{runs} (by p99): {line}");
     }
-    println!(
-        "AC-T7.4.2 bar p99 <= 10 ms on the mix and each class alone: {}",
-        if met { "MET" } else { "NOT MET" }
-    );
+    met
 }

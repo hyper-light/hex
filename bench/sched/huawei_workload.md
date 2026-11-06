@@ -4,8 +4,12 @@ Hex's scheduler places microVMs (Ada, 2026-11-06: "You are NOT Kiln's load balan
 general work. Your scheduler is for *microvms*."), of three kinds: OCI containers, Firecracker microVMs
 and Shards microVMs ("we work with OCI containers, Firecracker, and Shards Microvms", the same day). Its
 recorded workload is a day of serverless sandbox launches from a production cloud, each made a request of
-one of those kinds, on Hex's own fleet: `huawei-r5-day30.trace`, and the same day with Huawei's keep-alive
-added, `huawei-r5-day30.keepalive.trace`.
+one of those kinds, on two node models:
+- `huawei-r5-day30.trace`, the main one: 10 EC2 m5d.metal hosts, each running all three kinds;
+- `huawei-r5-day30.fleet.trace`, beside it: Hex's own fleet's host types, five of each, each running the
+  kinds its OS runs, so that where each kind may land matters.
+
+Each has a twin with Huawei's keep-alive added (`.keepalive.trace`).
 
 ## Source and licence
 
@@ -27,6 +31,8 @@ Downloaded 2026-11-06. Rebuilt byte for byte by:
 ```
 huawei_trace.py R5-coldstarts.zip R5-requests.zip huawei-r5-day30.trace
 huawei_trace.py R5-coldstarts.zip R5-requests.zip huawei-r5-day30.keepalive.trace --keep-alive-s 60
+huawei_trace.py R5-coldstarts.zip R5-requests.zip huawei-r5-day30.fleet.trace --nodes fleet:5
+huawei_trace.py R5-coldstarts.zip R5-requests.zip huawei-r5-day30.fleet.keepalive.trace --keep-alive-s 60 --nodes fleet:5
 ```
 
 ## Why this trace
@@ -84,9 +90,16 @@ which the trace doesn't record, comes from its owner (below).
 
 ## Where each kind may land, and what it costs there
 
-The nodes are Hex's own fleet's hosts, from kiln's runner facts (2026-11-05, `kiln_workload.md`), five
-of each, so a kind's hosts matter: each host's threads as millicores, its memory, its GPUs, no
-background load, and the kinds its OS runs.
+There are two node models, neither with background load (the lead, 2026-11-06: the first stays the main
+one, the second sits beside it to exercise where each kind may land).
+
+- **EC2 m5d.metal, the main one.** 10 hosts of the host the Firecracker paper measured on: "two Intel Xeon
+  Platinum 8175M processors (for a total of 48 cores with hyper-threading disabled), 384GB of RAM"
+  (Agache et al., NSDI 2020 §6), so 48,000 millicores and 384 GiB each, with no GPU. Each is Linux x86_64
+  with KVM, so each runs all three kinds, and every request may use every node. 10 hosts make each of
+  the 16 seeds of `AC-T7.4.3` pack about 600 launches to 90% from its own stretch of the day.
+- **Hex's fleet, beside it.** Hex's own hosts, from kiln's runner facts (2026-11-05, `kiln_workload.md`),
+  five of each: each host's threads as millicores, its memory, its GPUs, and the kinds its OS runs.
 
 | host | OS | threads | memory | kinds |
 |---|---|---:|---:|---|
@@ -112,8 +125,9 @@ background load, and the kinds its OS runs.
   §3.3); Shards 5 MiB, a stand-in marked as one until Shards states its own. No source gives a resting CPU
   cost for any of the three, so none is charged.
 
-So OCI containers may use 15 of the 50 nodes (480 cores), Firecracker microVMs 10 (320 cores), and
-Shards microVMs all 50 (1,105 cores). A pack's load is measured over the nodes its requests may use.
+On the fleet, OCI containers may use 15 of the 50 nodes (480 cores), Firecracker microVMs 10 (320
+cores), and Shards microVMs all 50 (1,105 cores). On either model, a pack's load is measured over the
+nodes its requests may use.
 
 ## What it holds
 
@@ -136,8 +150,8 @@ two logs' clocks differ slightly, and are run for 1 ms. Every rule is counted in
 | 1,000-2,200 | 1,024-2,560 | 720 (five pools of 144 each) |
 
 Lifetimes without the keep-alive: p50 0.32 s, p90 61 s, p99 770 s, the longest 14 hours. CPU binds:
-the mean sandbox asks 0.72 cores and 0.65 GiB, about 1.1 cores per GiB, against the fleet's 1,105 cores
-to 3,765 GiB (0.29 cores per GiB). By kind, the mean OCI request asks 0.61 cores and 0.51 GiB, the mean
+the mean sandbox asks 0.72 cores and 0.65 GiB, about 1.1 cores per GiB, against an m5d.metal's 0.125
+cores per GiB (48 to 384) and the fleet's 0.29 (1,105 cores to 3,765 GiB). By kind, the mean OCI request asks 0.61 cores and 0.51 GiB, the mean
 Firecracker one 0.47 and 0.34, the mean Shards one 1.09 and 1.11.
 
 ## What would make it wrong
@@ -151,6 +165,6 @@ Firecracker one 0.47 and 0.34, the mean Shards one 1.09 and 1.11.
   that much.
 - The pool's limits are taken as the request. A platform that packs by usage rather than limits would
   see smaller requests.
-- The fleet is Hex's today, five times over. A fleet of other shapes, or with more Linux hosts, would
-  change where each kind fits.
+- The nodes are two models: m5d.metal, where every kind fits everywhere, and Hex's fleet today, five
+  times over. A fleet of other shapes, or with more Linux hosts, would change where each kind fits.
 - One region and one day; another region's mix could pack differently.

@@ -703,131 +703,185 @@ fn the_hard_filters_keep_every_placement_in_bounds() {
     );
 }
 
-/// The recorded workload (bench/sched/huawei_workload.md): a day of Huawei Cloud's serverless
-/// sandboxes, each an OCI container, a Firecracker microVM or a Shards microVM by its owner, on Hex's
-/// fleet; its lifetimes as recorded and with Huawei's one-minute keep-alive added.
-fn recorded_workload() -> [Cluster; 2] {
+/// The recorded workload (bench/sched/huawei_workload.md) on one node model: a day of Huawei Cloud's
+/// serverless sandboxes, each an OCI container, a Firecracker microVM or a Shards microVM by its
+/// owner.
+struct NodeModel {
+    name: &'static str,
+    nodes: usize,
+    /// The day with lifetimes as recorded, and with Huawei's one-minute keep-alive added.
+    days: [Cluster; 2],
+    /// The speeds the completions of the mix, OCI, Firecracker and Shards sets run at, as recorded
+    /// and with the keep-alive: each the slowest of `sched_packing`'s ladder at which Hex and both
+    /// best fits reach 90% on every seed, so lifetimes enter as far as the nodes allow
+    /// (bench/sched/packing.md).
+    speeds: [[Time; 2]; 4],
+}
+
+/// The two node models: 10 EC2 m5d.metal hosts that each run every kind (the main one), and Hex's
+/// fleet's host types five times over, each running the kinds its OS runs.
+fn node_models() -> [NodeModel; 2] {
     let limits = hex_sim::replay::Limits::default();
-    let recorded = include_str!("../../../bench/sched/huawei-r5-day30.trace");
-    let kept_alive = include_str!("../../../bench/sched/huawei-r5-day30.keepalive.trace");
+    let parse = |text: &str| hex_sim::replay::parse(text, &limits).unwrap();
     [
-        hex_sim::replay::parse(recorded, &limits).unwrap(),
-        hex_sim::replay::parse(kept_alive, &limits).unwrap(),
+        NodeModel {
+            name: "m5d.metal",
+            nodes: 10,
+            days: [
+                parse(include_str!("../../../bench/sched/huawei-r5-day30.trace")),
+                parse(include_str!(
+                    "../../../bench/sched/huawei-r5-day30.keepalive.trace"
+                )),
+            ],
+            speeds: [[40, 20]; 4],
+        },
+        NodeModel {
+            name: "fleet",
+            nodes: 50,
+            days: [
+                parse(include_str!(
+                    "../../../bench/sched/huawei-r5-day30.fleet.trace"
+                )),
+                parse(include_str!(
+                    "../../../bench/sched/huawei-r5-day30.fleet.keepalive.trace"
+                )),
+            ],
+            speeds: [[150, 50], [40, 20], [30, 10], [150, 40]],
+        },
     ]
 }
 
-/// The day as recorded, a mix of the three classes, and the same day as each class alone, each with
-/// the speeds its completions run at, lifetimes as recorded and with the keep-alive: the slowest of
-/// `sched_packing`'s ladder at which Hex and both best fits reach 90% on every seed, so lifetimes
-/// enter as far as the fleet allows (bench/sched/packing.md).
-fn mix_and_alone(day: &Cluster) -> [(&'static str, Cluster, [Time; 2]); 4] {
+/// The day as recorded, a mix of the three kinds, and the same day as each kind alone.
+fn mix_and_alone(day: &Cluster) -> [(&'static str, Cluster); 4] {
     [
-        ("mix", day.clone(), [150, 50]),
-        ("oci", packing::alone(day, Class::Oci).unwrap(), [40, 20]),
+        ("mix", day.clone()),
+        ("oci", packing::alone(day, Class::Oci).unwrap()),
         (
             "firecracker",
             packing::alone(day, Class::Firecracker).unwrap(),
-            [30, 10],
         ),
-        (
-            "shards",
-            packing::alone(day, Class::Shards).unwrap(),
-            [150, 40],
-        ),
+        ("shards", packing::alone(day, Class::Shards).unwrap()),
     ]
 }
 
 /// G2 step 3 (`AC-T7.4.3`'s recorded workload): read a day of 25,295 recorded launches of 339
-/// owners on 50 hosts, each an OCI container, a Firecracker microVM or a Shards microVM, through the
-/// typed parser and replay it twice from one seed, with its lifetimes as recorded and with the
-/// keep-alive; expect the same trace hash, report and log, every launch done once, the log and the
-/// hard filters correct by the specification, and (non-vacuity) the class filter refusing nodes.
+/// owners, each an OCI container, a Firecracker microVM or a Shards microVM, on each node model,
+/// through the typed parser, and replay it twice from one seed, with its lifetimes as recorded and
+/// with the keep-alive; expect the same trace hash, report and log, every launch done once, and the
+/// log and the hard filters correct by the specification. Non-vacuity: the kind filter refuses nodes
+/// on the fleet, where some nodes run only some kinds, and none on m5d.metal, where each runs every
+/// kind.
 #[test]
 fn a_recorded_workload_replays_the_same_twice() {
-    for cluster in recorded_workload() {
-        assert_eq!(
-            (
-                cluster.nodes.len(),
-                cluster.workloads.len(),
-                cluster.owners.len()
-            ),
-            (50, 25_295, 339)
-        );
-        let config = Config::default();
-        let a = sim::run(&cluster, &config).unwrap();
-        let b = sim::run(&cluster, &config).unwrap();
-        assert!(same(&a.report, &b.report));
-        assert_eq!(a.store.log(), b.store.log());
-        let end = spec::check_end(&cluster, &a);
-        assert_eq!(end.lost_or_double(), 0, "{end:?}");
-        assert_eq!(end.complete, 25_295);
-        spec::check_log(&cluster.nodes, &a).unwrap();
-        assert_eq!(spec::check_filters(&cluster, &a).unwrap().violations(), 0);
-        assert!(a.report.refused.class > 0, "{:?}", a.report.refused);
+    for model in node_models() {
+        for cluster in model.days {
+            replays_the_same_twice(model.name, model.nodes, &cluster);
+        }
     }
 }
 
+fn replays_the_same_twice(model: &str, nodes: usize, cluster: &Cluster) {
+    assert_eq!(
+        (
+            cluster.nodes.len(),
+            cluster.workloads.len(),
+            cluster.owners.len()
+        ),
+        (nodes, 25_295, 339),
+        "{model}"
+    );
+    let config = Config::default();
+    let a = sim::run(cluster, &config).unwrap();
+    let b = sim::run(cluster, &config).unwrap();
+    assert!(same(&a.report, &b.report), "{model}");
+    assert_eq!(a.store.log(), b.store.log(), "{model}");
+    let end = spec::check_end(cluster, &a);
+    assert_eq!(end.lost_or_double(), 0, "{model}: {end:?}");
+    assert_eq!(end.complete, 25_295, "{model}");
+    spec::check_log(&cluster.nodes, &a).unwrap();
+    assert_eq!(
+        spec::check_filters(cluster, &a).unwrap().violations(),
+        0,
+        "{model}"
+    );
+    let every_node_runs_every_kind = cluster.nodes.iter().all(|n| n.classes == Classes::ALL);
+    assert_eq!(
+        a.report.refused.class == 0,
+        every_node_runs_every_kind,
+        "{model}: {:?}",
+        a.report.refused
+    );
+}
+
 /// AC-T7.4.3 (G2 step 4): pack the recorded workload to 90% load from 16 starting arrivals spread
-/// over the day, as a mix of the three classes and as each class alone, under best fit alone (by free
-/// CPU first, and across resources as Kubernetes' `MostAllocated` does) and under Hex's scorer, three
-/// ways: with no completions, and with completions at each set's speeds, lifetimes as recorded and
-/// with the keep-alive; expect Hex's stranded capacity at least 30% below each best fit's on every
-/// seed of each. Non-vacuity: best fit strands something, every arm reaches 90%, and under
+/// over the day, on each node model, as a mix of the three kinds and as each kind alone, under best
+/// fit alone (by free CPU first, and across resources as Kubernetes' `MostAllocated` does) and under
+/// Hex's scorer, three ways: with no completions, and with completions at each set's speeds,
+/// lifetimes as recorded and with the keep-alive; expect Hex's stranded capacity at least 30% below
+/// each best fit's on every seed of each. Non-vacuity: best fit strands something, every arm reaches 90%, and under
 /// completions some launch ends on the way, on every seed. Not bought by refusing work: Hex's scorer
 /// passes over no more launches on the way than either best fit.
 #[test]
 fn the_recorded_workload_strands_at_least_30_percent_less_than_best_fit() {
-    let [recorded, kept_alive] = recorded_workload();
-    let sets = mix_and_alone(&recorded)
-        .into_iter()
-        .zip(mix_and_alone(&kept_alive));
-    for ((set, recorded, [as_recorded, with_keep_alive]), (_, kept_alive, _)) in sets {
-        for (cluster, clock) in [
-            (&recorded, Clock::Held),
-            (&recorded, Clock::Compressed(as_recorded)),
-            (&kept_alive, Clock::Compressed(with_keep_alive)),
-        ] {
-            let sample = Sample {
-                shapes: Shapes::of(packing::minimal_shapes(cluster)),
-                ..Sample::default()
-            };
-            let pack = |scorer, from| {
-                packing::pack(cluster, &Sample { scorer, ..sample }, 900, from, clock).unwrap()
-            };
-            let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
-            for seed in 0..16 {
-                let from = seed * cluster.workloads.len() / 16;
-                let hex = pack(Scorer::HEX, from);
-                let best = pack(Scorer::BestFit, from);
-                let most = pack(Scorer::MostAllocated, from);
-                for p in [&hex, &best, &most] {
-                    assert!(p.reached, "{set} {clock:?} seed {seed}: {p:?}");
-                    assert_eq!(
-                        p.completions > 0,
-                        clock != Clock::Held,
-                        "{set} {clock:?} seed {seed}: {p:?}"
-                    );
-                }
-                for base in [&best, &most] {
-                    assert!(
-                        base.stranded_per_mille() > 0,
-                        "{set} {clock:?} seed {seed}: {base:?}"
-                    );
-                    assert!(
-                        hex.stranded_per_mille() * 10 <= base.stranded_per_mille() * 7,
-                        "{set} {clock:?} seed {seed}: Hex strands {} per-mille, best fit {}",
-                        hex.stranded_per_mille(),
-                        base.stranded_per_mille()
-                    );
-                }
-                passed_hex += hex.passed_over;
-                passed_best += best.passed_over;
-                passed_most += most.passed_over;
+    for model in node_models() {
+        let [recorded, kept_alive] = model.days;
+        let sets = mix_and_alone(&recorded)
+            .into_iter()
+            .zip(mix_and_alone(&kept_alive))
+            .zip(model.speeds);
+        for (((set, recorded), (_, kept_alive)), [as_recorded, with_keep_alive]) in sets {
+            let set = format!("{} {set}", model.name);
+            for (cluster, clock) in [
+                (&recorded, Clock::Held),
+                (&recorded, Clock::Compressed(as_recorded)),
+                (&kept_alive, Clock::Compressed(with_keep_alive)),
+            ] {
+                strands_less(&set, cluster, clock);
             }
-            assert!(
-                passed_hex <= passed_best.min(passed_most),
-                "{set} {clock:?}: {passed_hex} {passed_best} {passed_most}"
-            );
         }
     }
+}
+
+fn strands_less(set: &str, cluster: &Cluster, clock: Clock) {
+    let sample = Sample {
+        shapes: Shapes::of(packing::minimal_shapes(cluster)),
+        ..Sample::default()
+    };
+    let pack = |scorer, from| {
+        packing::pack(cluster, &Sample { scorer, ..sample }, 900, from, clock).unwrap()
+    };
+    let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
+    for seed in 0..16 {
+        let from = seed * cluster.workloads.len() / 16;
+        let hex = pack(Scorer::HEX, from);
+        let best = pack(Scorer::BestFit, from);
+        let most = pack(Scorer::MostAllocated, from);
+        for p in [&hex, &best, &most] {
+            assert!(p.reached, "{set} {clock:?} seed {seed}: {p:?}");
+            assert_eq!(
+                p.completions > 0,
+                clock != Clock::Held,
+                "{set} {clock:?} seed {seed}: {p:?}"
+            );
+        }
+        for base in [&best, &most] {
+            assert!(
+                base.stranded_per_mille() > 0,
+                "{set} {clock:?} seed {seed}: {base:?}"
+            );
+            assert!(
+                hex.stranded_per_mille() * 10 <= base.stranded_per_mille() * 7,
+                "{set} {clock:?} seed {seed}: Hex strands {} per-mille, best fit {}",
+                hex.stranded_per_mille(),
+                base.stranded_per_mille()
+            );
+        }
+        passed_hex += hex.passed_over;
+        passed_best += best.passed_over;
+        passed_most += most.passed_over;
+    }
+    assert!(
+        passed_hex <= passed_best.min(passed_most),
+        "{set} {clock:?}: {passed_hex} {passed_best} {passed_most}"
+    );
 }
