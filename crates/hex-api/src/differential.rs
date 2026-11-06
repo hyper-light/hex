@@ -676,6 +676,33 @@ mod tests {
         );
     }
 
+    /// Do: read with a look that takes a measurable time and never shows the oracle's answer, for a
+    /// patience. Expect: each re-read waits at least as long as the read before it took, so reading holds
+    /// at most half the time, at whatever a read costs on this platform (no picked interval).
+    #[test]
+    fn a_reread_waits_as_long_as_the_last_read_took() {
+        let reads = std::cell::RefCell::new(Vec::new());
+        let want = Seen::Listed(true);
+        until(Some(&want), Duration::from_millis(300), || {
+            let start = Instant::now();
+            // A read that costs longer than any fixed re-read interval the suite had (10 ms): the relation
+            // tested holds for any cost, and this one keeps the test under a second.
+            let mut x = 0u64;
+            while start.elapsed() < Duration::from_millis(20) {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            reads.borrow_mut().push((start, Instant::now()));
+            Seen::Listed(false)
+        });
+        let reads = reads.into_inner();
+        assert!(reads.len() >= 3, "{} reads", reads.len());
+        for pair in reads.windows(2) {
+            let (s0, e0) = pair[0];
+            let (s1, _) = pair[1];
+            assert!(s1 - e0 >= e0 - s0, "re-read after {:?}, the read took {:?}", s1 - e0, e0 - s0);
+        }
+    }
+
     /// Do a scenario whose box the runtime shows late; expect it to pass, since a reading waits for the
     /// oracle's answer (bounded by PATIENCE) rather than taking the first.
     #[test]
