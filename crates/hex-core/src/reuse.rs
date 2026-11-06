@@ -256,7 +256,11 @@ impl<K: PartialEq + Clone> Pool<K> {
             None => {
                 self.per_owner.missed(owner);
                 self.counts.per_owner = self.per_owner.bound();
-                Err((self.total > 0).then_some(Refused::Owner))
+                Err(if self.total > 0 {
+                    Some(Refused::Owner)
+                } else {
+                    None
+                })
             }
         };
         match found {
