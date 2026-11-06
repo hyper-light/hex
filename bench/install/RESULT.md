@@ -46,7 +46,7 @@ Measured earlier, on the user-service route: with `daemon-reload` alone, the alr
 didn't hand `io` on (unit `hex-native-s6-lab-20261104T085256Z`), as systemd's source predicts
 (docs/research/runtime/installer-per-os.md §1.4).
 
-## Windows: built, not yet run (jupiter offline)
+## Windows: built; the run of record waits on native plan steps 4 and 5
 
 This tree (`cp/t7-native-windows`) carries native step 4's `oci` class (merged from `cp/t7-native-s4` 0862d0e)
 beside step 6's feature check, so the lab checks every class there is. An `oci` box is routed by its image: a
@@ -61,7 +61,7 @@ feature and the installer (`a_windows_image_is_refused_naming_containers_while_i
 |---|---|---|
 | `jupiter.sh build`, `jupiter.sh gates` | kiln | hex.exe and the test binaries build; fmt, clippy and the workspace's tests pass natively |
 | `bench/native/windows/oci_setup.ps1` | kiln, on Ada's yes (step 4's setup) | the image's layers for the oci suite (`layers.txt`) |
-| `jupiter.sh before` | kiln | fresh of Hex; the plan saved; each feature the plan turns on reads off, and its image is refused naming it |
+| `jupiter.sh before` | kiln | fresh of Hex; the plan saved, asking hex for the features once (the lab's `asks` phase); each feature the plan turns on reads off, and its image is refused naming it |
 | `windows.ps1 install -Binary <hex.exe>` | Ada at jupiter: one UAC prompt, then the reboot | the one admin step |
 | `jupiter.sh installed` | kiln | every plan line present; no image refused for a feature; the process class's contract; the oci class's contract and step 4's criteria on the image; a Linux image refused only for the Shards guest |
 | `windows.ps1 uninstall` | Ada at jupiter: one UAC prompt, then the reboot | undoing it |
@@ -69,5 +69,9 @@ feature and the installer (`a_windows_image_is_refused_naming_containers_while_i
 
 Windows' part is open until step 5 lands too: the step's "every class working" isn't narrowed, so with step 5's
 guest the `installed` phase runs the oci suite in the guest in place of the Linux image's refusal.
+
+The lab's `asks` phase (also part of `before`) counts the dry run's hex runs through a counting `-Binary`. HEX-INST-9
+on jupiter, 2026-11-06 (`records/windows-asks-jupiter-20261106T195224Z.txt`): 3ba6028's `windows.ps1` ran hex twice
+for one plan (red, exit 1), 47c94e3's once (green, exit 0).
 
 ## macOS: waits on native plan step 2 (the box users' pool and the privileged helper)
