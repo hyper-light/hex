@@ -356,18 +356,19 @@ mod tests {
         assert!(features_off(&"x".repeat(FEATURE_LISTING_MAX + 1)).is_err());
     }
 
-    /// HEX-INST-2: the feature query's deadline is the swarm's failure-bound rule over its record: twice
-    /// the slowest of jupiter's 20 runs (1,683 ms at 79% CPU,
-    /// bench/install/records/windows-feature-query-jupiter-20261106.txt), the factor the false-alarm margin.
+    /// HEX-INST-2: the feature query's deadline is the swarm's failure-bound rule over its records: twice
+    /// the slowest recorded run, the factor the false-alarm margin. Of jupiter's 50 runs (20 at 79% CPU,
+    /// bench/install/records/windows-feature-query-jupiter-20261106.txt; 30 by the Windows agent at
+    /// 14:27Z, cp/t7-native-windows 01217f8 bench/install/windows-constants.md:20) the slowest is 2,421 ms.
     #[test]
     fn the_feature_querys_deadline_is_twice_its_slowest_recorded_run() {
         assert_eq!(
             FEATURE_QUERY_SLOWEST,
-            std::time::Duration::from_millis(1_683)
+            std::time::Duration::from_millis(2_421)
         );
         assert_eq!(
             FEATURE_QUERY_PATIENCE,
-            std::time::Duration::from_millis(3_366)
+            std::time::Duration::from_millis(4_842)
         );
     }
 
