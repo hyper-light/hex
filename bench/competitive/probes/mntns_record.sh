@@ -101,7 +101,8 @@ timed() {
 }
 export -f st cell timed
 export O MODE SRC MOUNTS ROUNDS LOOPS_SET
-flock -w 3600 /home/adalundhe/.cache/hex-t7/fedora-timed.lock bash -c timed || { st "refusing: the timed lock or the run failed"; exit 5; }
+# The timed lock is waited on itself: it frees when its holder exits, and this run's unit bounds the wait.
+flock /home/adalundhe/.cache/hex-t7/fedora-timed.lock bash -c timed || { st "refusing: the timed lock or the run failed"; exit 5; }
 
 python3 -I "$HERE/mntns_record.py" "$O/exits" "$RUN" "$REV" "$MODE" | tee "$O/record.txt"
 exit "${PIPESTATUS[0]}"

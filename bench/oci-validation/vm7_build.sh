@@ -64,7 +64,9 @@ if [ ! -s "$VM_DIR/rootfs.ext4" ] || [ ! -s "$VM_DIR/initramfs.img" ] || [ ! -s 
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev 2>/dev/null
 mkdir -p /opt/lab /job
 mount -t 9p -o trans=virtio,version=9p2000.L,ro lab /opt/lab
-mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576 job /job
+# msize 512000: the virtio-9p transport maximum, PAGE_SIZE (4,096 on x86_64) x (VIRTQUEUE_NUM 128 - 3) (Linux v7.2
+# net/9p/trans_virtio.c:38, :807); the client limits any larger msize to it (net/9p/client.c:900).
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=512000 job /job
 exec bash /opt/lab/vm7_inside.sh
 echo "VM7_EXIT=125 (vm7_inside.sh did not run)"; echo o > /proc/sysrq-trigger
 EOF
