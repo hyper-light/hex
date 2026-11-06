@@ -289,8 +289,6 @@ const NEED: &str = ".need";
 const LOCK: &str = ".lock";
 /// A box's folder of its root's layers, `<i>` each: a link to the store's layer or a layer of its own.
 const BOX_LAYERS: &str = "layers";
-/// The lowest priority a thread may take, nice 19 (setpriority(2): "a range of -20 to 19").
-const LOWEST_PRIORITY: i32 = 19;
 
 /// What a stage spends, or must leave free: entries and bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1446,11 +1444,10 @@ fn read_spend(store: &OwnedFd, name: &str) -> Spend {
 /// The reclaimer (§4a): after a stage bypassed the store for want of room, frees at least what it bypassed
 /// by, taking unreferenced layers, the least recently used first, until that much is freed or none is left.
 /// It runs on the stage's own thread once the host has its answer, off the create's path and the delete's,
-/// at the lowest priority a thread may take (setpriority(2): nice 19), so a box's work comes first. Each
-/// layer is taken out of the store under its lock (renamed to `.gone-<pid>-<n>`, so no stage counts it as
+/// as plain background work at the thread's own priority (Ada's rule: Hex changes no priority, either way);
+/// its work is bounded by what the bypassed stage used. Each layer is taken out of the store under its lock (renamed to `.gone-<pid>-<n>`, so no stage counts it as
 /// held after), then removed outside the lock. Bounded by the store's own entries: each pass takes one.
 fn reclaim(staged: &Path, amount: Spend) -> Result<Spend, Refusal> {
-    let _ = rustix::process::setpriority_process(None, LOWEST_PRIORITY);
     let staged = rustix::fs::open(
         staged,
         OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,

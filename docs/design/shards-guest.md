@@ -346,8 +346,9 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       written when its stage opens under the store's lock (flock(2) on `.layers/.lock`), so no reclaim takes a
       layer it counted as held; removing the box removes its record. A layer no record names becomes evictable
       and stays, a cache for the next create. After a stage bypassed the store for want of room, once its
-      answer is sent, its own thread drops to the lowest priority (setpriority(2), nice 19), so a box's work
-      comes first, and frees at least what the bypassed layers hold, off the create's path and the delete's:
+      answer is sent, its own thread frees at least what the bypassed layers hold, off the create's path and
+      the delete's, as plain background work at its own priority (Ada's rule: Hex changes no priority, either
+      way; the work is bounded by what the bypass used):
       the least recently used unreferenced layer (its folder's mtime, set at each use) is taken out of the store
       under the lock (renamed to `.gone-…`), then removed, until that much is freed or none is left.
     - **One copy roots:** a bundle's `root.path` and a `Rootfs::Dir` are one directory its container writes into,
