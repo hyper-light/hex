@@ -3,7 +3,7 @@
 //! record the node agent keeps of each box, the plan that takes every box back or removes it after
 //! the node agent crashed (T-T7.1.2), the pool of network namespaces it makes ahead for its
 //! containers ([`netns`]), the seeds it keeps to clone them ([`seeds`]), the idle cgroups and network
-//! namespaces it hands from box to box of one owner ([`reuse`], [`netns_reuse`]), and the node agent's socket as bytes ([`wire`]). Shells in `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
+//! namespaces it hands from box to box of one owner ([`reuse`], [`netns_reuse`]), the sizes its pools learn from demand ([`demand`]), and the node agent's socket as bytes ([`wire`]). Shells in `hex-runtime`, `hex-node` and `hex-client` do the I/O these decide.
 
 #![cfg_attr(
     test,
