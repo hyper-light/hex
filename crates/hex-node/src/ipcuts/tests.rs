@@ -106,3 +106,22 @@ fn a_bound_of_0_makes_none_and_counts_every_container() {
         "{c:?}"
     );
 }
+
+/// Ada's rule, 2026-11-06 (AC-T7.1.3): the mark the refill is woken at is derived from the recorded rates, not half
+/// the bound. Do: the mark for sizes 0 to 4,096. Expect: the refill, making at its slowest recorded rate, makes the
+/// pairs above the mark before the creates, taking at their fastest recorded rate, take the pairs at or under it;
+/// and a pool of any size holds at least one at the mark.
+#[test]
+fn the_refill_is_woken_while_what_is_left_outlasts_its_refill() {
+    assert_eq!(low(0), 0);
+    for size in 1..=4_096usize {
+        let mark = low(size);
+        assert!(mark >= 1 && mark <= size, "{size}: {mark}");
+        let (above, at) = (u64::try_from(size - mark).unwrap(), u64::try_from(mark).unwrap());
+        // Time to make what's above the mark against time to take what's at or under it, in common units.
+        assert!(
+            above * TAKES_PER_SECOND <= at * MAKES_PER_SECOND,
+            "{size}: the refill of {above} outlasts the {at} left"
+        );
+    }
+}

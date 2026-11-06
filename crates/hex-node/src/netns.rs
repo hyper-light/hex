@@ -24,12 +24,14 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{BOUND, Counts, IPC_UTS_BOUND, Pool, Take};
+use hex_core::netns::{BOUND, Counts, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
 use hex_runtime::linux::oci::netcheck::{self, Fresh, ProcNet, Scratch};
 use hex_runtime::linux::oci::run::Networks;
+
+use crate::sizes::Sizes;
 
 /// The pool and the thread that fills it, and the namespaces kept for their owners' next boxes (goal 5
 /// extended, step 6) with the thread that checks each as its box goes. Dropped, it shuts the pool down,
@@ -111,15 +113,31 @@ pub struct Pools {
     pub ipc_uts: usize,
     /// Whether the node keeps step 3's prepared `/dev` pool, goal 6's prepared proc pool and their mask sources.
     pub devfs: bool,
+    /// The node's pools' bounds on its host, which the kept namespaces and the seeds are counted at.
+    pub sizes: Sizes,
 }
 
 impl Pools {
-    /// A root node's, each pool at its bound unless set.
-    pub const ROOT: Self = Self {
-        netns: BOUND,
-        ipc_uts: IPC_UTS_BOUND,
-        devfs: true,
-    };
+    /// A root node's on a host whose pools' bounds are `sizes`, each pool at its bound unless set: the ipc and uts
+    /// pairs at the most their learned size may reach.
+    pub fn root(sizes: Sizes) -> Self {
+        Self {
+            netns: BOUND,
+            ipc_uts: sizes.ipc_uts,
+            devfs: true,
+            sizes,
+        }
+    }
+
+    /// A rootless node's, which makes no namespaces or mounts ahead.
+    pub fn rootless(sizes: Sizes) -> Self {
+        Self {
+            netns: 0,
+            ipc_uts: 0,
+            devfs: false,
+            sizes,
+        }
+    }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
     /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
@@ -156,8 +174,8 @@ fn of(count: usize, each: u64) -> u64 {
 }
 
 /// The kept namespaces there may be at once: idle, on the checkers' line, and one for each live box.
-fn kept_at_most() -> u64 {
-    of(netns_reuse::PER_NODE, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
+fn kept_at_most(sizes: Sizes) -> u64 {
+    of(sizes.idle_netns, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
 }
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
@@ -167,11 +185,11 @@ fn descriptors_of_the_node(pools: Pools) -> u64 {
     let connections = crate::serve::LIMITS.connections;
     [
         pools.descriptors(),
-        kept_at_most().saturating_mul(FDS_A_KEPT),
+        kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
         of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         of(connections, 1),
         of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
-        of(hex_core::seeds::SEEDS.get(), FDS_A_SEED),
+        of(pools.sizes.seeds.get(), FDS_A_SEED),
         EXEC_SEEDS.saturating_mul(FDS_A_SEED),
         FDS_BESIDE,
     ]
@@ -201,8 +219,8 @@ impl FilesBound {
     pub fn of(limit: &rustix::process::Rlimit, pools: Pools) -> Self {
         let own = descriptors_of_the_node(pools);
         let namespaces = match limit.current {
-            None => kept_at_most(),
-            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most()),
+            None => kept_at_most(pools.sizes),
+            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most(pools.sizes)),
         };
         Self {
             soft: limit.current,
@@ -249,7 +267,7 @@ struct KeptState {
     given_back: AtomicU64,
     /// Namespaces the checker ruled on, kept idle or closed.
     checked: AtomicU64,
-    /// Namespaces given back with the checkers' line full ([`netns_reuse::PER_NODE`]), or after every checker
+    /// Namespaces given back with the checkers' line full (the node's `idle_netns`), or after every checker
     /// ended,
     /// closed unchecked.
     unchecked: AtomicU64,
@@ -321,8 +339,9 @@ impl Netns {
     /// A pool that holds at most `bound` namespaces, and the thread that starts filling it at once, its kept
     /// namespaces holding their `/proc/net` files under `files`. With a bound of 0 there is no thread, and every
     /// container that makes a network namespace makes it on its create's path, counted, as a rootless node's
-    /// containers do (decision 4).
-    pub fn start(bound: usize, files: FilesBound) -> Result<Self, Refusal> {
+    /// containers do (decision 4). The namespaces kept idle for their owners are bounded by `sizes`: the node's
+    /// `idle_netns`, and each owner's learned from its fresh takes, starting at the host's parallelism.
+    pub fn start(bound: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
             pool: Mutex::new(Pool::new(bound)),
             wake: Condvar::new(),
@@ -340,7 +359,7 @@ impl Netns {
             .spawn(move || refill(&filling))
             .map_err(|e| Refusal::os("starting the network-namespace thread", e))?;
         let state = Arc::new(KeptState {
-            idle: Mutex::new(Idle::new(netns_reuse::PER_OWNER, netns_reuse::PER_NODE)),
+            idle: Mutex::new(Idle::new(sizes.start, sizes.idle_netns)),
             held: Mutex::new(BTreeMap::new()),
             given_back: AtomicU64::new(0),
             checked: AtomicU64::new(0),
@@ -355,7 +374,7 @@ impl Netns {
             files_held: Arc::new(AtomicU64::new(0)),
             check_ns: AtomicU64::new(0),
         });
-        let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
+        let (returns, line) = std::sync::mpsc::sync_channel(sizes.idle_netns);
         let line = Arc::new(Mutex::new(line));
         let mut checkers = Vec::with_capacity(CHECKERS);
         for n in 0..CHECKERS {
