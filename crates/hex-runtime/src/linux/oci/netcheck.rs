@@ -54,8 +54,9 @@ use crate::linux::oci::{OciError, net, sys};
 const MAX_PROC_FILE: usize = 64 << 10;
 /// Most bytes one dump may answer with, all its messages together: a fresh namespace's are under 2 KiB.
 const MAX_DUMP_BYTES: usize = 256 << 10;
-/// Most reads one dump may take before it ends.
-const MAX_DUMP_READS: usize = 64;
+/// Most reads one dump may take before it ends: a read that isn't refused holds a message's header at least
+/// ([`ask`] refuses less), so past [`MAX_DUMP_BYTES`] over a header's bytes the answer is past its bound anyway.
+const MAX_DUMP_READS: usize = MAX_DUMP_BYTES / NLMSG_HDR;
 /// Room for one read of a dump's answer: what the kernel allocates each of the dump's answers at, so the less the
 /// better, but more than `NLMSG_GOODSIZE`, or an answer could be cut. A socket's dumps are answered in buffers of
 /// its largest read so far, capped at 32 KiB (Linux v6.19 net/netlink/af_netlink.c:1940-1943, :2279-2290), each
@@ -710,6 +711,10 @@ fn ask(fd: &OwnedFd, request: &[u8], scratch: &mut Scratch) -> Result<(), Refuse
         let (got, _) = rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty())
             .map_err(|_| Refused::Unreadable)?;
         let chunk = scratch.read.get(..got).ok_or(Refused::Unreadable)?;
+        // Every answer the kernel queues holds a message (an end of file, from a peer that isn't the kernel, none).
+        if chunk.len() < NLMSG_HDR {
+            return Err(Refused::Unreadable);
+        }
         if scratch.answer.len().saturating_add(chunk.len()) > MAX_DUMP_BYTES {
             return Err(Refused::Unreadable);
         }
