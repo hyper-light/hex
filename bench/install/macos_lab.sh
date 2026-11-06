@@ -23,11 +23,13 @@ if [ -z "$LABUSER" ] || [ "$LABUSER" = root ]; then
   exit 2
 fi
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(cd "$HERE/../.." && pwd)
+# The tree under test: this script's own, unless HEX_LAB_REPO names another (macos_lab_ab.sh runs this
+# script on a red and a green tree, each pre-built into its own HEX_LAB_TARGET).
+REPO=${HEX_LAB_REPO:-$(cd "$HERE/../.." && pwd)}
 INSTALLER=$REPO/scripts/install/macos.sh
 HOMEDIR=$(dscl . -read "/Users/$LABUSER" NFSHomeDirectory | awk '{print $2}')
 DIR=$HOMEDIR/.cache/hex-t7/macos
-TARGET=$DIR/lab-target
+TARGET=${HEX_LAB_TARGET:-$DIR/lab-target}
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
 RECORD=$DIR/install-macos-$COMMIT-$TS.txt
