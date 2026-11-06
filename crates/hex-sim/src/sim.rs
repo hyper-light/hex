@@ -723,6 +723,7 @@ impl Sim<'_> {
             (&mut r.gpu, sampled.refused.gpu),
             (&mut r.shares, sampled.refused.shares),
             (&mut r.hot, sampled.refused.hot),
+            (&mut r.class, sampled.refused.class),
         ] {
             *total = total
                 .checked_add(now)

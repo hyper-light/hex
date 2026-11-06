@@ -16,7 +16,11 @@
 use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
 use hex_sim::index::{Sample, Scorer, Shapes};
-use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Resources, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId,
+    WorkloadSpec,
+};
+use hex_sim::packing::{self, Clock};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
 use hex_sim::spec::{self, Violation};
@@ -57,19 +61,25 @@ fn sample(r: &mut Rng) -> Sample {
         seed: r.next_u64(),
         min_feasible: u32::try_from(r.range(1, 8)).unwrap(),
         per_mille: u32::try_from(r.range(0, 300)).unwrap(),
-        scorer: [Scorer::BestFit, Scorer::Align, Scorer::Fragment]
+        scorer: [Scorer::BestFit, Scorer::Align, Scorer::HEX]
             [usize::try_from(r.range(0, 2)).unwrap()],
         shapes: Shapes::of(vec![
-            Resources {
-                cpu_milli: r.range(1, 4000),
-                mem_bytes: r.range(1, 1 << 33),
-                gpus: 0,
-            },
-            Resources {
-                cpu_milli: r.range(1, 16000),
-                mem_bytes: r.range(1, 1 << 35),
-                gpus: 0,
-            },
+            (
+                Resources {
+                    cpu_milli: r.range(1, 4000),
+                    mem_bytes: r.range(1, 1 << 33),
+                    gpus: 0,
+                },
+                Class::Oci,
+            ),
+            (
+                Resources {
+                    cpu_milli: r.range(1, 16000),
+                    mem_bytes: r.range(1, 1 << 35),
+                    gpus: 0,
+                },
+                Class::Oci,
+            ),
         ]),
     }
 }
@@ -278,11 +288,13 @@ fn two_nodes() -> Vec<NodeSpec> {
             id: NodeId(0),
             capacity: res(1000),
             background_milli: 0,
+            classes: Classes::ALL,
         },
         NodeSpec {
             id: NodeId(1),
             capacity: res(4000),
             background_milli: 0,
+            classes: Classes::ALL,
         },
     ]
 }
@@ -294,6 +306,8 @@ fn work(id: u64, cpu: u64) -> WorkloadSpec {
         kind: Kind::Plain,
         arrives: 0,
         runs_for: None,
+        tenancy: Tenancy::default(),
+        class: Class::Oci,
     }
 }
 
@@ -370,10 +384,7 @@ fn the_oracle_refuses_work_left_pending_with_room() {
 #[test]
 fn the_end_check_counts_doubles_and_losses() {
     let nodes = two_nodes();
-    let cluster = Cluster {
-        nodes: nodes.clone(),
-        workloads: vec![work(0, 500), work(1, 500)],
-    };
+    let cluster = Cluster::single_owner(nodes.clone(), vec![work(0, 500), work(1, 500)]);
     let mut s = Store::new(&nodes, 4, 16).unwrap();
     s.apply(0, Write::Submit(work(0, 500))).unwrap();
     s.apply(
@@ -556,8 +567,8 @@ fn a_control_plane_restart_leaves_running_workloads_running() {
     }
 }
 
-/// Step 1's re-take bound: do a saturated cluster whose workloads come in three needs (equivalence
-/// classes) and complete one by one; expect workloads found holding nowhere to be at most one per
+/// Step 1's re-take bound: do a saturated cluster whose workloads come in three demands, each a need
+/// and a class (equivalence classes), and complete one by one; expect workloads found holding nowhere to be at most one per
 /// class per stretch between completions, the rest of each class passed over undecided, and the log one
 /// the serial specification makes.
 #[test]
@@ -571,9 +582,14 @@ fn a_completion_under_saturation_rechecks_each_class_once() {
         max_share_per_mille: 600,
     };
     let mut cluster = generate::cluster(21, &shape).unwrap();
-    let classes: Vec<_> = cluster.workloads.iter().take(3).map(|w| w.need).collect();
+    let demands: Vec<_> = cluster
+        .workloads
+        .iter()
+        .take(3)
+        .map(|w| (w.need, w.class))
+        .collect();
     for (i, w) in cluster.workloads.iter_mut().enumerate() {
-        w.need = classes[i % 3];
+        (w.need, w.class) = demands[i % 3];
         w.kind = Kind::Plain;
     }
     let config = Config {
@@ -604,65 +620,268 @@ fn a_completion_under_saturation_rechecks_each_class_once() {
     );
 }
 
-/// G2 step 2 (AC-T7.6.3 and S3's filters): do generated clusters of GPU and non-GPU nodes, many
-/// above 90% CPU from their co-tenants, with plain work, builds, benchmarks and agent sessions;
-/// expect, by a replay of each log against the cluster's facts alone, sessions on a node above 90%
-/// while another had room = 0, GPU work off GPU nodes = 0 and benchmarks beside builds = 0; and
-/// (non-vacuity) each filter refused nodes that had the room, and some node ran hot while a session
-/// was placed elsewhere.
+/// G2 step 2 (AC-T7.6.3 and S3's filters), in Hex's three kinds: do generated clusters of Linux,
+/// Windows and macOS nodes, each running the kinds its platform can, some with GPUs and many above
+/// 90% CPU from their co-tenants, with OCI containers, Firecracker microVMs and Shards microVMs as
+/// plain work, builds, benchmarks and agent sessions, and one microVM in fifty asking a GPU; expect,
+/// by a replay of each log against the cluster's facts alone, none placed on a node that can't run
+/// its kind, an OCI container that needs a GPU only on a GPU node, every microVM that asks one
+/// refused at admission (neither Firecracker nor Shards can be given a GPU), a benchmark of any kind
+/// never beside a build, and no session on a node above 90% while another had room; and
+/// (non-vacuity) each filter refused nodes that had the room, every kind placed as a benchmark and
+/// as a session, and GPUs given to OCI containers.
 #[test]
 fn the_hard_filters_keep_every_placement_in_bounds() {
     let mut total = spec::FilterReport::default();
     let mut refused = hex_sim::index::Refusals::default();
-    let mut sessions = 0u64;
+    let (mut asked, mut turned_away) = (0u64, 0u64);
+    // By kind (OCI, Firecracker, Shards): benchmarks and sessions placed; OCI containers given GPUs.
+    let (mut benchmarks, mut sessions, mut gpus) = ([0u64; 3], [0u64; 3], 0u64);
     for seed in 0..500 {
         let shape = Shape {
             gpu_nodes_per_mille: 300,
             ..small(seed)
         };
-        let cluster = generate::cluster(seed, &shape).unwrap();
+        let mut cluster = generate::cluster(seed, &shape).unwrap();
+        for w in cluster
+            .workloads
+            .iter_mut()
+            .filter(|w| w.class != Class::Oci)
+            .step_by(50)
+        {
+            w.need.gpus = 1;
+            asked += 1;
+        }
         let run = sim::run(&cluster, &config(seed)).unwrap();
         spec::check_log(&cluster.nodes, &run).unwrap_or_else(|v| panic!("seed {seed}: {v}"));
-        assert_eq!(
-            spec::check_end(&cluster, &run).lost_or_double(),
-            0,
-            "seed {seed}"
-        );
+        let end = spec::check_end(&cluster, &run);
+        assert_eq!(end.lost_or_double(), 0, "seed {seed}");
+        turned_away += end.refused;
         let f = spec::check_filters(&cluster, &run).unwrap();
         total.placements += f.placements;
         total.gpu_off_gpu += f.gpu_off_gpu;
         total.benchmark_with_build += f.benchmark_with_build;
         total.hot_sessions += f.hot_sessions;
+        total.class_off_node += f.class_off_node;
         refused.gpu += run.report.refused.gpu;
         refused.shares += run.report.refused.shares;
         refused.hot += run.report.refused.hot;
-        sessions += u64::try_from(
-            cluster
-                .workloads
-                .iter()
-                .filter(|w| {
-                    w.kind == Kind::Session
-                        && matches!(
-                            run.store.record(w.id).map(|r| r.state),
-                            Some(State::Placed(_) | State::Complete(_))
-                        )
-                })
-                .count(),
-        )
-        .unwrap();
+        refused.class += run.report.refused.class;
+        for w in cluster.workloads.iter().filter(|w| {
+            matches!(
+                run.store.record(w.id).map(|r| r.state),
+                Some(State::Placed(_) | State::Complete(_))
+            )
+        }) {
+            let at = match w.class {
+                Class::Oci => 0,
+                Class::Firecracker => 1,
+                Class::Shards => 2,
+            };
+            match w.kind {
+                Kind::Benchmark => benchmarks[at] += 1,
+                Kind::Session => sessions[at] += 1,
+                Kind::Plain | Kind::Build => {}
+            }
+            gpus += u64::from(w.need.gpus > 0);
+        }
     }
     assert_eq!(total.hot_sessions, 0, "AC-T7.6.3: {total:?}");
-    assert_eq!(
-        total.gpu_off_gpu + total.benchmark_with_build,
-        0,
-        "{total:?}"
-    );
+    assert_eq!(total.violations(), 0, "{total:?}");
+    assert_eq!(turned_away, asked, "a microVM asking a GPU wasn't refused");
     assert!(
-        refused.gpu > 0 && refused.shares > 0 && refused.hot > 0,
+        refused.gpu > 0 && refused.shares > 0 && refused.hot > 0 && refused.class > 0,
         "a filter never refused: {refused:?}"
     );
     assert!(
-        sessions > 1_000 && total.placements > 20_000,
-        "{sessions} sessions, {total:?}"
+        asked > 100 && gpus > 100 && total.placements > 20_000,
+        "{asked} asked, {gpus} GPUs, {total:?}"
+    );
+    assert!(
+        benchmarks.iter().chain(&sessions).all(|&n| n > 100),
+        "benchmarks {benchmarks:?}, sessions {sessions:?}"
+    );
+}
+
+/// The recorded workload (bench/sched/huawei_workload.md) on one node model: a day of Huawei Cloud's
+/// serverless sandboxes, each an OCI container, a Firecracker microVM or a Shards microVM by its
+/// owner.
+struct NodeModel {
+    name: &'static str,
+    nodes: usize,
+    /// The day with lifetimes as recorded, and with Huawei's one-minute keep-alive added.
+    days: [Cluster; 2],
+    /// The speeds the completions of the mix, OCI, Firecracker and Shards sets run at, as recorded
+    /// and with the keep-alive: each the slowest of `sched_packing`'s ladder at which Hex and both
+    /// best fits reach 90% on every seed, so lifetimes enter as far as the nodes allow
+    /// (bench/sched/packing.md).
+    speeds: [[Time; 2]; 4],
+}
+
+/// The two node models: 10 EC2 m5d.metal hosts that each run every kind (the main one), and Hex's
+/// fleet's host types five times over, each running the kinds its OS runs.
+fn node_models() -> [NodeModel; 2] {
+    let limits = hex_sim::replay::Limits::default();
+    let parse = |text: &str| hex_sim::replay::parse(text, &limits).unwrap();
+    [
+        NodeModel {
+            name: "m5d.metal",
+            nodes: 10,
+            days: [
+                parse(include_str!("../../../bench/sched/huawei-r5-day30.trace")),
+                parse(include_str!(
+                    "../../../bench/sched/huawei-r5-day30.keepalive.trace"
+                )),
+            ],
+            speeds: [[40, 20]; 4],
+        },
+        NodeModel {
+            name: "fleet",
+            nodes: 50,
+            days: [
+                parse(include_str!(
+                    "../../../bench/sched/huawei-r5-day30.fleet.trace"
+                )),
+                parse(include_str!(
+                    "../../../bench/sched/huawei-r5-day30.fleet.keepalive.trace"
+                )),
+            ],
+            speeds: [[150, 50], [40, 20], [30, 10], [150, 40]],
+        },
+    ]
+}
+
+/// The day as recorded, a mix of the three kinds, and the same day as each kind alone.
+fn mix_and_alone(day: &Cluster) -> [(&'static str, Cluster); 4] {
+    [
+        ("mix", day.clone()),
+        ("oci", packing::alone(day, Class::Oci).unwrap()),
+        (
+            "firecracker",
+            packing::alone(day, Class::Firecracker).unwrap(),
+        ),
+        ("shards", packing::alone(day, Class::Shards).unwrap()),
+    ]
+}
+
+/// G2 step 3 (`AC-T7.4.3`'s recorded workload): read a day of 25,295 recorded launches of 339
+/// owners, each an OCI container, a Firecracker microVM or a Shards microVM, on each node model,
+/// through the typed parser, and replay it twice from one seed, with its lifetimes as recorded and
+/// with the keep-alive; expect the same trace hash, report and log, every launch done once, and the
+/// log and the hard filters correct by the specification. Non-vacuity: the kind filter refuses nodes
+/// on the fleet, where some nodes run only some kinds, and none on m5d.metal, where each runs every
+/// kind.
+#[test]
+fn a_recorded_workload_replays_the_same_twice() {
+    for model in node_models() {
+        for cluster in model.days {
+            replays_the_same_twice(model.name, model.nodes, &cluster);
+        }
+    }
+}
+
+fn replays_the_same_twice(model: &str, nodes: usize, cluster: &Cluster) {
+    assert_eq!(
+        (
+            cluster.nodes.len(),
+            cluster.workloads.len(),
+            cluster.owners.len()
+        ),
+        (nodes, 25_295, 339),
+        "{model}"
+    );
+    let config = Config::default();
+    let a = sim::run(cluster, &config).unwrap();
+    let b = sim::run(cluster, &config).unwrap();
+    assert!(same(&a.report, &b.report), "{model}");
+    assert_eq!(a.store.log(), b.store.log(), "{model}");
+    let end = spec::check_end(cluster, &a);
+    assert_eq!(end.lost_or_double(), 0, "{model}: {end:?}");
+    assert_eq!(end.complete, 25_295, "{model}");
+    spec::check_log(&cluster.nodes, &a).unwrap();
+    assert_eq!(
+        spec::check_filters(cluster, &a).unwrap().violations(),
+        0,
+        "{model}"
+    );
+    let every_node_runs_every_kind = cluster.nodes.iter().all(|n| n.classes == Classes::ALL);
+    assert_eq!(
+        a.report.refused.class == 0,
+        every_node_runs_every_kind,
+        "{model}: {:?}",
+        a.report.refused
+    );
+}
+
+/// AC-T7.4.3 (G2 step 4): pack the recorded workload to 90% load from 16 starting arrivals spread
+/// over the day, on each node model, as a mix of the three kinds and as each kind alone, under best
+/// fit alone (by free CPU first, and across resources as Kubernetes' `MostAllocated` does) and under
+/// Hex's scorer, three ways: with no completions, and with completions at each set's speeds,
+/// lifetimes as recorded and with the keep-alive; expect Hex's stranded capacity at least 30% below
+/// each best fit's on every seed of each. Non-vacuity: best fit strands something, every arm reaches 90%, and under
+/// completions some launch ends on the way, on every seed. Not bought by refusing work: Hex's scorer
+/// passes over no more launches on the way than either best fit.
+#[test]
+fn the_recorded_workload_strands_at_least_30_percent_less_than_best_fit() {
+    for model in node_models() {
+        let [recorded, kept_alive] = model.days;
+        let sets = mix_and_alone(&recorded)
+            .into_iter()
+            .zip(mix_and_alone(&kept_alive))
+            .zip(model.speeds);
+        for (((set, recorded), (_, kept_alive)), [as_recorded, with_keep_alive]) in sets {
+            let set = format!("{} {set}", model.name);
+            for (cluster, clock) in [
+                (&recorded, Clock::Held),
+                (&recorded, Clock::Compressed(as_recorded)),
+                (&kept_alive, Clock::Compressed(with_keep_alive)),
+            ] {
+                strands_less(&set, cluster, clock);
+            }
+        }
+    }
+}
+
+fn strands_less(set: &str, cluster: &Cluster, clock: Clock) {
+    let sample = Sample {
+        shapes: Shapes::of(packing::minimal_shapes(cluster)),
+        ..Sample::default()
+    };
+    let pack = |scorer, from| {
+        packing::pack(cluster, &Sample { scorer, ..sample }, 900, from, clock).unwrap()
+    };
+    let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
+    for seed in 0..16 {
+        let from = seed * cluster.workloads.len() / 16;
+        let hex = pack(Scorer::HEX, from);
+        let best = pack(Scorer::BestFit, from);
+        let most = pack(Scorer::MostAllocated, from);
+        for p in [&hex, &best, &most] {
+            assert!(p.reached, "{set} {clock:?} seed {seed}: {p:?}");
+            assert_eq!(
+                p.completions > 0,
+                clock != Clock::Held,
+                "{set} {clock:?} seed {seed}: {p:?}"
+            );
+        }
+        for base in [&best, &most] {
+            assert!(
+                base.stranded_per_mille() > 0,
+                "{set} {clock:?} seed {seed}: {base:?}"
+            );
+            assert!(
+                hex.stranded_per_mille() * 10 <= base.stranded_per_mille() * 7,
+                "{set} {clock:?} seed {seed}: Hex strands {} per-mille, best fit {}",
+                hex.stranded_per_mille(),
+                base.stranded_per_mille()
+            );
+        }
+        passed_hex += hex.passed_over;
+        passed_best += best.passed_over;
+        passed_most += most.passed_over;
+    }
+    assert!(
+        passed_hex <= passed_best.min(passed_most),
+        "{set} {clock:?}: {passed_hex} {passed_best} {passed_most}"
     );
 }

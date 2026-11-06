@@ -1,11 +1,16 @@
 # Hex's requirement registry: the goals of track T7 of kiln's critical path (kiln plan
 # 01a157fe102576a8bf44ccaa5d835de7), each acceptance criterion (AC-T7.n.k) and test (T-T7.n.k) with its ID,
-# from the plan's version below on 2026-10-20. Code comments, commits, tests and benchmarks cite these IDs;
-# kiln's citation gate (CP-T6.6) reads them from kiln's vendored copy. Hex's own IDs join them as
-# its design names them.
+# from the plan's version below (version 2 on 2026-10-20; version 4 on 2026-11-06). Code comments, commits,
+# tests and benchmarks cite these IDs; kiln's citation gate (CP-T6.6) reads them from kiln's vendored copy.
+# Hex's own IDs join them as its design names them.
+#
+# Version 4 rewrote CP-T7.3's title, AC-T7.3.1 and T-T7.3.1, AC-T7.4.1 and AC-T7.4.3, and AC-T7.5.1 and
+# AC-T7.5.2 on Ada's correction (2026-11-06): "You are NOT Kiln's load balancer for jobs, CI, and general
+# work. Your scheduler is for *microvms*." and "we work with OCI containers, Firecracker, and Shards
+# Microvms."
 
 plan = "01a157fe102576a8bf44ccaa5d835de7"
-plan_version = 2
+plan_version = 4
 track = "CP-T7"
 
 [[goal]]
@@ -39,24 +44,24 @@ tests = [
 
 [[goal]]
 id = "CP-T7.3"
-title = "The control plane, from one node to a cell; CI legs placed by resources"
+title = "The control plane, from one node to a cell; OCI containers, Firecracker microVMs and Shards microVMs placed by resources"
 criteria = [
-  { id = "AC-T7.3.1", text = "Usable now: kiln places CI legs by CPU, memory, disk and devices, never by slot counts (G-02), in a change request that passes the gate" },
+  { id = "AC-T7.3.1", text = "Usable now: Hex places OCI containers, Firecracker microVMs and Shards microVMs by CPU, memory, disk and devices, never by slot counts, in a change request that passes the gate" },
   { id = "AC-T7.3.2", text = "leg submit to start on an idle cell, p99 is at most 200 ms, measured by bench hex_submit across adacachy, fedora and jupiter" },
   { id = "AC-T7.3.3", text = "workloads lost or started twice over 10,000 crash seeds of the control plane is exactly 0, measured by hex-sim with the nemesis" },
   { id = "AC-T7.3.4", text = "A control plane restart leaves running workloads running, shown by a test" },
 ]
 tests = [
-  { id = "T-T7.3.1", text = "The CI labs end to end on Hex's placement, unchanged in what they check" },
+  { id = "T-T7.3.1", text = "launches of OCI containers, Firecracker microVMs and Shards microVMs end to end on Hex's placement" },
 ]
 
 [[goal]]
 id = "CP-T7.4"
 title = "The scheduler: plugins, scoring, sampling, explanations"
 criteria = [
-  { id = "AC-T7.4.1", text = "Usable now: CI legs and agent launches are placed by Hex's scheduler, and every pending one says why in words, in a change request that passes the gate" },
+  { id = "AC-T7.4.1", text = "Usable now: OCI containers, Firecracker microVMs and Shards microVMs, and the agent launches in them, are placed by Hex's scheduler, and every pending one says why in words, in a change request that passes the gate" },
   { id = "AC-T7.4.2", text = "placement decision p99 at 10,000 placements/s on 10,000 simulated nodes is at most 10 ms, measured by hex-sim" },
-  { id = "AC-T7.4.3", text = "stranded capacity at 90% load, against best fit alone falls by at least 30% compared with best fit alone, measured by hex-sim with a recorded kiln workload" },
+  { id = "AC-T7.4.3", text = "stranded capacity at 90% load, against best fit alone falls by at least 30% compared with best fit alone, measured by hex-sim with a recorded workload of OCI containers, Firecracker microVMs and Shards microVMs" },
 ]
 tests = [
   { id = "T-T7.4.1", text = "A model-based test: placements equal the serial specification's on generated clusters and workloads" },
@@ -66,8 +71,8 @@ tests = [
 id = "CP-T7.5"
 title = "Priority, quotas, fair share, preemption and gangs"
 criteria = [
-  { id = "AC-T7.5.1", text = "Usable now: kiln CI shares capacity fairly between repositories and people, deploy legs take precedence over batch, and matrix jobs are admitted whole, in a change request that passes the gate" },
-  { id = "AC-T7.5.2", text = "each of 4 equal-weight repositories' share of capacity under contention is within 2% of 25%, measured by hex-sim over a recorded day" },
+  { id = "AC-T7.5.1", text = "Usable now: the owners of OCI containers, Firecracker microVMs and Shards microVMs share capacity fairly, higher-priority ones take precedence over batch ones, and gangs are admitted whole (Ada, 2026-11-06: \"You are NOT Kiln's load balancer for jobs, CI, and general work. Your scheduler is for *microvms*.\" and \"we work with OCI containers, Firecracker, and Shards Microvms.\"), in a change request that passes the gate" },
+  { id = "AC-T7.5.2", text = "each of 4 equal-weight owners' share of capacity under contention is within 2% of 25%, measured by hex-sim over a recorded day of OCI containers, Firecracker microVMs and Shards microVMs" },
   { id = "AC-T7.5.3", text = "disruption budgets broken by preemption is exactly 0, measured by a property test" },
 ]
 tests = [

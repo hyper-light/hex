@@ -18,6 +18,8 @@ pub enum SimError {
     UnknownNode(NodeId),
     #[error("workload {0:?} is not in the run")]
     UnknownWorkload(WorkloadId),
+    #[error("workload {0:?}'s memory over- or underflowed when its class changed")]
+    Need(WorkloadId),
     #[error("workload {0:?}'s client gave up after {1} attempts")]
     ClientGaveUp(WorkloadId, u32),
     #[error("node {0:?} gave up reporting workload {1:?} done after {2} attempts")]
