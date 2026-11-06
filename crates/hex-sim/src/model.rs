@@ -73,11 +73,11 @@ pub struct Demand {
     pub kind: Kind,
 }
 
-/// Who a workload's capacity is charged to: a repository or a person (`AC-T7.5.2`).
+/// Who a workload's capacity is charged to: a microVM's owner, a tenant or an app (`AC-T7.5.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct OwnerId(pub u32);
 
-/// Workloads admitted whole or not at all: a matrix job's legs (`AC-T7.5.1`).
+/// Workloads admitted whole or not at all: microVMs that only work together (`AC-T7.5.1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GangId(pub u64);
 

@@ -1,5 +1,8 @@
-//! AC-T7.5.2 over a recorded day (CP-T7.5, `docs/design/scheduler-fairness.md` F1): kiln's own CI,
-//! replayed in hex-sim as recorded (`bench/sched/kiln_workload.md`).
+//! A side measurement, not of record: G4's bars run on days of kiln's own CI, replayed in hex-sim
+//! as recorded (`bench/sched/kiln_workload.md`). Hex schedules microVMs, not CI jobs (Ada,
+//! 2026-11-06: "You are NOT Kiln's load balancer for jobs, CI, and general work. Your scheduler is
+//! for *microvms*."), so these days stand for no workload of Hex's; G4's bars are met on microVM
+//! days (`tests/fair.rs`, `tests/burst.rs`). Kept for what they showed about the bars' preconditions.
 
 #![cfg_attr(
     test,
@@ -114,7 +117,7 @@ fn run(day: &Cluster, policy: Policy) -> (ShareReport, u64) {
     )
 }
 
-/// AC-T7.5.2 over a recorded day, measured for the record (`bench/sched/kiln_workload.md`): do
+/// Side measurement (kiln CI, not of record): AC-T7.5.2 over a recorded CI day, measured (`bench/sched/kiln_workload.md`): do
 /// 2026-10-25 of kiln's CI (kiln, slates, hyperscale and hyper-raft as four equal-weight owners;
 /// arrivals, run times and needs as recorded) on the largest cluster at which each of the four asks
 /// for more than a quarter of it, under bands-then-DRF and under submit order; expect the
@@ -140,16 +143,18 @@ fn four_recorded_repositories_on_the_largest_quarter_cluster() {
         background_milli: 0,
     }];
     eprintln!(
-        "AC-T7.5.2 recorded 2026-10-25: {} legs, one node of {} millicores and {:.2} GiB",
+        "kiln-CI side: AC-T7.5.2 2026-10-25: {} legs, one node of {} millicores and {:.2} GiB",
         day.workloads.len(),
         node.cpu_milli,
         node.mem_bytes as f64 / GIB
     );
     let (drf, refused) = run(&day, Policy::Drf);
     let (fifo, _) = run(&day, Policy::Fifo);
-    eprintln!("AC-T7.5.2 recorded: {refused} legs larger than the cluster, refused at admission");
-    describe("AC-T7.5.2 recorded DRF", &drf);
-    describe("AC-T7.5.2 recorded FIFO", &fifo);
+    eprintln!(
+        "kiln-CI side: AC-T7.5.2: {refused} legs larger than the cluster, refused at admission"
+    );
+    describe("kiln-CI side: AC-T7.5.2 DRF", &drf);
+    describe("kiln-CI side: AC-T7.5.2 FIFO", &fifo);
     assert!(
         drf.contended_ns > 0 && fifo.contended_ns > 0,
         "no contention"
@@ -157,7 +162,7 @@ fn four_recorded_repositories_on_the_largest_quarter_cluster() {
     assert!(refused > 0);
 }
 
-/// Beside it, for the record: do 2026-10-30, the day of the fourteen with the most kiln-slates
+/// Side measurement (kiln CI, not of record): do 2026-10-30, the day of the fourteen with the most kiln-slates
 /// contention, with kiln and slates as two equal-weight owners on the 10 runners kiln ran them on,
 /// under bands-then-DRF and under submit order, against 50% within 2%; expect them to contend. They
 /// barely do (2026-11-05: 560 us in all under DRF, 420 us under FIFO, the control plane's own commit
@@ -210,7 +215,7 @@ fn starts(day: &Cluster, policy: Policy, preemptions: u64) -> (Vec<Option<Time>>
     )
 }
 
-/// T-T7.5.1 on a recorded day: do 2026-10-30 of kiln's CI as recorded (focal, hyperscale, kiln and
+/// Side measurement (kiln CI, not of record): T-T7.5.1 on a recorded CI day: do 2026-10-30 of kiln's CI as recorded (focal, hyperscale, kiln and
 /// slates as owners, on the 10 runners kiln ran it on), then the same day with 1,000 legs from a
 /// repository that ran nothing that day, all arriving at the start of the day's busiest hour (the
 /// hour, counted from its first leg, in which most legs arrived), each leg's need, run time and kind
@@ -236,7 +241,7 @@ fn a_burst_on_a_recorded_day_leaves_the_others_start_p95_as_it_was() {
     let burst =
         generate::burst_from(usual.clone(), 7, OwnerId(owners), busiest * HOUR, 1_000).unwrap();
     eprintln!(
-        "T-T7.5.1 recorded 2026-10-30: {} legs of {owners} repositories, busiest hour {busiest} ({count} legs); with the burst {} legs",
+        "kiln-CI side: T-T7.5.1 2026-10-30: {} legs of {owners} repositories, busiest hour {busiest} ({count} legs); with the burst {} legs",
         usual.workloads.len(),
         burst.workloads.len()
     );
@@ -251,7 +256,7 @@ fn a_burst_on_a_recorded_day_leaves_the_others_start_p95_as_it_was() {
         let (a, b) = (p95s(&usual, &without, owners), p95s(&burst, &with, owners));
         let holds = b.iter().zip(&a).all(|(w, wo)| w <= wo);
         eprintln!(
-            "T-T7.5.1 recorded {name}: p95 ns without {a:?} with {b:?}; preempted {preempted}; holds {holds}"
+            "kiln-CI side: T-T7.5.1 {name}: p95 ns without {a:?} with {b:?}; preempted {preempted}; holds {holds}"
         );
         rows.push(holds);
     }

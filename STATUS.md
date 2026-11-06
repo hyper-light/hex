@@ -253,14 +253,15 @@ three different things (CLAUDE.md "Working here"):
   proximity on hyper-swim, priority/fair-share/gangs/preemption, correctness against a serial
   specification, one code path from a laptop to a region, and fast isolation of bad workloads and
   nodes, all measured in **hex-sim** (built first). Implementation open.
-  - **Priority, fair share, gangs and preemption** (implementation goal 4, CP-T7.5; `docs/design/scheduler-fairness.md`),
-    in hex-sim's control plane and its serial specification, 2026-11-05: queues by band then weighted DRF
-    (AC-T7.5.2: four equal-weight repositories within 479 ppm of a quarter on a generated day, bar 5,000; FIFO
-    133,982), gangs in one store write (partial gangs 0 over crashes at every write), preemption within
-    disruption budgets (AC-T7.5.3: breaches 0 by a 256-case proptest with the crash nemesis), and a 1,000-leg
-    burst leaving the other repositories' start p95 as it was (T-T7.5.1; plain DRF and FIFO fail it, a Kueue
-    cohort model keeps it). Open: AC-T7.5.2 over a recorded kiln day, when kiln's CI history is recorded
-    (`replay.rs` reads owners, bands, gangs and groups already).
+  - **Priority, fair share, gangs and preemption** between owners of microVMs (implementation goal 4,
+    CP-T7.5; `docs/design/scheduler-fairness.md`), in hex-sim's control plane and its serial specification,
+    2026-11-05: queues by band then weighted DRF (AC-T7.5.2: four equal-weight owners within 479 ppm of a
+    quarter on a generated day, bar 5,000; FIFO 133,982), gangs in one store write (partial gangs 0 over
+    crashes at every write), preemption within disruption budgets (AC-T7.5.3: breaches 0 by a 256-case
+    proptest with the crash nemesis), and a 1,000-microVM burst leaving the other owners' start p95 as it was
+    (T-T7.5.1; plain DRF and FIFO fail it, a Kueue cohort model keeps it). Open: AC-T7.5.2 over a recorded
+    microVM day, when G2's microVM trace is committed. Days of kiln's CI were measured too, as a side
+    measurement (`bench/sched/kiln_workload.md`): Hex schedules microVMs, not CI jobs (Ada, 2026-11-06).
 
 ## Next
 

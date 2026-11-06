@@ -1,5 +1,5 @@
-//! T-T7.5.1 (CP-T7.5, `docs/design/scheduler-fairness.md` F5): a burst from one repository leaves
-//! the others' start latency as it was, in hex-sim, beside the competitors' policies.
+//! T-T7.5.1 (CP-T7.5, `docs/design/scheduler-fairness.md` F5): a burst of microVMs from one owner leaves
+//! the other owners' start latency as it was, in hex-sim, beside the competitors' policies.
 
 #![cfg_attr(
     test,
@@ -15,7 +15,7 @@
 
 use hex_sim::baseline;
 use hex_sim::fair::Policy;
-use hex_sim::generate::{self, Day, Repo};
+use hex_sim::generate::{self, Day, Tenant};
 use hex_sim::model::{Cluster, OwnerId, Resources, Time};
 use hex_sim::sim::{self, Config};
 
@@ -23,11 +23,11 @@ const GIB: u64 = 1 << 30;
 const HOUR: u64 = 3_600_000_000_000;
 const MINUTE: u64 = 60_000_000_000;
 
-/// Three repositories' usual day on 16 nodes of 16 cores and 64 GiB: each asks for 20% of the
-/// cluster in the busy hours and 8% out of them, with legs of different shapes; a fourth asks for
+/// Three owners' usual day on 16 nodes of 16 cores and 64 GiB: each asks for 20% of the
+/// cluster in the busy hours and 8% out of them, with microVMs of different shapes; a fourth asks for
 /// nothing.
 fn usual() -> Cluster {
-    let repo = |cores, gib, busy_ppm, quiet_ppm| Repo {
+    let tenant = |cores, gib, busy_ppm, quiet_ppm| Tenant {
         weight: 1,
         cores,
         gib,
@@ -43,28 +43,28 @@ fn usual() -> Cluster {
                 mem_bytes: 64 * GIB,
                 gpus: 0,
             },
-            repos: vec![
-                repo((1, 2), (1, 4), 200_000, 80_000),
-                repo((2, 4), (4, 8), 200_000, 80_000),
-                repo((1, 4), (8, 16), 200_000, 80_000),
-                repo((1, 1), (1, 1), 0, 0),
+            tenants: vec![
+                tenant((1, 2), (1, 4), 200_000, 80_000),
+                tenant((2, 4), (4, 8), 200_000, 80_000),
+                tenant((1, 4), (8, 16), 200_000, 80_000),
+                tenant((1, 1), (1, 1), 0, 0),
             ],
             length: 24 * HOUR,
             busy: (9 * HOUR, 19 * HOUR),
             mean_run: 10 * MINUTE,
-            max_legs: 100_000,
+            max_vms: 100_000,
         },
     )
     .unwrap()
 }
 
-/// The usual day with 1,000 legs of the fourth repository's, of 1 to 8 cores, all arriving at noon.
+/// The usual day with 1,000 microVMs of the fourth owner's, of 1 to 8 cores, all arriving at noon.
 fn with_burst() -> Cluster {
     generate::burst(usual(), 6, OwnerId(3), 12 * HOUR, 1_000, 8, 10 * MINUTE).unwrap()
 }
 
-/// Each of the three usual repositories' 95th-percentile start latency (first start less arrival;
-/// a leg never started counts as waiting to the end of time).
+/// Each of the three usual owners' 95th-percentile start latency (first start less arrival;
+/// a microVM never started counts as waiting to the end of time).
 fn p95s(cluster: &Cluster, started: &[Option<Time>]) -> [Time; 3] {
     let mut out = [0; 3];
     for (owner, p) in out.iter_mut().enumerate() {
@@ -102,13 +102,13 @@ fn kueue(cluster: &Cluster) -> [Time; 3] {
     p95s(cluster, &out.started)
 }
 
-/// T-T7.5.1: do the three repositories' usual day, then the same day with 1,000 legs from a fourth
+/// T-T7.5.1: do the three owners' usual day, then the same day with 1,000 microVMs from a fourth
 /// arriving at once; expect, under Hex's policy (bands, weighted DRF, preemption of over-share work),
-/// each of the three's leg-start p95 with the burst to be at most its p95 without, with burst legs
+/// each of the three's start p95 with the burst to be at most its p95 without, with burst microVMs
 /// preempted to do it; and (non-vacuity) submit order to fail that on the same days. Plain DRF (no preemption) and Kueue's cohort sharing
 /// are measured beside it, for the record (F5).
 #[test]
-fn a_burst_leaves_the_other_repositories_start_p95_as_it_was() {
+fn a_burst_leaves_the_other_owners_start_p95_as_it_was() {
     let (usual, burst) = (usual(), with_burst());
     let us = |c: &Cluster| control_plane(c, Policy::Drf, 100_000);
     let (hex_burst, preempted) = us(&burst);
@@ -128,7 +128,7 @@ fn a_burst_leaves_the_other_repositories_start_p95_as_it_was() {
     ];
     for (name, without, with) in &rows {
         eprintln!(
-            "T-T7.5.1 {name}: legs {} / {}; p95 ns without {without:?} with {with:?}; holds {}",
+            "T-T7.5.1 {name}: microVMs {} / {}; p95 ns without {without:?} with {with:?}; holds {}",
             usual.workloads.len(),
             burst.workloads.len(),
             with.iter().zip(without).all(|(a, b)| a <= b)
@@ -137,7 +137,7 @@ fn a_burst_leaves_the_other_repositories_start_p95_as_it_was() {
     let holds = |(_, without, with): &(&str, [Time; 3], [Time; 3])| {
         with.iter().zip(without).all(|(a, b)| a <= b)
     };
-    eprintln!("T-T7.5.1 hex preempted {preempted} burst legs");
+    eprintln!("T-T7.5.1 hex preempted {preempted} burst microVMs");
     assert!(holds(&rows[0]), "hex: {:?}", rows[0]);
     // Non-vacuity: the burst took room the others then took back.
     assert!(preempted > 0);

@@ -1,5 +1,5 @@
-//! G4's fair-share bar (CP-T7.5, `docs/design/scheduler-fairness.md`): four repositories' shares of a
-//! contended day of CI, measured in hex-sim.
+//! G4's fair-share bar (CP-T7.5, `docs/design/scheduler-fairness.md`): four microVM owners' shares of
+//! a contended day, measured in hex-sim.
 
 #![cfg_attr(
     test,
@@ -14,7 +14,7 @@
 )]
 
 use hex_sim::fair::{self, Policy};
-use hex_sim::generate::{self, Day, Repo};
+use hex_sim::generate::{self, Day, Tenant};
 use hex_sim::model::Resources;
 use hex_sim::model::{Cluster, Kind};
 use hex_sim::replay;
@@ -24,15 +24,15 @@ use hex_sim::spec;
 const GIB: u64 = 1 << 30;
 const HOUR: u64 = 3_600_000_000_000;
 
-/// Four equal-weight repositories on 64 nodes of 16 cores and 64 GiB. In the ten busy hours they ask
-/// for 60%, 50%, 45% and 45% of the cluster (200% in all), with legs of different shapes (one
+/// Four equal-weight owners on 64 nodes of 16 cores and 64 GiB. In the ten busy hours they ask
+/// for 60%, 50%, 45% and 45% of the cluster (200% in all), with microVMs of different shapes (one
 /// memory-heavy); out of them, 8% each, so the backlog drains by night. Each asks well past the 28%
 /// DRF gives it here (three CPU-bound owners and one memory-bound one share the CPU), so each stays
 /// backlogged while all four wait: on a day where two asked for 30%, their arrivals often fell below
 /// that 28%, and an owner short of work holds less than its share under any policy
 /// (docs/design/scheduler-fairness.md F1, evidence).
-fn four_repos() -> Day {
-    let repo = |cores, gib, busy_ppm| Repo {
+fn four_tenants() -> Day {
+    let tenant = |cores, gib, busy_ppm| Tenant {
         weight: 1,
         cores,
         gib,
@@ -46,26 +46,26 @@ fn four_repos() -> Day {
             mem_bytes: 64 * GIB,
             gpus: 0,
         },
-        repos: vec![
-            repo((1, 1), (1, 2), 600_000),
-            repo((4, 4), (4, 8), 500_000),
-            repo((2, 2), (12, 16), 450_000),
-            repo((1, 8), (2, 16), 450_000),
+        tenants: vec![
+            tenant((1, 1), (1, 2), 600_000),
+            tenant((4, 4), (4, 8), 500_000),
+            tenant((2, 2), (12, 16), 450_000),
+            tenant((1, 8), (2, 16), 450_000),
         ],
         length: 24 * HOUR,
         busy: (9 * HOUR, 19 * HOUR),
         mean_run: 600_000_000_000,
-        max_legs: 400_000,
+        max_vms: 400_000,
     }
 }
 
-/// AC-T7.5.2: do a generated day of four equal-weight repositories, each asking for more than its
-/// quarter for ten hours; expect each repository's part of the capacity held while all four wait to
+/// AC-T7.5.2: do a generated day of four equal-weight owners, each asking for more than its
+/// quarter for ten hours; expect each owner's part of the capacity held while all four wait to
 /// be within 2% of 25% (0.5 percentage points) under bands-then-DRF, over at least eight contended
 /// hours; and (non-vacuity) submit order alone to miss that bar on the same day.
 #[test]
-fn four_equal_weight_repositories_each_hold_a_quarter_under_contention() {
-    let day = generate::day(4, &four_repos()).unwrap();
+fn four_equal_weight_owners_each_hold_a_quarter_under_contention() {
+    let day = generate::day(4, &four_tenants()).unwrap();
     let base = Config {
         workers: 4,
         max_events: 1 << 22,
@@ -76,7 +76,7 @@ fn four_equal_weight_repositories_each_hold_a_quarter_under_contention() {
         let run = sim::run(&day, &Config { policy, ..base }).unwrap();
         let shares = fair::measure(&day, &run.ran, run.report.end).unwrap();
         eprintln!(
-            "AC-T7.5.2 {policy:?}: legs {} placements {} contended {:.2} h shares_ppm {:?} of_cluster_ppm {:?} worst {} ppm",
+            "AC-T7.5.2 {policy:?}: microVMs {} placements {} contended {:.2} h shares_ppm {:?} of_cluster_ppm {:?} worst {} ppm",
             day.workloads.len(),
             run.report.placements,
             shares.contended_ns as f64 / HOUR as f64,
@@ -99,14 +99,14 @@ fn four_equal_weight_repositories_each_hold_a_quarter_under_contention() {
     );
 }
 
-/// AC-T7.5.1 (matrix jobs admitted whole), G4 step 3, over a generated day: do the contended day of
-/// AC-T7.5.2 with a tenth of its legs made matrix gangs of 2 to 12 (most needing more than one node,
-/// and arriving while every node is busy, among single legs); expect no write to leave a gang part
+/// AC-T7.5.1 (gangs of microVMs admitted whole), G4 step 3, over a generated day: do the contended day of
+/// AC-T7.5.2 with a tenth of its microVMs made gangs of 2 to 12 (most needing more than one node,
+/// and arriving while every node is busy, among single microVMs); expect no write to leave a gang part
 /// placed (check_gangs' partial = 0), every gang placed in one write, nothing lost or started
 /// twice, and (non-vacuity) hundreds of gangs that spanned nodes and waited for capacity placed.
 #[test]
-fn matrix_gangs_on_a_contended_day_are_placed_whole() {
-    let day = generate::gangs(generate::day(4, &four_repos()).unwrap(), 4, 100, 12);
+fn gangs_on_a_contended_day_are_placed_whole() {
+    let day = generate::gangs(generate::day(4, &four_tenants()).unwrap(), 4, 100, 12);
     let run = sim::run(
         &day,
         &Config {
@@ -148,7 +148,7 @@ fn matrix_gangs_on_a_contended_day_are_placed_whole() {
         spanned_and_waited += u64::from(!node.holds(&need) && waited);
     }
     eprintln!(
-        "AC-T7.5.1 day: legs {} gangs {} placed {} partial {} spanned_and_waited {} refused {}",
+        "AC-T7.5.1 day: microVMs {} gangs {} placed {} partial {} spanned_and_waited {} refused {}",
         day.workloads.len(),
         run.gangs.len(),
         gangs.placed,
@@ -159,7 +159,7 @@ fn matrix_gangs_on_a_contended_day_are_placed_whole() {
     assert!(spanned_and_waited > 200, "only {spanned_and_waited}");
 }
 
-/// `cluster` written in the recorded-workload format (`replay.rs`), every leg with its tenancy.
+/// `cluster` written in the recorded-workload format (`replay.rs`), every microVM with its tenancy.
 fn as_trace(cluster: &Cluster) -> String {
     let mut out = String::from("# source: tests/fair.rs, a generated day\n");
     for n in &cluster.nodes {
@@ -200,13 +200,13 @@ fn as_trace(cluster: &Cluster) -> String {
     out
 }
 
-/// AC-T7.5.2 over a recorded day: do hex-sim over the day in `HEX_SIM_RECORDED_DAY` (a recorded kiln
-/// CI day in `replay.rs`'s format, one owner per repository) when it is set; expect each owner's part
+/// AC-T7.5.2 over a recorded day: do hex-sim over the day in `HEX_SIM_RECORDED_DAY` (a recorded
+/// microVM day in `replay.rs`'s format, an owner per tenant or app) when it is set; expect each owner's part
 /// of the held share under contention within 2% of an equal part. Without a recording, do the
 /// generated day of `four_equal_weight_...` written as a trace and read back; expect it to read as the
 /// same cluster and measure the same shares, so a recording runs through the same path unchanged.
 #[test]
-fn four_equal_weight_repositories_over_a_recorded_day() {
+fn four_equal_weight_owners_over_a_recorded_day() {
     let config = Config {
         workers: 4,
         max_events: 1 << 22,
@@ -219,7 +219,7 @@ fn four_equal_weight_repositories_over_a_recorded_day() {
         let shares = fair::measure(&day, &run.ran, run.report.end).unwrap();
         let equal = 1_000_000 / shares.shares_ppm.len() as u64;
         eprintln!(
-            "AC-T7.5.2 recorded {path}: legs {} owners {} contended {:.2} h shares_ppm {:?} worst {} ppm (bar {})",
+            "AC-T7.5.2 recorded {path}: microVMs {} owners {} contended {:.2} h shares_ppm {:?} worst {} ppm (bar {})",
             day.workloads.len(),
             day.owners.len(),
             shares.contended_ns as f64 / HOUR as f64,
@@ -231,7 +231,7 @@ fn four_equal_weight_repositories_over_a_recorded_day() {
         assert!(shares.worst_from_equal_ppm() <= equal / 50);
         return;
     }
-    let day = generate::day(4, &four_repos()).unwrap();
+    let day = generate::day(4, &four_tenants()).unwrap();
     let read = replay::parse(&as_trace(&day), &replay::Limits::default()).unwrap();
     assert_eq!(read, day);
     let run = sim::run(&read, &config).unwrap();

@@ -61,6 +61,13 @@ kiln mis-measured carries that error into its need; the 26 legs capped on CPU sh
 measured needs were systematically low (a cgroup that missed child processes, say), packing on this
 trace would look better than on the hardware.
 
+## G4 on kiln's CI: a side measurement, not of record
+
+Hex schedules microVMs, not CI jobs (Ada, 2026-11-06: "You are NOT Kiln's load balancer for jobs, CI,
+and general work. Your scheduler is for *microvms*."), so G4's bars are met on microVM days, and the
+kiln-CI days below stand for no workload of Hex's. They're kept for what they showed: kiln's CI never
+has four owners each asking for more than a quarter of the cluster.
+
 ## One recorded day for G4's fair-share bar (AC-T7.5.2)
 
 `kiln-ci-20261025-four-repos.trace` is the 2026-10-25 UTC day of the export above, made by
