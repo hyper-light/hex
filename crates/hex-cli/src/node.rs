@@ -184,57 +184,69 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         let _ = writeln!(std::io::stderr().lock(), "hex node: parked procs: {said}");
     }
     let node = Arc::new(node);
-    end_on_sigterm(term, Arc::clone(&node)).map_err(failed)?;
+    let (ended, end) = std::sync::mpsc::channel();
+    end_on_sigterm(term, Arc::clone(&node), ended.clone()).map_err(failed)?;
     let mut server = Server::bind(&args.socket, node, LIMITS, WORKERS).map_err(failed)?;
     let mut out = std::io::stdout().lock();
     out.write_all(format!("ready {}\n", args.socket.display()).as_bytes())
         .and_then(|()| out.flush())
         .map_err(|e| (1, format!("saying it is ready: {e}")))?;
     drop(out);
-    let why = server
-        .wait()
-        .unwrap_or_else(|| "its socket stopped".to_owned());
-    Err((1, why))
+    std::thread::Builder::new()
+        .name("hex-serve".to_owned())
+        .spawn(move || {
+            let why = server
+                .wait()
+                .unwrap_or_else(|| "its socket stopped".to_owned());
+            let _ = ended.send((1, why));
+        })
+        .map_err(|e| (1, format!("starting the server's thread: {e}")))?;
+    Err(end
+        .recv()
+        .unwrap_or_else(|_| (1, "its ending threads stopped unsaid".to_owned())))
 }
 
-/// On SIGTERM, from a thread of its own: one line of the node's parked procs' counts on stderr, then the process
-/// exits 143 (128 + SIGTERM, as a shell reports a SIGTERM's end) with no destructor run, so the server, its
-/// connections and its boxes are left as a SIGKILL leaves them, for the next agent's recovery (T-T7.1.2). A
-/// count the node can't read is said as unread, never left out.
+/// What ends the node: a thread reading SIGTERM sends its exit status and last words here, and the thread that owns
+/// the server sends why it stopped. [`serve`] returns the first that comes, so `main` exits with the server still
+/// owned by a thread blocked in its wait: no destructor runs, and the server, its connections and its boxes are left
+/// as a SIGKILL leaves them, for the next agent's recovery (T-T7.1.2).
+type Ended = std::sync::mpsc::Sender<(u8, String)>;
+
+/// On SIGTERM, from a thread of its own: one line of the node's parked procs' counts, status 143 (128 + SIGTERM, as a
+/// shell reports a SIGTERM's end). The signalfd reads only SIGTERM; a read that fails ends the node saying why. A count
+/// the node can't read is said as unread, never left out.
 fn end_on_sigterm(
     term: hex_runtime::linux::oci::sys::ForwardedSignals,
     node: Arc<Node>,
+    ended: Ended,
 ) -> Result<(), Refusal> {
     std::thread::Builder::new()
         .name("hex-sigterm".to_owned())
         .spawn(move || {
-            // The signalfd reads only SIGTERM; a read that fails ends the node saying why, never a loop.
-            if let Err(e) = term.next() {
-                let _ = writeln!(std::io::stderr().lock(), "hex node: reading SIGTERM: {e}");
-                std::process::exit(1);
-            }
-            let line = match node.cgroup_reuse() {
-                Ok(c) => {
-                    let p = c.parked;
-                    format!(
-                        "made {}, hits {}, misses {}, dry {}, capped {}, alive {}",
-                        p.procs_made,
-                        p.proc_hits,
-                        p.proc_misses,
-                        p.proc_dry,
-                        p.procs_capped,
-                        p.procs_alive
-                    )
-                }
-                Err(e) => format!("unread: {e}"),
+            let end = match term.next() {
+                Ok(_) => (
+                    143,
+                    format!("parked procs at exit: {}", parked_counts(&node)),
+                ),
+                Err(e) => (1, format!("reading SIGTERM: {e}")),
             };
-            let mut err = std::io::stderr().lock();
-            let _ = writeln!(err, "hex node: parked procs at exit: {line}");
-            let _ = err.flush();
-            std::process::exit(143);
+            let _ = ended.send(end);
         })
         .map(drop)
         .map_err(|e| Refusal::os("starting the SIGTERM thread", e))
+}
+
+fn parked_counts(node: &Node) -> String {
+    match node.cgroup_reuse() {
+        Ok(c) => {
+            let p = c.parked;
+            format!(
+                "made {}, hits {}, misses {}, dry {}, capped {}, alive {}",
+                p.procs_made, p.proc_hits, p.proc_misses, p.proc_dry, p.procs_capped, p.procs_alive
+            )
+        }
+        Err(e) => format!("unread: {e}"),
+    }
 }
 
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
