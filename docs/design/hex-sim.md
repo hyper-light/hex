@@ -371,7 +371,7 @@ completions (`packing.md`, the record at `ad3053c`); least stranded then least a
 **Open.** Shards' own overhead and device model replace the stand-ins when Shards states them, and Hex's
 own launch records replace the given kinds once Hex runs microVMs for its users.
 
-### H10. The recorded kiln workload: what kiln measured, read through its API
+### H30. The recorded kiln workload: what kiln measured, read through its API
 
 **The choice.** `AC-T7.4.3`'s recorded kiln workload is fourteen days of kiln's own CI
 (`bench/sched/kiln-ci-20261022-20261105.trace`), read from the running kiln's HTTP API by
