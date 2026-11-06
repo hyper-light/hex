@@ -182,6 +182,21 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    windows_oci_box's suite passed BY SKIPPING here (no guest or image inputs in this phase); their real runs are
    entries 13, 15-16 and (for the oci suite) still to come. PHASE gates: PASS (exit 0).
 
+18. step 6's Windows install, the installer's one admin step, at 2e1ab3f, 2026-11-06T12:07:04Z, from kiln on jupiter
+   (as corph, elevated: no UAC prompt), from the stage C:\Users\corph\.cache\hex-t7-windows\stage\2e1ab3f (SHA256SUMS
+   checked): windows-install-2e1ab3f-20261106T120703Z.txt. The lab's before phase first, at 2e1ab3f
+   (windows-before-2e1ab3f-20261106T120643Z): fresh of Hex, the 4-line plan, both features on; PASS.
+   windows.ps1 install -Binary hex.exe -NoRestart: "installed: C:\Program Files\Hex\hex.exe", exit 0, no reboot asked
+   (no feature to turn on). check of the plan: all 4 lines on the machine. The installed hex.exe is the staged one,
+   byte for byte; the manifest holds the plan's 4 lines.
+   The installed checks but the oci suite, each passing: a_windows_image_is_refused_naming_containers_while_it_is_off
+   ("FEATURES: Containers on"), a_linux_image_is_refused_naming_what_its_guest_waits_on ("FEATURES: HypervisorPlatform
+   on"), a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest, windows_process_boxes_hold_the_contract.
+   NOT RUN: step 4's oci suite on the image (windows_oci_boxes_hold_the_contract_and_the_steps_criteria): step 4 found
+   it stalls after HEX-DIFF-2's TERM and is tracing it; Hex stays installed until its fix, then the suite runs on
+   layers.txt here, then uninstall and the lab's uninstalled phase. The Linux-image class's runs through the guest are
+   entries 13, 15-16 (the test binaries', not the installed hex.exe's).
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
