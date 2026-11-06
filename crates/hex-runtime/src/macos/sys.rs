@@ -191,6 +191,19 @@ pub fn max_processes() -> io::Result<usize> {
     sysctl_count(c"kern.maxproc")
 }
 
+/// An empty process listing with room for every process the kernel holds (`kern.maxproc`), so one
+/// listing call fills it; refused naming `kern.maxproc` when it can't be read, never sized by a guess.
+pub fn listing() -> io::Result<Vec<i32>> {
+    listing_from(max_processes())
+}
+
+/// A listing sized from a read of `kern.maxproc` ([`listing`] with the read given, so its refusal is
+/// testable).
+pub fn listing_from(max: io::Result<usize>) -> io::Result<Vec<i32>> {
+    let max = max.map_err(|e| io::Error::new(e.kind(), format!("reading kern.maxproc: {e}")))?;
+    Ok(Vec::with_capacity(max))
+}
+
 /// The most processes one uid may hold (`kern.maxprocperuid`, `bsd/kern/kern_resource.c:169-170`): a
 /// box-user box's process cap when its spec names none, each box having a uid of its own.
 pub fn max_processes_per_uid() -> io::Result<usize> {

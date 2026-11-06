@@ -54,7 +54,7 @@ pub struct Member {
 /// (docs/research/runtime/native-platforms.md §3). A process gone since it was listed (`ESRCH`) or ended
 /// and awaiting reap is left out; its footprint would be 0.
 pub fn members(uid: u32) -> io::Result<Vec<Member>> {
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let mut pids = sys::listing()?;
     sys::user_pids(uid, &mut pids)?;
     let mut out = Vec::with_capacity(pids.len());
     for &pid in &pids {
@@ -79,7 +79,7 @@ pub fn kill_user(uid: u32, linux_signal: i32) -> io::Result<usize> {
         .ok_or_else(|| io::Error::other(format!("signal {linux_signal} has no macOS number")))?;
     let sig = rustix::process::Signal::from_named_raw(macos)
         .ok_or_else(|| io::Error::other(format!("{macos} isn't a signal this kernel names")))?;
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let mut pids = sys::listing()?;
     sys::user_pids(uid, &mut pids)?;
     let mut signalled = 0usize;
     for &pid in &pids {

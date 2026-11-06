@@ -231,6 +231,7 @@ impl ProcessBox {
             kq: Kqueue::new().map_err(|e| Refusal::os("making a box's kqueue", e))?,
         });
         let watcher = Watcher::new(Arc::clone(&state), shared.clone())
+            .map_err(|e| Refusal::os("sizing a box's watcher", e))?
             .start()
             .map_err(|e| Refusal::os("starting a box's watcher", e))?;
         Ok(Self {
@@ -377,7 +378,7 @@ impl ProcessBox {
                 hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
             );
             let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
-            let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+            let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
             loop {
                 if alive_in(pgid, &mut pids)? == 0 {
                     return Ok(());
@@ -406,7 +407,7 @@ impl Drop for ProcessBox {
 
 /// Whether process group `pgid` has a member alive (not a zombie).
 fn live(pgid: i32) -> Result<bool, Refusal> {
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
     Ok(alive_in(pgid, &mut pids)? > 0)
 }
 
@@ -442,18 +443,18 @@ struct Watcher {
 }
 
 impl Watcher {
-    fn new(state: Arc<State>, shared: Shared) -> Self {
+    fn new(state: Arc<State>, shared: Shared) -> io::Result<Self> {
         let watch = Watch::new(state.limit, shared.rates);
-        Self {
+        Ok(Self {
             state,
             shared,
             watch,
             last: Vec::new(),
             last_sig: 0,
             watched: BTreeSet::new(),
-            pids: Vec::with_capacity(sys::max_processes().unwrap_or(4096)),
+            pids: sys::listing()?,
             events: Vec::with_capacity(sys::EVENTS),
-        }
+        })
     }
 
     fn start(mut self) -> io::Result<JoinHandle<()>> {
