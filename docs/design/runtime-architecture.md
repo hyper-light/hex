@@ -1794,9 +1794,12 @@ With reuse on, every cell is under the bar in both columns, and Hex's own create
 round (<!-- record: bench/competitive/RESULT.md -->0.93 and 0.71<!-- /record --> ms in process), so it holds against a quiet libcrun too.
 With no owner, host.sh's default and so the bar as written, both p50s are under and every p99.9 is over, Hex's at about
 <!-- record: bench/competitive/RESULT.md -->2.33<!-- /record --> ms against libcrun's <!-- record: bench/competitive/RESULT.md -->5.03<!-- /record -->: not met. The
-tail cut is in every create (no in-process create over 8 ms in either pass); what holds the no-owner p99.9 is the
-teardown of the box before it, the cgroup's css work items preempting creates on their CPUs (decision 8), which reuse
-within one owner takes away. Whether the bar is counted with an owner, met by reuse across boxes of no owner, or left
+tail cut is in every create (no in-process create over 8 ms in either pass). What holds the no-owner p99.9 is mostly
+Hex's own lock: the create's lookups of its cgroup's files queued behind Hex's own refill's `mkdir`, which waits on
+the host-wide cgroup-notification work, then the teardown of the pass's own boxes, and no other tenant's
+(`bench/competitive/probes/goal16_ab.md`, cp/t7-g16-memslot acf45f9, "Whose work the no-owner tail waits on"). Reuse
+within one owner takes both off the create's path. An earlier reading (RESULT.md, superseded there) put it on the
+teardown alone, because its grouping charged only the runtime thread's state and so hid what the init's wait was on. Whether the bar is counted with an owner, met by reuse across boxes of no owner, or left
 unmet on 6.19 is Ada's to decide. Until she does, goal 5 is not done as written.
 
 **The spec a container is made from** (found 2026-11-04, AC-T7.1.1). The runtime reads a bundle's `config.json`,

@@ -583,12 +583,20 @@ Best of 2, ms (Hex over libcrun in the same pass):
   10,100 in each round. No in-process create of either pass took over 8 ms, and the no-owner create's max fell to 3.08
   ms (r1 3.00, r2 3.08), where at 15a3323, before the cut, it was 18.78; there, with reuse on, 7 and 19 creates a
   round in process took over 8 ms (as 9 and 7 did at 2a91371), and none did here.
-- **What holds the no-owner p99.9 is the teardown of the box before it, not the lock** (decision 8; the tail agent's
-  `probes/create_tail.md`, "Reuse off after the cut"): the cgroup's css work items preempting creates on their CPUs.
-  Reuse within one owner takes it away, which is the gap between the passes.
+- **What holds the no-owner p99.9 is mostly Hex's own lock, not the cgroup lock the tail cut removed, and no other
+  tenant's work** (`probes/goal16_ab.md` on cp/t7-g16-memslot acf45f9, "Whose work the no-owner tail waits on"): in
+  its slowest 0.1% the create's lookups of its cgroup's files queue behind Hex's own refill's `mkdir` (1.377 ms),
+  itself waiting on the host-wide cgroup-notification work; then the teardown of the pass's own boxes (0.3 to 0.85
+  ms). Reuse within one owner makes no cgroup on the create's path and tears none down, which is the gap between the
+  passes. This line read "the teardown of the box before it" until 2026-11-06 (superseded: below).
 
-**What the slowest 0.1% of no-owner creates wait on** (the lead, 2026-11-05T14:20Z; not of record: the tracer costs
-each switch some). The tail agent's `probes/create_tail.sh` on this pass's own binaries (hex 2c9e4b58aa55c980, seam_oci
+**What the slowest 0.1% of no-owner creates wait on: the first reading, superseded** (the lead, 2026-11-05T14:20Z;
+not of record: the tracer costs each switch some). Its figures stand; its conclusion doesn't. `create_tail_attr.py`
+charged only the runtime thread's own state, so the runtime's wait in `ppoll` for its init (+0.552 ms below) hid what
+the init was waiting on. The tail agent's trace of 2026-11-06 followed that wait into the container's process
+(`probes/goal16_ab.md`, cp/t7-g16-memslot acf45f9, "Whose work the no-owner tail waits on"): the create's cgroupfs
+lookups queued behind Hex's own refill's `mkdir`, 1.377 ms of the slowest 0.1%, with the css teardown of the pass's
+own boxes 0.3 to 0.85 ms and no other tenant's. The first reading follows as it was. The tail agent's `probes/create_tail.sh` on this pass's own binaries (hex 2c9e4b58aa55c980, seam_oci
 d6330e7307fafb75), no owner, N=10000, 2 rounds, CPUs 4-15 under the lock, load 6.93 to 7.08: unit
 hex-g5rec-tailattr-20261105T144322Z, fedora `~/.cache/hex-bench/out/create-tail-20261105T144322Z`, 10,000 creates traced,
 each one's charges summing to its span. Traced creates p50 0.316, p99 1.039, p99.9 1.670, max 2.771 ms (the quieter
@@ -605,9 +613,9 @@ host than the pass's). `create_tail_attr.py`'s grouping, the top 0.1% over the m
 Of the ten slowest creates (1.670 to 2.771 ms), five were preempted on their CPU by `css_killed_work_fn` for 1.240 to
 1.940 ms, three waited 1.419 to 2.059 ms on their init (its own delay, seen from the runtime), and two sat 1.452 and
 1.700 ms on the run queue. The runtime's own work is about 0.3 ms in every band (0.286 mid, 0.334 in the top 0.1%).
-The slowest starts are the same: their top 0.1% is +0.414 and +0.210 ms of `css_killed_work_fn` preemption. So what
-holds the no-owner p99.9 is the teardown of the boxes deleted before, run on the CPUs the next creates use; with
-reuse within one owner no cgroup is torn down, and the pass with it reads under a millisecond.
+The slowest starts are the same: their top 0.1% is +0.414 and +0.210 ms of `css_killed_work_fn` preemption. Its
+conclusion then (superseded, above): "what holds the no-owner p99.9 is the teardown of the boxes deleted before, run on
+the CPUs the next creates use".
 
 The host's clock (`probes/host_clock.sh`) before: load 16.50, a short burst's p50 0.096 ms on the P-cores and 0.159 on
 the E-cores at rest, 0.107 and 0.172 held awake; after: load 11.27, 0.131 and 0.230 at rest, 0.120 and 0.171 held.
@@ -634,9 +642,9 @@ in each phase with no error, no round crashed, and the parked inits were claimed
 - **On the Mac Studio every cell is under the bar, in both columns and both modes**, the bar as written (no owner)
   included, with libcrun's tail quiet (create p99.9 3.77 and 3.92 ms). Hex's own create p99.9 there is about half a
   millisecond (0.58 and 0.49 by round in process with no owner, read at sample floor(0.999 n)), against fedora's 2.33
-  with no owner. Why isn't measured here (no trace ran on the Mac). Fedora's no-owner tail is the teardown of the
-  pass's own deleted boxes preempting creates on their CPUs (above), and the pass deletes as many boxes here; what
-  differs is the host around it: the VM ran nothing else (load 3.26 to 6.30 in 14 CPUs, against fedora's 16 to 17
+  with no owner. Why isn't measured here (no trace ran on the Mac). Fedora's no-owner tail is mostly the create's
+  cgroupfs lookups queued behind Hex's own refill's `mkdir`, that `mkdir` waiting on the host-wide cgroup-notification
+  work (above); what differs is the host around it: the VM ran nothing else (load 3.26 to 6.30 in 14 CPUs, against fedora's 16 to 17
   with kiln CI beside the pass), and its kernel is 6.12, not 6.19.
 - The Mac's own load was 2.38 at the job's start and 2.73 at its end.
 
