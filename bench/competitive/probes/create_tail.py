@@ -28,6 +28,9 @@ SWITCH = re.compile(r"prev_comm=(?P<pc>.*?) prev_pid=(?P<pp>\d+) prev_prio=-?\d+
                     r"next_comm=(?P<nc>.*?) next_pid=(?P<np>\d+)")
 WAKE = re.compile(r"comm=(?P<c>.*?) pid=(?P<p>\d+) ")
 WORK = re.compile(r"work struct \S+: function (?P<f>\S+)")
+CSSEV = re.compile(r"cg=(?P<id>\d+)")
+RMDIR = re.compile(r"id=(?P<id>\d+) level=\d+ path=(?P<path>\S+)")
+TEARDOWN = re.compile(r"work css_\w+_work_fn of (?P<src>[^)]+)\)")
 FORK = re.compile(r"comm=(?P<c>.*?) pid=(?P<p>\d+) child_comm=(?P<cc>.*?) child_pid=(?P<cp>\d+)")
 MARK = re.compile(r"hexbd (?P<be>[BE]) (?P<op>\w+) (?P<id>\S+)(?: (?P<ns>\d+))?")
 # Frames that say only that a task gave up its CPU, skipped when a stack is named by the frames that say why.
@@ -40,7 +43,9 @@ FRAMES = 4           # frames that name a blocking stack
 
 
 def ours(comm):
-    return comm == "seam_oci" or comm.startswith("hex")
+    """The runtime's tasks, and the bundles' programs (`sleep`, `true`): a create waits on its container's init, which
+    runs as its program's name once it has exec'd."""
+    return comm in ("seam_oci", "sleep", "true") or comm.startswith("hex")
 
 
 SOFTIRQ = re.compile(r"vec=\d+ \[action=(?P<a>\w+)\]")
@@ -71,6 +76,8 @@ def parse(lines):
     tasks = {}
     irqs, irq_open = collections.defaultdict(list), {}
     cgops = collections.defaultdict(list)  # pid -> [(ts, cgroup event, its stack)], every task's
+    css = collections.defaultdict(list)  # cpu -> [(ts, cgroup id)]: each controller's offline or release callback
+    paths = {}  # cgroup id -> its path, from its rmdir
     syncs, sync_open = collections.defaultdict(list), {}  # pid -> [(entry, return)] of rcu_sync_enter
     calls, open_ = [], {}
     last_out = {}  # cpu -> the frames list of the event (a blocking switch out, a cgroup op) the next stack is of
@@ -121,7 +128,19 @@ def parse(lines):
             g = (SOFTIRQ if ev == "softirq_entry" else HARDIRQ).search(rest)
             irq_open[(int(cpu), ev[:4])] = (ts, ("softirq " + g["a"]) if ev == "softirq_entry" and g
                                             else ("irq " + g["n"]) if g else ev)
+        elif ev in ("o_mem", "o_cpu", "o_blk", "r_mem", "r_cpu"):
+            g = CSSEV.search(rest)
+            if g:
+                css[int(cpu)].append((ts, int(g["id"])))
         elif ev.startswith("cgroup_"):
+            if ev in ("cgroup_rmdir", "cgroup_release"):
+                g = RMDIR.search(rest)
+                if g:
+                    paths.setdefault(int(g["id"]), g["path"])
+                    # A cgroup's own css is released in css_release_work_fn, which traces it (Linux v6.19
+                    # kernel/cgroup/cgroup.c, TRACE_CGROUP_PATH(release, cgrp)): that work item is of this cgroup.
+                    if ev == "cgroup_release":
+                        css[int(cpu)].append((ts, int(g["id"])))
             op = (ts, ev[len("cgroup_"):], [])
             cgops[int(m["pid"])].append(op)
             last_out[cpu] = op[2]
@@ -155,6 +174,7 @@ def parse(lines):
     for v in irqs.values():
         v.sort()
     irqs["cgops"], irqs["syncs"], irqs["holders"] = cgops, syncs, []
+    irqs["css"], irqs["paths"] = css, paths
     return tasks, calls, irqs
 
 
@@ -173,17 +193,55 @@ def ran(irqs, cpu, a, t, comm):
     return out
 
 
-def doing(irqs, cpu, a, t):
-    """What the CPU did most of from a to t, of its interrupt work and work items, or "" for none of it."""
+def source(path, container):
+    """Whose a removed cgroup was, by its path on the host: this run's boxes (its container's id in it), another Hex
+    run's (a box root's `hex` or `.oci` in it), another container's, a user session's, or the system's."""
+    if path is None:
+        return "a cgroup not removed in the trace"
+    if container and container in path:
+        return "this run's Hex boxes"
+    if "/hex/" in path or "/.oci/" in path or "/hex-" in path:
+        return "another Hex run's"
+    if "docker-" in path or "/docker/" in path or "libpod" in path or "containerd" in path or "kubepods" in path:
+        return "another container's"
+    if path.startswith("/user.slice"):
+        return "a user session's"
+    return "the system's"
+
+
+def whose(irqs, cpu, lo, hi):
+    """Whose cgroups the teardown callbacks on cpu from lo to hi took apart: the most frequent source, or ""."""
+    xs = irqs.get("css", {}).get(cpu, [])
+    i = bisect.bisect_left(xs, (lo,))
     acc = collections.Counter()
+    while i < len(xs) and xs[i][0] <= hi:
+        acc[source(irqs.get("paths", {}).get(xs[i][1]), irqs.get("container"))] += 1
+        i += 1
+    return acc.most_common(1)[0][0] if acc else ""
+
+
+def doing(irqs, cpu, a, t):
+    """What the CPU did most of from a to t, of its interrupt work and work items, or "" for none of it. A cgroup
+    teardown work item is named with whose cgroup its callbacks took apart, where they were traced."""
+    acc = collections.Counter()
+    span = {}
     xs = irqs.get(cpu, [])
     i = max(0, bisect.bisect_left(xs, (a,)) - 1)
     while i < len(xs) and xs[i][0] < t:
         lo, hi = max(xs[i][0], a), min(xs[i][1], t)
         if hi > lo:
             acc[xs[i][2]] += hi - lo
+            if hi - lo > span.get(xs[i][2], (0, 0, 0))[2]:
+                span[xs[i][2]] = (xs[i][0], xs[i][1], hi - lo)
         i += 1
-    return f" ({acc.most_common(1)[0][0]})" if acc else ""
+    if not acc:
+        return ""
+    top = acc.most_common(1)[0][0]
+    if top in ("work css_killed_work_fn", "work css_release_work_fn") and irqs.get("css"):
+        lo, hi, _ = span[top]
+        by = whose(irqs, cpu, lo, hi)
+        return f" ({top} of {by or 'a css with no callback traced'})"
+    return f" ({top})"
 
 
 def last_le(xs, t, key=lambda x: x):
@@ -327,6 +385,20 @@ def report(tasks, calls, irqs, w=sys.stdout.write):
             if max(a, b1, c) < 0.005:
                 continue
             w(f"| {k} | {a:.3f} | {b1:.3f} | {c:.3f} | {c - a:+.3f} |\n")
+        # The slowest 0.1%'s time behind cgroup teardown, by whose cgroups it took apart: preempted by its work items, or
+        # blocked until a kworker running one woke the call.
+        by_src = collections.Counter()
+        for i in bands["top 0.1%"]:
+            for k, d in charges[i]:
+                g = TEARDOWN.search(k)
+                if g:
+                    by_src[("preempted" if k.startswith("runq") else "blocked", g["src"])] += d * 1e3
+        if by_src:
+            top_n = len(bands["top 0.1%"])
+            w(f"\nThe slowest 0.1% ({top_n} calls) behind cgroup teardown, by whose cgroups it took apart (mean ms a "
+              "call):\n\n| how | whose | mean ms |\n|---|---|---|\n")
+            for (how, src), v in by_src.most_common():
+                w(f"| {how} | {src} | {v / top_n:.3f} |\n")
         holders = sorted({h for h in irqs.get("holders", []) if h[2] >= 1e-3}, key=lambda h: -h[2])
         if holders:
             w("\nEvery block of 1 ms or more whose waker did a cgroup operation meanwhile (each once): the waker, the "
@@ -353,6 +425,7 @@ def selftest():
         T.format("1.000000", "B", ""),
         "seam_oci-10 [004] d..2. 1.000500: sched_switch: prev_comm=seam_oci prev_pid=10 prev_prio=120 prev_state=R+ ==> next_comm=kworker/4:1 next_pid=99 next_prio=120",
         "kworker/4:1-99 [004] ..... 1.000510: workqueue_execute_start: work struct 0000: function css_killed_work_fn",
+        "kworker/4:1-99 [004] ..... 1.000520: o_mem: (mem_cgroup_css_offline+0x0/0x10) cg=77",
         "kworker/4:1-99 [004] ..... 1.000690: workqueue_execute_end: work struct 0000: function css_killed_work_fn",
         "kworker/4:1-99 [004] d..2. 1.000700: sched_switch: prev_comm=kworker/4:1 prev_pid=99 prev_prio=120 prev_state=I ==> next_comm=seam_oci next_pid=10 next_prio=120",
         wk.format(c="seam_oci", p=10, cpu=4, ts="1.000900", wc="hex", wp=30),
@@ -376,6 +449,7 @@ def selftest():
         "kworker/6:0-98 [006] ..... 1.001600: rse: (rcu_sync_enter+0x0/0x60)",
         "kworker/6:0-98 [006] ..... 1.002400: rsx: (percpu_down_write+0x20/0x100 <- rcu_sync_enter)",
         "kworker/6:0-98 [006] ..... 1.002500: cgroup_release: root=0 id=7 level=1 path=/x",
+        "seam_oci-12 [007] ..... 1.000100: cgroup_rmdir: root=0 id=77 level=4 path=/system.slice/docker-abc.scope/hex/.oci/.3",
         "kworker/6:0-98 [006] ..... 1.002500: <stack trace>",
         " => cgroup_migrate_execute+0x1",
         " => cgroup_attach_task+0x2",
@@ -389,6 +463,7 @@ def selftest():
         T.format("1.004000", "E", " 3000000"),
     ]
     tasks, calls, irqs = parse(lines)
+    irqs["container"] = "abc"
     assert len(calls) == 1, calls
     op, _, b, e, pid, _ = calls[0]
     ch = walk(tasks, irqs, b, e, pid)
@@ -401,13 +476,14 @@ def selftest():
     # woken by a kworker at 3000 from its block at 1500 in cgroup_mkdir; it ran 1400-1500, forked by the seed at
     # 1200; the seed ran 1100-1200, woken by the driver at 900; the driver ran 700-900, preempted 500-700 by a
     # kworker, and ran 0-500. Its own run 900-1000 and block from 1000 are off the path: the seed's wake-up is on it.
-    # An RCU softirq ran on the driver's CPU 3700-3750, within its last run.
+    # An RCU softirq ran on the driver's CPU 3700-3750, within its last run. The kworker's work item took apart a css
+    # of cgroup 77, whose rmdir names this run's container: the preemption is charged to this run's boxes.
     want = {"run: seam_oci": 400 - 50 + 200 + 500, "softirq RCU": 50,
             "runq: woken, not yet run": 100 + 100 + 200,
             "run: hex": 400 + 100 + 100,
             "blocked: cgroup_mkdir < kernfs_iop_mkdir, woken by kworker (work css_free_rwork_fn) after its release": 1500,
             "runq: new task hex, before its first run": 200,
-            "runq: preempted by kworker (work css_killed_work_fn)": 200}
+            "runq: preempted by kworker (work css_killed_work_fn of this run's Hex boxes)": 200}
     assert dict(got) == want, (dict(got), want)
     # The kworker that woke the init is recorded as a holder: its wait, its release's stack, its rcu_sync_enter.
     (h,) = irqs["holders"]
@@ -425,6 +501,10 @@ def main(argv):
         return 2
     with open(f"{argv[2]}/trace.txt", errors="replace") as f:
         tasks, calls, irqs = parse(f)
+    try:
+        irqs["container"] = open(f"{argv[2]}/container_id").read().strip() or None
+    except OSError:
+        irqs["container"] = None
     w = sys.stdout.write
     w(f"# create_tail: {argv[2]}\n\n{len(calls)} marked calls, {len(tasks)} tasks traced.\n")
     report(tasks, calls, irqs, w)

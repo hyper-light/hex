@@ -6,7 +6,8 @@
 # for the guest's Fedora 44), lab/ a copy of bench/competitive, env the variables below that are set, and out/ the
 # breakdown's results, handed back. In the guest vm7_breakdown_inside.sh starts IDLE_THREADS idle threads and
 # LOOPS busy loops at nice 0 on every vCPU, in a cgroup beside the bench's, and the breakdown in a cgroup and
-# mount namespace of its own, as the bench container on a host. VM_CPUS, VM_SMP and VM_MEM size the guest.
+# mount namespace of its own, as the bench container on a host. VM_CPUS, VM_SMP and VM_MEM size the guest. PROBE names
+# another probe of bench/competitive/probes to run so (css_cost_inside.sh, with N lifecycles).
 # Usage: vm7_breakdown.sh <hex release binary> <seam_oci release binary>
 set -euo pipefail
 HEX=$(realpath "${1:?hex release binary}"); SEAM=$(realpath "${2:?seam_oci release binary}")
@@ -21,7 +22,7 @@ rm -rf "${D:?}/lab"; cp -r "$COMP" "$D/lab"
 # Only what's set reaches the guest; an unset one stays unset there (HEXBENCH_PROCFS unset is its pool on).
 : > "$D/env"
 for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_PROCFS HEXBENCH_DEVFS HEXBENCH_OWNER \
-  HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS HEXBENCH_PARKED_PROCS HEXBENCH_AHEAD; do
+  HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS HEXBENCH_PARKED_PROCS HEXBENCH_AHEAD PROBE N SUPERBLOCKS SUPERBLOCKS_ALONE; do
   [ -n "${!v+x}" ] && printf 'export %s=%q\n' "$v" "${!v}" >> "$D/env"
 done
 printf 'export TRACE_TAG=vm7_%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" >> "$D/env"
