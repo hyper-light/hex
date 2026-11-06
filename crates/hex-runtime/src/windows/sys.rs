@@ -317,47 +317,62 @@ impl Job {
         })
     }
 
-    /// How many processes are live in the job right now: `JobObjectBasicProcessIdList`'s
-    /// `NumberOfAssignedProcesses`, the number of ids the list holds for the job, which Windows fills in
-    /// even when the buffer holds fewer ids (`ERROR_MORE_DATA`; jobobject_basic_process_id_list.md:
-    /// "NumberOfAssignedProcesses: The number of process identifiers to be stored in ProcessIdList"), so
-    /// the count is the job's own at any size and the read needs room for one id. This counts running
-    /// processes, not the job's accounting `ActiveProcesses`, which lingers while a terminated member's
-    /// handle is still held, so a box whose member has exited reads as empty here even while the node
-    /// still holds its process handle.
+    /// How many processes are live in the job right now (`JobObjectBasicProcessIdList`'s
+    /// `NumberOfProcessIdsInList`). This counts running processes, not the job's accounting
+    /// `ActiveProcesses`, which lingers while a terminated member's handle is still held — so a box
+    /// whose member has exited reads as empty here even while the node still holds its process handle.
+    /// The list is sized from the job itself: a first read with room for one id learns the job's
+    /// `NumberOfAssignedProcesses` (filled in even when the ids don't fit, `ERROR_MORE_DATA`), the second
+    /// reads that many. Ids that joined between the two reads don't fit; the box is running with at least
+    /// the ids listed, which is all a caller needs (CLAUDE.md §2: the read is bounded by the job's own
+    /// count, not a picked one).
     pub fn live_processes(&self) -> io::Result<u64> {
-        /// The pid list's header with room for one id: the header is what's read.
-        #[repr(C)]
-        struct List {
-            assigned: u32,
-            listed: u32,
-            ids: [usize; 1],
+        let header = size_of::<u32>().saturating_mul(2);
+        let first = self.process_ids(header.saturating_add(size_of::<usize>()))?;
+        if first.listed >= first.assigned {
+            return Ok(u64::from(first.listed));
         }
-        let mut list = List {
-            assigned: 0,
-            listed: 0,
-            ids: [0; 1],
-        };
-        let len = u32::try_from(size_of::<List>()).unwrap_or(u32::MAX);
-        // SAFETY: QueryInformationJobObject writes at most `len` bytes (one List) into `list`, alive for
-        // the call, for the job self owns; the class names the structure.
+        let ids = usize::try_from(first.assigned).unwrap_or(usize::MAX);
+        let second =
+            self.process_ids(header.saturating_add(ids.saturating_mul(size_of::<usize>())))?;
+        Ok(u64::from(second.listed))
+    }
+
+    /// One read of the job's process id list into a buffer of `len` bytes: its two counts, the ids
+    /// themselves unread. `ERROR_MORE_DATA` (the ids don't all fit) still fills both counts.
+    fn process_ids(&self, len: usize) -> io::Result<IdCounts> {
+        // usize-aligned, as the list's ids are; the counts are its first 8 bytes.
+        let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
+        let bytes = u32::try_from(buf.len().saturating_mul(size_of::<usize>()))
+            .map_err(|_| io::Error::other("a job's process id list past 4 GiB"))?;
+        // SAFETY: QueryInformationJobObject writes at most `bytes` bytes into `buf`, alive and that long
+        // for the call, for the job self owns; the class names the structure, whose header is two u32s.
         let ok = unsafe {
             QueryInformationJobObject(
                 self.0.raw(),
                 JobObjectBasicProcessIdList,
-                (&mut list as *mut List).cast(),
-                len,
+                buf.as_mut_ptr().cast(),
+                bytes,
                 null_mut(),
             )
         };
         if ok == 0 {
             let err = last_error();
-            // More ids than the one-id buffer holds: the header's count is still filled in.
             if err.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
                 return Err(err);
             }
         }
-        Ok(u64::from(list.assigned))
+        // The header's 8 bytes, whatever usize's width.
+        let head: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).take(8).collect();
+        let count = |at: usize| {
+            head.get(at..at.saturating_add(4))
+                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                .map_or(0, u32::from_ne_bytes)
+        };
+        Ok(IdCounts {
+            assigned: count(0),
+            listed: count(4),
+        })
     }
 
     /// Whether the job's memory notification limit has been violated since this was last read: the
@@ -376,6 +391,14 @@ impl Job {
         }
         Ok(())
     }
+}
+
+/// A job process id list's two counts (`JOBOBJECT_BASIC_PROCESS_ID_LIST`'s header).
+struct IdCounts {
+    /// `NumberOfAssignedProcesses`: the ids the list would hold.
+    assigned: u32,
+    /// `NumberOfProcessIdsInList`: the ids it holds.
+    listed: u32,
 }
 
 /// A job's resource accounting, read whole.
