@@ -305,8 +305,9 @@ fn config() -> GuestConfig {
         binary: PathBuf::from("/shards"),
         kernel: PathBuf::from("/k"),
         initrd: PathBuf::from("/i"),
+        // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
-        memory_mib: 256,
+        memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         shares: vec![share(0, "/", false)],
         staged: STAGED.to_owned(),
     }
@@ -382,6 +383,7 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
             .collect();
         GuestConfig::from_vars(move |name| vars.get(name).cloned())
     };
+    // Inputs to the parse, not a guest's size: any numbers do.
     let sized = [("HEX_GUEST_CPUS", "2"), ("HEX_GUEST_MEMORY_MIB", "1024")];
     let Err(Refusal::Invalid { why, .. }) = read(&sized) else {
         panic!("expected a refusal");

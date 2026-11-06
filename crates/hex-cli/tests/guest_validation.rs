@@ -14,7 +14,7 @@
 //!   on Windows necessarily (§4a), its tarball (lab.sh's fourth argument), to which this adds `/opt/hex`;
 //! - `HEX_GUEST_RUNTIME_TOOLS`: runtime-tools built for the guest's arch (runtime_tools.sh), unpacked;
 //! - `HEX_GUEST_VALIDATION_OUT`: an empty directory for the results;
-//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else 2 and 4096).
+//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs, `shards_api::max_vcpus`, and 4096).
 //!
 //! Run: `cargo test -p hex-cli --test guest_validation -- --nocapture` with those set.
 #![allow(
@@ -36,8 +36,9 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Runtime};
 use hex_runtime::guest::shares::{SHARES, Share};
 use hex_runtime::guest::{GuestConfig, GuestRuntime};
 
-/// The suite's longest run: inside.sh gives each of its 58 tests at most 60 s (`timeout 60`).
-const SUITE: Duration = Duration::from_secs(58 * 60);
+/// The most inside.sh gives one test (`timeout 60`, bench/oci-validation/inside.sh:16): the suite's
+/// longest run is this for each test the Linux record holds, the lab's own bound.
+const PER_TEST: Duration = Duration::from_secs(60);
 
 /// Every capability Hex's runtime names (crates/hex-runtime/src/linux/oci/caps.rs), as a privileged
 /// container holds them.
@@ -231,7 +232,10 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         binary: given("SHARDS_BIN").unwrap(),
         kernel: given("HEX_GUEST_KERNEL").unwrap(),
         initrd: given("HEX_GUEST_INITRD").unwrap(),
-        vcpus: u32::try_from(number("HEX_GUEST_CPUS", 2)).unwrap(),
+        // Unset, every CPU Shards gives a guest here (`shards_api::max_vcpus`, the host's): the
+        // fastest run, as a vCPU costs nothing while it idles.
+        vcpus: std::env::var("HEX_GUEST_CPUS")
+            .map_or_else(|_| shards_api::max_vcpus(), |v| v.parse().unwrap()),
         memory_mib: number("HEX_GUEST_MEMORY_MIB", 4096),
         shares: vec![
             Share {
@@ -261,7 +265,11 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
     .expect("create the lab in the guest");
     node.start(&id).expect("start the lab");
     // The fact waited on is the lab's end, which the node reports with its exit.
-    let deadline = Instant::now() + SUITE;
+    let linux = results(include_str!(
+        "../../../bench/oci-validation/results-hex-linux.tsv"
+    ));
+    let suite = PER_TEST * u32::try_from(linux.len()).unwrap();
+    let deadline = Instant::now() + suite;
     let exit = loop {
         let info = node.inspect(&id).expect("inspect the lab");
         if let Some(exit) = info.exit {
@@ -269,8 +277,11 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         }
         assert!(
             Instant::now() < deadline,
-            "the lab ran past the suite's {SUITE:?}"
+            "the lab ran past the suite's {suite:?}"
         );
+        // The seam has no wait for a box's end (`hex_api::Runtime`), so the test samples it; the
+        // period only sets how late the test sees an end it already has (a (d) left for Ada in
+        // docs/research/runtime/shards-guest-constants.md until the seam can wait on a box).
         std::thread::park_timeout(Duration::from_millis(500));
     };
     eprintln!("the lab ended: {exit:?}");
@@ -278,9 +289,6 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
 
     let got = std::fs::read_to_string(out.join("results.tsv")).expect("the lab's results.tsv");
     let guest = results(&got);
-    let linux = results(include_str!(
-        "../../../bench/oci-validation/results-hex-linux.tsv"
-    ));
     eprintln!("{got}");
     let lost: Vec<&String> = linux
         .iter()
