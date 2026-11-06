@@ -1,0 +1,33 @@
+# HEX-INST-9 (native plan step 6): windows.ps1 asks hex for the features once a run.
+# windows_lab.ps1 phase 'asks' (lab blob f170b295643c15689c989f4dce04e61ab9056127 = 3896e42) on jupiter,
+# Windows NT 10.0.26200.0, as a standard user, 2026-11-06T19:52Z; -Binary = hex.exe built (dev profile) from
+# the kiln-synced tree at 3896e42 (hex-cli identical to 47c94e3). Both features already on, so the plan
+# lists no feature line; the dry run still reads both features' state.
+# red:   windows.ps1 blob 4f5eb848c414861c1c3cd934629fcdb63a86e324 = 3ba6028 (one listing per feature)
+# green: windows.ps1 blob cd1be91ac2d0690bd26c50dd0316583eefa1264f = 47c94e3 (one listing a run)
+# The run's output, as kiln returned it, with its CRLF line ends written as LF.
+
+=== GREEN (47c94e3 windows.ps1)
+
+## the machine: 2026-11-06T19:52:24Z, Microsoft Windows NT 10.0.26200.0, as Jupiter\corph
+
+## HEX-INST-9: the dry run asks hex for the features once
+folder C:\Program Files\Hex
+file C:\Program Files\Hex\hex.exe
+folder C:\ProgramData\Hex
+file C:\ProgramData\Hex\manifest
+hex runs: 1 (setup features)
+PASS
+green exit=0
+=== RED (3ba6028 windows.ps1)
+
+## the machine: 2026-11-06T19:52:26Z, Microsoft Windows NT 10.0.26200.0, as Jupiter\corph
+
+## HEX-INST-9: the dry run asks hex for the features once
+folder C:\Program Files\Hex
+file C:\Program Files\Hex\hex.exe
+folder C:\ProgramData\Hex
+file C:\ProgramData\Hex\manifest
+hex runs: 2 (setup features; setup features)
+FAIL: windows.ps1 ran hex 2 times for one plan; it asks for the features once a run
+red exit=1

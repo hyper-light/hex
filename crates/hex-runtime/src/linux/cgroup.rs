@@ -50,7 +50,6 @@ pub fn own_cgroup() -> Result<PathBuf, Refusal> {
 #[derive(Debug, Clone)]
 pub struct BoxRoot {
     dir: PathBuf,
-    controllers: BTreeSet<String>,
     disks: Vec<Dev>,
 }
 
@@ -96,10 +95,8 @@ impl BoxRoot {
             ));
         }
         write_file(&dir.join("cgroup.subtree_control"), &enable)?;
-        let controllers = read_set(&dir.join("cgroup.subtree_control"))?;
         Ok(Self {
             dir: dir.to_owned(),
-            controllers,
             disks,
         })
     }
@@ -122,48 +119,14 @@ impl BoxRoot {
         &self.dir
     }
 
-    /// The controllers boxes get.
-    pub fn controllers(&self) -> &BTreeSet<String> {
-        &self.controllers
-    }
-
     /// The disks `io.latency` and `io.max` apply to.
     pub fn disks(&self) -> &[Dev] {
         &self.disks
     }
 
-    /// Makes box `id`'s cgroup with `bounds` in force. A bound whose controller the root doesn't
-    /// have is refused by name, before anything is made.
+    /// Makes box `id`'s cgroup with `bounds` in force: every bound's controller is there, since the root
+    /// opened only with all of [`CONTROLLERS`] ([`BoxRoot::open`]).
     pub fn create(&self, id: &BoxId, bounds: &Bounds) -> Result<BoxCgroup, Refusal> {
-        for (needed, set) in [
-            (
-                "cpu",
-                bounds.cpu_weight.is_some() || bounds.cpu_max_milli.is_some(),
-            ),
-            (
-                "memory",
-                bounds.memory_max.is_some() || bounds.memory_high.is_some(),
-            ),
-            (
-                "io",
-                bounds.io_weight.is_some()
-                    || bounds.io_latency_us.is_some()
-                    || bounds.io_max.is_some(),
-            ),
-            ("pids", bounds.pids_max.is_some()),
-        ] {
-            if set && !self.controllers.contains(needed) {
-                return Err(Refusal::Platform {
-                    what: "a bound",
-                    platform: "linux",
-                    why: format!(
-                        "the {needed} controller isn't delegated to {} (it has {:?}): delegate it to the node agent's cgroup",
-                        self.dir.display(),
-                        self.controllers
-                    ),
-                });
-            }
-        }
         let writes = core::writes(bounds, &self.disks)?;
         if self.count()? >= MAX_BOXES {
             return Err(Refusal::Full(MAX_BOXES));

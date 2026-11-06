@@ -133,15 +133,20 @@ fn nofile_by_default(lab: &Lab, client: &Client) {
     }
 }
 
-/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's,
-/// 2048:4096 here (under the node's hard limit, which a rootless init can't raise), not the default.
+/// HEX-INST-6 (native plan step 6): an oci box whose spec names RLIMIT_NOFILE keeps the spec's, not the
+/// default: here one less than the default's soft limit, soft, and the default's soft limit, hard
+/// (1023:1024), below the default in both and a lowering a rootless init may make under any node.
 fn nofile_named(lab: &Lab, client: &Client) {
+    let hard = hex_core::limits::NOFILE_SOFT;
+    let soft = hard - 1;
     let bundle = lab.bundle(&Lab::act(&Act::Wait));
     let config = bundle.join("config.json");
     let text = std::fs::read_to_string(&config).unwrap();
     let named = text.replacen(
         r#""noNewPrivileges": true"#,
-        r#""noNewPrivileges": true, "rlimits": [{"type": "RLIMIT_NOFILE", "soft": 2048, "hard": 4096}]"#,
+        &format!(
+            r#""noNewPrivileges": true, "rlimits": [{{"type": "RLIMIT_NOFILE", "soft": {soft}, "hard": {hard}}}]"#
+        ),
         1,
     );
     assert_ne!(
@@ -151,7 +156,7 @@ fn nofile_named(lab: &Lab, client: &Client) {
     std::fs::write(&config, named).unwrap();
     assert_eq!(
         nofile_seen(client, ClassSpec::Bundle(bundle)),
-        "2048:4096",
+        format!("{soft}:{hard}"),
         "oci box"
     );
 }
@@ -188,6 +193,45 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     );
     client.delete(&id).unwrap();
     said.trim().to_owned()
+}
+
+/// HEX-INST-8 (native plan step 6): `hex node` started with `$NOTIFY_SOCKET` (systemd's `Type=notify`) says
+/// `READY=1` there once its socket listens, so the installed unit is up exactly when it serves, within the
+/// start bound systemd gives it (sd_notify(3); systemd.service(5) `TimeoutStartSec=`), and the installer
+/// needs no wait of its own. A client connects right after the datagram arrives.
+fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("notify-")
+        .tempdir_in(cache)
+        .unwrap();
+    let notify = dir.path().join("notify.sock");
+    let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
+    manager
+        .set_read_timeout(Some(conformance::PATIENCE))
+        .unwrap();
+    let socket = dir.path().join("node.sock");
+    let mut node = Command::new(exe)
+        .arg("node")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("--box-root")
+        .arg(own.join("hex-notify"))
+        .env("NOTIFY_SOCKET", &notify)
+        .stdout(Std::null())
+        .spawn()
+        .expect("start hex node");
+    let mut said = [0u8; 64];
+    let n = manager.recv(&mut said).expect("READY=1 on $NOTIFY_SOCKET");
+    let said = String::from_utf8_lossy(&said[..n]).into_owned();
+    assert!(
+        said.lines().any(|l| l == "READY=1"),
+        "the node told {said:?}"
+    );
+    Client::connect(&socket).expect("connect once the node has said it's ready");
+    node.kill().unwrap();
+    node.wait().unwrap();
 }
 
 /// A `hex node` process serving its socket, killed when dropped.
@@ -427,6 +471,7 @@ impl Fixture for ProcessBoxes<'_> {
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
+    ready_is_told_to_the_service_manager(own, cache, exe);
     let lab = Lab::new(cache, exe);
     let agent = Agent::start(exe, cache, own.join("hex-sock"));
     let client = agent.client();
@@ -1163,25 +1208,15 @@ fn prepare_cgroup(disk: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&leaf).map_err(|e| format!("making a leaf for the agent: {e}"))?;
     std::fs::write(leaf.join("cgroup.procs"), format!("{}", std::process::id()))
         .map_err(|e| format!("moving self into a leaf: {e}"))?;
-    let probe = hex_runtime::linux::cgroup::BoxRoot::open(
+    // The probe root opening proves every controller a box uses is delegated here: `BoxRoot::open`
+    // refuses by name otherwise (HEX-INST-1).
+    hex_runtime::linux::cgroup::BoxRoot::open(
         &own.join("hex-probe"),
         hex_runtime::linux::disks::under(disk).unwrap_or_default(),
     )
     .map_err(|e| e.to_string())?;
-    let missing: Vec<&str> = hex_core::cgroup::CONTROLLERS
-        .into_iter()
-        .filter(|c| !probe.controllers().contains(*c))
-        .collect();
     let _ = std::fs::remove_dir(own.join("hex-probe"));
-    if missing.is_empty() {
-        Ok(own)
-    } else {
-        Err(format!(
-            "{} can't hand down the {} controllers",
-            own.display(),
-            missing.join(", ")
-        ))
-    }
+    Ok(own)
 }
 
 fn cache_dir() -> PathBuf {

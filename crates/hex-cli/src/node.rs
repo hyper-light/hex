@@ -8,7 +8,8 @@
 //! directory (`/run/hex-node` as root, `$XDG_RUNTIME_DIR/hex-node` rootless; decision 1), takes back
 //! or cleans up what an agent before it left
 //! (T-T7.1.2), raises its soft descriptor limit to the hard one, binds the socket, says
-//! `ready <path>` on stdout, and serves until it is signalled; if serving fails it says why on stderr
+//! `ready <path>` on stdout (and `READY=1` to systemd, where `$NOTIFY_SOCKET` names it), and serves until it is
+//! signalled; if serving fails it says why on stderr
 //! and exits 1. A socket an ended agent left at the path is replaced; one a live agent serves is
 //! refused.
 
@@ -85,10 +86,31 @@ fn serve(args: &[String]) -> Result<(), (u8, String)> {
         .and_then(|()| out.flush())
         .map_err(|e| (1, format!("saying it is ready: {e}")))?;
     drop(out);
+    tell_the_service_manager().map_err(|e| (1, format!("telling systemd it is ready: {e}")))?;
     let why = server
         .wait()
         .unwrap_or_else(|| "its socket stopped".to_owned());
     Err((1, why))
+}
+
+/// Under systemd's `Type=notify` (`$NOTIFY_SOCKET` set), says `READY=1` there, so the unit is up exactly
+/// when the node serves (sd_notify(3): one datagram to the socket the variable names, a path or, after
+/// `@`, a Linux abstract name). Non-blocking: a manager not reading is an error, never a wait.
+fn tell_the_service_manager() -> std::io::Result<()> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let Some(at) = std::env::var_os("NOTIFY_SOCKET") else {
+        return Ok(());
+    };
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(at.as_os_str());
+    let addr = match bytes.strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name)?,
+        None => SocketAddr::from_pathname(std::path::Path::new(&at))?,
+    };
+    let socket = UnixDatagram::unbound()?;
+    socket.set_nonblocking(true)?;
+    socket.send_to_addr(b"READY=1", &addr)?;
+    Ok(())
 }
 
 /// Raises the soft limit on open descriptors to the hard one: each connection and watched program
