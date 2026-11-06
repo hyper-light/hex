@@ -185,6 +185,28 @@ Hex's tests of the channel, each citing its ID:
   guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
   rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).
 
+- HEX-GUEST-9: the staging stream (§4a): a stage's entries read back as written however the stream cuts them;
+  hostile names (absolute, `..`, `.`, empty components, NUL, not UTF-8), kinds (a device's, a FIFO's, a socket's),
+  modes and fields refused by type; every count past its bound refused from its head (`hex_core::stream::files`).
+- HEX-GUEST-10: the relay's staging port: a staged tree lands under `<staged>/<box id>/` as it was, modes kept, and
+  goes when removed; a stage that names its way out through a link it made, comes twice, carries a device's kind or
+  is cut short is refused and leaves nothing (`hex_node::relay::files`).
+- HEX-GUEST-11: the host's packer: a host tree packs parents first, files with their bytes; a device node or socket
+  is refused by its path; the stage's bounds refused before anything past them is sent
+  (`hex_client::guest::stage`).
+- HEX-GUEST-12: the spec rewrite and the shares: shared roots read from `HEX_GUEST_SHARES` or this OS's default
+  (Docker Desktop's list, never `/`); a bundle's `config.json` and an `OciSpec` rewritten to the staged root and
+  each bind source's path under its share, writable binds passing; a source under no share refused by name, naming
+  the shared roots (`hex_runtime::guest`).
+- HEX-GUEST-13: the guest runtime: where Shards has no backend the class is refused as the platform's before
+  anything boots; the guest's spec names its init, the channel's three ports and its shares (`hex_runtime::guest`).
+- HEX-GUEST-14: the conformance suite on `oci` boxes through `hex_runtime::guest::WithGuest` over
+  `shards_api::sim::SimGuests`, whose guest runs `hex guest relay` to a node agent: the real link, staging and
+  rewrite on Linux (`crates/hex-cli/tests/node_socket.rs`).
+- HEX-GUEST-15: the same suite through the real `shards_api::Shards` from the host's node, run where
+  `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD` and `SHARDS_BIN` are set (`crates/hex-cli/tests/guest_real.rs`,
+  ignored elsewhere).
+
 ## 7. What would falsify it
 
 - A create's staging copy (§4a) costing more than the `oci` class's own create on the same image, measured in the

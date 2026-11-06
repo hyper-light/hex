@@ -52,6 +52,58 @@ pub fn active_processors() -> u32 {
     n.max(1)
 }
 
+/// The users folder (`FOLDERID_UserProfiles`, `%SystemDrive%\\Users` unless moved), read from its known
+/// folder as Windows resolves it, never a literal: the node guest's default share
+/// (docs/design/shards-guest.md §4a).
+pub fn user_profiles() -> io::Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_UserProfiles, SHGetKnownFolderPath};
+    let mut path: windows_sys::core::PWSTR = null_mut();
+    // SAFETY: FOLDERID_UserProfiles is a static GUID read for the call's length; flags 0 and a null
+    // token ask for the folder as the calling user sees it; `path` is a valid place for the callee to
+    // store a CoTaskMemAlloc'd, NUL-terminated wide string, which it does on success and may on
+    // failure, so it is freed below either way.
+    let hr = unsafe { SHGetKnownFolderPath(&FOLDERID_UserProfiles, 0, null_mut(), &mut path) };
+    let read = if hr >= 0 && !path.is_null() {
+        let mut len = 0usize;
+        // SAFETY: on success `path` is NUL-terminated, so each read up to and at the NUL is within
+        // the string the callee allocated; the walk stops at the NUL.
+        while unsafe { *path.add(len) } != 0 {
+            len = len.saturating_add(1);
+        }
+        // SAFETY: `path` holds `len` initialised u16s before its NUL (counted above), alive until
+        // the CoTaskMemFree below.
+        let wide = unsafe { std::slice::from_raw_parts(path, len) };
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(wide)))
+    } else {
+        Err(io::Error::from_raw_os_error(hr))
+    };
+    // SAFETY: `path` is null or the callee's CoTaskMemAlloc'd string, freed once here and not used
+    // after; CoTaskMemFree takes null.
+    unsafe { CoTaskMemFree(path.cast_const().cast()) };
+    read
+}
+
+/// The temp folder, as Windows resolves it for this process (`GetTempPath2W`: `TMP`, `TEMP`, the
+/// user's profile, then the Windows folder), the node guest's other default share.
+pub fn temp_folder() -> io::Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetTempPath2W;
+    // MAX_PATH + 1, the most GetTempPath2W writes (its documentation: "The maximum possible return
+    // value is MAX_PATH+1 (261)").
+    let mut buf = [0u16; 261];
+    let size = u32::try_from(buf.len()).unwrap_or(0);
+    // SAFETY: `buf` is a writable array of `size` u16s, alive for the call; GetTempPath2W writes at
+    // most that many, NUL included, and returns how many it wrote before the NUL, 0 on failure.
+    let n = unsafe { GetTempPath2W(size, buf.as_mut_ptr()) };
+    let n = usize::try_from(n).unwrap_or(usize::MAX);
+    match buf.get(..n) {
+        Some(wide) if n > 0 => Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(wide))),
+        _ => Err(last_error()),
+    }
+}
+
 fn last_error() -> io::Error {
     io::Error::from_raw_os_error(
         // SAFETY: GetLastError reads the calling thread's own last-error value and returns it.

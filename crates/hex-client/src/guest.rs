@@ -274,5 +274,8 @@ impl Client {
     }
 }
 
+pub mod shards;
+pub mod stage;
+
 #[cfg(test)]
 mod tests;

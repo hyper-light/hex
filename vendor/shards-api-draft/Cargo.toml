@@ -1,0 +1,52 @@
+# A copy of Shards' draft `shards-api` (crates/api) and the crates it needs (afunix on Windows, testdir
+# for its tests), at hyper-light/shards hex/shards-api 86b4422c (local, task A of native plan step 5),
+# so Hex builds against it on every machine before Shards lands it. It moves to vendor/shards, recorded
+# in vendor/MANIFEST.toml, once Shards lands the crate (docs/design/shards-guest.md Appendix A). Its own
+# workspace, Shards' settings below (its root Cargo.toml at that commit), so its lints are Shards'.
+[workspace]
+members = ["crates/api", "crates/afunix", "crates/testdir"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/hyper-light/shards"
+rust-version = "1.98.1"
+
+# Versions are pinned once here.
+[workspace.dependencies]
+libc = "0.2"
+thiserror = "2"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_IO",
+  "Win32_System_Memory",
+  "Win32_System_Registry",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+# Production code never panics (CLAUDE.md); clippy.toml exempts tests.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+print_stdout = "deny"
+print_stderr = "deny"

@@ -83,3 +83,23 @@ off (`:119`: "# CONFIG_BPF_JIT is not set"), so a device program runs interprete
   Linux host.
 - Shards' owner choosing a different seam (the daemon's protocol, or the Engine API): then this note's §2 is the
   implementation behind it, not the seam.
+
+## 7. The default shared roots: Docker Desktop's file-sharing list
+
+Checked 2026-11-06 for the guest's default shares (`docs/design/shards-guest.md` §4a, the lead's ruling that the
+host's `/` is never shared by default).
+
+- Docker Desktop's settings page, "File sharing"
+  (<https://docs.docker.com/desktop/settings-and-maintenance/settings/>), quoted: "By default the `/Users`,
+  `/Volumes`, `/private`, `/tmp` and `/var/folders` directory are shared." The page gives that list under the
+  settings for Mac, Linux and Windows Hyper-V alike, and no Windows path of its own.
+- The same page, "Resources": the memory limit "Defaults to 50% of your host's memory"; for CPUs it says only
+  "Specify the maximum number of CPUs to be used by Docker Desktop", no default. Hex therefore guesses neither: the
+  guest's vCPUs and memory are the node's configuration (`HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`), charged to
+  its budget (§1 of the design).
+- On Windows the page lists no Windows folder, so the Windows default (the users folder, read from its known
+  folder `FOLDERID_UserProfiles`, and the temp folder) is the lead's ruling of 2026-11-06, the counterparts of
+  `/Users` and `/tmp`, not a quote of Docker's.
+
+What would falsify it: Docker Desktop changing its default list (then Hex's default follows it, or says why not), or
+a host whose users or temporary folders are not where those calls say.

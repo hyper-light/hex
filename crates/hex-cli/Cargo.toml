@@ -28,6 +28,9 @@ socket2.workspace = true
 
 [dev-dependencies]
 hex-api.workspace = true
+# The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux
+# (tests/node_socket.rs, HEX-GUEST-14) and the real client where a guest is given (tests/guest_real.rs).
+shards-api.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -37,12 +40,14 @@ hex-node.workspace = true
 # runtime with the `hex selftest-box` programs this crate's binary provides.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 hex-core.workspace = true
+hex-client.workspace = true
 hex-runtime.workspace = true
 
 # The Windows process class's conformance test (tests/windows_process_box.rs) drives hex-runtime's
 # Windows runtime; windows-sys is for the test's own check that a deleted box's grandchild is gone.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 hex-core.workspace = true
+hex-client.workspace = true
 hex-runtime.workspace = true
 windows-sys.workspace = true
 

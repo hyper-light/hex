@@ -17,7 +17,12 @@
 //!   answered `Invalid` naming the bound, the stream closed;
 //! - a set's patience ([`Limits::patience`]): an exec whose streams don't all come in it is answered
 //!   `Invalid`, naming them, and the streams that came are closed;
-//! - a stdio connection's name ([`NAME_PATIENCE`]): one that doesn't name itself in it is closed.
+//! - a stdio connection's name ([`NAME_PATIENCE`]): one that doesn't name itself in it is closed;
+//! - staging connections at once (the control connections' bound again): one more is answered
+//!   `Exhausted` and closed; a stage's entries, bytes and path lengths ([`Limits::files`]).
+//!
+//! - **Files:** a box's bundle and root come on the staging port before its create
+//!   (docs/design/shards-guest.md §4a, [`files`]), written under the staged folder, and go with it.
 
 use std::collections::BTreeMap;
 use std::io::{self, IoSlice, IoSliceMut, PipeReader, PipeWriter, Read, Write};
@@ -48,6 +53,8 @@ pub struct Limits {
     pub sets: usize,
     /// Longest an exec waits for its streams.
     pub patience: Duration,
+    /// A stage's entries, bytes and path lengths.
+    pub files: hex_core::stream::files::Limits,
 }
 
 /// The relay's bounds unless set:
@@ -61,7 +68,11 @@ pub const LIMITS: Limits = Limits {
     connections: crate::serve::LIMITS.connections,
     sets: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight,
     patience: Duration::from_secs(60),
+    files: hex_core::stream::files::LIMITS,
 };
+/// Where the guest's relay writes staged bundles and roots: the guest's tmpfs `/run`, charged to its
+/// memory (docs/design/shards-guest.md §4).
+pub const STAGED: &str = "/run/hex/staged";
 /// Longest a stdio connection takes to name itself: the host writes its name as soon as it connects.
 pub const NAME_PATIENCE: Duration = Duration::from_secs(5);
 /// Each stdio copier's stack: one copy buffer and little else.
@@ -81,11 +92,13 @@ impl Listen for std::os::unix::net::UnixListener {
 /// The relay's state, shared by its threads.
 pub struct Relay {
     node: PathBuf,
+    staged: PathBuf,
     limits: Limits,
     sets: Mutex<Sets>,
     came: Condvar,
     tokens: AtomicU64,
     connections: AtomicUsize,
+    stagings: AtomicUsize,
 }
 
 /// Sets under way, and those made whole by a stream, waiting for their exec's thread to take them.
@@ -99,10 +112,11 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl Relay {
-    /// A relay to the node agent's socket at `node`, holding `limits`.
-    pub fn new(node: &Path, limits: Limits) -> Arc<Self> {
+    /// A relay to the node agent's socket at `node`, staging under `staged`, holding `limits`.
+    pub fn new(node: &Path, staged: &Path, limits: Limits) -> Arc<Self> {
         Arc::new(Self {
             node: node.to_owned(),
+            staged: staged.to_owned(),
             limits,
             sets: Mutex::new(Sets {
                 gather: Gather::new(limits.sets),
@@ -111,6 +125,7 @@ impl Relay {
             came: Condvar::new(),
             tokens: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
+            stagings: AtomicUsize::new(0),
         })
     }
 
@@ -118,11 +133,12 @@ impl Relay {
         self.sets.lock().map_err(poisoned)
     }
 
-    /// Serves `control` and `stdio` until either listener fails, which is returned.
+    /// Serves `control`, `stdio` and `files` until a listener fails, which is returned.
     pub fn serve(
         self: &Arc<Self>,
         control: Box<dyn Listen>,
         stdio: Box<dyn Listen>,
+        files: Box<dyn Listen>,
     ) -> Result<(), Refusal> {
         let streams = {
             let relay = Arc::clone(self);
@@ -130,6 +146,13 @@ impl Relay {
                 .name("hex-relay-stdio".to_owned())
                 .spawn(move || relay.take_streams(stdio.as_ref()))
                 .map_err(|e| Refusal::os("starting the relay's stdio thread", e))?
+        };
+        let stagings = {
+            let relay = Arc::clone(self);
+            std::thread::Builder::new()
+                .name("hex-relay-files".to_owned())
+                .spawn(move || relay.take_stagings(files.as_ref()))
+                .map_err(|e| Refusal::os("starting the relay's staging thread", e))?
         };
         let why = loop {
             let conn = match control.accept() {
@@ -145,8 +168,42 @@ impl Relay {
                 break Refusal::os("starting a control connection's thread", e);
             }
         };
-        drop(streams);
+        drop((streams, stagings));
         Err(why)
+    }
+
+    /// Takes staging connections as they come, each on a thread of its own, at most the control
+    /// connections' bound at once.
+    fn take_stagings(self: &Arc<Self>, listener: &dyn Listen) -> Refusal {
+        loop {
+            let mut conn = match listener.accept() {
+                Ok(conn) => conn,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Refusal::os("accepting a host's staging connection", e),
+            };
+            let held = self.stagings.fetch_add(1, Ordering::AcqRel);
+            if held >= self.limits.connections {
+                self.stagings.fetch_sub(1, Ordering::AcqRel);
+                refuse(
+                    conn.as_mut(),
+                    Refusal::Exhausted {
+                        what: "staging connections",
+                        bound: self.limits.connections,
+                    },
+                );
+                continue;
+            }
+            let relay = Arc::clone(self);
+            let started = std::thread::Builder::new()
+                .name("hex-relay-stage".to_owned())
+                .spawn(move || {
+                    let _release = Release(&relay.stagings);
+                    files::serve(conn, &relay.staged, &relay.limits.files);
+                });
+            if let Err(e) = started {
+                return Refusal::os("starting a staging connection's thread", e);
+            }
+        }
     }
 
     /// Takes stdio connections as they come, each to its exec's set.
@@ -495,6 +552,8 @@ fn send(node: &OwnedFd, bytes: &[u8], fds: &[OwnedFd]) -> Result<(), Gone> {
         }
     }
 }
+
+pub mod files;
 
 #[cfg(test)]
 mod tests;
