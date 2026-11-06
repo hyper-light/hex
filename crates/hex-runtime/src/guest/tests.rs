@@ -1,8 +1,8 @@
 //! The guest runtime's tests (docs/design/shards-guest.md §1, §4a, §5; native plan step 5): the shared
 //! roots read from `HEX_GUEST_SHARES` or this OS's default, never `/`; a box's spec rewritten to the
 //! guest's paths, its root staged and each bind source under its share, one under none refused by
-//! name (HEX-GUEST-12); and where Shards has no backend, the class refused by name before anything
-//! boots, and one guest booted for every create after (HEX-GUEST-13).
+//! name (HEX-GUEST-15); and where Shards has no backend, the class refused by name before anything
+//! boots, and one guest booted for every create after (HEX-GUEST-16).
 
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -26,7 +26,7 @@ fn share(i: usize, dir: &str, read_only: bool) -> Share {
 
 const STAGED: &str = "/run/hex/staged";
 
-/// HEX-GUEST-12: read share lists as an operator writes them: expect each root, `:ro` or a following
+/// HEX-GUEST-15: read share lists as an operator writes them: expect each root, `:ro` or a following
 /// `ro` making it read-only; a relative root, an empty list, `ro` first and a list past the bound
 /// refused by name.
 #[cfg(unix)]
@@ -57,7 +57,7 @@ fn shared_roots_read_as_the_operator_writes_them() {
     assert!(read(&many.join(":")).is_err());
 }
 
-/// HEX-GUEST-12: read this OS's default roots: expect Docker Desktop's list on macOS, the users and
+/// HEX-GUEST-15: read this OS's default roots: expect Docker Desktop's list on macOS, the users and
 /// temp folders on Windows, nothing on Linux, every one read-write and none the host's root.
 #[test]
 fn the_default_roots_are_docker_desktops_never_the_hosts_root() {
@@ -85,7 +85,7 @@ fn the_default_roots_are_docker_desktops_never_the_hosts_root() {
     );
 }
 
-/// HEX-GUEST-12: map sources under nested shares: expect each under the deepest share that holds it,
+/// HEX-GUEST-15: map sources under nested shares: expect each under the deepest share that holds it,
 /// and a source escaping by `..`, or under no share, under none.
 #[test]
 fn a_source_maps_under_the_deepest_share_that_holds_it() {
@@ -129,7 +129,7 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
     }
 }
 
-/// HEX-GUEST-12: rewrite an OciSpec with a root folder and with layers, and a writable and a read-only
+/// HEX-GUEST-15: rewrite an OciSpec with a root folder and with layers, and a writable and a read-only
 /// bind: expect its root named by the staged copy and staged from the host path, each bind's source
 /// its path under its share (writable binds pass), and a bind under no share refused naming it and the
 /// shared roots.
@@ -204,7 +204,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     );
 }
 
-/// HEX-GUEST-12: rewrite a bundle whose config names a relative root, a relative and an absolute
+/// HEX-GUEST-15: rewrite a bundle whose config names a relative root, a relative and an absolute
 /// writable bind (both kinds of bind option) and a proc mount: expect the bundle the staged folder,
 /// its root staged from the bundle's, its config's root `root`, each bind's source its share path and
 /// the proc mount untouched; and a bind under no share refused.
@@ -289,7 +289,7 @@ fn config() -> GuestConfig {
     }
 }
 
-/// HEX-GUEST-13: create an oci box where Shards has no backend (macOS x86_64's refusal): expect the
+/// HEX-GUEST-16: create an oci box where Shards has no backend (macOS x86_64's refusal): expect the
 /// class refused as the platform's, naming the OS, arch and Shards, and no boot asked for; a process
 /// box refused as the host's; and a call about a box before any boot NoSuchBox, with nothing booted.
 #[test]
@@ -325,12 +325,20 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
     assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
 }
 
-/// HEX-GUEST-13: read the guest's spec from its config: expect the initramfs as its init, the init's
+/// HEX-GUEST-16: read the guest's spec from its config: expect the initramfs as its init, the init's
 /// command line naming the shares, the channel's three ports alone, and each share as configured.
 #[test]
 fn the_guests_spec_names_its_init_ports_and_shares() {
     let spec = config().spec();
-    assert_eq!(spec.cmdline, "-- guest init --shares 1");
+    assert_eq!(
+        spec.cmdline,
+        "console=ttyS0 panic=-1 hex.shares=rw -- guest init"
+    );
+    let none = GuestConfig {
+        shares: Vec::new(),
+        ..config()
+    };
+    assert_eq!(none.spec().cmdline, "console=ttyS0 panic=-1 -- guest init");
     assert_eq!(
         spec.ports,
         [stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT]

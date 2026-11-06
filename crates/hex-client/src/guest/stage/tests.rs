@@ -1,4 +1,4 @@
-//! The host packer's tests (docs/design/shards-guest.md §4a, HEX-GUEST-11; native plan step 5): a host
+//! The host packer's tests (docs/design/shards-guest.md §4a, HEX-GUEST-14; native plan step 5): a host
 //! tree packs to the entries it holds, each parent before its children, files with their bytes; what is
 //! never staged (a device node, a socket) is refused by its path; and the stage's bounds are refused
 //! before anything past them is sent.
@@ -31,7 +31,7 @@ fn unpack(bytes: &[u8]) -> Vec<(Entry, Vec<u8>)> {
     out
 }
 
-/// HEX-GUEST-11: pack a folder holding a subfolder, a file, an empty file and (on Unix) a symlink, and
+/// HEX-GUEST-14: pack a folder holding a subfolder, a file, an empty file and (on Unix) a symlink, and
 /// a bytes item: expect each as an entry under its item's name, the file's bytes after it, every
 /// parent before its children.
 #[test]
@@ -81,7 +81,7 @@ fn a_host_tree_packs_to_its_entries_parents_first() {
     assert_eq!(entries.len(), if cfg!(unix) { 6 } else { 5 });
 }
 
-/// HEX-GUEST-11: pack a root holding a device node and one holding a socket: expect each refused
+/// HEX-GUEST-14: pack a root holding a device node and one holding a socket: expect each refused
 /// naming the path and its kind, nothing staged of it.
 #[cfg(unix)]
 #[test]
@@ -111,7 +111,7 @@ fn a_device_node_or_socket_is_refused_by_its_path() {
     );
 }
 
-/// HEX-GUEST-11: pack past the entries bound and past the bytes bound: expect each refused as
+/// HEX-GUEST-14: pack past the entries bound and past the bytes bound: expect each refused as
 /// exhausted, naming the bound, before the entry past it is sent.
 #[test]
 fn a_stage_past_its_bounds_is_refused_before_it_is_sent() {

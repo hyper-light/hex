@@ -68,14 +68,15 @@ impl GuestConfig {
         })
     }
 
-    /// The spec Shards boots: the generated initramfs's `/init` is `hex`, its command line saying to
-    /// start as the guest's init and mount this many shares; the guest is reached on the channel's
-    /// three ports alone.
+    /// The spec Shards boots: the initramfs's `/init` is `hex`, its command line the guest image's
+    /// (`scripts/guest/build.sh`): the serial console, a panic resetting the guest so the host sees it end,
+    /// `hex.shares=` naming each share's mode in tag order (none when there are none), and `-- guest init`
+    /// (HEX-GUEST-11). The guest is reached on the channel's three ports alone.
     pub fn spec(&self) -> shards_api::GuestSpec {
         shards_api::GuestSpec {
             kernel: self.kernel.clone(),
             init: shards_api::Init::Initrd(self.initrd.clone()),
-            cmdline: format!("-- guest init --shares {}", self.shares.len()),
+            cmdline: self.cmdline(),
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,
             disks: Vec::new(),
@@ -90,6 +91,25 @@ impl GuestConfig {
                     read_only: s.read_only,
                 })
                 .collect(),
+        }
+    }
+}
+
+impl GuestConfig {
+    fn cmdline(&self) -> String {
+        let modes: Vec<&str> = self
+            .shares
+            .iter()
+            .map(|s| if s.read_only { "ro" } else { "rw" })
+            .collect();
+        if modes.is_empty() {
+            "console=ttyS0 panic=-1 -- guest init".to_owned()
+        } else {
+            format!(
+                "console=ttyS0 panic=-1 {}={} -- guest init",
+                shares::CMDLINE,
+                modes.join(",")
+            )
         }
     }
 }

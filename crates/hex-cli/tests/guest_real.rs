@@ -1,4 +1,4 @@
-//! HEX-GUEST-15 (native plan step 5, docs/design/shards-guest.md §6): the `oci` class's conformance suite,
+//! HEX-GUEST-18 (native plan step 5, docs/design/shards-guest.md §6): the `oci` class's conformance suite,
 //! every case, through a real Shards guest booted by `shards_api::Shards` from this host, the path a macOS
 //! or Windows node takes: `hex_runtime::guest::WithGuest` boots one guest, stages each box's root into it
 //! and forwards every call to the Linux node agent inside. "Boot the guest, run every case, expect each to

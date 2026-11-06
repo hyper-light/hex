@@ -2,7 +2,7 @@
 //! step 5): a host's guest client, through the relay, reaches a stand-in node agent's own socket; its
 //! calls and answers cross whole; an exec's streams reach the node as pipe ends with the exec; and the
 //! relay's bounds refuse by type: an exec whose stream never comes, and a connection past the bound.
-//! And its staging port (§4a, HEX-GUEST-10): a host tree staged lands under the box's staged root as it
+//! And its staging port (§4a, HEX-GUEST-13): a host tree staged lands under the box's staged root as it
 //! was, and goes when removed; a stage that names its way out, or comes twice, is refused and leaves
 //! nothing behind.
 
@@ -318,7 +318,7 @@ fn stage_raw(lab: &Lab, bytes: &[u8]) -> Answer {
     wire::read_answer(&received, wire::MAX_MESSAGE).unwrap().1
 }
 
-/// HEX-GUEST-10: stage a host tree (a folder, a file with mode 0750, an empty file, a symlink) and a
+/// HEX-GUEST-13: stage a host tree (a folder, a file with mode 0750, an empty file, a symlink) and a
 /// bytes item through the host's packer: expect each under `<staged>/box-1/` as it was, modes kept,
 /// the root 0755; then remove it: expect it gone, and a second removal refused as no such box.
 #[test]
@@ -392,7 +392,7 @@ fn raw_stage(entries: &[(&str, hf::What)]) -> Vec<u8> {
     out
 }
 
-/// HEX-GUEST-10: stage a symlink `a` to `/` and then a directory `a/escaped` under it, and a symlink
+/// HEX-GUEST-13: stage a symlink `a` to `/` and then a directory `a/escaped` under it, and a symlink
 /// to the staged folder's parent then a file under it: expect each refused as leading through a
 /// symbolic link, nothing made outside the box's root, and the partial copy removed.
 #[test]
@@ -421,7 +421,7 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
     }
 }
 
-/// HEX-GUEST-10: stage an entry of a device's kind, and an entry twice: expect each refused by type
+/// HEX-GUEST-13: stage an entry of a device's kind, and an entry twice: expect each refused by type
 /// and the partial copy removed; and a stream cut before its end head refused as truncated.
 #[test]
 fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {

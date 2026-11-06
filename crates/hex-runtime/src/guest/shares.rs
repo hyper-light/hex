@@ -1,7 +1,8 @@
 //! The host folders a node's Shards guest sees live (docs/design/shards-guest.md §4a): Shards' virtio-fs
 //! shares, fixed at the guest's boot and mounted by its init at `/run/hex/shares/<i>`. A bind mount's
 //! source is rewritten to its path under the share that holds it; a source under none is refused by
-//! name, naming the shared roots.
+//! name, naming the shared roots. The guest learns the shares from its kernel's command line
+//! ([`CMDLINE`]).
 //!
 //! The host's `/` is never shared by default: that would hand any process in the guest, a container's
 //! escape included, everything the node's user can write. The default is Docker Desktop's file-sharing
@@ -16,10 +17,12 @@ use hex_api::Refusal;
 
 /// The guest's folder holding the shares, `<i>` under it for the `i`th.
 pub const SHARES: &str = "/run/hex/shares";
-/// The most roots a node shares: Docker Desktop's default list is five on macOS and two on Windows, and
-/// each is a virtio-fs device and a server for the guest's life, so a node's list is bounded (CLAUDE.md
-/// §2) and one past it refused. The guest's init holds the same bound.
-pub const MAX_SHARES: usize = 64;
+/// The most roots a node shares: the guest's init mounts at most 32 (`hex guest init`'s bound on
+/// `hex.shares=`, HEX-GUEST-11), so a longer list is refused here by name, before a guest is booted that
+/// would refuse it. Docker Desktop's default list is five.
+pub const MAX_SHARES: usize = 32;
+/// The kernel command-line parameter naming each share's mode, in tag order, for the guest's init.
+pub const CMDLINE: &str = "hex.shares";
 /// The environment variable naming the node's shared roots, in place of the default.
 pub const ENV: &str = "HEX_GUEST_SHARES";
 
