@@ -339,7 +339,7 @@ real class held to the simulator's trace), runs as each OS's own tests. Where it
 | | `process` | `oci` |
 |---|---|---|
 | Linux amd64 (fedora) | **Passes** (cgroup v2; `process_box.rs`, and over the node's socket) | **Passes** (bundles and specs, rootless; `oci_box.rs`, `oci_spec_box.rs`, over the socket) |
-| Linux arm64 | Not run: no Linux arm64 machine in the lab. Built for it by no gate yet | As `process` |
+| Linux arm64 | **Built and linted**: the Linux clippy gate checks `aarch64-unknown-linux-gnu` and `-musl` with `-D warnings` (gates 7/7 at e1b4c01, fedora unit hex-native-s7-gates-20261106T132708Z); the musl aarch64 `hex` is what step 5's Shards guest runs. The suite isn't run natively: no Linux arm64 machine in the lab | As `process` |
 | macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, integrated into `cp/t7-native` (ebf01f7); its record is step 5's |
 | macOS amd64 (Intel) | Built and linted for `x86_64-apple-darwin` (clippy `-D warnings` and build exit 0, 1aa735c); not run, no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
 | Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | Windows images through HCS (native step 4): conformance and HEX-DIFF-1..6 **pass** on jupiter at `cp/t7-native-s4` 51a487e (step 4's log `suite-20261106T131956Z.log`; TERM ends the init, read as the oracle's `Signal(15)`); its own device criterion fails there, open with step 4 |
