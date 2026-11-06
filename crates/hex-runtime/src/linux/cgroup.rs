@@ -27,12 +27,6 @@ pub const MAX_BOXES: usize = 65_536;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
 /// kernel delivers to the whole box at once through `cgroup.kill`).
 pub const MAX_SIGNALLED: usize = 1 << 20;
-/// Most cgroups the kill sweep walks in one box's subtree before it refuses. A box is its own cgroup
-/// and any the container nested under it — a handful; a tree with thousands is pathological, so this
-/// bounds the walk (its pending queue included) well above any real box (CLAUDE.md §2). Past it the
-/// sweep refuses ([`Refusal::Full`]) rather than stop silently (§3).
-pub const MAX_SWEEP_CGROUPS: usize = 4_096;
-
 thread_local! {
     /// This thread's cgroupfs lookups so far ([`lookups_on_this_thread`]).
     static LOOKUPS: Cell<u64> = const { Cell::new(0) };
@@ -617,7 +611,18 @@ impl BoxCgroup {
         if !self.populated()? {
             return Ok(());
         }
-        for (dir, pid) in sweep_targets(&self.dir, &FsTree, MAX_SWEEP_CGROUPS, MAX_SIGNALLED)? {
+        let budget = sweep_budget(
+            &self.read("cgroup.stat")?,
+            &self.read("cgroup.max.descendants")?,
+        )
+        .ok_or_else(|| Refusal::Os {
+            op: "reading a box's cgroup count",
+            why: format!(
+                "{}: cgroup.stat or cgroup.max.descendants doesn't parse",
+                self.dir.display()
+            ),
+        })?;
+        for (dir, pid) in sweep_targets(&self.dir, &FsTree, budget, MAX_SIGNALLED)? {
             sigkill_box_process(&dir, pid)?;
         }
         Ok(())
@@ -965,6 +970,21 @@ fn sweep_targets(
         }
     }
     Ok(targets)
+}
+
+/// How many cgroups the kill sweep of a box may visit, the box's own count, learned from the kernel (CLAUDE.md §2):
+/// the box and what its `cgroup.max.descendants` lets be under it where it sets a number, since the kernel refuses
+/// a `mkdir` past it (`cgroup_check_hierarchy_limits`, Linux v6.19 kernel/cgroup/cgroup.c:5972), so the subtree
+/// never outgrows it; else, `max` (`INT_MAX`, :2116, :3734-3735), the box and the descendants its `cgroup.stat`
+/// counts as the sweep begins (`nr_descendants`, :3832-3833). A subtree grown past that count since is refused
+/// ([`Refusal::Full`]) rather than walked on. The sweep holds a path for each cgroup the kernel holds, whose own
+/// cost is charged to the box. `None` where either file doesn't parse.
+fn sweep_budget(stat: &str, max_descendants: &str) -> Option<usize> {
+    let under = match max_descendants.trim() {
+        "max" => core::flat(stat, "nr_descendants")?,
+        limit => limit.parse().ok()?,
+    };
+    usize::try_from(under).ok()?.checked_add(1)
 }
 
 /// The real cgroupfs for [`sweep_targets`].
