@@ -13,7 +13,8 @@
 # kube-scheduler's client at 5000 QPS, burst 10000).
 # Environment: NODES (10000) and PODS (50000), which only check the example's counts; RUNS (3);
 # FILES (64, manifest files created side by side); STALL_S (120); HEX_SHARDS (1,12); REPO (the
-# checkout, for prep's build); LOCK (empty: no lock, for smoke runs).
+# checkout, for prep's build); LOCK (empty: no lock, for smoke runs); MODEL (m5d: EC2 m5d.metal,
+# G2's main node model; or fleet: Hex's fleet beside it; hex-sim.md H69).
 set -euo pipefail
 
 ROOT="${HOME:?}/.cache/hex-t7/sched-g6/kwok"
@@ -23,10 +24,11 @@ PODS="${PODS:-50000}"
 RUNS="${RUNS:-3}"
 FILES="${FILES:-64}"
 HEX_SHARDS="${HEX_SHARDS:-1,12}"
+MODEL="${MODEL:-m5d}"
 STALL_S="${STALL_S:-120}"
 LOCK="${LOCK-}"
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MANIFESTS="$ROOT/manifests/h13-f$FILES"
+MANIFESTS="$ROOT/manifests/$MODEL-f$FILES"
 NAME=hexg6
 export KWOK_WORKDIR="$ROOT/work"
 KUBECONFIG_FILE="$ROOT/kubeconfig"
@@ -84,7 +86,7 @@ prep() {
   install -m 0755 "${CARGO_TARGET_DIR:?}/release/examples/sched_kwok" "$BIN/sched_kwok"
   echo "commit: $(git -C "$REPO" rev-parse HEAD)$(git -C "$REPO" diff --quiet HEAD -- crates/hex-bench crates/hex-sim || echo ' (+ uncommitted changes)')" >"$BIN/sched_kwok.commit"
   rm -rf -- "${MANIFESTS:?}"
-  "$BIN/sched_kwok" manifests "$MANIFESTS" "$FILES"
+  "$BIN/sched_kwok" manifests "$MANIFESTS" "$FILES" "$MODEL"
   local n p
   n=$(cat "$MANIFESTS"/nodes-*.yaml | grep -c '^kind: Node$')
   p=$(cat "$MANIFESTS"/pods-*.yaml | grep -c '^kind: Pod$')
@@ -193,9 +195,9 @@ hex() {
   cat "$BIN/sched_kwok.commit" >"$out/hex.txt"
   { echo "before:"; host_state; } >>"$out/hex.txt"
   if [ -n "$LOCK" ]; then
-    flock -w 3600 "$LOCK" "$BIN/sched_kwok" hex "$RUNS" "$HEX_SHARDS" | tee -a "$out/hex.txt"
+    flock -w 3600 "$LOCK" "$BIN/sched_kwok" hex "$RUNS" "$HEX_SHARDS" "$MODEL" | tee -a "$out/hex.txt"
   else
-    "$BIN/sched_kwok" hex "$RUNS" "$HEX_SHARDS" | tee -a "$out/hex.txt"
+    "$BIN/sched_kwok" hex "$RUNS" "$HEX_SHARDS" "$MODEL" | tee -a "$out/hex.txt"
   fi
   { echo "after:"; host_state; } >>"$out/hex.txt"
 }

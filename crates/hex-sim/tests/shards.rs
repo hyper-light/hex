@@ -15,7 +15,7 @@
 
 use std::time::Instant;
 
-use hex_sim::generate::{self, Shape};
+use hex_sim::generate::{self, NodeModel, Shape};
 use hex_sim::model::{Class, Cluster, Kind};
 use hex_sim::sim::{self, Config, ControlPlane, Layout, Nemesis, Run};
 use hex_sim::spec;
@@ -27,10 +27,10 @@ const SECOND: u64 = 1_000_000_000;
 /// short and the serial specification's replay stays affordable. No GPU nodes and no benchmarks: at
 /// 20 workloads a node a node's few GPUs are taken and nearly every node runs a build, which leaves
 /// GPU work and benchmarks queued (S3's filters, tested in `tests/sim.rs`), not what this test is
-/// about. Nodes run the generator's classes (six in ten Linux, two Windows, two macOS); workloads take
-/// G2's rule, a third of them each OCI containers, Firecracker and Shards microVMs by owner, at 75
-/// launches an owner, each with its class's overhead (H69).
-fn million() -> Cluster {
+/// about. The nodes are one of G2's node models (EC2 m5d.metal, the main one, or Hex's fleet beside
+/// it); workloads take G2's rule, a third of them each OCI containers, Firecracker and Shards microVMs
+/// by owner, at 75 launches an owner, each with its class's overhead (H69).
+fn million(model: NodeModel) -> Cluster {
     let shape = Shape {
         nodes: 10_000,
         workloads: 1_000_000,
@@ -45,6 +45,7 @@ fn million() -> Cluster {
             w.kind = Kind::Plain;
         }
     }
+    cluster.nodes = model.nodes(10_000);
     generate::owners(&mut cluster, 7, 75).unwrap();
     generate::by_owner(&mut cluster, generate::overheads()).unwrap();
     cluster
@@ -75,20 +76,31 @@ fn lose_after_submits(cluster: &Cluster) -> Nemesis {
     }
 }
 
-/// T-T7.11.1: do 1,000,000 workloads submitted on 10,000 nodes under 8 shards and lose shard 3 for
-/// good; expect lost-or-double 0, the lost shard's running workloads undisturbed (kept-running 0),
+/// T-T7.11.1, on the main node model (10,000 EC2 m5d.metal): do 1,000,000 workloads submitted under 8
+/// shards and lose shard 3 for good; expect lost-or-double 0, the lost shard's running workloads undisturbed (kept-running 0),
 /// every slice's log one the serial specification makes, and its slice rebuilt by a live shard and
 /// committing at most 5 s after the loss; and (non-vacuity) tens of thousands running on the lost
 /// slice when it was lost and completions it recorded after the takeover.
 #[test]
 fn a_lost_shard_is_taken_over_within_five_seconds() {
-    let cluster = million();
-    let config = eight_shards(lose_after_submits(&cluster));
-    let run = sim::run(&cluster, &config).unwrap();
-    check_takeover(&cluster, &config, &run);
+    lose_a_shard(NodeModel::M5dMetal);
 }
 
-fn check_takeover(cluster: &Cluster, config: &Config, run: &Run) {
+/// T-T7.11.1 on Hex's fleet beside it (its ten hosts repeated to 10,000 nodes, Firecracker on the
+/// Linux two in ten): the same loss and the same expectations.
+#[test]
+fn a_lost_shard_is_taken_over_within_five_seconds_on_the_fleet() {
+    lose_a_shard(NodeModel::Fleet);
+}
+
+fn lose_a_shard(model: NodeModel) {
+    let cluster = million(model);
+    let config = eight_shards(lose_after_submits(&cluster));
+    let run = sim::run(&cluster, &config).unwrap();
+    check_takeover(model, &cluster, &config, &run);
+}
+
+fn check_takeover(model: NodeModel, cluster: &Cluster, config: &Config, run: &Run) {
     let end = spec::check_end(cluster, run);
     assert_eq!(end.lost_or_double(), 0, "{end:?}");
     assert_eq!(end.complete, 1_000_000, "{end:?}");
@@ -149,8 +161,9 @@ fn check_takeover(cluster: &Cluster, config: &Config, run: &Run) {
         "{on_lost:?} running on the lost slice, by class"
     );
     println!(
-        "T-T7.11.1: detection {} ms, rebuild of {} records {} ms, takeover {} ms; {} running on the \
+        "T-T7.11.1 on {}: detection {} ms, rebuild of {} records {} ms, takeover {} ms; {} running on the \
          lost slice (OCI, Firecracker, Shards {on_lost:?}), {} commits after",
+        model.name(),
         t.detection_ns / 1_000_000,
         t.records,
         t.rebuild_ns / 1_000_000,
@@ -167,7 +180,7 @@ fn check_takeover(cluster: &Cluster, config: &Config, run: &Run) {
 #[test]
 #[ignore = "a wall-clock measurement, run by hand in release"]
 fn rebuild_cost() {
-    let mut cluster = million();
+    let mut cluster = million(NodeModel::M5dMetal);
     for w in &mut cluster.workloads {
         w.runs_for = None;
     }

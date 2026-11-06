@@ -29,10 +29,8 @@
 use std::alloc::System;
 
 use cap::Cap;
-use hex_sim::generate;
-use hex_sim::model::{
-    Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
-};
+use hex_sim::generate::{self, NodeModel};
+use hex_sim::model::{Class, Cluster, Kind, Resources, Tenancy, WorkloadId, WorkloadSpec};
 use hex_sim::sim::{self, Config, Run};
 use hex_sim::spec;
 use hex_sim::store::{State, Store};
@@ -47,26 +45,15 @@ const NODES: u32 = 10_000;
 const WORKLOADS: u64 = 1_000_000;
 const SHARDS: u32 = 8;
 const MIB: u64 = 1 << 20;
-const GIB: u64 = 1 << 30;
 
-/// H63's shape, in G2's classes (H69): nodes in the six-Linux, two-Windows, two-macOS mix by index,
-/// and each pod an OCI container, Firecracker or Shards microVM by owner, a third each, with its
-/// class's overhead in its memory. `scheduler_perf`'s pause pod (100m CPU, 500Mi) on nodes of 11 CPU and 55 GiB, which
-/// hold 110 of them; 1,000,000 on 10,000 nodes fill the 1,100,000 slots to 91%. All are submitted at
-/// once and none ends.
+/// H63's pods on G2's main node model, in G2's classes (H69): 10,000 EC2 m5d.metal nodes (48 cores,
+/// 384 GiB, every class), and 1,000,000 of `scheduler_perf`'s pause pod (100m CPU, 500Mi), each an OCI
+/// container, a Firecracker or a Shards microVM by owner, a third each, with its class's overhead in
+/// its memory. All are submitted at once and none ends. Not run on the fleet model: there, a million
+/// pods don't fit (its Linux and Windows hosts hold about 332 TB, and the OCI and Firecracker thirds
+/// ask about 360 TB), and the count is of placed workloads.
 fn h13() -> Cluster {
-    let nodes = (0..NODES)
-        .map(|id| NodeSpec {
-            id: NodeId(id),
-            capacity: Resources {
-                cpu_milli: 11_000,
-                mem_bytes: 55 * GIB,
-                gpus: 0,
-            },
-            background_milli: 0,
-            classes: generate::platform(id),
-        })
-        .collect();
+    let nodes = NodeModel::M5dMetal.nodes(NODES);
     let workloads = (0..WORKLOADS)
         .map(|id| WorkloadSpec {
             id: WorkloadId(id),
@@ -144,7 +131,7 @@ fn a_million_placed_workloads_hold_at_most_4_kib_each() {
     let total = store_bytes + plane_bytes + inline;
     eprintln!(
         "AC-T7.11.4: store {store_bytes} B, planes {plane_bytes} B, inline {inline} B; \
-         {} B per workload over {WORKLOADS} on {NODES} nodes, {SHARDS} shards (bar {BAR_BYTES})",
+         {} B per workload over {WORKLOADS} on {NODES} EC2 m5d.metal nodes, {SHARDS} shards (bar {BAR_BYTES})",
         total / workloads
     );
 

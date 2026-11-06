@@ -135,14 +135,86 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
     Ok(Cluster::single_owner(nodes, workloads))
 }
 
-/// The classes of the `i`th node of a fleet, in the generator's proportions: six nodes in ten Linux
-/// (all three), two Windows (OCI containers and Shards microVMs), two macOS (Shards microVMs alone),
-/// by `i mod 10`, so any ten consecutive nodes hold the mix.
-pub fn platform(i: u32) -> Classes {
-    match i.checked_rem(10).unwrap_or(0) {
-        0..6 => Classes::ALL,
-        6..8 => Classes::NONE.with(Class::Oci).with(Class::Shards),
-        _ => Classes::NONE.with(Class::Shards),
+/// G2's two node models (`bench/sched/huawei_workload.md`, "Where each kind may land"; the same hosts
+/// as `bench/sched/huawei_trace.py:79-94`). Each node runs the classes its OS runs: Linux all three,
+/// Windows OCI containers and Shards microVMs, macOS Shards microVMs alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeModel {
+    /// EC2 m5d.metal, the main model: 48,000 millicores, 384 GiB, no GPU, Linux with KVM, so every
+    /// class (Agache et al., NSDI 2020 §6: "two Intel Xeon Platinum 8175M processors (for a total of
+    /// 48 cores with hyper-threading disabled), 384GB of RAM").
+    M5dMetal,
+    /// Hex's fleet beside it: its ten hosts from kiln's runner facts (2026-11-05), in G2's order,
+    /// node `id` being host `id mod 10`, as `sched_fast_path` repeats them.
+    Fleet,
+}
+
+/// Hex's fleet: threads, memory bytes, GPUs, and the OS's classes (`huawei_trace.py:83-94`).
+const FLEET: [(u64, u64, u32, Os); 10] = [
+    (32, 131_986_903_040, 1, Os::Linux),   // adacachy
+    (32, 67_128_643_584, 0, Os::Linux),    // fedora, kiln-a094a12d.attlocal.net
+    (32, 132_766_306_304, 0, Os::Windows), // jupiter
+    (18, 68_719_476_736, 0, Os::Macos),    // adalundhe-macbook-pro
+    (14, 38_654_705_664, 0, Os::Macos),    // adas-mac-studio-2.local
+    (14, 38_654_705_664, 0, Os::Macos),    // adas-mac-studio-3.local
+    (14, 38_654_705_664, 0, Os::Macos),    // adas-mac-studio.local
+    (32, 103_079_215_104, 0, Os::Macos),   // adas-mac-studio.local-2
+    (15, 51_539_607_552, 0, Os::Macos),    // adas-macbook-pro.local
+    (18, 137_438_953_472, 0, Os::Macos),   // e30189ea29182644fe5a4b2e06c7dac2
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Os {
+    Linux,
+    Windows,
+    Macos,
+}
+
+impl Os {
+    fn classes(self) -> Classes {
+        match self {
+            Os::Linux => Classes::ALL,
+            Os::Windows => Classes::NONE.with(Class::Oci).with(Class::Shards),
+            Os::Macos => Classes::NONE.with(Class::Shards),
+        }
+    }
+}
+
+impl NodeModel {
+    /// Node `id` of the model.
+    pub fn node(self, id: u32) -> NodeSpec {
+        let (cpu_milli, mem_bytes, gpus, classes) = match self {
+            NodeModel::M5dMetal => (48_000, 384 << 30, 0, Classes::ALL),
+            NodeModel::Fleet => {
+                // `id mod 10` is always a host; the fallback is unreachable and empty.
+                let at = usize::try_from(id.checked_rem(10).unwrap_or(0)).unwrap_or(0);
+                let (threads, mem, gpus, os) =
+                    FLEET.get(at).copied().unwrap_or((0, 0, 0, Os::Macos));
+                (threads.saturating_mul(1000), mem, gpus, os.classes())
+            }
+        };
+        NodeSpec {
+            id: NodeId(id),
+            capacity: Resources {
+                cpu_milli,
+                mem_bytes,
+                gpus,
+            },
+            background_milli: 0,
+            classes,
+        }
+    }
+
+    /// `n` nodes of the model, ids from 0.
+    pub fn nodes(self, n: u32) -> Vec<NodeSpec> {
+        (0..n).map(|id| self.node(id)).collect()
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            NodeModel::M5dMetal => "EC2 m5d.metal",
+            NodeModel::Fleet => "Hex's fleet",
+        }
     }
 }
 

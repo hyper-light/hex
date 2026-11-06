@@ -705,17 +705,36 @@ the three.
 - **Each class's overhead is in its workload's memory** (`huawei_workload.md:122-127`): OCI 440,402 bytes
   (0.42 MiB), Firecracker 5 MiB, and Shards 5 MiB, **a stand-in**, until Shards states its own
   (`generate::overheads`).
-- **Each node declares the classes it runs**, by platform (`huawei_workload.md:112-116`): Linux all three,
-  Windows OCI and Shards, macOS Shards alone, in the generator's proportions, six, two and two in ten
-  (`generate.rs:51-56`; `generate::platform` gives them by node id for the benches' fixed shapes).
+- **The nodes are G2's two node models** (`huawei_workload.md:92-120`; the lead, 2026-11-06: the main
+  model and the fleet beside it), in `generate::NodeModel`:
+  - **EC2 m5d.metal, the main one**: 48,000 millicores, 384 GiB, no GPU, Linux with KVM, so every class
+    on every node (Agache et al., NSDI 2020 §6). Every G6 and G7 figure is of record on it.
+  - **Hex's fleet, beside it**: its ten hosts from kiln's runner facts exactly as G2's fleet model has
+    them (`huawei_trace.py:83-94`: adacachy and fedora Linux, jupiter Windows, seven Macs), repeated in
+    that order to the figure's node count, as `sched_fast_path` repeats them. Each runs its OS's classes
+    (`huawei_workload.md:112-116`): Linux all three, Windows OCI and Shards, macOS Shards alone. So
+    Firecracker may use two nodes in ten, OCI three, Shards all ten. Each figure is measured on it too
+    where it applies, and says when it doesn't (a million pause pods don't fit the fleet's OCI and
+    Firecracker capacity).
 - **Each slice, cell and region declares the union of its nodes' classes** (`Layout::classes`,
   `CellRun::classes`), and routing passes over one that doesn't declare a workload's class before it
   asks whether its empty nodes admit it (H60, H64). `Capacity::admit` skips a cell that doesn't run the
   class (H66). The index already refuses a node that doesn't (H9), and the specification counts any such
   placement (`FilterReport::class_off_node`).
-- **The drills give regions a platform each**: Linux, Windows, macOS. So a lost region's work can move
-  only to a region that runs its class, and the Linux region's loss leaves Firecracker nowhere to go:
-  every Firecracker microVM is then refused, typed, which `T-T7.12.1`'s capacity check asks for.
+- **Cells and regions are cut from those nodes** in id order, as H60 and H64 cut them, so on the fleet
+  every cell holds the fleet's mix and a lost region's work of each class moves only to nodes of that
+  class elsewhere. Regions are places, each holding a mix of hosts (the lead, 2026-11-06).
+  `T-T7.12.1` is of record on the main model, where every node runs every kind; beside it on the fleet,
+  a lost region's Firecracker goes to the other regions' Linux hosts within their capacity. The typed
+  refusal is its own case (`a_kind_no_surviving_node_runs_is_refused_typed`): three regions each of
+  one OS's fleet hosts, so losing the Linux one leaves no surviving node that runs Firecracker, and
+  every Firecracker microVM is refused, typed.
+- **Plain best fit strands the scarce class; Hex's score doesn't.** With classes, the 1M mixed row on
+  one plane under best fit left 4,678 Firecracker microVMs unplaced: OCI and Shards work filled the
+  nodes that alone run Firecracker. G2's `Scorer::HEX` (H11: least stranded against each class's
+  smallest needs, then the node running the fewest classes) placed all 1,000,000, the spec accepting
+  the run. Every G6/G7 bench places by it, and the finding is evidence for H11 recorded in
+  `bench/sched/million.md`.
 - **kube-scheduler is held to the same constraint** (H63's comparison): each kwok node carries
   `hex.dev/<class>: "true"` for each class it runs, and each pod a required node affinity on its class's
   label, and its memory request carries its class's overhead. That is Kubernetes' own way to keep a pod

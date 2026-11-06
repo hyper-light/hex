@@ -1,9 +1,11 @@
-//! AC-T7.11.3's cluster, on both sides of the comparison (`docs/design/hex-sim.md` H63,
-//! `bench/sched/kube_scheduler_kwok.md`): 10,000 nodes of `scheduler_perf`'s node sized to hold its
-//! own 110-pod limit (11 CPU, 55 GiB, 110 pods) and 50,000 of its pause pods (100m CPU, 500Mi).
+//! AC-T7.11.3's cluster, on both sides of the comparison (`docs/design/hex-sim.md` H63, H69,
+//! `bench/sched/kube_scheduler_kwok.md`): 10,000 nodes of one of G2's node models, each with
+//! `scheduler_perf`'s 110-pod limit, and 50,000 of its pause pods (100m CPU, 500Mi). The model is
+//! `m5d` (EC2 m5d.metal, 48 cores and 384 GiB, every class; the main one) or `fleet` (Hex's fleet's ten
+//! hosts repeated in G2's order, beside it).
 //!
-//!   cargo run --release -p hex-bench --example sched_kwok -- manifests <out-dir> <files>
-//!   cargo run --release -p hex-bench --example sched_kwok -- hex <runs> <shards,...>
+//!   cargo run --release -p hex-bench --example sched_kwok -- manifests <out-dir> <files> <m5d|fleet>
+//!   cargo run --release -p hex-bench --example sched_kwok -- hex <runs> <shards,...> <m5d|fleet>
 //!
 //! `manifests` writes the cluster for kube-scheduler on kwok's fake nodes (`bench/sched/kwok/run.sh`
 //! drives it): `nodes-<i>.yaml` and `pods-<i>.yaml` for `i` in `0..files`, multi-document YAML, so
@@ -11,9 +13,8 @@
 //! (kwok.x-k8s.io/node=fake, NoSchedule) and the shape as both capacity and allocatable; each pod
 //! requests the pause pod's shape and tolerates kwok's taint.
 //!
-//! Both sides place Hex's three classes (`docs/design/hex-sim.md` H69). Nodes run, by id, six in ten
-//! Linux (all three classes), two Windows (OCI containers and Shards microVMs), two macOS (Shards
-//! alone); each pod is an OCI container, a Firecracker or a Shards microVM by G2's rule (owners at 75
+//! Both sides place Hex's three classes (`docs/design/hex-sim.md` H69). Each node runs its OS's:
+//! Linux all three, Windows OCI containers and Shards microVMs, macOS Shards alone; each pod is an OCI container, a Firecracker or a Shards microVM by G2's rule (owners at 75
 //! launches each, a third of the pods each), and its memory request carries its class's overhead (OCI
 //! 0.42 MiB, Firecracker 5 MiB, Shards 5 MiB, a stand-in). For kube-scheduler a node carries a label
 //! `hex.dev/<class>: "true"` for each class it runs (and `kubernetes.io/os` its platform's), and a
@@ -47,7 +48,7 @@ use std::path::Path;
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
-use hex_sim::generate;
+use hex_sim::generate::{self, NodeModel};
 use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
@@ -58,29 +59,18 @@ const NODES: u32 = 10_000;
 const PODS: u64 = 50_000;
 const MAX_PODS: u64 = 110;
 const MIB: u64 = 1 << 20;
-const GIB: u64 = 1 << 30;
 /// `scheduler_perf`'s pause pod: 100m CPU, 500Mi.
 const POD: Resources = Resources {
     cpu_milli: 100,
     mem_bytes: 500 * MIB,
     gpus: 0,
 };
-/// A node that holds its own 110-pod limit of that pod.
-const NODE: Resources = Resources {
-    cpu_milli: 11_000,
-    mem_bytes: 55 * GIB,
-    gpus: 0,
-};
-
-fn nodes() -> Vec<NodeSpec> {
-    (0..NODES)
-        .map(|id| NodeSpec {
-            id: NodeId(id),
-            capacity: NODE,
-            background_milli: 0,
-            classes: generate::platform(id),
-        })
-        .collect()
+fn model(name: &str) -> NodeModel {
+    match name {
+        "m5d" => NodeModel::M5dMetal,
+        "fleet" => NodeModel::Fleet,
+        other => panic!("node model {other:?} is neither m5d nor fleet"),
+    }
 }
 
 fn pods() -> Vec<WorkloadSpec> {
@@ -112,14 +102,14 @@ fn label(class: Class) -> &'static str {
 
 const CLASSES: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
 
-fn manifests(out: &Path, files: u32) {
+fn manifests(out: &Path, files: u32, model: NodeModel) {
     assert!(files > 0, "at least one file");
     std::fs::create_dir_all(out).unwrap();
     let open = |what: &str, i: u32| {
         BufWriter::new(File::create(out.join(format!("{what}-{i:03}.yaml"))).unwrap())
     };
     let mut w: Vec<_> = (0..files).map(|i| open("nodes", i)).collect();
-    for (i, node) in nodes().iter().enumerate() {
+    for (i, node) in model.nodes(NODES).iter().enumerate() {
         let f = &mut w[i % files as usize];
         let name = format!("kwok-node-{}", node.id.0);
         let r = format!(
@@ -226,9 +216,9 @@ struct Shard {
     index: FitIndex,
 }
 
-fn shards_of(n: usize) -> Vec<Shard> {
+fn shards_of(n: usize, model: NodeModel) -> Vec<Shard> {
     let mut parts: Vec<Vec<NodeSpec>> = vec![Vec::new(); n];
-    for node in nodes() {
+    for node in model.nodes(NODES) {
         let part = &mut parts[node.id.0 as usize % n];
         let local = NodeId(part.len() as u32);
         part.push(NodeSpec { id: local, ..node });
@@ -322,7 +312,7 @@ fn check(p: &Placed) -> Result<(), String> {
     Ok(())
 }
 
-fn hex(runs: u32, shard_counts: &[usize]) {
+fn hex(runs: u32, shard_counts: &[usize], model: NodeModel) {
     // Hex's packing score (H11, `Scorer::HEX`), against each class's one need.
     let sample = Sample {
         scorer: Scorer::HEX,
@@ -338,12 +328,13 @@ fn hex(runs: u32, shard_counts: &[usize]) {
     };
     let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     println!(
-        "sched_kwok hex: {PODS} pending pods of {POD:?} on {NODES} nodes of {NODE:?}, {cpus} CPUs, {runs} runs each"
+        "sched_kwok hex: {PODS} pending pods of {POD:?} on {NODES} nodes of {}, {cpus} CPUs, {runs} runs each",
+        model.name()
     );
     for &n in shard_counts {
         let mut best: Option<Duration> = None;
         for run in 0..runs {
-            let parts = shards_of(n);
+            let parts = shards_of(n, model);
             let start = Barrier::new(parts.len());
             let done: Vec<Placed> = std::thread::scope(|s| {
                 let handles: Vec<_> = parts
@@ -396,20 +387,23 @@ fn main() {
                 .unwrap_or_else(|a| panic!("an argument isn't Unicode: {a:?}"))
         })
         .collect();
-    let usage = "usage: sched_kwok manifests <out-dir> <files> | hex <runs> <shards,...>";
+    let usage = "usage: sched_kwok manifests <out-dir> <files> <m5d|fleet> | hex <runs> <shards,...> <m5d|fleet>";
     match args
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["manifests", out, files] => manifests(Path::new(out), files.parse().expect(usage)),
-        ["hex", runs, shards] => hex(
+        ["manifests", out, files, m] => {
+            manifests(Path::new(out), files.parse().expect(usage), model(m));
+        }
+        ["hex", runs, shards, m] => hex(
             runs.parse().expect(usage),
             &shards
                 .split(',')
                 .map(|s| s.parse().expect(usage))
                 .collect::<Vec<_>>(),
+            model(m),
         ),
         _ => panic!("{usage}"),
     }

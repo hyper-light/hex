@@ -2,13 +2,13 @@
 //! `cluster_schedule` P99 of 32 ms on 100 simulated member clusters (`docs/design/hex-sim.md` H68;
 //! `cluster-managers-at-scale.md:239-245`). The bar is a p99 at most a fifth of Karmada's, 6.4 ms.
 //!
-//!   cargo bench -p hex-bench --bench sched_cells -- [runs]
+//!   cargo bench -p hex-bench --bench sched_cells -- [runs] [fleet]
 //!
 //! The topology is Karmada's report's: 100 cells (10 regions of 10) of 5,000 nodes each, 500,000
-//! nodes, and 2,000,000 workloads, 20,000 a cell on average. The node and the pod are H63's: 11 CPU
-//! and 55 GiB, and `scheduler_perf`'s pause pod, 100m and 500Mi. In Hex's classes (H69): each region
-//! one platform, six Linux (all three classes), two Windows (OCI, Shards), two macOS (Shards); each
-//! pod an OCI container, a Firecracker or a Shards microVM by owner, a third each, with its class's
+//! nodes, and 2,000,000 workloads, 20,000 a cell on average. The nodes are G2's node models (H69):
+//! EC2 m5d.metal (48 cores, 384 GiB, every class; the main one) or with `fleet` Hex's fleet beside it,
+//! its ten hosts repeated, so every cell holds the fleet's mix and each node runs its OS's classes. The
+//! pod is `scheduler_perf`'s pause pod, 100m and 500Mi, each an OCI container, a Firecracker or a Shards microVM by owner, a third each, with its class's
 //! overhead, selected only into a cell that runs its class. Each workload's selection is timed alone,
 //! wall-clock, on a release build: `federation::Capacity::admit`, which routes it to its home region
 //! and cell and on to the first with room, reads that cell's live free nodes by the cells' sampled
@@ -31,12 +31,12 @@
 use std::time::{Duration, Instant};
 
 use hex_sim::federation::{Capacity, Topology};
-use hex_sim::generate;
+use hex_sim::generate::{self, NodeModel};
 use std::collections::BTreeSet;
 
 use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::{
-    Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+    Class, Cluster, Kind, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
 
 const TOPOLOGY: Topology = Topology {
@@ -46,11 +46,6 @@ const TOPOLOGY: Topology = Topology {
 const NODES_PER_CELL: u32 = 5_000;
 const WORKLOADS: u64 = 2_000_000;
 const MIB: u64 = 1 << 20;
-const NODE: Resources = Resources {
-    cpu_milli: 11_000,
-    mem_bytes: 55 * 1024 * MIB,
-    gpus: 0,
-};
 const POD: Resources = Resources {
     cpu_milli: 100,
     mem_bytes: 500 * MIB,
@@ -58,18 +53,10 @@ const POD: Resources = Resources {
 };
 const BAR: Duration = Duration::from_micros(6_400);
 
-/// Each region one platform, in the generator's proportions over the ten regions (H69): regions 0-5
-/// Linux (all three classes), 6-7 Windows (OCI and Shards), 8-9 macOS (Shards).
-fn nodes() -> Vec<NodeSpec> {
-    let per_region = TOPOLOGY.cells * NODES_PER_CELL;
-    (0..TOPOLOGY.regions * per_region)
-        .map(|id| NodeSpec {
-            id: NodeId(id),
-            capacity: NODE,
-            background_milli: 0,
-            classes: generate::platform(id / per_region),
-        })
-        .collect()
+/// The cells' nodes: 500,000 of a G2 node model (H69), in id order, so each cell of 5,000 holds the
+/// model's mix.
+fn nodes(model: NodeModel) -> Vec<NodeSpec> {
+    model.nodes(TOPOLOGY.regions * TOPOLOGY.cells * NODES_PER_CELL)
 }
 
 /// The workloads, each one of G2's classes by owner, a third each, with its class's overhead.
@@ -120,11 +107,17 @@ fn main() {
         .filter(|a| a != "--bench")
         .collect();
     let runs: u32 = args.first().map_or(5, |a| a.parse().expect("runs"));
-    let nodes = nodes();
+    let model = if args.iter().any(|a| a == "fleet") {
+        NodeModel::Fleet
+    } else {
+        NodeModel::M5dMetal
+    };
+    let nodes = nodes(model);
     let work = workloads();
     let cells = TOPOLOGY.regions * TOPOLOGY.cells;
     println!(
-        "sched_cells: {WORKLOADS} workloads of {POD:?} over {cells} cells of {NODES_PER_CELL} nodes of {NODE:?}, {runs} runs"
+        "sched_cells: {WORKLOADS} workloads of {POD:?} over {cells} cells of {NODES_PER_CELL} nodes of {}, {runs} runs",
+        model.name()
     );
     let mut best: Option<Duration> = None;
     for run in 0..runs {
@@ -152,11 +145,11 @@ fn main() {
             by_class[w.class as usize].push(d);
             let a = got.unwrap_or_else(|| panic!("workload {:?} found no room", w.id));
             let cell = (a.region * TOPOLOGY.cells + a.cell) as usize;
+            let node = cell as u32 * NODES_PER_CELL + a.node.0;
             assert!(
-                generate::platform(a.region).has(w.class),
-                "{:?} placed in region {} which doesn't run {:?}",
+                nodes[node as usize].classes.has(w.class),
+                "{:?} placed on node {node}, which doesn't run {:?}",
                 w.id,
-                a.region,
                 w.class
             );
             per_cell[cell] += 1;

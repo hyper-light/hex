@@ -1,11 +1,14 @@
 //! AC-T7.11.2's bench: wall time to place 1,000,000 pending workloads on 10,000 nodes, on a release
 //! build, against a bar of 120 s (G6 step 4; the method is `docs/design/hex-sim.md` H63).
 //!
-//!   cargo bench -p hex-bench --bench sched_million -- [runs] [slices] [pods|mixed] [check]
+//!   cargo bench -p hex-bench --bench sched_million -- [runs] [slices] [pods|mixed] [check] [fleet]
 //!
-//! The cluster is H63's: 10,000 nodes of 11 CPU and 55 GiB (`scheduler_perf`'s node sized to hold
-//! its 110-pod limit of its pod), no co-tenants. Row `pods` is 1,000,000 of `scheduler_perf`'s pause
-//! pod, 100m and 500Mi, filling the 1,100,000 slots to 91%. Row `mixed` draws each need uniformly
+//! The nodes are 10,000 of one of G2's node models (H69): EC2 m5d.metal, the main one (48 cores,
+//! 384 GiB, every class), or with `fleet` Hex's fleet beside it, its ten hosts repeated in G2's order
+//! (`generate::NodeModel`). Row `pods` is 1,000,000 of `scheduler_perf`'s pause pod, 100m and 500Mi
+//! (a fifth of the m5d.metal nodes' CPU). On the fleet a million don't fit (its Linux and Windows
+//! hosts can't hold the OCI and Firecracker thirds), so the fleet's row reports what each class placed,
+//! not the bar. Row `mixed` draws each need uniformly
 //! from 1-199m and 1-999 MiB (the same means, so the same budget) and its kind as hex-sim's generator
 //! does (40% plain, 25% builds, 15% benchmarks, 20% sessions), so H9's filters run and a one-class
 //! best case never stands alone.
@@ -48,7 +51,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use hex_sim::generate;
+use hex_sim::generate::{self, NodeModel};
 use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
@@ -61,11 +64,6 @@ use hex_sim::store::{Op, Outcome, State, Store, Write};
 const NODES: u32 = 10_000;
 const WORKLOADS: u64 = 1_000_000;
 const MIB: u64 = 1 << 20;
-const NODE: Resources = Resources {
-    cpu_milli: 11_000,
-    mem_bytes: 55 * 1024 * MIB,
-    gpus: 0,
-};
 const BAR: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -170,15 +168,8 @@ struct Placed {
 
 /// The nodes, the slices with their routed workloads, and the one store with every workload
 /// submitted.
-fn setup(row: Row, seed: u64, slices: u32) -> (Vec<NodeSpec>, Vec<Slice>, Store) {
-    let nodes: Vec<NodeSpec> = (0..NODES)
-        .map(|id| NodeSpec {
-            id: NodeId(id),
-            capacity: NODE,
-            background_milli: 0,
-            classes: generate::platform(id),
-        })
-        .collect();
+fn setup(row: Row, seed: u64, slices: u32, model: NodeModel) -> (Vec<NodeSpec>, Vec<Slice>, Store) {
+    let nodes = model.nodes(NODES);
     let layout = Layout::new(&nodes, slices).unwrap();
     let mut base = 0;
     let mut parts: Vec<Slice> = (0..layout.len())
@@ -322,6 +313,11 @@ fn main() {
         Row::Pods
     };
     let checking = args.iter().any(|a| a == "check");
+    let model = if args.iter().any(|a| a == "fleet") {
+        NodeModel::Fleet
+    } else {
+        NodeModel::M5dMetal
+    };
     let cpus = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
     // Hex's packing score (H11, `Scorer::HEX`), as `sched_fast_path.rs` measures it: least stranded
     // against each class's smallest needs, then the node running the fewest classes. With classes,
@@ -332,18 +328,19 @@ fn main() {
         ..Sample::default()
     };
     println!(
-        "sched_million: {WORKLOADS} pending {} on {NODES} nodes of 11 CPU/55 GiB, {slices} slices on {cpus} CPUs, {runs} runs, check={checking}",
+        "sched_million: {WORKLOADS} pending {} on {NODES} nodes of {}, {slices} slices on {cpus} CPUs, {runs} runs, check={checking}",
         if row == Row::Pods {
             "pods of 100m/500Mi"
         } else {
             "mixed workloads"
-        }
+        },
+        model.name()
     );
     let mut best: Option<(Duration, String)> = None;
     let mut all_ok = true;
     for seed in 0..runs {
         let built = Instant::now();
-        let (_nodes, parts, store) = setup(row, seed, slices);
+        let (_nodes, parts, store) = setup(row, seed, slices, model);
         let setup_s = built.elapsed().as_secs_f64();
         let store = Mutex::new(store);
         let done: Vec<Placed> = std::thread::scope(|s| {
