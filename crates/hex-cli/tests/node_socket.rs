@@ -368,7 +368,8 @@ impl hex_client::guest::Link for GuestPorts {
 
 /// HEX-GUEST-8: start `hex guest relay` to the agent's socket, connect through it as a host reaches
 /// the node in its guest, and run the conformance suite on `oci` and `process` boxes: expect every case
-/// to pass, as over the socket itself.
+/// to pass, as over the socket itself. The relay stages under the test's own folder: its default,
+/// `/run/hex/staged`, is the guest's, which a rootless test can't make.
 fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
     let dir = tempfile::Builder::new()
         .prefix("relay-")
@@ -379,6 +380,8 @@ fn through_the_guest_relay(lab: &Lab, agent: &Agent, exe: &str) {
         .arg(&agent.socket)
         .arg("--unix")
         .arg(dir.path())
+        .arg("--staged")
+        .arg(dir.path().join("staged"))
         .stdout(Std::piped())
         .spawn()
         .expect("start hex guest relay");
