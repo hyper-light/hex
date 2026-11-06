@@ -203,3 +203,63 @@ fn a_stage_spends_the_relays_learned_budget() {
         })
     );
 }
+
+/// A relay stand-in for a box whose staged copy already exists: it reads a stage's opening, answers
+/// `Refused(Exists)` as the relay does, and reports every byte the packer sent after the opening.
+#[cfg(unix)]
+struct RefusesAtOpening {
+    sent_after: std::sync::mpsc::Sender<usize>,
+}
+
+#[cfg(unix)]
+impl super::super::Link for RefusesAtOpening {
+    fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        use std::os::unix::net::UnixStream;
+        let (near, mut far) = UnixStream::pair().unwrap();
+        let report = self.sent_after.clone();
+        std::thread::spawn(move || {
+            // The opening: OPEN_BYTES, then the id `box-1`.
+            let mut open = [0u8; 10 + 5];
+            far.read_exact(&mut open).unwrap();
+            let refused = wire::answer(
+                wire::FIRST,
+                0,
+                &Answer::Refused(Refusal::Exists(id())),
+                wire::MAX_MESSAGE,
+            )
+            .unwrap();
+            far.write_all(&hex_core::stream::frame(&refused, wire::MAX_MESSAGE).unwrap())
+                .unwrap();
+            // Whatever the packer sends after the opening, until it closes its side.
+            let mut rest = Vec::new();
+            let _ = far.read_to_end(&mut rest);
+            report.send(rest.len()).unwrap();
+        });
+        Ok(Box::new(near))
+    }
+}
+
+/// HEX-GUEST-15 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): stage for a box whose staged copy
+/// the relay already holds, so it refuses the opening as `Exists` and closes: expect the packer to return
+/// that typed `Exists`, and to have sent nothing after the opening. A packer that writes on past a refused
+/// opening leaves bytes the relay never reads, and over vsock the close then resets the connection and
+/// the answer is lost: the host saw "Broken pipe", never `Exists`.
+#[cfg(unix)]
+#[test]
+fn a_stage_refused_at_its_opening_is_refused_typed_and_sends_nothing_more() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let relay = RefusesAtOpening { sent_after: tx };
+    let items = [Item {
+        name: "config.json".to_owned(),
+        source: Source::Bytes(vec![b'x'; 64 << 10]),
+    }];
+    assert_eq!(
+        stage(&relay, &id(), &items, &LIMITS),
+        Err(Refusal::Exists(id()))
+    );
+    assert_eq!(
+        rx.recv().unwrap(),
+        0,
+        "the packer wrote on past a refused opening"
+    );
+}

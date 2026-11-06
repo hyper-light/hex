@@ -459,6 +459,9 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     let ports = dir.path().to_owned();
     let boots = Arc::new(AtomicUsize::new(0));
     let booted = Arc::clone(&boots);
+    // Connections to the staging port: a stage each.
+    let stages = Arc::new(AtomicUsize::new(0));
+    let staging = Arc::clone(&stages);
     let guests = shards_api::sim::SimGuests::new(move |host| {
         booted.fetch_add(1, Ordering::SeqCst);
         for port in [
@@ -472,7 +475,10 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
             let name = match port {
                 stream::CONTROL_PORT => "control.sock",
                 stream::STDIO_PORT => "stdio.sock",
-                _ => "files.sock",
+                _ => {
+                    staging.fetch_add(1, Ordering::SeqCst);
+                    "files.sock"
+                }
             };
             let relay = std::os::unix::net::UnixStream::connect(ports.join(name)).unwrap();
             pump(conn.try_clone().unwrap(), relay.try_clone().unwrap());
@@ -512,6 +518,23 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     assert!(node.list().unwrap().is_empty(), "a box is left");
     let left: Vec<_> = std::fs::read_dir(&staged).unwrap().collect();
     assert!(left.is_empty(), "staged copies left: {left:?}");
+    // HEX-GUEST-18 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): a second create of an id the
+    // guest's node holds is refused as `Exists` before anything is staged: one stage for the two creates.
+    let fixture = OciBoxes(lab, false);
+    let id = BoxId::new("twice").unwrap();
+    let before = stages.load(Ordering::SeqCst);
+    node.create(fixture.spec(id.clone(), Bounds::default()))
+        .unwrap();
+    assert_eq!(
+        node.create(fixture.spec(id.clone(), Bounds::default())),
+        Err(Refusal::Exists(id.clone()))
+    );
+    assert_eq!(
+        stages.load(Ordering::SeqCst) - before,
+        1,
+        "the refused create staged its root"
+    );
+    node.delete(&id).unwrap();
     drop(node);
     relay.kill().unwrap();
     relay.wait().unwrap();

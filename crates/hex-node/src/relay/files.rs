@@ -65,17 +65,26 @@ fn os(op: &'static str) -> impl Fn(Errno) -> Refusal {
     move |e| Refusal::os(op, e)
 }
 
-/// Serves one staging connection: reads its op, does it, and answers `Done` or `Refused`.
+/// Serves one staging connection: reads its op, does it, and answers `Done` or `Refused`. A refusal can come
+/// with the host's stream still unread; closing on it then would reset the connection, which over vsock
+/// discards the answer in flight, and the host would see a broken pipe, never why (CLAUDE.md §3). So a
+/// refused connection is half-closed after its answer and read to its end, within what a stage may still
+/// send ([`unread_bound`]), before it closes.
 pub fn serve(mut conn: Box<dyn Duplex>, staged: &Path, limits: &Limits) {
     let answer = match take(conn.as_mut(), staged, limits) {
         Ok(()) => Answer::Done,
         Err(why) => Answer::Refused(why),
     };
+    let refused = matches!(answer, Answer::Refused(_));
     if let Some(bytes) = wire::answer(wire::FIRST, 0, &answer, wire::MAX_MESSAGE)
         .ok()
         .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok())
     {
         let _ = conn.write_all(&bytes);
+    }
+    if refused {
+        let _ = conn.shutdown(Shutdown::Write);
+        drain(conn.as_mut(), unread_bound(staged, limits));
     }
     let _ = conn.shutdown(Shutdown::Both);
 }
@@ -174,6 +183,46 @@ fn send_budget(conn: &mut dyn Duplex, free: Free) -> Result<(), Refusal> {
         .map_err(|e| Refusal::Broken(format!("framing a stage's budget: {e}")))?;
     conn.write_all(&bytes)
         .map_err(|e| Refusal::os("sending a stage's budget", e))
+}
+
+/// The most a stage's stream can still hold, learned as its budget is: the bytes the staged folder's file
+/// system has free (file and xattr bytes), and for each entry it has inodes free for, a head, a path and a
+/// link target at the path bound, and an owner and times. Past it the stream is no stage's, and the relay
+/// closes on it.
+fn unread_bound(staged: &Path, limits: &Limits) -> u64 {
+    let Ok(dir) = rustix::fs::open(
+        staged,
+        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return 0;
+    };
+    let Ok(free) = free(&dir) else {
+        return 0;
+    };
+    let entry = files::HEAD_BYTES
+        .saturating_add(limits.path.saturating_mul(2))
+        .saturating_add(files::META_BYTES);
+    free.bytes
+        .saturating_add(
+            free.entries
+                .saturating_mul(u64::try_from(entry).unwrap_or(u64::MAX)),
+        )
+        .saturating_add(u64::try_from(files::HEAD_BYTES).unwrap_or(u64::MAX))
+}
+
+/// Reads `conn` to its end, at most `bound` bytes, discarding them: what the host sent past a refusal.
+fn drain(conn: &mut dyn Duplex, bound: u64) {
+    let mut buf = vec![0u8; wire::MAX_MESSAGE];
+    let mut read: u64 = 0;
+    while read <= bound {
+        match conn.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX)),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
 }
 
 /// Removes a stage's partial copy, then returns why it failed.

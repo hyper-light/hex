@@ -788,6 +788,52 @@ fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
     assert_eq!(sh.ino(), sh2.ino());
 }
 
+/// HEX-GUEST-14 (CLAUDE.md §3; HEX-GUEST-19's HEX-RT-1 in a real guest): send a stage refused at an entry
+/// mid-stream (a device's kind), followed by 4 MiB more the relay won't stage: expect every byte of it
+/// written (the relay reads its peer to the end after a refusal; over vsock a close with bytes unread
+/// resets the connection and loses the answer), then its typed refusal read back, and nothing staged.
+#[test]
+fn a_relay_refusing_mid_stream_reads_its_peer_to_the_end_and_answers_typed() {
+    let (lab, staged) = staged_lab();
+    let mut bytes = raw_stage(&[("ok", hf::What::Dir)]);
+    bytes.truncate(bytes.len() - hf::HEAD_BYTES);
+    // A head of kind 8 (none on the stream), then bytes past it.
+    bytes.extend([8u8, 0]);
+    bytes.extend(0o644u16.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend([0u8; 10]);
+    bytes.push(b'd');
+    bytes.extend(vec![0x5a_u8; 4 << 20]);
+    let mut conn = UnixStream::connect(lab.dir.path().join("files.sock")).unwrap();
+    conn.write_all(&bytes)
+        .expect("the relay closed on bytes it hadn't read");
+    conn.shutdown(Shutdown::Write).unwrap();
+    let mut back = Vec::new();
+    conn.read_to_end(&mut back).unwrap();
+    let mut d = Deframer::new(wire::MAX_MESSAGE);
+    let mut rest = &back[..];
+    let answer = loop {
+        let (took, whole) = d.take(rest).unwrap();
+        rest = &rest[took..];
+        if let Some(m) = whole
+            && hf::read_budget(&m).is_none()
+        {
+            let received = Received {
+                bytes: &m,
+                size: m.len(),
+                descriptors: 0,
+                descriptors_cut: false,
+            };
+            break wire::read_answer(&received, wire::MAX_MESSAGE).unwrap().1;
+        }
+    };
+    let Answer::Refused(Refusal::Invalid { why, .. }) = answer else {
+        panic!("expected a typed refusal, got {answer:?}");
+    };
+    assert!(why.contains("never staged"), "{why}");
+    assert!(!staged.join("b").exists());
+}
+
 /// HEX-GUEST-14 (Ada's rule on constants: a learned bound): open a stage: expect the relay's first answer
 /// its budget, the free inodes and bytes statvfs(3) reports for the staged folder, which a stage spends
 /// against (within what the folder's file system holds, read again beside it).

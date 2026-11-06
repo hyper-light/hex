@@ -282,6 +282,13 @@ impl Runtime for GuestRuntime {
         let id = spec.id.clone();
         let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged)?;
         let b = self.guest()?;
+        // An id the guest's node already holds is refused as the node refuses it, before anything is
+        // staged: staging first would send a box's whole root only to be refused (CLAUDE.md §3).
+        match b.client.inspect(&id) {
+            Ok(_) => return Err(Refusal::Exists(id)),
+            Err(Refusal::NoSuchBox(_)) => {}
+            Err(why) => return Err(why),
+        }
         self.stage(&b, &id, &rewritten.items)?;
         b.client.create(rewritten.spec).inspect_err(|_| {
             // The copy goes with the create that failed; a removal that fails leaves it for the
