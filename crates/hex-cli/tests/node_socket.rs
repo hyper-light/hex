@@ -181,6 +181,45 @@ fn nofile_seen(client: &Client, class: ClassSpec) -> String {
     said.trim().to_owned()
 }
 
+/// HEX-INST-8 (native plan step 6): `hex node` started with `$NOTIFY_SOCKET` (systemd's `Type=notify`) says
+/// `READY=1` there once its socket listens, so the installed unit is up exactly when it serves, within the
+/// start bound systemd gives it (sd_notify(3); systemd.service(5) `TimeoutStartSec=`), and the installer
+/// needs no wait of its own. A client connects right after the datagram arrives.
+fn ready_is_told_to_the_service_manager(own: &Path, cache: &Path, exe: &str) {
+    let dir = tempfile::Builder::new()
+        .prefix("notify-")
+        .tempdir_in(cache)
+        .unwrap();
+    let notify = dir.path().join("notify.sock");
+    let manager = std::os::unix::net::UnixDatagram::bind(&notify).unwrap();
+    manager
+        .set_read_timeout(Some(conformance::PATIENCE))
+        .unwrap();
+    let socket = dir.path().join("node.sock");
+    let mut node = Command::new(exe)
+        .arg("node")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--state")
+        .arg(dir.path().join("state"))
+        .arg("--box-root")
+        .arg(own.join("hex-notify"))
+        .env("NOTIFY_SOCKET", &notify)
+        .stdout(Std::null())
+        .spawn()
+        .expect("start hex node");
+    let mut said = [0u8; 64];
+    let n = manager.recv(&mut said).expect("READY=1 on $NOTIFY_SOCKET");
+    let said = String::from_utf8_lossy(&said[..n]).into_owned();
+    assert!(
+        said.lines().any(|l| l == "READY=1"),
+        "the node told {said:?}"
+    );
+    Client::connect(&socket).expect("connect once the node has said it's ready");
+    node.kill().unwrap();
+    node.wait().unwrap();
+}
+
 /// A `hex node` process serving its socket, killed when dropped.
 struct Agent {
     child: Child,
@@ -418,6 +457,7 @@ impl Fixture for ProcessBoxes<'_> {
 }
 
 fn exercise(own: &Path, cache: &Path, exe: &str) {
+    ready_is_told_to_the_service_manager(own, cache, exe);
     let lab = Lab::new(cache, exe);
     let agent = Agent::start(exe, cache, own.join("hex-sock"));
     let client = agent.client();
