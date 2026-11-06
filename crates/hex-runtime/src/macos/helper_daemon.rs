@@ -31,11 +31,6 @@ use super::sys;
 mod kids;
 use kids::{Full, Kids, Taken};
 
-/// How long [`Daemon::end`] waits for a killed box's user to empty before it reports the kill didn't take
-/// (a `SIGKILL` ends a user's processes in milliseconds; missing a generous bound is a fault, not a limit
-/// to raise, CLAUDE.md §4). Freeing the uid before it is empty would hand a live process to the next box.
-const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
-
 /// How long a [`Request::Wait`] waits for its program's zombie. Not a tuning: the node asks once it has
 /// seen the program's `NOTE_EXIT`, so the daemon's own watch has that event queued and its reap waits for
 /// the zombie the same exit path makes (`proc::BoxProc`); this bounds only a wait asked of a program
@@ -660,11 +655,18 @@ impl<P: Privileged> Daemon<P> {
             }
         };
         // Kill every process of the user, then wait for the user to empty before freeing it, so the next
-        // box never inherits a live process. KILL is 9; mapped through the table like the rest of Hex.
+        // box never inherits a live process. KILL is 9; mapped through the table like the rest of Hex. The
+        // user's size sets how long it gets: the measured kill-to-empty envelope, doubled
+        // (hex_core::drain); past it the kill didn't take, a fault named (CLAUDE.md §4).
+        let members = match self.ops.list(uid) {
+            Ok(m) => m.len(),
+            Err(e) => return os("listing a box's user", &e),
+        };
         if let Err(e) = self.ops.kill(uid, Signal::KILL.number()) {
             return os("ending a box", &e);
         }
-        let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
+        let patience = hex_core::drain::bound(members);
+        let deadline = Instant::now().checked_add(patience);
         loop {
             match self.ops.list(uid).map(|m| m.is_empty()) {
                 Ok(true) => break,
@@ -683,7 +685,7 @@ impl<P: Privileged> Daemon<P> {
         }
         // Reap the box's programs (each a zombie now, or about to be) and keep their ends for the node.
         if let Ok(mut k) = self.kids() {
-            k.close(box_id, Instant::now().checked_add(DRAIN_PATIENCE));
+            k.close(box_id, Instant::now().checked_add(patience));
         }
         if let Ok(mut pool) = self.pool.lock() {
             pool.push(uid);
@@ -765,7 +767,7 @@ impl<P: Privileged> Daemon<P> {
             };
             // Its box was dropped meanwhile: reap it here rather than leave a zombie.
             if let Err(mut p) = back {
-                let _ = p.wait_for(DRAIN_PATIENCE);
+                let _ = p.wait_for(hex_core::drain::bound(1));
             }
         }
         match got {

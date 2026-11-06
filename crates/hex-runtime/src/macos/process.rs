@@ -37,11 +37,6 @@ use hex_core::watch::{self, Life, Limit, Member, Rates, Verdict, Watch};
 
 use super::sys::{self, Clamp, Event, Kqueue, Timebase};
 
-/// How long [`ProcessBox::delete`] waits for a killed box's members to die before it reports the kill
-/// didn't take: a `SIGKILL` to a process group ends its members in milliseconds, so missing a generous
-/// bound is a fault to report, not a limit to raise (CLAUDE.md §4).
-const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
-
 /// Why a box ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
@@ -373,12 +368,15 @@ impl ProcessBox {
             .lock()
             .map_err(|_| poisoned("a box's group"))?
         {
+            let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
+            // The group's size sets how long it gets to empty: the measured kill-to-empty envelope,
+            // doubled (hex_core::drain). Past it the kill didn't take, a fault named (CLAUDE.md §4).
+            let members = alive_in(pgid, &mut pids)?;
             let _ = killpg(
                 pgid,
                 hex_core::darwin::signal_to_macos(Signal::KILL.number()).unwrap_or(9),
             );
-            let deadline = Instant::now().checked_add(DRAIN_PATIENCE);
-            let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
+            let deadline = Instant::now().checked_add(hex_core::drain::bound(members));
             loop {
                 if alive_in(pgid, &mut pids)? == 0 {
                     return Ok(());

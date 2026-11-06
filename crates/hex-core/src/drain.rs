@@ -2,10 +2,32 @@
 //! (Ada's rule, 2026-11-06: no picked numbers). A kill ends its members in milliseconds; past this bound a
 //! drain is a fault reported by name, never a limit raised (CLAUDE.md §4).
 
+use std::time::Duration;
+
+/// The worst kill-to-empty of a one-member group, in nanoseconds: the record's n=1 maximum
+/// (bench/native/macos/records/killscale-a84e094-20261106T160339Z.txt).
+pub const FIXED_NS: u64 = 883_000;
+/// The worst cost of each member past the first, in nanoseconds: the record's largest slope over its
+/// one-member maximum (n=32: (10.125 - 0.883) ms / 31).
+pub const PER_MEMBER_NS: u64 = 298_000;
+/// The lead's margin over the measured envelope.
+pub const MARGIN: u64 = 2;
+
+/// How long a group of `members` processes gets to empty after `SIGKILL`: the measured envelope times the
+/// margin. Saturates at the largest duration a `u64` of nanoseconds holds (its stated meaning: never
+/// overflows); a group listed empty gets the one-member bound.
+pub fn bound(members: usize) -> Duration {
+    let past_first = u64::try_from(members.saturating_sub(1)).unwrap_or(u64::MAX);
+    Duration::from_nanos(
+        PER_MEMBER_NS
+            .saturating_mul(past_first)
+            .saturating_add(FIXED_NS)
+            .saturating_mul(MARGIN),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     /// The record's envelope, doubled: 2 x (0.883 ms + 0.298 ms per member past the first)
