@@ -9,6 +9,8 @@ and over the window. Each run's own pooled-p50 difference is printed too. Goal 5
 asks the difference be within 0.02 ms of 0 with that standard error at most 0.01 ms (the lead, 2026-11-03T02:36Z and
 03:14Z: chunks of 20 rounds, so a host reset costs one chunk).
 
+It ends with the criterion's verdict, both bars held to: "met", exit 0, or "not met" and which bar, exit 1.
+
   create_breakdown_pool.py [--window MS] [--boot B] <run dir>...
 """
 import json
@@ -16,6 +18,10 @@ import os
 import random
 import statistics as st
 import sys
+
+# The third criterion's bar on the estimate's standard error (req: the lead, 2026-11-03T02:36Z). The window, 0.02 ms,
+# is its bar on the mean, --window's default.
+SE_BAR_MS = 0.01
 
 
 def creates(run, kind, n):
@@ -70,7 +76,14 @@ def main(argv):
           f"bootstrap SE {st.stdev(means):.4f} ({boot} resamples); median {st.median(pairs):+.4f}, "
           f"sd {st.stdev(pairs):.4f}")
     print(f"rounds within {window} ms: {within}; under: {under}; over: {len(pairs) - within - under}")
-    return 0
+    mean, se = st.mean(pairs), st.stdev(means)
+    why = []
+    if abs(mean) > window:
+        why.append(f"mean {mean:+.4f} ms is outside {window} ms of 0")
+    if se > SE_BAR_MS:
+        why.append(f"bootstrap SE {se:.4f} ms is over {SE_BAR_MS} ms")
+    print("third criterion: met" if not why else f"third criterion: not met: {'; '.join(why)}")
+    return 0 if not why else 1
 
 
 if __name__ == "__main__":
