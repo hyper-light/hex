@@ -188,6 +188,8 @@ fn exercise_clone_into_cgroup(own: &Path) {
         )
     };
     let c = |s: &str| CString::new(s).unwrap();
+    // This process's own limit: what this case checks is where the clone lands, not what it starts under.
+    let nofile = || rustix::process::getrlimit(rustix::process::Resource::Nofile);
     let (mut out, w) = std::io::pipe().unwrap();
     let spawn = Spawn::new(
         vec![c("/usr/bin/cat")],
@@ -195,6 +197,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
         vec![],
         None,
         [null_in(), OwnedFd::from(w), null_out()],
+        nofile(),
     )
     .unwrap();
     let dir = cg.open_dir().unwrap();
@@ -219,6 +222,7 @@ fn exercise_clone_into_cgroup(own: &Path) {
                 vec![],
                 None,
                 [null_in(), null_out(), null_out()],
+                nofile(),
             )
             .unwrap();
             let e = match clone_into_cgroup(dir.as_fd(), missing) {
