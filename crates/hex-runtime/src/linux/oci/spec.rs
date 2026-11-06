@@ -598,6 +598,25 @@ mod tests {
         "linux": {"namespaces": [{"type": "pid"}, {"type": "mount"}], "maskedPaths": ["/proc/kcore"]}
     }"#;
 
+    /// HEX-RT-14 at create: do parse a config whose init has a variable one byte past this kernel's
+    /// per-string execve bound (read now); expect it refused as the config, naming the bound, before
+    /// anything is made, so no box is left that can't start.
+    #[test]
+    fn an_init_past_the_kernels_exec_bound_is_refused_at_parse() {
+        let most = crate::linux::process::exec_limit().string.unwrap();
+        // "BIG=" and the value with its NUL pass `most` by a byte.
+        let value = "x".repeat(most - "BIG=".len());
+        let json = format!(
+            r#"{{"ociVersion":"1.3.0","root":{{"path":"rootfs"}},"process":{{"args":["/bin/sh"],"cwd":"/","env":["BIG={value}"]}}}}"#
+        );
+        assert!(json.len() <= MAX_CONFIG_BYTES, "the config itself fits");
+        let r = Spec::parse(json.as_bytes());
+        assert!(
+            matches!(r, Err(OciError::Config(ref why)) if why.contains("execve")),
+            "{r:?}"
+        );
+    }
+
     #[test]
     fn a_minimal_config_parses_with_its_fields() {
         let spec = Spec::parse(MINIMAL.as_bytes()).unwrap();
