@@ -69,6 +69,8 @@ struct Model {
     idle: BTreeMap<u8, Vec<(u64, u64)>>,
     seq: u64,
     next: u64,
+    /// The per-owner bound, learned as the pool must learn it (Ada's rule, 2026-11-06).
+    ghosts: Option<crate::demand::Ghosts>,
 }
 
 impl Model {
@@ -85,7 +87,10 @@ fn owner_name(o: u8) -> String {
 /// property holds after each op; returns the pool's counts.
 fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
     let mut pool = Idle::<u64>::new(per_owner, per_node);
-    let mut m = Model::default();
+    let mut m = Model {
+        ghosts: Some(crate::demand::Ghosts::new(per_owner, per_node)),
+        ..Model::default()
+    };
     for op in ops {
         match *op {
             Op::Create {
@@ -127,6 +132,7 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                             !m.idle.contains_key(&o),
                             "a fresh namespace made while the owner had one idle"
                         );
+                        m.ghosts.as_mut().unwrap().missed(&owner_name(o));
                         m.next += 1;
                         Ns::Kept(m.next << 8)
                     }
@@ -161,9 +167,11 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                     m.seq += 1;
                     m.idle.entry(o).or_default().push((n, m.seq));
                     let mut want = Vec::new();
+                    let per_owner = m.ghosts.as_ref().unwrap().bound();
                     if let Some(list) = m.idle.get_mut(&o)
                         && list.len() > per_owner
                     {
+                        m.ghosts.as_mut().unwrap().evicted(&owner_name(o));
                         want.push(list.remove(0).0);
                         if list.is_empty() {
                             m.idle.remove(&o);
@@ -194,9 +202,11 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                 m.idle.clear();
             }
         }
+        let per_owner_now = m.ghosts.as_ref().unwrap().bound();
+        assert_eq!(pool.counts().per_owner, per_owner_now, "the learned bound");
         for (o, list) in &m.idle {
             assert!(
-                list.len() <= per_owner,
+                list.len() <= per_owner_now,
                 "owner {o} keeps {} idle",
                 list.len()
             );
@@ -317,6 +327,42 @@ fn another_owners_box_is_counted_and_the_idle_one_kept() {
         ..p
     };
     assert_eq!(pool.take(o), Take::Idle(7));
+}
+
+/// Ada's rule, 2026-11-06 (AC-T7.1.3): an owner's burst that its bound cut one round is kept whole the next. Do:
+/// four boxes of one owner taken and given back at a bound of 2, three rounds. Expect: two closed the first round,
+/// the second round's two fresh takes raise the bound to 4, and the third takes four idle, none fresh.
+#[test]
+fn a_burst_the_owner_bound_cut_is_kept_whole_the_next_round() {
+    let mut pool = Idle::<u64>::new(2, 100);
+    let o = Whose {
+        owner: Some("o"),
+        reuse: true,
+        eligible: Ok(()),
+    };
+    let mut next = 0;
+    let mut round = |pool: &mut Idle<u64>| {
+        let taken: Vec<u64> = (0..4)
+            .map(|_| match pool.take(o) {
+                Take::Idle(n) => {
+                    pool.hand_on();
+                    n
+                }
+                Take::Fresh => {
+                    next += 1;
+                    next
+                }
+                Take::Own(why) => panic!("{why:?}"),
+            })
+            .collect();
+        taken.into_iter().flat_map(|n| pool.give("o", n)).count()
+    };
+    assert_eq!(round(&mut pool), 2, "four fresh, two past the bound given back");
+    assert_eq!(round(&mut pool), 0, "two taken fresh raised the bound to 4");
+    assert_eq!(pool.counts().per_owner, 4);
+    let fresh_learned = pool.counts().fresh;
+    assert_eq!(round(&mut pool), 0);
+    assert_eq!(pool.counts().fresh, fresh_learned, "no cold take once learned");
 }
 
 /// Every reason has a name of its own, and `ALL` lists each once.

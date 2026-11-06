@@ -16,17 +16,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::cgroup::flat;
-
-/// Most idle cgroups one owner keeps. The seam's busiest phase runs 32 boxes at once (seam_oci's sustained
-/// phase at concurrency 32, which the create seeds' bound of 32 is set by: decision 5), so 32 boxes of one
-/// owner deleted and made again in turn each find one; past it the owner's oldest is removed.
-pub const PER_OWNER: usize = 32;
-
-/// Most idle cgroups a node keeps, all owners' together; past it the node's oldest is removed. Each idle
-/// cgroup holds the kernel memory its controllers keep for it, and RunD measured the kernel's load
-/// tracking walk over cgroups at 7.6% of a node's cycles past 10,000 of them (f65), so a node keeps no
-/// more than this many waiting: eight owners' worth at [`PER_OWNER`].
-pub const PER_NODE: usize = 256;
+use crate::demand::Ghosts;
 
 /// The name of slot `n`'s cgroup under the oci boxes' root: a `.` and its number. No box id starts with
 /// `.`, so no slot's name is a box's.
@@ -129,9 +119,9 @@ impl Refused {
 /// Why idle cgroups were removed: each counted ([`Counts`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Evicted {
-    /// Past its owner's bound ([`PER_OWNER`]).
+    /// Past its owner's bound, learned ([`Pool::new`]).
     OwnerBound,
-    /// Past the node's bound ([`PER_NODE`]).
+    /// Past the node's bound.
     NodeBound,
     /// Its check refused it ([`Pool::refuse`]).
     Refused,
@@ -157,6 +147,8 @@ pub struct Counts {
     pub drained: u64,
     /// Idle cgroups now.
     pub idle: usize,
+    /// The most idle cgroups an owner keeps now, learned ([`Pool::new`]).
+    pub per_owner: usize,
 }
 
 impl Counts {
@@ -201,7 +193,8 @@ struct Idle<K> {
 /// A node's idle cgroups, by owner, each owner's oldest first.
 #[derive(Debug, Clone)]
 pub struct Pool<K> {
-    per_owner: usize,
+    /// The most idle cgroups an owner keeps, learned from its misses.
+    per_owner: Ghosts,
     per_node: usize,
     idle: BTreeMap<String, VecDeque<Idle<K>>>,
     total: usize,
@@ -213,19 +206,33 @@ pub struct Pool<K> {
 }
 
 impl<K: PartialEq + Clone> Pool<K> {
-    /// An empty pool keeping at most `per_owner` idle cgroups for one owner and `per_node` for all,
-    /// numbering fresh slots from `first`: one past every slot a record or a cgroup named when the node
+    /// An empty pool keeping at most `per_node` idle cgroups for all owners, and for one owner `per_owner` at
+    /// first, numbering fresh slots from `first`: one past every slot a record or a cgroup named when the node
     /// started, so no slot is made under a name already there.
+    ///
+    /// The owner bound is learned (Ada's rule, 2026-11-06): each idle cgroup it puts out is remembered as its
+    /// owner's ghost, and a take that then finds the owner with none idle raises it by one, up to `per_node`
+    /// ([`Ghosts`]: ARC's ghost hits, Megiddo and Modha, FAST 2003, §4.3). So an owner whose burst the bound cut
+    /// one round finds the whole burst idle the next; it never falls, so no demand already seen meets it again.
     pub fn new(per_owner: usize, per_node: usize, first: u64) -> Self {
+        let per_owner = Ghosts::new(per_owner, per_node);
         Self {
+            counts: Counts {
+                per_owner: per_owner.bound(),
+                ..Counts::default()
+            },
             per_owner,
             per_node,
             idle: BTreeMap::new(),
             total: 0,
             next: first,
             seq: 0,
-            counts: Counts::default(),
         }
+    }
+
+    /// The most idle cgroups an owner keeps now.
+    pub fn per_owner(&self) -> usize {
+        self.per_owner.bound()
     }
 
     /// The cgroup for a box `whose` is, whose device policy is `policy`: the owner's idle cgroup under
@@ -246,8 +253,11 @@ impl<K: PartialEq + Clone> Pool<K> {
                 .iter()
                 .rposition(|i| i.policy == *policy)
                 .ok_or(Some(Refused::Policy)),
-            None if self.total > 0 => Err(Some(Refused::Owner)),
-            None => Err(None),
+            None => {
+                self.per_owner.missed(owner);
+                self.counts.per_owner = self.per_owner.bound();
+                Err((self.total > 0).then_some(Refused::Owner))
+            }
         };
         match found {
             Ok(at) => {
@@ -307,7 +317,7 @@ impl<K: PartialEq + Clone> Pool<K> {
         let mut out = Vec::new();
         // At most one past each bound after one give; the loops end on the bounds all the same.
         while let Some(list) = self.idle.get_mut(owner)
-            && list.len() > self.per_owner
+            && list.len() > self.per_owner.bound()
         {
             let Some(old) = list.pop_front() else { break };
             if list.is_empty() {
@@ -315,6 +325,7 @@ impl<K: PartialEq + Clone> Pool<K> {
             }
             self.total = self.total.saturating_sub(1);
             self.counts.evicted_owner_bound = self.counts.evicted_owner_bound.saturating_add(1);
+            self.per_owner.evicted(owner);
             out.push(old.slot);
         }
         while self.total > self.per_node {
