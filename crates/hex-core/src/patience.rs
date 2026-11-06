@@ -86,11 +86,24 @@ impl Patience {
 
     /// An answer came `took` after its wait began: the estimate moves toward it (RFC 6298 (2.2), (2.3)).
     pub fn answered(&mut self, took: Duration) {
-        let _ = took;
+        let (srtt, rttvar) = match self.smoothed {
+            None => (took, part(took, 2)),
+            Some((srtt, rttvar)) => (
+                srtt.saturating_sub(part(srtt, 8))
+                    .saturating_add(part(took, 8)),
+                rttvar
+                    .saturating_sub(part(rttvar, 4))
+                    .saturating_add(part(srtt.abs_diff(took), 4)),
+            ),
+        };
+        self.smoothed = Some((srtt, rttvar));
+        self.timer = within(self.bounds, srtt.saturating_add(rttvar.saturating_mul(4)));
     }
 
     /// A wait ran out with no answer: the next lasts twice as long, to the ceiling (RFC 6298 (5.5)).
-    pub fn expired(&mut self) {}
+    pub fn expired(&mut self) {
+        self.timer = within(self.bounds, self.timer.saturating_mul(2));
+    }
 }
 
 /// `d` divided by `n`, rounded down; never fails for the constant divisors above.
