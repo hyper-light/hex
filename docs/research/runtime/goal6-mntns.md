@@ -470,9 +470,42 @@ so these runs can't show (4)'s effect on them either way. What they do show is t
 ~1.2-1.4 ms each in A against the node's one in B. Showing the stall a co-tenant would see needs one that mounts in a
 loop during seed start, which this A/B didn't have.
 
-## 14. Where the under-load bar stands on 6.19, in plain words (2026-11-05)
+## 14. Where the under-load bar stands on 6.19, in plain words (2026-11-05, amended 2026-11-06)
 
-On fedora's Linux 6.19, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6 and 12 busy loops, 8 in flight,
+**Over the socket path, with parked procs on by default, the bar is met on Linux 6.19** (the lead, 2026-11-06 09:20Z).
+The bar: the init's root mounted (part 19) at p99 0.5 ms or less, with 6 and 12 busy loops, 8 in flight, 8,000 idle
+threads, Docker's paths, the whole create's p99 improving with it, and no priority change.
+- The run: cp/t7-g5-parkproc-default 3402c55 (parked procs on by default for a root node; the lever-3 agent's build,
+  reviewed here). The socket A/B, unit hex-ppd-ab-20261106T085438Z, 08:58-09:00Z: a real `hex node` serving its
+  socket, as kiln runs Hex; parked procs off (A) against on (B), both with parked inits, 4 interleaved rounds, 2,000
+  creates a cell. Gate 6 and the root lab ran at its code tree, b5681e6, in one unit, hex-ppd-full-20261106T061238Z.
+- Part 19's p99: **111-242 us in all 8 B cells** (off: 495-667 us). Its p50: 31-33 us (off: 188-208).
+- The create's p99 is lower in 7 of 8 pairs. Its p50 falls about 24%.
+- The cost is on the delete: its p50 is about 40% higher (0.46-0.51 ms off, 0.66-0.72 on), and its p99 is higher in
+  8 of 8 pairs.
+- Each cell's load at its start:
+
+  | round | cell (load) | cell (load) | cell (load) | cell (load) |
+  |---|---|---|---|---|
+  | 1 | A-L6 (6.5) | B-L6 (5.7) | A-L12 (646) | B-L12 (547) |
+  | 2 | B-L6 (464) | A-L6 (393) | B-L12 (333) | A-L12 (306) |
+  | 3 | A-L6 (382) | B-L6 (324) | A-L12 (275) | B-L12 (233) |
+  | 4 | B-L6 (198) | A-L6 (182) | B-L12 (142) | A-L12 (199) |
+
+- The socket node's settings match the bar's in-process runs: the `/dev` and proc pools on, the ipc/uts pool at its
+  bound, reuse on, 8 inits ahead (the record at 3402c55 cites each). **One setting differs: the descriptor limit.** The
+  shipped node runs with its soft limit raised to the hard one, as the installer sets it, so its kept network
+  namespaces hold their `/proc/net` files. An in-process node at the container's 1,024 holds none, and enters each
+  namespace to check it.
+
+**In process, it isn't met yet**: part 19's p99 was 351-761 us at 2caebe2 and 508-1,373 us at 1e5e956 (below). A
+confirming in-process A/B at the shipped node's limit (`HEXBENCH_NOFILE=hard`) is below this section, recorded either
+way. If the gap is the limit, both readings meet the bar for the node as it ships.
+
+The run of record is still the 7.2 host's, after Ada's upgrade (`mntns_record.sh host`, with parked procs and the
+faster mount way as defaults). What follows is the record as it stood before the socket A/B.
+
+On fedora's Linux 6.19, in process, Ada's under-load bar for part 19 (p99 at most 0.5 ms with 6 and 12 busy loops, 8 in flight,
 8,000 idle threads, Docker's paths, no priority change) is approached, but not yet met.
 - Goal 6's own levers on 6.19 can't reach it. §11 measured the tail as mostly the init being preempted, plus the
   init's own CPU time; the mount lock is about a tenth. §13 sized the levers on the init's CPU time at about 20% at
