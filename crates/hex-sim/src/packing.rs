@@ -1,8 +1,8 @@
 //! Stranded capacity (`AC-T7.4.3`): what a placement policy leaves free that no workload can use.
 //!
-//! [`pack`] places a workload's arrivals in order from a given one, with no completions, through the
-//! fast path's sampled choice ([`FitIndex::sampled_fit`]), passing over one no node admits, until the
-//! load reaches what is asked (90% for `AC-T7.4.3`). The load is the dominant share of what is
+//! [`pack`] places a workload's arrivals in order from a given one, with no completions or, by its
+//! [`Clock`], with them, through the fast path's sampled choice ([`FitIndex::sampled_fit`]), passing
+//! over one no node admits, until the load reaches what is asked (90% for `AC-T7.4.3`). The load is the dominant share of what is
 //! placed: the larger of placed CPU over all CPU and placed memory over all memory, as Dominant
 //! Resource Fairness measures a share, so a workload that runs out of CPU first is loaded by its CPU.
 //!
@@ -15,11 +15,12 @@
 //! a load it never has to pack tightly at, so [`PackReport::first_full_per_mille`] records the load
 //! at the first arrival that found no node with room: spreading shows there as an earlier refusal.
 
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Refusals, Sample};
-use crate::model::{Cluster, Resources};
+use crate::model::{Cluster, NodeId, Resources, Time};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PackReport {
@@ -92,6 +93,16 @@ pub fn minimal_shapes(cluster: &Cluster) -> Vec<Resources> {
         .collect()
 }
 
+/// How a pack runs through time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clock {
+    /// No completions: what is placed stays, so lifetimes don't enter.
+    Held,
+    /// Completions: arrivals come this many times faster than recorded and each runs for its recorded
+    /// lifetime, so a workload reaches a load its own traffic wouldn't, and what ends leaves holes.
+    Compressed(Time),
+}
+
 /// Packs `cluster`'s arrivals from the `from`th on (none past the last) to `load_per_mille`, then
 /// measures what is stranded.
 pub fn pack(
@@ -99,7 +110,11 @@ pub fn pack(
     sample: &Sample,
     load_per_mille: u64,
     from: usize,
+    clock: Clock,
 ) -> Result<PackReport, SimError> {
+    if clock == Clock::Compressed(0) {
+        return Err(SimError::Config("a compressed clock runs at least 1x"));
+    }
     let mut index = FitIndex::new(&cluster.nodes)?;
     let mut r = PackReport::default();
     for node in &cluster.nodes {
@@ -112,10 +127,34 @@ pub fn pack(
             .checked_add(node.capacity.mem_bytes)
             .ok_or(SimError::Resources(node.id))?;
     }
-    for w in cluster.workloads.get(from..).unwrap_or_default() {
+    let arrivals = cluster.workloads.get(from..).unwrap_or_default();
+    let start = arrivals.first().map_or(0, |w| w.arrives);
+    // What runs, by when it ends. Bounded by the arrivals: each goes in once, when placed.
+    let mut running: BinaryHeap<Reverse<(Time, usize, NodeId)>> = BinaryHeap::new();
+    for (at, w) in arrivals.iter().enumerate() {
         if r.load_per_mille() >= load_per_mille {
             r.reached = true;
             break;
+        }
+        let now = match clock {
+            Clock::Held => 0,
+            Clock::Compressed(speed) => w
+                .arrives
+                .saturating_sub(start)
+                .checked_div(speed)
+                .unwrap_or(0),
+        };
+        while let Some(&Reverse((end, ended, node))) = running.peek() {
+            if end > now {
+                break;
+            }
+            running.pop();
+            let Some(done) = arrivals.get(ended) else {
+                continue;
+            };
+            index.give(node, &done.demand())?;
+            r.placed_cpu_milli = r.placed_cpu_milli.saturating_sub(done.need.cpu_milli);
+            r.placed_mem_bytes = r.placed_mem_bytes.saturating_sub(done.need.mem_bytes);
         }
         let demand = w.demand();
         let sampled = index.sampled_fit(&demand, sample);
@@ -141,6 +180,9 @@ pub fn pack(
         r.placed_cpu_milli = r.placed_cpu_milli.saturating_add(w.need.cpu_milli);
         r.placed_mem_bytes = r.placed_mem_bytes.saturating_add(w.need.mem_bytes);
         r.placements = r.placements.saturating_add(1);
+        if let (Clock::Compressed(_), Some(life)) = (clock, w.runs_for) {
+            running.push(Reverse((now.saturating_add(life), at, key.node)));
+        }
     }
     r.reached = r.reached || r.load_per_mille() >= load_per_mille;
     let shapes = minimal_shapes(cluster);
@@ -205,7 +247,7 @@ mod tests {
     fn stranded_is_free_capacity_no_shape_fits() {
         let c = cluster(2, res(4000, 4), &[res(3000, 1), res(3000, 1), res(1000, 3)]);
         assert_eq!(minimal_shapes(&c).len(), 2);
-        let r = pack(&c, &Sample::whole(), 1000, 0).unwrap();
+        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
         assert_eq!((r.placements, r.passed_over), (3, 0));
         // After all three: one node holds (3,1)+(1,3) = full; the other (3,1), free (1,3), which (1,3) fits.
         assert_eq!((r.stranded_cpu_milli, r.stranded_mem_bytes), (0, 0));
@@ -216,7 +258,7 @@ mod tests {
     #[test]
     fn a_memory_bound_load_strands_the_cpu_beside_spent_memory() {
         let c = cluster(1, res(8000, 4), &[res(1000, 3), res(1000, 2)]);
-        let r = pack(&c, &Sample::whole(), 1000, 0).unwrap();
+        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
         assert_eq!((r.placements, r.passed_over), (1, 1));
         assert_eq!(r.load_per_mille(), 750);
         assert_eq!(r.first_full_per_mille, Some(750));
@@ -232,7 +274,7 @@ mod tests {
         let mut needs = vec![res(1000, 1)];
         needs.extend(std::iter::repeat_n(res(9000, 1), EARLY_KEPT + 2));
         let c = cluster(1, res(8000, 8), &needs);
-        let r = pack(&c, &Sample::whole(), 1000, 0).unwrap();
+        let r = pack(&c, &Sample::whole(), 1000, 0, Clock::Held).unwrap();
         assert_eq!(r.early_passed_over, u64::try_from(EARLY_KEPT).unwrap() + 2);
         assert_eq!(
             r.early[0],
@@ -245,13 +287,33 @@ mod tests {
         assert!(r.early.iter().all(Option::is_some));
     }
 
+    /// Do two arrivals that each fill the node, the first ending before the second comes; expect a held
+    /// clock to refuse the second, a clock at the recorded speed to place it in the room the first
+    /// gave back, a clock fast enough that the first hasn't ended to refuse it, and a zero speed
+    /// refused typed.
+    #[test]
+    fn a_compressed_clock_gives_back_what_ended() {
+        let mut c = cluster(1, res(8000, 8), &[res(8000, 8), res(8000, 8)]);
+        c.workloads[0].runs_for = Some(10);
+        c.workloads[1].arrives = 100;
+        let at = |clock| pack(&c, &Sample::whole(), 2000, 0, clock).unwrap();
+        assert_eq!(at(Clock::Held).passed_over, 1);
+        assert_eq!(at(Clock::Compressed(1)).passed_over, 0);
+        assert_eq!(at(Clock::Compressed(1)).placed_cpu_milli, 8000);
+        assert_eq!(at(Clock::Compressed(100)).passed_over, 1);
+        assert_eq!(
+            pack(&c, &Sample::whole(), 2000, 0, Clock::Compressed(0)),
+            Err(SimError::Config("a compressed clock runs at least 1x"))
+        );
+    }
+
     /// Do a pack from a later arrival; expect the arrivals before it left out.
     #[test]
     fn a_pack_starts_at_its_arrival() {
         let c = cluster(1, res(8000, 8), &[res(8000, 8), res(1000, 1)]);
-        let r = pack(&c, &Sample::whole(), 1000, 1).unwrap();
+        let r = pack(&c, &Sample::whole(), 1000, 1, Clock::Held).unwrap();
         assert_eq!((r.placements, r.placed_cpu_milli), (1, 1000));
-        let past = pack(&c, &Sample::whole(), 1000, 9).unwrap();
+        let past = pack(&c, &Sample::whole(), 1000, 9, Clock::Held).unwrap();
         assert_eq!(past.placements, 0);
     }
 }

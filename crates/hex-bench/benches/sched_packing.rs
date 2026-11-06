@@ -2,11 +2,12 @@
 //!
 //!   cargo bench -p hex-bench --bench sched_packing
 //!
-//! It packs the recorded microVM workload (bench/sched/huawei_workload.md) twice, its sandboxes'
-//! lifetimes as recorded (huawei-r5-day30.trace) and with Huawei's one-minute keep-alive added
-//! (huawei-r5-day30.keepalive.trace), each from 16 starting arrivals spread evenly over the day (the
-//! seeds), to 90% load through the fast path's sampled choice (`hex_sim::packing::pack`), under each
-//! arm: best fit by free CPU first (`BestFit`) and across resources (`MostAllocated`), Tetris's
+//! It packs the recorded microVM workload (bench/sched/huawei_workload.md) from 16 starting arrivals
+//! spread evenly over the day (the seeds), to 90% load through the fast path's sampled choice
+//! (`hex_sim::packing::pack`), three ways: with no completions, so lifetimes don't enter; and with
+//! completions, its arrivals 500 times faster than recorded, once with its sandboxes' lifetimes as
+//! recorded (huawei-r5-day30.trace) and once with Huawei's one-minute keep-alive added
+//! (huawei-r5-day30.keepalive.trace). Each runs under each arm: best fit by free CPU first (`BestFit`) and across resources (`MostAllocated`), Tetris's
 //! alignment (`Align`), and least stranded then a tie: Tetris's alignment (the plan's), least
 //! allocated, or most allocated (Hex's, `Scorer::HEX`). For each arm and seed it prints the stranded
 //! capacity, the arrivals passed over on the way, the load at the first refusal for room, and the
@@ -25,10 +26,13 @@
 )]
 
 use hex_sim::index::{Sample, Scorer, Shapes, Tie};
-use hex_sim::model::Cluster;
-use hex_sim::packing::{PackReport, minimal_shapes, pack};
+use hex_sim::model::{Cluster, Time};
+use hex_sim::packing::{Clock, PackReport, minimal_shapes, pack};
 
 const SEEDS: usize = 16;
+/// The slowest of 20, 50, 100, 200, 500 and 1,000 times the recorded speed at which every seed reaches
+/// 90% load with lifetimes as recorded (a model of this packing, 2026-11-06).
+const SPEED: Time = 500;
 const ARMS: [(&str, Scorer); 6] = [
     ("best_fit", Scorer::BestFit),
     ("most_allocated", Scorer::MostAllocated),
@@ -65,16 +69,28 @@ fn early(p: &PackReport) -> String {
     format!("{} [{}]", p.early_passed_over, kept.join(" "))
 }
 
-fn main() {
-    for name in ["huawei-r5-day30.trace", "huawei-r5-day30.keepalive.trace"] {
-        let path = format!("{}/../../bench/sched/{name}", env!("CARGO_MANIFEST_DIR"));
-        let text = std::fs::read_to_string(&path).unwrap();
-        let cluster = hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap();
-        measure(name, &cluster);
-    }
+fn trace(name: &str) -> Cluster {
+    let path = format!("{}/../../bench/sched/{name}", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    hex_sim::replay::parse(&text, &hex_sim::replay::Limits::default()).unwrap()
 }
 
-fn measure(name: &str, cluster: &Cluster) {
+fn main() {
+    let recorded = trace("huawei-r5-day30.trace");
+    measure("no completions", &recorded, Clock::Held);
+    measure(
+        "completions at 500x, lifetimes as recorded",
+        &recorded,
+        Clock::Compressed(SPEED),
+    );
+    measure(
+        "completions at 500x, with the keep-alive",
+        &trace("huawei-r5-day30.keepalive.trace"),
+        Clock::Compressed(SPEED),
+    );
+}
+
+fn measure(name: &str, cluster: &Cluster, clock: Clock) {
     let shapes = minimal_shapes(cluster);
     let sample = Sample {
         shapes: Shapes::of(shapes.clone()),
@@ -92,7 +108,9 @@ fn measure(name: &str, cluster: &Cluster) {
         .map(|seed| {
             let from = seed * cluster.workloads.len() / SEEDS;
             ARMS.iter()
-                .map(|&(_, scorer)| pack(cluster, &Sample { scorer, ..sample }, 900, from).unwrap())
+                .map(|&(_, scorer)| {
+                    pack(cluster, &Sample { scorer, ..sample }, 900, from, clock).unwrap()
+                })
                 .collect()
         })
         .collect();

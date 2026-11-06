@@ -19,7 +19,7 @@ use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::{
     Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
-use hex_sim::packing;
+use hex_sim::packing::{self, Clock};
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
 use hex_sim::spec::{self, Violation};
@@ -710,19 +710,25 @@ fn a_recorded_microvm_workload_replays_the_same_twice() {
 
 /// AC-T7.4.3 (G2 step 4): pack the recorded microVM workload to 90% load from 16 starting arrivals
 /// spread over the day, under best fit alone (by free CPU first, and across resources as Kubernetes'
-/// `MostAllocated` does) and under Hex's scorer, with lifetimes as recorded and with the keep-alive;
-/// expect Hex's stranded capacity at least 30% below each best fit's on every seed. Non-vacuity: best
-/// fit strands something on every seed. Not bought by refusing work: Hex's scorer reaches 90% on every
+/// `MostAllocated` does) and under Hex's scorer, three ways: with no completions, and with completions
+/// at 500 times the recorded speed, lifetimes as recorded and with the keep-alive; expect Hex's
+/// stranded capacity at least 30% below each best fit's on every seed of each. Non-vacuity: best fit
+/// strands something on every seed. Not bought by refusing work: Hex's scorer reaches 90% on every
 /// seed and passes over no more microVMs on the way than either best fit.
 #[test]
 fn the_recorded_microvm_workload_strands_at_least_30_percent_less_than_best_fit() {
-    for cluster in recorded_microvms() {
+    let [recorded, kept_alive] = recorded_microvms();
+    for (cluster, clock) in [
+        (&recorded, Clock::Held),
+        (&recorded, Clock::Compressed(500)),
+        (&kept_alive, Clock::Compressed(500)),
+    ] {
         let sample = Sample {
-            shapes: Shapes::of(packing::minimal_shapes(&cluster)),
+            shapes: Shapes::of(packing::minimal_shapes(cluster)),
             ..Sample::default()
         };
         let pack = |scorer, from| {
-            packing::pack(&cluster, &Sample { scorer, ..sample }, 900, from).unwrap()
+            packing::pack(cluster, &Sample { scorer, ..sample }, 900, from, clock).unwrap()
         };
         let (mut passed_hex, mut passed_best, mut passed_most) = (0, 0, 0);
         for seed in 0..16 {
