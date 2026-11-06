@@ -50,32 +50,41 @@ launched none that day, all at the start of the day's busiest hour (hour 2 from 
 host count is set by a rule fixed before Hex's numbers were read: from 10 hosts down to 1, the largest
 count at which submit order (FIFO) lets the burst slow another owner's start p95.
 
-| hosts | FIFO: owners slower with the burst | most slower by |
-|---:|---:|---:|
-| 10 | 0 of 339 | 0 |
-| 9 | 0 of 339 | 0 |
-| 8 | 1 of 339 | 93.7 ms |
+Each cell is how many of the 339 other owners start slower at p95 with the burst, and the most any
+is slowed; Hex's cell adds the burst workloads it preempted.
 
-The rule picks 8 hosts (384 cores). There:
+| hosts | Hex: bands, weighted DRF, preemption | plain DRF | FIFO |
+|---:|---|---|---|
+| 10 | 0 (0 preempted) | 0 | 0 |
+| 9 | 0 (0 preempted) | 0 | 0 |
+| **8** | **0 (3 preempted)** | **1, by 3.0 ms** | **1, by 93.7 ms** |
+| 7 | 0 (4 preempted) | 1, by 3.0 ms | 1, by 285.6 ms |
+| 6 | 0 (6 preempted) | 1, by 3.0 ms | 1, by 454.9 ms |
+| 5 | 0 (5 preempted) | 1, by 3.0 ms | 1, by 1.26 s |
+| 4 | 0 (16 preempted) | 1, by 3.5 ms | 1, by 3.11 s |
+| 3 | 0 (30 preempted) | 1, by 3.0 ms | 1, by 13.2 s |
+| 2 | 0 (93 preempted) | 1, by 3.0 ms | 2, by 55.8 s |
+| 1 | 0 (673 preempted) | 16, by 92.1 s | 14, by 217.7 s |
 
-| policy, 8 hosts | owners slower with the burst | most slower by | workloads preempted | holds |
-|---|---:|---:|---:|---|
-| Hex: bands, weighted DRF, preemption | 0 of 339 | 0 | 3 | yes |
-| plain DRF | 1 of 339 | 3.0 ms | 0 | no |
-| FIFO | 1 of 339 | 93.7 ms | 0 | no |
+The rule picks 8 hosts (384 cores), the largest count at which FIFO lets the burst slow anyone; it
+was applied to FIFO's rows alone before Hex's were run. Hex's policy holds there, and at every
+count.
 
-**Reading.** At the largest host count where the burst is felt at all, Hex's policy keeps every other
-owner's start p95 where it was, by preempting 3 of the burst's workloads; plain DRF, which orders but
-doesn't preempt, lets one owner start 3 ms later at p95, and FIFO 94 ms. Measured 2026-11-06 on fedora
-(unit `hex-sched-g4-test-20261106T124405Z`).
+**Reading.** At every host count, Hex's policy keeps every other owner's start p95 where it was, by
+preempting burst workloads (more as the cluster shrinks: 3 at 8 hosts, 673 at one); plain DRF, which
+orders but doesn't preempt, lets one owner start up to 3.5 ms later from 8 hosts down, and 16 owners
+up to 92 s later on one host; FIFO is slower at every count below 9. Measured 2026-11-06 on
+adas-mac-studio-2 (hex-sim is deterministic).
 
 ## Where the bars stand
 
-AC-T7.5.2 holds on a recorded day: day 1 of Azure's Packing Trace 2020 (below), at 166 ppm from 25%.
-T-T7.5.1 holds on the recorded Huawei day at the host count its rule picks (above). On generated days,
-AC-T7.5.2 holds under DRF at 479 ppm from 25% (FIFO 133,982), and T-T7.5.1 holds under Hex's policy
-with the others' p95 unchanged (plain DRF and FIFO miss). On Huawei's R5 day 30, AC-T7.5.2's
-precondition can be met only on a cluster smaller than the trace's own workloads allow DRF to work in.
+AC-T7.5.2 holds on recorded days: day 2 of Azure's VM trace 2019 (below), 234 ppm from 25% while FIFO
+misses by 149,530 ppm over 24 contended hours, and all 14 days of Azure's Packing Trace 2020, 129-166
+ppm (where FIFO's miss covers no contention). T-T7.5.1 holds on the recorded Huawei day at every host
+count from 1 to 10 (above), and at the count its rule picks. On generated days, AC-T7.5.2 holds under
+DRF at 479 ppm from 25% (FIFO 133,982), and T-T7.5.1 holds under Hex's policy with the others' p95
+unchanged (plain DRF and FIFO miss). On Huawei's R5 day 30, AC-T7.5.2's precondition can be met only
+on a cluster smaller than the trace's own workloads allow DRF to work in.
 
 ## Searching for a recorded day where the bar's precondition holds
 

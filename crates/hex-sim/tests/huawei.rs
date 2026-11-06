@@ -24,7 +24,7 @@ use common::{
     run_with, with_burst,
 };
 use hex_sim::fair::Policy;
-use hex_sim::model::{Classes, NodeId, NodeSpec, Resources, Time};
+use hex_sim::model::{Classes, Cluster, NodeId, NodeSpec, Resources, Time};
 
 const TRACE: &str = "huawei-r5-day30.trace";
 
@@ -111,11 +111,12 @@ fn four_workload_owners_on_the_largest_quarter_cluster() {
 /// T-T7.5.1 on a recorded day of workloads (`bench/sched/g4_huawei.md`): do day 30 of Huawei Cloud's
 /// region 5 as recorded (all its owners) on 10 down to 1 of the trace's m5d.metal hosts, each with
 /// and without 1,000 workloads from an owner that launched none that day, all at the start of the
-/// day's busiest hour, each drawn from the day's own (`common::with_burst`). The host count is fixed
-/// by a rule set before Hex's numbers are read: the largest count at which submit order (FIFO) lets
-/// the burst slow another owner, so the burst is a stress there. Expect, at that count, every
-/// owner's start p95 with the burst at most its p95 without under Hex's policy (bands, weighted DRF,
-/// preemption of over-share work); plain DRF beside it, for the record.
+/// day's busiest hour, each drawn from the day's own (`common::with_burst`). The host count of record
+/// is fixed by a rule set before Hex's numbers are read: the largest count at which submit order
+/// (FIFO) lets the burst slow another owner, so the burst is a stress there. Expect, at that count,
+/// every owner's start p95 with the burst at most its p95 without under Hex's policy (bands,
+/// weighted DRF, preemption of over-share work). Hex's policy, plain DRF and FIFO are measured at
+/// every count, for the record's full table.
 #[test]
 fn a_burst_of_workloads_leaves_the_other_owners_start_p95_as_it_was() {
     let full = recorded(TRACE);
@@ -128,28 +129,40 @@ fn a_burst_of_workloads_leaves_the_other_owners_start_p95_as_it_was() {
             holds(a, b)
         );
     };
-    // The rule, applied before Hex runs at all.
-    let mut chosen = None;
-    for hosts in (1..=10).rev() {
-        let mut usual = full.clone();
-        usual.nodes.truncate(hosts);
-        let burst = with_burst(&usual, &format!("T-T7.5.1 huawei r5 day 30, {hosts} hosts"));
-        let fifo = burst_row(&usual, &burst, Policy::Fifo, 0);
-        report("fifo", hosts, &fifo);
-        if !holds(&fifo.0, &fifo.1) {
-            chosen = Some((hosts, usual, burst));
-            break;
+    let days: Vec<(usize, Cluster, Cluster)> = (1..=10)
+        .rev()
+        .map(|hosts| {
+            let mut usual = full.clone();
+            usual.nodes.truncate(hosts);
+            let burst = with_burst(&usual, &format!("T-T7.5.1 huawei r5 day 30, {hosts} hosts"));
+            (hosts, usual, burst)
+        })
+        .collect();
+    // The rule, applied to FIFO alone before Hex runs at all.
+    let fifo: Vec<_> = days
+        .iter()
+        .map(|(hosts, usual, burst)| {
+            let row = burst_row(usual, burst, Policy::Fifo, 0);
+            report("fifo", *hosts, &row);
+            row
+        })
+        .collect();
+    let chosen = fifo
+        .iter()
+        .position(|(a, b, _)| !holds(a, b))
+        .expect("FIFO keeps the bar at every host count from 1 to 10");
+    let (hosts, _, _) = &days[chosen];
+    eprintln!("T-T7.5.1 huawei: the rule picks {hosts} hosts");
+    let mut hex_at_chosen = None;
+    for (at, (hosts, usual, burst)) in days.iter().enumerate() {
+        let hex = burst_row(usual, burst, Policy::Drf, 100_000);
+        let drf = burst_row(usual, burst, Policy::Drf, 0);
+        report("hex", *hosts, &hex);
+        report("drf", *hosts, &drf);
+        if at == chosen {
+            hex_at_chosen = Some(hex);
         }
     }
-    let (hosts, usual, burst) =
-        chosen.expect("FIFO keeps the bar at every host count from 1 to 10");
-    eprintln!("T-T7.5.1 huawei: the rule picks {hosts} hosts");
-    let hex = burst_row(&usual, &burst, Policy::Drf, 100_000);
-    let drf = burst_row(&usual, &burst, Policy::Drf, 0);
-    report("hex", hosts, &hex);
-    report("drf", hosts, &drf);
-    assert!(
-        holds(&hex.0, &hex.1),
-        "Hex's policy lets the burst delay an owner"
-    );
+    let (a, b, _) = hex_at_chosen.unwrap();
+    assert!(holds(&a, &b), "Hex's policy lets the burst delay an owner");
 }
