@@ -66,7 +66,7 @@ set +e
   echo "jupiter.sh $phase: commit $commit, $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "host: $(hostname), $(powershell.exe -NoProfile -Command '[Environment]::OSVersion.VersionString' | tr -d '\r')"
   echo "load: $(powershell.exe -NoProfile -Command '(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average' | tr -d '\r')% CPU"
-  git -C "$repo" status --short | head -20
+  echo "tree: $(git -C "$repo" status --short | wc -l) paths differ from the commit"
   case $phase in
     build) build ;;
     gates)
