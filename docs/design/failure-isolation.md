@@ -36,7 +36,7 @@ each named below.
 | Stuck tool loop | a session repeats a call without progress | the third identical call (F5) | the session stopped at it | at the 3rd call: 0 after it |
 | Quota shown as slowness | a provider answers rate limit or quota exhausted | the first typed error (F5) | the account held | at the first error; node suspicions = 0 |
 | Partial provider outage | a provider fails for most of its callers | the provider marked degraded (F5) | no work needing it placed | ≤ 2 windows (2 s); node suspicions = 0 |
-| Dangerous | a seccomp kill, ungranted egress or refused privilege gain | the signal (F7) | stopped, and restarted only in a stronger class, or refused | at the signal: 0 after it |
+| Dangerous | a seccomp kill, ungranted egress or refused privilege gain, in an OCI container, a Firecracker or a Shards microVM | the signal (F7) | stopped; an OCI container restarted as the first microVM its node runs that holds it (Firecracker, then Shards), else refused; a microVM's trip refused | at the signal: 0 after it |
 
 And across classes (F6):
 
@@ -204,7 +204,9 @@ hex-sim, 2026-11-05, unit `hex-sched-g5-main-meas-20261105T081731Z`).
 
 ### F5. Agent faults are charged to what caused them, never to the node
 
-**The choice.**
+**The choice.** These are faults of an agent session, the workload running inside an OCI container, a
+Firecracker microVM or a Shards microVM; the detectors read the session's calls and its provider's
+errors, which are the same in each kind, so the bars hold for all three.
 - A stuck tool loop: a session that makes the same call (its tool and arguments, hashed) a third time
   with no progress between is stopped, as is one that makes 256 different calls with none (the memory
   bound, and itself a verdict). The repeat limit is chosen, not measured: MAST names step repetition and
@@ -246,21 +248,41 @@ gray fault, a partition losing most of a cell) never exceed the cap or the rate.
 **What would falsify it.** A run in which a cell has more nodes ejected or draining than the cap, or
 moves work faster than the rate; retries growing load past 1.1x.
 
-### F7. Dangerous workloads move to a stronger class or are refused
+### F7. Dangerous workloads move to a stronger kind or are refused
 
-**The choice.** A workload that trips a runtime security signal is stopped at once, and starts again
-only in the weakest class the cell offers that isolates more strongly than the one it tripped in
-(process, then OCI, then microVM), or is refused, typed. What trips: a seccomp kill, an egress attempt no
-grant names, a refused privilege gain. A call failed with an errno doesn't: profiles answer calls they
-don't support that way, and programs fall back.
+**The choice.** Hex places three kinds of workload: OCI containers, Firecracker microVMs and Shards
+microVMs (G2's `model::Class`; Ada, 2026-11-06). A workload that trips a runtime security signal is
+stopped at once. A tripped OCI container starts again only as a microVM on its node: the first of
+Firecracker, then Shards, that the node runs and that will hold it, its own need plus that microVM's
+overhead in what the node has free once the container's need and overhead are given back
+(`hex_sim::danger`). A GPU workload fits neither, since neither microVM takes a device. Otherwise it is
+refused, typed: its node runs no microVM (`NoMicroVmOnNode`), or none it runs holds it (`DoesNotFit`). A
+trip inside a Firecracker or Shards microVM is refused (`InMicroVm`): no kind Hex places isolates more
+strongly. What trips: a seccomp kill, an egress attempt no grant names, a refused privilege gain. A call
+failed with an errno doesn't: profiles answer calls they don't support that way, and programs fall back.
+
+**How the two microVMs rank.** Firecracker first. Both run their own guest kernel under KVM, unlike an OCI
+container on its host's (FI[19]). Firecracker's isolation surface is published and measured: a minimal
+device model (Agache et al., NSDI '20; `docs/research/runtime/substrates-and-sandboxes.md` [SUB-11]).
+Shards' device model is not public in the sources read (`docs/research/scheduler/agentic-workloads.md`,
+its device table). Their overheads don't decide it: Firecracker's is 5 MiB by its specification and
+Shards' 5 MiB is a stand-in until Shards' own is measured (`docs/design/hex-sim.md`, the recorded
+workload). Shards first would need its device model shown smaller than Firecracker's.
+
+**Which bars are per kind.** Only this one: a trip's outcome depends on the kind it ran in. The agent
+faults (F5) read a session's own tool calls and provider errors, which are the same inside any of the
+three kinds; gray and fail-slow (F2), the disk stall (F3), antagonists (F4) and the penalties (F6) are
+the node's. So those are measured once, for every kind on the node.
 
 **Sources.** seccomp's typed actions (FI[18]); containers share the host kernel and microVMs don't
-(FI[19]). Which signals should trip is unresearched (FI §8): this is Hex's own choice.
+(FI[19]); Firecracker's device model [SUB-11]; the kinds and their overheads, G2 (`hex-sim.md`). Which
+signals should trip is unresearched (FI §8): this is Hex's own choice.
 
-**Evidence.** `hex-health` `danger` tests; `faults.rs` measures each signal's isolation.
+**Evidence.** `hex-sim` `danger` tests (the move counts both overheads, to the byte; refusals typed);
+`faults.rs` over 1,000 seeds of each kind, an oracle from the rule's statement.
 
-**What would falsify it.** A tripped workload started again in its own class or a weaker one; a benign
-workload refused for errno'd calls.
+**What would falsify it.** A tripped workload started again as an OCI container, or in a kind its node
+doesn't run or that doesn't hold it; a microVM's trip moved; a benign workload refused for errno'd calls.
 
 ## Constants
 

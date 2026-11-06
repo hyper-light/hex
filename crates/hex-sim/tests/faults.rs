@@ -16,9 +16,10 @@
 )]
 
 use hex_health::agent::REPEAT_LIMIT;
-use hex_health::danger::Isolation;
 use hex_health::grade::WINDOW_NS;
+use hex_sim::danger::{Isolation, Refusal};
 use hex_sim::faults::{self, MS, Mutant, S};
+use hex_sim::model::Class;
 
 const SEEDS: u64 = 1_000;
 
@@ -158,22 +159,50 @@ fn the_mutant_that_reads_provider_errors_as_slowness_suspects_nodes() {
     assert!(wrong > 0);
 }
 
-/// S8 dangerous (F7): every trip is isolated at its signal, to a stronger offered class or refused;
-/// both outcomes occur.
+/// S8 dangerous (F7), per kind Hex places: do 1,000 trips of each kind; expect each isolated at its
+/// signal by the rule (no wrong verdict); an OCI container moved to Firecracker and to Shards, and
+/// refused both for a node without a microVM and for one that won't hold it (non-vacuity); every
+/// trip in a Firecracker or Shards microVM refused.
 #[test]
-fn a_dangerous_workload_moves_up_or_is_refused_at_its_signal() {
-    let (mut moved, mut refused) = (0, 0);
-    for seed in 0..SEEDS {
-        let (m, iso) = faults::dangerous(seed).unwrap();
-        assert_eq!(m.wrong_verdicts, 0, "seed {seed}: {iso:?}");
-        assert_eq!(m.isolated_after_ns, Some(0));
-        match iso {
-            Isolation::Move { .. } => moved += 1,
-            Isolation::Refuse { .. } => refused += 1,
-            Isolation::None => panic!("seed {seed}"),
+fn a_dangerous_workload_moves_to_a_stronger_kind_or_is_refused_at_its_signal() {
+    for kind in [Class::Oci, Class::Firecracker, Class::Shards] {
+        let (mut to_fc, mut to_shards, mut none_on_node, mut no_fit, mut in_vm) = (0, 0, 0, 0, 0);
+        for seed in 0..SEEDS {
+            let (m, iso) = faults::dangerous(seed, kind).unwrap();
+            assert_eq!(m.wrong_verdicts, 0, "{kind:?} seed {seed}: {iso:?}");
+            assert_eq!(m.isolated_after_ns, Some(0));
+            match iso {
+                Isolation::Move {
+                    to: Class::Firecracker,
+                    ..
+                } => to_fc += 1,
+                Isolation::Move {
+                    to: Class::Shards, ..
+                } => to_shards += 1,
+                Isolation::Refuse {
+                    why: Refusal::NoMicroVmOnNode,
+                    ..
+                } => none_on_node += 1,
+                Isolation::Refuse {
+                    why: Refusal::DoesNotFit,
+                    ..
+                } => no_fit += 1,
+                Isolation::Refuse {
+                    why: Refusal::InMicroVm,
+                    ..
+                } => in_vm += 1,
+                other => panic!("{kind:?} seed {seed}: {other:?}"),
+            }
+        }
+        println!(
+            "dangerous {kind:?}: to Firecracker {to_fc}, to Shards {to_shards}, refused: no microVM on the node {none_on_node}, none holds it {no_fit}, in a microVM {in_vm}"
+        );
+        if kind == Class::Oci {
+            assert!(to_fc > 0 && to_shards > 0 && none_on_node > 0 && no_fit > 0);
+        } else {
+            assert_eq!(in_vm, SEEDS);
         }
     }
-    assert!(moved > 0 && refused > 0, "{moved} {refused}");
 }
 
 /// S8 ejection cap and mass loss (F6): a cell-wide fault ejects no more than the cap at once (and does

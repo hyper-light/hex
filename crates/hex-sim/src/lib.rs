@@ -14,6 +14,8 @@
 //! - [`generate`]: generated clusters and workloads from a seed.
 //! - [`replay`]: a recorded workload read from text, for replaying a real day.
 //! - [`packing`]: stranded capacity at a load, the measure of `AC-T7.4.3`.
+//! - [`danger`]: where a workload that trips a security signal may run again, by the kinds Hex places
+//!   (S8).
 //! - [`faults`]: the fault nemesis, each fault class against its detection and isolation bound (S8).
 //! - [`membership`]: SWIM with Lifeguard on memberlist's protocol, the competitor: crash detection and
 //!   slow-member false positives (S8).
@@ -32,6 +34,7 @@
     )
 )]
 
+pub mod danger;
 pub mod error;
 pub mod faults;
 pub mod generate;

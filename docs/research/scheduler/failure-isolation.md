@@ -140,5 +140,5 @@ Kinds as in the comparison: `MV` measured-vendor, `MI` measured-independent, `CL
   users" (FI[17]), not at what share of callers a scheduler should conclude it. Hex uses a majority of
   callers in a window, stated as its own choice.
 - Security signals' trip rules: seccomp's actions are typed (FI[18]), but no source read says which
-  should move a workload to a stronger class. Hex trips on kills, ungranted egress and refused privilege
+  should move a workload to a stronger kind. Hex trips on kills, ungranted egress and refused privilege
   gains, not on errno'd calls, as its own choice with its falsifier.

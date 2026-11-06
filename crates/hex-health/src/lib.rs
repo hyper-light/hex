@@ -11,7 +11,8 @@
 //! - [`retry`]: the retry budget.
 //! - [`antagonist`]: CPI²-style victims, their antagonist found by correlation, and its capped throttle.
 //! - [`agent`]: stuck tool loops, and provider errors told apart as quota, outage or a node's own path.
-//! - [`danger`]: a workload that trips a security signal moves to a stronger class or is refused.
+//! - [`danger`]: which runtime security signals trip (where the workload goes is hex-sim's `danger`, by
+//!   the kinds Hex places).
 
 #![cfg_attr(
     test,

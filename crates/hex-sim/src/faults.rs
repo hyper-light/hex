@@ -8,18 +8,20 @@
 //! - [`disk_stall`]: one node's disk probe stops completing ([`hex_health::probe`]).
 //! - [`antagonist`]: a co-tenant raises its neighbours' CPI ([`hex_health::antagonist`]).
 //! - [`stuck_loop`], [`quota`], [`provider_outage`]: the agent faults ([`hex_health::agent`]).
-//! - [`dangerous`]: a security signal ([`hex_health::danger`]).
+//! - [`dangerous`]: a security signal, per kind Hex places ([`crate::danger`]).
 //! - [`correlated`]: many nodes slow at once, against the ejection cap, and a mass loss against the
 //!   eviction rate ([`hex_health::penalty`]).
 
 use hex_health::agent::{Cause, LoopDetector, ProviderError, ProviderHealth, Stuck};
 use hex_health::antagonist::{Antagonists, Sample};
-use hex_health::danger::{self, Class, Isolation, Signal};
+use hex_health::danger::Signal;
 use hex_health::grade::{self, PeerGrade};
 use hex_health::penalty::{Ejector, EvictionLimiter};
 use hex_health::probe::{self, DiskProbe};
 use hex_health::{HealthError, Level};
 
+use crate::danger::{self, Isolation, Refusal, STRONGER};
+use crate::model::{Class, Classes, Overheads, Resources};
 use crate::rng::Rng;
 
 pub const MS: u64 = 1_000_000;
@@ -423,33 +425,87 @@ pub fn provider_outage(seed: u64, mutant: Mutant) -> Result<Measured, FaultError
     Ok(m)
 }
 
-/// Dangerous (F7): a workload in a seeded class raises a seeded trip signal in a cell offering a
-/// seeded set of classes. Isolated at the signal: moved to a stronger class, or refused when none is
-/// offered; anything else is wrong.
-pub fn dangerous(seed: u64) -> Result<(Measured, Isolation), FaultError> {
+/// The kinds' overheads as G2's traces state them (`docs/design/hex-sim.md`, the recorded workload):
+/// OCI 0.42 MiB, measured (`bench/competitive/RESULT.md:95`); Firecracker 5 MiB, its specification
+/// (Agache et al., NSDI '20); Shards 5 MiB, a stand-in until Shards' own is measured.
+pub fn kind_overheads() -> Overheads {
+    let mut o = Overheads::default();
+    o.set(Class::Oci, 440_402);
+    o.set(Class::Firecracker, 5_242_880);
+    o.set(Class::Shards, 5_242_880);
+    o
+}
+
+/// Dangerous (F7): a workload of kind `kind` raises a seeded trip signal on a node that runs its kind
+/// and a seeded set of the others, with seeded free capacity and a seeded need (GPUs only for an OCI
+/// container, the one kind that takes them). Isolated at the signal: moved to the first stronger kind
+/// the node runs that holds it, or refused for the reason that holds; anything else is wrong.
+pub fn dangerous(seed: u64, kind: Class) -> Result<(Measured, Isolation), FaultError> {
+    const MIB: u64 = 1 << 20;
     let mut rng = Rng::new(seed);
-    let classes = [Class::Process, Class::Oci, Class::MicroVm];
-    let class = *classes
-        .get(usize::try_from(rng.range(0, 2)).unwrap_or(0))
-        .unwrap_or(&Class::Oci);
+    let mut classes = Classes::NONE.with(kind);
+    for c in [Class::Oci, Class::Firecracker, Class::Shards] {
+        if rng.chance(600) {
+            classes = classes.with(c);
+        }
+    }
     let signal = match rng.range(0, 2) {
         0 => Signal::SeccompKill,
         1 => Signal::EgressRefused,
         _ => Signal::PrivilegeEscalation,
     };
-    let offered: Vec<Class> = classes
-        .iter()
-        .copied()
-        .filter(|_| rng.chance(700))
-        .collect();
+    let need = Resources {
+        cpu_milli: rng.range(250, 8_000),
+        mem_bytes: rng.range(128, 16_384).saturating_mul(MIB),
+        gpus: u32::from(kind == Class::Oci && rng.chance(150)),
+    };
+    // What the node has free beside the workload: from nothing to plenty, so some moves fit and some
+    // don't.
+    let free = Resources {
+        cpu_milli: rng.range(0, 16_000),
+        mem_bytes: rng.range(0, 32_768).saturating_mul(MIB),
+        gpus: u32::try_from(rng.range(0, 1)).unwrap_or(0),
+    };
+    let overheads = kind_overheads();
     let onset = rng.range(S, 100 * S);
-    let iso = danger::isolate(class, signal, &offered);
-    let mut m = Measured::default();
+    let iso = danger::isolate(kind, signal, classes, free, need, overheads);
+    // The oracle, from the rule's statement: room is what's free once the workload gives back its need
+    // and its kind's overhead; a microVM holds it when it takes its GPUs and its need plus the
+    // microVM's overhead fits in the room.
+    let room = Resources {
+        cpu_milli: free.cpu_milli.saturating_add(need.cpu_milli),
+        mem_bytes: free
+            .mem_bytes
+            .saturating_add(need.mem_bytes)
+            .saturating_add(overheads.of(kind)),
+        gpus: free.gpus.saturating_add(need.gpus),
+    };
+    let fits = |c: Class| {
+        classes.has(c)
+            && (need.gpus == 0 || c.takes_gpus())
+            && need.cpu_milli <= room.cpu_milli
+            && need.mem_bytes.saturating_add(overheads.of(c)) <= room.mem_bytes
+    };
+    let first = STRONGER.into_iter().find(|c| fits(*c));
     let right = match iso {
-        Isolation::Move { from, to } => from == class && to > class && offered.contains(&to),
-        Isolation::Refuse { class: c, .. } => c == class && !offered.iter().any(|o| *o > class),
+        Isolation::Move { from, to } => from == kind && kind == Class::Oci && first == Some(to),
+        Isolation::Refuse { from, why } => {
+            from == kind
+                && match why {
+                    Refusal::InMicroVm => kind != Class::Oci,
+                    Refusal::NoMicroVmOnNode => {
+                        kind == Class::Oci && !STRONGER.iter().any(|c| classes.has(*c))
+                    }
+                    Refusal::DoesNotFit => {
+                        kind == Class::Oci
+                            && STRONGER.iter().any(|c| classes.has(*c))
+                            && first.is_none()
+                    }
+                }
+        }
         Isolation::None => false,
     };
+    let mut m = Measured::default();
     if right {
         m.detected_after_ns = after(onset, onset);
         m.isolated_after_ns = after(onset, onset);
