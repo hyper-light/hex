@@ -206,7 +206,7 @@ fn a_device_not_granted_isnt_visible(lab: &Lab) {
         let mut spec = lab.spec(id.clone(), Bounds::default());
         if granted {
             let ClassSpec::Bundle(dir) = &spec.class else {
-                unreachable!()
+                panic!("the lab makes bundle boxes")
             };
             let path = dir.join("config.json");
             let mut cfg: serde_json::Value =
