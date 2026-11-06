@@ -514,7 +514,7 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     the spawn SPI the macOS SDK ships no prototype for; flags from `bsd/sys/spawn_internal.h`), so the kernel
     `SIGKILL`s a member the instant its footprint crosses the bound — 0 overshoot, no privilege. It bounds a
     single-member box, and any one runaway member, exactly, and lets the watcher read a fully-armed box
-    holding at most one member only at the ceiling (~0.1% of a core). The cap is per process, doesn't survive
+    holding at most one member only when it changes (a fork, an end). The cap is per process, doesn't survive
     a fork, and caps each member at the whole bound, so it does not bound a multi-member tree's footprint
     *sum* — layers two and three do. Layer two, the **primary** for a many-member box, is kernel-enforced and
     event-driven, armed by the privileged helper (step 2; root alone suffices, `kern_memorystatus.c:9192-9193`):
@@ -524,8 +524,9 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     bounding the whole tree, and re-arming a forked child, which layer one can't. Layer three is
     **defense-in-depth**, the whole bound on a node with no helper: Hex's own polling rule, a Mach
     time-constraint thread that reads each member's footprint (`proc_pid_rusage`) on `NOTE_CRITICAL` kqueue
-    timers, every (bound - footprint) / the machine's measured allocation rate (floor 250 µs, ceiling 25.8 ms:
-    step 1's 64 MiB overshoot bar at the measured worst rate of 2.60 GB/s), and ends the box past its bound
+    timers, every (bound + 64 MiB - footprint) / the recorded worst aggregate rate (47.46 GB/s, one member per
+    core filling at once; floor 250 µs, no ceiling), so no box passes its bound by more than step 1's 64 MiB
+    bar between reads, and ends the box past its bound
     (an eviction by a stated rule, CLAUDE.md §2). A rootless, kernel-enforced per-process cap thus **does**
     exist — at spawn, layer one — but re-arming a *running* task and apportioning a bound across members need
     root (`memorystatus_control` → `EPERM`, `task_set_phys_footprint_limit` →

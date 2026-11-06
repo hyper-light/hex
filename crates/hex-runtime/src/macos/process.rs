@@ -11,10 +11,10 @@
 //! Each member Hex spawns is also armed with a fatal per-process memory cap at the box's whole bound
 //! (`posix_spawnattr_setjetsam_ext`, rootless; `sys`, docs/research/runtime/macos-spawn-jetsam-cap.md):
 //! the kernel SIGKILLs it at the bound with no overshoot (native plan step 1's `_ext` backstop). So a box
-//! holding at most one armed member is bounded by the kernel, and the watcher reads it only at the
-//! ceiling (25.8 ms, `hex_core::watch::CEILING`) to keep its accounting current and to notice a fork; any
-//! fork (an unarmed child) or any unarmed member reverts it to the polling pace at once (the watcher watches
-//! each member for its `NOTE_FORK`/`NOTE_EXIT`). The cap is per process, doesn't survive a fork, and caps each member at the
+//! holding at most one armed member is bounded by the kernel, and the watcher reads it only when it
+//! changes; any fork (an unarmed child) or any unarmed member reverts it to the polling pace at once (the
+//! watcher watches each member for its `NOTE_FORK`/`NOTE_EXIT`). [`ProcessBox::usage`] reads the box live,
+//! so its accounting is current however long the watcher waits. The cap is per process, doesn't survive a fork, and caps each member at the
 //! *whole* bound, not its share, so it doesn't bound a multi-member box's footprint sum — the watcher's
 //! rule still does that (step 2's privileged helper apportions a per-member share). A member killed at
 //! its cap dies by SIGKILL; the watcher tells that from an ordinary kill by the dead member's peak
@@ -123,7 +123,7 @@ struct State {
     pgid: Mutex<Option<i32>>,
     status: Mutex<Status>,
     /// The pids the box armed with the fatal per-process cap — members it spawned, each kernel-bounded.
-    /// The watcher reads it to pace a fully-armed one-member box at the ceiling and to attribute a
+    /// The watcher reads it to leave a fully-armed one-member box to its events and to attribute a
     /// member's death at its cap to memory; a pid is dropped once gone or accounted, so the set stays
     /// bounded by the box's live member count (CLAUDE.md §2).
     armed: Mutex<BTreeSet<i32>>,
@@ -143,9 +143,12 @@ impl State {
         self.status.lock().map_err(|_| poisoned("a box's status"))
     }
 
-    /// Wakes the watcher so it reads now rather than at its next timer.
-    fn wake(&self) {
-        let _ = self.kq.trigger();
+    /// Wakes the watcher so it reads now rather than at its next timer. A box with no bound to pace by has
+    /// no timer, so a wake that fails is the caller's refusal: the watcher wouldn't see the change.
+    fn wake(&self) -> Result<(), Refusal> {
+        self.kq
+            .trigger()
+            .map_err(|e| Refusal::os("waking a box's watcher", e))
     }
 
     /// Counts member `pid`'s death as a memory end — once — if the box armed it with the fatal cap, isn't
@@ -212,6 +215,8 @@ pub struct ProcessBox {
     watcher: Mutex<Option<JoinHandle<()>>>,
     /// The node's learned drain bound, shared by every box ([`Shared`]).
     drain: Arc<Mutex<hex_core::drain::Learned>>,
+    /// The machine's timebase, for a live read's CPU.
+    tb: Timebase,
 }
 
 impl ProcessBox {
@@ -239,6 +244,7 @@ impl ProcessBox {
             state,
             watcher: Mutex::new(Some(watcher)),
             drain: Arc::clone(&shared.drain),
+            tb: shared.tb,
         })
     }
 
@@ -290,7 +296,7 @@ impl ProcessBox {
                 .map_err(|_| poisoned("a box's armed set"))?
                 .insert(pid);
         }
-        self.state.wake();
+        self.state.wake()?;
         Ok(pid)
     }
 
@@ -313,9 +319,29 @@ impl ProcessBox {
         }
     }
 
-    /// What the box has used and holds now, as a [`Usage`].
+    /// What the box has used and holds now, as a [`Usage`]: its members read live (the group listed, each
+    /// one's rusage), as the Linux class reads its cgroup's files, so it is current however long the
+    /// watcher waits (a box with no bound to pace by is read only when it changes). The kill counts and
+    /// the peak are the watcher's, the peak raised to what this read finds.
     pub fn usage(&self) -> Result<Usage, Refusal> {
-        let s = self.state.status()?;
+        let pgid = *self
+            .state
+            .pgid
+            .lock()
+            .map_err(|_| poisoned("a box's group"))?;
+        let live = match pgid {
+            Some(pgid) => Some(read_live(pgid)?),
+            None => None,
+        };
+        let mut s = self.state.status()?;
+        if let Some(live) = live {
+            s.footprint = live.footprint;
+            s.processes = live.processes;
+            s.peak = s.peak.max(live.footprint);
+            s.cpu_ticks = self.tb.nanos(live.cpu) / 1000;
+            s.read_bytes = s.read_bytes.max(live.read);
+            s.written_bytes = s.written_bytes.max(live.written);
+        }
         Ok(Usage {
             memory_bytes: s.footprint,
             memory_peak_bytes: s.peak,
@@ -359,7 +385,7 @@ impl ProcessBox {
     /// each member's own waiter to reap it. Idempotent.
     pub fn delete(&self) -> Result<(), Refusal> {
         self.state.stop.store(true, Ordering::SeqCst);
-        self.state.wake();
+        self.state.wake()?;
         if let Some(handle) = self
             .watcher
             .lock()
@@ -418,6 +444,45 @@ impl Drop for ProcessBox {
     fn drop(&mut self) {
         let _ = self.delete();
     }
+}
+
+/// A box's group as one live read finds it: its footprint and processes as the watcher's rule counts them,
+/// and its members' summed CPU (Mach ticks) and I/O.
+struct Live {
+    footprint: u64,
+    processes: u64,
+    cpu: u64,
+    read: u64,
+    written: u64,
+}
+
+/// Reads process group `pgid` now: each listed member's rusage, a pid gone since the listing (ESRCH) left
+/// out, and the leader's zombie not counted as a process while it is held for the group's id, as
+/// [`watch::Watch::read`] counts.
+fn read_live(pgid: i32) -> Result<Live, Refusal> {
+    let mut pids = sys::listing().map_err(|e| Refusal::os("listing a box's group", e))?;
+    sys::group(pgid, &mut pids).map_err(|e| Refusal::os("listing a box's group", e))?;
+    let mut live = Live {
+        footprint: 0,
+        processes: 0,
+        cpu: 0,
+        read: 0,
+        written: 0,
+    };
+    for &pid in &pids {
+        let Some(r) = sys::rusage(pid).map_err(|e| Refusal::os("reading a member's rusage", e))?
+        else {
+            continue;
+        };
+        if !(r.ended && pid == pgid) {
+            live.processes = live.processes.saturating_add(1);
+        }
+        live.footprint = live.footprint.saturating_add(r.footprint);
+        live.cpu = live.cpu.saturating_add(r.cpu);
+        live.read = live.read.saturating_add(r.read_bytes);
+        live.written = live.written.saturating_add(r.written_bytes);
+    }
+    Ok(live)
 }
 
 /// Whether process group `pgid` has a member alive (not a zombie).
@@ -509,11 +574,9 @@ impl Watcher {
                 // is left as it is for delete to clean up.
                 Err(_) => return,
             };
-            let _ = self.state.kq.wait(
-                next,
-                next.map_or(Some(watch::CEILING), |_| None),
-                &mut self.events,
-            );
+            // A timer only where a bound needs one; otherwise the box's next change wakes it: a member's
+            // fork or end, a start (exec) or a delete, each a kqueue event.
+            let _ = self.state.kq.wait(next, None, &mut self.events);
         }
     }
 
@@ -552,7 +615,7 @@ impl Watcher {
                 let _ = killpg(pgid, kill_signal());
                 Ok(Some(watch::FLOOR))
             }
-            Verdict::Idle => Ok(None),
+            Verdict::Idle | Verdict::Events => Ok(None),
         }
     }
 
@@ -651,7 +714,7 @@ impl Watcher {
         status.footprint = read.footprint;
         // Max, not assignment: a member the kernel killed at its cap recorded its peak in account_jetsam
         // before this read, and the watcher's own peak (summed live footprints) can be lower — a box read
-        // only at the ceiling may never have seen the member near its cap while it was alive.
+        // only on its events may never have seen the member near its cap while it was alive.
         status.peak = status.peak.max(self.watch.peak());
         // In microseconds, from the machine's timebase (`cpu` is Mach ticks).
         status.cpu_ticks = self.shared.tb.nanos(totals.cpu) / 1000;
@@ -695,7 +758,7 @@ impl Watcher {
     }
 
     /// Watches the box's running members for their forks and ends on the box's kqueue, so a fork (an
-    /// unarmed child) or a death wakes the watcher at once — to revert a ceiling-paced box to headroom, or
+    /// unarmed child) or a death wakes the watcher at once — to put an events-paced box back on headroom, or
     /// to read a cap kill's peak before the member's own waiter reaps it — rather than at its next timer.
     /// Members gone since the last read are unwatched (the kernel already dropped an exited member's knote,
     /// so that unwatch is a no-op it tolerates).

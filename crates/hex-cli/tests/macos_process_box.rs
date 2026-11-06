@@ -13,11 +13,11 @@
     clippy::disallowed_macros
 )]
 
-use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Runtime, Signal, Stdio};
+use hex_core::watch::RECORDED;
 use hex_runtime::macos::MacRuntime;
 
 const MIB: u64 = 1 << 20;
@@ -74,15 +74,10 @@ impl Fixture for BinFixture {
     }
 }
 
-/// The Mac Studio's measured allocation rate (bench/native/macos/RESULT.md): 256 GiB/s, the pacing the
-/// footprint bound is reckoned against. The process rate is set high so the process bound reads at the
-/// 250 µs floor near it; a box forks far slower than this.
+/// A runtime reckoning the recorded worst aggregate growth (`hex_core::watch::RECORDED`): one member per
+/// core filling memory and spawning at once, the rates a node's boxes are paced at.
 fn runtime() -> MacRuntime {
-    MacRuntime::new(
-        NonZeroU64::new(256 * GIB).unwrap(),
-        NonZeroU64::new(1_000_000).unwrap(),
-    )
-    .expect("a macOS runtime")
+    MacRuntime::new(RECORDED.bytes, RECORDED.processes).expect("a macOS runtime")
 }
 
 fn fixture() -> BinFixture {
@@ -110,8 +105,8 @@ fn box_user_boxes_hold_the_contract() {
     let sock = std::env::var("HEX_BOX_HELPER_SOCK")
         .expect("HEX_BOX_HELPER_SOCK, set by boxlab.sh to the running helper's socket");
     let rt = MacRuntime::detect(
-        NonZeroU64::new(256 * GIB).unwrap(),
-        NonZeroU64::new(1_000_000).unwrap(),
+        RECORDED.bytes,
+        RECORDED.processes,
         std::path::Path::new(&sock),
     )
     .expect("a box-user macOS runtime");

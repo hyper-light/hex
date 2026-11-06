@@ -41,13 +41,13 @@ fn main() {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::num::NonZeroU64;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio as Piped};
     use std::time::{Duration, Instant};
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Stdio};
+    use hex_core::watch::RECORDED;
     use hex_runtime::macos::MacRuntime;
     use hex_runtime::macos::sys;
 
@@ -76,14 +76,10 @@ mod macos {
         hex
     }
 
-    /// A runtime reckoning 256 GiB/s (RESULT.md) and a high process rate, so the bound is read at its
-    /// 250 µs floor near it.
+    /// A runtime reckoning the recorded worst aggregate growth (`hex_core::watch::RECORDED`), so each box
+    /// is read before it can pass its bound by the 64 MiB bar, every member filling at once.
     fn runtime() -> MacRuntime {
-        MacRuntime::new(
-            NonZeroU64::new(256 * GIB).unwrap(),
-            NonZeroU64::new(1_000_000).unwrap(),
-        )
-        .expect("a macOS runtime")
+        MacRuntime::new(RECORDED.bytes, RECORDED.processes).expect("a macOS runtime")
     }
 
     fn member(hex: &Path, act: &[&str]) -> Program {
@@ -135,9 +131,12 @@ mod macos {
         peak.saturating_sub(BOUND)
     }
 
-    /// The watcher's CPU for a box held at 95% of its bound for `secs` seconds: the bench process's own CPU
-    /// over that window (nothing else in it runs — the main thread parks), as a fraction of one core.
-    fn watcher_cpu(hex: &Path, secs: u64) -> f64 {
+    /// The watcher's CPU for a box of `members` held together at `percent` of its bound for `secs` seconds:
+    /// the bench process's own CPU over that window (nothing else in it runs — the main thread parks), as a
+    /// percentage of one core, and whether the box held through it (the watcher didn't end it: each
+    /// member's own baseline footprint adds to what it holds). One member is armed with the kernel's cap
+    /// and left to its events; two or more are paced by headroom.
+    fn watcher_cpu(hex: &Path, secs: u64, percent: u64, members: u64) -> (f64, bool) {
         let rt = runtime();
         let id = BoxId::new("mac-bench-hold").unwrap();
         let _ = rt.delete(&id);
@@ -150,34 +149,41 @@ mod macos {
             class: ClassSpec::Process,
         })
         .expect("create");
-        let hold = BOUND / 100 * 95;
+        let hold = BOUND / 100 * percent;
         let millis = secs * 1000 + 4000;
-        let _p = rt
-            .exec(
-                &id,
-                member(hex, &["hold", &hold.to_string(), &millis.to_string()]),
-                Stdio::null(),
-            )
-            .expect("exec hold");
-        // Wait for it to reach ~90% of the bound, so the watcher is reading at its floor; then measure with
-        // the main thread parked so the only CPU the process spends is the watcher's.
+        let _p: Vec<_> = (0..members)
+            .map(|_| {
+                rt.exec(
+                    &id,
+                    member(
+                        hex,
+                        &["hold", &(hold / members).to_string(), &millis.to_string()],
+                    ),
+                    Stdio::null(),
+                )
+                .expect("exec hold")
+            })
+            .collect();
+        // Wait for it to hold its footprint, so the watcher paces by the headroom it holds at; then measure
+        // with the main thread parked so the only CPU the process spends is the watcher's.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let u = rt.usage(&id).expect("usage");
-            if u.memory_bytes >= BOUND / 100 * 90 {
+            if u.memory_bytes >= hold / 100 * 99 {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "the hold member never reached 90%"
+                "the hold member never reached {percent}%"
             );
             std::thread::yield_now();
         }
         let c0 = sys::process_cpu().expect("process cpu");
         std::thread::park_timeout(Duration::from_secs(secs));
         let cpu = sys::process_cpu().expect("process cpu").saturating_sub(c0);
+        let held = rt.usage(&id).expect("usage").oom_kills == 0;
         rt.delete(&id).expect("delete");
-        cpu.as_secs_f64() / secs as f64 * 100.0
+        (cpu.as_secs_f64() / secs as f64 * 100.0, held)
     }
 
     /// The box sizes the overshoot pass measures: one member up to twice the cores of the record's Mac.
@@ -459,11 +465,15 @@ mod macos {
             }
         }
         for pass in 1..=passes {
-            let pct = watcher_cpu(&hex, 2);
-            println!(
-                "pass={pass} hold_seconds=2 watcher_cpu_pct_of_core={pct:.2} load1={:.2}",
-                sys::loadavg().unwrap_or(-1.0)
-            );
+            for members in [1u64, 2, 14] {
+                for percent in [1u64, 25, 50, 75, 90, 95, 99] {
+                    let (pct, held) = watcher_cpu(&hex, 2, percent, members);
+                    println!(
+                        "pass={pass} members={members} hold_pct_of_bound={percent} hold_seconds=2 watcher_cpu_pct_of_core={pct:.3} held={held} load1={:.2}",
+                        sys::loadavg().unwrap_or(-1.0)
+                    );
+                }
+            }
         }
     }
 }
