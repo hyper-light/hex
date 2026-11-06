@@ -26,7 +26,7 @@ SHARDS_BIN=~/.cache/hex-t7/native-s5/a/target/debug/shards
 ```
 
 The command line is `console=ttyS0 panic=-1`, with `hex.shares=rw,ro,…` before any `--` where the guest
-has shares. It needs no `-- guest init`: `hex` as PID 1 is the guest's init (HEX-GUEST-12).
+has shares. It needs no `-- guest init`: `hex` as PID 1 named `/init` is the guest's init (HEX-GUEST-12).
 
 ## Boots
 

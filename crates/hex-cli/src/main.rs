@@ -8,9 +8,9 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.into_string().ok())
         .collect();
-    // As PID 1, `hex` is a Shards guest's init, whatever words the kernel passes it.
+    // As PID 1 started as `/init`, `hex` is a Shards guest's init, whatever words the kernel passes it.
     #[cfg(target_os = "linux")]
-    if hex_cli::guest::runs_as_init(std::process::id()) {
+    if hex_cli::guest::runs_as_init(std::process::id(), std::env::args_os().next().as_deref()) {
         return ExitCode::from(hex_cli::guest::init_main());
     }
     // `hex selftest-box <act> …` runs a small program inside a box (hex_cli::selftest); it ends the

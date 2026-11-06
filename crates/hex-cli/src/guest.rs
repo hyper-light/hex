@@ -2,11 +2,11 @@
 //!
 //!   hex guest relay --node <socket> (--vsock | --unix <dir>)
 //!
-//! The guest's init is the `hex` binary itself as its initramfs's `/init`: run as PID 1, `hex` is the
-//! guest's init whatever words the kernel passes it ([`init_main`]), as Shards appends its own to a
-//! command line (` quiet` where no one reads the console, `crates/vmm/src/vm/mod.rs:1007-1018` at
-//! `a0cced87`), and words after a `--` are init's. It first moves itself off the kernel's initramfs onto a tmpfs root, as
-//! switch_root does, since a container's start pivots its root and pivot_root(2) refuses to leave the
+//! The guest's init is the `hex` binary itself as its initramfs's `/init`: run as PID 1 named `/init`,
+//! `hex` is the guest's init whatever words the kernel passes it ([`init_main`]), as Shards appends its
+//! own to a command line (` quiet` where no one reads the console, `crates/vmm/src/vm/mod.rs:1007-1018`
+//! at `a0cced87`), and words after a `--` are init's. It first moves itself off the kernel's initramfs
+//! onto a tmpfs root, as switch_root does, since a container's start pivots its root and pivot_root(2) refuses to leave the
 //! initramfs ("EINVAL The current root directory is on the rootfs"). It then mounts what a Linux node
 //! needs (`/proc`, `/sys`, cgroup2, `/dev`, a tmpfs `/run` and `/tmp`; the node's state is under `/run`,
 //! as the guest has no disk: docs/design/shards-guest.md §4), mounts the Shards shares the kernel's
@@ -173,9 +173,12 @@ const BOX_ROOT: &str = "/sys/fs/cgroup/hex";
 /// children.
 const CONTROLLERS: &str = "+cpu +io +memory +pids";
 
-/// Whether `hex` runs as the guest's init: as PID 1, the kernel's first process, whatever its arguments.
-pub fn runs_as_init(pid: u32) -> bool {
-    pid == 1
+/// Whether `hex` runs as the guest's init: the kernel's first process, PID 1 started as `/init` (the
+/// initramfs's init, which the kernel runs by that name: init/main.c, `ramdisk_execute_command`),
+/// whatever its other arguments. A container's init is PID 1 too, in its own namespace, but runs as
+/// `__oci-init` from another path, so it is not.
+pub fn runs_as_init(pid: u32, argv0: Option<&std::ffi::OsStr>) -> bool {
+    pid == 1 && argv0 == Some(std::ffi::OsStr::new("/init"))
 }
 
 /// Runs as the guest's init (§4); returns only if it fails, with the exit status.
@@ -570,15 +573,27 @@ mod tests {
         }
     }
 
-    /// HEX-GUEST-12 (§4): as PID 1, `hex` is the guest's init, whatever words the kernel passes it
-    /// (Shards appends `quiet` to a run with no console, which once reached init as an argument and
-    /// ended the guest: a boot on adas-mac-studio-2, 2026-11-06, `Attempted to kill init!
-    /// exitcode=0x00000200`); as any other process it is not.
+    /// HEX-GUEST-12 (§4): as PID 1 started as `/init`, `hex` is the guest's init, whatever words the
+    /// kernel passes it (Shards appends `quiet` to a run with no console, which once reached init as
+    /// an argument and ended the guest: a boot on adas-mac-studio-2, 2026-11-06, `Attempted to kill
+    /// init! exitcode=0x00000200`). A container's init is PID 1 too, under another name, and is not
+    /// (the conformance suite's exec failed when it was taken for one: fedora, 2026-11-06, unit
+    /// hex-ns5b-guest-20261106T053731Z); nor is any other process.
     #[test]
-    fn hex_is_the_guests_init_as_pid_1_alone() {
-        assert!(runs_as_init(1));
-        for pid in [0, 2, 1000, u32::MAX] {
-            assert!(!runs_as_init(pid), "{pid}");
+    fn hex_is_the_guests_init_as_pid_1_named_init_alone() {
+        use std::ffi::OsStr;
+        assert!(runs_as_init(1, Some(OsStr::new("/init"))));
+        for (pid, argv0) in [
+            (1, None),
+            (1, Some("/proc/self/exe")),
+            (1, Some("/usr/bin/hex")),
+            (1, Some("init")),
+            (1, Some("/init/")),
+            (2, Some("/init")),
+            (0, Some("/init")),
+            (u32::MAX, Some("/init")),
+        ] {
+            assert!(!runs_as_init(pid, argv0.map(OsStr::new)), "{pid} {argv0:?}");
         }
     }
 }

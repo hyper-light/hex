@@ -200,9 +200,10 @@ Hex's tests of the channel, each citing its ID:
   `ro` per share in tag order (`hex.shares=rw,ro`: `shards0` writable, `shards1` read-only), and mounts each as
   `virtiofs` at `/run/hex/shares/<i>`; a bad mode, the parameter twice or more than 32 shares are refused by
   name (`crates/hex-cli/src/guest.rs`).
-- HEX-GUEST-12: as PID 1, `hex` is the guest's init whatever words the kernel passes it, so the command line
-  needs no `-- guest init` (Shards appends its own words, ` quiet` with no console reader,
-  `crates/vmm/src/vm/mod.rs:1007-1018`), and as any other process it is not (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-12: as PID 1 started as `/init`, `hex` is the guest's init whatever words the kernel passes it, so
+  the command line needs no `-- guest init` (Shards appends its own words, ` quiet` with no console reader,
+  `crates/vmm/src/vm/mod.rs:1007-1018`); a container's init, PID 1 in its own namespace under another name,
+  is not, nor is any other process (`crates/hex-cli/src/guest.rs`).
 - HEX-GUEST-8: the conformance suite, every case, on `oci` and `process` boxes, through `hex guest relay` and the
   guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
   rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).
