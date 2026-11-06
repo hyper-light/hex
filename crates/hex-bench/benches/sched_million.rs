@@ -14,15 +14,15 @@
 //! into `slices` contiguous ranges, and each workload is routed to the first slice, from slice
 //! `id mod slices` on, holding a node that would admit it empty. Every workload is submitted to the one store before the clock starts, so all
 //! 1,000,000 are pending at once and none ends. Then one thread per slice runs hex-sim's own fast path
-//! over its slice's pending workloads in submit order: the sampled best fit over the slice's index
-//! (`FitIndex::sampled_fit`, kube-scheduler's floors of 100 nodes or 5%), the commit to the one store
+//! over its slice's pending workloads in submit order: the sampled best node by Hex's packing score
+//! (`FitIndex::sampled_fit` with `Scorer::HEX`, H11; kube-scheduler's floors of 100 nodes or 5%), the commit to the one store
 //! by compare-and-set on the version the submit returned (`Store::apply`, behind a mutex: the store is
 //! the planes' one shared point, as Amphora's will be), and the index update. The time runs from the
 //! first decision to the last commit, wall-clock.
 //!
 //! With `check`, after each timed run (untimed), each slice's part of the store's log is replayed, in
 //! the store's order, into a store of that slice alone, and the serial specification judges it
-//! (`spec::check_log`, H4 per slice): each placement the slice's sampled best fit at its point, no
+//! (`spec::check_log`, H4 per slice): each placement the slice's sampled choice at its point, no
 //! queue jumped, nothing left pending that a node holds.
 //!
 //! Every workload is one of Hex's three classes by G2's rule (`docs/design/hex-sim.md` H69): owners
@@ -49,7 +49,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use hex_sim::generate;
-use hex_sim::index::{FitIndex, Sample};
+use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -119,6 +119,36 @@ fn workloads(row: Row, seed: u64) -> Vec<WorkloadSpec> {
     generate::owners(&mut c, seed, 75).unwrap();
     generate::by_owner(&mut c, generate::overheads()).unwrap();
     c.workloads
+}
+
+/// Each class's Pareto-minimal needs (`packing::minimal_shapes`' set, found by a sort and a sweep:
+/// these needs ask for no GPU, so the front is two-dimensional, and the mixed row's ~600,000
+/// distinct needs are too many for its pairwise scan).
+fn shapes(work: &[WorkloadSpec]) -> Shapes {
+    assert!(work.iter().all(|w| w.need.gpus == 0));
+    let mut needs: Vec<(Class, u64, u64)> = work
+        .iter()
+        .map(|w| (w.class, w.need.cpu_milli, w.need.mem_bytes))
+        .collect();
+    needs.sort_unstable();
+    needs.dedup();
+    let mut front = Vec::new();
+    let mut last: Option<(Class, u64)> = None;
+    for (class, cpu, mem) in needs {
+        if last.is_none_or(|(c, m)| c != class || mem < m) {
+            front.push((
+                Resources {
+                    cpu_milli: cpu,
+                    mem_bytes: mem,
+                    gpus: 0,
+                },
+                class,
+            ));
+            last = Some((class, mem));
+        }
+    }
+    assert!(front.len() <= Shapes::MAX, "{} minimal shapes", front.len());
+    Shapes::of(front)
 }
 
 /// One slice: its first global node id, its nodes (ids dense from 0 within it), and its pending
@@ -293,7 +323,14 @@ fn main() {
     };
     let checking = args.iter().any(|a| a == "check");
     let cpus = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
-    let sample = Sample::default();
+    // Hex's packing score (H11, `Scorer::HEX`), as `sched_fast_path.rs` measures it: least stranded
+    // against each class's smallest needs, then the node running the fewest classes. With classes,
+    // plain best fit puts OCI and Shards work on the Linux nodes Firecracker alone can use.
+    let sample = Sample {
+        scorer: Scorer::HEX,
+        shapes: shapes(&workloads(row, 0)),
+        ..Sample::default()
+    };
     println!(
         "sched_million: {WORKLOADS} pending {} on {NODES} nodes of 11 CPU/55 GiB, {slices} slices on {cpus} CPUs, {runs} runs, check={checking}",
         if row == Row::Pods {

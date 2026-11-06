@@ -23,7 +23,8 @@
 //! `hex` places the same 50,000 on the same 10,000 with hex-sim's own fast path, as
 //! `benches/sched_million.rs` does: every pod submitted to the store before the clock starts, the
 //! nodes split into `shards` disjoint partitions (node `n` to shard `n % shards`, pod `id % shards`),
-//! one thread per shard running the sampled best fit (`FitIndex::sampled_fit`, kube-scheduler's floors
+//! one thread per shard running the sampled choice by Hex's packing score (`FitIndex::sampled_fit`
+//! with `Scorer::HEX`, H11; kube-scheduler's floors
 //! of 100 nodes or 5%), the compare-and-set commit (`Store::apply`) and the index update, in submit
 //! order. The time runs from the first shard starting to the last one ending. After each run
 //! (untimed) every record must be placed, and no node above its capacity or its 110 pods.
@@ -47,7 +48,7 @@ use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 use hex_sim::generate;
-use hex_sim::index::{FitIndex, Sample};
+use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -322,7 +323,19 @@ fn check(p: &Placed) -> Result<(), String> {
 }
 
 fn hex(runs: u32, shard_counts: &[usize]) {
-    let sample = Sample::default();
+    // Hex's packing score (H11, `Scorer::HEX`), against each class's one need.
+    let sample = Sample {
+        scorer: Scorer::HEX,
+        shapes: Shapes::of(
+            pods()
+                .iter()
+                .map(|w| (w.need, w.class))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        ),
+        ..Sample::default()
+    };
     let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     println!(
         "sched_kwok hex: {PODS} pending pods of {POD:?} on {NODES} nodes of {NODE:?}, {cpus} CPUs, {runs} runs each"

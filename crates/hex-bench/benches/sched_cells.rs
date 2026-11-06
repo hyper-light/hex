@@ -12,7 +12,7 @@
 //! overhead, selected only into a cell that runs its class. Each workload's selection is timed alone,
 //! wall-clock, on a release build: `federation::Capacity::admit`, which routes it to its home region
 //! and cell and on to the first with room, reads that cell's live free nodes by the cells' sampled
-//! best fit, and deducts the node it takes (H66's check, run for every workload). The record gives
+//! choice by Hex's packing score (`Scorer::HEX`, H11), and deducts the node it takes (H66's check, run for every workload). The record gives
 //! p50, p90, p99, p99.9 and max of each run, over all and per class, and the run of record is the one
 //! with the best p99 over all.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
@@ -32,7 +32,9 @@ use std::time::{Duration, Instant};
 
 use hex_sim::federation::{Capacity, Topology};
 use hex_sim::generate;
-use hex_sim::index::Sample;
+use std::collections::BTreeSet;
+
+use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::{
     Class, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
@@ -126,7 +128,19 @@ fn main() {
     );
     let mut best: Option<Duration> = None;
     for run in 0..runs {
-        let mut capacity = Capacity::empty(&nodes, TOPOLOGY, Sample::default()).unwrap();
+        // Hex's packing score (H11), against each class's one need.
+        let sample = Sample {
+            scorer: Scorer::HEX,
+            shapes: Shapes::of(
+                work.iter()
+                    .map(|w| (w.need, w.class))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Sample::default()
+        };
+        let mut capacity = Capacity::empty(&nodes, TOPOLOGY, sample).unwrap();
         let mut took = Vec::with_capacity(WORKLOADS as usize);
         let mut by_class: [Vec<Duration>; 3] = Default::default();
         let mut per_cell = vec![0u64; cells as usize];
