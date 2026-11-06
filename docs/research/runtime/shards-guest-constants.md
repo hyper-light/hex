@@ -34,11 +34,12 @@ tests.
 | final kind | Hex table rows | Shards table rows |
 |---|---|---|
 | fact | 13 | 1, plus parts of 1 |
-| a | 4 | 1, plus parts of 1 |
+| a | 4, plus part of 1 | 1, plus parts of 1 |
+| b | 2, plus part of 1 | part of 1 |
 | c | 34 | 10, plus parts of 3 |
 | input | 5 | 2, plus parts of 2 |
 | relied on (another step's) | 10 | — |
-| d, left for Ada | 4 | 0 |
+| d, left for Ada | 1 | 0 |
 | C's (pointers to C's branch) | 7 | — |
 
 Behaviour fixed on the way:
@@ -66,12 +67,12 @@ Behaviour fixed on the way:
 | name | value | file:line | kind | source or record |
 |---|---|---|---|---|
 | `HEX_GUEST_CPUS` default | the host's CPUs | crates/hex-cli/tests/guest_real.rs:126 | a | `shards_api::max_vcpus()` (std's `available_parallelism`); the fastest run, as an idle vCPU costs nothing |
-| `HEX_GUEST_MEMORY_MIB` default | 1024 | guest_real.rs:127 | d | Not yet measured. To convert it: run HEX-GUEST-19 on adas-mac-studio.local-2 and jupiter, read the shards VM process's peak RSS once the guest stops (`getrusage(RUSAGE_CHILDREN)` / job accounting), and set the default to the record's max, never below it. Fedora and jupiter were unreachable for this pass |
+| `HEX_GUEST_MEMORY_MIB` default | `min_memory_mib(ARCH)` + 2 × 284 = 632 MiB (aarch64) | crates/hex-cli/tests/guest_real.rs (`PEAK_MIB`) | b | bench/native/guest/peak-rss/RECORD.md: the VM's peak RSS under HEX-GUEST-19, the most of 3 runs on HVF. ×2 is the parent's stated margin, as C's guest_tree takes. x86_64 isn't measured yet (fedora and jupiter down) |
 | guest vcpus / memory_mib, walk 600 s, `take(40)`, `ANSWER_PATIENCE` | — | crates/hex-cli/tests/guest_tree.rs | C | C's file. Line 318 was edited here on the parent's word, because the link no longer takes a patience (HEX-GUEST-33) |
 | `SUITE` | gone: `PER_TEST` × the Linux record's tests | crates/hex-cli/tests/guest_validation.rs:41, :271 | c | inside.sh's `timeout 60` per test (bench/oci-validation/inside.sh:16) times the rows of results-hex-linux.tsv: the lab's own bound |
 | `HEX_GUEST_CPUS` default | the host's CPUs | guest_validation.rs:238 | a | as above |
-| `HEX_GUEST_MEMORY_MIB` default | 4096 | guest_validation.rs:239 | d | Not yet measured; converted by the same peak-RSS run under the OCI validation's workload (HEX-GUEST-20) |
-| poll interval | 500 ms | guest_validation.rs:285 | d | `hex_api::Runtime` has no wait for a box's end, so the test samples `inspect`. The period only sets how late the test sees an end that has already happened. It goes once the seam can wait on a box (a seam change, the runtime seam's owner's) |
+| `HEX_GUEST_MEMORY_MIB` default | `min_memory_mib(ARCH)` + 2 × 975 = 2014 MiB (aarch64) | guest_validation.rs (`PEAK_MIB`) | b | the same record, under HEX-GUEST-20. At 2014 MiB it passes with the record's 28 of 58 |
+| poll interval | 500 ms | guest_validation.rs:285 | d | A gap in `hex_api`: nothing in the seam ends with a box's init that a caller can block on. `Runtime` has `inspect`/`list`, whose `BoxInfo.exit` is set once the init has ended, but no blocking wait. `BoxSpec` (id, bounds, class) gives the init no stdio, so the test can't wait on its stdout closing as an exec's caller can. The lab's results file lands on a share, which is only a file to poll. So the test samples `inspect`, and the period only sets how late it sees an end that has already happened. It goes once the seam has a box-end wait (e.g. `Runtime::wait(id, timeout)`, as `Proc::wait_for` is for an exec), the runtime seam's owner's change |
 | sim guest vcpus / memory | 1 / `min_memory_mib(ARCH)` | crates/hex-cli/tests/node_socket.rs:490 | c | Shards' least guest (`shards_api::check`; min_memory_mib cites shards-vmm vm/{aarch64,x86_64}.rs:28) |
 
 ## hex-client
@@ -148,7 +149,7 @@ Behaviour fixed on the way:
 | handshake timeout 5 s | gone | boot_check.py | fact | one handshake after ready; the VM's end closes the socket |
 | backoff 0.01→0.5 s | gone | boot_check.py | fact | no retries: the console line says the relay listens |
 | OK line cap 64 B | `len("OK 4294967295\n")` = 14 | boot_check.py:25 | c | Firecracker docs/vsock.md, "Host-Initiated Connections" |
-| VM size | 2 vCPU / 1024 MiB | boot_check.py:84 | d | Kept at the record's size (bench/native/guest/aarch64/RECORD.md) until the guest's least is measured by the peak-RSS run above. Shards' 64/128 MiB floor is too small for this image's two copies of `/init` |
+| VM size | the host's CPUs / least + 2 × 284 MiB | scripts/guest/boot_check.py (`PEAK_MIB`, `guest_memory_mib`) | a / b | `os.cpu_count()`; HEX-GUEST-19's peak record, as a boot is part of that workload |
 | terminate grace 10 s | 10 s | boot_check.py:117 | c | Shards' own `STOP_GRACE` (crates/shards/src/daemon.rs:228-231, dockerd's default stop timeout), which `shards_api::STOP_GRACE` now names |
 | `panic=-1` copy | -1 | boot_check.py:31 | c | kernel-parameters.txt |
 | `BENCH_MEMORY` 8g / `BENCH_OOM` 1000 / `CARGO_BUILD_JOBS` 4 | — | scripts/guest/build.sh:41, :87 | c | The lead's shared fedora limits (hex-slot; the T7 fedora-unit-limits rule): an operator's limit on a shared host |
@@ -184,10 +185,8 @@ Behaviour fixed on the way:
 
 ## The (d) rows left, and why
 
-1. **Real guest memory: guest_real 1024 MiB, guest_validation 4096 MiB, boot_check 1024 MiB / 2 vCPUs.** These
-   need the guest's measured peak under each workload. That means real guests on the Mac and on jupiter, which
-   this pass couldn't reach. The method is above. The value must never fall below the measured peak.
-2. **guest_validation's 500 ms sample period.** The seam can't wait on a box's end. Removing it means adding
-   that wait to `hex_api::Runtime`, a seam change that isn't step 5's to make.
-3. **The relied-on (d)s** (`ANSWER_PATIENCE`, `MAX_LIST`, `serve::LIMITS`, `MAX_CONFIG_BYTES`, `MAX_BOXES`, the
+1. **guest_validation's 500 ms sample period.** `hex_api` has no blocking wait for a box's end: `BoxInfo.exit`
+   is read by `inspect`, and a box's init has no stdio through the seam. Removing the period means adding that
+   wait to `hex_api::Runtime`, a seam change that isn't step 5's to make.
+2. **The relied-on (d)s** (`ANSWER_PATIENCE`, `MAX_LIST`, `serve::LIMITS`, `MAX_CONFIG_BYTES`, `MAX_BOXES`, the
    pre-hello limits) are other steps'. Step 5 now uses each one where it is correct, or no longer uses it.

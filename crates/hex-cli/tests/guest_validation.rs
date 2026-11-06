@@ -14,7 +14,7 @@
 //!   on Windows necessarily (§4a), its tarball (lab.sh's fourth argument), to which this adds `/opt/hex`;
 //! - `HEX_GUEST_RUNTIME_TOOLS`: runtime-tools built for the guest's arch (runtime_tools.sh), unpacked;
 //! - `HEX_GUEST_VALIDATION_OUT`: an empty directory for the results;
-//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs, `shards_api::max_vcpus`, and 4096).
+//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs, `shards_api::max_vcpus`, and Shards' least plus twice `PEAK_MIB`).
 //!
 //! Run: `cargo test -p hex-cli --test guest_validation -- --nocapture` with those set.
 #![allow(
@@ -35,6 +35,10 @@ use std::time::{Duration, Instant};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Runtime};
 use hex_runtime::guest::shares::{SHARES, Share};
 use hex_runtime::guest::{GuestConfig, GuestRuntime};
+
+/// The guest VM process's peak resident set under this test's workload, in MiB, the most of three runs
+/// (HEX-GUEST-20 on adas-mac-studio.local-2, aarch64 HVF, 2026-11-06; bench/native/guest/peak-rss/RECORD.md).
+const PEAK_MIB: u64 = 975;
 
 /// The most inside.sh gives one test (`timeout 60`, bench/oci-validation/inside.sh:16): the suite's
 /// longest run is this for each test the Linux record holds, the lab's own bound.
@@ -236,7 +240,12 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         // fastest run, as a vCPU costs nothing while it idles.
         vcpus: std::env::var("HEX_GUEST_CPUS")
             .map_or_else(|_| shards_api::max_vcpus(), |v| v.parse().unwrap()),
-        memory_mib: number("HEX_GUEST_MEMORY_MIB", 4096),
+        // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
+        // C's guest_tree takes, stated as a factor, never below what was measured.
+        memory_mib: number(
+            "HEX_GUEST_MEMORY_MIB",
+            shards_api::min_memory_mib(std::env::consts::ARCH) + 2 * PEAK_MIB,
+        ),
         shares: vec![
             Share {
                 dir: runtime_tools.clone(),

@@ -15,6 +15,7 @@ backs, which must end the guest.
 """
 
 import os
+import platform
 import socket
 import subprocess
 import sys
@@ -60,6 +61,17 @@ def handshake(path):
         conn.close()
 
 
+# HEX-GUEST-19's guest VM peak resident set, the most of three runs, in MiB (a boot is part of its workload;
+# bench/native/guest/peak-rss/RECORD.md), and Shards' least guest by architecture (shards_api::min_memory_mib).
+PEAK_MIB = 284
+
+
+def guest_memory_mib():
+    """Shards' least guest and twice the measured peak, as hex-cli's guest_real takes."""
+    least = 64 if platform.machine() in ("arm64", "aarch64") else 128
+    return least + 2 * PEAK_MIB
+
+
 def values(argv, flag):
     return [argv[i + 1] for i, word in enumerate(argv) if word == flag]
 
@@ -79,10 +91,8 @@ def main(argv):
     vsock = os.path.join(work, "vsock.sock")
     if os.path.exists(vsock):
         os.unlink(vsock)
-    # Shards' least guest that boots this image is not yet measured: these stay the record's size
-    # (bench/native/guest/aarch64/RECORD.md) until it is (docs/research/runtime/shards-guest-constants.md).
     args = [shards, "run", "vm", "--kernel", kernel, "--initrd", initrd, "--vsock", vsock,
-            "--cpus", "2", "--memory", "1024", "--cmdline", cmdline]
+            "--cpus", str(os.cpu_count()), "--memory", str(guest_memory_mib()), "--cmdline", cmdline]
     for share in shares:
         args += ["--share", share]
     print("running:", " ".join(args), flush=True)
