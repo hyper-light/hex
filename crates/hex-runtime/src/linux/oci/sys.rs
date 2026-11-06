@@ -1091,6 +1091,11 @@ pub struct Attached {
     pub ids: Vec<u32>,
 }
 
+/// How many ids a query of a cgroup holding `count` device programs reads.
+fn ids_to_read(count: u32) -> usize {
+    usize::try_from(count).map_or(0, |n| n.min(MAX_QUERIED))
+}
+
 /// The device programs attached to the cgroup whose directory is open as `cgroup` (`BPF_PROG_QUERY`,
 /// which needs CAP_NET_ADMIN or CAP_SYS_ADMIN and takes the kernel's `cgroup_mutex`: a node asks it at
 /// its start, never per create).
@@ -1123,7 +1128,7 @@ pub fn attached_device_programs(cgroup: std::os::fd::BorrowedFd<'_>) -> Result<A
     if r != 0 && err.raw_os_error() != Some(libc::ENOSPC) {
         return Err(OciError::os("querying a cgroup's device programs", err));
     }
-    let read = usize::try_from(attr.prog_cnt).map_or(0, |n| n.min(ids.len()));
+    let read = ids_to_read(attr.prog_cnt).min(ids.len());
     Ok(Attached {
         flags: attr.attach_flags,
         count: attr.prog_cnt,
@@ -1511,4 +1516,21 @@ pub fn listmount(_parent: u64, _last: u64, _ids: &mut [u64]) -> Result<usize, ru
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn statmount(_id: u64, _mask: u64, _buf: &mut [u8]) -> Result<(), rustix::io::Errno> {
     Err(rustix::io::Errno::NOSYS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ada's 2026-11-06 rule (AC-T7.1.4, decision 2's device programs): do size a query for cgroups the kernel says
+    /// hold 1, 9 (past the 8 once picked) and 65 programs; expect room for every one of them, up to the kernel's own
+    /// cap on one cgroup's programs, 64, and no more.
+    #[test]
+    fn a_query_reads_every_program_the_kernel_can_attach() {
+        assert_eq!(ids_to_read(0), 0);
+        assert_eq!(ids_to_read(1), 1);
+        assert_eq!(ids_to_read(9), 9);
+        assert_eq!(ids_to_read(64), 64);
+        assert_eq!(ids_to_read(65), 64);
+    }
 }
