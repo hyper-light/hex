@@ -117,8 +117,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
   member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
   `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
-  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
-  time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
+  membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit;
+  `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members;
   `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing and `sysctlbyname("kern.maxprocperuid")` is a box-user box's default process cap; `getrusage`
