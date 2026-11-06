@@ -971,7 +971,7 @@ impl Runtime {
                     &Command::spawn,
                 )
             }),
-            Start::Seed(seeds) => self.start_seeded(
+            Start::Seed(seeds) => match self.start_seeded(
                 &making,
                 &spec,
                 &cgroup,
@@ -983,7 +983,27 @@ impl Runtime {
                     parked,
                     chooser: chosen_by,
                 },
-            ),
+            ) {
+                // No seed came free and nothing of the create was made: it goes through the shim, the ordinary
+                // path, counted, rather than fail its caller (the lead's rule of 2026-11-06). What was made ahead
+                // for the seed went with its request, so the shim makes its namespaces and `/dev` on the path.
+                Err(OciError::NoSeed(_)) => {
+                    seeds.classic(ClassicReason::NoSeed);
+                    self.start_shim(
+                        &making,
+                        &spec,
+                        &cgroup,
+                        Ahead {
+                            network: None,
+                            dev: None,
+                            masked_directory: None,
+                        },
+                        ShimStdio::Null,
+                        &Command::spawn,
+                    )
+                }
+                other => other,
+            },
         });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.

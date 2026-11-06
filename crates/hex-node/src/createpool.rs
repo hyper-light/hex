@@ -954,9 +954,14 @@ fn refused(r: Refused, start_failure: Option<&str>) -> OciError {
         Some(cause) => format!("{r}; the last create seed start failed: {cause}"),
         None => r.to_string(),
     };
-    OciError::Os {
-        op: "create via a seed",
-        why,
+    match r {
+        // No seed was handed the create, so nothing of it was made: declined, for the runtime to make it the
+        // ordinary way (the lead's rule of 2026-11-06: no caller failure where an alternative exists).
+        Refused::Busy { .. } | Refused::Waited { .. } => OciError::NoSeed(why),
+        Refused::Died { .. } | Refused::Hung { .. } => OciError::Os {
+            op: "create via a seed",
+            why,
+        },
     }
 }
 

@@ -71,7 +71,9 @@ impl Patience {
     /// to the census where one is installed.
     pub fn answered(&self, took: Duration) {
         self.seen.fetch_max(stored(took), Ordering::Relaxed);
-        let _ = CENSUS.get();
+        if let Some(sink) = CENSUS.get() {
+            sink(self.name, took);
+        }
     }
 
     /// The wait's name.
