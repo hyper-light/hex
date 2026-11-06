@@ -389,3 +389,49 @@ fn every_missing_guest_input_is_named_in_one_refusal() {
     assert_eq!(config.spec().binary, Some(PathBuf::from("/opt/shards")));
     assert_eq!(config.shares.len(), 1);
 }
+
+/// One value of a spec broken, as HEX-RT-13 breaks them.
+type Break = fn(&mut OciSpec);
+
+/// HEX-RT-13 through the guest (found by HEX-GUEST-19 on studio-2): create oci boxes whose specs break
+/// one value each (HEX-RT-13's), their bind source under no share: expect each refused as the spec's
+/// own Invalid naming the field, as on any node, before its sources are mapped to shares and before
+/// anything boots.
+#[test]
+fn an_unrenderable_spec_is_refused_by_its_field_before_its_shares_or_a_boot() {
+    let guests = Arc::new(NoGuest {
+        backend: Ok(shards_api::Backend::Kvm),
+        boots: AtomicUsize::new(0),
+    });
+    let runtime = GuestRuntime::new(guests.clone(), config());
+    let unshared = GuestConfig {
+        shares: vec![share(0, "/Users", false)],
+        ..config()
+    };
+    let unshared = GuestRuntime::new(guests.clone(), unshared);
+    let broken: [(&str, Break); 3] = [
+        ("mounts[0].destination", |s| {
+            s.mounts[0].destination = "data".to_owned();
+        }),
+        ("hostname", |s| s.hostname = Some("two words".to_owned())),
+        ("init.cwd", |s| s.init.cwd = Some("relative".to_owned())),
+    ];
+    for (field, break_it) in broken {
+        let mut spec = oci(
+            Rootfs::Dir(PathBuf::from("/hex-conformance/rootfs")),
+            vec![mount("/hex-conformance/data", "/data", true)],
+        );
+        let ClassSpec::Oci(o) = &mut spec.class else {
+            panic!("not oci");
+        };
+        break_it(o);
+        for rt in [&runtime, &unshared] {
+            let got = rt.create(spec.clone());
+            assert!(
+                matches!(&got, Err(Refusal::Invalid { what: "oci spec", why }) if why.contains(field)),
+                "{field}: {got:?}"
+            );
+        }
+    }
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
+}

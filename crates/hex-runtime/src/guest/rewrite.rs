@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hex_api::{BoxId, BoxSpec, ClassSpec, Refusal, Rootfs};
+use hex_api::{BoxId, BoxSpec, ClassSpec, OciSpec, Refusal, Rootfs};
 use hex_client::guest::stage::{Item, Source, staged_path};
 use serde_json::Value;
 
@@ -66,6 +66,53 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
         spec: BoxSpec { id, bounds, class },
         items,
     })
+}
+
+/// The spec's own refusals (HEX-RT-13), before its host paths are mapped or a guest is booted: every
+/// value but the host paths as [`OciSpec::check`] reads it on any node, with each host path stood in by
+/// `/`; and each host path as this host reads it (absolute here, UTF-8 and without a NUL, as the guest's
+/// config carries it), since `check` reads them as a Linux host's and a Windows host's are not.
+pub fn check(spec: &OciSpec) -> Result<(), Refusal> {
+    let root = || PathBuf::from("/");
+    let mut probe = spec.clone();
+    probe.rootfs = match &spec.rootfs {
+        Rootfs::Dir(_) => Rootfs::Dir(root()),
+        Rootfs::Layers(layers) => Rootfs::Layers(layers.iter().map(|_| root()).collect()),
+    };
+    for mount in &mut probe.mounts {
+        mount.source = root();
+    }
+    probe.check()?;
+    let mut paths: Vec<(String, &Path)> = match &spec.rootfs {
+        Rootfs::Dir(dir) => vec![("rootfs.dir".to_owned(), dir.as_path())],
+        Rootfs::Layers(layers) => layers
+            .iter()
+            .enumerate()
+            .map(|(i, layer)| (format!("rootfs.layers[{i}]"), layer.as_path()))
+            .collect(),
+    };
+    paths.extend(
+        spec.mounts
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (format!("mounts[{i}].source"), m.source.as_path())),
+    );
+    for (field, path) in paths {
+        let invalid = |why: &str| Refusal::Invalid {
+            what: "oci spec",
+            why: format!("{field} {path:?} {why}"),
+        };
+        let text = path
+            .to_str()
+            .ok_or_else(|| invalid("isn't UTF-8, which config.json can't carry"))?;
+        if text.contains('\0') {
+            return Err(invalid("holds a NUL"));
+        }
+        if !path.is_absolute() {
+            return Err(invalid("isn't an absolute path"));
+        }
+    }
+    Ok(())
 }
 
 /// Adds `path` to stage as `name`, and returns its copy's path in the guest.

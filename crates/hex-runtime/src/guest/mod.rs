@@ -275,6 +275,10 @@ impl Runtime for GuestRuntime {
             });
         }
         spec.bounds.check()?;
+        // Refused as on any node, naming the field, before anything is mapped, staged or booted.
+        if let ClassSpec::Oci(oci) = &spec.class {
+            rewrite::check(oci)?;
+        }
         let id = spec.id.clone();
         let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged)?;
         let b = self.guest()?;
