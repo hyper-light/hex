@@ -19,10 +19,10 @@
 //! to start, while the thread adds more, up to the bound.
 //!
 //! Bounds (CLAUDE.md §2), each a typed refusal past it: at most [`hex_core::seeds::Limits::seeds`] seeds
-//! up or starting, [`Limits::waiting`] creates in line, a wait learned from the line's waits
-//! ([`Limits::wait`]), and a seed killed past the hang bound learned from its answers ([`Limits::hang`]):
-//! the shell's wait for a seed's answer ends where the core takes the seed for hung. A seed that dies, or a round trip that breaks, refuses its
-//! create by type and leaves its slot, which the thread starts again, counted.
+//! up or starting, [`Limits::waiting`] creates in line, a wait learned from the line's waits, and a seed
+//! killed past the hang bound learned from its answers: the shell's wait for a seed's answer ends where the
+//! core takes the seed for hung. A seed that dies, or a round trip that breaks, refuses its create by type
+//! and leaves its slot, which the thread starts again, counted.
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -33,7 +33,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hex_api::Refusal;
-use hex_core::patience::RFC_6298;
 use hex_core::seed::{Answer, Create, Failed, MountNamespace, Park};
 use hex_core::seeds::{Admit, Claim, Counts, Limits, Refused, SEEDS, SeedId, Seeds, Stale};
 use hex_runtime::linux::oci::run::{ClassicReason, CloneInit, CloneReq, Parked};
@@ -55,16 +54,14 @@ pub const SPARE: usize = 1;
 /// - [`SEEDS`] seeds.
 /// - [`crate::serve::WORKERS`] creates waiting at once: the most calls the node's socket runs at once, so no
 ///   create over the socket is refused for want of room in line.
-/// - The line's wait and the hang bound each RFC 6298's timer over the pool's own answers ([`RFC_6298`]: 1 s
-///   before any answer and at least, at most 60 s). A seed's clone of an init took 0.209 ms p50 and 0.989 ms max
-///   on fedora at concurrency 1 (`bench/competitive/probes/seed_path.md`, run 2), so the 1 s floor holds both
-///   while answers are that fast; answers slow enough to pass it (a host whose clones wait on `cgroup_mutex`)
-///   raise them, and a wait that runs out doubles the next, to 60 s.
+///
+/// The line's wait and the hang bound are learned by the core, each twice the slowest answer this pool has
+/// recorded. The hang bound's calibration read is the pool's first clone: a park where the node makes inits
+/// ahead, off every create's path, else the node's first create's; that one answer is waited for unbounded, and
+/// arms the bound for every clone after it.
 pub const LIMITS: Limits = Limits {
     seeds: SEEDS,
     waiting: crate::serve::WORKERS,
-    wait: RFC_6298,
-    hang: RFC_6298,
 };
 
 /// The node agent's create seeds. Dropped, it stops its starting thread and ends and reaps every seed it
@@ -306,7 +303,7 @@ impl CloneInit for CreatePool {
         let (create, fds) = message(req);
         let patience = self.shared.lock()?.seeds.deadlines().1;
         // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for, within
-        // the hang bound the seeds' answers taught.
+        // the hang bound the seeds' answers taught (the park that made it calibrated it, if nothing before had).
         match round_trip(socket.as_fd(), &create, &fds, patience) {
             Ok((_, _, made)) => {
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
@@ -361,7 +358,8 @@ impl Parker {
             Ok(false) => {
                 shared.hung(id, proc);
                 return Err(OciError::Broken(format!(
-                    "a create seed did not answer a park within {patience:?}"
+                    "a create seed did not answer a park within {:?}",
+                    patience.unwrap_or_default()
                 )));
             }
             Err(e) => Err(e),
@@ -374,8 +372,10 @@ impl Parker {
                 // Held from here, so ended and reaped if it never says it is parked, which it does within
                 // the hang bound the seeds' answers taught.
                 let parked = Parked::new(pid, pidfd, ours, flags);
+                // Its park was a seed's answer, so the hang bound is armed by now; were it not, the wait is
+                // a calibration read, unbounded.
                 let patience = shared.lock()?.seeds.deadlines().1;
-                parked.wait_parked(patience)?;
+                parked.wait_parked(patience.unwrap_or(Duration::MAX))?;
                 Ok(parked)
             }
             Ok((Answer::Refused { failed, why }, _)) => {
@@ -531,8 +531,8 @@ impl Shared {
     /// its spare, and not otherwise: a wake is a system call, and the woken thread takes the lock this
     /// create holds. Returns the seed and its checked-out process (its slot's `procs` entry taken until
     /// [`done`](Self::done) or [`died`](Self::died)), and how long the shell waits for its answer: until the
-    /// core takes it for hung.
-    fn acquire(&self) -> Result<(SeedId, Proc, Duration), OciError> {
+    /// core takes it for hung, or `None` while the hang bound is uncalibrated (this answer is its calibration).
+    fn acquire(&self) -> Result<(SeedId, Proc, Option<Duration>), OciError> {
         let mut inner = self.lock()?;
         // A seed that has served a create for the hang bound is taken for hung here, killed and its slot
         // freed for a restart, so a wedged seed never holds a slot for ever.
@@ -556,11 +556,17 @@ impl Shared {
                 Claim::Refused(r) => return Err(refused(r, inner.start_failure.as_deref())),
                 Claim::Wait { until } => until,
             };
-            let left = until.saturating_sub(self.now());
-            let (guard, _timed_out) = self.free.wait_timeout(inner, left).map_err(|_| {
+            fn poisoned<T>(_: T) -> OciError {
                 OciError::Broken("the create seed pool's lock was poisoned".to_owned())
-            })?;
-            inner = guard;
+            }
+            // An uncalibrated line's wait lasts until a seed is handed to it: the line's calibration read.
+            inner = match until {
+                Some(until) => {
+                    let left = until.saturating_sub(self.now());
+                    self.free.wait_timeout(inner, left).map_err(poisoned)?.0
+                }
+                None => self.free.wait(inner).map_err(poisoned)?,
+            };
         }
     }
 
@@ -569,12 +575,10 @@ impl Shared {
         &self,
         inner: &mut Inner,
         id: SeedId,
-    ) -> Result<(SeedId, Proc, Duration), OciError> {
-        let until = inner
-            .seeds
-            .until(id)
-            .ok_or_else(|| OciError::Broken(format!("create seed {id} serves no create")))?;
-        Ok((id, take(inner, id)?, until.saturating_sub(self.now())))
+    ) -> Result<(SeedId, Proc, Option<Duration>), OciError> {
+        let until = inner.seeds.until(id).map_err(stale)?;
+        let now = self.now();
+        Ok((id, take(inner, id)?, until.map(|u| u.saturating_sub(now))))
     }
 
     /// Takes each seed past the hang bound over its create, killing and reaping it and freeing its slot;
@@ -715,7 +719,10 @@ fn start_seeds(shared: &Shared) {
             // refusals of the creates that find no seed meanwhile, each at its wait's end.
             Err(e) => {
                 inner.start_failure = Some(e.to_string());
-                let _ = inner.seeds.start_failed(id);
+                // With no seed up or starting, the core refuses the creates in line: woken to say why.
+                if matches!(inner.seeds.start_failed(id, shared.now()), Ok(true)) {
+                    shared.wake_line();
+                }
             }
         }
     }
@@ -797,17 +804,19 @@ enum Trip {
 
 /// Sends the create and its descriptors to the seed and reads the answer: the init's pid and pidfd, or a
 /// refusal. The wait for the answer is bounded by `patience`, what is left of the hang bound the core
-/// learned, so a wedged seed is taken for hung rather than waited on for ever (CLAUDE.md §2, §4).
+/// learned, so a wedged seed is taken for hung rather than waited on for ever (CLAUDE.md §2, §4); `None`
+/// only for the pool's calibration read, its first answer.
 fn round_trip(
     socket: BorrowedFd<'_>,
     create: &Create,
     fds: &[BorrowedFd<'_>],
-    patience: Duration,
+    patience: Option<Duration>,
 ) -> Result<(i32, OwnedFd, MountNamespace), Trip> {
     rt_seed::send_create(socket, create, fds).map_err(Trip::Broken)?;
     if !readable(socket, patience).map_err(Trip::Broken)? {
         return Err(Trip::Hung(OciError::Broken(format!(
-            "a create seed did not answer within {patience:?}"
+            "a create seed did not answer within {:?}",
+            patience.unwrap_or_default()
         ))));
     }
     let (answer, pidfd) = rt_seed::recv_answer(socket).map_err(Trip::Broken)?;
@@ -845,19 +854,19 @@ fn round_trip(
     }
 }
 
-/// Whether `fd` turns readable within `patience`.
-fn readable(fd: BorrowedFd<'_>, patience: Duration) -> Result<bool, OciError> {
-    let deadline = Instant::now().checked_add(patience);
+/// Whether `fd` turns readable within `patience`; with none (a calibration read) it waits until it does.
+fn readable(fd: BorrowedFd<'_>, patience: Option<Duration>) -> Result<bool, OciError> {
+    let deadline = patience.and_then(|p| Instant::now().checked_add(p));
     loop {
-        let left = deadline.map_or(patience, |d| d.saturating_duration_since(Instant::now()));
-        let ts = Timespec {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let ts = left.map(|left| Timespec {
             tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
             tv_nsec: i64::from(left.subsec_nanos()),
-        };
+        });
         let mut fds = [PollFd::new(&fd, PollFlags::IN)];
-        match rustix::event::poll(&mut fds, Some(&ts)) {
+        match rustix::event::poll(&mut fds, ts.as_ref()) {
             Ok(n) if n > 0 => return Ok(true),
-            Ok(_) if left.is_zero() => return Ok(false),
+            Ok(_) if left.is_some_and(|l| l.is_zero()) => return Ok(false),
             Ok(_) | Err(rustix::io::Errno::INTR) => {}
             Err(e) => return Err(OciError::os("poll on a create seed's socket", e)),
         }
@@ -888,7 +897,6 @@ fn stale(s: Stale) -> OciError {
 mod tests {
     use super::*;
     use hex_api::conformance::PATIENCE;
-    use hex_core::patience::Bounds;
 
     /// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
     /// [`PATIENCE`], the longest a case waits for a fact: past it the test fails naming `what`.
@@ -928,9 +936,9 @@ mod tests {
 
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
-    /// seed under the node's own bounds, whose first wait is RFC 6298's 1 s. Expect: the create is refused
-    /// by type after the wait, naming the wait that ran out and the failed start's cause, not only that no
-    /// seed came free.
+    /// seed under the node's own bounds, its line's wait uncalibrated. Expect: the create is refused by
+    /// type once the start it asked for fails too (no seed is up or starting, so none can come), naming
+    /// the failed start's cause, not only that no seed came free; never left waiting.
     #[test]
     fn a_pool_whose_seeds_cannot_start_names_why_it_refuses() {
         let pool = CreatePool::new(
@@ -972,7 +980,6 @@ mod tests {
     fn a_create_wakes_the_starting_thread_only_for_a_seed_to_start() {
         let limits = Limits {
             seeds: std::num::NonZeroUsize::new(2).unwrap(),
-            wait: Bounds::fixed(PATIENCE),
             ..LIMITS
         };
         let pool = CreatePool::with_limits(
@@ -1014,15 +1021,14 @@ mod tests {
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the
-    /// hand-off and not by its wait's end. Do: open a pool of one slot whose creates wait twice the test's
-    /// patience; take its seed; ask for another from a thread of the test's, and once that create waits in
-    /// line, give the first back. Expect: the waiting create is handed the seed given back (the test waits
-    /// its patience for it, the create twice that, so a hand-off that woke no one fails).
+    /// hand-off and not by its wait's end. Do: open a pool of one slot, whose line's wait is uncalibrated, so
+    /// a create in it waits for a wake alone; take its seed; ask for another from a thread of the test's, and
+    /// once that create waits in line, give the first back. Expect: the waiting create is handed the seed
+    /// given back within the test's patience (a hand-off that woke no one fails).
     #[test]
     fn a_seed_given_back_goes_at_once_to_the_create_in_line() {
         let limits = Limits {
             seeds: std::num::NonZeroUsize::new(1).unwrap(),
-            wait: Bounds::fixed(PATIENCE.saturating_mul(2)),
             ..LIMITS
         };
         let pool = CreatePool::with_limits(

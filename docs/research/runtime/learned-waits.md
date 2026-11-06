@@ -1,35 +1,29 @@
-# Learned waits: RFC 6298's timer for the node's waits, and the limits beside them
+# Learned waits: twice the slowest answer, and the limits beside them
 
 Source notes for decision 9 of `docs/design/runtime-architecture.md` (Ada's rule of 2026-11-06: no picked
-constants; values learned at runtime, derived from a named record, or cited limits).
+constants; values learned at runtime, derived from a named record, or cited limits; and the lead's failure-bound
+rule of the same day).
 
-## RFC 6298, "Computing TCP's Retransmission Timer" (Paxson, Allman, Chu, Sargent; June 2011)
+## The failure-bound rule (the lead, 2026-11-06)
 
-https://www.rfc-editor.org/rfc/rfc6298, §2-§5. The rules `hex_core::patience` follows, as the RFC numbers them:
+A wait lasts twice the slowest answer recorded on this node, a running maximum; a node with no samples makes one
+calibration read at start before arming the bound, as goal 5's disk probe does; no picked floor or initial value.
+A timeout then needs an answer more than twice slower than any seen. RFC 6298's estimator was the first draft's
+basis; the lead ruled its floor (1 s) and its constants (K = 4, alpha 1/8, beta 1/4) were chosen for TCP's clocks
+and paths and don't carry over, so it is not cited as a basis.
 
-- (2.1) Before any RTT measurement, RTO is set to 1 second, the back-off of (5.5) still applying.
-- (2.2) On the first measurement R: SRTT <- R, RTTVAR <- R/2, RTO <- SRTT + max(G, K*RTTVAR) with K = 4.
-- (2.3) On each later R': RTTVAR <- (1 - beta)*RTTVAR + beta*|SRTT - R'|, then SRTT <- (1 - alpha)*SRTT + alpha*R',
-  with alpha = 1/8 and beta = 1/4 (after Jacobson and Karels); RTTVAR is updated with the SRTT before.
-- (2.4) An RTO under 1 second SHOULD be rounded up to 1 second.
-- (2.5) A maximum value MAY be placed on RTO provided it is at least 60 seconds.
-- §3, Karn's algorithm: RTT samples MUST NOT be taken from retransmitted segments, whose answer is ambiguous. Hex's
-  analogue: no sample from a create whose seed died or was taken for hung, nor from a wait that ran out.
-- (5.5) When the timer expires, RTO <- RTO*2 ("back off the timer"), bounded by the (2.5) maximum; §5's note after
-  (5.7): a new measurement recomputes RTO per §2, which may collapse it after back-off.
+Karn's point is kept from Karn and Partridge ("Improving Round-Trip Time Estimates in Reliable Transport
+Protocols", SIGCOMM '87; RFC 6298 §3 states it for TCP): a sample is taken only from an answer whose wait is
+unambiguous. Here: no sample from a wait that ran out, nor from a seed that died or was taken for hung.
 
-What carries over and what doesn't: TCP times a peer across a network; Hex times its own kernel and its own child
-processes. The estimator's form (an EWMA of the mean and of the mean deviation, the wait four deviations past the
-mean) is about any answer time with a shifting mean and spread; the 1 s floor is the RFC's guard against a wait
-that ends before a slow but healthy answer, the same asymmetry Hex has (a refused create or killed seed costs more
-than a late detection of a hung one).
+## What Hex's own records say about the spread a running maximum must cover
 
-## Allman and Paxson, "On Estimating End-to-End Network Path Properties", SIGCOMM '99
+`bench/competitive/probes/seed_path.md`, run 2 (fedora, concurrency 1): a seed's clone of an init p50 0.209 ms,
+p90 0.262, p99 0.856, max 0.989 ms; run 1: max 15.778 ms against a p50 of 0.256. A bound calibrated on one p50-like
+read (2 × 0.209 = 0.418 ms) sits under that run's p99; it is the slowest answer seen that sets the bound, so the
+calibration read's own place in the distribution decides how soon the bound is wide enough.
 
-§3 evaluates retransmission-timer variants on traces and finds the minimum RTO the dominant factor in avoiding
-spurious timeouts; the 1 s minimum RFC 6298 (2.4) adopts comes from it.
-
-## Linux: pid_max
+## Linux: pid_max, /proc/self/fd, RLIMIT_NOFILE
 
 Documentation/admin-guide/sysctl/kernel.rst, "pid_max": the PID allocation wrap value; no task holds a pid at or
 past it, so the threads a box's cgroups list are at most `pid_max` (read at runtime from

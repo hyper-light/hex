@@ -914,9 +914,10 @@ fn end_and_remove(cg: &BoxCgroup) -> Result<(), Refusal> {
         return Ok(());
     }
     if cg.populated()? {
+        let killed = std::time::Instant::now();
         cg.kill()?;
         // The same learned wait as a delete's for its box to empty, which this answer teaches too.
-        let (emptied, patience) = crate::node::wait_empty(cg)?;
+        let (emptied, patience) = crate::node::wait_empty(cg, killed)?;
         if !emptied {
             return Err(Refusal::Os {
                 op: "removing an idle cgroup",

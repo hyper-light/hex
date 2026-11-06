@@ -28,7 +28,7 @@ use hex_api::{
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
-use hex_core::patience::{Patience, RFC_6298};
+use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
@@ -58,37 +58,40 @@ use crate::turns::{Turn, Turns};
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
 const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 
-/// How long a wait for a killed box to empty lasts (decision 9; Ada's 2026-11-06 rule): RFC 6298's timer
-/// over how long the waits before it took, from every delete, scrub and removal of this process's nodes,
-/// since all wait on one kernel ([`RFC_6298`]'s bounds: 1 s before any and at least, 60 s at most). A
-/// `cgroup.kill` empties a box in milliseconds, so the floor holds it while the host is well; a wait that
-/// runs out is a fault to report (the kernel is wedged), not a limit to raise (CLAUDE.md §4), and doubles
-/// the next. Its programs' reaping and its init's end, which a box's emptying waits on, take the same wait.
-static EMPTYING: Mutex<Patience> = Mutex::new(Patience::new(RFC_6298));
+/// How long a killed box takes to empty, from its kill (decision 9; Ada's 2026-11-06 rule, the lead's
+/// failure-bound rule): twice the slowest emptying recorded by this process's nodes, from every delete, scrub
+/// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
+/// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
+/// emptying waits on, share the wait. The calibration read is the first emptying a node waits for, unbounded:
+/// a recovery's scrub of a stray slot at start where there is one, else the first delete's. An emptying made
+/// only to calibrate would be of a cgroup with nothing in it, which empties at once and so would arm a bound
+/// no kill of a running box meets.
+static EMPTYING: Mutex<Patience> = Mutex::new(Patience::new());
 
-/// How long the next wait for a killed box to empty lasts, as learned ([`EMPTYING`]).
-pub(crate) fn empty_patience() -> Duration {
+/// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
+/// `Duration::MAX`, unbounded, while it is uncalibrated.
+pub(crate) fn empty_patience(killed: Instant) -> Duration {
     EMPTYING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .deadline()
+        .map_or(Duration::MAX, |wait| wait.saturating_sub(killed.elapsed()))
 }
 
-/// Waits for `cg`, killed, to empty within the learned wait ([`EMPTYING`]), which its answer teaches: the
-/// time it took when it emptied, a back-off when it didn't. Says whether it emptied, and the wait it had.
-pub(crate) fn wait_empty(cg: &BoxCgroup) -> Result<(bool, Duration), Refusal> {
-    let patience = empty_patience();
-    let began = Instant::now();
-    let emptied = cg.wait_empty(patience)?;
-    let mut learned = EMPTYING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+/// Waits for `cg`, killed at `killed`, to empty within the learned wait ([`EMPTYING`]), which it teaches
+/// when it empties: the time from its kill. Says whether it emptied, and the wait it had from the kill.
+pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Duration), Refusal> {
+    let learned = || {
+        EMPTYING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let wait = learned().deadline();
+    let emptied = cg.wait_empty(empty_patience(killed))?;
     if emptied {
-        learned.answered(began.elapsed());
-    } else {
-        learned.expired();
+        learned().answered(killed.elapsed());
     }
-    Ok((emptied, patience))
+    Ok((emptied, wait.unwrap_or(Duration::MAX)))
 }
 
 /// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
@@ -96,13 +99,15 @@ pub(crate) fn wait_empty(cg: &BoxCgroup) -> Result<(bool, Duration), Refusal> {
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
-/// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
-/// runtime directory is shared with every node of this user on the host, so its entries are theirs as
-/// well as this node's. RFC 6298's timer over the listings before it (decision 9; Ada's 2026-11-06 rule):
-/// a recovery lists several directories, each listing a sample for the next, and the first waits
-/// [`RFC_6298`]'s first 1 s. A listing that runs out refuses the recovery by type and doubles the next
-/// wait, so a restart that retries meets a longer one, to 60 s (CLAUDE.md §2, §4).
-static LISTING: Mutex<Patience> = Mutex::new(Patience::new(RFC_6298));
+/// How long [`Node::recover`] spends on each entry of a directory it lists for the parts of boxes before it
+/// refuses: the runtime directory is shared with every node of this user on the host, so its entries are
+/// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
+/// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
+/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). The
+/// calibration read is recovery's first listing, the state directory's, unbounded but for its entries, which
+/// are finite: a directory listed only to calibrate would be an empty one, whose time is the call's own and no
+/// entry's, so it would measure nothing the listings after it spend.
+static LISTING: Mutex<Patience> = Mutex::new(Patience::new());
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -209,8 +214,9 @@ pub struct Node {
     /// for the create under way and then finds the box made or not, rather than make or remove parts at
     /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
     /// at once, the node's box budget, a wait learned from how long creates and deletes held their turns
-    /// (decision 9: RFC 6298's timer, [`RFC_6298`]'s bounds); past either the call is refused by type, a
-    /// create past the budget as [`Refusal::Full`] ([`create_turn`]).
+    /// (decision 9: twice the longest held; the first create's or delete's is the calibration, and a wait
+    /// before it lasts until the turn is let go); past either the call is refused by type, a create past
+    /// the budget as [`Refusal::Full`] ([`create_turn`]).
     turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
@@ -340,7 +346,6 @@ impl Node {
             turns: Turns::new(
                 "making or removing a box",
                 "creates and deletes under way",
-                RFC_6298,
                 MAX_BOXES,
             ),
             #[cfg(debug_assertions)]
@@ -871,8 +876,9 @@ impl Node {
         // removed first, so nothing of them is left (T-T7.1.2).
         for n in recovery::strays(&seen, &slots) {
             if let Some(cg) = self.oci_boxes.slot(n) {
+                let killed = Instant::now();
                 cg.kill()?;
-                let (emptied, patience) = wait_empty(&cg)?;
+                let (emptied, patience) = wait_empty(&cg, killed)?;
                 if !emptied {
                     let op = "removing an idle cgroup";
                     let mut why =
@@ -997,20 +1003,21 @@ impl Node {
         if let Ending::Init(init) = ending
             && init.pid_namespace
         {
+            let killed = Instant::now();
             init.kill()?;
-            let patience = empty_patience();
-            self.supervisor.reap_programs(id, patience)?;
-            if !init.ended_within(patience)? {
+            self.supervisor.reap_programs(id, empty_patience(killed))?;
+            if !init.ended_within(empty_patience(killed))? {
                 return Err(Refusal::Os {
                     op: "emptying a box",
                     why: format!(
-                        "box {id}'s init still runs {patience:?} after SIGKILL through its pidfd"
+                        "box {id}'s init still runs {:?} after SIGKILL through its pidfd",
+                        killed.elapsed()
                     ),
                 });
             }
             // The init leaves its cgroup at its last switch, after its pidfd reads as ended (Linux v6.19,
             // kernel/sched/core.c:5156), so a cgroup that holds nothing else empties without a kill.
-            if !cg.populated()? || (!outsiders(cg, init.pid()) && wait_empty(cg)?.0) {
+            if !cg.populated()? || (!outsiders(cg, init.pid()) && wait_empty(cg, killed)?.0) {
                 self.cgroups.ended_through_init();
                 return Ok(false);
             }
@@ -1018,12 +1025,13 @@ impl Node {
         } else {
             self.cgroups.killed();
         }
+        let killed = Instant::now();
         cg.kill()?;
         // The kill reaches every process in the box; now reap the exec'd programs the agent watches for
         // it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until the
         // programs in that namespace are reaped — can finish exiting and the box empty.
-        self.supervisor.reap_programs(id, empty_patience())?;
-        let (emptied, patience) = wait_empty(cg)?;
+        self.supervisor.reap_programs(id, empty_patience(killed))?;
+        let (emptied, patience) = wait_empty(cg, killed)?;
         if !emptied {
             let op = "emptying a box";
             let mut why = format!("box {id} still holds processes {patience:?} after cgroup.kill:");
@@ -1877,8 +1885,8 @@ fn why_text(why: &Why) -> String {
 
 /// The box ids named by the directories in `dir` whose names start with `prefix`, the rest of each name
 /// the id, or none when `dir` isn't there: a box's parts there are directories, so any other entry is no
-/// box's. The listing ends at the wait learned from the listings before it ([`LISTING`]), refused past it
-/// by type.
+/// box's. The listing ends at the wait learned from the listings before it, for as many entries as it has
+/// listed ([`LISTING`]), refused past it by type.
 fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
     let listing = |e| Refusal::os("listing a directory for boxes' parts", e);
     let entries = match fs::read_dir(dir) {
@@ -1891,18 +1899,21 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
-    let patience = learned().deadline();
+    let per_entry = learned().deadline();
     let began = Instant::now();
-    let deadline = began.checked_add(patience);
+    let mut listed = 0u32;
     let mut ids = BTreeSet::new();
     for entry in entries {
-        if deadline.is_none_or(|d| Instant::now() >= d) {
-            learned().expired();
+        listed = listed.saturating_add(1);
+        if let Some(per_entry) = per_entry
+            && began.elapsed() > per_entry.saturating_mul(listed)
+        {
             return Err(Refusal::Os {
                 op: "listing a directory for boxes' parts",
                 why: format!(
-                    "{} was still being listed after {patience:?}",
-                    dir.display()
+                    "{} took {:?} for {listed} entries, past twice the slowest a listing has taken an entry",
+                    dir.display(),
+                    began.elapsed()
                 ),
             });
         }
@@ -1919,7 +1930,12 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             ids.insert(id);
         }
     }
-    learned().answered(began.elapsed());
+    learned().answered(
+        began
+            .elapsed()
+            .checked_div(listed.max(1))
+            .unwrap_or_default(),
+    );
     Ok(ids)
 }
 
@@ -2100,9 +2116,10 @@ mod tests {
         assert!(!fits(room + 1), "one byte past its room doesn't");
     }
 
-    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): a recovery's listing teaches the next its wait. Do: list a
-    /// directory holding two boxes' parts and a file. Expect: the two ids, and the listings' timer holding an
-    /// answer (RFC 6298 (2.2)), so the next listing waits what this one took, not only the first wait.
+    /// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; T-T7.1.2): a recovery's listing teaches
+    /// the next its wait. Do: list a directory holding two boxes' parts and a file. Expect: the two ids, and the
+    /// listings' slowest time per entry recorded, so the next listing's bound is armed (this one, or one before,
+    /// was its calibration read).
     #[test]
     fn a_listing_teaches_the_next_its_wait() {
         let dir = tempfile::tempdir().unwrap();
@@ -2111,7 +2128,7 @@ mod tests {
         fs::write(dir.path().join("hex-c"), b"").unwrap();
         let ids = ids_in(dir.path(), "hex-").unwrap();
         assert_eq!(ids.len(), 2, "{ids:?}");
-        assert!(LISTING.lock().unwrap().smoothed().is_some());
+        assert!(LISTING.lock().unwrap().slowest().is_some());
     }
 
     /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
@@ -2122,7 +2139,6 @@ mod tests {
         let turns = Turns::new(
             "making or removing a box",
             "creates and deletes under way",
-            RFC_6298,
             2,
         );
         let id = |n: &str| BoxId::new(n).unwrap();
