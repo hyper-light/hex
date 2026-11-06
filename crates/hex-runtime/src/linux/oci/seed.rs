@@ -486,18 +486,24 @@ pub fn exec_direct(
     // exec's p50 falls from 1.186–1.227 ms to 1.123–1.141. The child gives the pin back before anything
     // else, so the program never runs pinned, and the thread does after the clone.
     let pin = Pin::here();
+    // What the child failed at, if it did: written by the child into this thread's memory, which it
+    // shares, before it exits, and read once the vfork has let this thread go, so the kernel's E2BIG
+    // reaches the caller as a refusal, not as a program that ends 126 (HEX-RT-14).
+    let failed = std::cell::Cell::new(None);
     let child = || {
         if let Some(pin) = &pin {
             pin.release();
         }
-        program(
+        let (code, why) = program(
             &p.becoming,
             &p.launch,
             stdio,
             None,
             None,
             (p.init.as_fd(), rest),
-        )
+        );
+        failed.set(Some(why));
+        (code, why)
     };
     let cloned = STACK.with(|stack| -> Result<_, OciError> {
         let mut stack = stack
@@ -529,13 +535,36 @@ pub fn exec_direct(
         }
         return Err(e);
     }
-    match cloned? {
-        Some((pid, pidfd)) => {
+    match (cloned?, failed.get()) {
+        // The kernel refused the program's arguments and environment: this thread's stack limit is below
+        // what the node last read. The child has exited (the vfork waited for it); it is reaped here,
+        // and the limit read again, so the next exec is held to it before any clone.
+        (
+            Some((_, pidfd)),
+            Some(Failure {
+                errno: rustix::io::Errno::TOOBIG,
+                ..
+            }),
+        ) => {
+            let _reaped = rustix::process::waitid(
+                rustix::process::WaitId::PidFd(pidfd.as_fd()),
+                rustix::process::WaitIdOptions::EXITED,
+            )
+            .map_err(|e| OciError::os("reaping a program the kernel refused", e))?;
+            crate::linux::process::relearn_stack();
+            Err(OciError::Program(format!(
+                "execve refused its arguments and environment (E2BIG): this node's stack limit, read \
+                 again, allows {} bytes ({})",
+                crate::linux::process::exec_limit().block,
+                crate::linux::process::exec_limit().source
+            )))
+        }
+        (Some((pid, pidfd)), _) => {
             let pid = u32::try_from(pid)
                 .map_err(|_| OciError::os("clone3 the program", "a pid out of range"))?;
             Ok(Direct::Started(pid, pidfd))
         }
-        None => Ok(Direct::Unable(p.init)),
+        (None, _) => Ok(Direct::Unable(p.init)),
     }
 }
 
@@ -672,6 +701,9 @@ fn serve_exec(
         Ok(p)
     }) {
         Ok(prepared) => prepared,
+        // Past the exec bound this seed's own stack limit gives (HEX-RT-14): said as that, so the agent
+        // refuses the program by name and reads its own limit again.
+        Err(OciError::Program(why)) => return refused(Failed::Program, why),
         Err(e) => return refused(Failed::Start, e.to_string()),
     };
     match single_clone(prepared, stdio, pid_for) {

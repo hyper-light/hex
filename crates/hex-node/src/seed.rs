@@ -268,6 +268,13 @@ fn round_trip(
                 "a seed said a program started but sent no pidfd".to_owned(),
             ))),
         },
+        Answer::Refused {
+            failed: Failed::Program,
+            why,
+        } => Err(Trip::Refused(Refusal::Invalid {
+            what: "program",
+            why,
+        })),
         Answer::Refused { failed, why } => {
             let refusal = Refusal::Os {
                 op: "exec in a container",
@@ -277,7 +284,9 @@ fn round_trip(
                 Failed::Seed => Err(Trip::Broken(refusal)),
                 // `Unable` is a create's outcome (no clone3 into a cgroup), which an exec never meets;
                 // were it to, the seed is whole, so the exec is refused by type, not the seed replaced.
-                Failed::Request | Failed::Start | Failed::Unable => Err(Trip::Refused(refusal)),
+                Failed::Request | Failed::Start | Failed::Unable | Failed::Program => {
+                    Err(Trip::Refused(refusal))
+                }
             }
         }
     }
