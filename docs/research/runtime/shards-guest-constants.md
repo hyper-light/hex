@@ -34,12 +34,12 @@ tests.
 | final kind | Hex table rows | Shards table rows |
 |---|---|---|
 | fact | 13 | 1, plus parts of 1 |
-| a | 4, plus part of 1 | 1, plus parts of 1 |
+| a | 5, plus part of 1 | 1, plus parts of 1 |
 | b | 2, plus part of 1 | part of 1 |
 | c | 34 | 10, plus parts of 3 |
 | input | 5 | 2, plus parts of 2 |
 | relied on (another step's) | 10 | — |
-| d, left for Ada | 1 | 0 |
+| d, left for Ada | 0 | 0 |
 | C's (pointers to C's branch) | 7 | — |
 
 Behaviour fixed on the way:
@@ -72,7 +72,7 @@ Behaviour fixed on the way:
 | `SUITE` | gone: `PER_TEST` × the Linux record's tests | crates/hex-cli/tests/guest_validation.rs:41, :271 | c | inside.sh's `timeout 60` per test (bench/oci-validation/inside.sh:16) times the rows of results-hex-linux.tsv: the lab's own bound |
 | `HEX_GUEST_CPUS` default | the host's CPUs | guest_validation.rs:238 | a | as above |
 | `HEX_GUEST_MEMORY_MIB` default | `min_memory_mib(ARCH)` + 2 × 975 = 2014 MiB (aarch64) | guest_validation.rs (`PEAK_MIB`) | b | the same record, under HEX-GUEST-20. At 2014 MiB it passes with the record's 28 of 58 |
-| poll interval | 500 ms | guest_validation.rs:285 | d | A gap in `hex_api`: nothing in the seam ends with a box's init that a caller can block on. `Runtime` has `inspect`/`list`, whose `BoxInfo.exit` is set once the init has ended, but no blocking wait. `BoxSpec` (id, bounds, class) gives the init no stdio, so the test can't wait on its stdout closing as an exec's caller can. The lab's results file lands on a share, which is only a file to poll. So the test samples `inspect`, and the period only sets how late it sees an end that has already happened. It goes once the seam has a box-end wait (e.g. `Runtime::wait(id, timeout)`, as `Proc::wait_for` is for an exec), the runtime seam's owner's change |
+| poll interval | gone: re-read after as long as the last read took | crates/hex-cli/tests/guest_validation.rs (`reread`) | a | The lead's call: step 7's learned re-read (cp/t7-native-s7 `hex_api::differential::until`), so reading takes at most half the time, at a read's own cost (HEX-GUEST-35). Why it isn't a fact: `hex_api` has no blocking wait for a box's end. A box's init gets no stdio through the seam, and `inspect` reports `BoxInfo.exit` only after the end. `Runtime::wait(id, timeout)` is noted as a later seam improvement for every class |
 | sim guest vcpus / memory | 1 / `min_memory_mib(ARCH)` | crates/hex-cli/tests/node_socket.rs:490 | c | Shards' least guest (`shards_api::check`; min_memory_mib cites shards-vmm vm/{aarch64,x86_64}.rs:28) |
 
 ## hex-client
@@ -185,8 +185,7 @@ Behaviour fixed on the way:
 
 ## The (d) rows left, and why
 
-1. **guest_validation's 500 ms sample period.** `hex_api` has no blocking wait for a box's end: `BoxInfo.exit`
-   is read by `inspect`, and a box's init has no stdio through the seam. Removing the period means adding that
-   wait to `hex_api::Runtime`, a seam change that isn't step 5's to make.
-2. **The relied-on (d)s** (`ANSWER_PATIENCE`, `MAX_LIST`, `serve::LIMITS`, `MAX_CONFIG_BYTES`, `MAX_BOXES`, the
+None of step 5's own. What remains is other steps':
+
+1. **The relied-on (d)s** (`ANSWER_PATIENCE`, `MAX_LIST`, `serve::LIMITS`, `MAX_CONFIG_BYTES`, `MAX_BOXES`, the
    pre-hello limits) are other steps'. Step 5 now uses each one where it is correct, or no longer uses it.

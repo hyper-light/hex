@@ -448,6 +448,8 @@ Hex's tests of the channel, each citing its ID:
   any boot is seen (bench/native/guest/boot-ready/RECORD.md), then twice the slowest of the record's and the
   node's own, only rising; a guest alive and not ready within it is stopped, counted and booted once more, and
   only a second hang refuses its caller, by type (`hex_runtime::guest::GuestRuntime`).
+- HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
+  learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
 
 ## 7. What would falsify it
 

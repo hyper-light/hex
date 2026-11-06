@@ -278,21 +278,9 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         "../../../bench/oci-validation/results-hex-linux.tsv"
     ));
     let suite = PER_TEST * u32::try_from(linux.len()).unwrap();
-    let deadline = Instant::now() + suite;
-    let exit = loop {
-        let info = node.inspect(&id).expect("inspect the lab");
-        if let Some(exit) = info.exit {
-            break exit;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the lab ran past the suite's {suite:?}"
-        );
-        // The seam has no wait for a box's end (`hex_api::Runtime`), so the test samples it; the
-        // period only sets how late the test sees an end it already has (a (d) left for Ada in
-        // docs/research/runtime/shards-guest-constants.md until the seam can wait on a box).
-        std::thread::park_timeout(Duration::from_millis(500));
-    };
+    let read = || node.inspect(&id).expect("inspect the lab").exit;
+    let exit =
+        reread(suite, read).unwrap_or_else(|| panic!("the lab ran past the suite's {suite:?}"));
     eprintln!("the lab ended: {exit:?}");
     node.delete(&id).expect("delete the lab");
 
@@ -359,3 +347,63 @@ fn make_executable(path: &Path) {
 /// NTFS holds no mode: the packer stages every file 0755 from Windows.
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) {}
+
+/// Waits `d` at least: `park_timeout` may wake early, and `thread::sleep` is disallowed.
+fn rest(d: Duration) {
+    let Some(end) = Instant::now().checked_add(d) else {
+        return;
+    };
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::park_timeout(left);
+    }
+}
+
+/// Reads with `look` until it shows something, or `patience` has passed. The seam has no wait for a box's
+/// end (`hex_api::Runtime`: `inspect` reports it once it has come), so it is read again after waiting as
+/// long as the last read took, step 7's learned re-read (cp/t7-native-s7 `hex_api::differential::until`):
+/// at most half the time reading, at whatever a read costs here, and no picked interval.
+fn reread<T>(patience: Duration, mut look: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now().checked_add(patience);
+    loop {
+        let read = Instant::now();
+        let seen = look();
+        let took = read.elapsed();
+        if seen.is_some() || deadline.is_none_or(|d| Instant::now() >= d) {
+            return seen;
+        }
+        rest(took);
+    }
+}
+
+/// HEX-GUEST-35 (the lead's call: the poll follows the read's own time): read with a look that costs a
+/// measurable time and shows nothing until its fourth read. Expect each re-read to wait at least as
+/// long as the read before it took, and the fourth read's answer returned.
+#[test]
+fn a_reread_waits_as_long_as_the_last_read_took() {
+    let mut reads = Vec::new();
+    let got = reread(Duration::from_secs(60), || {
+        let start = Instant::now();
+        // A read that costs 600 ms, more than the fixed 500 ms the poll had, so that interval, or any
+        // fixed one shorter than a read, fails the relation below.
+        let mut x = 0u64;
+        while start.elapsed() < Duration::from_millis(600) {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+        reads.push((start, Instant::now()));
+        (reads.len() == 4).then_some(reads.len())
+    });
+    assert_eq!(got, Some(4));
+    for pair in reads.windows(2) {
+        let ((s0, e0), (s1, _)) = (pair[0], pair[1]);
+        assert!(
+            s1 - e0 >= e0 - s0,
+            "re-read after {:?}, the read took {:?}",
+            s1 - e0,
+            e0 - s0
+        );
+    }
+}
