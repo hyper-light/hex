@@ -53,7 +53,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' TERM INT
 MAINPID=$$
-WATCHDOG_SECS=1800
+# Twice the lab's recorded phases (18.950 s) plus each unrecorded phase's own guard, step 2's probe waits
+# (10.700 s): bench/native/macos/records/labphases-40454fe-20261106T165836Z.txt (the lead's call 5, 2026-11-06).
+# Ada's run prints every phase's time (TIME: lines); her record sets it after.
+WATCHDOG_SECS=29.650
 (sleep "$WATCHDOG_SECS"; echo "macos_lab: watchdog fired after ${WATCHDOG_SECS} s" >&2; kill -TERM "$MAINPID") &
 WATCHDOG_PID=$!
 
