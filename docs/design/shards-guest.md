@@ -145,7 +145,8 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (the interface
   that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with
   (default `/`, writable) at the guest's boot; the guest's init mounts each as `virtiofs` at
-  `/run/hex/shares/<i>` (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
+  `/run/hex/shares/<i>`, as the kernel's command line names them (`hex.shares=rw,ro,…`, a mode per tag in
+  order; HEX-GUEST-11) (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
   rewrites each bind mount's source to its path under the share that holds it, and a source under no share is
   refused by name (`Refusal::Unsupported`, naming the mount and the shared roots). Shares are fixed at boot, as
   Shards attaches them then; a plain run has no hotplug of them.
@@ -183,6 +184,10 @@ Hex's tests of the channel, each citing its ID:
   takes no disk (`crates/hex-cli/src/guest.rs`).
 - HEX-GUEST-10: `hex guest init` reads the root's file system from mountinfo, so it leaves the initramfs
   once; hostile lines name no root (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-11: `hex guest init` reads the shares from the kernel's command line, `hex.shares=` and `rw` or
+  `ro` per share in tag order (`hex.shares=rw,ro`: `shards0` writable, `shards1` read-only), and mounts each as
+  `virtiofs` at `/run/hex/shares/<i>`; a bad mode, the parameter twice or more than 32 shares are refused by
+  name (`crates/hex-cli/src/guest.rs`).
 - HEX-GUEST-8: the conformance suite, every case, on `oci` and `process` boxes, through `hex guest relay` and the
   guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
   rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).

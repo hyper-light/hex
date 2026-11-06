@@ -8,7 +8,8 @@
 //! switch_root does, since a container's start pivots its root and pivot_root(2) refuses to leave the
 //! initramfs ("EINVAL The current root directory is on the rootfs"). It then mounts what a Linux node
 //! needs (`/proc`, `/sys`, cgroup2, `/dev`, a tmpfs `/run` and `/tmp`; the node's state is under `/run`,
-//! as the guest has no disk: docs/design/shards-guest.md §4), starts `hex node` and then
+//! as the guest has no disk: docs/design/shards-guest.md §4), mounts the Shards shares the kernel's
+//! command line names (`hex.shares=rw,ro,…`, §4a) at `/run/hex/shares/<i>`, starts `hex node` and then
 //! `hex guest relay --vsock`, says `hex guest ready` on the console, and reaps every process that ends,
 //! as PID 1 must. When the node or the relay ends, it says why and powers the guest off, so the host sees
 //! the guest end.
@@ -190,6 +191,7 @@ fn init(args: &[String]) -> Result<(), (u8, String)> {
     let fail = |why: String| (1, why);
     leave_rootfs().map_err(fail)?;
     mount_all().map_err(fail)?;
+    mount_shares().map_err(fail)?;
     std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", CONTROLLERS).map_err(|e| {
         fail(format!(
             "enabling the cgroup controllers {CONTROLLERS}: {e}"
@@ -341,9 +343,72 @@ struct Share {
 /// default one, `/`); a longer list is refused by name.
 const MAX_SHARES: usize = 32;
 
-/// The shares the kernel's command line names, in tag order.
-fn shares(_cmdline: &str) -> Result<Vec<Share>, String> {
-    Ok(Vec::new())
+/// The parameter on the kernel's command line that names the guest's shares: `hex.shares=` and a mode
+/// per share, `rw` or `ro`, joined by commas, in the order of their tags (`shards0`, `shards1`, …).
+/// Absent, the guest has none.
+const SHARES_PARAMETER: &str = "hex.shares=";
+
+/// Where share `i` is mounted: `/run/hex/shares/<i>`.
+const SHARES: &str = "/run/hex/shares";
+
+/// The most read of `/proc/cmdline`: the kernel's own bound on a command line is smaller (`COMMAND_LINE_SIZE`,
+/// 2048 on x86_64 and arm64).
+const CMDLINE_BOUND: u64 = 4096;
+
+/// The shares the kernel's command line names, in tag order. Only the kernel's own parameters count:
+/// what follows `--` is init's arguments.
+fn shares(cmdline: &str) -> Result<Vec<Share>, String> {
+    let mut named = cmdline
+        .split_whitespace()
+        .take_while(|word| *word != "--")
+        .filter_map(|word| word.strip_prefix(SHARES_PARAMETER));
+    let Some(modes) = named.next() else {
+        return Ok(Vec::new());
+    };
+    if named.next().is_some() {
+        return Err(format!("{SHARES_PARAMETER} is given twice"));
+    }
+    let mut out = Vec::new();
+    for mode in modes.split(',') {
+        if out.len() == MAX_SHARES {
+            return Err(format!(
+                "{SHARES_PARAMETER} names more than {MAX_SHARES} shares"
+            ));
+        }
+        out.push(Share {
+            read_only: match mode {
+                "rw" => false,
+                "ro" => true,
+                other => {
+                    return Err(format!(
+                        "{SHARES_PARAMETER} names a share {other:?}, not rw or ro"
+                    ));
+                }
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// Mounts each share the kernel's command line names, as `virtiofs` by its tag, at `/run/hex/shares/<i>`.
+fn mount_shares() -> Result<(), String> {
+    use rustix::mount::{MountFlags, mount};
+    let mut cmdline = String::new();
+    std::fs::File::open("/proc/cmdline")
+        .and_then(|f| f.take(CMDLINE_BOUND).read_to_string(&mut cmdline))
+        .map_err(|e| format!("reading /proc/cmdline: {e}"))?;
+    for (i, share) in shares(&cmdline)?.iter().enumerate() {
+        let (tag, target) = (format!("shards{i}"), Path::new(SHARES).join(i.to_string()));
+        let mut flags = MountFlags::NOSUID | MountFlags::NODEV;
+        if share.read_only {
+            flags |= MountFlags::RDONLY;
+        }
+        std::fs::create_dir_all(&target)
+            .map_err(|e| format!("making {}: {e}", target.display()))?;
+        mount(&tag, &target, "virtiofs", flags, None)
+            .map_err(|e| format!("mounting share {tag} on {}: {e}", target.display()))?;
+    }
+    Ok(())
 }
 
 /// Mounts what the node needs, each on a directory made for it.
