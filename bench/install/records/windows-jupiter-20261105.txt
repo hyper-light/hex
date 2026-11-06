@@ -163,6 +163,18 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    windows-guest-ae644ff-20261106T103136Z.txt. cargo test -p hex-runtime --lib guest:: 7 passed, 0 failed (entry 14's
    failure fixed); HEX-GUEST-19 1 passed, 0 failed, 1.27 s, with its one-boot assertion.
 
+16. HEX-GUEST-20, the OCI runtime-spec validation in the guest through the seam, at 73e4d3b (step 5's c230d0a
+   merged: tarball roots), 2026-11-06T11:00:42Z, load 56% CPU: windows-guestval-73e4d3b-20261106T110042Z.txt.
+   cargo test -p hex-cli --test guest_validation -- --nocapture --test-threads=1: the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux
+   ... ok, 1 passed, 0 failed, 75.5 s. Inputs: a fresh initramfs from 73e4d3b (hex 4e0eba3d1ba4108c..., cpio
+   8578fdfacadd1f00...), Shards' vmlinux-6.18.48-x86_64-hyperv, entry 10's shards.exe, HEX_GUEST_LAB the Linux-made
+   lab-x86_64.tar.gz (2296b019415a4a3f...), HEX_GUEST_RUNTIME_TOOLS rt-amd64 (unpacked runtime-tools, a read-only
+   virtio-fs share of an NTFS folder, whose tests ran), CPUs 2, memory 4096 MiB. results.tsv (sha256 70937565358d254e...,
+   kept as windows-guestval-73e4d3b-results.tsv beside this record): 28 pass, 30 fail of 58, against the Linux
+   reference bench/oci-validation/results-hex-linux.tsv's 26 pass, 32 fail. Every test passing on Linux passes in the
+   guest (none regress); two more pass in the guest than on Linux: linux_masked_paths, linux_readonly_paths. HEX-GUEST-19
+   at the same tree, its root now a tarball: 1 passed, 2.09 s.
+
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
 and HEX-DIFF-2 step 11 (asked by step 7): NOT OBSERVED. windows_oci_boxes_hold_the_contract_and_the_steps_criteria
 skipped in every run above (no HEX_WINDOWS_LAYERS), so no Windows oci box was made; it is read in the first run
