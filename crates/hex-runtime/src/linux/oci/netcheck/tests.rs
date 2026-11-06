@@ -465,3 +465,45 @@ fn a_dumps_reads_are_bounded_by_its_bytes() {
     assert_eq!(ask(&ours, &[0; NLMSG_HDR], &mut scratch), Ok(()));
     assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
 }
+
+/// Ada's 2026-11-06 rule (no picked constants): a wait on the kernel's answer has its deadline learned from the
+/// answer times seen, by RFC 6298's estimator. Do: ask its deadline before any sample, after a first sample of
+/// 8 ms, after a second of 16 ms, then after a wait that passed it, and after enough of those. Expect: 1 s before
+/// any (2.1); 8 + 4 x 4 = 24 ms after the first (2.2); SRTT 9 ms and RTTVAR 3/4 x 4 + 1/4 x 8 = 5 ms, so 29 ms, after
+/// the second (2.3); doubled to 58 ms past it (5.5); and never past 60 s (2.5).
+#[test]
+fn a_waits_deadline_is_learned_from_the_answer_times_seen() {
+    let ms = Duration::from_millis;
+    let mut rto = Rto::new();
+    assert_eq!(rto.deadline(), Duration::from_secs(1));
+    rto.sample(ms(8));
+    assert_eq!(rto.deadline(), ms(24));
+    rto.sample(ms(16));
+    assert_eq!(rto.deadline(), ms(29));
+    rto.expired();
+    assert_eq!(rto.deadline(), ms(58));
+    for _ in 0..64 {
+        rto.expired();
+    }
+    assert_eq!(rto.deadline(), Duration::from_secs(60));
+}
+
+/// Ada's 2026-11-06 rule: a check's reads of a dump wait as long as its thread has learned answers take, and one
+/// that passes that is refused and doubles it (RFC 6298 (5.5)), not held for a second picked. Do: learn a 1 ms
+/// answer time, then dump through a socket pair whose other end never answers. Expect: refused as unreadable, at
+/// once rather than for good, and the deadline doubled from 3 ms to 6 ms.
+#[test]
+fn a_dump_unanswered_past_its_learned_deadline_is_refused_and_the_deadline_doubled() {
+    let (ours, _theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let mut scratch = Scratch::default();
+    scratch.answers.sample(Duration::from_millis(1));
+    assert_eq!(scratch.answers.deadline(), Duration::from_millis(3));
+    assert_eq!(dumps(&ours, &mut scratch), Err(Refused::Unreadable));
+    assert_eq!(scratch.answers.deadline(), Duration::from_millis(6));
+}
