@@ -107,24 +107,49 @@ $names = @("docker", "containerd", "hex")
 $t = @{}
 foreach ($name in $names) { $t[$name] = @{ create = @(); start = @(); delete = @(); cli = @() } }
 $t.hex.copy = @(); $t.hex.exec = @()
+# A failed call is data, not the end of the run: it is counted per runtime with its message, the round's
+# container removed, and the run goes on (jupiter, 2026-11-06: Docker's create failed at round ~96 with
+# "ExpandScratchSize ... semaphore timeout" and aborted the whole record). Each round is appended to
+# <Out>.rounds.jsonl as it ends, so a run cut short keeps every finished round.
+$failures = @{}
+foreach ($name in $names) { $failures[$name] = @() }
+$roundsOut = "$Out.rounds.jsonl"
+Remove-Item -ErrorAction SilentlyContinue $roundsOut
 for ($i = 0; $i -lt $W + $N; $i++) {
-    if ($i -ge $W) { $record.load += (Load) }
+    $load = Load
+    if ($i -ge $W) { $record.load += $load }
+    $round = [ordered]@{ round = $i; load = $load }
     for ($k = 0; $k -lt $names.Count; $k++) {
         $name = $names[($i + $k) % $names.Count]
         $r = $runs[$name]
-        if ($name -eq "hex") {
-            & $r.create $i
-            if ($LASTEXITCODE -ne 0) { throw "Hex's bench failed ($LASTEXITCODE) at round $i" }
-            $c = $script:hexRound.create; $s = $script:hexRound.start; $d = $script:hexRound.delete; $q = 0
-            if ($i -ge $W) { $t.hex.copy += $script:hexRound.copy; $t.hex.exec += $script:hexRound.exec }
-        } else {
-            $c = Timed { & $r.create $i }
-            $s = Timed { & $r.start $i }
-            $d = Timed { & $r.delete $i }
-            $q = Timed { & $r.cli }
+        try {
+            if ($name -eq "hex") {
+                & $r.create $i
+                if ($LASTEXITCODE -ne 0) { throw "Hex's bench exited $LASTEXITCODE" }
+                $c = $script:hexRound.create; $s = $script:hexRound.start; $d = $script:hexRound.delete; $q = 0
+                if ($i -ge $W) { $t.hex.copy += $script:hexRound.copy; $t.hex.exec += $script:hexRound.exec }
+            } else {
+                $c = Timed { & $r.create $i }
+                $s = Timed { & $r.start $i }
+                $d = Timed { & $r.delete $i }
+                $q = Timed { & $r.cli }
+            }
+            if ($i -ge $W) { $t[$name].create += $c; $t[$name].start += $s; $t[$name].delete += $d; $t[$name].cli += $q }
+            $round[$name] = [ordered]@{ create = $c; start = $s; delete = $d }
+        } catch {
+            $why = "$_"
+            if ($i -ge $W) { $failures[$name] += [ordered]@{ round = $i; why = $why } }
+            $round[$name] = [ordered]@{ failed = $why }
+            # Its container, if one was made, goes before the next round reuses no name.
+            if ($name -eq "docker") { & $docker -H $Dock rm -f "hexcmp-$i" 2>$null | Out-Null }
+            if ($name -eq "containerd") {
+                & $ctr -a $Ctrd tasks kill -s SIGKILL "hexcmp-$i" 2>$null | Out-Null
+                & $ctr -a $Ctrd tasks delete -f "hexcmp-$i" 2>$null | Out-Null
+                & $ctr -a $Ctrd containers delete "hexcmp-$i" 2>$null | Out-Null
+            }
         }
-        if ($i -ge $W) { $t[$name].create += $c; $t[$name].start += $s; $t[$name].delete += $d; $t[$name].cli += $q }
     }
+    $round | ConvertTo-Json -Depth 5 -Compress | Add-Content $roundsOut
 }
 foreach ($name in $names) {
     $record[$name] = [ordered]@{
@@ -132,6 +157,7 @@ foreach ($name in $names) {
         cli_alone_ms = Stats $t[$name].cli
     }
 }
+foreach ($name in $names) { $record[$name].failures = $failures[$name] }
 $record.hex.blank_copy_ms = Stats $t.hex.copy
 $record.hex.exec_ms = Stats $t.hex.exec
 $record | ConvertTo-Json -Depth 6 | Set-Content $Out
