@@ -179,3 +179,41 @@ fn raise_descriptor_limit() -> Result<(), Refusal> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(more: &[&str]) -> Vec<String> {
+        ["--socket", "/s", "--state", "/d"]
+            .iter()
+            .chain(more)
+            .map(|s| (*s).to_owned())
+            .collect()
+    }
+
+    /// `hex node --parked-procs on|off` (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: parse
+    /// with the flag absent, `on`, `off`, a value of neither, and given twice. Expect: on, on, off, and each of
+    /// the last two refused naming the flag.
+    #[test]
+    fn parked_procs_are_on_unless_the_flag_says_off() {
+        assert!(parse(&args(&[])).unwrap().parked_procs);
+        assert!(
+            parse(&args(&["--parked-procs", "on"]))
+                .unwrap()
+                .parked_procs
+        );
+        assert!(
+            !parse(&args(&["--parked-procs", "off"]))
+                .unwrap()
+                .parked_procs
+        );
+        for bad in [
+            &["--parked-procs", "yes"][..],
+            &["--parked-procs", "off", "--parked-procs", "on"],
+        ] {
+            let why = parse(&args(bad)).err().unwrap();
+            assert!(why.contains("--parked-procs"), "{bad:?}: {why}");
+        }
+    }
+}

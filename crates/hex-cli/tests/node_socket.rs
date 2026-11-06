@@ -114,16 +114,29 @@ impl Agent {
     /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
     /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
     fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
-        Self::armed(exe, dir, box_root, runtime, None)
+        Self::armed(exe, dir, box_root, runtime, None, &[])
     }
 
-    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given.
+    /// As [`Agent::start`], with `flags` among the agent's arguments.
+    fn flagged(exe: &str, cache: &Path, box_root: PathBuf, flags: &[&str]) -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("agent-")
+            .tempdir_in(cache)
+            .unwrap();
+        let mut agent = Self::armed(exe, dir.path(), box_root, None, None, flags);
+        agent._dir = Some(dir);
+        agent
+    }
+
+    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given, with
+    /// `flags` among its arguments.
     fn armed(
         exe: &str,
         dir: &Path,
         box_root: PathBuf,
         runtime: Option<&Path>,
         crash_at: Option<&str>,
+        flags: &[&str],
     ) -> Self {
         let socket = dir.join("node.sock");
         let mut command = Command::new(exe);
@@ -140,6 +153,7 @@ impl Agent {
         if let Some(point) = crash_at {
             command.arg("--crash-at").arg(point);
         }
+        command.args(flags);
         if let Some(runtime) = runtime {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
@@ -404,6 +418,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         return;
     }
     namespaces_counted(&lab, &client);
+    the_agent_parks_procs_unless_told_not_to(&lab, own, cache, exe);
     let failures = conformance::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
@@ -417,8 +432,40 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     );
     disconnect(&lab, &agent, &client);
     a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(&lab, own, exe);
+    a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(&lab, own, exe);
     crash_at_each_point_of_a_create(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// Parked procs are the socket agent's default too, and `hex node --parked-procs off` turns them off (decision 8,
+/// parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: an agent started with no setting, then one with
+/// `--parked-procs off`. Expect: the first says on stderr, from its node's own state, that it parks procs (root)
+/// or that a rootless node parks none; the second that it parks none.
+fn the_agent_parks_procs_unless_told_not_to(lab: &Lab, own: &Path, cache: &Path, exe: &str) {
+    let by_default = if lab.rootless {
+        "hex node: parked procs: off: a rootless node parks none"
+    } else {
+        "hex node: parked procs: on"
+    };
+    for (flags, said) in [
+        (&[][..], by_default),
+        (
+            &["--parked-procs", "off"][..],
+            "hex node: parked procs: off",
+        ),
+    ] {
+        let agent = Agent::flagged(exe, cache, own.join("hex-sock-pp"), flags);
+        wait_for(&format!("hex node {flags:?} saying {said:?}"), || {
+            agent.errors().lines().any(|l| l.starts_with(said))
+        });
+        let said_on = agent.errors().contains("hex node: parked procs: on");
+        assert_eq!(
+            said_on,
+            said.ends_with(": on"),
+            "{flags:?}: {}",
+            agent.errors()
+        );
+    }
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it
@@ -851,6 +898,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         own.join(&name),
         runtime.as_deref(),
         at.armed(),
+        &[],
     );
     if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
@@ -1171,6 +1219,110 @@ fn box_slots(oci: &Path) -> std::collections::BTreeSet<String> {
             !p.is_empty() && !p.iter().all(parked)
         })
         .collect()
+}
+
+/// `hex node` ends on SIGTERM saying its parked procs (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3,
+/// T-T7.1.2): one line of counts on stderr, then it exits 143, and nothing else of its end differs from a
+/// SIGKILL's. Do: over the socket, make and start A of owner O, delete A, make and start B of O; SIGTERM the
+/// agent; start it again over the same state. Expect: it said `parked procs at exit:` with made, hits, misses,
+/// dry, capped and alive, as root B's create a hit of the proc A's delete made (rootless none made); it exited 143;
+/// its socket's file and B's processes are left as a SIGKILL leaves them; the restarted agent takes B back
+/// running, and once B is deleted no box is listed.
+fn a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(
+    lab: &Lab,
+    own: &Path,
+    exe: &str,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("agent-term-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let box_root = own.join("hex-sock-term");
+    let mut agent = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = agent.client();
+    let o = BoxOwner::named("owner-term").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let id = |name: &str| BoxId::new(name).unwrap();
+    for name in ["term-a", "term-b"] {
+        client
+            .create(BoxSpec {
+                id: id(name),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
+                owner: Some(o.clone()),
+            })
+            .unwrap();
+        client.start(&id(name)).unwrap();
+        if name == "term-a" {
+            client.delete(&id(name)).unwrap();
+        }
+    }
+    drop(client);
+    let term = Command::new("kill")
+        .args(["-TERM", &agent.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(term.success(), "kill -TERM {}", agent.pid());
+    let ended = agent.child.wait().unwrap();
+    assert_eq!(
+        ended.code(),
+        Some(143),
+        "hex node ended on SIGTERM: {ended:?}"
+    );
+    wait_for("the agent's parked procs line", || {
+        agent.errors().contains("hex node: parked procs at exit:")
+    });
+    let said = agent.errors();
+    let line = said
+        .lines()
+        .find_map(|l| l.strip_prefix("hex node: parked procs at exit: "))
+        .unwrap()
+        .to_owned();
+    let counts: Vec<(String, u64)> = line
+        .split(", ")
+        .map(|kv| {
+            let (k, v) = kv.split_once(' ').unwrap();
+            (k.to_owned(), v.parse().unwrap())
+        })
+        .collect();
+    let names: Vec<&str> = counts.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        names,
+        ["made", "hits", "misses", "dry", "capped", "alive"],
+        "{line}"
+    );
+    let count = |k: &str| counts.iter().find(|(n, _)| n == k).unwrap().1;
+    if lab.rootless {
+        assert_eq!(
+            (count("made"), count("hits")),
+            (0, 0),
+            "a rootless node parks none: {line}"
+        );
+    } else {
+        assert!(
+            count("hits") >= 1 && count("made") >= count("hits"),
+            "B took A's delete's proc: {line}"
+        );
+    }
+    assert!(
+        agent.socket.exists(),
+        "the socket's file is left, as a SIGKILL leaves it"
+    );
+    assert!(
+        !procs_in(&oci_cgroup(&box_root.join(OCI_BOXES), &id("term-b"))).is_empty(),
+        "B runs on after its agent's SIGTERM"
+    );
+    drop(agent);
+    let again = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = again.client();
+    assert_eq!(
+        client.inspect(&id("term-b")).unwrap().state,
+        BoxState::Running,
+        "B is taken back running"
+    );
+    client.delete(&id("term-b")).unwrap();
+    assert!(client.list().unwrap().is_empty(), "no box is listed");
+    eprintln!("T-T7.1.2, parked procs: SIGTERM said {line:?}, exited 143, B taken back");
 }
 
 /// Goal 5 extended, step 6 (T-T7.1.2). Do: over the socket, make and start boxes A and B of owner O and a
