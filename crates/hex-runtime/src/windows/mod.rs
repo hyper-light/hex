@@ -52,9 +52,13 @@ pub struct WinRuntime {
     /// own folder unless told otherwise.
     launcher: Option<PathBuf>,
     boxes: Mutex<BTreeMap<BoxId, Held>>,
-    /// The installer's features that are off, read at the first `oci` create: a feature turns on or
-    /// off only across a reboot, which starts the node again.
+    /// The installer's features that are off, read when the runtime is made (node start), so no box's
+    /// create waits on the query: a feature turns on or off only across a reboot, which starts the
+    /// node again.
     features_off: OnceLock<BTreeSet<WindowsFeature>>,
+    /// How many times [`features::off`] ran, for the test that no create runs it.
+    #[cfg(test)]
+    feature_reads: std::sync::atomic::AtomicU32,
 }
 
 impl WinRuntime {
@@ -65,23 +69,35 @@ impl WinRuntime {
     }
 
     /// A runtime told the machine has `processors` logical processors (at least one), keeping `oci`
-    /// scratch under `scratch_root`.
+    /// scratch under `scratch_root`. The installer's features are read here, before any box, so the
+    /// first `oci` create doesn't wait on PowerShell's query (p50 1,183 ms on jupiter,
+    /// bench/install/records/windows-jupiter-20261105.txt entry 19). A read that fails here isn't
+    /// lost: the first box that needs the features reads them again, and is refused by name if that
+    /// fails too.
     pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
-        Self {
+        let runtime = Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
             scratch_root,
             launcher: None,
             boxes: Mutex::new(BTreeMap::new()),
             features_off: OnceLock::new(),
-        }
+            #[cfg(test)]
+            feature_reads: std::sync::atomic::AtomicU32::new(0),
+        };
+        // Read now so no create waits on it; a failure is read again, and refused, at the first ask.
+        let _ = runtime.features_off();
+        runtime
     }
 
-    /// The installer's features that are off, read once ([`features::off`]); a failed read is refused
-    /// and tried again at the next ask.
+    /// The installer's features that are off, read once ([`features::off`]), at the runtime's making; a
+    /// failed read is refused and tried again at the next ask.
     fn features_off(&self) -> Result<&BTreeSet<WindowsFeature>, Refusal> {
         if let Some(off) = self.features_off.get() {
             return Ok(off);
         }
+        #[cfg(test)]
+        self.feature_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let off = features::off(self.processors)?;
         Ok(self.features_off.get_or_init(|| off))
     }
@@ -390,5 +406,34 @@ fn handle(given: Option<OwnedHandle>) -> Result<OwnedHandle, Refusal> {
                 .map_err(|e| Refusal::os("opening NUL", e))?;
             Ok(OwnedHandle::from(nul))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// HEX-INST-9 (native plan step 6): the installer's features are read when the runtime is made, so
+    /// a box's create doesn't wait on PowerShell's query. Do: make a runtime, then route a Linux image's
+    /// bundle, the first ask that needs the features. Expect: one query, made with the runtime, and
+    /// none by the routing.
+    #[test]
+    fn the_features_are_read_at_the_runtimes_making_not_at_a_create() {
+        let scratch = tempfile::tempdir().unwrap();
+        let rt = WinRuntime::with(1, scratch.path().to_path_buf());
+        assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 1);
+        assert!(
+            rt.features_off.get().is_some(),
+            "the query at the runtime's making failed"
+        );
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bundle.path().join("config.json"),
+            r#"{"ociVersion": "1.2.0", "process": {"args": ["/bin/true"], "cwd": "/"}, "root": {"path": "rootfs"}, "linux": {}}"#,
+        )
+        .unwrap();
+        let _ = rt.oci_side(&ClassSpec::Bundle(bundle.path().to_path_buf()));
+        assert_eq!(rt.feature_reads.load(Ordering::SeqCst), 1);
     }
 }
