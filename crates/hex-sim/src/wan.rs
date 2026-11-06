@@ -25,8 +25,9 @@
 //! so far is tracked, and the convergence stops once as many rounds have passed without a new low as
 //! it took to reach that low (best at round 4, stop at round 8 if nothing lower), so a noisy uptick
 //! doesn't stop it and no round count is chosen ([`Coordinates::history`] holds the error after each
-//! round; [`MAX_ROUNDS`] only bounds it). The coordinates held are the lowest round's, as patience
-//! keeps its best. A seed names the result.
+//! round; [`MAX_ROUNDS`] only bounds it). The coordinates are the last round's, as a running
+//! cluster's are: choosing the lowest round would read the true RTTs, which no node knows. A seed
+//! names the result.
 
 use std::time::Duration;
 
@@ -240,9 +241,6 @@ fn set(terms: &mut [[u64; ZONES]; ZONES], a: usize, b: usize, term: u64) -> Resu
 /// Every node's coordinate engine after a convergence.
 pub struct Coordinates {
     engines: Vec<CoordinateEngine>,
-    /// The coordinates predictions read: each engine's as it stood at the round with the lowest
-    /// median error.
-    held: Vec<NetworkCoordinate>,
     /// Samples taken (the engine's `update` said so), and offered.
     pub taken: u64,
     pub offered: u64,
@@ -258,10 +256,8 @@ impl Coordinates {
             let id = u64::try_from(node).map_err(|_| SimError::Config("node ids"))?;
             engines.push(CoordinateEngine::new(seed ^ id.rotate_left(32)));
         }
-        let held = engines.iter().map(|e| *e.coordinate()).collect();
         Ok(Self {
             engines,
-            held,
             taken: 0,
             offered: 0,
             history: Vec::new(),
@@ -269,8 +265,8 @@ impl Coordinates {
     }
 
     /// Runs hyper-swim's schedule from the origin, round after round, until as many rounds have
-    /// passed without a new lowest median error as it took to reach the lowest, and holds the
-    /// coordinates of that lowest round; refused past [`MAX_ROUNDS`].
+    /// passed without a new lowest median error as it took to reach the lowest; refused past
+    /// [`MAX_ROUNDS`]. The coordinates are the last round's, as a running cluster's are.
     pub fn converge(wan: &Wan, seed: u64, rng: &mut Rng) -> Result<Self, SimError> {
         let n = wan.len();
         let mut coordinates = Self::fresh(n, seed)?;
@@ -279,9 +275,8 @@ impl Coordinates {
             return Ok(coordinates);
         };
         coordinates.history.push(origin);
-        // The lowest median error so far, the round it came at, and the coordinates then.
+        // The lowest median error so far, and the round it came at.
         let (mut best_round, mut best) = (0usize, origin);
-        let mut best_held = coordinates.held.clone();
         let probes = n.saturating_sub(1);
         let mut order: Vec<NodeId> = Vec::with_capacity(probes);
         for round in 1..=MAX_ROUNDS {
@@ -294,11 +289,7 @@ impl Coordinates {
                 shuffle(&mut order, rng)?;
                 for &peer in &order {
                     let rtt = Duration::from_nanos(wan.sample_ns(me, peer, rng)?);
-                    let theirs = *coordinates
-                        .engines
-                        .get(usize::try_from(peer.0).map_err(|_| SimError::UnknownNode(peer))?)
-                        .ok_or(SimError::UnknownNode(peer))?
-                        .coordinate();
+                    let theirs = *coordinates.coordinate(peer)?;
                     let engine = coordinates
                         .engines
                         .get_mut(node)
@@ -310,20 +301,15 @@ impl Coordinates {
                     }
                 }
             }
-            for (held, engine) in coordinates.held.iter_mut().zip(&coordinates.engines) {
-                *held = *engine.coordinate();
-            }
             let now = median_error(wan, &coordinates)?.ok_or(SimError::Config("pairs"))?;
             coordinates.history.push(now);
             if now < best {
                 (best_round, best) = (round, now);
-                best_held.clone_from(&coordinates.held);
             }
             let since = round
                 .checked_sub(best_round)
                 .ok_or(SimError::Config("rounds"))?;
             if since >= best_round {
-                coordinates.held = best_held;
                 return Ok(coordinates);
             }
         }
@@ -340,7 +326,8 @@ impl Coordinates {
     pub fn coordinate(&self, node: NodeId) -> Result<&NetworkCoordinate, SimError> {
         usize::try_from(node.0)
             .ok()
-            .and_then(|i| self.held.get(i))
+            .and_then(|i| self.engines.get(i))
+            .map(CoordinateEngine::coordinate)
             .ok_or(SimError::UnknownNode(node))
     }
 
@@ -355,7 +342,8 @@ impl Coordinates {
     /// A hash of every coordinate's bits, in node order.
     pub fn hash(&self) -> u64 {
         let mut h = TraceHash::default();
-        for c in &self.held {
+        for engine in &self.engines {
+            let c = engine.coordinate();
             for x in c.position {
                 h.word(x.to_bits());
             }
@@ -629,8 +617,7 @@ mod tests {
     /// median error rises once by noise (25.4% at round 3, 26.4% at round 4); expect the convergence to
     /// run on past that uptick, by patience: it stops once as many rounds have passed without a new
     /// low as it took to reach the low, so it ends at twice the best round, with nothing after the
-    /// best lower than it, holding the best round's coordinates, so its error is below the 26.4% the
-    /// first uptick stopped at.
+    /// best lower than it.
     #[test]
     fn patience_runs_past_a_noise_uptick() {
         let (_, coordinates) = converged(&record(10, 15));
@@ -642,16 +629,24 @@ mod tests {
             .enumerate()
             .min_by(|a, b| a.1.total_cmp(b.1))
             .unwrap();
-        assert!(best < &h[4], "{h:?}");
         assert_eq!(coordinates.rounds(), 2 * best_round, "{h:?}");
         assert!(h[best_round + 1..].iter().all(|e| e >= best), "{h:?}");
-        let wan = Wan::generate(&record(10, 15), &mut Rng::new(15)).unwrap();
+    }
+
+    /// S4, A2 (G3 step 1): do converge seed 15's WAN, whose last round is not its best; expect the
+    /// coordinates held to be the last round's, as a running cluster's are: choosing the best round
+    /// reads the true RTTs, which no node knows, and would make proximity look better than
+    /// production can be (the lead, 2026-11-06).
+    #[test]
+    fn the_coordinates_held_are_the_last_rounds() {
+        let config = record(10, 15);
+        let (wan, coordinates) = converged(&config);
+        let h = &coordinates.history;
+        let last = h[h.len() - 1];
+        let best = h.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(last > best, "seed 15's last round is not its best: {h:?}");
         let held = Accuracy::measure(&wan, &coordinates).unwrap();
-        assert_eq!(
-            held.median_relative_error, *best,
-            "the held coordinates are the best round's"
-        );
-        assert!(held.median_relative_error < h[4], "{h:?}");
+        assert_eq!(held.median_relative_error, last, "{h:?}");
     }
 
     /// Non-vacuity for the test above: coordinates still at the origin fail both of its bounds.
