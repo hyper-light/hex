@@ -42,7 +42,7 @@ asm-generic.
 | Name | Value | Where | Kind | How |
 |---|---|---|---|---|
 | Watcher floor | 250 µs | hex-core watch.rs | (b) | RESULT.md, 9694770 |
-| Watcher ceiling | 100 ms | watch.rs | (b), weak | Read-cost curve measured (watcher-readcost-events-a7d13c6: 0.12-0.25 % of a core at 10 reads/s, 11-24 % at the floor); the lateness at 100 ms and the derived ceiling are with the lead (call 1) |
+| Watcher ceiling | 28,079,022 ns (28.1 ms) | watch.rs | (b) | Step 1's 64 MiB overshoot bar at the measured worst rate, 2.39 GB/s (step 7's native_box at bench start, adalundhe-macbook-pro, 549f547): the lead's call 1. Was 100 ms. Stated property, not a bar: a missed wake lets about 10.7 processes in at 381 spawns/s (forks of watched members wake at once, NOTE_FORK). Cost 0.41-0.76 % of a core per box (watcher-readcost-events-a7d13c6). a880917 test |
 | RT computation budget | 150 µs per 250 µs | process.rs | (b) | rtbudget on studio-3 |
 | Group drain | 2 x (0.883 ms + 0.298 ms x (n-1)) to start, then raised by this node's slower drains | hex_core::drain::Learned, process.rs | (b)/(a) | Was DRAIN_PATIENCE 10 s. Record killscale-a84e094. ffcec11 test, 9c72dac; only rises (the learned-waits rule): 2bc6963 test, d1c004e, 25652c9 |
 | Listing size | kern.maxproc, or refused naming it | sys::listing | (c) | Was a 4096 fallback at five sites. 54e8ad0 test, 4f41305 |

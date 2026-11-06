@@ -12,9 +12,9 @@
 //! (`posix_spawnattr_setjetsam_ext`, rootless; `sys`, docs/research/runtime/macos-spawn-jetsam-cap.md):
 //! the kernel SIGKILLs it at the bound with no overshoot (native plan step 1's `_ext` backstop). So a box
 //! holding at most one armed member is bounded by the kernel, and the watcher reads it only at the
-//! ceiling (100 ms) to keep its accounting current and to notice a fork; any fork (an unarmed child) or
-//! any unarmed member reverts it to the polling pace at once (the watcher watches each member for its
-//! `NOTE_FORK`/`NOTE_EXIT`). The cap is per process, doesn't survive a fork, and caps each member at the
+//! ceiling (28.1 ms, `hex_core::watch::CEILING`) to keep its accounting current and to notice a fork; any
+//! fork (an unarmed child) or any unarmed member reverts it to the polling pace at once (the watcher watches
+//! each member for its `NOTE_FORK`/`NOTE_EXIT`). The cap is per process, doesn't survive a fork, and caps each member at the
 //! *whole* bound, not its share, so it doesn't bound a multi-member box's footprint sum — the watcher's
 //! rule still does that (step 2's privileged helper apportions a per-member share). A member killed at
 //! its cap dies by SIGKILL; the watcher tells that from an ordinary kill by the dead member's peak
