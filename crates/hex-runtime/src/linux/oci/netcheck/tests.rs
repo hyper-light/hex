@@ -423,7 +423,8 @@ fn an_error_another_requests_answer_or_a_torn_message_is_unreadable() {
 }
 
 proptest! {
-    /// Any bytes give a verdict or a refusal, never a panic.
+    /// Any bytes give a verdict or a refusal, never a panic. 512 bytes is a fixture: room for headers, attributes
+    /// and lengths that run past the end, which is what the readers must refuse.
     #[test]
     fn any_answer_or_text_is_read_without_a_panic(
         bytes in proptest::collection::vec(any::<u8>(), 0..512),

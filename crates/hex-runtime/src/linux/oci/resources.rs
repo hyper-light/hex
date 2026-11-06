@@ -1144,6 +1144,8 @@ mod tests {
         assert_eq!(devices(&everything).unwrap(), None);
     }
 
+    /// A device rule. Its majors and minors are fixtures, kept small (majors 1-3, minors 0-2, beside the requests'
+    /// 0-4 and 0-3) so that rules and requests name the same devices often and the rules' order decides.
     fn arb_rule() -> impl Strategy<Value = DeviceRule> {
         (
             any::<bool>(),
@@ -1204,7 +1206,12 @@ mod tests {
                     devshare::Give::Program(p) => Some(p),
                 };
                 for kind in [DEV_BLOCK, DEV_CHAR] {
+                    // Every access: r, w and m (1, 2, 4) and each union of them.
                     for access in 1u32..8 {
+                        // The majors and minors of the devices the default program allows
+                        // (Documentation/admin-guide/devices.txt: 1 mem, whose 3 null, 5 zero, 7 full, 8 random and
+                        // 9 urandom; 5 tty, whose 0 tty, 1 console and 2 ptmx; 136 the ptys; 10 misc, whose 200 tun),
+                        // those the rules name (majors 1-3, minors 0-2), and majors 0 and 4, which neither names.
                         for major in [0u32, 1, 2, 3, 4, 5, 10, 136] {
                             for minor in [0u32, 1, 2, 3, 5, 7, 8, 9, 200] {
                                 let got = deciding
