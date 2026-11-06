@@ -135,6 +135,11 @@ impl Fixture for Lab {
         false
     }
 
+    /// HEX-RT-14: Windows' exec bound, the class's own (hex_core::hcs::exec_limit).
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_core::hcs::exec_limit())
+    }
+
     /// TERM ends the box, init included: Windows has no POSIX signals. HCS's ProcessSignal carries only
     /// console controls (Virtualization-Documentation hcs/SchemaReference.md:796-808), hcsshim maps TERM to
     /// a shutdown and KILL to terminate (internal/signals/signal.go:185-197), Docker ends the container on

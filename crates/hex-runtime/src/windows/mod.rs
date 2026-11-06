@@ -282,6 +282,8 @@ fn std_handles(stdio: Stdio) -> Result<[OwnedHandle; 3], Refusal> {
 /// three standard handles (each the NUL device where the caller gave none).
 fn build_spawn(program: &Program, stdio: Stdio) -> Result<Spawn, Refusal> {
     program.check()?;
+    // One Windows exec bound for both classes, so a program moves between them unchanged (HEX-RT-14).
+    program.fits(&hex_core::hcs::exec_limit())?;
     if program.user.is_some() {
         return Err(Refusal::Invalid {
             what: "program",

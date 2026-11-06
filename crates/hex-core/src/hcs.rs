@@ -68,6 +68,20 @@ pub const ENV_VAR_UNITS: usize = 32_767;
 /// them unchanged (a stated policy; nothing in CreateProcessW bounds it).
 pub const ENV_BLOCK_UNITS: usize = (3 * crate::bundle::MAX_CONFIG_BYTES - 6 * FOLDER_UNITS + 2) / 6;
 
+/// A Windows program's exec bound (HEX-RT-14), the same for the `process` and `oci` classes: each
+/// NAME=VALUE with its NUL at most [`ENV_VAR_UNITS`] UTF-16 units, and the whole at most
+/// [`ENV_BLOCK_UNITS`] in [`Program::exec_size`]'s count, which is sound because UTF-8 never takes fewer
+/// bytes than UTF-16 takes units, so a program within it fits the wire (and its arguments and pointers
+/// counted too only make it stricter). The command line is bounded apart ([`COMMAND_LINE_UNITS`]).
+pub fn exec_limit() -> hex_api::ExecLimit {
+    hex_api::ExecLimit {
+        block: ENV_BLOCK_UNITS,
+        string: Some(ENV_VAR_UNITS),
+        unit: hex_api::StringUnit::Utf16,
+        source: "Windows (a variable 32,767 UTF-16 units with its NUL; the environment what the launcher's wire leaves)",
+    }
+}
+
 /// Refuses a command line past [`COMMAND_LINE_UNITS`], naming the limit.
 fn command_line_fits(field: &str, line: &str) -> Result<(), Refusal> {
     let units = line.encode_utf16().count();
@@ -415,7 +429,10 @@ pub fn process(field: &str, program: &Program) -> Result<Process, Refusal> {
         None => None,
     };
     let command_line = crate::job::command_line(&program.args);
+    // The command line's own limit first: it is what bounds a Windows program's arguments.
     command_line_fits(field, &command_line)?;
+    // Then the exec bound, refused as the program it is, as every class refuses it (HEX-RT-14).
+    program.fits(&exec_limit())?;
     Ok(Process {
         command_line,
         env: program.env.clone(),
@@ -876,6 +893,14 @@ fn bundle_process(p: &Value) -> Result<Process, Refusal> {
             .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
     };
+    // The init is held to the exec bound when its config is read (HEX-RT-14), counted as a program is.
+    Program {
+        args: vec![command_line.clone()],
+        env: env.clone(),
+        ..Program::default()
+    }
+    .fits(&exec_limit())
+    .map_err(|e| invalid(format!("process: {e}")))?;
     let cwd = match p.get("cwd") {
         Some(c) => Some(container_path("process.cwd", string("process.cwd", c)?)?),
         None => None,
@@ -1619,6 +1644,54 @@ mod tests {
         };
         let line = encode(&worst).unwrap();
         assert!(line.len() <= MAX_WIRE, "{} > {MAX_WIRE}", line.len());
+    }
+
+    /// HEX-RT-14 on Windows (the lead's decisions, 2026-11-06): the class's exec bound is Microsoft's
+    /// 32,767 units a variable, counted over NAME=VALUE and its NUL in UTF-16, and the environment block the
+    /// launcher's wire leaves. Do: read it; give `process` a variable one unit past it, and a block past it.
+    /// Expect: the values, and each program refused as an invalid program.
+    #[test]
+    fn a_windows_program_is_held_to_its_exec_bound() {
+        let limit = exec_limit();
+        assert_eq!(limit.block, ENV_BLOCK_UNITS);
+        assert_eq!(limit.string, Some(ENV_VAR_UNITS));
+        assert_eq!(limit.unit, hex_api::StringUnit::Utf16);
+        // NAME=VALUE with its NUL at 32,768 units: "K" "=" and 32,765 of "é" (two UTF-8 bytes, one unit).
+        let long = Program {
+            env: vec![("K".to_owned(), "é".repeat(ENV_VAR_UNITS - 2))],
+            ..Program::of(&["a"])
+        };
+        let block = Program {
+            env: (0..ENV_BLOCK_UNITS / 1000 + 1)
+                .map(|i| (format!("V{i}"), "x".repeat(1000)))
+                .collect(),
+            ..Program::of(&["a"])
+        };
+        for p in [long, block] {
+            match process("program", &p) {
+                Err(Refusal::Invalid {
+                    what: "program", ..
+                }) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        let at = Program {
+            env: vec![("K".to_owned(), "é".repeat(ENV_VAR_UNITS - 3))],
+            ..Program::of(&["a"])
+        };
+        assert!(process("program", &at).is_ok());
+    }
+
+    /// HEX-RT-14 on Windows, a bundle's init: do: a config.json whose environment holds a variable past
+    /// the bound. Expect: refused when the config is read, naming the program.
+    #[test]
+    fn a_bundles_init_past_the_exec_bound_is_refused_at_read() {
+        let mut b = bundle();
+        b["process"]["env"] = json!([format!("K={}", "é".repeat(ENV_VAR_UNITS - 2))]);
+        match from_bundle(&b) {
+            Err(Refusal::Invalid { why, .. }) => assert!(why.contains("program"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// HEX-HCS-4 (Windows' longest path, 32,767 units with its NUL): do: a program whose folder is one unit

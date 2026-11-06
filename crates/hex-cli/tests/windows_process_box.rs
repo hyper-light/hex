@@ -73,6 +73,11 @@ impl Fixture for BinFixture {
     fn refused_forks_counted(&self) -> bool {
         false
     }
+
+    /// HEX-RT-14: Windows' exec bound, one for both Windows classes (hex_core::hcs::exec_limit).
+    fn exec_limit(&self) -> Option<hex_api::ExecLimit> {
+        Some(hex_core::hcs::exec_limit())
+    }
 }
 
 fn runtime() -> WinRuntime {
