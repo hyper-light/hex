@@ -361,6 +361,8 @@ Mac Studio (macOS `process`) and jupiter (Windows `process` and `oci`), and in s
 Linux arm64 and Intel macOS are linted by the gates (7/7 at a7670e0, unit hex-native-s7-gates-20261106T135145Z),
 Intel macOS built on adalundhe-macbook-pro at a7670e0, and the musl aarch64 `hex` runs in step 5's Shards guest;
 Windows arm64 is skipped (Ada). Every OS's `process` class is benchmarked against its competitors (`bench/native/RESULT.md`).
+Its CLAUDE.md changes are approved by Ada, 2026-11-06, as written: the Gates block's Linux and macOS lint lines
+(1b1fea3, 47a9683) and §12's `sysctlbyname("kern.argmax")` for the exec bound (08d52a0).
 Final once fedora's gates pass at 81c6ad8 (unit hex-native-s4-gates-20261106T144702Z): at c4961c1 gate 4 refused an `unreachable!` in step 4's device test, and 81c6ad8 changes only that test line (plus a bench script).
 
 ## Next
