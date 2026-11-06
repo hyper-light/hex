@@ -464,8 +464,8 @@ impl Node {
     }
 
     /// Sets the ipc and uts namespace pairs a root node makes ahead to `bound`, fixed, in place of the pool it
-    /// opened with, whose size it learns from its draws (Ada's rule, 2026-11-06), which closes what it held. With 0 it makes none, and every
-    /// container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
+    /// opened with, whose size it learns from its draws (Ada's rule, 2026-11-06), which closes what it held. With 0
+    /// it makes none, and every container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
     pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
         if bound > 0 && self.owner != Owner::Root {
             return Err(Refusal::Invalid {
@@ -505,7 +505,8 @@ impl Node {
     /// the node's first create.
     pub fn with_parked_procs(self, enabled: bool) -> Result<Self, Refusal> {
         if enabled {
-            self.with_parked_procs_bound(self.pools.sizes.procs_alive())
+            let bound = self.pools.sizes.procs_alive();
+            self.with_parked_procs_bound(bound)
         } else {
             self.cgroups.stop_parked_procs();
             Ok(self)
@@ -518,7 +519,8 @@ impl Node {
     }
 
     /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of the node's
-    /// ([`crate::sizes::Sizes::procs_alive`]): the dropper's queue holds as many, so a tree handed to it never finds it full.
+    /// ([`crate::sizes::Sizes::procs_alive`]): the dropper's queue holds as many, so a tree handed to it never finds it
+    /// full.
     /// Refused when the dropper can't be started.
     pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
         if let Some(maker) = self.devfs.proc_maker() {

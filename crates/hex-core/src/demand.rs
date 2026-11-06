@@ -178,9 +178,10 @@ pub fn mem_available(meminfo: &str) -> Option<u64> {
         let rest = line.strip_prefix("MemAvailable:")?;
         let mut words = rest.split_whitespace();
         let kib: u64 = words.next()?.parse().ok()?;
-        (words.next()? == "kB" && words.next().is_none())
-            .then(|| kib.checked_mul(1024))
-            .flatten()
+        if words.next()? != "kB" || words.next().is_some() {
+            return None;
+        }
+        kib.checked_mul(1024)
     })
 }
 

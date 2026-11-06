@@ -15,18 +15,18 @@ use hex_core::demand::{cgroup_headroom, mem_available, share};
 /// An idle cgroup kept for its owner's next box: what the bench's lifecycle leaves charged to it, at most
 /// 1,748,992 bytes over 256 idle cgroups of fedora's OCI pass 20261103T044133Z
 /// (bench/competitive/probes/reuse_residual.md), and the init parked in it for that box, about 24.7 KB an init with
-/// reuse on (bench/competitive/probes/create_tail.md, "What a park charged its cgroup"). The check admits up to
-/// [`crate::cgroups::RESIDUAL`] a cgroup; a node whose idle cgroups hold more than measured here is what would
-/// falsify this bound.
-pub const IDLE_CGROUP_BYTES: u64 = 1_748_992 + 24_700;
+/// reuse on (bench/competitive/probes/create_tail.md, "What a park charged its cgroup"): 1,773,692 bytes. The check
+/// admits up to [`crate::cgroups::RESIDUAL`] a cgroup; a node whose idle cgroups hold more than measured here is what
+/// would falsify this bound.
+pub const IDLE_CGROUP_BYTES: u64 = 1_773_692;
 /// A cgroup made ahead for a box of no owner with its init parked in it: about 262 KB an init in a fresh cgroup
 /// (bench/competitive/probes/create_tail.md, "What a park charged its cgroup", reuse off).
 pub const AHEAD_BYTES: u64 = 262_000;
 /// A network namespace held, the most the host's Slab and Percpu rose for one: 762.0 KiB on the Mac Studio, the
 /// heavier of the two machines measured (bench/competitive/probes/netns_pool.md).
-pub const NETNS_BYTES: u64 = 762 * 1024;
+pub const NETNS_BYTES: u64 = 780_288;
 /// A create seed, its largest `VmRSS` measured: 2,488 KiB on fedora (bench/competitive/probes/seed_path.md).
-pub const SEED_BYTES: u64 = 2_488 * 1024;
+pub const SEED_BYTES: u64 = 2_547_712;
 /// An ipc and uts namespace pair made ahead, the most the host's Slab rose for one: 14.1 KiB on fedora
 /// (bench/competitive/probes/netns_pool.md, goal 5 extended step 4).
 pub const IPC_UTS_BYTES: u64 = 14_438;

@@ -243,8 +243,8 @@ struct Parking {
     queued: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     dropped_inline: Arc<AtomicU64>,
-    /// Procs alive and their bound ([`Sizes::procs_alive`] unless set): a make reserves one first, and a drop or a claim's hit gives
-    /// it back.
+    /// Procs alive and their bound ([`Sizes::procs_alive`] unless set): a make reserves one first, and a drop or a
+    /// claim's hit gives it back.
     alive: Arc<AtomicU64>,
     bound: AtomicU64,
     /// The dropper's queue's capacity, the highest `bound` may be.
@@ -632,8 +632,8 @@ impl Cgroups {
     }
 
     /// Each init parked from here on has the proc of its own pid namespace made with it, through `maker`, for its
-    /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`Sizes::procs_alive`]), and the dropper
-    /// started with a queue of as many. Set before the node's first create; unset, none is made. Set again once the
+    /// owner's last spec (decision 8, parked procs), at most `bound` alive at once ([`Sizes::procs_alive`]), and the
+    /// dropper started with a queue of as many. Set before the node's first create; unset, none is made. Set again once the
     /// dropper runs, it turns them on with `bound`, refused past the dropper's queue (so a tree handed to it never
     /// finds it full).
     pub fn set_parked_procs(&self, maker: ProcMaker, bound: usize) -> Result<(), Refusal> {

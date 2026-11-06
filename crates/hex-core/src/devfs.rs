@@ -385,7 +385,12 @@ mod tests {
     /// outstanding. Expect bounded resources, unique ownership and exact successful-make accounting.
     #[test]
     fn fresh_mounts_are_bounded_and_never_reused_under_churn() {
-        let mut p = Pool::<usize, usize>::new(true, FIXED);
+        // A cap past the run's 2,000 makes, so the learned keys and depths never meet it and a job is always wanted.
+        let shape = Shape {
+            cap: 4_096,
+            ..FIXED
+        };
+        let mut p = Pool::<usize, usize>::new(true, shape);
         let mut made = 0;
         let mut seen = std::collections::BTreeSet::new();
         for i in 0..2000 {
@@ -402,8 +407,8 @@ mod tests {
             }
             made += 1;
             let _ = p.complete(job, Ok(made));
-            assert!(p.entries.len() <= FIXED.cap);
-            assert!(p.held() <= FIXED.cap);
+            assert!(p.entries.len() <= shape.cap);
+            assert!(p.held() <= shape.cap);
             let c = p.counts();
             assert_eq!(c.made, c.taken + c.discarded + p.held() as u64);
         }

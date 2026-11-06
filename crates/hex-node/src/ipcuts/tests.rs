@@ -116,7 +116,7 @@ fn the_refill_is_woken_while_what_is_left_outlasts_its_refill() {
     assert_eq!(low(0), 0);
     for size in 1..=4_096usize {
         let mark = low(size);
-        assert!(mark >= 1 && mark <= size, "{size}: {mark}");
+        assert!((1..=size).contains(&mark), "{size}: {mark}");
         let (above, at) = (
             u64::try_from(size - mark).unwrap(),
             u64::try_from(mark).unwrap(),
