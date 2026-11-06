@@ -1,8 +1,9 @@
 # The macOS line's constants, by kind (Ada's rule, 2026-11-06)
 
 "We do not support arbitrary constants. We support learned and data derived values." Latency and throughput
-come before memory. Every constant `cp/t7-native-macos` adds or relies on: native steps 1 and 2's macOS
-process class and box helper, step 6's macOS installer and labs, and step 6's descriptor default.
+come before memory. This lists every constant `cp/t7-native-macos` adds or relies on: native steps 1 and 2's
+macOS process class and box helper (step 2 merged at 84eca3f), and step 6's macOS installer, labs and
+descriptor default.
 
 Kinds:
 - **(a)** learned at run time;
@@ -10,80 +11,76 @@ Kinds:
 - **(c)** a platform or spec limit, cited at its source;
 - **(d)** picked, or copied from another system's defaults.
 
-Status says what happens to each (d): converted, to convert (with the lead's call), or kept and why.
-Branch tip at audit: 64a0500.
-
-Left out: OS ABI values used as values rather than limits (`NOTE_*`, `EV_*`, kqueue idents, `KERN_SUCCESS`),
-wire tags, exit codes, stdio indices, test pids and uids, unit conversions (`1 << 20` as MiB, `/ 1000` for
-ns to µs, `NANOS_PER_SECOND`), and the darwin signal table, which is (c): XNU `bsd/sys/signal.h:84-123` and
+Left out: OS ABI values used as values rather than limits, wire tags, exit codes, stdio indices, test pids
+and uids, unit conversions, and the darwin signal table, which is (c): XNU `bsd/sys/signal.h:84-123` and
 asm-generic.
 
 ## Installer and labs (step 6, macOS)
 
-| Name | Value | Where | Kind | Status |
+| Name | Value | Where | Kind | How |
 |---|---|---|---|---|
-| Box users' role range | 450-499 | scripts/install/macos.sh:42-43 | (c) Apple's `sysadminctl` usage, macOS 26.4 | Converted, 64a0500. Was 200-400 from Nix's note |
-| Box users' first id | first free run of COUNT+2 in 450-499 (450 on .local-2) | macos.sh `free_run` | (a) | Converted, 64a0500. Was FIRST_ID=320 (d). Test macos_ids_test.sh 12/12 |
-| Pool size | COUNT=30 | macos.sh:38 | (d) Nix's 32 | Lead: grow on demand, learned, ahead by the node's observed peak of concurrent box-user boxes. Account creation in the root helper is a security question, brought first |
-| Box user's process cap | NPROC=1024, and helper `DEFAULT_NPROC`=1024 | macos.sh:44, crates/hex-cli/src/box_helper.rs:15 | (d) step 2's default | Lead: the box's `pids_max` when its spec gives one, else `kern.maxprocperuid` read at run time (c). Linux sets no default either (`pids.max` only from `pids_max`, hex-core cgroup.rs:86) |
-| Helper start wait | WAIT_STEPS=300 (30 s, 0.1 s polls) | macos.sh:46,166-171 | (d) | Lead: wait on the fact; deadline derived from the lab's recorded start times. Needs the lab to record them first |
-| dscl retries | DSCL_TRIES=3 | macos.sh:49 | (d) Nix's | Lead: retry only eNotYetImplemented, until a read of the record answers, or a deadline from measured transient durations. None measured yet |
-| File modes | folder 0750 root:hexnode; Umask, so socket 0770; 0755 binaries; 0644 plist and log | macos.sh:195-237 | (c) access policy, the folder rule cited (research §3.6: open.2:117, launchd.plist.5:293-296) | Kept |
-| Lab watchdog | 1800 s | bench/install/macos_lab.sh:54 | (d) | To (b) from the lab's recorded duration |
+| Box users' role range | 450-499 | scripts/install/macos.sh `ROLE_FIRST`/`ROLE_LAST`; hex_core::pool::ROLE_UIDS | (c) | Apple's `sysadminctl` usage, macOS 26.4 (was 200-400, Nix's note). 64a0500, cc74620 |
+| Box users' ids | first free run in 450-499 (450 on .local-2) | macos.sh `free_run` | (a) | Learned at install. 95e0557 test, 64a0500 |
+| Pool size | grown on demand, one account per box past the pool | hex_core::pool, Daemon::growing, macos/directory.rs | (a) | Was COUNT=30, Nix's 32. The installer makes the groups and one user; the pool stays ahead by the kept peak. Tests 6863a8f, c2dff27; code cc74620, 6895232, a6aa2ba |
+| Box user's process cap | the box's `pids_max`, else `kern.maxprocperuid` read at start | helper_daemon.rs, box_helper.rs, sys.rs | (c)/(a) | Was NPROC=1024. Linux sets no default either. dea5772 test, 6bbd791; §12 1c701ed held |
+| Helper start wait | success: a connect accepted; failure: launchd's exit report; bound only while running and not accepting: 0.075360 s | macos.sh `wait_serving`, `START_BOUND_S` | (b) | 2 x the max of 20 proxy starts (record agentstart-40454fe-20261106T150233Z). f023f4b, 63e701c. Ada's lab prints the real daemon's time to confirm |
+| dscl writes | once; a failure refused naming dscl's error | macos.sh `dscl_write` | none | No retry (was DSCL_TRIES=3, Nix's): eNotYetImplemented never seen. d0d8291, 8ba8ef5 |
+| Uninstall's process wait | by the fact (pgrep finds none), bound 2 x (0.883 ms + 0.298 ms x (n-1)) | macos.sh `end_pool_processes`, `drain_bound_s` | (b) | Was WAIT_STEPS 30 s. Record killscale-a84e094-20261106T160339Z. 3af15a2, 925771c |
+| File modes | 0750 folder, Umask 7 (socket 0770), 0755, 0644 | macos.sh | (c) | Access policy; research §3.6 cites open.2:117, launchd.plist.5:293-296 |
+| Lab watchdog | 1800 s | bench/install/macos_lab.sh | (d) | A hang guard for an admin run; to (b) from Ada's recorded lab duration |
 
 ## Descriptor default (step 6)
 
-| Name | Value | Where | Kind | Status |
+| Name | Value | Where | Kind | How |
 |---|---|---|---|---|
-| NOFILE soft | 1024 | crates/hex-core/src/limits.rs:7 | (c) select(2)'s FD_SETSIZE; Docker 29's | Kept |
-| NOFILE hard | 524288 | limits.rs:9 | (d) systemd's DefaultLimitNOFILE, via Docker 29 | Kept: Ada's call, for compatibility. The lead names it to her under her rule. On macOS the kernel's kern.maxfilesperproc (138,240 measured) binds first |
-| Cap at the runner's hard limit | getrlimit at run time | helper_sys.rs:203-205 | (a) | Kept |
+| NOFILE soft | 1024 | hex-core limits.rs | (c) | select(2)'s FD_SETSIZE |
+| NOFILE hard | 524288 | limits.rs | (d) | Ada's call (Docker 29's default, for compatibility); the lead names it to her. On macOS kern.maxfilesperproc (138,240 measured) binds first |
+| Cap at the helper's hard limit | getrlimit | helper_sys.rs | (a) | |
 
 ## Process class (step 1)
 
-| Name | Value | Where | Kind | Status |
+| Name | Value | Where | Kind | How |
 |---|---|---|---|---|
-| Watcher floor | 250 µs | crates/hex-core/src/watch.rs:18 | (b) RESULT.md, 9694770 (256 MiB held to 42 MiB at 164 GiB/s) | Kept |
-| Watcher ceiling | 100 ms | watch.rs:23 | (b), weakly: RESULT.md says a box read this often costs "next to nothing"; no number fixes 100 | To derive from a measured read-cost curve |
-| RT computation budget | 150 µs per 250 µs | crates/hex-runtime/src/macos/process.rs:477 | (b) rtbudget on studio-3, 2026-11-01 | Kept |
-| Group drain patience | 10 s | process.rs:43 | (d), a failure bound ("a SIGKILL ends members in milliseconds") | To (b) from measured killpg-to-empty times |
-| Listing capacity fallback | 4096 when kern.maxproc can't be read | process.rs:380, 409, 454 | (d) | To a typed refusal: no listing without kern.maxproc |
-| Event batch | EVENTS=64 | sys.rs:512 | (d) a buffer; more events wait a call (EV_CLEAR, kern_event.c:1139) | To (b) from measured events per wait, or keep as a batch size with no effect on correctness. Lead's call |
-| kevent change chunk | 64 | sys.rs:560 | (d) | Same as EVENTS |
-| Background clamp under weight | cpu_weight < 100 | process.rs:750 | (c) 100 is cgroup v2's default cpu.weight (the API's own default) | Kept |
-| Jetsam priority band | 40 | sys.rs:298 | (b) jetsam_probe.c, the band the fatal kill was confirmed at | Kept |
-| Jetsam cap floor and ceiling | 1 MiB; c_int's max | sys.rs:324-325 | (c) the SPI's MiB unit and int type | Kept |
-| Order hash multiplier | 0x9e3779b9 | process.rs:586 | (c) the golden-ratio constant of Fibonacci hashing (Knuth, TAOCP vol. 3 §6.4) | Kept; cite it in the code |
+| Watcher floor | 250 µs | hex-core watch.rs | (b) | RESULT.md, 9694770 |
+| Watcher ceiling | 100 ms | watch.rs | (b), weak | RESULT.md says a box read this often costs "next to nothing", but no measurement fixes 100. Open: needs a read-cost curve (reads per second against CPU) to derive the ceiling as the slowest pace whose cost is under the stated budget. Step 1's code; the lead's call whether this line measures it |
+| RT computation budget | 150 µs per 250 µs | process.rs | (b) | rtbudget on studio-3 |
+| Group drain | 2 x (0.883 ms + 0.298 ms x (n-1)) | hex_core::drain, process.rs | (b) | Was DRAIN_PATIENCE 10 s. Record killscale-a84e094. ffcec11 test, 9c72dac |
+| Listing size | kern.maxproc, or refused naming it | sys::listing | (c) | Was a 4096 fallback at five sites. 54e8ad0 test, 4f41305 |
+| Event batch | EVENTS = 64, also the registration chunk | sys.rs | (d) | A batch size that changes no outcome: more events wait one more call (EV_CLEAR coalesces a process's events, kern_event.c:1139). The second 64 merged into it (c376bc2). Open: derive it from measured events per wait under the largest box, or accept it as a batch size; the lead's call |
+| Background clamp | cpu_weight < 100 | process.rs | (c) | 100 is cgroup v2's default cpu.weight |
+| Jetsam band | 40 | sys.rs | (b) | jetsam_probe.c |
+| Jetsam cap floor and ceiling | 1 MiB; c_int's max | sys.rs | (c) | The SPI's unit and type |
+| Order hash multiplier | 0x9e3779b9 | process.rs | (c) | Fibonacci hashing, Knuth TAOCP vol. 3 §6.4 (cited, 622902f) |
 
 ## Box helper (step 2)
 
-| Name | Value | Where | Kind | Status |
+| Name | Value | Where | Kind | How |
 |---|---|---|---|---|
-| Ledger reserve | 16 MiB, capped at bound/4 | crates/hex-runtime/src/macos/mod.rs:36,150 | (d), its comment says "a constant until measured" (boxlab.sh) | To (b) from the arming-window allocation boxlab measures (Ada's root lab) |
-| Crossing pump timeout | 500 ms | box_helper.rs:74 | (d) | The daemon's sweep pace (layer three). To (a), the watch rule's own wait for the boxes it holds (watch.rs), as rootless mode does |
-| User drain patience | 10 s | helper_daemon.rs:36 | (d), a failure bound | To (b) as for the group drain |
-| Reap patience | 100 ms | helper_daemon.rs:42 | (d), a bound on a wait asked of a running program | To (b) from measured NOTE_EXIT-to-zombie times (kern_exit.c:2594-2664), or remove: the node asks only after NOTE_EXIT |
-| Listen backlog | 16 | helper_daemon.rs:649 | (d) | The helper serves one node connection at a time. To (c), the socket's own: SOMAXCONN, or 1 |
-| Programs per box | nproc | helper_daemon.rs:268 | follows #NPROC | Converts with NPROC |
-| Ended boxes kept | pool size | helper_daemon.rs:269 | follows the pool | Converts with the pool |
-| Message cap | MAX_MESSAGE=64 KiB | crates/hex-core/src/helper.rs:35 | (d), argued ("holds any a caller passes in practice") | To (c): the program's own ARG_MAX (sysctl kern.argmax) plus the header, read at run time |
-| Mach constants, message layout | EXC_MASK_RESOURCE 1<<11 … MACH_RCV_TIMED_OUT; trailer 68 B; reply id+100 | helper_sys.rs:84-140, 299 | (c) mach headers; trailer 68 and id+100 uncited | Cite: the trailer is mach_msg_max_trailer_t's size; +100 is MIG's reply-id rule |
+| Ledger reserve | 16 MiB, capped at bound/4 | macos/mod.rs | (d) | Step 2 derives it from Ada's root lab record (armlat); its SHA comes before the lab is re-pinned |
+| Sweep pace | none | helper | none | Was pump(500). Event-driven: crossings and member forks and ends wake it (step 2's b05d3a0, merged) |
+| End drain | hex_core::drain::bound | helper_daemon.rs | (b) | As the group drain. Step 2 checks Ada's box-user drain record against it |
+| Reap wait | none | helper_daemon.rs | none | Was REAP_PATIENCE 100 ms. Wait answers at once, try_wait (step 2's 469b093) |
+| Listen backlog | SOMAXCONN | helper_daemon.rs | (c) | `bsd/sys/socket.h:597` (step 2) |
+| Message cap | from ARG_MAX, PATH_MAX, NGROUPS_MAX | hex-core helper.rs | (c) | Step 2's 469b093 |
+| Mach constants | mach headers; trailer 68 B = MAX_TRAILER_SIZE; reply id + 100 | helper_sys.rs | (c) | message.h:563-564 (622902f); ipc_kobject.c:402 (step 2) |
+| Probe waits | 30 s, usleep 300 ms | boxuser_probe.c | (d) | Step 2 derives them from Ada's record |
 
-## Tests (steps 1, 2, 6)
+## Tests
 
-| Name | Value | Where | Kind | Status |
+| Name | Value | Where | Kind | How |
 |---|---|---|---|---|
-| Waits on a program's end | 10 s, 30 s, 20 s budget; lateness budget/2 | macos_process_box.rs:132,171,207,240,269,310,337,345; hex-runtime macos/tests.rs:193,303,308 | (d) | To (b) from the suite's measured exec-to-exit distributions (launchd runs, outside kiln's pacing) |
-| Bench and test rates | 256 GiB/s, 1,000,000 procs/s | macos_process_box.rs:68-69; watch.rs:298 | (b) RESULT.md's allocation rate | Kept |
-| Overshoot bar | 64 MiB | macos_process_box.rs:178-181 | (b) the step's bench bar (criterion 2) | Kept |
-| Loop and case counts | 60 programs; proptest 512/2048/4096 cases; spin budget 100,000 | macos_process_box.rs:339; watch/ledger/boxuser/helper tests; helper_daemon/tests.rs:380 | (d) | 60 is (b): the bench's 3-of-60 failure. Proptest case counts: to the count giving a stated miss probability. The spin budget: to a wait on the fact |
-| Test bounds and footprints | 256 MiB, 128 MiB, 2 GiB hogs, nproc 64/2 | tests across the line | Test inputs, not limits | Kept |
-| launchd one-shot limits | 2 h, 1 h | outside the repo (run scripts) | (d) | To (b) from recorded run times |
+| Fact waits | HANG_GUARD 39.507 s | macos_process_box.rs, macos/tests.rs, helper_daemon/tests.rs | (b) | 2 x the slowest recorded run of the tests that wait (record test-waits-macos.txt, step 2's 4f09e8f). A guard only ends a hang. This line's per-act 2 x 30-sample waits (e436b28) flaked as latency assertions and were replaced at 84eca3f |
+| A bound kill's lateness | ENDED_AT_BOUND 930.938 ms, budget HANG_GUARD | macos_process_box.rs | (b) | 2 x the max of 30 hog kills (record execexit-a82ce7b-20261106T161405Z); the one test that claims latency |
+| Property-test cases | derived from the rarest case's share | watch, ledger, boxuser, helper tests | (b) | Step 2's f262faf |
+| Pool property test | proptest's default (256 cases) | hex-core pool.rs | (d) | Copied default. Its rare branch (a full range) is pinned by its own deterministic test; to derive the count from the share of pools that hold a pool name |
+| Measurement hang guard | 600 s a sample | macos_process_box.rs measure_exec_to_exit | (d) | A measurement tool's guard under its launchd limit; not a check |
+| Test inputs | 256 MiB bounds, 2 GiB hogs, 60 programs, rates | tests | inputs | 60 is (b), the bench's 3 of 60; the rates are RESULT.md's |
 
 ## CLAUDE.md §12 lines on this branch
 
 | Commit | Line | State |
 |---|---|---|
 | caa6e9f | helper_sys.rs: the box helper's child sets `RLIMIT_NOFILE` beside `RLIMIT_NPROC` | Approved by Ada, 2026-11-06, as written (git note on caa6e9f) |
-| 1c701ed | sys.rs: `sysctlbyname` also reads `kern.maxprocperuid` (a box-user box's default process cap) | HELD FOR ADA, sent to the lead |
-| b0cfaae | sys.rs fork for a plain box's descriptor limit | Never landed: reverted at 1c8309f on the lead's call |
+| d4252f3, a960732 | helper_sys.rs (step 2): the file, its fork, user drop, ledger and exception arming; the mach_msg crossing receive | Approved by Ada, 2026-11-06 (step 2's cd46d31, merged) |
+| 1c701ed | sys.rs: `sysctlbyname` also reads `kern.maxprocperuid` | HELD FOR ADA; step 7's 08d52a0 adds `kern.argmax` to the same line |
+| b0cfaae | sys.rs fork for a plain box's descriptor limit | Never landed: reverted at 1c8309f |
