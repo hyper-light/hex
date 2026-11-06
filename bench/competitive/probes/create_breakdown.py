@@ -790,7 +790,8 @@ def summarize(run):
 
     # What decision 5's levers take, by the pooled parts: the record's fsyncs (plan step 2), the shim's spawn and
     # exec (the seed, plan steps 3 and 4), and the cgroup's making (a pool made ahead, plan step 5), each against
-    # the creates between the traced ones; what's left once the first two go; and goal 5's target, a quarter of
+    # the creates between the traced ones; what's left once the first two go; and goal 5's target (req: goal 5's bar,
+    # create p50 at most 0.25x libcrun's; STATUS.md, goal 5), a quarter of
     # libcrun's create p50 in the same run.
     if whole and between["p50"] and libcrun["p50"] and SEED in groups:
         # The seed path (goal 5 plan step 4): what's left for goal 5's added steps, each against the create.
@@ -1045,6 +1046,8 @@ def switch(trace, stats, seam_json=None, scope="switch"):
     whole_covered = creates is not None and len(create_ms) == creates
     fallback_counts_match = expected_dry is not None and expected_dry == clone_starts
     mount_evidence = (levels == ["8"] and whole_covered and fallback_counts_match)
+    # The bar, p99 at most 0.5 ms (500 us) at 8 creates in flight, is AC-e's as written (req: goal 5 plan step 2, AC-e;
+    # create_breakdown.md, "The root switch at concurrency").
     switch_le_bar = sp99 is not None and sp99 <= 500
     mounts_le_bar = mp99 is not None and mp99 <= 500
     ok = (n_lost == 0 and dangling == 0 and failed_switches == 0 and seam_error is None

@@ -459,7 +459,8 @@ def summarize(run):
         lines.append(f"| {kind} {op} | " + " | ".join(row) + f" | {ms3((v['best'] or {}).get('p50'))} |")
     lines.append("")
 
-    # The floor under exec, against a quarter of libcrun's exec p50: in each round, where the two ran back to
+    # The floor under exec, against a quarter of libcrun's exec p50 (req: runtime design goal 3's target, exec p50 at
+    # most a quarter of libcrun's, argument A3; docs/design/runtime-architecture.md): in each round, where the two ran back to
     # back, and best of the rounds.
     floors, pairs = {}, {}
     for rnd, path in rounds(run, "floor").items():
