@@ -98,10 +98,22 @@ nothing_left_listed() {
     if [ -e "$p" ]; then echo "left: $p"; return 1; fi
   done
 }
-outsider_refused() { # a user outside hexnode (nobody) can't connect to the helper's socket
-  ! sudo -u nobody nc -U -z "$SOCK" 2>/dev/null
+# A connect(2) to the helper's socket, as its caller: prints "ok", or the refusal's errno text. macOS's
+# `nc -U -z` exits 1 even against a listening socket (measured on .local-2, 2026-11-06), so it can't probe.
+CONNECT='use IO::Socket::UNIX; IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $ARGV[0]) ? print "ok\n" : print "$!\n"'
+connect_as() { sudo -u "$1" perl -e "$CONNECT" "$SOCK"; }
+outsider_refused() { # a user outside hexnode (nobody) is refused the socket by its folder's mode (EACCES)
+  local got
+  got=$(connect_as nobody)
+  echo "nobody's connect: $got"
+  [ "$got" = "Permission denied" ]
 }
-member_connects() { as_user nc -U -z "$SOCK"; }
+member_connects() { # the lab user, in hexnode, connects
+  local got
+  got=$(connect_as "$LABUSER")
+  echo "$LABUSER's connect: $got"
+  [ "$got" = ok ]
+}
 
 # The record takes everything from here, in this shell (not a pipeline's subshell), so the EXIT trap sees
 # whether install ran.
