@@ -86,6 +86,11 @@ struct Shared {
     /// the way their mount namespace was made as the seed answered ([`MountNamespace::code`]'s index).
     /// Zero on a rootless node, whose seeds don't prune. Each stops at `u64::MAX`.
     made: [AtomicU64; 3],
+    /// Claims of a parked init that failed, by why: it didn't answer within the hang bound, or it refused or broke.
+    /// Each falls back to a seed's clone (the runtime's request, which the claim only borrowed, goes to
+    /// [`CloneInit::clone_init`]), so these say how often a parked init cost its create a clone. Each stops at
+    /// `u64::MAX`.
+    claims_failed: [AtomicU64; 2],
     /// The wakes sent the starting thread and the line, for the tests.
     #[cfg(test)]
     woke: [AtomicU64; 2],
@@ -203,6 +208,7 @@ impl CreatePool {
             classic: std::array::from_fn(|_| AtomicU64::new(0)),
             mount_namespace,
             made: std::array::from_fn(|_| AtomicU64::new(0)),
+            claims_failed: std::array::from_fn(|_| AtomicU64::new(0)),
             #[cfg(test)]
             woke: [AtomicU64::new(0), AtomicU64::new(0)],
         });
@@ -262,6 +268,17 @@ impl CreatePool {
     pub fn learned(&self) -> Result<(usize, usize), Refusal> {
         let inner = self.shared.lock().map_err(Refusal::from)?;
         Ok((inner.seeds.slots(), inner.spare.size()))
+    }
+
+    /// Claims of a parked init that failed and fell back to a seed's clone, by why: (hung, refused or broken).
+    pub fn claims_failed(&self) -> (u64, u64) {
+        let at = |i: usize| {
+            self.shared
+                .claims_failed
+                .get(i)
+                .map_or(0, |c| c.load(Ordering::Relaxed))
+        };
+        (at(0), at(1))
     }
 
     pub fn counts(&self) -> Result<Counts, Refusal> {
@@ -378,7 +395,9 @@ impl CreatePool {
                 }
                 Ok((pid, pidfd))
             }
-            Err(Trip::Refused(e) | Trip::Broken(e) | Trip::Hung(e)) => {
+            Err(trip) => {
+                self.shared.claim_failed(&trip);
+                let (Trip::Refused(e) | Trip::Broken(e) | Trip::Hung(e)) = trip;
                 // Refused, the init ends itself; ended either way, and reaped, so none is left.
                 drop(socket);
                 let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::KILL);
@@ -574,6 +593,11 @@ impl Shared {
 
     fn now(&self) -> Duration {
         self.base.elapsed()
+    }
+
+    /// A parked init's claim failed with `trip`: counted by its kind.
+    fn claim_failed(&self, trip: &Trip) {
+        let _ = trip;
     }
 
     /// Wakes the starting thread, for a seed to start.
@@ -1105,6 +1129,28 @@ mod tests {
             (0, 0),
             "the wakes sent the starting thread and the line over 1,000 creates that left nothing to start"
         );
+    }
+
+    /// The lead's rule of 2026-11-06 (AC-T7.1.3): a parked init's claim that fails falls back to a seed's clone, and
+    /// is counted by why, so a pass shows how often a parked init cost its create a clone. Do: tell a pool a claim
+    /// hung once and was refused twice. Expect: (1, 2), and none before.
+    #[test]
+    fn a_failed_parked_claim_is_counted_by_why() {
+        let pool = CreatePool::new(
+            PathBuf::from("/nonexistent/hex-for-the-test"),
+            crate::sizes::Sizes::now().unwrap(),
+            None,
+            None,
+            #[cfg(debug_assertions)]
+            None,
+        )
+        .unwrap();
+        assert_eq!(pool.claims_failed(), (0, 0));
+        let e = || OciError::Broken("for the test".to_owned());
+        pool.shared.claim_failed(&Trip::Hung(e()));
+        pool.shared.claim_failed(&Trip::Refused(e()));
+        pool.shared.claim_failed(&Trip::Broken(e()));
+        assert_eq!(pool.claims_failed(), (1, 2));
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the
