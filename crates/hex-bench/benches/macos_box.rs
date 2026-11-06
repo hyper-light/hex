@@ -7,6 +7,8 @@
 //!   macos_box [passes]           both measurements, `passes` times each (default 3)
 //!   macos_box readcost [passes]  the watcher's read-cost curve: CPU against reads a second, by box size
 //!   macos_box events [passes]    the most events one kqueue wait takes, by box size
+//!   macos_box fill [passes]      a box's worst aggregate growth: one member per core filling memory, and
+//!                                one member per core spawning, all at once
 //!
 //! `readcost` and `events` size the watcher's ceiling and its event batch (the lead's calls 1 and 2,
 //! 2026-11-06, under Ada's rule): each drives the watcher's own calls (`hex_runtime::macos::sys`) on a group
@@ -38,6 +40,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::num::NonZeroU64;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -298,6 +301,78 @@ mod macos {
         most
     }
 
+    /// What one fill member takes: a box's whole bound, so each races past it as the overshoot pass's hogs do.
+    const FILL_BYTES: u64 = BOUND;
+    /// How many `true`s one spawn member starts, one after another: step 7's growth record's n (20).
+    const SPAWNS: usize = 20;
+
+    /// A member of the `fill` pass, run as this bench's own child: waits for the go byte on stdin, then
+    /// either fills `FILL_BYTES` of fresh memory with an incompressible xorshift stream a u64 at a time (as
+    /// step 7's native_box measures one member's fill) or spawns and reaps `/usr/bin/true` `SPAWNS` times,
+    /// and prints what it did and its own elapsed nanoseconds.
+    fn member_main(what: &str) {
+        let mut go = [0u8; 1];
+        std::io::stdin().read_exact(&mut go).expect("the go byte");
+        let t = Instant::now();
+        let done = if what == "fill-member" {
+            let mut touched = vec![0u8; FILL_BYTES as usize];
+            let mut x = 0x9e37_79b9_7f4a_7c15u64;
+            for word in touched.as_chunks_mut::<{ size_of::<u64>() }>().0 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *word = x.to_le_bytes();
+            }
+            std::hint::black_box(&touched);
+            FILL_BYTES
+        } else {
+            for _ in 0..SPAWNS {
+                Command::new("/usr/bin/true")
+                    .stdout(Piped::null())
+                    .status()
+                    .expect("spawn true");
+            }
+            SPAWNS as u64
+        };
+        println!("{done} {}", t.elapsed().as_nanos());
+    }
+
+    /// One `fill` pass of `what` (`fill-member` or `spawn-member`) with `members` members started together:
+    /// returns the sum of the members' own rates (an upper bound on the aggregate, every member overlapping)
+    /// and the total over the slowest member's time (a lower bound), in units a second.
+    fn together(what: &str, members: usize) -> (f64, f64) {
+        let me = std::env::current_exe().expect("current exe");
+        let mut kids: Vec<Child> = (0..members)
+            .map(|_| {
+                Command::new(&me)
+                    .arg(what)
+                    .stdin(Piped::piped())
+                    .stdout(Piped::piped())
+                    .stderr(Piped::inherit())
+                    .spawn()
+                    .expect("spawn a member")
+            })
+            .collect();
+        for k in &mut kids {
+            k.stdin.take().expect("stdin").write_all(&[1]).expect("go");
+        }
+        let (mut sum, mut total, mut slowest) = (0.0, 0.0, 0.0f64);
+        for k in &mut kids {
+            let mut line = String::new();
+            BufReader::new(k.stdout.take().expect("stdout"))
+                .read_line(&mut line)
+                .expect("a member's report");
+            let mut words = line.split_whitespace();
+            let done: f64 = words.next().expect("done").parse().expect("done");
+            let secs = words.next().expect("ns").parse::<f64>().expect("ns") / 1e9;
+            sum += done / secs;
+            total += done;
+            slowest = slowest.max(secs);
+            assert!(k.wait().expect("wait").success(), "a member failed");
+        }
+        (sum, total / slowest)
+    }
+
     fn passes() -> usize {
         std::env::args_os()
             .skip(1)
@@ -311,7 +386,13 @@ mod macos {
         let mode = std::env::args_os()
             .skip(1)
             .filter_map(|a| a.into_string().ok())
-            .find(|a| a == "readcost" || a == "events");
+            .find(|a| {
+                ["readcost", "events", "fill", "fill-member", "spawn-member"].contains(&a.as_str())
+            });
+        if let Some(what @ ("fill-member" | "spawn-member")) = mode.as_deref() {
+            member_main(what);
+            return;
+        }
         let passes = passes();
         match mode.as_deref() {
             Some("readcost") => {
@@ -328,6 +409,25 @@ mod macos {
                             );
                         }
                     }
+                }
+                return;
+            }
+            Some("fill") => {
+                let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+                println!(
+                    "macos_box fill passes={passes} members={cores} fill_bytes={FILL_BYTES} spawns={SPAWNS}"
+                );
+                for pass in 1..=passes {
+                    let (sum, span) = together("fill-member", cores);
+                    println!(
+                        "pass={pass} fill members={cores} bytes_per_s_sum={sum:.0} bytes_per_s_span={span:.0} load1={:.2}",
+                        sys::loadavg().unwrap_or(-1.0)
+                    );
+                    let (sum, span) = together("spawn-member", cores);
+                    println!(
+                        "pass={pass} spawn members={cores} spawns_per_s_sum={sum:.1} spawns_per_s_span={span:.1} load1={:.2}",
+                        sys::loadavg().unwrap_or(-1.0)
+                    );
                 }
                 return;
             }

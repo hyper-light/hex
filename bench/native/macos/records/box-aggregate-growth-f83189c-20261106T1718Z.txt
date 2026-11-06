@@ -1,0 +1,40 @@
+# A macOS box's worst aggregate growth (the lead, 2026-11-06): one member per core, all started together by one
+# go byte, each a child process of crates/hex-bench/benches/macos_box.rs `fill`:
+# - fill: each member fills 256 MiB (a box's whole bound, so it races past it as the overshoot pass's hogs do) of
+#   fresh memory with an incompressible xorshift stream, a u64 at a time: step 7's one-member method
+#   (bench/native/records/native-box-macos-growth-8503dc0-20261106T171108Z.txt), run by every core at once;
+# - spawn: each member spawns and reaps /usr/bin/true 20 times, one after another, all members at once.
+# sum = the members' own rates added (an upper bound: every member overlapping); span = the total over the
+# slowest member's time (a lower bound). Release build of tree f83189c + the pass, 5 passes, launchd one-shots
+# outside kiln's runs.
+
+## adas-mac-studio-2: Mac16,9, Apple M4 Max, 14 cores, 36 GiB, macOS 26.2 25C56; 2026-11-06T17:18:19Z, load 5.69
+# launchd hex-macos-fill-20261106T171811Z
+pass=1 fill members=14 bytes_per_s_sum=37554886964 bytes_per_s_span=33713971329
+pass=1 spawn members=14 spawns_per_s_sum=9751.5 spawns_per_s_span=9166.5
+pass=2 fill members=14 bytes_per_s_sum=46263841186 bytes_per_s_span=41316282599
+pass=2 spawn members=14 spawns_per_s_sum=9752.4 spawns_per_s_span=9277.9
+pass=3 fill members=14 bytes_per_s_sum=44625848937 bytes_per_s_span=37862630003
+pass=3 spawn members=14 spawns_per_s_sum=10196.1 spawns_per_s_span=9571.8
+pass=4 fill members=14 bytes_per_s_sum=46221597629 bytes_per_s_span=41520498033
+pass=4 spawn members=14 spawns_per_s_sum=10436.4 spawns_per_s_span=9831.0
+pass=5 fill members=14 bytes_per_s_sum=47464532324 bytes_per_s_span=33154652022
+pass=5 spawn members=14 spawns_per_s_sum=9545.0 spawns_per_s_span=8988.9
+
+## adalundhe-macbook-pro: Mac17,6, Apple M5 Max, 18 CPUs, 64 GiB, macOS 26.5.2 25F84; 2026-11-06T17:19:44Z,
+## load 47.64-49.03 (overloaded by other work; its figures are low for that, not the machine's worst)
+# launchd hex-macos-fill-20261106T171915Z
+pass=1 fill members=18 bytes_per_s_sum=1765371281 bytes_per_s_span=1727728131
+pass=1 spawn members=18 spawns_per_s_sum=638.5 spawns_per_s_span=623.2
+pass=2 fill members=18 bytes_per_s_sum=3832112766 bytes_per_s_span=3537172823
+pass=2 spawn members=18 spawns_per_s_sum=594.4 spawns_per_s_span=580.2
+pass=3 fill members=18 bytes_per_s_sum=6068653165 bytes_per_s_span=5491926333
+pass=3 spawn members=18 spawns_per_s_sum=464.7 spawns_per_s_span=453.4
+pass=4 fill members=18 bytes_per_s_sum=4377713821 bytes_per_s_span=4100586728
+pass=4 spawn members=18 spawns_per_s_sum=836.1 spawns_per_s_span=830.3
+pass=5 fill members=18 bytes_per_s_sum=7496935343 bytes_per_s_span=7195549556
+pass=5 spawn members=18 spawns_per_s_sum=970.3 spawns_per_s_span=936.1
+
+# Worst: adas-mac-studio-2, fill 47,464,532,324 bytes/s (sum; 41,520,498,033 span), spawn 10,436.4/s (sum).
+# The ceiling these give at step 1's 64 MiB bar: 64 MiB / 47,464,532,324 B/s = 1,413,873 ns (1,616,282 ns at
+# the span rate); a missed wake within it at 10,436.4 spawns/s lets about 14.8 processes in.
