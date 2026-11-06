@@ -26,6 +26,53 @@ pub fn bound(members: usize) -> Duration {
     )
 }
 
+/// The drain bound as this node learns it (the learned-waits rule, 2026-11-06): the record's to start, then
+/// raised by the slowest drain this node has seen, for every group size in proportion, never lowered. It keeps
+/// that slowest drain as a ratio to the record's envelope for its size, in parts per million (at least one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Learned {
+    slowest_ppm: u64,
+}
+
+const PPM: u64 = 1_000_000;
+
+impl Default for Learned {
+    fn default() -> Self {
+        Self { slowest_ppm: PPM }
+    }
+}
+
+impl Learned {
+    /// How long a group of `members` gets to empty: [`bound`] scaled by the slowest drain seen, never below it.
+    pub fn bound(&self, members: usize) -> Duration {
+        let scaled = bound(members)
+            .as_nanos()
+            .saturating_mul(u128::from(self.slowest_ppm))
+            .checked_div(u128::from(PPM))
+            .unwrap_or(u128::MAX);
+        Duration::from_nanos(u64::try_from(scaled).unwrap_or(u64::MAX))
+    }
+
+    /// Notes a drain of `members` that took `elapsed`: raises the bound if it was slower, relative to the
+    /// record's envelope for its size, than any seen.
+    pub fn observe(&mut self, members: usize, elapsed: Duration) {
+        let Some(envelope) = bound(members).as_nanos().checked_div(u128::from(MARGIN)) else {
+            return;
+        };
+        let Some(ratio) = elapsed
+            .as_nanos()
+            .saturating_mul(u128::from(PPM))
+            .checked_div(envelope)
+        else {
+            return;
+        };
+        let ratio = u64::try_from(ratio).unwrap_or(u64::MAX);
+        if ratio > self.slowest_ppm {
+            self.slowest_ppm = ratio;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
