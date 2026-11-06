@@ -128,7 +128,7 @@ Each test passed again with the check restored.
 records), run on fedora by `bench/native/tarball-census/run.sh`, unit `hex-ns5route-census-20261106T120325Z`. Images,
 pinned by the digest each tag resolved to:
 
-| image | digest | entries | hard links (groups) | non-root uid/gid | xattrs | setuid/setgid | distinct mtimes |
+| image | digest | entries | hard links (groups) | non-root uid/gid | xattrs | setuid/setgid | distinct mtimes (summed over layers) |
 |---|---|---|---|---|---|---|---|
 | debian:bookworm-slim | `sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc` | 4,226 | 2 (2) | 10 | 0 | 13 | 139 |
 | ubuntu:24.04 | `sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852` | 3,443 | 2 (2) | 18 | 0 | 14 | 230 |

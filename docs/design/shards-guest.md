@@ -187,9 +187,8 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   are tarballs to begin with. The archive is read flat, one entry at a time, within the stage's bounds (entries,
   bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, an entry before its
   directory, a corrupt or truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending
-  mid-entry) are refused by name. A hard link is refused by name too: none of the lab's inputs or runtime-tools holds
-  one (`tar -tv` on each, 2026-11-06), so nothing needs it; falsified, and staged as a copy of an earlier entry, when
-  a root that must run does.
+  mid-entry) are refused by name. A hard link was refused by name too, since none of the lab's inputs holds one; that
+  was falsified the same day by real images (below) and is superseded by what a tarball root carries.
   - **The reader is the `tar` crate**, 0.4.46 from crates.io (alexcrichton's tar-rs), already a workspace
     dependency (`Cargo.toml:40`), used as it is rather than a reader of Hex's own; not vendored, since Hex changes
     nothing in it (CLAUDE.md "Vendoring"). Hex's checks wrap what it yields, and every hostile-input test runs
@@ -203,9 +202,9 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     `EntryFields::read_all`, called at `src/archive.rs:418,429,440`), so a few MB of gzip can make it buffer
     gigabytes. tar-rs leaves bounding the stream to its callers, so this is no bug to patch, vendor or report;
     Hex bounds it. A global PAX record (`g`) is read within the same 64 KiB and may set only keys staging doesn't
-    carry, so can't get wrong: `mtime`, `atime`, `ctime`, `uid`, `gid`, `uname`, `gname`, `comment`, `charset`,
-    `hdrcharset` (staging carries a mode and a link text, never times, owners or names, and a root's texts are
-    UTF-8 either way); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
+    carry, so can't get wrong: `atime`, `ctime`, `uname`, `gname`, `comment`, `charset`, `hdrcharset` (staging
+    sets atime from mtime, never ctime (the kernel's), ignores owner names for numeric ids, and a root's texts are
+    UTF-8 either way; `uid`, `gid` and `mtime` left the list when staging began carrying them, below); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
     every later entry, and is refused by name, never ignored (CLAUDE.md §3); a key on neither list is refused naming
     it, so a real archive that meets one shows exactly what to weigh before it is added. `git archive`'s tarballs,
     which begin with a global record holding only `comment=<commit>`, stage with every entry exact (a real one,
@@ -215,6 +214,38 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     roots it serves holds: `tar -tv`), and an extension record with no entry after it. The tests that pin this
     handling are `crates/hex-client/src/guest/stage/tar_tests.rs` and the relay's end-to-end
     `a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothing` (HEX-GUEST-14, -15).
+- **A tarball root carries what Linux's own unpack holds** (amended 2026-11-06, the lead's call): owners, times,
+  extended attributes and hard links, not only a path, a mode and a link text. The evidence
+  (`docs/research/runtime/shards-guest.md` §9, six public images pinned by digest): every image but alpine has hard
+  links (debian's and ubuntu's perl-base ship `usr/bin/perl` and `perl5.x` as one inode; fedora:44 has 551 groups),
+  grafana has 16,280 entries owned by 1000:1000 or 472:0, the shadow group owns `etc/shadow` in debian, ubuntu and
+  alpine, and caddy's binary holds `security.capability`. Dropping them would make every non-root image's files
+  root's and copies of hard links, and strip capabilities; refusing them would refuse nearly every image. So:
+  - **The staging stream's entry gains, append-only** (its version 2; a version-1 stream reads as before): a numeric
+    uid and gid (names ignored, as containerd does: the layers carry none), an mtime (seconds and nanoseconds), up to
+    a bound of extended attributes (name, value), and a hard-link kind whose target is an earlier entry of the same
+    root, a regular file, named as a staged path is and refused if it names its way out, a later or missing entry, or
+    a directory. Bounds (CLAUDE.md §2), from Linux's own: at most 64 xattrs an entry, a name at most 255 bytes
+    (`XATTR_NAME_MAX`), a value at most 64 KiB (`XATTR_SIZE_MAX`) and all of an entry's at most 64 KiB
+    (`XATTR_LIST_MAX`); a link target within the path bound.
+  - **Where they come from:** the tar header's uid, gid and mtime, or PAX `uid`, `gid`, `mtime` past what a header
+    holds; xattrs from PAX `SCHILY.xattr.*` and `LIBARCHIVE.xattr.*` (base64 there). Every xattr in a Linux namespace
+    (`security.`, `system.`, `trusted.`, `user.`) is carried; one in no Linux namespace (`com.apple.*`, from macOS
+    bsdtar) can't exist on Linux, so not carrying it loses nothing Linux's unpack would hold, and is stated, not
+    refused. A global PAX record setting `uid`, `gid` or `mtime` would now change what's staged, so those leave the
+    global record's allowed keys and are refused by name there.
+  - **The relay applies them in Linux's order** for each entry, since a chown and a write each clear setuid, setgid and
+    `security.capability`: contents written and closed, then the owner (`fchownat` with `AT_SYMLINK_NOFOLLOW`), the
+    mode, the xattrs, and last the times (`utimensat` with `AT_SYMLINK_NOFOLLOW`, atime set to mtime as containerd's
+    unpack does). A directory's are applied when the stage ends, deepest first, after everything in it, so writing its
+    children doesn't move its mtime. A hard link is `linkat` from the target's directory, opened inside the root
+    through no symbolic link. An xattr the guest refuses to set is refused by name. All through rustix's safe
+    wrappers; no new `unsafe`.
+  - **User namespaces:** the ids are staged as the image holds them, as Linux's unpack stores them; mapping them for a
+    box in a user namespace is the runtime's, as on any Linux host.
+  - A directory root (a `Path` source) carries none of these: a host directory holds no Linux owners (and on Windows
+    is refused, above). The test that holds it: HEX-GUEST-21, each image staged as a tarball root in a real guest,
+    compared entry by entry with the same image unpacked as root on Linux.
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 
