@@ -746,3 +746,59 @@ fn a_release_sent_before_a_reset_is_honoured() {
     rustix::process::kill_process(pid, Signal::KILL).unwrap();
     rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()).unwrap();
 }
+
+/// HEX-SOCK-5, the lead's call of 2026-11-06 (AC-T7.1.3): calls in flight are one budget for the node, not a share
+/// for each connection; the node's clients are its own control plane, so none is fair to another. Do: two
+/// connections under a node-wide bound of 2, the host's gate shut, one call on the first and two on the second.
+/// Expect: the third call, whichever connection it is on, refused naming the bound; the two within it answered once
+/// the gate opens.
+#[test]
+fn calls_in_flight_are_bounded_for_the_node_not_each_connection() {
+    let lab = Lab::new(Limits {
+        in_flight: 2,
+        ..limits()
+    });
+    let (one, two) = (lab.raw(), lab.raw());
+    lab.host.gate.set(true);
+    send_raw(&one, &request(1, Call::Inspect(b())), &[]);
+    send_raw(&two, &request(2, Call::Inspect(b())), &[]);
+    send_raw(&two, &request(3, Call::Inspect(b())), &[]);
+    assert_eq!(
+        answer_of(&two).1,
+        Answer::Refused(Refusal::Exhausted {
+            what: IN_FLIGHT,
+            bound: 2
+        })
+    );
+    lab.host.gate.set(false);
+    assert!(matches!(answer_of(&one), (Header { id: 1, .. }, Answer::Info(_))));
+    assert!(matches!(answer_of(&two), (Header { id: 2, .. }, Answer::Info(_))));
+}
+
+/// HEX-SOCK-7, the lead's call of 2026-11-06: the programs watched are one budget for the node. Do: two connections
+/// under a node-wide bound of 1, an exec on each. Expect: the second refused naming the bound, though its
+/// connection watches none.
+#[test]
+fn programs_watched_are_bounded_for_the_node_not_each_connection() {
+    let lab = Lab::new(Limits {
+        programs: 1,
+        ..limits()
+    });
+    let (a, c) = (lab.client(), lab.client());
+    let mut first = a
+        .exec(&b(), Program::of(&["sleep", "1000"]), Stdio::null())
+        .unwrap();
+    assert_eq!(
+        c.exec(&b(), Program::of(&["true"]), Stdio::null()).err(),
+        Some(Refusal::Exhausted {
+            what: PROGRAMS,
+            bound: 1
+        })
+    );
+    rustix::process::kill_process(
+        Pid::from_raw(i32::try_from(first.pid()).unwrap()).unwrap(),
+        Signal::KILL,
+    )
+    .unwrap();
+    assert_eq!(first.wait_for(PATIENCE).unwrap(), Some(Exit::Signal(9)));
+}
