@@ -2,21 +2,21 @@
 //! test runs on, privileged or not.
 
 use super::*;
+use hex_api::conformance::PATIENCE;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-/// Longest a test waits for a fact it needs: a bound, so a thread that never makes it true fails the test instead
+/// Waits for `fact`, giving the CPU up between looks rather than sleeping a picked period, for at most
+/// [`PATIENCE`], the longest a case waits for a fact: a thread that never makes it true fails the test instead
 /// of hanging it.
-const PATIENCE: Duration = Duration::from_secs(30);
-
 fn wait_for(what: &str, mut fact: impl FnMut() -> bool) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {
         if fact() {
             return;
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        std::thread::yield_now();
     }
     panic!("no {what} within {PATIENCE:?}");
 }
