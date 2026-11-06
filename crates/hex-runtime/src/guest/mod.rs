@@ -159,11 +159,27 @@ struct Booted {
     client: Client,
 }
 
-/// The slowest boot to ready on record before this node has seen one: HVF's, the most of every run on
-/// record, quiet and under its hosts' own load, across both Mac Studios (N=40 each;
-/// bench/native/guest/boot-ready/RECORD.md). KVM and WHP aren't recorded yet, so they take it too, as
-/// that record states.
-pub const RECORDED_BOOT: Duration = Duration::from_millis(265);
+/// The slowest boot to ready on record for this host's class, the seed of the first dial's bound before
+/// this node has seen a boot (bench/native/guest/boot-ready/RECORD.md). macOS (HVF): the most of every
+/// run, quiet and under its hosts' own load, across both Mac Studios. Linux (KVM) and Windows (WHP) have
+/// no record yet, so they have no seed: a guest there is refused by name until their records are taken,
+/// never bounded by another class's.
+pub fn recorded_boot() -> Result<Duration, Refusal> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Duration::from_millis(265))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(Refusal::Platform {
+            what: "the oci class's guest",
+            platform: std::env::consts::OS,
+            why: "this host class's boot-to-ready record is pending \
+                  (bench/native/guest/boot-ready/RECORD.md), so its first dial has no bound to seed"
+                .to_owned(),
+        })
+    }
+}
 
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
@@ -201,7 +217,7 @@ impl GuestRuntime {
     /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
     pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
         let seen = *self.slowest.lock().map_err(poisoned)?;
-        Ok(seen.max(RECORDED_BOOT).saturating_mul(2))
+        Ok(seen.max(recorded_boot()?).saturating_mul(2))
     }
 
     /// A boot to ready this node has seen, taking `took`: the bound rises with it, never falls.

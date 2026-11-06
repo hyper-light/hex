@@ -5,8 +5,11 @@ HEX_GUEST_KERNEL and HEX_GUEST_INITRD. Every wait is on a fact, never a clock (C
 console's line or the VM's end, which a guest that can't start brings (init powers off, and a panic
 reboots at once, `panic=-1`).
 
-    python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--share DIR[:ro]]...
+    python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--record] [--share DIR[:ro]]...
         [--cmdline-extra WORDS]
+
+The VM is stopped by SIGTERM and killed past twice the slowest stop on record for this host's class. A class
+with no record yet is refused unless --record is given, which waits on the VM's end alone, to take that record.
 
 The console is kept in WORKDIR/vm.log; --console echoes it too. Each --share is given to Shards and
 named on the command line (`hex.shares=`), so READY proves init mounted it: a share init can't mount
@@ -67,8 +70,9 @@ PEAK_MIB = 284
 
 
 # How long a VM may take to end after SIGTERM before it is killed: twice (the margin) the slowest stop on
-# record (bench/native/guest/stop/RECORD.md), the lead's rule for a timeout that can't wait on a fact.
-STOP_GRACE = 2 * 0.013
+# record for this host's class (bench/native/guest/stop/RECORD.md), the lead's rule for a timeout that can't
+# wait on a fact. macOS (HVF): 13 ms. Linux (KVM) and Windows (WHP): pending, so none is borrowed.
+STOP_GRACES = {"Darwin": 2 * 0.013}
 
 
 def guest_memory_mib():
@@ -84,6 +88,10 @@ def values(argv, flag):
 def main(argv):
     if not argv:
         sys.exit(__doc__)
+    record = "--record" in argv
+    if platform.system() not in STOP_GRACES and not record:
+        sys.exit(f"no VM stop record for {platform.system()} yet (bench/native/guest/stop/RECORD.md): "
+                 "take it first with --record")
     work = argv[0]
     console = "--console" in argv
     shares = values(argv, "--share")
@@ -128,10 +136,11 @@ def main(argv):
     finally:
         stopping = time.monotonic()
         vm.terminate()
-        # SIGTERM, then SIGKILL past STOP_GRACE; the console is drained meanwhile so the VM never blocks
+        # SIGTERM, then SIGKILL past the stop grace; the console is drained meanwhile so the VM never blocks
         # writing it.
         try:
-            rest, _ = vm.communicate(timeout=STOP_GRACE)
+            # --record takes the record: it waits on the VM's end alone, the time it prints the sample.
+            rest, _ = vm.communicate(timeout=None if record else STOP_GRACES[platform.system()])
         except subprocess.TimeoutExpired:
             vm.kill()
             rest, _ = vm.communicate()

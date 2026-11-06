@@ -646,6 +646,7 @@ impl shards_api::Guests for Planned {
 
 /// HEX-GUEST-34 (the lead's rule for learned waits): boot a guest before any boot is seen: expect its
 /// first dial bounded by twice the record's slowest boot to ready, never unbounded.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_first_boot_is_bounded_by_the_record() {
     if shards_api::backend().is_err() {
@@ -656,13 +657,14 @@ fn the_first_boot_is_bounded_by_the_record() {
     rt.guest().unwrap();
     let given = guests.patience.lock().unwrap()[0];
     assert!(
-        given <= 2 * RECORDED_BOOT && given > RECORDED_BOOT,
+        given <= 2 * recorded_boot().unwrap() && given > recorded_boot().unwrap(),
         "{given:?}"
     );
 }
 
 /// HEX-GUEST-34: tell the runtime of a boot slower than the record, then a faster one, and boot: expect
 /// the first dial bounded by twice the slowest seen, the bound only rising.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_bound_rises_with_a_slow_boot_and_never_falls() {
     if shards_api::backend().is_err() {
@@ -670,9 +672,9 @@ fn the_bound_rises_with_a_slow_boot_and_never_falls() {
     }
     let guests = Arc::new(Planned::new(&[Boots::Ready]));
     let rt = GuestRuntime::new(guests.clone(), config());
-    let slow = 3 * RECORDED_BOOT;
+    let slow = 3 * recorded_boot().unwrap();
     rt.learn(slow);
-    rt.learn(RECORDED_BOOT / 2);
+    rt.learn(recorded_boot().unwrap() / 2);
     assert_eq!(rt.first_dial_bound().unwrap(), 2 * slow);
     rt.guest().unwrap();
     let given = guests.patience.lock().unwrap()[0];
@@ -681,6 +683,7 @@ fn the_bound_rises_with_a_slow_boot_and_never_falls() {
 
 /// HEX-GUEST-34 (no caller fails where an alternative exists): boot a guest that stays alive and never
 /// listens, then one that does: expect the first stopped and counted, the second booted and used.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_hung_guest_is_retired_and_booted_again() {
     if shards_api::backend().is_err() {
@@ -696,6 +699,7 @@ fn a_hung_guest_is_retired_and_booted_again() {
 
 /// HEX-GUEST-34: boot two guests that both hang: expect the caller refused by type, naming the boot and
 /// its bound, after exactly two boots, both stopped.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_second_hang_is_refused_by_type() {
     if shards_api::backend().is_err() {
@@ -711,4 +715,20 @@ fn a_second_hang_is_refused_by_type() {
     assert_eq!(guests.boots.load(Ordering::SeqCst), 2);
     assert_eq!(guests.stops.load(Ordering::SeqCst), 2);
     assert_eq!(rt.retired(), 2);
+}
+
+/// HEX-GUEST-34 (the parent's rule: a host class without a record doesn't seed its bound): on Linux (KVM)
+/// and Windows (WHP), whose boot-to-ready records are pending, ask for a guest: expect it refused by type,
+/// naming the pending record, before anything boots, never a bound borrowed from another class.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_host_class_without_a_record_refuses_by_name() {
+    let guests = Arc::new(Planned::new(&[Boots::Ready, Boots::Hung]));
+    let rt = GuestRuntime::new(guests.clone(), config());
+    let got = rt.guest().map(|_| ());
+    let Err(Refusal::Platform { why, .. }) = got else {
+        panic!("expected the pending record named, got {got:?}");
+    };
+    assert!(why.contains("boot-ready/RECORD.md"), "{why}");
+    assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
 }

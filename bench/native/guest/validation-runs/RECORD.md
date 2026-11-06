@@ -12,4 +12,5 @@ test's whole run, as cargo prints it (boot, staging, the lab, the comparison), s
 | adas-mac-studio.local-2, HVF | 2026-11-06 16:37Z, launchd hex.ns5.dver.20261106T163737Z, 2014 MiB | 749823c + sizes | 73.75 |
 | adas-mac-studio.local-2, HVF | 2026-11-06 16:58Z, launchd hex.ns5.dver2.20261106T165820Z, 2014 MiB, load 9.2-10.5 | de00973 | 67.13 |
 
-The slowest: **75.5 s** (jupiter), so `SUITE` is 151 s. KVM (fedora) isn't recorded in a guest yet.
+Each host class's slowest seeds its own bound (`suite()`): HVF **73.75 s** (147.5 s), WHP **75.5 s** (jupiter, 151 s).
+KVM (fedora) isn't recorded in a guest yet, so it has no bound; the test names the pending record there.

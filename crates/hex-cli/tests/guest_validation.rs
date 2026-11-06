@@ -41,10 +41,22 @@ use hex_runtime::guest::{GuestConfig, GuestRuntime};
 const PEAK_MIB: u64 = 975;
 
 /// How long the lab may run before the test fails: twice (the margin) the slowest run of this test on
-/// record, jupiter's 75.5 s under WHP (bench/native/guest/validation-runs/RECORD.md), the lead's rule for
-/// a wait that can't end on a fact alone. Each run's time includes its boot and staging, so the lab's
-/// own is less.
-const SUITE: Duration = Duration::from_millis(2 * 75_500);
+/// record for this host's class (bench/native/guest/validation-runs/RECORD.md), the lead's rule for a wait
+/// that can't end on a fact alone. Each run's time includes its boot and staging, so the lab's own is less.
+/// macOS (HVF): 73.75 s; Windows (WHP): jupiter's 75.5 s; Linux (KVM): pending, so the test says so
+/// rather than borrow another class's.
+fn suite() -> Duration {
+    if cfg!(target_os = "macos") {
+        Duration::from_millis(2 * 73_750)
+    } else if cfg!(target_os = "windows") {
+        Duration::from_millis(2 * 75_500)
+    } else {
+        panic!(
+            "this host class's HEX-GUEST-20 run record is pending \
+             (bench/native/guest/validation-runs/RECORD.md): no bound to seed"
+        )
+    }
+}
 
 /// Every capability Hex's runtime names (crates/hex-runtime/src/linux/oci/caps.rs), as a privileged
 /// container holds them.
@@ -276,7 +288,7 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
     .expect("create the lab in the guest");
     node.start(&id).expect("start the lab");
     // The fact waited on is the lab's end, which the node reports with its exit.
-    let suite = SUITE;
+    let suite = suite();
     let read = || node.inspect(&id).expect("inspect the lab").exit;
     let exit =
         reread(suite, read).unwrap_or_else(|| panic!("the lab ran past the suite's {suite:?}"));
