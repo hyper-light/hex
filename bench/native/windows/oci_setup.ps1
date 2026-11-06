@@ -93,8 +93,11 @@ Must "ctr snapshots prepare"
 & ctr -a $Ctrd snapshots --snapshotter windows rm $key
 Must "ctr snapshots rm"
 "image $Image chain $chain head $head mount $mount" | Add-Content $versions
-$m = [regex]::Match($mount, 'parentLayerPaths=(\[[^\]]*\])')
-if (-not $m.Success) { throw "no parentLayerPaths in ctr's mount: $mount" }
-$layers = ($m.Groups[1].Value | ConvertFrom-Json) -join ";"
+# ctr prints the mounts as JSON; the parents are one option's JSON array, topmost first.
+$opt = (($mount | ConvertFrom-Json) | ForEach-Object { $_.Options }) |
+    Where-Object { $_ -like "parentLayerPaths=*" } | Select-Object -First 1
+if (-not $opt) { throw "no parentLayerPaths in ctr's mount: $mount" }
+$layers = ($opt.Substring("parentLayerPaths=".Length) | ConvertFrom-Json) -join ";"
+if (-not $layers) { throw "ctr's mount names no parent layers: $mount" }
 $layers | Set-Content (Join-Path $Root "layers.txt")
 "HEX_WINDOWS_LAYERS=$layers"
