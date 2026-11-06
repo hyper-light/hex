@@ -1,10 +1,6 @@
 [toolchain]
-# An exact version: the gates must mean the same on every machine and CI runner. The macOS and
-# Windows targets are for the gates' lints of those platforms (scripts/gates.sh).
+# An exact version: the gates must mean the same on every machine and CI runner. Cross targets aren't
+# named here, so entering the repo installs none: scripts/gates.sh adds each gate's targets before it.
 channel = "1.99.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
-targets = [
-  "aarch64-apple-darwin",
-  "x86_64-pc-windows-msvc",
-]

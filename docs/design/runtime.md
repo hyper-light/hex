@@ -790,6 +790,27 @@ simulator, and compares what each step shows (`docs/research/runtime/differentia
   scenarios grow with it), or the simulator diverging from the design text (then the simulator is fixed
   and every class re-run).
 
+## Decision: a program is held to its OS's exec bound, before any spawn (HEX-RT-14)
+
+`Program` carried an environment of any size, and only Linux's execve stopped it (`E2BIG`, after the spawn
+began); Windows bounds no environment block at all. CLAUDE.md §2 and §3 ask a bound and a typed refusal, so every
+class refuses a program past its OS's exec bound as `Invalid` naming the program, the sizes and the bound's source,
+before anything is spawned (`docs/research/runtime/exec-size-bounds.md`).
+
+- **One count:** `Program::exec_size` counts as Linux's execve does (each string and its NUL, the filename again, a
+  pointer per string), which is at least what XNU counts.
+- **Each OS's bound, from its source:** Linux reads the kernel's own formula at run time (a quarter of
+  `RLIMIT_STACK`, capped at three quarters of `_STK_LIM`, never under `ARG_MAX`; 32 pages a string; `fs/exec.c:410-416`,
+  `binfmts.h:15`), not glibc's `sysconf(_SC_ARG_MAX)`, which skips the cap. macOS reads `kern.argmax` (XNU's
+  `NCARGS`). Windows, whose block Microsoft documents as unbounded, takes a census of real container environments with
+  a stated margin, and 32,767 characters a variable (native step 4). The simulator holds Linux's floor, `ARG_MAX`.
+- **Over the node's socket** the wire's one-message bound is tighter than Linux's, so the client refuses past it, as a
+  program, before encoding.
+- **Tested by** HEX-RT-14 on every class's conformance run (a fixture that states no bound fails it), and a unit test of
+  the count against the kernel's arithmetic.
+- **What would falsify it:** a program the count admits that the OS's exec refuses with `E2BIG` (the count is short),
+  or a kernel whose formula changes; either is fixed in the count or the read, and HEX-RT-14 re-run.
+
 ## Open (STATUS.md)
 
 - Each OS's own boxes, natively (the decision above, proposed): under way. The **macOS `process` class is

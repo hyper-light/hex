@@ -121,7 +121,8 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
   it, and `EVFILT_PROC` (`NOTE_FORK`/`NOTE_EXIT`/`NOTE_EXITSTATUS`, the dead member's wait status in the
   event, so a cap kill is told from an ordinary SIGKILL without racing its reaper) on members;
-  `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing; `getrusage`
+  `mach_timebase_info` converts Mach ticks; `sysctlbyname("kern.maxproc")` bounds a listing and
+  `sysctlbyname("kern.argmax")` a program's arguments and environment; `getrusage`
   and `getloadavg` read the node's own cost for the bench and observability. rustix wraps the `kqueue`,
   `kill`/`killpg` and `waitid` beside these, which the class calls through it; libc binds the rest as
   `unsafe` foreign functions, and `posix_spawnattr_set_qos_class_np` and `posix_spawnattr_setjetsam_ext`
@@ -210,8 +211,8 @@ the first failure; kiln CI runs it on every push and pull request (`.kiln/ci.yam
 
 ```
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin -- -D warnings
+cargo clippy --workspace --all-targets --locked --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu --target aarch64-unknown-linux-musl -- -D warnings
+cargo clippy --workspace --all-targets --locked --target aarch64-apple-darwin --target x86_64-apple-darwin -- -D warnings
 cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
 bash scripts/check-production.sh
 cargo test --workspace --locked

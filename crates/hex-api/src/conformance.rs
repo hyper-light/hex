@@ -4,6 +4,7 @@
 //! own programs. Each case reads "do X, expect Y"; [`run`] returns the cases that failed and why.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::{
@@ -47,6 +48,11 @@ pub trait Fixture {
     fn refused_forks_counted(&self) -> bool {
         true
     }
+    /// The bound this class's exec puts on a program's arguments and environment, read as the class reads
+    /// it (CLAUDE.md §2). `None` states none, and HEX-RT-14 fails on it: every class bounds a program.
+    fn exec_limit(&self) -> Option<crate::ExecLimit> {
+        None
+    }
     /// Whether TERM ends an `oci` box's init that has no handler for it. False for Linux: the kernel
     /// gives a PID namespace's init only KILL and STOP from outside it (pid_namespaces(7)). True for a
     /// class with no POSIX signals, which ends the container instead: HCS's ProcessSignal carries only
@@ -72,11 +78,61 @@ pub struct Failure {
     pub why: String,
 }
 
-/// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a
-/// runtime that never reports an end fails the case instead of hanging the suite.
-pub const PATIENCE: Duration = Duration::from_secs(60);
-/// How long a case watches a program it expects to keep running.
-pub const STILL_RUNNING: Duration = Duration::from_millis(200);
+/// The slowest end recorded across every driver and OS of the native bench, from a program's start to
+/// its reported end: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1).
+pub const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
+/// The learned wait's bound before any sample, twice [`SLOWEST_RECORDED_END`] (the x2 the false-alarm margin):
+/// a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
+/// (hex-cli's oci_box, oci_spec_box and node_socket on every native line). The suite itself waits on
+/// [`patience`], which learns.
+pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
+
+/// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
+/// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
+/// node slower than the record is waited for, and no first wait is unbounded.
+pub struct LearnedWait {
+    record: Duration,
+    seen_nanos: AtomicU64,
+}
+
+impl LearnedWait {
+    /// A wait seeded from `record`, the slowest answer on its record.
+    pub const fn new(record: Duration) -> Self {
+        Self {
+            record,
+            seen_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Learns from an answer that came after `answered`.
+    pub fn saw(&self, answered: Duration) {
+        let nanos = u64::try_from(answered.as_nanos()).unwrap_or(u64::MAX);
+        self.seen_nanos.fetch_max(nanos, Ordering::Relaxed);
+    }
+
+    /// Its bound now: twice the slowest of its record and what it has seen.
+    pub fn bound(&self) -> Duration {
+        let seen = Duration::from_nanos(self.seen_nanos.load(Ordering::Relaxed));
+        self.record.max(seen).saturating_mul(2)
+    }
+}
+
+/// The suite's waits for a program's end or a box's answer, seeded from [`SLOWEST_RECORDED_END`]; each wait
+/// that gets its answer teaches it. [`PATIENCE`] is its bound before any sample.
+pub static ENDS: LearnedWait = LearnedWait::new(SLOWEST_RECORDED_END);
+
+/// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
+pub fn patience() -> Duration {
+    ENDS.bound()
+}
+
+/// How long a case watches now a program it expects to keep running (the negative watch, "this does not
+/// end"): [`ENDS`]' bound, since an end may come as late as the slowest seen, and one host's end maximum
+/// doesn't carry (59.6 ms on adas-mac-studio-2 was 550-770 ms on adalundhe-macbook-pro at load 21,
+/// 2026-11-06).
+pub fn still_running() -> Duration {
+    ENDS.bound()
+}
 
 /// Every case, in order.
 pub const CASES: &[Case] = &[
@@ -145,6 +201,11 @@ pub const CASES: &[Case] = &[
         says: "create of an oci box whose spec names a value that can't be rendered is refused as Invalid naming the field, and makes nothing",
         run: unrenderable,
     },
+    Case {
+        id: "HEX-RT-14",
+        says: "exec of a program whose arguments and environment pass the class's exec bound is refused as Invalid naming the program, before any spawn",
+        run: oversized_program,
+    },
 ];
 
 /// Runs every case on fresh boxes; returns the failures.
@@ -178,9 +239,14 @@ fn made(rt: &dyn Runtime, fx: &dyn Fixture, name: &str, bounds: Bounds) -> Resul
 }
 
 fn ended(p: &mut Box<dyn crate::Proc>) -> Result<Exit, String> {
-    p.wait_for(PATIENCE)
+    let patience = patience();
+    let asked = std::time::Instant::now();
+    let exit = p
+        .wait_for(patience)
         .map_err(|e| format!("wait: {e}"))?
-        .ok_or_else(|| format!("still running after {PATIENCE:?}"))
+        .ok_or_else(|| format!("still running after {patience:?}"))?;
+    ENDS.saw(asked.elapsed());
+    Ok(exit)
 }
 
 fn piped() -> Result<(std::io::PipeReader, std::io::PipeWriter), String> {
@@ -233,6 +299,42 @@ fn say(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     ensure(out == "hello from a box\n", || format!("stdout {out:?}"))
 }
 
+fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
+    let limit = fx.exec_limit().ok_or(
+        "the class states no bound on a program's arguments and environment (CLAUDE.md §2)",
+    )?;
+    let id = made(rt, fx, "oversized", Bounds::default())?;
+    let mut program = fx.program(&Act::Say("never"));
+    // Strings each under the OS's per-string bound (half of it, or of the block where there is none), as
+    // many as pass the block: only passing it matters, and any split under the string bound does. Each
+    // grows the program by at least a byte, so the loop ends.
+    let piece = limit
+        .string
+        .unwrap_or(limit.block)
+        .min(limit.block)
+        .div_ceil(2)
+        .max(1);
+    let mut n = 0usize;
+    while limit.size(&program) <= limit.block {
+        program
+            .env
+            .push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
+        n = n.saturating_add(1);
+    }
+    let refused = rt.exec(&id, program, Stdio::null());
+    rt.delete(&id).map_err(|e| e.to_string())?;
+    match refused {
+        Err(Refusal::Invalid {
+            what: "program", ..
+        }) => Ok(()),
+        Err(e) => Err(format!("refused, but not as an invalid program: {e}")),
+        Ok(_) => Err(format!(
+            "a program past the class's bound ({} bytes, {}) was taken",
+            limit.block, limit.source
+        )),
+    }
+}
+
 fn fail(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let id = made(rt, fx, "fail", Bounds::default())?;
     let mut p = rt
@@ -248,7 +350,7 @@ fn signal(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
     let mut p = rt
         .exec(&id, fx.program(&Act::Wait), Stdio::null())
         .map_err(|e| format!("exec: {e}"))?;
-    let early = p.wait_for(STILL_RUNNING).map_err(|e| e.to_string())?;
+    let early = p.wait_for(still_running()).map_err(|e| e.to_string())?;
     ensure(early.is_none(), || {
         format!("a waiting program ended: {early:?}")
     })?;
@@ -432,20 +534,39 @@ fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
     )
 }
 
-/// Polls `inspect` until the box reports an exit, for at most [`PATIENCE`]: the fact the exit cases
-/// wait on, never a guessed delay.
-fn exit_of(rt: &dyn Runtime, id: &BoxId) -> Result<crate::BoxInfo, String> {
-    let deadline = std::time::Instant::now().checked_add(PATIENCE);
+/// Waits `d` at least: `park_timeout` may wake early, and `thread::sleep` is disallowed.
+pub(crate) fn rest(d: Duration) {
+    let Some(end) = std::time::Instant::now().checked_add(d) else {
+        return;
+    };
     loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::park_timeout(left);
+    }
+}
+
+/// Polls `inspect` until the box reports an exit, for at most [`PATIENCE`]: the fact the exit cases
+/// wait on, never a guessed delay. A box's state has no event to wait on, so it is read again after
+/// waiting as long as the last read took: at most half the time reading, at this platform's cost.
+fn exit_of(rt: &dyn Runtime, id: &BoxId) -> Result<crate::BoxInfo, String> {
+    let patience = patience();
+    let asked = std::time::Instant::now();
+    let deadline = asked.checked_add(patience);
+    loop {
+        let read = std::time::Instant::now();
         let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
+        let took = read.elapsed();
         if info.exit.is_some() {
+            ENDS.saw(asked.elapsed());
             return Ok(info);
         }
         if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
-            return Err(format!("no exit reported after {PATIENCE:?}: {info:?}"));
+            return Err(format!("no exit reported after {patience:?}: {info:?}"));
         }
-        // park_timeout (thread::sleep is disallowed) yields between looks at the fact.
-        std::thread::park_timeout(Duration::from_millis(10));
+        rest(took);
     }
 }
 

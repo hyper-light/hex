@@ -364,10 +364,10 @@ real class held to the simulator's trace), runs as each OS's own tests. Where it
 | | `process` | `oci` |
 |---|---|---|
 | Linux amd64 (fedora) | **Passes** (cgroup v2; `process_box.rs`, and over the node's socket) | **Passes** (bundles and specs, rootless; `oci_box.rs`, `oci_spec_box.rs`, over the socket) |
-| Linux arm64 | Not run: no Linux arm64 machine in the lab. Built for it by no gate yet | As `process` |
-| macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, not merged into the native line |
-| macOS amd64 (Intel) | Built and linted for `x86_64-apple-darwin` (clippy `-D warnings` and build exit 0, 1aa735c); not run, no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
-| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | Windows images through HCS: native step 4, integrated into `cp/t7-native` (5ec923e); its suite not run on jupiter yet (`oci_setup.ps1` approved; the run waits on kiln taking adacachy's runs again) |
+| Linux arm64 | **Built and linted**: the Linux clippy gate checks `aarch64-unknown-linux-gnu` and `-musl` with `-D warnings` (gates 7/7 at e1b4c01, fedora unit hex-native-s7-gates-20261106T132708Z); the musl aarch64 `hex` is what step 5's Shards guest runs. The suite isn't run natively: no Linux arm64 machine in the lab | As `process` |
+| macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, integrated into `cp/t7-native` (ebf01f7); its record is step 5's |
+| macOS amd64 (Intel) | **Built and linted**: the macOS clippy gate checks `x86_64-apple-darwin` with `-D warnings` (gates 7/7 at a7670e0, fedora unit hex-native-s7-gates-20261106T135145Z), and `cargo build --workspace --target x86_64-apple-darwin` at a7670e0 exits 0 on adalundhe-macbook-pro (Apple M5 Max, macOS 26.5.2; a launchd one-shot, a fresh target dir, 2026-11-06 13:52Z), an x86_64 Mach-O `hex`. Not run: no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
+| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | **Passes** (HCS, native step 4): `windows_oci_box` 2/2 on jupiter at `cp/t7-native-s4` 5f712ff, real layers, no skips, HEX-RT-14 included (step 4's log `suite-20261106T191231Z.log`); jupiter's `cargo test --workspace` at 5f712ff exits 0 (`wstest-20261106T191231Z.log`): conformance and HEX-DIFF-1..6 match the oracle, TERM ending the init as `Signal(15)`, and the step's criteria pass |
 | Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
 
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
@@ -381,8 +381,14 @@ wait's budget (XNU posts the exit event before the zombie), fixed at abdbfd0.
 Each OS's `process` class against its competitors, recorded in `bench/native/RESULT.md`: Linux start 11.1x and
 delete 14.7x a systemd scope's, both holding the bound; macOS start 1.87x `taskpolicy -m`'s, delete 0.90x, both
 holding the bound, and a launchd job's limit holds none; Windows start 2.4x and delete 256x Process Governor's,
-both holding the bound. Open: the Windows `oci` suite (step 4's, on jupiter: `oci_setup.ps1` is approved, the run waits on kiln taking
-adacachy's runs again), which also reads HCS's exit for HEX-DIFF-1/2 against the oracle's; and the macOS `oci` class through a Shards guest when native step 5 lands.
+both holding the bound. **Native step 7 is closed** on step 4's clean run: the suite passes on fedora (Linux `process` and `oci`), the
+Mac Studio (macOS `process`) and jupiter (Windows `process` and `oci`), and in step 5's Shards guest (its record);
+Linux arm64 and Intel macOS are linted by the gates (7/7 at a7670e0, unit hex-native-s7-gates-20261106T135145Z),
+Intel macOS built on adalundhe-macbook-pro at a7670e0, and the musl aarch64 `hex` runs in step 5's Shards guest;
+Windows arm64 is skipped (Ada). Every OS's `process` class is benchmarked against its competitors (`bench/native/RESULT.md`).
+Its CLAUDE.md changes are approved by Ada, 2026-11-06, as written: the Gates block's Linux and macOS lint lines
+(1b1fea3, 47a9683) and §12's `sysctlbyname("kern.argmax")` for the exec bound (08d52a0).
+Final once fedora's 7 gates pass at 5f712ff (step 4's run; 6 of 7 already pass on adas-mac-studio-2, all but Linux `cargo test`).
 
 ## Next
 

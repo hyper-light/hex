@@ -22,12 +22,24 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Membership, Proc, Program,
-    Refusal, Runtime, Signal, Stdio, Usage,
+    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, ExecLimit, Membership, Proc,
+    Program, Refusal, Runtime, Signal, Stdio, Usage,
 };
 use rustix::fs::{Mode, OFlags};
 
 use process::{ProcessBox, Shared};
+
+/// The bound macOS's execve puts on a program's arguments and environment, read from the kernel now
+/// (`kern.argmax`, kind (a); docs/research/runtime/exec-size-bounds.md). XNU has no bound on one string apart.
+pub fn exec_limit() -> Result<ExecLimit, Refusal> {
+    Ok(ExecLimit {
+        block: sys::arg_max().map_err(|e| Refusal::os("reading kern.argmax", e))?,
+        counts: hex_api::BlockCount::Execve,
+        string: None,
+        unit: hex_api::StringUnit::Bytes,
+        source: "macOS's execve (kern.argmax)",
+    })
+}
 
 /// The headroom held back from a box's bound for the fork arming window, in bytes ([`hex_core::boxuser`]'s
 /// reserve): a just-forked member is unarmed until the helper arms it, and this is what it may grow into
@@ -58,6 +70,8 @@ pub struct MacRuntime {
     shared: Arc<Shared>,
     boxes: Mutex<BTreeMap<BoxId, Arc<ProcessBox>>>,
     helper: Option<BoxUser>,
+    /// The kernel's bound on a program's arguments and environment, read at start (`kern.argmax`).
+    exec_limit: ExecLimit,
 }
 
 impl MacRuntime {
@@ -71,6 +85,7 @@ impl MacRuntime {
             shared: Arc::new(shared),
             boxes: Mutex::new(BTreeMap::new()),
             helper: None,
+            exec_limit: exec_limit()?,
         })
     }
 
@@ -92,6 +107,7 @@ impl MacRuntime {
                         helper: Arc::new(helper),
                         boxes: Mutex::new(BTreeMap::new()),
                     }),
+                    exec_limit: exec_limit()?,
                 })
             }
             None => Self::new(rate_bytes, rate_processes),
@@ -279,6 +295,7 @@ impl Runtime for MacRuntime {
     }
 
     fn exec(&self, id: &BoxId, program: Program, stdio: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+        program.fits(&self.exec_limit)?;
         if let Some(bu) = &self.helper {
             program.check()?;
             if program.user.is_some() {
