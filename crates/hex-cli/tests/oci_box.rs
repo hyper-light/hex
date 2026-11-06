@@ -289,10 +289,12 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
 /// HEX-RT-14, the bound learned (CLAUDE.md §3): the node keeps its RLIMIT_STACK from its first reading, so
 /// a limit lowered after it is first met where a program starts: as root, the agent's vfork-style child's
 /// `execve` fails `E2BIG`; rootless, the seed (started under the lower limit) refuses the program by its
-/// own reading. Do: lower this node's RLIMIT_STACK after its first reading, then exec a program between
-/// the two limits' bounds, twice. Expect: the first is refused as `Invalid` "program" and the node reads
-/// its limit again, once; the second is refused the same way by the node itself, with no further
-/// reading; a small program still runs.
+/// own reading. Do: lower this node's RLIMIT_STACK after its first reading to 512 KiB (whose bound is
+/// Linux's floor, `ARG_MAX`), then exec a program between the two limits' bounds and within the seed
+/// wire's one message, twice. Expect: the first is refused as `Invalid` "program" and the node reads its
+/// limit again, once; the second is refused the same way by the node itself, with no further reading; a
+/// small program still runs. Rootless, a program within the node's bound but past the seed wire's one
+/// message is refused as `Invalid` "program" too, with no reading: no seed can be handed it.
 fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, own: &Path) {
     use hex_runtime::linux::process::{exec_limit, exec_limit_for, relearn_stack, stack_reads};
     use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
@@ -304,22 +306,45 @@ fn a_program_past_the_kernels_bound_is_refused_by_name_and_learned(lab: &Lab, ow
     node.start(&id).expect("start");
     let high = exec_limit().block;
     let was = getrlimit(Resource::Stack);
-    let lower = 1 << 20;
+    let lower = 512 << 10;
     let low = exec_limit_for(lower).block;
+    let wire = hex_core::seed::MAX_REQUEST;
     assert!(
-        low < high,
-        "this host's stack bound ({high}) is above a 1 MiB stack's ({low})"
+        low < wire && wire < high,
+        "this host's stack bound ({high}) is above the seed wire's message ({wire}), above a 512 KiB stack's ({low})"
     );
-    let mut program = lab.program(&Act::Say("past"));
-    let mut n = 0;
-    while program.exec_size() <= (low + high) / 2 {
-        program.env.push((format!("PAD{n}"), "x".repeat(64 << 10)));
-        n += 1;
+    // Padded a page at a time past the lower bound, by an eighth of the room the seed's message leaves.
+    let padded = |past: usize| {
+        let mut program = lab.program(&Act::Say("past"));
+        let mut n = 0;
+        while program.exec_size() <= past {
+            program.env.push((format!("PAD{n}"), "x".repeat(4 << 10)));
+            n += 1;
+        }
+        program
+    };
+    let program = padded(low + (wire - low) / 8);
+    if lab.rootless {
+        // Two pages past, since the wire counts each string's length where execve counts a pointer and a NUL.
+        let reads = stack_reads();
+        let oversized = node.exec(&id, padded(wire + (8 << 10)), hex_api::Stdio::null());
+        assert!(
+            matches!(
+                oversized,
+                Err(Refusal::Invalid {
+                    what: "program",
+                    ..
+                })
+            ),
+            "a program past the seed wire's one message is refused by name, got {:?}",
+            oversized.map(|p| p.pid())
+        );
+        assert_eq!(
+            stack_reads(),
+            reads,
+            "the wire's bound reads no stack limit"
+        );
     }
-    assert!(
-        program.exec_size() <= high,
-        "the program fits the bound the node read first"
-    );
     setrlimit(
         Resource::Stack,
         Rlimit {
