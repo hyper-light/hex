@@ -29,12 +29,16 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
         ClassSpec::Process => ClassSpec::Process,
         ClassSpec::Oci(mut oci) => {
             oci.rootfs = match oci.rootfs {
-                Rootfs::Dir(dir) => Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir)),
+                Rootfs::Dir(dir) => {
+                    Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir))
+                }
                 Rootfs::Layers(layers) => Rootfs::Layers(
                     layers
                         .into_iter()
                         .enumerate()
-                        .map(|(i, layer)| stage(staged, &id, &mut items, format!("layer{i}"), layer))
+                        .map(|(i, layer)| {
+                            stage(staged, &id, &mut items, format!("layer{i}"), layer)
+                        })
                         .collect(),
                 ),
             };
@@ -65,13 +69,7 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
 }
 
 /// Adds `path` to stage as `name`, and returns its copy's path in the guest.
-fn stage(
-    staged: &str,
-    id: &BoxId,
-    items: &mut Vec<Item>,
-    name: String,
-    path: PathBuf,
-) -> PathBuf {
+fn stage(staged: &str, id: &BoxId, items: &mut Vec<Item>, name: String, path: PathBuf) -> PathBuf {
     let guest = PathBuf::from(staged_path(staged, id, &name));
     items.push(Item {
         name,
@@ -109,9 +107,11 @@ fn bundle(dir: &Path, shared: &[Share]) -> Result<(PathBuf, Vec<u8>), Refusal> {
     let root = config
         .pointer_mut("/root/path")
         .ok_or_else(|| invalid("its config.json names no root.path".to_owned()))?;
-    let host_root = host(dir, root.as_str().ok_or_else(|| {
-        invalid("its config.json's root.path isn't a string".to_owned())
-    })?);
+    let host_root = host(
+        dir,
+        root.as_str()
+            .ok_or_else(|| invalid("its config.json's root.path isn't a string".to_owned()))?,
+    );
     *root = Value::String("root".to_owned());
     if let Some(mounts) = config.get_mut("mounts").and_then(Value::as_array_mut) {
         for mount in mounts {
@@ -128,9 +128,9 @@ fn bundle(dir: &Path, shared: &[Share]) -> Result<(PathBuf, Vec<u8>), Refusal> {
             };
             let host_source = host(
                 dir,
-                source
-                    .as_str()
-                    .ok_or_else(|| invalid(format!("bind mount {destination}'s source isn't a string")))?,
+                source.as_str().ok_or_else(|| {
+                    invalid(format!("bind mount {destination}'s source isn't a string"))
+                })?,
             );
             let guest = shares::in_guest(shared, &host_source)
                 .ok_or_else(|| shares::unshared(shared, &destination, &host_source))?;

@@ -91,9 +91,13 @@ pub struct Entry {
 pub enum What {
     Dir,
     /// A regular file of `size` bytes, which follow its head.
-    File { size: u64 },
+    File {
+        size: u64,
+    },
     /// A symbolic link to `target`, kept as its text: resolved in the container, never here.
-    Symlink { target: String },
+    Symlink {
+        target: String,
+    },
 }
 
 impl What {
@@ -115,7 +119,9 @@ pub enum Refused {
     Version { got: u16 },
     #[error("op {0} is neither stage (1) nor remove (2)")]
     Op(u8),
-    #[error("kind {0} is none of directory (1), file (2) and symbolic link (3): devices, FIFOs and sockets are never staged")]
+    #[error(
+        "kind {0} is none of directory (1), file (2) and symbolic link (3): devices, FIFOs and sockets are never staged"
+    )]
     Kind(u8),
     #[error("a pad byte is {0}, not 0")]
     Pad(u8),
@@ -301,14 +307,21 @@ pub enum Step {
 enum At {
     Open,
     /// The opening's fixed part read; its id, `len` bytes, comes.
-    Id { len: usize },
+    Id {
+        len: usize,
+    },
     /// A remove's opening is whole: nothing may follow.
     Closed,
     Head,
     /// A head read; its path and target, `len` bytes together, come.
-    Names { head: Head, len: usize },
+    Names {
+        head: Head,
+        len: usize,
+    },
     /// A file's bytes, `left` of them to come.
-    Data { left: u64 },
+    Data {
+        left: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -389,7 +402,8 @@ impl Unpack {
     /// Fills `held` to `want` bytes from `input`: how many it took, and whether `held` is whole.
     fn fill(&mut self, input: &[u8], want: usize) -> (usize, bool) {
         let n = want.saturating_sub(self.held.len()).min(input.len());
-        self.held.extend_from_slice(input.get(..n).unwrap_or_default());
+        self.held
+            .extend_from_slice(input.get(..n).unwrap_or_default());
         (n, self.held.len() >= want)
     }
 
@@ -557,9 +571,9 @@ impl Unpack {
 
     fn named(&mut self, head: Head) -> Result<Step, Refused> {
         let held = std::mem::take(&mut self.held);
-        let (path, target) = held.split_at_checked(head.path).ok_or(Refused::Truncated(
-            "in the middle of an entry's path",
-        ))?;
+        let (path, target) = held
+            .split_at_checked(head.path)
+            .ok_or(Refused::Truncated("in the middle of an entry's path"))?;
         let path = std::str::from_utf8(path)
             .map_err(|_| Refused::Name {
                 path: String::from_utf8_lossy(path).into_owned(),

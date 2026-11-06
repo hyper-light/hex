@@ -75,7 +75,9 @@ pub fn user_profiles() -> io::Result<std::path::PathBuf> {
         // SAFETY: `path` holds `len` initialised u16s before its NUL (counted above), alive until
         // the CoTaskMemFree below.
         let wide = unsafe { std::slice::from_raw_parts(path, len) };
-        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(wide)))
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            wide,
+        )))
     } else {
         Err(io::Error::from_raw_os_error(hr))
     };
@@ -99,7 +101,9 @@ pub fn temp_folder() -> io::Result<std::path::PathBuf> {
     let n = unsafe { GetTempPath2W(size, buf.as_mut_ptr()) };
     let n = usize::try_from(n).unwrap_or(usize::MAX);
     match buf.get(..n) {
-        Some(wide) if n > 0 => Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(wide))),
+        Some(wide) if n > 0 => Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+            wide,
+        ))),
         _ => Err(last_error()),
     }
 }

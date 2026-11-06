@@ -197,7 +197,11 @@ fn init(args: &[String]) -> Result<(), (u8, String)> {
         let given = match flag.as_str() {
             "--state-disk" => state_disk.replace(PathBuf::from(value)).is_some(),
             "--shares" => shares
-                .replace(value.parse::<u32>().map_err(|e| (2, format!("--shares {value:?}: {e}\n{USAGE}")))?)
+                .replace(
+                    value
+                        .parse::<u32>()
+                        .map_err(|e| (2, format!("--shares {value:?}: {e}\n{USAGE}")))?,
+                )
                 .is_some(),
             _ => return Err((2, USAGE.to_owned())),
         };
@@ -314,7 +318,9 @@ const MAX_SHARES: u32 = 64;
 fn mount_shares(n: u32) -> Result<(), String> {
     use rustix::mount::{MountFlags, mount};
     if n > MAX_SHARES {
-        return Err(format!("--shares {n} is over the {MAX_SHARES} a guest mounts"));
+        return Err(format!(
+            "--shares {n} is over the {MAX_SHARES} a guest mounts"
+        ));
     }
     for i in 0..n {
         let target = Path::new(SHARES).join(i.to_string());

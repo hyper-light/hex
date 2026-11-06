@@ -94,7 +94,9 @@ pub fn parse(list: &OsStr) -> Result<Vec<Share>, Refusal> {
 
 /// This OS's default roots, Docker Desktop's file-sharing list, read-write.
 pub fn defaults() -> Result<Vec<Share>, Refusal> {
-    Ok(numbered(default_dirs()?.into_iter().map(|dir| (dir, false))))
+    Ok(numbered(
+        default_dirs()?.into_iter().map(|dir| (dir, false)),
+    ))
 }
 
 #[cfg(target_os = "macos")]

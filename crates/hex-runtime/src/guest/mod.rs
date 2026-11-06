@@ -43,7 +43,6 @@ pub const ENV_INITRD: &str = "HEX_GUEST_INITRD";
 pub const ENV_CPUS: &str = "HEX_GUEST_CPUS";
 pub const ENV_MEMORY_MIB: &str = "HEX_GUEST_MEMORY_MIB";
 
-
 impl GuestConfig {
     /// The guest named by the environment: `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, `HEX_GUEST_CPUS`
     /// and `HEX_GUEST_MEMORY_MIB`, each needed (the guest's vCPUs and memory are the node's to give
@@ -82,11 +81,7 @@ impl GuestConfig {
             disks: Vec::new(),
             // Shards' own choice: `SHARDS_BIN`, else `shards` on `PATH` (shards-api's `GuestSpec`).
             binary: None,
-            ports: vec![
-                stream::CONTROL_PORT,
-                stream::STDIO_PORT,
-                files::FILES_PORT,
-            ],
+            ports: vec![stream::CONTROL_PORT, stream::STDIO_PORT, files::FILES_PORT],
             shares: self
                 .shares
                 .iter()
@@ -278,7 +273,9 @@ impl Runtime for GuestRuntime {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
-        let b = self.running()?.ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
+        let b = self
+            .running()?
+            .ok_or_else(|| Refusal::NoSuchBox(id.clone()))?;
         b.client.delete(id)?;
         match stage::unstage(b.link.as_ref(), id) {
             // A box staged nothing only if its spec named no root, which the class refuses; either

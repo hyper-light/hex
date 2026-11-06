@@ -458,7 +458,11 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
     let booted = Arc::clone(&boots);
     let guests = shards_api::sim::SimGuests::new(move |host| {
         booted.fetch_add(1, Ordering::SeqCst);
-        for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::files::FILES_PORT] {
+        for port in [
+            stream::CONTROL_PORT,
+            stream::STDIO_PORT,
+            stream::files::FILES_PORT,
+        ] {
             host.listen(port);
         }
         while let Some((port, conn)) = host.accept() {
@@ -495,7 +499,11 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         failures.is_empty(),
         "oci boxes through a simulated Shards guest: {failures:#?}"
     );
-    assert_eq!(boots.load(Ordering::SeqCst), 1, "the guest booted more than once");
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        1,
+        "the guest booted more than once"
+    );
     assert!(node.list().unwrap().is_empty(), "a box is left");
     let left: Vec<_> = std::fs::read_dir(&staged).unwrap().collect();
     assert!(left.is_empty(), "staged copies left: {left:?}");

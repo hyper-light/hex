@@ -323,8 +323,8 @@ fn stage_raw(lab: &Lab, bytes: &[u8]) -> Answer {
 /// the root 0755; then remove it: expect it gone, and a second removal refused as no such box.
 #[test]
 fn a_staged_tree_lands_as_it_was_and_goes_when_removed() {
-    use std::os::unix::fs::PermissionsExt;
     use hex_client::guest::stage::{Item, Source, stage, unstage};
+    use std::os::unix::fs::PermissionsExt;
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
     let root = host.path().join("rootfs");
@@ -348,16 +348,28 @@ fn a_staged_tree_lands_as_it_was_and_goes_when_removed() {
     let link = lab.link();
     stage(link.as_ref(), &id, &items, &LIMITS).unwrap();
     let copy = staged.join("box-1");
-    let mode = |p: &str| std::fs::symlink_metadata(copy.join(p)).unwrap().permissions().mode() & 0o7777;
+    let mode = |p: &str| {
+        std::fs::symlink_metadata(copy.join(p))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
     assert_eq!(mode(""), 0o755);
     assert_eq!(std::fs::read(copy.join("root/bin/sh")).unwrap(), b"#!sh\n");
     assert_eq!(mode("root/bin/sh"), 0o750);
     assert_eq!(mode("root/bin"), 0o555);
     assert_eq!(std::fs::read(copy.join("root/empty")).unwrap(), b"");
-    assert_eq!(std::fs::read_link(copy.join("root/lib")).unwrap(), Path::new("/usr/lib"));
+    assert_eq!(
+        std::fs::read_link(copy.join("root/lib")).unwrap(),
+        Path::new("/usr/lib")
+    );
     assert_eq!(std::fs::read(copy.join("config.json")).unwrap(), b"{}");
     // A box id staged already is refused, its copy untouched.
-    assert_eq!(stage(link.as_ref(), &id, &items, &LIMITS), Err(Refusal::Exists(id.clone())));
+    assert_eq!(
+        stage(link.as_ref(), &id, &items, &LIMITS),
+        Err(Refusal::Exists(id.clone()))
+    );
     assert!(copy.join("root/bin/sh").exists());
     unstage(link.as_ref(), &id).unwrap();
     assert!(!copy.exists());
@@ -415,12 +427,32 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
 fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     let (lab, staged) = staged_lab();
     let mut device = hf::open(hf::Op::Stage, "b").unwrap();
-    device.extend([4u8, 0, 0o644 & 0xff, 0o644 >> 8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    device.extend([
+        4u8,
+        0,
+        0o644 & 0xff,
+        0o644 >> 8,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]);
     device.push(b'd');
     let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &device) else {
         panic!("expected a refusal");
     };
-    assert!(why.contains("devices, FIFOs and sockets are never staged"), "{why}");
+    assert!(
+        why.contains("devices, FIFOs and sockets are never staged"),
+        "{why}"
+    );
     assert!(!staged.join("b").exists());
     let twice = raw_stage(&[("d", hf::What::Dir), ("d", hf::What::Dir)]);
     let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &twice) else {
@@ -429,8 +461,7 @@ fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     assert!(why.contains("came twice"), "{why}");
     assert!(!staged.join("b").exists());
     let whole = raw_stage(&[("d", hf::What::Dir)]);
-    let Answer::Refused(Refusal::Invalid { why, .. }) =
-        stage_raw(&lab, &whole[..whole.len() - 1])
+    let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &whole[..whole.len() - 1])
     else {
         panic!("expected a refusal");
     };

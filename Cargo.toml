@@ -23,9 +23,9 @@ hex-runtime = { path = "crates/hex-runtime", version = "0.1.0" }
 hex-node = { path = "crates/hex-node", version = "0.1.0" }
 hex-client = { path = "crates/hex-client", version = "0.1.0" }
 # Shards' guests (docs/design/shards-guest.md §2, Appendix A): the oci class's Linux guest on macOS and
-# Windows. A path to a copy of Shards' draft until Shards lands it; then `shards-api = "0.1"`, patched to
-# vendor/shards below as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
-shards-api = { path = "vendor/shards-api-draft/crates/api", version = "0.1.0" }
+# Windows. By name and version, patched below to a copy of Shards' draft until Shards lands it, then to
+# vendor/shards as every other vendored project (vendor/shards-api-draft/Cargo.toml says which).
+shards-api = "0.1"
 flate2 = "1.1.10"
 libc = "0.2.190"
 # AF_VSOCK, for the guest relay: its safe `SockAddr::vsock` needs feature `all` (docs/design/shards-guest.md §3).
@@ -93,3 +93,4 @@ inherits = "release"
 # workspace (excluded above); the patch points at the crate directory inside it.
 [patch.crates-io]
 seccompiler = { path = "vendor/seccompiler" }
+shards-api = { path = "vendor/shards-api-draft/crates/api" }

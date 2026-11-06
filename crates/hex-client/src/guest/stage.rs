@@ -10,8 +10,8 @@ use std::net::Shutdown;
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, Refusal};
-use hex_core::stream::files::{self, Entry, Limits, Op, What};
 use hex_core::stream::Deframer;
+use hex_core::stream::files::{self, Entry, Limits, Op, What};
 use hex_core::wire::{self, Answer, Received};
 
 use super::{Duplex, Link};
@@ -272,11 +272,18 @@ fn walk(
     let mut dirs: Vec<(PathBuf, String)> = Vec::new();
     one(out, name, path, limits, counts, &mut dirs)?;
     while let Some((dir, dir_name)) = dirs.pop() {
-        let listing = fs::read_dir(&dir)
-            .map_err(|e| Refusal::os("listing a folder to stage", format!("{}: {e}", dir.display())))?;
+        let listing = fs::read_dir(&dir).map_err(|e| {
+            Refusal::os(
+                "listing a folder to stage",
+                format!("{}: {e}", dir.display()),
+            )
+        })?;
         for entry in listing {
             let entry = entry.map_err(|e| {
-                Refusal::os("listing a folder to stage", format!("{}: {e}", dir.display()))
+                Refusal::os(
+                    "listing a folder to stage",
+                    format!("{}: {e}", dir.display()),
+                )
             })?;
             let file_name = entry.file_name();
             let child = entry.path();
@@ -299,15 +306,22 @@ fn one(
     counts: &mut Counts,
     dirs: &mut Vec<(PathBuf, String)>,
 ) -> Result<(), Refusal> {
-    let meta = fs::symlink_metadata(path)
-        .map_err(|e| Refusal::os("reading a path to stage", format!("{}: {e}", path.display())))?;
+    let meta = fs::symlink_metadata(path).map_err(|e| {
+        Refusal::os(
+            "reading a path to stage",
+            format!("{}: {e}", path.display()),
+        )
+    })?;
     let mode = mode(&meta);
     let (what, size) = match kind(path, &meta)? {
         Kind::Dir => (What::Dir, 0),
         Kind::File(size) => (What::File { size }, size),
         Kind::Symlink => {
             let target = fs::read_link(path).map_err(|e| {
-                Refusal::os("reading a link to stage", format!("{}: {e}", path.display()))
+                Refusal::os(
+                    "reading a link to stage",
+                    format!("{}: {e}", path.display()),
+                )
             })?;
             let target = target
                 .to_str()
@@ -336,8 +350,12 @@ fn one(
 /// Sends exactly `size` bytes of the file at `path`: one that changed size while it was sent is refused,
 /// as its stream would no longer say what it holds.
 fn copy(out: &mut dyn Write, path: &Path, size: u64) -> Result<(), Refusal> {
-    let file = File::open(path)
-        .map_err(|e| Refusal::os("opening a file to stage", format!("{}: {e}", path.display())))?;
+    let file = File::open(path).map_err(|e| {
+        Refusal::os(
+            "opening a file to stage",
+            format!("{}: {e}", path.display()),
+        )
+    })?;
     let sent = io::copy(&mut file.take(size), out)
         .map_err(|e| Refusal::os("sending a staged file", format!("{}: {e}", path.display())))?;
     if sent != size {

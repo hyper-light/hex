@@ -90,9 +90,16 @@ fn a_device_node_or_socket_is_refused_by_its_path() {
         name: "root".to_owned(),
         source: Source::Path(p.to_owned()),
     };
-    let why = pack(&mut Vec::new(), &id(), &[item(Path::new("/dev/null"))], &LIMITS).unwrap_err();
+    let why = pack(
+        &mut Vec::new(),
+        &id(),
+        &[item(Path::new("/dev/null"))],
+        &LIMITS,
+    )
+    .unwrap_err();
     assert!(
-        why.to_string().contains("/dev/null: a device node is never staged"),
+        why.to_string()
+            .contains("/dev/null: a device node is never staged"),
         "{why}"
     );
     let dir = tempfile::tempdir().unwrap();
@@ -128,10 +135,7 @@ fn a_stage_past_its_bounds_is_refused_before_it_is_sent() {
             bound: 3
         })
     );
-    let small = Limits {
-        bytes: 9,
-        ..LIMITS
-    };
+    let small = Limits { bytes: 9, ..LIMITS };
     assert_eq!(
         pack(&mut Vec::new(), &id(), &items, &small),
         Err(Refusal::Exhausted {

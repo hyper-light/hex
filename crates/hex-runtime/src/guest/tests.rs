@@ -34,11 +34,21 @@ fn shared_roots_read_as_the_operator_writes_them() {
     let read = |s: &str| shares::parse(&OsString::from(s));
     assert_eq!(
         read("/Users:/data:ro:/srv").unwrap(),
-        vec![share(0, "/Users", false), share(1, "/data", true), share(2, "/srv", false)]
+        vec![
+            share(0, "/Users", false),
+            share(1, "/data", true),
+            share(2, "/srv", false)
+        ]
     );
     for bad in ["", "relative", "ro:/a"] {
         assert!(
-            matches!(read(bad), Err(Refusal::Invalid { what: shares::ENV, .. })),
+            matches!(
+                read(bad),
+                Err(Refusal::Invalid {
+                    what: shares::ENV,
+                    ..
+                })
+            ),
             "{bad:?}"
         );
     }
@@ -58,13 +68,20 @@ fn the_default_roots_are_docker_desktops_never_the_hosts_root() {
     } else if cfg!(target_os = "windows") {
         // The users folder holds this user's profile; the temp folder is the one TMP or TEMP names.
         let profile = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
-        let temp = PathBuf::from(std::env::var_os("TMP").or_else(|| std::env::var_os("TEMP")).unwrap());
+        let temp = PathBuf::from(
+            std::env::var_os("TMP")
+                .or_else(|| std::env::var_os("TEMP"))
+                .unwrap(),
+        );
         assert_eq!(dirs, [profile.parent().unwrap(), temp.as_path()]);
     } else {
         assert!(dirs.is_empty());
     }
     assert!(defaults.iter().all(|s| !s.read_only));
-    assert!(dirs.iter().all(|d| d.parent().is_some()), "a default shares a root");
+    assert!(
+        dirs.iter().all(|d| d.parent().is_some()),
+        "a default shares a root"
+    );
 }
 
 /// HEX-GUEST-12: map sources under nested shares: expect each under the deepest share that holds it,
@@ -135,13 +152,22 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     let ClassSpec::Oci(spec) = &got.spec.class else {
         panic!("not oci");
     };
-    assert_eq!(spec.rootfs, Rootfs::Dir(PathBuf::from("/run/hex/staged/box-1/root")));
+    assert_eq!(
+        spec.rootfs,
+        Rootfs::Dir(PathBuf::from("/run/hex/staged/box-1/root"))
+    );
     assert_eq!(spec.mounts[0].source, PathBuf::from("/run/hex/shares/1"));
     assert!(!spec.mounts[0].read_only);
-    assert_eq!(spec.mounts[1].source, PathBuf::from("/run/hex/shares/0/ada/src"));
+    assert_eq!(
+        spec.mounts[1].source,
+        PathBuf::from("/run/hex/shares/0/ada/src")
+    );
     assert_eq!(got.items.len(), 1);
     assert_eq!(got.items[0].name, "root");
-    assert_eq!(got.items[0].source, Source::Path(PathBuf::from("/Users/ada/rootfs")));
+    assert_eq!(
+        got.items[0].source,
+        Source::Path(PathBuf::from("/Users/ada/rootfs"))
+    );
 
     let layered = rewrite(
         oci(
@@ -164,13 +190,19 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     );
 
     let Err(Refusal::Platform { why, .. }) = rewrite(
-        oci(Rootfs::Dir(PathBuf::from("/Users/r")), vec![mount("/opt/x", "/x", true)]),
+        oci(
+            Rootfs::Dir(PathBuf::from("/Users/r")),
+            vec![mount("/opt/x", "/x", true)],
+        ),
         &shared,
         STAGED,
     ) else {
         panic!("expected the unshared bind refused");
     };
-    assert!(why.contains("/x's source /opt/x") && why.contains("[/Users, /etc]"), "{why}");
+    assert!(
+        why.contains("/x's source /opt/x") && why.contains("[/Users, /etc]"),
+        "{why}"
+    );
 }
 
 /// HEX-GUEST-12: rewrite a bundle whose config names a relative root, a relative and an absolute
@@ -214,7 +246,10 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
     assert_eq!(rewritten["root"]["path"], "root");
     assert_eq!(rewritten["mounts"][0]["source"], "proc");
     assert_eq!(rewritten["mounts"][1]["source"], "/run/hex/shares/0");
-    assert_eq!(rewritten["mounts"][2]["source"], "/run/hex/shares/1/bundle/data");
+    assert_eq!(
+        rewritten["mounts"][2]["source"],
+        "/run/hex/shares/1/bundle/data"
+    );
     assert!(matches!(
         rewrite(spec, &[share(0, "/etc", false)], STAGED),
         Err(Refusal::Platform { .. })
@@ -238,7 +273,9 @@ impl shards_api::Guests for NoGuest {
         _spec: &shards_api::GuestSpec,
     ) -> Result<Box<dyn shards_api::Guest>, shards_api::Refusal> {
         self.boots.fetch_add(1, Ordering::SeqCst);
-        Err(shards_api::Refusal::Boot("a stand-in boots nothing".to_owned()))
+        Err(shards_api::Refusal::Boot(
+            "a stand-in boots nothing".to_owned(),
+        ))
     }
 }
 
@@ -279,7 +316,10 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
         bounds: Bounds::default(),
         class: ClassSpec::Process,
     };
-    assert!(matches!(runtime.create(process), Err(Refusal::Invalid { .. })));
+    assert!(matches!(
+        runtime.create(process),
+        Err(Refusal::Invalid { .. })
+    ));
     let id = BoxId::new("box-1").unwrap();
     assert_eq!(runtime.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
     assert_eq!(runtime.list(), Ok(Vec::new()));

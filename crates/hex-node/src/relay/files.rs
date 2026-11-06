@@ -11,7 +11,10 @@ use std::path::Path;
 
 use hex_api::{BoxId, Refusal};
 use hex_client::guest::Duplex;
-use hex_core::stream::{self, files::{self, Entry, Limits, Op, Step, Unpack, What}};
+use hex_core::stream::{
+    self,
+    files::{self, Entry, Limits, Op, Step, Unpack, What},
+};
 use hex_core::wire::{self, Answer};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
@@ -196,7 +199,11 @@ impl Stage {
                 let fd = rustix::fs::openat(
                     &parent,
                     leaf,
-                    OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::WRONLY
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
                     Mode::from_raw_mode(0o600),
                 )
                 .map_err(exists)?;
@@ -283,7 +290,8 @@ pub fn remove(staged: &Path, id: &BoxId, limits: &Limits) -> Result<(), Refusal>
         Mode::empty(),
     )
     .map_err(os("opening the staged folder"))?;
-    let budget = usize::try_from(limits.entries.saturating_mul(REMOVE_FACTOR)).unwrap_or(usize::MAX);
+    let budget =
+        usize::try_from(limits.entries.saturating_mul(REMOVE_FACTOR)).unwrap_or(usize::MAX);
     remove_at(&staged, id, budget)
 }
 

@@ -104,9 +104,8 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
     std::fs::create_dir_all(&rootfs).unwrap();
     std::fs::copy(given("HEX_GUEST_LINUX_HEX").unwrap(), rootfs.join("hex")).unwrap();
     make_executable(&rootfs.join("hex"));
-    let number = |name: &str, default: u64| {
-        std::env::var(name).map_or(default, |v| v.parse().unwrap())
-    };
+    let number =
+        |name: &str, default: u64| std::env::var(name).map_or(default, |v| v.parse().unwrap());
     let config = GuestConfig {
         kernel: given("HEX_GUEST_KERNEL").unwrap(),
         initrd: given("HEX_GUEST_INITRD").unwrap(),

@@ -165,7 +165,10 @@ fn hostile_names_are_refused_by_name() {
         }
     }
     let long = "a".repeat(NAME_MAX + 1);
-    assert!(matches!(refused_name(long.as_bytes()), Refused::Name { .. }));
+    assert!(matches!(
+        refused_name(long.as_bytes()),
+        Refused::Name { .. }
+    ));
 }
 
 /// HEX-GUEST-9: send a device node's, a FIFO's and a socket's kind (there is none on the stream), a
@@ -206,10 +209,7 @@ fn hostile_kinds_modes_and_fields_are_refused_by_type() {
     let mut bad_end = END;
     bad_end[8] = 1;
     end.extend(bad_end);
-    assert!(matches!(
-        read(LIMITS, &end, 64),
-        Err(Refused::Field { .. })
-    ));
+    assert!(matches!(read(LIMITS, &end, 64), Err(Refused::Field { .. })));
 }
 
 /// HEX-GUEST-9: open with the wrong magic, version, op or pad, and with an empty or over-long id:
