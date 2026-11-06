@@ -212,6 +212,9 @@ mod tests {
             .trim()
             .split(['.', '-'])
             .map(|p| p.parse::<u32>().unwrap_or(0));
+        // 7.1 is the first kernel that opens a pid namespace with no process yet: below it
+        // `pidns_for_children_get` refuses one (v6.19 kernel/pid_namespace.c:372-379), and v7.1 dropped the check
+        // (:361-373), as init.rs's PID_NAMESPACE_AHEAD says.
         let at_least_7_1 = (v.next().unwrap(), v.next().unwrap()) >= (7, 1);
         let made = super::super::init::prepare_proc(&key, &sources);
         if !at_least_7_1 {
