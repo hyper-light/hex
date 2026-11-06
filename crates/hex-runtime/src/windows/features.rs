@@ -18,15 +18,9 @@ use super::process::JobBox;
 use super::sys::Started;
 use super::{build_spawn, proc};
 
-/// The slowest the query has taken, PowerShell's start and one WMI read: 2,421 ms, the max of 30 runs on
-/// jupiter (AMD Ryzen AI MAX+ 395, Windows 11 26200; bench/install/records/windows-jupiter-20261105.txt
-/// entry 19: min 1,048, p50 1,183, p90 1,398 ms).
-const SLOWEST_RECORDED_QUERY: Duration = Duration::from_millis(2_421);
-
-/// The longest the query may take before its box is ended and the read refused by name: a bound on a
-/// wait (CLAUDE.md §2), twice the slowest recorded, the ×2 the false-alarm margin Hex sets every hang
-/// bound by.
-const PATIENCE: Duration = SLOWEST_RECORDED_QUERY.saturating_mul(2);
+/// The longest the query may take before its box is ended and the read refused by name: twice its slowest
+/// recorded run ([`setup::FEATURE_QUERY_PATIENCE`]), a bound on a wait (CLAUDE.md §2).
+const PATIENCE: Duration = setup::FEATURE_QUERY_PATIENCE;
 
 /// The environment PowerShell and WMI read, taken from the node's own where it has them: the box gives
 /// a program nothing it isn't given.
