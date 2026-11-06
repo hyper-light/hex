@@ -1015,9 +1015,10 @@ mod tests {
 
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
-    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is refused by
-    /// type once the start it asked for fails too (no seed is up or starting, so none can come), naming
-    /// the failed start's cause, not only that no seed came free; never left waiting.
+    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is declined
+    /// by type as one no seed came free for ([`OciError::NoSeed`], which the runtime sends through the shim,
+    /// the ordinary path) once the start it asked for fails too (no seed is up or starting, so none can
+    /// come), naming the failed start's cause; never left waiting.
     #[test]
     fn a_pool_whose_seeds_cannot_start_names_why_it_refuses() {
         let pool = CreatePool::new(
@@ -1032,10 +1033,9 @@ mod tests {
         until("the pool tried a start", || {
             pool.counts().unwrap().start_failed > 0
         });
-        let Err(OciError::Os { op, why }) = pool.shared.acquire() else {
-            panic!("a pool with no seed refuses its create by type");
+        let Err(OciError::NoSeed(why)) = pool.shared.acquire() else {
+            panic!("a pool with no seed declines its create by type, for the runtime to make it another way");
         };
-        assert_eq!(op, "create via a seed");
         assert!(
             why.contains("the last create seed start failed: starting a create seed"),
             "the refusal names the failed start's cause: {why}"

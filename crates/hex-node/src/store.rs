@@ -142,7 +142,7 @@ impl Store {
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
-                Patience::measuring(),
+                Patience::measuring("store.turns"),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]

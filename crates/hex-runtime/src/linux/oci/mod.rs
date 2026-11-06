@@ -55,6 +55,11 @@ pub enum OciError {
     Os { op: &'static str, why: String },
     #[error("the runtime's state is unusable: {0}")]
     Broken(String),
+    /// No create seed came free for the create (the pool's line was full, or its wait ended), and nothing of it
+    /// was made: the runtime makes it the ordinary way, through the shim (the lead's rule of 2026-11-06: no caller
+    /// failure where an alternative exists).
+    #[error("no create seed came free: {0}")]
+    NoSeed(String),
 }
 
 impl OciError {
@@ -110,6 +115,10 @@ impl From<OciError> for Refusal {
             },
             OciError::Os { op, why } => Refusal::Os { op, why },
             OciError::Broken(why) => Refusal::Broken(why),
+            OciError::NoSeed(why) => Refusal::Os {
+                op: "create via a seed",
+                why,
+            },
         }
     }
 }

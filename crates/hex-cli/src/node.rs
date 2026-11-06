@@ -108,6 +108,8 @@ fn parse(args: &[String]) -> Result<Args, String> {
 fn serve(args: &[String]) -> Result<(), (u8, String)> {
     let args = parse(args).map_err(|why| (2, why))?;
     let failed = |e: Refusal| (1, e.to_string());
+    // The waits census, where the probe asks for it (bench/competitive/probes/waits_census.md); nothing otherwise.
+    hex_node::census::install_from_env().map_err(failed)?;
     // SIGTERM is read from a signalfd, blocked before the node starts a thread so every thread inherits the block;
     // each process the node starts has its mask emptied before it execs (the seeds' and execs' `default_signals`,
     // std's Command), so none inherits it.

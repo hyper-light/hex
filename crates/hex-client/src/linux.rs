@@ -30,55 +30,43 @@ use hex_core::patience::Patience;
 
 use crate::MAX_LIST;
 
-/// A call's kind, by which its answer's wait is learned: a delete waits on its box's emptying and a list on its
-/// parts, so a fast inspect's answer says nothing of theirs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Request(std::mem::Discriminant<Request>),
-    Call(std::mem::Discriminant<Call>),
-}
+/// How long a call waits for the node agent's answer, and its send for room in the agent's socket, one wait a kind
+/// of call, since a delete waits on its box's emptying and a list on its parts, so a fast inspect's answer says
+/// nothing of theirs: twice the slowest answer this process has had to a call of that kind (decision 9; the lead's
+/// failure-bound rule of 2026-11-06), past which the call is refused by type, the only way left to it. MEASURING: the
+/// record to come is `bench/competitive/probes/waits_census.md`'s `client.answer.*` rows (seam_oci's socket phases on
+/// fedora), which then seed each. Until then a kind's first call waits for its answer unbounded.
+static ANSWERS: [Patience; 10] = [
+    Patience::measuring("client.answer.hello"),
+    Patience::measuring("client.answer.create"),
+    Patience::measuring("client.answer.start"),
+    Patience::measuring("client.answer.exec"),
+    Patience::measuring("client.answer.signal"),
+    Patience::measuring("client.answer.inspect"),
+    Patience::measuring("client.answer.usage"),
+    Patience::measuring("client.answer.list"),
+    Patience::measuring("client.answer.delete"),
+    Patience::measuring("client.answer.netns"),
+];
 
-impl Kind {
-    fn of(request: &Request) -> Self {
-        match request {
-            Request::Call(call) => Self::Call(std::mem::discriminant(call)),
-            other => Self::Request(std::mem::discriminant(other)),
-        }
-    }
-}
-
-/// How long a call waits for the node agent's answer, and its send for room in the agent's socket, by its kind:
-/// twice the slowest answer this process has had to a call of that kind (decision 9; the lead's failure-bound rule
-/// of 2026-11-06), past which the call is refused by type, the only way left to it. MEASURING: no record gives each
-/// call kind's slowest answer over the socket; the record to come is seam_oci's socket phases, each kind's max on
-/// fedora, which then seeds each. Until then a kind's first call waits for its answer unbounded. At most one entry
-/// a kind of request, a fixed set.
-static ANSWERS: Mutex<Vec<(Kind, Patience)>> = Mutex::new(Vec::new());
-
-/// How long a call of `kind` waits now, `None` while it measures with no answer seen.
-fn answer_wait(kind: Kind) -> Option<Duration> {
-    let answers = ANSWERS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    answers
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .and_then(|(_, p)| p.deadline())
-}
-
-/// A call of `kind` was answered `took` after it was sent.
-fn answered(kind: Kind, took: Duration) {
-    let mut answers = ANSWERS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match answers.iter().find(|(k, _)| *k == kind) {
-        Some((_, p)) => p.answered(took),
-        None => {
-            let p = Patience::measuring();
-            p.answered(took);
-            answers.push((kind, p));
-        }
-    }
+/// The wait for `request`'s answer, `None` for one that has none (a release).
+fn answers(request: &Request) -> Option<&'static Patience> {
+    let n = match request {
+        Request::Hello => 0,
+        Request::Call(call) => match call {
+            Call::Create(_) => 1,
+            Call::Start(_) => 2,
+            Call::Exec { .. } => 3,
+            Call::Signal { .. } => 4,
+            Call::Inspect(_) => 5,
+            Call::Usage(_) => 6,
+            Call::List => 7,
+            Call::Delete(_) => 8,
+            Call::Netns => 9,
+        },
+        Request::Release => return None,
+    };
+    ANSWERS.get(n)
 }
 
 /// A node agent, reached through its socket.
@@ -397,8 +385,8 @@ impl Client {
                 state.programs.remove(&id);
             }
         };
-        let kind = Kind::of(request);
-        let patience = answer_wait(kind);
+        let waits = answers(request);
+        let patience = waits.and_then(Patience::deadline);
         let asked = Instant::now();
         let sent = rustix::net::sockopt::set_socket_timeout(&shared.fd, Timeout::Send, patience)
             .map_err(|e| Sent::Refused(Refusal::os("bounding a socket's sends", e)))
@@ -424,7 +412,9 @@ impl Client {
         };
         let answer = match got {
             Ok(answer) => {
-                answered(kind, asked.elapsed());
+                if let Some(waits) = waits {
+                    waits.answered(asked.elapsed());
+                }
                 answer
             }
             Err(RecvTimeoutError::Timeout) => {

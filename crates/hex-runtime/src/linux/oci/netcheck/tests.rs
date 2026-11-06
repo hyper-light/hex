@@ -464,7 +464,7 @@ fn a_dumps_reads_are_bounded_by_its_bytes() {
     rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
     let mut scratch = Scratch::default();
     assert_eq!(
-        ask(&ours, &[0; NLMSG_HDR], &mut scratch, &Patience::measuring()),
+        ask(&ours, &[0; NLMSG_HDR], &mut scratch, &Patience::measuring("test")),
         Ok(())
     );
     assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
@@ -486,7 +486,7 @@ fn a_measuring_dump_is_waited_for_and_arms_the_bound() {
         let done = msg(NLMSG_DONE, seq, &[0, 0, 0, 0]);
         rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
     }
-    let slowest = Patience::measuring();
+    let slowest = Patience::measuring("test");
     let mut scratch = Scratch::default();
     assert_eq!(
         dumps(&ours, &mut scratch, &slowest),
@@ -508,7 +508,7 @@ fn a_dump_unanswered_past_its_bound_is_refused_and_no_sample() {
         None,
     )
     .unwrap();
-    let slowest = Patience::seeded(Duration::from_millis(1));
+    let slowest = Patience::seeded("test", Duration::from_millis(1));
     let mut scratch = Scratch::default();
     assert_eq!(
         dumps(&ours, &mut scratch, &slowest),

@@ -1285,6 +1285,9 @@ mod linux {
     }
 
     pub(super) fn main() -> ExitCode {
+        // The waits census probe's switch (bench/competitive/probes/waits_census.md): the in-process node's waits and
+        // this client's answers, recorded from their own timing points.
+        hex_node::census::install_from_env().expect("the waits census installs");
         let args: Vec<String> = std::env::args_os()
             .skip(1)
             .map(|a| {

@@ -99,7 +99,7 @@ const BACKLOG: i32 = 64;
 /// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: no record times a
 /// client's read of a list's part; the record to come is seam_oci's list phase timing each part's drain, its max on
 /// fedora, which then seeds it. Until then the first part waited for is waited out.
-static READS: Patience = Patience::measuring();
+static READS: Patience = Patience::measuring("serve.reads");
 
 /// The epoll tokens of the listener and the stop eventfd; connections and programs take the rest.
 const LISTENER: u64 = 0;

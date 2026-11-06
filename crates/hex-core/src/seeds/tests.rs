@@ -39,10 +39,12 @@ impl Setup {
 }
 
 fn calibrate(wait: &mut Patience, hang: &mut Patience, setup: Setup) {
-    let seed =
-        |ms_: Option<u64>| ms_.map_or_else(Patience::measuring, |n| Patience::seeded(ms(n) / 2));
-    *wait = seed(setup.wait);
-    *hang = seed(setup.hang);
+    let seed = |name, ms_: Option<u64>| match ms_ {
+        Some(n) => Patience::seeded(name, ms(n) / 2),
+        None => Patience::measuring(name),
+    };
+    *wait = seed(WAIT, setup.wait);
+    *hang = seed(HANG, setup.hang);
 }
 
 fn setup(seeds: usize, waiting: usize, wait: Option<u64>, hang: Option<u64>) -> Setup {
@@ -148,8 +150,8 @@ impl Oracle {
             asking: true,
             counts: Counts::default(),
             handed: vec![0; slots],
-            wait: Patience::measuring(),
-            hang: Patience::measuring(),
+            wait: Patience::measuring(WAIT),
+            hang: Patience::measuring(HANG),
         }
         .calibrated(setup)
     }

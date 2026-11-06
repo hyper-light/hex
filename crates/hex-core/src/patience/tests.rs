@@ -24,8 +24,8 @@ proptest! {
         next in 0u64..200_000_000_000_000,
     ) {
         let patience = match record {
-            Some(ns) => Patience::seeded(Duration::from_nanos(ns)),
-            None => Patience::measuring(),
+            Some(ns) => Patience::seeded("test", Duration::from_nanos(ns)),
+            None => Patience::measuring("test"),
         };
         let mut slowest = record.map(Duration::from_nanos);
         let mut before = patience.deadline();
@@ -47,7 +47,7 @@ proptest! {
 /// the bound armed at 3.836 ms, with no calibration read.
 #[test]
 fn before_any_answer_the_bound_is_twice_the_records_slowest() {
-    let p = Patience::seeded(Duration::from_micros(1_918));
+    let p = Patience::seeded("test", Duration::from_micros(1_918));
     assert_eq!(p.deadline(), Some(Duration::from_micros(3_836)));
 }
 
@@ -55,7 +55,7 @@ fn before_any_answer_the_bound_is_twice_the_records_slowest() {
 /// 50 ms. Expect: the wait stays 80 ms through the fast answers, then 100 ms.
 #[test]
 fn fast_answers_never_shrink_the_wait_and_a_slower_one_raises_it() {
-    let p = Patience::seeded(ms(40));
+    let p = Patience::seeded("test", ms(40));
     for _ in 0..200 {
         p.answered(ms(1));
     }
@@ -67,7 +67,7 @@ fn fast_answers_never_shrink_the_wait_and_a_slower_one_raises_it() {
 /// Measuring. Do: ask a wait with no record and no answer, then answer once in 3 ms. Expect: unarmed, then 6 ms.
 #[test]
 fn a_measuring_wait_is_unarmed_until_its_first_answer() {
-    let p = Patience::measuring();
+    let p = Patience::measuring("test");
     assert_eq!((p.deadline(), p.slowest()), (None, None));
     p.answered(ms(3));
     assert_eq!(p.deadline(), Some(ms(6)));
@@ -76,7 +76,7 @@ fn a_measuring_wait_is_unarmed_until_its_first_answer() {
 /// Shared by threads. Do: from eight threads, answer 1 to 800 ms between them. Expect: the slowest, 800 ms, kept.
 #[test]
 fn answers_from_many_threads_keep_the_slowest() {
-    let p = Patience::measuring();
+    let p = Patience::measuring("test");
     std::thread::scope(|s| {
         for t in 0..8u64 {
             let p = &p;
@@ -88,4 +88,28 @@ fn answers_from_many_threads_keep_the_slowest() {
         }
     });
     assert_eq!(p.slowest(), Some(ms(800)));
+}
+
+/// The census (the waits census probe, `bench/competitive/probes/waits_census.md`): every answer a wait records
+/// reaches the installed sink by the wait's name, from the wait's own timing point. Do: install a sink, answer a wait
+/// named `census.test` in 7 ms and 9 ms. Expect: the sink told both, by that name.
+#[test]
+fn every_answer_reaches_the_census_by_its_waits_name() {
+    static TOLD: std::sync::Mutex<Vec<(&'static str, Duration)>> =
+        std::sync::Mutex::new(Vec::new());
+    fn sink(name: &'static str, took: Duration) {
+        TOLD.lock().unwrap().push((name, took));
+    }
+    assert!(census(sink), "the first install takes");
+    let p = Patience::seeded("census.test", ms(1));
+    p.answered(ms(7));
+    p.answered(ms(9));
+    let told: Vec<Duration> = TOLD
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| *name == "census.test")
+        .map(|(_, took)| *took)
+        .collect();
+    assert_eq!(told, [ms(7), ms(9)]);
 }

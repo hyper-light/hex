@@ -74,10 +74,10 @@ const READ_BYTES: usize = 8 << 10;
 /// host's, so the process's to record, not one checker's. MEASURING: no record of the settle's distribution yet
 /// (`bench/competitive/probes/input_census.md` records the dumps' sizes, not their times); the lead's pass that
 /// times it on fedora seeds it. Until then it is unarmed until the first settle this process sees.
-static SETTLES: Patience = Patience::measuring();
+static SETTLES: Patience = Patience::measuring("netcheck.settles");
 /// How long one read of a dump's answer takes, learned in this process ([`Patience`]). MEASURING, as [`SETTLES`]:
 /// the record to come is the same pass's, timing each read of the five dumps.
-static ANSWERS: Patience = Patience::measuring();
+static ANSWERS: Patience = Patience::measuring("netcheck.answers");
 
 /// `bound` as `SO_RCVTIMEO` takes it: in whole microseconds, a `struct timeval`, rounded up, since one of zero
 /// waits for ever (socket(7)); `None`, no bound, waits for ever.

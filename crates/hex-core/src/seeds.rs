@@ -47,6 +47,11 @@ use crate::patience::Patience;
 /// from this one's and learns its own.
 pub const CLONE_SLOWEST: Duration = Duration::from_micros(1_918);
 
+/// The line's wait's name, as the waits census records it.
+pub const WAIT: &str = "seeds.wait";
+/// The hang bound's name, as the waits census records it.
+pub const HANG: &str = "seeds.hang";
+
 /// The pool's bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -259,8 +264,8 @@ impl Seeds {
     /// The pool with both its waits seeded from a record whose slowest answer is `slowest` in place of
     /// [`CLONE_SLOWEST`]: for a host class with a record of its own, or a test whose seeds answer as it chooses.
     pub fn seeded(mut self, slowest: Duration) -> Self {
-        self.wait = Patience::seeded(slowest);
-        self.hang = Patience::seeded(slowest);
+        self.wait = Patience::seeded(WAIT, slowest);
+        self.hang = Patience::seeded(HANG, slowest);
         self
     }
 
@@ -286,8 +291,8 @@ impl Seeds {
             next_ticket: 0,
             counts: Counts::default(),
             handed: vec![0; slots],
-            wait: Patience::seeded(CLONE_SLOWEST),
-            hang: Patience::seeded(CLONE_SLOWEST),
+            wait: Patience::seeded(WAIT, CLONE_SLOWEST),
+            hang: Patience::seeded(HANG, CLONE_SLOWEST),
         }
     }
 

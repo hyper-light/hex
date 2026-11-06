@@ -16,6 +16,7 @@
     )
 )]
 
+pub mod census;
 pub mod store;
 mod turns;
 

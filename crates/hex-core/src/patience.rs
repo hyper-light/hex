@@ -14,7 +14,11 @@
 //!   come named at the wait). Its bound is unarmed until this node's first answer: no value is picked for it.
 //! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
 //!   shell reports only answers it waited for and got.
+//! - **The census**: each wait is named, and every answer it records goes to the census sink as well, where a shell
+//!   installs one ([`census`]): the waits census probe's record of each wait's distribution
+//!   (`bench/competitive/probes/waits_census.md`), from the code's own timing points.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -22,9 +26,20 @@ use std::time::Duration;
 /// slower than any recorded or seen. The lead's failure-bound rule (2026-11-06), stated here.
 pub const TIMES_SLOWEST: u32 = 2;
 
+/// Where every named wait's answers go besides its own maximum, once a shell installs it: none unless one does.
+static CENSUS: OnceLock<fn(&'static str, Duration)> = OnceLock::new();
+
+/// Installs `sink` to be told every answer every wait records, by the wait's name: the waits census probe's. Only
+/// the first install takes; says whether this one did.
+pub fn census(sink: fn(&'static str, Duration)) -> bool {
+    CENSUS.set(sink).is_ok()
+}
+
 /// A wait's bound, seeded from a record and learned from its answers ([module docs](self)).
 #[derive(Debug)]
 pub struct Patience {
+    /// The wait's name, as the census records it: dotted, as the node's event targets are.
+    name: &'static str,
     /// The record's slowest answer, in nanoseconds and one; 0 while measuring.
     recorded: u64,
     /// This node's slowest answer, in nanoseconds and one; 0 before any.
@@ -32,26 +47,36 @@ pub struct Patience {
 }
 
 impl Patience {
-    /// A wait whose recorded distribution's slowest answer for this host class is `slowest`, cited at the caller.
-    pub const fn seeded(slowest: Duration) -> Self {
+    /// The wait `name`, whose recorded distribution's slowest answer for this host class is `slowest`, cited at the
+    /// caller.
+    pub const fn seeded(name: &'static str, slowest: Duration) -> Self {
         Self {
+            name,
             recorded: stored(slowest),
             seen: AtomicU64::new(0),
         }
     }
 
-    /// A wait with no record yet (MEASURING, the record to come named at the caller): unarmed until its first
-    /// answer.
-    pub const fn measuring() -> Self {
+    /// The wait `name`, with no record yet (MEASURING, the record to come named at the caller): unarmed until its
+    /// first answer.
+    pub const fn measuring(name: &'static str) -> Self {
         Self {
+            name,
             recorded: 0,
             seen: AtomicU64::new(0),
         }
     }
 
-    /// An answer came `took` after its wait began: this node's slowest if it is slower than any before.
+    /// An answer came `took` after its wait began: this node's slowest if it is slower than any before, and told
+    /// to the census where one is installed.
     pub fn answered(&self, took: Duration) {
         self.seen.fetch_max(stored(took), Ordering::Relaxed);
+        let _ = CENSUS.get();
+    }
+
+    /// The wait's name.
+    pub fn name(&self) -> &'static str {
+        self.name
     }
 
     /// The slowest answer, the record's or this node's, whichever is slower: `None` while measuring with none seen.

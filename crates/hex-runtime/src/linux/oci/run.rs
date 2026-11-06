@@ -277,11 +277,14 @@ pub enum ClassicReason {
     /// they don't prune, and the init a seed clones builds the root the classic way. The one reason whose
     /// creates don't go through the shim.
     Rootless,
+    /// No create seed came free within the line's learned wait, or the line was full ([`OciError::NoSeed`]): the
+    /// create went through the shim, the ordinary path, rather than fail.
+    NoSeed,
 }
 
 impl ClassicReason {
     /// The fixed count of reasons, for a per-reason counter.
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 8;
 
     /// This reason's index, for a per-reason counter.
     pub fn index(self) -> usize {
@@ -293,6 +296,7 @@ impl ClassicReason {
             Self::NoMountNamespace => 4,
             Self::Source => 5,
             Self::Rootless => 6,
+            Self::NoSeed => 7,
         }
     }
 }

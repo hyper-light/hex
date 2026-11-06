@@ -67,7 +67,7 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// records, `bench/competitive/probes/oci_breakdown.md`'s among them, time the whole delete); the record to come is
 /// the lead's delete pass timing each kill to `populated 0`, its max on fedora, which then seeds this. Until then a
 /// node's first emptying is waited out, and arms the bound.
-static EMPTYING: Patience = Patience::measuring();
+static EMPTYING: Patience = Patience::measuring("node.emptying");
 
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
 /// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
@@ -101,7 +101,7 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// no record times a listing per entry; the record to come is a recovery pass timing the state and runtime
 /// directories' listings per entry, its max on fedora. Until then recovery's first listing, the state
 /// directory's, is bounded by its entries, which are finite, not by time, and its time per entry arms the bound.
-static LISTING: Patience = Patience::measuring();
+static LISTING: Patience = Patience::measuring("node.listing");
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -350,7 +350,7 @@ impl Node {
                 MAX_BOXES,
                 // MEASURING: no record of how long a create or delete holds its turn; the record to come is
                 // seam_oci's create and delete phases with each call's max on fedora, which then seeds it.
-                Patience::measuring(),
+                Patience::measuring("node.turns"),
             ),
             #[cfg(debug_assertions)]
             crash_at: None,
@@ -2226,7 +2226,7 @@ mod tests {
             "making or removing a box",
             "creates and deletes under way",
             2,
-            Patience::measuring(),
+            Patience::measuring("node.turns"),
         );
         let id = |n: &str| BoxId::new(n).unwrap();
         let a = create_turn(&turns, &id("a")).unwrap();
