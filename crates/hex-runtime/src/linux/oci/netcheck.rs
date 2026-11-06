@@ -710,8 +710,8 @@ fn time_wait(sockstat: &str) -> Result<(), Refused> {
     Ok(())
 }
 
-/// `/proc/net/dev`'s word: loopback, and no other link. Its two first lines are headers; each other names a
-/// link before its colon.
+/// `/proc/net/dev`'s word: loopback, and no other link. Its two first lines are headers (`dev_seq_show`'s
+/// `SEQ_START_TOKEN` text, Linux v6.19 net/core/net-procfs.c:74-79); each other names a link before its colon.
 fn links(dev: &str) -> Result<(), Refused> {
     let mut lo = false;
     for line in dev.lines().skip(2) {

@@ -760,7 +760,7 @@ impl BoxCgroup {
         let now = self.usage();
         let peak = peak
             .and_then(|fd| {
-                let mut buf = [0u8; 32];
+                let mut buf = [0u8; PEAK_TEXT];
                 let n = rustix::io::pread(fd, &mut buf, 0).ok()?;
                 std::str::from_utf8(buf.get(..n)?).ok()?.trim().parse().ok()
             })
@@ -791,6 +791,15 @@ fn swap_active() -> Result<bool, Refusal> {
     Ok(text.lines().skip(1).any(|l| !l.trim().is_empty()))
 }
 
+/// `memory.peak`'s most bytes: a `u64`'s 20 decimal digits and a newline (`peak_show`'s `"%llu\n"`, Linux v6.19
+/// mm/memcontrol.c:4250).
+const PEAK_TEXT: usize = 21;
+
+/// The bytes [`read_fd`] asks of a cgroup file a read: a page, the least on x86_64 and aarch64, which is the
+/// buffer the kernel first fills a seq_file read from (`seq_read_iter`, `seq_buf_alloc(m->size = PAGE_SIZE)`, Linux
+/// v6.19 fs/seq_file.c:210), so a file that fits a page is read in one call.
+const READ_CHUNK: usize = 4096;
+
 /// Largest cgroup file Hex reads whole: `io.stat` and `cpu.stat` hold a few lines each; a file past
 /// this is damage, refused by type rather than read on.
 const MAX_CGROUP_FILE: usize = 64 << 10;
@@ -814,7 +823,7 @@ fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
 /// dozen on create's path. Refused past [`MAX_CGROUP_FILE`]; `path` names the file in a refusal.
 fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
     let mut out = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; READ_CHUNK];
     // From the file's start whatever its offset: a descriptor opened ahead is read more than once, through copies that
     // share it ([`BoxCgroup::open_ahead`]).
     loop {
