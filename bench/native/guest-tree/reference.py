@@ -39,8 +39,13 @@ def root(hex_bin, out, script):
         if done.returncode != 0:
             raise SystemExit(f"root lab step failed ({done.returncode}): {script}\n{done.stderr.decode()}")
         return done.stdout
+    # Each container's id, recorded as it starts (the lead's rule: every container recorded, and removed when
+    # its run ends; --rm removes it).
+    cid = os.path.join(out, ".cid")
+    if os.path.exists(cid):
+        os.remove(cid)
     cmd = [
-        "docker", "run", "--rm", "--privileged", "--network", "host",
+        "docker", "run", "--rm", "--cidfile", cid, "--privileged", "--network", "host",
         # The lead's shared fedora limits for a container (hex-slot, the T7 fedora-unit-limits rule):
         # an operator's limit, not tuning.
         "--memory", "8g", "--oom-score-adj", "1000",
@@ -52,6 +57,10 @@ def root(hex_bin, out, script):
         BOX, "sh", "-euc", script,
     ]
     done = subprocess.run(cmd, capture_output=True)
+    if os.path.exists(cid):
+        with open(cid) as f, open(os.path.join(out, "CONTAINERS.txt"), "a") as log:
+            log.write(f.read().strip() + "\n")
+        os.remove(cid)
     if done.returncode != 0:
         raise SystemExit(f"root lab step failed ({done.returncode}): {script}\n{done.stderr.decode()}")
     return done.stdout
