@@ -4,9 +4,8 @@ use super::{mount::Op, spec::Spec};
 use hex_core::devfs::Unpooled;
 use rustix::mount::MountFlags;
 
-/// Configuration bytes retained per key (four keys): larger specifications use ordinary setup.
-const MAX_KEY_BYTES: usize = 2048;
-
+/// What a prepared `/dev` is made for: its mount's source, data and flags. Every byte of it is the spec's, so a
+/// key is bounded by the spec's own bound (`spec::MAX_CONFIG_BYTES`), and the pool's four keys by four of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub source: String,
@@ -41,14 +40,6 @@ pub fn eligible(spec: &Spec, plan: &[Op]) -> Result<(u32, Key), Unpooled> {
         .any(|s| s.split('=').next() == Some("nr_inodes"))
     {
         return Err(Unpooled::Inodes);
-    }
-    if !op
-        .kind_source
-        .len()
-        .checked_add(op.data.len())
-        .is_some_and(|n| n <= MAX_KEY_BYTES)
-    {
-        return Err(Unpooled::KeyBytes);
     }
     Ok((
         u32::try_from(index).map_err(|_| Unpooled::Capacity)?,
