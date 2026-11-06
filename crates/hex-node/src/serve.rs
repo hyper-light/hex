@@ -89,12 +89,13 @@ const EVENTS: usize = 256;
 const BACKLOG: i32 = 64;
 /// Longest a list's worker waits for its client to read one part before it sends the next; past it
 /// the client has stopped reading, and its connection is closed. Five times the node's longest wait
-/// of its own (a delete's [`crate::node::EMPTY_PATIENCE`]), so a client busy with another call isn't
-/// taken for one that stopped.
+/// of its own (the ceiling of its learned waits, [`hex_core::patience::RFC_6298`]'s 60 s), so a client
+/// busy with another call isn't taken for one that stopped.
 const READ_PATIENCE: Duration = Duration::from_secs(300);
-/// Longest a stopping server waits for the programs it ended to be reaped and recorded, as
-/// [`crate::node::EMPTY_PATIENCE`]: a killed process ends in milliseconds.
-const STOP_PATIENCE: Duration = Duration::from_secs(60);
+/// Longest a stopping server waits for the programs it ended to be reaped and recorded: the ceiling of
+/// the node's learned waits for a killed box to empty ([`hex_core::patience::RFC_6298`]), the longest
+/// such a wait lasts. A killed process ends in milliseconds.
+const STOP_PATIENCE: Duration = hex_core::patience::RFC_6298.ceiling;
 
 /// The epoll tokens of the listener and the stop eventfd; connections and programs take the rest.
 const LISTENER: u64 = 0;

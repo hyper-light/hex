@@ -65,8 +65,8 @@ pub struct Patience {
 }
 
 impl Patience {
-    /// A wait under `bounds`, with no answer seen.
-    pub fn new(bounds: Bounds) -> Self {
+    /// A wait under `bounds`, with no answer seen. Const, so a shell may keep one in a static.
+    pub const fn new(bounds: Bounds) -> Self {
         Self {
             bounds,
             smoothed: None,
@@ -111,9 +111,18 @@ fn part(d: Duration, n: u32) -> Duration {
     d.checked_div(n).unwrap_or_default()
 }
 
-/// `d` held within `bounds`, the floor first, so a ceiling under the floor wins.
-fn within(bounds: Bounds, d: Duration) -> Duration {
-    d.max(bounds.floor).min(bounds.ceiling)
+/// `d` held within `bounds`, the floor first, so a ceiling under the floor wins. Const for [`Patience::new`].
+const fn within(bounds: Bounds, d: Duration) -> Duration {
+    let d = if d.as_nanos() < bounds.floor.as_nanos() {
+        bounds.floor
+    } else {
+        d
+    };
+    if d.as_nanos() > bounds.ceiling.as_nanos() {
+        bounds.ceiling
+    } else {
+        d
+    }
 }
 
 #[cfg(test)]

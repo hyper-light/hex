@@ -49,8 +49,6 @@ const REMOVALS: usize = PER_NODE;
 /// counted (`procs_capped`), and its init parks without one.
 pub const PROCS_ALIVE: usize = PER_NODE;
 
-/// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
-const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
 /// The device policy a cgroup's own program is under: `None` when it carries none.
 type Policy = Option<Vec<Insn>>;
@@ -919,11 +917,13 @@ fn end_and_remove(cg: &BoxCgroup) -> Result<(), Refusal> {
     }
     if cg.populated()? {
         cg.kill()?;
-        if !cg.wait_empty(REMOVE_PATIENCE)? {
+        // The same learned wait as a delete's for its box to empty, which this answer teaches too.
+        let (emptied, patience) = crate::node::wait_empty(cg)?;
+        if !emptied {
             return Err(Refusal::Os {
                 op: "removing an idle cgroup",
                 why: format!(
-                    "{} still holds processes {REMOVE_PATIENCE:?} after cgroup.kill",
+                    "{} still holds processes {patience:?} after cgroup.kill",
                     cg.dir().display()
                 ),
             });

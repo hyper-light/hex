@@ -28,7 +28,7 @@ use hex_api::{
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
-use hex_core::patience::RFC_6298;
+use hex_core::patience::{Patience, RFC_6298};
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
@@ -57,10 +57,38 @@ use crate::turns::{Turn, Turns};
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
 const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 
-/// How long [`Runtime::delete`] waits for a box to empty after killing it before it reports the
-/// kernel is wedged. A `cgroup.kill` empties a box in milliseconds; a minute is far past any real
-/// delay, so missing it is a fault to report, not a limit to raise (CLAUDE.md §4).
-pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
+/// How long a wait for a killed box to empty lasts (decision 9; Ada's 2026-11-06 rule): RFC 6298's timer
+/// over how long the waits before it took, from every delete, scrub and removal of this process's nodes,
+/// since all wait on one kernel ([`RFC_6298`]'s bounds: 1 s before any and at least, 60 s at most). A
+/// `cgroup.kill` empties a box in milliseconds, so the floor holds it while the host is well; a wait that
+/// runs out is a fault to report (the kernel is wedged), not a limit to raise (CLAUDE.md §4), and doubles
+/// the next. Its programs' reaping and its init's end, which a box's emptying waits on, take the same wait.
+static EMPTYING: Mutex<Patience> = Mutex::new(Patience::new(RFC_6298));
+
+/// How long the next wait for a killed box to empty lasts, as learned ([`EMPTYING`]).
+pub(crate) fn empty_patience() -> Duration {
+    EMPTYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deadline()
+}
+
+/// Waits for `cg`, killed, to empty within the learned wait ([`EMPTYING`]), which its answer teaches: the
+/// time it took when it emptied, a back-off when it didn't. Says whether it emptied, and the wait it had.
+pub(crate) fn wait_empty(cg: &BoxCgroup) -> Result<(bool, Duration), Refusal> {
+    let patience = empty_patience();
+    let began = Instant::now();
+    let emptied = cg.wait_empty(patience)?;
+    let mut learned = EMPTYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if emptied {
+        learned.answered(began.elapsed());
+    } else {
+        learned.expired();
+    }
+    Ok((emptied, patience))
+}
 
 /// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
 /// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
@@ -70,9 +98,11 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
 /// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
 /// runtime directory is shared with every node of this user on the host, so its entries are theirs as
-/// well as this node's. A bound on a restart's wait, as [`REMOVE_PATIENCE`] is on a delete's, not a
-/// guess at a directory's size (CLAUDE.md §2, §4).
-pub const LIST_PATIENCE: Duration = Duration::from_secs(60);
+/// well as this node's. RFC 6298's timer over the listings before it (decision 9; Ada's 2026-11-06 rule):
+/// a recovery lists several directories, each listing a sample for the next, and the first waits
+/// [`RFC_6298`]'s first 1 s. A listing that runs out refuses the recovery by type and doubles the next
+/// wait, so a restart that retries meets a longer one, to 60 s (CLAUDE.md §2, §4).
+static LISTING: Mutex<Patience> = Mutex::new(Patience::new(RFC_6298));
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -842,11 +872,12 @@ impl Node {
         for n in recovery::strays(&seen, &slots) {
             if let Some(cg) = self.oci_boxes.slot(n) {
                 cg.kill()?;
-                if !cg.wait_empty(EMPTY_PATIENCE)? {
+                let (emptied, patience) = wait_empty(&cg)?;
+                if !emptied {
                     return Err(Refusal::Os {
                         op: "removing an idle cgroup",
                         why: format!(
-                            "slot {n} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
+                            "slot {n} still holds processes {patience:?} after cgroup.kill:{}",
                             survivors(&cg)
                         ),
                     });
@@ -969,18 +1000,19 @@ impl Node {
             && init.pid_namespace
         {
             init.kill()?;
-            self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
-            if !init.ended_within(EMPTY_PATIENCE)? {
+            let patience = empty_patience();
+            self.supervisor.reap_programs(id, patience)?;
+            if !init.ended_within(patience)? {
                 return Err(Refusal::Os {
                     op: "emptying a box",
                     why: format!(
-                        "box {id}'s init still runs {EMPTY_PATIENCE:?} after SIGKILL through its pidfd"
+                        "box {id}'s init still runs {patience:?} after SIGKILL through its pidfd"
                     ),
                 });
             }
             // The init leaves its cgroup at its last switch, after its pidfd reads as ended (Linux v6.19,
             // kernel/sched/core.c:5156), so a cgroup that holds nothing else empties without a kill.
-            if !cg.populated()? || (!outsiders(cg, init.pid()) && cg.wait_empty(EMPTY_PATIENCE)?) {
+            if !cg.populated()? || (!outsiders(cg, init.pid()) && wait_empty(cg)?.0) {
                 self.cgroups.ended_through_init();
                 return Ok(false);
             }
@@ -992,12 +1024,13 @@ impl Node {
         // The kill reaches every process in the box; now reap the exec'd programs the agent watches for
         // it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until the
         // programs in that namespace are reaped — can finish exiting and the box empty.
-        self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
-        if !cg.wait_empty(EMPTY_PATIENCE)? {
+        self.supervisor.reap_programs(id, empty_patience())?;
+        let (emptied, patience) = wait_empty(cg)?;
+        if !emptied {
             return Err(Refusal::Os {
                 op: "emptying a box",
                 why: format!(
-                    "box {id} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
+                    "box {id} still holds processes {patience:?} after cgroup.kill:{}",
                     survivors(cg)
                 ),
             });
@@ -1816,7 +1849,8 @@ fn why_text(why: &Why) -> String {
 
 /// The box ids named by the directories in `dir` whose names start with `prefix`, the rest of each name
 /// the id, or none when `dir` isn't there: a box's parts there are directories, so any other entry is no
-/// box's. The listing ends at [`LIST_PATIENCE`], refused past it by type.
+/// box's. The listing ends at the wait learned from the listings before it ([`LISTING`]), refused past it
+/// by type.
 fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
     let listing = |e| Refusal::os("listing a directory for boxes' parts", e);
     let entries = match fs::read_dir(dir) {
@@ -1824,14 +1858,18 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(e) => return Err(listing(e)),
     };
-    let deadline = Instant::now().checked_add(LIST_PATIENCE);
+    let learned = || LISTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let patience = learned().deadline();
+    let began = Instant::now();
+    let deadline = began.checked_add(patience);
     let mut ids = BTreeSet::new();
     for entry in entries {
         if deadline.is_none_or(|d| Instant::now() >= d) {
+            learned().expired();
             return Err(Refusal::Os {
                 op: "listing a directory for boxes' parts",
                 why: format!(
-                    "{} was still being listed after {LIST_PATIENCE:?}",
+                    "{} was still being listed after {patience:?}",
                     dir.display()
                 ),
             });
@@ -2011,6 +2049,20 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): a recovery's listing teaches the next its wait. Do: list a
+    /// directory holding two boxes' parts and a file. Expect: the two ids, and the listings' timer holding an
+    /// answer (RFC 6298 (2.2)), so the next listing waits what this one took, not only the first wait.
+    #[test]
+    fn a_listing_teaches_the_next_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("hex-a")).unwrap();
+        fs::create_dir(dir.path().join("hex-b")).unwrap();
+        fs::write(dir.path().join("hex-c"), b"").unwrap();
+        let ids = ids_in(dir.path(), "hex-").unwrap();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(LISTING.lock().unwrap().smoothed().is_some());
+    }
 
     /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
     /// never queued. Do: turns bounded at two, two boxes' turns held, a third box's create turn asked. Expect:
