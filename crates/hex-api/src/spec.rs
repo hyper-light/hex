@@ -439,6 +439,33 @@ mod tests {
         ));
     }
 
+    /// HEX-RT-14: a per-string bound counts in its OS's own unit. Do: a variable of three two-byte
+    /// characters, "A=ééé": 8 bytes with its NUL, 6 UTF-16 units. Expect a bound of 6 to take it in UTF-16
+    /// units (Windows' count) and refuse it in bytes (Linux's), naming the variable.
+    #[test]
+    fn a_per_string_bound_counts_in_the_os_unit() {
+        let p = Program {
+            args: vec!["sh".into()],
+            env: vec![("A".into(), "ééé".into())],
+            ..Program::default()
+        };
+        let utf16 = ExecLimit {
+            block: usize::MAX,
+            string: Some(6),
+            unit: StringUnit::Utf16,
+            source: "a test",
+        };
+        assert_eq!(p.fits(&utf16), Ok(()));
+        let bytes = ExecLimit {
+            unit: StringUnit::Bytes,
+            ..utf16
+        };
+        assert!(matches!(
+            p.fits(&bytes),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("\"A\"")
+        ));
+    }
+
     fn spec() -> OciSpec {
         OciSpec {
             rootfs: Rootfs::Layers(vec!["/images/base".into(), "/images/app".into()]),
