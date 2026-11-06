@@ -729,6 +729,25 @@ fn a_host_class_without_a_record_refuses_by_name() {
     let Err(Refusal::Platform { why, .. }) = got else {
         panic!("expected the pending record named, got {got:?}");
     };
-    assert!(why.contains("boot-ready/RECORD.md"), "{why}");
+    assert!(why.contains("records.tsv") && why.contains(CLASS), "{why}");
     assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
+}
+
+/// HEX-GUEST-34 (the lead: the record is the input that turns a class on): read a records table with
+/// HVF's rows alone, then with a KVM row added: expect KVM to have no seed from the first (HVF's never
+/// borrowed) and its own from the second, with no code between them.
+#[test]
+fn a_records_row_is_what_turns_a_class_on() {
+    let hvf = "# measure\tclass\tslowest_us\trecord\nboot_ready\tmacOS-HVF\t265000\tr.md\n";
+    assert_eq!(
+        slowest_in(hvf, "boot_ready", "macOS-HVF"),
+        Some(Duration::from_millis(265))
+    );
+    assert_eq!(slowest_in(hvf, "boot_ready", "Linux-KVM"), None);
+    let kvm = format!("{hvf}boot_ready\tLinux-KVM\t180000\tr.md\n");
+    assert_eq!(
+        slowest_in(&kvm, "boot_ready", "Linux-KVM"),
+        Some(Duration::from_millis(180))
+    );
+    assert_eq!(slowest_in(&kvm, "stop", "Linux-KVM"), None);
 }

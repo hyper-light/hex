@@ -41,21 +41,12 @@ use hex_runtime::guest::{GuestConfig, GuestRuntime};
 const PEAK_MIB: u64 = 975;
 
 /// How long the lab may run before the test fails: twice (the margin) the slowest run of this test on
-/// record for this host's class (bench/native/guest/validation-runs/RECORD.md), the lead's rule for a wait
-/// that can't end on a fact alone. Each run's time includes its boot and staging, so the lab's own is less.
-/// macOS (HVF): 73.75 s; Windows (WHP): jupiter's 75.5 s; Linux (KVM): pending, so the test says so
-/// rather than borrow another class's.
+/// record for this host's class (its `validation_run` row in bench/native/guest/records.tsv; the runs in
+/// bench/native/guest/validation-runs/RECORD.md), the lead's rule for a wait that can't end on a fact
+/// alone. Each run's time includes its boot and staging, so the lab's own is less. A class with no row
+/// fails here by name rather than borrow another's.
 fn suite() -> Duration {
-    if cfg!(target_os = "macos") {
-        Duration::from_millis(2 * 73_750)
-    } else if cfg!(target_os = "windows") {
-        Duration::from_millis(2 * 75_500)
-    } else {
-        panic!(
-            "this host class's HEX-GUEST-20 run record is pending \
-             (bench/native/guest/validation-runs/RECORD.md): no bound to seed"
-        )
-    }
+    2 * hex_runtime::guest::recorded("validation_run").unwrap_or_else(|why| panic!("{why}"))
 }
 
 /// Every capability Hex's runtime names (crates/hex-runtime/src/linux/oci/caps.rs), as a privileged

@@ -159,26 +159,49 @@ struct Booted {
     client: Client,
 }
 
-/// The slowest boot to ready on record for this host's class, the seed of the first dial's bound before
-/// this node has seen a boot (bench/native/guest/boot-ready/RECORD.md). macOS (HVF): the most of every
-/// run, quiet and under its hosts' own load, across both Mac Studios. Linux (KVM) and Windows (WHP) have
-/// no record yet, so they have no seed: a guest there is refused by name until their records are taken,
-/// never bounded by another class's.
-pub fn recorded_boot() -> Result<Duration, Refusal> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(Duration::from_millis(265))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(Refusal::Platform {
-            what: "the oci class's guest",
-            platform: std::env::consts::OS,
-            why: "this host class's boot-to-ready record is pending \
-                  (bench/native/guest/boot-ready/RECORD.md), so its first dial has no bound to seed"
-                .to_owned(),
+/// The slowest recorded value of each wait that seeds a bound, by host class
+/// (bench/native/guest/records.tsv): the input that turns a class on. A class with no row for a measure
+/// has no seed; adding its row, once its record is taken, turns it on with no code change.
+const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
+
+/// This host's class, as the records name it: the hypervisor Shards boots its guests with here.
+pub const CLASS: &str = if cfg!(target_os = "macos") {
+    "macOS-HVF"
+} else if cfg!(target_os = "windows") {
+    "Windows-WHP"
+} else {
+    "Linux-KVM"
+};
+
+/// The slowest value `table` records for `measure` on host class `class`: each line `measure`, `class`,
+/// microseconds and its record, tab-separated; `#` lines are comments. `None` where no row names both.
+pub fn slowest_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
+    table
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split('\t'))
+        .find_map(|mut row| {
+            (row.next()? == measure && row.next()? == class)
+                .then(|| row.next()?.parse().ok().map(Duration::from_micros))?
         })
-    }
+}
+
+/// The slowest value recorded for `measure` on this host's class, or the refusal naming the record to take.
+pub fn recorded(measure: &str) -> Result<Duration, Refusal> {
+    slowest_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
+        what: "the oci class's guest",
+        platform: std::env::consts::OS,
+        why: format!(
+            "no {measure} record for {CLASS} yet (bench/native/guest/records.tsv): record one first; \
+             no other class's is borrowed"
+        ),
+    })
+}
+
+/// The slowest boot to ready on record for this host's class, the seed of the first dial's bound before
+/// this node has seen a boot (bench/native/guest/boot-ready/RECORD.md, its row in records.tsv).
+pub fn recorded_boot() -> Result<Duration, Refusal> {
+    recorded("boot_ready")
 }
 
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung

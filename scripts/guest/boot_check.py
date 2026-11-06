@@ -69,10 +69,21 @@ def handshake(path):
 PEAK_MIB = 284
 
 
-# How long a VM may take to end after SIGTERM before it is killed: twice (the margin) the slowest stop on
-# record for this host's class (bench/native/guest/stop/RECORD.md), the lead's rule for a timeout that can't
-# wait on a fact. macOS (HVF): 13 ms. Linux (KVM) and Windows (WHP): pending, so none is borrowed.
-STOP_GRACES = {"Darwin": 2 * 0.013}
+# This host's class, as bench/native/guest/records.tsv names it: the hypervisor Shards boots guests with.
+CLASSES = {"Darwin": "macOS-HVF", "Linux": "Linux-KVM", "Windows": "Windows-WHP"}
+RECORDS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../bench/native/guest/records.tsv")
+
+
+def recorded(measure):
+    """The slowest value records.tsv holds for `measure` on this host's class, in seconds, or None: the
+    table is the input that turns a class on, read here at run time."""
+    cls = CLASSES.get(platform.system())
+    with open(RECORDS) as f:
+        for line in f:
+            row = line.rstrip("\n").split("\t")
+            if not line.startswith("#") and len(row) >= 3 and row[0] == measure and row[1] == cls:
+                return int(row[2]) / 1e6
+    return None
 
 
 def guest_memory_mib():
@@ -89,8 +100,12 @@ def main(argv):
     if not argv:
         sys.exit(__doc__)
     record = "--record" in argv
-    if platform.system() not in STOP_GRACES and not record:
-        sys.exit(f"no VM stop record for {platform.system()} yet (bench/native/guest/stop/RECORD.md): "
+    # How long a VM may take to end after SIGTERM before it is killed: twice (the margin) the slowest stop
+    # on record for this host's class (its `stop` row), the lead's rule for a timeout that can't wait on a
+    # fact. A class with no row borrows none: it takes its record first, with --record.
+    slowest_stop = recorded("stop")
+    if slowest_stop is None and not record:
+        sys.exit(f"no stop record for {CLASSES.get(platform.system())} yet ({RECORDS}): "
                  "take it first with --record")
     work = argv[0]
     console = "--console" in argv
@@ -140,7 +155,7 @@ def main(argv):
         # writing it.
         try:
             # --record takes the record: it waits on the VM's end alone, the time it prints the sample.
-            rest, _ = vm.communicate(timeout=None if record else STOP_GRACES[platform.system()])
+            rest, _ = vm.communicate(timeout=None if record else 2 * slowest_stop)
         except subprocess.TimeoutExpired:
             vm.kill()
             rest, _ = vm.communicate()
