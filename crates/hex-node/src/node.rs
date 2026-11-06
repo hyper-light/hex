@@ -189,9 +189,8 @@ pub struct Node {
     /// release builds (CLAUDE.md §6).
     #[cfg(debug_assertions)]
     inject: Option<String>,
-    /// The way a pruned create's mount namespace is made, as its owner asked by
-    /// [`hex_runtime::linux::oci::mntns::ENV_WAY`]'s words ([`Node::with_mount_namespace`]); `None` takes
-    /// the node's default (decision 6's update).
+    /// The way a pruned create's mount namespace is made, as its owner asked (`copy`, `empty` or `tree`,
+    /// [`Node::with_mount_namespace`]); `None` takes the node's default (decision 6's update).
     mount_namespace: Option<String>,
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
@@ -441,7 +440,8 @@ impl Node {
     }
 
     /// Asks for a way of making a pruned create's mount namespace (decision 6's update): `copy`, `empty` or
-    /// `tree`, the words of [`hex_runtime::linux::oci::mntns::ENV_WAY`], for the bench's A/B and the lab.
+    /// `tree`, for the bench's A/B and the lab; a node agent asks for none, taking the way its kernel's probe chooses
+    /// ([`hex_runtime::linux::oci::mntns::default_way`]).
     /// Must come before [`Node::with_oci_helper`], which builds the seed pool. A way this node can't take is
     /// refused by type at its first create.
     pub fn with_mount_namespace(mut self, way: &str) -> Self {

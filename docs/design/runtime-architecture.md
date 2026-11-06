@@ -1987,8 +1987,9 @@ made in two parts.
   The node probes for `OPEN_TREE_NAMESPACE` once at start with an `open_tree` that makes nothing (an empty path at
   descriptor -1: `EBADF` where the call is there, `EINVAL` where it isn't, `EPERM` where the agent may not;
   `goal6-mntns.md` §6). The default is the path the record shows fastest. Until a 7.x host has measured them, it is
-  `OpenTree` where the probe finds it, by the hold count above. A node's owner may ask for another (`HEX_OCI_MNTNS`:
-  `copy`, `empty` or `tree`, the bench's A/B). A namespace from its tree asked where the probe doesn't find it is
+  `OpenTree` where the probe finds it, by the hold count above. The bench and the lab may ask a node they build for another
+  (`Node::with_mount_namespace`: `copy`, `empty` or `tree`; seam_oci's `HEX_OCI_MNTNS`, the A/B's, until the 7.1/7.2
+  host record decides it); the node agent reads no environment for it (Ada's 2026-11-06 rule). A namespace from its tree asked where the probe doesn't find it is
   refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
   create is counted under the way its seed answers it was made (`Node::mount_namespaces_made`), so that fallback
   shows, beside `ClassicReason`'s counts.

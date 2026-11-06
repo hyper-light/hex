@@ -126,7 +126,7 @@ impl CreatePool {
     /// starting thread up and starting the first spare. `prune`, when
     /// given, is the mountpoint each seed prunes its mount namespace at (a root node, goal 5 plan
     /// step 2); `None` on a rootless node, whose seeds keep the agent's mount namespace. `asked`, when
-    /// given, is the way a pruned create's mount namespace is made, in [`mntns::ENV_WAY`]'s words
+    /// given, is the way a pruned create's mount namespace is made (`copy`, `empty` or `tree`)
     /// (decision 6's update); a way this node can't take is refused by type.
     pub fn new(
         exe: PathBuf,

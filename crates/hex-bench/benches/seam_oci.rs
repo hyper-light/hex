@@ -1370,9 +1370,10 @@ mod linux {
                         root.display()
                     )
                 });
-            // HEX_OCI_MNTNS: the way a pruned create's mount namespace is made, for decision 6's A/B;
-            // unset, the node's default.
-            let node = match std::env::var(hex_runtime::linux::oci::mntns::ENV_WAY) {
+            // HEX_OCI_MNTNS: the way a pruned create's mount namespace is made, for decision 6's A/B, set on this
+            // in-process node's builder alone (the node agent reads no environment for it, Ada's 2026-11-06 rule);
+            // unset, the node's default. It stays until the 7.1/7.2 host record decides that A/B, then goes.
+            let node = match std::env::var("HEX_OCI_MNTNS") {
                 Ok(way) => node.with_mount_namespace(&way),
                 Err(_) => node,
             }
