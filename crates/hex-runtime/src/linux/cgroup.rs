@@ -25,8 +25,11 @@ pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// default bound on descendants is unlimited; this is Hex's, well above a node's useful load.
 pub const MAX_BOXES: usize = 65_536;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
-/// kernel delivers to the whole box at once through `cgroup.kill`).
-pub const MAX_SIGNALLED: usize = 1 << 20;
+/// kernel delivers to the whole box at once through `cgroup.kill`), and the kill sweep collects: no box
+/// holds more than there are pids, `PID_MAX_LIMIT` on a 64-bit kernel, the ceiling `pid_max` may be set to
+/// (include/linux/threads.h; proc(5), /proc/sys/kernel/pid_max).
+pub const MAX_SIGNALLED: usize = 4 * 1024 * 1024;
+
 thread_local! {
     /// This thread's cgroupfs lookups so far ([`lookups_on_this_thread`]).
     static LOOKUPS: Cell<u64> = const { Cell::new(0) };
