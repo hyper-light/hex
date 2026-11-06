@@ -500,6 +500,33 @@ mod tests {
         ));
     }
 
+    /// HEX-RT-14: Windows' block is the environment alone, in UTF-16 units (each NAME=VALUE and its NUL;
+    /// the command line is bounded apart). Do: a long argument and the variable "A=ééé" (6 units with its
+    /// NUL). Expect a 6-unit environment block to take it whatever the argument's length, and a 5-unit one
+    /// to refuse it naming the environment.
+    #[test]
+    fn a_windows_block_counts_the_environment_alone_in_its_unit() {
+        let p = Program {
+            args: vec!["cmd".into(), "x".repeat(1000)],
+            env: vec![("A".into(), "ééé".into())],
+            ..Program::default()
+        };
+        let six = ExecLimit {
+            block: 6,
+            counts: BlockCount::Environment,
+            string: None,
+            unit: StringUnit::Utf16,
+            source: "a test",
+        };
+        assert_eq!(six.size(&p), 6);
+        assert_eq!(p.fits(&six), Ok(()));
+        let five = ExecLimit { block: 5, ..six };
+        assert!(matches!(
+            p.fits(&five),
+            Err(Refusal::Invalid { what: "program", ref why }) if why.contains("environment")
+        ));
+    }
+
     fn spec() -> OciSpec {
         OciSpec {
             rootfs: Rootfs::Layers(vec!["/images/base".into(), "/images/app".into()]),
