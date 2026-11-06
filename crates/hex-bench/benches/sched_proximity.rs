@@ -1,13 +1,18 @@
 //! S4/A2's measure (G3): goodput and the completion-time tail of proximity-scored placement against
-//! proximity-blind placement on hex-sim's modelled WAN (`hex_sim::proximity`, `hex-sim.md` H13).
+//! proximity-blind placement on hex-sim's modelled WAN (`hex_sim::proximity`, `hex-sim.md` H21).
 //!
 //!   cargo bench -p hex-bench --bench sched_proximity
 //!
-//! Every study is 1,000 nodes over Azure's eight regions and 20,000 workloads, run under each policy:
-//! blind (the fast path's best fit), proximity (hyper-swim's coordinates as an upper bound), the
-//! tie-break (proximity only among best fit's ties) and the oracle (the true RTT). It sweeps seeds 1-5,
-//! homes uniform and skewed, 50% and 90% offered load, and 10 ms, 100 ms and 1 s of compute a round
-//! trip. Virtual time: the numbers depend on the seed and the build, not the host's load.
+//! Every study is 1,000 nodes over Azure's eight regions and 20,000 workloads of Hex's three kinds,
+//! OCI containers, Firecracker microVMs and Shards microVMs (`hex-sim.md` H10): owners drawn by their
+//! launches in G2's recorded workload (`bench/sched/huawei-r5-day30.trace`), kinds by G2's rule (a
+//! kind per owner, in thirds of the launches) and each kind's overhead from that trace (Shards' a
+//! 5 MiB stand-in). Each runs under every policy: blind (the fast path's best fit), proximity
+//! (hyper-swim's coordinates as an upper bound), the tie-break (proximity only among best fit's ties)
+//! and the oracle (the true RTT). It sweeps seeds 1-5, H10's two fleets (every node running all three
+//! kinds, and Hex's Linux, Windows and macOS mix), homes uniform and skewed, 50% and 90% offered load,
+//! and 10 ms, 100 ms and 1 s of compute a round trip. Virtual time: the numbers depend on the seed and
+//! the build, not the host's load.
 // A bench (not production, CLAUDE.md): it takes the test-style allowances, as the other benches do.
 #![allow(
     clippy::unwrap_used,
@@ -20,7 +25,9 @@
     clippy::cast_precision_loss
 )]
 
-use hex_sim::proximity::{Homes, Policy, PolicyReport, Study, StudyConfig};
+use hex_sim::model::Class;
+use hex_sim::proximity::{CLASSES, Fleet, Homes, Policy, PolicyReport, Study, StudyConfig};
+use hex_sim::replay::{Limits, parse};
 use hex_sim::wan::{Accuracy, WanConfig};
 
 const POLICIES: [Policy; 4] = [
@@ -51,68 +58,139 @@ fn line(r: &PolicyReport) -> String {
     )
 }
 
+fn class_lines(r: &PolicyReport) -> String {
+    CLASSES
+        .iter()
+        .zip(&r.classes)
+        .map(|(class, c)| {
+            let q = c.completion.unwrap();
+            format!(
+                "{:<11} placed {:>5} done {:>5} goodput {:>8.3}/s p50 {:>10.1} p99 {:>10.1} ms",
+                format!("{class:?}"),
+                c.placements,
+                c.done_by_horizon,
+                r.class_goodput_per_s(*class),
+                ms(q.p50),
+                ms(q.p99)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n      ")
+}
+
+/// Proximity's gain over blind: (goodput %, p99 cut %), overall and for each kind.
+fn gains(blind: &PolicyReport, near: &PolicyReport) -> [(f64, f64); 4] {
+    let gain = |b: f64, n: f64| 100.0 * (n / b - 1.0);
+    let cut = |b: u64, n: u64| 100.0 * (1.0 - n as f64 / b as f64);
+    let mut out = [(
+        gain(blind.goodput_per_s(), near.goodput_per_s()),
+        cut(blind.completion.unwrap().p99, near.completion.unwrap().p99),
+    ); 4];
+    for (i, class) in CLASSES.iter().enumerate() {
+        out[i + 1] = (
+            gain(
+                blind.class_goodput_per_s(*class),
+                near.class_goodput_per_s(*class),
+            ),
+            cut(
+                blind.classes[i].completion.unwrap().p99,
+                near.classes[i].completion.unwrap().p99,
+            ),
+        );
+    }
+    out
+}
+
 fn main() {
+    // G2's recorded workload: its owners (each study draws owners by their launches there, and kinds
+    // by G2's rule) and its kinds' overheads (Shards' a 5 MiB stand-in in it until Shards' is measured).
+    let recorded = parse(
+        include_str!("../../../bench/sched/huawei-r5-day30.trace"),
+        &Limits::default(),
+    )
+    .unwrap();
+    println!(
+        "recorded workload: huawei-r5-day30.trace, {} owners, {} launches; overheads oci {} B, firecracker {} B, shards {} B",
+        recorded.owners.len(),
+        recorded.workloads.len(),
+        recorded.overheads.of(Class::Oci),
+        recorded.overheads.of(Class::Firecracker),
+        recorded.overheads.of(Class::Shards)
+    );
     // Gains of proximity over blind, per configuration: (goodput %, p99 %), over seeds.
     let mut summary = Vec::new();
-    for step_ms in [10u64, 100, 1_000] {
-        for load in [500u64, 900] {
-            for homes in [Homes::Uniform, Homes::Skewed] {
-                let mut gains = Vec::new();
-                for seed in 1..=5u64 {
-                    let config = StudyConfig {
-                        wan: WanConfig {
-                            nodes: 1_000,
+    for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+        for step_ms in [10u64, 100, 1_000] {
+            for load in [500u64, 900] {
+                for homes in [Homes::Uniform, Homes::Skewed] {
+                    let mut gains_of = Vec::new();
+                    for seed in 1..=5u64 {
+                        let config = StudyConfig {
+                            wan: WanConfig {
+                                nodes: 1_000,
+                                seed,
+                                ..WanConfig::default()
+                            },
+                            workloads: 20_000,
+                            load_per_mille: load,
+                            step_ns: step_ms * 1_000_000,
+                            homes,
+                            fleet,
                             seed,
-                            ..WanConfig::default()
-                        },
-                        workloads: 20_000,
-                        load_per_mille: load,
-                        step_ns: step_ms * 1_000_000,
-                        homes,
-                        seed,
-                        ..StudyConfig::default()
-                    };
-                    let study = Study::generate(&config).unwrap();
-                    let accuracy = Accuracy::measure(
-                        &study.wan,
-                        &study.coordinates,
-                        20_000,
-                        &mut hex_sim::rng::Rng::new(seed ^ 0xacc),
-                    )
-                    .unwrap();
-                    println!(
-                        "== step {step_ms} ms, load {load}‰, homes {homes:?}, seed {seed}: horizon {:.1} s, coordinates median error {:.1}%, region ranked first {}/{}",
-                        study.horizon as f64 / 1e9,
-                        accuracy.median_relative_error * 100.0,
-                        accuracy.region_ranked_first,
-                        accuracy.region_trials
-                    );
-                    let reports: Vec<PolicyReport> =
-                        POLICIES.iter().map(|&p| study.run(p).unwrap()).collect();
-                    for r in &reports {
-                        println!("   {}", line(r));
+                            ..StudyConfig::default()
+                        };
+                        let study = Study::generate(&config, &recorded).unwrap();
+                        let accuracy = Accuracy::measure(
+                            &study.wan,
+                            &study.coordinates,
+                            20_000,
+                            &mut hex_sim::rng::Rng::new(seed ^ 0xacc),
+                        )
+                        .unwrap();
+                        println!(
+                            "== {fleet:?}, step {step_ms} ms, load {load}‰, homes {homes:?}, seed {seed}: horizon {:.1} s, coordinates median error {:.1}%, region ranked first {}/{}",
+                            study.horizon as f64 / 1e9,
+                            accuracy.median_relative_error * 100.0,
+                            accuracy.region_ranked_first,
+                            accuracy.region_trials
+                        );
+                        let reports: Vec<PolicyReport> =
+                            POLICIES.iter().map(|&p| study.run(p).unwrap()).collect();
+                        for r in &reports {
+                            println!("   {}", line(r));
+                            println!("      {}", class_lines(r));
+                        }
+                        gains_of.push(gains(&reports[0], &reports[1]));
                     }
-                    let (blind, near) = (&reports[0], &reports[1]);
-                    let goodput = 100.0 * (near.goodput_per_s() / blind.goodput_per_s() - 1.0);
-                    let p99 = 100.0
-                        * (1.0
-                            - near.completion.unwrap().p99 as f64
-                                / blind.completion.unwrap().p99 as f64);
-                    gains.push((goodput, p99));
+                    summary.push((fleet, step_ms, load, homes, gains_of));
                 }
-                summary.push((step_ms, load, homes, gains));
             }
         }
     }
-    println!("\nSUMMARY: proximity against blind, per seed (goodput gain %, p99 completion cut %)");
-    for (step_ms, load, homes, gains) in summary {
-        let cells: Vec<String> = gains
-            .iter()
-            .map(|(g, p)| format!("({g:+.1}, {p:+.1})"))
-            .collect();
+    println!(
+        "\nSUMMARY: proximity against blind, per seed (goodput gain %, p99 completion cut %), all workloads then each kind"
+    );
+    let mut least = [(f64::MAX, f64::MAX); 4];
+    for (fleet, step_ms, load, homes, gains_of) in summary {
+        for (k, name) in ["all", "Oci", "Firecracker", "Shards"].iter().enumerate() {
+            let cells: Vec<String> = gains_of
+                .iter()
+                .map(|g| {
+                    let (gp, p) = g[k];
+                    least[k] = (least[k].0.min(gp), least[k].1.min(p));
+                    format!("({gp:+.1}, {p:+.1})")
+                })
+                .collect();
+            println!(
+                "{fleet:?} step {step_ms:>4} ms load {load}‰ {homes:?} {name:<11}: {}",
+                cells.join(" ")
+            );
+        }
+    }
+    for (k, name) in ["all", "Oci", "Firecracker", "Shards"].iter().enumerate() {
         println!(
-            "step {step_ms:>4} ms load {load}‰ {homes:?}: {}",
-            cells.join(" ")
+            "LEAST {name:<11}: goodput {:+.1}%, p99 cut {:+.1}%",
+            least[k].0, least[k].1
         );
     }
 }

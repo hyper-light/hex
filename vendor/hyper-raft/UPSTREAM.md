@@ -9,4 +9,4 @@ these, byte for byte.
 | --- | --- | --- | --- |
 
 None: hex-sim includes `crates/hyper-swim/src/coordinates.rs` unchanged (`crates/hex-sim/src/lib.rs`,
-`#[path]`), so its scores use the engine hyper-swim ships (`docs/design/hex-sim.md` H12).
+`#[path]`), so its scores use the engine hyper-swim ships (`docs/design/hex-sim.md` H20).

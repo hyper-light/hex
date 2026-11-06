@@ -1,4 +1,4 @@
-//! A modelled WAN, and hyper-swim's coordinates learned over it (`hex-sim.md` H12, scheduler design
+//! A modelled WAN, and hyper-swim's coordinates learned over it (`hex-sim.md` H20, scheduler design
 //! S4 and A2).
 //!
 //! **Regions.** Eight Azure regions, their round trips Azure's published monthly P50s between

@@ -9,7 +9,7 @@ it is not dropped to a tie-breaker.
 
 ## What was measured
 
-`crates/hex-bench/benches/sched_proximity.rs` over `hex_sim::proximity` (`docs/design/hex-sim.md` H12, H13):
+`crates/hex-bench/benches/sched_proximity.rs` over `hex_sim::proximity` (`docs/design/hex-sim.md` H20, H21):
 - 1,000 nodes of 16 cores and 64 GiB over Azure's eight regions (`hex_sim::wan`: Azure's published P50
   inter-region round trips, zones under 2 ms, access heights 25-250 µs, probes stretched up to 10%).
   Every node learns hyper-swim's coordinates: 8 probes a round, 64 rounds.
@@ -129,5 +129,5 @@ step 1000 ms load 900‰ Skewed: (+1.3, +5.7) (+1.3, +8.8) (+1.2, +8.2) (+1.2, +
   room, but proximity among them alone leaves most placements cross-region.
 - What the gain rests on (the model, not measured on Hex's fleet): each workload talks to one home, its
   round trips sequential; bandwidth is not modelled (A2's bandwidth gap stands); the WAN's jitter and
-  heights may be kinder than a real WAN (H12's falsifier). The full log is on fedora at
+  heights may be kinder than a real WAN (H20's falsifier). The full log is on fedora at
   `~/.cache/hex-t7/sched-g3/out/hex-sched-g3-bench-20261105T025724Z.log`.

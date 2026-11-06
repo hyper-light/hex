@@ -1,7 +1,17 @@
 //! Proximity-scored placement against proximity-blind placement on a modelled WAN (scheduler design
-//! S4 and A2; `hex-sim.md` H13): the goodput and completion-time tail each buys.
+//! S4 and A2; `hex-sim.md` H21): the goodput and completion-time tail each buys.
 //!
-//! **Workloads.** Each talks to a home, the node holding its data or service, and makes its round
+//! **Workloads** are Hex's three kinds (`hex-sim.md` H10): each is an OCI container, a Firecracker
+//! microVM or a Shards microVM, by G2's rule (`bench/sched/huawei_trace.py:31-35`, [`classes_by_owner`]):
+//! a workload's kind is its owner's, and owners go to kinds so each kind has a third of the launches.
+//! Each workload's owner is drawn in proportion to the launches of the recorded workload's owners, and
+//! its memory need carries its kind's runtime overhead as that workload states it (`Cluster::overheads`):
+//! [`Study::generate`] takes it, and the bench and the tests pass G2's of record, Huawei Cloud's Region
+//! 5, day 30 (`bench/sched/huawei-r5-day30.trace`: 339 owners; OCI 0.42 MiB, Firecracker 5 MiB, Shards
+//! 5 MiB as a stand-in until Shards' own is measured). Each workload is placed
+//! only on a node that runs its kind. Nodes are H10's two models: every node Linux with KVM running
+//! all three ([`Fleet::AllKinds`], the main one), or Hex's fleet's mix of Linux, Windows and macOS
+//! hosts ([`Fleet::Mixed`]). Each workload talks to a home, the node holding its data or service, and makes its round
 //! trips to it in sequence, each after a step of compute: it runs `round_trips × (step + RTT)`, the
 //! RTT the WAN's true one from the node it was placed on to its home. Agent sessions are such
 //! workloads: TraceLab counts 101.4 tool calls a session on average, p50 25 and p99 1,438
@@ -27,6 +37,7 @@
 //! expected occupancy. Goodput is the work finished by the horizon: workloads, and useful CPU time
 //! (CPU × compute, the round trips' waits excluded). Completion time is arrival to end, every
 //! workload run to its end. The queue is first come, first served: the head waits until it fits.
+//! Each measure is reported for all workloads and for each kind.
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
@@ -34,7 +45,9 @@ use std::time::Duration;
 
 use crate::error::SimError;
 use crate::index::{FitIndex, Key, Sample, Verdict};
-use crate::model::{Demand, Kind, NodeId, NodeSpec, Resources, Time};
+use crate::model::{
+    Class, Classes, Cluster, Demand, Kind, NodeId, NodeSpec, OwnerId, Resources, Time,
+};
 use crate::rng::Rng;
 use crate::trace::{Latencies, Quantiles, TraceHash};
 use crate::wan::{Coordinates, Wan, WanConfig, node_id};
@@ -50,6 +63,10 @@ const Z99: f64 = 2.326_347_874;
 pub const MAX_ROUND_TRIPS: u64 = 14_380;
 /// The most workloads a study runs; the queue and the event heap are bounded by it.
 pub const MAX_WORKLOADS: usize = 1 << 20;
+/// The most owners a study draws from, as `replay::Limits::max_owners`.
+pub const MAX_OWNERS: usize = 100_000;
+/// Hex's three kinds, in the order reports give them.
+pub const CLASSES: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Policy {
@@ -57,6 +74,16 @@ pub enum Policy {
     Proximity,
     TieBreak,
     Oracle,
+}
+
+/// Which kinds each node runs (`hex-sim.md` H10's two node models).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fleet {
+    /// Every node Linux x86_64 with KVM, running all three kinds.
+    AllKinds,
+    /// Hex's fleet's mix, drawn per node: six in ten Linux (all three kinds), two x86_64 Windows (OCI
+    /// containers and Shards microVMs), two arm64 macOS (Shards microVMs alone).
+    Mixed,
 }
 
 /// Where workloads' homes are.
@@ -79,6 +106,7 @@ pub struct StudyConfig {
     /// Compute before each round trip.
     pub step_ns: Time,
     pub homes: Homes,
+    pub fleet: Fleet,
     pub sample: Sample,
     pub seed: u64,
 }
@@ -101,6 +129,7 @@ impl Default for StudyConfig {
             load_per_mille: 900,
             step_ns: 100_000_000,
             homes: Homes::Uniform,
+            fleet: Fleet::AllKinds,
             sample: Sample::default(),
             seed: 1,
         }
@@ -110,7 +139,11 @@ impl Default for StudyConfig {
 /// One workload of a study.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Job {
+    /// What it asks, its kind's overhead included.
     pub need: Resources,
+    pub owner: OwnerId,
+    /// Its owner's kind ([`classes_by_owner`]).
+    pub class: Class,
     pub home: NodeId,
     pub round_trips: u64,
     pub arrives: Time,
@@ -139,6 +172,8 @@ pub struct PolicyReport {
     pub horizon: Time,
     /// Arrival to end, every workload.
     pub completion: Option<Quantiles>,
+    /// The same two measures for each kind, in [`CLASSES`]' order.
+    pub classes: [ClassReport; 3],
     /// The true RTT to home of each placement, summed.
     pub rtt_sum_ns: u128,
     /// The longest the queue grew.
@@ -146,7 +181,22 @@ pub struct PolicyReport {
     pub hash: u64,
 }
 
+/// One kind's share of a [`PolicyReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ClassReport {
+    pub placements: u64,
+    pub done_by_horizon: u64,
+    pub completion: Option<Quantiles>,
+}
+
 impl PolicyReport {
+    /// One kind's workloads finished by the horizon per second of it.
+    pub fn class_goodput_per_s(&self, class: Class) -> f64 {
+        self.classes.get(class_at(class)).map_or(0.0, |c| {
+            c.done_by_horizon as f64 / (self.horizon as f64 / 1e9)
+        })
+    }
+
     /// Workloads finished by the horizon per second of it.
     pub fn goodput_per_s(&self) -> f64 {
         self.done_by_horizon as f64 / (self.horizon as f64 / 1e9)
@@ -166,11 +216,40 @@ impl PolicyReport {
 }
 
 impl Study {
-    pub fn generate(config: &StudyConfig) -> Result<Self, SimError> {
+    /// A study whose workloads' owners are drawn in proportion to their launches in `recorded`, and
+    /// whose kinds' overheads are `recorded`'s.
+    pub fn generate(config: &StudyConfig, recorded: &Cluster) -> Result<Self, SimError> {
         if config.workloads == 0 || config.workloads > MAX_WORKLOADS {
             return Err(SimError::Config(
                 "a study runs 1 to MAX_WORKLOADS workloads",
             ));
+        }
+        let mut owner_launches: Vec<u64> = Vec::new();
+        for workload in &recorded.workloads {
+            let at = usize::try_from(workload.tenancy.owner.0)
+                .ok()
+                .filter(|&at| at < MAX_OWNERS)
+                .ok_or(SimError::Config(
+                    "a study draws from at most MAX_OWNERS owners",
+                ))?;
+            if owner_launches.len() <= at {
+                owner_launches.resize(at.saturating_add(1), 0);
+            }
+            if let Some(n) = owner_launches.get_mut(at) {
+                *n = n.saturating_add(1);
+            }
+        }
+        // Cumulative weights, to draw an owner by its share.
+        let mut cumulative = Vec::with_capacity(owner_launches.len());
+        let mut total: u64 = 0;
+        for &launches in &owner_launches {
+            total = total
+                .checked_add(launches)
+                .ok_or(SimError::Config("owner launches"))?;
+            cumulative.push(total);
+        }
+        if total == 0 {
+            return Err(SimError::Config("a recorded workload of no launches"));
         }
         if config.load_per_mille == 0 || config.step_ns == 0 {
             return Err(SimError::Config(
@@ -182,12 +261,22 @@ impl Study {
         let coordinates = Coordinates::converge(&wan, &config.wan, &mut rng)?;
         let mut nodes = Vec::with_capacity(wan.len());
         for at in 0..wan.len() {
+            let classes = match config.fleet {
+                Fleet::AllKinds => Classes::ALL,
+                Fleet::Mixed => match rng.range(0, 9) {
+                    0..6 => Classes::ALL,
+                    6..8 => Classes::NONE.with(Class::Oci).with(Class::Shards),
+                    _ => Classes::NONE.with(Class::Shards),
+                },
+            };
             nodes.push(NodeSpec {
                 id: node_id(at)?,
                 capacity: config.node,
                 background_milli: 0,
+                classes,
             });
         }
+        let overheads = recorded.overheads;
         // Each region's nodes, to draw a home in a region.
         let regions = config.wan.regions;
         let mut by_region: Vec<Vec<NodeId>> = vec![Vec::new(); regions];
@@ -209,9 +298,12 @@ impl Study {
             .and_then(|r| r.checked_sub(1))
             .ok_or(SimError::Config("regions"))?;
         for _ in 0..config.workloads {
+            let draw = rng.range(0, total.saturating_sub(1));
+            let owner = cumulative.partition_point(|&c| c <= draw);
             let cpu = rng.range(1, cores.clamp(1, 4)).saturating_mul(1_000);
             let need = Resources {
                 cpu_milli: cpu,
+                // 4 GiB a core; its kind's overhead is added once the kinds are known.
                 mem_bytes: cpu.checked_div(1_000).unwrap_or(0).saturating_mul(4 << 30),
                 gpus: 0,
             };
@@ -233,17 +325,40 @@ impl Study {
             let round_trips = whole(ROUND_TRIPS_P50 * (sigma * z).exp())
                 .unwrap_or(MAX_ROUND_TRIPS)
                 .clamp(1, MAX_ROUND_TRIPS);
-            let mean_rtt = mean_rtt_ns(&wan, home)?;
-            let run = run_ns(round_trips, config.step_ns, mean_rtt)?;
-            occupancy = occupancy
-                .checked_add(u128::from(run).saturating_mul(u128::from(cpu)))
-                .ok_or(SimError::TimeOverflow)?;
             jobs.push(Job {
                 need,
+                owner: OwnerId(u32::try_from(owner).map_err(|_| SimError::Config("owners"))?),
+                // Its owner's kind, set below once every owner's launches are counted.
+                class: Class::Oci,
                 home,
                 round_trips,
                 arrives: 0,
             });
+        }
+        // Each owner's kind, by its launches in this study, then each job's need with its kind's
+        // overhead, and blind placement's occupancy over the nodes that run its kind.
+        let mut launches = vec![0u64; owner_launches.len()];
+        for job in &jobs {
+            let n = launches
+                .get_mut(usize::try_from(job.owner.0).map_err(|_| SimError::Config("owners"))?)
+                .ok_or(SimError::Config("owners"))?;
+            *n = n.saturating_add(1);
+        }
+        let classes = classes_by_owner(&launches);
+        for job in &mut jobs {
+            job.class = *classes
+                .get(usize::try_from(job.owner.0).map_err(|_| SimError::Config("owners"))?)
+                .ok_or(SimError::Config("owners"))?;
+            job.need.mem_bytes = job
+                .need
+                .mem_bytes
+                .checked_add(overheads.of(job.class))
+                .ok_or(SimError::Config("memory"))?;
+            let mean_rtt = mean_rtt_ns(&wan, &nodes, job.home, job.class)?;
+            let run = run_ns(job.round_trips, config.step_ns, mean_rtt)?;
+            occupancy = occupancy
+                .checked_add(u128::from(run).saturating_mul(u128::from(job.need.cpu_milli)))
+                .ok_or(SimError::TimeOverflow)?;
         }
         // horizon = occupancy / (capacity × load).
         let capacity = u128::from(config.node.cpu_milli)
@@ -281,6 +396,7 @@ impl Study {
             useful_by_horizon: 0,
             horizon: self.horizon,
             completion: None,
+            classes: [ClassReport::default(); 3],
             rtt_sum_ns: 0,
             queue_peak: 0,
             hash: 0,
@@ -291,6 +407,7 @@ impl Study {
         let mut ends: BinaryHeap<Reverse<(Time, usize, NodeId)>> =
             BinaryHeap::with_capacity(self.jobs.len());
         let mut completion = Vec::with_capacity(self.jobs.len());
+        let mut by_class: [Vec<Time>; 3] = Default::default();
         let mut next = 0usize;
         // Each job arrives once and ends once: the loop's turns are bounded by twice the jobs.
         let budget = self.jobs.len().saturating_mul(2).saturating_add(1);
@@ -312,10 +429,7 @@ impl Study {
             // Place from the head while it fits.
             while let Some(&job) = queue.front() {
                 let spec = self.jobs.get(job).ok_or(SimError::Config("jobs"))?;
-                let demand = Demand {
-                    need: spec.need,
-                    kind: Kind::Plain,
-                };
+                let demand = demand(spec);
                 let Some(node) = self.choose(policy, &index, &demand, spec.home, &mut report)?
                 else {
                     break;
@@ -327,11 +441,23 @@ impl Study {
                     .checked_add(run_ns(spec.round_trips, self.config.step_ns, rtt)?)
                     .ok_or(SimError::TimeOverflow)?;
                 ends.push(Reverse((ends_at, job, node)));
-                completion.push(
-                    ends_at
-                        .checked_sub(spec.arrives)
-                        .ok_or(SimError::TimeOverflow)?,
-                );
+                let took = ends_at
+                    .checked_sub(spec.arrives)
+                    .ok_or(SimError::TimeOverflow)?;
+                completion.push(took);
+                let at = class_at(spec.class);
+                by_class
+                    .get_mut(at)
+                    .ok_or(SimError::Config("classes"))?
+                    .push(took);
+                let class = report
+                    .classes
+                    .get_mut(at)
+                    .ok_or(SimError::Config("classes"))?;
+                class.placements = class.placements.saturating_add(1);
+                if ends_at <= self.horizon {
+                    class.done_by_horizon = class.done_by_horizon.saturating_add(1);
+                }
                 report.placements = report.placements.saturating_add(1);
                 report.rtt_sum_ns = report.rtt_sum_ns.saturating_add(u128::from(rtt));
                 if ends_at <= self.horizon {
@@ -356,6 +482,9 @@ impl Study {
             ));
         }
         report.completion = Latencies::new(completion).quantiles();
+        for (class, times) in report.classes.iter_mut().zip(by_class) {
+            class.completion = Latencies::new(times).quantiles();
+        }
         report.hash = hash.finish();
         Ok(report)
     }
@@ -367,13 +496,7 @@ impl Study {
     ) -> Result<Time, SimError> {
         let Reverse((at, job, node)) = ends.pop().ok_or(SimError::Config("no end to take"))?;
         let spec = self.jobs.get(job).ok_or(SimError::Config("jobs"))?;
-        index.give(
-            node,
-            &Demand {
-                need: spec.need,
-                kind: Kind::Plain,
-            },
-        )?;
+        index.give(node, &demand(spec))?;
         Ok(at)
     }
 
@@ -450,17 +573,67 @@ fn run_ns(round_trips: u64, step_ns: Time, rtt_ns: Time) -> Result<Time, SimErro
         .ok_or(SimError::TimeOverflow)
 }
 
-/// The mean true RTT from `home` to every node.
-fn mean_rtt_ns(wan: &Wan, home: NodeId) -> Result<Time, SimError> {
-    let mut sum: u128 = 0;
-    for at in 0..wan.len() {
-        sum = sum.saturating_add(u128::from(wan.rtt_ns(home, node_id(at)?)?));
+/// G2's kind rule (`bench/sched/huawei_trace.py:31-35` and its `classes_by_owner`): each owner's
+/// workloads are one kind, and owners go to kinds so each kind has a third of the launches: the owner
+/// with the most launches first (ties by owner), each to the kind with the fewest so far, ties OCI,
+/// then Firecracker, then Shards. `launches` is each owner's count; the result is each owner's kind.
+pub fn classes_by_owner(launches: &[u64]) -> Vec<Class> {
+    let mut order: Vec<usize> = (0..launches.len()).collect();
+    order.sort_by_key(|&o| (Reverse(launches.get(o).copied().unwrap_or(0)), o));
+    let mut got = [0u64; 3];
+    let mut out = vec![Class::Oci; launches.len()];
+    for owner in order {
+        let mut pick = 0;
+        for (at, &n) in got.iter().enumerate() {
+            if got.get(pick).is_some_and(|&least| n < least) {
+                pick = at;
+            }
+        }
+        let class = CLASSES.get(pick).copied().unwrap_or(Class::Oci);
+        if let Some(slot) = out.get_mut(owner) {
+            *slot = class;
+        }
+        if let Some(sum) = got.get_mut(pick) {
+            *sum = sum.saturating_add(launches.get(owner).copied().unwrap_or(0));
+        }
     }
-    u128::try_from(wan.len())
-        .ok()
-        .and_then(|n| sum.checked_div(n))
+    out
+}
+
+/// What a job asks of the index: its need, as one of its kind.
+fn demand(job: &Job) -> Demand {
+    Demand {
+        need: job.need,
+        kind: Kind::Plain,
+        class: job.class,
+    }
+}
+
+/// Where `class` sits in [`CLASSES`] and a report's `classes`.
+fn class_at(class: Class) -> usize {
+    match class {
+        Class::Oci => 0,
+        Class::Firecracker => 1,
+        Class::Shards => 2,
+    }
+}
+
+/// The mean true RTT from `home` to every node that runs `class`.
+fn mean_rtt_ns(
+    wan: &Wan,
+    nodes: &[NodeSpec],
+    home: NodeId,
+    class: Class,
+) -> Result<Time, SimError> {
+    let mut sum: u128 = 0;
+    let mut count: u128 = 0;
+    for node in nodes.iter().filter(|n| n.classes.has(class)) {
+        sum = sum.saturating_add(u128::from(wan.rtt_ns(home, node.id)?));
+        count = count.saturating_add(1);
+    }
+    sum.checked_div(count)
         .and_then(|m| Time::try_from(m).ok())
-        .ok_or(SimError::Config("a WAN of no nodes"))
+        .ok_or(SimError::Config("a kind no node runs"))
 }
 
 /// A standard normal draw (Box and Muller, 1958).
@@ -490,7 +663,27 @@ mod tests {
         Policy::Oracle,
     ];
 
+    /// G2's recorded workload, its owners and overheads.
+    fn recorded() -> &'static Cluster {
+        static RECORDED: std::sync::OnceLock<Cluster> = std::sync::OnceLock::new();
+        RECORDED.get_or_init(|| {
+            crate::replay::parse(
+                include_str!("../../../bench/sched/huawei-r5-day30.trace"),
+                &crate::replay::Limits::default(),
+            )
+            .unwrap()
+        })
+    }
+
+    fn generate(config: &StudyConfig) -> Study {
+        Study::generate(config, recorded()).unwrap()
+    }
+
     fn small(seed: u64, load_per_mille: u64, homes: Homes) -> StudyConfig {
+        on(seed, load_per_mille, homes, Fleet::AllKinds)
+    }
+
+    fn on(seed: u64, load_per_mille: u64, homes: Homes, fleet: Fleet) -> StudyConfig {
         StudyConfig {
             wan: WanConfig {
                 nodes: 200,
@@ -501,6 +694,7 @@ mod tests {
             workloads: 3_000,
             load_per_mille,
             homes,
+            fleet,
             seed,
             ..StudyConfig::default()
         }
@@ -510,8 +704,8 @@ mod tests {
     /// every job placed once, the queue drained, and completion quantiles for all of them.
     #[test]
     fn every_policy_runs_every_job_deterministically() {
-        let study = Study::generate(&small(5, 900, Homes::Uniform)).unwrap();
-        let again = Study::generate(&small(5, 900, Homes::Uniform)).unwrap();
+        let study = generate(&small(5, 900, Homes::Uniform));
+        let again = generate(&small(5, 900, Homes::Uniform));
         assert_eq!(study.jobs, again.jobs);
         for policy in POLICIES {
             let a = study.run(policy).unwrap();
@@ -520,21 +714,131 @@ mod tests {
             assert_eq!(a.placements, 3_000);
             assert_eq!(a.completion.unwrap().count, 3_000);
             assert!(a.done_by_horizon > 0 && a.done_by_horizon < 3_000);
+            for (class, got) in CLASSES.iter().zip(&a.classes) {
+                let jobs = study.jobs.iter().filter(|j| j.class == *class).count();
+                assert!(jobs > 800, "{class:?}: {jobs} of 3,000");
+                assert_eq!(got.placements, u64::try_from(jobs).unwrap(), "{class:?}");
+                assert_eq!(got.completion.unwrap().count, jobs, "{class:?}");
+            }
+            assert_eq!(
+                a.classes.iter().map(|c| c.done_by_horizon).sum::<u64>(),
+                a.done_by_horizon
+            );
         }
     }
 
-    /// S4, A2 (G3 step 2) non-vacuity: proximity, the tie-break and the oracle each chose a node
-    /// blind placement wouldn't have in some decisions; blind never "moved".
+    /// AC-T7.4.3's kinds (H10), S4: do generate a study; expect each job's memory to carry its
+    /// kind's overhead over its whole-GiB request, and on the mixed fleet some nodes that run only
+    /// some kinds, every kind on some node.
+    #[test]
+    fn workloads_are_hexs_three_kinds() {
+        let study = generate(&on(3, 900, Homes::Uniform, Fleet::Mixed));
+        for job in &study.jobs {
+            assert_eq!(
+                job.need.mem_bytes % (1 << 30),
+                recorded().overheads.of(job.class)
+            );
+        }
+        assert!(study.nodes.iter().any(|n| n.classes != Classes::ALL));
+        for class in CLASSES {
+            assert!(
+                study.nodes.iter().any(|n| n.classes.has(class)),
+                "{class:?}"
+            );
+        }
+        let all = generate(&small(3, 900, Homes::Uniform));
+        assert!(all.nodes.iter().all(|n| n.classes == Classes::ALL));
+    }
+
+    /// AC-T7.4.3's kinds (H10): do assign kinds to owners by G2's rule; expect it to match
+    /// `huawei_trace.py`'s worked order (the most launches first, each to the kind with the fewest so
+    /// far, ties OCI, Firecracker, Shards), and on the recorded day each kind within one owner's
+    /// launches of a third, as the trace's own header records (oci 8432, firecracker 8432, shards 8431).
+    #[test]
+    fn kinds_go_to_owners_by_g2s_rule() {
+        assert_eq!(
+            classes_by_owner(&[5, 9, 2, 2, 0]),
+            [
+                Class::Firecracker,
+                Class::Oci,
+                Class::Shards,
+                Class::Shards,
+                Class::Shards
+            ]
+        );
+        let mut launches = vec![0u64; recorded().owners.len()];
+        for w in &recorded().workloads {
+            launches[usize::try_from(w.tenancy.owner.0).unwrap()] += 1;
+        }
+        let kinds = classes_by_owner(&launches);
+        let mut got = [0u64; 3];
+        for (owner, n) in launches.iter().enumerate() {
+            got[class_at(kinds[owner])] += n;
+        }
+        assert_eq!(got, [8432, 8432, 8431]);
+        for w in &recorded().workloads {
+            assert_eq!(kinds[usize::try_from(w.tenancy.owner.0).unwrap()], w.class);
+        }
+    }
+
+    /// AC-T7.4.3's kinds (H10), S4: do generate a study from the recorded day's owners; expect each
+    /// owner's jobs one kind, and each kind between a fifth and a half of the jobs (the day's largest
+    /// owner alone launched 30% of it, so a study's draw can't split finer than its owners).
+    #[test]
+    fn a_studys_kinds_follow_its_owners() {
+        let study = generate(&small(7, 900, Homes::Uniform));
+        let mut kind_of = std::collections::HashMap::new();
+        let mut count = [0usize; 3];
+        for job in &study.jobs {
+            assert_eq!(*kind_of.entry(job.owner).or_insert(job.class), job.class);
+            count[class_at(job.class)] += 1;
+        }
+        for (class, n) in CLASSES.iter().zip(count) {
+            assert!(n * 5 > 3_000 && n * 2 < 3_000, "{class:?}: {n} of 3,000");
+        }
+    }
+
+    /// AC-T7.4.3's kinds (H10), S4: do run a study in which no node runs Firecracker microVMs;
+    /// expect every policy to refuse it with a typed error, the Firecracker workloads left queued,
+    /// never placed on a node that can't run them.
+    #[test]
+    fn a_kind_no_node_runs_is_refused_not_misplaced() {
+        let mut study = generate(&on(4, 500, Homes::Uniform, Fleet::Mixed));
+        for node in &mut study.nodes {
+            node.classes = Classes::NONE.with(Class::Oci).with(Class::Shards);
+        }
+        for policy in POLICIES {
+            assert!(
+                matches!(study.run(policy), Err(SimError::StepBudget(_))),
+                "{policy:?}"
+            );
+        }
+    }
+
+    /// S4, A2 (G3 step 2) non-vacuity: proximity and the oracle each chose a node blind placement
+    /// wouldn't have in more than a tenth of decisions, the tie-break in more than a fiftieth; blind
+    /// never "moved". The tie-break acts only where best fit's free capacity ties exactly, and the
+    /// kinds' overheads (0.42 MiB against 5 MiB) leave nodes' free memory apart by odd bytes, so it
+    /// finds fewer ties than over generic jobs (235 of 3,000 decisions here, seed 6, against over 300
+    /// before the kinds).
     #[test]
     fn proximity_changes_decisions() {
-        let study = Study::generate(&small(6, 900, Homes::Skewed)).unwrap();
+        let study = generate(&small(6, 900, Homes::Skewed));
         for policy in POLICIES {
             let r = study.run(policy).unwrap();
-            if policy == Policy::Blind {
-                assert_eq!(r.moved, 0);
-            } else {
-                assert!(r.moved * 10 > r.placements, "{policy:?} moved {}", r.moved);
-            }
+            let floor = match policy {
+                Policy::Blind => {
+                    assert_eq!(r.moved, 0);
+                    continue;
+                }
+                Policy::TieBreak => 50,
+                Policy::Proximity | Policy::Oracle => 10,
+            };
+            assert!(
+                r.moved * floor > r.placements,
+                "{policy:?} moved {}",
+                r.moved
+            );
         }
     }
 
@@ -544,7 +848,7 @@ mod tests {
     fn the_oracle_bounds_the_coordinates() {
         for seed in 1..=3 {
             for homes in [Homes::Uniform, Homes::Skewed] {
-                let study = Study::generate(&small(seed, 500, homes)).unwrap();
+                let study = generate(&small(seed, 500, homes));
                 let [blind, near, tie, oracle] = POLICIES.map(|p| study.run(p).unwrap());
                 for r in [&blind, &near, &tie, &oracle] {
                     eprintln!(
@@ -565,24 +869,36 @@ mod tests {
         }
     }
 
-    /// S4, A2 (G3 step 3): do run blind and proximity-scored placement on five seeds, homes uniform
-    /// and skewed, at 50% and 90% load; expect proximity's goodput higher and its p99 completion time
-    /// lower on every one, the direction `bench/sched/proximity.md` records at full size. Mutant
-    /// `no-proximity-term` (proximity scored as 0) fails it.
+    /// S4, A2 (G3 step 3): do run blind and proximity-scored placement of Hex's three kinds on five
+    /// seeds, both fleets, homes uniform and skewed, at 50% and 90% load; expect proximity's goodput
+    /// higher and its p99 completion time lower on every one, over all workloads and for each kind,
+    /// the direction `bench/sched/proximity.md` records at full size. Mutant `no-proximity-term`
+    /// (proximity scored as 0) fails it.
     #[test]
     fn proximity_beats_blind_on_every_seed() {
         for seed in 1..=5 {
-            for homes in [Homes::Uniform, Homes::Skewed] {
-                for load in [500, 900] {
-                    let study = Study::generate(&small(seed, load, homes)).unwrap();
-                    let blind = study.run(Policy::Blind).unwrap();
-                    let near = study.run(Policy::Proximity).unwrap();
-                    let at = format!("seed {seed} {homes:?} load {load}");
-                    assert!(near.goodput_per_s() > blind.goodput_per_s(), "{at}");
-                    assert!(
-                        near.completion.unwrap().p99 < blind.completion.unwrap().p99,
-                        "{at}"
-                    );
+            for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+                for homes in [Homes::Uniform, Homes::Skewed] {
+                    for load in [500, 900] {
+                        let study = generate(&on(seed, load, homes, fleet));
+                        let blind = study.run(Policy::Blind).unwrap();
+                        let near = study.run(Policy::Proximity).unwrap();
+                        let at = format!("seed {seed} {fleet:?} {homes:?} load {load}");
+                        assert!(near.goodput_per_s() > blind.goodput_per_s(), "{at}");
+                        assert!(
+                            near.completion.unwrap().p99 < blind.completion.unwrap().p99,
+                            "{at}"
+                        );
+                        for (class, (b, n)) in
+                            CLASSES.iter().zip(blind.classes.iter().zip(&near.classes))
+                        {
+                            assert!(n.done_by_horizon > b.done_by_horizon, "{at} {class:?}");
+                            assert!(
+                                n.completion.unwrap().p99 < b.completion.unwrap().p99,
+                                "{at} {class:?}"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -604,7 +920,18 @@ mod tests {
                 ..StudyConfig::default()
             },
         ] {
-            assert!(matches!(Study::generate(&bad), Err(SimError::Config(_))));
+            assert!(matches!(
+                Study::generate(&bad, recorded()),
+                Err(SimError::Config(_))
+            ));
         }
+        let empty = Cluster {
+            workloads: Vec::new(),
+            ..recorded().clone()
+        };
+        assert!(matches!(
+            Study::generate(&StudyConfig::default(), &empty),
+            Err(SimError::Config(_))
+        ));
     }
 }

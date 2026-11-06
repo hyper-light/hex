@@ -75,7 +75,8 @@ on 44 to 256 GPUs or nodes (finding 4). Best-fit packing alone strands capacity 
 (Borg CM[1]); `AC-T7.4.3` holds Hex to ≥30% less stranded capacity than best-fit at 90% load.
 
 **What would falsify it.** A balance-only or best-fit-only scorer matching the goodput objective on the
-recorded kiln workload in hex-sim (`AC-T7.4.3`), or the goodput model costing more to evaluate than the
+recorded workload of OCI containers, Firecracker microVMs and Shards microVMs in hex-sim (`AC-T7.4.3`), or
+the goodput model costing more to evaluate than the
 10 ms p99 budget allows at 10,000/s (`AC-T7.4.2`) — in which case goodput moves to the optimiser tier
 (S2) and the fast path scores a cheap proxy.
 
@@ -167,7 +168,7 @@ gap PF[6][7][34]). So this decision's benefit is **unproven until hex-sim measur
 models inter-node latency and the scheduler's proximity term, and reports the goodput and tail it buys,
 against placement that ignores proximity.
 
-**Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H12-H13).** On a modelled WAN of Azure's eight
+**Measured (G3, `bench/sched/proximity.md`, `hex-sim.md` H20-H21).** On a modelled WAN of Azure's eight
 regions, hyper-swim's coordinates learned to a 9-10% median error, and proximity-scored placement beat
 proximity-blind best fit on all 60 studies: goodput +0.9% to +18.6%, p99 completion time 5.7% to 93.7%
 lower, the gain largest where round trips dominate a workload's steps. The falsifier below was not met,

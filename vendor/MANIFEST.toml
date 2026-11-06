@@ -19,7 +19,7 @@ exclude = ["rust-vmm-ci"]
 own = ["UPSTREAM.md"]
 
 # hyper-raft (hyper-light): hex-sim scores placement with hyper-swim's own Vivaldi engine
-# (docs/design/hex-sim.md H12). hyper-raft has no -api crate for Hex to depend on (CLAUDE.md §9), so
+# (docs/design/hex-sim.md H20). hyper-raft has no -api crate for Hex to depend on (CLAUDE.md §9), so
 # only the files hex-sim compiles are taken, each included unchanged by path; when hyper-raft
 # publishes the engine behind an -api crate, hex-sim depends on that by name and this entry goes.
 [projects.hyper-raft]
