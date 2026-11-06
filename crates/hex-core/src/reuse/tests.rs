@@ -63,6 +63,8 @@ struct Model {
     idle: BTreeMap<u8, Vec<(u64, u8, u64)>>,
     seq: u64,
     made: BTreeSet<u64>,
+    /// The per-owner bound, learned as the pool must learn it (Ada's rule, 2026-11-06).
+    ghosts: Option<crate::demand::Ghosts>,
 }
 
 impl Model {
@@ -79,7 +81,10 @@ fn owner_name(o: u8) -> String {
 /// every property holds after each op; returns the pool's counts.
 fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
     let mut pool = Pool::<u8>::new(per_owner, per_node, 0);
-    let mut m = Model::default();
+    let mut m = Model {
+        ghosts: Some(crate::demand::Ghosts::new(per_owner, per_node)),
+        ..Model::default()
+    };
     for op in ops {
         match *op {
             Op::Create {
@@ -100,7 +105,7 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                 // The shell's loop: each refused idle cgroup is removed and the box takes again.
                 let cg = loop {
                     takes += 1;
-                    assert!(takes <= per_owner + 2, "a create took {takes} times");
+                    assert!(takes <= per_node + 2, "a create took {takes} times");
                     match pool.take(whose, &policy) {
                         Take::Idle(n) => {
                             let o = owner.expect("an idle cgroup handed to a box with no owner");
@@ -130,6 +135,9 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                         }
                         Take::Fresh(n) => {
                             let o = owner.expect("a fresh slot for a box with no owner");
+                            if !m.idle.contains_key(&o) {
+                                m.ghosts.as_mut().unwrap().missed(&owner_name(o));
+                            }
                             assert!(reuse && !privileged, "slot {n} made for {whose:?}");
                             let passed_over = m
                                 .idle
@@ -170,9 +178,11 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                 m.seq += 1;
                 m.idle.entry(o).or_default().push((n, gone.policy, m.seq));
                 let mut want = Vec::new();
+                let per_owner = m.ghosts.as_ref().unwrap().bound();
                 if let Some(list) = m.idle.get_mut(&o)
                     && list.len() > per_owner
                 {
+                    m.ghosts.as_mut().unwrap().evicted(&owner_name(o));
                     want.push(list.remove(0).0);
                     if list.is_empty() {
                         m.idle.remove(&o);
@@ -202,9 +212,11 @@ fn run(ops: &[Op], per_owner: usize, per_node: usize) -> Counts {
                 m.idle.clear();
             }
         }
+        let per_owner_now = m.ghosts.as_ref().unwrap().bound();
+        assert_eq!(pool.counts().per_owner, per_owner_now, "the learned bound");
         for (o, list) in &m.idle {
             assert!(
-                list.len() <= per_owner,
+                list.len() <= per_owner_now,
                 "owner {o} keeps {} idle",
                 list.len()
             );
@@ -311,6 +323,43 @@ fn a_long_run_takes_every_path_and_counts_it() {
     assert!(counts.evicted_node_bound > 0, "{counts:?}");
     assert!(counts.evicted_refused > 0, "{counts:?}");
     assert!(counts.drained > 0, "{counts:?}");
+}
+
+/// Ada's rule, 2026-11-06 (AC-T7.1.3): an owner's burst that its bound cut one round is kept whole the next. Do:
+/// four boxes of one owner made and deleted at a bound of 2, then four again. Expect: two put out the first round,
+/// the owner's two misses raise its bound to 4, and the third round is handed all four idle, none made fresh.
+#[test]
+fn a_burst_the_owner_bound_cut_is_kept_whole_the_next_round() {
+    let mut pool = Pool::<u8>::new(2, 100, 0);
+    let whose = Whose {
+        owner: Some("o"),
+        reuse: true,
+        privileged: false,
+    };
+    let round = |pool: &mut Pool<u8>| {
+        let slots: Vec<u64> = (0..4)
+            .map(|_| match pool.take(whose, &0) {
+                Take::Idle(n) => {
+                    pool.hand_on();
+                    n
+                }
+                Take::Fresh(n) => n,
+                Take::Own(why) => panic!("{why:?}"),
+            })
+            .collect();
+        slots
+            .into_iter()
+            .flat_map(|n| pool.give("o", n, 0))
+            .count()
+    };
+    assert_eq!(round(&mut pool), 2, "the first round's two past the bound");
+    assert_eq!(round(&mut pool), 0, "two misses raised the bound to 4");
+    assert_eq!(pool.counts().per_owner, 4);
+    let missed = pool.counts().missed;
+    let fresh = pool.counts().fresh;
+    assert_eq!(round(&mut pool), 0);
+    assert_eq!(pool.counts().missed, missed, "no cold take once learned");
+    assert_eq!(pool.counts().fresh, fresh);
 }
 
 /// A node that has numbered every slot a `u64` holds makes a box a cgroup of its own, by type.
