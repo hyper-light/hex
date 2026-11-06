@@ -107,6 +107,12 @@ pub enum End {
     Failed(String),
 }
 
+/// How long [`Guest::stop`] lets a guest's process end after SIGTERM before SIGKILL: what
+/// `shards daemon stop` gives a run, Shards' own `STOP_GRACE`
+/// (`crates/shards/src/daemon.rs:228-231`), dockerd's default stop timeout (moby
+/// `daemon/config/config_linux.go`). `stop` returns within it and the kill's reaping.
+pub const STOP_GRACE: Duration = Duration::from_secs(10);
+
 /// What can't be done, and why.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
@@ -160,11 +166,14 @@ pub trait Guests: Send + Sync {
 pub trait Guest: Send + Sync {
     /// A stream to its vsock `port` (`CONNECT <port>`), within `patience`: until the guest
     /// listens there it is refused, and asked again, so the first that connects says the
-    /// guest is ready.
+    /// guest is ready. One dial is always made, so a patience of zero is that one alone;
+    /// `Duration::MAX` is no clock, until the guest listens or ends. A guest that has ended
+    /// is refused as soon as it has, whatever patience is left.
     fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal>;
     /// Stops it: its [`wait_for`](Guest::wait_for) then returns [`End::Stopped`].
     fn stop(&self) -> Result<(), Refusal>;
-    /// Its end, once it has come, waiting at most `timeout`.
+    /// Its end, once it has come, waiting at most `timeout` (`Duration::MAX`: until it
+    /// comes).
     fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal>;
 }
 
@@ -185,14 +194,15 @@ pub fn backend() -> Result<Backend, Refusal> {
     backend_of(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// The least memory a guest of `arch` boots in, in MiB (shards-vmm's `MIN_MEMORY_MIB`,
-/// `vm/aarch64.rs` and `vm/x86_64.rs`).
+/// The least memory a guest of `arch` boots in, in MiB: shards-vmm's `MIN_MEMORY_MIB`
+/// (`crates/vmm/src/vm/aarch64.rs:28`, `crates/vmm/src/vm/x86_64.rs:28`).
 pub fn min_memory_mib(arch: &str) -> u64 {
     if arch == "x86_64" { 128 } else { 64 }
 }
 
-/// The most vCPUs a guest has here: the host's CPUs, as std reads them (a cgroup's or
-/// affinity's bound included). shards-vmm then holds a guest to its hypervisor's own limit,
+/// The most vCPUs a guest has here: the host's CPUs, read from it now as std reads them (a
+/// cgroup's or affinity's bound included), as shards-vmm bounds them
+/// (`crates/vmm/src/vm/runtime.rs:1059` `check_vcpus`). shards-vmm then holds a guest to its hypervisor's own limit,
 /// which is no lower on any backend it has.
 pub fn max_vcpus() -> u32 {
     std::thread::available_parallelism()
@@ -201,11 +211,12 @@ pub fn max_vcpus() -> u32 {
 }
 
 /// The most vsock ports a spec may allow: the connections shards' muxer holds at once
-/// (`MAX_CONNECTIONS`, Firecracker's, `devices/virtio/vsock/muxer.rs`).
+/// (`MAX_CONNECTIONS`, Firecracker's, `crates/vmm/src/devices/virtio/vsock/muxer.rs:40-41`).
 pub const MAX_PORTS: usize = 1023;
 
 /// Checks `spec` against this host's bounds, as shards-vmm does as it starts a VM
-/// (`vm/runtime.rs` `check_vcpus`; `vm/{aarch64,x86_64}.rs`' memory), so that both the
+/// (`vm/runtime.rs:1059` `check_vcpus`; memory even and at least the least,
+/// `vm/aarch64.rs:414`, `vm/x86_64.rs:361`), so that both the
 /// client and the simulator refuse it before anything boots.
 pub fn check(spec: &GuestSpec) -> Result<(), Refusal> {
     let max = max_vcpus();
@@ -259,6 +270,8 @@ fn allowed(ports: &[u32], port: u32) -> Result<(), Refusal> {
 mod tests {
     use super::*;
 
+    /// Inputs: one vCPU and 256 MiB, within every host's bounds; the cases below step
+    /// past each bound by one (257, odd; `least - 2`; `MAX_PORTS + 1` ports).
     fn spec() -> GuestSpec {
         GuestSpec {
             kernel: "k".into(),
