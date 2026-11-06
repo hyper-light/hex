@@ -46,10 +46,13 @@ Measured earlier, on the user-service route: with `daemon-reload` alone, the alr
 didn't hand `io` on (unit `hex-native-s6-lab-20261104T085256Z`), as systemd's source predicts
 (docs/research/runtime/installer-per-os.md §1.4).
 
-## Windows: built, not yet run (jupiter offline)
+## Windows: built; the run of record waits on native plan steps 4 and 5
 
 `bench/install/windows_lab.ps1` runs as a standard user around an administrator's `windows.ps1 install` and
-`uninstall` (one UAC prompt and the reboot Windows asks for, each): `before`, `installed`, `uninstalled`. The
+`uninstall` (one UAC prompt and the reboot Windows asks for, each): `before`, `installed`, `uninstalled`; its
+`asks` phase (also part of `before`) counts the hex runs of the dry run through a counting `-Binary`. HEX-INST-9 on
+jupiter, 2026-11-06 (`records/windows-asks-jupiter-20261106T195224Z.txt`): 3ba6028's `windows.ps1` ran hex twice
+for one plan (red, exit 1), 47c94e3's once (green, exit 0). The
 Windows `oci` class itself is native plan steps 4 and 5, not built, so after install it is refused for that
 alone. Windows' part is open until steps 4 and 5 land: the step's "every class working" isn't narrowed, so the
 lab runs again then.
