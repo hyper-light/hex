@@ -108,3 +108,22 @@ fn run(
         None => Err(late()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HEX-INST-9 (native plan step 6): a query that runs past the bound is ended and refused by name, not
+    /// waited on. The fake query is PowerShell sleeping twice [`PATIENCE`], so the case derives from the
+    /// bound itself.
+    #[test]
+    fn a_query_past_the_bound_is_refused_by_name() {
+        let processors = NonZeroU32::new(super::super::sys::active_processors()).unwrap();
+        let sleep = format!("Start-Sleep -Milliseconds {}", PATIENCE.as_millis() * 2);
+        let refused = listing(processors, &powershell(&sleep).unwrap()).unwrap_err();
+        assert!(
+            matches!(&refused, Refusal::Os { why, .. } if why.contains("didn't finish within")),
+            "{refused:?}"
+        );
+    }
+}

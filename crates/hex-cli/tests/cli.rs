@@ -67,3 +67,28 @@ fn an_argument_that_isnt_unicode_is_refused_not_a_panic() {
     assert_eq!(hex_cli::reply(&[None]).status, 2);
     assert!(hex_cli::reply(&[None]).text.contains("isn't Unicode"));
 }
+
+/// HEX-INST-9 (native plan step 6): `hex setup features` runs the node's own bounded feature query and
+/// prints each feature's state, one `<name> on|off` line each, Containers then HypervisorPlatform, for the
+/// Windows installer to read; off Windows it is refused by name, naming the platform.
+#[test]
+fn setup_features_prints_each_features_state_or_refuses_off_windows() {
+    let out = run(&["setup", "features"]);
+    if cfg!(windows) {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let text = String::from_utf8(out.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text:?}");
+        for (line, name) in lines.iter().zip(["Containers", "HypervisorPlatform"]) {
+            let state = line.strip_prefix(name).and_then(|r| r.strip_prefix(' '));
+            assert!(matches!(state, Some("on" | "off")), "{line:?}");
+        }
+    } else {
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            err.contains(&format!("isn't available on {}", std::env::consts::OS)),
+            "{err}"
+        );
+    }
+}

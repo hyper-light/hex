@@ -373,6 +373,22 @@ mod tests {
         );
     }
 
+    /// HEX-INST-9 (native plan step 6): `hex setup features` prints each feature the installer turns on,
+    /// one `<name> on|off` line in [`WindowsFeature::ALL`]'s order, which the Windows installer reads in
+    /// place of a query of its own.
+    #[test]
+    fn the_features_state_renders_one_line_each_in_order() {
+        let off: BTreeSet<WindowsFeature> = [WindowsFeature::HypervisorPlatform].into();
+        assert_eq!(
+            render_features(&off),
+            "Containers on\nHypervisorPlatform off\n"
+        );
+        assert_eq!(
+            render_features(&BTreeSet::new()),
+            "Containers on\nHypervisorPlatform on\n"
+        );
+    }
+
     /// HEX-INST-2: the listing's bound is its format's own size, every feature's `<name> <state>\r\n`
     /// line: the 36 bytes jupiter's PowerShell wrote, 20 runs of 20 (2026-11-06, Windows 11 26200), fit
     /// exactly, and a byte past them is refused rather than read.
