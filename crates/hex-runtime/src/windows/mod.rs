@@ -1,8 +1,8 @@
 //! The Windows runtime: [`hex_api::Runtime`] over the `process` class (docs/design/runtime.md). A box
 //! is a job object; its bounds are the kernel's and hard (`process`, `sys`, [`hex_core::job`]), and a
 //! member is started suspended inside the job and resumed, so nothing runs outside it. The `oci` class
-//! is a Linux kernel's, refused by name here until a Shards guest carries it (the native plan's step
-//! 5). This is the node's runtime seam on Windows; the records, recovery and socket that wrap it on
+//! is a Linux kernel's, refused by name here: a node runs it in its Shards guest by wrapping this in
+//! [`crate::guest::WithGuest`] (the native plan's step 5). This is the node's runtime seam on Windows; the records, recovery and socket that wrap it on
 //! Linux (`hex-node`) are not yet cross-OS, so this holds its boxes in memory and is driven in process.
 
 pub mod proc;
@@ -91,7 +91,8 @@ impl Runtime for WinRuntime {
             return Err(Refusal::Platform {
                 what: "the oci class",
                 platform: "windows",
-                why: "a Linux image needs a Linux kernel; a Shards guest carries it (native plan step 5)"
+                why: "a Linux image needs a Linux kernel: the node's Shards guest carries it \
+                      (hex_runtime::guest::WithGuest routes the class there)"
                     .to_owned(),
             });
         };

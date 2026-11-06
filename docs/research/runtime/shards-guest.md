@@ -83,3 +83,41 @@ off (`:119`: "# CONFIG_BPF_JIT is not set"), so a device program runs interprete
   Linux host.
 - Shards' owner choosing a different seam (the daemon's protocol, or the Engine API): then this note's §2 is the
   implementation behind it, not the seam.
+
+## 7. The default shared roots: Docker Desktop's file-sharing list
+
+Checked 2026-11-06 for the guest's default shares (`docs/design/shards-guest.md` §4a, the lead's ruling that the
+host's `/` is never shared by default).
+
+- Docker Desktop's settings page, "File sharing"
+  (<https://docs.docker.com/desktop/settings-and-maintenance/settings/>), quoted: "By default the `/Users`,
+  `/Volumes`, `/private`, `/tmp` and `/var/folders` directory are shared." The page gives that list under the
+  settings for Mac, Linux and Windows Hyper-V alike, and no Windows path of its own.
+- The same page, "Resources": the memory limit "Defaults to 50% of your host's memory"; for CPUs it says only
+  "Specify the maximum number of CPUs to be used by Docker Desktop", no default. Hex therefore guesses neither: the
+  guest's vCPUs and memory are the node's configuration (`HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`), charged to
+  its budget (§1 of the design).
+- On Windows the page lists no Windows folder, so the Windows default (the users folder, read from its known
+  folder `FOLDERID_UserProfiles`, and the temp folder) is the lead's ruling of 2026-11-06, the counterparts of
+  `/Users` and `/tmp`, not a quote of Docker's.
+
+What would falsify it: Docker Desktop changing its default list (then Hex's default follows it, or says why not), or
+a host whose users or temporary folders are not where those calls say.
+
+## 8. The tarball roots' tests can fail: a mutation check (2026-11-06)
+
+The hostile-archive tests (`crates/hex-client/src/guest/stage/tar_tests.rs`, HEX-GUEST-15) were written before
+`stage::Source::Tar` and first ran with it, never red. So each check they cover was disabled in turn, in a scratch copy
+of `c230d0a` never committed, and its test run and seen to fail, then restored. On fedora, units
+`hex-ns5route-mut-20261106T110202Z` and `hex-ns5route-mut2-20261106T110229Z`; the Windows refusal on jupiter.
+
+| check disabled | test | failure |
+|---|---|---|
+| absolute and `..` names | `a_tarball_naming_its_way_out_or_out_of_order_is_refused_by_name` | `tar_tests.rs:126:9` (the refusal no longer says why) |
+| device and FIFO entries staged as files | `a_tarball_with_a_device_fifo_hard_link_or_unknown_kind_is_refused_by_name` | `tar_tests.rs:70:36` (`unwrap_err` on `Ok`: packed) |
+| hard links staged as files | the same test | `tar_tests.rs:70:36` |
+| the gzip trailer not read | `a_lying_or_truncated_tarball_is_refused` | `tar_tests.rs:70:36` |
+| the end-of-archive block not required | the same test | `tar_tests.rs:70:36` |
+| a Windows directory root not refused | `a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows` (`crates/hex-runtime/src/guest/tests.rs`), on jupiter | `tests.rs:457:13`, "expected a Windows directory root refused, got Ok(…)" |
+
+Each test passed again with the check restored.

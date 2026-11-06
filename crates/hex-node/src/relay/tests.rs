@@ -2,6 +2,9 @@
 //! step 5): a host's guest client, through the relay, reaches a stand-in node agent's own socket; its
 //! calls and answers cross whole; an exec's streams reach the node as pipe ends with the exec; and the
 //! relay's bounds refuse by type: an exec whose stream never comes, and a connection past the bound.
+//! And its staging port (§4a, HEX-GUEST-14): a host tree staged lands under the box's staged root as it
+//! was, and goes when removed; a stage that names its way out, or comes twice, is refused and leaves
+//! nothing behind.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -11,6 +14,7 @@ use std::path::PathBuf;
 use super::*;
 use hex_api::{BoxId, Class, Exit, Program, Runtime, Stdio};
 use hex_client::guest::{Client, Link};
+use hex_core::stream::files as hf;
 use hex_core::wire::{Header, Hello, Received};
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::FileType;
@@ -20,6 +24,7 @@ use rustix::fs::FileType;
 struct Ports {
     control: PathBuf,
     stdio: PathBuf,
+    files: PathBuf,
 }
 
 impl Link for Ports {
@@ -27,6 +32,7 @@ impl Link for Ports {
         let path = match port {
             stream::CONTROL_PORT => &self.control,
             stream::STDIO_PORT => &self.stdio,
+            stream::files::FILES_PORT => &self.files,
             other => panic!("dialed port {other:#x}"),
         };
         Ok(Box::new(UnixStream::connect(path).unwrap()))
@@ -59,8 +65,13 @@ impl Lab {
         rustix::net::listen(&node, 4).unwrap();
         let control = UnixListener::bind(dir.path().join("control.sock")).unwrap();
         let stdio = UnixListener::bind(dir.path().join("stdio.sock")).unwrap();
-        let relay = Relay::new(&node_path, limits);
-        std::thread::spawn(move || relay.serve(Box::new(control), Box::new(stdio)));
+        let files = UnixListener::bind(dir.path().join("files.sock")).unwrap();
+        let staged = dir.path().join("staged");
+        std::fs::create_dir(&staged).unwrap();
+        let relay = Relay::new(&node_path, &staged, limits);
+        std::thread::spawn(move || {
+            relay.serve(Box::new(control), Box::new(stdio), Box::new(files))
+        });
         Self { dir, node }
     }
 
@@ -68,6 +79,7 @@ impl Lab {
         Arc::new(Ports {
             control: self.dir.path().join("control.sock"),
             stdio: self.dir.path().join("stdio.sock"),
+            files: self.dir.path().join("files.sock"),
         })
     }
 }
@@ -226,6 +238,7 @@ fn an_exec_whose_stream_never_comes_is_refused_and_never_reaches_the_node() {
     let link = Arc::new(Ports {
         control: lab.dir.path().join("control.sock"),
         stdio: nowhere,
+        files: lab.dir.path().join("files.sock"),
     });
     let node = lab.node.try_clone().unwrap();
     let agent = std::thread::spawn(move || {
@@ -272,4 +285,180 @@ fn a_connection_past_the_bound_is_refused() {
         })
     );
     drop(held);
+}
+
+fn staged_lab() -> (Lab, PathBuf) {
+    let lab = Lab::new(LIMITS);
+    let staged = lab.dir.path().join("staged");
+    (lab, staged)
+}
+
+/// Sends `bytes` raw on the staging port and returns the relay's answer.
+fn stage_raw(lab: &Lab, bytes: &[u8]) -> Answer {
+    let mut conn = UnixStream::connect(lab.dir.path().join("files.sock")).unwrap();
+    let _ = conn.write_all(bytes);
+    conn.shutdown(Shutdown::Write).unwrap();
+    let mut back = Vec::new();
+    conn.read_to_end(&mut back).unwrap();
+    let mut d = Deframer::new(wire::MAX_MESSAGE);
+    let mut rest = &back[..];
+    let message = loop {
+        let (took, whole) = d.take(rest).unwrap();
+        rest = &rest[took..];
+        if let Some(m) = whole {
+            break m;
+        }
+    };
+    let received = Received {
+        bytes: &message,
+        size: message.len(),
+        descriptors: 0,
+        descriptors_cut: false,
+    };
+    wire::read_answer(&received, wire::MAX_MESSAGE).unwrap().1
+}
+
+/// HEX-GUEST-14: stage a host tree (a folder, a file with mode 0750, an empty file, a symlink) and a
+/// bytes item through the host's packer: expect each under `<staged>/box-1/` as it was, modes kept,
+/// the root 0755; then remove it: expect it gone, and a second removal refused as no such box.
+#[test]
+fn a_staged_tree_lands_as_it_was_and_goes_when_removed() {
+    use hex_client::guest::stage::{Item, Source, stage, unstage};
+    use std::os::unix::fs::PermissionsExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let root = host.path().join("rootfs");
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::write(root.join("bin/sh"), b"#!sh\n").unwrap();
+    std::fs::set_permissions(root.join("bin/sh"), std::fs::Permissions::from_mode(0o750)).unwrap();
+    std::fs::set_permissions(root.join("bin"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::write(root.join("empty"), b"").unwrap();
+    std::os::unix::fs::symlink("/usr/lib", root.join("lib")).unwrap();
+    let id = BoxId::new("box-1").unwrap();
+    let items = [
+        Item {
+            name: "root".to_owned(),
+            source: Source::Path(root.clone()),
+        },
+        Item {
+            name: "config.json".to_owned(),
+            source: Source::Bytes(b"{}".to_vec()),
+        },
+    ];
+    let link = lab.link();
+    stage(link.as_ref(), &id, &items, &hf::LIMITS).unwrap();
+    let copy = staged.join("box-1");
+    let mode = |p: &str| {
+        std::fs::symlink_metadata(copy.join(p))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode(""), 0o755);
+    assert_eq!(std::fs::read(copy.join("root/bin/sh")).unwrap(), b"#!sh\n");
+    assert_eq!(mode("root/bin/sh"), 0o750);
+    assert_eq!(mode("root/bin"), 0o555);
+    assert_eq!(std::fs::read(copy.join("root/empty")).unwrap(), b"");
+    assert_eq!(
+        std::fs::read_link(copy.join("root/lib")).unwrap(),
+        Path::new("/usr/lib")
+    );
+    assert_eq!(std::fs::read(copy.join("config.json")).unwrap(), b"{}");
+    // A box id staged already is refused, its copy untouched.
+    assert_eq!(
+        stage(link.as_ref(), &id, &items, &hf::LIMITS),
+        Err(Refusal::Exists(id.clone()))
+    );
+    assert!(copy.join("root/bin/sh").exists());
+    unstage(link.as_ref(), &id).unwrap();
+    assert!(!copy.exists());
+    assert_eq!(unstage(link.as_ref(), &id), Err(Refusal::NoSuchBox(id)));
+    std::fs::set_permissions(root.join("bin"), std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The raw stage of `entries` (path, kind, target) for `b`.
+fn raw_stage(entries: &[(&str, hf::What)]) -> Vec<u8> {
+    let mut out = hf::open(hf::Op::Stage, "b").unwrap();
+    for (path, what) in entries {
+        let e = hf::Entry {
+            path: (*path).to_owned(),
+            mode: 0o755,
+            what: what.clone(),
+        };
+        out.extend(hf::head(&e, &hf::LIMITS).unwrap());
+    }
+    out.extend(hf::END);
+    out
+}
+
+/// HEX-GUEST-14: stage a symlink `a` to `/` and then a directory `a/escaped` under it, and a symlink
+/// to the staged folder's parent then a file under it: expect each refused as leading through a
+/// symbolic link, nothing made outside the box's root, and the partial copy removed.
+#[test]
+fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing() {
+    let (lab, staged) = staged_lab();
+    for (link_to, under) in [("/", hf::What::Dir), ("../..", hf::What::File { size: 0 })] {
+        let answer = stage_raw(
+            &lab,
+            &raw_stage(&[
+                (
+                    "a",
+                    hf::What::Symlink {
+                        target: link_to.to_owned(),
+                    },
+                ),
+                ("a/escaped", under),
+            ]),
+        );
+        let Answer::Refused(Refusal::Invalid { why, .. }) = answer else {
+            panic!("expected a refusal, got {answer:?}");
+        };
+        assert!(why.contains("symbolic link"), "{why}");
+        assert!(!Path::new("/escaped").exists());
+        assert!(!lab.dir.path().join("escaped").exists());
+        assert!(!staged.join("b").exists(), "the partial copy was left");
+    }
+}
+
+/// HEX-GUEST-14: stage an entry of a device's kind, an entry twice, and an entry under a file: expect
+/// each refused by type (the file by its name) and the partial copy removed; and a stream cut before its end head refused as truncated.
+#[test]
+fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
+    let (lab, staged) = staged_lab();
+    let mut device = hf::open(hf::Op::Stage, "b").unwrap();
+    // A head of kind 4, mode 0644, a one-byte path and no size, then its path.
+    device.extend([4u8, 0]);
+    device.extend(0o644u16.to_le_bytes());
+    device.extend(1u16.to_le_bytes());
+    device.extend([0u8; 10]);
+    device.push(b'd');
+    let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &device) else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        why.contains("devices, FIFOs and sockets are never staged"),
+        "{why}"
+    );
+    assert!(!staged.join("b").exists());
+    let twice = raw_stage(&[("d", hf::What::Dir), ("d", hf::What::Dir)]);
+    let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &twice) else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains("came twice"), "{why}");
+    assert!(!staged.join("b").exists());
+    // A file in the way of a later entry's parent is refused by its name, and the copy removed.
+    let through_a_file = raw_stage(&[("f", hf::What::File { size: 0 }), ("f/x", hf::What::Dir)]);
+    let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &through_a_file) else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains("\"f\", which isn't a directory"), "{why}");
+    assert!(!staged.join("b").exists());
+    let whole = raw_stage(&[("d", hf::What::Dir)]);
+    let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &whole[..whole.len() - 1])
+    else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains("ended before its end head"), "{why}");
+    assert!(!staged.join("b").exists());
 }

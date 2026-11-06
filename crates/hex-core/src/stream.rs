@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use crate::wire::{self, Fault};
 
+pub mod files;
+
 /// The guest's vsock port the host's client dials for its control connection, and the one it dials for
 /// each stdio stream. Above 1024, as the ports of vsock(7) below it take `CAP_NET_BIND_SERVICE` to bind,
 /// and spelling `HEX` so a capture reads them.

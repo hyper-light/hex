@@ -118,14 +118,29 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
 
 - Kernel: Shards' pinned 6.18.48 (`shards-guest.md` §5), which has every option the class needs.
 - PID 1: Hex's own static `hex` binary as the generated initramfs's init (`GuestSpec::init`), which mounts `/proc`,
-  `/sys`, cgroup2, `devtmpfs` and a tmpfs `/run`, and starts the node agent and the relay.
+  `/sys`, cgroup2, `devtmpfs` and a tmpfs `/run`, and starts the node agent and the relay. It first moves
+  itself off the initramfs onto a tmpfs root (`MS_MOVE` over `/`, then `chroot`, as switch_root does), since
+  each container's start pivots its root and pivot_root(2) refuses to leave the initramfs ("EINVAL The
+  current root directory is on the rootfs (initial ramfs) filesystem", pivot_root(2), ERRORS).
 - No disk (amended 2026-11-06): the node's record, its runtime directory and the staged bundles (§4a) live on the
   guest's tmpfs, charged to the guest's memory, which the node's budget holds (§1). What the record is for is a
   node's or relay's restart, which tmpfs survives; a guest's own reboot ends every box in it, so a disk would keep
   only records of boxes that no longer exist. Falsified if a guest must keep boxes across its own reboot (it
   can't: their processes are gone) or if staged images outgrow the guest's memory budget: then a disk, as first
   written, holds the store.
-- Its build is a script in `scripts/`, its outputs' SHA-256 recorded in `bench/native/guest/`.
+- Its build is `scripts/guest/build.sh`, its outputs' SHA-256 recorded in `bench/native/guest/<arch>/RECORD.md`.
+  Two paths, both recorded there:
+  - **From source** (build.sh): the kernel by Shards' own `scripts/build-kernel.sh` in Shards' pinned builder,
+    checked against `scripts/guest/kernel-needs.config`; `hex` static against glibc, the runtime's choice for the
+    `oci` class's start (static glibc spawned 0.22 ms against 0.34 ms dynamic, and musl gained nothing over it).
+  - **The bring-up's** (2026-11-06, while no Linux host could build): the kernel is Shards' release of the same
+    pinned build (`crates/shards/src/kernel.rs:21-61` pins each URL and SHA-256), its released config checked
+    against the same list; `hex` is static **musl**, linked by the `rust-lld` Rust ships, built on the Mac Studio
+    as Shards builds its own Linux guests there (Shards' `.cargo/config.toml:21-27`), so no cross C toolchain is
+    needed. This departs from static glibc: musl's allocator and its thread and process start are the unknowns
+    the runtime chose glibc to avoid. Falsified, and replaced by the from-source glibc build, if the guest's
+    `oci` create-to-start or exec measures slower with the musl `hex` than with a static-glibc `hex` on the same
+    guest kernel.
 
 ## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
@@ -147,11 +162,13 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   everything the node's user can write, and undo the VM boundary (the lead, 2026-11-06). The default is Docker
   Desktop's file-sharing list: on macOS `/Users`, `/Volumes`, `/private`, `/tmp` and `/var/folders`; on Windows the
   users folder and the temp folder; read-write, served as the node's own user, never root. Any other root is the
-  operator's configuration (`HEX_GUEST_SHARES`). The OCI validation run sets the roots its tests bind (its `mounts`
-  test binds `/etc`), and its record says so; the guest's init mounts each as `virtiofs` at
-  `/run/hex/shares/<i>` (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
+  operator's configuration (`HEX_GUEST_SHARES`). The OCI validation shares only its runtime-tools checkout
+  (read-only) and its out directory (read-write), and its record names them (§6a): its `mounts` test binds `/etc`
+  of the runtime's own host, which in the guest is the lab's own `/etc`, as on Linux; the guest's init mounts each as `virtiofs` at
+  `/run/hex/shares/<i>`, as the kernel's command line names them (`hex.shares=rw,ro,…`, a mode per tag in
+  order; HEX-GUEST-11) (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
   rewrites each bind mount's source to its path under the share that holds it, and a source under no share is
-  refused by name (`Refusal::Unsupported`, naming the mount and the shared roots). Shares are fixed at boot, as
+  refused by name (`Refusal::Platform`, the closest variant `hex_api` has, naming the mount and the shared roots). Shares are fixed at boot, as
   Shards attaches them then; a plain run has no hotplug of them.
 - **The bundle and rootfs are copied into the guest before create**, over a third vsock port
   (`stream::FILES_PORT`): a bounded stream of entries (directories, regular files with their bytes, symlinks as
@@ -161,6 +178,20 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   `hex_core::stream` (CLAUDE.md §9), with hostile-input tests (§6). A container's root is the guest's own copy, as
   a Linux host's is its own disk: a root over virtio-fs would put every exec's page cache and the overlay's upper
   layer across the share. The host rewrites `root.path` (or `Rootfs`) to the copy; the copy is deleted with its box.
+- **A root may be a tarball** (`.tar`, `.tar.gz` or `.tgz`; amended 2026-11-06): a bundle's `root.path`, a
+  `Rootfs::Dir` or a layer naming one is staged from the archive's own entries, each with its Linux mode and a
+  symbolic link's target text exactly as written. A Linux root unpacked into a Windows directory can't be staged
+  faithfully: unpacking the OCI validation lab's Alpine root (§6a) with Git Bash's tar on jupiter turned its 322
+  absolute links into Windows ones (`bin/ls` → `C:\Program Files\Git\usr\bin\busybox`, MSYS's translation of
+  `/usr/bin/busybox`), and NTFS keeps no Unix modes at all, so the copy would hold broken links and guessed modes, a
+  silent corruption (CLAUDE.md §3). So on Windows a directory root is refused by name (`Refusal::Platform`), pointing
+  at the tarball form; on macOS and Linux, whose file systems keep both, a directory stays a root. OCI image layers
+  are tarballs to begin with. The archive is read flat, one entry at a time, within the stage's bounds (entries,
+  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, an entry before its
+  directory, a corrupt or truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending
+  mid-entry) are refused by name. A hard link is refused by name too: none of the lab's inputs or runtime-tools holds
+  one (`tar -tv` on each, 2026-11-06), so nothing needs it; falsified, and staged as a copy of an earlier entry, when
+  a root that must run does.
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 
@@ -175,6 +206,43 @@ The `oci` class's conformance suite (`hex_api::conformance`) and the OCI runtime
 (`bench/oci-validation/`) pass in the guest on the Mac Studio and on jupiter, reached from the host's node through
 the seam, and every gate passes.
 
+### 6a. Where the OCI validation runs: in the guest, its lab made by the host's node (decided 2026-11-06)
+
+runtime-tools (`opencontainers/runtime-tools` `bd3b0bd`) needs one Linux kernel under both its harness and the
+runtime it tests:
+- it drives the runtime's CLI (`create`, `start`, `state`, `kill`, `delete`: `validation/util/container.go:79,126,
+  138,172,196`), giving the container a stdout file in the bundle (`:81-85`, read back at `:109-110`), and builds
+  each bundle with `tar` (`validation/util/test.go:130`) around its `runtimetest`, which checks from inside
+  (`:199`, `:276`);
+- it reads the container's namespaces at `/proc/<state.pid>/ns` (`validation/linux_ns_itype/linux_ns_itype.go:83`,
+  `validation/linux_ns_path/linux_ns_path.go:96`), and its cgroup files through `/proc/self/mountinfo`
+  (`cgroups/cgroups.go:33-34`; `validation/util/linux_resources_memory.go:11,18` and the other `linux_cgroups_*`);
+- it runs `unshare … --fork sleep` itself and hands the runtime `/proc/<pid>/ns/<x>` to join
+  (`linux_ns_path.go:113,63,93`);
+- its `mounts` test binds the runtime's host's `/etc` eight ways (`validation/mounts/mounts.go:38-72`).
+
+Hex's Linux run (`bench/oci-validation/run_hex.sh:12-16`, `inside.sh:6-16`) runs it in a privileged container with
+a cgroup namespace of its own, the suite's `RUNTIME` a shim to `hex oci`.
+
+So in the guest it runs as on Linux, the docker container replaced by a Hex `oci` box, the **lab**, which the
+host's node makes and drives through the seam (HEX-GUEST-20, `crates/hex-cli/tests/guest_validation.rs`): the host
+boots the guest through `hex_runtime::guest`, creates the lab from a bundle (an Alpine userland with util-linux and
+the guest's `hex`; every capability, no seccomp filter, its own pid, mount and cgroup namespaces, cgroup2 mounted
+writable), staged as every root is (§4a), with the runtime-tools checkout for the guest's architecture (read-only)
+and an out directory (read-write) bound through the run's two shares. The lab runs the unchanged `inside.sh`; every
+call, stdio stream and exit crosses vsock; the host reads `results.tsv` from the out share and checks it against
+the Linux record's pass/fail list (`bench/oci-validation/SUMMARY-hex.txt`). A test that passes on Linux and fails
+in the guest is a failure to fix at its cause; the record's two deliberate refusals (`linux_mount_label`,
+`linux_process_apparmor_profile`) stand as they are.
+
+The other reading, the harness on the macOS or Windows host and a host-side `hex oci` forwarding to the guest,
+can't run the suite unmodified: its binaries are Linux's, and the `/proc`, cgroup and `unshare` steps above exist
+on no other OS. Answering them from the guest would rewrite runtime-tools, and then it would no longer be the OCI
+runtime-spec validation.
+
+Falsified if the suite needs the host's own files (a test reading a macOS or Windows path), which no test above
+does.
+
 Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-1: the wire framed by length over a stream, refused from its prefix past its bound; an exec whose stdio
   travels apart (`hex_core::stream`, `hex_core::wire::read_request_apart`).
@@ -183,9 +251,48 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-4..5: the guest client's calls, stdio and end over a stream; an agent's bad bytes refused
   (`hex_client::guest`).
 - HEX-GUEST-6..7: the relay to the node's own socket; its bounds refused by type (`hex_node::relay`).
+- HEX-GUEST-9: `hex guest init` mounts §4's file systems, keeps the node's state on the tmpfs `/run`, and
+  takes no disk (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-10: `hex guest init` reads the root's file system from mountinfo, so it leaves the initramfs
+  once; hostile lines name no root (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-11: `hex guest init` reads the shares from the kernel's command line, `hex.shares=` and `rw` or
+  `ro` per share in tag order (`hex.shares=rw,ro`: `shards0` writable, `shards1` read-only), and mounts each as
+  `virtiofs` at `/run/hex/shares/<i>`; a bad mode, the parameter twice or more than 32 shares are refused by
+  name (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-12: as the kernel's first process (PID 1 with `argv[0]` `/init`; a container's PID 1 runs as itself),
+  `hex` is the guest's init whatever words the kernel passes it, so the command line
+  needs no `-- guest init` (Shards appends its own words, ` quiet` with no console reader,
+  `crates/vmm/src/vm/mod.rs:1007-1018`), and as any other process it is not (`crates/hex-cli/src/guest.rs`).
 - HEX-GUEST-8: the conformance suite, every case, on `oci` and `process` boxes, through `hex guest relay` and the
   guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
   rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).
+
+- HEX-GUEST-13: the staging stream (§4a): a stage's entries read back as written however the stream cuts them;
+  hostile names (absolute, `..`, `.`, empty components, NUL, not UTF-8), kinds (a device's, a FIFO's, a socket's),
+  modes and fields refused by type; every count past its bound refused from its head (`hex_core::stream::files`).
+- HEX-GUEST-14: the relay's staging port: a staged tree lands under `<staged>/<box id>/` as it was, modes kept, and
+  goes when removed; a stage that names its way out through a link it made, comes twice, carries a device's kind or
+  is cut short is refused and leaves nothing (`hex_node::relay::files`).
+- HEX-GUEST-15: the host's packer: a host tree packs parents first, files with their bytes; a device node or socket
+  is refused by its path; the stage's bounds refused before anything past them is sent
+  (`hex_client::guest::stage`).
+- HEX-GUEST-16: the spec rewrite and the shares: shared roots read from `HEX_GUEST_SHARES` or this OS's default
+  (Docker Desktop's list, never `/`); a bundle's `config.json` and an `OciSpec` rewritten to the staged root and
+  each bind source's path under its share, writable binds passing; a source under no share refused by name, naming
+  the shared roots (`hex_runtime::guest`).
+- HEX-GUEST-17: the guest runtime: its inputs (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
+  `HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`) read before any boot, every missing one named in one refusal;
+  where Shards has no backend the class is refused as the platform's before
+  anything boots; the guest's spec names its init, the channel's three ports and its shares (`hex_runtime::guest`).
+- HEX-GUEST-18: the conformance suite on `oci` boxes through `hex_runtime::guest::WithGuest` over
+  `shards_api::sim::SimGuests`, whose guest runs `hex guest relay` to a node agent: the real link, staging and
+  rewrite on Linux (`crates/hex-cli/tests/node_socket.rs`).
+- HEX-GUEST-19: the same suite through the real `shards_api::Shards` from the host's node, run where
+  `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD` and `SHARDS_BIN` are set (`crates/hex-cli/tests/guest_real.rs`,
+  ignored elsewhere).
+- HEX-GUEST-20: the OCI runtime-spec validation in the guest (§6a): the host's node boots the guest, makes the lab
+  and runs `inside.sh` in it through the seam; each test's result matches the Linux record's
+  (`crates/hex-cli/tests/guest_validation.rs`, run where its inputs are set, skipped elsewhere).
 
 ## 7. What would falsify it
 
