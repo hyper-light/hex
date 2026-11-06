@@ -16,9 +16,6 @@ use crate::{
     Bounds, BoxId, BoxState, Class, ClassSpec, Exit, Proc, Refusal, Runtime, Signal, Stdio,
 };
 
-/// How often a step that waits for the oracle's answer reads again.
-const POLL: Duration = Duration::from_millis(10);
-
 /// A box's bound, as a scenario names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
@@ -201,6 +198,10 @@ pub const SCENARIOS: &[Scenario] = &[
         id: "HEX-DIFF-5",
         says: "a box bounded to 256 MiB: a program using 16 MiB exits 0 and none is killed; one using 1 GiB doesn't exit 0 and the kill is counted",
         steps: &[
+            // Test inputs, not tunings: only the order under < bound < over matters. The bound is the
+            // native bar's 256 MiB box (bench/native/macos/RESULT.md). The program's own footprint is at
+            // most 6 MiB (a climb stopped at 250-254 MiB in that box on all three OSes, bench/native/RESULT.md),
+            // so 16 MiB stays under with 234 MiB of margin and 1 GiB passes it four times over.
             Step::Create(0, Bound::Memory(256 * MIB)),
             Step::Exec(0, Act::Hog(16 * MIB)),
             Step::Wait(0, End::Ok),
@@ -492,16 +493,20 @@ impl Play<'_> {
     }
 }
 
-/// Reads with `look` until it shows `want`, or `patience` has passed; returns the last reading.
+/// Reads with `look` until it shows `want`, or `patience` has passed; returns the last reading. A box's
+/// state has no event to wait on, so it is read again after waiting as long as the last read took: at most
+/// half the time reading, at whatever a read costs on this platform.
 fn until(want: Option<&Seen>, patience: Duration, mut look: impl FnMut() -> Seen) -> Seen {
     let deadline = Instant::now().checked_add(patience);
     loop {
+        let read = Instant::now();
         let seen = look();
+        let took = read.elapsed();
         let late = deadline.is_none_or(|d| Instant::now() >= d);
         if want.is_none_or(|w| *w == seen) || late {
             return seen;
         }
-        std::thread::park_timeout(POLL);
+        conformance::rest(took);
     }
 }
 

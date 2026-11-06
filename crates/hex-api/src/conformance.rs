@@ -72,11 +72,20 @@ pub struct Failure {
     pub why: String,
 }
 
-/// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a
-/// runtime that never reports an end fails the case instead of hanging the suite.
-pub const PATIENCE: Duration = Duration::from_secs(60);
-/// How long a case watches a program it expects to keep running.
-pub const STILL_RUNNING: Duration = Duration::from_millis(200);
+/// The slowest end recorded across every driver and OS of the native bench, from a program's start to
+/// its reported end: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1).
+const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
+/// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a runtime that
+/// never reports an end fails the case instead of hanging the suite. Twice [`SLOWEST_RECORDED_END`]: the
+/// x2 is the false-alarm margin, so a run as slow as the slowest on record still passes.
+pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
+/// The slowest recorded end-seen time: 59.6 ms from a program's start to its reported end, for programs
+/// killed at their bound (bench/native/RESULT.md, macOS at b1ddb89, the slowest of 60). It bounds the time
+/// from an end to its being seen from above, since it includes the program's own run.
+const SLOWEST_END_SEEN: Duration = Duration::from_micros(59_600);
+/// How long a case watches a program it expects to keep running. An end within the watch would be seen
+/// within [`SLOWEST_END_SEEN`]; twice that is the false-alarm margin.
+pub const STILL_RUNNING: Duration = SLOWEST_END_SEEN.saturating_mul(2);
 
 /// Every case, in order.
 pub const CASES: &[Case] = &[
@@ -432,20 +441,36 @@ fn started(rt: &dyn Runtime, id: &BoxId, class: Class) -> Result<(), String> {
     )
 }
 
+/// Waits `d` at least: `park_timeout` may wake early, and `thread::sleep` is disallowed.
+pub(crate) fn rest(d: Duration) {
+    let Some(end) = std::time::Instant::now().checked_add(d) else {
+        return;
+    };
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::park_timeout(left);
+    }
+}
+
 /// Polls `inspect` until the box reports an exit, for at most [`PATIENCE`]: the fact the exit cases
-/// wait on, never a guessed delay.
+/// wait on, never a guessed delay. A box's state has no event to wait on, so it is read again after
+/// waiting as long as the last read took: at most half the time reading, at this platform's cost.
 fn exit_of(rt: &dyn Runtime, id: &BoxId) -> Result<crate::BoxInfo, String> {
     let deadline = std::time::Instant::now().checked_add(PATIENCE);
     loop {
+        let read = std::time::Instant::now();
         let info = rt.inspect(id).map_err(|e| format!("inspect: {e}"))?;
+        let took = read.elapsed();
         if info.exit.is_some() {
             return Ok(info);
         }
         if deadline.is_none_or(|d| std::time::Instant::now() >= d) {
             return Err(format!("no exit reported after {PATIENCE:?}: {info:?}"));
         }
-        // park_timeout (thread::sleep is disallowed) yields between looks at the fact.
-        std::thread::park_timeout(Duration::from_millis(10));
+        rest(took);
     }
 }
 
