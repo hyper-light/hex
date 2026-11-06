@@ -334,6 +334,8 @@ impl Job {
     /// One read of the job's process id list into a buffer of `len` bytes, for its
     /// `NumberOfAssignedProcesses`. `ERROR_MORE_DATA` (the ids don't all fit) still fills it in.
     fn assigned_processes(&self, len: usize) -> io::Result<u32> {
+        #[cfg(test)]
+        tests::ID_LIST_READS.with(|n| n.set(n.get() + 1));
         // usize-aligned, as the list's ids are; the count is its first 4 bytes.
         let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
         let bytes = u32::try_from(buf.len().saturating_mul(size_of::<usize>()))
@@ -557,6 +559,12 @@ fn zeroed_struct<T>() -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The job id-list reads [`Job::live_processes`] made on this thread.
+        pub(super) static ID_LIST_READS: Cell<u32> = const { Cell::new(0) };
+    }
 
     fn nul() -> OwnedHandle {
         OwnedHandle::from(
@@ -622,5 +630,45 @@ mod tests {
         );
         assert_eq!(assigned, listed);
         drop(started);
+    }
+
+    /// HEX-WIN-1 (native plan step 3): a box's live count is one read of its job, however many members
+    /// it holds. Do: start two members that wait on stdin in a job, count the job's id-list reads one
+    /// `live_processes` makes. Expect: one read, and a count of at least the two members (each console
+    /// member may bring its console host).
+    #[test]
+    fn a_live_count_of_many_members_is_one_read() {
+        let job = Job::create().unwrap();
+        let system = std::env::var("SystemRoot").unwrap();
+        let mut writers = Vec::new();
+        let mut members = Vec::new();
+        for _ in 0..2 {
+            let (reader, writer) = std::io::pipe().unwrap();
+            writers.push(writer);
+            let mut spawn = Spawn {
+                command_line: format!("{system}\\System32\\cmd.exe /c set /p x=")
+                    .encode_utf16()
+                    .chain([0])
+                    .collect(),
+                environment: hex_core::job::environment(&[(
+                    "SystemRoot".to_owned(),
+                    system.clone(),
+                )]),
+                cwd: None,
+                stdio: [OwnedHandle::from(reader), nul(), nul()],
+            };
+            let started = create(&mut spawn, &[job.raw()]).unwrap();
+            resume(&started.thread).unwrap();
+            members.push(started);
+        }
+        ID_LIST_READS.with(|n| n.set(0));
+        let live = job.live_processes().unwrap();
+        let reads = ID_LIST_READS.with(Cell::get);
+        drop(writers);
+        for m in &members {
+            assert!(wait(&m.process, u32::MAX).unwrap());
+        }
+        assert!(live >= 2, "two waiting members read as {live}");
+        assert_eq!(reads, 1, "{reads} id-list reads for one live count");
     }
 }
