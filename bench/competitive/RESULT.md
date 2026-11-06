@@ -622,6 +622,37 @@ bpftrace; the program and its maps under `~/.cache/hex-t7/g5rec/g16/` there). Th
 6. `create_tail_attr.py`'s per-create walk agrees: the slowest 0.1% add +1.368 ms of `css_*_work_fn` preemption over the
    middle band, +0.271 ms run queue, +0.086 ms Hex's own runs, and nothing waiting on `cgroup_mutex`.
 
+**What's left of goal 16's tail, and why** (2026-11-06, fedora, Linux 6.19.10, and the 7.2.15 guest; not of record:
+kprobes and bpftrace cost each callback some, so the figures compare runs, they don't time them). `probes/css_cost.sh`
+at 53ac40d (2,000 boxes each, no owner, CPUs 4-15 under the lock), the same binaries throughout (pass g16-a186d35),
+with bpftrace beside it (`~/.cache/hex-t7/g5rec/g16/` on fedora: units hex-g5rec-g16sb-20261106T132322Z and
+hex-g5rec-g16c-20261106T135913Z).
+- The memory offline is the kernel's walk of every memcg-aware list_lru on the host. `mem_cgroup_css_offline` is 0.20 to
+  0.34 ms a box across four runs (load 8 to 24), `memcg_reparent_list_lrus` 85 to 87% of it,
+  `reparent_shrinker_deferred` 0.019 to 0.024 ms, the rest about 0.02. Linux visits each list_lru under
+  `list_lrus_mutex`, inside `css_killed_work_fn`'s `cgroup_mutex`: 6.19 takes the xarray's IRQ lock and stores for each
+  (`mm/list_lru.c` v6.19.10:467-503), 7.2 loads it lockless (v7.2:525-563, 98733f3f0bec). The box's own entries aren't
+  the cost: walks whose memcg held an entry in no list_lru took 355 us on average, those with 2 to 16 took 193 to 613
+  (the walk's `kvfree_call_rcu` calls counted, one per list_lru that held an entry).
+- Hex's share of those list_lrus is at most 2.5%. Fedora had 1,923 to 1,979 superblocks mounted (two memcg-aware
+  list_lrus each, so about 3,900) across the runs; Hex's pooled ones are inside that run-to-run spread. Each box makes and
+  destroys three (its proc, its `/dev` tmpfs, its ipc namespace's mqueue), the mounts its spec asks for: 12,204 to
+  12,222 list_lru inits and 12,218 to 12,252 destroys per 2,000 boxes, with Hex's pools on or off. With them off the
+  create's own thread waits on `list_lrus_mutex` behind other memcgs' walks (464 to 483 waits a run, 88 to 98 us each);
+  with them on only the pools' threads do. The A/B's walk times (0.17 ms off, 0.21 to 0.29 on) follow the host's load
+  (8 to 13 against 19 to 24), not the pools.
+- The cost per list_lru per offline: 43 to 75 ns on fedora's 6.19 (0.168 to 0.291 ms over about 3,900), rising with
+  load; 56 ns in the 7.2 guest, whose walk is 0.013 ms with its own 27 mounts and 0.230 ms with 1,950 tmpfs superblocks
+  added (fedora's count; offline 0.025 to 0.256 ms a box). So 7.2 is no cheaper at the same count: an upgrade alone
+  doesn't move this tail. No posted or merged kernel work (v7.2, master, mm-unstable, linux-next, to 2026-11-06) walks
+  only the dying memcg's lists; Waiman Long's skip of empty lists (405cc51fc104, 2022) was reverted over races
+  (b33e1044475a).
+- The release: `css_release_work_fn` 0.216 ms a box, of which `css_rstat_flush` 0.069 (about 11.5 calls a box) and the
+  rest its wait for `cgroup_mutex`; `cgroup_bpf_release` 0.058 ms a box beside it.
+- Re-split, the trace above's slowest 0.1% are 1.10 ms preempted by these offlines and 0.27 ms by these releases, all
+  of the pass's own boxes. What Hex could cut there is at most about 0.4 ms; 0.25x needs about 0.6 to 0.7 ms off. The
+  rest is the walk, sized by every tenant's superblocks.
+
 `cgroup_mutex`, which `css_killed_work_fn` holds across the memcg offline, is contended too: Hex's threads waited 925
 ms (seam_oci), 478 ms (the seed and inits) and 336 ms (the refill) in all, most 64 to 256 us, in `clone3`
 (`CLONE_INTO_CGROUP`, `cgroup_css_set_fork`, `:6694`), `cgroup_rmdir` and the refill's `cgroup_mkdir`: parks, execs,

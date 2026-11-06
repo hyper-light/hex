@@ -138,6 +138,11 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
     memory-cgroup offline (`mem_cgroup_css_offline`, 128-256 us a box most often), run by a per-CPU kworker
     (`cgroup_offline_wq`, `WQ_PERCPU`) on the very CPU whose RCU callback queued it, a create CPU, preempting the next
     create there (256 us to 2 ms); not a lock the create waits on. Being cut by doing less (goal 16).
+  - What's left, measured (2026-11-06; RESULT.md "What's left of goal 16's tail"): the offline is the kernel's walk of
+    every memcg-aware list_lru on the host (85-87% of it), 43-75 ns a list_lru on 6.19 and 56 ns on 7.2 at the same
+    count, so 7.2 alone doesn't move it; Hex holds at most 2.5% of fedora's ~1,950 superblocks. Hex can cut at most
+    about 0.4 ms of the slowest 0.1% (its releases), against the 0.6-0.7 ms 0.25x needs. Open: the levers' pass, and a
+    guest-only kernel change that walks only the dying memcg's lists.
   - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
     **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
     (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
