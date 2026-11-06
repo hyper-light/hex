@@ -63,7 +63,6 @@ mod bench {
     pub const BOUND: u64 = 256 * MIB;
     pub const CLIMB: u64 = 1024 * MIB;
 
-
     /// The hex binary whose `selftest-box` acts are the programs: `HEX_BIN`, else the `hex` beside this
     /// bench (cargo puts both under the same profile directory).
     pub fn hex_binary() -> PathBuf {
@@ -221,7 +220,11 @@ mod bench {
         fn ended(&mut self) -> String {
             // The suite's learned wait: twice the slowest end of the record and this run.
             let asked = Instant::now();
-            match self.proc.wait_for(hex_api::conformance::patience()).expect("wait") {
+            match self
+                .proc
+                .wait_for(hex_api::conformance::patience())
+                .expect("wait")
+            {
                 Some(e) => {
                     hex_api::conformance::ENDS.saw(asked.elapsed());
                     format!("{e:?}")
@@ -628,11 +631,11 @@ mod os {
         let t = Instant::now();
         let mut touched = vec![0u8; super::bench::BOUND as usize];
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
-        for word in touched.chunks_exact_mut(size_of::<u64>()) {
+        for word in touched.as_chunks_mut::<{ size_of::<u64>() }>().0 {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            word.copy_from_slice(&x.to_le_bytes());
+            *word = x.to_le_bytes();
         }
         std::hint::black_box(&touched);
         let bytes = (super::bench::BOUND as f64 / t.elapsed().as_secs_f64()) as u64;

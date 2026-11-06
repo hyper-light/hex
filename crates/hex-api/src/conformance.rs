@@ -303,9 +303,9 @@ fn say(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
 }
 
 fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
-    let limit = fx
-        .exec_limit()
-        .ok_or("the class states no bound on a program's arguments and environment (CLAUDE.md §2)")?;
+    let limit = fx.exec_limit().ok_or(
+        "the class states no bound on a program's arguments and environment (CLAUDE.md §2)",
+    )?;
     let id = made(rt, fx, "oversized", Bounds::default())?;
     let mut program = fx.program(&Act::Say("never"));
     // Strings each under the OS's per-string bound (half of it, or of the block where there is none), as
@@ -319,13 +319,17 @@ fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         .max(1);
     let mut n = 0usize;
     while limit.size(&program) <= limit.block {
-        program.env.push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
+        program
+            .env
+            .push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
         n = n.saturating_add(1);
     }
     let refused = rt.exec(&id, program, Stdio::null());
     rt.delete(&id).map_err(|e| e.to_string())?;
     match refused {
-        Err(Refusal::Invalid { what: "program", .. }) => Ok(()),
+        Err(Refusal::Invalid {
+            what: "program", ..
+        }) => Ok(()),
         Err(e) => Err(format!("refused, but not as an invalid program: {e}")),
         Ok(_) => Err(format!(
             "a program past the class's bound ({} bytes, {}) was taken",
