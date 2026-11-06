@@ -17,7 +17,7 @@ use hex_api::Refusal;
 
 /// The guest's folder holding the shares, `<i>` under it for the `i`th.
 pub const SHARES: &str = "/run/hex/shares";
-/// The most roots a node shares: the guest's init mounts at most 32 (`hex guest init`'s bound on
+/// The most roots a node shares: the guest's init mounts at most 32 (the bound on its
 /// `hex.shares=`, HEX-GUEST-11), so a longer list is refused here by name, before a guest is booted that
 /// would refuse it. Docker Desktop's default list is five.
 pub const MAX_SHARES: usize = 32;

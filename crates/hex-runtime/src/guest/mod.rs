@@ -92,10 +92,11 @@ impl GuestConfig {
         })
     }
 
-    /// The spec Shards boots: the initramfs's `/init` is `hex`, its command line the guest image's
-    /// (`scripts/guest/build.sh`): the serial console, a panic resetting the guest so the host sees it end,
-    /// `hex.shares=` naming each share's mode in tag order (none when there are none), and `-- guest init`
-    /// (HEX-GUEST-11). The guest is reached on the channel's three ports alone.
+    /// The spec Shards boots: the initramfs's `/init` is `hex`, which as PID 1 is the guest's init
+    /// whatever words the kernel passes it (HEX-GUEST-12); its command line the serial console, a panic
+    /// resetting the guest so the host sees it end, and `hex.shares=` naming each share's mode in tag
+    /// order, none when there are none (HEX-GUEST-11). The guest is reached on the channel's three
+    /// ports alone.
     pub fn spec(&self) -> shards_api::GuestSpec {
         shards_api::GuestSpec {
             kernel: self.kernel.clone(),
@@ -125,15 +126,11 @@ impl GuestConfig {
             .iter()
             .map(|s| if s.read_only { "ro" } else { "rw" })
             .collect();
-        if modes.is_empty() {
-            "console=ttyS0 panic=-1 -- guest init".to_owned()
-        } else {
-            format!(
-                "console=ttyS0 panic=-1 {}={} -- guest init",
-                shares::CMDLINE,
-                modes.join(",")
-            )
+        let mut cmdline = "console=ttyS0 panic=-1".to_owned();
+        if !modes.is_empty() {
+            cmdline.push_str(&format!(" {}={}", shares::CMDLINE, modes.join(",")));
         }
+        cmdline
     }
 }
 

@@ -1,10 +1,11 @@
 //! `hex guest`: what runs in a Shards guest (docs/design/shards-guest.md §3 and §4).
 //!
-//!   hex guest init
 //!   hex guest relay --node <socket> (--vsock | --unix <dir>) [--staged <dir>]
 //!
-//! `init` is the guest's PID 1, the `hex` binary itself as its initramfs's `/init`, the kernel's command
-//! line ending `-- guest init`. It first moves itself off the kernel's initramfs onto a tmpfs root, as
+//! The guest's init is the `hex` binary itself as its initramfs's `/init`: run as PID 1, `hex` is the
+//! guest's init whatever words the kernel passes it ([`init_main`]), as Shards appends its own to a
+//! command line (` quiet` where no one reads the console, `crates/vmm/src/vm/mod.rs:1007-1018` at
+//! `a0cced87`), and words after a `--` are init's. It first moves itself off the kernel's initramfs onto a tmpfs root, as
 //! switch_root does, since a container's start pivots its root and pivot_root(2) refuses to leave the
 //! initramfs ("EINVAL The current root directory is on the rootfs"). It then mounts what a Linux node
 //! needs (`/proc`, `/sys`, cgroup2, `/dev`, a tmpfs `/run` and `/tmp`; the node's state is under `/run`,
@@ -17,8 +18,8 @@
 //! With `--vsock` it listens on the guest's vsock ports ([`hex_core::stream::CONTROL_PORT`],
 //! [`hex_core::stream::STDIO_PORT`] and [`hex_core::stream::files::FILES_PORT`], any CID); with `--unix` on
 //! `control.sock`, `stdio.sock` and `files.sock` in `<dir>`, which tests dial as the host would. It stages
-//! boxes' roots under `--staged` (default `/run/hex/staged`, made if absent; §4a). Once both listen it says `ready` on stdout, and it serves until a
-//! listener fails, when it says why on stderr and exits 1.
+//! boxes' roots under `--staged` (default `/run/hex/staged`, made if absent; §4a). Once all listen it says
+//! `ready` on stdout, and it serves until a listener fails, when it says why on stderr and exits 1.
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -33,11 +34,7 @@ use socket2::{Domain, SockAddr, Socket, Type};
 
 /// Runs `hex guest`'s arguments (everything after `guest`); returns the exit status.
 pub fn main(args: &[String]) -> u8 {
-    let run = match args.first().map(String::as_str) {
-        Some("init") => init(args.get(1..).unwrap_or_default()),
-        _ => relay(args),
-    };
-    match run {
+    match relay(args) {
         Ok(()) => 0,
         Err((status, why)) => {
             let _ = std::io::stderr()
@@ -48,7 +45,8 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str = "usage: hex guest init\n       hex guest relay --node <socket> (--vsock | --unix <dir>) [--staged <dir>]";
+const USAGE: &str =
+    "usage: hex guest relay --node <socket> (--vsock | --unix <dir>) [--staged <dir>]";
 
 /// Where the relay listens.
 enum On {
@@ -191,17 +189,32 @@ const BOX_ROOT: &str = "/sys/fs/cgroup/hex";
 /// children.
 const CONTROLLERS: &str = "+cpu +io +memory +pids";
 
-/// `init` takes no arguments: a guest has no disk (§4), so nothing to choose.
-fn init_args(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
-        Ok(())
-    } else {
-        Err(USAGE.to_owned())
-    }
+/// How the kernel names the initramfs's first process: `rdinit`'s default, passed as its `argv[0]`
+/// (init/main.c, `ramdisk_execute_command` and `run_init_process`).
+const KERNEL_INIT: &str = "/init";
+
+/// Whether `hex` runs as the guest's init: PID 1, and the kernel's first process, whatever other words it
+/// is given. PID 1 alone isn't enough: a container's first program is PID 1 of its own PID namespace, and
+/// `/hex selftest-box` or the runtime's `__oci-init` there must run as themselves, so its `argv[0]` tells them
+/// apart. A container that names its own program `/init` and is `hex` fails init's first privileged step
+/// or stays inside its namespaces: it reaches nothing a container can't.
+pub fn runs_as_init(pid: u32, argv0: Option<&std::ffi::OsStr>) -> bool {
+    pid == 1 && argv0 == Some(std::ffi::OsStr::new(KERNEL_INIT))
 }
 
-fn init(args: &[String]) -> Result<(), (u8, String)> {
-    init_args(args).map_err(|why| (2, why))?;
+/// Runs as the guest's init (§4); returns only if it fails, with the exit status.
+pub fn init_main() -> u8 {
+    let why = match init() {
+        Ok(()) => "powering off returned".to_owned(),
+        Err((_, why)) => why,
+    };
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("hex guest: {why}\n").as_bytes());
+    1
+}
+
+fn init() -> Result<(), (u8, String)> {
     let fail = |why: String| (1, why);
     leave_rootfs().map_err(fail)?;
     mount_all().map_err(fail)?;
@@ -329,9 +342,7 @@ fn leave_rootfs() -> Result<(), String> {
     mount_move(".", "/").map_err(|e| format!("moving {NEW_ROOT} to /: {e}"))?;
     rustix::process::chroot(".").map_err(|e| format!("entering the new root: {e}"))?;
     std::env::set_current_dir("/").map_err(|e| format!("entering /: {e}"))?;
-    let e = std::os::unix::process::CommandExt::exec(
-        std::process::Command::new("/init").args(["guest", "init"]),
-    );
+    let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new("/init"));
     Err(format!("running /init from the new root: {e}"))
 }
 
@@ -583,18 +594,24 @@ mod tests {
         }
     }
 
-    /// HEX-GUEST-9: a guest has no disk (§4, amended), so `init` takes no state disk, and refuses any
-    /// argument as its usage.
+    /// HEX-GUEST-12 (§4): as PID 1, `hex` is the guest's init, whatever words the kernel passes it
+    /// (Shards appends `quiet` to a run with no console, which once reached init as an argument and
+    /// ended the guest: a boot on adas-mac-studio-2, 2026-11-06, `Attempted to kill init!
+    /// exitcode=0x00000200`); as any other process it is not, nor as PID 1 of a container's namespace.
     #[test]
-    fn init_refuses_a_state_disk() {
-        assert!(init_args(&[]).is_ok());
-        for args in [
-            &["--state-disk", "/dev/vda"][..],
-            &["--state-disk"][..],
-            &["relay"][..],
-        ] {
-            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
-            assert_eq!(init_args(&args).err().as_deref(), Some(USAGE), "{args:?}");
+    fn hex_is_the_guests_init_as_pid_1_alone() {
+        let init = Some(std::ffi::OsStr::new("/init"));
+        assert!(runs_as_init(1, init));
+        for pid in [0, 2, 1000, u32::MAX] {
+            assert!(!runs_as_init(pid, init), "{pid}");
         }
+        // A container's first program is PID 1 of its namespace, and runs as itself.
+        for argv0 in ["/hex", "/proc/self/exe", "hex", "/usr/bin/hex"] {
+            assert!(
+                !runs_as_init(1, Some(std::ffi::OsStr::new(argv0))),
+                "{argv0}"
+            );
+        }
+        assert!(!runs_as_init(1, None));
     }
 }

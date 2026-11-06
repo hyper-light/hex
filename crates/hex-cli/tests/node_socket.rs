@@ -10,7 +10,7 @@
 //!   case, on `oci` and `process` boxes, again through `hex guest relay` and `hex_client::guest`'s
 //!   client, the path a macOS or Windows host takes to the node in its Shards guest, Unix sockets
 //!   standing in for vsock;
-//! - HEX-GUEST-17 (§4a): the conformance suite, every case, on `oci` boxes through
+//! - HEX-GUEST-18 (§4a): the conformance suite, every case, on `oci` boxes through
 //!   `hex_runtime::guest::WithGuest`, the node's runtime on macOS and Windows, over `shards_api`'s
 //!   simulator, whose guest bridges each port to `hex guest relay`: the real link, staging and spec
 //!   rewrite, each box's root staged and its copy removed with it;
@@ -423,7 +423,7 @@ fn pump_back(mut from: std::os::unix::net::UnixStream, mut to: Box<dyn shards_ap
     });
 }
 
-/// HEX-GUEST-17: start `hex guest relay` (staging under a folder of the test's) to the agent's socket,
+/// HEX-GUEST-18: start `hex guest relay` (staging under a folder of the test's) to the agent's socket,
 /// boot a simulated Shards guest whose PID 1 bridges each of the channel's ports to it, and run the
 /// conformance suite on `oci` boxes through `WithGuest` over that guest, one share `/` seen at `/` (a
 /// simulated guest is the host): expect every case to pass, the guest booted once, and no staged

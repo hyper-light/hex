@@ -1,4 +1,4 @@
-//! The staging stream's tests (docs/design/shards-guest.md §4a, HEX-GUEST-12; native plan step 5): a
+//! The staging stream's tests (docs/design/shards-guest.md §4a, HEX-GUEST-13; native plan step 5): a
 //! stage's entries read back as written however the stream cuts them; hostile names, kinds, modes and
 //! fields are refused by type; and every count past its bound is refused before its bytes are held.
 
@@ -66,7 +66,7 @@ fn sample() -> Vec<(Entry, Vec<u8>)> {
     ]
 }
 
-/// HEX-GUEST-12: stage a directory tree with a file, an empty file and a symlink, read it back fed a
+/// HEX-GUEST-13: stage a directory tree with a file, an empty file and a symlink, read it back fed a
 /// byte at a time and whole: expect the opening, each entry with its bytes, and the end, the same both
 /// ways.
 #[test]
@@ -87,7 +87,7 @@ fn a_stage_reads_back_as_written_however_it_is_cut() {
     }
 }
 
-/// HEX-GUEST-12: a remove is its opening alone: expect it read back, and a byte after it refused as
+/// HEX-GUEST-13: a remove is its opening alone: expect it read back, and a byte after it refused as
 /// trailing.
 #[test]
 fn a_remove_is_its_opening_alone() {
@@ -107,7 +107,7 @@ fn a_remove_is_its_opening_alone() {
     assert_eq!(read(LIMITS, &more, 64), Err(Refused::Trailing(1)));
 }
 
-/// HEX-GUEST-12: end the stream before its end head, in a head and in a file: expect each refused as
+/// HEX-GUEST-13: end the stream before its end head, in a head and in a file: expect each refused as
 /// truncated, never taken as a whole stage.
 #[test]
 fn a_stage_cut_short_is_refused_as_truncated() {
@@ -144,7 +144,7 @@ fn refused_name(path: &[u8]) -> Refused {
     read(LIMITS, &raw(1, 0, 0o755, path, b"", 0), 64).unwrap_err()
 }
 
-/// HEX-GUEST-12: send names that would leave the staged root, or aren't names: expect each refused as
+/// HEX-GUEST-13: send names that would leave the staged root, or aren't names: expect each refused as
 /// [`Refused::Name`] naming the path and why, before anything is made.
 #[test]
 fn hostile_names_are_refused_by_name() {
@@ -171,7 +171,7 @@ fn hostile_names_are_refused_by_name() {
     ));
 }
 
-/// HEX-GUEST-12: send a device node's, a FIFO's and a socket's kind (there is none on the stream), a
+/// HEX-GUEST-13: send a device node's, a FIFO's and a socket's kind (there is none on the stream), a
 /// mode with type bits, a pad byte set, a directory with a size, a file with a target, and a symlink
 /// with no target: expect each refused by its type.
 #[test]
@@ -212,7 +212,7 @@ fn hostile_kinds_modes_and_fields_are_refused_by_type() {
     assert!(matches!(read(LIMITS, &end, 64), Err(Refused::Field { .. })));
 }
 
-/// HEX-GUEST-12: open with the wrong magic, version, op or pad, and with an empty or over-long id:
+/// HEX-GUEST-13: open with the wrong magic, version, op or pad, and with an empty or over-long id:
 /// expect each refused by its type.
 #[test]
 fn hostile_openings_are_refused_by_type() {
@@ -235,7 +235,7 @@ fn hostile_openings_are_refused_by_type() {
     assert!(matches!(read(LIMITS, &long, 64), Err(Refused::Id(_))));
 }
 
-/// HEX-GUEST-12: stage one entry past the entries bound, a file past the bytes bound, and a path and a
+/// HEX-GUEST-13: stage one entry past the entries bound, a file past the bytes bound, and a path and a
 /// target past the path bound: expect each refused as over its bound from its head, before its path
 /// or bytes are held.
 #[test]
@@ -288,7 +288,7 @@ fn every_count_past_its_bound_is_refused_from_its_head() {
 }
 
 proptest! {
-    /// HEX-GUEST-12: feed any bytes after a stage's opening: expect a refusal, steps, or a wait for
+    /// HEX-GUEST-13: feed any bytes after a stage's opening: expect a refusal, steps, or a wait for
     /// more, never a panic, and never a name that leaves the root.
     #[test]
     fn any_bytes_are_read_or_refused(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {

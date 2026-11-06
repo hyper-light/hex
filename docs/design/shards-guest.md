@@ -128,7 +128,19 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   only records of boxes that no longer exist. Falsified if a guest must keep boxes across its own reboot (it
   can't: their processes are gone) or if staged images outgrow the guest's memory budget: then a disk, as first
   written, holds the store.
-- Its build is a script in `scripts/`, its outputs' SHA-256 recorded in `bench/native/guest/`.
+- Its build is `scripts/guest/build.sh`, its outputs' SHA-256 recorded in `bench/native/guest/<arch>/RECORD.md`.
+  Two paths, both recorded there:
+  - **From source** (build.sh): the kernel by Shards' own `scripts/build-kernel.sh` in Shards' pinned builder,
+    checked against `scripts/guest/kernel-needs.config`; `hex` static against glibc, the runtime's choice for the
+    `oci` class's start (static glibc spawned 0.22 ms against 0.34 ms dynamic, and musl gained nothing over it).
+  - **The bring-up's** (2026-11-06, while no Linux host could build): the kernel is Shards' release of the same
+    pinned build (`crates/shards/src/kernel.rs:21-61` pins each URL and SHA-256), its released config checked
+    against the same list; `hex` is static **musl**, linked by the `rust-lld` Rust ships, built on the Mac Studio
+    as Shards builds its own Linux guests there (Shards' `.cargo/config.toml:21-27`), so no cross C toolchain is
+    needed. This departs from static glibc: musl's allocator and its thread and process start are the unknowns
+    the runtime chose glibc to avoid. Falsified, and replaced by the from-source glibc build, if the guest's
+    `oci` create-to-start or exec measures slower with the musl `hex` than with a static-glibc `hex` on the same
+    guest kernel.
 
 ## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
@@ -193,31 +205,35 @@ Hex's tests of the channel, each citing its ID:
   `ro` per share in tag order (`hex.shares=rw,ro`: `shards0` writable, `shards1` read-only), and mounts each as
   `virtiofs` at `/run/hex/shares/<i>`; a bad mode, the parameter twice or more than 32 shares are refused by
   name (`crates/hex-cli/src/guest.rs`).
+- HEX-GUEST-12: as the kernel's first process (PID 1 with `argv[0]` `/init`; a container's PID 1 runs as itself),
+  `hex` is the guest's init whatever words the kernel passes it, so the command line
+  needs no `-- guest init` (Shards appends its own words, ` quiet` with no console reader,
+  `crates/vmm/src/vm/mod.rs:1007-1018`), and as any other process it is not (`crates/hex-cli/src/guest.rs`).
 - HEX-GUEST-8: the conformance suite, every case, on `oci` and `process` boxes, through `hex guest relay` and the
   guest client, Unix sockets standing in for vsock (`crates/hex-cli/tests/node_socket.rs`): passed on fedora,
   rootless, 2026-11-04 (unit `hex-native-s5-test-20261104T091420Z`, tree `2f93b9d`).
 
-- HEX-GUEST-12: the staging stream (§4a): a stage's entries read back as written however the stream cuts them;
+- HEX-GUEST-13: the staging stream (§4a): a stage's entries read back as written however the stream cuts them;
   hostile names (absolute, `..`, `.`, empty components, NUL, not UTF-8), kinds (a device's, a FIFO's, a socket's),
   modes and fields refused by type; every count past its bound refused from its head (`hex_core::stream::files`).
-- HEX-GUEST-13: the relay's staging port: a staged tree lands under `<staged>/<box id>/` as it was, modes kept, and
+- HEX-GUEST-14: the relay's staging port: a staged tree lands under `<staged>/<box id>/` as it was, modes kept, and
   goes when removed; a stage that names its way out through a link it made, comes twice, carries a device's kind or
   is cut short is refused and leaves nothing (`hex_node::relay::files`).
-- HEX-GUEST-14: the host's packer: a host tree packs parents first, files with their bytes; a device node or socket
+- HEX-GUEST-15: the host's packer: a host tree packs parents first, files with their bytes; a device node or socket
   is refused by its path; the stage's bounds refused before anything past them is sent
   (`hex_client::guest::stage`).
-- HEX-GUEST-15: the spec rewrite and the shares: shared roots read from `HEX_GUEST_SHARES` or this OS's default
+- HEX-GUEST-16: the spec rewrite and the shares: shared roots read from `HEX_GUEST_SHARES` or this OS's default
   (Docker Desktop's list, never `/`); a bundle's `config.json` and an `OciSpec` rewritten to the staged root and
   each bind source's path under its share, writable binds passing; a source under no share refused by name, naming
   the shared roots (`hex_runtime::guest`).
-- HEX-GUEST-16: the guest runtime: its inputs (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
+- HEX-GUEST-17: the guest runtime: its inputs (`SHARDS_BIN`, `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`,
   `HEX_GUEST_CPUS`, `HEX_GUEST_MEMORY_MIB`) read before any boot, every missing one named in one refusal;
   where Shards has no backend the class is refused as the platform's before
   anything boots; the guest's spec names its init, the channel's three ports and its shares (`hex_runtime::guest`).
-- HEX-GUEST-17: the conformance suite on `oci` boxes through `hex_runtime::guest::WithGuest` over
+- HEX-GUEST-18: the conformance suite on `oci` boxes through `hex_runtime::guest::WithGuest` over
   `shards_api::sim::SimGuests`, whose guest runs `hex guest relay` to a node agent: the real link, staging and
   rewrite on Linux (`crates/hex-cli/tests/node_socket.rs`).
-- HEX-GUEST-18: the same suite through the real `shards_api::Shards` from the host's node, run where
+- HEX-GUEST-19: the same suite through the real `shards_api::Shards` from the host's node, run where
   `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD` and `SHARDS_BIN` are set (`crates/hex-cli/tests/guest_real.rs`,
   ignored elsewhere).
 

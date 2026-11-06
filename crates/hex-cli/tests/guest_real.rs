@@ -1,4 +1,4 @@
-//! HEX-GUEST-18 (native plan step 5, docs/design/shards-guest.md §6): the `oci` class's conformance suite,
+//! HEX-GUEST-19 (native plan step 5, docs/design/shards-guest.md §6): the `oci` class's conformance suite,
 //! every case, through a real Shards guest booted by `shards_api::Shards` from this host, the path a macOS
 //! or Windows node takes: `hex_runtime::guest::WithGuest` boots one guest, stages each box's root into it
 //! and forwards every call to the Linux node agent inside. "Boot the guest, run every case, expect each to
@@ -6,7 +6,7 @@
 //!
 //! It needs a guest, so it runs only where one is given, and says SKIP and why elsewhere:
 //! - `HEX_GUEST_KERNEL`: the guest's kernel (Shards' pinned 6.18; an arm64 `Image` or x86_64 `vmlinux`);
-//! - `HEX_GUEST_INITRD`: its initramfs, whose `/init` is a static Linux `hex` (`hex guest init`);
+//! - `HEX_GUEST_INITRD`: its initramfs, whose `/init` is a static Linux `hex` (as PID 1, `hex` is the guest's init);
 //! - `SHARDS_BIN`: the `shards` binary (on macOS the signed build, where it is installed);
 //! - `HEX_GUEST_LINUX_HEX`: a static Linux `hex` for the guest's architecture, put at `/hex` in each
 //!   box's root so the suite's programs (`hex selftest-box`) run there;
