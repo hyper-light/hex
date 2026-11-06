@@ -396,7 +396,7 @@ mod tests {
         let config = r#"{"ociVersion":"1.3.0","root":{"path":"rootfs"},"annotations":{"k\u0001":"\"\\\/\b\f\n\r\t\u001féé","k":"v","k":"w"}}"#;
         let spec = crate::linux::oci::spec::Spec::parse(config.as_bytes()).unwrap();
         let key = r#""annotations":"#;
-        let text = &config[config.find(key).unwrap() + key.len()..config.len() - 1];
+        let text = config.split_once(key).unwrap().1.strip_suffix('}').unwrap();
         let annotations = serde_json::to_vec(&spec.annotations).unwrap();
         assert!(
             annotations.len() <= text.len(),
