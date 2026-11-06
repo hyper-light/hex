@@ -64,13 +64,13 @@ impl Fixture for BinFixture {
     }
 }
 
-/// The Mac Studio's measured allocation rate (bench/native/macos/RESULT.md): 256 GiB/s, the pacing the
-/// footprint bound is reckoned against. The process rate is set high so the process bound reads at the
-/// 250 µs floor near it; a box forks far slower than this.
+/// The runtime's pacing rates from the record of one member's growth, the fastest of its passes
+/// (bench/native/records/native-box-macos-growth-8503dc0-20261106T171108Z.txt): every box here holds one
+/// member at a time.
 fn runtime() -> MacRuntime {
     MacRuntime::new(
-        NonZeroU64::new(256 * GIB).unwrap(),
-        NonZeroU64::new(1_000_000).unwrap(),
+        NonZeroU64::new(2_596_898_598).unwrap(),
+        NonZeroU64::new(426).unwrap(),
     )
     .expect("a macOS runtime")
 }
@@ -280,12 +280,12 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
     .expect("create");
     const RUNS: usize = 60;
     // A missed exit event makes the wait sleep out its whole budget. Late is past the slowest end on record
-    // across every host and OS (conformance's SLOWEST_RECORDED_END); the budget is conformance's PATIENCE,
-    // twice that, so a legitimate end is never late and a missed one always is. (One host's end maximum
+    // across every host and OS (conformance's SLOWEST_RECORDED_END); the budget is the suite's learned
+    // patience, at least twice that, so a legitimate end is never late and a missed one always is. (One host's end maximum
     // doesn't carry: 59.6 ms on adas-mac-studio-2 at load 2-5 was 550-770 ms on adalundhe-macbook-pro at
     // load 21, 2026-11-06.)
     let late_after = hex_api::conformance::SLOWEST_RECORDED_END;
-    let budget = hex_api::conformance::PATIENCE;
+    let budget = hex_api::conformance::patience();
     let mut late = Vec::new();
     for i in 0..RUNS {
         let mut p = rt

@@ -891,7 +891,7 @@ mod tests {
             &SimFixture::Process,
             &SimFixture::Process,
             s,
-            conformance::PATIENCE,
+            conformance::patience(),
         )
         .unwrap();
         // HEX-DIFF-2 reads the box twice; the second read waited out two lagging readings.

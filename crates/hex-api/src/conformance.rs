@@ -81,16 +81,11 @@ pub struct Failure {
 /// The slowest end recorded across every driver and OS of the native bench, from a program's start to
 /// its reported end: Process Governor's 6,239 ms on jupiter (bench/native/RESULT.md, Windows, pass 1).
 pub const SLOWEST_RECORDED_END: Duration = Duration::from_millis(6_239);
-/// Longest a case waits for a program it expects to end: a bound on a wait for a fact, so a runtime that
-/// never reports an end fails the case instead of hanging the suite. Twice [`SLOWEST_RECORDED_END`]: the
-/// x2 is the false-alarm margin, so a run as slow as the slowest on record still passes.
+/// The learned wait's bound before any sample, twice [`SLOWEST_RECORDED_END`] (the x2 the false-alarm margin):
+/// a fixed wait for a program's end, for the tests that wait outside the suite's learned waits
+/// (hex-cli's oci_box, oci_spec_box and node_socket on every native line). The suite itself waits on
+/// [`patience`], which learns.
 pub const PATIENCE: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
-/// How long a case watches a program it expects to keep running: the negative watch, "this does not end".
-/// It rests on the same record across hosts as [`PATIENCE`]: an end can come as late as
-/// [`SLOWEST_RECORDED_END`] (one host's end maximum doesn't carry: 59.6 ms on adas-mac-studio-2 was 550-770 ms
-/// on adalundhe-macbook-pro at load 21, 2026-11-06), so the watch is twice that, the x2 the same
-/// false-alarm margin. Each such watch costs that long; the suite has a handful per class.
-pub const STILL_RUNNING: Duration = SLOWEST_RECORDED_END.saturating_mul(2);
 
 /// A wait whose bound is learned (Hex's rule for learned waits): before any sample, twice the slowest
 /// answer on its record; then twice the slowest of the record and what it has seen; and it only rises, so a
@@ -123,7 +118,7 @@ impl LearnedWait {
 }
 
 /// The suite's waits for a program's end or a box's answer, seeded from [`SLOWEST_RECORDED_END`]; each wait
-/// that gets its answer teaches it. [`PATIENCE`] and [`STILL_RUNNING`] are its bound before any sample.
+/// that gets its answer teaches it. [`PATIENCE`] is its bound before any sample.
 pub static ENDS: LearnedWait = LearnedWait::new(SLOWEST_RECORDED_END);
 
 /// How long a case waits now for a program it expects to end: [`ENDS`]' bound.
@@ -131,8 +126,10 @@ pub fn patience() -> Duration {
     ENDS.bound()
 }
 
-/// How long a case watches now a program it expects to keep running: [`ENDS`]' bound, since an end may
-/// come as late as the slowest seen.
+/// How long a case watches now a program it expects to keep running (the negative watch, "this does not
+/// end"): [`ENDS`]' bound, since an end may come as late as the slowest seen, and one host's end maximum
+/// doesn't carry (59.6 ms on adas-mac-studio-2 was 550-770 ms on adalundhe-macbook-pro at load 21,
+/// 2026-11-06).
 pub fn still_running() -> Duration {
     ENDS.bound()
 }
