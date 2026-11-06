@@ -19,8 +19,8 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-/// A pool's bounds and its waits' calibration reads, in milliseconds: `None` for a wait left uncalibrated, so its
-/// first wait is unarmed and its first answer calibrates it.
+/// A pool's bounds and its waits' seeds, in milliseconds: `None` for a wait left measuring, so its first wait is
+/// unarmed and its first answer arms it.
 #[derive(Debug, Clone, Copy)]
 struct Setup {
     limits: Limits,
@@ -29,8 +29,8 @@ struct Setup {
 }
 
 impl Setup {
-    /// The pool, its waits calibrated by one read each of half the wait it is to start with, so it starts at twice
-    /// that (`patience::TIMES_SLOWEST`).
+    /// The pool, each wait seeded with half the wait it is to start with, so it starts at twice that
+    /// (`patience::TIMES_SLOWEST`).
     fn pool(self) -> Seeds {
         let mut pool = Seeds::new(self.limits);
         calibrate(&mut pool.wait, &mut pool.hang, self);
@@ -39,12 +39,10 @@ impl Setup {
 }
 
 fn calibrate(wait: &mut Patience, hang: &mut Patience, setup: Setup) {
-    if let Some(w) = setup.wait {
-        wait.answered(ms(w) / 2);
-    }
-    if let Some(h) = setup.hang {
-        hang.answered(ms(h) / 2);
-    }
+    let seed =
+        |ms_: Option<u64>| ms_.map_or_else(Patience::measuring, |n| Patience::seeded(ms(n) / 2));
+    *wait = seed(setup.wait);
+    *hang = seed(setup.hang);
 }
 
 fn setup(seeds: usize, waiting: usize, wait: Option<u64>, hang: Option<u64>) -> Setup {
@@ -150,8 +148,8 @@ impl Oracle {
             asking: true,
             counts: Counts::default(),
             handed: vec![0; slots],
-            wait: Patience::new(),
-            hang: Patience::new(),
+            wait: Patience::measuring(),
+            hang: Patience::measuring(),
         }
         .calibrated(setup)
     }
@@ -704,7 +702,7 @@ fn event() -> impl Strategy<Value = Event> {
 }
 
 /// Small pools, short lines and short waits, which histories fill, cross and drain often, calibrated and not; and
-/// a node's first-start pool of one seed, uncalibrated as a node starts.
+/// a node's first-start pool of one seed, measuring.
 fn bounds() -> impl Strategy<Value = Setup> {
     prop_oneof![
         8 => (
@@ -1044,12 +1042,12 @@ fn a_growing_pool_adds_a_slot_for_each_create_that_finds_none_free_up_to_its_bou
     );
 }
 
-/// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; AC-T7.1.3): the line's wait and the hang bound
-/// are each twice the slowest answer the pool has recorded, unarmed until the first. Do: on a new pool of one seed,
-/// serve a create for 4 ms while another waits 3 ms in line; let the second's seed pass its bound; then let a
-/// create's wait in line end. Expect: the first waits unarmed (their calibration reads), then the hang bound 8 ms and
-/// the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused after 6 ms; neither
-/// wait moved by the hang or the refusal, which are no samples.
+/// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; AC-T7.1.3): measuring, with no record, the
+/// line's wait and the hang bound are each twice the slowest answer the pool has seen, unarmed until the first. Do:
+/// on a pool of one seed whose waits measure, serve a create for 4 ms while another waits 3 ms in line; let the
+/// second's seed pass its bound; then let a create's wait in line end. Expect: the first waits unarmed, then the
+/// hang bound 8 ms and the line's wait 6 ms; the seed taken for hung at 8 ms and not before; the create refused after
+/// 6 ms; neither wait moved by the hang or the refusal, which are no samples.
 #[test]
 fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
     let mut pool = setup(1, 4, None, None).pool();
@@ -1059,7 +1057,7 @@ fn the_wait_and_the_hang_bound_are_twice_the_slowest_answer() {
     assert_eq!(
         pool.until(seed),
         Ok(None),
-        "the first clone is the calibration read"
+        "measuring, the first clone's wait is unarmed"
     );
     let Ok(Admit::Wait { ticket, until }) = pool.create(ms(1)) else {
         panic!("a create with its only seed busy didn't wait");
@@ -1108,4 +1106,23 @@ fn a_failed_start_with_no_seed_left_refuses_the_line() {
         Ok(Claim::Refused(Refused::Waited { wait: ms(3) }))
     );
     assert_eq!(pool.waiting(), 0);
+}
+
+/// Decision 9 (the lead's failure-bound rule; AC-T7.1.3): before any answer of its own, a node's pool bounds its waits
+/// from the record. Do: open a pool with the node's seeds, serve a create for 1 ms, then one for 5 ms. Expect: both
+/// waits armed at once at twice the record's slowest clone (`seed_path.md` run 3, 1.918 ms), no calibration read;
+/// the fast answer leaving the hang bound there, the slow one raising it to 10 ms; the line's wait untouched.
+#[test]
+fn a_pools_waits_are_seeded_from_the_record_and_only_rise() {
+    let record = Some(CLONE_SLOWEST * 2);
+    let mut pool = Seeds::new(setup(1, 4, None, None).limits);
+    assert_eq!(pool.deadlines(), (record, record));
+    let seed = up(&mut pool, ms(0));
+    assert_eq!(pool.create(ms(0)), Ok(Admit::Seed(seed)));
+    assert_eq!(pool.until(seed), Ok(record));
+    assert_eq!(pool.done(seed, ms(1)), Ok(None));
+    assert_eq!(pool.deadlines(), (record, record));
+    assert_eq!(pool.create(ms(1)), Ok(Admit::Seed(seed)));
+    assert_eq!(pool.done(seed, ms(6)), Ok(None));
+    assert_eq!(pool.deadlines(), (record, Some(ms(10))));
 }

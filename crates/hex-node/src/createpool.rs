@@ -52,6 +52,9 @@ pub struct CreatePool {
 }
 
 struct Shared {
+    /// The most seeds a create is tried on before it is refused: the pool's bound, each try past the first
+    /// having retired a seed taken for hung.
+    retries: usize,
     /// The `hex` binary re-exec'd as `hex __oci-seed`.
     exe: PathBuf,
     /// The mountpoint a create seed prunes its mount namespace at (goal 5 plan step 2), passed to each
@@ -143,7 +146,8 @@ impl CreatePool {
         )
     }
 
-    /// A pool with `limits`, every slot from the start: the tests', which set each bound.
+    /// A pool with `limits`, every slot from the start, its waits seeded from the tests' own patience
+    /// ([`hex_api::conformance::PATIENCE`]): the tests', which set each bound and hold seeds as long as they need.
     #[cfg(test)]
     pub fn with_limits(
         exe: PathBuf,
@@ -154,7 +158,7 @@ impl CreatePool {
     ) -> Result<Self, Refusal> {
         Self::open(
             exe,
-            Seeds::new(limits),
+            Seeds::new(limits).seeded(hex_api::conformance::PATIENCE),
             limits,
             1,
             prune,
@@ -181,6 +185,7 @@ impl CreatePool {
         };
         let slots = limits.seeds.get();
         let shared = Arc::new(Shared {
+            retries: slots,
             exe,
             prune,
             #[cfg(debug_assertions)]
@@ -283,10 +288,45 @@ impl CloneInit for CreatePool {
 
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
         let shared = &self.shared;
-        let (id, proc, patience) = shared.acquire()?;
         let pruned = req.pruned.is_some();
         let (create, fds) = message(&req);
-        match round_trip(proc.socket.as_fd(), &create, &fds, patience) {
+        // A seed past its hang bound is retired, counted, and the create goes to another seed (the lead's rule of
+        // 2026-11-06: no caller failure where an alternative exists), at most once a slot.
+        let mut tries = 0usize;
+        loop {
+            tries = tries.saturating_add(1);
+            match self.try_seed(&create, &fds, pruned) {
+                Err(Trip::Hung(e)) => {
+                    // The hung seed is killed and reaped, so its clone either made the init in the box's cgroup or
+                    // never will: with the cgroup empty nothing of this create was made, and another seed may make
+                    // it; otherwise it is refused, by type.
+                    if tries >= shared.retries || req.cgroup.populated().unwrap_or(true) {
+                        return Err(e);
+                    }
+                }
+                Err(Trip::Refused(e) | Trip::Broken(e)) => return Err(e),
+                Ok(started) => return Ok(started),
+            }
+        }
+    }
+
+    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+        self.claim_parked(parked, req)
+    }
+}
+
+impl CreatePool {
+    /// One try of a create on a seed the pool hands it: the init's pid and pidfd, or why not, the seed given
+    /// back, ended or retired as its answer says.
+    fn try_seed(
+        &self,
+        create: &Create,
+        fds: &[BorrowedFd<'_>],
+        pruned: bool,
+    ) -> Result<(i32, OwnedFd), Trip> {
+        let shared = &self.shared;
+        let (id, proc, patience) = shared.acquire().map_err(Trip::Refused)?;
+        match round_trip(proc.socket.as_fd(), create, fds, patience) {
             Ok((pid, pidfd, made)) => {
                 if pruned && let Some(count) = shared.made.get(usize::from(made.code())) {
                     let _ = count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -301,23 +341,23 @@ impl CloneInit for CreatePool {
             // to the pool, the refusal to the caller.
             Err(Trip::Refused(e)) => {
                 shared.done(id, proc);
-                Err(e)
+                Err(Trip::Refused(e))
             }
             // The seed is unusable (its socket broke, or it says its own machinery failed): end it, free
             // its slot for a restart, refuse this create.
             Err(Trip::Broken(e)) => {
                 shared.died(id, proc);
-                Err(e)
+                Err(Trip::Broken(e))
             }
-            // It didn't answer within the hang bound: taken for hung, which backs the bound off.
+            // It didn't answer within the hang bound: retired, taken for hung and counted (no sample).
             Err(Trip::Hung(e)) => {
                 shared.hung(id, proc);
-                Err(e)
+                Err(Trip::Hung(e))
             }
         }
     }
 
-    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+    fn claim_parked(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
         let pruned = req.pruned.is_some();
         let Some((pid, pidfd, socket)) = parked.take() else {
             return Err(OciError::Broken(
@@ -327,7 +367,7 @@ impl CloneInit for CreatePool {
         let (create, fds) = message(req);
         let patience = self.shared.lock()?.seeds.deadlines().1;
         // The parked init answers as a seed does, with a pidfd of its own, which the agent's stands for, within
-        // the hang bound the seeds' answers taught (the park that made it calibrated it, if nothing before had).
+        // the hang bound the seeds' answers taught, or the record's before them.
         match round_trip(socket.as_fd(), &create, &fds, patience) {
             Ok((_, _, made)) => {
                 // Counted by how its mount namespace was made, as a seed's clone is (clone_init).
@@ -396,8 +436,8 @@ impl Parker {
                 // Held from here, so ended and reaped if it never says it is parked, which it does within
                 // the hang bound the seeds' answers taught.
                 let parked = Parked::new(pid, pidfd, ours, flags);
-                // Its park was a seed's answer, so the hang bound is armed by now; were it not, the wait is
-                // a calibration read, unbounded.
+                // The hang bound, seeded from the record, is armed; were it measuring with nothing seen, the
+                // wait would be unbounded.
                 let patience = shared.lock()?.seeds.deadlines().1;
                 parked.wait_parked(patience.unwrap_or(Duration::MAX))?;
                 Ok(parked)
@@ -555,7 +595,7 @@ impl Shared {
     /// its spare, and not otherwise: a wake is a system call, and the woken thread takes the lock this
     /// create holds. Returns the seed and its checked-out process (its slot's `procs` entry taken until
     /// [`done`](Self::done) or [`died`](Self::died)), and how long the shell waits for its answer: until the
-    /// core takes it for hung, or `None` while the hang bound is uncalibrated (this answer is its calibration).
+    /// core takes it for hung, or `None` while the hang bound measures with nothing seen.
     fn acquire(&self) -> Result<(SeedId, Proc, Option<Duration>), OciError> {
         let mut inner = self.lock()?;
         // A seed that has served a create for the hang bound is taken for hung here, killed and its slot
@@ -591,7 +631,7 @@ impl Shared {
             fn poisoned<T>(_: T) -> OciError {
                 OciError::Broken("the create seed pool's lock was poisoned".to_owned())
             }
-            // An uncalibrated line's wait lasts until a seed is handed to it: the line's calibration read.
+            // A measuring line's wait, with nothing seen, lasts until a seed is handed to it.
             inner = match until {
                 Some(until) => {
                     let left = until.saturating_sub(self.now());
@@ -838,7 +878,7 @@ enum Trip {
 /// Sends the create and its descriptors to the seed and reads the answer: the init's pid and pidfd, or a
 /// refusal. The wait for the answer is bounded by `patience`, what is left of the hang bound the core
 /// learned, so a wedged seed is taken for hung rather than waited on for ever (CLAUDE.md §2, §4); `None`
-/// only for the pool's calibration read, its first answer.
+/// only while the hang bound measures with nothing seen.
 fn round_trip(
     socket: BorrowedFd<'_>,
     create: &Create,
@@ -887,7 +927,7 @@ fn round_trip(
     }
 }
 
-/// Whether `fd` turns readable within `patience`; with none (a calibration read) it waits until it does.
+/// Whether `fd` turns readable within `patience`; with none (a wait measuring) it waits until it does.
 fn readable(fd: BorrowedFd<'_>, patience: Option<Duration>) -> Result<bool, OciError> {
     let deadline = patience.and_then(|p| Instant::now().checked_add(p));
     loop {
@@ -975,7 +1015,7 @@ mod tests {
 
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
-    /// seed under the node's own bounds, its line's wait uncalibrated. Expect: the create is refused by
+    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is refused by
     /// type once the start it asked for fails too (no seed is up or starting, so none can come), naming
     /// the failed start's cause, not only that no seed came free; never left waiting.
     #[test]
@@ -1061,8 +1101,8 @@ mod tests {
     }
 
     /// Goal 5 extended step 6: a seed given back goes at once to the create waiting in line, woken by the
-    /// hand-off and not by its wait's end. Do: open a pool of one slot, whose line's wait is uncalibrated, so
-    /// a create in it waits for a wake alone; take its seed; ask for another from a thread of the test's, and
+    /// hand-off and not by its wait's end. Do: open a pool of one slot, whose waits are seeded from the test's
+    /// patience, so a create in it is refused only past twice that; take its seed; ask for another from a thread of the test's, and
     /// once that create waits in line, give the first back. Expect: the waiting create is handed the seed
     /// given back within the test's patience (a hand-off that woke no one fails).
     #[test]

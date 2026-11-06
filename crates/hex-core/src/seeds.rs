@@ -20,11 +20,10 @@
 //!   A report about a seed that has left is refused by type ([`Stale::Gone`]), never taken for its slot's next
 //!   seed's.
 //! - **Learned waits** (decision 9; Ada's 2026-11-06 rule, the lead's failure-bound rule): the line's wait and the
-//!   hang bound are each twice the slowest answer the pool has recorded on `now`'s clock ([`crate::patience`]). A
-//!   create handed a seed after waiting is a sample of the line's wait, a seed done with its create one of the hang
-//!   bound's. Until its first sample a wait is unarmed (`until` is `None`): that first wait is its calibration read,
-//!   the first seed's first clone for the hang bound. A create refused at its wait's end, and a seed that died or
-//!   was taken for hung, is no sample (Karn's point).
+//!   hang bound are each twice the slowest answer, recorded ([`CLONE_SLOWEST`], before the node has one) or seen by
+//!   this pool on `now`'s clock ([`crate::patience`]), and only rise. A create handed a seed after waiting is a
+//!   sample of the line's wait, a seed done with its create one of the hang bound's. A create refused at its wait's
+//!   end, and a seed that died or was taken for hung, is no sample (Karn's point).
 //! - **Restarts are bounded**: a start that fails, or a seed that dies before it serves a create, stops the starting
 //!   until the next create, so a node whose seeds can't start tries each slot once a create, never in a loop
 //!   (CLAUDE.md §2).
@@ -38,6 +37,15 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::patience::Patience;
+
+/// The slowest answer in a seed's recorded distribution on the bench's host class (x86_64 Linux, fedora's Core
+/// i9-14900HX): a seed's clone of an init, request to the init's first run, max 1.918 ms of 320
+/// (`bench/competitive/probes/seed_path.md`, run 3, under a 1-minute load of 25.5 to 29.6). Run 1's max of 15.778 ms
+/// is no clone's: its first create's, timed from its seed's own start, as the record says. It seeds a pool's hang
+/// bound before the node has an answer of its own, and the line's wait, since a create in line waits for a busy
+/// seed's answer (decision 9: twice the slowest, recorded or seen). Another host class has no record yet; it starts
+/// from this one's and learns its own.
+pub const CLONE_SLOWEST: Duration = Duration::from_micros(1_918);
 
 /// The pool's bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +256,14 @@ impl Seeds {
         Self::growing(limits, limits.seeds.get())
     }
 
+    /// The pool with both its waits seeded from a record whose slowest answer is `slowest` in place of
+    /// [`CLONE_SLOWEST`]: for a host class with a record of its own, or a test whose seeds answer as it chooses.
+    pub fn seeded(mut self, slowest: Duration) -> Self {
+        self.wait = Patience::seeded(slowest);
+        self.hang = Patience::seeded(slowest);
+        self
+    }
+
     /// A pool with `start` slots vacant (one at least, [`Limits::seeds`] at most), asking for all of them, that adds
     /// a vacant slot for each create that finds no seed idle and no slot vacant, up to [`Limits::seeds`]: its slots
     /// are the most creates it has seen at once, never fewer than it started with, and never removed, so a burst it
@@ -270,8 +286,8 @@ impl Seeds {
             next_ticket: 0,
             counts: Counts::default(),
             handed: vec![0; slots],
-            wait: Patience::new(),
-            hang: Patience::new(),
+            wait: Patience::seeded(CLONE_SLOWEST),
+            hang: Patience::seeded(CLONE_SLOWEST),
         }
     }
 

@@ -37,6 +37,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hex_api::{BoxId, Refusal};
+use hex_core::patience::Patience;
 use hex_core::record::BoxRecord;
 
 use crate::turns::{Turn, Turns};
@@ -124,7 +125,6 @@ impl Store {
                 .and_then(|()| owner_only(&shard))
                 .map_err(|e| Refusal::os("making a shard of the runtime record directory", e))?;
         }
-        let calibration = calibrate(disk)?;
         let store = Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
@@ -133,18 +133,21 @@ impl Store {
             #[cfg(target_os = "linux")]
             run_fd: Arc::new(open_directory(run)?),
             // A change waits for the change of the same box before it: that one's write and its fsyncs.
-            // How long is learned from the changes made (decision 9), calibrated as the store opens, so a disk
-            // that has stopped answering is reported as a fault, never waited on for ever (CLAUDE.md §4).
+            // How long is learned from the changes made (decision 9), so a disk that has stopped answering is
+            // reported as a fault, refused by type, never waited on for ever (CLAUDE.md §4): a record write has
+            // no other path. MEASURING: `bench/competitive/probes/levers.md` times a record-sized write and
+            // rename but not its fsyncs, and gives no max; the record to come is that probe's write mode with
+            // the file's and directory's fsyncs, its max on fedora's btrfs, which then seeds it.
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
                 TURNS,
+                Patience::measuring(),
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             crash_before_write: Arc::default(),
         };
-        store.turns.calibrate(calibration);
         Ok(store)
     }
 
@@ -465,29 +468,6 @@ impl Store {
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-}
-
-/// The store's calibration read for its turns' wait (decision 9): one write as a durable record's is made, to a
-/// file of its own in the state directory `disk` (written, fsynced, renamed into place, the directory fsynced),
-/// timed and removed, as the store opens, off every create's path. A durable write is the slowest a turn holds,
-/// so the wait it arms is twice the slowest kind of change. Its name is no record's (`<id>.json`), so a crash
-/// mid-write leaves nothing recovery reads as one, and the next open writes over it.
-fn calibrate(disk: &Path) -> Result<std::time::Duration, Refusal> {
-    let calibrating = |e| Refusal::os("calibrating the record store's writes", e);
-    let (temp, file) = (disk.join(".calibration.tmp"), disk.join(".calibration"));
-    let began = std::time::Instant::now();
-    let mut f = File::create(&temp).map_err(calibrating)?;
-    f.write_all(b"{}\n")
-        .and_then(|()| f.sync_all())
-        .map_err(calibrating)?;
-    drop(f);
-    fs::rename(&temp, &file).map_err(calibrating)?;
-    File::open(disk)
-        .and_then(|d| d.sync_all())
-        .map_err(calibrating)?;
-    let took = began.elapsed();
-    fs::remove_file(&file).map_err(calibrating)?;
-    Ok(took)
 }
 
 /// Retain a close-on-exec directory descriptor for relative record writes and durable renames.
@@ -842,13 +822,13 @@ mod tests {
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
     /// not written, until the turn is let go, and then is. The test holds the turn as long as it takes to
-    /// see the second write wait, so the turns are calibrated with the test's own patience, within which
+    /// see the second write wait, so the turns are armed with the test's own patience, within which
     /// the hold ends (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
-        store.turns.calibrate(hex_api::conformance::PATIENCE);
+        store.turns.held_for(hex_api::conformance::PATIENCE);
         let held = record("held");
         let turn = store.claim(&held.spec.id).unwrap();
         let (done, written) = std::sync::mpsc::channel();

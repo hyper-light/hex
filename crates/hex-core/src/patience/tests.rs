@@ -1,6 +1,7 @@
 //! The learned wait's tests (decision 9; Ada's 2026-11-06 rule and the lead's failure-bound rule; AC-T7.1.1,
-//! AC-T7.1.3: every wait a node makes is bounded and learned). Against random answers, the wait is twice the
-//! slowest, never shrinks, and lets through every answer no more than twice slower than any seen, and no other.
+//! AC-T7.1.3: every wait a node makes is bounded and learned). Against random records and answers, the wait is twice
+//! the larger of the record's slowest and the slowest seen, never shrinks, and lets through every answer no more
+//! than twice slower than those, and no other; a measuring wait is unarmed until its first answer.
 
 use std::time::Duration;
 
@@ -13,58 +14,78 @@ fn ms(n: u64) -> Duration {
 }
 
 proptest! {
-    /// Do: record random answers, then ask whether a new answer would come within the wait. Expect: after each
-    /// answer the wait is twice the slowest so far, never less than before; a new answer comes within it exactly
-    /// when it is at most twice the slowest.
+    /// Do: seed a wait from a random record (or none, measuring), record random answers, then ask whether a new
+    /// answer would come within it. Expect: after each answer the wait is twice the larger of the record's slowest
+    /// and the slowest so far, never less than before; a new answer comes within it exactly when it is at most that.
     #[test]
-    fn the_wait_is_twice_the_slowest_answer(
+    fn the_wait_is_twice_the_slowest_recorded_or_seen(
+        record in proptest::option::of(0u64..86_400_000_000_000),
         answers in prop::collection::vec(0u64..86_400_000_000_000, 1..100),
         next in 0u64..200_000_000_000_000,
     ) {
-        let mut patience = Patience::new();
-        let (mut before, mut slowest) = (Duration::ZERO, Duration::ZERO);
+        let patience = match record {
+            Some(ns) => Patience::seeded(Duration::from_nanos(ns)),
+            None => Patience::measuring(),
+        };
+        let mut slowest = record.map(Duration::from_nanos);
+        let mut before = patience.deadline();
         for &ns in &answers {
             let answer = Duration::from_nanos(ns);
             patience.answered(answer);
-            slowest = slowest.max(answer);
-            let got = patience.deadline().unwrap();
-            prop_assert_eq!(got, slowest * 2);
+            slowest = Some(slowest.map_or(answer, |s| s.max(answer)));
+            let got = patience.deadline();
+            prop_assert_eq!(got, slowest.map(|s| s * 2));
             prop_assert!(got >= before, "the wait shrank from {:?} to {:?}", before, got);
             before = got;
         }
-        prop_assert_eq!(patience.slowest(), Some(slowest));
         let next = Duration::from_nanos(next);
-        prop_assert_eq!(next <= patience.deadline().unwrap(), next <= slowest * 2);
+        prop_assert_eq!(next <= patience.deadline().unwrap(), next <= slowest.unwrap() * 2);
     }
 }
 
-/// Calibration. Do: ask a wait with no answer recorded. Expect: no bound to arm, so the shell's first wait is its
-/// calibration read.
+/// The seed. Do: seed a wait from a record whose slowest answer is 1.918 ms, and ask before any answer. Expect:
+/// the bound armed at 3.836 ms, with no calibration read.
 #[test]
-fn with_no_answer_there_is_no_bound() {
-    let p = Patience::new();
-    assert_eq!(p.deadline(), None);
-    assert_eq!(p.slowest(), None);
+fn before_any_answer_the_bound_is_twice_the_records_slowest() {
+    let p = Patience::seeded(Duration::from_micros(1_918));
+    assert_eq!(p.deadline(), Some(Duration::from_micros(3_836)));
 }
 
-/// The calibration read arms the bound. Do: record one answer of 3 ms. Expect: the wait 6 ms.
-#[test]
-fn the_calibration_read_arms_the_bound_at_twice_its_time() {
-    let mut p = Patience::new();
-    p.answered(ms(3));
-    assert_eq!(p.deadline(), Some(ms(6)));
-}
-
-/// A running maximum. Do: answer in 40 ms, then 200 times in 1 ms. Expect: the wait stays 80 ms (a slow answer that
-/// came is a fact about the host), and one slower answer, 50 ms, raises it to 100 ms.
+/// The record is a floor the node's answers only raise. Do: seed at 40 ms, answer 200 times in 1 ms, then once in
+/// 50 ms. Expect: the wait stays 80 ms through the fast answers, then 100 ms.
 #[test]
 fn fast_answers_never_shrink_the_wait_and_a_slower_one_raises_it() {
-    let mut p = Patience::new();
-    p.answered(ms(40));
+    let p = Patience::seeded(ms(40));
     for _ in 0..200 {
         p.answered(ms(1));
     }
     assert_eq!(p.deadline(), Some(ms(80)));
     p.answered(ms(50));
     assert_eq!(p.deadline(), Some(ms(100)));
+}
+
+/// Measuring. Do: ask a wait with no record and no answer, then answer once in 3 ms. Expect: unarmed, then 6 ms.
+#[test]
+fn a_measuring_wait_is_unarmed_until_its_first_answer() {
+    let p = Patience::measuring();
+    assert_eq!((p.deadline(), p.slowest()), (None, None));
+    p.answered(ms(3));
+    assert_eq!(p.deadline(), Some(ms(6)));
+}
+
+/// Shared by threads. Do: from eight threads, answer 1 to 800 ms between them. Expect: the slowest, 800 ms, kept.
+#[test]
+fn answers_from_many_threads_keep_the_slowest() {
+    let p = Patience::measuring();
+    std::thread::scope(|s| {
+        for t in 0..8u64 {
+            let p = &p;
+            s.spawn(move || {
+                for n in 0..100u64 {
+                    p.answered(ms(t * 100 + n + 1));
+                }
+            });
+        }
+    });
+    assert_eq!(p.slowest(), Some(ms(800)));
 }

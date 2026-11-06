@@ -41,10 +41,10 @@
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hex_core::netns_reuse::Refused;
+use hex_core::patience::Patience;
 use rustix::fs::{Mode, OFlags};
 use rustix::net::{AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType};
 
@@ -67,47 +67,17 @@ const MAX_DUMP_READS: usize = MAX_DUMP_BYTES / NLMSG_HDR;
 /// clearing them (`bench/competitive/probes/create_serial.md`, run 15). 8 KiB is over `NLMSG_GOODSIZE` at any page
 /// size, and a fresh namespace's answers are under 2 KiB.
 const READ_BYTES: usize = 8 << 10;
-/// The slowest a fresh namespace's loopback IPv6 address has taken to settle in this process ([`Slowest`]). `::1` is
-/// added tentative (net/ipv6/addrconf.c:1148-1149) and its DAD work is queued (:4173), which clears that once it
-/// gets RTNL (:4194, :4107-4121), then puts in its host route (:6283) and tells `RTNLGRP_IPV6_IFADDR` (:4320,
-/// :5621). So how long it takes is how long the host's RTNL is held by others: the host's, so the process's to
-/// record, not one checker's.
-static SETTLES: Slowest = Slowest::new();
-/// The slowest one read of a dump's answer has taken in this process ([`Slowest`]).
-static ANSWERS: Slowest = Slowest::new();
-
-/// The slowest of the waits it has recorded, and the bound it sets on the next: twice that (Hex's failure bound,
-/// the lead's of 2026-11-06), no other floor or cap. Before it has recorded one there is no bound: the first wait is
-/// the calibration, waited out, and its time arms it. A wait that passes the bound is refused, and recorded as
-/// taking the bound, the least it took, so the next may take twice that. Kept per process, shared by its threads.
-///
-/// A local core of the shape of hex-core's shared one (the waits agent's), until this is pointed at it.
-#[derive(Debug)]
-struct Slowest {
-    /// The slowest wait's nanoseconds and one, so 0 is none recorded.
-    nanos: AtomicU64,
-}
-
-impl Slowest {
-    const fn new() -> Self {
-        Self {
-            nanos: AtomicU64::new(0),
-        }
-    }
-
-    /// One more wait, that took `took`.
-    fn record(&self, took: Duration) {
-        let nanos = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);
-        self.nanos
-            .fetch_max(nanos.saturating_add(1), Ordering::Relaxed);
-    }
-
-    /// The bound on the next wait: twice the slowest recorded, `None` before any is.
-    fn bound(&self) -> Option<Duration> {
-        let stored = self.nanos.load(Ordering::Relaxed).checked_sub(1)?;
-        Some(Duration::from_nanos(stored).saturating_mul(2))
-    }
-}
+/// How long a fresh namespace's loopback IPv6 address takes to settle, learned in this process (decision 9;
+/// [`Patience`]). `::1` is added tentative (net/ipv6/addrconf.c:1148-1149) and its DAD work is queued (:4173), which
+/// clears that once it gets RTNL (:4194, :4107-4121), then puts in its host route (:6283) and tells
+/// `RTNLGRP_IPV6_IFADDR` (:4320, :5621). So how long it takes is how long the host's RTNL is held by others: the
+/// host's, so the process's to record, not one checker's. MEASURING: no record of the settle's distribution yet
+/// (`bench/competitive/probes/input_census.md` records the dumps' sizes, not their times); the lead's pass that
+/// times it on fedora seeds it. Until then it is unarmed until the first settle this process sees.
+static SETTLES: Patience = Patience::measuring();
+/// How long one read of a dump's answer takes, learned in this process ([`Patience`]). MEASURING, as [`SETTLES`]:
+/// the record to come is the same pass's, timing each read of the five dumps.
+static ANSWERS: Patience = Patience::measuring();
 
 /// `bound` as `SO_RCVTIMEO` takes it: in whole microseconds, a `struct timeval`, rounded up, since one of zero
 /// waits for ever (socket(7)); `None`, no bound, waits for ever.
@@ -257,9 +227,9 @@ impl Fresh {
 }
 
 /// The dumps of the namespace the calling thread is in, once no IPv6 address in it is tentative: read again at
-/// each of the namespace's IPv6 address notices, until [`SETTLES`]'s bound, or with none, the first settle this
-/// process sees being its calibration. The socket the notices come to is bound before the first read, so none is
-/// missed. Each settle seen is recorded; one not seen within the bound is refused and recorded as taking it.
+/// each of the namespace's IPv6 address notices, until [`SETTLES`]'s bound, unbounded while it is measuring. The
+/// socket the notices come to is bound before the first read, so none is missed. Each settle seen is recorded; one
+/// not seen within the bound is refused, no sample (Karn's point).
 fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     const WAITING: &str = "waiting for a fresh network namespace's IPv6 address notices";
     let notices = rustix::net::socket_with(
@@ -278,22 +248,22 @@ fn settled(scratch: &mut Scratch) -> Result<Vec<Vec<Vec<u8>>>, OciError> {
     let socket = dump_socket()
         .map_err(|why| OciError::os("reading a fresh network namespace", why.name().to_owned()))?;
     let began = Instant::now();
-    let bound = SETTLES.bound();
-    // Ends at the bound: each pass waits on a notice for what is left of it, or ends. With no bound, the calibration
+    let bound = SETTLES.deadline();
+    // Ends at the bound: each pass waits on a notice for what is left of it, or ends. Measuring, with no bound, it
     // waits on notices until the address settles.
     loop {
         let seen = dumps(&socket, scratch, &ANSWERS).map_err(|why| {
             OciError::os("reading a fresh network namespace", why.name().to_owned())
         })?;
         if !tentative(&seen) {
-            SETTLES.record(began.elapsed());
+            SETTLES.answered(began.elapsed());
             return Ok(seen);
         }
         let left = bound.map(|b| b.saturating_sub(began.elapsed()));
         if let Some(bound) = bound
             && left.is_some_and(|l| l.is_zero())
         {
-            SETTLES.record(bound);
+            // No sample (Karn's point): the namespace is refused, and the checker reads another.
             return Err(OciError::Broken(format!(
                 "a fresh network namespace's loopback IPv6 address was still tentative after {bound:?}, \
                  twice the slowest settle recorded"
@@ -707,16 +677,16 @@ fn links(dev: &str) -> Result<(), Refused> {
 }
 
 /// The five dumps of `socket`'s namespace, the one it was made in, each normalized and sorted, read through
-/// `scratch`, each read waiting at most `answers`' bound ([`Slowest`]), or with none, the calibration, waited out.
+/// `scratch`, each read waiting at most `answers`' bound ([`Patience`]), unbounded while it is measuring.
 fn dumps(
     socket: &OwnedFd,
     scratch: &mut Scratch,
-    answers: &Slowest,
+    answers: &Patience,
 ) -> Result<Vec<Vec<Vec<u8>>>, Refused> {
     rustix::net::sockopt::set_socket_timeout(
         socket,
         rustix::net::sockopt::Timeout::Recv,
-        receive_wait(answers.bound()),
+        receive_wait(answers.deadline()),
     )
     .map_err(|_| Refused::Unreadable)?;
     let mut out = Vec::with_capacity(DUMPS.len());
@@ -760,12 +730,13 @@ fn request(kind: u16, family: u8, header: usize, seq: u32) -> Vec<u8> {
 }
 
 /// Sends `request` and reads the whole answer into `scratch`'s, until `NLMSG_DONE`, bounded; each read's time is
-/// recorded in `answers`, and a read that passed its bound is recorded as taking the bound ([`Slowest`]).
+/// recorded in `answers`; a read that passed its bound is no sample ([`Patience`], Karn's point), and refuses the
+/// namespace, which is thrown away, counted.
 fn ask(
     fd: &OwnedFd,
     request: &[u8],
     scratch: &mut Scratch,
-    answers: &Slowest,
+    answers: &Patience,
 ) -> Result<(), Refused> {
     let sent =
         rustix::net::send(fd, request, SendFlags::empty()).map_err(|_| Refused::Unreadable)?;
@@ -777,15 +748,10 @@ fn ask(
         let asked = Instant::now();
         let got = match rustix::net::recv(fd, &mut scratch.read, RecvFlags::empty()) {
             Ok((got, _)) => got,
-            Err(rustix::io::Errno::AGAIN) => {
-                if let Some(bound) = answers.bound() {
-                    answers.record(bound);
-                }
-                return Err(Refused::Unreadable);
-            }
+            Err(rustix::io::Errno::AGAIN) => return Err(Refused::Unreadable),
             Err(_) => return Err(Refused::Unreadable),
         };
-        answers.record(asked.elapsed());
+        answers.answered(asked.elapsed());
         let chunk = scratch.read.get(..got).ok_or(Refused::Unreadable)?;
         // Every answer the kernel queues holds a message (an end of file, from a peer that isn't the kernel, none).
         if chunk.len() < NLMSG_HDR {

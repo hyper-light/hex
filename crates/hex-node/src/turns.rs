@@ -7,13 +7,15 @@
 //!
 //! The patience is twice the longest a turn has been held (decision 9; Ada's 2026-11-06 rule, the lead's
 //! failure-bound rule; [`hex_core::patience`]): each turn let go is a sample of what a wait for one waits on.
-//! Until the first sample, or a calibration read its owner makes ([`Turns::calibrate`]), a wait is unarmed and
-//! lasts until the turn is let go.
+//! Each owner seeds its turns from the record of its holds, or, with none yet, measures ([`Patience::measuring`]):
+//! until the first sample a measuring wait is unarmed and lasts until the turn is let go.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::patience::Patience;
@@ -65,13 +67,13 @@ impl Drop for Turn<'_> {
 }
 
 impl Turns {
-    /// Turns for `op`, a wait for one learned from the turns held, at most `bound` of them (`what`) taken at
-    /// once.
-    pub fn new(op: &'static str, what: &'static str, bound: usize) -> Self {
+    /// Turns for `op`, a wait for one seeded as `patience` and learned from the turns held, at most `bound` of
+    /// them (`what`) taken at once.
+    pub fn new(op: &'static str, what: &'static str, bound: usize, patience: Patience) -> Self {
         Self {
             held: Mutex::new(Held {
                 boxes: BTreeMap::new(),
-                patience: Patience::new(),
+                patience,
             }),
             free: Condvar::new(),
             waited: AtomicU64::new(0),
@@ -81,8 +83,10 @@ impl Turns {
         }
     }
 
-    /// A calibration read of what a turn holds, `took` long: arms the wait before any turn is let go.
-    pub fn calibrate(&self, took: Duration) {
+    /// A hold of `took` recorded as if a turn had been let go: what a test whose own hold is long arms its wait
+    /// with.
+    #[cfg(test)]
+    pub(crate) fn held_for(&self, took: Duration) {
         self.held
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -103,7 +107,7 @@ impl Turns {
         while let Some(&since) = held.boxes.get(id) {
             let patience = held.patience.deadline();
             held = match patience.and_then(|p| since.checked_add(p)) {
-                // Unarmed: no turn has been let go, nor a calibration made; this wait is the first sample's.
+                // Unarmed: measuring, and no turn has been let go; this wait is the first sample's.
                 None => self.free.wait(held).map_err(|e| self.poisoned(e))?,
                 Some(deadline) => {
                     let left = deadline.saturating_duration_since(Instant::now());
@@ -171,7 +175,7 @@ mod tests {
     /// `Exhausted` naming the bound, then the third's turn given.
     #[test]
     fn turns_past_the_bound_are_refused_by_type() {
-        let turns = Turns::new("op", "turns under way", 2);
+        let turns = Turns::new("op", "turns under way", 2, Patience::measuring());
         let a = turns.take(&id("a")).unwrap();
         let _b = turns.take(&id("b")).unwrap();
         assert_eq!(
@@ -186,13 +190,17 @@ mod tests {
     }
 
     /// CLAUDE.md §2 (T-T7.1.2), decision 9: a wait for the same box's turn ends at twice the slowest hold recorded,
-    /// refused by type, never longer, and the refusal is no sample. Do: calibrate the turns with a read of 25 ms,
+    /// refused by type, never longer, and the refusal is no sample. Do: seed the turns from a hold of 25 ms,
     /// hold box a's turn and take it again. Expect: refused as `Os` for the turns' op after at least 50 ms, the wait
     /// counted once, and the wait still 50 ms.
     #[test]
     fn a_wait_for_the_same_box_ends_at_twice_the_slowest_hold() {
-        let turns = Turns::new("op", "turns under way", 2);
-        turns.calibrate(Duration::from_millis(25));
+        let turns = Turns::new(
+            "op",
+            "turns under way",
+            2,
+            Patience::seeded(Duration::from_millis(25)),
+        );
         let asked = Instant::now();
         let _held = turns.take(&id("a")).unwrap();
         let refused = turns.take(&id("a")).err();
@@ -208,13 +216,13 @@ mod tests {
         assert_eq!(turns.patience(), Some(Duration::from_millis(50)));
     }
 
-    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): uncalibrated, a wait for a turn lasts until it is let go, and
+    /// Decision 9 (Ada's 2026-11-06 rule; T-T7.1.2): measuring, a wait for a turn lasts until it is let go, and
     /// the hold teaches the next. Do: on new turns, hold box a's turn while another thread takes it, until that take
     /// waits; hold on for at least 30 ms and let go. Expect: the waiting take given the turn, and the wait then at
     /// least twice the hold.
     #[test]
-    fn an_uncalibrated_wait_lasts_until_the_turn_is_let_go_and_the_hold_arms_it() {
-        let turns = Turns::new("op", "turns under way", 2);
+    fn a_measuring_wait_lasts_until_the_turn_is_let_go_and_the_hold_arms_it() {
+        let turns = Turns::new("op", "turns under way", 2, Patience::measuring());
         assert_eq!(turns.patience(), None);
         let held = turns.take(&id("a")).unwrap();
         let took = Instant::now();

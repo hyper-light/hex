@@ -6,6 +6,7 @@
 use super::*;
 use std::io::{Read, Write as _};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::time::Duration;
 
 use hex_api::sim::SimRuntime;
 use hex_api::{Bounds, BoxInfo, BoxSpec, ClassSpec, Signal as HexSignal, Usage};

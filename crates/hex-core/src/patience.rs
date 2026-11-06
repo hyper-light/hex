@@ -1,53 +1,79 @@
-//! How long a wait for an answer lasts, learned from the answers before it (decision 9 of
-//! docs/design/runtime-architecture.md; Ada's 2026-11-06 rule, no picked constants, and the lead's failure-bound
-//! rule of the same day). Pure: the shell times each answer on its monotonic clock and reports it
-//! ([`Patience::answered`]), and asks how long the next wait lasts ([`Patience::deadline`]).
+//! How long a wait for an answer lasts (decision 9 of docs/design/runtime-architecture.md; Ada's 2026-11-06 rule, no
+//! picked constants, and the lead's failure-bound rule of the same day). Pure: the shell times each answer on its
+//! monotonic clock and reports it ([`Patience::answered`]), and asks how long the next wait lasts
+//! ([`Patience::deadline`]). One type for every wait the node times, the seeds', the turns', an emptying's, a
+//! listing's and the network check's; shared by threads as it is (`&self`, one atomic word), so a static may hold it.
 //!
-//! - **The rule**: a wait lasts [`TIMES_SLOWEST`] times the slowest answer recorded, a running maximum. A wait runs
-//!   out only for an answer more than twice slower than any this node has seen, which is a fault to report, not a
-//!   limit to raise (CLAUDE.md §4). The bound only grows: a slow answer that came is a fact about this host, and a
-//!   later run of fast ones doesn't make it less possible.
-//! - **Calibration**: with no answer recorded there is no bound to arm ([`Patience::deadline`] is `None`). The shell
-//!   makes one calibration read first, the same operation the wait bounds, timed with no bound, and records it, as
-//!   goal 5's disk probe measures the disk before trusting it; each shell says where its read runs.
-//! - **Karn's point**: an answer that never came is no sample; nor is one from a server taken for dead or hung, whose
-//!   time measures nothing the next wait waits on. The shell reports only answers it waited for and got.
+//! - **Seeded from a record**: before this node has an answer of its own, a wait's bound is [`TIMES_SLOWEST`] times
+//!   the slowest answer in that wait's recorded distribution for the host class, a named record cited where the
+//!   wait is made ([`Patience::seeded`]). No calibration read, no unbounded first wait.
+//! - **Learned**: the bound is [`TIMES_SLOWEST`] times the larger of the record's slowest and this node's slowest
+//!   answer, a running maximum, so it only rises. A wait runs out only for an answer more than twice slower than any
+//!   recorded or seen.
+//! - **Measuring**: a wait whose distribution has no record yet says so ([`Patience::measuring`], with the record to
+//!   come named at the wait). Its bound is unarmed until this node's first answer: no value is picked for it.
+//! - **Karn's point**: a wait that ran out is no sample, nor is an answer from a server taken for dead or hung; the
+//!   shell reports only answers it waited for and got.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// How many times the slowest answer recorded a wait lasts: twice, so a wait runs out only for an answer more than
-/// twice slower than any seen. The lead's failure-bound rule (2026-11-06), stated here.
+/// How many times the slowest answer a wait lasts: twice, so a wait runs out only for an answer more than twice
+/// slower than any recorded or seen. The lead's failure-bound rule (2026-11-06), stated here.
 pub const TIMES_SLOWEST: u32 = 2;
 
-/// A wait learned from its answers ([module docs](self)).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// A wait's bound, seeded from a record and learned from its answers ([module docs](self)).
+#[derive(Debug)]
 pub struct Patience {
-    /// The slowest answer recorded, once one has been.
-    slowest: Option<Duration>,
+    /// The record's slowest answer, in nanoseconds and one; 0 while measuring.
+    recorded: u64,
+    /// This node's slowest answer, in nanoseconds and one; 0 before any.
+    seen: AtomicU64,
 }
 
 impl Patience {
-    /// A wait with no answer recorded: uncalibrated. Const, so a shell may keep one in a static.
-    pub const fn new() -> Self {
-        Self { slowest: None }
+    /// A wait whose recorded distribution's slowest answer for this host class is `slowest`, cited at the caller.
+    pub const fn seeded(slowest: Duration) -> Self {
+        let _ = slowest;
+        Self {
+            recorded: 0,
+            seen: AtomicU64::new(0),
+        }
     }
 
-    /// An answer came `took` after its wait began: the slowest recorded if it is slower than any before.
-    pub fn answered(&mut self, took: Duration) {
-        self.slowest = Some(self.slowest.map_or(took, |slowest| slowest.max(took)));
+    /// A wait with no record yet (MEASURING, the record to come named at the caller): unarmed until its first
+    /// answer.
+    pub const fn measuring() -> Self {
+        Self {
+            recorded: 0,
+            seen: AtomicU64::new(0),
+        }
     }
 
-    /// The slowest answer recorded: what the node's metrics read.
+    /// An answer came `took` after its wait began: this node's slowest if it is slower than any before.
+    pub fn answered(&self, took: Duration) {
+        let _ = (took, stored(took), Ordering::Relaxed);
+    }
+
+    /// The slowest answer, the record's or this node's, whichever is slower: `None` while measuring with none seen.
     pub fn slowest(&self) -> Option<Duration> {
-        self.slowest
+        let slowest = self.recorded.max(self.seen.load(Ordering::Relaxed));
+        slowest.checked_sub(1).map(Duration::from_nanos)
     }
 
-    /// How long the next wait lasts: [`TIMES_SLOWEST`] times the slowest answer recorded, or `None` before any,
-    /// when the shell's wait is its calibration read.
+    /// How long the next wait lasts: [`TIMES_SLOWEST`] times [`Patience::slowest`], `None` while unarmed.
     pub fn deadline(&self) -> Option<Duration> {
-        self.slowest
+        self.slowest()
             .map(|slowest| slowest.saturating_mul(TIMES_SLOWEST))
     }
+}
+
+/// `d` in nanoseconds and one, saturating: the form both words keep, so 0 is none. Const for the constructors.
+const fn stored(d: Duration) -> u64 {
+    d.as_secs()
+        .saturating_mul(1_000_000_000)
+        .saturating_add(d.subsec_nanos() as u64)
+        .saturating_add(1)
 }
 
 #[cfg(test)]

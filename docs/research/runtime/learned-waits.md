@@ -4,24 +4,31 @@ Source notes for decision 9 of `docs/design/runtime-architecture.md` (Ada's rule
 constants; values learned at runtime, derived from a named record, or cited limits; and the lead's failure-bound
 rule of the same day).
 
-## The failure-bound rule (the lead, 2026-11-06)
+## The failure-bound rule (the lead, 2026-11-06, final)
 
-A wait lasts twice the slowest answer recorded on this node, a running maximum; a node with no samples makes one
-calibration read at start before arming the bound, as goal 5's disk probe does; no picked floor or initial value.
-A timeout then needs an answer more than twice slower than any seen. RFC 6298's estimator was the first draft's
-basis; the lead ruled its floor (1 s) and its constants (K = 4, alpha 1/8, beta 1/4) were chosen for TCP's clocks
-and paths and don't carry over, so it is not cited as a basis.
+Before any sample on a node, a wait's bound is 2 × the slowest answer in that wait's recorded distribution for the
+host class, from a named record; after, 2 × max(the record's slowest, the node's slowest), only rising. A wait that
+ran out is no sample, nor a dead or hung seed. No caller failure where an alternative exists. Where no record
+exists, the wait is MEASURING with the record to come named, and no value is picked. RFC 6298's estimator (the
+first draft) and calibration reads (the second) were ruled out: the RFC's floor and constants are TCP's clocks', and
+a calibration read leaves the first wait unbounded.
 
-Karn's point is kept from Karn and Partridge ("Improving Round-Trip Time Estimates in Reliable Transport
-Protocols", SIGCOMM '87; RFC 6298 §3 states it for TCP): a sample is taken only from an answer whose wait is
-unambiguous. Here: no sample from a wait that ran out, nor from a seed that died or was taken for hung.
+Karn's point is from Karn and Partridge ("Improving Round-Trip Time Estimates in Reliable Transport Protocols",
+SIGCOMM '87; RFC 6298 §3 states it for TCP): a sample is taken only from an answer whose wait is unambiguous.
 
-## What Hex's own records say about the spread a running maximum must cover
+## The records the seeds come from, checked in the files
 
-`bench/competitive/probes/seed_path.md`, run 2 (fedora, concurrency 1): a seed's clone of an init p50 0.209 ms,
-p90 0.262, p99 0.856, max 0.989 ms; run 1: max 15.778 ms against a p50 of 0.256. A bound calibrated on one p50-like
-read (2 × 0.209 = 0.418 ms) sits under that run's p99; it is the slowest answer seen that sets the bound, so the
-calibration read's own place in the distribution decides how soon the bound is wide enough.
+- `bench/competitive/probes/seed_path.md`, run 3 (fedora, 2026-10-30T06:06:13Z, load 25.5 to 29.6): a seed's
+  clone of an init, request to the init's first run, p50 0.234, p90 0.278, p99 1.050, max 1.918 ms, n=320. Run 2:
+  request to child max 0.989 ms. Run 1's max of 15.778 ms is its first create's, timed from the seed's own start
+  (the record says so), not a clone. `seeds::CLONE_SLOWEST` is run 3's 1.918 ms, the slowest clone recorded.
+- `bench/competitive/probes/levers.md`, runs 1 and 2: a 400-byte record write and rename p99 1,037.7 µs on btrfs,
+  893.8 on overlayfs, 42.1 on tmpfs; no fsync, no max. Not the store's durable write's distribution, so the store's
+  wait is MEASURING.
+- `bench/competitive/probes/input_census.md` (adacachy, 2026-11-06): sizes of `/proc/net` files and netlink dumps,
+  no times. The network check's waits are MEASURING.
+- No record times a box's emptying from its kill, a listing per entry, a turn's hold, a list part's drain or a
+  socket call's answer by kind: each is MEASURING, its record to come named at the wait.
 
 ## Linux: pid_max, /proc/self/fd, RLIMIT_NOFILE
 

@@ -63,18 +63,16 @@ const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 /// failure-bound rule): twice the slowest emptying recorded by this process's nodes, from every delete, scrub
 /// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
 /// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
-/// emptying waits on, share the wait. The calibration read is the first emptying a node waits for, unbounded:
-/// a recovery's scrub of a stray slot at start where there is one, else the first delete's. An emptying made
-/// only to calibrate would be of a cgroup with nothing in it, which empties at once and so would arm a bound
-/// no kill of a running box meets.
-static EMPTYING: Mutex<Patience> = Mutex::new(Patience::new());
+/// emptying waits on, share the wait. MEASURING: no record times a box's emptying from its kill (the delete
+/// records, `bench/competitive/probes/oci_breakdown.md`'s among them, time the whole delete); the record to come is
+/// the lead's delete pass timing each kill to `populated 0`, its max on fedora, which then seeds this. Until then a
+/// node's first emptying is waited out, and arms the bound.
+static EMPTYING: Patience = Patience::measuring();
 
 /// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
-/// `Duration::MAX`, unbounded, while it is uncalibrated.
+/// `Duration::MAX`, unbounded, while it is measuring with no emptying seen.
 pub(crate) fn empty_patience(killed: Instant) -> Duration {
     EMPTYING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .deadline()
         .map_or(Duration::MAX, |wait| wait.saturating_sub(killed.elapsed()))
 }
@@ -82,15 +80,10 @@ pub(crate) fn empty_patience(killed: Instant) -> Duration {
 /// Waits for `cg`, killed at `killed`, to empty within the learned wait ([`EMPTYING`]), which it teaches
 /// when it empties: the time from its kill. Says whether it emptied, and the wait it had from the kill.
 pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Duration), Refusal> {
-    let learned = || {
-        EMPTYING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    };
-    let wait = learned().deadline();
+    let wait = EMPTYING.deadline();
     let emptied = cg.wait_empty(empty_patience(killed))?;
     if emptied {
-        learned().answered(killed.elapsed());
+        EMPTYING.answered(killed.elapsed());
     }
     Ok((emptied, wait.unwrap_or(Duration::MAX)))
 }
@@ -104,11 +97,11 @@ pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 /// refuses: the runtime directory is shared with every node of this user on the host, so its entries are
 /// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
 /// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
-/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). The
-/// calibration read is recovery's first listing, the state directory's, unbounded but for its entries, which
-/// are finite: a directory listed only to calibrate would be an empty one, whose time is the call's own and no
-/// entry's, so it would measure nothing the listings after it spend.
-static LISTING: Mutex<Patience> = Mutex::new(Patience::new());
+/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). MEASURING:
+/// no record times a listing per entry; the record to come is a recovery pass timing the state and runtime
+/// directories' listings per entry, its max on fedora. Until then recovery's first listing, the state
+/// directory's, is bounded by its entries, which are finite, not by time, and its time per entry arms the bound.
+static LISTING: Patience = Patience::measuring();
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -208,9 +201,9 @@ pub struct Node {
     /// for the create under way and then finds the box made or not, rather than make or remove parts at
     /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
     /// at once, the node's box budget, a wait learned from how long creates and deletes held their turns
-    /// (decision 9: twice the longest held; the first create's or delete's is the calibration, and a wait
-    /// before it lasts until the turn is let go); past either the call is refused by type, a create past
-    /// the budget as [`Refusal::Full`] ([`create_turn`]).
+    /// (decision 9: twice the longest held, measuring until the first is let go, a wait before it lasting
+    /// until then); past either the call is refused by type, a create past the budget as [`Refusal::Full`]
+    /// ([`create_turn`]).
     turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
@@ -355,6 +348,9 @@ impl Node {
                 "making or removing a box",
                 "creates and deletes under way",
                 MAX_BOXES,
+                // MEASURING: no record of how long a create or delete holds its turn; the record to come is
+                // seam_oci's create and delete phases with each call's max on fedora, which then seeds it.
+                Patience::measuring(),
             ),
             #[cfg(debug_assertions)]
             crash_at: None,
@@ -1989,12 +1985,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(e) => return Err(listing(e)),
     };
-    let learned = || {
-        LISTING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    };
-    let per_entry = learned().deadline();
+    let per_entry = LISTING.deadline();
     let began = Instant::now();
     let mut listed = 0u32;
     let mut ids = BTreeSet::new();
@@ -2025,7 +2016,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             ids.insert(id);
         }
     }
-    learned().answered(
+    LISTING.answered(
         began
             .elapsed()
             .checked_div(listed.max(1))
@@ -2214,7 +2205,7 @@ mod tests {
     /// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; T-T7.1.2): a recovery's listing teaches
     /// the next its wait. Do: list a directory holding two boxes' parts and a file. Expect: the two ids, and the
     /// listings' slowest time per entry recorded, so the next listing's bound is armed (this one, or one before,
-    /// was its calibration read).
+    /// armed it).
     #[test]
     fn a_listing_teaches_the_next_its_wait() {
         let dir = tempfile::tempdir().unwrap();
@@ -2223,7 +2214,7 @@ mod tests {
         fs::write(dir.path().join("hex-c"), b"").unwrap();
         let ids = ids_in(dir.path(), "hex-").unwrap();
         assert_eq!(ids.len(), 2, "{ids:?}");
-        assert!(LISTING.lock().unwrap().slowest().is_some());
+        assert!(LISTING.slowest().is_some());
     }
 
     /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
@@ -2235,6 +2226,7 @@ mod tests {
             "making or removing a box",
             "creates and deletes under way",
             2,
+            Patience::measuring(),
         );
         let id = |n: &str| BoxId::new(n).unwrap();
         let a = create_turn(&turns, &id("a")).unwrap();

@@ -45,10 +45,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hex_api::{BoxId, Exit, Proc, Program, Refusal, Runtime, Stdio};
 use hex_core::netns;
+use hex_core::patience::Patience;
 use hex_core::wire::{self, Answer, Call, Header, Hello, Received, Request, Streams};
 use rustix::buffer::spare_capacity;
 use rustix::event::epoll::{self, CreateFlags, EventData, EventFlags};
@@ -93,15 +94,12 @@ const READS_PER_WAKE: usize = 64;
 const EVENTS: usize = 256;
 /// Connections waiting to be accepted: the I/O thread accepts them as they come.
 const BACKLOG: i32 = 64;
-/// Longest a list's worker waits for its client to read one part before it sends the next; past it
-/// the client has stopped reading, and its connection is closed. Five times the 60 s a delete once
-/// waited for its box to empty, so a client busy with another call isn't taken for one that stopped;
-/// that wait is learned now (decision 9), so this is a picked value until it is learned too.
-const READ_PATIENCE: Duration = Duration::from_secs(300);
-/// Longest a stopping server waits for the programs it ended to be reaped and recorded: the 60 s a
-/// delete once waited for its box to empty, which is learned now (decision 9), so this is a picked value
-/// until it is learned too. A killed process ends in milliseconds.
-const STOP_PATIENCE: Duration = Duration::from_secs(60);
+/// How long a list's worker waits for its client to read one part before it sends the next: twice the slowest
+/// such read this process has seen (decision 9; the lead's failure-bound rule); past it the client has stopped
+/// reading, and its connection is closed, the other calls on it refused by the close. MEASURING: no record times a
+/// client's read of a list's part; the record to come is seam_oci's list phase timing each part's drain, its max on
+/// fedora, which then seeds it. Until then the first part waited for is waited out.
+static READS: Patience = Patience::measuring();
 
 /// The epoll tokens of the listener and the stop eventfd; connections and programs take the rest.
 const LISTENER: u64 = 0;
@@ -714,24 +712,35 @@ impl Shared {
                 wire::answer(version, id, &refused, self.limits.message_bytes)
             })
             .map_err(|e| Refusal::Broken(format!("a refusal couldn't be written: {e}")))?;
-        self.send(conn, bytes, None)
+        self.send(conn, bytes, false)
     }
 
     /// Queues `bytes` after a connection's waiting answers, or sends them now when none wait. With a
-    /// `deadline`, first waits for the waiting ones to go (a list's next part), closing the connection
-    /// once it passes. Sending on a closed connection does nothing: its client is gone.
-    fn send(&self, conn: &Conn, bytes: Vec<u8>, deadline: Option<Instant>) -> Result<(), Refusal> {
+    /// `after_read` (a list's next part), first waits for the waiting ones to go, closing the connection
+    /// once the wait passes [`READS`]' bound. Sending on a closed connection does nothing: its client is gone.
+    fn send(&self, conn: &Conn, bytes: Vec<u8>, after_read: bool) -> Result<(), Refusal> {
         let mut out = conn.out.lock().map_err(poisoned)?;
-        if let Some(deadline) = deadline {
+        if after_read {
+            let began = Instant::now();
+            let deadline = READS.deadline().and_then(|wait| began.checked_add(wait));
+            let waited = out.open && !out.backlog.is_empty();
             while out.open && !out.backlog.is_empty() {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    drop(out);
-                    // The I/O thread sees the hang-up and closes it, by the disconnect rule.
-                    let _ = rustix::net::shutdown(&conn.fd, Shutdown::Both);
-                    return Ok(());
-                }
-                out = conn.drained.wait_timeout(out, left).map_err(poisoned)?.0;
+                out = match deadline {
+                    None => conn.drained.wait(out).map_err(poisoned)?,
+                    Some(deadline) => {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            drop(out);
+                            // The I/O thread sees the hang-up and closes it, by the disconnect rule. No sample.
+                            let _ = rustix::net::shutdown(&conn.fd, Shutdown::Both);
+                            return Ok(());
+                        }
+                        conn.drained.wait_timeout(out, left).map_err(poisoned)?.0
+                    }
+                };
+            }
+            if waited && out.open {
+                READS.answered(began.elapsed());
             }
         }
         if !out.open {
@@ -1030,9 +1039,8 @@ impl Shared {
                 );
             }
         };
-        let deadline = Instant::now().checked_add(READ_PATIENCE);
         for (n, part) in parts.into_iter().enumerate() {
-            self.send(conn, part, if n == 0 { None } else { deadline })?;
+            self.send(conn, part, n > 0)?;
         }
         Ok(())
     }
@@ -1115,9 +1123,11 @@ impl Shared {
         ) {
             drop(table);
             // It can't be watched: ended now, and the exec refused saying so.
+            let killed = Instant::now();
             let _ = rustix::process::pidfd_send_signal(&pidfd, Signal::KILL);
             let mut proc = proc;
-            let _ = proc.wait_for(STOP_PATIENCE);
+            // A killed process's end: the node's learned wait for a killed box to empty, its kind of wait.
+            let _ = proc.wait_for(crate::node::empty_patience(killed));
             unreserve()?;
             return reply(Answer::Refused(Refusal::Os {
                 op: "watching a started program",
@@ -1165,10 +1175,12 @@ impl Shared {
             Ok(table) => table.conns.values().cloned().collect(),
             Err(_) => Vec::new(),
         };
+        // The programs the closes end are waited for as a killed box's processes are: the node's learned wait
+        // for an emptying, from their kill.
+        let killed = Instant::now();
         for conn in &conns {
             let _ = self.close(conn);
         }
-        let deadline = Instant::now().checked_add(STOP_PATIENCE);
         let mut events = Vec::with_capacity(EVENTS);
         loop {
             let tokens: Vec<u64> = match self.table() {
@@ -1178,9 +1190,7 @@ impl Shared {
             if tokens.is_empty() {
                 break;
             }
-            let left = deadline.map_or(Duration::ZERO, |d| {
-                d.saturating_duration_since(Instant::now())
-            });
+            let left = crate::node::empty_patience(killed);
             if left.is_zero() {
                 break;
             }

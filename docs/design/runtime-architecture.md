@@ -2308,47 +2308,42 @@ memory charge pushing an owner's box past bounds the fresh path keeps.
 Ada's rule: "We do not support arbitrary constants. We support learned and data derived values." Every bound Hex
 states is of one of four kinds: learned at runtime; derived from a named record (a `bench/` file and its run);
 a platform or specification limit cited at its source; or picked. A picked one is converted where it can be. This
-decision covers the node's waits for an answer whose time it can observe, and the copies and counts beside them
-(source notes: `docs/research/runtime/learned-waits.md`).
+decision covers the node's waits for an answer whose time it can observe (source notes:
+`docs/research/runtime/learned-waits.md`).
 
-**The rule.** The lead's failure-bound rule: a wait lasts twice the slowest answer recorded on this node, a running
-maximum (`hex_core::patience`, `TIMES_SLOWEST` = 2, stated at the code). A wait runs out only for an answer more than
-twice slower than any this node has seen: a fault to report, not a limit to raise (CLAUDE.md §4). The bound only
-grows; a slow answer that came is a fact about the host. There is no picked first wait, floor, ceiling or back-off:
-a node with no sample makes one calibration read, the operation the wait bounds, timed unbounded, before it arms
-the bound, as goal 5's disk probe measures the disk before trusting it. An answer that never came, or came from a
-server taken for dead or hung, is no sample (Karn's point: its time measures nothing the next wait waits on). An
-earlier draft used RFC 6298's timer; the lead ruled its floor and K, alpha and beta are TCP's clocks' and don't
-count as a basis here.
+**The rule** (the lead's failure-bound rule, final form of 2026-11-06), one core for every such wait,
+`hex_core::patience::Patience`:
+- **Seed**: before any sample on this node, a wait's bound is twice (`TIMES_SLOWEST`, stated at the code) the
+  slowest answer in that wait's recorded distribution for the host class, from a named record cited at the wait. No
+  calibration read, no unbounded first wait.
+- **Learn**: the bound is twice the larger of the record's slowest and this node's slowest answer, and only rises.
+  A wait that ran out is no sample, nor is a dead or hung seed (Karn's point).
+- **No caller failure where an alternative exists**: a seed past its bound is retired, counted, and the create goes
+  to another seed (when the hung seed is reaped with the box's cgroup still empty, so nothing of the create was
+  made); the network check past its bound throws the namespace away, counted; only where there is no alternative (a
+  record write, a client's call) is the caller refused, by type.
+- **Measuring**: where no record exists yet, the wait says so (`Patience::measuring`) and names the record to come;
+  no value is picked. Until it lands the wait is unarmed until this process's first answer.
 
-**What is learned, from what, and where each calibration read runs.**
+RFC 6298's timer was this decision's first draft and calibration reads its second; the lead ruled out both (the
+RFC's floor and constants are TCP's clocks'; a calibration read leaves the first wait unbounded).
 
-| Wait | Was | Sample | Calibration read |
+| Wait | Was | Now | Seed |
 | --- | --- | --- | --- |
-| a create's wait in line for a seed (`seeds`' line) | 1 s, picked | each wait that ended in a seed | the first wait in line, unarmed until a seed is handed to it; a failed start with no seed up or starting refuses the line at once, so an unarmed wait never outlives the last seed that could serve it |
-| a seed's hang bound, and the shell's wait for its answer (createpool's `ANSWER_PATIENCE`) | 30 s, copied from the exec seeds | each create (or park) a seed was done with | the pool's first clone: a park where the node makes inits ahead, off every create's path, else the node's first create's |
-| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | each record turn held | one durable write (file written and fsynced, renamed, directory fsynced) as the store opens, off every create's path |
-| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, two picked 60 s | each create or delete turn held | the first create's or delete's turn; a wait before it lasts until the turn is let go |
-| a killed box's emptying, its programs' reaping, its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`) | 60 s, picked, and a copy | the time from each kill to empty, every node of the process (one kernel) | the first emptying waited for: recovery's scrub of a stray slot at start where there is one, else the first delete's. An emptying made only to calibrate would be of a cgroup holding nothing, which empties at once and would arm a bound no kill of a running box meets |
-| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | each listing's time per entry; a listing's first `k` entries may take `k` times twice the slowest | recovery's first listing, the state directory's, bounded by its entries, which are finite, not by time. A calibration listing of an empty directory would time the call and no entry, so would bound nothing a listing after it spends |
+| a seed's hang bound and the shell's wait for its answer (createpool `ANSWER_PATIENCE`) | 30 s, copied | 2 × max(record, seen) | `seeds::CLONE_SLOWEST` 1.918 ms: `seed_path.md` run 3, a clone of an init to its first run, max of 320 on fedora |
+| a create's wait in line for a seed (`seeds`' line) | 1 s, picked | the same | the same record: a create in line waits for a busy seed's answer |
+| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | learned, refused by type past it | MEASURING: `levers.md` times a record write and rename without its fsyncs and gives no max; to come, that probe's write mode with the file's and directory's fsyncs, its max on fedora's btrfs |
+| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, picked | learned, from the holder's take | MEASURING: to come, seam_oci's create and delete phases with each call's max |
+| a killed box's emptying, its programs' reaping and its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`), and a stopping server's wait for the programs it ended (serve `STOP_PATIENCE`) | 60 s each, picked or copied | learned from each kill to empty | MEASURING: the delete records time the whole delete; to come, the lead's delete pass timing each kill to `populated 0` |
+| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | learned per entry | MEASURING: to come, a recovery pass timing the state and runtime directories' listings per entry |
+| a list's worker's wait for its client to read a part (serve `READ_PATIENCE`) | 300 s, picked | learned | MEASURING: to come, seam_oci's list phase timing each part's drain |
+| a client's call's wait for its answer and its send (hex-client `ANSWER_PATIENCE`) | 300 s, picked | learned per call kind | MEASURING: to come, seam_oci's socket phases, each call kind's max |
+| the network check's settle and dump reads (netcheck `SETTLES`, `ANSWERS`) | the check's local `Slowest` | the shared core; past the bound the namespace is thrown away, counted | MEASURING: `input_census.md` records the dumps' sizes, not their times; to come, a pass timing them on fedora |
 
-Beside them: the line's room is `serve::WORKERS` by reference (a create over the socket is one of its calls), the
-record store's turns `hex_runtime::MAX_BOXES` by reference, the exec seeds' ceiling `seed::MOST` = `serve::WORKERS`
-(an exec holds its seed only for its call), the descriptors the agent holds past its bounds counted in
-`/proc/self/fd` as the bound is taken (`netns::open_descriptors`; the netns module is Linux's alone), the outsider
-walk's threads bounded by the host's `pid_max` read at runtime (Documentation/admin-guide/sysctl/kernel.rst) and its
-cgroups by the kill sweep's `MAX_SWEEP_CGROUPS`, and a delete's list of survivors by what fits one message of the
-socket (`node::why_room`).
-
-**What would falsify it.** A healthy node refusing a create `Hung` or `Waited`, or a delete for a box that emptied
-after, where the answer it refused was more than twice the slowest before but the host was well: the running
-maximum calibrated on an idle moment and a later answer's tail is wider than twice that. The record of it would be
-the answer times around the refusal. The risk is largest early in a node's life, when one fast calibration read
-arms the bound: a seed's clone took 0.209 ms p50 and 0.989 ms max on fedora (`bench/competitive/probes/seed_path.md`,
-run 2), 4.7 times the p50, so a node calibrated on a p50 clone would take a max-length clone for hung. The same holds
-for an emptying whose first sample was quick. The waits whose calibration read is unbounded (the first seed answer,
-the first emptying, the first listing, the first turn) are unbounded in time once per process; a wedge there hangs
-that one call, and a hang there would falsify the choice of calibration.
+**What would falsify it.** A healthy node retiring seeds as hung, or refusing a call or a record write, for an
+answer more than twice the record's slowest and the node's: then the record's distribution is narrower than the
+node's, and the evidence is the answer times around the refusal. The seed record is fedora's; another host class
+starts from it and learns its own, and a slower class's first answers would show the record doesn't carry.
 
 ## Axes that can't reach 4x, and why
 
