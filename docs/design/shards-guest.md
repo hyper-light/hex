@@ -1,7 +1,7 @@
 # Decision (proposed 2026-11-04): Linux images on macOS and Windows run in one Shards guest per node
 
 Native plan step 5 (kiln plan `01a194669ce477718e3b3b8c7be44138`). Status: **proposed; the seam (§2) agreed with
-Shards' owner 2026-11-04; §4 amended and §4a added 2026-11-06** (CLAUDE.md §9), its crate to be drafted by Hex as a pull request Shards reviews.
+Shards' owner 2026-11-04; §4 amended and §4a added 2026-11-06 (bind mounts through shares, the lead's steer)** (CLAUDE.md §9), its crate to be drafted by Hex as a pull request Shards reviews.
 
 Sources: `docs/research/runtime/shards-guest.md` (what Shards offers, at `hyper-light/shards` `b3e5ca27`),
 `docs/research/runtime/native-platforms.md` §1 and §4 (why a Linux image needs a Linux kernel; Shards' backends),
@@ -130,31 +130,35 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   written, holds the store.
 - Its build is a script in `scripts/`, its outputs' SHA-256 recorded in `bench/native/guest/`.
 
-## 4a. Host paths: staged into the guest, never shared live
+## 4a. Host paths: the bundle and rootfs copied in, bind mounts through Shards' shares
 
 A box's spec names host paths: a bundle's directory, its `root.path`, a `Rootfs::Dir` or its layers, and each
-bind mount's source. The guest can't see them: Shards' plain `shards run` takes disks and a vsock and no host
-folder (`crates/shards/src/vm_run.rs:388-410`: `--shares N` makes slots its daemon fills, and `--slates-fs-fd`
-takes a share another server serves in that device's framing, D38), and the seam (§2) has no share. So:
+bind mount's source. The guest sees none of them by itself. (Amended 2026-11-06 on the lead's steer: a first
+draft refused writable bind mounts, which fails the OCI runtime-spec validation's `mounts` test, which binds
+host `/etc` writable eight ways, bind and rbind under each propagation (runtime-tools
+`validation/mounts/mounts.go:38-72`).)
 
-- **The host stages each path into the guest before create**, over a third vsock port (`stream::FILES_PORT`): a
-  bounded stream of entries (directories, regular files with their bytes, symlinks as their target text, each with
-  its mode), which the relay unpacks under the guest's `/run/hex/staged/<box id>/` through `RESOLVE_IN_ROOT`,
-  refusing an absolute or `..` name, a device node, a FIFO or a socket by name, and every count past its bound
-  (entries, bytes, path length; CLAUDE.md §2). Its framing is a sans-IO core in `hex_core::stream` beside the
-  channel's (CLAUDE.md §9), with hostile-input tests (§6).
-- **The host rewrites the spec to the staged paths**: a bundle's `config.json` gets `root.path` and each bind
-  mount's `source` pointed at their staged copies; an `OciSpec`'s `rootfs` and mounts the same. A non-bind mount
-  (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime namespace, so
-  their paths are the guest's.
-- **A writable bind mount of a host path is refused by name** (`Refusal::Unsupported`, naming the mount's
-  destination and that Shards' plain run shares no host folder): a copy would drop the container's writes to
-  it, which CLAUDE.md §3 forbids. Read-only bind mounts are equivalent as copies taken at create.
-- The staged copy is deleted with its box.
-
-Falsified, and replaced by a live share, when `shards-api` offers one (a Shards share the host serves): then the
-staging port goes and writable mounts pass. The copy per create is a cost to measure against a Linux host's
-create on the same image (§7).
+- **Bind mounts go through Shards' shares, live.** Shards' share device is virtio-fs, tagged `shards{i}`
+  (`crates/vmm/src/devices/virtio/fs/mod.rs:1-6`, `crates/vmm/src/vm/mod.rs:835`, at `90de623f`), writes going
+  both ways on all three host OSes (D38, `docs/design/architecture.md:2774-2853`; Windows D197, `:7482-7518`), and
+  a plain `shards run` takes a share another process serves (`--slates-fs-fd N`, `crates/shards/src/vm_run.rs:390-401`).
+  So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (the interface
+  that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with
+  (default `/`, writable) at the guest's boot; the guest's init mounts each as `virtiofs` at
+  `/run/hex/shares/<i>` (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
+  rewrites each bind mount's source to its path under the share that holds it, and a source under no share is
+  refused by name (`Refusal::Unsupported`, naming the mount and the shared roots). Shares are fixed at boot, as
+  Shards attaches them then; a plain run has no hotplug of them.
+- **The bundle and rootfs are copied into the guest before create**, over a third vsock port
+  (`stream::FILES_PORT`): a bounded stream of entries (directories, regular files with their bytes, symlinks as
+  their target text, each with its mode), which the relay unpacks under the guest's `/run/hex/staged/<box id>/`
+  through `RESOLVE_IN_ROOT`, refusing an absolute or `..` name, a device node, a FIFO or a socket by name, and every
+  count past its bound (entries, bytes, path length; CLAUDE.md §2). Its framing is a sans-IO core in
+  `hex_core::stream` (CLAUDE.md §9), with hostile-input tests (§6). A container's root is the guest's own copy, as
+  a Linux host's is its own disk: a root over virtio-fs would put every exec's page cache and the overlay's upper
+  layer across the share. The host rewrites `root.path` (or `Rootfs`) to the copy; the copy is deleted with its box.
+- A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
+  namespace, so their paths are the guest's.
 
 ## 5. Where Shards has no backend
 
