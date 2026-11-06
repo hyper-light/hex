@@ -10,7 +10,8 @@
 #
 # <cfg> is `defaults` (kwokctl's cluster as it comes; kube-scheduler with its client defaults, 50 QPS,
 # burst 100) or `raised` (kwokctl --disable-qps-limits: the API server's in-flight limits off; and
-# kube-scheduler's client at 5000 QPS, burst 10000).
+# kube-scheduler's client limiter off, `qps: -1`: client-go builds no rate limiter for a negative QPS,
+# and kube-scheduler passes it through unvalidated; scale-and-shards.md finding 8).
 # Environment: NODES (10000) and PODS (50000), which only check the example's counts; RUNS (3);
 # FILES (64, manifest files created side by side); STALL_S (120); HEX_SHARDS (1,12); REPO (the
 # checkout, for prep's build); LOCK (empty: no lock, for smoke runs); MODEL (m5d: EC2 m5d.metal,
@@ -135,7 +136,7 @@ one() {
   local extra=() qps=""
   case "$cfg" in
     defaults) ;;
-    raised) extra=(--disable-qps-limits); qps=$'  qps: 5000\n  burst: 10000' ;;
+    raised) extra=(--disable-qps-limits); qps=$'  qps: -1' ;;
     *) echo "unknown config $cfg" >&2; return 2 ;;
   esac
   delete_cluster

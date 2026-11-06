@@ -91,6 +91,13 @@ pub enum Nemesis {
 /// `tests/shards.rs`'s `rebuild_cost`; recorded in `bench/sched/takeover_rebuild.md`.
 pub const REBUILD_NS_PER_RECORD: Time = 155;
 
+/// The store's write round trip a shard's lease is seeded from: Amphora's durable write p99.9 under
+/// kiln's K0 load (32 writers), 22.27 ms, recorded in Amphora's `bench/records/2026-10-23-adacachy-
+/// matrix-v6.md:120` (main, 38feed2; one node, best of 3, adacachy at load 3.5-123.6). The only
+/// recorded Amphora write latency: no quorum commit is recorded yet (AC-T1.8.2's 5 ms is a target),
+/// so T-T7.11.1's takeover holds on this figure, and moves with it.
+pub const STORE_WRITE_RTT_NS: Time = 22_270_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Parallel deciders.
@@ -142,10 +149,11 @@ impl Default for Config {
             nemesis: Nemesis::None,
             sample: Sample::default(),
             shards: 1,
-            // Cited: etcd's defaults, an election timeout of 1,000 ms and a heartbeat of 100 ms
-            // (etcd tuning.md:14,16,20, docs/v3.5).
-            lease_ns: 1_000_000_000,
-            renew_ns: 100_000_000,
+            // The learned-wait rule, seeded from the recorded store write round trip (H61): renew
+            // once a round trip, and let the lease run ten, etcd's rule for an election timeout
+            // (tuning.md:20, docs/v3.5: "at least 10 times the round-trip time").
+            lease_ns: STORE_WRITE_RTT_NS.saturating_mul(10),
+            renew_ns: STORE_WRITE_RTT_NS,
             rebuild_ns_per_record: REBUILD_NS_PER_RECORD,
         }
     }

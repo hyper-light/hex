@@ -49,7 +49,8 @@ fn fed(topology: Topology, cell: Config, loss: Loss) -> FedConfig {
         topology,
         cell,
         loss,
-        region_grace_ns: federation::REGION_GRACE_NS,
+        // One region has no grace (no other watches it), and no region loss to use one.
+        region_grace_ns: federation::region_grace_ns(topology.regions).unwrap_or(0),
     }
 }
 
@@ -542,7 +543,7 @@ fn a_lost_regions_work_waits_behind_what_the_others_have_queued() {
 }
 
 fn queued_ahead(model: NodeModel) {
-    let when = 2 * SECOND + federation::REGION_GRACE_NS;
+    let when = 2 * SECOND + federation::region_grace_ns(REGIONS.regions).unwrap();
     // A class of capacity C, a third full (C/9 a region), loses a region's C/9 while the survivors
     // have 4C/9 free; a burst B of it arriving as the federation acts queues 2B/9 there. Moved work
     // then both lands and is refused while 2B/9 is between 3C/9 and 4C/9: B = 1.75C of each class,
@@ -646,4 +647,24 @@ fn a_kind_no_surviving_node_runs_is_refused_typed() {
         "every Firecracker microVM refused, typed"
     );
     assert!(to[0] > 0 && to[2] > 0, "{to:?}: OCI and Shards moved");
+}
+
+/// H66's grace, by the detector's math (the lead 2026-11-06): do ask for the grace of three and of
+/// eight regions; expect hyper-swim's crash bound, `(2(2m - 1) + 1)` periods for `m` other regions
+/// (G5's H40), each period a direct stage and a relay stage at RFC 6298's timeout for the slowest
+/// round trip between G3's Azure regions (331 ms: SRTT + 4 x RTTVAR = 3 x 331 ms after a first
+/// sample, floored at 1 s), plus one round trip for another member's answer; and refused, typed, for
+/// a single region, which has no other to watch it.
+#[test]
+fn a_region_is_called_lost_by_the_node_detectors_math() {
+    assert_eq!(federation::SLOWEST_REGION_RTT_NS, 331_000_000);
+    assert_eq!(
+        federation::region_grace_ns(3).unwrap(),
+        7 * 2 * SECOND + 331_000_000
+    );
+    assert_eq!(
+        federation::region_grace_ns(8).unwrap(),
+        27 * 2 * SECOND + 331_000_000
+    );
+    assert!(federation::region_grace_ns(1).is_err());
 }

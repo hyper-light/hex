@@ -9,11 +9,43 @@ use crate::model::{Classes, Cluster, Demand, NodeId, NodeSpec, Time, WorkloadId,
 use crate::sim::{self, Config, Layout, Nemesis, Run};
 use crate::store::Op;
 
-/// How long the federation waits, unheard, before it treats a region as lost. Cited: Karmada's
-/// `cluster-monitor-grace-period` default, 40 s (karmada-io/website at 09a9148,
-/// `docs/userguide/failover/cluster-status-maintenance.md:34`; `cells-and-regions.md:39-42`).
-/// `T-T7.12.1` sets no time bar, so the drill takes the competitor's default.
-pub const REGION_GRACE_NS: Time = 40_000_000_000;
+/// The slowest round trip between two of the eight Azure regions in G3's WAN model: Southeast Asia
+/// to Brazil South, 331 ms, Azure's published monthly P50 (`crates/hex-sim/src/wan.rs:45-54` on
+/// cp/t7-sched-g3 at 5920b50; "Azure network round-trip latency statistics", 2026-07-30).
+pub const SLOWEST_REGION_RTT_NS: Time = 331_000_000;
+
+/// How long the federation waits, unheard, before it treats a region as lost: the bound by which
+/// hyper-swim's own detector condemns a crashed member (G5's H40; hyper-raft
+/// `crates/hyper-swim/src/detector.rs:1914-1957` at 6a236ae), with the regions as its members, so
+/// a region is called lost by the same math as a node. From the last answer to a condemnation:
+/// `2(2m - 1) + 1` periods for `m` other regions (SWIM's round-robin, §4.3), each a direct stage
+/// and a relay stage at RFC 6298's retransmission timeout for the slowest inter-region round trip
+/// `r` after a first sample (SRTT = r, RTTVAR = r/2, RTO = SRTT + 4 RTTVAR = 3r, §2.2-2.3,
+/// rounded up to 1 s, §2.4), plus one round trip for another member's answer, the proof that the
+/// condemner's own network works. Refused for one region: nothing else watches it.
+pub fn region_grace_ns(regions: u32) -> Result<Time, SimError> {
+    const SECOND: Time = 1_000_000_000;
+    let m = u64::from(regions)
+        .checked_sub(1)
+        .filter(|&m| m > 0)
+        .ok_or(SimError::Config(
+            "a region's loss is seen by another region",
+        ))?;
+    let periods = m
+        .checked_mul(2)
+        .and_then(|x| x.checked_sub(1))
+        .and_then(|x| x.checked_mul(2))
+        .and_then(|x| x.checked_add(1))
+        .ok_or(SimError::TimeOverflow)?;
+    let stage = SLOWEST_REGION_RTT_NS
+        .checked_mul(3)
+        .ok_or(SimError::TimeOverflow)?
+        .max(SECOND);
+    periods
+        .checked_mul(stage.checked_mul(2).ok_or(SimError::TimeOverflow)?)
+        .and_then(|x| x.checked_add(SLOWEST_REGION_RTT_NS))
+        .ok_or(SimError::TimeOverflow)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Topology {

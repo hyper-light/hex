@@ -205,3 +205,15 @@ fn rebuild_cost() {
         best / u128::from(records)
     );
 }
+
+/// The lease's learned-wait rule (H61, the lead 2026-11-06): do read the default configuration;
+/// expect a shard to renew once per recorded store write round trip (Amphora's K0 write p99.9,
+/// `sim::STORE_WRITE_RTT_NS`) and its lease to run ten of them (etcd's rule: an election timeout of at
+/// least ten round trips), so T-T7.11.1's takeover follows the recorded figure, not a copied default.
+#[test]
+fn the_lease_is_ten_recorded_store_write_round_trips() {
+    let c = Config::default();
+    assert_eq!(sim::STORE_WRITE_RTT_NS, 22_270_000);
+    assert_eq!(c.renew_ns, sim::STORE_WRITE_RTT_NS);
+    assert_eq!(c.lease_ns, 10 * sim::STORE_WRITE_RTT_NS);
+}

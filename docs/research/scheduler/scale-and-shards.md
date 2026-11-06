@@ -65,6 +65,13 @@ Sharding facts (Twine, Shard Manager, Gödel, Hydra, Borg) are already in
    the most recent 250 test runs", set "somewhat pessimistically" SS[10] `:229,233` (DE). Its README
    pins a run to six CPUs with `numactl --physcpubind=0-5` and suggests `-count=6` for "statistically
    relevant" comparisons SS[10] `:53,58` (DE).
+8. **kube-scheduler's client limiter can be switched off, not raised to a picked number.** client-go:
+   "Setting this to a negative value will disable client-side ratelimiting unless `Ratelimiter` is also
+   set" SS[14] `config.go:120-121`, and it builds a token bucket only `if qps > 0` `:383-385` (DE).
+   kube-scheduler copies its configuration's `clientConnection.qps` into that client unchanged SS[14]
+   `options.go:396`, and the configuration's validation checks only that burst isn't negative SS[14]
+   `validation.go:27-28` (DE). So `qps: -1` takes the client limit out of the comparison without
+   choosing a rate.
 
 ## Gaps
 
@@ -175,3 +182,10 @@ Kind: DE.
 - `:18-20`: `let reg = Region::new(&GLOBAL);` ... `reg.change()`
 - `:80-82`: `pub bytes_allocated: usize`, `pub bytes_deallocated: usize` (fields of `Stats`)
 - `:233`, `:251`: `unsafe impl ... GlobalAlloc for &'a StatsAlloc<T>` and `for StatsAlloc<T>`
+
+[SS14] Kubernetes v1.37.1, files of kubernetes/kubernetes at tag v1.37.1, under
+`https://raw.githubusercontent.com/kubernetes/kubernetes/v1.37.1/`, read 2026-11-06. Kind: DE.
+- `staging/src/k8s.io/client-go/rest/config.go:120-121`: "Setting this to a negative value will disable client-side ratelimiting unless `Ratelimiter` is also set."
+- `staging/src/k8s.io/client-go/rest/config.go:383-385`: `if qps > 0 { rateLimiter = flowcontrol.NewTokenBucketRateLimiter(qps, burst) }`
+- `cmd/kube-scheduler/app/options/options.go:396`: `kubeConfig.QPS = config.QPS`
+- `staging/src/k8s.io/component-base/config/validation/validation.go:27-28`: `if cc.Burst < 0 {` ... `"must be non-negative"`

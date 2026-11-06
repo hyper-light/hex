@@ -241,8 +241,8 @@ The cell's sharding, its shard-loss takeover, its memory accounting and its scal
 `hex-sim.md`:
 - H60: shards as one Plane per contiguous node slice, with workloads routed by a pure function of
   spec and cluster; `slices = 1` is today's plane.
-- H61: lease takeover. `lease_ns` is 1 s, renewed every 100 ms, from etcd's defaults; the rebuild from
-  the store is measured within `T-T7.11.1`'s 5 s.
+- H61: lease takeover. Renewed once per recorded store write round trip (Amphora's K0 p99.9, 22.27 ms),
+  the lease ten of them, etcd's rule; the rebuild from the store is measured within `T-T7.11.1`'s 5 s.
 - H62: a counting allocator over the store and the planes (`AC-T7.11.4`).
 - H63: the 1,000,000-placement bench and the kwok comparison method, with kube-scheduler at its default
   and raised QPS, on the same node and pod shapes (`AC-T7.11.2`, `AC-T7.11.3`).

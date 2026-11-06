@@ -422,8 +422,15 @@ routing would then take free capacity into account.
 ### H61. Shard loss and lease takeover: detection plus rebuild within 5 s
 
 **The choice.** A shard holds each of its slices under a lease in the store: a record naming the
-holder, an epoch, and the expiry. The shard renews every 100 ms. The lease lapses when `lease_ns`
-(1 s) passes without a renewal. A live shard then takes the slice by compare-and-set on the lease
+holder, an epoch, and the expiry. The shard renews once per store write round trip, and the lease
+lapses when `lease_ns`, ten round trips, passes without a renewal: the learned-wait rule (the lead,
+2026-11-06), seeded from the recorded round trip, `sim::STORE_WRITE_RTT_NS` = 22.27 ms, Amphora's
+durable write p99.9 under kiln's K0 load (Amphora `bench/records/2026-10-23-adacachy-matrix-v6.md:120`,
+main 38feed2), and etcd's rule that an election timeout be "at least 10 times the round-trip time"
+(SS[11] `tuning.md:20`): renew 22.27 ms, lease 222.7 ms. No quorum commit of Amphora's is recorded yet
+(AC-T1.8.2's 5 ms is a target), so **`T-T7.11.1`'s takeover figure is conditional on that one-node
+record**, and is measured again when a quorum write round trip is recorded. In production the round
+trip is learned from the renewals the shard makes. A live shard then takes the slice by compare-and-set on the lease
 record, bumping its epoch, and rebuilds the slice's plane from the store with `Plane::rebuild` (H7):
 placed workloads count as running and pending ones queue again. Every placement write names its slice's
 epoch, and the store refuses a write from an older epoch. A lost shard that comes back and writes is
@@ -433,7 +440,8 @@ decides a lapse, as Chubby's master holds the authoritative lease timer. In hex-
 time (H1).
 
 The bound, from `T-T7.11.1`'s 5 s: takeover = detection + rebuild. Detection is at most `lease_ns` after
-the last renewal, so 1 s. That leaves 4 s for the rebuild of the lost shard's slices.
+the last renewal, so 222.7 ms at the recorded round trip. That leaves the rest of 5 s for the rebuild
+of the lost shard's slices.
 
 **Sources.**
 - The detection terms are Raft's defaults: etcd heartbeats every 100 ms and starts an election after
@@ -620,9 +628,12 @@ workload in the lost cell stopped.
 ### H66. A region lost: its work re-placed within the others' capacity, checked before it moves
 
 **The choice.** A region is lost wholesale at time `at`: its nodes and its cells' planes. The
-federation sees it after `region_grace_ns` without a report (default 40 s, cited: Karmada's
-`cluster-monitor-grace-period`, CR[3] `:34`; `T-T7.12.1` sets no time bar, so the competitor's default
-is the drill's). Then:
+federation sees it after `region_grace_ns` without a report (`federation::region_grace_ns`): the bound
+by which hyper-swim's own detector condemns a crashed member (G5's H40), with the regions as its
+members, so a region is called lost by the same math as a node. `2(2m - 1) + 1` periods for `m` other
+regions, each period a direct and a relay stage at RFC 6298's timeout for the slowest round trip
+between G3's Azure regions (331 ms; RTO = 3 x 331 ms after a first sample, rounded up to 1 s), plus
+one round trip for another member's answer: 14.33 s for three regions. No Karmada default. Then:
 - **What moves:** every workload the federation routed to the lost region and not reported ended. A lost
   region is a total loss, as MultiKueue treats a lost worker (CR[11] `:351-356`). The region is fenced by
   an epoch: the federation refuses its reports after the loss, so a region that comes back can't start a
