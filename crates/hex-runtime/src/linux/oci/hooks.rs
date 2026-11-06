@@ -23,10 +23,8 @@ use crate::linux::oci::state::State;
 /// and its other fields at their widest: the shape of a state with those strings taken out
 /// ([`STATE_SHAPE`]), a container id (at most [`MAX_ID_BYTES`], none of whose characters is escaped), and its
 /// bundle and cgroup paths, each at most `PATH_MAX` less its NUL, every byte at worst a six-byte `\u00XX`.
-pub const MAX_STATE_BYTES: usize = MAX_CONFIG_BYTES
-    + STATE_SHAPE.len()
-    + (MAX_ID_BYTES + 2)
-    + 2 * ((PATH_MAX - 1) * 6 + 2);
+pub const MAX_STATE_BYTES: usize =
+    MAX_CONFIG_BYTES + STATE_SHAPE.len() + (MAX_ID_BYTES + 2) + 2 * ((PATH_MAX - 1) * 6 + 2);
 
 /// A state's JSON at its widest with its id, its paths and its annotations taken out: every key, the longest
 /// status, and each number its widest (`i32::MIN`, `u64::MAX`), in the order serde writes them ([`State`]).
@@ -400,7 +398,12 @@ mod tests {
         let key = r#""annotations":"#;
         let text = &config[config.find(key).unwrap() + key.len()..config.len() - 1];
         let annotations = serde_json::to_vec(&spec.annotations).unwrap();
-        assert!(annotations.len() <= text.len(), "{} > {}", annotations.len(), text.len());
+        assert!(
+            annotations.len() <= text.len(),
+            "{} > {}",
+            annotations.len(),
+            text.len()
+        );
     }
 
     /// Do: a startContainer failure whose reason is longer than a pipe's atomic write, peeked from a FIFO,
@@ -435,14 +438,20 @@ mod tests {
         let (probe, _) = rustix::pipe::pipe().unwrap();
         let holds = rustix::pipe::fcntl_getpipe_size(&probe).unwrap();
         let mut state = State::new("c1", "/bundle");
-        state.annotations.insert("big".to_owned(), "x".repeat(holds + 1));
+        state
+            .annotations
+            .insert("big".to_owned(), "x".repeat(holds + 1));
         let started = Instant::now();
         let got = run("a hook", &[sh("exec sleep infinity", Some(1))], &state);
         assert!(
             matches!(&got, Err(OciError::Os { why, .. }) if why.contains("timeout")),
             "{got:?}"
         );
-        assert!(started.elapsed() >= Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// AC-T7.1.4; Ada's 2026-11-06 rule (no picked constants): the runner waits on the facts it needs, the hook
@@ -454,7 +463,12 @@ mod tests {
     fn a_hook_is_waited_on_not_polled() {
         let state = State::new("c1", "/bundle");
         let before = wakes_on_this_thread();
-        run("a hook", &[sh("cat > /dev/null; exec sleep 0.2", None)], &state).unwrap();
+        run(
+            "a hook",
+            &[sh("cat > /dev/null; exec sleep 0.2", None)],
+            &state,
+        )
+        .unwrap();
         let wakes = wakes_on_this_thread() - before;
         assert!(wakes <= 2, "woke {wakes} times");
     }
