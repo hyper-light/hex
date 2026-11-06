@@ -133,8 +133,10 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   - The Mac Studio through `docker_pass.sh` (2026-11-06, Docker Desktop's VM, 6.12.65-linuxkit aarch64, the same tree):
     **every cell under the bar in both columns and both modes**, no owner 0.107x (0.150x), 0.127x (0.175x), 0.102x
     (0.160x), 0.103x (0.131x); reuse on 0.107x (0.139x), 0.122x (0.151x), 0.099x (0.152x), 0.108x (0.134x), libcrun's
-    create p99.9 3.77 and 3.92 ms. jupiter's pass waits on kiln, which refuses this session's runs there since its
-    2026-11-06 restart.
+    create p99.9 3.77 and 3.92 ms.
+  - jupiter (2026-11-06, Docker Desktop's WSL2 VM, the same tree), no owner: 0.200x (0.242x), 0.310x (0.489x), 0.208x
+    (0.287x), 0.342x (0.330x): both p99.9 over, as on fedora. Reuse on didn't finish: jupiter's C: drive filled from
+    other writers and Docker Desktop stopped; it waits for space.
   - Open, Ada's: count the bar with an owner, reuse across boxes of no owner, or accept it unmet on 6.19 (fedora's
     no-owner p99.9). Goal 5 lands from this tree on her word.
 - **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5

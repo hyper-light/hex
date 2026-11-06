@@ -635,8 +635,25 @@ in each phase with no error, no round crashed, and the parked inits were claimed
   pass's own deleted boxes preempting creates on their CPUs (above), and the pass deletes as many boxes here; what
   differs is the host around it: the VM ran nothing else (load 3.26 to 6.30 in 14 CPUs, against fedora's 16 to 17
   with kiln CI beside the pass), and its kernel is 6.12, not 6.19.
-- The Mac's own load was 2.38 at the job's start and 2.73 at its end. jupiter's pass waits on kiln, which refuses this
-  session's runs there since its restart of 2026-11-06 about 02:06Z.
+- The Mac's own load was 2.38 at the job's start and 2.73 at its end.
+
+**And on jupiter** (2026-11-06): Windows, AMD Ryzen AI MAX+ 395, Docker Desktop's WSL2 VM (kernel 6.18.54.1, x86_64,
+32 CPUs, the pass pinned to 4-31, 78 GiB), docker_pass.sh building hex (static-glibc, sha256 568e107e06b2d915) and
+seam_oci at 70376d7 in the pass image, N=10000, best of 2. Amphora's benchmark chain there last wrote on 2026-11-01
+and ran nothing; step 4's own Windows-container dockerd ran beside Docker Desktop, on its own pipe, and one container
+(`w28host`) not of this pass ran in Docker Desktop's engine.
+
+| pass | | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| no owner (VM load 3.16 to 3.51) | Hex in process | 0.81, 0.200x | 2.00, 0.310x | 0.89, 0.208x | 2.81, 0.342x |
+| | Hex over the socket | 0.98, 0.242x | 3.16, 0.489x | 1.23, 0.287x | 2.71, 0.330x |
+| | libcrun | 4.05 | 6.46 | 4.28 | 8.22 |
+
+Every round's file holds its 10,000 in each phase with no error and none crashed. With no owner, jupiter is as fedora
+is: both p50s under in process, both p99.9s over (and over the socket the create+start p50 too). The reuse-on pass
+didn't finish: jupiter's C: drive, which holds Docker Desktop's VM disk, filled from other writers (5.9 GB free at
+06:00Z, 67 MB at 06:27Z), and Docker Desktop stopped ("Docker Desktop is unable to start") in its first round. Its
+disk wasn't freed for it; reuse on there waits for space.
 
 The passes before it, on the way (same method, fedora, noisy; each round read whole): at 6eb38bd (goal 6 merged) no
 owner out/20261105T030924Z 0.286x, 0.191x, 0.255x, 0.251x (libcrun create p99.9 22.15) and reuse on
