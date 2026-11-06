@@ -26,6 +26,7 @@ pub const SIM_BOXES: usize = 10_000;
 /// program the simulator takes runs on every Linux (docs/research/runtime/exec-size-bounds.md).
 pub const SIM_EXEC_LIMIT: crate::ExecLimit = crate::ExecLimit {
     block: 131_072,
+    counts: crate::BlockCount::Execve,
     string: None,
     unit: crate::StringUnit::Bytes,
     source: "the simulator (Linux's ARG_MAX floor, include/uapi/linux/limits.h:8)",

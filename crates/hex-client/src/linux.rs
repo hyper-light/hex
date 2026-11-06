@@ -467,6 +467,7 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
 /// program, before it is encoded; the node then holds it to its OS's own exec bound (HEX-RT-14).
 pub const WIRE_EXEC_LIMIT: ExecLimit = ExecLimit {
     block: wire::MAX_MESSAGE,
+    counts: hex_api::BlockCount::Execve,
     string: None,
     unit: hex_api::StringUnit::Bytes,
     source: "the node agent's wire (one message, hex_core::wire::MAX_MESSAGE)",

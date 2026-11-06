@@ -308,12 +308,16 @@ impl Program {
     /// Whether this OS's exec takes it: refused as `Invalid` naming the sizes and the bound's source when it
     /// doesn't, before any spawn (CLAUDE.md §2, §3).
     pub fn fits(&self, limit: &ExecLimit) -> Result<(), Refusal> {
-        let size = self.exec_size();
+        let size = limit.size(self);
         if size > limit.block {
+            let (what, unit) = match limit.counts {
+                BlockCount::Execve => ("its arguments and environment take", "bytes"),
+                BlockCount::Environment => ("its environment takes", limit.unit.name()),
+            };
             return Err(Refusal::Invalid {
                 what: "program",
                 why: format!(
-                    "its arguments and environment take {size} bytes; {} allows {}",
+                    "{what} {size} {unit}; {} allows {}",
                     limit.source, limit.block
                 ),
             });
@@ -355,6 +359,17 @@ impl Program {
     }
 }
 
+/// What an OS's exec bound counts of a program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockCount {
+    /// Every argument and variable, the filename and their pointers, in bytes: [`Program::exec_size`]
+    /// (Linux's execve, which bounds at least what XNU's does).
+    Execve,
+    /// The environment alone, each NAME=VALUE and its NUL in [`ExecLimit::unit`] (Windows' environment block;
+    /// its command line is bounded apart).
+    Environment,
+}
+
 /// The unit an OS counts one string of a program in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringUnit {
@@ -362,6 +377,21 @@ pub enum StringUnit {
     Bytes,
     /// UTF-16 code units (Windows' 32,767 characters a variable).
     Utf16,
+}
+
+impl ExecLimit {
+    /// `program`'s size as this bound counts it.
+    pub fn size(&self, program: &Program) -> usize {
+        match self.counts {
+            BlockCount::Execve => program.exec_size(),
+            BlockCount::Environment => program.env.iter().fold(0usize, |n, (k, v)| {
+                // NAME=VALUE and its NUL.
+                n.saturating_add(self.unit.of(k))
+                    .saturating_add(self.unit.of(v))
+                    .saturating_add(2)
+            }),
+        }
+    }
 }
 
 impl StringUnit {
@@ -385,8 +415,10 @@ impl StringUnit {
 /// (docs/research/runtime/exec-size-bounds.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecLimit {
-    /// Bytes for every string and its pointer together, as [`Program::exec_size`] counts them.
+    /// The most a program may take, counted as [`ExecLimit::counts`] says.
     pub block: usize,
+    /// What [`ExecLimit::block`] counts.
+    pub counts: BlockCount,
     /// Any one string with its NUL, in [`ExecLimit::unit`], where the OS bounds that too.
     pub string: Option<usize>,
     /// What [`ExecLimit::string`] counts: Linux and macOS bound a string in bytes, Windows in UTF-16 units.
@@ -449,6 +481,7 @@ mod tests {
         assert_eq!(p.exec_size(), size);
         let fits = ExecLimit {
             block: size,
+            counts: BlockCount::Execve,
             string: None,
             unit: StringUnit::Bytes,
             source: "a test",
@@ -485,6 +518,7 @@ mod tests {
         };
         let utf16 = ExecLimit {
             block: usize::MAX,
+            counts: BlockCount::Execve,
             string: Some(6),
             unit: StringUnit::Utf16,
             source: "a test",

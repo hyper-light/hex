@@ -32,6 +32,7 @@ pub fn exec_limit() -> ExecLimit {
     let block = cap.min(quarter).max(ARG_MAX);
     ExecLimit {
         block: usize::try_from(block).unwrap_or(usize::MAX),
+        counts: hex_api::BlockCount::Execve,
         string: Some(rustix::param::page_size().saturating_mul(MAX_ARG_STRLEN_PAGES)),
         unit: hex_api::StringUnit::Bytes,
         source: "Linux's execve (a quarter of RLIMIT_STACK, fs/exec.c)",

@@ -28,6 +28,7 @@ use process::{ProcessBox, Shared};
 pub fn exec_limit() -> Result<ExecLimit, Refusal> {
     Ok(ExecLimit {
         block: sys::arg_max().map_err(|e| Refusal::os("reading kern.argmax", e))?,
+        counts: hex_api::BlockCount::Execve,
         string: None,
         unit: hex_api::StringUnit::Bytes,
         source: "macOS's execve (kern.argmax)",

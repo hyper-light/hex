@@ -267,7 +267,7 @@ fn oversized_program(rt: &dyn Runtime, fx: &dyn Fixture) -> Result<(), String> {
         .div_ceil(2)
         .max(1);
     let mut n = 0usize;
-    while program.exec_size() <= limit.block {
+    while limit.size(&program) <= limit.block {
         program.env.push((format!("HEX_RT_14_{n}"), "x".repeat(piece)));
         n = n.saturating_add(1);
     }
