@@ -188,13 +188,26 @@ pub fn loadavg() -> Option<f64> {
 
 /// The most processes this kernel holds at once (`kern.maxproc`): no box can list more members.
 pub fn max_processes() -> io::Result<usize> {
+    let v = sysctl_int(c"kern.maxproc")?;
+    usize::try_from(v).map_err(|_| io::Error::other(format!("kern.maxproc reads {v}")))
+}
+
+/// The most processes macOS lets one user hold (`kern.maxprocperuid`, `bsd/conf/param.c:94`, scaled per
+/// device): the box helper's process cap for a box's user unless the installer names another.
+pub fn max_processes_per_user() -> io::Result<u32> {
+    let v = sysctl_int(c"kern.maxprocperuid")?;
+    u32::try_from(v).map_err(|_| io::Error::other(format!("kern.maxprocperuid reads {v}")))
+}
+
+/// Reads an integer sysctl by `name`.
+fn sysctl_int(name: &std::ffi::CStr) -> io::Result<c_int> {
     let mut v: c_int = 0;
     let mut len = size_of::<c_int>();
     // SAFETY: sysctlbyname reads the NUL-terminated name and writes at most `len` bytes, one c_int, into `v`,
     // and the new length into `len`; all three outlive the call, and nothing is set (newp null).
     let r = unsafe {
         libc::sysctlbyname(
-            c"kern.maxproc".as_ptr(),
+            name.as_ptr(),
             (&raw mut v).cast::<c_void>(),
             &raw mut len,
             std::ptr::null_mut(),
@@ -204,7 +217,7 @@ pub fn max_processes() -> io::Result<usize> {
     if r != 0 {
         return Err(io::Error::last_os_error());
     }
-    usize::try_from(v).map_err(|_| io::Error::other(format!("kern.maxproc reads {v}")))
+    Ok(v)
 }
 
 /// Makes the calling thread a Mach time-constraint thread (`THREAD_TIME_CONSTRAINT_POLICY`,

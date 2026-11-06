@@ -272,3 +272,31 @@ fn the_parser_never_panics_on_hostile_input() {
         })
         .unwrap();
 }
+
+/// HEX-MAC-10, CLAUDE.md §5 (the bound is macOS's, not picked): do encode the largest Start a macOS exec
+/// would take: an argument filling `ARG_MAX` as the kernel charges it (its bytes, its NUL and its argv
+/// pointer, `bsd/kern/kern_exec.c:6108-6112`), a `PATH_MAX` working folder, `NGROUPS_MAX` groups and a
+/// longest box id; expect it within the message bound and read back unchanged. A program past that is
+/// one exec refuses (`E2BIG`), so the helper's bound need hold no more.
+#[test]
+fn the_largest_program_a_macos_exec_takes_fits_one_message() {
+    let pointer = 8;
+    let start = Request::Start {
+        box_id: box_id(&"b".repeat(BoxId::MAX_LEN)),
+        program: Program {
+            args: vec!["a".repeat(ARG_MAX - 1 - pointer)],
+            env: vec![],
+            cwd: Some("c".repeat(PATH_MAX)),
+            user: Some(User {
+                uid: 501,
+                gid: 20,
+                groups: vec![12; NGROUPS_MAX],
+            }),
+        },
+        leader: true,
+    };
+    let bytes = encode_request(VERSION, 1, &start).expect("within the bound");
+    assert!(bytes.len() <= MAX_MESSAGE);
+    let (_, _, got) = read_request(&bytes, START_FDS).expect("read back");
+    assert_eq!(got, start);
+}

@@ -88,7 +88,15 @@ impl Proc for BoxProc {
         u32::try_from(self.pid).unwrap_or(0)
     }
 
+    /// Takes the exit event its watch holds, if any, then reaps: at once either way, since an exit event
+    /// means the zombie is being made on the same exit path.
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+        if !self.exiting && self.exit.is_none() {
+            self.kq
+                .wait(None, Some(Duration::ZERO), &mut self.events)
+                .map_err(|e| Refusal::os("waiting on a program", e))?;
+            self.exiting = ended_in(&self.events, self.pid);
+        }
         self.reap(self.exiting)
     }
 

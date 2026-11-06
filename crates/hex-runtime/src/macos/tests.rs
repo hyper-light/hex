@@ -176,6 +176,10 @@ struct Shells {
 struct ShellProc {
     pid: i32,
     end: mpsc::Receiver<Exit>,
+    /// Its own watch of the program's exit, as the real helper's `BoxProc` holds one.
+    kq: super::sys::Kqueue,
+    exiting: bool,
+    events: Vec<super::sys::Event>,
 }
 
 impl Proc for ShellProc {
@@ -183,14 +187,28 @@ impl Proc for ShellProc {
         u32::try_from(self.pid).unwrap_or(0)
     }
 
+    /// As the real one: take the exit event if its watch holds it, then the end, which follows it at once
+    /// (here the shell's status line; there the zombie), up to a bound past any test's run.
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
-        Ok(self.end.try_recv().ok())
+        if !self.exiting {
+            self.kq
+                .wait(None, Some(Duration::ZERO), &mut self.events)
+                .map_err(|e| Refusal::os("kevent", e))?;
+            let me = self.pid;
+            self.exiting = self
+                .events
+                .iter()
+                .any(|e| matches!(e, super::sys::Event::Exit { pid, .. } if *pid == me));
+        }
+        if self.exiting {
+            Ok(self.end.recv_timeout(Duration::from_secs(30)).ok())
+        } else {
+            Ok(self.end.try_recv().ok())
+        }
     }
 
-    /// The helper asks only once the node saw the program's exit, and the real reap then waits for the
-    /// zombie (`proc::BoxProc`); so does this, up to a bound past any test's run.
     fn wait_for(&mut self, _timeout: Duration) -> Result<Option<Exit>, Refusal> {
-        Ok(self.end.recv_timeout(Duration::from_secs(30)).ok())
+        self.try_wait()
     }
 }
 
@@ -245,7 +263,15 @@ impl Privileged for Shells {
             .unwrap()
             .remove(&pid)
             .ok_or_else(|| io::Error::other("no such program"))?;
-        Ok(Box::new(ShellProc { pid, end }))
+        let kq = super::sys::Kqueue::new()?;
+        let exiting = kq.watch(&[pid], 0)?.contains(&pid);
+        Ok(Box::new(ShellProc {
+            pid,
+            end,
+            kq,
+            exiting,
+            events: Vec::new(),
+        }))
     }
 
     fn arm(&self, _pid: i32, _cap_mib: u32) -> io::Result<()> {
@@ -308,4 +334,56 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         three.wait_for(Duration::from_secs(10)).unwrap(),
         Some(Exit::Code(3))
     );
+}
+
+/// CLAUDE.md §5 (the box helper's default process cap is the kernel's, not picked): do read the per-user
+/// process limit; expect what `sysctl kern.maxprocperuid` prints, the limit macOS itself holds each user to
+/// (`bsd/conf/param.c:94`, scaled per device), so a box's user gets what any user of this machine gets.
+#[test]
+fn the_default_box_process_cap_is_the_kernels_per_user_limit() {
+    let out = std::process::Command::new("/usr/sbin/sysctl")
+        .args(["-n", "kern.maxprocperuid"])
+        .output()
+        .expect("sysctl");
+    let want: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("a number");
+    assert_eq!(super::sys::max_processes_per_user().expect("read"), want);
+}
+
+/// HEX-RT-3 (no wait bound to pick): do watch a running child, then end it; expect `try_wait` to answer
+/// it runs at once while it does, and its end at once after its exit event, with no wait between (it
+/// takes the event its watch holds and then reaps the zombie the same exit path makes), so the box
+/// helper answers a node's `Wait` without bounding a wait.
+#[test]
+fn try_wait_answers_at_once_running_or_ended() {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "read _; exit 3"])
+        .stdin(Piped::piped())
+        .spawn()
+        .expect("spawn");
+    let pid = i32::try_from(child.id()).expect("pid");
+    let mut p = super::proc::BoxProc::watch(pid).expect("watch");
+    assert_eq!(
+        p.try_wait().expect("try_wait"),
+        None,
+        "a running child read as ended"
+    );
+    drop(child.stdin.take());
+    // Wait on the fact: the child's exit event, on a kqueue of the test's own.
+    let kq = super::sys::Kqueue::new().expect("kqueue");
+    let mut events = Vec::new();
+    if !kq.watch(&[pid], 0).expect("watch").contains(&pid) {
+        while !events
+            .iter()
+            .any(|e| matches!(e, super::sys::Event::Exit { pid: p, .. } if *p == pid))
+        {
+            kq.wait(None, Some(Duration::from_secs(30)), &mut events)
+                .expect("wait");
+        }
+    }
+    assert_eq!(p.try_wait().expect("try_wait"), Some(Exit::Code(3)));
+    // `try_wait` reaped it; this wait finds no child left (ECHILD) and leaves no zombie either way.
+    let _ = child.wait();
 }

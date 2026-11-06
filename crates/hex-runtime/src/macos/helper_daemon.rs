@@ -35,12 +35,6 @@ use kids::{Full, Kids, Taken};
 /// to raise, CLAUDE.md §4). Freeing the uid before it is empty would hand a live process to the next box.
 const DRAIN_PATIENCE: Duration = Duration::from_secs(10);
 
-/// How long a [`Request::Wait`] waits for its program's zombie. Not a tuning: the node asks once it has
-/// seen the program's `NOTE_EXIT`, so the daemon's own watch has that event queued and its reap waits for
-/// the zombie the same exit path makes (`proc::BoxProc`); this bounds only a wait asked of a program
-/// still running, which answers `None` and holds the daemon's connection no longer than this.
-const REAP_PATIENCE: Duration = Duration::from_millis(100);
-
 /// One live member of a box's user: its pid and its physical footprint in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Member {
@@ -54,7 +48,7 @@ pub struct Member {
 /// (docs/research/runtime/native-platforms.md §3). A process gone since it was listed (`ESRCH`) or ended
 /// and awaiting reap is left out; its footprint would be 0.
 pub fn members(uid: u32) -> io::Result<Vec<Member>> {
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let mut pids = Vec::with_capacity(sys::max_processes()?);
     sys::user_pids(uid, &mut pids)?;
     let mut out = Vec::with_capacity(pids.len());
     for &pid in &pids {
@@ -79,7 +73,7 @@ pub fn kill_user(uid: u32, linux_signal: i32) -> io::Result<usize> {
         .ok_or_else(|| io::Error::other(format!("signal {linux_signal} has no macOS number")))?;
     let sig = rustix::process::Signal::from_named_raw(macos)
         .ok_or_else(|| io::Error::other(format!("{macos} isn't a signal this kernel names")))?;
-    let mut pids = Vec::with_capacity(sys::max_processes().unwrap_or(4096));
+    let mut pids = Vec::with_capacity(sys::max_processes()?);
     sys::user_pids(uid, &mut pids)?;
     let mut signalled = 0usize;
     for &pid in &pids {
@@ -619,7 +613,9 @@ impl<P: Privileged> Daemon<P> {
             Some(Some(Taken::Ended(exit))) => return Answer::Waited(Some(exit)),
             Some(Some(Taken::Live(p))) => p,
         };
-        let got = proc.wait_for(REAP_PATIENCE);
+        // At once: the node asks after the program's exit event, which the daemon's own watch holds too,
+        // so the reap finds the zombie its exit path makes; a running program answers `None`.
+        let got = proc.try_wait();
         if !matches!(got, Ok(Some(_))) {
             let back = match self.kids() {
                 Ok(mut k) => k.put_back(box_id, pid, proc),
@@ -646,7 +642,10 @@ pub fn bind(path: &Path) -> Result<OwnedFd, Refusal> {
         .map_err(|e| Refusal::os("making the helper socket", e))?;
     let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::os("naming the helper socket", e))?;
     rustix::net::bind(&fd, &addr).map_err(|e| Refusal::os("binding the helper socket", e))?;
-    rustix::net::listen(&fd, 16).map_err(|e| Refusal::os("listening on the helper socket", e))?;
+    // The platform's own backlog bound (`SOMAXCONN`, `bsd/sys/socket.h:597`): a node keeps one connection, and
+    // the kernel caps any larger request at `kern.ipc.somaxconn`.
+    rustix::net::listen(&fd, libc::SOMAXCONN)
+        .map_err(|e| Refusal::os("listening on the helper socket", e))?;
     Ok(fd)
 }
 

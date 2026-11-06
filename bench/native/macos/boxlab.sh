@@ -118,7 +118,7 @@ TESTBIN="$(find "$USERTARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*'
         "$PROBE" uid "$LABUID" "$N"
 
         echo "## box-user class end to end: a real 'hex __box-helper' + box-user HEX-RT conformance + helper CPU"
-        "$HEXBIN" __box-helper --socket "$SOCK" --users "$LABUID" --nproc 1024 &
+        "$HEXBIN" __box-helper --socket "$SOCK" --users "$LABUID" &  # its process cap: kern.maxprocperuid
         HELPER_PID=$!
         for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
         if [ -S "$SOCK" ] && [ -n "$TESTBIN" ]; then
