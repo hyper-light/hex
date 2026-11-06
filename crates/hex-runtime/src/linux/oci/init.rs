@@ -1931,7 +1931,19 @@ fn found_one(found: &mut Vec<String>, under: String, destination: &str) -> Resul
 fn cgroupfs_in_table(top_fd: &OwnedFd, destination: &str) -> Result<Vec<String>, OciError> {
     let top_real = std::fs::read_link(inroot::fd_path(top_fd))
         .map_err(|e| OciError::os("reading the bind's path", e))?;
-    let mountinfo = read_mountinfo(destination)?;
+    let file = std::fs::File::open("/proc/self/mountinfo")
+        .map_err(|e| OciError::os("reading the mount table", e))?;
+    cgroupfs_in_mountinfo(file, &top_real, destination)
+}
+
+/// The cgroup filesystems beneath `top` in the mount table `table` (proc_pid_mountinfo(5)), for the recursive bind
+/// at `destination`.
+fn cgroupfs_in_mountinfo(
+    table: impl std::io::Read,
+    top: &Path,
+    destination: &str,
+) -> Result<Vec<String>, OciError> {
+    let mountinfo = read_mountinfo(table, destination)?;
     let mut found = Vec::new();
     for line in mountinfo.lines() {
         // proc_pid_mountinfo(5): the mount point is field 5, then the optional fields, then " - ",
@@ -1945,19 +1957,17 @@ fn cgroupfs_in_table(top_fd: &OwnedFd, destination: &str) -> Result<Vec<String>,
         let Some(point) = left.split(' ').nth(4) else {
             continue;
         };
-        if let Some(under) = beneath_top(&unescape_mountpoint(point), &top_real) {
+        if let Some(under) = beneath_top(&unescape_mountpoint(point), top) {
             found_one(&mut found, under, destination)?;
         }
     }
     Ok(found)
 }
 
-/// This process's mount table, `/proc/self/mountinfo`, read whole and bounded ([`MOUNTINFO_FIRST_READ`],
-/// [`MAX_MOUNTINFO`]), for the recursive bind at `destination`.
-fn read_mountinfo(destination: &str) -> Result<String, OciError> {
+/// A mount table, `file`, read whole and bounded ([`MOUNTINFO_FIRST_READ`], [`MAX_MOUNTINFO`]), for the recursive
+/// bind at `destination`.
+fn read_mountinfo(file: impl std::io::Read, destination: &str) -> Result<String, OciError> {
     use std::io::Read;
-    let file = std::fs::File::open("/proc/self/mountinfo")
-        .map_err(|e| OciError::os("reading the mount table", e))?;
     let mut bytes = Vec::with_capacity(MOUNTINFO_FIRST_READ);
     file.take(MAX_MOUNTINFO)
         .read_to_end(&mut bytes)
@@ -2730,6 +2740,53 @@ mod tests {
             .expect("this host's kernel has statmount (Linux 6.8)");
         assert_eq!(got, (String::new(), "/sys".to_owned()));
         assert_eq!(buf.len(), STATMOUNT_BUF);
+    }
+
+    /// A mount table's line for a cgroup2 filesystem at `point`, as the kernel writes one (proc_pid_mountinfo(5)),
+    /// its filesystem's own options `options`.
+    fn cgroup_line(id: usize, point: &str, options: &str) -> String {
+        format!("{id} 25 0:31 / {point} rw,nosuid,nodev shared:9 - cgroup2 cgroup2 rw,{options}\n")
+    }
+
+    /// Ada's 2026-11-06 rule (goal 5 plan step 3, T-T7.1.4; CLAUDE.md §2): do read a mount table holding 300 cgroup
+    /// filesystems beneath a bind's top (past the 256 once picked as their bound), and one whose lines carry 90 KiB
+    /// of a filesystem's own options each, 17 MiB in all (past the 16 MiB once picked as the table's), as an
+    /// overlay's long `lowerdir` makes. Expect every cgroup filesystem found in both, the namespace's own mount
+    /// cap the one bound on lines, and a line's length bounded by the kernel's alone.
+    #[test]
+    fn a_mount_table_is_bounded_by_the_namespaces_mount_cap_alone() {
+        let top = Path::new("/sys");
+        let table: String = (0..300)
+            .map(|i| cgroup_line(i, &format!("/sys/fs/cgroup/c{i}"), "nsdelegate"))
+            .collect();
+        let found = cgroupfs_in_mountinfo(table.as_bytes(), top, "/sys").unwrap();
+        assert_eq!(found.len(), 300);
+        assert_eq!(found[299], "fs/cgroup/c299");
+        let long = format!("lowerdir={}", "/l".repeat(45 * 1024));
+        let mut table: String = (0..200)
+            .map(|i| format!("{i} 25 0:40 / /o{i} rw - overlay overlay rw,{long}\n"))
+            .collect();
+        table.push_str(&cgroup_line(201, "/sys/fs/cgroup", "nsdelegate"));
+        assert!(table.len() > 17 << 20);
+        let found = cgroupfs_in_mountinfo(table.as_bytes(), top, "/sys").unwrap();
+        assert_eq!(found, ["fs/cgroup"]);
+    }
+
+    /// CLAUDE.md §2, §3: do read a mount table whose cgroup filesystem beneath the bind has a mount point past what
+    /// `openat2` takes (`PATH_MAX`), so no remount could reach it, and one whose point holds a space (`\040`).
+    /// Expect the first refused, naming the bind, and the second found, its point decoded.
+    #[test]
+    fn a_cgroup_filesystem_past_path_max_is_refused_by_name() {
+        let top = Path::new("/sys");
+        let deep = format!("/sys/fs/cgroup/{}", "d/".repeat(4096));
+        let refused = cgroupfs_in_mountinfo(cgroup_line(1, &deep, "").as_bytes(), top, "/sys");
+        assert!(
+            matches!(&refused, Err(OciError::Config(why)) if why.contains("/sys")),
+            "{refused:?}"
+        );
+        let spaced = cgroup_line(1, "/sys/fs/cgroup/a\\040b", "");
+        let found = cgroupfs_in_mountinfo(spaced.as_bytes(), top, "/sys").unwrap();
+        assert_eq!(found, ["fs/cgroup/a b"]);
     }
 
     /// Do: a mount's target is a link to a host directory, or a path through a file. Expect: a target
