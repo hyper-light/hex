@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use super::tests::{id, pack, unpack};
+use super::tests::{id, layers_of, pack, unpack};
 use super::*;
 use hex_core::stream::files::LIMITS;
 
@@ -280,7 +280,10 @@ fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
         std::fs::write(dir.path().join("2.tar"), archive(&two)).unwrap();
         let items = [Item {
             name: "root".to_owned(),
-            source: Source::Layers(vec![dir.path().join("1.tar"), dir.path().join("2.tar")]),
+            source: Source::Layers(layers_of(&[
+                dir.path().join("1.tar"),
+                dir.path().join("2.tar"),
+            ])),
         }];
         let mut out = Vec::new();
         pack(&mut out, &id(), &items, &LIMITS).map(|()| out)
@@ -304,13 +307,14 @@ fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
         .filter(|(_, k)| *k.1 == What::Layer)
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(layers, [1, 8], "{kinds:?}");
-    assert_eq!(kinds[9], ("root/etc/a", &What::Whiteout));
-    assert_eq!(kinds[10], ("root/d", &What::Dir));
-    assert_eq!(kinds[11], ("root/d", &What::Opaque));
-    assert_eq!(kinds[13], ("root/f", &What::Dir));
+    // A layered root's layers go to the guest's store: no directory of the box's comes before them.
+    assert_eq!(layers, [0, 7], "{kinds:?}");
+    assert_eq!(kinds[8], ("root/etc/a", &What::Whiteout));
+    assert_eq!(kinds[9], ("root/d", &What::Dir));
+    assert_eq!(kinds[10], ("root/d", &What::Opaque));
+    assert_eq!(kinds[12], ("root/f", &What::Dir));
     assert_eq!(
-        kinds[14],
+        kinds[13],
         (
             "root/h",
             &What::Hardlink {

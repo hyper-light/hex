@@ -40,9 +40,64 @@ pub enum Source {
     /// A tarball (`.tar`, or gzip's `.tar.gz` or `.tgz`), staged from its own entries: their Linux modes
     /// and symlink texts exact, which a root unpacked on a host that keeps neither would lose (§4a).
     Tar(PathBuf),
-    /// An image's layers, each a tarball, applied in order into one root by containerd's rules: a later
-    /// entry replaces an earlier one, and OCI's whiteouts and opaque markers remove (§4a).
-    Layers(Vec<PathBuf>),
+    /// An image's layers, each a tarball, lowest first: each applied once into the guest's layer store by
+    /// its digest, as containerd's overlay applier applies a layer, and mounted together by overlayfs
+    /// (§4a). A layer the guest holds isn't sent again.
+    Layers(Vec<Layer>),
+}
+
+/// One layer of an image: its tarball, and its digest, the store's name for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layer {
+    pub path: PathBuf,
+    pub digest: files::Digest,
+}
+
+/// The sha256 of the tarball at `path`, a layer's digest (OCI image-spec descriptor.md, "Digests"), read
+/// in its file's own preferred block (st_blksize, stat(2)) where the host says one.
+pub fn digest_of(path: &Path) -> Result<files::Digest, Refusal> {
+    use sha2::{Digest as _, Sha256};
+    let read = |e: io::Error| {
+        Refusal::os(
+            "reading a layer to digest it",
+            format!("{}: {e}", path.display()),
+        )
+    };
+    let mut file = File::open(path).map_err(read)?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; block_of(&file)];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(read(e)),
+        };
+        hash.update(buf.get(..n).unwrap_or_default());
+    }
+    Ok(hash.finalize().into())
+}
+
+/// A file's preferred I/O block (st_blksize, stat(2)), or on a host that says none, a page's 4096 bytes
+/// (the x86_64 and aarch64 base page, as the guest's kernel has it).
+#[cfg(unix)]
+fn block_of(file: &File) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata()
+        .ok()
+        .and_then(|m| usize::try_from(m.blksize()).ok())
+        .filter(|b| *b > 0)
+        .unwrap_or(4096)
+}
+
+#[cfg(not(unix))]
+fn block_of(_file: &File) -> usize {
+    4096
+}
+
+/// The guest's path of the layer `digest` in its store, the relay staging under `staged`.
+pub fn layer_path(staged: &str, digest: &files::Digest) -> String {
+    format!("{staged}/{}/{}", files::STORE, files::digest_hex(digest))
 }
 
 /// Whether `path` names a tarball root, by its name: `.tar`, `.tar.gz` or `.tgz`.
@@ -59,25 +114,43 @@ pub fn staged_path(staged: &str, id: &BoxId, name: &str) -> String {
 
 /// Stages `items` for `id` through `link`, waiting for the relay's answer.
 pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Result<(), Refusal> {
+    // The root's layers, by digest: the store's names for them (§4a). A stage stages one root.
+    let layers: Vec<&Layer> = items
+        .iter()
+        .filter_map(|item| match &item.source {
+            Source::Layers(layers) => Some(layers),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let digests: Vec<files::Digest> = layers.iter().map(|l| l.digest).collect();
     let mut conn = dial(link)?;
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    conn.write_all(&files::open(Op::Stage, id.as_str()).map_err(refused)?)
+    conn.write_all(&files::open_stage(id.as_str(), &digests).map_err(refused)?)
         .map_err(|e| Refusal::os("sending staged files", e))?;
-    // The relay answers the opening with the stage's budget, what its file system has free, or refuses.
+    // The relay answers the opening with the stage's budget, what its file system has free and which of
+    // the layers it already holds, or refuses.
     let first = message(conn.as_mut(), &mut deframer)?;
-    let Some((entries, bytes)) = files::read_budget(&first) else {
+    let Some(budget) = files::read_budget(&first) else {
         return Err(answer_of(&first).err().unwrap_or_else(|| {
             Refusal::Broken("the relay answered a stage's opening with no budget".to_owned())
         }));
     };
+    if budget.present.len() != digests.len() {
+        return Err(Refusal::Broken(format!(
+            "the relay said which of {} layers it holds, of {}",
+            budget.present.len(),
+            digests.len()
+        )));
+    }
     let learned = Limits {
-        entries: limits.entries.min(entries),
-        bytes: limits.bytes.min(bytes),
+        entries: limits.entries.min(budget.entries),
+        bytes: limits.bytes.min(budget.bytes),
         path: limits.path,
     };
     let sent = {
         let mut out = BufWriter::with_capacity(64 << 10, Writer(conn.as_mut()));
-        pack_items(&mut out, items, &learned).and_then(|()| {
+        pack_items(&mut out, items, &learned, &budget.present).and_then(|()| {
             out.write_all(&files::END)
                 .and_then(|()| out.flush())
                 .map_err(|e| Refusal::os("sending staged files", e))
@@ -258,7 +331,12 @@ fn kind(path: &Path, meta: &fs::Metadata) -> Result<Kind, Refusal> {
 
 /// Writes every entry of `items` to `out`, within `limits`: each directory walked flat, a queue of the
 /// directories found (CLAUDE.md §11), and every entry counted against the stage's bound before it is sent.
-fn pack_items(out: &mut dyn Write, items: &[Item], limits: &Limits) -> Result<(), Refusal> {
+fn pack_items(
+    out: &mut dyn Write,
+    items: &[Item],
+    limits: &Limits,
+    present: &[bool],
+) -> Result<(), Refusal> {
     let send = |out: &mut dyn Write, bytes: &[u8]| {
         out.write_all(bytes)
             .map_err(|e| Refusal::os("sending staged files", e))
@@ -279,14 +357,24 @@ fn pack_items(out: &mut dyn Write, items: &[Item], limits: &Limits) -> Result<()
                 send(out, bytes)?;
             }
             Source::Path(path) => walk(out, &item.name, path, limits, &mut counts)?,
-            Source::Tar(path) => tarball(
-                out,
-                &item.name,
-                std::slice::from_ref(path),
-                limits,
-                &mut counts,
-            )?,
-            Source::Layers(layers) => tarball(out, &item.name, layers, limits, &mut counts)?,
+            Source::Tar(path) => {
+                tarball(
+                    out,
+                    &item.name,
+                    &[(path.clone(), false)],
+                    limits,
+                    &mut counts,
+                    true,
+                )?;
+            }
+            Source::Layers(layers) => {
+                let layers: Vec<(PathBuf, bool)> = layers
+                    .iter()
+                    .zip(present.iter().copied().chain(std::iter::repeat(false)))
+                    .map(|(l, held)| (l.path.clone(), held))
+                    .collect();
+                tarball(out, &item.name, &layers, limits, &mut counts, false)?;
+            }
         }
     }
     Ok(())
@@ -894,15 +982,19 @@ impl Tree {
     }
 }
 
-/// Sends the tarball root at `layers` as `name`: one directory, each layer's entries applied over those
-/// before it in order, by containerd's rules (§4a): each counted against the stage's bounds before it
-/// is sent, and every fault refused naming the archive and the entry.
+/// Sends the tarball root at `layers` (each with whether the guest holds it already) as `name`: each
+/// layer's entries after a layer marker, applied over those before it by containerd's overlay rules, each
+/// counted against the stage's bounds before it is sent, and every fault refused naming the archive and
+/// the entry. A layer the guest holds is sent no more. A root applied `in_place` (a bundle's or a
+/// `Rootfs::Dir`'s one tarball, which its container writes into) is a directory `name` the relay makes
+/// first; a layered root's layers go to the guest's store, under no directory of the box's.
 fn tarball(
     out: &mut dyn Write,
     name: &str,
-    layers: &[PathBuf],
+    layers: &[(PathBuf, bool)],
     limits: &Limits,
     counts: &mut Counts,
+    in_place: bool,
 ) -> Result<(), Refusal> {
     if layers.len() > MAX_LAYERS {
         return Err(Refusal::Invalid {
@@ -913,19 +1005,24 @@ fn tarball(
             ),
         });
     }
-    // The root itself, 0755 and the relay's: an archive's own `./` entry, if it has one, names nothing
-    // more (the root is the box's mount point, whose owner and times are the runtime's).
-    counts.add(0, limits)?;
-    let root = Entry {
-        path: name.to_owned(),
-        mode: 0o755,
-        what: What::Dir,
-        meta: None,
-    };
-    out.write_all(&files::head(&root, limits).map_err(refused)?)
-        .map_err(|e| Refusal::os("sending staged files", e))?;
+    if in_place {
+        // The root itself, 0755 and the relay's: an archive's own `./` entry, if it has one, names
+        // nothing more (the root is the box's mount point, whose owner and times are the runtime's).
+        counts.add(0, limits)?;
+        let root = Entry {
+            path: name.to_owned(),
+            mode: 0o755,
+            what: What::Dir,
+            meta: None,
+        };
+        out.write_all(&files::head(&root, limits).map_err(refused)?)
+            .map_err(|e| Refusal::os("sending staged files", e))?;
+    }
     let mut tree = Tree::default();
-    for path in layers {
+    for (path, held) in layers {
+        if *held {
+            continue;
+        }
         counts.add(0, limits)?;
         let marker = Entry {
             path: name.to_owned(),

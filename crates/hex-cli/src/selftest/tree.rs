@@ -39,14 +39,45 @@ struct Line {
 }
 
 /// Writes `dir`'s manifest to stdout; 0 when whole, 1 (with why on stderr) when it can't be.
-pub fn tree(dir: &str) -> u8 {
-    match manifest(Path::new(dir)) {
+pub fn tree(args: &[String]) -> u8 {
+    let made = match args {
+        [flag, layers] if flag == "--layers" => overlay(layers),
+        [dir] => manifest(Path::new(dir)),
+        _ => Err("usage: tree <dir> | tree --layers <lowest>:...:<topmost>".to_owned()),
+    };
+    match made {
         Ok(text) => u8::from(super::write_all(&mut std::io::stdout(), text.as_bytes()).is_err()),
         Err(why) => {
             let _ = std::io::stderr().write_all(format!("tree: {why}\n").as_bytes());
             1
         }
     }
+}
+
+/// The manifest of the overlay of `layers` (`:`-separated, lowest first), as the guest's node mounts a
+/// box's layered root: overlayfs over the layers' folders, read-only, with no upper, mounted by the new mount
+/// API (fsopen(2), one `lowerdir+` per layer, topmost first, Linux 6.8+; Documentation/filesystems/
+/// overlayfs.rst) and walked through its descriptor, never attached anywhere, so it goes when the walk ends.
+fn overlay(layers: &str) -> Result<String, String> {
+    use std::os::fd::AsRawFd;
+
+    use rustix::mount::{
+        FsMountFlags, FsOpenFlags, MountAttrFlags, fsconfig_create, fsconfig_set_string, fsmount,
+        fsopen,
+    };
+    let fs = fsopen("overlay", FsOpenFlags::FSOPEN_CLOEXEC).map_err(|e| format!("fsopen: {e}"))?;
+    for layer in layers.split(':').rev() {
+        fsconfig_set_string(&fs, "lowerdir+", layer)
+            .map_err(|e| format!("lowerdir+ {layer}: {e}"))?;
+    }
+    fsconfig_create(&fs).map_err(|e| format!("making the overlay: {e}"))?;
+    let mount = fsmount(
+        &fs,
+        FsMountFlags::FSMOUNT_CLOEXEC,
+        MountAttrFlags::MOUNT_ATTR_RDONLY,
+    )
+    .map_err(|e| format!("mounting the overlay: {e}"))?;
+    manifest(Path::new(&format!("/proc/self/fd/{}", mount.as_raw_fd())))
 }
 
 fn manifest(root: &Path) -> Result<String, String> {

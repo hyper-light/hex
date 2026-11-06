@@ -286,19 +286,37 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     box in a user namespace is the runtime's, as on any Linux host.
   - **atime** is the later of the archive's atime and mtime, as containerd's unpack sets it (`pkg/archive/tar.go:335,
     445` at containerd v2.3.6, `ee273536`): the entry's metadata carries it beside mtime.
-  - **A multi-layer image is its layers' own tarballs, applied in order into one staged root**, by containerd's
-    rules (`applyNaive`, `pkg/archive/tar.go:161-340` at v2.3.6): a layer's entry replaces whatever was at its path,
-    of any kind, except a directory onto a directory, which merges and takes the later header's owner, mode,
-    xattrs and times (`:304-311`); `.wh.<name>` removes `<name>` (`:218-222`); `.wh..wh..opq` removes every entry of
-    its directory this layer hasn't made (`:184-216`); a directory's mode and times are its latest header's, set
-    when its layer ends, after everything in it (`:330-337`; a later layer that writes into it without a header
-    of its own moves its mtime, there as here). The stream marks each layer's start, and carries a whiteout and an
-    opaque marker as kinds of their own, never as files; one staging can't apply is refused by name. At most 500
-    layers (`hex_core::bundle::MAX_LAYERS`); the relay's set of what this layer made is bounded by the stage's
-    entries, and a removal by a counted walk. An `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest as
-    `Rootfs::Layers` of the one staged root, under the box's own writable layer; a bundle's `root.path` is one path,
-    so one tarball. The packer keeps the same state across layers, so a hard link can't name what a later layer
-    removed or replaced.
+  - **A multi-layer image's layers live once each in the guest's layer store, by digest** (the lead's call,
+    2026-11-06: it replaces staging a box's whole root at every create, in the same change, with no fallback).
+    The guest's staged folder holds `.layers/<sha256 of the layer's blob>` (a box id never starts with '.'), one
+    folder a layer, applied once as containerd's overlay snapshotter applies a layer into its own upper directory
+    (below), and a box of the image mounts them as its overlay's lower layers, as a Linux host does
+    (`hex_core::bundle`'s overlay, lowest first). An `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest
+    as `Rootfs::Layers` of those folders.
+    - **What's sent:** the host digests each layer's tarball and names the digests in the stage's opening; the
+      relay answers with the stage's budget and which of the layers it holds; the packer sends only those it
+      lacks, each after a layer marker. A layer the guest holds costs a create nothing but its digest.
+    - **Applying a layer:** within its own folder, by containerd's rules (`applyNaive`, `pkg/archive/tar.go:161-340`
+      at v2.3.6) with its overlay conversion: a layer's entry replaces what this layer put at its path, except a
+      directory onto a directory, which merges and takes the later header's owner, mode, xattrs and times
+      (`:304-311`); `.wh.<name>` becomes overlayfs's whiteout, a character device 0/0, and `.wh..wh..opq` its
+      opaque directory, the xattr `trusted.overlay.opaque` = `y` (`user.overlay.opaque` where the relay runs
+      unprivileged, as such a node mounts with `userxattr`) (containerd's `OverlayConvertWhiteout`;
+      Documentation/filesystems/overlayfs.rst, "Whiteouts and opaque directories"); a directory's mode and times
+      are its latest header's, set when its layer ends, after everything in it (`:330-337`). One staging can't
+      apply is refused by name. At most 500 layers (`hex_core::bundle::MAX_LAYERS`, overlayfs's `OVL_MAX_STACK`).
+    - **Crash safety:** a layer is staged into `.layers/.partial-<relay pid>-<n>-<digest>` and renamed to its
+      digest only once whole, so a stage cut or crashed mid-layer leaves nothing that counts as held; a partial
+      another relay process left is removed when a stage opens, and one this process left with its stage.
+    - **References and eviction:** a box's record, `<staged>/<box id>/.layers`, names its layers, written when
+      its stage opens, so a layer it names is never evicted under it; removing the box removes its record. A layer
+      no record names stays, a cache for the next create. When the file system says it has no room (`ENOSPC`, the
+      learned budget run short), the least recently used unreferenced layer (its folder's mtime, set at each use)
+      is evicted and the write tried again; with none left, `ENOSPC` is the refusal. The budget the relay
+      answers counts what unreferenced layers hold as free (each layer's `<digest>.size`, its entries and bytes).
+    - **One copy roots:** a bundle's `root.path` and a `Rootfs::Dir` are one directory its container writes into,
+      not an overlay, so a tarball given for one is applied in place, into the box's own folder, as one layer
+      with nothing below; a directory root (macOS, Linux) is copied as it is. Neither is a layered image's root.
   - **A layer applies as containerd's overlay applier applies it** (the lead's ruling, 2026-11-06, after ctr's
     snapshot): with the overlayfs snapshotter (ctr's and Docker's default) containerd unpacks each layer into the
     snapshot's upper directory alone, the layers below given only as `WithParents`

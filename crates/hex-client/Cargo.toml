@@ -15,6 +15,8 @@ hex-core.workspace = true
 flate2.workspace = true
 shards-api.workspace = true
 tar.workspace = true
+# A layer tarball's digest, its name in the guest's layer store (docs/design/shards-guest.md §4a).
+sha2.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true

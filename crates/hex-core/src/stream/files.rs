@@ -20,6 +20,8 @@
 
 use std::fmt;
 
+use crate::bundle::MAX_LAYERS;
+
 /// The guest's vsock port the host dials to stage paths or remove them: the channel's next (`HEX` and
 /// 2, beside [`super::CONTROL_PORT`] and [`super::STDIO_PORT`]).
 pub const FILES_PORT: u32 = 0x4845_5802;
@@ -235,29 +237,72 @@ pub enum Refused {
     Trailing(usize),
 }
 
-/// A stage's budget message: `HEXB`, then the entries and the bytes (`u64` each, little-endian).
+/// A stage's budget message: `HEXB`, the entries and the bytes (`u64` each, little-endian), the count of the
+/// opening's layers (`u16`) and one bit each, lowest first, set when the guest holds that layer.
 const BUDGET_MAGIC: [u8; 4] = *b"HEXB";
-const BUDGET_BYTES: usize = 4 + 8 + 8;
+/// The folder under the guest's staged folder holding its layers by digest, `<STORE>/<64 hex digits>` each
+/// (§4a's layer store); a box id never starts with '.' (`hex_api::BoxId`), so none is ever named so.
+pub const STORE: &str = ".layers";
 
-/// A stage's budget as the relay sends it, before the packer sends an entry: `entries` and `bytes`, what
-/// the staged root's file system has free (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`).
-pub fn budget(entries: u64, bytes: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(BUDGET_BYTES);
+/// A digest's 64 lowercase hex digits, as the store names its layer.
+pub fn digest_hex(d: &Digest) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A layer's digest: its blob's sha256 (OCI image-spec descriptor.md, "Digests").
+pub type Digest = [u8; 32];
+const DIGEST_BYTES: usize = 32;
+/// A byte's bits, lowest first: the budget's presence bits in order.
+const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+
+/// A stage's answer to its opening, before the packer sends an entry: what the staged root's file system
+/// has free for it (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`, with what unreferenced layers
+/// hold, which it evicts to make room), and which of the opening's layers the guest already holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Budget {
+    pub entries: u64,
+    pub bytes: u64,
+    pub present: Vec<bool>,
+}
+
+/// A budget as the relay sends it.
+pub fn budget(b: &Budget) -> Vec<u8> {
+    let mut out = Vec::new();
     out.extend_from_slice(&BUDGET_MAGIC);
-    out.extend_from_slice(&entries.to_le_bytes());
-    out.extend_from_slice(&bytes.to_le_bytes());
+    out.extend_from_slice(&b.entries.to_le_bytes());
+    out.extend_from_slice(&b.bytes.to_le_bytes());
+    let count = u16::try_from(b.present.len()).unwrap_or(u16::MAX);
+    out.extend_from_slice(&count.to_le_bytes());
+    for chunk in b.present.chunks(8) {
+        let byte = chunk
+            .iter()
+            .zip(BITS)
+            .fold(0u8, |acc, (p, bit)| if *p { acc | bit } else { acc });
+        out.push(byte);
+    }
     out
 }
 
-/// The entries and bytes of a budget message, or `None` when `message` isn't one.
-pub fn read_budget(message: &[u8]) -> Option<(u64, u64)> {
+/// The budget in `message`, or `None` when it isn't one.
+pub fn read_budget(message: &[u8]) -> Option<Budget> {
     let rest = message.strip_prefix(&BUDGET_MAGIC)?;
     let entries = u64::from_le_bytes(rest.get(..8)?.try_into().ok()?);
     let bytes = u64::from_le_bytes(rest.get(8..16)?.try_into().ok()?);
-    if rest.len() != 16 {
+    let count = usize::from(u16::from_le_bytes(rest.get(16..18)?.try_into().ok()?));
+    let bits = rest.get(18..)?;
+    if bits.len() != count.div_ceil(8) {
         return None;
     }
-    Some((entries, bytes))
+    let present = bits
+        .iter()
+        .flat_map(|byte| BITS.iter().map(move |bit| byte & bit != 0))
+        .take(count)
+        .collect();
+    Some(Budget {
+        entries,
+        bytes,
+        present,
+    })
 }
 
 /// A staging stream's bounds (CLAUDE.md §2), each refused past by type.
@@ -284,6 +329,30 @@ pub const LIMITS: Limits = Limits {
 };
 
 /// A connection's opening bytes.
+/// A stage's opening naming its root's layers by digest, lowest first: the opening, then their count
+/// (`u16`, at most [`MAX_LAYERS`]) and each digest. A root staged as one copy names none.
+pub fn open_stage(id: &str, layers: &[Digest]) -> Result<Vec<u8>, Refused> {
+    let mut out = open(Op::Stage, id)?;
+    // `open` closed a stage's opening with a count of none: this names the layers in its place.
+    out.truncate(out.len().saturating_sub(2));
+    if layers.len() > MAX_LAYERS {
+        return Err(Refused::Over {
+            what: "the stage's layers",
+            bound: u64::try_from(MAX_LAYERS).unwrap_or(u64::MAX),
+        });
+    }
+    let count = u16::try_from(layers.len()).map_err(|_| Refused::Over {
+        what: "the stage's layers",
+        bound: u64::try_from(MAX_LAYERS).unwrap_or(u64::MAX),
+    })?;
+    out.extend_from_slice(&count.to_le_bytes());
+    for d in layers {
+        out.extend_from_slice(d);
+    }
+    Ok(out)
+}
+
+/// A connection's opening: a stage's names no layers ([`open_stage`] names them).
 pub fn open(op: Op, id: &str) -> Result<Vec<u8>, Refused> {
     let len = u16::try_from(id.len()).map_err(|_| Refused::Id(id.to_owned()))?;
     let mut out = Vec::with_capacity(OPEN_BYTES.saturating_add(id.len()));
@@ -293,6 +362,9 @@ pub fn open(op: Op, id: &str) -> Result<Vec<u8>, Refused> {
     out.push(0);
     out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(id.as_bytes());
+    if op == Op::Stage {
+        out.extend_from_slice(&0u16.to_le_bytes());
+    }
     Ok(out)
 }
 
@@ -529,8 +601,13 @@ fn check_target(path: &str, target: &str, limits: &Limits) -> Result<(), Refused
 /// What the unpacker read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// The connection's op and its box id (a valid one: `hex_api::BoxId`'s rule is the shell's).
-    Open { op: Op, id: String },
+    /// The connection's op, its box id (a valid one: `hex_api::BoxId`'s rule is the shell's) and, for a
+    /// stage, its root's layers by digest, lowest first (§4a's layer store; none for a root of one copy).
+    Open {
+        op: Op,
+        id: String,
+        layers: Vec<Digest>,
+    },
     /// An entry. A file's bytes come next, as [`Step::Data`], unless its size is 0.
     Entry(Entry),
     /// The bytes just taken are the current file's; `done` once its last is among them.
@@ -546,6 +623,15 @@ enum At {
     /// The opening's fixed part read; its id, `len` bytes, comes.
     Id {
         len: usize,
+    },
+    /// A stage's id read; its count of layers (`u16`) comes.
+    Layers {
+        id: String,
+    },
+    /// A stage's count read; its layers' digests, `count` of them, come.
+    Digests {
+        id: String,
+        count: usize,
     },
     /// A remove's opening is whole: nothing may follow.
     Closed,
@@ -647,7 +733,9 @@ impl Unpack {
         }
         match self.at {
             At::Closed => Ok(()),
-            At::Open | At::Id { .. } => Err(Refused::Truncated("before its opening was whole")),
+            At::Open | At::Id { .. } | At::Layers { .. } | At::Digests { .. } => {
+                Err(Refused::Truncated("before its opening was whole"))
+            }
             At::Head | At::Names { .. } => Err(Refused::Truncated("before its end head")),
             At::Meta | At::Xattrs { .. } => {
                 Err(Refused::Truncated("in the middle of an entry's metadata"))
@@ -685,12 +773,26 @@ impl Unpack {
                 let id = String::from_utf8(std::mem::take(&mut self.held))
                     .map_err(|e| Refused::Id(String::from_utf8_lossy(e.as_bytes()).into_owned()))?;
                 let op = self.op.ok_or(Refused::Truncated("before its op"))?;
-                self.at = match op {
-                    Op::Stage => At::Head,
-                    Op::Remove => At::Closed,
-                };
-                Ok((n, Some(Step::Open { op, id })))
+                match op {
+                    Op::Stage => {
+                        self.at = At::Layers { id };
+                        Ok((n, None))
+                    }
+                    Op::Remove => {
+                        self.at = At::Closed;
+                        Ok((
+                            n,
+                            Some(Step::Open {
+                                op,
+                                id,
+                                layers: Vec::new(),
+                            }),
+                        ))
+                    }
+                }
             }
+            At::Layers { .. } => self.layer_count(input),
+            At::Digests { count, .. } => self.digests(input, count),
             At::Head => {
                 let (n, whole) = self.fill(input, HEAD_BYTES);
                 if !whole {
@@ -760,6 +862,62 @@ impl Unpack {
         }
         self.at = At::Id { len };
         Ok(())
+    }
+
+    /// A stage's count of layers, then its opening is whole if it names none.
+    fn layer_count(&mut self, input: &[u8]) -> Result<(usize, Option<Step>), Refused> {
+        let (n, whole) = self.fill(input, 2);
+        if !whole {
+            return Ok((n, None));
+        }
+        let held = std::mem::take(&mut self.held);
+        let [c0, c1] = held
+            .get(..2)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .ok_or(Refused::Truncated("in a stage's count of layers"))?;
+        let count = usize::from(u16::from_le_bytes([c0, c1]));
+        if count > MAX_LAYERS {
+            return Err(Refused::Over {
+                what: "the stage's layers",
+                bound: u64::try_from(MAX_LAYERS).unwrap_or(u64::MAX),
+            });
+        }
+        let At::Layers { id } = std::mem::replace(&mut self.at, At::Head) else {
+            return Err(Refused::Truncated("before a stage's count of layers"));
+        };
+        if count == 0 {
+            return Ok((
+                n,
+                Some(Step::Open {
+                    op: Op::Stage,
+                    id,
+                    layers: Vec::new(),
+                }),
+            ));
+        }
+        self.at = At::Digests { id, count };
+        Ok((n, None))
+    }
+
+    /// A stage's layers' digests, `count` of them: its opening is whole.
+    fn digests(&mut self, input: &[u8], count: usize) -> Result<(usize, Option<Step>), Refused> {
+        let (n, whole) = self.fill(input, count.saturating_mul(DIGEST_BYTES));
+        if !whole {
+            return Ok((n, None));
+        }
+        let held = std::mem::take(&mut self.held);
+        let layers: Vec<Digest> = held.as_chunks::<DIGEST_BYTES>().0.to_vec();
+        let At::Digests { id, .. } = std::mem::replace(&mut self.at, At::Head) else {
+            return Err(Refused::Truncated("before a stage's layers"));
+        };
+        Ok((
+            n,
+            Some(Step::Open {
+                op: Op::Stage,
+                id,
+                layers,
+            }),
+        ))
     }
 
     fn headed(&mut self) -> Result<Option<Step>, Refused> {

@@ -10,7 +10,8 @@ docker group):
   overlay of the lower layers alone; ctr 2.3.6's `images mount` gave an empty tmpfs here), walk it with `hex selftest-box tree`, and unmount;
 - record ctr's and containerd's versions, the snapshotter, the kernel, and each image's digests.
 
-Usage: python3 -I reference.py HEX OUT IMAGE...   (IMAGE: name@sha256:..., or `lab:tree`, `lab:file`,
+Usage: python3 -I reference.py [--here] HEX OUT IMAGE...   (--here: containerd runs in this container, as
+reference_vm.sh runs it, the hex walker at /hex)   (IMAGE: name@sha256:..., or `lab:tree`, `lab:file`,
 `lab:hardlink` for the lab images)
 """
 
@@ -26,8 +27,18 @@ NS = "hexg21"
 BOX = "registry.fedoraproject.org/fedora:44@sha256:b3e011d47e686a89781495c9a87bc80349af742965e5d51e79cd51711982e4a2"
 
 
+# Where containerd runs: beside fedora's own (through `docker run`, by default), or HERE, in the container
+# this runs in, which runs its own containerd (reference_vm.sh, in a Mac Studio's Docker VM).
+HERE = False
+
+
 def root(hex_bin, out, script):
-    """Runs `script` (sh) as root beside the host's containerd; returns its stdout."""
+    """Runs `script` (sh) as root beside containerd; returns its stdout."""
+    if HERE:
+        done = subprocess.run(["sh", "-euc", script], capture_output=True)
+        if done.returncode != 0:
+            raise SystemExit(f"root lab step failed ({done.returncode}): {script}\n{done.stderr.decode()}")
+        return done.stdout
     cmd = [
         "docker", "run", "--rm", "--privileged", "--network", "host",
         # The lead's shared fedora limits for a container (hex-slot, the T7 fedora-unit-limits rule):
@@ -170,6 +181,9 @@ def main(hex_bin, out, images):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--here"]:
+        HERE = True
+        del sys.argv[1]
     if len(sys.argv) < 4:
         sys.exit("usage: reference.py HEX OUT IMAGE...")
     main(os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:])

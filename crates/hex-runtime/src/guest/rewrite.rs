@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, ClassSpec, OciSpec, Refusal, Rootfs};
-use hex_client::guest::stage::{Item, Source, is_tarball, staged_path};
+use hex_client::guest::stage::{
+    Item, Layer, Source, digest_of, is_tarball, layer_path, staged_path,
+};
 use serde_json::Value;
 
 use super::shares::{self, Share};
@@ -126,11 +128,12 @@ fn stage(
     Ok(guest)
 }
 
-/// Adds an image's layers to stage, and returns their copies' paths in the guest. Tarballs are an
-/// image's own layers, applied in order into one root as containerd unpacks them, whiteouts and all
-/// (§4a), which the guest mounts as its one lower layer; directories are each staged as they are, an
-/// overlay's layers already. A list of both is refused by name: a tarball's whiteouts would have to
-/// apply over a directory staged apart from it.
+/// Adds an image's layers to stage, and returns their paths in the guest. Tarballs are an image's own
+/// layers: each is named by its digest and lives once in the guest's layer store, applied as containerd's
+/// overlay applier applies one layer, so the guest mounts them as the overlay's lower layers, as a Linux
+/// host's overlayfs snapshotter does, and a layer the guest holds is staged no more (§4a). Directories
+/// are each staged as they are, an overlay's layers already. A list of both is refused by name: a
+/// tarball's whiteouts would have to apply over a directory staged apart from it.
 fn stage_layers(
     staged: &str,
     id: &BoxId,
@@ -153,13 +156,24 @@ fn stage_layers(
                 .to_owned(),
         });
     }
-    let name = "root".to_owned();
-    let guest = PathBuf::from(staged_path(staged, id, &name));
+    let layers = layers
+        .into_iter()
+        .map(|path| {
+            Ok(Layer {
+                digest: digest_of(&path)?,
+                path,
+            })
+        })
+        .collect::<Result<Vec<Layer>, Refusal>>()?;
+    let guests = layers
+        .iter()
+        .map(|l| PathBuf::from(layer_path(staged, &l.digest)))
+        .collect();
     items.push(Item {
-        name,
+        name: "root".to_owned(),
         source: Source::Layers(layers),
     });
-    Ok(vec![guest])
+    Ok(guests)
 }
 
 /// What the root at `path` is staged from (§4a): a tarball's own entries (`.tar`, `.tar.gz`, `.tgz`), or

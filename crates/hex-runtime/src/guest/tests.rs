@@ -168,14 +168,18 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         Source::Tar(PathBuf::from("/Users/ada/rootfs.tar"))
     );
 
+    // Two layer tarballs, their bytes what the store names them by.
+    let held = tempfile::tempdir().unwrap();
+    let tarballs: Vec<PathBuf> = [("l0.tar", &b"layer zero"[..]), ("l1.tar", b"layer one")]
+        .iter()
+        .map(|(name, bytes)| {
+            let path = held.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        })
+        .collect();
     let layered = rewrite(
-        oci(
-            Rootfs::Layers(vec![
-                PathBuf::from("/Users/l0.tar"),
-                PathBuf::from("/Users/l1.tar"),
-            ]),
-            vec![],
-        ),
+        oci(Rootfs::Layers(tarballs.clone()), vec![]),
         &shared,
         STAGED,
     )
@@ -183,17 +187,33 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     let ClassSpec::Oci(spec) = &layered.spec.class else {
         panic!("not oci");
     };
-    // An image's tarball layers are applied in order into one staged root (§4a), its one lower layer.
+    // An image's tarball layers are named by their digests in the guest's layer store (§4a), each a lower
+    // layer of the box's overlay, lowest first.
+    let digests: Vec<[u8; 32]> = [&b"layer zero"[..], b"layer one"]
+        .iter()
+        .map(|b| <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(b)))
+        .collect();
     assert_eq!(
         spec.rootfs,
-        Rootfs::Layers(vec![PathBuf::from("/run/hex/staged/box-1/root")])
+        Rootfs::Layers(
+            digests
+                .iter()
+                .map(|d| PathBuf::from(hex_client::guest::stage::layer_path(STAGED, d)))
+                .collect()
+        )
     );
     assert_eq!(
         layered.items[0].source,
-        Source::Layers(vec![
-            PathBuf::from("/Users/l0.tar"),
-            PathBuf::from("/Users/l1.tar"),
-        ])
+        Source::Layers(
+            tarballs
+                .iter()
+                .zip(&digests)
+                .map(|(path, digest)| hex_client::guest::stage::Layer {
+                    path: path.clone(),
+                    digest: *digest,
+                })
+                .collect()
+        )
     );
     let Err(Refusal::Invalid { why, .. }) = rewrite(
         oci(

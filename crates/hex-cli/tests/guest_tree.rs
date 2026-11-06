@@ -16,10 +16,11 @@
 //!
 //! Hex's side, one of:
 //! - a real guest (`HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, `SHARDS_BIN`, as HEX-GUEST-19): the layers are
-//!   staged over the guest's staging port and walked by a `process` box in the guest running the guest's own
-//!   `hex` (`/init selftest-box tree`);
-//! - on Linux, as root, `HEX_GUEST21_LOCAL=1`: staged by the relay in this process, walked by this build's
-//!   `hex` (the check before a guest run).
+//!   staged into the guest's layer store over its staging port, and a `process` box in the guest running
+//!   the guest's own `hex` walks them through the overlay the node mounts for a box of that image
+//!   (`/init selftest-box tree --layers`), so fidelity is proved through the guest's real overlayfs;
+//! - on Linux, as root, `HEX_GUEST21_LOCAL=1`: staged by the relay in this process, walked through a real
+//!   overlay mount by this build's `hex` (the check before a guest run).
 //!
 //! `HEX_GUEST21_OUT`, when set, gets each image's Hex-side walk (`<image>.tree`) for the record. Run:
 //! `cargo test -p hex-cli --test guest_tree -- --nocapture` with those set; elsewhere it says SKIP and why.
@@ -172,11 +173,33 @@ fn now() -> i64 {
     .unwrap()
 }
 
+/// The image's layers, each named by its digest, as the host's node stages them (§4a's layer store).
+fn layers(image: &Image) -> Vec<hex_client::guest::stage::Layer> {
+    image
+        .layers
+        .iter()
+        .map(|path| hex_client::guest::stage::Layer {
+            digest: hex_client::guest::stage::digest_of(path).unwrap(),
+            path: path.clone(),
+        })
+        .collect()
+}
+
 fn items(image: &Image) -> Vec<Item> {
     vec![Item {
         name: "root".to_owned(),
-        source: Source::Layers(image.layers.clone()),
+        source: Source::Layers(layers(image)),
     }]
+}
+
+/// The image's layers' folders in the store under `staged`, lowest first, `:`-joined: what the walker
+/// mounts as the overlay the guest's node mounts for a box of that image.
+fn store_layers(staged: &str, image: &Image) -> String {
+    layers(image)
+        .iter()
+        .map(|l| hex_client::guest::stage::layer_path(staged, &l.digest))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Hex's side: stages and walks each image, returning its walk.
@@ -193,7 +216,7 @@ mod local {
     use hex_client::guest::{Duplex, Link, stage};
     use hex_core::stream::files::LIMITS;
 
-    use super::{Image, Side, items};
+    use super::{Image, Side, items, store_layers};
 
     /// The relay in this process: each dial a socket pair whose far end it serves.
     struct InProcess(PathBuf);
@@ -219,10 +242,10 @@ mod local {
             let link: Arc<dyn Link> = Arc::new(InProcess(self.dir.path().to_owned()));
             stage::stage(link.as_ref(), id, &items(image), &LIMITS)
                 .unwrap_or_else(|why| panic!("{}: staging: {why}", image.name));
-            let root = self.dir.path().join(id.as_str()).join("root");
+            let staged = self.dir.path().to_str().unwrap();
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_hex"))
-                .args(["selftest-box", "tree"])
-                .arg(&root)
+                .args(["selftest-box", "tree", "--layers"])
+                .arg(store_layers(staged, image))
                 .output()
                 .unwrap();
             assert!(
@@ -260,7 +283,7 @@ impl Side for Guest {
                 class: ClassSpec::Process,
             })
             .unwrap();
-        let root = format!("{}/{}/root", stage::STAGED, id.as_str());
+        let layers = store_layers(stage::STAGED, image);
         let (mut r, w) = std::io::pipe().unwrap();
         let reader = std::thread::spawn(move || {
             let mut text = String::new();
@@ -271,7 +294,7 @@ impl Side for Guest {
             .client
             .exec(
                 &walker,
-                Program::of(&["/init", "selftest-box", "tree", &root]),
+                Program::of(&["/init", "selftest-box", "tree", "--layers", &layers]),
                 Stdio {
                     stdout: Some(w),
                     ..Stdio::null()

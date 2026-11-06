@@ -974,28 +974,53 @@ fn layer_tar(path: &Path, mtime: u64, entries: &[T]) {
     b.into_inner().unwrap();
 }
 
-/// Stages `layers` (each its mtime and entries) as one root through the host's packer and the relay.
-fn stage_layers(lab: &Lab, host: &Path, layers: &[(u64, Vec<T>)]) -> Result<(), Refusal> {
-    use hex_client::guest::stage::{Item, Source, stage};
-    let paths: Vec<PathBuf> = layers
+/// Stages `layers` (each its mtime and entries) as box `box-1`'s root through the host's packer and the
+/// relay: each layer to the guest's store, by its digest. Its layers' folders in the store, lowest first.
+fn stage_layers(lab: &Lab, host: &Path, layers: &[(u64, Vec<T>)]) -> Result<Vec<PathBuf>, Refusal> {
+    stage_as(lab, host, "box-1", layers)
+}
+
+/// [`stage_layers`] as box `id`, its layers' tarballs named by their place in `layers`.
+fn stage_as(
+    lab: &Lab,
+    host: &Path,
+    id: &str,
+    layers: &[(u64, Vec<T>)],
+) -> Result<Vec<PathBuf>, Refusal> {
+    use hex_client::guest::stage::{Item, Layer, Source, digest_of, stage};
+    let tarballs: Vec<Layer> = layers
         .iter()
         .enumerate()
         .map(|(i, (mtime, entries))| {
-            let path = host.join(format!("layer{i}.tar"));
+            let path = host.join(format!("{id}-layer{i}.tar"));
             layer_tar(&path, *mtime, entries);
-            path
+            Layer {
+                digest: digest_of(&path).unwrap(),
+                path,
+            }
+        })
+        .collect();
+    let folders = tarballs
+        .iter()
+        .map(|l| {
+            lab.dir
+                .path()
+                .join("staged")
+                .join(hf::STORE)
+                .join(hf::digest_hex(&l.digest))
         })
         .collect();
     let items = [Item {
         name: "root".to_owned(),
-        source: Source::Layers(paths),
+        source: Source::Layers(tarballs),
     }];
     stage(
         lab.link().as_ref(),
-        &BoxId::new("box-1").unwrap(),
+        &BoxId::new(id).unwrap(),
         &items,
         &hf::LIMITS,
     )
+    .map(|()| folders)
 }
 
 /// HEX-GUEST-14 with the host's packer (the lead's ruling, §4a): stage a tarball root whose entries are
@@ -1005,11 +1030,11 @@ fn stage_layers(lab: &Lab, host: &Path, layers: &[(u64, Vec<T>)]) -> Result<(), 
 /// untouched.
 #[test]
 fn a_tarball_writing_through_its_own_link_lands_inside_its_root() {
-    let (lab, staged) = staged_lab();
+    let (lab, _staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
     let sentinel = lab.dir.path().join("x");
     std::fs::write(&sentinel, b"sentinel").unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[(
@@ -1024,7 +1049,7 @@ fn a_tarball_writing_through_its_own_link_lands_inside_its_root() {
         )],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
+    let root = &layers[0];
     assert_eq!(std::fs::read(root.join("etc/x")).unwrap(), b"in etc");
     assert_eq!(std::fs::read(root.join("x")).unwrap(), b"at the top");
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
@@ -1046,7 +1071,7 @@ fn a_later_layers_entry_under_an_earlier_layers_link_makes_a_directory_as_overla
     use std::os::unix::fs::PermissionsExt;
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[
@@ -1062,12 +1087,26 @@ fn a_later_layers_entry_under_an_earlier_layers_link_makes_a_directory_as_overla
         ],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
-    let bin = std::fs::symlink_metadata(root.join("bin")).unwrap();
+    // The second layer's folder: `bin` a directory, which the overlay shows over the first's link.
+    let bin = std::fs::symlink_metadata(layers[1].join("bin")).unwrap();
     assert!(bin.is_dir(), "bin became a directory");
     assert_eq!(bin.permissions().mode() & 0o7777, 0o750, "usr/bin's mode");
-    assert_eq!(std::fs::read(root.join("bin/tool")).unwrap(), b"tool");
-    assert!(!root.join("usr/bin/tool").exists(), "usr/bin is unchanged");
+    assert_eq!(std::fs::read(layers[1].join("bin/tool")).unwrap(), b"tool");
+    assert!(
+        !layers[1].join("usr").exists(),
+        "the second layer made nothing under usr"
+    );
+    assert!(
+        std::fs::symlink_metadata(layers[0].join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the first layer's link is its own still"
+    );
+    assert!(
+        !staged.join("box-1/root").exists(),
+        "a layered root has no copy of its own"
+    );
 }
 
 /// HEX-GUEST-14 (§4a, as ctr's snapshot of lab:file holds): stage a file `p` in one layer and `p/inner`
@@ -1077,7 +1116,7 @@ fn a_later_layers_entry_under_an_earlier_layers_file_makes_a_directory_as_overla
     use std::os::unix::fs::PermissionsExt;
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[
@@ -1086,11 +1125,11 @@ fn a_later_layers_entry_under_an_earlier_layers_file_makes_a_directory_as_overla
         ],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
-    let p = std::fs::symlink_metadata(root.join("p")).unwrap();
+    let p = std::fs::symlink_metadata(layers[1].join("p")).unwrap();
     assert!(p.is_dir());
     assert_eq!(p.permissions().mode() & 0o7777, 0o755);
-    assert_eq!(std::fs::read(root.join("p/inner")).unwrap(), b"inner");
+    assert_eq!(std::fs::read(layers[1].join("p/inner")).unwrap(), b"inner");
+    assert!(staged.join("box-1").exists());
 }
 
 /// HEX-GUEST-14 (§4a, as ctr fails lab:hardlink's unpack, `link .../q .../h: no such file or
@@ -1129,7 +1168,7 @@ fn a_hard_link_through_the_roots_own_link_resolves_inside_it() {
     use std::os::unix::fs::MetadataExt;
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[(
@@ -1144,7 +1183,7 @@ fn a_hard_link_through_the_roots_own_link_resolves_inside_it() {
         )],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
+    let root = &layers[0];
     let perl5 = std::fs::metadata(root.join("usr/bin/perl5")).unwrap();
     let perl = std::fs::symlink_metadata(root.join("usr/bin/perl")).unwrap();
     assert_eq!(perl.ino(), perl5.ino());
@@ -1175,9 +1214,9 @@ fn a_hard_link_through_the_roots_own_link_resolves_inside_it() {
 #[test]
 fn an_entry_whose_parents_no_layer_made_gets_them_made_as_containerd_does() {
     use std::os::unix::fs::PermissionsExt;
-    let (lab, staged) = staged_lab();
+    let (lab, _staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[(
@@ -1186,7 +1225,7 @@ fn an_entry_whose_parents_no_layer_made_gets_them_made_as_containerd_does() {
         )],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
+    let root = &layers[0];
     assert_eq!(std::fs::read(root.join("usr/local/bin/x")).unwrap(), b"x");
     for made in ["usr/local", "usr/local/bin"] {
         let meta = std::fs::symlink_metadata(root.join(made)).unwrap();
@@ -1200,9 +1239,9 @@ fn an_entry_whose_parents_no_layer_made_gets_them_made_as_containerd_does() {
 #[test]
 fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
     use std::os::unix::fs::MetadataExt;
-    let (lab, staged) = staged_lab();
+    let (lab, _staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[(
@@ -1211,7 +1250,7 @@ fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
         )],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
+    let root = &layers[0];
     let sh = std::fs::symlink_metadata(root.join("sh")).unwrap();
     let sh2 = std::fs::symlink_metadata(root.join("sh2")).unwrap();
     assert!(sh2.file_type().is_symlink());
@@ -1275,15 +1314,20 @@ fn a_stages_first_answer_is_the_staged_folders_free_space() {
         .unwrap();
     let mut d = Deframer::new(wire::MAX_MESSAGE);
     let mut buf = [0u8; 256];
-    let message = loop {
+    let message = 'read: loop {
         let n = conn.read(&mut buf).unwrap();
         assert!(n > 0, "the relay closed before its budget");
-        let (_, whole) = d.take(&buf[..n]).unwrap();
-        if let Some(m) = whole {
-            break m;
+        // The deframer takes what it can of the bytes at a time: every byte read is offered to it.
+        let mut rest = &buf[..n];
+        while !rest.is_empty() {
+            let (took, whole) = d.take(rest).unwrap();
+            rest = &rest[took..];
+            if let Some(m) = whole {
+                break 'read m;
+            }
         }
     };
-    let (entries, bytes) = hf::read_budget(&message).expect("a budget");
+    let hf::Budget { entries, bytes, .. } = hf::read_budget(&message).expect("a budget");
     let st = rustix::fs::statvfs(&staged).unwrap();
     assert!(
         entries > 0 && entries <= st.f_files,
@@ -1294,26 +1338,44 @@ fn a_stages_first_answer_is_the_staged_folders_free_space() {
     drop(conn);
 }
 
-/// HEX-GUEST-14 (§4a, as ctr fails lab:hardlink's unpack): send the relay, raw, a layer making `r/q` and
-/// a later layer linking `r/h` to it: expect the stage refused naming both and the earlier layer, and the
-/// partial copy gone, the relay holding the rule where no packer stands before it.
+/// The raw stage of `entries` for `b`, its root's layers named `layers` in its opening.
+fn raw_layered(layers: &[hf::Digest], entries: &[(&str, hf::What)]) -> Vec<u8> {
+    let mut out = hf::open_stage("b", layers).unwrap();
+    for (path, what) in entries {
+        let e = hf::Entry {
+            path: (*path).to_owned(),
+            mode: 0o755,
+            what: what.clone(),
+            meta: None,
+        };
+        out.extend(hf::head(&e, &hf::LIMITS).unwrap());
+    }
+    out.extend(hf::END);
+    out
+}
+
+/// HEX-GUEST-14 (§4a, as ctr fails lab:hardlink's unpack): send the relay, raw, a stage of two layers, the
+/// first making `r/q` and the second linking `r/h` to it: expect the stage refused naming both and the
+/// earlier layer, and the box's copy gone, the relay holding the rule where no packer stands before it.
 #[test]
 fn the_relay_refuses_a_hard_link_to_an_earlier_layers_file() {
     let (lab, staged) = staged_lab();
     let answer = stage_raw(
         &lab,
-        &raw_stage(&[
-            ("r", hf::What::Dir),
-            ("r", hf::What::Layer),
-            ("r/q", hf::What::File { size: 0 }),
-            ("r", hf::What::Layer),
-            (
-                "r/h",
-                hf::What::Hardlink {
-                    target: "r/q".to_owned(),
-                },
-            ),
-        ]),
+        &raw_layered(
+            &[[1; 32], [2; 32]],
+            &[
+                ("r", hf::What::Layer),
+                ("r/q", hf::What::File { size: 0 }),
+                ("r", hf::What::Layer),
+                (
+                    "r/h",
+                    hf::What::Hardlink {
+                        target: "r/q".to_owned(),
+                    },
+                ),
+            ],
+        ),
     );
     let Answer::Refused(Refusal::Invalid { why, .. }) = answer else {
         panic!("expected a refusal, got {answer:?}");
@@ -1322,19 +1384,21 @@ fn the_relay_refuses_a_hard_link_to_an_earlier_layers_file() {
         why.contains("\"r/h\"") && why.contains("\"r/q\"") && why.contains("an earlier layer made"),
         "{why}"
     );
-    assert!(!staged.join("b").exists(), "the partial copy was left");
+    assert!(!staged.join("b").exists(), "the box's copy was left");
 }
 
-/// HEX-GUEST-14 (§4a, containerd's `applyNaive`): stage two layers, the second whiting out `etc/a`,
-/// making `d` opaque and adding `d/new`, and replacing a file with a directory, a directory with a file
-/// and a link with a directory: expect `etc/a` gone and `etc/b` kept, `d` holding `d/new` alone with the
-/// second layer's mtime, and each replaced path of its new kind.
+/// HEX-GUEST-14 (§4a; containerd's overlay applier, `OverlayConvertWhiteout`): stage two layers, the second
+/// whiting out `etc/a`, making `d` opaque and adding `d/new`, and putting a directory at `f` (a file below),
+/// a file at `g` (a directory below) and a directory at `s` (a link below): expect the second layer's folder
+/// to hold overlayfs's own forms, `etc/a` a character device 0/0 and `d` with the opaque xattr (`user.` as
+/// a rootless relay's, `trusted.` as root's), with `d/new`, `d`'s mtime the second layer's, `f` a directory,
+/// `g` a file and `s` a directory; and the first layer's folder as it was.
 #[test]
-fn a_later_layer_whites_out_makes_opaque_and_replaces() {
-    use std::os::unix::fs::MetadataExt;
-    let (lab, staged) = staged_lab();
+fn a_later_layer_whites_out_makes_opaque_and_replaces_as_overlayfs_reads_them() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let (lab, _staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
-    stage_layers(
+    let layers = stage_layers(
         &lab,
         host.path(),
         &[
@@ -1346,8 +1410,6 @@ fn a_later_layer_whites_out_makes_opaque_and_replaces() {
                     T::File("etc/b", b"b"),
                     T::Dir("d"),
                     T::File("d/old", b"old"),
-                    T::Dir("d/keep"),
-                    T::File("d/keep/k", b"k"),
                     T::File("f", b"file"),
                     T::Dir("g"),
                     T::File("g/inner", b"inner"),
@@ -1357,6 +1419,7 @@ fn a_later_layer_whites_out_makes_opaque_and_replaces() {
             (
                 1_600_000_100,
                 vec![
+                    T::Dir("etc"),
                     T::File("etc/.wh.a", b""),
                     T::Dir("d"),
                     T::File("d/.wh..wh..opq", b""),
@@ -1369,31 +1432,156 @@ fn a_later_layer_whites_out_makes_opaque_and_replaces() {
         ],
     )
     .unwrap();
-    let root = staged.join("box-1/root");
-    assert!(!root.join("etc/a").exists());
+    let (first, second) = (&layers[0], &layers[1]);
+    let a = std::fs::symlink_metadata(second.join("etc/a")).unwrap();
+    assert!(a.file_type().is_char_device(), "a whiteout is overlayfs's");
+    assert_eq!(a.rdev(), 0);
     assert!(
-        !root.join("etc/.wh.a").exists(),
+        !second.join("etc/.wh.a").exists(),
         "a whiteout is never a file"
     );
-    assert_eq!(std::fs::read(root.join("etc/b")).unwrap(), b"b");
-    let mut d: Vec<String> = std::fs::read_dir(root.join("d"))
+    let opaque = if rustix::process::geteuid().is_root() {
+        "trusted.overlay.opaque"
+    } else {
+        "user.overlay.opaque"
+    };
+    let mut value = [0u8; 8];
+    let n = rustix::fs::getxattr(second.join("d"), opaque, &mut value).unwrap();
+    assert_eq!(&value[..n], b"y");
+    let mut d: Vec<String> = std::fs::read_dir(second.join("d"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     d.sort();
     assert_eq!(d, ["new"]);
     assert_eq!(
-        std::fs::metadata(root.join("d")).unwrap().mtime(),
+        std::fs::metadata(second.join("d")).unwrap().mtime(),
         1_600_000_100
     );
-    assert!(std::fs::symlink_metadata(root.join("f")).unwrap().is_dir());
-    assert_eq!(std::fs::read(root.join("g")).unwrap(), b"now a file");
-    assert!(std::fs::symlink_metadata(root.join("s")).unwrap().is_dir());
-    assert_eq!(
-        std::fs::read(root.join("etc/b")).unwrap(),
-        b"b",
-        "the link's target is untouched when the link is replaced"
+    assert!(
+        std::fs::symlink_metadata(second.join("f"))
+            .unwrap()
+            .is_dir()
     );
+    assert_eq!(std::fs::read(second.join("g")).unwrap(), b"now a file");
+    assert!(
+        std::fs::symlink_metadata(second.join("s"))
+            .unwrap()
+            .is_dir()
+    );
+    // The first layer's folder is its own, untouched by the second.
+    assert_eq!(std::fs::read(first.join("etc/a")).unwrap(), b"a");
+    assert_eq!(std::fs::read(first.join("d/old")).unwrap(), b"old");
+    assert!(
+        std::fs::symlink_metadata(first.join("s"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// HEX-GUEST-14 (§4a, the layer store): stage box `one` of layers A and B, then box `two` of A and C, A's
+/// tarball gone from the host by then: expect `two` staged (the guest holds A, so the packer never reads it
+/// again), the store holding A, B and C once each, A's folder the same one, and each box's record naming
+/// its own layers.
+#[test]
+fn a_layer_the_guest_holds_is_staged_once_and_shared() {
+    use hex_client::guest::stage::{Item, Layer, Source, digest_of, stage};
+    use std::os::unix::fs::MetadataExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let one = stage_as(
+        &lab,
+        host.path(),
+        "one",
+        &[
+            (1_600_000_000, vec![T::Dir("base"), T::File("base/a", b"a")]),
+            (1_600_000_100, vec![T::File("b", b"b")]),
+        ],
+    )
+    .unwrap();
+    let a_inode = std::fs::metadata(&one[0]).unwrap().ino();
+    // A's tarball, as `two` names it: its digest kept, the file itself gone.
+    let a = host.path().join("one-layer0.tar");
+    let a_layer = Layer {
+        digest: digest_of(&a).unwrap(),
+        path: a.clone(),
+    };
+    std::fs::remove_file(&a).unwrap();
+    let c = host.path().join("c.tar");
+    layer_tar(&c, 1_600_000_200, &[T::File("c", b"c")]);
+    let c_layer = Layer {
+        digest: digest_of(&c).unwrap(),
+        path: c,
+    };
+    stage(
+        lab.link().as_ref(),
+        &BoxId::new("two").unwrap(),
+        &[Item {
+            name: "root".to_owned(),
+            source: Source::Layers(vec![a_layer.clone(), c_layer.clone()]),
+        }],
+        &hf::LIMITS,
+    )
+    .unwrap();
+    let store = staged.join(hf::STORE);
+    let mut layers: Vec<String> = std::fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.len() == 64)
+        .collect();
+    layers.sort();
+    assert_eq!(layers.len(), 3, "{layers:?}");
+    assert_eq!(std::fs::metadata(&one[0]).unwrap().ino(), a_inode);
+    let record = std::fs::read_to_string(staged.join("two/.layers")).unwrap();
+    assert_eq!(
+        record,
+        format!(
+            "{}\n{}\n",
+            hf::digest_hex(&a_layer.digest),
+            hf::digest_hex(&c_layer.digest)
+        )
+    );
+    assert_eq!(
+        std::fs::read(store.join(hf::digest_hex(&c_layer.digest)).join("c")).unwrap(),
+        b"c"
+    );
+}
+
+/// HEX-GUEST-14 (§4a, the store's crash safety): stage a layer whose file is cut short as the connection
+/// ends mid-layer: expect it refused, no folder named its digest (nothing half-staged counts as held), and
+/// no partial left; and a partial another relay process left (its pid not this one's), with junk in it:
+/// expect the next stage to say the layer isn't held, remove that partial, and stage the layer whole.
+#[test]
+fn a_layer_cut_or_crashed_mid_stage_is_never_held() {
+    let (lab, staged) = staged_lab();
+    let store = staged.join(hf::STORE);
+    let digest = [7u8; 32];
+    let mut cut = raw_layered(
+        &[digest],
+        &[("r", hf::What::Layer), ("r/f", hf::What::File { size: 10 })],
+    );
+    cut.truncate(cut.len() - hf::HEAD_BYTES);
+    cut.extend(b"half");
+    let answer = stage_raw(&lab, &cut);
+    assert!(matches!(answer, Answer::Refused(_)), "{answer:?}");
+    let left: Vec<String> = std::fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(left.is_empty(), "left in the store: {left:?}");
+    // A crashed relay's partial: another pid's.
+    let partial = store.join(format!(".partial-1-1-{}", hf::digest_hex(&digest)));
+    std::fs::create_dir(&partial).unwrap();
+    std::fs::write(partial.join("junk"), b"junk").unwrap();
+    let whole = raw_layered(
+        &[digest],
+        &[("r", hf::What::Layer), ("r/f", hf::What::File { size: 0 })],
+    );
+    assert_eq!(stage_raw(&lab, &whole), Answer::Done);
+    assert!(!partial.exists(), "the crashed partial was left");
+    let held = store.join(hf::digest_hex(&digest));
+    assert!(held.join("f").exists() && !held.join("junk").exists());
 }
 
 /// HEX-GUEST-14 (§4a as amended): stage a tarball root, end to end through the host's packer and the relay,

@@ -15,12 +15,33 @@ pub(super) fn pack(
     items: &[Item],
     limits: &Limits,
 ) -> Result<(), Refusal> {
-    let opening = files::open(Op::Stage, id.as_str()).map_err(refused)?;
+    let digests: Vec<files::Digest> = items
+        .iter()
+        .filter_map(|item| match &item.source {
+            Source::Layers(layers) => Some(layers),
+            _ => None,
+        })
+        .flatten()
+        .map(|l| l.digest)
+        .collect();
+    let opening = files::open_stage(id.as_str(), &digests).map_err(refused)?;
     out.write_all(&opening)
         .map_err(|e| Refusal::os("sending staged files", e))?;
-    pack_items(out, items, limits)?;
+    // A guest that holds none of the layers.
+    pack_items(out, items, limits, &vec![false; digests.len()])?;
     out.write_all(&files::END)
         .map_err(|e| Refusal::os("sending staged files", e))
+}
+
+/// `paths` as an image's layers, each named by its digest.
+pub(super) fn layers_of(paths: &[PathBuf]) -> Vec<Layer> {
+    paths
+        .iter()
+        .map(|path| Layer {
+            path: path.clone(),
+            digest: digest_of(path).unwrap(),
+        })
+        .collect()
 }
 
 pub(super) fn id() -> BoxId {
@@ -174,10 +195,18 @@ impl super::super::Link for Budgeted {
         let (near, mut far) = UnixStream::pair().unwrap();
         let (entries, bytes) = self.budget;
         std::thread::spawn(move || {
-            let mut open = [0u8; 10 + 5];
+            // OPEN_BYTES, the id `box-1`, and a stage's count of layers (none).
+            let mut open = [0u8; 10 + 5 + 2];
             far.read_exact(&mut open).unwrap();
-            let budget =
-                hex_core::stream::frame(&files::budget(entries, bytes), wire::MAX_MESSAGE).unwrap();
+            let budget = hex_core::stream::frame(
+                &files::budget(&files::Budget {
+                    entries,
+                    bytes,
+                    present: vec![],
+                }),
+                wire::MAX_MESSAGE,
+            )
+            .unwrap();
             far.write_all(&budget).unwrap();
             let mut rest = Vec::new();
             let _ = far.read_to_end(&mut rest);
@@ -233,8 +262,8 @@ impl super::super::Link for RefusesAtOpening {
         let (near, mut far) = UnixStream::pair().unwrap();
         let report = self.sent_after.clone();
         std::thread::spawn(move || {
-            // The opening: OPEN_BYTES, then the id `box-1`.
-            let mut open = [0u8; 10 + 5];
+            // OPEN_BYTES, the id `box-1`, and a stage's count of layers (none).
+            let mut open = [0u8; 10 + 5 + 2];
             far.read_exact(&mut open).unwrap();
             let refused = wire::answer(
                 wire::FIRST,

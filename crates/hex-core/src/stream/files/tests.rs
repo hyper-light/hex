@@ -80,6 +80,7 @@ fn a_stage_reads_back_as_written_however_it_is_cut() {
         Step::Open {
             op: Op::Stage,
             id: "box-1".to_owned(),
+            layers: vec![],
         },
         vec![],
     )];
@@ -100,7 +101,8 @@ fn a_remove_is_its_opening_alone() {
         vec![(
             Step::Open {
                 op: Op::Remove,
-                id: "box-1".to_owned()
+                id: "box-1".to_owned(),
+                layers: vec![],
             },
             vec![]
         )]
@@ -259,9 +261,10 @@ fn every_count_past_its_bound_is_refused_from_its_head() {
             bound: 2
         })
     );
-    // The head alone, its 11 bytes never sent: refused as soon as the head is whole.
+    // The opening (its fixed part, the id `b`, a stage's count of layers) and the head alone, its 11 bytes
+    // never sent: refused as soon as the head is whole.
     let big = raw(2, 0, 0o644, b"f", b"", 11);
-    let head_only = &big[..OPEN_BYTES + 1 + HEAD_BYTES];
+    let head_only = &big[..OPEN_BYTES + 1 + 2 + HEAD_BYTES];
     assert_eq!(
         read(tight, head_only, 64),
         Err(Refused::Over {
@@ -271,7 +274,7 @@ fn every_count_past_its_bound_is_refused_from_its_head() {
     );
     let long_path = raw(1, 0, 0o755, b"abcdefghi", b"", 0);
     assert_eq!(
-        read(tight, &long_path[..OPEN_BYTES + 1 + HEAD_BYTES], 64),
+        read(tight, &long_path[..OPEN_BYTES + 1 + 2 + HEAD_BYTES], 64),
         Err(Refused::Over {
             what: "a path",
             bound: 8
@@ -279,7 +282,7 @@ fn every_count_past_its_bound_is_refused_from_its_head() {
     );
     let long_target = raw(3, 0, 0o777, b"l", b"/abcdefgh", 0);
     assert_eq!(
-        read(tight, &long_target[..OPEN_BYTES + 1 + HEAD_BYTES], 64),
+        read(tight, &long_target[..OPEN_BYTES + 1 + 2 + HEAD_BYTES], 64),
         Err(Refused::Over {
             what: "a symbolic link's target",
             bound: 8
@@ -383,6 +386,7 @@ fn version_2_entries_read_back_with_owners_times_xattrs_and_hard_links() {
         Step::Open {
             op: Op::Stage,
             id: "b".to_owned(),
+            layers: vec![],
         },
         vec![],
     )];
@@ -499,6 +503,7 @@ fn layers_whiteouts_and_opaque_markers_read_back_and_carry_nothing_else() {
         Step::Open {
             op: Op::Stage,
             id: "b".to_owned(),
+            layers: vec![],
         },
         vec![],
     )];
@@ -574,9 +579,14 @@ fn xattr_bytes_spend_the_stages_byte_budget() {
 /// isn't one; an unpacker that learns a budget refuses an entry past it by type.
 #[test]
 fn a_stages_learned_budget_bounds_it() {
-    assert_eq!(read_budget(&budget(7, 1 << 40)), Some((7, 1 << 40)));
+    let want = Budget {
+        entries: 7,
+        bytes: 1 << 40,
+        present: vec![],
+    };
+    assert_eq!(read_budget(&budget(&want)), Some(want.clone()));
     assert_eq!(read_budget(b"HEXB"), None);
-    assert_eq!(read_budget(&[budget(1, 2), vec![0]].concat()), None);
+    assert_eq!(read_budget(&[budget(&want), vec![0]].concat()), None);
     let three: Vec<(Entry, Vec<u8>)> = ["a", "b", "c"]
         .iter()
         .map(|p| (entry(p, What::Dir), vec![]))
@@ -602,4 +612,47 @@ fn a_stages_learned_budget_bounds_it() {
             bound: 2
         }
     );
+}
+
+/// HEX-GUEST-13 (§4a, the guest's layer store): open a stage naming its root's layers by digest, 9 of
+/// them, and read it back fed a byte at a time and whole: expect the opening's digests in order; a stage
+/// naming more layers than overlayfs stacks (`MAX_LAYERS`) refused from its count, before any digest is
+/// held; and a budget answer saying which of 9 layers the guest holds read back as written.
+#[test]
+fn a_stages_layers_are_named_by_digest_and_the_guest_says_which_it_holds() {
+    let digests: Vec<Digest> = (0..9u8).map(|i| [i; 32]).collect();
+    let mut bytes = open_stage("b", &digests).unwrap();
+    bytes.extend(END);
+    for cut in [1, 7, bytes.len()] {
+        let got = read(LIMITS, &bytes, cut).unwrap();
+        assert_eq!(
+            got[0].0,
+            Step::Open {
+                op: Op::Stage,
+                id: "b".to_owned(),
+                layers: digests.clone(),
+            },
+            "cut {cut}"
+        );
+    }
+    let mut over = open_stage("b", &[]).unwrap();
+    over.truncate(over.len() - 2);
+    over.extend(
+        u16::try_from(crate::bundle::MAX_LAYERS + 1)
+            .unwrap()
+            .to_le_bytes(),
+    );
+    assert_eq!(
+        read(LIMITS, &over, 64),
+        Err(Refused::Over {
+            what: "the stage's layers",
+            bound: u64::try_from(crate::bundle::MAX_LAYERS).unwrap()
+        })
+    );
+    let held = Budget {
+        entries: 1,
+        bytes: 2,
+        present: vec![true, false, true, true, false, false, false, true, true],
+    };
+    assert_eq!(read_budget(&budget(&held)), Some(held));
 }

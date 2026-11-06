@@ -72,10 +72,11 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 .unwrap_or(0),
         )),
         "echo" => Some(echo()),
-        // tree <dir>: a manifest of everything under `dir`, for HEX-GUEST-21's comparison of a staged
-        // root with containerd's unpack of the same image (selftest/tree.rs).
+        // tree <dir> | tree --layers <lowest>:...: a manifest of everything under `dir`, or in the overlay
+        // of a box's layers, for HEX-GUEST-21's comparison of a staged root with containerd's unpack of
+        // the same image (selftest/tree.rs).
         #[cfg(target_os = "linux")]
-        "tree" => Some(tree::tree(args.first().map(String::as_str).unwrap_or("."))),
+        "tree" => Some(tree::tree(args)),
         // fsync-probe <file> <iters>: the noisy-neighbour victim — times fsync over small writes
         // and prints "p50_us=<n> p99_us=<n>" (AC-T7.1.2).
         "fsync-probe" => Some(fsync_probe(
