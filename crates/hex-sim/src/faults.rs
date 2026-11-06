@@ -1,7 +1,8 @@
-//! The fault nemesis (`docs/design/failure-isolation.md`, scheduler implementation goal 5): each fault
-//! class injected into a simulated cell from a seed, the cell driving `hex-health` as the scheduler
-//! does, and each fault's detection and isolation time measured against the bound the design states.
-//! One seed, virtual time, one thread (hex-sim H1): a run is a function of its seed.
+//! The fault nemesis (`docs/design/failure-isolation.md`, `hex-sim.md` H42, scheduler
+//! implementation goal 5): each fault class injected into a simulated cell from a seed, the cell
+//! driving `hex-health` as the scheduler does, and each fault's detection and isolation time
+//! measured against the bound the design states. One seed, virtual time, one thread (hex-sim H1): a
+//! run is a function of its seed.
 //!
 //! The crash class is [`crate::membership`]'s. Here:
 //! - [`gray`]: one node's work runs slower than its peers' ([`hex_health::grade`]).
@@ -425,7 +426,7 @@ pub fn provider_outage(seed: u64, mutant: Mutant) -> Result<Measured, FaultError
     Ok(m)
 }
 
-/// The kinds' overheads as G2's traces state them (`docs/design/hex-sim.md`, the recorded workload):
+/// The kinds' overheads as G2's traces state them (`docs/design/hex-sim.md` H10, the recorded workload):
 /// OCI 0.42 MiB, measured (`bench/competitive/RESULT.md:95`); Firecracker 5 MiB, its specification
 /// (Agache et al., NSDI '20); Shards 5 MiB, a stand-in until Shards' own is measured.
 pub fn kind_overheads() -> Overheads {

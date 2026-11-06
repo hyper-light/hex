@@ -1,10 +1,11 @@
 //! hyper-swim's own failure detector, driven over a simulated LAN (S8's crash class; F1 in
-//! `docs/design/failure-isolation.md`): the membership the design gives the node agent (which runs
-//! none yet), vendored unchanged from hyper-raft (`vendor/MANIFEST.toml`), not a model of it. Each member is a `hyper_swim` `Detector`;
-//! this module is only its owner: it delivers the pings, acknowledgements, ping-requests, relayed
-//! answers and nacks the detectors ask for after a seeded one-way delay, carries their gossip, wakes
-//! each when it asks, and crashes one member after a warm-up. One seed, virtual nanoseconds, a bounded
-//! event queue (H1, H5); handlers never call one another in a cycle (CLAUDE.md §11).
+//! `docs/design/failure-isolation.md`, `hex-sim.md` H40): the membership the design gives the node
+//! agent (which runs none yet), vendored unchanged from hyper-raft (`vendor/MANIFEST.toml`), not a
+//! model of it. Each member is a `hyper_swim` `Detector`; this module is only its owner: it
+//! delivers the pings, acknowledgements, ping-requests, relayed answers and nacks the detectors ask
+//! for after a seeded one-way delay, carries their gossip, wakes each when it asks, and crashes one
+//! member after a warm-up. One seed, virtual nanoseconds, a bounded event queue (H1, H5); handlers
+//! never call one another in a cycle (CLAUDE.md §11).
 //!
 //! What it measures of the crash: when a live member's own probes first suspect the crashed one,
 //! when one first condemns it, and, for every condemnation, the time from the victim's last answer

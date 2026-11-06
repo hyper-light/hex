@@ -1,5 +1,5 @@
-//! Where a dangerous workload may run again (S8; F7 in `docs/design/failure-isolation.md`): by the
-//! kinds Hex places, G2's [`Class`]. A workload that trips a security signal
+//! Where a dangerous workload may run again (S8; F7 in `docs/design/failure-isolation.md`, `hex-sim.md`
+//! H42): by the kinds Hex places, G2's [`Class`]. A workload that trips a security signal
 //! ([`hex_health::danger::trips`]) is stopped, and starts again only in a stronger kind on its node, or
 //! is refused, typed.
 //!

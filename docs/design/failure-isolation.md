@@ -266,7 +266,7 @@ container on its host's (FI[19]). Firecracker's isolation surface is published a
 device model (Agache et al., NSDI '20; `docs/research/runtime/substrates-and-sandboxes.md` [SUB-11]).
 Shards' device model is not public in the sources read (`docs/research/scheduler/agentic-workloads.md`,
 its device table). Their overheads don't decide it: Firecracker's is 5 MiB by its specification and
-Shards' 5 MiB is a stand-in until Shards' own is measured (`docs/design/hex-sim.md`, the recorded
+Shards' 5 MiB is a stand-in until Shards' own is measured (`docs/design/hex-sim.md` H10, the recorded
 workload). Shards first would need its device model shown smaller than Firecracker's.
 
 **Which bars are per kind.** Only this one: a trip's outcome depends on the kind it ran in. The agent
@@ -275,8 +275,8 @@ three kinds; gray and fail-slow (F2), the disk stall (F3), antagonists (F4) and 
 the node's. So those are measured once, for every kind on the node.
 
 **Sources.** seccomp's typed actions (FI[18]); containers share the host kernel and microVMs don't
-(FI[19]); Firecracker's device model [SUB-11]; the kinds and their overheads, G2 (`hex-sim.md`). Which
-signals should trip is unresearched (FI §8): this is Hex's own choice.
+(FI[19]); Firecracker's device model [SUB-11]; the kinds and their overheads, G2 (`hex-sim.md` H10);
+the simulator's side, `hex-sim.md` H40-H42. Which signals should trip is unresearched (FI §8): this is Hex's own choice.
 
 **Evidence.** `hex-sim` `danger` tests (the move counts both overheads, to the byte; refusals typed);
 `faults.rs` over 1,000 seeds of each kind against an oracle from the rule's statement, no wrong verdict

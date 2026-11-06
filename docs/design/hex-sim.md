@@ -384,13 +384,44 @@ most once; handlers schedule events, never call each other's handlers in a cycle
 
 ## Failure detection and isolation (goal 5)
 
-`swim.rs` drives hyper-swim's own failure detector, vendored unchanged (`vendor/MANIFEST.toml`), over a
-seeded LAN: the crash class's bound. `membership.rs` models SWIM with Lifeguard on memberlist's
-protocol and constants as the competitor (crash timing and slow-member false positives); `faults.rs` is the nemesis for the other classes (gray and fail-slow,
-disk stall, antagonist, the agent faults, dangerous signals, and correlated faults against the ejection
-cap and eviction rate), each driving `hex-health`; `danger.rs` says where a tripped workload may run
-again, by the kinds Hex places (`model::Class`, F7), and measured against its bound in
-`failure-isolation.md`. Each is a function of its seed (H1) and bounded with typed refusals (H5).
+G5's decisions, numbered H40-H49 (the lead's ranges: the base H1-H11, G3 H20-H29, G4 H30-H39, G5
+H40-H49, G6/G7 H60-H69). Each run is a function of its seed (H1) and bounded with typed refusals (H5);
+the bounds they're measured against are `failure-isolation.md`'s.
+
+### H40. The crash class runs hyper-swim's own failure detector
+
+**The choice.** `swim.rs` owns N of hyper-swim's `Detector`s, vendored unchanged from hyper-raft at
+6a236ae (`vendor/MANIFEST.toml`) and depended on by name, and delivers what they ask over a seeded
+LAN: the membership the design gives the node agent, not a model of it.
+
+**Evidence.** `tests/swim.rs`: 1,000 seeds at each pace, every crash condemned within the bound its
+condemner stated (F1).
+
+**What would falsify it.** hyper-swim's detector changing upstream without the vendored copy following.
+
+### H41. memberlist's SWIM with Lifeguard is modelled as the competitor
+
+**The choice.** `membership.rs` models SWIM with Lifeguard on memberlist's protocol and constants, for
+memberlist's crash timing and Lifeguard's slow-member false-positive bar; it takes none of
+hyper-swim's code. Health-gated confirmations are a switch beside Lifeguard as published.
+
+**Evidence.** `tests/membership.rs`: the crash bound against its derivation, and the 4% case (F1).
+
+**What would falsify it.** The model's crash timing or false positives departing from memberlist's
+published behaviour.
+
+### H42. The fault nemesis and where a tripped workload goes, by the kinds Hex places
+
+**The choice.** `faults.rs` injects the other classes (gray and fail-slow, disk stall, antagonist, the
+agent faults, dangerous signals, correlated faults against the ejection cap and eviction rate), each
+driving `hex-health`. `danger.rs` says where a tripped workload may run again, on G2's `model::Class`,
+the node's kinds and their overheads (H10's figures): an OCI container to Firecracker, then Shards, on
+its node if it holds; a microVM's trip refused (F7).
+
+**Evidence.** `tests/faults.rs`: each class over 1,000 seeds, the dangerous class per kind (F2-F7).
+
+**What would falsify it.** A fault class missing its bound on a seed, or a dangerous verdict the rule
+doesn't give.
 
 ## What it doesn't do yet
 

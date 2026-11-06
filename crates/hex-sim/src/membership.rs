@@ -1,6 +1,7 @@
 //! SWIM membership with Lifeguard, as a deterministic discrete-event model of memberlist's protocol and
-//! constants (S8's crash class). It is not hyper-swim's detector, which times each pair from its
-//! measured round trips (NFD-E) rather than memberlist's fixed period and timeout. One seed, virtual nanoseconds, one SplitMix64 generator and B-tree maps
+//! constants: S8's competitor (`docs/design/hex-sim.md` H41). It is not hyper-swim's detector, which
+//! times each pair from its measured round trips (NFD-E) rather than memberlist's fixed period and
+//! timeout. One seed, virtual nanoseconds, one SplitMix64 generator and B-tree maps
 //! decide a run (H1); events at equal times run in the order they were scheduled; the event queue,
 //! each member's relayed probes and the run's steps are bounded, past which a typed [`SimError`]
 //! (H5). Handlers schedule events and never call one another in a cycle (CLAUDE.md §11).
