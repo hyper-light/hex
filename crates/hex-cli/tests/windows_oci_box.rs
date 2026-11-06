@@ -405,8 +405,8 @@ fn windows_oci_boxes_hold_the_contract_and_the_steps_criteria() {
     boxes_started_at_once_each_have_their_own_volume(&lab, 8);
     boxes_started_at_once_each_have_their_own_volume(&lab, 32);
     contract(&lab);
-    a_device_not_granted_isnt_visible(&lab);
     a_read_only_mount_refuses_writes(&lab);
+    a_device_not_granted_isnt_visible(&lab);
     eprintln!("PASS: HEX-RT-1..13, device, read-only mount, version refusal");
 }
 
