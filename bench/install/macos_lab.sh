@@ -79,10 +79,15 @@ as_user cc -O2 -Wall -Wextra -o "$PROBE" "$REPO/bench/native/macos/boxuser_probe
 
 FAIL=0
 step() { echo; echo "## $*"; }
-expect() { # <what> <command...>: records PASS when the command succeeds, else FAIL
-  local what=$1
+now() { perl -MTime::HiRes=time -e 'printf "%.6f", time'; }
+expect() { # <what> <command...>: records PASS when the command succeeds, else FAIL, and how long it took
+  local what=$1 t0 st
   shift
-  if "$@"; then echo "PASS: $what"; else echo "FAIL: $what"; FAIL=1; fi
+  t0=$(now)
+  if "$@"; then st=PASS; else st=FAIL; FAIL=1; fi
+  echo "$st: $what"
+  # Each phase's time, so a recorded run sets the watchdog for the next (the lead's call 5, 2026-11-06).
+  echo "TIME: $(perl -e "printf '%.3f', $(now) - $t0") s: $what"
 }
 box_user_contract() { as_user env HEX_BOX_HELPER_SOCK="$SOCK" "$TESTBIN" --exact --ignored box_user_boxes_hold_the_contract --test-threads 1 2>&1 | tail -n 15; return "${PIPESTATUS[0]}"; }
 process_contract() { as_user "$TESTBIN" --exact macos_process_boxes_hold_the_contract 2>&1 | tail -n 3; return "${PIPESTATUS[0]}"; }
