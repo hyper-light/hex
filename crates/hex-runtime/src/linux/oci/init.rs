@@ -1342,14 +1342,12 @@ fn fs_context(
     // The mount label as a parameter of its own, which an MLS label's commas can't break (research §1).
     if let Some(label) = label
         && super::lsm::labelling(fstype) == super::lsm::Labelling::Context
+        && let Err(e) = rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label)
+        // Where SELinux doesn't run, the label is skipped: the create found that first, warned of it, and
+        // under HEX_OCI_LSM=strict refused (lsm::admit). Where it runs, the refusal is the label's.
+        && super::lsm::selinux_module()? == super::lsm::Module::Active
     {
-        if let Err(e) = rustix::mount::fsconfig_set_string(fs.as_fd(), "context", label) {
-            // Where SELinux doesn't run, the label is skipped: the create found that first, warned of it,
-            // and under HEX_OCI_LSM=strict refused (lsm::admit). Where it runs, the refusal is the label's.
-            if super::lsm::selinux_module()? == super::lsm::Module::Active {
-                return Err(super::lsm::refused_label(label, fstype, e));
-            }
-        }
+        return Err(super::lsm::refused_label(label, fstype, e));
     }
     rustix::mount::fsconfig_create(fs.as_fd()).map_err(|e| match label {
         Some(label) => OciError::os(
