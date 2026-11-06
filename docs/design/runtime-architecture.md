@@ -1875,8 +1875,8 @@ made in two parts.
   runtime reads at build (`mntns::RECORD`). Once all three ways have a create p50 from one interleaved run on a 7.1+
   bench host of record, the default is the fastest this node can take. Until then it is the record's stated
   prediction, `OpenTree` first by the hold count above. Changing the record changes the default, with nothing else
-  to edit. A node's owner may ask for another (`HEX_OCI_MNTNS`:
-  `copy`, `empty` or `tree`, the bench's A/B). A namespace from its tree asked where the probe doesn't find it is
+  to edit. The record's A/B asks for each way in turn (`HEX_OCI_MNTNS`: `copy`, `empty` or `tree`, read by the bench's
+  node alone; a `hex node` takes its default, with no switch back to an older way). A namespace from its tree asked where the probe doesn't find it is
   refused by type at the first create. Empty asked where the kernel lacks the flag is served by the seed's copy. Each
   create is counted under the way its seed answers it was made (`Node::mount_namespaces_made`), so that fallback
   shows, beside `ClassicReason`'s counts.

@@ -20,9 +20,9 @@ gcc -O2 -pthread -o "$D/bin/idlethreads" "$COMP/probes/idlethreads.c"
 rm -rf "${D:?}/lab"; cp -r "$COMP" "$D/lab"
 # The mounts trace (MOUNTS) names the calls from asm/unistd_64.h, which the guest's root lacks: the host's goes along.
 cp /usr/include/asm/unistd_64.h "$D/lab/unistd_64.h"
-# Only what's set reaches the guest; an unset one stays unset there (HEXBENCH_PROCFS unset is its pool on).
+# Only what's set reaches the guest; an unset one stays unset there.
 : > "$D/env"
-for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_PROCFS HEXBENCH_DEVFS HEXBENCH_OWNER \
+for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_DEVFS HEXBENCH_OWNER \
   HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS HEXBENCH_MASKS HEXBENCH_PARKED_PROCS HEXBENCH_AHEAD MOUNTS MOUNTS_CONC MOUNTS_SPAN MOUNTS_UNTRACED; do
   [ -n "${!v+x}" ] && printf 'export %s=%q\n' "$v" "${!v}" >> "$D/env"
 done

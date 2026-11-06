@@ -2014,8 +2014,8 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
     }
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let node = lab.node(&own.join("hex-oci-seedns"), state.path());
-    // A create seed is a child of this process re-exec'd as `__oci-seed` that prunes (before goal 6's change)
-    // or joins (after it) a pruned namespace, as its environment says; an exec seed does neither. A box's init
+    // A create seed is a child of this process re-exec'd as `__oci-seed` that joins the node's pruned namespace,
+    // as its environment says; an exec seed doesn't. A box's init
     // made and not yet started is a child of this process too (cloned with `CLONE_PARENT`) and still the seed's
     // image, but in its box's pid namespace: its `NSpid` names two pids, a seed's one (proc_pid_status(5)).
     let create_seeds = || -> Vec<u32> {
@@ -2038,7 +2038,7 @@ fn create_seeds_share_the_nodes_one_pruned_namespace(lab: &Lab, own: &Path) {
             if ppid == Some(me.as_str())
                 && in_our_pid_namespace
                 && has(&cmdline, b"__oci-seed")
-                && (has(&environ, b"HEX_OCI_SEED_PRUNE=") || has(&environ, b"HEX_OCI_SEED_JOIN="))
+                && has(&environ, b"HEX_OCI_SEED_JOIN=")
             {
                 seeds.push(pid);
             }

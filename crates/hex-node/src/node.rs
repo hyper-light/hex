@@ -372,8 +372,9 @@ impl Node {
         Ok(self)
     }
 
-    /// Enables or disables procs made ahead (decision 6's update, part 2), apart from `/dev`'s pool, for
-    /// the bench's A/B; disabled creates mount their own proc. Root nodes only, as `/dev`'s.
+    /// Enables or disables procs made ahead (decision 6's update, part 2), apart from `/dev`'s pool; disabled
+    /// creates mount their own proc, as every create does on a kernel before 7.1 or with a spec the pool can't
+    /// serve, which is the path the lab's tests hold this way on a 7.1+ host. Root nodes only, as `/dev`'s.
     pub fn with_prepared_procs(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (dev, _, root) = self.devfs.enabled();
         self.devfs = self.devfs.restart(dev, enabled && root)?;
