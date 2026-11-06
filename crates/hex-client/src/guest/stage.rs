@@ -1150,7 +1150,9 @@ fn layer(
         file,
         hash: match hash {
             Hash::No => None,
-            Hash::Verify(_) | Hash::Learn => Some(<sha2::Sha256 as sha2::Digest>::new()),
+            Hash::Verify(_) | Hash::Learn => {
+                Some(Hasher::start().map_err(|e| bad("starting its hash", &e))?)
+            }
         },
     });
     let head = raw.fill_buf().map_err(|e| bad("reading it", &e))?;
@@ -1500,7 +1502,7 @@ fn layer(
     let Some(hashed) = hashed else {
         return Err(bad("its digest", &"its bytes weren't hashed"));
     };
-    let got: files::Digest = sha2::Digest::finalize(hashed).into();
+    let got = hashed.finish().map_err(|e| bad("its digest", &e))?;
     match hash {
         Hash::Verify(want) if got != want => Err(bad(
             "its digest",
@@ -1535,16 +1537,63 @@ const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 /// A layer's file, its bytes hashed as they are read when its digest is to be checked.
 struct Hashing {
     file: File,
-    hash: Option<sha2::Sha256>,
+    hash: Option<Hasher>,
 }
 
 impl Read for Hashing {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.file.read(buf)?;
-        if let Some(hash) = self.hash.as_mut() {
-            sha2::Digest::update(hash, buf.get(..n).unwrap_or_default());
+        if let Some(hash) = self.hash.as_ref() {
+            hash.feed(buf.get(..n).unwrap_or_default())?;
         }
         Ok(n)
+    }
+}
+
+/// A sha256 taken on a thread of its own from the very bytes the packer reads, so hashing a layer overlaps
+/// reading, unzipping and sending it rather than adding to them: hashed in line, it was about 0.8 s of a
+/// grafana create that missed the store (480 MB at sha2 0.10.9's 606 MB/s on a Mac Studio, its software path),
+/// which made a miss slower than whole-root staging (HEX-GUEST-22, 4x: 5007 ms against 4274). The channel
+/// holds one chunk: one is hashed while the next is read; more depth buys nothing once the slower side is
+/// busy, and a full channel makes the reader wait, so what's in flight is bounded.
+struct Hasher {
+    chunks: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    done: std::thread::JoinHandle<files::Digest>,
+}
+
+impl Hasher {
+    fn start() -> io::Result<Self> {
+        let (chunks, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        let done = std::thread::Builder::new()
+            .name("hex-layer-hash".to_owned())
+            .spawn(move || {
+                let mut hash = <sha2::Sha256 as sha2::Digest>::new();
+                for chunk in rx {
+                    sha2::Digest::update(&mut hash, &chunk);
+                }
+                sha2::Digest::finalize(hash).into()
+            })?;
+        Ok(Self {
+            chunks: Some(chunks),
+            done,
+        })
+    }
+
+    fn feed(&self, bytes: &[u8]) -> io::Result<()> {
+        let Some(chunks) = self.chunks.as_ref() else {
+            return Err(io::Error::other("the layer's hash was already taken"));
+        };
+        chunks
+            .send(bytes.to_vec())
+            .map_err(|_| io::Error::other("the layer's hashing thread ended"))
+    }
+
+    /// The digest of every byte fed, once the thread has hashed the last.
+    fn finish(mut self) -> io::Result<files::Digest> {
+        drop(self.chunks.take());
+        self.done
+            .join()
+            .map_err(|_| io::Error::other("the layer's hashing thread failed"))
     }
 }
 
