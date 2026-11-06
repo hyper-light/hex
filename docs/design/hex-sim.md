@@ -235,8 +235,10 @@ keep-alive added), converted by `bench/sched/huawei_trace.py` from raw files it 
   keep-alive in the second trace), its resource pool (millicores and MiB) and its owner (`userID`). The
   sandboxes are Huawei's pods, which may be containers, taken as requests by shape.
 - Each request's kind is its owner's, the owners split so that each kind has a third of the day's launches.
-- The nodes are Hex's own fleet's hosts, five of each. Linux runs all three kinds, x86_64 Windows OCI
-  containers and Shards microVMs, and arm64 macOS Shards microVMs.
+- Two node models (the lead, 2026-11-06). The main one is 10 EC2 m5d.metal hosts (48 cores, 384 GiB),
+  Linux x86_64 with KVM, each running all three kinds. Beside it, to exercise where each kind may land,
+  are Hex's own fleet's hosts, five of each: Linux runs all three kinds, x86_64 Windows OCI containers and
+  Shards microVMs, and arm64 macOS Shards microVMs alone.
 - Each kind's runtime overhead is added to its requests' memory: OCI 0.42 MiB, Firecracker 5 MiB, and
   Shards 5 MiB as a stand-in.
 
@@ -247,6 +249,7 @@ a side measurement, not of record.
 **Sources.**
 - Joosen et al., "Serverless Cold Starts and Where to Find Them", EuroSys 2025, and its data at
   github.com/sir-lab/data-release (CC BY 4.0); its §2 for the one-minute keep-alive.
+- The m5d.metal host: Agache et al., NSDI 2020 §6, the host the Firecracker paper measured on.
 - Where each kind runs: Hex's oci class (Linux, and Windows over HCS), Firecracker (Linux with KVM), and
   Shards' API draft (`a0cced87`, `crates/api/src/lib.rs:172-178`).
 - Overheads: `bench/competitive/RESULT.md:95` for OCI; Firecracker's specification and Agache et al., NSDI
@@ -256,10 +259,11 @@ a side measurement, not of record.
   the counts, and why this trace over the Azure Functions traces.
 
 **Evidence.**
-- `a_recorded_workload_replays_the_same_twice`: 25,295 launches of 339 owners on 50 nodes, both traces. The
-  same hash, report and log come twice from one seed; every launch is done once; `check_log` and
-  `check_filters` are clean; and the kind filter refuses nodes.
-- `huawei_trace.py` run again on the recorded raw files gives both traces byte for byte.
+- `a_recorded_workload_replays_the_same_twice`: 25,295 launches of 339 owners, all four traces (each node
+  model, with and without the keep-alive). The same hash, report and log come twice from one seed; every
+  launch is done once; `check_log` and `check_filters` are clean. The kind filter refuses nodes on the
+  fleet, and none on m5d.metal, where every node runs every kind.
+- `huawei_trace.py` run again on the recorded raw files gives all four traces byte for byte.
 - The parser reads the kinds and overheads (`classes_are_read_and_default_to_every_class_and_oci`).
   `malformed_traces_are_refused_by_line`, `traces_past_their_bounds_are_refused` and its proptests refuse
   malformed, oversized and out-of-order text with a typed error, and none panics.
@@ -284,8 +288,9 @@ a side measurement, not of record.
    stranded packs;
 4. then the node's key.
 
-`AC-T7.4.3` is measured by `packing::pack` on the recorded workload (H10), to 90% load, the mix of kinds
-and each kind alone (`packing::alone`: the whole day as that kind, each need moved to its overhead).
+`AC-T7.4.3` is measured by `packing::pack` on the recorded workload (H10), on both node models, to 90%
+load, the mix of kinds and each kind alone (`packing::alone`: the whole day as that kind, each need moved
+to its overhead).
 - Load is the dominant share placed (the larger of CPU's and memory's) over the nodes the requests may use.
 - Stranded capacity is the free CPU and memory on nodes where no request shape of a kind the node runs
   fits, each as a share of those nodes', summed (`PackReport::stranded_per_mille`). That is Borg's
@@ -293,9 +298,9 @@ and each kind alone (`packing::alone`: the whole day as that kind, each need mov
 - The seeds are 16 starting arrivals spread evenly over the day, each wrapping round it.
 - Three clocks. With no completions (`Clock::Held`), lifetimes don't enter. With completions
   (`Clock::Compressed`), once with lifetimes as recorded and once with the keep-alive. At the recorded
-  rate the day never loads the fleet to 90%, so arrivals come faster: for each set, the slowest speed on
-  `sched_packing`'s ladder (10x to 2,000x) at which Hex and both best fits reach 90% on every seed, so
-  lifetimes enter as far as the fleet allows.
+  rate the day never loads the nodes to 90%, so arrivals come faster: for each node model and set, the
+  slowest speed on `sched_packing`'s ladder (10x to 2,000x) at which Hex and both best fits reach 90% on
+  every seed, so lifetimes enter as far as the nodes allow.
 - Best fit alone is measured two ways: by free CPU first (`Scorer::BestFit`) and across resources
   (`Scorer::MostAllocated`, Kubernetes' bin packing).
 
@@ -306,34 +311,41 @@ fully allocated", and its hybrid of best fit and worst fit, which packs "about 3
 [22]). Tetris's alignment, measured beside it ([19]).
 
 **Evidence.** `the_recorded_workload_strands_at_least_30_percent_less_than_best_fit` and
-`bench/sched/packing.md`. On every one of the 16 seeds of the mix and of each kind alone, under all three
-clocks, Hex's scorer strands at least 30% less than both best fits at 90% load.
-- On the mix with no completions the least cut is 52.9% against best fit by CPU and 52.6% against
-  `MostAllocated`. Everywhere else Hex strands nothing, against the best fits' 36-646 per-mille.
+`bench/sched/packing.md`. On every one of the 16 seeds of the mix and of each kind alone, on both node
+models, under all three clocks, Hex's scorer strands at least 30% less than both best fits at 90% load.
+- On m5d.metal, Hex strands nothing on any seed, against the best fits' 87-804 per-mille.
+- On the fleet's mix with no completions the least cut is 52.9% against best fit by CPU and 52.6% against
+  `MostAllocated`. Everywhere else on the fleet Hex strands nothing, against the best fits' 36-646
+  per-mille.
 - Every arm reaches 90% on every seed. Under completions, some launches end on the way on every seed.
-- Hex passes over no more launches than either best fit in any set: 2,556 across the seeds on the mix with
-  no completions, against 6,679 and 11,322, and none anywhere else. It passes over none below half load and
-  none for room.
+- Hex passes over no more launches than either best fit in any set: 2,556 across the seeds on the fleet's
+  mix with no completions, against 6,679 and 11,322, and none anywhere else. It passes over none below
+  half load and none for room.
+- The bar doesn't hang on the chosen speeds. Of the 179 ladder rows at which every arm reaches 90% on every
+  seed, Hex meets it on every seed of 176. In the other three, one seed has `MostAllocated` stranding
+  nothing either, so no cut is possible.
 
 The bench measures the arms not taken beside it (`packing.md`), and every fragment-aware arm meets the bar.
-- Least stranded then most allocated (Hex's tie without the kinds) strands a little less on the mix with no
-  completions (a least cut of 54.1%). But it passes over 11,195 launches there, 950 of them below half load:
-  Firecracker microVMs wait for Linux room that the other kinds took.
-- Least stranded then Tetris's alignment (the plan's) passes over 2,397 there. Its cuts fall as low as 31.7%
-  (Firecracker alone, lifetimes as recorded), and it passes over launches under every set and clock but one
-  (Shards alone, lifetimes as recorded).
+- Least stranded then most allocated is Hex's tie without the kinds. On m5d.metal, where every node runs
+  every kind, it is Hex's score. On the fleet it strands a little less on the mix with no completions (a
+  least cut of 54.1%), but it passes over 11,195 launches there, 950 of them below half load: Firecracker
+  microVMs wait for Linux room that the other kinds took.
+- Least stranded then Tetris's alignment (the plan's) passes over 2,397 on the fleet's mix with no
+  completions. Its cuts fall as low as 66.8% on m5d.metal and 31.7% on the fleet (Firecracker alone,
+  lifetimes as recorded), and it passes over launches in every set and clock on m5d.metal, and in all but
+  one on the fleet (Shards alone, lifetimes as recorded).
 
 On kiln's CI trace, a side measurement since Ada's correction, every node runs every kind, so Hex's tie
-there is most allocated. That arm met the bar on 8 of 16 seeds of kiln's fourteen days (`packing.md`, the
-record at `ad3053c`); least stranded then least allocated met it on all 16.
+there is most allocated too. That arm met the bar on 8 of 16 seeds of kiln's fourteen days, with no
+completions (`packing.md`, the record at `ad3053c`); least stranded then least allocated met it on all 16.
 
 **What would falsify it.**
 - A recorded microVM workload on which Hex's scorer strands no less than best fit, or passes over more
   arrivals on the way to the same load.
 - The narrowest-node tie spends first the nodes few kinds can use. A workload whose kinds skew against the
   fleet's could exhaust those nodes and refuse the next launches of their one kind.
-- Where every node runs every kind, the tie can't tell nodes apart and is most allocated, which met the bar
-  on only half of kiln's seeds.
+- Where every node runs every kind, the tie can't tell nodes apart and is most allocated. That strands
+  nothing on m5d.metal, but met the bar on only half of kiln's CI seeds.
 
 **Open.** Shards' own overhead and device model replace the stand-ins when Shards states them, and Hex's
 own launch records replace the given kinds once Hex runs microVMs for its users.

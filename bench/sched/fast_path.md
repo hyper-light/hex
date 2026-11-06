@@ -1,10 +1,11 @@
 # The scheduler fast path's decision latency (AC-T7.4.2)
 
 **Bar:** placement decision p99 at 10,000 placements/s on 10,000 simulated nodes is at most 10 ms
-(`AC-T7.4.2`; G2 step 5). **Result: MET on the recorded microVM workload (`huawei_workload.md`), for the mix
-of kinds and for each kind alone, at `1d72fd5`. Best of 5 by p99: 27.9 µs on the mix, 25.9 µs for OCI
-containers alone, 27.9 µs for Firecracker microVMs alone and 19.0 µs for Shards microVMs alone. Every run's
-p99 is at most 37.9 µs.**
+(`AC-T7.4.2`; G2 step 5). **Result: MET on the recorded microVM workload (`huawei_workload.md`), on both
+node models, for the mix of kinds and for each kind alone, at `5374202`. Best of 5 by p99, on 10,000 EC2
+m5d.metal nodes (the main model): 21.4 µs on the mix, 23.4 µs for OCI containers alone, 23.0 µs for
+Firecracker microVMs alone and 29.0 µs for Shards microVMs alone. On 10,000 nodes of Hex's fleet's host
+types: 30.0, 28.6, 27.4 and 30.3 µs. Every run's p99 is at most 39.1 µs.**
 
 ## What was measured
 
@@ -15,8 +16,10 @@ on a release build, wall-clock:
 - the compare-and-set commit to the store;
 - the index update.
 
-- **Nodes.** 10,000 of them, repeating the recorded workload's 50: Hex's fleet's host types in their
-  proportions (two Linux hosts in ten, one Windows, seven Macs), each running the kinds its OS runs.
+- **Nodes.** 10,000 of them, repeating one node model's hosts: 10,000 m5d.metal hosts, each running every
+  kind (`huawei-r5-day30.trace`, the main model); or Hex's fleet's host types in their proportions (two
+  Linux hosts in ten, one Windows, seven Macs), each running the kinds its OS runs
+  (`huawei-r5-day30.fleet.trace`).
 - **Launches.** The recorded workload's, with their needs (each with its kind's overhead) and kinds, in
   arrival order from a different place in the day for each run (the seed), repeated as needed.
 - **Sets.** The mix as recorded, and each kind alone (`packing::alone`).
@@ -26,9 +29,10 @@ on a release build, wall-clock:
   timed arrival then retires the oldest running launch first, so the load holds.
 - **One thread.** The in-order committer is the serial point.
 
-Decisions that find no node ("refused") are included. On the mix, 4,945 to 7,202 launches a run are
+Decisions that find no node ("refused") are included. On the fleet's mix, 4,945 to 7,202 launches a run are
 refused, over the fill and the timed placements. They are OCI containers and Firecracker microVMs that find
-every Linux and Windows node full while the Macs have room. Each kind alone refuses none.
+every Linux and Windows node full while the Macs have room. Each kind alone, and every set on m5d.metal,
+refuses none.
 
 ## The run of record
 
@@ -36,48 +40,74 @@ every Linux and Windows node full while the Macs have room. Each kind alone refu
   6.19.10-300.fc44.
 - Placement: CPUs 4-15 (`AllowedCPUs=4-15`, affinity checked: `4-15`), under
   `flock /home/adalundhe/.cache/hex-t7/fedora-timed.lock`.
-- Commit: `1d72fd5` (cp/t7-sched), release (`cargo bench` profile), from a `git archive` of the commit.
-- Date: 2026-11-06, 09:43:20Z to 09:47:20Z. Units: hex-sched-fastpath-20261106T094305Z-build (build,
-  CPUs 16-31) and hex-sched-fastpath-20261106T094305Z-time (timed).
-- Load: noisy. Load average 7.21 before and 11.22 after. Eight docker containers were up (others' labs
-  and builders: issue556oss-control-plane, three buildx builders, kind-registry, kiln-t10-minio and two
-  others). Units hex-integrate-native-20261106T093947Z and hex-sched-g4-gates-20261106T090907Z ran beside
-  it. Nothing was done to quiet the host.
-- Runs: 5 × 100,000 timed placements per set, best of 5 by p99.
+- Commit: `5374202` (cp/t7-sched), release (`cargo bench` profile), from a `git archive` of the commit.
+- Date: 2026-11-06, 10:06:19Z to 10:17:57Z. Units: hex-sched-fastpath-20261106T100603Z-build (build,
+  CPUs 16-31) and hex-sched-fastpath-20261106T100603Z-time (timed).
+- Load: noisy. Load average 10.40 before and 25.94 after. Eight docker containers were up (others' labs,
+  benches and builders: hexbench-oci-2660782, goofy_keldysh, issue556oss-control-plane, three buildx
+  builders, kind-registry and kiln-t10-minio). Units hex-g5tail-g16pfab-20261106T094401Z,
+  hex-integrate-native-20261106T100543Z and hex-sched-g4-gates-20261106T095115Z ran beside it. Nothing
+  was done to quiet the host.
+- Runs: 5 × 100,000 timed placements per node model and set, best of 5 by p99.
 
-| set | seed | refused | p50 µs | p99 µs | p99.9 µs | max µs |
-|---|---:|---:|---:|---:|---:|---:|
-| mix | 0 | 4,945 | 15.2 | 32.1 | 44.9 | 367.0 |
-| mix | 1 | 6,506 | 14.7 | 37.7 | 211.7 | 5,293.0 |
-| mix | 2 | 7,202 | 16.8 | 37.9 | 56.3 | 493.9 |
-| mix | 3 | 6,994 | 17.6 | 32.8 | 46.1 | 420.9 |
-| mix | 4 | 5,437 | 14.7 | **27.9** | 36.4 | 5,256.2 |
-| OCI | 0 | 0 | 12.7 | **25.9** | 113.2 | 5,398.2 |
-| OCI | 1 | 0 | 13.2 | 29.9 | 307.5 | 4,774.8 |
-| OCI | 2 | 0 | 14.3 | 32.6 | 159.9 | 5,368.7 |
-| OCI | 3 | 0 | 14.0 | 32.5 | 298.1 | 5,424.5 |
-| OCI | 4 | 0 | 14.2 | 32.7 | 409.4 | 5,467.8 |
-| Firecracker | 0 | 0 | 15.8 | 29.1 | 186.2 | 2,576.5 |
-| Firecracker | 1 | 0 | 15.4 | 28.6 | 159.2 | 2,941.3 |
-| Firecracker | 2 | 0 | 15.6 | 29.5 | 44.3 | 2,884.1 |
-| Firecracker | 3 | 0 | 15.9 | **27.9** | 41.9 | 2,790.2 |
-| Firecracker | 4 | 0 | 16.0 | 29.4 | 43.8 | 2,876.0 |
-| Shards | 0 | 0 | 9.7 | 25.8 | 108.8 | 6,050.2 |
-| Shards | 1 | 0 | 9.2 | 23.1 | 57.3 | 5,443.4 |
-| Shards | 2 | 0 | 8.3 | 21.7 | 41.8 | 5,457.1 |
-| Shards | 3 | 0 | 7.9 | 19.1 | 31.1 | 4,896.5 |
-| Shards | 4 | 0 | 8.6 | **19.0** | 30.1 | 5,163.8 |
+| node model | set | seed | refused | p50 µs | p99 µs | p99.9 µs | max µs |
+|---|---|---:|---:|---:|---:|---:|---:|
+| m5d.metal | mix | 0 | 0 | 11.4 | 24.5 | 40.3 | 853.6 |
+| m5d.metal | mix | 1 | 0 | 11.6 | 22.5 | 33.2 | 250.1 |
+| m5d.metal | mix | 2 | 0 | 11.1 | 24.7 | 40.0 | 536.1 |
+| m5d.metal | mix | 3 | 0 | 11.3 | **21.4** | 31.1 | 117.6 |
+| m5d.metal | mix | 4 | 0 | 10.9 | 23.0 | 31.7 | 210.5 |
+| m5d.metal | OCI | 0 | 0 | 10.1 | **23.4** | 34.7 | 199.7 |
+| m5d.metal | OCI | 1 | 0 | 10.1 | 25.5 | 40.0 | 364.8 |
+| m5d.metal | OCI | 2 | 0 | 9.9 | 28.2 | 46.6 | 521.9 |
+| m5d.metal | OCI | 3 | 0 | 9.8 | 24.3 | 43.3 | 491.5 |
+| m5d.metal | OCI | 4 | 0 | 9.5 | 23.5 | 36.7 | 235.1 |
+| m5d.metal | Firecracker | 0 | 0 | 10.9 | **23.0** | 31.4 | 232.6 |
+| m5d.metal | Firecracker | 1 | 0 | 10.6 | 23.5 | 33.9 | 479.5 |
+| m5d.metal | Firecracker | 2 | 0 | 9.5 | 24.9 | 53.0 | 756.6 |
+| m5d.metal | Firecracker | 3 | 0 | 12.7 | 34.2 | 106.7 | 1,993.9 |
+| m5d.metal | Firecracker | 4 | 0 | 11.9 | 28.5 | 40.9 | 273.0 |
+| m5d.metal | Shards | 0 | 0 | 10.6 | 30.0 | 42.1 | 810.9 |
+| m5d.metal | Shards | 1 | 0 | 10.1 | 29.1 | 38.0 | 261.7 |
+| m5d.metal | Shards | 2 | 0 | 10.7 | **29.0** | 44.9 | 1,128.1 |
+| m5d.metal | Shards | 3 | 0 | 10.9 | 31.0 | 41.9 | 222.8 |
+| m5d.metal | Shards | 4 | 0 | 11.0 | 29.8 | 39.4 | 211.1 |
+| fleet | mix | 0 | 4,945 | 18.2 | 33.8 | 45.2 | 228.3 |
+| fleet | mix | 1 | 6,506 | 17.3 | **30.0** | 44.1 | 5,765.8 |
+| fleet | mix | 2 | 7,202 | 19.0 | 35.1 | 46.0 | 503.7 |
+| fleet | mix | 3 | 6,994 | 17.9 | 32.3 | 49.3 | 468.2 |
+| fleet | mix | 4 | 5,437 | 17.3 | 31.8 | 55.7 | 5,245.3 |
+| fleet | OCI | 0 | 0 | 14.2 | 29.5 | 174.4 | 6,099.6 |
+| fleet | OCI | 1 | 0 | 14.1 | **28.6** | 204.2 | 5,609.5 |
+| fleet | OCI | 2 | 0 | 14.3 | 29.0 | 212.0 | 5,854.7 |
+| fleet | OCI | 3 | 0 | 14.9 | 33.5 | 77.5 | 5,286.7 |
+| fleet | OCI | 4 | 0 | 13.8 | 29.0 | 205.4 | 5,761.5 |
+| fleet | Firecracker | 0 | 0 | 14.7 | **27.4** | 42.4 | 2,680.5 |
+| fleet | Firecracker | 1 | 0 | 14.5 | 30.1 | 55.0 | 2,560.1 |
+| fleet | Firecracker | 2 | 0 | 16.7 | 39.1 | 115.1 | 2,957.7 |
+| fleet | Firecracker | 3 | 0 | 16.9 | 36.5 | 63.4 | 3,202.2 |
+| fleet | Firecracker | 4 | 0 | 17.2 | 35.1 | 64.9 | 2,667.4 |
+| fleet | Shards | 0 | 0 | 11.9 | 33.2 | 350.6 | 5,885.1 |
+| fleet | Shards | 1 | 0 | 11.4 | 33.2 | 92.7 | 6,202.3 |
+| fleet | Shards | 2 | 0 | 10.3 | 31.2 | 81.8 | 6,328.3 |
+| fleet | Shards | 3 | 0 | 10.4 | **30.3** | 48.0 | 5,435.1 |
+| fleet | Shards | 4 | 0 | 10.2 | 32.0 | 103.6 | 5,355.0 |
 
-The maxima are single placements. The host ran at load 7 to 11 beside others' work; p99.9 stayed at or
-under 409 µs.
+The maxima are single placements. The host ran at load 10 to 26 beside others' work. p99.9 stayed at or
+under 107 µs on m5d.metal and 351 µs on the fleet.
 
 ## Earlier runs, not of record
 
-Before the microVM workload, the bench drove generated nodes and needs under best fit. It measured p99 78.0
-µs at `e201e11` (2026-11-05) and 81.0 µs at `e6ebcc7` (2026-11-04), best of 5; this file at `e201e11` holds
-their tables. At `d457978`, before the kinds, it measured p99 30.6 µs on 10,000 EC2 m5d.metal nodes
-(hex-sched-benchtime-20261106T054155Z). None of these compares with the run above: the nodes, the needs and
-the scorer all differ.
+- At `1d72fd5`, on the fleet alone, the same bench measured p99 27.9 µs (mix), 25.9 (OCI), 27.9
+  (Firecracker) and 19.0 (Shards), best of 5, at load 7 to 11 (hex-sched-fastpath-20261106T094305Z-time;
+  this file at `04b0ef1` holds its table).
+- At `d457978`, before the kinds, it measured p99 30.6 µs on 10,000 EC2 m5d.metal nodes
+  (hex-sched-benchtime-20261106T054155Z).
+- Before the microVM workload, it drove generated nodes and needs under best fit: p99 78.0 µs at `e201e11`
+  (2026-11-05) and 81.0 µs at `e6ebcc7` (2026-11-04), best of 5. This file at `e201e11` holds their tables.
+
+None of these compares with the run above class for class: the nodes, the needs, the load or the scorer
+differ.
 
 ## What it doesn't show
 
