@@ -71,8 +71,14 @@ mod unix {
         /// its timeout: then fails `WouldBlock`, as std's sockets do at theirs on Unix.
         pub(super) fn ready(&self, which: usize) -> io::Result<()> {
             let ms = self.waits.get(which).map_or(0, |w| w.load(Ordering::Relaxed));
-            let deadline = (ms != 0).then(|| Instant::now().checked_add(Duration::from_millis(ms))).flatten();
-            let events = if which == READ { libc::POLLIN } else { libc::POLLOUT };
+            let deadline = (ms != 0)
+                .then(|| Instant::now().checked_add(Duration::from_millis(ms)))
+                .flatten();
+            let events = if which == READ {
+                libc::POLLIN
+            } else {
+                libc::POLLOUT
+            };
             loop {
                 let wait = match deadline {
                     None => -1,
@@ -180,14 +186,14 @@ impl Stream for Socket {
         #[cfg(unix)]
         return self.set_wait(unix::READING, timeout);
         #[cfg(windows)]
-        return self.inner.set_read_timeout(timeout);
+        self.inner.set_read_timeout(timeout)
     }
 
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         #[cfg(unix)]
         return self.set_wait(unix::WRITING, timeout);
         #[cfg(windows)]
-        return self.inner.set_write_timeout(timeout);
+        self.inner.set_write_timeout(timeout)
     }
 }
 
@@ -233,8 +239,7 @@ mod tests {
         assert!(Stream::set_read_timeout(&a, Some(Duration::ZERO)).is_err());
     }
 
-    /// A clone is the same connection: what one writes the peer reads, and the clone's
-    /// timeout is the original's (Hex HEX-GUEST-9).
+    /// A clone is the same connection: what one writes the peer reads (Hex HEX-GUEST-9).
     #[test]
     fn a_clone_is_the_same_connection() {
         let (a, mut b) = pair().unwrap();
