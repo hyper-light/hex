@@ -26,9 +26,13 @@ OOM=${BENCH_OOM:-1000}
 # which a box's writable layer is refused by name), owned by the host user, whose uid the lab user takes.
 LAB_HOME=$HOME/.cache/hex-t7/native-s6/home-${NAME#hex-native-s6-lab-}
 mkdir -p "$LAB_HOME"
+# Every wait inside is bounded by what this host's systemd gives a unit to start (its DefaultTimeoutStartSec=,
+# systemd-system.conf(5)), learned here rather than picked (Ada's rule, 2026-11-06).
+LAB_BOUND_S=$(( $(systemd-analyze timespan "$(systemctl show -p DefaultTimeoutStartUSec --value)" | awk '/μs:/ {print $2}') / 1000000 ))
+[ "$LAB_BOUND_S" -gt 0 ] || { echo "linux_lab.sh: this host's systemd gives units no start bound" >&2; exit 2; }
 # Every path the binaries name lives at the same path inside.
 mounts=(-v /usr:/usr:ro --tmpfs /usr/local:rw,exec -v "$HERE:/opt/lab:ro" -v "$REPO/scripts/install:/opt/install:ro"
-  -v "$LAB_HOME:/home/hexlab" -e LAB_UID="$(id -u)")
+  -v "$LAB_HOME:/home/hexlab" -e LAB_UID="$(id -u)" -e LAB_BOUND_S="$LAB_BOUND_S")
 # The test names the hex binary it was built beside (CARGO_BIN_EXE_hex), so its profile's directory.
 BUILT=$(dirname "$(dirname "$TESTBIN")")
 mounts+=(-v "$BUILT:$BUILT:ro")

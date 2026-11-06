@@ -31,8 +31,6 @@ MANIFEST=$STATE/manifest
 NOFILE=1048576
 # DelegateSubgroup= is systemd 254's (systemd.resource-control(5)).
 SYSTEMD_MIN=254
-# How long a node gets to come up: a bounded wait, counted in 0.1 s steps.
-WAIT_STEPS=300
 
 die() { echo "linux.sh: $*" >&2; exit 1; }
 
@@ -101,18 +99,6 @@ write_file() { # <path> <mode>, content on stdin
   chmod "$2" "$1"
 }
 
-# Waits (bounded) for a condition; says which and fails when it doesn't come.
-wait_for() {
-  local what=$1 i
-  shift
-  for ((i = 0; i < WAIT_STEPS; i++)); do
-    "$@" && return 0
-    sleep 0.1
-  done
-  echo "linux.sh: $what didn't happen within $((WAIT_STEPS / 10)) s" >&2
-  return 1
-}
-
 install_hex() {
   [ -n "$BINARY" ] || die "install needs --binary <hex>"
   [ -x "$BINARY" ] || die "$BINARY isn't an executable"
@@ -138,7 +124,9 @@ Description=Hex node agent for %i
 Documentation=https://github.com/hyper-light/hex
 
 [Service]
-Type=exec
+# The node says READY=1 once its socket listens (sd_notify(3)), so systemctl's start returns exactly then,
+# bounded by this unit's TimeoutStartSec=, the machine's DefaultTimeoutStartSec= (systemd.service(5)).
+Type=notify
 User=%i
 ExecStart=$BIN node --socket $RUN/%i/node.sock --state $LIB/%i
 Environment=XDG_RUNTIME_DIR=$RUN/%i
@@ -161,12 +149,13 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   for u in "${USERS[@]}"; do
-    systemctl enable --now "hex-node@$u.service"
-    if ! wait_for "$u's node serving $RUN/$u/node.sock" test -S "$RUN/$u/node.sock"; then
+    # Returns once the node has said it's ready, or fails past the unit's start bound.
+    if ! systemctl enable --now "hex-node@$u.service"; then
       systemctl status "hex-node@$u.service" --no-pager >&2 || true
-      die "$u's node didn't come up (its status is above)"
+      die "$u's node didn't come up within systemd's start bound for it (its status is above)"
     fi
-    echo "$u's node serves $RUN/$u/node.sock"
+    [ -S "$RUN/$u/node.sock" ] || die "$u's node said it was ready with no socket at $RUN/$u/node.sock"
+    echo "$u's node serves $RUN/$u/node.sock (it said ready within $(systemctl show -p TimeoutStartUSec --value "hex-node@$u.service"), the bound systemd gives it)"
   done
   echo "installed; uninstall with: sudo bash $0 uninstall"
 }

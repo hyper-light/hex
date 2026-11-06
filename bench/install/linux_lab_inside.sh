@@ -8,24 +8,27 @@ TESTBIN=${2:?node_socket test binary}
 INSTALL=/opt/install/linux.sh
 U=hexlab
 step() { echo; echo "## $*"; }
+# Waits until a command succeeds, at most LAB_BOUND_S (the host systemd's unit start bound, linux_lab.sh).
+# The 0.1 s between tries paces the checks; it bounds nothing.
+wait_until() {
+  local what=$1 until=$((SECONDS + LAB_BOUND_S))
+  shift
+  until "$@"; do
+    [ "$SECONDS" -lt "$until" ] || { echo "FAIL: $what didn't happen within $LAB_BOUND_S s"; return 1; }
+    sleep 0.1
+  done
+}
 
 # docker exec puts this shell in the cgroup namespace's root, where cgroup v2's no-internal-processes
 # rule keeps systemd from handing controllers down: it moves into systemd's own leaf first (once systemd
 # has made it), and systemd enables them when the root is empty.
-for ((i = 0; i < 300; i++)); do [ -d /sys/fs/cgroup/init.scope ] && break; sleep 0.1; done
+wait_until "systemd making init.scope" test -d /sys/fs/cgroup/init.scope
 echo $$ >/sys/fs/cgroup/init.scope/cgroup.procs
 
 step "the machine: $(date -u +%Y-%m-%dT%H:%M:%SZ), $(systemctl --version | head -1), kernel $(uname -r)"
-wait_running() {
-  local i s
-  for ((i = 0; i < 300; i++)); do
-    s=$(systemctl is-system-running 2>/dev/null || true)
-    case $s in running | degraded) echo "systemd: $s"; return 0 ;; esac
-    sleep 0.1
-  done
-  echo "systemd didn't finish starting: $s"; return 1
-}
-wait_running
+running() { case $(systemctl is-system-running 2>/dev/null) in running | degraded) ;; *) return 1 ;; esac; }
+wait_until "systemd finishing its start" running
+echo "systemd: $(systemctl is-system-running)"
 # The image's /etc lacks what Fedora's install makes at enable time from /usr: its system users and
 # the dbus.service aliases (system and user), without which logind, lingering and a user's own
 # systemd-run can't start.
@@ -44,7 +47,7 @@ chown $U: /home/$U
 UID_=$(id -u $U)
 # The user's manager runs before Hex is installed, as a CI runner's does.
 loginctl enable-linger $U
-for ((i = 0; i < 300; i++)); do [ -S /run/user/$UID_/bus ] && break; sleep 0.1; done
+wait_until "$U's manager opening its bus" test -S /run/user/$UID_/bus
 systemctl show user@$UID_.service -p DelegateControllers
 # setpriv, not runuser: the container has no PAM session to give.
 as_user() {
@@ -52,7 +55,7 @@ as_user() {
     HOME=/home/$U "$@"
 }
 # The fact to wait on: the user's manager has finished starting (bounded).
-echo "user manager: $(as_user timeout 30 systemctl --user is-system-running --wait || true)"
+echo "user manager: $(as_user timeout "$LAB_BOUND_S" systemctl --user is-system-running --wait || true)"
 
 step "fresh of Hex: the installer's check lists nothing"
 bash $INSTALL check
@@ -83,6 +86,13 @@ step "install: the one admin step"
 MANAGER_BEFORE=$(systemctl show -p MainPID --value user@$UID_.service)
 bash $INSTALL install --binary "$HEX" --user $U
 bash $INSTALL check /tmp/plan || true
+
+step "HEX-INST-8: the installed node is up exactly when it serves (Type=notify), no wait of the installer's"
+TYPE=$(systemctl show -p Type --value hex-node@$U.service)
+echo "hex-node@$U.service: Type=$TYPE, start bound $(systemctl show -p TimeoutStartUSec --value hex-node@$U.service)"
+[ "$TYPE" = notify ] || { echo "FAIL: the unit isn't Type=notify"; exit 1; }
+[ -S /run/hex/$U/node.sock ] || { echo "FAIL: install returned before the node served"; exit 1; }
+echo "PASS: up when it serves"
 
 step "HEX-INST-7: install leaves $U's running manager as it was (a CI runner's work runs under it)"
 MANAGER_AFTER=$(systemctl show -p MainPID --value user@$UID_.service)
