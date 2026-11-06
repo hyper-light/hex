@@ -59,23 +59,27 @@ fn a_slow_node_is_suspected_in_2s_and_drained_in_4s() {
     );
 }
 
-/// AC-T7.10.3 in the model (F3), Hex's rule for learned waits: a stalled disk is suspected within
-/// the slowest answer its probe holds (the record's, or its own if slower) and one probe period, and
-/// drained within twice that and one period.
+/// AC-T7.10.3 in the model (F3), Ada's cost rule: do stall a disk whose probe holds a record of its
+/// healthy answers and a measured re-placement time (an OCI start or a Shards boot); expect it marked
+/// within the earlier of the slowest answer and the drain age, plus a period, never before, and drained
+/// within its drain age and a period, at either price.
 #[test]
 fn a_stalled_disk_is_suspected_then_drained_within_its_bound() {
+    let mut by_price = [0u64; 2];
     for seed in 0..SEEDS {
-        let (m, slowest, period) = faults::disk_stall(seed).unwrap();
-        let (suspect, drain) = faults::disk_stall_bounds(slowest, period);
+        let (m, j) = faults::disk_stall(seed).unwrap();
+        let (suspect, drain) = faults::disk_stall_bounds(&j);
         let d = m.detected_after_ns.unwrap();
         let i = m.isolated_after_ns.unwrap();
         assert!(d <= suspect, "seed {seed}: {d} > {suspect}");
         assert!(i <= drain, "seed {seed}: {i} > {drain}");
         assert!(
-            d + period > slowest,
-            "seed {seed}: suspected before its slowest answer"
+            d + j.period_ns > j.slowest_ns.min(j.drain_age_ns),
+            "seed {seed}: marked before either age"
         );
+        by_price[usize::from(j.replace_ns == faults::REPLACE_NS[1])] += 1;
     }
+    assert!(by_price.iter().all(|n| *n > 0), "{by_price:?}");
 }
 
 /// S8 antagonist (F4): an antagonist is capped within 3 CPI samples (CPI²'s one a minute) and a second

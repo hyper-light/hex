@@ -5,8 +5,9 @@
 //! it began isn't done, and its unit not moved, by the deadline. Prints one `key=value` record line.
 //!
 //! Usage: disk_drill --state DIR --spare DIR --probe on|off --stall-cmd CMD --resume-cmd CMD
-//!        [--seed-us N: the state disk's recorded slowest probe answer; default the host class's]
-//!        [--units 8] [--deadline-ms 10000] [--period-ms 100] [--warm-s 10] [--after-s 30]
+//!        --replace-ms N (the measured time to re-place one unit elsewhere: what a false drain costs)
+//!        [--record FILE: the state disk's recorded probe answers, `fsync_latency --dump`'s lines;
+//!        default the host class's] [--units 8] [--deadline-ms 10000] [--period-ms 100] [--warm-s 10] [--after-s 30]
 
 #![allow(
     clippy::unwrap_used,
@@ -27,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hex_health::Level;
-use hex_node::disk_probe::{DiskProber, recorded_slowest};
+use hex_node::disk_probe::{DiskProber, recorded};
 
 /// One unit of work: where it runs now, and when its write in flight began.
 struct Unit {
@@ -93,11 +94,17 @@ fn main() {
     let (stall_cmd, resume_cmd) = (get("stall-cmd", ""), get("resume-cmd", ""));
 
     let prober = if probe_on {
-        let seed = match args.get("seed-us") {
-            Some(us) => Duration::from_micros(us.parse().unwrap()),
-            None => recorded_slowest().unwrap(),
+        let replace = Duration::from_millis(args["replace-ms"].parse().unwrap());
+        let record: Vec<(u64, u32)> = match args.get("record") {
+            Some(file) => std::fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .filter_map(|l| l.split_whitespace().nth(1))
+                .map(|ns| (ns.parse().unwrap(), 1))
+                .collect(),
+            None => recorded().unwrap().to_vec(),
         };
-        Some(DiskProber::start(&state, period, seed).unwrap())
+        Some(DiskProber::start(&state, period, &record, replace).unwrap())
     } else {
         None
     };
@@ -123,7 +130,7 @@ fn main() {
         let now = Instant::now();
         if stalled_at.is_none() && now - start >= warm {
             if let Some(p) = &prober {
-                timeout_at_stall = p.bound().unwrap();
+                timeout_at_stall = p.drain_age().unwrap();
             }
             stalled_at = Some(Instant::now());
             sh(&stall_cmd);
@@ -162,7 +169,7 @@ fn main() {
     let ms = |d: Option<Duration>| d.map_or("none".to_string(), |d| d.as_millis().to_string());
     let writes: u64 = all.iter().map(|u| u.writes.load(Ordering::Relaxed)).sum();
     println!(
-        "drill probe={} units={units} deadline_ms={} period_ms={} bound_at_stall_ms={} marked_ms={} drained_ms={} moved={moved} writes={writes} failed={}",
+        "drill probe={} units={units} deadline_ms={} period_ms={} drain_age_at_stall_ms={} marked_ms={} drained_ms={} moved={moved} writes={writes} failed={}",
         if probe_on { "on" } else { "off" },
         deadline.as_millis(),
         period.as_millis(),

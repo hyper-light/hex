@@ -3,61 +3,118 @@
 //! node only while its log device takes a write and flush within the period ("a node whose disk stalls
 //! stops being trusted, as a crashed one does", PF[26]).
 //!
-//! Its wait is a learned one, by Hex's rule for learned waits (the lead, 2026-11-06):
+//! Nothing in it is picked (Ada, 2026-11-06: "learned, data-derived, and adaptive"):
 //!
-//! - Before any sample on this node, the slowest answer is the slowest in the recorded distribution
-//!   for its host class, from a named record (the shell's to give): no calibration read, and no
-//!   unbounded first wait.
-//! - Then it learns: the slowest is the greater of the record's and this node's own slowest answer,
-//!   and it only rises.
-//! - `Suspect` (no new placements) once the outstanding write is slower than any answer seen; `Drain`
-//!   (retire the node, its work moved) once it outlives [`BOUND_FACTOR`] times that, the bound.
+//! - `Suspect` (no new placements) once the outstanding write is slower than any healthy answer seen:
+//!   its host class's recorded answers (a named record, the shell's to give), then its own.
+//! - `Drain` (retire the node, its work moved) at the age where waiting costs more than acting. A
+//!   drain at age `T` costs a false drain when a healthy write outlives `T`, the node's work moved for
+//!   nothing at the measured re-placement time `C` per workload; waiting costs, per workload, the time
+//!   a real stall blocks it. The probe drains at the `T` minimizing the expected loss per probe,
+//!   `(1 - pi) * S(T) * C + pi * T`, where `S(T)` is the share of healthy answers slower than `T` (the
+//!   record's and the node's, with a Jeffreys half-count past the slowest, so never zero) and `pi` the
+//!   Jeffreys posterior of a stall per probe, `1/2 / (n + 1)` over the node's `n` probes: the fleet has
+//!   no recorded stall incidents to seed it with. The candidate ages are the healthy answers'
+//!   histogram buckets (25%); `bench/health/replay_probe.py`'s `cost_rule` is the exact form, replayed
+//!   on the recorded traces.
 //!
-//! A write that outlived the bound before it answered is no answer: the wait had given up on it, and
-//! taking it would let one stall raise the bound that judges the next (Karn's rule, RFC 6298 §3). A
-//! disk that answers ever more slowly raises its own bound; that fail-slow case is the peer grade's
-//! (F2), which judges a node against its peers, not against its own history.
+//! A write that outlived the drain age before it answered is no answer: the drain had given up on it,
+//! and taking it would let one stall raise the age that judges the next (Karn's rule, RFC 6298 §3). Nor
+//! is it counted a stall: whether it was one is not known, and counting the probe's own verdicts would
+//! feed its drains back into its prior. A disk that answers ever more slowly raises its own ages; that
+//! fail-slow case is the peer grade's (F2), which judges a node against its peers.
 
+use crate::histogram::Histogram;
 use crate::{HealthError, Level};
-
-/// The bound is this many times the slowest answer: Hex's rule for learned waits (the lead,
-/// 2026-11-06).
-pub const BOUND_FACTOR: u64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct DiskProbe {
-    /// The slowest answer this probe's wait has seen or been seeded with, nanoseconds.
+    /// Healthy answers' latencies: the record's, then the node's own, nanoseconds.
+    healthy: Histogram,
+    /// The slowest healthy answer, exact.
     slowest_ns: u64,
+    /// The measured re-placement time of one workload, nanoseconds: what a false drain costs.
+    replace_ns: u64,
+    /// Probes this node has finished.
+    probes: u64,
     outstanding: Option<u64>,
     last_ns: u64,
 }
 
 impl DiskProbe {
-    /// A probe seeded with the slowest answer in its host class's recorded distribution. A seed of
-    /// zero is no record: refused.
-    pub fn new(recorded_slowest_ns: u64) -> Result<Self, HealthError> {
-        if recorded_slowest_ns == 0 {
+    /// A probe seeded with its host class's recorded healthy answers, `(latency ns, count)` each, and
+    /// the measured time to re-place one workload. No answer, or a free re-placement, is no record:
+    /// refused.
+    pub fn new(record: &[(u64, u32)], replace_ns: u64) -> Result<Self, HealthError> {
+        if replace_ns == 0 {
             return Err(HealthError::Config(
-                "a disk probe needs its host class's recorded slowest answer",
+                "a disk probe needs the measured time to re-place a workload",
+            ));
+        }
+        let mut healthy = Histogram::new();
+        let mut slowest_ns = 0;
+        for &(ns, n) in record.iter().filter(|(ns, n)| *ns > 0 && *n > 0) {
+            healthy.record_n(ns, n)?;
+            slowest_ns = slowest_ns.max(ns);
+        }
+        if slowest_ns == 0 {
+            return Err(HealthError::Config(
+                "a disk probe needs its host class's recorded answers",
             ));
         }
         Ok(Self {
-            slowest_ns: recorded_slowest_ns,
+            healthy,
+            slowest_ns,
+            replace_ns,
+            probes: 0,
             outstanding: None,
             last_ns: 0,
         })
     }
 
-    /// The slowest answer seen, the record's included: past it, `Suspect`.
+    /// The slowest healthy answer, the record's included: past it, `Suspect`.
     pub fn slowest_ns(&self) -> u64 {
         self.slowest_ns
     }
 
-    /// The bound: [`BOUND_FACTOR`] times the slowest answer; past it, `Drain`.
-    pub fn bound_ns(&self) -> Result<u64, HealthError> {
-        self.slowest_ns
-            .checked_mul(BOUND_FACTOR)
-            .ok_or(HealthError::Overflow("probe bound"))
+    /// The age past which an outstanding write drains the node: the candidate `T` (a healthy
+    /// bucket's highest value) of least expected loss, the least such on a tie. Scaled by
+    /// `4 (n + 1) (N + 1)` over `N` healthy answers, the loss is
+    /// `(2n + 1)(2a + 1) C + 2 (N + 1) T` with `a` the answers above `T`: integers, compared exactly.
+    pub fn drain_age_ns(&self) -> Result<u64, HealthError> {
+        let overflow = HealthError::Overflow("probe drain age");
+        let total = u128::from(self.healthy.total());
+        let not_stalled = u128::from(self.probes)
+            .checked_mul(2)
+            .and_then(|x| x.checked_add(1))
+            .ok_or(overflow.clone())?;
+        let wait = total
+            .checked_add(1)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or(overflow.clone())?;
+        let mut above = total;
+        let mut best: Option<(u128, u64)> = None;
+        for (t, count) in self.healthy.counted() {
+            above = above
+                .checked_sub(u128::from(count))
+                .ok_or(overflow.clone())?;
+            let false_drain = above
+                .checked_mul(2)
+                .and_then(|x| x.checked_add(1))
+                .and_then(|x| x.checked_mul(not_stalled))
+                .and_then(|x| x.checked_mul(u128::from(self.replace_ns)));
+            let waiting = wait.checked_mul(u128::from(t));
+            let loss = false_drain
+                .zip(waiting)
+                .and_then(|(f, w)| f.checked_add(w))
+                .ok_or(overflow.clone())?;
+            if best.is_none_or(|(b, _)| loss < b) {
+                best = Some((loss, t));
+            }
+        }
+        best.map(|(_, t)| t).ok_or(HealthError::Config(
+            "a disk probe needs its host class's recorded answers",
+        ))
     }
 
     /// A write and flush began at `now_ns`.
@@ -70,17 +127,22 @@ impl DiskProbe {
         Ok(())
     }
 
-    /// The outstanding write and flush finished at `now_ns`; returns its latency. Within the bound it
-    /// is an answer, and raises the slowest if it is slower.
+    /// The outstanding write and flush finished at `now_ns`; returns its latency. Within the drain
+    /// age it is a healthy answer, and raises the slowest if it is slower.
     pub fn finish(&mut self, now_ns: u64) -> Result<u64, HealthError> {
         self.advance(now_ns)?;
         let began = self.outstanding.ok_or(HealthError::NoProbe)?;
         let latency = now_ns
             .checked_sub(began)
             .ok_or(HealthError::Overflow("probe latency"))?;
-        let bound = self.bound_ns()?;
+        let drain_age = self.drain_age_ns()?;
+        self.probes = self
+            .probes
+            .checked_add(1)
+            .ok_or(HealthError::Overflow("probe count"))?;
         self.outstanding = None;
-        if latency <= bound {
+        if latency <= drain_age {
+            self.healthy.record(latency)?;
             self.slowest_ns = self.slowest_ns.max(latency);
         }
         Ok(latency)
@@ -101,7 +163,7 @@ impl DiskProbe {
                 .ok_or(HealthError::Overflow("probe age"))?,
             None => 0,
         };
-        Ok(if age > self.bound_ns()? {
+        Ok(if age > self.drain_age_ns()? {
             Level::Drain
         } else if age > self.slowest_ns {
             Level::Suspect
@@ -111,19 +173,17 @@ impl DiskProbe {
     }
 
     /// When the outstanding write, if it stays outstanding, next changes the grade: the instant a
-    /// driver should look again.
+    /// driver should look again. The ages don't move while a write is outstanding.
     pub fn next_change(&self) -> Result<Option<u64>, HealthError> {
         let Some(began) = self.outstanding else {
             return Ok(None);
         };
         let overflow = HealthError::Overflow("probe deadline");
         let suspect = began.checked_add(self.slowest_ns).ok_or(overflow.clone())?;
-        let drain = began.checked_add(self.bound_ns()?).ok_or(overflow)?;
-        Ok(Some(if self.last_ns <= suspect {
-            suspect.saturating_add(1)
-        } else {
-            drain.saturating_add(1)
-        }))
+        let drain = began.checked_add(self.drain_age_ns()?).ok_or(overflow)?;
+        let (first, last) = (suspect.min(drain), suspect.max(drain));
+        let next = if self.last_ns <= first { first } else { last };
+        Ok(Some(next.saturating_add(1)))
     }
 
     fn advance(&mut self, now_ns: u64) -> Result<(), HealthError> {
@@ -145,12 +205,41 @@ mod tests {
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
-    /// The macOS/APFS record's slowest answer (`bench/health/records/2026-11-06-probe-floor-apfs.md`).
-    const RECORD: u64 = 147_330 * 1_000;
+    /// Re-placement times the replay priced (`bench/health/records/2026-11-06-probe-floor-apfs.md`):
+    /// an OCI start, and Shards' measured boot p99.
+    const OCI: u64 = 2 * MS;
+    const SHARDS: u64 = 194 * MS;
+
+    /// A record shaped as the APFS record's tail: most answers a few ms, a thin tail to 147 ms.
+    fn record() -> Vec<(u64, u32)> {
+        vec![
+            (4 * MS, 5_000),
+            (8 * MS, 3_000),
+            (16 * MS, 600),
+            (32 * MS, 60),
+            (64 * MS, 6),
+            (147 * MS, 1),
+        ]
+    }
+
+    /// The oracle: the expected loss of draining at `t`, in floating point, straight from the
+    /// formula, over the healthy answers `answers` (latency, count) after `n` probes.
+    fn loss(answers: &[(u64, u32)], n: u64, replace: u64, t: u64) -> f64 {
+        let f = |x: u64| f64::from(u32::try_from(x).unwrap());
+        let total: f64 = answers.iter().map(|a| f64::from(a.1)).sum();
+        let above: f64 = answers
+            .iter()
+            .filter(|a| a.0 > t)
+            .map(|a| f64::from(a.1))
+            .sum();
+        let pi = 0.5 / (f(n) + 1.0);
+        let s = (above + 0.5) / (total + 1.0);
+        (1.0 - pi) * s * f(replace) + pi * f(t)
+    }
 
     /// A probe that has answered `n` writes of `latency` each, 100 ms apart.
-    fn answered(latency: u64, n: u32) -> (DiskProbe, u64) {
-        let mut p = DiskProbe::new(RECORD).unwrap();
+    fn answered(replace: u64, latency: u64, n: u32) -> (DiskProbe, u64) {
+        let mut p = DiskProbe::new(&record(), replace).unwrap();
         let mut t = 0;
         for _ in 0..n {
             p.start(t).unwrap();
@@ -161,63 +250,130 @@ mod tests {
         (p, t)
     }
 
-    /// AC-T7.10.3, before any sample: do stall the very first write; expect `Suspect` past the
-    /// record's slowest and `Drain` past twice it: armed from the start, bounded from the start.
+    /// AC-T7.10.3, model-based: do seed probes with random records, re-placement times and probe
+    /// counts; expect the drain age to be a healthy bucket's highest value whose loss, by the oracle
+    /// over the probe's own buckets, is the least of all of them.
     #[test]
-    fn the_first_wait_is_bounded_by_the_record() {
-        let mut p = DiskProbe::new(RECORD).unwrap();
-        assert_eq!(p.bound_ns().unwrap(), 2 * RECORD);
-        p.start(0).unwrap();
-        assert_eq!(p.level(RECORD).unwrap(), Level::Healthy);
-        assert_eq!(p.level(RECORD + 1).unwrap(), Level::Suspect);
-        assert_eq!(p.level(2 * RECORD).unwrap(), Level::Suspect);
-        assert_eq!(p.level(2 * RECORD + 1).unwrap(), Level::Drain);
+    fn the_drain_age_is_the_age_of_least_expected_loss() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |m: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % m
+        };
+        for _ in 0..500 {
+            let rec: Vec<(u64, u32)> = (0..1 + next(12))
+                .map(|_| (1 + next(500 * MS), u32::try_from(1 + next(5_000)).unwrap()))
+                .collect();
+            let replace = 1 + next(500 * MS);
+            let mut p = DiskProbe::new(&rec, replace).unwrap();
+            let probes = next(50);
+            let mut t = 0;
+            for _ in 0..probes {
+                p.start(t).unwrap();
+                t += 1 + next(5 * MS);
+                p.finish(t).unwrap();
+            }
+            let buckets: Vec<_> = p.healthy.counted().collect();
+            let age = p.drain_age_ns().unwrap();
+            assert!(buckets.iter().any(|b| b.0 == age));
+            let at = loss(&buckets, probes, replace, age);
+            for b in &buckets {
+                let other = loss(&buckets, probes, replace, b.0);
+                assert!(
+                    at <= other * (1.0 + 1e-12),
+                    "{age}: {at} > {}: {other}",
+                    b.0
+                );
+            }
+        }
     }
 
-    /// AC-T7.10.3, it learns and only rises: do answer a write slower than the record (within the
-    /// bound); expect the bound twice that answer; then faster answers; expect it not to fall.
+    /// AC-T7.10.3, before any sample: do stall the very first write; expect `Suspect` past the
+    /// record's slowest and `Drain` past the drain age, armed and bounded from the record alone.
     #[test]
-    fn the_bound_rises_with_the_slowest_answer_and_never_falls() {
-        let (mut p, mut t) = answered(4 * MS, 10);
-        assert_eq!(p.bound_ns().unwrap(), 2 * RECORD);
-        let slow = RECORD + 50 * MS;
+    fn the_first_wait_is_judged_by_the_record() {
+        let mut p = DiskProbe::new(&record(), SHARDS).unwrap();
+        let drain = p.drain_age_ns().unwrap();
+        let slowest = p.slowest_ns();
+        assert_eq!(slowest, 147 * MS);
+        p.start(0).unwrap();
+        assert_eq!(p.level(drain.min(slowest)).unwrap(), Level::Healthy);
+        assert_eq!(p.level(drain.max(slowest) + 1).unwrap(), Level::Drain);
+        assert_eq!(p.level(drain + 1).unwrap(), Level::Drain);
+    }
+
+    /// Ada's rule, the price of a false drain: do judge one record with a cheap re-placement (an OCI
+    /// start) and a dear one (a Shards boot); expect the dear one to wait longer before draining.
+    #[test]
+    fn a_dear_re_placement_waits_longer() {
+        let cheap = DiskProbe::new(&record(), OCI).unwrap();
+        let dear = DiskProbe::new(&record(), SHARDS).unwrap();
+        assert!(cheap.drain_age_ns().unwrap() < dear.drain_age_ns().unwrap());
+    }
+
+    /// Ada's rule, the learned stall prior: do answer many healthy probes; expect the drain age not
+    /// to fall (a stall grows less likely per probe, so waiting grows cheaper), and to have risen.
+    #[test]
+    fn healthy_probes_make_waiting_cheaper() {
+        let (p0, _) = answered(SHARDS, 4 * MS, 0);
+        let (p1, _) = answered(SHARDS, 4 * MS, 100);
+        let (p2, _) = answered(SHARDS, 4 * MS, 10_000);
+        let ages = [p0, p1, p2].map(|p| p.drain_age_ns().unwrap());
+        assert!(ages[0] <= ages[1] && ages[1] <= ages[2], "{ages:?}");
+        assert!(ages[0] < ages[2], "{ages:?}");
+    }
+
+    /// AC-T7.10.3, Karn: a write that answers only after outliving the drain age (a stall that
+    /// ended) is no healthy answer: the slowest and the healthy count don't move.
+    #[test]
+    fn a_stall_that_ends_is_no_answer() {
+        let (mut p, t) = answered(SHARDS, 4 * MS, 10);
+        let (slowest, total) = (p.slowest_ns(), p.healthy.total());
+        p.start(t).unwrap();
+        p.finish(t + 60 * S).unwrap();
+        assert_eq!(p.slowest_ns(), slowest);
+        assert_eq!(p.healthy.total(), total);
+    }
+
+    /// A healthy answer slower than the record but within the drain age raises the slowest, and
+    /// faster ones never lower it. One bucket of record, so the drain age is that bucket's top.
+    #[test]
+    fn the_slowest_rises_and_never_falls() {
+        let mut p = DiskProbe::new(&[(4 * MS, 10)], SHARDS).unwrap();
+        let slow = p.drain_age_ns().unwrap();
+        assert!(slow > p.slowest_ns());
+        let mut t = 0;
         p.start(t).unwrap();
         t += slow;
         p.finish(t).unwrap();
-        assert_eq!(p.bound_ns().unwrap(), 2 * slow);
+        assert_eq!(p.slowest_ns(), slow);
         for _ in 0..100 {
             p.start(t).unwrap();
             t += MS;
             p.finish(t).unwrap();
         }
-        assert_eq!(p.bound_ns().unwrap(), 2 * slow);
+        assert_eq!(p.slowest_ns(), slow);
     }
 
-    /// AC-T7.10.3, Karn: a write that answers only after outliving the bound (a stall that ended)
-    /// doesn't raise the bound that judges the next stall.
-    #[test]
-    fn a_stall_that_ends_is_no_answer() {
-        let (mut p, t) = answered(4 * MS, 10);
-        let before = p.bound_ns().unwrap();
-        p.start(t).unwrap();
-        p.finish(t + 60 * S).unwrap();
-        assert_eq!(p.bound_ns().unwrap(), before);
-    }
-
-    /// A steady disk is healthy at its own pace: answers at the record's slowest are no suspicion.
-    #[test]
-    fn a_disk_at_its_recorded_pace_is_healthy() {
-        let (mut p, t) = answered(RECORD, 20);
-        p.start(t).unwrap();
-        assert_eq!(p.level(t + RECORD).unwrap(), Level::Healthy);
-    }
-
-    /// Hostile input: no record, time going backwards, a second start, a finish with none
-    /// outstanding, and a seed whose bound passes u64 are typed refusals, never a panic.
+    /// Hostile input: no record, a free re-placement, time going backwards, a second start, a finish
+    /// with none outstanding, and a loss past u128 are typed refusals, never a panic.
     #[test]
     fn hostile_input_is_refused_typed() {
-        assert!(matches!(DiskProbe::new(0), Err(HealthError::Config(_))));
-        let mut p = DiskProbe::new(RECORD).unwrap();
+        assert!(matches!(
+            DiskProbe::new(&[], OCI),
+            Err(HealthError::Config(_))
+        ));
+        assert!(matches!(
+            DiskProbe::new(&[(0, 9), (5, 0)], OCI),
+            Err(HealthError::Config(_))
+        ));
+        assert!(matches!(
+            DiskProbe::new(&record(), 0),
+            Err(HealthError::Config(_))
+        ));
+        let mut p = DiskProbe::new(&record(), OCI).unwrap();
         p.start(5 * S).unwrap();
         assert_eq!(p.start(6 * S), Err(HealthError::ProbeOutstanding));
         assert!(matches!(
@@ -227,16 +383,24 @@ mod tests {
         assert!(matches!(p.level(S), Err(HealthError::TimeBackwards { .. })));
         p.finish(6 * S).unwrap();
         assert_eq!(p.finish(7 * S), Err(HealthError::NoProbe));
-        let huge = DiskProbe::new(u64::MAX).unwrap();
-        assert_eq!(huge.bound_ns(), Err(HealthError::Overflow("probe bound")));
+        let huge = DiskProbe::new(&[(u64::MAX, u32::MAX)], u64::MAX).unwrap();
+        let mut huge = huge;
+        huge.probes = u64::MAX;
+        assert_eq!(
+            huge.drain_age_ns(),
+            Err(HealthError::Overflow("probe drain age"))
+        );
     }
 
-    /// The driver's wake-up: one past the suspect deadline, then one past the drain deadline.
+    /// The driver's wake-up: one past the earlier deadline, then one past the later.
     #[test]
     fn next_change_names_each_deadline() {
-        let (mut p, t) = answered(4 * MS, 10);
+        let (mut p, t) = answered(SHARDS, 4 * MS, 10);
         assert_eq!(p.next_change().unwrap(), None);
         p.start(t).unwrap();
-        assert_eq!(p.next_change().unwrap(), Some(t + RECORD + 1));
+        let (s, d) = (p.slowest_ns(), p.drain_age_ns().unwrap());
+        assert_eq!(p.next_change().unwrap(), Some(t + s.min(d) + 1));
+        p.level(t).unwrap();
+        p.finish(t + 1).unwrap();
     }
 }

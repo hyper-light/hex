@@ -11,10 +11,12 @@ Every constant `cp/t7-sched-g5` adds or relies on, by kind:
 - **(d)** anything else: picked, or another system's default. A published number counts as (d): citing
   it isn't deriving it.
 
-Each (d) has its way out: how it becomes (a)-(c), or why it can't yet. Many wait on one requirement
-from Ada: how often Hex may wrongly stop placing on, or drain, a healthy node. The thresholds that
-decide a verdict (drain counts, the slow bar, CPI²'s 2σ and 0.35, the probe's warm-up) are each the
-point at which a healthy node is wrongly flagged at that rate, computed from what the system learns. "Requirement" marks a number
+Each (d) has its way out: how it becomes (a)-(c), or why it can't yet. There are no tolerated
+false-alarm rates (Ada: "Why any of these? We don't allow arbitrary values. Learned, data-derived, and
+adaptive."): each threshold that decides a verdict (drain counts, the slow bar, CPI²'s 2σ and 0.35)
+becomes a cost rule, acting when the expected loss of waiting passes that of acting, with learned
+inputs: P(at fault | observed) from the learned healthy distribution and a learned prior, a false
+action priced at the measured re-placement, waiting at the work blocked. The disk probe is the first. "Requirement" marks a number
 that is the bar being met, not a tuning; "bound" marks a resource bound (CLAUDE.md §2), whose overflow
 is a typed refusal.
 
@@ -24,9 +26,9 @@ is a typed refusal.
 |---|---|---|---|---|
 | `swim::gossip_room` | 8 entries, picked | what QUIC's minimum datagram (1,200 B) leaves beside the widest ack | `crates/hex-sim/src/swim.rs` | (c) RFC 9000 §14.1, as hyper-swim's owner sizes it |
 | `disk_probe::RECORD_BYTES` | 4,096, a page | 1 byte: the least write that dirties a block | `crates/hex-node/src/disk_probe.rs:22` | the minimum; nothing chosen |
-| `probe::INITIAL_TIMEOUT_NS` | 1 s, RFC 6298 §2.1's prior | gone: before any answer the wait is seeded from the host class's recorded slowest answer (Hex's rule for learned waits) | `crates/hex-node/src/disk_probe.rs` `recorded_slowest` | (b) macOS: 147.3 ms, `bench/health/records/2026-11-06-probe-floor-apfs.md`; Linux and Windows: recorded first, refused until then; the drill seeds from its own disk's recorded baseline |
+| `probe::INITIAL_TIMEOUT_NS` | 1 s, RFC 6298 §2.1's prior | gone: before any answer the probe judges by its host class's recorded healthy answers | `crates/hex-node/src/disk_probe.rs` `recorded` | (b) macOS: the APFS record's third run, 23,764 answers by the probe's buckets, `bench/health/records/2026-11-06-probe-floor-apfs.md`; Linux and Windows: recorded first, refused until then; the drill judges by its own disk's recorded baseline |
 | `probe::MAX_TIMEOUT_NS` | 60 s, RFC 6298 §2.5's "MAY" | gone: no ceiling; a disk steadily slower than 60 s is judged by its own latency | `crates/hex-health/src/probe.rs` | (a) |
-| `probe::MIN_TIMEOUT_NS`, `DRAIN_TIMEOUTS`, `SLOW_STREAK`, RFC 6298's timer | 1 s, 3, 3 | gone: Suspect past the slowest answer (record's or node's, only rising), Drain past `BOUND_FACTOR` (2) times it | `crates/hex-health/src/probe.rs` | (a)/(b), by Hex's rule for learned waits; the 2 is the rule's. Replayed: 0 false suspects, 0 false drains, a stall drained at 295 ms (was 3 s). A disk that keeps answering ever more slowly raises its own bound: fail-slow is the peer grade's (F2). |
+| `probe::MIN_TIMEOUT_NS`, `DRAIN_TIMEOUTS`, `SLOW_STREAK`, RFC 6298's timer; then the learned-wait rule's `BOUND_FACTOR` | 1 s, 3, 3; then 2 | gone: Suspect past the slowest healthy answer; Drain at the age where waiting costs more than acting, `(1 - pi) S(T) C + pi T` least, `S` the healthy answers' tail (Jeffreys half-count past the slowest), `pi` the Jeffreys posterior of a stall per probe, `C` the caller's measured re-placement time | `crates/hex-health/src/probe.rs` | (a)/(b), Ada's cost rule (2026-11-06). Replayed in Rust on APFS run 2 against run 3's record (`crates/hex-health/examples/replay_probe.rs`): at 2 ms a workload, 2 false drains, a stall drained at 67.1 ms; at 194 ms, 0 false drains, drained at 335.5 ms; the exact form (Python) 69.5 and 275.2 ms, the difference the histogram's 25%; the 1 s floor drained at 3,000 ms. A disk that keeps answering ever more slowly raises its own ages: fail-slow is the peer grade's (F2). |
 | `penalty::MAX_EJECTION_PER_MILLE` | 10%, Envoy `max_ejection_percent` | gone: a node is ejected only when the rest of the cell re-places its every workload at that moment (`admitted_anywhere`, then the fast path, on a copy of the cell with the node fenced); else `Refusal::NoRoom` and it stays in placement, `Suspect`. The purpose kept: a correlated fault drains no cell | `crates/hex-health/src/penalty.rs`, `crates/hex-sim/src/faults.rs` `correlated` | (a): measured on the cell each time. 1,000 seeds, loaded cells of G2's node models, a third to two fifths slow at once: 9,211 ejected, 30,627 refused, 14,356 workloads re-placed, 0 stranded (up to 41.5% of a cell out at once where it had room); the check off strands 67,244 workloads on 843 seeds |
 
 ## hex-health, the detectors and penalties

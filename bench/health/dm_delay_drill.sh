@@ -6,11 +6,13 @@
 # 60 s delay on every I/O, dm-delay's documented use, kernel Documentation/admin-guide/device-mapper/
 # delay.rst) and the drill records when the node was marked, when it was drained and whether any work
 # failed. Run twice: the probe on (expect 0 failed), and off (expect failures: non-vacuity).
-# The probe's wait is seeded, by Hex's rule for learned waits, from this disk's recorded healthy
-# baseline: first, under the drill's own load (its 8 work units, no stall), `fsync_latency` records 120 s
-# of the probe's answers on the device; its slowest is the seed (`--seed-us`), and the record keeps it.
+# The probe judges by the cost rule (F3) from this disk's recorded healthy baseline: first, under the
+# drill's own load (its 8 work units, no stall), `fsync_latency` records 120 s of the probe's answers on
+# the device (`--record`), and the record keeps their summary. A false drain is priced at REPLACE_MS,
+# the measured time to re-place a unit: default Shards' measured boot p99 on fedora/KVM, 194 ms
+# (`bench/health/records/2026-11-06-probe-floor-apfs.md`, the replay's dear case).
 # Usage: dm_delay_drill.sh <disk_drill binary> <record file> (fsync_latency beside disk_drill)
-# Env: BENCH_MEMORY (8g), BENCH_OOM (1000), BENCH_CPUS (4-15), IMAGE (fedora:44), LAB (~/.cache dir).
+# Env: REPLACE_MS (194), BENCH_MEMORY (8g), BENCH_OOM (1000), BENCH_CPUS (4-15), IMAGE (fedora:44), LAB (~/.cache dir).
 set -euo pipefail
 DRILL=$(realpath "${1:?disk_drill binary}")
 FSYNC=$(dirname "$DRILL")/fsync_latency
@@ -26,7 +28,7 @@ DIRTY=$(git -C "$HERE" status --porcelain | wc -l)
 out=$(docker run --rm --privileged --security-opt label=disable --network=none \
   --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" --cpuset-cpus "${BENCH_CPUS:-4-15}" \
   -v /usr:/usr:ro -v /dev:/dev -v "$DRILL:/opt/disk_drill:ro" -v "$FSYNC:/opt/fsync_latency:ro" -v "$LAB:/lab" \
-  -e DM_DISABLE_UDEV=1 "$IMAGE" bash -c '
+  -e DM_DISABLE_UDEV=1 -e REPLACE_MS="${REPLACE_MS:-194}" "$IMAGE" bash -c '
 set -euo pipefail
 name=hexdrill-$$
 img=/lab/disk-$$.img
@@ -59,16 +61,15 @@ chmod +x /tmp/set_delay
 /opt/disk_drill --state /mnt/state --spare /lab/spare --probe off --stall-cmd true --resume-cmd true \
   --units 8 --deadline-ms 10000 --period-ms 100 --warm-s 1 --after-s 120 >/tmp/load.out &
 load=$!
-/opt/fsync_latency --dir /mnt/state --period-ms 10 --run-s 120 | head -1 >/tmp/base.txt
+/opt/fsync_latency --dir /mnt/state --period-ms 10 --run-s 120 --dump /tmp/base.trace | head -1 >/tmp/base.txt
 wait "$load"
 echo "baseline $(cat /tmp/base.txt)"
-seed_us=$(sed -n "s/.* max_us=\([0-9]*\).*/\1/p" /tmp/base.txt)
-[ -n "$seed_us" ] || { echo "no baseline" >&2; exit 2; }
+[ -s /tmp/base.trace ] || { echo "no baseline" >&2; exit 2; }
 for probe in on off; do
   find /mnt/state /lab/spare -mindepth 1 -delete
   /opt/disk_drill --state /mnt/state --spare /lab/spare --probe "$probe" \
     --stall-cmd "/tmp/set_delay 60000" --resume-cmd "/tmp/set_delay 0" \
-    --units 8 --deadline-ms 10000 --period-ms 100 --warm-s 10 --after-s 25 --seed-us "$seed_us"
+    --units 8 --deadline-ms 10000 --period-ms 100 --warm-s 10 --after-s 25 --record /tmp/base.trace --replace-ms "$REPLACE_MS"
 done
 ')
 echo "$out"
@@ -88,7 +89,7 @@ drained_on=$(sed -n "s/.* drained_ms=\([0-9a-z]*\).*/\1/p" <<<"$on")
   echo "- Device: dm-delay over a 512 MiB loop file, ext4; stall: every I/O delayed 60 s"
   echo "- Work: 8 units, a 4 KiB write and fdatasync each 50 ms, each write due in 10,000 ms"
   echo
-  echo "- Seed: the slowest probe answer of the healthy baseline below (Hex's rule for learned waits)"
+  echo "- Judged by the cost rule from the healthy baseline below; a false drain priced at ${REPLACE_MS:-194} ms a unit"
   echo
   echo '```'
   echo "$base"

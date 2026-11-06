@@ -18,7 +18,7 @@ use hex_health::antagonist::{Antagonists, Sample};
 use hex_health::danger::Signal;
 use hex_health::grade::{self, PeerGrade};
 use hex_health::penalty::{Ejector, EvictionLimiter};
-use hex_health::probe::{self, DiskProbe};
+use hex_health::probe::DiskProbe;
 use hex_health::{HealthError, Level};
 
 use crate::danger::{self, Isolation, Refusal, STRONGER, Tripped};
@@ -138,19 +138,35 @@ pub fn gray_with(seed: u64, mutant: Mutant) -> Result<(Measured, u64), FaultErro
     Ok((m, factor))
 }
 
-/// The slowest probe answer of the recorded healthy disk the model's disk stands for (macOS/APFS,
-/// `bench/health/records/2026-11-06-probe-floor-apfs.md`): the probe's seed, by Hex's rule for learned
-/// waits.
-pub const RECORDED_SLOWEST_NS: u64 = 147_330_000;
+/// The re-placement times the probe's cost rule was replayed at
+/// (`bench/health/records/2026-11-06-probe-floor-apfs.md`): an OCI start, and Shards' measured boot p99.
+pub const REPLACE_NS: [u64; 2] = [2 * MS, 194 * MS];
 
-/// Disk stall (F3, `AC-T7.10.3`): a node probes its disk every `period` with 1-5 ms flushes; from a
-/// seeded onset the outstanding write never completes. Returns the slowest answer the probe holds at
-/// the onset (the record's, or the node's if slower) and the period.
-pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
+/// What a disk-stall run judged by: the slowest healthy answer and the drain age its probe held at the
+/// onset, its period and its price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StallJudge {
+    pub slowest_ns: u64,
+    pub drain_age_ns: u64,
+    pub period_ns: u64,
+    /// The re-placement time its false drains were priced at.
+    pub replace_ns: u64,
+}
+
+/// Disk stall (F3, `AC-T7.10.3`): a node probes its disk every `period` with 1-5 ms flushes, its probe
+/// seeded with a record of 1,000 answers of the same disk and one of [`REPLACE_NS`]; from a seeded
+/// onset the outstanding write never completes.
+pub fn disk_stall(seed: u64) -> Result<(Measured, StallJudge), FaultError> {
     let mut rng = Rng::new(seed);
     let period = rng.range(100 * MS, 500 * MS);
     let onset_probe = rng.range(20, 200);
-    let mut p = DiskProbe::new(RECORDED_SLOWEST_NS)?;
+    let replace = if rng.chance(500) {
+        REPLACE_NS[0]
+    } else {
+        REPLACE_NS[1]
+    };
+    let record: Vec<(u64, u32)> = (0..1_000).map(|_| (rng.range(MS, 5 * MS), 1)).collect();
+    let mut p = DiskProbe::new(&record, replace)?;
     let mut t: u64 = 0;
     for _ in 0..onset_probe {
         p.start(t)?;
@@ -158,7 +174,12 @@ pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
         p.finish(add(t, lat)?)?;
         t = add(t, period)?;
     }
-    let slowest = p.slowest_ns();
+    let judge = StallJudge {
+        slowest_ns: p.slowest_ns(),
+        drain_age_ns: p.drain_age_ns()?,
+        period_ns: period,
+        replace_ns: replace,
+    };
     // The stall: the write the node starts at its next probe after `onset` never finishes.
     let onset = add(t, rng.range(0, period.saturating_sub(1)))?;
     let start = add(t, period)?;
@@ -184,7 +205,7 @@ pub fn disk_stall(seed: u64) -> Result<(Measured, u64, u64), FaultError> {
             return Err(FaultError::StepBudget(steps));
         }
     }
-    Ok((m, slowest, period))
+    Ok((m, judge))
 }
 
 /// Antagonist (F4): a node of 5-10 latency-sensitive tasks of one job and one batch co-tenant,
@@ -847,13 +868,14 @@ pub fn correlated(seed: u64, mutant: Mutant) -> Result<Correlated, FaultError> {
     Ok(out)
 }
 
-/// The disk stall's bounds (F3): suspect within one timeout and one period of the onset, drain within
-/// three timeouts and one period.
-pub fn disk_stall_bounds(slowest: u64, period: u64) -> (u64, u64) {
-    let suspect = slowest.saturating_add(period).saturating_add(MS);
-    let drain = slowest
-        .saturating_mul(probe::BOUND_FACTOR)
-        .saturating_add(period)
+/// The disk stall's bounds (F3): marked within the earlier of its probe's two ages and one period of
+/// the onset, drained within its drain age and one period (and the driver's millisecond).
+pub fn disk_stall_bounds(j: &StallJudge) -> (u64, u64) {
+    let first = j.slowest_ns.min(j.drain_age_ns);
+    let suspect = first.saturating_add(j.period_ns).saturating_add(MS);
+    let drain = j
+        .drain_age_ns
+        .saturating_add(j.period_ns)
         .saturating_add(MS);
     (suspect, drain)
 }

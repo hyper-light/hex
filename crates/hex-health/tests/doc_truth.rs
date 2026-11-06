@@ -15,13 +15,12 @@
 
 use std::collections::BTreeMap;
 
-use hex_health::{agent, antagonist, grade, penalty, probe, retry};
+use hex_health::{agent, antagonist, grade, penalty, retry};
 
 const DOC: &str = include_str!("../../../docs/design/failure-isolation.md");
 
 fn code() -> BTreeMap<&'static str, u128> {
     BTreeMap::from([
-        ("probe::BOUND_FACTOR", u128::from(probe::BOUND_FACTOR)),
         ("grade::WINDOW_NS", u128::from(grade::WINDOW_NS)),
         (
             "grade::MIN_OBSERVATIONS",
@@ -151,6 +150,6 @@ fn the_designs_constants_are_the_codes() {
         .map(|(k, v)| (k.to_string(), v))
         .collect();
     let doc = doc();
-    assert_eq!(doc.len(), 34, "the table lost or gained a row");
+    assert_eq!(doc.len(), 33, "the table lost or gained a row");
     assert_eq!(doc, code);
 }

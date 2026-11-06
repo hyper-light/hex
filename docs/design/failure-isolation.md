@@ -31,7 +31,7 @@ each named below.
 |---|---|---|---|---|
 | Crash | a node stops answering | a member's own probe first suspects it (F1) | a member condemns it (hyper-swim; memberlist: declares it dead) and its work is moved | hyper-swim: condemnation within the bound its condemner states, `(2(2m − 1) + 1)` periods + its measured wait (F1); memberlist, the competitor: suspicion ≤ 6 probe periods + probe timeout at p99, ≤ 2(n−1) periods + timeout at max, dead ≤ suspicion + suspicion max timeout + 1 period |
 | Gray / fail-slow | a node's work runs ≥ 2.5x slower than its peers' | `Suspect` (F2) | `Drain` | ≤ 2 windows (2 s) and ≤ 4 windows (4 s): under Panorama's 7 s (FI[4]) |
-| Disk stall | a node's probe write stops completing | `Suspect` (F3) | `Drain` | ≤ 1 timeout + 1 probe period and ≤ 3 timeouts + 1 period; the timeout is at least 1 s (1 s on a healthy fast disk) |
+| Disk stall | a node's probe write stops completing | `Suspect`, or `Drain` where it comes first (F3) | `Drain` | marked ≤ the earlier of the slowest healthy answer and the drain age, + 1 probe period; drained ≤ the drain age + 1 period, the drain age priced by the cost rule (F3) |
 | Antagonist | a co-tenant's CPU use doubles its neighbours' CPI | a victim with an antagonist correlated ≥ 0.35 (F4) | the antagonist capped | ≤ 3 CPI samples + 1 s (CPI²'s cadence: one a minute, so ≤ 181 s) |
 | Stuck tool loop | a session repeats a call without progress | the third identical call (F5) | the session stopped at it | at the 3rd call: 0 after it |
 | Quota shown as slowness | a provider answers rate limit or quota exhausted | the first typed error (F5) | the account held | at the first error; node suspicions = 0 |
@@ -160,26 +160,37 @@ Perseus compare peers (FI[7], `PF[14]`); a graded verdict each consumer threshol
 **What would falsify it.** A ≥ 2.5x-slow node with evidence not suspected within 2 s or drained within 4
 s; or a healthy node suspected when the slowdown is cell-wide.
 
-### F3. Disk stall: the node's own write-and-flush probe, its wait learned from a record
+### F3. Disk stall: the node's own write-and-flush probe, its drain priced
 
 **The choice.** The node agent writes and flushes a one-byte record on its state disk every probe
-period, and its wait is learned by Hex's rule for learned waits (the lead, 2026-11-06). Before any
-answer on this node, the slowest answer is the slowest in the recorded distribution for its host class,
-from a named record (macOS/APFS: 147.3 ms, `bench/health/records/2026-11-06-probe-floor-apfs.md`; a
-class with no record is refused until one is taken; the dm-delay drill records its own disk's healthy
-baseline under its load first and seeds from it). Then the slowest is the greater of the record's and the
-node's own slowest answer, and only rises. The node is `Suspect` (no new placements) once its outstanding
-write is slower than any answer seen, and `Drain` (retired, its work moved) past twice that, the bound.
-No calibration read and no unbounded first wait; no TCP numbers. A write that answers only after
-outliving the bound is no answer: the wait had given up, and taking it would let one stall raise the
-bound for the next (Karn's rule). A disk that answers ever more slowly raises its own bound: that
-fail-slow case is the peer grade's (F2), which judges a node against its peers. A node that can't write
-its own disk stops being trusted as a crashed one does (hyper-raft's heartbeat after flush, `PF[26]`).
+period and judges the outstanding write's age from data alone (Ada, 2026-11-06: "learned,
+data-derived, and adaptive"). Its healthy answers start as the recorded distribution for its host class,
+from a named record (macOS/APFS: run 3 of `bench/health/records/2026-11-06-probe-floor-apfs.md`, 23,764
+answers; a class with no record is refused until one is taken; the dm-delay drill records its own disk's
+healthy baseline under its load first), then take in the node's own. The node is `Suspect` (no new
+placements) once its outstanding write is slower than any healthy answer, and `Drain` (retired, its work
+moved) at the age where waiting costs more than acting: the `T` minimizing the expected loss per probe,
+`(1 - pi) * S(T) * C + pi * T`. A drain at `T` is false when a healthy write outlives it, which happens with
+`S(T)`, the healthy answers' share above `T` (a Jeffreys half-count past the slowest, so never zero), and
+costs the work moved, `C` per workload, the caller's measured re-placement time; waiting through a real
+stall costs each workload the time it blocks; `pi`, the chance a probe is a stall, is the Jeffreys
+posterior `1/2 / (n + 1)` over the node's `n` probes, since the fleet has no recorded stall incidents to
+seed it. A dear re-placement (a Shards boot) waits longer than a cheap one (an OCI start), and a node
+that has answered long waits longer than a new one. Early on the drain age can fall inside the record's
+thin tail, so a stall drains without a `Suspect` first. No calibration read, no unbounded first wait,
+no TCP numbers. A write that answers only after outliving the drain age is no answer: the drain had given
+up, and taking it would let one stall raise the age for the next (Karn's rule); nor is it counted a stall,
+which would feed the probe's own verdicts back into its prior. A disk that answers ever more slowly raises
+its own ages: that fail-slow case is the peer grade's (F2), which judges a node against its peers. A node
+that can't write its own disk stops being trusted as a crashed one does (hyper-raft's heartbeat after
+flush, `PF[26]`).
 
-Replayed on the recorded healthy trace (12,715 probes, its slowest 34 ms) and seeded from the other
-run's record (147.3 ms): no false suspect, no false drain, and a stall suspected at 147 ms and drained at
-295 ms, where RFC 6298's 1 s floor took 1 s and 3 s (`bench/health/replay_probe.py`, the
-`recorded-2x` rule).
+Replayed on APFS run 2 (12,715 probes) against run 3's record, in `hex-health`
+(`crates/hex-health/examples/replay_probe.rs`) and in the exact form (`bench/health/replay_probe.py`
+`cost_rule`): at 2 ms a workload, 2 false drains and a stall drained at 67.1 ms (exact: 69.5 ms); at
+194 ms, no false drain and a stall drained at 335.5 ms (exact: 275.2 ms), the difference the probe's
+histogram's 25% buckets; RFC 6298's 1 s floor drained at 3,000 ms, and the learned-wait rule's 2x at
+1,172 ms.
 
 **Sources.** FI[8]; `PF[26]`; FI[6] for why waiting for a human doesn't do (fail-slow found in hours to
 months).
@@ -188,8 +199,9 @@ months).
 stalls the node's disk under running work and records when it was marked, drained, and whether any work
 failed.
 
-**What would falsify it.** A drill in which work fails before the node is drained, or a healthy disk's
-ordinary flush latency suspected.
+**What would falsify it.** A drill in which work fails before the node is drained, or a replay in which
+the probe drains a healthy disk more, or a stall later, than the exact cost rule on the same trace and
+record by more than the histogram's resolution.
 
 ### F4. Antagonists: CPI² as written
 
@@ -324,7 +336,6 @@ holds this table to the code.
 
 | Constant | Value | Source |
 |---|---|---|
-| `probe::BOUND_FACTOR` | 2 | Hex's rule for learned waits (the lead, 2026-11-06) |
 | `grade::WINDOW_NS` | 1000000000 | chosen: 2 and 4 windows fit Panorama's 7 s (FI[4]) |
 | `grade::MIN_OBSERVATIONS` | 5 | chosen: the fewest a median of which one outlier can't move |
 | `grade::MIN_PEERS` | 3 | chosen: two nodes can't say which of them is slow |

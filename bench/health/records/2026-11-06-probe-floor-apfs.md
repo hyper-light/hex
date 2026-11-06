@@ -65,3 +65,19 @@ cost rule (re-placement 194 ms/workload, record 23764 answers): false drains    
 The cost rule prices what the learned-wait rule's 2x fixes: dear re-placement waits longer and drains
 nothing healthy; cheap re-placement drains a stall 17x sooner and accepts two false drains, each a 2 ms
 restart.
+
+## The cost rule in hex-health, replayed (2026-11-06)
+
+The same trace and record through `hex_health::probe::DiskProbe` (adas-mac-studio-2, release build,
+`cargo run --release -p hex-health --example replay_probe -- apfs-trace.txt apfs-trace-3.txt 2 194`),
+beside the exact form above:
+
+```
+cost rule in hex-health (re-placement 2 ms/workload, record 23764 answers): false drains    2  a stall at the end drained at     67.1 ms
+cost rule in hex-health (re-placement 194 ms/workload, record 23764 answers): false drains    0  a stall at the end drained at    335.5 ms
+cost rule (re-placement 2 ms/workload, record 23764 answers): false drains    2  a stall at the end drained at     69.5 ms
+cost rule (re-placement 194 ms/workload, record 23764 answers): false drains    0  a stall at the end drained at    275.2 ms
+```
+
+The same false drains; the drain ages differ by the probe's histogram buckets (25%), whose highest
+values are its candidate ages, where the exact form takes each answer.

@@ -22,13 +22,48 @@ use hex_health::{HealthError, Level};
 /// must write that block to the device (fdatasync(2)); nothing about the disk is assumed.
 pub const RECORD_BYTES: usize = 1;
 
-/// The slowest probe answer recorded for this host class: the seed of the probe's learned wait (Hex's
-/// rule for learned waits). macOS: `bench/health/records/2026-11-06-probe-floor-apfs.md`, APFS on an
-/// M4 Max, the slowest of 27,655 probes over two runs. A host class with no record is refused, typed:
-/// its distribution is recorded first (`examples/fsync_latency`).
-pub fn recorded_slowest() -> Result<Duration, ProbeError> {
+/// macOS's recorded probe answers, `(latency ns, count)`, by the probe's histogram buckets (each the
+/// bucket's highest value, the slowest exact): `bench/health/records/2026-11-06-probe-floor-apfs.md`,
+/// its third run, APFS on an M4 Max under load, 23,764 probes, the slowest 586.1 ms.
+const MACOS_RECORD: [(u64, u32); 31] = [
+    (2_621_439, 9),
+    (3_145_727, 51),
+    (3_670_015, 1_450),
+    (4_194_303, 3_996),
+    (5_242_879, 3_571),
+    (6_291_455, 819),
+    (7_340_031, 362),
+    (8_388_607, 1_792),
+    (10_485_759, 2_844),
+    (12_582_911, 2_394),
+    (14_680_063, 1_953),
+    (16_777_215, 1_507),
+    (20_971_519, 1_640),
+    (25_165_823, 695),
+    (29_360_127, 330),
+    (33_554_431, 136),
+    (41_943_039, 119),
+    (50_331_647, 42),
+    (58_720_255, 19),
+    (67_108_863, 7),
+    (83_886_079, 10),
+    (100_663_295, 5),
+    (117_440_511, 4),
+    (134_217_727, 2),
+    (167_772_159, 1),
+    (201_326_591, 1),
+    (234_881_023, 1),
+    (268_435_455, 1),
+    (335_544_319, 1),
+    (536_870_911, 1),
+    (586_085_750, 1),
+];
+
+/// This host class's recorded healthy probe answers: the seed of the probe's judgement. A host class
+/// with no record is refused, typed: its distribution is recorded first (`examples/fsync_latency`).
+pub fn recorded() -> Result<&'static [(u64, u32)], ProbeError> {
     if cfg!(target_os = "macos") {
-        Ok(Duration::from_micros(147_330))
+        Ok(&MACOS_RECORD)
     } else {
         Err(ProbeError::NoRecord(std::env::consts::OS))
     }
@@ -96,14 +131,17 @@ fn write_record(file: &mut File, record: &[u8]) -> std::io::Result<()> {
 }
 
 impl DiskProber {
-    /// Start probing the disk under `state_dir` every `period`, its record at `state_dir/.hex-probe`.
+    /// Start probing the disk under `state_dir` every `period`, its record at `state_dir/.hex-probe`,
+    /// judged from its host class's `recorded` answers and the measured time to `replace` one of the
+    /// node's workloads elsewhere (what a false drain costs).
     pub fn start(
         state_dir: &Path,
         period: Duration,
-        recorded_slowest: Duration,
+        recorded: &[(u64, u32)],
+        replace: Duration,
     ) -> Result<Self, ProbeError> {
-        let seed = u64::try_from(recorded_slowest.as_nanos()).map_err(|_| ProbeError::Clock)?;
-        let probe = DiskProbe::new(seed)?;
+        let replace_ns = u64::try_from(replace.as_nanos()).map_err(|_| ProbeError::Clock)?;
+        let probe = DiskProbe::new(recorded, replace_ns)?;
         let path = state_dir.join(".hex-probe");
         let mut file = OpenOptions::new()
             .create(true)
@@ -160,15 +198,16 @@ impl DiskProber {
     }
 
     /// Whether the node may take new work: false once a judgement saw `Drain`.
-    /// Whether the node may take new work: false once a judgement saw `Drain`.
     pub fn schedulable(&self) -> bool {
         !self.shared.cordoned.load(Ordering::Acquire)
     }
 
-    /// The probe's current bound, past which an outstanding write drains the node, for a record of
-    /// the drill.
-    pub fn bound(&self) -> Result<Duration, ProbeError> {
-        Ok(Duration::from_nanos(lock(&self.shared.probe)?.bound_ns()?))
+    /// The probe's current drain age, past which an outstanding write drains the node, for a record
+    /// of the drill.
+    pub fn drain_age(&self) -> Result<Duration, ProbeError> {
+        Ok(Duration::from_nanos(
+            lock(&self.shared.probe)?.drain_age_ns()?,
+        ))
     }
 
     /// Stop the prober after its current write.
@@ -223,9 +262,10 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    /// The macOS/APFS record's slowest answer, the seed every test runs on, whatever its host: the
-    /// mechanics under test don't depend on the disk.
-    const SEED_NS: u64 = 147_330_000;
+    /// The macOS/APFS record, the seed every test runs on, whatever its host (the mechanics under
+    /// test don't depend on the disk), and Shards' measured boot p99 as the re-placement time.
+    const RECORD: &[(u64, u32)] = &MACOS_RECORD;
+    const REPLACE: Duration = Duration::from_millis(194);
 
     /// Wait `d` between judgements: on a channel nothing sends on, as `thread::sleep` is disallowed.
     fn pause(d: Duration) {
@@ -235,12 +275,16 @@ mod tests {
 
     fn shared() -> Arc<Shared> {
         Arc::new(Shared {
-            probe: Mutex::new(DiskProbe::new(SEED_NS).unwrap()),
+            probe: Mutex::new(DiskProbe::new(RECORD, ns(REPLACE)).unwrap()),
             cordoned: AtomicBool::new(false),
             stop: Mutex::new(false),
             wake: Condvar::new(),
             failed: Mutex::new(None),
         })
+    }
+
+    fn ns(d: Duration) -> u64 {
+        u64::try_from(d.as_nanos()).unwrap()
     }
 
     /// Run the prober over `write`, stalling its write number `stall_at` (0 the first) until released;
@@ -288,14 +332,13 @@ mod tests {
     }
 
     /// AC-T7.10.3: do a probe whose writes answer, then stall one (it blocks until released); expect
-    /// `Suspect` and then `Drain` while it is still blocked, and the node cordoned, and cordoned still
-    /// once the disk answers again.
+    /// `Drain` while it is still blocked, and the node cordoned, and cordoned still once the disk
+    /// answers again. (`Suspect` comes first only where the slowest answer is under the drain age:
+    /// this early, a stall per probe is likely enough that the cost rule drains inside the record's
+    /// thin tail.)
     #[test]
     fn a_stalled_write_is_judged_while_it_blocks_and_cordons_the_node() {
         let (prober, release, thread) = stalling(20);
-        assert!(prober.schedulable());
-        // Suspect past the record's 147 ms, Drain past its 295 ms bound, with room.
-        wait_for(&prober, Level::Suspect, Duration::from_secs(5));
         assert!(prober.schedulable());
         wait_for(&prober, Level::Drain, Duration::from_secs(10));
         assert!(!prober.schedulable());
@@ -305,13 +348,17 @@ mod tests {
         assert!(!prober.schedulable());
     }
 
-    /// AC-T7.10.3, Hex's rule for learned waits, before any sample: do stall the very first write;
-    /// expect it judged against the record's bound (no calibration, no unbounded first wait): drained
-    /// past twice the record's slowest, the node cordoned.
+    /// AC-T7.10.3, before any sample: do stall the very first write; expect it judged by the record
+    /// alone (no calibration, no unbounded first wait): drained past the record's drain age, the node
+    /// cordoned.
     #[test]
-    fn the_first_write_is_bounded_by_the_record() {
+    fn the_first_write_is_judged_by_the_record() {
         let (prober, release, thread) = stalling(0);
-        assert_eq!(prober.bound().unwrap(), Duration::from_nanos(2 * SEED_NS));
+        let age = DiskProbe::new(RECORD, ns(REPLACE))
+            .unwrap()
+            .drain_age_ns()
+            .unwrap();
+        assert_eq!(prober.drain_age().unwrap(), Duration::from_nanos(age));
         wait_for(&prober, Level::Drain, Duration::from_secs(10));
         assert!(!prober.schedulable());
         prober.stop();
@@ -327,18 +374,19 @@ mod tests {
         let err = DiskProber::start(
             &dir.path().join("absent"),
             Duration::from_millis(100),
-            Duration::from_nanos(SEED_NS),
+            RECORD,
+            REPLACE,
         );
         assert!(matches!(err, Err(ProbeError::Record { .. })));
     }
 
-    /// A real disk answers: do probe a temporary directory at this host class's recorded seed across
+    /// A real disk answers: do probe a temporary directory judged by this host class's record across
     /// 20 periods; expect it never drained, the node schedulable, and the record one byte. A host class
     /// with no record is refused, typed, naming it (record its distribution first).
     #[test]
     fn a_disk_that_answers_is_never_drained() {
-        let seed = match recorded_slowest() {
-            Ok(seed) => seed,
+        let record = match recorded() {
+            Ok(record) => record,
             Err(ProbeError::NoRecord(os)) => {
                 assert_eq!(os, std::env::consts::OS);
                 return;
@@ -346,7 +394,7 @@ mod tests {
             Err(other) => panic!("{other}"),
         };
         let dir = tempfile::tempdir().unwrap();
-        let p = DiskProber::start(dir.path(), Duration::from_millis(10), seed).unwrap();
+        let p = DiskProber::start(dir.path(), Duration::from_millis(10), record, REPLACE).unwrap();
         for _ in 0..20 {
             assert_ne!(p.level().unwrap(), Level::Drain);
             pause(Duration::from_millis(10));
