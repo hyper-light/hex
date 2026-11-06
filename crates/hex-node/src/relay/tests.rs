@@ -135,8 +135,8 @@ fn hello(node: &OwnedFd) -> OwnedFd {
     conn
 }
 
-/// Whether a message is waiting on `conn` within `ms`.
-fn readable(conn: &OwnedFd, ms: i64) -> bool {
+/// Whether a message, or its end, is waiting on `conn` within `ms` (0: now).
+fn readable(conn: impl AsFd, ms: i64) -> bool {
     let mut ready = [PollFd::new(conn, PollFlags::IN)];
     let ts = Timespec {
         tv_sec: 0,
@@ -224,32 +224,80 @@ fn an_execs_streams_reach_the_node_as_pipe_ends() {
     drop(agent.join().unwrap());
 }
 
-/// HEX-GUEST-7: exec with a stdin whose connection never reaches the relay: expect the exec refused by
-/// type once the relay's patience ends, naming its streams, and the node never asked to run it.
-#[test]
-fn an_exec_whose_stream_never_comes_is_refused_and_never_reaches_the_node() {
-    let lab = Lab::new(Limits {
-        patience: Duration::from_millis(300),
-        ..LIMITS
-    });
-    // Stdio goes to a socket nobody serves from: it connects, and nothing reads it.
-    let nowhere = lab.dir.path().join("nowhere.sock");
-    let _nowhere = UnixListener::bind(&nowhere).unwrap();
-    let link = Arc::new(Ports {
-        control: lab.dir.path().join("control.sock"),
-        stdio: nowhere,
-        files: lab.dir.path().join("files.sock"),
-    });
-    let node = lab.node.try_clone().unwrap();
-    let agent = std::thread::spawn(move || {
-        let conn = hello(&node);
-        // Nothing more comes: the exec was refused at the relay.
-        assert!(!readable(&conn, 900));
-        conn
-    });
-    let client = Client::connect(link).unwrap();
+use std::time::Duration;
+
+/// A host connection that says each time its client writes to it.
+struct Told {
+    conn: UnixStream,
+    wrote: std::sync::mpsc::Sender<()>,
+}
+
+impl Read for Told {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.conn.read(buf)
+    }
+}
+
+impl Write for Told {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.conn.write(buf)?;
+        let _ = self.wrote.send(());
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.conn.flush()
+    }
+}
+
+impl Duplex for Told {
+    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(Told {
+            conn: self.conn.try_clone()?,
+            wrote: self.wrote.clone(),
+        }))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.conn.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.conn.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.conn.set_read_timeout(timeout)
+    }
+}
+
+/// The relay's control port, its client's writes told and the connection held for the test to end;
+/// stdio to `stdio`.
+struct Held {
+    control: PathBuf,
+    stdio: PathBuf,
+    wrote: Mutex<std::sync::mpsc::Sender<()>>,
+    held: Mutex<Option<UnixStream>>,
+}
+
+impl Link for Held {
+    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        if port != stream::CONTROL_PORT {
+            return Ok(Box::new(UnixStream::connect(&self.stdio).unwrap()));
+        }
+        let conn = UnixStream::connect(&self.control).unwrap();
+        *self.held.lock().unwrap() = Some(conn.try_clone().unwrap());
+        Ok(Box::new(Told {
+            conn,
+            wrote: self.wrote.lock().unwrap().clone(),
+        }))
+    }
+}
+
+/// An exec of `cat` with stdin alone, through `client`.
+fn exec_stdin(client: &Client) -> Result<Box<dyn hex_api::Proc>, Refusal> {
     let (in_r, _in_w) = std::io::pipe().unwrap();
-    let got = client.exec(
+    client.exec(
         &BoxId::new("b").unwrap(),
         Program::of(&["cat"]),
         Stdio {
@@ -257,12 +305,119 @@ fn an_exec_whose_stream_never_comes_is_refused_and_never_reaches_the_node() {
             stdout: None,
             stderr: None,
         },
-    );
-    let Err(Refusal::Invalid { what: "stdio", why }) = got.map(|_| ()) else {
-        panic!("expected the exec's stdio refused");
-    };
-    assert!(why.contains("0 of the exec's 1 streams"), "{why}");
+    )
+}
+
+/// HEX-GUEST-7 (CLAUDE.md §4: facts, not clocks): on a relay of one set, exec with a stdin whose
+/// connection never reaches the relay, then end the host's connection: expect the exec never sent to
+/// the node, its set gone with its host (no clock), so a second host's exec takes the one set and runs.
+#[test]
+fn an_exec_whose_stream_never_comes_waits_for_its_host_and_goes_with_it() {
+    let lab = Lab::new(Limits { sets: 1, ..LIMITS });
+    // Stdio goes to a socket nobody serves from: it connects, and nothing reads it.
+    let nowhere = lab.dir.path().join("nowhere.sock");
+    let nowhere_listener = UnixListener::bind(&nowhere).unwrap();
+    let (wrote, writes) = std::sync::mpsc::channel();
+    let link = Arc::new(Held {
+        control: lab.dir.path().join("control.sock"),
+        stdio: nowhere,
+        wrote: Mutex::new(wrote),
+        held: Mutex::new(None),
+    });
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || {
+        let first = hello(&node);
+        // The host's end reaches the node as its connection's end, with no exec before it.
+        let mut buf = [0u8; 64];
+        assert_eq!(rustix::io::read(&first, &mut buf).unwrap(), 0);
+        let second = hello(&node);
+        let (h, r, fds) = next_request(&second);
+        assert!(matches!(r, Request::Call(Call::Exec { .. })), "{r:?}");
+        assert_eq!(fds.len(), 1);
+        answer(&second, h, &Answer::Started { pid: 8 });
+        answer(&second, h, &Answer::Exited(Exit::Code(0)));
+        second
+    });
+    let first = Client::connect(Arc::clone(&link) as Arc<dyn Link>).unwrap();
+    while writes.try_recv().is_ok() {}
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| exec_stdin(&first).map(|_| ()));
+        // The client dials its stream, then writes its exec: once written, the relay reads it before
+        // the end that follows on the same connection.
+        let _stream = nowhere_listener.accept().unwrap();
+        writes.recv().unwrap();
+        let host = link.held.lock().unwrap().take().unwrap();
+        host.shutdown(Shutdown::Write).unwrap();
+        assert!(matches!(waiting.join().unwrap(), Err(Refusal::Broken(_))));
+    });
+    let second = Client::connect(lab.link()).unwrap();
+    let mut proc = exec_stdin(&second).unwrap();
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
     drop(agent.join().unwrap());
+}
+
+/// HEX-GUEST-7: connect a stdio connection that never names itself, then exec with stdout through the
+/// relay: expect the exec's stream named and its output read while the silent one waits, and the silent
+/// one still open after (it waits on its host, not a clock).
+#[test]
+fn a_silent_stdio_connection_holds_no_other_exec_up() {
+    let lab = Lab::new(LIMITS);
+    let silent = UnixStream::connect(lab.dir.path().join("stdio.sock")).unwrap();
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || {
+        let conn = hello(&node);
+        let (h, _, fds) = next_request(&conn);
+        answer(&conn, h, &Answer::Started { pid: 9 });
+        let mut stdout = File::from(fds.into_iter().next().unwrap());
+        stdout.write_all(b"named").unwrap();
+        drop(stdout);
+        answer(&conn, h, &Answer::Exited(Exit::Code(0)));
+        conn
+    });
+    let client = Client::connect(lab.link()).unwrap();
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["echo"]),
+            Stdio {
+                stdin: None,
+                stdout: Some(out_w),
+                stderr: None,
+            },
+        )
+        .unwrap();
+    let mut out = String::new();
+    out_r.read_to_string(&mut out).unwrap();
+    assert_eq!(out, "named");
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
+    assert!(!readable(&silent, 0), "the silent connection was closed");
+    drop(agent.join().unwrap());
+}
+
+/// HEX-GUEST-7 (CLAUDE.md §2): on a relay bounded at two unnamed stdio connections, connect three that
+/// never name themselves: expect the third refused and closed (its end is what it reads), the two
+/// within the bound still open.
+#[test]
+fn an_unnamed_connection_past_the_bound_is_refused() {
+    let lab = Lab::new(Limits {
+        unnamed: 2,
+        ..LIMITS
+    });
+    let path = lab.dir.path().join("stdio.sock");
+    let held = [
+        UnixStream::connect(&path).unwrap(),
+        UnixStream::connect(&path).unwrap(),
+    ];
+    let mut past = UnixStream::connect(&path).unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(past.read(&mut byte).unwrap(), 0);
+    for conn in &held {
+        assert!(
+            !readable(conn, 0),
+            "a connection within the bound was closed"
+        );
+    }
 }
 
 /// HEX-GUEST-7: connect twice to a relay bounded at one connection: expect the second refused by type,
