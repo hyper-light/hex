@@ -606,7 +606,9 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   spec names no `RLIMIT_NOFILE` gets Docker 29's 1024:524288, not the node's own (Ada, 2026-11-06;
   `hex_core::limits`, capped at the node's hard limit, which an unprivileged process can't raise): the `oci`
   init and every program exec'd into a container add it where the spec names none, and the Linux `process`
-  class (and `hex box run`) sets it in the child before `execve` (HEX-INST-6). Rootless `oci` boxes need
+  class (and `hex box run`) sets it in the child before `execve` (HEX-INST-6). On macOS it is set in the
+  member's own process before its image: a forked child sets it and spawns over itself (`POSIX_SPAWN_SETEXEC`),
+  which keeps every spawn attribute (`docs/research/runtime/nofile-limit.md` §6). Rootless `oci` boxes need
   nothing more: each maps only the node's own uid (`hex_core::bundle`), so no subordinate id ranges (§1.6).
   Ubuntu 24.04's `apparmor_restrict_unprivileged_userns` (§1.6) would need an AppArmor profile for `hex`; no
   Ubuntu machine is in this step's bar, so that is a gap the installer doesn't fill yet (STATUS.md).
