@@ -352,3 +352,44 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
         "ends not seen as the bound's kill when they happened: {late:?}"
     );
 }
+
+/// Ada's rule (2026-11-06): the waits in this file are 2 x the measured exec-to-exit of what each waits on,
+/// not picked budgets. This measures them, on this Mac, through the class's own path: 30 of each of a program
+/// that exits at once, a hog ended at its 256 MiB bound, a waiting program ended by TERM, and the shell that
+/// prints its limits; each line is one exec-to-exit in seconds. Ignored: a measurement, not a check; its
+/// output is the record (bench/native/macos/records/execexit-*.txt).
+#[test]
+#[ignore = "a measurement; run by hand and recorded in bench/native/macos/records"]
+fn measure_exec_to_exit() {
+    let rt = runtime();
+    let fx = fixture();
+    let id = BoxId::new("mac-measure").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds {
+            memory_max: Some(256 * MIB),
+            ..Bounds::default()
+        },
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let shell = Program::of(&["/bin/sh", "-c", r#"echo "$(ulimit -Sn):$(ulimit -Hn)""#]);
+    for (what, program, term) in [
+        ("fail", fx.act(&Act::Fail(7)), false),
+        ("hog", fx.act(&Act::Hog(2 * GIB)), false),
+        ("term", fx.act(&Act::Wait), true),
+        ("shell", shell, false),
+    ] {
+        for _ in 0..30 {
+            let t = Instant::now();
+            let mut p = rt.exec(&id, program.clone(), Stdio::null()).expect("exec");
+            if term {
+                rt.signal(&id, Signal::TERM).expect("signal TERM");
+            }
+            let exit = p.wait_for(Duration::from_secs(600)).expect("wait");
+            println!("EXEC_EXIT {what} {:.6} {exit:?}", t.elapsed().as_secs_f64());
+        }
+    }
+    rt.delete(&id).expect("delete");
+}
