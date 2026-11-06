@@ -9,7 +9,8 @@
 # Env (defaults): RUNTIMES (libcrun), HEXBENCH_PHASES (lifecycle), ROUNDS (2), N (1000), WARMUP (100), LIFECYCLES
 # (2000), HEXBENCH_SUSTAINED (10000, the sustained phase's lifecycles), CAP (1000), BUDGET_MIB (8192), MEMORY (16g),
 # CPUSET (the VM's CPUs past an eighth of them, at least 2: fedora's 4-31 of 32), HOST_CPU (the machine's processor,
-# for env.txt), HEXBENCH_OWNER and HEXBENCH_REUSE (unset: boxes of no owner; as host.sh passes them). The VM's load
+# for env.txt), HEXBENCH_OWNER and HEXBENCH_REUSE (unset: boxes of no owner; as host.sh passes them), CRUN_TARBALL
+# (unset: crun's release downloaded; either way its bytes checked against the pinned sha256). The VM's load
 # is recorded at the pass's start and end, as host.sh records the host's, and so are
 # the pass's parameters as it ran them.
 set -euo pipefail
@@ -25,6 +26,10 @@ PACKAGES="python3 procps-ng findutils diffutils util-linux coreutils gcc make ta
   glibc-static json-c-devel libcap-devel libseccomp-devel"
 IMG=hexbench/pass:44-$(printf '%s' "$PACKAGES" | cksum | cut -d' ' -f1)
 CRUN_VERSION=1.30.1
+# Its release tarball's sha256, as fetch.py pins it (CRUN_SRC): a tarball that isn't these bytes is refused.
+CRUN_SHA256=99d036d95113552b6df66c7c879432835504bf0e525fc0372745071df129527b
+# CRUN_TARBALL, a path on this machine: that tarball in place of the download, for a machine with no way out.
+CRUN_GIVEN=(); [ -n "${CRUN_TARBALL:-}" ] && CRUN_GIVEN=(-v "$CRUN_TARBALL:/crun-given.tar.gz:ro")
 NCPU=$(docker info --format '{{.NCPU}}')
 SKIP=$((NCPU / 8)); [ "$SKIP" -ge 2 ] || SKIP=2
 CPUSET=${CPUSET:-$SKIP-$((NCPU - 1))}
@@ -52,7 +57,8 @@ say "build hex, seam_oci and the libcrun driver into volume $BIN"
 docker volume create "$BIN" > /dev/null
 docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass-cargo:/cargo -v hexpass-rustup:/rustup -v hexpass-target:/target \
   -e CARGO_HOME=/cargo -e RUSTUP_HOME=/rustup -e CARGO_TARGET_DIR=/target -e RUSTUP_TOOLCHAIN=1.99.1 \
-  -e PATH=/cargo/bin:/usr/bin:/bin -e CRUN_VERSION="$CRUN_VERSION" -w /src "$IMG" bash -euo pipefail -c '
+  -e PATH=/cargo/bin:/usr/bin:/bin -e CRUN_VERSION="$CRUN_VERSION" -e CRUN_SHA256="$CRUN_SHA256" "${CRUN_GIVEN[@]}" \
+  -w /src "$IMG" bash -euo pipefail -c '
     [ -x /cargo/bin/rustup ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
     for i in 1 2 3; do rustup toolchain install 1.99.1 --profile minimal && break; sleep 10; done
     triple=$(uname -m)-unknown-linux-gnu; flags=CARGO_TARGET_$(echo "$triple" | tr a-z- A-Z_)_RUSTFLAGS
@@ -60,7 +66,9 @@ docker run "${BENCH_LABELS[@]}" --rm -v "$SRC:/src:ro" -v "$BIN:/out" -v hexpass
     cp "/target/$triple/release/hex" /out/hex
     nice -n 10 cargo bench --locked --no-run -p hex-bench --bench seam_oci 2> /tmp/bench.log || { cat /tmp/bench.log; exit 1; }
     cp "$(ls -t /target/release/deps/seam_oci-* | grep -v "\.d$" | head -1)" /out/seam_oci
-    curl -fsSL -o /tmp/crun.tar.gz "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION.tar.gz"
+    if [ -f /crun-given.tar.gz ]; then cp /crun-given.tar.gz /tmp/crun.tar.gz
+    else curl -fsSL -o /tmp/crun.tar.gz "https://github.com/containers/crun/releases/download/$CRUN_VERSION/crun-$CRUN_VERSION.tar.gz"; fi
+    echo "$CRUN_SHA256  /tmp/crun.tar.gz" | sha256sum -c --quiet - || { echo "refusing: crun $CRUN_VERSION'"'"'s tarball is not the pinned bytes" >&2; exit 1; }
     sha256sum /tmp/crun.tar.gz | cut -c1-16 > /out/crun-src.sha256
     BUILD_DIR=/tmp bash /src/bench/competitive/libcrun/build.sh /tmp/crun.tar.gz /out/libcrun-driver
     /out/hex --version > /out/hex.version'
