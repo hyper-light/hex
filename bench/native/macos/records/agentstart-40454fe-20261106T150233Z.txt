@@ -1,0 +1,28 @@
+# The box helper's launchd start, bootstrap to its socket accepting a connect(2): a user LaunchAgent proxy of
+# the same binary (hex __box-helper), 20 runs. The basis of the installer's bound on "running but never
+# accepting" (the lead's #4, Ada's rule 2026-11-06). Ada's installer lab records the real daemon's time.
+# launchd one-shot hex-macos-agentstart-20261106T150233Z, adas-mac-studio.local-2, macOS 26.4 25E246, Mac15,14,
+# hex built at 40454fe (lab-ab/target-green, debug). Probe: perl IO::Socket::UNIX connect in a loop (macOS's
+# `nc -U -z` can't probe: it exits 1 against a listening socket). Load average 33.67 at start, 36.08 at end
+# (noisy, as runs of record are here).
+RUN 1 accepted after 0.030165 s, 1906 polls
+RUN 2 accepted after 0.032183 s, 1609 polls
+RUN 3 accepted after 0.037680 s, 1899 polls
+RUN 4 accepted after 0.033066 s, 1694 polls
+RUN 5 accepted after 0.035836 s, 1787 polls
+RUN 6 accepted after 0.032140 s, 1561 polls
+RUN 7 accepted after 0.028385 s, 1495 polls
+RUN 8 accepted after 0.032451 s, 1555 polls
+RUN 9 accepted after 0.032940 s, 1532 polls
+RUN 10 accepted after 0.031596 s, 1360 polls
+RUN 11 accepted after 0.033107 s, 1779 polls
+RUN 12 accepted after 0.034141 s, 1704 polls
+RUN 13 accepted after 0.032388 s, 1620 polls
+RUN 14 accepted after 0.033870 s, 1667 polls
+RUN 15 accepted after 0.029113 s, 1143 polls
+RUN 16 accepted after 0.029197 s, 1669 polls
+RUN 17 accepted after 0.032858 s, 1610 polls
+RUN 18 accepted after 0.034533 s, 1816 polls
+RUN 19 accepted after 0.032017 s, 1572 polls
+RUN 20 accepted after 0.036199 s, 1842 polls
+# min 0.028385 s, max 0.037680 s, all 20 accepted. Bound = 2 x max = 0.075360 s (the lead's x2).
