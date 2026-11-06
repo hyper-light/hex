@@ -1887,6 +1887,7 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             ids.insert(id);
         }
     }
+    learned().answered(began.elapsed());
     Ok(ids)
 }
 
