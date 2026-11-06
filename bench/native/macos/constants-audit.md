@@ -22,7 +22,7 @@ asm-generic.
 | Box users' role range | 450-499 | scripts/install/macos.sh `ROLE_FIRST`/`ROLE_LAST`; hex_core::pool::ROLE_UIDS | (c) | Apple's `sysadminctl` usage, macOS 26.4 (was 200-400, Nix's note). 64a0500, cc74620 |
 | Box users' ids | first free run in 450-499 (450 on .local-2) | macos.sh `free_run` | (a) | Learned at install. 95e0557 test, 64a0500 |
 | Pool size | grown on demand, one account per box past the pool | hex_core::pool, Daemon::growing, macos/directory.rs | (a) | Was COUNT=30, Nix's 32. The installer makes the groups and one user; the pool stays ahead by the kept peak. Tests 6863a8f, c2dff27; code cc74620, 6895232, a6aa2ba |
-| Box user's process cap | the box's `pids_max`, else `kern.maxprocperuid` read at start | helper_daemon.rs, box_helper.rs, sys.rs | (c)/(a) | Was NPROC=1024. Linux sets no default either. dea5772 test, 6bbd791; §12 1c701ed held |
+| Box user's process cap | the box's `pids_max`, else `kern.maxprocperuid` read at start | helper_daemon.rs, box_helper.rs, sys.rs | (c)/(a) | Was NPROC=1024. Linux sets no default either. dea5772 test, 6bbd791; §12 1c701ed approved by Ada 2026-11-06 |
 | Helper start wait | success: a connect accepted; failure: launchd's exit report; bound only while running and not accepting: 0.075360 s | macos.sh `wait_serving`, `START_BOUND_S` | (b) | 2 x the max of 20 proxy starts (record agentstart-40454fe-20261106T150233Z). f023f4b, 63e701c. Ada's lab prints the real daemon's time to confirm |
 | dscl writes | once; a failure refused naming dscl's error | macos.sh `dscl_write` | none | No retry (was DSCL_TRIES=3, Nix's): eNotYetImplemented never seen. d0d8291, 8ba8ef5 |
 | Uninstall's process wait | by the fact (pgrep finds none), bound 2 x (0.883 ms + 0.298 ms x (n-1)) | macos.sh `end_pool_processes`, `drain_bound_s` | (b) | Was WAIT_STEPS 30 s. Record killscale-a84e094-20261106T160339Z. 3af15a2, 925771c. One wait per uninstall, so the record's bound is its whole learned bound; a learned one kept across installs would outlive the uninstall that removes everything |
@@ -84,5 +84,5 @@ asm-generic.
 |---|---|---|
 | caa6e9f | helper_sys.rs: the box helper's child sets `RLIMIT_NOFILE` beside `RLIMIT_NPROC` | Approved by Ada, 2026-11-06, as written (git note on caa6e9f) |
 | d4252f3, a960732 | helper_sys.rs (step 2): the file, its fork, user drop, ledger and exception arming; the mach_msg crossing receive | Approved by Ada, 2026-11-06 (step 2's cd46d31, merged) |
-| 1c701ed | sys.rs: `sysctlbyname` also reads `kern.maxprocperuid` | HELD FOR ADA; step 7's 08d52a0 adds `kern.argmax` to the same line |
+| 1c701ed | sys.rs: `sysctlbyname` also reads `kern.maxprocperuid` | Approved by Ada, 2026-11-06, as written (git note on 1c701ed); step 7's 08d52a0 adds `kern.argmax` to the same line |
 | b0cfaae | sys.rs fork for a plain box's descriptor limit | Never landed: reverted at 1c8309f |
