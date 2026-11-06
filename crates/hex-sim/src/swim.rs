@@ -18,6 +18,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use hyper_swim::HostId;
+use hyper_swim::codec::{Coordinate, GossipBatch, SwimMessage, gossip_capacity};
 use hyper_swim::detector::{Detector, Finding, PingReq};
 use hyper_swim::membership::MemberState;
 use hyper_timing::Exposure;
@@ -26,8 +27,30 @@ use crate::SimError;
 use crate::model::Time;
 use crate::rng::Rng;
 
-/// Gossip entries carried by one ping or acknowledgement.
-const GOSSIP_ROOM: usize = 8;
+/// The path's datagram size: QUIC's minimum, which every path carries (RFC 9000 §14.1), as
+/// hyper-swim's own owner sizes its messages (hyper-raft `crates/hyper-swim/tests/sim.rs:48-49`).
+pub const DATAGRAM: usize = 1_200;
+
+/// The gossip entries one message carries: what the datagram leaves beside the largest message
+/// hyper-swim sends with an empty batch, an acknowledgement with this member's coordinate and every
+/// field at its widest (`codec::gossip_capacity`).
+pub fn gossip_room(detector: &Detector) -> usize {
+    let coordinate = *detector.coordinate();
+    let ack = SwimMessage::Ack {
+        from: HostId(u64::MAX),
+        nonce: u64::MAX,
+        boot_nonce: u64::MAX,
+        configuration_version: u64::MAX,
+        standing: Some(u64::MAX),
+        promise_ns: u64::MAX,
+        relay_within_ns: u64::MAX,
+        gossip: GossipBatch::Entries(&[]),
+        coordinate: Coordinate::Held(&coordinate),
+    };
+    let mut bare = Vec::new();
+    ack.encode_into(&mut bare);
+    gossip_capacity(DATAGRAM, bare.len())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
@@ -154,6 +177,8 @@ struct World {
     report: Report,
     requests: Vec<PingReq>,
     batch: Vec<(HostId, MemberState)>,
+    /// Gossip entries a message carries ([`gossip_room`]).
+    gossip_room: usize,
 }
 
 fn host(member: u32) -> HostId {
@@ -280,7 +305,7 @@ impl World {
             batch.clear();
             self.member_mut(m)?
                 .detector
-                .ping_gossip_into(ping.to, GOSSIP_ROOM, &mut batch);
+                .ping_gossip_into(ping.to, self.gossip_room, &mut batch);
             self.report.pings = self.report.pings.saturating_add(1);
             let gossip = batch.clone();
             self.batch = batch;
@@ -339,9 +364,11 @@ impl World {
                 let ack = member.detector.on_ping(from_host);
                 let mut batch = std::mem::take(&mut self.batch);
                 batch.clear();
-                self.member_mut(to)?
-                    .detector
-                    .ack_gossip_into(from_host, GOSSIP_ROOM, &mut batch);
+                self.member_mut(to)?.detector.ack_gossip_into(
+                    from_host,
+                    self.gossip_room,
+                    &mut batch,
+                );
                 let gossip = batch.clone();
                 self.batch = batch;
                 self.send(
@@ -476,7 +503,12 @@ pub fn run(config: &Config, seed: u64) -> Result<Report, SimError> {
         report: Report::default(),
         requests: Vec::new(),
         batch: Vec::new(),
+        gossip_room: 0,
     };
+    w.gossip_room = w
+        .members
+        .first()
+        .map_or(0, |member| gossip_room(&member.detector));
     // Members start a seeded fraction of a millisecond apart, so their periods don't align.
     for m in 0..config.members {
         let at = w.rng.range(0, 1_000_000);
@@ -527,4 +559,50 @@ pub fn run(config: &Config, seed: u64) -> Result<Report, SimError> {
         }
     }
     Ok(w.report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper_swim::membership::Liveness;
+
+    /// S8 crash class (F1), gossip sized from the datagram, not picked: do fill an acknowledgement at
+    /// its widest with `gossip_room` entries; expect it to fit QUIC's 1,200-byte datagram, one more
+    /// entry not to, and the room to carry some gossip.
+    #[test]
+    fn the_gossip_room_is_what_the_datagram_leaves() {
+        let d = Detector::new(
+            HostId(0),
+            Exposure::new(),
+            NonZeroUsize::new(128).unwrap(),
+            Duration::from_nanos(1),
+            Duration::ZERO,
+        );
+        let room = gossip_room(&d);
+        assert!(room > 0);
+        let state = MemberState {
+            liveness: Liveness::Suspect,
+            incarnation: u64::MAX,
+        };
+        let coordinate = *d.coordinate();
+        let encoded = |entries: usize| {
+            let batch = vec![(HostId(u64::MAX), state); entries];
+            let ack = SwimMessage::Ack {
+                from: HostId(u64::MAX),
+                nonce: u64::MAX,
+                boot_nonce: u64::MAX,
+                configuration_version: u64::MAX,
+                standing: Some(u64::MAX),
+                promise_ns: u64::MAX,
+                relay_within_ns: u64::MAX,
+                gossip: GossipBatch::Entries(&batch),
+                coordinate: Coordinate::Held(&coordinate),
+            };
+            let mut out = Vec::new();
+            ack.encode_into(&mut out);
+            out.len()
+        };
+        assert!(encoded(room) <= DATAGRAM, "{} > {DATAGRAM}", encoded(room));
+        assert!(encoded(room + 1) > DATAGRAM, "{}", encoded(room + 1));
+    }
 }

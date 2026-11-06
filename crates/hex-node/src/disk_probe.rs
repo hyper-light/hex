@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use hex_health::probe::DiskProbe;
 use hex_health::{HealthError, Level};
 
-/// The record written each period: one page, so each probe is one block write and its flush.
-pub const RECORD_BYTES: usize = 4096;
+/// The record written each period: one byte, the least write that dirties a block, so the flush
+/// must write that block to the device (fdatasync(2)); nothing about the disk is assumed.
+pub const RECORD_BYTES: usize = 1;
 /// The clock's granularity G (RFC 6298 §2) the judge sees: `Instant` in nanoseconds, read at a
 /// millisecond's resolution by a node agent's timers.
 pub const GRANULARITY_NS: u64 = 1_000_000;
@@ -281,7 +282,7 @@ mod tests {
     }
 
     /// A real disk answers: do probe a temporary directory and judge it across 20 periods; expect
-    /// `Healthy` at every judgement and the node schedulable.
+    /// `Healthy` at every judgement, the node schedulable, and the record one byte, rewritten in place.
     #[test]
     fn a_disk_that_answers_stays_healthy() {
         let dir = tempfile::tempdir().unwrap();
@@ -291,5 +292,9 @@ mod tests {
             pause(Duration::from_millis(10));
         }
         assert!(p.schedulable());
+        let len = std::fs::metadata(dir.path().join(".hex-probe"))
+            .unwrap()
+            .len();
+        assert_eq!(len, 1);
     }
 }
