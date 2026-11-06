@@ -112,6 +112,32 @@ fn box_user_boxes_hold_the_contract() {
         Some(hex_api::Membership::BoxUser),
         "the helper must be live, so the runtime is box-user"
     );
+    // HEX-INST-6 (native plan step 6, Ada 2026-11-06), as on Linux: a program in a box naming no
+    // RLIMIT_NOFILE gets Docker 29's 1024:524288, which the helper's child sets before its exec. The
+    // installed helper runs under launchd's unlimited hard limit, so nothing caps the default.
+    let (mut out, w) = std::io::pipe().expect("pipe");
+    let mut p = rt
+        .exec(
+            &probe,
+            Program::of(&["/bin/sh", "-c", r#"echo "$(ulimit -Sn):$(ulimit -Hn)""#]),
+            Stdio {
+                stdout: Some(w),
+                ..Stdio::null()
+            },
+        )
+        .expect("exec in the probe box");
+    let mut seen = String::new();
+    std::io::Read::read_to_string(&mut out, &mut seen).expect("read");
+    assert_eq!(
+        p.wait_for(Duration::from_secs(10)).expect("wait"),
+        Some(Exit::Code(0))
+    );
+    let want = hex_core::limits::default_nofile(None);
+    assert_eq!(
+        seen.trim(),
+        format!("{}:{}", want.soft, want.hard),
+        "a box-user program's descriptor limits"
+    );
     rt.delete(&probe).expect("delete the probe box");
 
     let failures = conformance::run(&rt, &fixture());
