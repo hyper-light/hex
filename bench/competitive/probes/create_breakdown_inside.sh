@@ -24,6 +24,15 @@
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-3}
 OUT=/opt/out; mkdir -p /run/err
+# The soft descriptor limit everything here runs with (HEXBENCH_NOFILE), as create_serial_inside.sh sets it: `hard`
+# for the hard limit the container was given, as Hex's installer sets a node's, a number for that, unset for the
+# container's own (dockerd's 1024), at which an in-process node holds no /proc/net files. Said in nofile.txt.
+case "${HEXBENCH_NOFILE:-given}" in
+  given) ;;
+  hard) ulimit -Sn "$(ulimit -Hn)" ;;
+  *) ulimit -Sn "$HEXBENCH_NOFILE" ;;
+esac
+echo "descriptor limit: soft $(ulimit -Sn), hard $(ulimit -Hn) (HEXBENCH_NOFILE=${HEXBENCH_NOFILE:-given})" > "$OUT/nofile.txt"
 
 # The OCI pass's bundles (oci_inside.sh): the `sleep` container seam_oci's lifecycle creates, and the `true` one
 # its command line names.
