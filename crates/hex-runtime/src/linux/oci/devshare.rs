@@ -435,7 +435,8 @@ mod tests {
         // AC-T7.1.5, CLAUDE.md §6, model-based: under any sequence of lookups and holds, the held programs are an
         // oracle's least-recently-used list of at most `bound` policies: a lookup finds exactly what the
         // oracle holds, and a hold hands back exactly what the oracle drops. (The deterministic test above
-        // is the one that must hit and drop.)
+        // is the one that must hit and drop.) The sizes are fixtures: bounds of 1-4 against 7 policies and up to 63
+        // operations, so lookups hit and miss and holds drop.
         #[test]
         fn the_held_programs_are_a_least_recently_used_list(
             bound in 1usize..5,

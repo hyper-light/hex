@@ -39,7 +39,7 @@ const DEFAULT_CONTROLLERS: [&str; 4] = hex_core::cgroup::CONTROLLERS;
 
 /// The longest container id: a file name's limit (`NAME_MAX`, 255 bytes), since the id names the
 /// container's state directory.
-const MAX_ID_BYTES: usize = 255;
+pub(crate) const MAX_ID_BYTES: usize = 255;
 
 /// Refuses an id that isn't a plain name, before anything is touched. The id names the container's
 /// state directory and its default cgroup, so a `/` or `..` would reach outside the state root, and
@@ -1601,10 +1601,10 @@ impl Runtime {
         state.poststart = Some(!spec.hooks.poststart.is_empty());
         state.pid_namespace = Some(spec.makes_namespace("pid"));
         if !spec.hooks.start_container.is_empty() {
-            state.start_container = Some(hooks::budget(
-                "startContainer",
-                &spec.hooks.start_container,
-            )?);
+            // A hook naming no timeout is waited for as long as it runs: recorded as the most seconds there are.
+            state.start_container = Some(
+                hooks::budget("startContainer", &spec.hooks.start_container)?.unwrap_or(u64::MAX),
+            );
         }
         making.dir.put(&state)?;
         if let Some(path) = making.pid_file {
@@ -2808,8 +2808,9 @@ mod tests {
     /// `delete --force` waits for the killed container to exit (AC-T7.1.4); the competitive bench
     /// found it returning at once, which made its delete look 16x faster than crun's.
     fn sleeper() -> (std::process::Child, OwnedFd) {
+        // Until it is killed: each test that starts one ends it.
         let child = std::process::Command::new("sleep")
-            .arg("30")
+            .arg("infinity")
             .spawn()
             .unwrap();
         let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
@@ -2821,14 +2822,15 @@ mod tests {
     fn a_killed_process_is_seen_to_exit() {
         let (mut child, pidfd) = sleeper();
         child.kill().unwrap();
-        assert!(wait_exited(&pidfd, Duration::from_secs(10)).unwrap());
+        assert!(wait_exited(&pidfd, DELETE_PATIENCE).unwrap());
         child.wait().unwrap();
     }
 
+    /// A live process isn't seen to exit when the patience is spent, however short: none at all is the shortest.
     #[test]
     fn a_live_process_outlasts_a_short_patience() {
         let (mut child, pidfd) = sleeper();
-        assert!(!wait_exited(&pidfd, Duration::from_millis(50)).unwrap());
+        assert!(!wait_exited(&pidfd, Duration::ZERO).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
     }
@@ -2855,7 +2857,7 @@ mod tests {
         let (_dir, path, start) = exec_fifo();
         let end = open_to_write(&path);
         assert_eq!(rustix::io::write(&end, b"0").unwrap(), 1);
-        let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+        let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
         assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("exec.fifo");
@@ -2866,7 +2868,7 @@ mod tests {
                 assert_eq!(rustix::io::write(&end, b"0").unwrap(), 1);
             });
             let start = open_start_end(&path).unwrap();
-            let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+            let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
             assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
             writer.join().unwrap();
         });
@@ -2891,11 +2893,11 @@ mod tests {
             tv_nsec: 0,
         };
         assert_eq!(rustix::event::poll(&mut fds, Some(&none)).unwrap(), 0);
-        let took = wait_for_byte(&start, &pidfd, Duration::from_millis(50));
+        let took = wait_for_byte(&start, &pidfd, Duration::ZERO);
         assert!(matches!(took, Ok(Took::Nothing)), "{took:?}");
         let end = open_to_write(&path);
         assert_eq!(rustix::io::write(&end, b"0").unwrap(), 1);
-        let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+        let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
         assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
         init.kill().unwrap();
         init.wait().unwrap();
@@ -2913,7 +2915,7 @@ mod tests {
             init.kill().unwrap();
             init.wait().unwrap();
             drop(end);
-            let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+            let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
             assert!(matches!(took, Ok(Took::End)), "opened {opened}: {took:?}");
         }
     }
@@ -2929,7 +2931,7 @@ mod tests {
         drop(end);
         init.kill().unwrap();
         init.wait().unwrap();
-        let took = wait_for_byte(&start, &pidfd, Duration::from_secs(10));
+        let took = wait_for_byte(&start, &pidfd, START_PATIENCE);
         assert!(matches!(took, Ok(Took::Byte)), "{took:?}");
     }
 
@@ -3196,7 +3198,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         let path = lab.path().join("stand-in");
         stand_in_at(&path, "#!/bin/sh\nexit 0\n");
         let mut holder = Command::new("sh")
-            .args(["-c", "exec 3>>\"$0\" && echo ready && exec sleep 30"])
+            .args(["-c", "exec 3>>\"$0\" && echo ready && exec sleep infinity"])
             .arg(&path)
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -3287,7 +3289,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         // otherwise keep the create's handshake from its end-of-file for as long as it lives.
         let held = std::cell::RefCell::new(Vec::new());
         let spawn = |cmd: &mut Command| {
-            let mut bystander = Command::new("sleep").arg("30").spawn()?;
+            let mut bystander = Command::new("sleep").arg("infinity").spawn()?;
             // Linux lets a vfork parent go before the exec closes what is close-on-exec (v6.19
             // `fs/exec.c:1156`, `:1194`, `kernel/fork.c:1488`), and sets the new program's arguments after
             // that (`fs/binfmt_elf.c:1296`): what it holds is read once it shows them.

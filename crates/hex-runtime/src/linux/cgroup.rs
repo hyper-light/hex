@@ -25,13 +25,17 @@ pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// default bound on descendants is unlimited; this is Hex's, well above a node's useful load.
 pub const MAX_BOXES: usize = 65_536;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
-/// kernel delivers to the whole box at once through `cgroup.kill`).
-pub const MAX_SIGNALLED: usize = 1 << 20;
-/// Most cgroups the kill sweep walks in one box's subtree before it refuses. A box is its own cgroup
-/// and any the container nested under it — a handful; a tree with thousands is pathological, so this
-/// bounds the walk (its pending queue included) well above any real box (CLAUDE.md §2). Past it the
-/// sweep refuses ([`Refusal::Full`]) rather than stop silently (§3).
-pub const MAX_SWEEP_CGROUPS: usize = 4_096;
+/// kernel delivers to the whole box at once through `cgroup.kill`), and the kill sweep collects: no box
+/// holds more than there are pids ([`PID_MAX_LIMIT`]).
+pub const MAX_SIGNALLED: usize = PID_MAX_LIMIT;
+
+/// `PID_MAX_LIMIT` on a 64-bit kernel, the most pids there are: the ceiling `pid_max` may be set to
+/// (include/linux/threads.h; proc(5), /proc/sys/kernel/pid_max).
+const PID_MAX_LIMIT: usize = 4 * 1024 * 1024;
+
+/// The most bytes a box's `cgroup.procs` holds: a line for each of [`MAX_SIGNALLED`] processes, each pid at most
+/// `PID_MAX_LIMIT - 1`, seven digits, and a newline.
+const MAX_PROCS_FILE: usize = MAX_SIGNALLED * 8;
 
 thread_local! {
     /// This thread's cgroupfs lookups so far ([`lookups_on_this_thread`]).
@@ -513,12 +517,18 @@ impl BoxCgroup {
         }
     }
 
-    /// The text of the cgroup's file `file` ([`read_fd`]).
+    /// The text of the cgroup's file `file` ([`read_fd`]), bounded by [`MAX_PROCS_FILE`] for its `cgroup.procs`,
+    /// which grows with its processes, and by [`MAX_CGROUP_FILE`] for the rest.
     fn read(&self, file: &str) -> Result<String, Refusal> {
         let fd = self
             .open_file(file, OFlags::RDONLY)
             .map_err(|e| os_err("reading a cgroup file", &self.dir.join(file), e))?;
-        read_fd(fd.as_fd(), || self.dir.join(file))
+        let max = if file == "cgroup.procs" {
+            MAX_PROCS_FILE
+        } else {
+            MAX_CGROUP_FILE
+        };
+        read_fd(fd.as_fd(), max, || self.dir.join(file))
     }
 
     /// Writes `value` to the cgroup's file `file` ([`write_fd`]).
@@ -617,7 +627,18 @@ impl BoxCgroup {
         if !self.populated()? {
             return Ok(());
         }
-        for (dir, pid) in sweep_targets(&self.dir, &FsTree, MAX_SWEEP_CGROUPS, MAX_SIGNALLED)? {
+        let budget = sweep_budget(
+            &self.read("cgroup.stat")?,
+            &self.read("cgroup.max.descendants")?,
+        )
+        .ok_or_else(|| Refusal::Os {
+            op: "reading a box's cgroup count",
+            why: format!(
+                "{}: cgroup.stat or cgroup.max.descendants doesn't parse",
+                self.dir.display()
+            ),
+        })?;
+        for (dir, pid) in sweep_targets(&self.dir, &FsTree, budget, MAX_SIGNALLED)? {
             sigkill_box_process(&dir, pid)?;
         }
         Ok(())
@@ -755,7 +776,7 @@ impl BoxCgroup {
         let now = self.usage();
         let peak = peak
             .and_then(|fd| {
-                let mut buf = [0u8; 32];
+                let mut buf = [0u8; PEAK_TEXT];
                 let n = rustix::io::pread(fd, &mut buf, 0).ok()?;
                 std::str::from_utf8(buf.get(..n)?).ok()?.trim().parse().ok()
             })
@@ -786,6 +807,15 @@ fn swap_active() -> Result<bool, Refusal> {
     Ok(text.lines().skip(1).any(|l| !l.trim().is_empty()))
 }
 
+/// `memory.peak`'s most bytes: a `u64`'s 20 decimal digits and a newline (`peak_show`'s `"%llu\n"`, Linux v6.19
+/// mm/memcontrol.c:4250).
+const PEAK_TEXT: usize = 21;
+
+/// The bytes [`read_fd`] asks of a cgroup file a read: a page, the least on x86_64 and aarch64, which is the
+/// buffer the kernel first fills a seq_file read from (`seq_read_iter`, `seq_buf_alloc(m->size = PAGE_SIZE)`, Linux
+/// v6.19 fs/seq_file.c:210), so a file that fits a page is read in one call.
+const READ_CHUNK: usize = 4096;
+
 /// Largest cgroup file Hex reads whole: `io.stat` and `cpu.stat` hold a few lines each; a file past
 /// this is damage, refused by type rather than read on.
 const MAX_CGROUP_FILE: usize = 64 << 10;
@@ -806,10 +836,10 @@ fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
 
 /// A cgroup file's text from its open descriptor `fd`, in as few reads as it takes, no stat
 /// (`fs::read_to_string` takes one per file to size its buffer): an idle cgroup's check and baseline read a
-/// dozen on create's path. Refused past [`MAX_CGROUP_FILE`]; `path` names the file in a refusal.
-fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
+/// dozen on create's path. Refused past `max` bytes; `path` names the file in a refusal.
+fn read_fd(fd: BorrowedFd<'_>, max: usize, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
     let mut out = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; READ_CHUNK];
     // From the file's start whatever its offset: a descriptor opened ahead is read more than once, through copies that
     // share it ([`BoxCgroup::open_ahead`]).
     loop {
@@ -820,10 +850,10 @@ fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Ref
             break;
         }
         out.extend_from_slice(buf.get(..n).unwrap_or_default());
-        if out.len() > MAX_CGROUP_FILE {
+        if out.len() > max {
             return Err(Refusal::Os {
                 op: "reading a cgroup file",
-                why: format!("{} is over {MAX_CGROUP_FILE} bytes", path().display()),
+                why: format!("{} is over {max} bytes", path().display()),
             });
         }
     }
@@ -967,6 +997,21 @@ fn sweep_targets(
     Ok(targets)
 }
 
+/// How many cgroups the kill sweep of a box may visit, the box's own count, learned from the kernel (CLAUDE.md §2):
+/// the box and what its `cgroup.max.descendants` lets be under it where it sets a number, since the kernel refuses
+/// a `mkdir` past it (`cgroup_check_hierarchy_limits`, Linux v6.19 kernel/cgroup/cgroup.c:5972), so the subtree
+/// never outgrows it; else, `max` (`INT_MAX`, :2116, :3734-3735), the box and the descendants its `cgroup.stat`
+/// counts as the sweep begins (`nr_descendants`, :3832-3833). A subtree grown past that count since is refused
+/// ([`Refusal::Full`]) rather than walked on. The sweep holds a path for each cgroup the kernel holds, whose own
+/// cost is charged to the box. `None` where either file doesn't parse.
+fn sweep_budget(stat: &str, max_descendants: &str) -> Option<usize> {
+    let under = match max_descendants.trim() {
+        "max" => core::flat(stat, "nr_descendants")?,
+        limit => limit.parse().ok()?,
+    };
+    usize::try_from(under).ok()?.checked_add(1)
+}
+
 /// The real cgroupfs for [`sweep_targets`].
 struct FsTree;
 
@@ -1078,6 +1123,63 @@ mod tests {
             "the next slot, found by its name under the root"
         );
         assert!(root.slot(9).is_none(), "and none that isn't there");
+    }
+
+    /// AC-T7.1.4 (delete ends every process), CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): the kill
+    /// sweep's bound on cgroups is the box's own, learned from the kernel, not a number picked for every box: its
+    /// `cgroup.max.descendants` where it sets one, which the kernel never lets its subtree pass, else its
+    /// `cgroup.stat`'s `nr_descendants` as the sweep begins. Do: kill a box still populated after `cgroup.kill`, two
+    /// cgroups under it, its `cgroup.stat` counting one and its `cgroup.max.descendants` `max`; then again with
+    /// `cgroup.max.descendants` 2. Expect: the first refused past the box and the one it counted (`Full(2)`), not
+    /// walked on; the second swept. Plain files stand in for the cgroup's.
+    #[test]
+    fn the_kill_sweeps_bound_is_the_boxs_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("box");
+        for sub in ["", "a", "b"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+            std::fs::write(dir.join(sub).join("cgroup.procs"), "").unwrap();
+        }
+        std::fs::write(dir.join("cgroup.kill"), "").unwrap();
+        std::fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        std::fs::write(
+            dir.join("cgroup.stat"),
+            "nr_descendants 1\nnr_dying_descendants 0\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("cgroup.max.descendants"), "max\n").unwrap();
+        let cg = BoxCgroup::at(dir.clone());
+        assert_eq!(cg.kill(), Err(Refusal::Full(2)));
+        std::fs::write(dir.join("cgroup.max.descendants"), "2\n").unwrap();
+        assert_eq!(cg.kill(), Ok(()));
+    }
+
+    /// AC-T7.1.4 (delete ends every process), CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): the most
+    /// processes a box's signal or sweep is sent to is the kernel's ceiling on pids, so no box this host can make
+    /// holds more. Do: read this host's `pid_max` (proc(5), at most `PID_MAX_LIMIT`). Expect: the bound no lower.
+    #[test]
+    fn the_signal_bound_is_no_lower_than_the_hosts_pid_max() {
+        let pid_max: usize = std::fs::read_to_string("/proc/sys/kernel/pid_max")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(MAX_SIGNALLED >= pid_max, "{MAX_SIGNALLED} < {pid_max}");
+    }
+
+    /// AC-T7.1.4, CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): a box's `cgroup.procs` is bounded by the
+    /// most processes a box can hold, not by the bound on the files of a few lines beside it. Do: list a box's
+    /// processes when its `cgroup.procs` holds 10,000 of the widest pids there are, 80,000 bytes, past the 64 KiB once
+    /// picked for every cgroup file. Expect: every one listed.
+    #[test]
+    fn a_box_with_many_processes_has_them_all_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let widest = PID_MAX_LIMIT - 1;
+        let text = format!("{widest}\n").repeat(10_000);
+        assert!(text.len() > 64 << 10);
+        std::fs::write(tmp.path().join("cgroup.procs"), text).unwrap();
+        let procs = BoxCgroup::at(tmp.path().to_owned()).procs().unwrap();
+        assert_eq!(procs.len(), 10_000);
     }
 
     #[test]

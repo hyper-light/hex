@@ -423,7 +423,8 @@ fn an_error_another_requests_answer_or_a_torn_message_is_unreadable() {
 }
 
 proptest! {
-    /// Any bytes give a verdict or a refusal, never a panic.
+    /// Any bytes give a verdict or a refusal, never a panic. 512 bytes is a fixture: room for headers, attributes
+    /// and lengths that run past the end, which is what the readers must refuse.
     #[test]
     fn any_answer_or_text_is_read_without_a_panic(
         bytes in proptest::collection::vec(any::<u8>(), 0..512),
@@ -440,4 +441,70 @@ proptest! {
         let _ = sockets(&text, &BTreeMap::new());
         let _ = links(&text);
     }
+}
+
+/// CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): a dump's reads are bounded by its bytes, each read
+/// that isn't refused holding at least a message's header, not by a count picked beside them. Do: answer a dump in
+/// 65 reads of one header-only message each (one past the 64 once picked), then `NLMSG_DONE`, through a
+/// socket pair that keeps each read apart. Expect: the answer read whole, every message of it kept.
+#[test]
+fn a_dumps_reads_are_bounded_by_its_bytes() {
+    let (ours, theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let reads = 65;
+    for _ in 0..reads {
+        rustix::net::send(&theirs, &msg(20, 1, &[]), SendFlags::empty()).unwrap();
+    }
+    let done = msg(NLMSG_DONE, 1, &[0, 0, 0, 0]);
+    rustix::net::send(&theirs, &done, SendFlags::empty()).unwrap();
+    let mut scratch = Scratch::default();
+    assert_eq!(ask(&ours, &[0; NLMSG_HDR], &mut scratch), Ok(()));
+    assert_eq!(scratch.answer.len(), reads * NLMSG_HDR + done.len());
+}
+
+/// Ada's 2026-11-06 rule (no picked constants): a wait on the kernel's answer has its deadline learned from the
+/// answer times seen, by RFC 6298's estimator. Do: ask its deadline before any sample, after a first sample of
+/// 8 ms, after a second of 16 ms, then after a wait that passed it, and after enough of those. Expect: 1 s before
+/// any (2.1); 8 + 4 x 4 = 24 ms after the first (2.2); SRTT 9 ms and RTTVAR 3/4 x 4 + 1/4 x 8 = 5 ms, so 29 ms, after
+/// the second (2.3); doubled to 58 ms past it (5.5); and never past 60 s (2.5).
+#[test]
+fn a_waits_deadline_is_learned_from_the_answer_times_seen() {
+    let ms = Duration::from_millis;
+    let mut rto = Rto::new();
+    assert_eq!(rto.deadline(), Duration::from_secs(1));
+    rto.sample(ms(8));
+    assert_eq!(rto.deadline(), ms(24));
+    rto.sample(ms(16));
+    assert_eq!(rto.deadline(), ms(29));
+    rto.expired();
+    assert_eq!(rto.deadline(), ms(58));
+    for _ in 0..64 {
+        rto.expired();
+    }
+    assert_eq!(rto.deadline(), Duration::from_secs(60));
+}
+
+/// Ada's 2026-11-06 rule: a check's reads of a dump wait as long as its thread has learned answers take, and one
+/// that passes that is refused and doubles it (RFC 6298 (5.5)), not held for a second picked. Do: learn a 1 ms
+/// answer time, then dump through a socket pair whose other end never answers. Expect: refused as unreadable, at
+/// once rather than for good, and the deadline doubled from 3 ms to 6 ms.
+#[test]
+fn a_dump_unanswered_past_its_learned_deadline_is_refused_and_the_deadline_doubled() {
+    let (ours, _theirs) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let mut scratch = Scratch::default();
+    scratch.answers.sample(Duration::from_millis(1));
+    assert_eq!(scratch.answers.deadline(), Duration::from_millis(3));
+    assert_eq!(dumps(&ours, &mut scratch), Err(Refused::Unreadable));
+    assert_eq!(scratch.answers.deadline(), Duration::from_millis(6));
 }
