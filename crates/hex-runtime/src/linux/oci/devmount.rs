@@ -4,9 +4,8 @@ use super::{mount::Op, spec::Spec};
 use hex_core::devfs::Unpooled;
 use rustix::mount::MountFlags;
 
-/// Configuration bytes retained per key (four keys): larger specifications use ordinary setup.
-const MAX_KEY_BYTES: usize = 2048;
-
+/// What a prepared `/dev` is made for: its mount's source, data and flags. Every byte of it is the spec's, so a
+/// key is bounded by the spec's own bound (`spec::MAX_CONFIG_BYTES`), and the pool's four keys by four of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub source: String,
@@ -41,14 +40,6 @@ pub fn eligible(spec: &Spec, plan: &[Op]) -> Result<(u32, Key), Unpooled> {
         .any(|s| s.split('=').next() == Some("nr_inodes"))
     {
         return Err(Unpooled::Inodes);
-    }
-    if !op
-        .kind_source
-        .len()
-        .checked_add(op.data.len())
-        .is_some_and(|n| n <= MAX_KEY_BYTES)
-    {
-        return Err(Unpooled::KeyBytes);
     }
     Ok((
         u32::try_from(index).map_err(|_| Unpooled::Capacity)?,
@@ -141,10 +132,11 @@ mod tests {
         assert!(is_dev("//dev/./"));
     }
 
-    /// AC-T7.1.4: duplicate /dev, custom devices, explicit inode quotas and an oversized key retain
-    /// ordinary construction order; a different source or data option is a different pool key.
+    /// AC-T7.1.4: duplicate /dev, custom devices and explicit inode quotas retain ordinary construction
+    /// order; a different source or data option is a different pool key, and a key past the 2,048 bytes
+    /// once picked for it is served, bounded by its spec alone.
     #[test]
-    fn sensitive_specs_and_oversized_keys_use_ordinary_setup() {
+    fn sensitive_specs_use_ordinary_setup() {
         let mut s = spec("");
         let plan = mount::plan(&s.mounts).unwrap();
         let (_, original) = eligible(&s, &plan).unwrap();
@@ -163,8 +155,10 @@ mod tests {
         assert_ne!(eligible(&spec(""), &changed).unwrap().1, original);
         changed[0].data.push_str(",uid=5");
         assert_ne!(eligible(&spec(""), &changed).unwrap().1, original);
-        changed[0].data = "x".repeat(MAX_KEY_BYTES + 1);
-        assert!(eligible(&spec(""), &changed).is_err());
+        // A key is bounded by the spec it comes from (spec::MAX_CONFIG_BYTES), with no bound of its own: one
+        // over the 2,048 bytes once picked for it is served from the pool.
+        changed[0].data = "x".repeat(4 * 2048);
+        assert!(eligible(&spec(""), &changed).is_ok());
     }
 
     /// AC-T7.1.4: leave ineligible specifications on ordinary setup and report their fixed reason.
@@ -189,8 +183,11 @@ mod tests {
         changed[0].data.push_str(",nr_inodes=12");
         assert_eq!(eligible(&base, &changed), Err(Unpooled::Inodes));
         changed = plan;
-        changed[0].data = "x".repeat(MAX_KEY_BYTES + 1);
-        assert_eq!(eligible(&base, &changed), Err(Unpooled::KeyBytes));
+        changed[0].data = "x".repeat(4 * 2048);
+        assert_eq!(
+            eligible(&base, &changed).map(|(_, k)| k.data.len()),
+            Ok(4 * 2048)
+        );
         let mut devices = base;
         devices.linux.devices.push(
             serde_json::from_str(r#"{"path":"/dev/custom","type":"c","major":1,"minor":3}"#)

@@ -95,7 +95,8 @@ fn serve() -> Result<(), OciError> {
     // spawn, so the agent never clears close-on-exec on it. Moved off fd 0 close-on-exec, so it doesn't
     // survive into a program an intermediate's clone execs (the intermediate is a fork, which keeps it;
     // only the workload's execve, which must not hold the agent's socket, closes it), and /dev/null put
-    // on fd 0 in its place.
+    // on fd 0 in its place. It goes to the lowest free descriptor from 3, the first past standard
+    // input, output and error's 0-2 (stdin(3)), so it never takes one of theirs.
     let mut stdin = sys::own_fd(0)?;
     let mut socket = rustix::io::fcntl_dupfd_cloexec(&stdin, 3)
         .map_err(|e| OciError::os("moving the seed's socket off its stdin", e))?;
@@ -115,6 +116,9 @@ fn serve() -> Result<(), OciError> {
     // A create seed on a root node prunes its mount namespace once, here, off every create's path, so
     // every init it clones copies a two-mount namespace holding nothing of the host (goal 5 plan step 2).
     if let Some(mountpoint) = std::env::var_os(ENV_PRUNE) {
+        // The namespace's mount cap, read while there is a `/proc` to read it from, for every init this seed
+        // clones to bound its walks of the namespace's mounts by (init::MOUNT_MAX).
+        init::mount_max()?;
         prune(Path::new(&mountpoint))?;
     }
     let mut specs = Specs::default();
@@ -131,6 +135,11 @@ fn serve() -> Result<(), OciError> {
         }
     }
 }
+
+/// The data of the pruned root's tmpfs: one block, a page on any page size (`nr_blocks`,
+/// Documentation/filesystems/tmpfs.rst:82), the least bound tmpfs takes (0 is none, :94). It holds nothing and is
+/// remounted read-only; a container's root is attached on it, which takes no block.
+pub(crate) const ROOT_TMPFS: &std::ffi::CStr = c"nr_blocks=1,mode=755";
 
 /// Prunes the create seed's mount namespace once, at start (goal 5 plan step 2): unshare a mount
 /// namespace, make `/` private, mount a small tmpfs over `mountpoint`, pivot into it, detach the old
@@ -155,7 +164,7 @@ fn prune(mountpoint: &Path) -> Result<(), OciError> {
         mountpoint,
         "tmpfs",
         MountFlags::NOSUID,
-        Some(c"size=64k,mode=755"),
+        Some(ROOT_TMPFS),
     )
     .map_err(|e| OciError::os("the seed's root tmpfs", e))?;
     rustix::process::chdir(mountpoint).map_err(|e| OciError::os("chdir the seed's root", e))?;

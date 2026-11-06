@@ -6,11 +6,9 @@ use super::{mount::Op, spec::Spec};
 use hex_core::devfs::Unpooled;
 use rustix::mount::MountFlags;
 
-/// Configuration bytes retained per key (four keys): larger specifications use ordinary setup.
-const MAX_KEY_BYTES: usize = 4096;
-
 /// What a prepared proc is made for: its mount's data and flags, and the masked and read-only paths beneath
-/// it, each relative to the proc's root, in the spec's order.
+/// it, each relative to the proc's root, in the spec's order. Every byte of it is the spec's, so a key is bounded by
+/// the spec's own bound (`spec::MAX_CONFIG_BYTES`), and the pool's four keys by four of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub data: String,
@@ -60,15 +58,6 @@ pub fn eligible(spec: &Spec, plan: &[Op]) -> Result<(u32, Key), Unpooled> {
         masked: within(&spec.linux.masked_paths)?,
         readonly: within(&spec.linux.readonly_paths)?,
     };
-    let bytes = key
-        .masked
-        .iter()
-        .chain(&key.readonly)
-        .map(String::len)
-        .try_fold(key.data.len(), usize::checked_add);
-    if !bytes.is_some_and(|n| n <= MAX_KEY_BYTES) {
-        return Err(Unpooled::KeyBytes);
-    }
     Ok((u32::try_from(index).map_err(|_| Unpooled::Capacity)?, key))
 }
 
@@ -154,7 +143,8 @@ mod tests {
 
     /// HEX-MNTNS-6: specs a prepared proc can't stand for. Expect each counted under its reason: no pid
     /// namespace of its own (none, or one by path), no proc, two procs, a mount beneath `/proc`, a proc
-    /// that's a bind or another filesystem, a mask of `/proc` itself or through `..`, an oversized key.
+    /// that's a bind or another filesystem, a mask of `/proc` itself or through `..`; and a key past the
+    /// 4,096 bytes once picked for it served, bounded by its spec alone.
     #[test]
     fn specs_a_prepared_proc_cannot_serve_keep_ordinary_setup() {
         assert_eq!(
@@ -193,10 +183,12 @@ mod tests {
             check(&spec(PID, PROC, "[]", r#"["/proc/sys/../../etc"]"#)),
             Err(Unpooled::Beneath)
         );
-        let long = format!(r#"["/proc/{}"]"#, "a".repeat(MAX_KEY_BYTES + 1));
+        // A key is bounded by the spec it comes from (spec::MAX_CONFIG_BYTES), with no bound of its own: one
+        // over the 4,096 bytes once picked for it is served from the pool.
+        let long = format!(r#"["/proc/{}"]"#, "a".repeat(4 * 4096));
         assert_eq!(
-            check(&spec(PID, PROC, &long, "[]")),
-            Err(Unpooled::KeyBytes)
+            check(&spec(PID, PROC, &long, "[]")).map(|(_, k)| k.masked.len()),
+            Ok(1)
         );
         assert_eq!(beneath_proc("//proc/./sys/"), Some("sys".to_owned()));
         assert_eq!(beneath_proc("/procfs/sys"), None);
@@ -220,6 +212,9 @@ mod tests {
             .trim()
             .split(['.', '-'])
             .map(|p| p.parse::<u32>().unwrap_or(0));
+        // 7.1 is the first kernel that opens a pid namespace with no process yet: below it
+        // `pidns_for_children_get` refuses one (v6.19 kernel/pid_namespace.c:372-379), and v7.1 dropped the check
+        // (:361-373), as init.rs's PID_NAMESPACE_AHEAD says.
         let at_least_7_1 = (v.next().unwrap(), v.next().unwrap()) >= (7, 1);
         let made = super::super::init::prepare_proc(&key, &sources);
         if !at_least_7_1 {
