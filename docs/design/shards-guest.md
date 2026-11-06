@@ -160,8 +160,9 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   everything the node's user can write, and undo the VM boundary (the lead, 2026-11-06). The default is Docker
   Desktop's file-sharing list: on macOS `/Users`, `/Volumes`, `/private`, `/tmp` and `/var/folders`; on Windows the
   users folder and the temp folder; read-write, served as the node's own user, never root. Any other root is the
-  operator's configuration (`HEX_GUEST_SHARES`). The OCI validation run sets the roots its tests bind (its `mounts`
-  test binds `/etc`), and its record says so; the guest's init mounts each as `virtiofs` at
+  operator's configuration (`HEX_GUEST_SHARES`). The OCI validation shares only its runtime-tools checkout
+  (read-only) and its out directory (read-write), and its record names them (§6a): its `mounts` test binds `/etc`
+  of the runtime's own host, which in the guest is the lab's own `/etc`, as on Linux; the guest's init mounts each as `virtiofs` at
   `/run/hex/shares/<i>`, as the kernel's command line names them (`hex.shares=rw,ro,…`, a mode per tag in
   order; HEX-GUEST-11) (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
   rewrites each bind mount's source to its path under the share that holds it, and a source under no share is
@@ -188,6 +189,43 @@ macOS on x86_64 and Windows on arm64 (`shards-guest.md` §4): the `oci` class is
 The `oci` class's conformance suite (`hex_api::conformance`) and the OCI runtime-spec validation
 (`bench/oci-validation/`) pass in the guest on the Mac Studio and on jupiter, reached from the host's node through
 the seam, and every gate passes.
+
+### 6a. Where the OCI validation runs: in the guest, its lab made by the host's node (decided 2026-11-06)
+
+runtime-tools (`opencontainers/runtime-tools` `bd3b0bd`) needs one Linux kernel under both its harness and the
+runtime it tests:
+- it drives the runtime's CLI (`create`, `start`, `state`, `kill`, `delete`: `validation/util/container.go:79,126,
+  138,172,196`), giving the container a stdout file in the bundle (`:81-85`, read back at `:109-110`), and builds
+  each bundle with `tar` (`validation/util/test.go:130`) around its `runtimetest`, which checks from inside
+  (`:199`, `:276`);
+- it reads the container's namespaces at `/proc/<state.pid>/ns` (`validation/linux_ns_itype/linux_ns_itype.go:83`,
+  `validation/linux_ns_path/linux_ns_path.go:96`), and its cgroup files through `/proc/self/mountinfo`
+  (`cgroups/cgroups.go:33-34`; `validation/util/linux_resources_memory.go:11,18` and the other `linux_cgroups_*`);
+- it runs `unshare … --fork sleep` itself and hands the runtime `/proc/<pid>/ns/<x>` to join
+  (`linux_ns_path.go:113,63,93`);
+- its `mounts` test binds the runtime's host's `/etc` eight ways (`validation/mounts/mounts.go:38-72`).
+
+Hex's Linux run (`bench/oci-validation/run_hex.sh:12-16`, `inside.sh:6-16`) runs it in a privileged container with
+a cgroup namespace of its own, the suite's `RUNTIME` a shim to `hex oci`.
+
+So in the guest it runs as on Linux, the docker container replaced by a Hex `oci` box, the **lab**, which the
+host's node makes and drives through the seam (HEX-GUEST-20, `crates/hex-cli/tests/guest_validation.rs`): the host
+boots the guest through `hex_runtime::guest`, creates the lab from a bundle (an Alpine userland with util-linux and
+the guest's `hex`; every capability, no seccomp filter, its own pid, mount and cgroup namespaces, cgroup2 mounted
+writable), staged as every root is (§4a), with the runtime-tools checkout for the guest's architecture (read-only)
+and an out directory (read-write) bound through the run's two shares. The lab runs the unchanged `inside.sh`; every
+call, stdio stream and exit crosses vsock; the host reads `results.tsv` from the out share and checks it against
+the Linux record's pass/fail list (`bench/oci-validation/SUMMARY-hex.txt`). A test that passes on Linux and fails
+in the guest is a failure to fix at its cause; the record's two deliberate refusals (`linux_mount_label`,
+`linux_process_apparmor_profile`) stand as they are.
+
+The other reading, the harness on the macOS or Windows host and a host-side `hex oci` forwarding to the guest,
+can't run the suite unmodified: its binaries are Linux's, and the `/proc`, cgroup and `unshare` steps above exist
+on no other OS. Answering them from the guest would rewrite runtime-tools, and then it would no longer be the OCI
+runtime-spec validation.
+
+Falsified if the suite needs the host's own files (a test reading a macOS or Windows path), which no test above
+does.
 
 Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-1: the wire framed by length over a stream, refused from its prefix past its bound; an exec whose stdio
@@ -236,6 +274,9 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-19: the same suite through the real `shards_api::Shards` from the host's node, run where
   `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD` and `SHARDS_BIN` are set (`crates/hex-cli/tests/guest_real.rs`,
   ignored elsewhere).
+- HEX-GUEST-20: the OCI runtime-spec validation in the guest (§6a): the host's node boots the guest, makes the lab
+  and runs `inside.sh` in it through the seam; each test's result matches the Linux record's
+  (`crates/hex-cli/tests/guest_validation.rs`, run where its inputs are set, skipped elsewhere).
 
 ## 7. What would falsify it
 
