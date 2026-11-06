@@ -349,6 +349,8 @@ pub fn measure(
             // Refused at admission: it never waits for capacity.
             continue;
         }
+        // A run started at or past `end` holds nothing in the window: it waits until `end`.
+        let r = r.filter(|r| r.started < end);
         let started = r.map_or(end, |r| r.started);
         events.push((w.arrives.min(started), 2, at));
         events.push((started, 3, at));
@@ -499,6 +501,11 @@ mod tests {
         // Not refused, owner 1's workload waits the whole run: the two contend for 10 ns.
         let shares = measure(&cluster, &ran, &[false, false], 30).unwrap();
         assert_eq!(shares.contended_ns, 10);
+        // Measured up to 5 (a recorded day's end before the run's): owner 0's workload, started at
+        // 10, holds nothing in the window and waits all of it, as owner 1's does.
+        let shares = measure(&cluster, &ran, &[false, false], 5).unwrap();
+        assert_eq!(shares.contended_ns, 5);
+        assert_eq!(shares.of_cluster_ppm, vec![0, 0]);
     }
 
     /// AC-T7.5.2 (DRF's order, NSDI 2011 §4): the owner with the lower dominant share over its

@@ -94,6 +94,17 @@ pub fn run(day: &Cluster, policy: Policy) -> (ShareReport, u64) {
 /// `day` under `policy` with up to `preemptions` workloads preempted: its shares under contention,
 /// and the workloads refused at admission.
 pub fn run_with(day: &Cluster, policy: Policy, preemptions: u64) -> (ShareReport, u64) {
+    run_within(day, policy, preemptions, Time::MAX)
+}
+
+/// As [`run_with`], with the shares measured up to `until` (the recorded day's end), or the run's
+/// end if that comes first.
+pub fn run_within(
+    day: &Cluster,
+    policy: Policy,
+    preemptions: u64,
+    until: Time,
+) -> (ShareReport, u64) {
     let run = sim::run(
         day,
         &Config {
@@ -106,7 +117,7 @@ pub fn run_with(day: &Cluster, policy: Policy, preemptions: u64) -> (ShareReport
     .unwrap();
     let refused = u64::try_from(run.refused.iter().filter(|&&r| r).count()).unwrap();
     (
-        fair::measure(day, &run.ran, &run.refused, run.report.end).unwrap(),
+        fair::measure(day, &run.ran, &run.refused, run.report.end.min(until)).unwrap(),
         refused,
     )
 }
@@ -146,13 +157,11 @@ pub fn starts(day: &Cluster, policy: Policy, preemptions: u64) -> (Vec<Option<Ti
     )
 }
 
-/// T-T7.5.1's runs on a recorded day: `usual` as recorded, then with 1,000 workloads from a new
-/// owner (one past the last), all arriving at the start of the day's busiest hour (the hour, counted
-/// from its first arrival, in which most arrived), each drawn from the day's own workloads
-/// ([`generate::burst_from`], seed 7). For Hex's policy (bands, weighted DRF, preemption), plain DRF
-/// and submit order: each of `usual`'s owners' start p95 without the burst and with it, and the
-/// workloads preempted with it. Prints each row under `label`.
-pub fn burst_rows(usual: &Cluster, label: &str) -> Vec<(&'static str, Vec<Time>, Vec<Time>, u64)> {
+/// T-T7.5.1's burst on a recorded day: `usual` with 1,000 workloads from a new owner (one past the
+/// last), all arriving at the start of the day's busiest hour (the hour, counted from its first
+/// arrival, in which most arrived), each drawn from the day's own workloads
+/// ([`generate::burst_from`], seed 7). Prints what it made under `label`.
+pub fn with_burst(usual: &Cluster, label: &str) -> Cluster {
     const HOUR: Time = 3_600_000_000_000;
     let owners = u32::try_from(usual.owners.len()).unwrap();
     let mut per_hour = std::collections::BTreeMap::<Time, u64>::new();
@@ -170,18 +179,43 @@ pub fn burst_rows(usual: &Cluster, label: &str) -> Vec<(&'static str, Vec<Time>,
         usual.workloads.len(),
         burst.workloads.len()
     );
-    let mut rows = Vec::new();
-    for (name, policy, preemptions) in [
+    burst
+}
+
+/// Each of `usual`'s owners' start p95 without the burst and with it under one policy, and the
+/// workloads preempted with it.
+pub fn burst_row(
+    usual: &Cluster,
+    burst: &Cluster,
+    policy: Policy,
+    preemptions: u64,
+) -> (Vec<Time>, Vec<Time>, u64) {
+    let owners = u32::try_from(usual.owners.len()).unwrap();
+    let (without, _) = starts(usual, policy, preemptions);
+    let (with, preempted) = starts(burst, policy, preemptions);
+    (
+        p95s(usual, &without, owners),
+        p95s(burst, &with, owners),
+        preempted,
+    )
+}
+
+/// T-T7.5.1's runs on a recorded day ([`with_burst`]): for Hex's policy (bands, weighted DRF,
+/// preemption), plain DRF and submit order, each owner's start p95 without the burst and with it,
+/// and the workloads preempted with it.
+pub fn burst_rows(usual: &Cluster, label: &str) -> Vec<(&'static str, Vec<Time>, Vec<Time>, u64)> {
+    let burst = with_burst(usual, label);
+    [
         ("hex", Policy::Drf, 100_000),
         ("drf", Policy::Drf, 0),
         ("fifo", Policy::Fifo, 0),
-    ] {
-        let (without, _) = starts(usual, policy, preemptions);
-        let (with, preempted) = starts(&burst, policy, preemptions);
-        let (a, b) = (p95s(usual, &without, owners), p95s(&burst, &with, owners));
-        rows.push((name, a, b, preempted));
-    }
-    rows
+    ]
+    .into_iter()
+    .map(|(name, policy, preemptions)| {
+        let (a, b, preempted) = burst_row(usual, &burst, policy, preemptions);
+        (name, a, b, preempted)
+    })
+    .collect()
 }
 
 /// Whether every owner's p95 with the burst is at most its p95 without.

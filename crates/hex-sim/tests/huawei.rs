@@ -20,11 +20,11 @@
 mod common;
 
 use common::{
-    DAY, GIB, asked, burst_rows, describe, holds, only_owners, quarter_cluster, recorded, run,
-    run_with,
+    DAY, GIB, asked, burst_row, describe, holds, only_owners, quarter_cluster, recorded, run,
+    run_with, with_burst,
 };
 use hex_sim::fair::Policy;
-use hex_sim::model::{Classes, NodeId, NodeSpec, Resources};
+use hex_sim::model::{Classes, NodeId, NodeSpec, Resources, Time};
 
 const TRACE: &str = "huawei-r5-day30.trace";
 
@@ -108,29 +108,48 @@ fn four_workload_owners_on_the_largest_quarter_cluster() {
     assert!(refused > 0);
 }
 
-/// T-T7.5.1, measured on a recorded day of workloads (`bench/sched/g4_huawei.md`): do day 30 of Huawei
-/// Cloud's region 5 as recorded (all its owners, on the trace's 10 hosts), then the same day with
-/// 1,000 workloads from an owner that launched none that day, all at the start of the day's busiest
-/// hour, each drawn from the day's own sandboxes (`common::burst_rows`); expect, under Hex's policy,
-/// every owner's start p95 with the burst to be at most its p95 without. It holds, but under plain
-/// DRF and submit order too (2026-11-06: no owner slower, nothing preempted): the ten 48-core hosts
-/// take a burst of mostly 0.3-core, short-lived sandboxes without anyone waiting, so this day can't
-/// tell the policies apart. The generated burst of `tests/burst.rs` does.
+/// T-T7.5.1 on a recorded day of workloads (`bench/sched/g4_huawei.md`): do day 30 of Huawei Cloud's
+/// region 5 as recorded (all its owners) on 10 down to 1 of the trace's m5d.metal hosts, each with
+/// and without 1,000 workloads from an owner that launched none that day, all at the start of the
+/// day's busiest hour, each drawn from the day's own (`common::with_burst`). The host count is fixed
+/// by a rule set before Hex's numbers are read: the largest count at which submit order (FIFO) lets
+/// the burst slow another owner, so the burst is a stress there. Expect, at that count, every
+/// owner's start p95 with the burst at most its p95 without under Hex's policy (bands, weighted DRF,
+/// preemption of over-share work); plain DRF beside it, for the record.
 #[test]
 fn a_burst_of_workloads_leaves_the_other_owners_start_p95_as_it_was() {
-    let usual = recorded(TRACE);
-    let rows = burst_rows(&usual, "T-T7.5.1 huawei r5 day 30");
-    for (name, a, b, preempted) in &rows {
+    let full = recorded(TRACE);
+    let report = |name: &str, hosts: usize, (a, b, preempted): &(Vec<Time>, Vec<Time>, u64)| {
         let worse = b.iter().zip(a).filter(|(w, wo)| w > wo).count();
         let worst = b.iter().zip(a).map(|(w, wo)| w.saturating_sub(*wo)).max();
         eprintln!(
-            "T-T7.5.1 huawei {name}: owners {}, slower with the burst {worse}, most slower by {worst:?} ns; preempted {preempted}; holds {}",
+            "T-T7.5.1 huawei {hosts} hosts {name}: owners {}, slower with the burst {worse}, most slower by {worst:?} ns; preempted {preempted}; holds {}",
             a.len(),
             holds(a, b)
         );
+    };
+    // The rule, applied before Hex runs at all.
+    let mut chosen = None;
+    for hosts in (1..=10).rev() {
+        let mut usual = full.clone();
+        usual.nodes.truncate(hosts);
+        let burst = with_burst(&usual, &format!("T-T7.5.1 huawei r5 day 30, {hosts} hosts"));
+        let fifo = burst_row(&usual, &burst, Policy::Fifo, 0);
+        report("fifo", hosts, &fifo);
+        if !holds(&fifo.0, &fifo.1) {
+            chosen = Some((hosts, usual, burst));
+            break;
+        }
     }
+    let (hosts, usual, burst) =
+        chosen.expect("FIFO keeps the bar at every host count from 1 to 10");
+    eprintln!("T-T7.5.1 huawei: the rule picks {hosts} hosts");
+    let hex = burst_row(&usual, &burst, Policy::Drf, 100_000);
+    let drf = burst_row(&usual, &burst, Policy::Drf, 0);
+    report("hex", hosts, &hex);
+    report("drf", hosts, &drf);
     assert!(
-        holds(&rows[0].1, &rows[0].2),
+        holds(&hex.0, &hex.1),
         "Hex's policy lets the burst delay an owner"
     );
 }
