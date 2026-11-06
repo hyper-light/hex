@@ -62,12 +62,13 @@ PY
 st "built $(sha256sum "$O/hex" "$O/seam_oci" | cut -c1-16 | paste -sd' ')"
 
 # A cell is called hung past twice the slowest recorded cell (the false-alarm margin of a failure bound: it never
-# changes what's measured, only when a hung cell is called hung; the lead's call, 2026-11-06). Recorded so far, the
-# slowest cell is bounded by its run's whole timed window: the guest's 18 cells (mntns-guest-20261106T054217Z, §16)
-# ran in 323 s, so 646 s; on the host, 16 single-phase cells of the same load ran in 177 s
-# (hex-g6-givenab-20261106T093407Z, §14), and a record cell runs two phases, so 2 x 2 x 177 = 708 s. Each cell's own
-# seconds now go into `exits`, so the host record's slowest cell sets this from its own run.
-case $MODE in host) CELL_BOUND=708 ;; guest) CELL_BOUND=646 ;; esac
+# changes what's measured, only when a hung cell is called hung; the lead's call, 2026-11-06). The guest's slowest
+# recorded cell took 22 s (tree-L12-r1 and copy-L12-r2, each from the cell before it ending to its own end in the
+# exits of mntns-guest-20261106T054217Z, §16: cells 15-22 s), so 44 s. No host record cell yet: the host's is bounded by its run's
+# whole window, 16 single-phase cells of the same load in 177 s (hex-g6-givenab-20261106T093407Z, §14), and a record
+# cell runs two phases, so 2 x 2 x 177 = 708 s. Each cell's own seconds go into `exits`, so the host record's slowest
+# cell sets this from its own run.
+case $MODE in host) CELL_BOUND=708 ;; guest) CELL_BOUND=44 ;; esac
 
 cell() { # cell <way> <loops> <round>
   local way=$1 L=$2 r=$3 name=$1-L$2-r$3 pids=() p rc res t0=$SECONDS
