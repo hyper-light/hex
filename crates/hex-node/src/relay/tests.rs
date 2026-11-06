@@ -1310,7 +1310,8 @@ fn a_relay_refusing_mid_stream_reads_its_peer_to_the_end_and_answers_typed() {
 
 /// HEX-GUEST-14 (Ada's rule on constants: a learned bound): open a stage: expect the relay's first answer
 /// its budget, the free inodes and bytes statvfs(3) reports for the staged folder, which a stage spends
-/// against (within what the folder's file system holds, read again beside it).
+/// against (within what the folder's file system holds, read again beside it; where it keeps no inode count,
+/// btrfs, its bytes bound the entries).
 #[test]
 fn a_stages_first_answer_is_the_staged_folders_free_space() {
     let (lab, staged) = staged_lab();
@@ -1334,11 +1335,13 @@ fn a_stages_first_answer_is_the_staged_folders_free_space() {
     };
     let hf::Budget { entries, bytes, .. } = hf::read_budget(&message).expect("a budget");
     let st = rustix::fs::statvfs(&staged).unwrap();
-    assert!(
-        entries > 0 && entries <= st.f_files,
-        "{entries} of {}",
+    // Within the inodes the file system holds, or where it keeps no count (btrfs: f_files 0), its bytes.
+    let held = if st.f_files == 0 {
+        st.f_blocks * st.f_frsize
+    } else {
         st.f_files
-    );
+    };
+    assert!(entries > 0 && entries <= held, "{entries} of {held}");
     assert!(bytes > 0 && bytes <= st.f_blocks * st.f_frsize, "{bytes}");
     drop(conn);
 }

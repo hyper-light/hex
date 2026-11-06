@@ -315,6 +315,12 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     - **Crash safety:** a layer is staged into `.layers/.partial-<relay pid>-<n>-<digest>` and renamed to its
       digest only once whole, so a stage cut or crashed mid-layer leaves nothing that counts as held; a partial
       another relay process left is removed when a stage opens, and one this process left with its stage.
+    - **The budget:** the relay answers a stage's opening with what its staged folder's file system has free
+      (statvfs(3)), and both sides spend against it: free inodes for entries, bytes free to an unprivileged
+      writer for file and xattr bytes; inodes in use bound what a removal visits. A file system that keeps no
+      inode count (btrfs: statfs(2), "fields that are undefined for a particular filesystem are set to 0")
+      bounds entries by its bytes instead, free and in use, since every entry takes at least one byte of it:
+      fedora's btrfs `/home` refused every stage as "entries in one stage, bound 0" before this.
     - **References and eviction:** a box's record, `<staged>/<box id>/.layers`, names its layers, written when
       its stage opens, so a layer it names is never evicted under it; removing the box removes its record. A layer
       no record names stays, a cache for the next create. When the file system says it has no room (`ENOSPC`, the

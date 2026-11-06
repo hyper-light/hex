@@ -155,21 +155,56 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Ref
 /// it begins (CLAUDE.md §2: a bound the system says, not a number Hex picks).
 #[derive(Debug, Clone, Copy)]
 struct Free {
-    /// Free inodes (`f_ffree`): the entries a stage may make.
+    /// The entries a stage may make: free inodes (`f_ffree`), or where the file system keeps no inode
+    /// count, its free bytes.
     entries: u64,
     /// Bytes free to an unprivileged writer (`f_bavail` × `f_frsize`; past `u64`, no bound short of it).
     bytes: u64,
-    /// Inodes in use (`f_files` − `f_ffree`): the most entries a removal can visit.
+    /// The most entries a removal can visit: inodes in use (`f_files` − `f_ffree`), or where the file
+    /// system keeps no inode count, its bytes in use.
     used: u64,
+}
+
+/// The fields of statvfs(3) a stage's budget is learned from.
+#[derive(Debug, Clone, Copy)]
+struct Stat {
+    files: u64,
+    ffree: u64,
+    blocks: u64,
+    bfree: u64,
+    bavail: u64,
+    frsize: u64,
 }
 
 fn free(dir: &OwnedFd) -> Result<Free, Refusal> {
     let st = rustix::fs::fstatvfs(dir).map_err(os("reading the staged folder's free space"))?;
-    Ok(Free {
-        entries: st.f_ffree,
-        bytes: st.f_bavail.saturating_mul(st.f_frsize),
-        used: st.f_files.saturating_sub(st.f_ffree),
-    })
+    Ok(learned(&Stat {
+        files: st.f_files,
+        ffree: st.f_ffree,
+        blocks: st.f_blocks,
+        bfree: st.f_bfree,
+        bavail: st.f_bavail,
+        frsize: st.f_frsize,
+    }))
+}
+
+/// What `st` says a stage may spend. A file system that keeps no inode count (btrfs) reports `f_files` 0
+/// ("fields that are undefined for a particular filesystem are set to 0", statfs(2)); every entry still
+/// takes at least one byte of it, so its bytes bound its entries.
+fn learned(st: &Stat) -> Free {
+    let bytes = st.bavail.saturating_mul(st.frsize);
+    if st.files == 0 {
+        return Free {
+            entries: bytes,
+            bytes,
+            used: st.blocks.saturating_sub(st.bfree).saturating_mul(st.frsize),
+        };
+    }
+    Free {
+        entries: st.ffree,
+        bytes,
+        used: st.files.saturating_sub(st.ffree),
+    }
 }
 
 /// Sends a stage's budget, framed as the relay's answers are.
@@ -1511,5 +1546,7 @@ fn remove_tree(parent: &OwnedFd, leaf: &str, budget: &mut Budget) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
+mod free_tests;
 #[cfg(test)]
 mod store_tests;
