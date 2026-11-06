@@ -141,17 +141,6 @@ const fn line_size(f: WindowsFeature) -> usize {
     f.name().len().saturating_add(LINE_TAIL)
 }
 
-/// The slowest recorded run of [`FEATURE_QUERY`], over jupiter's 50 (2026-11-06): 2,421 ms, of the Windows
-/// agent's 30 at 14:27Z (cp/t7-native-windows 01217f8, bench/install/windows-constants.md:20); the other 20
-/// peaked at 1,683 ms at 79% CPU (bench/install/records/windows-feature-query-jupiter-20261106.txt).
-/// Measured, not picked: a slower recorded run raises it.
-pub const FEATURE_QUERY_SLOWEST: std::time::Duration = std::time::Duration::from_millis(2_421);
-
-/// The longest the node waits for [`FEATURE_QUERY`] before ending it and refusing by name: the swarm's
-/// failure-bound rule, twice the slowest recorded run, the factor being the false-alarm margin (the Hex
-/// lead, 2026-11-06). A slower machine is a new record, not a longer guess.
-pub const FEATURE_QUERY_PATIENCE: std::time::Duration = FEATURE_QUERY_SLOWEST.saturating_mul(2);
-
 /// The query an unprivileged node runs (PowerShell) for the installer's features' state:
 /// `Win32_OptionalFeature`, one `<name> <InstallState>` line per feature Windows lists.
 pub const FEATURE_QUERY: &str = "Get-CimInstance -ClassName Win32_OptionalFeature -Filter \"Name='Containers' OR Name='HypervisorPlatform'\" | ForEach-Object { '{0} {1}' -f $_.Name, $_.InstallState }";
@@ -354,22 +343,6 @@ mod tests {
             );
         }
         assert!(features_off(&"x".repeat(FEATURE_LISTING_MAX + 1)).is_err());
-    }
-
-    /// HEX-INST-2: the feature query's deadline is the swarm's failure-bound rule over its records: twice
-    /// the slowest recorded run, the factor the false-alarm margin. Of jupiter's 50 runs (20 at 79% CPU,
-    /// bench/install/records/windows-feature-query-jupiter-20261106.txt; 30 by the Windows agent at
-    /// 14:27Z, cp/t7-native-windows 01217f8 bench/install/windows-constants.md:20) the slowest is 2,421 ms.
-    #[test]
-    fn the_feature_querys_deadline_is_twice_its_slowest_recorded_run() {
-        assert_eq!(
-            FEATURE_QUERY_SLOWEST,
-            std::time::Duration::from_millis(2_421)
-        );
-        assert_eq!(
-            FEATURE_QUERY_PATIENCE,
-            std::time::Duration::from_millis(4_842)
-        );
     }
 
     /// HEX-INST-2: the listing's bound is its format's own size, every feature's `<name> <state>\r\n`
