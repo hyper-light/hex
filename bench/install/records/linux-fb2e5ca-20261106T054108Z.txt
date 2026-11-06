@@ -72,7 +72,7 @@ user@1000.service main pid: 463 before, 463 after
 PASS: the manager wasn't restarted
 
 ## HEX-INST-5: the installed node's soft descriptor limit covers its own and every kept namespace's files
-Max open files            1048576              1048576              files
+Max open files            1048576              1048576              files     
 PASS: soft 1048576 >= 594304
 
 ## HEX-INST-3: the installed node serves every class to hexlab with no further step

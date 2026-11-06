@@ -68,5 +68,5 @@ left: folder /var/lib/hex-install
 left: file /var/lib/hex-install/manifest
 
 ## HEX-INST-5: the installed node's soft descriptor limit covers its own and every kept namespace's files
-Max open files            524288               524288               files
+Max open files            524288               524288               files     
 FAIL: soft 524288 < 594304
