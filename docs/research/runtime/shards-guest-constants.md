@@ -74,6 +74,7 @@ Behaviour fixed on the way:
 | `HEX_GUEST_MEMORY_MIB` default | `min_memory_mib(ARCH)` + 2 × 975 = 2014 MiB (aarch64) | guest_validation.rs (`PEAK_MIB`) | b | the same record, under HEX-GUEST-20. At 2014 MiB it passes with the record's 28 of 58 |
 | poll interval | gone: re-read after as long as the last read took | crates/hex-cli/tests/guest_validation.rs (`reread`) | a | The lead's call: step 7's learned re-read (cp/t7-native-s7 `hex_api::differential::until`), so reading takes at most half the time, at a read's own cost (HEX-GUEST-35). Why it isn't a fact: `hex_api` has no blocking wait for a box's end. A box's init gets no stdio through the seam, and `inspect` reports `BoxInfo.exit` only after the end. `Runtime::wait(id, timeout)` is noted as a later seam improvement for every class |
 | sim guest vcpus / memory | 1 / `min_memory_mib(ARCH)` | crates/hex-cli/tests/node_socket.rs:490 | c | Shards' least guest (`shards_api::check`; min_memory_mib cites shards-vmm vm/{aarch64,x86_64}.rs:28) |
+| `wait_for` 10 ms park; fixture `sleep 0.01` | — | node_socket.rs:1012, :790 | relied | goal 1's (0f41abb, 2026-10-27), not step 5's; not in the step-5 audit, so they're listed for goal 1 to convert |
 
 ## hex-client
 
@@ -139,6 +140,7 @@ Behaviour fixed on the way:
 | GetTempPath2W buffer | 261 | crates/hex-runtime/src/windows/sys.rs:96 | c | MAX_PATH+1, its documentation |
 | test config | 1 / `min_memory_mib(ARCH)` | crates/hex-runtime/src/guest/tests.rs:310 | c | Shards' least guest |
 | test env 2 / 1024 | — | guest/tests.rs:386 | input | inputs to the parse |
+| fixture `sleep 1` | — | guest/tests.rs:114 | input | a box program's argv in a rewrite fixture: data |
 
 ## scripts/guest and bench
 
