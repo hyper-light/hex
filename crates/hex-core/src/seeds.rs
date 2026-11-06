@@ -5,8 +5,10 @@
 //! by type what can't be done. `now` is the shell's monotonic clock: the time since a fixed point it chose, the same
 //! for every call.
 //!
-//! - **The bound**: at most [`Limits::seeds`] seeds are up or starting at once, one to a slot ([`SEEDS`] unless the
-//!   node is given another). A seed serves one create at a time, so a node keeps several.
+//! - **The bound**: at most [`Limits::seeds`] seeds are up or starting at once, one to a slot: the node's, derived
+//!   from its memory (`hex_node::sizes`). A seed serves one create at a time, so a node keeps several. A growing
+//!   pool ([`Seeds::growing`]) starts with fewer slots, the host's parallelism, and adds one for each create that
+//!   finds none free, up to the bound (Ada's rule, 2026-11-06).
 //! - **A create** is handed an idle seed that is up, never one starting, busy or gone. With none idle it waits in
 //!   line ([`Admit::Wait`]), and each seed that frees goes to the create that has waited longest. While
 //!   [`Limits::waiting`] creates wait, the next is refused at once ([`Refused::Busy`]); a create handed no seed
@@ -29,24 +31,8 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-/// The most seeds a node keeps unless given another bound: the most creates the bench's busiest phase has in flight
-/// at once (concurrency 32, seam_oci's throughput and sustained phases), as decision 4's pool of network namespaces
-/// holds. A seed serves one create at a time ("only one instance can be cloned from it at a time (serially)", AFaaS:
-/// Chai et al., OSDI 2025, §8), so with this many no create of that phase waits for a seed, whatever share of a
-/// create a seed's clone takes, and the bench host has as many hardware threads (fedora's Core i9-14900HX), so all of
-/// them can clone at once there. The node's shell starts seeds as creates wait for them, one spare beyond the creates
-/// waiting, not all at once: at concurrency 1 one seed serves every create (its clone of an init took 0.209 ms p50 on
-/// fedora, goal 5 plan step 4's `bench/competitive/probes/seed_path.md`), and at concurrency 32 on a loaded fedora,
-/// where a clone into a cgroup waits on the kernel's `cgroup_mutex`, a sustained phase had all 32 busy at once.
-/// [`Counts::most_busy`] shows how many a run used. The bound caps the memory they hold: a seed is 1.5 to 2.4 MiB
-/// resident on fedora, so 32 hold at most about 78 MiB, charged to the node agent's cgroup.
-pub const SEEDS: NonZeroUsize = match NonZeroUsize::new(32) {
-    Some(n) => n,
-    None => NonZeroUsize::MIN,
-};
-
 /// The node's bounds on its seeds unless set:
-/// - [`SEEDS`] seeds.
+/// - One seed: the node gives its own bound, derived from its memory (`hex_node::sizes`; Ada's rule, 2026-11-06).
 /// - 128 creates waiting at once: the most calls the node's socket runs at once (`hex_node::serve::WORKERS`), so no
 ///   create over the socket is refused for want of room in line; an in-process caller with more creates waiting is
 ///   refused past it.
@@ -60,7 +46,7 @@ pub const SEEDS: NonZeroUsize = match NonZeroUsize::new(32) {
 ///   past the clone it bounds, so a healthy seed under any load measured never meets it, and a hung one is replaced
 ///   within it.
 pub const LIMITS: Limits = Limits {
-    seeds: SEEDS,
+    seeds: NonZeroUsize::MIN,
     waiting: 128,
     wait: Duration::from_secs(1),
     hang: Duration::from_secs(30),
@@ -263,7 +249,15 @@ pub struct Seeds {
 impl Seeds {
     /// A pool with every slot vacant, asking for all of them.
     pub fn new(limits: Limits) -> Self {
-        let slots = limits.seeds.get();
+        Self::growing(limits, limits.seeds.get())
+    }
+
+    /// A pool with `start` slots vacant (one at least, [`Limits::seeds`] at most), asking for all of them, that adds
+    /// a vacant slot for each create that finds no seed idle and no slot vacant, up to [`Limits::seeds`]: its slots
+    /// are the most creates it has seen at once, never fewer than it started with, and never removed, so a burst it
+    /// has seen finds a slot for each create again (Ada's rule, 2026-11-06). Its scans walk only the slots it has.
+    pub fn growing(limits: Limits, start: usize) -> Self {
+        let slots = start.clamp(1, limits.seeds.get());
         Self {
             limits,
             slots: vec![
@@ -366,6 +360,7 @@ impl Seeds {
             self.hand(seed, now, None);
             return Ok(Admit::Seed(seed));
         }
+        self.grow();
         let room = self.line.len().saturating_add(self.answered.len()) < self.limits.waiting;
         // Past `u64::MAX` waits no ticket is left, and a create is refused as if the line were full: at one a
         // nanosecond, 584 years.
@@ -495,6 +490,22 @@ impl Seeds {
             self.answered.insert(ticket, Err(refused));
         }
         Some((seed, refused))
+    }
+
+    /// A create found no seed idle: a vacant slot is added for a seed to start, unless one is vacant already or the
+    /// slots are at the bound.
+    fn grow(&mut self) {
+        let vacant = self
+            .slots
+            .iter()
+            .any(|s| matches!(s.holds, Holds::Nothing));
+        if !vacant && self.slots.len() < self.limits.seeds.get() {
+            self.slots.push(Slot {
+                holds: Holds::Nothing,
+                up_before: false,
+            });
+            self.handed.push(0);
+        }
     }
 
     /// How many seeds are up and serve no create.
