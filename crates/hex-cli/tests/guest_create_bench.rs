@@ -1,16 +1,21 @@
-//! HEX-GUEST-22 (native plan step 5, docs/design/shards-guest.md §4a): what a create of a multi-layer image
-//! costs through a real Shards guest, the record the guest's layer store is measured by. Each round creates
-//! and deletes an `oci` box of each image in turn (interleaved), through `GuestRuntime` from this host, and
-//! times each create: the first of an image after the guest's boot, and every later one. It prints each
-//! create's milliseconds and, per image, p50 / p99 / max of the later ones.
+//! HEX-GUEST-22 (native plan step 5, docs/design/shards-guest.md §4a): what a box's life costs through a real
+//! Shards guest, create and delete, the record the guest's layer store is measured by (the store moves cost
+//! between them: whole-root staging removed a box's root at its delete). Each round creates and deletes an
+//! `oci` box of each image in turn (interleaved), through `GuestRuntime` from this host, and times each create,
+//! its delete, and the two together: the first of an image after the guest's boot, and every later one. It
+//! prints each, and, per image, p50 / p99 / max of the later ones.
 //!
 //! Given as (else it says SKIP and why):
 //! - a guest: `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, `SHARDS_BIN`, as HEX-GUEST-19;
-//! - `HEX_GUEST22_IMAGES`: a folder of images, each `<name>/layers.txt` naming its layer tarballs lowest
-//!   first (bench/native/guest-tree's layout);
-//! - `HEX_GUEST22_ROUNDS`: how many rounds, the record's N.
+//! - `HEX_GUEST22_IMAGES`: a folder of images, each `<name>/<list>` naming its layer tarballs lowest first,
+//!   relative to `<name>` (bench/native/guest-tree's layout); `HEX_GUEST22_LIST` names the list, `layers.txt`
+//!   (the image's own `layer<i>.tar.gz`) unless set (`blobs.txt`: the same files linked as `blobs/sha256/<hex>`);
+//! - `HEX_GUEST22_ROUNDS`: how many rounds, the record's N;
+//! - `HEX_GUEST22_MEMX`: the guest's memory past Shards' least, in multiples of the images' layers unpacked
+//!   (2 unless set: its tmpfs, half its memory, holds them once).
 //!
-//! Run: `cargo test --release -p hex-cli --test guest_create_bench -- --nocapture` with those set.
+//! The file needs nothing of the store's own API, so the same file measures whole-root staging's commit and
+//! the store's. Run: `cargo test --release -p hex-cli --test guest_create_bench -- --nocapture` with those set.
 
 #![allow(
     clippy::unwrap_used,
@@ -56,16 +61,18 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
         return;
     };
     let rounds: usize = rounds.parse().unwrap();
+    let list = std::env::var("HEX_GUEST22_LIST").unwrap_or_else(|_| "layers.txt".to_owned());
+    let memx: u64 = std::env::var("HEX_GUEST22_MEMX").map_or(2, |m| m.parse().unwrap());
     let mut names: Vec<String> = std::fs::read_dir(&images)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|n| images.join(n).join("layers.txt").exists())
+        .filter(|n| images.join(n).join(&list).exists())
         .collect();
     names.sort();
     let layers: Vec<Vec<PathBuf>> = names
         .iter()
         .map(|n| {
-            std::fs::read_to_string(images.join(n).join("layers.txt"))
+            std::fs::read_to_string(images.join(n).join(&list))
                 .unwrap()
                 .lines()
                 .filter(|l| !l.is_empty())
@@ -73,31 +80,8 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
                 .collect()
         })
         .collect();
-    // Each layer as its image keeps it, a blob named by its digest (an OCI layout's blobs/sha256/<hex>, a hard
-    // link beside its tarball), hashed here once, before any create is timed: a create takes a layer's
-    // digest from its name (§4a).
-    let blobs: Vec<Vec<PathBuf>> = layers
-        .iter()
-        .map(|image| {
-            image
-                .iter()
-                .map(|path| {
-                    let mut hash = <sha2::Sha256 as sha2::Digest>::new();
-                    std::io::copy(&mut std::fs::File::open(path).unwrap(), &mut hash).unwrap();
-                    let digest: [u8; 32] = sha2::Digest::finalize(hash).into();
-                    let dir = path.parent().unwrap().join("blobs/sha256");
-                    std::fs::create_dir_all(&dir).unwrap();
-                    let blob = dir.join(hex_core::stream::files::digest_hex(&digest));
-                    if !blob.exists() {
-                        std::fs::hard_link(path, &blob).unwrap();
-                    }
-                    blob
-                })
-                .collect()
-        })
-        .collect();
-    // The guest's tmpfs holds half its memory (tmpfs(5)): twice the images' layers, unpacked, and Shards'
-    // least besides, so the largest round fits.
+    // The guest's tmpfs holds half its memory (tmpfs(5)): MEMX times the images' layers, unpacked, and
+    // Shards' least besides.
     let unpacked: u64 = layers
         .iter()
         .flatten()
@@ -115,17 +99,18 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
         initrd,
         vcpus: 1,
         memory_mib: (shards_api::min_memory_mib(std::env::consts::ARCH)
-            + (2 * unpacked).div_ceil(1 << 20))
+            + (memx * unpacked).div_ceil(1 << 20))
         .next_multiple_of(2),
         shares: Vec::new(),
         staged: hex_client::guest::stage::STAGED.to_owned(),
     };
     eprintln!(
-        "images {names:?}, {rounds} rounds, guest memory {} MiB",
+        "images {names:?} by {list}, {rounds} rounds, guest memory {} MiB (MEMX {memx})",
         config.memory_mib
     );
     let node = GuestRuntime::new(Arc::new(shards_api::Shards::new()), config);
-    let mut times: Vec<Vec<f64>> = vec![Vec::new(); names.len()];
+    // Per image, each round's create, delete, and the two together, in ms.
+    let mut times: Vec<[Vec<f64>; 3]> = vec![Default::default(); names.len()];
     for round in 0..rounds {
         for (i, name) in names.iter().enumerate() {
             let id = BoxId::new(&format!("b{round}-{i}")).unwrap();
@@ -133,7 +118,7 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
                 id: id.clone(),
                 bounds: Bounds::default(),
                 class: ClassSpec::Oci(Box::new(OciSpec {
-                    rootfs: Rootfs::Layers(blobs[i].clone()),
+                    rootfs: Rootfs::Layers(layers[i].clone()),
                     init: Program::of(&["/bin/true"]),
                     mounts: Vec::new(),
                     hostname: None,
@@ -144,26 +129,38 @@ fn a_multi_layer_create_through_a_real_guest_is_timed() {
             let began = Instant::now();
             node.create(spec)
                 .unwrap_or_else(|why| panic!("{name}: create: {why}"));
-            let ms = began.elapsed().as_secs_f64() * 1e3;
+            let created = began.elapsed().as_secs_f64() * 1e3;
+            let deleting = Instant::now();
             node.delete(&id).unwrap();
-            eprintln!("round {round} {name}: create {ms:.1} ms");
-            times[i].push(ms);
+            let deleted = deleting.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "round {round} {name}: create {created:.1} ms delete {deleted:.1} ms life {:.1} ms",
+                created + deleted
+            );
+            for (k, ms) in [created, deleted, created + deleted]
+                .into_iter()
+                .enumerate()
+            {
+                times[i][k].push(ms);
+            }
         }
     }
     for (i, name) in names.iter().enumerate() {
-        let first = times[i][0];
-        let mut later = times[i][1..].to_vec();
-        later.sort_by(f64::total_cmp);
-        if later.is_empty() {
-            eprintln!("{name}: first {first:.1} ms");
-            continue;
+        for (k, what) in ["create", "delete", "life"].iter().enumerate() {
+            let first = times[i][k][0];
+            let mut later = times[i][k][1..].to_vec();
+            later.sort_by(f64::total_cmp);
+            if later.is_empty() {
+                eprintln!("{name} {what}: first {first:.1} ms");
+                continue;
+            }
+            eprintln!(
+                "{name} {what}: first {first:.1} ms; later (N={}) p50 {:.1} p99 {:.1} max {:.1} ms",
+                later.len(),
+                at(&later, 50),
+                at(&later, 99),
+                later[later.len() - 1]
+            );
         }
-        eprintln!(
-            "{name}: first {first:.1} ms; later (N={}) p50 {:.1} p99 {:.1} max {:.1} ms",
-            later.len(),
-            at(&later, 50),
-            at(&later, 99),
-            later[later.len() - 1]
-        );
     }
 }

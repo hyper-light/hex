@@ -583,6 +583,7 @@ fn a_stages_learned_budget_bounds_it() {
         entries: 7,
         bytes: 1 << 40,
         present: vec![],
+        capacity: 1 << 20,
     };
     assert_eq!(read_budget(&budget(&want)), Some(want.clone()));
     assert_eq!(read_budget(b"HEXB"), None);
@@ -614,14 +615,24 @@ fn a_stages_learned_budget_bounds_it() {
     );
 }
 
-/// HEX-GUEST-13 (§4a, the guest's layer store): open a stage naming its root's layers by digest, 9 of
-/// them, and read it back fed a byte at a time and whole: expect the opening's digests in order; a stage
-/// naming more layers than overlayfs stacks (`MAX_LAYERS`) refused from its count, before any digest is
-/// held; and a budget answer saying which of 9 layers the guest holds read back as written.
+/// HEX-GUEST-13 (§4a, the guest's layer store): open a stage naming its root's 9 layers, 7 by digest and 2
+/// unnamed (a tarball whose digest the host doesn't know yet, staged into the box), and read it back fed a
+/// byte at a time and whole: expect each layer's digest or none, in order. A layer whose named byte is
+/// neither 0 nor 1, and an unnamed one with digest bytes, are refused as hostile; a stage naming more layers
+/// than overlayfs stacks (`MAX_LAYERS`) is refused from its count, before any layer is held. A budget answer
+/// saying which of 9 layers the guest holds, and how many layers its store can hold, reads back as written.
 #[test]
-fn a_stages_layers_are_named_by_digest_and_the_guest_says_which_it_holds() {
-    let digests: Vec<Digest> = (0..9u8).map(|i| [i; 32]).collect();
-    let mut bytes = open_stage("b", &digests).unwrap();
+fn a_stages_layers_are_named_by_digest_or_unnamed_and_the_guest_says_which_it_holds() {
+    let layers: Vec<Option<Digest>> = (0..9u8)
+        .map(|i| {
+            if i == 2 || i == 8 {
+                None
+            } else {
+                Some([i; 32])
+            }
+        })
+        .collect();
+    let mut bytes = open_stage("b", &layers).unwrap();
     bytes.extend(END);
     for cut in [1, 7, bytes.len()] {
         let got = read(LIMITS, &bytes, cut).unwrap();
@@ -630,11 +641,25 @@ fn a_stages_layers_are_named_by_digest_and_the_guest_says_which_it_holds() {
             Step::Open {
                 op: Op::Stage,
                 id: "b".to_owned(),
-                layers: digests.clone(),
+                layers: layers.clone(),
             },
             "cut {cut}"
         );
     }
+    // The opening's first layer starts after its count: its named byte, then its digest.
+    let first = open_stage("b", &[]).unwrap().len();
+    let mut odd = open_stage("b", &layers).unwrap();
+    odd[first] = 2;
+    assert!(
+        matches!(read(LIMITS, &odd, 64), Err(Refused::Layer(_))),
+        "{:?}",
+        read(LIMITS, &odd, 64)
+    );
+    let mut stray = open_stage("b", &layers).unwrap();
+    let unnamed = first + 2 * (1 + DIGEST_BYTES);
+    assert_eq!(stray[unnamed], 0);
+    stray[unnamed + 1] = 9;
+    assert!(matches!(read(LIMITS, &stray, 64), Err(Refused::Layer(_))));
     let mut over = open_stage("b", &[]).unwrap();
     over.truncate(over.len() - 2);
     over.extend(
@@ -653,6 +678,8 @@ fn a_stages_layers_are_named_by_digest_and_the_guest_says_which_it_holds() {
         entries: 1,
         bytes: 2,
         present: vec![true, false, true, true, false, false, false, true, true],
+        capacity: 3,
     };
-    assert_eq!(read_budget(&budget(&held)), Some(held));
+    assert_eq!(read_budget(&budget(&held)), Some(held.clone()));
+    assert_eq!(read_budget(&budget(&held)[..budget(&held).len() - 1]), None);
 }

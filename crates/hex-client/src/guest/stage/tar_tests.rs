@@ -205,7 +205,10 @@ fn layer_blobs_are_read_by_their_magic_and_refused_when_their_bytes_arent_their_
         let digest: files::Digest = <sha2::Sha256 as sha2::Digest>::digest(bytes).into();
         let path = blobs.join(files::digest_hex(&digest));
         std::fs::write(&path, bytes).unwrap();
-        Layer { path, digest }
+        Layer {
+            path,
+            digest: Some(digest),
+        }
     };
     let layers = vec![blob(&lower), blob(&upper)];
     let pack_layers = |layers: &[Layer]| {
@@ -231,7 +234,7 @@ fn layer_blobs_are_read_by_their_magic_and_refused_when_their_bytes_arent_their_
     assert!(
         why.contains(&layers[1].path.display().to_string())
             && why.contains(&got)
-            && why.contains(&files::digest_hex(&layers[1].digest)),
+            && why.contains(&files::digest_hex(&layers[1].digest.unwrap())),
         "{why}"
     );
     assert!(!out.ends_with(&files::END), "an end was sent after it");
@@ -244,6 +247,48 @@ fn layer_blobs_are_read_by_their_magic_and_refused_when_their_bytes_arent_their_
         why.contains(&zstd.path.display().to_string()) && why.contains("zstd"),
         "{why}"
     );
+}
+
+/// HEX-GUEST-15 (§4a; the lead's check, 2026-11-06: what whole-root staging took, the store takes): pack a
+/// layer as `docker save` writes it, `<id>/layer.tar`, its name no digest and none known: expect it packed,
+/// and its digest learned as it crossed, its bytes' sha256, with its file's identity, for the next create
+/// to name it by without reading it.
+#[test]
+fn a_layer_of_no_known_digest_is_hashed_as_it_crosses_and_its_digest_learned() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("0f3e").join("layer.tar");
+    std::fs::create_dir(path.parent().unwrap()).unwrap();
+    let bytes = archive(&[(header(b"a", b'0', 0o644, 1, b""), &b"a"[..])]);
+    std::fs::write(&path, &bytes).unwrap();
+    let items = [Item {
+        name: "root".to_owned(),
+        source: Source::Layers(vec![Layer {
+            path: path.clone(),
+            digest: None,
+        }]),
+    }];
+    let mut out = Vec::new();
+    let learned = pack_items(&mut out, &items, &LIMITS, &[false]).unwrap();
+    assert_eq!(
+        learned,
+        [Learned {
+            path: path.clone(),
+            digest: <sha2::Sha256 as sha2::Digest>::digest(&bytes).into(),
+            identity: identity(&std::fs::metadata(&path).unwrap()),
+        }]
+    );
+    let paths: Vec<String> = unpack(
+        &[
+            files::open_stage("box-1", &[None]).unwrap(),
+            out,
+            files::END.to_vec(),
+        ]
+        .concat(),
+    )
+    .into_iter()
+    .map(|e| e.0.path)
+    .collect();
+    assert_eq!(paths, ["root", "root/a"]);
 }
 
 /// HEX-GUEST-15: pack a gzip tarball whose trailer lies (its length, then its CRC), an archive cut in the

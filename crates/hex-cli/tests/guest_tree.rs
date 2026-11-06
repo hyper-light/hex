@@ -180,7 +180,9 @@ fn layers(image: &Image) -> Vec<hex_client::guest::stage::Layer> {
         .layers
         .iter()
         .map(|path| hex_client::guest::stage::Layer {
-            digest: <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
+            digest: Some(
+                <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
+            ),
             path: path.clone(),
         })
         .collect()
@@ -193,12 +195,11 @@ fn items(image: &Image) -> Vec<Item> {
     }]
 }
 
-/// The image's layers' folders in the store under `staged`, lowest first, `:`-joined: what the walker
-/// mounts as the overlay the guest's node mounts for a box of that image.
-fn store_layers(staged: &str, image: &Image) -> String {
-    layers(image)
-        .iter()
-        .map(|l| hex_client::guest::stage::layer_path(staged, &l.digest))
+/// Box `id`'s layers under `staged`, lowest first, `:`-joined, each its `layers/<i>` (a link to the store's
+/// folder, or the box's own): what the walker mounts as the overlay the guest's node mounts for the box.
+fn box_layers(staged: &str, id: &BoxId, image: &Image) -> String {
+    (0..image.layers.len())
+        .map(|i| hex_client::guest::stage::box_layer_path(staged, id, i))
         .collect::<Vec<_>>()
         .join(":")
 }
@@ -217,7 +218,7 @@ mod local {
     use hex_client::guest::{Duplex, Link, stage};
     use hex_core::stream::files::LIMITS;
 
-    use super::{Image, Side, items, store_layers};
+    use super::{Image, Side, box_layers, items};
 
     /// The relay in this process: each dial a socket pair whose far end it serves.
     struct InProcess(PathBuf);
@@ -246,7 +247,7 @@ mod local {
             let staged = self.dir.path().to_str().unwrap();
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_hex"))
                 .args(["selftest-box", "tree", "--layers"])
-                .arg(store_layers(staged, image))
+                .arg(box_layers(staged, id, image))
                 .output()
                 .unwrap();
             assert!(
@@ -284,7 +285,7 @@ impl Side for Guest {
                 class: ClassSpec::Process,
             })
             .unwrap();
-        let layers = store_layers(stage::STAGED, image);
+        let layers = box_layers(stage::STAGED, id, image);
         let (mut r, w) = std::io::pipe().unwrap();
         let reader = std::thread::spawn(move || {
             let mut text = String::new();

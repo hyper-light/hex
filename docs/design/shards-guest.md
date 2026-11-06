@@ -287,22 +287,41 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   - **atime** is the later of the archive's atime and mtime, as containerd's unpack sets it (`pkg/archive/tar.go:335,
     445` at containerd v2.3.6, `ee273536`): the entry's metadata carries it beside mtime.
   - **A multi-layer image's layers live once each in the guest's layer store, by digest** (the lead's call,
-    2026-11-06: it replaces staging a box's whole root at every create, in the same change, with no fallback).
-    The guest's staged folder holds `.layers/<sha256 of the layer's blob>` (a box id never starts with '.'), one
-    folder a layer, applied once as containerd's overlay snapshotter applies a layer into its own upper directory
-    (below), and a box of the image mounts them as its overlay's lower layers, as a Linux host does
-    (`hex_core::bundle`'s overlay, lowest first). An `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest
-    as `Rootfs::Layers` of those folders.
-    - **What's sent:** each layer tarball is given as its image keeps it, a blob named by its digest
-      (`…/sha256/<hex>`, an OCI image layout's `blobs/<alg>/<encoded>`, image-spec `image-layout.md`, "Blobs",
-      and containerd's content store's alike); another name is refused by name. The host names the digests in
-      the stage's opening without reading a layer; the relay answers with the stage's budget and which of the
-      layers it holds; the packer sends only those it lacks, each after a layer marker, reading each as gzip or
-      uncompressed by its own magic (containerd's `DetectCompression`; zstd is refused by name) and hashing its
-      bytes as they cross, and refuses it, before the next layer's marker or the stage's end that would let the
+    2026-11-06: it replaces staging a box's whole root at every create, in the same change, with no fallback;
+    after HEX-GUEST-22's first records, the lead's rule that it be no worse than whole-root staging in every
+    regime, with room or under pressure). The guest's staged folder holds `.layers/<sha256 of the layer's blob>`
+    (a box id never starts with '.'), one folder a layer, applied once as containerd's overlay snapshotter
+    applies a layer into its own upper directory (below). A box names its root's layers `<staged>/<box
+    id>/layers/<i>`, lowest first: each a link to the store's folder, or, where the store had no room or the
+    layer's digest isn't known, the layer itself, staged into the box as whole-root staging staged it. Its
+    overlay mounts those as its lower layers, as a Linux host does (`hex_core::bundle`'s overlay, lowest
+    first; overlayfs follows the links), so an `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest as
+    `Rootfs::Layers` of those paths whichever each is.
+    - **What's sent:** a layer is named by its digest without being read: by its blob's name as its image
+      keeps it (`…/sha256/<hex>`, an OCI image layout's `blobs/<alg>/<encoded>`, image-spec
+      `image-layout.md`, "Blobs", and containerd's content store's alike), or by a digest the host learned
+      when it last crossed. Any other tarball whole-root staging took (`docker save`'s `<id>/layer.tar`) is
+      staged with no digest, into the box, hashed as it crosses, and its digest kept with its file's identity
+      (on Unix its device, inode, size, and modification and change times; stat(2)), for the next create to
+      name it by; one whose identity has changed is hashed again, never trusted. The host keeps at most one
+      such digest per layer the guest's store can hold (its inodes, from the stage's budget), the least
+      recently used going first. The opening names each layer's digest or none; the relay answers with the
+      stage's budget and which layers it holds; the packer sends only those it lacks, each after a layer
+      marker, reading each as gzip or uncompressed by its own magic (containerd's `DetectCompression`; zstd,
+      which whole-root staging never took either, is refused by name, an open gap), hashing its bytes as they
+      cross, and refusing a named one, before the next layer's marker or the stage's end that would let the
       relay keep it, unless they are its digest. A layer the guest holds costs a create its digest alone, never
       a read: HEX-GUEST-22's first record had the host hash every tarball at every create, about 0.9 s of a
       grafana create (480 MB of blobs at 500-560 MB/s on a Mac Studio, sha2 0.10.9), the lead's rule after it.
+    - **Admission, never eviction on the create's path:** the store admits a layer only into room already
+      free: it leaves free, within what the stage's budget learned, the most entries and bytes one stage has
+      spent (`.layers/.need`, learned at each stage's end, rising only). A layer that would cut into that room,
+      even part way, goes into the box instead (a partial folder is renamed into it), and so does every later
+      layer of its stage, so a create's worst case is whole-root staging's own; a create never evicts.
+      HEX-GUEST-22's second record showed why: with eviction on the create's path (least recently used, on
+      `ENOSPC`), a guest whose store couldn't hold its three images evicted a peer's layers at every create,
+      and alpine's create took 52 ms against whole-root staging's 30 (LRU's loop on a working set past its
+      cache).
     - **Applying a layer:** within its own folder, by containerd's rules (`applyNaive`, `pkg/archive/tar.go:161-340`
       at v2.3.6) with its overlay conversion: a layer's entry replaces what this layer put at its path, except a
       directory onto a directory, which merges and takes the later header's owner, mode, xattrs and times
@@ -314,19 +333,23 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       apply is refused by name. At most 500 layers (`hex_core::bundle::MAX_LAYERS`, overlayfs's `OVL_MAX_STACK`).
     - **Crash safety:** a layer is staged into `.layers/.partial-<relay pid>-<n>-<digest>` and renamed to its
       digest only once whole, so a stage cut or crashed mid-layer leaves nothing that counts as held; a partial
-      another relay process left is removed when a stage opens, and one this process left with its stage.
+      another relay process left, and a layer it was reclaiming (`.gone-<pid>-<n>`), is removed when a stage
+      opens, and what this process left with its stage.
     - **The budget:** the relay answers a stage's opening with what its staged folder's file system has free
       (statvfs(3)), and both sides spend against it: free inodes for entries, bytes free to an unprivileged
-      writer for file and xattr bytes; inodes in use bound what a removal visits. A file system that keeps no
-      inode count (btrfs: statfs(2), "fields that are undefined for a particular filesystem are set to 0")
-      bounds entries by its bytes instead, free and in use, since every entry takes at least one byte of it:
-      fedora's btrfs `/home` refused every stage as "entries in one stage, bound 0" before this.
-    - **References and eviction:** a box's record, `<staged>/<box id>/.layers`, names its layers, written when
-      its stage opens, so a layer it names is never evicted under it; removing the box removes its record. A layer
-      no record names stays, a cache for the next create. When the file system says it has no room (`ENOSPC`, the
-      learned budget run short), the least recently used unreferenced layer (its folder's mtime, set at each use)
-      is evicted and the write tried again; with none left, `ENOSPC` is the refusal. The budget the relay
-      answers counts what unreferenced layers hold as free (each layer's `<digest>.size`, its entries and bytes).
+      writer for file and xattr bytes; inodes in use bound what a removal visits, and its inodes how many
+      layers its store can hold. A file system that keeps no inode count (btrfs: statfs(2), "fields that are
+      undefined for a particular filesystem are set to 0") bounds entries by its bytes instead, free, in use
+      and in all, since every entry takes at least one byte of it: fedora's btrfs `/home` refused every stage as
+      "entries in one stage, bound 0" before this.
+    - **References and the reclaimer:** a box's record, `<staged>/<box id>/.layers`, names its layers,
+      written when its stage opens under the store's lock (flock(2) on `.layers/.lock`), so no reclaim takes a
+      layer it counted as held; removing the box removes its record. A layer no record names becomes evictable
+      and stays, a cache for the next create. After a stage bypassed the store for want of room, once its
+      answer is sent, its own thread drops to the lowest priority (setpriority(2), nice 19), so a box's work
+      comes first, and frees at least what the bypassed layers hold, off the create's path and the delete's:
+      the least recently used unreferenced layer (its folder's mtime, set at each use) is taken out of the store
+      under the lock (renamed to `.gone-…`), then removed, until that much is freed or none is left.
     - **One copy roots:** a bundle's `root.path` and a `Rootfs::Dir` are one directory its container writes into,
       not an overlay, so a tarball given for one is applied in place, into the box's own folder, as one layer
       with nothing below; a directory root (macOS, Linux) is copied as it is. Neither is a layered image's root.

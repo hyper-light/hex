@@ -15,7 +15,7 @@ pub(super) fn pack(
     items: &[Item],
     limits: &Limits,
 ) -> Result<(), Refusal> {
-    let digests: Vec<files::Digest> = items
+    let digests: Vec<Option<files::Digest>> = items
         .iter()
         .filter_map(|item| match &item.source {
             Source::Layers(layers) => Some(layers),
@@ -39,7 +39,9 @@ pub(super) fn layers_of(paths: &[PathBuf]) -> Vec<Layer> {
         .iter()
         .map(|path| Layer {
             path: path.clone(),
-            digest: <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
+            digest: Some(
+                <sha2::Sha256 as sha2::Digest>::digest(std::fs::read(path).unwrap()).into(),
+            ),
         })
         .collect()
 }
@@ -203,6 +205,7 @@ impl super::super::Link for Budgeted {
                     entries,
                     bytes,
                     present: vec![],
+                    capacity: 1,
                 }),
                 wire::MAX_MESSAGE,
             )
@@ -236,7 +239,10 @@ fn a_stage_spends_the_relays_learned_budget() {
             bound: 4
         })
     );
-    assert_eq!(stage(&relay, &id(), &[item(4)], &LIMITS), Ok(()));
+    assert_eq!(
+        stage(&relay, &id(), &[item(4)], &LIMITS).map(|_| ()),
+        Ok(())
+    );
     // The entries too: a file system with one inode free takes one entry, not two.
     let relay = Budgeted { budget: (1, 100) };
     assert_eq!(

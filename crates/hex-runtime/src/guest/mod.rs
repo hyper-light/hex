@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal, Stdio,
-    Usage,
+    BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Rootfs, Runtime, Signal,
+    Stdio, Usage,
 };
 use hex_client::guest::shards::{ShardsLink, refusal};
 use hex_client::guest::stage::{self, Item};
@@ -217,6 +217,66 @@ pub struct GuestRuntime {
     slowest: Mutex<Duration>,
     /// Guests stopped for hanging alive past the bound, never ready.
     retired: AtomicU64,
+    /// The digests learned for layer tarballs not named by theirs, as they crossed (§4a).
+    digests: Mutex<Digests>,
+}
+
+/// The digests learned for layer tarballs not named by theirs (docker save's `<id>/layer.tar`), each with the
+/// identity its file had when it was read whole ([`stage::Identity`]): a create names such a layer by it
+/// without reading it, while its file's identity is that one; one whose identity changed is hashed again
+/// as it crosses. Bounded by the layers the guest's store can hold (its last budget's capacity), one entry
+/// each; past it, the least recently used goes, and that layer is hashed again when it next crosses.
+#[derive(Default)]
+struct Digests {
+    by_path: std::collections::BTreeMap<PathBuf, (stage::Identity, files::Digest, u64)>,
+    by_use: std::collections::BTreeMap<u64, PathBuf>,
+    used: u64,
+    bound: usize,
+}
+
+impl Digests {
+    /// The digests of `paths` this remembers, for files whose identity is the one each was learned with.
+    fn known(&mut self, paths: &[PathBuf]) -> rewrite::Known {
+        let mut known = rewrite::Known::new();
+        for path in paths {
+            let Ok(meta) = std::fs::metadata(path) else {
+                continue;
+            };
+            let Some((identity, digest, last)) = self.by_path.get_mut(path) else {
+                continue;
+            };
+            if *identity != stage::identity(&meta) {
+                continue;
+            }
+            self.used = self.used.saturating_add(1);
+            self.by_use.remove(last);
+            *last = self.used;
+            self.by_use.insert(self.used, path.clone());
+            known.insert(path.clone(), *digest);
+        }
+        known
+    }
+
+    /// Remembers what a stage learned, within the layers the guest's store can hold.
+    fn learn(&mut self, staged: stage::Staged) {
+        self.bound = usize::try_from(staged.capacity).unwrap_or(usize::MAX);
+        for learned in staged.learned {
+            self.used = self.used.saturating_add(1);
+            if let Some((_, _, last)) = self.by_path.insert(
+                learned.path.clone(),
+                (learned.identity, learned.digest, self.used),
+            ) {
+                self.by_use.remove(&last);
+            }
+            self.by_use.insert(self.used, learned.path);
+        }
+        while self.by_path.len() > self.bound {
+            let Some((_, path)) = self.by_use.pop_first() else {
+                break;
+            };
+            self.by_path.remove(&path);
+        }
+    }
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -233,6 +293,7 @@ impl GuestRuntime {
             booted: Mutex::new(None),
             slowest: Mutex::new(Duration::ZERO),
             retired: AtomicU64::new(0),
+            digests: Mutex::new(Digests::default()),
         }
     }
 
@@ -336,7 +397,7 @@ impl GuestRuntime {
     /// Stages `items` for `id`. A copy left by a box the guest's node no longer holds (a host that
     /// ended between a stage and its create) is removed and staged again; one of a box it holds is
     /// refused as [`Refusal::Exists`].
-    fn stage(&self, b: &Booted, id: &BoxId, items: &[Item]) -> Result<(), Refusal> {
+    fn stage(&self, b: &Booted, id: &BoxId, items: &[Item]) -> Result<stage::Staged, Refusal> {
         match stage::stage(b.link.as_ref(), id, items, &files::LIMITS) {
             Err(Refusal::Exists(_)) => match b.client.inspect(id) {
                 Err(Refusal::NoSuchBox(_)) => {
@@ -377,7 +438,14 @@ impl Runtime for GuestRuntime {
             rewrite::check(oci)?;
         }
         let id = spec.id.clone();
-        let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged)?;
+        let known = match &spec.class {
+            ClassSpec::Oci(oci) => match &oci.rootfs {
+                Rootfs::Layers(paths) => self.digests.lock().map_err(poisoned)?.known(paths),
+                Rootfs::Dir(_) => rewrite::Known::new(),
+            },
+            _ => rewrite::Known::new(),
+        };
+        let rewritten = rewrite::rewrite(spec, &self.config.shares, &self.config.staged, &known)?;
         let b = self.guest()?;
         // An id the guest's node already holds is refused as the node refuses it, before anything is
         // staged: staging first would send a box's whole root only to be refused (CLAUDE.md §3).
@@ -386,7 +454,8 @@ impl Runtime for GuestRuntime {
             Err(Refusal::NoSuchBox(_)) => {}
             Err(why) => return Err(why),
         }
-        self.stage(&b, &id, &rewritten.items)?;
+        let staged = self.stage(&b, &id, &rewritten.items)?;
+        self.digests.lock().map_err(poisoned)?.learn(staged);
         b.client.create(rewritten.spec).inspect_err(|_| {
             // The copy goes with the create that failed; a removal that fails leaves it for the
             // next stage of this id, which removes it (above).

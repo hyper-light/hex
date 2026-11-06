@@ -40,17 +40,75 @@ pub enum Source {
     /// A tarball (`.tar`, or gzip's `.tar.gz` or `.tgz`), staged from its own entries: their Linux modes
     /// and symlink texts exact, which a root unpacked on a host that keeps neither would lose (§4a).
     Tar(PathBuf),
-    /// An image's layers, each a tarball, lowest first: each applied once into the guest's layer store by
-    /// its digest, as containerd's overlay applier applies a layer, and mounted together by overlayfs
-    /// (§4a). A layer the guest holds isn't sent again.
+    /// An image's layers, each a tarball, lowest first, each applied as containerd's overlay applier applies
+    /// a layer and mounted together by overlayfs (§4a): into the guest's layer store by its digest where the
+    /// store has room, else into the box's own `layers/<i>`. A layer the guest holds isn't sent again.
     Layers(Vec<Layer>),
 }
 
-/// One layer of an image: its tarball, and its digest, the store's name for it.
+/// One layer of an image: its tarball, and its digest, the store's name for it, when the host knows it (its
+/// blob's name, or a digest learned when it last crossed: [`Learned`]). A layer of no known digest is staged
+/// into the box, hashed as it crosses, its digest learned for the next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layer {
     pub path: PathBuf,
+    pub digest: Option<files::Digest>,
+}
+
+/// What identifies a file's bytes without reading them: on Unix its device and inode, size, and modification
+/// and status-change times to the nanosecond (stat(2)); on Windows its size and its last-write and creation
+/// times. A digest learned for a file is trusted only while its identity is the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+/// `meta`'s file's identity.
+#[cfg(unix)]
+pub fn identity(meta: &fs::Metadata) -> Identity {
+    use std::os::unix::fs::MetadataExt;
+    Identity {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        size: meta.size(),
+        modified: (meta.mtime(), meta.mtime_nsec()),
+        changed: (meta.ctime(), meta.ctime_nsec()),
+    }
+}
+
+/// `meta`'s file's identity.
+#[cfg(windows)]
+pub fn identity(meta: &fs::Metadata) -> Identity {
+    use std::os::windows::fs::MetadataExt;
+    let at = |t: u64| (i64::try_from(t).unwrap_or(i64::MAX), 0);
+    Identity {
+        size: meta.file_size(),
+        modified: at(meta.last_write_time()),
+        changed: at(meta.creation_time()),
+    }
+}
+
+/// A layer of no known digest, hashed as it crossed: its file, its digest, and its identity, the same when
+/// the packer opened it and when it had read it to its end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Learned {
+    pub path: PathBuf,
     pub digest: files::Digest,
+    pub identity: Identity,
+}
+
+/// What a stage learned: the digests of the layers it hashed, and how many layers the guest's store can hold
+/// ([`files::Budget::capacity`]), what the host bounds its memory of digests by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staged {
+    pub learned: Vec<Learned>,
+    pub capacity: u64,
 }
 
 /// A layer blob's digest, from its name as its image keeps it: `…/sha256/<64 hex digits>`, an OCI image
@@ -75,9 +133,11 @@ pub fn blob_digest(path: &Path) -> Option<files::Digest> {
     Some(digest)
 }
 
-/// The guest's path of the layer `digest` in its store, the relay staging under `staged`.
-pub fn layer_path(staged: &str, digest: &files::Digest) -> String {
-    format!("{staged}/{}/{}", files::STORE, files::digest_hex(digest))
+/// The guest's path of `id`'s `i`th layer, lowest first, the relay staging under `staged`: the box's own
+/// `layers/<i>`, a link to the store's folder for a layer the store holds, or the layer itself, staged into
+/// the box (§4a). A box's overlay names its layers so, whichever each is.
+pub fn box_layer_path(staged: &str, id: &BoxId, i: usize) -> String {
+    format!("{staged}/{id}/layers/{i}")
 }
 
 /// Whether `path` names a tarball, by its name: `.tar`, `.tar.gz` or `.tgz`, or a layer blob named by its
@@ -96,7 +156,12 @@ pub fn staged_path(staged: &str, id: &BoxId, name: &str) -> String {
 }
 
 /// Stages `items` for `id` through `link`, waiting for the relay's answer.
-pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Result<(), Refusal> {
+pub fn stage(
+    link: &dyn Link,
+    id: &BoxId,
+    items: &[Item],
+    limits: &Limits,
+) -> Result<Staged, Refusal> {
     // The root's layers, by digest: the store's names for them (§4a). A stage stages one root.
     let layers: Vec<&Layer> = items
         .iter()
@@ -106,7 +171,7 @@ pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Re
         })
         .flatten()
         .collect();
-    let digests: Vec<files::Digest> = layers.iter().map(|l| l.digest).collect();
+    let digests: Vec<Option<files::Digest>> = layers.iter().map(|l| l.digest).collect();
     let mut conn = dial(link)?;
     let mut deframer = Deframer::new(wire::MAX_MESSAGE);
     conn.write_all(&files::open_stage(id.as_str(), &digests).map_err(refused)?)
@@ -133,9 +198,10 @@ pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Re
     };
     let sent = {
         let mut out = BufWriter::with_capacity(64 << 10, Writer(conn.as_mut()));
-        pack_items(&mut out, items, &learned, &budget.present).and_then(|()| {
+        pack_items(&mut out, items, &learned, &budget.present).and_then(|hashed| {
             out.write_all(&files::END)
                 .and_then(|()| out.flush())
+                .map(|()| hashed)
                 .map_err(|e| Refusal::os("sending staged files", e))
         })
     };
@@ -150,7 +216,10 @@ pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Re
         (_, Err(why)) if !matches!(&why, Refusal::Os { op, .. } if op.starts_with("sending")) => {
             Err(why)
         }
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Ok(learned)) => Ok(Staged {
+            learned,
+            capacity: budget.capacity,
+        }),
         (Err(why), _) | (Ok(()), Err(why)) => Err(why),
     }
 }
@@ -319,12 +388,13 @@ fn pack_items(
     items: &[Item],
     limits: &Limits,
     present: &[bool],
-) -> Result<(), Refusal> {
+) -> Result<Vec<Learned>, Refusal> {
     let send = |out: &mut dyn Write, bytes: &[u8]| {
         out.write_all(bytes)
             .map_err(|e| Refusal::os("sending staged files", e))
     };
     let mut counts = Counts::default();
+    let mut learned = Vec::new();
     for item in items {
         match &item.source {
             Source::Bytes(bytes) => {
@@ -344,23 +414,45 @@ fn pack_items(
                 tarball(
                     out,
                     &item.name,
-                    &[(path.clone(), None, false)],
+                    &[(path.clone(), Hash::No, false)],
                     limits,
                     &mut counts,
                     true,
                 )?;
             }
             Source::Layers(layers) => {
-                let layers: Vec<(PathBuf, Option<files::Digest>, bool)> = layers
+                let layers: Vec<(PathBuf, Hash, bool)> = layers
                     .iter()
                     .zip(present.iter().copied().chain(std::iter::repeat(false)))
-                    .map(|(l, held)| (l.path.clone(), Some(l.digest), held))
+                    .map(|(l, held)| {
+                        (
+                            l.path.clone(),
+                            l.digest.map_or(Hash::Learn, Hash::Verify),
+                            held,
+                        )
+                    })
                     .collect();
-                tarball(out, &item.name, &layers, limits, &mut counts, false)?;
+                learned.extend(tarball(
+                    out,
+                    &item.name,
+                    &layers,
+                    limits,
+                    &mut counts,
+                    false,
+                )?);
             }
         }
     }
-    Ok(())
+    Ok(learned)
+}
+
+/// What the packer does with a tarball's bytes as it reads them: nothing (a root of one copy), check them
+/// against the layer's digest, or learn its digest (a layer of none known).
+#[derive(Debug, Clone, Copy)]
+enum Hash {
+    No,
+    Verify(files::Digest),
+    Learn,
 }
 
 /// Entries and bytes sent so far, refused past the stage's bounds before they are sent.
@@ -974,11 +1066,11 @@ impl Tree {
 fn tarball(
     out: &mut dyn Write,
     name: &str,
-    layers: &[(PathBuf, Option<files::Digest>, bool)],
+    layers: &[(PathBuf, Hash, bool)],
     limits: &Limits,
     counts: &mut Counts,
     in_place: bool,
-) -> Result<(), Refusal> {
+) -> Result<Vec<Learned>, Refusal> {
     if layers.len() > MAX_LAYERS {
         return Err(Refusal::Invalid {
             what: "staged files",
@@ -1002,7 +1094,8 @@ fn tarball(
             .map_err(|e| Refusal::os("sending staged files", e))?;
     }
     let mut tree = Tree::default();
-    for (path, digest, held) in layers {
+    let mut learned = Vec::new();
+    for (path, hash, held) in layers {
         if *held {
             continue;
         }
@@ -1016,9 +1109,9 @@ fn tarball(
         out.write_all(&files::head(&marker, limits).map_err(refused)?)
             .map_err(|e| Refusal::os("sending staged files", e))?;
         tree.made = BTreeSet::new();
-        layer(out, name, path, digest.as_ref(), limits, counts, &mut tree)?;
+        learned.extend(layer(out, name, path, *hash, limits, counts, &mut tree)?);
     }
-    Ok(())
+    Ok(learned)
 }
 
 /// The later of two times: containerd sets atime so (`latestTime`, `tar.go:335,445`).
@@ -1031,29 +1124,34 @@ fn later(a: Mtime, b: Mtime) -> Mtime {
 }
 
 /// Sends one layer's entries, the archive at `path`, under `name`: gzip or uncompressed, as its own bytes'
-/// magic says (containerd's `compression.DetectCompression` reads them so). Given its `digest`, its bytes
-/// are hashed as they are read and the layer refused, before anything after it is sent, unless they are
-/// that digest: the relay keeps a layer only once the next one's marker or the stage's end follows it.
+/// magic says (containerd's `compression.DetectCompression` reads them so). Its bytes are hashed as they are
+/// read when `hash` says: checked against its digest, the layer refused, before anything after it is sent,
+/// unless they are that digest (the relay keeps a layer only once the next one's marker or the stage's end
+/// follows it); or learned, returned with the file's identity when that held still while it was read.
 fn layer(
     out: &mut dyn Write,
     name: &str,
     path: &Path,
-    digest: Option<&files::Digest>,
+    hash: Hash,
     limits: &Limits,
     counts: &mut Counts,
     tree: &mut Tree,
-) -> Result<(), Refusal> {
+) -> Result<Option<Learned>, Refusal> {
     let bad = |what: &str, why: &dyn std::fmt::Display| never(path, &format!("{what}: {why}"));
     let send = |out: &mut dyn Write, entry: &Entry| {
         out.write_all(&files::head(entry, limits).map_err(refused)?)
             .map_err(|e| Refusal::os("sending staged files", e))
     };
     let file = File::open(path).map_err(|e| bad("opening it", &e))?;
+    let opened = file.metadata().map_err(|e| bad("opening it", &e))?;
     // The most bytes past what the archive needs that its digest covers: the file's own length.
-    let length = file.metadata().map_err(|e| bad("opening it", &e))?.len();
+    let length = opened.len();
     let mut raw = io::BufReader::new(Hashing {
         file,
-        hash: digest.map(|_| <sha2::Sha256 as sha2::Digest>::new()),
+        hash: match hash {
+            Hash::No => None,
+            Hash::Verify(_) | Hash::Learn => Some(<sha2::Sha256 as sha2::Digest>::new()),
+        },
     });
     let head = raw.fill_buf().map_err(|e| bad("reading it", &e))?;
     let (gzip, zstd) = (head.starts_with(&GZIP_MAGIC), head.starts_with(&ZSTD_MAGIC));
@@ -1392,27 +1490,41 @@ fn layer(
             &format!("more than {TRAILING} bytes follow its end-of-archive block"),
         ));
     }
-    let Some(want) = digest else {
-        return Ok(());
-    };
+    if matches!(hash, Hash::No) {
+        return Ok(None);
+    }
     // The rest of the file, past the stream the archive needed: its digest covers every byte.
     let mut raw = counted.inner.into_raw();
     io::copy(&mut (&mut raw).take(length), &mut io::sink()).map_err(|e| bad("its end", &e))?;
-    let Some(hash) = raw.into_inner().hash else {
+    let Hashing { file, hash: hashed } = raw.into_inner();
+    let Some(hashed) = hashed else {
         return Err(bad("its digest", &"its bytes weren't hashed"));
     };
-    let got: files::Digest = sha2::Digest::finalize(hash).into();
-    if &got != want {
-        return Err(bad(
+    let got: files::Digest = sha2::Digest::finalize(hashed).into();
+    match hash {
+        Hash::Verify(want) if got != want => Err(bad(
             "its digest",
             &format!(
                 "its bytes' sha256 is {}, not {}, the digest it is named by",
                 files::digest_hex(&got),
-                files::digest_hex(want)
+                files::digest_hex(&want)
             ),
-        ));
+        )),
+        Hash::Learn => {
+            // Learned only if the file held still while it was read: a write between would make the
+            // digest some other bytes'.
+            let read = file.metadata().map_err(|e| bad("its end", &e))?;
+            if identity(&opened) != identity(&read) {
+                return Ok(None);
+            }
+            Ok(Some(Learned {
+                path: path.to_owned(),
+                digest: got,
+                identity: identity(&opened),
+            }))
+        }
+        Hash::Verify(_) | Hash::No => Ok(None),
     }
-    Ok(())
 }
 
 /// gzip's magic (RFC 1952 §2.3.1, ID1 and ID2).

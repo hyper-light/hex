@@ -1000,7 +1000,7 @@ fn stage_as(
             let path = host.join(format!("{id}-layer{i}.tar"));
             layer_tar(&path, *mtime, entries);
             Layer {
-                digest: sha256(&path),
+                digest: Some(sha256(&path)),
                 path,
             }
         })
@@ -1012,7 +1012,7 @@ fn stage_as(
                 .path()
                 .join("staged")
                 .join(hf::STORE)
-                .join(hf::digest_hex(&l.digest))
+                .join(hf::digest_hex(&l.digest.unwrap()))
         })
         .collect();
     let items = [Item {
@@ -1025,7 +1025,7 @@ fn stage_as(
         &items,
         &hf::LIMITS,
     )
-    .map(|()| folders)
+    .map(|_| folders)
 }
 
 /// HEX-GUEST-14 with the host's packer (the lead's ruling, §4a): stage a tarball root whose entries are
@@ -1346,9 +1346,20 @@ fn a_stages_first_answer_is_the_staged_folders_free_space() {
     drop(conn);
 }
 
+/// What the store at `store` holds but its lock and the room it leaves a stage (`.lock`, `.need`): layers,
+/// partials, sizes.
+fn layers_left(store: &Path) -> Vec<String> {
+    std::fs::read_dir(store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n != ".lock" && n != ".need")
+        .collect()
+}
+
 /// The raw stage of `entries` for `b`, its root's layers named `layers` in its opening.
 fn raw_layered(layers: &[hf::Digest], entries: &[(&str, hf::What)]) -> Vec<u8> {
-    let mut out = hf::open_stage("b", layers).unwrap();
+    let named: Vec<Option<hf::Digest>> = layers.iter().copied().map(Some).collect();
+    let mut out = hf::open_stage("b", &named).unwrap();
     for (path, what) in entries {
         let e = hf::Entry {
             path: (*path).to_owned(),
@@ -1512,14 +1523,14 @@ fn a_layer_the_guest_holds_is_staged_once_and_shared() {
     // A's tarball, as `two` names it: its digest kept, the file itself gone.
     let a = host.path().join("one-layer0.tar");
     let a_layer = Layer {
-        digest: sha256(&a),
+        digest: Some(sha256(&a)),
         path: a.clone(),
     };
     std::fs::remove_file(&a).unwrap();
     let c = host.path().join("c.tar");
     layer_tar(&c, 1_600_000_200, &[T::File("c", b"c")]);
     let c_layer = Layer {
-        digest: sha256(&c),
+        digest: Some(sha256(&c)),
         path: c,
     };
     stage(
@@ -1546,12 +1557,17 @@ fn a_layer_the_guest_holds_is_staged_once_and_shared() {
         record,
         format!(
             "{}\n{}\n",
-            hf::digest_hex(&a_layer.digest),
-            hf::digest_hex(&c_layer.digest)
+            hf::digest_hex(&a_layer.digest.unwrap()),
+            hf::digest_hex(&c_layer.digest.unwrap())
         )
     );
     assert_eq!(
-        std::fs::read(store.join(hf::digest_hex(&c_layer.digest)).join("c")).unwrap(),
+        std::fs::read(
+            store
+                .join(hf::digest_hex(&c_layer.digest.unwrap()))
+                .join("c")
+        )
+        .unwrap(),
         b"c"
     );
 }
@@ -1573,10 +1589,7 @@ fn a_layer_cut_or_crashed_mid_stage_is_never_held() {
     cut.extend(b"half");
     let answer = stage_raw(&lab, &cut);
     assert!(matches!(answer, Answer::Refused(_)), "{answer:?}");
-    let left: Vec<String> = std::fs::read_dir(&store)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
+    let left = layers_left(&store);
     assert!(left.is_empty(), "left in the store: {left:?}");
     // A crashed relay's partial: another pid's.
     let partial = store.join(format!(".partial-1-1-{}", hf::digest_hex(&digest)));
@@ -1613,7 +1626,7 @@ fn a_layer_whose_bytes_arent_its_digest_is_refused_and_never_held() {
             name: "root".to_owned(),
             source: Source::Layers(vec![Layer {
                 path,
-                digest: named,
+                digest: Some(named),
             }]),
         }],
         &hf::LIMITS,
@@ -1624,11 +1637,78 @@ fn a_layer_whose_bytes_arent_its_digest_is_refused_and_never_held() {
         why.contains(&hf::digest_hex(&got)) && why.contains(&hf::digest_hex(&named)),
         "{why}"
     );
-    let left: Vec<String> = std::fs::read_dir(staged.join(hf::STORE))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
+    let left = layers_left(&staged.join(hf::STORE));
     assert!(left.is_empty(), "left in the store: {left:?}");
+}
+
+/// HEX-GUEST-14 (§4a; the lead's check, 2026-11-06: what whole-root staging took, the store takes): stage a
+/// layer whose digest the host doesn't know (docker save's `<id>/layer.tar`): expect it staged into the
+/// box's own `layers/0`, a folder, nothing of it in the store, and its digest learned as it crossed.
+#[test]
+fn a_layer_of_no_known_digest_is_staged_into_its_box_and_its_digest_learned() {
+    use hex_client::guest::stage::{Item, Layer, Source, stage};
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let path = host.path().join("layer.tar");
+    layer_tar(&path, 1_600_000_000, &[T::File("f", b"saved")]);
+    let got = stage(
+        lab.link().as_ref(),
+        &BoxId::new("b").unwrap(),
+        &[Item {
+            name: "root".to_owned(),
+            source: Source::Layers(vec![Layer {
+                path: path.clone(),
+                digest: None,
+            }]),
+        }],
+        &hf::LIMITS,
+    )
+    .unwrap();
+    assert_eq!(got.learned.len(), 1);
+    assert_eq!(got.learned[0].digest, sha256(&path));
+    let own = staged.join("b/layers/0");
+    assert!(std::fs::symlink_metadata(&own).unwrap().is_dir());
+    assert_eq!(std::fs::read(own.join("f")).unwrap(), b"saved");
+    assert!(layers_left(&staged.join(hf::STORE)).is_empty());
+}
+
+/// HEX-GUEST-14 (§4a; the lead's rule, 2026-11-06: a create never evicts; the reclaimer frees what a bypass
+/// used, off the create's path): stage box `one` of layer A and remove it, so A is cached unreferenced; make
+/// the room a stage needs more than is free; stage box `b` of layer B, raw, reading the relay to its end:
+/// expect `b` answered `Done` with B in its own folder, never the store, and once the relay closes (it
+/// reclaims after answering), A taken from the store, the least recently used unreferenced layer.
+#[test]
+fn a_stage_without_room_is_answered_then_its_bypass_is_reclaimed() {
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let one = stage_as(
+        &lab,
+        host.path(),
+        "one",
+        &[(1_600_000_000, vec![T::File("a", b"a")])],
+    )
+    .unwrap();
+    assert!(one[0].exists());
+    crate::relay::files::remove(&staged, &BoxId::new("one").unwrap()).unwrap();
+    assert!(one[0].exists(), "a layer no box names stays cached");
+    std::fs::write(
+        staged.join(hf::STORE).join(".need"),
+        format!("0 {}\n", u64::MAX),
+    )
+    .unwrap();
+    let b = [0xbb; 32];
+    let raw = raw_layered(
+        &[b],
+        &[("r", hf::What::Layer), ("r/f", hf::What::File { size: 0 })],
+    );
+    assert_eq!(stage_raw(&lab, &raw), Answer::Done);
+    assert!(
+        std::fs::symlink_metadata(staged.join("b/layers/0"))
+            .unwrap()
+            .is_dir()
+    );
+    assert!(!staged.join(hf::STORE).join(hf::digest_hex(&b)).exists());
+    assert!(!one[0].exists(), "the bypass was reclaimed");
 }
 
 /// HEX-GUEST-14 (§4a as amended): stage a tarball root, end to end through the host's packer and the relay,

@@ -38,8 +38,7 @@ shards-api.workspace = true
 # HEX-GUEST-19 and -20 give roots as tarballs, as §4a's roots may be (tests/guest_real.rs,
 # tests/guest_validation.rs).
 flate2.workspace = true
-# HEX-GUEST-21 and -22 name each layer by its sha256, as its image does (tests/guest_tree.rs,
-# tests/guest_create_bench.rs).
+# HEX-GUEST-21 names each layer by its sha256, as its image does (tests/guest_tree.rs).
 sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true

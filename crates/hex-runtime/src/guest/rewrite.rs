@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, ClassSpec, OciSpec, Refusal, Rootfs};
 use hex_client::guest::stage::{
-    Item, Layer, Source, blob_digest, is_tarball, layer_path, staged_path,
+    Item, Layer, Source, blob_digest, box_layer_path, is_tarball, staged_path,
 };
 use serde_json::Value;
 
@@ -24,8 +24,18 @@ pub struct Rewritten {
     pub items: Vec<Item>,
 }
 
-/// `spec` rewritten for a guest whose shares are `shared` and whose relay stages under `staged`.
-pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritten, Refusal> {
+/// The digests the host learned for layer tarballs not named by theirs, by path, each trusted only while
+/// its file's identity is the one it was learned with (the caller checks).
+pub type Known = std::collections::BTreeMap<PathBuf, hex_core::stream::files::Digest>;
+
+/// `spec` rewritten for a guest whose shares are `shared` and whose relay stages under `staged`, its layer
+/// tarballs' digests their blob names' or `known`'s.
+pub fn rewrite(
+    spec: BoxSpec,
+    shared: &[Share],
+    staged: &str,
+    known: &Known,
+) -> Result<Rewritten, Refusal> {
     let BoxSpec { id, bounds, class } = spec;
     let mut items = Vec::new();
     let class = match class {
@@ -36,7 +46,7 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
                     Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir)?)
                 }
                 Rootfs::Layers(layers) => {
-                    Rootfs::Layers(stage_layers(staged, &id, &mut items, layers)?)
+                    Rootfs::Layers(stage_layers(staged, &id, &mut items, layers, known)?)
                 }
             };
             for mount in &mut oci.mounts {
@@ -129,16 +139,18 @@ fn stage(
 }
 
 /// Adds an image's layers to stage, and returns their paths in the guest. Tarballs are an image's own
-/// layers, its blobs, each named by its digest ([`blob_digest`]); each lives once in the guest's layer store, applied as containerd's
-/// overlay applier applies one layer, so the guest mounts them as the overlay's lower layers, as a Linux
-/// host's overlayfs snapshotter does, and a layer the guest holds is staged no more (§4a). Directories
-/// are each staged as they are, an overlay's layers already. A list of both is refused by name: a
-/// tarball's whiteouts would have to apply over a directory staged apart from it.
+/// layers, each applied as containerd's overlay applier applies one layer, so the guest mounts them as the
+/// overlay's lower layers, as a Linux host's overlayfs snapshotter does: each in the guest's layer store by
+/// its digest where the store has room, a layer the guest holds staged no more, else in the box (§4a). The
+/// box names each `layers/<i>` either way. Directories are each staged as they are, an overlay's layers
+/// already. A list of both is refused by name: a tarball's whiteouts would have to apply over a directory
+/// staged apart from it.
 fn stage_layers(
     staged: &str,
     id: &BoxId,
     items: &mut Vec<Item>,
     layers: Vec<PathBuf>,
+    known: &Known,
 ) -> Result<Vec<PathBuf>, Refusal> {
     let tarballs = layers.iter().filter(|l| is_tarball(l)).count();
     if tarballs == 0 {
@@ -156,26 +168,18 @@ fn stage_layers(
                 .to_owned(),
         });
     }
-    // Each layer's digest is its blob's name, never learned by reading it: a create costs a layer the
-    // guest holds its name alone (§4a).
-    let layers = layers
+    // Each layer's digest is its blob's name, or one learned when it last crossed (`known`), never learned
+    // by reading it here: a create costs a layer the guest holds its name alone. A layer of neither is
+    // staged into the box, hashed as it crosses, for the next create to know (§4a).
+    let layers: Vec<Layer> = layers
         .into_iter()
-        .enumerate()
-        .map(|(i, path)| match blob_digest(&path) {
-            Some(digest) => Ok(Layer { path, digest }),
-            None => Err(Refusal::Invalid {
-                what: "oci spec",
-                why: format!(
-                    "rootfs.layers[{i}] {}: a layer tarball is named by its digest, as its image keeps \
-                     it (an OCI image layout's or containerd's content store's blobs/sha256/<hex>)",
-                    path.display()
-                ),
-            }),
+        .map(|path| Layer {
+            digest: blob_digest(&path).or_else(|| known.get(&path).copied()),
+            path,
         })
-        .collect::<Result<Vec<Layer>, Refusal>>()?;
-    let guests = layers
-        .iter()
-        .map(|l| PathBuf::from(layer_path(staged, &l.digest)))
+        .collect();
+    let guests = (0..layers.len())
+        .map(|i| PathBuf::from(box_layer_path(staged, id, i)))
         .collect();
     items.push(Item {
         name: "root".to_owned(),

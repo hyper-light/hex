@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::rewrite::rewrite;
+use super::rewrite::{Known, rewrite};
 use super::shares::{self, Share};
 use super::*;
 use hex_api::{Bounds, Mount, Network, OciSpec, Rootfs};
@@ -130,8 +130,9 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
 
 /// HEX-GUEST-16: rewrite an OciSpec with a root folder and with layers, and a writable and a read-only
 /// bind: expect its root named by the staged copy and staged from the host path (an image's layer blobs
-/// named by the digests their names give, never read, a layer tarball named otherwise refused by name, and
-/// tarballs mixed with directories refused), each bind's source
+/// named by the digests their names give, never read; docker save's `<id>/layer.tar` by a digest learned
+/// before, or none; each layer the box's `layers/<i>`; tarballs mixed with directories refused), each
+/// bind's source
 /// its path under its share (writable binds pass), and a bind under no share refused naming it and the
 /// shared roots.
 #[test]
@@ -147,6 +148,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         ),
         &shared,
         STAGED,
+        &Known::new(),
     )
     .unwrap();
     let ClassSpec::Oci(spec) = &got.spec.class else {
@@ -182,51 +184,54 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
             ))
         })
         .collect();
-    let layered = rewrite(oci(Rootfs::Layers(blobs.clone()), vec![]), &shared, STAGED).unwrap();
+    // And a layer as `docker save` writes it, `<id>/layer.tar`, its name no digest: whole-root staging took
+    // it, and so does the store (the lead's check, 2026-11-06), named by a digest learned when it last
+    // crossed (`known`), or else by none, staged into the box and hashed as it crosses.
+    let saved = PathBuf::from("/Users/ada/save/0f3e/layer.tar");
+    let mut layers = blobs.clone();
+    layers.push(saved.clone());
+    let layered = rewrite(
+        oci(Rootfs::Layers(layers.clone()), vec![]),
+        &shared,
+        STAGED,
+        &Known::new(),
+    )
+    .unwrap();
     let ClassSpec::Oci(spec) = &layered.spec.class else {
         panic!("not oci");
     };
-    // Each is a lower layer of the box's overlay, its folder in the guest's layer store, lowest first.
+    // Each is a lower layer of the box's overlay, by the box's own name for it, lowest first.
     assert_eq!(
         spec.rootfs,
         Rootfs::Layers(
-            digests
-                .iter()
-                .map(|d| PathBuf::from(hex_client::guest::stage::layer_path(STAGED, d)))
+            (0..3)
+                .map(|i| PathBuf::from(format!("{STAGED}/box-1/layers/{i}")))
                 .collect()
         )
     );
-    assert_eq!(
-        layered.items[0].source,
+    let named = |saved: Option<[u8; 32]>| {
         Source::Layers(
-            blobs
+            layers
                 .iter()
-                .zip(&digests)
+                .zip(digests.iter().copied().map(Some).chain([saved]))
                 .map(|(path, digest)| hex_client::guest::stage::Layer {
                     path: path.clone(),
-                    digest: *digest,
+                    digest,
                 })
-                .collect()
+                .collect(),
         )
-    );
-    // A layer tarball not named by its digest is refused by name, never hashed to name it.
-    let Err(Refusal::Invalid { why, .. }) = rewrite(
-        oci(
-            Rootfs::Layers(vec![
-                blobs[0].clone(),
-                PathBuf::from("/Users/ada/l1.tar.gz"),
-            ]),
-            vec![],
-        ),
+    };
+    assert_eq!(layered.items[0].source, named(None));
+    let learned = [0x5au8; 32];
+    let known: Known = [(saved.clone(), learned)].into_iter().collect();
+    let again = rewrite(
+        oci(Rootfs::Layers(layers.clone()), vec![]),
         &shared,
         STAGED,
-    ) else {
-        panic!("expected a layer tarball not named by its digest refused");
-    };
-    assert!(
-        why.contains("rootfs.layers[1] /Users/ada/l1.tar.gz") && why.contains("blobs/sha256/"),
-        "{why}"
-    );
+        &known,
+    )
+    .unwrap();
+    assert_eq!(again.items[0].source, named(Some(learned)));
     let Err(Refusal::Invalid { why, .. }) = rewrite(
         oci(
             Rootfs::Layers(vec![
@@ -237,6 +242,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         ),
         &shared,
         STAGED,
+        &Known::new(),
     ) else {
         panic!("expected tarballs and directories together refused");
     };
@@ -249,12 +255,57 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
         ),
         &shared,
         STAGED,
+        &Known::new(),
     ) else {
         panic!("expected the unshared bind refused");
     };
     assert!(
         why.contains("/x's source /opt/x") && why.contains("[/Users, /etc]"),
         "{why}"
+    );
+}
+
+/// HEX-GUEST-16 (§4a; the lead's conditions, 2026-11-06): learn the digests of three layer files from a
+/// stage whose guest's store holds two layers: expect the least recently learned forgotten, and the other
+/// two known by path while their files are as they were read. Rewrite one (its identity changes): expect it
+/// unknown, so it's hashed again when it next crosses, never trusted.
+#[test]
+fn a_learned_digest_is_trusted_while_its_file_is_the_same_within_what_the_store_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<PathBuf> = ["a", "b", "c"]
+        .iter()
+        .map(|n| {
+            let path = dir.path().join(n).join("layer.tar");
+            std::fs::create_dir(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, n.as_bytes()).unwrap();
+            path
+        })
+        .collect();
+    let learned = paths
+        .iter()
+        .enumerate()
+        .map(|(i, path)| hex_client::guest::stage::Learned {
+            path: path.clone(),
+            digest: [u8::try_from(i).unwrap(); 32],
+            identity: hex_client::guest::stage::identity(&std::fs::metadata(path).unwrap()),
+        })
+        .collect();
+    let mut digests = Digests::default();
+    digests.learn(hex_client::guest::stage::Staged {
+        learned,
+        capacity: 2,
+    });
+    let known = digests.known(&paths);
+    assert_eq!(
+        known,
+        [(paths[1].clone(), [1; 32]), (paths[2].clone(), [2; 32])]
+            .into_iter()
+            .collect::<Known>()
+    );
+    std::fs::write(&paths[2], b"changed").unwrap();
+    assert!(
+        digests.known(&paths[2..]).is_empty(),
+        "a changed file is never trusted"
     );
 }
 
@@ -285,7 +336,7 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
     };
-    let got = rewrite(spec.clone(), &shared, STAGED).unwrap();
+    let got = rewrite(spec.clone(), &shared, STAGED, &Known::new()).unwrap();
     assert_eq!(
         got.spec.class,
         ClassSpec::Bundle(PathBuf::from("/run/hex/staged/box-1"))
@@ -304,7 +355,7 @@ fn a_bundles_config_is_rewritten_to_the_guests_paths() {
         "/run/hex/shares/1/bundle/data"
     );
     assert!(matches!(
-        rewrite(spec, &[share(0, "/etc", false)], STAGED),
+        rewrite(spec, &[share(0, "/etc", false)], STAGED, &Known::new()),
         Err(Refusal::Platform { .. })
     ));
 }
@@ -502,10 +553,21 @@ fn an_unrenderable_spec_is_refused_by_its_field_before_its_shares_or_a_boot() {
 fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows() {
     let host = tempfile::tempdir().unwrap();
     let tarball = host.path().join("rootfs.tar.gz");
-    let got = rewrite(oci(Rootfs::Dir(tarball.clone()), vec![]), &[], STAGED).unwrap();
+    let got = rewrite(
+        oci(Rootfs::Dir(tarball.clone()), vec![]),
+        &[],
+        STAGED,
+        &Known::new(),
+    )
+    .unwrap();
     assert_eq!(got.items[0].source, Source::Tar(tarball));
     let dir = host.path().join("rootfs");
-    let got = rewrite(oci(Rootfs::Dir(dir.clone()), vec![]), &[], STAGED);
+    let got = rewrite(
+        oci(Rootfs::Dir(dir.clone()), vec![]),
+        &[],
+        STAGED,
+        &Known::new(),
+    );
     if cfg!(windows) {
         let Err(Refusal::Platform { why, .. }) = got else {
             panic!("expected a Windows directory root refused, got {got:?}");

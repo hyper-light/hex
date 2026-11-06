@@ -231,6 +231,8 @@ pub enum Refused {
     Meta { path: String, why: String },
     #[error("{what} is over its bound of {bound}")]
     Over { what: &'static str, bound: u64 },
+    #[error("a stage's layer {0}")]
+    Layer(&'static str),
     #[error("the stream ended {0}")]
     Truncated(&'static str),
     #[error("{0} bytes follow the stream's end")]
@@ -238,7 +240,8 @@ pub enum Refused {
 }
 
 /// A stage's budget message: `HEXB`, the entries and the bytes (`u64` each, little-endian), the count of the
-/// opening's layers (`u16`) and one bit each, lowest first, set when the guest holds that layer.
+/// opening's layers (`u16`) and one bit each, lowest first, set when the guest holds that layer, then the
+/// layers its store can hold (`u64`).
 const BUDGET_MAGIC: [u8; 4] = *b"HEXB";
 /// The folder under the guest's staged folder holding its layers by digest, `<STORE>/<64 hex digits>` each
 /// (§4a's layer store); a box id never starts with '.' (`hex_api::BoxId`), so none is ever named so.
@@ -253,17 +256,22 @@ pub fn digest_hex(d: &Digest) -> String {
 pub type Digest = [u8; DIGEST_BYTES];
 /// A sha256's bytes (FIPS 180-4 §1: a 256-bit message digest).
 pub const DIGEST_BYTES: usize = 32;
+/// A layer in a stage's opening: whether it's named (1) or not (0), and its digest (zeros when not).
+const LAYER_BYTES: usize = 1 + DIGEST_BYTES;
 /// A byte's bits, lowest first: the budget's presence bits in order.
 const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 /// A stage's answer to its opening, before the packer sends an entry: what the staged root's file system
-/// has free for it (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`, with what unreferenced layers
-/// hold, which it evicts to make room), and which of the opening's layers the guest already holds.
+/// has free for it (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`), which of the opening's layers the
+/// guest already holds, and how many layers its store can hold: one each per inode its file system holds
+/// (`f_files`; its bytes where it keeps no count), since a layer is at least its folder. The host bounds what
+/// it remembers of layers' digests by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     pub entries: u64,
     pub bytes: u64,
     pub present: Vec<bool>,
+    pub capacity: u64,
 }
 
 /// A budget as the relay sends it.
@@ -281,6 +289,7 @@ pub fn budget(b: &Budget) -> Vec<u8> {
             .fold(0u8, |acc, (p, bit)| if *p { acc | bit } else { acc });
         out.push(byte);
     }
+    out.extend_from_slice(&b.capacity.to_le_bytes());
     out
 }
 
@@ -290,10 +299,10 @@ pub fn read_budget(message: &[u8]) -> Option<Budget> {
     let entries = u64::from_le_bytes(rest.get(..8)?.try_into().ok()?);
     let bytes = u64::from_le_bytes(rest.get(8..16)?.try_into().ok()?);
     let count = usize::from(u16::from_le_bytes(rest.get(16..18)?.try_into().ok()?));
-    let bits = rest.get(18..)?;
-    if bits.len() != count.div_ceil(8) {
-        return None;
-    }
+    let end = 18usize.checked_add(count.div_ceil(8))?;
+    let bits = rest.get(18..end)?;
+    let tail = rest.get(end..)?;
+    let capacity = u64::from_le_bytes(tail.try_into().ok()?);
     let present = bits
         .iter()
         .flat_map(|byte| BITS.iter().map(move |bit| byte & bit != 0))
@@ -303,6 +312,7 @@ pub fn read_budget(message: &[u8]) -> Option<Budget> {
         entries,
         bytes,
         present,
+        capacity,
     })
 }
 
@@ -330,9 +340,10 @@ pub const LIMITS: Limits = Limits {
 };
 
 /// A connection's opening bytes.
-/// A stage's opening naming its root's layers by digest, lowest first: the opening, then their count
-/// (`u16`, at most [`MAX_LAYERS`]) and each digest. A root staged as one copy names none.
-pub fn open_stage(id: &str, layers: &[Digest]) -> Result<Vec<u8>, Refused> {
+/// A stage's opening naming its root's layers, lowest first: the opening, then their count (`u16`, at most
+/// [`MAX_LAYERS`]) and each layer's [`LAYER_BYTES`]: 1 and its digest, or 0 and zeros for a layer the host
+/// knows no digest of yet (staged into the box, never the store). A root staged as one copy names none.
+pub fn open_stage(id: &str, layers: &[Option<Digest>]) -> Result<Vec<u8>, Refused> {
     let mut out = open(Op::Stage, id)?;
     // `open` closed a stage's opening with a count of none: this names the layers in its place.
     out.truncate(out.len().saturating_sub(2));
@@ -347,8 +358,14 @@ pub fn open_stage(id: &str, layers: &[Digest]) -> Result<Vec<u8>, Refused> {
         bound: u64::try_from(MAX_LAYERS).unwrap_or(u64::MAX),
     })?;
     out.extend_from_slice(&count.to_le_bytes());
-    for d in layers {
-        out.extend_from_slice(d);
+    for layer in layers {
+        match layer {
+            Some(d) => {
+                out.push(1);
+                out.extend_from_slice(d);
+            }
+            None => out.extend_from_slice(&[0; LAYER_BYTES]),
+        }
     }
     Ok(out)
 }
@@ -603,11 +620,12 @@ fn check_target(path: &str, target: &str, limits: &Limits) -> Result<(), Refused
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// The connection's op, its box id (a valid one: `hex_api::BoxId`'s rule is the shell's) and, for a
-    /// stage, its root's layers by digest, lowest first (§4a's layer store; none for a root of one copy).
+    /// stage, its root's layers, lowest first, each by its digest or none known (§4a's layer store; no
+    /// layers for a root of one copy).
     Open {
         op: Op,
         id: String,
-        layers: Vec<Digest>,
+        layers: Vec<Option<Digest>>,
     },
     /// An entry. A file's bytes come next, as [`Step::Data`], unless its size is 0.
     Entry(Entry),
@@ -900,14 +918,23 @@ impl Unpack {
         Ok((n, None))
     }
 
-    /// A stage's layers' digests, `count` of them: its opening is whole.
+    /// A stage's layers, `count` of them, each named or not: its opening is whole.
     fn digests(&mut self, input: &[u8], count: usize) -> Result<(usize, Option<Step>), Refused> {
-        let (n, whole) = self.fill(input, count.saturating_mul(DIGEST_BYTES));
+        let (n, whole) = self.fill(input, count.saturating_mul(LAYER_BYTES));
         if !whole {
             return Ok((n, None));
         }
         let held = std::mem::take(&mut self.held);
-        let layers: Vec<Digest> = held.as_chunks::<DIGEST_BYTES>().0.to_vec();
+        let mut layers = Vec::with_capacity(count);
+        for layer in held.as_chunks::<LAYER_BYTES>().0 {
+            let [named, digest @ ..] = layer;
+            layers.push(match named {
+                1 => Some(*digest),
+                0 if digest.iter().all(|b| *b == 0) => None,
+                0 => return Err(Refused::Layer("unnamed carries a digest")),
+                _ => return Err(Refused::Layer("is neither named (1) nor unnamed (0)")),
+            });
+        }
         let At::Digests { id, .. } = std::mem::replace(&mut self.at, At::Head) else {
             return Err(Refused::Truncated("before a stage's layers"));
         };
