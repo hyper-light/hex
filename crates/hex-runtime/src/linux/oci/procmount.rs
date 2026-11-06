@@ -6,11 +6,9 @@ use super::{mount::Op, spec::Spec};
 use hex_core::devfs::Unpooled;
 use rustix::mount::MountFlags;
 
-/// Configuration bytes retained per key (four keys): larger specifications use ordinary setup.
-const MAX_KEY_BYTES: usize = 4096;
-
 /// What a prepared proc is made for: its mount's data and flags, and the masked and read-only paths beneath
-/// it, each relative to the proc's root, in the spec's order.
+/// it, each relative to the proc's root, in the spec's order. Every byte of it is the spec's, so a key is bounded by
+/// the spec's own bound (`spec::MAX_CONFIG_BYTES`), and the pool's four keys by four of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub data: String,
@@ -60,15 +58,6 @@ pub fn eligible(spec: &Spec, plan: &[Op]) -> Result<(u32, Key), Unpooled> {
         masked: within(&spec.linux.masked_paths)?,
         readonly: within(&spec.linux.readonly_paths)?,
     };
-    let bytes = key
-        .masked
-        .iter()
-        .chain(&key.readonly)
-        .map(String::len)
-        .try_fold(key.data.len(), usize::checked_add);
-    if !bytes.is_some_and(|n| n <= MAX_KEY_BYTES) {
-        return Err(Unpooled::KeyBytes);
-    }
     Ok((u32::try_from(index).map_err(|_| Unpooled::Capacity)?, key))
 }
 
