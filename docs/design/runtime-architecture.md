@@ -2212,6 +2212,60 @@ to 59, not of record):
 (some other call on its path takes it). Or a claim that costs more at p50 than the clone it saves. Or a parked init's
 memory charge pushing an owner's box past bounds the fresh path keeps.
 
+### 9. Waits learn their deadlines from the answers they wait on (Ada's rule, 2026-11-06)
+
+Ada's rule: "We do not support arbitrary constants. We support learned and data derived values." Every bound Hex
+states is of one of four kinds: learned at runtime; derived from a named record (a `bench/` file and its run);
+a platform or specification limit cited at its source; or picked. A picked one is converted where it can be. This
+decision covers the node's waits for an answer whose time it can observe, and the copies and counts beside them
+(source notes: `docs/research/runtime/learned-waits.md`).
+
+**The estimator.** Each such wait is RFC 6298's retransmission timer (RFC 6298, "Computing TCP's Retransmission
+Timer", §2), a small pure core, `hex_core::patience`, shared by every wait below. The first answer R sets
+SRTT = R and RTTVAR = R/2 (2.2); each later R' sets RTTVAR = 3/4·RTTVAR + 1/4·|SRTT − R'| from the SRTT before,
+then SRTT = 7/8·SRTT + 1/8·R' (2.3: alpha 1/8, beta 1/4); the wait is SRTT + 4·RTTVAR (K = 4). A wait that runs
+out doubles the next ((5.5)) until an answer computes it afresh (§5, the note after (5.7)); an answer whose server
+died or was taken for hung is no sample (Karn's rule, §3). The shell times each answer on its monotonic clock.
+Property tests hold it to an oracle of the RFC's formulas in exact arithmetic, within the nanosecond rounding the
+integer form takes (`crates/hex-core/src/patience/tests.rs`).
+
+**The bound before the first sample, and the bounds after.** RFC 6298's own: the first wait 1 s ((2.1)), never
+under 1 s ((2.4)), never over 60 s, the least maximum (2.5) allows (`hex_core::patience::RFC_6298`). The floor is
+the RFC's reason as much as its number: a wait that ends too soon costs more than one that ends late (in TCP a
+spurious retransmission; here a create refused and a healthy seed killed, or a delete refused), and Allman and
+Paxson found the 1 s floor kept spurious timeouts rare (SIGCOMM '99, §3). The node's answers are far under the
+floor while the host is well (a seed's clone 0.209 ms p50, 0.989 ms max on fedora,
+`bench/competitive/probes/seed_path.md` run 2), so the floor is the wait then; the learned part shows when answers
+slow past it, and the back-off when one never comes.
+
+**What is learned, from what.**
+
+| Wait | Was | Learned from | Expiry means |
+| --- | --- | --- | --- |
+| a create's wait in line for a seed (`seeds::Limits::wait`) | 1 s, picked | the waits that ended in a seed | refused `Waited`; next wait doubles |
+| a seed's hang bound, and the shell's wait for its answer (`Limits::hang`, createpool's `ANSWER_PATIENCE`) | 30 s, copied from the exec seeds | the creates seeds were done with | the seed killed and replaced, its create refused `Hung` |
+| a create or delete's wait for the same box's (`TURN_PATIENCE`) | 120 s, the sum of two picked 60 s | how long turns were held | refused by type |
+| a record change's wait for the same box's (`WRITE_PATIENCE`) | 60 s, picked | the same, on the store's turns | refused by type |
+| a killed box's emptying, its programs' reaping, its init's end (`EMPTY_PATIENCE`, cgroups' `REMOVE_PATIENCE`) | 60 s, picked, and a copy | every emptying of the process's nodes (one kernel) | refused by type, naming what survives |
+| a recovery's listing of a directory (`LIST_PATIENCE`) | 60 s, picked | the listings before it | the recovery refused by type |
+
+Beside them: the line's room is `serve::WORKERS` by reference (a create over the socket is one of its calls), the
+record store's turns `hex_runtime::MAX_BOXES` by reference, the exec seeds' ceiling `seed::MOST` = `serve::WORKERS`
+(an exec holds its seed only for its call), the descriptors the agent holds past its bounds counted in
+`/proc/self/fd` as the bound is taken (`netns::open_descriptors`), the outsider walk's threads bounded by the
+host's `pid_max` read at runtime (Documentation/admin-guide/sysctl/kernel.rst) and its cgroups by the kill sweep's
+`MAX_SWEEP_CGROUPS`, and a delete's list of survivors by what fits one message of the socket (`node::why_room`).
+
+**What would falsify it.** A healthy run that counts a seed taken for hung (`Counts::hung`) or a create refused
+`Waited` where none was before, or a delete refused for a box that emptied after: the floor or the estimator is
+too tight for this domain, and the evidence would be the answer times around the expiry. A run whose answers sit
+near the floor (a loaded host's clones at hundreds of milliseconds) is where the learned part decides; if its
+waits run out while RTTVAR says the answers are steady, RFC 6298's K of 4 is too small for answers whose tail is
+heavier than a network path's. The waits that run once per process (a recovery's first listing) learn nothing
+before they wait: a node whose state directory is so large that a listing passes 1 s refuses its first recovery
+and needs a restart, whose listing then waits twice as long; measured listing times on a large state directory
+would show whether that happens.
+
 ## Axes that can't reach 4x, and why
 
 - **A1. Held memory and density per container or box.** A process in a cgroup of its own carries a kernel floor.
