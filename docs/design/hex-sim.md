@@ -441,8 +441,8 @@ that by name and version (patched to kiln's copy in `[patch.crates-io]`, CLAUDE.
   failed on a best-round snapshot, which held 25.4% where the last round was 29.2%.
 - `true_round_trips_follow_the_model` and `the_census_is_the_traces`.
 - hyper-swim's own six tests pass on the vendored file.
-- Over the record's 118 studies (adas-mac-studio-2.local, commit `fac8372`, virtual time; the run of
-  record on fedora is pending), the final median error is at least 3.1%, 6.0% at the median and at
+- Over the record's 118 studies (fedora, commit `272b220`, unit
+  `hex-sched-g3-record-20261106T204635Z`, virtual time), the final median error is at least 3.1%, 6.0% at the median and at
   most 29.2% (seed 15, 6 rounds). `bench/sched/proximity.md` lists each seed's rounds and final error.
 
 **What would falsify it.** hyper-swim's coordinates measured on a real WAN (the open gap `PF[6]`)
@@ -489,8 +489,9 @@ rule: 25,295 launches × 2.
 - `proximity-and-failure-containment.md` §1.5 (Hyperscale's `rtt_ucb`, PF[33]).
 - Kiln research `01a1a9977b2273d0860ac510b8aa0a69`.
 
-**Evidence.** `bench/sched/proximity.md` (adas-mac-studio-2.local, commit `fac8372`, virtual time; the
-run of record on fedora is pending). Proximity cuts the completion time's p99 and p50, and mean RTT,
+**Evidence.** `bench/sched/proximity.md` (the run of record: fedora, commit `272b220`, unit
+`hex-sched-g3-record-20261106T204635Z`, virtual time; adas-mac-studio-2.local gives the same tables
+digit for digit). Proximity cuts the completion time's p99 and p50, and mean RTT,
 against blind on all 118 studies, over all launches and for each kind:
 
 | | AllKinds | Mixed |
