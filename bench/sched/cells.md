@@ -2,6 +2,54 @@
 
 **Bar:** the federation's selection of a cell for a workload, on 100 simulated cells, at p99 at most a
 fifth of Karmada's `cluster_schedule` P99 of 32 ms on 100 simulated member clusters, so 6.4 ms
+(`docs/design/hex-sim.md` H68, classes H69; Karmada's 2022 report, `cluster-managers-at-scale.md:239-245`,
+[41], MV). **Result: MET, over Hex's three classes.** Best p99 of 5 is 5.04 µs, about 6,350x below
+Karmada's 32 ms; per class 4.97 µs (OCI), 5.14 µs (Firecracker), 5.03 µs (Shards). Every run selected all
+2,000,000, each into a cell of a region that runs its class.
+
+## Of record: Hex's three classes (2026-11-06)
+
+What changed from the run below (H69):
+- **Regions** each one platform, in the generator's proportion over the ten: regions 0-5 Linux (all
+  three classes), 6-7 Windows (OCI and Shards), 8-9 macOS (Shards). Every node, cell and region
+  declares the classes it runs, and `Capacity::admit` passes over a cell that doesn't run the
+  workload's class; the bench asserts each selection's region runs its class.
+- **Workloads** one class each by G2's rule (owners at 75 launches each, a third each, each class's
+  overhead in its memory; Shards' 5 MiB a stand-in): 666,667 OCI, 666,666 Firecracker, 666,667 Shards.
+- **Selection** by Hex's packing score (`Scorer::HEX`, H11) against each class's one need, not best fit.
+- So cells fill unevenly by design: Firecracker can use 60 cells, OCI 80, Shards all 100. The least-used
+  cell got 6,577 workloads, the most-used 60,250, the same in every run.
+
+The run of record: fedora, commit `e311314`, release, built on CPUs 16-31, timed with `taskset -c 4-15`
+under the timed lock (taken 2026-11-06 14:18:58Z, released 14:19:29Z), unit
+hex-sched-g6-classbench-20261106T141227Z. Load 7.67 when the lock was taken, 6.47 after; 7 containers;
+co-tenant hex units: hex-native-s7-gates, hex-sched-g4-gates, hex-sched-g4-gatesm.
+
+| run | p50 µs | p90 µs | p99 µs | p99.9 µs | max µs |
+|---|---|---|---|---|---|
+| 0 | 2.79 | 3.61 | 5.27 | 8.14 | 33.17 |
+| 1 | 2.77 | 3.58 | 5.23 | 8.10 | 37.42 |
+| 2 | 2.78 | 4.19 | 7.64 | 10.71 | 82.99 |
+| 3 | 2.74 | 3.52 | 5.24 | 7.85 | 46.53 |
+| 4 | 2.73 | 3.50 | **5.04** | 7.70 | 38.95 |
+
+Run 4 by class:
+
+| class | selections | p50 µs | p90 µs | p99 µs | p99.9 µs | max µs |
+|---|---|---|---|---|---|---|
+| OCI | 666,667 | 2.71 | 3.29 | 4.97 | 7.55 | 38.95 |
+| Firecracker | 666,666 | 2.82 | 3.92 | 5.14 | 7.74 | 28.75 |
+| Shards | 666,667 | 2.70 | 2.96 | 5.03 | 7.82 | 37.64 |
+
+**What moved, against the run below:** best p99 3.77 µs to 5.04 µs, and p50 1.51 µs to 2.73 µs: a
+class check per cell visited, and Hex's score ranking each sample against the class shapes. The maxima
+fell, 0.75-2.0 ms to 25-83 µs, on a quieter host (load 7 against 40-51). Firecracker's p90 runs highest,
+since it has the fewest cells.
+
+## Before classes (2026-11-05, superseded by the above)
+
+**Bar (then):** the federation's selection of a cell for a workload, on 100 simulated cells, at p99 at most a
+fifth of Karmada's `cluster_schedule` P99 of 32 ms on 100 simulated member clusters, so 6.4 ms
 (`docs/design/hex-sim.md` H68; Karmada's 2022 report, `cluster-managers-at-scale.md:239-245`, [41],
 MV). **Result: MET.** Best p99 of 5 is 3.77 µs, about 8,500x below Karmada's 32 ms. Every run selected
 all 2,000,000, and every cell got exactly 20,000.

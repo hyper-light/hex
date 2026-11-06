@@ -85,11 +85,11 @@ pub enum Nemesis {
     },
 }
 
-/// A takeover's rebuild, per record read. Measured: unit hex-sched-g6s2-measure-20261105T042030Z,
-/// 2026-11-05, fedora 4-15, best of 5: 130 ns a record over rebuilds of 125,000 of 1,000,000 records,
-/// release, load 37.9, by `tests/shards.rs`'s `rebuild_cost`; recorded in
-/// `bench/sched/takeover_rebuild.md`.
-pub const REBUILD_NS_PER_RECORD: Time = 130;
+/// A takeover's rebuild, per record read. Measured with Hex's three classes (H69): unit
+/// hex-sched-g6-classbench-20261106T141227Z, 2026-11-06, fedora 4-15 under the timed lock, best of 5:
+/// 155 ns a record over rebuilds of 125,000 of 1,000,000 records, release, commit e311314, by
+/// `tests/shards.rs`'s `rebuild_cost`; recorded in `bench/sched/takeover_rebuild.md`.
+pub const REBUILD_NS_PER_RECORD: Time = 155;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {

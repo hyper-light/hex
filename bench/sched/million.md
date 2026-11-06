@@ -1,6 +1,52 @@
 # 1,000,000 pending workloads placed on 10,000 nodes (AC-T7.11.2)
 
 **Bar:** the time to place 1,000,000 pending workloads on 10,000 simulated nodes is at most 120 s,
+measured on fedora (`AC-T7.11.2`, G6 step 4; method H63, classes H69). **Result: MET, over Hex's three
+classes.** Every run of every row placed all 1,000,000 (a third each OCI containers, Firecracker and
+Shards microVMs, each only on a node that runs it), and the serial specification accepted every
+slice's log. Best of 5: pods 17.76 s on one plane, 0.616 s on eight; mixed 12.91 s and 0.612 s. The
+slowest of all 20 runs took 19.21 s.
+
+## Of record: Hex's three classes (2026-11-06)
+
+What changed from the run below (H69, the lead's check of 2026-11-06 under Ada's correction):
+- **Workloads** each one class by G2's rule: owners at 75 launches each (`generate::owners`), each
+  owner's workloads one class, a third of the launches each (`generate::by_owner`), and each class's
+  overhead added to its memory: OCI 0.42 MiB, Firecracker 5 MiB, Shards 5 MiB, **a stand-in** until
+  Shards states its own. Placed by class every run: OCI 333,303-333,349, Firecracker 333,304-333,350,
+  Shards 333,304-333,348, varying by seed with the owner draw.
+- **Nodes** declare their classes, by id (`generate::platform`): six in ten Linux (all three), two
+  Windows (OCI and Shards), two macOS (Shards). So Firecracker may use 6,000 nodes, OCI 8,000, Shards
+  all 10,000.
+- **Placement** by Hex's packing score (`Scorer::HEX`, H11: least stranded against each class's
+  smallest needs, then the node running the fewest classes), as `sched_fast_path` measures it. The first
+  try kept plain best fit and failed: the mixed row on one plane left 4,678 Firecracker microVMs
+  unplaced (seed 0, unit hex-sched-g6-classbench-20261106T132322Z), because OCI and Shards work filled
+  the Linux nodes, the only ones Firecracker can use. That run isn't of record; its pods rows (13.47 s
+  and 0.586 s best) met the bar under best fit.
+
+The run of record: fedora (`kiln-a094a12d.attlocal.net`, i9-14900HX), commit `e311314`
+(cp/t7-sched-g6), release, built on CPUs 16-31, each row timed with `taskset -c 4-15` under
+`flock /home/adalundhe/.cache/hex-t7/fedora-timed.lock`, unit hex-sched-g6-classbench-20261106T141227Z,
+2026-11-06 14:13-14:19Z. Load 13.82 when the first row took the lock, 7.67 after the last; 7-8
+containers; co-tenant hex units: hex-ns5route-g21m, hex-sched-g4-gates, hex-sched-g4-gatesm,
+hex-sched-g5-main-gates, hex-native-s7-gates.
+
+| row | slices | wall s, seeds 0-4 | best | spec |
+|---|---|---|---|---|
+| pods | 1 | 19.212, 18.696, 18.015, 17.981, 17.763 | **17.763** | accepted, 5 of 5 |
+| pods | 8 | 0.655, 0.616, 0.665, 0.633, 0.679 | **0.616** | accepted, 5 of 5 |
+| mixed | 1 | 15.242, 14.991, 12.905, 13.450, 13.428 | **12.905** | accepted, 5 of 5 |
+| mixed | 8 | 0.614, 0.627, 0.612, 0.623, 0.648 | **0.612** | accepted, 5 of 5 |
+
+**What moved, against the run below:** pods on one plane 8.13 s to 17.76 s (2.2x), on eight 0.418 s to
+0.616 s; mixed 7.55 s to 12.91 s, and 0.394 s to 0.612 s. Hex's score ranks a sample by stranding
+against each class's shapes, more work a decision than best fit's single key, and a class narrows the
+nodes a sample may take. Every row still meets the bar with at least 6.7x to spare.
+
+## Before classes (2026-11-05, superseded by the above)
+
+**Bar (then):** the time to place 1,000,000 pending workloads on 10,000 simulated nodes is at most 120 s,
 measured on fedora (`AC-T7.11.2`, G6 step 4; the method is `docs/design/hex-sim.md` H63).
 **Result: MET.** Every run of every row placed all 1,000,000, and the serial specification accepted
 every slice's log. With one plane (`slices = 1`), the best of 5 is 8.13 s for pods and 7.55 s for the

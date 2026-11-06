@@ -1,6 +1,30 @@
 # A takeover's rebuild of a slice's plane (T-T7.11.1)
 
 **What it sets:** `sim::REBUILD_NS_PER_RECORD`, the virtual time hex-sim charges a takeover for each
+store record its rebuild reads (`docs/design/hex-sim.md` H61). **Result, over Hex's three classes: 155 ns
+a record (best of 5)**, and with it a shard lost at 1,000,000 workloads is taken over in **905 ms**
+against T-T7.11.1's 5 s.
+
+## Of record: Hex's three classes (2026-11-06)
+
+The same measurement and test as below, on H69's cluster: workloads a third each OCI containers,
+Firecracker and Shards microVMs by owner (G2's rule, each with its class's overhead, Shards' 5 MiB a
+stand-in), on nodes in the generator's six-Linux, two-Windows, two-macOS mix. A store record now carries
+its workload's class and tenancy, so each record the rebuild reads is larger.
+
+- **Rebuild cost:** `rebuild_cost`, release, commit `e311314`, fedora, `taskset -c 4-15` under the timed
+  lock (2026-11-06 14:19:29-14:19:36Z), unit hex-sched-g6-classbench-20261106T141227Z, load 6.47, 7
+  containers. Output: `rebuild of slice 3: 125000 of 1000000 records, best of 5 19391806 ns, 155 ns a
+  record`. 130 ns before classes.
+- **Takeover at 155 ns** (`a_lost_shard_is_taken_over_within_five_seconds`, release, unit
+  hex-sched-g6-verify-20261106T142050Z, CPUs 16-31, 2026-11-06 14:25Z): detection 902 ms, a rebuild of
+  22,085 records (3 ms), **takeover 905 ms**. Running on the lost slice when its shard was lost: 7,275
+  OCI, 7,334 Firecracker, 7,476 Shards, all undisturbed; every workload of every class recorded done;
+  lost-or-double 0; all 8 slices' logs accepted. 922 ms before classes.
+
+## Before classes (2026-11-05, superseded by the above)
+
+**What it sets:** `sim::REBUILD_NS_PER_RECORD`, the virtual time hex-sim charges a takeover for each
 store record its rebuild reads (`docs/design/hex-sim.md` H61). **Result: 130 ns a record (best of 5).**
 
 ## What was measured
