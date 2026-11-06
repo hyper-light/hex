@@ -20,9 +20,13 @@ import subprocess
 import sys
 import urllib.request
 
-MAX_PAGES = 2_000
-MAX_RUNS = 200_000
+# The input-bound rule (the lead, 2026-11-06): twice the most runs an export on record holds, the 1,488 of
+# kiln-ci-20261022-20261105.export.json.gz.
+MAX_RUNS = 2 * 1_488
+# kiln's own most a page (`GET /api/runs`).
 PAGE = 500
+# Each page goes on only with a fresh run in the window, so the window's runs and one last page.
+MAX_PAGES = MAX_RUNS + 1
 TIMEOUT_S = 60
 RUN_KEYS = ("id", "repo_name", "number", "pipeline", "event", "branch", "status", "created_at",
             "started_at", "finished_at")

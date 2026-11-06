@@ -7,7 +7,10 @@ recorded workload uses, the host memory an idle guest holds and its boot-to-read
 Reads SHARDS_BIN, HEX_GUEST_KERNEL and HEX_GUEST_INITRD and boots as Hex's scripts/guest/boot_check.py does
 (`shards run vm`, `console=ttyS0 panic=-1`, no console). READY is boot_check's: a CONNECT to the relay's
 control port answered OK, then the connection's 8-byte token, tried every millisecond from the moment the
-VM process is started.
+VM process is started. A boot not READY by its bound is a failure, counted: the bound follows Hex's rule
+for learned waits (the lead, 2026-11-06), twice the slowest boot to ready on record for this host class,
+then twice the slowest of the record's and this run's, only rising. A guest is stopped by SIGKILL and
+waited for, which the kernel ends without a bound of ours.
 
 - Boot-to-ready, per size: RUNS runs of BOOTS boots one after another, each stopped and waited for before the
   next; per run its p50 and p99 (nearest rank); the best run by p99.
@@ -15,6 +18,9 @@ VM process is started.
   its process tree's smaps: PSS in all, and the guest RAM's (the anonymous or memfd mappings whose sizes sum
   to the guest's memory), so the VMM's own is the rest. From the cgroup's memory.stat before the guests and
   with them idle, what the kernel holds per guest (`kernel`, of it `sec_pagetables`, KVM's own page tables).
+- Overhead, per size: what one more guest costs a node beside its own RAM, the VMM's own private memory
+  (the most of any guest) plus the kernel's per guest (the most of any run). The VMM's text, shared by every
+  guest on a node, is a cost per node, not per guest, so the figure doesn't depend on how many share it.
 """
 
 import os
@@ -34,17 +40,27 @@ POOLS = [(300, 128), (400, 256), (600, 512), (800, 768), (1000, 1024), (1200, 12
 KIB = 1024
 POLL_S = 0.001
 MAPPING = re.compile(r"^[0-9a-f]+-[0-9a-f]+ ")
+# The relay's longest answer to a CONNECT: "OK", a u32 port and a newline (Firecracker's hybrid-vsock
+# handshake, which Shards' relay speaks).
+REPLY_MAX = len(b"OK 4294967295\n")
+# Hex's rule for learned waits: the bound is this many times the slowest recorded (the lead, 2026-11-06).
+BOUND_FACTOR = 2
+# The slowest boot to ready on record for KVM on fedora: the 3,584 MiB guests' best run under a load spike,
+# p99 6,088.2 ms (bench/sched/shards_overhead.md; that run's maximum wasn't kept).
+RECORDED_SLOWEST_S = 6.0882
+slowest_s = RECORDED_SLOWEST_S
 
 
-def handshake(path):
-    """One try: True once the guest's relay answers, False while it doesn't yet."""
+def handshake(path, left_s):
+    """One try, within the `left_s` seconds its boot has left: True once the guest's relay answers, False
+    while it doesn't yet."""
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(5.0)
+    conn.settimeout(left_s)
     try:
         conn.connect(path)
         conn.sendall(b"CONNECT %d\n" % CONTROL_PORT)
         line = b""
-        while not line.endswith(b"\n") and len(line) < 64:
+        while not line.endswith(b"\n") and len(line) < REPLY_MAX:
             chunk = conn.recv(1)
             if not chunk:
                 return False
@@ -64,8 +80,11 @@ def handshake(path):
         conn.close()
 
 
-def boot(work, cpus, mib, deadline_s=60.0):
-    """Starts a guest and waits for READY: (process, seconds to READY), or (process, None) if it never was."""
+def boot(work, cpus, mib):
+    """Starts a guest and waits for READY: (process, seconds to READY), or (process, None) if it wasn't READY
+    within twice the slowest boot to ready yet seen, the record's or this run's."""
+    global slowest_s
+    deadline_s = BOUND_FACTOR * slowest_s
     os.makedirs(work, exist_ok=True)
     vsock = os.path.join(work, "vsock.sock")
     if os.path.exists(vsock):
@@ -76,22 +95,21 @@ def boot(work, cpus, mib, deadline_s=60.0):
     log = open(os.path.join(work, "vm.log"), "wb")
     start = time.monotonic()
     vm = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT)
-    while time.monotonic() - start < deadline_s:
+    while (left_s := deadline_s - (time.monotonic() - start)) > 0:
         if vm.poll() is not None:
             return vm, None
-        if handshake(vsock):
-            return vm, time.monotonic() - start
+        if handshake(vsock, left_s):
+            took = time.monotonic() - start
+            slowest_s = max(slowest_s, took)
+            return vm, took
         time.sleep(POLL_S)
+    print(f"BOOT mib={mib} cpus={cpus} not READY within {deadline_s:.3f} s", flush=True)
     return vm, None
 
 
 def stop(vm):
-    vm.terminate()
-    try:
-        vm.wait(10)
-    except subprocess.TimeoutExpired:
-        vm.kill()
-        vm.wait()
+    vm.kill()
+    vm.wait()
 
 
 def tree(root):
@@ -188,7 +206,7 @@ def timing(work, cpus, mib, runs, boots):
 
 
 def memory(work, cpus, mib, runs, guests, idle_s, show_maps):
-    rows = []
+    rows, kernels = [], []
     for run in range(runs):
         before = cgroup_stat()
         vms = []
@@ -222,13 +240,14 @@ def memory(work, cpus, mib, runs, guests, idle_s, show_maps):
               + " ".join(f"{k}_kib={v / KIB:.0f}" for k, v in per.items()), flush=True)
         for vm in vms:
             stop(vm)
+        kernels.append(per["kernel"])
         rows.extend(run_rows)
         if run_rows:
             print(f"MEMORY mib={mib} run={run} pss_kib={[r[0] for r in run_rows]} guest_ram_pss_kib="
                   f"{[r[1] for r in run_rows]} vmm_own_pss_kib={[r[2] for r in run_rows]} "
                   f"vmm_own_private_kib={[r[3] for r in run_rows]} kernel_kib={per['kernel'] / KIB:.0f} "
                   f"sec_pagetables_kib={per['sec_pagetables'] / KIB:.0f}", flush=True)
-    return rows
+    return rows, kernels
 
 
 def main(argv):
@@ -247,7 +266,7 @@ def main(argv):
     for cpu, mib in pools:
         cpus = max(1, -(-cpu // 1000))
         best = timing(work, cpus, mib, runs, boots)
-        rows = memory(work, cpus, mib, memory_runs, guests, idle_s, True) if memory_runs else []
+        rows, kernels = memory(work, cpus, mib, memory_runs, guests, idle_s, True) if memory_runs else ([], [])
         if best:
             print(f"SUMMARY TIMING mib={mib} cpus={cpus} best-of-{runs} by p99: p50_ms={best[1] * 1e3:.1f} "
                   f"p99_ms={best[0] * 1e3:.1f} max_ms={best[2] * 1e3:.1f} failures={best[3]}", flush=True)
@@ -258,6 +277,11 @@ def main(argv):
                   f"median {statistics.median(col(1)) / KIB:.1f} max {col(1)[-1] / KIB:.1f}; VMM's own PSS "
                   f"median {statistics.median(col(2)) / KIB:.2f} max {col(2)[-1] / KIB:.2f}; VMM's own private "
                   f"median {statistics.median(col(3)) / KIB:.2f} max {col(3)[-1] / KIB:.2f}", flush=True)
+            overhead = col(3)[-1] * KIB + max(kernels)
+            print(f"SUMMARY OVERHEAD mib={mib} cpus={cpus}: the VMM's own private (most) {col(3)[-1]} KiB + "
+                  f"the kernel's per guest (most) {max(kernels) / KIB:.0f} KiB = {overhead:.0f} bytes", flush=True)
+        print(f"SUMMARY BOUND mib={mib} slowest boot to ready so far {slowest_s * 1e3:.1f} ms, bound "
+              f"{BOUND_FACTOR * slowest_s * 1e3:.1f} ms", flush=True)
 
 
 if __name__ == "__main__":

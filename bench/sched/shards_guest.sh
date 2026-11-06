@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Shards and Hex's guest on an x86_64 Linux host with KVM, everything fetched or built pinned by SHA-256 as
 # native step 5's job does on macOS (its m2.sh): zig 0.16.0 by its index's hash; Shards at p/internal-local
-# b8270370 plus hex/shards-api a0cced87 (from step 5's bundle), a debug build as step 5 ran; Shards' released
-# x86_64 kernel and config, pinned by Shards' crates/shards/src/kernel.rs; and Hex's guest image from
-# cp/t7-native-s5 by its scripts/guest/image.sh. For bench/sched/shards_overhead.py
+# b8270370 plus hex/shards-api a0cced87 (from step 5's bundle), built as it ships (release) or as step 5 ran
+# (debug); Shards' released x86_64 kernel and config, pinned by Shards' crates/shards/src/kernel.rs; and
+# Hex's guest image from cp/t7-native-s5 by its scripts/guest/image.sh. For bench/sched/shards_overhead.py
 # (bench/sched/shards_overhead.md).
-#   shards_guest.sh OUT SHARDS_BUNDLE HEX_REPO
+#   shards_guest.sh OUT SHARDS_BUNDLE HEX_REPO [release|debug]
 set -euo pipefail
-out=${1:?usage: shards_guest.sh OUT SHARDS_BUNDLE HEX_REPO}
+out=${1:?usage: shards_guest.sh OUT SHARDS_BUNDLE HEX_REPO [release|debug]}
 bundle=${2:?usage}
 hex_repo=${3:?usage}
+profile=${4:-release}
+case $profile in
+    release) cargo_profile=(--release) ;;
+    debug) cargo_profile=() ;;
+    *) echo "PROFILE_NOT_release_OR_debug $profile" >&2; exit 2 ;;
+esac
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 sha() { sha256sum "$1" | cut -d' ' -f1; }
@@ -30,20 +36,18 @@ zig version
 
 echo "== shards"
 s=$out/shards
-for _ in 1 2 3; do
-    git -C "$s" rev-parse -q --verify HEAD >/dev/null 2>&1 && break
+if ! git -C "$s" rev-parse -q --verify HEAD >/dev/null 2>&1; then
     rm -rf "${s:?}"
-    git clone -q --filter=blob:none https://github.com/hyper-light/shards.git "$s" && break
-    sleep 10
-done
+    git clone -q --filter=blob:none https://github.com/hyper-light/shards.git "$s"
+fi
 git -C "$s" fetch -q origin p/internal-local
 git -C "$s" fetch -q "$bundle" +hex/shards-api:refs/remotes/xfer/shards-api
 git -C "$s" checkout -q -B hex/shards-api xfer/shards-api
 [ "$(git -C "$s" rev-parse HEAD)" = a0cced87a47138e182df7574c063aa55bb3e1d3a ] || { echo "SHARDS_NOT_a0cced87" >&2; exit 7; }
 git -C "$s" merge-base --is-ancestor b8270370a62fc55e8ddc3247f89fdc889cec32a8 HEAD || { echo "SHARDS_NOT_ON_b8270370" >&2; exit 7; }
 git -C "$s" log --oneline -1
-(cd "$s" && CARGO_TARGET_DIR=$out/target-shards cargo build -q -p shards -j "${JOBS:-4}")
-echo "shards $(sha "$out/target-shards/debug/shards")"
+(cd "$s" && CARGO_TARGET_DIR=$out/target-shards cargo build -q -p shards "${cargo_profile[@]}" -j "${JOBS:-4}")
+echo "shards ($profile) $(sha "$out/target-shards/$profile/shards")"
 
 echo "== kernel"
 r=https://github.com/hyper-light/shards/releases/download/kernel-6.18.48-64a9427a8997
