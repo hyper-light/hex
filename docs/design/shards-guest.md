@@ -457,6 +457,9 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-37: the guest reports its boot's own stamps on `STAMPS_PORT`: `CLOCK_BOOTTIME` at init's first entry
   (carried across its re-exec), its mounts, its node ready and its relay listening, which split a boot
   (bench/native/guest/boot-split) (`hex guest`).
+- HEX-GUEST-38: init mounts cgroup2 alone with RCU's grace periods expedited (`/sys/kernel/rcu_expedited`, after
+  sysfs), as the kernel expedites them until it starts init: its first mount otherwise waits out grace periods, about
+  20 ms of an HVF boot (`hex guest`).
 
 ## 7. What would falsify it
 

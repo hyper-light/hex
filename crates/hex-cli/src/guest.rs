@@ -336,6 +336,8 @@ struct Mount {
     target: &'static str,
     fs: &'static str,
     flags: rustix::mount::MountFlags,
+    /// Made with RCU's grace periods expedited ([`RCU_EXPEDITED`]).
+    expedite: bool,
 }
 
 /// What `init` mounts, in order.
@@ -347,11 +349,18 @@ fn mounts() -> [Mount; 6] {
         target,
         fs,
         flags,
+        expedite: false,
     };
     [
         mount("proc", "/proc", "proc", quiet),
         mount("sysfs", "/sys", "sysfs", quiet),
-        mount("cgroup2", "/sys/fs/cgroup", "cgroup2", quiet),
+        // cgroup2's first mount waits out RCU grace periods, which the kernel expedites only until it starts
+        // init (`rcu_end_inkernel_boot`): about 20 ms of an HVF boot, under 0.1 ms expedited
+        // (bench/native/guest/boot-split/RECORD.md).
+        Mount {
+            expedite: true,
+            ..mount("cgroup2", "/sys/fs/cgroup", "cgroup2", quiet)
+        },
         mount("devtmpfs", "/dev", "devtmpfs", MountFlags::NOSUID),
         mount(
             "tmpfs",
@@ -518,13 +527,31 @@ fn mount_shares() -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel's switch for expediting RCU's grace periods (kernel/ksysfs.c, `rcu_expedited_store`):
+/// on, a grace period ends at once at the cost of an interrupt to every CPU; the kernel does so itself during
+/// its boot, until it starts init.
+const RCU_EXPEDITED: &str = "/sys/kernel/rcu_expedited";
+
+/// Turns RCU's expedited grace periods on or off.
+fn expedite_rcu(on: bool) -> Result<(), String> {
+    std::fs::write(RCU_EXPEDITED, if on { "1" } else { "0" })
+        .map_err(|e| format!("writing {on} to {RCU_EXPEDITED}: {e}"))
+}
+
 /// Mounts what the node needs, each on a directory made for it.
 fn mount_all() -> Result<(), String> {
     for m in mounts() {
         let (target, fs) = (m.target, m.fs);
         std::fs::create_dir_all(target).map_err(|e| format!("making {target}: {e}"))?;
-        rustix::mount::mount(m.source, target, fs, m.flags, None)
-            .map_err(|e| format!("mounting {fs} on {target}: {e}"))?;
+        if m.expedite {
+            expedite_rcu(true)?;
+        }
+        let mounted = rustix::mount::mount(m.source, target, fs, m.flags, None)
+            .map_err(|e| format!("mounting {fs} on {target}: {e}"));
+        if m.expedite {
+            expedite_rcu(false)?;
+        }
+        mounted?;
     }
     for dir in [RUN, STATE, BOX_ROOT] {
         std::fs::create_dir_all(dir).map_err(|e| format!("making {dir}: {e}"))?;
@@ -632,6 +659,18 @@ mod tests {
             );
         }
         assert!(Path::new(STATE).starts_with(RUN), "the state is at {STATE}");
+    }
+
+    /// HEX-GUEST-38 (the boot split): read init's mounts: expect cgroup2's alone made with RCU's grace
+    /// periods expedited (its first mount waits out grace periods, 20 ms of an HVF boot), after sysfs, whose
+    /// /sys/kernel/rcu_expedited switches it, and every other mount made as the kernel leaves RCU.
+    #[test]
+    fn only_cgroup2_is_mounted_with_rcu_expedited_after_sysfs() {
+        let all = mounts();
+        let expedited: Vec<&str> = all.iter().filter(|m| m.expedite).map(|m| m.fs).collect();
+        assert_eq!(expedited, ["cgroup2"]);
+        let at = |fs| all.iter().position(|m| m.fs == fs).unwrap();
+        assert!(at("sysfs") < at("cgroup2"));
     }
 
     /// HEX-GUEST-10 (§4): `init` reads the root's file system from mountinfo, so it leaves the

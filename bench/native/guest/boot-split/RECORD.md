@@ -35,6 +35,28 @@ Reading: the strip cut the median boot by 61 ms (40%), most of it on the host si
 the guest) and 3.7 ms of the kernel's unpack. Init's own 21 ms, re-exec to mounts, didn't move: the copy and re-exec
 of `/init` aren't what it spends. That is the next look. The node and relay take under 1 ms.
 
+### Init's 21 ms, found (scratch builds, not committed; adas-mac-studio-2, launchd, 2026-11-06 21:13-21:15Z, load 13-34)
+
+Finer stamps in a scratch build (each of init's three stamps moved; hex.ns5.dfine.20261106T211315Z and
+dfine2.20261106T211351Z, N=20 and N=12):
+
+- re-exec off the initramfs (copy and exec of the stripped `/init`): under 1 ms (init's first entry 25.1-27.1 ms;
+  after the re-exec 25.0-26.6 ms of boottime, its first stamp being the first entry carried across).
+- proc and sysfs: under 1 ms.
+- **cgroup2's mount: about 20 ms** (stamp after sysfs 25.3-28.6 ms, after cgroup2 45.1-51.1 ms), each ending
+  just past a whole millisecond: it waits out RCU grace periods, timer tick by timer tick.
+- devtmpfs, /run, /tmp: under 0.05 ms together.
+
+Tests on the kernel's command line (scratch, N=12 each): `cgroup_no_v1=all` leaves it at 20 ms
+(hex.ns5.dfine3.20261106T211502Z); `rcupdate.rcu_expedited=1` brings it to 0.03-0.05 ms, the relay listening at
+26.6-27.8 ms instead of 45-56 (hex.ns5.dfine4.20261106T211529Z). The kernel expedites RCU itself only until it starts
+init (`rcu_end_inkernel_boot`), and cgroup2's mount comes after.
+
+Cut 2 (HEX-GUEST-38): init turns `/sys/kernel/rcu_expedited` on for cgroup2's mount alone and off after it, as
+the kernel does for its own boot. The guest's run otherwise keeps RCU as the kernel leaves it. Whether to leave it
+on, trading an interrupt to every CPU per grace period for faster cgroup and namespace teardown in the boxes, is a
+separate measured question. Its 40-boot record with the committed tree is pending: studio-2 stopped answering.
+
 ## WHP (Windows x86_64, jupiter)
 
 Pending: jupiter's runner wasn't answering when this was taken.
