@@ -8,6 +8,11 @@ fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.into_string().ok())
         .collect();
+    // As PID 1, `hex` is a Shards guest's init, whatever words the kernel passes it.
+    #[cfg(target_os = "linux")]
+    if hex_cli::guest::runs_as_init(std::process::id()) {
+        return ExitCode::from(hex_cli::guest::init_main());
+    }
     // `hex selftest-box <act> …` runs a small program inside a box (hex_cli::selftest); it ends the
     // process itself rather than returning text, so it is handled before the text replies.
     if let [Some(first), rest @ ..] = args.as_slice()

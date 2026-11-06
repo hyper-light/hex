@@ -15,7 +15,7 @@ import time
 
 CONTROL_PORT = 0x4845_5800  # hex_core::stream::CONTROL_PORT
 TOKEN_BYTES = 8
-CMDLINE = "console=ttyS0 panic=-1 -- guest init"
+CMDLINE = "console=ttyS0 panic=-1"
 
 
 def read_exact(conn, n):

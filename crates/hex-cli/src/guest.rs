@@ -1,10 +1,11 @@
 //! `hex guest`: what runs in a Shards guest (docs/design/shards-guest.md §3 and §4).
 //!
-//!   hex guest init
 //!   hex guest relay --node <socket> (--vsock | --unix <dir>)
 //!
-//! `init` is the guest's PID 1, the `hex` binary itself as its initramfs's `/init`, the kernel's command
-//! line ending `-- guest init`. It first moves itself off the kernel's initramfs onto a tmpfs root, as
+//! The guest's init is the `hex` binary itself as its initramfs's `/init`: run as PID 1, `hex` is the
+//! guest's init whatever words the kernel passes it ([`init_main`]), as Shards appends its own to a
+//! command line (` quiet` where no one reads the console, `crates/vmm/src/vm/mod.rs:1007-1018` at
+//! `a0cced87`), and words after a `--` are init's. It first moves itself off the kernel's initramfs onto a tmpfs root, as
 //! switch_root does, since a container's start pivots its root and pivot_root(2) refuses to leave the
 //! initramfs ("EINVAL The current root directory is on the rootfs"). It then mounts what a Linux node
 //! needs (`/proc`, `/sys`, cgroup2, `/dev`, a tmpfs `/run` and `/tmp`; the node's state is under `/run`,
@@ -32,11 +33,7 @@ use socket2::{Domain, SockAddr, Socket, Type};
 
 /// Runs `hex guest`'s arguments (everything after `guest`); returns the exit status.
 pub fn main(args: &[String]) -> u8 {
-    let run = match args.first().map(String::as_str) {
-        Some("init") => init(args.get(1..).unwrap_or_default()),
-        _ => relay(args),
-    };
-    match run {
+    match relay(args) {
         Ok(()) => 0,
         Err((status, why)) => {
             let _ = std::io::stderr()
@@ -47,8 +44,7 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-const USAGE: &str =
-    "usage: hex guest init\n       hex guest relay --node <socket> (--vsock | --unix <dir>)";
+const USAGE: &str = "usage: hex guest relay --node <socket> (--vsock | --unix <dir>)";
 
 /// Where the relay listens.
 enum On {
@@ -177,17 +173,24 @@ const BOX_ROOT: &str = "/sys/fs/cgroup/hex";
 /// children.
 const CONTROLLERS: &str = "+cpu +io +memory +pids";
 
-/// `init` takes no arguments: a guest has no disk (§4), so nothing to choose.
-fn init_args(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
-        Ok(())
-    } else {
-        Err(USAGE.to_owned())
-    }
+/// Whether `hex` runs as the guest's init: as PID 1, the kernel's first process, whatever its arguments.
+pub fn runs_as_init(pid: u32) -> bool {
+    pid == 1
 }
 
-fn init(args: &[String]) -> Result<(), (u8, String)> {
-    init_args(args).map_err(|why| (2, why))?;
+/// Runs as the guest's init (§4); returns only if it fails, with the exit status.
+pub fn init_main() -> u8 {
+    let why = match init() {
+        Ok(()) => "powering off returned".to_owned(),
+        Err((_, why)) => why,
+    };
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("hex guest: {why}\n").as_bytes());
+    1
+}
+
+fn init() -> Result<(), (u8, String)> {
     let fail = |why: String| (1, why);
     leave_rootfs().map_err(fail)?;
     mount_all().map_err(fail)?;
@@ -315,9 +318,7 @@ fn leave_rootfs() -> Result<(), String> {
     mount_move(".", "/").map_err(|e| format!("moving {NEW_ROOT} to /: {e}"))?;
     rustix::process::chroot(".").map_err(|e| format!("entering the new root: {e}"))?;
     std::env::set_current_dir("/").map_err(|e| format!("entering /: {e}"))?;
-    let e = std::os::unix::process::CommandExt::exec(
-        std::process::Command::new("/init").args(["guest", "init"]),
-    );
+    let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new("/init"));
     Err(format!("running /init from the new root: {e}"))
 }
 
@@ -569,18 +570,15 @@ mod tests {
         }
     }
 
-    /// HEX-GUEST-9: a guest has no disk (§4, amended), so `init` takes no state disk, and refuses any
-    /// argument as its usage.
+    /// HEX-GUEST-12 (§4): as PID 1, `hex` is the guest's init, whatever words the kernel passes it
+    /// (Shards appends `quiet` to a run with no console, which once reached init as an argument and
+    /// ended the guest: a boot on adas-mac-studio-2, 2026-11-06, `Attempted to kill init!
+    /// exitcode=0x00000200`); as any other process it is not.
     #[test]
-    fn init_refuses_a_state_disk() {
-        assert!(init_args(&[]).is_ok());
-        for args in [
-            &["--state-disk", "/dev/vda"][..],
-            &["--state-disk"][..],
-            &["relay"][..],
-        ] {
-            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
-            assert_eq!(init_args(&args).err().as_deref(), Some(USAGE), "{args:?}");
+    fn hex_is_the_guests_init_as_pid_1_alone() {
+        assert!(runs_as_init(1));
+        for pid in [0, 2, 1000, u32::MAX] {
+            assert!(!runs_as_init(pid), "{pid}");
         }
     }
 }
