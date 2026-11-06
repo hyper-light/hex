@@ -1984,7 +1984,8 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
         assert_eq!(
             devs.len(),
             1,
-            "one empty filesystem for every masked directory of every box: {devs:?}"
+            "one empty filesystem for every masked directory of every box: {devs:?}; by box {each_box:?}; parked {:?}",
+            node.cgroup_reuse().map(|c| c.parked)
         );
     } else {
         for (n, (here, its)) in each_box.iter().enumerate() {
