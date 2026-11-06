@@ -82,6 +82,25 @@ fn a_stalled_disk_is_suspected_then_drained_within_its_bound() {
     assert!(by_price.iter().all(|n| *n > 0), "{by_price:?}");
 }
 
+/// F2 owns fail-slow (the lead, 2026-11-06): do slow one node's disk gradually, 0.5-5% a window
+/// from 1x to 4x; expect the peer grade to drain it, against its healthy peers, by the time its work
+/// runs 3x theirs, with no verdict on a peer. (Its own probe drains it too: the cost rule takes an
+/// answer only within its drain age, and a slowing disk outruns it; F2 doesn't lean on that.)
+#[test]
+fn a_gradually_slowing_disk_is_caught_by_its_peers() {
+    let mut probe_drained = 0u64;
+    for seed in 0..SEEDS {
+        let f = faults::fail_slow_disk(seed).unwrap();
+        assert_eq!(f.measured.wrong_verdicts, 0, "seed {seed}: {f:?}");
+        let at = f
+            .slowdown_at_drain_milli
+            .unwrap_or_else(|| panic!("seed {seed}: never drained: {f:?}"));
+        assert!(at <= 3_000, "seed {seed}: drained at {at}");
+        probe_drained += u64::from(f.probe_drained);
+    }
+    println!("fail-slow disk: its own probe drained {probe_drained} of {SEEDS} too");
+}
+
 /// S8 antagonist (F4): an antagonist is capped within 3 CPI samples (CPI²'s one a minute) and a second
 /// of its onset, and no bystander is.
 #[test]

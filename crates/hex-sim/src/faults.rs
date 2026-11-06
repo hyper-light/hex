@@ -208,6 +208,70 @@ pub fn disk_stall(seed: u64) -> Result<(Measured, StallJudge), FaultError> {
     Ok((m, judge))
 }
 
+/// What a fail-slow disk run saw: whether the node's own probe drained it, and the peer grade's
+/// verdicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailSlow {
+    pub probe_drained: bool,
+    pub measured: Measured,
+    /// The node's disk slowdown when the grade drained it, in thousandths.
+    pub slowdown_at_drain_milli: Option<u64>,
+}
+
+/// A disk that slows gradually (F2, F3): one node of 5-50 among healthy peers, its disk 0.5-5% slower
+/// each window, from 1x to 4x. Its work, slowed as its disk is, runs slow against its peers', which
+/// the peer grade judges; its own probe (1-5 ms flushes every 100 ms, seeded with a record of 1,000 of
+/// them) is watched beside it.
+pub fn fail_slow_disk(seed: u64) -> Result<FailSlow, FaultError> {
+    let mut rng = Rng::new(seed);
+    let nodes = rng.range(5, 50);
+    let step = rng.range(5, 50);
+    let replace = if rng.chance(500) {
+        REPLACE_NS[0]
+    } else {
+        REPLACE_NS[1]
+    };
+    let record: Vec<(u64, u32)> = (0..1_000).map(|_| (rng.range(MS, 5 * MS), 1)).collect();
+    let mut probe = DiskProbe::new(&record, replace)?;
+    let mut g = PeerGrade::new(usize::try_from(nodes).unwrap_or(usize::MAX), 0);
+    let mut out = FailSlow {
+        probe_drained: false,
+        measured: Measured::default(),
+        slowdown_at_drain_milli: None,
+    };
+    let mut changes = Vec::new();
+    let (mut t, mut slowdown) = (0u64, 1_000u64);
+    while slowdown < 4_000 && out.measured.isolated_after_ns.is_none() {
+        // One window: ten probes of the node's disk, ten pieces of work on each node.
+        for k in 0..10u64 {
+            let at = add(t, k.saturating_mul(100 * MS))?;
+            let latency = rng.range(MS, 5 * MS).saturating_mul(slowdown) / 1000;
+            probe.start(at)?;
+            out.probe_drained |= probe.level(add(at, latency)?)? == Level::Drain;
+            probe.finish(add(at, latency)?)?;
+            for n in 0..nodes {
+                let mut s = noise(&mut rng);
+                if n == 0 {
+                    s = s.saturating_mul(slowdown) / 1000;
+                }
+                changes.clear();
+                g.observe(n, add(at, n)?, s, &mut changes)?;
+                for c in &changes {
+                    if c.node != 0 {
+                        out.measured.wrong_verdicts = out.measured.wrong_verdicts.saturating_add(1);
+                    } else if c.level == Level::Drain {
+                        out.measured.isolated_after_ns = Some(at);
+                        out.slowdown_at_drain_milli = Some(slowdown);
+                    }
+                }
+            }
+        }
+        t = add(t, S)?;
+        slowdown = slowdown.saturating_add(slowdown.saturating_mul(step) / 1000);
+    }
+    Ok(out)
+}
+
 /// Antagonist (F4): a node of 5-10 latency-sensitive tasks of one job and one batch co-tenant,
 /// sampled once a minute (CPI²'s cadence); from a seeded onset after the job has its spec, the
 /// co-tenant's CPU use rises tenfold and its neighbours' CPI by `factor_milli` / 1000 until it is
