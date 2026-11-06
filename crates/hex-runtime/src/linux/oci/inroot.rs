@@ -227,6 +227,12 @@ fn in_root(root: BorrowedFd<'_>, path: &str) -> Result<OwnedFd, Errno> {
             ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS,
         )
     };
+    tried(open)
+}
+
+/// `open` tried until it answers other than EAGAIN, at most [`IN_ROOT_TRIES`] times, each EAGAIN tried again
+/// past counted ([`retried`]); past the budget, the last EAGAIN.
+fn tried(mut open: impl FnMut() -> Result<OwnedFd, Errno>) -> Result<OwnedFd, Errno> {
     for _ in 1..IN_ROOT_TRIES {
         match open() {
             Err(Errno::AGAIN) => RETRIED.with(|n| n.set(n.get().saturating_add(1))),
@@ -372,6 +378,28 @@ mod tests {
             retried() > before,
             "the nemesis crossed a resolve's `..` and the resolver tried again past it"
         );
+    }
+
+    /// Ada's 2026-11-06 rule (AC-T7.1.4, CLAUDE.md §2): the budget is twice the most tries a resolve was measured to
+    /// need under a storm, 5 (unit hex-inroot-storm-20261105T130241Z, docs/research/runtime/inroot-eagain.md §3). Do:
+    /// a path Linux refuses with EAGAIN 9 times, then answers, and one it refuses 10 times. Expect the first opened,
+    /// its 9 retries counted, and the second refused with the EAGAIN, the budget spent.
+    #[test]
+    fn a_resolve_past_twice_the_measured_need_is_refused() {
+        let answer_after = |again: u32| {
+            let mut left = again;
+            move || match left.checked_sub(1) {
+                Some(n) => {
+                    left = n;
+                    Err(Errno::AGAIN)
+                }
+                None => rustix::fs::open("/", OFlags::PATH | OFlags::CLOEXEC, Mode::empty()),
+            }
+        };
+        let before = retried();
+        assert!(tried(answer_after(9)).is_ok());
+        assert_eq!(retried() - before, 9);
+        assert_eq!(tried(answer_after(10)).err(), Some(Errno::AGAIN));
     }
 
     /// CLAUDE.md §3: past its budget the resolver's refusal names the path, the component and the budget, never a
