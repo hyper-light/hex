@@ -638,7 +638,7 @@ impl Shared {
         let admit = inner
             .seeds
             .create(now)
-            .map_err(|r| refused(r, inner.start_failure.as_deref()))?;
+            .map_err(|r| refused(r, inner.start_failure.as_deref(), inner.procs.len()))?;
         if matches!(admit, Admit::Wait { .. }) {
             let waiting = inner.seeds.waiting();
             // A slot added, or the spare raised, is a peak the node keeps for its next start.
@@ -657,7 +657,13 @@ impl Shared {
             let now = self.now();
             let until = match inner.seeds.claim(ticket, now).map_err(stale)? {
                 Claim::Seed(id) => return self.checked_out(&mut inner, id),
-                Claim::Refused(r) => return Err(refused(r, inner.start_failure.as_deref())),
+                Claim::Refused(r) => {
+                    return Err(refused(
+                        r,
+                        inner.start_failure.as_deref(),
+                        inner.procs.len(),
+                    ));
+                }
                 Claim::Wait { until } => until,
             };
             fn poisoned<T>(_: T) -> OciError {
@@ -978,21 +984,25 @@ fn readable(fd: BorrowedFd<'_>, patience: Option<Duration>) -> Result<bool, OciE
     }
 }
 
-/// A core refusal as a typed node error naming why (the line was full, the create's seed died or was
-/// taken for hung, or its wait ran out), with why the last seed start failed when none has started since;
-/// it reaches the caller as a [`Refusal::Os`].
-fn refused(r: Refused, start_failure: Option<&str>) -> OciError {
-    let why = match start_failure {
-        Some(cause) => format!("{r}; the last create seed start failed: {cause}"),
-        None => r.to_string(),
-    };
-    match r {
-        // No seed was handed the create, so nothing of it was made: declined, for the runtime to make it the
-        // ordinary way (the lead's rule of 2026-11-06: no caller failure where an alternative exists).
-        Refused::Busy { .. } | Refused::Waited { .. } => OciError::NoSeed(why),
-        Refused::Died { .. } | Refused::Hung { .. } => OciError::Os {
+/// A core refusal as a typed node error naming why. A line at the seeds' `bound` (full, or its wait ended) is
+/// [`OciError::SeedsExhausted`], which reaches the caller as [`Refusal::Exhausted`] naming the bound: refused, never
+/// sent through the shim (one implementation per job, the lead's ruling of 2026-11-06), and counted by the core
+/// (`refused_busy`, `refused_waited`). Where the last seed start failed and none has started since, no seed could
+/// come at any bound, so the refusal names that cause instead, as a [`Refusal::Os`]; as does a seed that died or
+/// was taken for hung over the create.
+fn refused(r: Refused, start_failure: Option<&str>, bound: usize) -> OciError {
+    match (r, start_failure) {
+        (Refused::Busy { .. } | Refused::Waited { .. }, None) => OciError::SeedsExhausted {
+            bound,
+            why: r.to_string(),
+        },
+        (_, Some(cause)) => OciError::Os {
             op: "create via a seed",
-            why,
+            why: format!("{r}; the last create seed start failed: {cause}"),
+        },
+        (Refused::Died { .. } | Refused::Hung { .. }, None) => OciError::Os {
+            op: "create via a seed",
+            why: r.to_string(),
         },
     }
 }
@@ -1055,10 +1065,10 @@ mod tests {
 
     /// Goal 5 plan step 4 (T-T7.1.4; CLAUDE.md §3): a node whose seeds can't start says why. Do: open a
     /// pool on a `hex` binary that isn't there, wait until it has counted a failed start, then ask for a
-    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is declined
-    /// by type as one no seed came free for ([`OciError::NoSeed`], which the runtime sends through the shim,
-    /// the ordinary path) once the start it asked for fails too (no seed is up or starting, so none can
-    /// come), naming the failed start's cause; never left waiting.
+    /// seed under the node's own bounds, its waits seeded from the record. Expect: the create is refused by
+    /// type once the start it asked for fails too (no seed is up or starting, so none can come), naming the
+    /// failed start's cause, not the seeds' bound (no bound was reached); never left waiting, never sent
+    /// another way.
     #[test]
     fn a_pool_whose_seeds_cannot_start_names_why_it_refuses() {
         let pool = CreatePool::new(
@@ -1073,10 +1083,8 @@ mod tests {
         until("the pool tried a start", || {
             pool.counts().unwrap().start_failed > 0
         });
-        let Err(OciError::NoSeed(why)) = pool.shared.acquire() else {
-            panic!(
-                "a pool with no seed declines its create by type, for the runtime to make it another way"
-            );
+        let Err(OciError::Os { why, .. }) = pool.shared.acquire() else {
+            panic!("a pool with no seed refuses its create by type, naming why");
         };
         assert!(
             why.contains("the last create seed start failed: starting a create seed"),

@@ -183,9 +183,9 @@ struct Route<'a> {
     start: Start<'a>,
 }
 
-/// How a create starts the container's init: the command line and the legacy adoption path spawn
-/// `hex __oci-init` (the shim, [`Runtime::create`] and [`Runtime::create_in_cgroup`]); the node agent's
-/// seam hands a seed the container to clone ([`Runtime::create_in_cgroup_seeded`], decision 5).
+/// How a create starts the container's init: the command line spawns `hex __oci-init` (the shim,
+/// [`Runtime::create`]); the node agent's seam hands a seed the container to clone
+/// ([`Runtime::create_in_cgroup_seeded`], decision 5), and the shim only for a spec a seed can't serve.
 enum Start<'a> {
     /// Spawn `hex __oci-init`, which unshares the namespaces and forks the container.
     Shim,
@@ -277,14 +277,11 @@ pub enum ClassicReason {
     /// they don't prune, and the init a seed clones builds the root the classic way. The one reason whose
     /// creates don't go through the shim.
     Rootless,
-    /// No create seed came free within the line's learned wait, or the line was full ([`OciError::NoSeed`]): the
-    /// create went through the shim, the ordinary path, rather than fail.
-    NoSeed,
 }
 
 impl ClassicReason {
     /// The fixed count of reasons, for a per-reason counter.
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 7;
 
     /// This reason's index, for a per-reason counter.
     pub fn index(self) -> usize {
@@ -296,7 +293,6 @@ impl ClassicReason {
             Self::NoMountNamespace => 4,
             Self::Source => 5,
             Self::Rootless => 6,
-            Self::NoSeed => 7,
         }
     }
 }
@@ -759,48 +755,21 @@ impl Runtime {
         )
     }
 
-    /// Makes the container in a cgroup the caller already made and bounded, rather than from the
-    /// spec: the `Runtime` seam's path, where the node agent puts each container under its own
-    /// delegated box root with the box's bounds in force (as the `process` class does), so one code
-    /// path makes and bounds every box's cgroup. The spec's device list still governs the container's
-    /// device access; its `cgroupsPath` and `linux.resources` are ignored, the box's bounds standing
-    /// in their place. The caller owns the cgroup and removes it; a failed create leaves it be.
-    /// `held` is what the caller holds ready for it ([`Held`]): a container that makes a network
-    /// namespace of its own in this process's user namespace joins one made ahead in place of making
-    /// its own, and its device program is one the caller holds. Returns the state it wrote, so the
-    /// caller needn't read it back (goal 5 extended, step 5).
-    pub fn create_in_cgroup(
-        &self,
-        id: &str,
-        bundle: &Path,
-        pid_file: Option<&Path>,
-        cgroup: BoxCgroup,
-        held: Held<'_>,
-    ) -> Result<State, OciError> {
-        self.create_with(
-            id,
-            bundle,
-            pid_file,
-            Route {
-                cgroup: Cgroup::Provided(cgroup),
-                networks: held.networks,
-                devices: held.devices,
-                dev_mounts: held.dev_mounts,
-                ipc_uts: held.ipc_uts,
-                start: Start::Shim,
-            },
-        )
-    }
-
-    /// Makes the container as [`Runtime::create_in_cgroup`] does, but starts its init by handing it to a
-    /// seed to clone (decision 5, goal 5 plan step 4), in place of the shim's re-exec of the hex binary:
-    /// the `Runtime` seam's create, where `seeds` is the node agent's pool of `hex __oci-seed` processes.
-    /// The container's namespaces, cgroup, device policy, state and create-time hooks are the same as the
-    /// shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
+    /// Makes the container in a cgroup the caller already made and bounded, rather than from the spec, and
+    /// starts its init by handing it to a seed to clone (decision 5, goal 5 plan step 4): the `Runtime` seam's
+    /// create, where the node agent puts each container under its own delegated box root with the box's bounds
+    /// in force (as the `process` class does) and `seeds` is its pool of `hex __oci-seed` processes. The spec's
+    /// device list still governs the container's device access; its `cgroupsPath` and `linux.resources` are
+    /// ignored, the box's bounds standing in their place. The caller owns the cgroup and removes it; a failed
+    /// create leaves it be. `held` is what the caller holds ready for it ([`Held`]): a container that makes a
+    /// network namespace of its own in this process's user namespace joins one made ahead in place of making its
+    /// own, and its device program is one the caller holds. The container's namespaces, cgroup, device policy,
+    /// state and create-time hooks are the shim path's; only the init's start differs. A spec that joins a pid or user namespace by path can't
     /// be made by a seed's one clone ([`init::needs_shim`]), so it is made through the shim, as the command
     /// line makes every container, and the seeds count it ([`CloneInit::through_shim`]): the one create
-    /// that still re-execs the hex binary. Returns the state it wrote, as [`Runtime::create_in_cgroup`]
-    /// does.
+    /// that still re-execs the hex binary. A create no seed came free for is refused by type, naming the
+    /// seeds' bound ([`OciError::SeedsExhausted`]), never sent through the shim. Returns the state it wrote, so
+    /// the caller needn't read it back (goal 5 extended, step 5).
     pub fn create_in_cgroup_seeded(
         &self,
         id: &str,
@@ -957,21 +926,22 @@ impl Runtime {
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
-            Start::Shim => ipc_uts_on_path(&spec, ipc_uts).and_then(|()| {
-                self.start_shim(
-                    &making,
-                    &spec,
-                    &cgroup,
-                    Ahead {
-                        network,
-                        dev: None,
-                        masked_directory: shim_masked_directory(&spec, dev_mounts)?,
-                    },
-                    ShimStdio::Inherited,
-                    &Command::spawn,
-                )
-            }),
-            Start::Seed(seeds) => match self.start_seeded(
+            // The command line's create: nothing made ahead, the caller's streams passed on.
+            Start::Shim => self.start_shim(
+                &making,
+                &spec,
+                &cgroup,
+                Ahead {
+                    network,
+                    dev: None,
+                    masked_directory: None,
+                },
+                ShimStdio::Inherited,
+                &Command::spawn,
+            ),
+            // A create no seed came free for is refused by type (OciError::SeedsExhausted), never sent through the
+            // shim: one implementation per job (Ada's rule; the lead's ruling of 2026-11-06).
+            Start::Seed(seeds) => self.start_seeded(
                 &making,
                 &spec,
                 &cgroup,
@@ -983,27 +953,7 @@ impl Runtime {
                     parked,
                     chooser: chosen_by,
                 },
-            ) {
-                // No seed came free and nothing of the create was made: it goes through the shim, the ordinary
-                // path, counted, rather than fail its caller (the lead's rule of 2026-11-06). What was made ahead
-                // for the seed went with its request, so the shim makes its namespaces and `/dev` on the path.
-                Err(OciError::NoSeed(_)) => {
-                    seeds.classic(ClassicReason::NoSeed);
-                    self.start_shim(
-                        &making,
-                        &spec,
-                        &cgroup,
-                        Ahead {
-                            network: None,
-                            dev: None,
-                            masked_directory: None,
-                        },
-                        ShimStdio::Null,
-                        &Command::spawn,
-                    )
-                }
-                other => other,
-            },
+            ),
         });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
@@ -3604,5 +3554,107 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         assert!(network_for(&spec, Some(&pool)).is_err(), "a refused count");
 
         assert!(network_for(&own, None).unwrap().is_none(), "no pool");
+    }
+
+    /// A stand-in for a node's create seeds whose line is full: every clone is refused at the seeds' bound, and each
+    /// classic route is noted.
+    struct FullLine {
+        classic: std::cell::RefCell<Vec<ClassicReason>>,
+    }
+
+    impl CloneInit for FullLine {
+        fn clone_init(&self, _req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+            Err(OciError::SeedsExhausted {
+                bound: 2,
+                why: "no seed is free and 2 creates already wait for one".to_owned(),
+            })
+        }
+        fn claim(&self, _parked: Parked, _req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError> {
+            Err(OciError::Broken("no init is parked here".to_owned()))
+        }
+        fn prunes_root(&self) -> bool {
+            false
+        }
+        fn mount_namespace(&self) -> super::super::mntns::MountNamespace {
+            super::super::mntns::MountNamespace::Copy
+        }
+        fn classic(&self, reason: ClassicReason) {
+            self.classic.borrow_mut().push(reason);
+        }
+    }
+
+    /// A chooser that gives every create the one cgroup it holds, carrying its program already.
+    struct OneCgroup(PathBuf);
+
+    impl Choose for OneCgroup {
+        fn choose(&self, _wants: &Wants<'_>) -> Result<Chosen, OciError> {
+            Ok(Chosen {
+                cgroup: BoxCgroup::at(self.0.clone()),
+                attached: true,
+                parked: None,
+            })
+        }
+        fn init_made(&self, _flags: u64, _claimed: bool) {}
+        fn parked_proc(&self, _outcome: ParkedProc) {}
+    }
+
+    /// One implementation per job, no fallback path (Ada's rule; the lead's NoSeed ruling of 2026-11-06; AC-T7.1.4,
+    /// CLAUDE.md §3). Do: a seam create whose seeds' line is full (every clone refused at the seeds' bound), with a
+    /// stand-in shim that leaves a mark if it runs. Expect: the create refused by type, naming the seeds' bound, as
+    /// the caller's `Refusal::Exhausted`; the shim never run; no create counted through it (the one route noted is
+    /// the rootless seed's, which isn't the shim); and nothing of the container left.
+    #[test]
+    fn a_create_past_the_seeds_bound_is_refused_and_never_takes_the_shim() {
+        let lab = tempfile::tempdir().unwrap();
+        let ran = lab.path().join("shim-ran");
+        let stand_in = lab.path().join("shim");
+        stand_in_at(
+            &stand_in,
+            &format!("#!/bin/sh\ntouch '{}'\n", ran.display()),
+        );
+        let rt = Runtime::with_helper(lab.path().join("state"), stand_in);
+        let bundle = lab.path().join("bundle");
+        std::fs::create_dir_all(bundle.join("rootfs")).unwrap();
+        std::fs::write(
+            bundle.join("config.json"),
+            br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"},"process":{"args":["/bin/true"],"cwd":"/"},"linux":{"namespaces":[{"type":"pid"},{"type":"mount"}]}}"#,
+        )
+        .unwrap();
+        let cgroup = lab.path().join("cgroup");
+        std::fs::create_dir(&cgroup).unwrap();
+        let seeds = FullLine {
+            classic: std::cell::RefCell::new(Vec::new()),
+        };
+        let devices = Programs::rootless(1);
+        let made = rt.create_chosen_seeded(
+            "c1",
+            &bundle,
+            &OneCgroup(cgroup),
+            Held {
+                devices: Some(&devices),
+                ..Held::default()
+            },
+            &seeds,
+        );
+        match made {
+            Err(e @ OciError::SeedsExhausted { bound: 2, .. }) => assert_eq!(
+                Refusal::from(e),
+                Refusal::Exhausted {
+                    what: "create seeds",
+                    bound: 2
+                }
+            ),
+            other => panic!("refused by the seeds' bound, not {other:?}"),
+        }
+        assert!(!ran.exists(), "the shim ran");
+        assert_eq!(
+            *seeds.classic.borrow(),
+            vec![ClassicReason::Rootless],
+            "no create went through the shim"
+        );
+        assert!(
+            !rt.dir("c1").unwrap().path().exists(),
+            "the container's directory is left"
+        );
     }
 }

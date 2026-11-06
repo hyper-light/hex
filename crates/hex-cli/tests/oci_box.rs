@@ -18,8 +18,7 @@
 //! - goal 5 plan step 2: 31 boxes are made at once while another box's durable record write is held
 //!   open, none waiting on it, and none of their records synced with their container state on tmpfs;
 //!   two nodes with state directories of their own each make and start a box of the same id, two
-//!   containers, and deleting one leaves the other running; a box made before the container state
-//!   moved, its record naming `<state>/oci/<id>`, is taken back, inspected and deleted by today's node;
+//!   containers, and deleting one leaves the other running;
 //! - goal 5 extended step 5 (T-T7.1.2): a node restarted over records in both its places finds each
 //!   box's where it belongs, the boxes whose directories all lie on tmpfs among its runtime directory's
 //!   records and one with its rendered bundle's writable layer on disk in its state directory,
@@ -54,11 +53,11 @@ use hex_api::{
     Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec,
     Refusal, Rootfs, Runtime,
 };
-use hex_core::record::{BoxRecord, Phase, ProcId};
+use hex_core::record::{BoxRecord, Phase};
 use hex_node::{Node, OCI_BOXES, records_dir};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
-use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::run::ClassicReason;
 use hex_runtime::linux::oci::state::shard;
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
@@ -464,7 +463,6 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     orphans_are_reaped(&lab, own);
     held_record_write(&lab, own);
     two_nodes_one_box_id(&lab, own);
-    a_box_made_before_the_move_is_adopted(&lab, own);
     a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
     a_node_upgraded_over_state_dirs_in_the_one_parent_recovers_both_layouts(&lab, own);
     records_in_both_places_are_found_after_a_restart(&lab, own);
@@ -4092,8 +4090,9 @@ enum Second {
 /// make the container from that spec, never from a later read of the bundle. Do: hold a create reading its config.json
 /// (a FIFO); once the agent has it open, give the agent the lab's spec and put in its place, for any later read, the
 /// same spec holding CAP_SYS_ADMIN, which rootless (a user namespace on the host's network) spec.rs refuses. Through
-/// the node (a seed starts the init) and through the runtime alone (the shim). Expect: the create refused, or its init
-/// without CAP_SYS_ADMIN, as the spec the runtime checked has it.
+/// the node twice: a seed starts the init; and, the spec asking for a createRuntime hook, the shim does as root (the
+/// shim's one consumer, a spec a seed can't serve; rootless a seed serves it too). Expect: the create refused, or its
+/// init without CAP_SYS_ADMIN, as the spec the runtime checked has it.
 fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &Path) {
     let wait = Lab::act(&Act::Wait);
     let checked = lab.config(&wait, false);
@@ -4147,33 +4146,49 @@ fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &P
         );
     }
 
-    // Through the runtime alone: the shim starts the init.
-    let root = BoxRoot::open(
-        &own.join("hex-oci-swap-shim"),
-        disks::under(state.path()).unwrap(),
-    )
-    .unwrap();
+    // Through the node again, a createRuntime hook routing the create through the shim as root.
+    let hooked = |spec: &str| {
+        spec.replacen(
+            "\n  \"linux\":",
+            "\n  \"hooks\": {\"createRuntime\": [{\"path\": \"/usr/bin/true\", \"args\": [\"true\"]}]},\n  \"linux\":",
+            1,
+        )
+    };
+    let (checked, swapped) = (hooked(&checked), hooked(&swapped));
+    assert!(checked.contains("createRuntime"), "the hooked spec");
     let id = BoxId::new("swap-shim").unwrap();
-    let cgroup = root.create(&id, &Bounds::default()).unwrap();
-    let _cleanup = Killing(&root, id.clone());
-    let runtime = OciRuntime::with_helper(state.path().join("shim-oci"), PathBuf::from(&lab.exe));
     let bundle = held_bundle();
     let config = bundle.join("config.json");
+    let through_shim = node.creates_through_shim();
     let made = std::thread::scope(|s| {
         let made = s.spawn(|| {
-            runtime.create_in_cgroup(id.as_str(), &bundle, None, cgroup, Held::default())
+            node.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(bundle.clone()),
+                owner: None,
+            })
         });
         wait_for(
             blocked_opening_a_fifo,
-            "the runtime's create to wait reading its config",
+            "the shim's create to wait reading its config",
         );
         swap_the_held_config(&config, &checked, &swapped);
         made.join().unwrap()
     });
     if made.is_ok() {
-        let pid = u32::try_from(runtime.state(id.as_str()).unwrap().pid).unwrap();
+        if !lab.rootless {
+            assert_eq!(
+                node.creates_through_shim(),
+                through_shim + 1,
+                "a createRuntime hook routes the create through the shim"
+            );
+        }
+        let pid = u32::try_from(init_pid(&node.container_dir(&id))).unwrap();
+        let held = holds_sys_admin(pid);
+        node.delete(&id).unwrap();
         assert!(
-            !holds_sys_admin(pid),
+            !held,
             "the shim's container was made from the swapped spec, not the one checked"
         );
     }
@@ -4751,79 +4766,20 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
     );
 }
 
-/// T-T7.1.2 across goal 5 plan step 2's upgrade: a node before defda14 kept a box's container state in
-/// its state directory, `<state>/oci/<id>`, and the box's record names that directory. A box made so,
-/// its init waiting, is taken back by a node of today restarted on the same state directory, which reads
-/// its state where the record names it (created, not empty with an exit no one saw) and deletes it,
-/// leaving nothing of it.
-fn a_box_made_before_the_move_is_adopted(lab: &Lab, own: &Path) {
-    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let box_root = own.join("hex-oci-legacy");
-    let id = BoxId::new("legacy").unwrap();
-    let bundle = lab.bundle(&Lab::act(&Act::Wait));
-    // The box as the node before defda14 made it: its cgroup under the box root with its bounds, its
-    // container under `<state>/oci` named by its id, and its record naming that directory.
-    let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
-    let cgroup = root.create(&id, &Bounds::default()).unwrap();
-    let _cleanup = Killing(&root, id.clone());
-    let before = state.path().join("oci");
-    let oci = OciRuntime::with_helper(before.clone(), PathBuf::from(&lab.exe));
-    oci.create_in_cgroup(id.as_str(), &bundle, None, cgroup, Held::default())
-        .unwrap();
-    let made = oci.state(id.as_str()).unwrap();
-    let mut record = BoxRecord::new(
-        BoxSpec {
-            id: id.clone(),
-            bounds: Bounds::default(),
-            class: ClassSpec::Bundle(bundle),
-            owner: None,
-        },
-        Phase::Ready,
-        vec![before.join(id.as_str())],
-    );
-    record.init = Some(ProcId {
-        pid: u32::try_from(made.pid).unwrap(),
-        start_ticks: made.start_time.unwrap(),
-    });
-    as_an_older_node_wrote(state.path(), &record);
-
-    let node = lab.node(&box_root, state.path());
-    assert_ne!(
-        node.container_dir(&id),
-        before.join(id.as_str()),
-        "today's node keeps its containers elsewhere"
-    );
-    let summary = node.recover().expect("recover");
-    assert!(summary.adopted.contains(&id), "not adopted: {summary:?}");
-    let info = node.inspect(&id).unwrap();
-    assert_eq!(
-        (info.state, info.exit),
-        (BoxState::Created, None),
-        "its state, read where its record names it"
-    );
-    node.delete(&id).expect("delete");
-    assert!(
-        !before.join(id.as_str()).exists(),
-        "its container state is left"
-    );
-    assert!(!box_root.join(id.as_str()).exists(), "its cgroup is left");
-    assert_eq!(node.inspect(&id), Err(Refusal::NoSuchBox(id.clone())));
-}
-
 /// T-T7.1.2 across goal 5 extended step 1's move of the `oci` boxes under `<box root>/.oci`: a node upgraded
 /// over boxes its older self made at `<box root>/<id>`, beside boxes of its own at `<box root>/.oci/<id>`, finds
 /// both places in its recovery. Do: with today's node, make a box whose init waits (`.oci/new-live`), and leave a
-/// cgroup there with no record (`.oci/new-orphan`); as the node before the move made boxes, its cgroup under the
-/// box root itself, make a box whose init waits (`old-live`, its record ready), a cgroup there with no record
-/// (`old-orphan`) and one whose record says it was being made (`old-mid`); then open today's node again and
-/// recover. Expect: the two live boxes taken back, each where it was; the other three removed, their cgroups
-/// gone; and, the two deleted, nothing of any box left at either place.
+/// cgroup there with no record (`.oci/new-orphan`); as the node before the move left boxes, its cgroup under the box
+/// root itself, leave a cgroup there with no record (`old-orphan`) and one whose record says it was being made
+/// (`old-mid`); then open today's node again and recover. Expect: the live box taken back where it was; the other
+/// three removed, their cgroups gone; and, it deleted, nothing of any box left at either place. (A live box at the
+/// old place was made with `Runtime::create_in_cgroup`, removed with no consumer left, Ada's 2026-11-06 rule.)
 fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let box_root = own.join("hex-oci-upgrade");
     let oci_dir = box_root.join(OCI_BOXES);
     let id = |n: &str| BoxId::new(n).unwrap();
-    let (old_live, old_orphan, old_mid) = (id("old-live"), id("old-orphan"), id("old-mid"));
+    let (old_orphan, old_mid) = (id("old-orphan"), id("old-mid"));
     let (new_live, new_orphan) = (id("new-live"), id("new-orphan"));
 
     // Today's node first: a box of its own, and where it keeps a box's container.
@@ -4831,8 +4787,6 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
     first
         .create(lab.running(new_live.clone(), &Lab::act(&Act::Wait)))
         .expect("create at the new place");
-    let container = first.container_dir(&old_live);
-    let containers = first.oci_root().to_owned();
     drop(first);
     let oci_boxes = BoxRoot::open(&oci_dir, disks::under(state.path()).unwrap()).unwrap();
     let _new = Killing(&oci_boxes, new_live.clone());
@@ -4840,27 +4794,13 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
 
     // What the node before the move left, made as it made it: each cgroup under the box root itself.
     let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
-    let _old = Killing(&root, old_live.clone());
     let bundle = lab.bundle(&Lab::act(&Act::Wait));
-    let runtime = OciRuntime::with_helper(containers, PathBuf::from(&lab.exe));
-    let name = container.file_name().unwrap().to_str().unwrap();
-    let cgroup = root.create(&old_live, &Bounds::default()).unwrap();
-    runtime
-        .create_in_cgroup(name, &bundle, None, cgroup, Held::default())
-        .unwrap();
-    let made = runtime.state(name).unwrap();
     let spec = |id: &BoxId| BoxSpec {
         id: id.clone(),
         bounds: Bounds::default(),
         class: ClassSpec::Bundle(bundle.clone()),
         owner: None,
     };
-    let mut live = BoxRecord::new(spec(&old_live), Phase::Ready, vec![container.clone()]);
-    live.init = Some(ProcId {
-        pid: u32::try_from(made.pid).unwrap(),
-        start_ticks: made.start_time.unwrap(),
-    });
-    as_an_older_node_wrote(state.path(), &live);
     root.create(&old_orphan, &Bounds::default()).unwrap();
     root.create(&old_mid, &Bounds::default()).unwrap();
     as_an_older_node_wrote(
@@ -4875,7 +4815,7 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
     assert_eq!(
         (adopted, removed),
         (
-            [old_live.clone(), new_live.clone()].into_iter().collect(),
+            [new_live.clone()].into_iter().collect(),
             [old_orphan.clone(), old_mid.clone(), new_orphan.clone()]
                 .into_iter()
                 .collect()
@@ -4893,24 +4833,24 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         );
     }
     assert!(
-        box_root.join(old_live.as_str()).exists() && oci_dir.join(new_live.as_str()).exists(),
-        "each box taken back where it was"
+        oci_dir.join(new_live.as_str()).exists(),
+        "the live box taken back where it was"
     );
-    for id in [&old_live, &new_live] {
-        assert_eq!(node.inspect(id).unwrap().state, BoxState::Created, "{id}");
-        node.delete(id)
-            .unwrap_or_else(|e| panic!("delete {id}: {e}"));
-    }
-    for (gone, place) in [(&old_live, &box_root), (&new_live, &oci_dir)] {
-        assert!(
-            !place.join(gone.as_str()).exists(),
-            "{gone}'s cgroup is left"
-        );
-    }
+    assert_eq!(
+        node.inspect(&new_live).unwrap().state,
+        BoxState::Created,
+        "{new_live}"
+    );
+    node.delete(&new_live)
+        .unwrap_or_else(|e| panic!("delete {new_live}: {e}"));
+    assert!(
+        !oci_dir.join(new_live.as_str()).exists(),
+        "{new_live}'s cgroup is left"
+    );
     assert!(node.list().unwrap().is_empty(), "a box is left");
     eprintln!(
-        "oci_box upgrade: adopted {old_live} at the old place and {new_live} at .oci; removed {old_orphan}, \
-         {old_mid} and {new_orphan}; nothing left after the deletes"
+        "oci_box upgrade: adopted {new_live} at .oci; removed {old_orphan} and {old_mid} at the old place and \
+         {new_orphan}; nothing left after the delete"
     );
 }
 

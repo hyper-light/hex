@@ -707,9 +707,7 @@ impl Node {
 
     /// Where `record`'s box keeps its container's state, as the record names it: the runtime over the
     /// directory's parent, and the container's name there. Create names the container's directory
-    /// first, so a box made before its node kept container state under the runtime directory (defda14),
-    /// whose record names `<state>/oci/<id>`, is found there and managed as any other (T-T7.1.2 across
-    /// the upgrade). `None` for a record that names no directory: a `process` box's.
+    /// first. `None` for a record that names no directory: a `process` box's.
     fn container_of(&self, record: &BoxRecord) -> Option<(OciRuntime, String)> {
         let (root, name) = state::root_of(record.dirs.first()?)?;
         Some((self.oci_in(root), name))
@@ -1560,25 +1558,16 @@ impl Runtime for Node {
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
         // An oci box's start is tried first, so the hot path reads only the container's state: a box with
-        // no container under the oci root is a process box, no box, or one made before its node kept
-        // container state there, which the record then says (goal 3 plan step 3: start costs one FIFO
-        // operation and the state read beside it). The init's end is watched through the pidfd the
-        // supervisor holds for it; one not watched is found from its state.
+        // no container under the oci root is a process box or no box, which the record then says (goal 3 plan
+        // step 3: start costs one FIFO operation and the state read beside it). The init's end is watched
+        // through the pidfd the supervisor holds for it; one not watched is found from its state.
         let init = self.supervisor.live(id)?.map(|live| live.pidfd);
-        let mut started = self.oci().start_with(&self.container(id), init);
-        let mut record = None;
-        if matches!(started, Err(OciError::NoSuchContainer(_))) {
-            record = self.record(id)?;
-            // A box made before defda14: its container's state is where its record names it.
-            let elsewhere = record
-                .as_ref()
-                .filter(|r| r.dirs.first() != Some(&self.container_dir(id)))
-                .and_then(|r| self.container_of(r));
-            if let Some((oci, name)) = elsewhere {
-                let init = self.supervisor.live(id)?.map(|live| live.pidfd);
-                started = oci.start_with(&name, init);
-            }
-        }
+        let started = self.oci().start_with(&self.container(id), init);
+        let record = if matches!(started, Err(OciError::NoSuchContainer(_))) {
+            self.record(id)?
+        } else {
+            None
+        };
         match started {
             Ok(()) => Ok(()),
             // `running` has started already (Invalid); `stopped` or mid-create has no live init to start

@@ -2344,7 +2344,11 @@ RFC's floor and constants are TCP's clocks'; a calibration read leaves the first
 Each MEASURING row's record is `bench/competitive/probes/waits_census.md`'s row of the same wait name, from the
 waits' own timing points (`hex_node::census`); the exec seeds' wait for a busy seed (`seed.rs`, a picked 30 s) is
 seeded from the clone record as the create seeds' are; and a create no seed came free for (line full, wait ended) is
-declined as `OciError::NoSeed` and made through the shim, counted under `ClassicReason::NoSeed`, rather than failed.
+refused by type, `OciError::SeedsExhausted` as `Refusal::Exhausted { what: "create seeds", bound }`, counted by the
+seeds' core (`refused_busy`, `refused_waited`), never sent through the shim: one implementation per job (the lead's
+ruling of 2026-11-06 under Ada's rule; it replaced the shim fallback, `ClassicReason::NoSeed`). Seeds grow ahead under
+the pool rule from the persisted learned peak, so a node's next start begins where the last peaked. The shim stays
+for its named consumer alone: a spec a seed can't serve (the classic reasons).
 A parked init that doesn't answer a claim already falls back to a seed's clone: the claim borrows the request, whose
 descriptors stay the runtime's.
 
