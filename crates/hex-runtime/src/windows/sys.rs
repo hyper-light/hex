@@ -317,24 +317,26 @@ impl Job {
         })
     }
 
-    /// How many processes are live in the job right now (`JobObjectBasicProcessIdList`'s
-    /// `NumberOfProcessIdsInList`). This counts running processes, not the job's accounting
-    /// `ActiveProcesses`, which lingers while a terminated member's handle is still held — so a box
-    /// whose member has exited reads as empty here even while the node still holds its process handle.
-    /// A box with more live processes than [`LIVE_CAP`] reads as that many (a bounded read, CLAUDE.md
-    /// §2); such a box is already running, which is all the caller needs.
+    /// How many processes are live in the job right now: `JobObjectBasicProcessIdList`'s
+    /// `NumberOfAssignedProcesses`, the number of ids the list holds for the job, which Windows fills in
+    /// even when the buffer holds fewer ids (`ERROR_MORE_DATA`; jobobject_basic_process_id_list.md:
+    /// "NumberOfAssignedProcesses: The number of process identifiers to be stored in ProcessIdList"), so
+    /// the count is the job's own at any size and the read needs room for one id. This counts running
+    /// processes, not the job's accounting `ActiveProcesses`, which lingers while a terminated member's
+    /// handle is still held, so a box whose member has exited reads as empty here even while the node
+    /// still holds its process handle.
     pub fn live_processes(&self) -> io::Result<u64> {
-        /// The pid list, header plus a bounded array of process ids.
+        /// The pid list's header with room for one id: the header is what's read.
         #[repr(C)]
         struct List {
             assigned: u32,
             listed: u32,
-            ids: [usize; LIVE_CAP],
+            ids: [usize; 1],
         }
         let mut list = List {
             assigned: 0,
             listed: 0,
-            ids: [0; LIVE_CAP],
+            ids: [0; 1],
         };
         let len = u32::try_from(size_of::<List>()).unwrap_or(u32::MAX);
         // SAFETY: QueryInformationJobObject writes at most `len` bytes (one List) into `list`, alive for
@@ -349,13 +351,13 @@ impl Job {
             )
         };
         if ok == 0 {
-            // More live processes than the buffer holds: the box is running, with at least LIVE_CAP.
-            if last_error().raw_os_error() == i32::try_from(ERROR_MORE_DATA).ok() {
-                return Ok(u64::try_from(LIVE_CAP).unwrap_or(u64::MAX));
+            let err = last_error();
+            // More ids than the one-id buffer holds: the header's count is still filled in.
+            if err.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
+                return Err(err);
             }
-            return Err(last_error());
         }
-        Ok(u64::from(list.listed))
+        Ok(u64::from(list.assigned))
     }
 
     /// Whether the job's memory notification limit has been violated since this was last read: the
@@ -375,10 +377,6 @@ impl Job {
         Ok(())
     }
 }
-
-/// The most live process ids [`Job::live_processes`] reads at once; past it a box reads as running with
-/// this many (a box of this many processes is far past any Hex sets, bounded for the read, CLAUDE.md §2).
-const LIVE_CAP: usize = 1024;
 
 /// A job's resource accounting, read whole.
 #[derive(Debug, Clone, Copy, Default)]
