@@ -18,7 +18,7 @@ mountpoint -q "$T" || mount -t tracefs nodev "$T" || { echo "refusing: no tracef
 I="$T/instances/hexcss-$TAG"; KG="hexcss_$TAG"
 FNS="mem_cgroup_css_offline mem_cgroup_css_released mem_cgroup_css_free blkcg_css_offline blkcg_css_free
   cpu_cgroup_css_offline cpu_cgroup_css_released cpu_cgroup_css_free pids_css_free
-  memcg_reparent_list_lrus reparent_shrinker_deferred"
+  memcg_reparent_list_lrus reparent_shrinker_deferred ${CSS_FNS_EXTRA:-}"
 untrace() {
   [ -d "$I" ] && { echo 0 > "$I/tracing_on"; for ev in workqueue/workqueue_execute_start workqueue/workqueue_execute_end; do
     echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
