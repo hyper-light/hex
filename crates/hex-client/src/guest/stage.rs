@@ -439,6 +439,52 @@ fn pax_keys(
     Ok((path, link))
 }
 
+/// The keys a global PAX record may set: what staging doesn't carry and so can't get wrong (times, ids
+/// and owner names, a comment, the character sets the record's texts are in). Any other key would apply
+/// to every entry after it, and is refused rather than ignored (CLAUDE.md §3; docs/design/shards-guest.md
+/// §4a).
+const GLOBAL_KEYS: [&[u8]; 10] = [
+    b"mtime",
+    b"atime",
+    b"ctime",
+    b"uid",
+    b"gid",
+    b"uname",
+    b"gname",
+    b"comment",
+    b"charset",
+    b"hdrcharset",
+];
+
+/// A global PAX record's keys, each one staging may ignore ([`GLOBAL_KEYS`]), or the refusal of the
+/// first that isn't: GNU's sparse keys, and every key that would change what's staged (`path`,
+/// `linkpath`, `size`, or one Hex doesn't know).
+fn global_keys(
+    text: &[u8],
+    bad: &dyn Fn(&str, &dyn std::fmt::Display) -> Refusal,
+) -> Result<(), Refusal> {
+    for ext in tar::PaxExtensions::new(text) {
+        let ext = ext.map_err(|e| bad("a PAX record", &e))?;
+        let key = ext.key_bytes();
+        if key.starts_with(b"GNU.sparse.") {
+            return Err(bad(
+                "a PAX record",
+                &"a sparse entry is never staged (none of the roots it serves holds one, §4a)",
+            ));
+        }
+        if !GLOBAL_KEYS.contains(&key) {
+            return Err(bad(
+                "a PAX record",
+                &format!(
+                    "a global PAX record sets {}, which staging doesn't apply",
+                    String::from_utf8_lossy(key)
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A tarball's bytes, counted as they're read, so its end is checked against its last entry's.
 struct Counted<R> {
     inner: R,
@@ -544,8 +590,7 @@ fn tarball(
                     }
                     pax = Some(text);
                 } else {
-                    // A global record's keys apply to every entry; only those staging can't honour matter.
-                    pax_keys(&text, &bad)?;
+                    global_keys(&text, &bad)?;
                 }
                 continue;
             }

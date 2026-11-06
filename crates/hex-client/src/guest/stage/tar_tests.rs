@@ -374,3 +374,54 @@ fn a_sparse_entry_is_refused_by_name() {
     ]);
     assert!(refused("r.tar", &px).contains("a sparse entry"), "pax");
 }
+
+/// A global PAX record ('g') of `pairs`, then one plain file, as an archive.
+fn global(pairs: &[(&str, &str)]) -> Vec<u8> {
+    let record = pax(pairs);
+    archive(&[
+        (
+            header(b"pax_global_header", b'g', 0o644, record.len() as u64, b""),
+            &record,
+        ),
+        (header(b"f", b'0', 0o644, 1, b""), b"x"),
+    ])
+}
+
+/// HEX-GUEST-15 (the lead's question on global PAX records): pack a global record past 64 KiB, one with
+/// GNU sparse keys, and one setting `path`, `linkpath` or `size`: expect each refused by name, never held
+/// whole nor ignored; and one with only keys that don't change what's staged (times, ids, names, a
+/// comment, charsets) packed.
+#[test]
+fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies() {
+    let big = "c".repeat(70 << 10);
+    let got = refused("r.tar", &global(&[("comment", &big)]));
+    assert!(
+        got.contains("a PAX record") && got.contains("past 65536 bytes"),
+        "{got}"
+    );
+    let got = refused("r.tar", &global(&[("GNU.sparse.major", "1")]));
+    assert!(got.contains("a sparse entry"), "{got}");
+    for key in ["path", "linkpath", "size"] {
+        let got = refused("r.tar", &global(&[(key, "1")]));
+        assert!(
+            got.contains(&format!(
+                "a global PAX record sets {key}, which staging doesn't apply"
+            )),
+            "{key}: {got}"
+        );
+    }
+    let quiet = global(&[
+        ("mtime", "1700000000.5"),
+        ("atime", "1700000000"),
+        ("ctime", "1700000000"),
+        ("uid", "0"),
+        ("gid", "0"),
+        ("uname", "root"),
+        ("gname", "root"),
+        ("comment", "made by git archive"),
+        ("charset", "ISO-IR 10646 2000 UTF-8"),
+        ("hdrcharset", "ISO-IR 10646 2000 UTF-8"),
+    ]);
+    let entries = unpack(&pack_tar("r.tar", &quiet, &LIMITS).unwrap());
+    assert_eq!(entries.len(), 2, "the root and its file");
+}

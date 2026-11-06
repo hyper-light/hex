@@ -198,7 +198,15 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     record whole, however long (`src/archive.rs:418,429,440`, `read_all`), and leaves PAX `GNU.sparse.*`
     entries uninterpreted, so one would stage as a file holding its sparse map. A long name or link is read
     within the path bound, a PAX record within 64 KiB, and its `path` and `linkpath` taken with the crate's own
-    parser (`tar::PaxExtensions`). Refused by name: an entry written through one of the archive's own symbolic
+    parser (`tar::PaxExtensions`). Why not the crate's own pass (the lead's ruling, 2026-11-06): its `read_all`
+    preallocates at most 128 KiB but then `read_to_end`s the record's whole declared size (`src/entry.rs:297-301`,
+    `EntryFields::read_all`, called at `src/archive.rs:418,429,440`), so a few MB of gzip can make it buffer
+    gigabytes. tar-rs leaves bounding the stream to its callers, so this is no bug to patch, vendor or report;
+    Hex bounds it. A global PAX record (`g`) is read within the same 64 KiB and may set only keys staging doesn't
+    carry, so can't get wrong: `mtime`, `atime`, `ctime`, `uid`, `gid`, `uname`, `gname`, `comment`, `charset`,
+    `hdrcharset` (staging carries a mode and a link text, never times, owners or names, and a root's texts are
+    UTF-8 either way); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
+    every later entry, and is refused by name, never ignored (CLAUDE.md §3). Refused by name: an entry written through one of the archive's own symbolic
     links (whatever its text, which stays legal: a root's absolute links resolve inside it when used), a PAX
     `size` (a file past a header's 8 GiB), sparse entries (GNU `S` and PAX `GNU.sparse.*`, which none of the
     roots it serves holds: `tar -tv`), and an extension record with no entry after it. The tests that pin this
