@@ -9,8 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use std::collections::BTreeSet;
+
 use hex_api::{BoxId, Exit, Proc, Program};
 use hex_core::helper::{START_FDS, VERSION};
+use hex_core::pool::{Account, ROLE_UIDS, pool_index};
 use rustix::net::{AddressFamily, SocketFlags, SocketType};
 
 use super::super::helper_client::Helper;
@@ -72,6 +75,14 @@ struct SimState {
     reaped: u32,
     /// The process cap each spawn was asked to set (`RLIMIT_NPROC` of the box's user), in order.
     nprocs: Vec<u32>,
+    /// The directory's pool users (name, uid), which the daemon reads at start.
+    pool_users: Vec<(String, u32)>,
+    /// The ids held outside the pool (other users, groups, processes).
+    taken: BTreeSet<u32>,
+    /// The accounts the daemon asked to make, in order.
+    made: Vec<Account>,
+    /// The kept peak of concurrent boxes.
+    peak: u32,
 }
 
 /// The stand-in's watch: a program has ended (by KILL, the stand-in's only end) once it is no member.
@@ -132,6 +143,33 @@ impl Privileged for Sim {
 
     fn list(&self, _uid: u32) -> std::io::Result<Vec<Member>> {
         Ok(self.inner.lock().expect("sim lock").members.clone())
+    }
+
+    fn pool_users(&self) -> std::io::Result<Vec<(String, u32)>> {
+        Ok(self.inner.lock().expect("sim lock").pool_users.clone())
+    }
+
+    fn taken_ids(&self) -> std::io::Result<BTreeSet<u32>> {
+        let s = self.inner.lock().expect("sim lock");
+        let mut taken = s.taken.clone();
+        taken.extend(s.pool_users.iter().map(|(_, uid)| *uid));
+        Ok(taken)
+    }
+
+    fn make_user(&self, account: &Account) -> std::io::Result<()> {
+        let mut s = self.inner.lock().expect("sim lock");
+        s.pool_users.push((account.name.clone(), account.uid));
+        s.made.push(account.clone());
+        Ok(())
+    }
+
+    fn peak(&self) -> std::io::Result<u32> {
+        Ok(self.inner.lock().expect("sim lock").peak)
+    }
+
+    fn keep_peak(&self, peak: u32) -> std::io::Result<()> {
+        self.inner.lock().expect("sim lock").peak = peak;
+        Ok(())
     }
 
     fn kill(&self, _uid: u32, signal: i32) -> std::io::Result<usize> {
@@ -429,4 +467,114 @@ fn a_box_naming_no_process_limit_gets_the_per_uid_ceiling() {
     drop(client);
     let daemon = handle.join().expect("daemon thread");
     assert_eq!(daemon.ops.inner.lock().unwrap().nprocs, vec![64, 5]);
+}
+
+/// A connected client to a daemon that grows its pool, over a stand-in whose directory holds `pool_users`,
+/// with `taken` ids held outside it and a kept `peak`.
+fn served_growing(
+    pool_users: Vec<(String, u32)>,
+    taken: BTreeSet<u32>,
+    peak: u32,
+) -> (
+    Helper,
+    Arc<Mutex<SimState>>,
+    thread::JoinHandle<Daemon<Sim>>,
+) {
+    let (client, server) = rustix::net::socketpair(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::empty(),
+        None,
+    )
+    .expect("socketpair");
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&client, true);
+    let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
+    let sim = Sim::default();
+    {
+        let mut s = sim.inner.lock().unwrap();
+        s.pool_users = pool_users;
+        s.taken = taken;
+        s.peak = peak;
+    }
+    let state = Arc::clone(&sim.inner);
+    let daemon = Daemon::growing(sim, 64).expect("a growing daemon");
+    let handle = thread::spawn(move || {
+        let _ = daemon.serve(server.as_fd());
+        daemon
+    });
+    (Helper::over(client, VERSION), state, handle)
+}
+
+/// The lead's #2 (2026-11-06): a hexnode member can't make the helper create anything outside Apple's role
+/// range or the pool's name pattern, nor at an id someone holds. Do acquire 60 boxes (more than the range
+/// holds) through the socket, with ids 455 and 9000 held outside the pool and one pool user at 450; expect
+/// every account made to be `_hexbox<n>` in 450-499 and never 455, one made per box past the first, and
+/// the acquires past the range refused by name.
+#[test]
+fn a_member_cannot_make_an_account_outside_the_range_or_the_pattern() {
+    let (client, state, handle) = served_growing(
+        vec![("_hexbox1".to_owned(), 450)],
+        BTreeSet::from([455, 9000]),
+        0,
+    );
+    let mut refused = 0;
+    for i in 0..60 {
+        let b = BoxId::new(&format!("hostile-{i}")).expect("box id");
+        match client.acquire(&b, 256 * MIB, 16 * MIB, None) {
+            Ok(uid) => assert!(ROLE_UIDS.contains(&uid) && uid != 455, "uid {uid}"),
+            Err(hex_api::Refusal::Os { .. }) => refused += 1,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    drop(client);
+    handle.join().expect("daemon thread");
+    let made = state.lock().unwrap().made.clone();
+    // 50 role uids, less 450 (the pool's) and 455 (held): 48 accounts, then refusals.
+    assert_eq!(made.len(), 48);
+    assert_eq!(refused, 60 - 49);
+    for a in &made {
+        assert!(pool_index(&a.name).is_some(), "{}", a.name);
+        assert!(ROLE_UIDS.contains(&a.uid) && a.uid != 455, "{}", a.uid);
+    }
+}
+
+/// The lead's #2: an id is checked free just before its account is made, since another installer may have
+/// taken it since install. Do take 451 after the daemon starts; expect the account made at 452.
+#[test]
+fn an_id_taken_after_start_is_skipped() {
+    let (client, state, handle) =
+        served_growing(vec![("_hexbox1".to_owned(), 450)], BTreeSet::new(), 0);
+    state.lock().unwrap().taken.insert(451);
+    let a = BoxId::new("a").expect("box id");
+    let b = BoxId::new("b").expect("box id");
+    client.acquire(&a, 256 * MIB, 16 * MIB, None).unwrap();
+    assert_eq!(client.acquire(&b, 256 * MIB, 16 * MIB, None).unwrap(), 452);
+    drop(client);
+    handle.join().expect("daemon thread");
+    assert_eq!(
+        state.lock().unwrap().made,
+        vec![Account {
+            name: "_hexbox2".to_owned(),
+            uid: 452
+        }]
+    );
+}
+
+/// The lead's #2: the pool stays ahead by the node's observed peak of concurrent box-user boxes, kept
+/// across restarts. Do start a daemon with one pool user and a kept peak of 3, then hold 4 boxes at once;
+/// expect 2 accounts made at start, a 4th when the 4th box comes, and the kept peak 4.
+#[test]
+fn the_pool_is_grown_to_the_kept_peak_and_the_peak_is_kept() {
+    let (client, state, handle) =
+        served_growing(vec![("_hexbox1".to_owned(), 450)], BTreeSet::new(), 3);
+    assert_eq!(state.lock().unwrap().made.len(), 2);
+    for i in 0..4 {
+        let b = BoxId::new(&format!("b{i}")).expect("box id");
+        client.acquire(&b, 256 * MIB, 16 * MIB, None).unwrap();
+    }
+    drop(client);
+    handle.join().expect("daemon thread");
+    let s = state.lock().unwrap();
+    assert_eq!(s.made.len(), 3);
+    assert_eq!(s.peak, 4);
 }
