@@ -61,12 +61,17 @@ pub fn run(argv: &[String]) -> Option<u8> {
                 std::thread::park();
             }
         }
-        // climb <bytes>: as `hog`, reporting the MiB it has touched after each one, so a bound's
-        // overshoot is read from the program itself whatever ends it (bench/native).
+        // climb <bytes> [step]: as `hog`, a step at a time (1 MiB unless given), reporting the KiB it has
+        // touched after each, so a bound's overshoot is read from the program itself whatever ends it
+        // (bench/native).
         "climb" => Some(climb(
             args.first()
                 .and_then(|b| b.parse::<u64>().ok())
                 .unwrap_or(0),
+            args.get(1)
+                .and_then(|b| b.parse::<usize>().ok())
+                .filter(|s| *s > 0)
+                .unwrap_or(CHUNK),
         )),
         "hog" => Some(hog(args
             .first()
@@ -265,21 +270,22 @@ fn hog(bytes: u64) -> u8 {
     u8::from(keep == usize::MAX)
 }
 
-/// Takes and touches `bytes` a MiB at a time, writing the MiB touched so far as a line after each;
-/// exits 0 once all are touched, 1 when stdout is gone.
-fn climb(bytes: u64) -> u8 {
+/// Takes and touches `bytes` a `step` at a time, writing the KiB touched so far as a line after each;
+/// exits 0 once all are touched, 1 when stdout is gone. The step is the instrument's resolution: an
+/// overshoot reads to within one step.
+fn climb(bytes: u64, step: usize) -> u8 {
     let target = usize::try_from(bytes).unwrap_or(usize::MAX);
     let mut held: Vec<Vec<u8>> = Vec::new();
     let mut taken = 0usize;
     let mut rng = 0x9e37_79b9_7f4a_7c15u64;
     let mut out = std::io::stdout();
     while taken < target {
-        let want = CHUNK.min(target.saturating_sub(taken));
+        let want = step.min(target.saturating_sub(taken));
         let mut chunk = vec![0u8; want];
         fill_incompressible(&mut chunk, &mut rng);
         held.push(chunk);
         taken = taken.saturating_add(want);
-        let line = format!("{}\n", taken.div_ceil(CHUNK));
+        let line = format!("{}\n", taken.div_ceil(1024));
         if write_all(&mut out, line.as_bytes()).is_err() {
             return 1;
         }
