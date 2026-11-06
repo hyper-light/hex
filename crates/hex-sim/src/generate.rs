@@ -147,7 +147,7 @@ pub fn tenants(
     Ok(cluster)
 }
 
-/// `cluster` with a burst (`T-T7.5.1`): `count` microVMs of `owner`'s, all arriving at `at`, each of
+/// `cluster` with a burst (`T-T7.5.1`): `count` workloads of `owner`'s, all arriving at `at`, each of
 /// 1 to `max_cores` cores and 2 GiB a core, running 1 minute to `2 * mean_run` less a minute. The
 /// workloads are put back in arrival order (the burst after what arrived at `at` before it) and their
 /// ids made dense again.
@@ -166,7 +166,7 @@ pub fn burst(
         .checked_mul(2)
         .and_then(|x| x.checked_sub(minute))
         .ok_or(SimError::TimeOverflow)?;
-    let extra = usize::try_from(count).map_err(|_| SimError::Config("burst microVMs"))?;
+    let extra = usize::try_from(count).map_err(|_| SimError::Config("burst workloads"))?;
     cluster
         .workloads
         .try_reserve_exact(extra)
@@ -200,9 +200,9 @@ pub fn burst(
     Ok(cluster)
 }
 
-/// `cluster` with a burst drawn from its own microVMs (`T-T7.5.1` on a recorded day): `count` microVMs of
+/// `cluster` with a burst drawn from its own workloads (`T-T7.5.1` on a recorded day): `count` workloads of
 /// `owner`'s (a new owner of weight 1 if the cluster has fewer), all arriving at `at`, each taking the
-/// need, run time and kind of one of the cluster's microVMs chosen uniformly, with replacement. The
+/// need, run time and kind of one of the cluster's workloads chosen uniformly, with replacement. The
 /// workloads are put back in arrival order and their ids made dense again, as [`burst`] does.
 pub fn burst_from(
     mut cluster: Cluster,
@@ -212,17 +212,17 @@ pub fn burst_from(
     count: u64,
 ) -> Result<Cluster, SimError> {
     let mut rng = Rng::new(seed ^ 0xb025_f0d1);
-    let n = u64::try_from(cluster.workloads.len()).map_err(|_| SimError::Config("microVMs"))?;
+    let n = u64::try_from(cluster.workloads.len()).map_err(|_| SimError::Config("workloads"))?;
     let last = n
         .checked_sub(1)
-        .ok_or(SimError::Config("a burst drawn from no microVMs"))?;
-    let extra = usize::try_from(count).map_err(|_| SimError::Config("burst microVMs"))?;
+        .ok_or(SimError::Config("a burst drawn from no workloads"))?;
+    let extra = usize::try_from(count).map_err(|_| SimError::Config("burst workloads"))?;
     let mut drawn = Vec::new();
     drawn
         .try_reserve_exact(extra)
         .map_err(|_| SimError::Config("no memory for the burst"))?;
     for _ in 0..count {
-        let i = usize::try_from(rng.range(0, last)).map_err(|_| SimError::Config("microVMs"))?;
+        let i = usize::try_from(rng.range(0, last)).map_err(|_| SimError::Config("workloads"))?;
         let like = cluster
             .workloads
             .get(i)
@@ -280,7 +280,7 @@ pub fn groups(
     cluster
 }
 
-/// `cluster` with runs of 2 to `max_size` consecutive workloads made gangs (a group of microVMs that run together),
+/// `cluster` with runs of 2 to `max_size` consecutive workloads made gangs (workloads that only work together),
 /// starting one at a workload with probability `per_mille / 1000`: each member takes the first's
 /// arrival, owner, band and group, so a gang is submitted at once into one queue.
 pub fn gangs(mut cluster: Cluster, seed: u64, per_mille: u64, max_size: u64) -> Cluster {
@@ -307,7 +307,7 @@ pub fn gangs(mut cluster: Cluster, seed: u64, per_mille: u64, max_size: u64) -> 
     cluster
 }
 
-/// One tenant's microVMs over a [`Day`]: their sizes, and how much of the cluster's capacity they
+/// One tenant's workloads over a [`Day`]: their sizes, and how much of the cluster's capacity they
 /// ask for, in parts per million, in the busy hours and out of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tenant {
@@ -318,7 +318,7 @@ pub struct Tenant {
     pub quiet_ppm: u64,
 }
 
-/// A day of microVMs on identical nodes: each tenant's microVMs arrive at its rate, more in the busy
+/// A day of workloads on identical nodes: each tenant's workloads arrive at its rate, more in the busy
 /// hours `busy.0..busy.1`, and run for a minute to `2 * mean_run` less a minute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Day {
@@ -328,11 +328,11 @@ pub struct Day {
     pub length: Time,
     pub busy: (Time, Time),
     pub mean_run: Time,
-    /// Past this many microVMs the day is refused, not cut short.
+    /// Past this many workloads the day is refused, not cut short.
     pub max_vms: usize,
 }
 
-/// A generated day of microVMs ([`Day`]): every tenant an owner.
+/// A generated day of workloads ([`Day`]): every tenant an owner.
 pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
     if day.nodes == 0 || day.tenants.is_empty() {
         return Err(SimError::Config("a day has nodes and tenants"));
@@ -361,7 +361,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
         while t < day.length {
             if vms.len() >= day.max_vms {
                 return Err(SimError::Full {
-                    what: "the day's microVMs",
+                    what: "the day's workloads",
                     bound: day.max_vms,
                 });
             }
@@ -374,7 +374,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
                     .ok_or(SimError::Config("memory"))?,
                 gpus: 0,
             };
-            // The microVM's dominant share of the cluster, in parts per million.
+            // The workload's dominant share of the cluster, in parts per million.
             let ppm = |n: u64, of: u64| {
                 n.checked_mul(1_000_000)
                     .and_then(|x| x.checked_div(of))
@@ -386,7 +386,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             } else {
                 tenant.quiet_ppm
             };
-            // Mean gap = run time * microVM share / the share asked for, so the microVMs in flight ask for
+            // Mean gap = run time * workload share / the share asked for, so the workloads in flight ask for
             // `rate` of the cluster.
             let mean_gap = day
                 .mean_run
@@ -414,7 +414,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
     let mut workloads = Vec::new();
     workloads
         .try_reserve_exact(vms.len())
-        .map_err(|_| SimError::Config("no memory for the microVMs"))?;
+        .map_err(|_| SimError::Config("no memory for the workloads"))?;
     for (id, (arrives, owner, need, runs_for)) in (0u64..).zip(vms) {
         workloads.push(WorkloadSpec {
             id: WorkloadId(id),

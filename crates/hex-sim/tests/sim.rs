@@ -150,7 +150,7 @@ fn placements_equal_the_serial_specification_with_owners_and_bands() {
     );
 }
 
-/// AC-T7.5.1 (gangs of microVMs admitted whole), G4 step 3: do 500 generated clusters over 1 to 5 owners
+/// AC-T7.5.1 (gangs of workloads admitted whole), G4 step 3: do 500 generated clusters over 1 to 5 owners
 /// and 1 to 3 bands with a quarter of their workloads in gangs of 2 to 8 (a gang's whole need often
 /// more than any one node's room); expect every run's log to be one the specification makes, every
 /// gang placed in one write (partial gangs = 0), nothing lost or started twice, and (non-vacuity)

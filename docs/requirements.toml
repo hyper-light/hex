@@ -62,19 +62,21 @@ tests = [
   { id = "T-T7.4.1", text = "A model-based test: placements equal the serial specification's on generated clusters and workloads" },
 ]
 
-# CP-T7.5 is about owners of microVMs (tenants or apps), not CI repositories: Ada, 2026-11-06, "You are
-# NOT Kiln's load balancer for jobs, CI, and general work. Your scheduler is for *microvms*." The texts
-# below say so in place of kiln's plan's CI wording.
+# CP-T7.5 is about the owners (tenants or apps) of Hex's workloads, OCI containers, Firecracker microVMs
+# and Shards microVMs, not CI repositories: Ada, 2026-11-06, "You are NOT Kiln's load balancer for jobs,
+# CI, and general work. Your scheduler is for *microvms*." and "Your goals are still wrong and list
+# containers when we work with OCI containers, Firecracker, and Shards Microvms." The texts below say so
+# in place of kiln's plan's CI wording.
 [[goal]]
 id = "CP-T7.5"
 title = "Priority, quotas, fair share, preemption and gangs"
 criteria = [
-  { id = "AC-T7.5.1", text = "Usable now: microVM owners share capacity fairly, a higher band takes precedence over a lower one, and gangs of microVMs are admitted whole, in a change request that passes the gate" },
-  { id = "AC-T7.5.2", text = "each of 4 equal-weight microVM owners' share of capacity under contention is within 2% of 25%, measured by hex-sim over a recorded microVM day" },
+  { id = "AC-T7.5.1", text = "Usable now: the owners of OCI containers, Firecracker microVMs and Shards microVMs share capacity fairly, a higher band takes precedence over a lower one, and gangs of them are admitted whole, in a change request that passes the gate" },
+  { id = "AC-T7.5.2", text = "each of 4 equal-weight owners' share of capacity under contention is within 2% of 25%, measured by hex-sim over a recorded day of OCI containers, Firecracker microVMs and Shards microVMs" },
   { id = "AC-T7.5.3", text = "disruption budgets broken by preemption is exactly 0, measured by a property test" },
 ]
 tests = [
-  { id = "T-T7.5.1", text = "A burst of 1,000 microVMs from one owner — passes when the other owners' microVMs still start within their usual p95" },
+  { id = "T-T7.5.1", text = "A burst of 1,000 OCI containers, Firecracker microVMs or Shards microVMs from one owner — passes when the other owners' workloads still start within their usual p95" },
 ]
 
 [[goal]]

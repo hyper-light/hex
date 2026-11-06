@@ -1,7 +1,9 @@
-//! G4's bars on a recorded microVM day (CP-T7.5, `docs/design/scheduler-fairness.md`): Huawei
+//! G4's bars on a recorded day of workloads (CP-T7.5, `docs/design/scheduler-fairness.md`): Huawei
 //! Cloud's public serverless trace, region 5, day 30 (Joosen et al., EuroSys 2025; CC BY 4.0;
-//! `bench/sched/huawei_workload.md`), each sandbox a microVM and each user an owner, replayed in
+//! `bench/sched/huawei_workload.md`), each sandbox a workload and each user an owner, replayed in
 //! hex-sim as recorded.
+//! A workload is one of Hex's: an OCI container, a Firecracker microVM or a Shards microVM, and its
+//! owner the tenant or app it runs for.
 
 #![cfg_attr(
     test,
@@ -47,25 +49,25 @@ fn busiest_four() -> Vec<u32> {
     by_share.iter().take(4).map(|&(_, o)| o).collect()
 }
 
-/// AC-T7.5.2, measured on a recorded microVM day (`bench/sched/g4_microvm.md`): do day 30 of Huawei
+/// AC-T7.5.2, measured on a recorded day of workloads (`bench/sched/g4_huawei.md`): do day 30 of Huawei
 /// Cloud's region 5 with its four busiest owners as four equal-weight owners (their sandboxes'
 /// launches, lifetimes and shapes as recorded), on the largest cluster at which each of the four
 /// asks, on average over the day, for more than a quarter of it (`common::quarter_cluster`),
-/// counting only the microVMs that cluster can hold; under Hex's policy for microVMs (bands,
+/// counting only the workloads that cluster can hold; under Hex's policy (bands,
 /// weighted DRF, preemption of over-share work: F1, F4 and F5), plain DRF and submit order; expect
-/// the precondition to hold, the four to contend, and microVMs larger than the cluster refused. It
+/// the precondition to hold, the four to contend, and workloads larger than the cluster refused. It
 /// does not meet the bar (2026-11-06: Hex and plain DRF worst 461,564 ppm from 25%, FIFO 503,860):
-/// that cluster is 2.777 cores, and two of the owners run single microVMs of 1.8 and 2.6 cores, 65%
-/// and 94% of it. An owner holding one such microVM is never a victim under F4's same-band rule (it
-/// would fall below the preemptor), so the owners of 0.3-core microVMs wait for days. DRF's equal
+/// that cluster is 2.777 cores, and two of the owners run single workloads of 1.8 and 2.6 cores, 65%
+/// and 94% of it. An owner holding one such workload is never a victim under F4's same-band rule (it
+/// would fall below the preemptor), so the owners of 0.3-core workloads wait for days. DRF's equal
 /// shares assume tasks small beside the cluster (NSDI 2011 §4), and the bar's precondition sizes the
 /// cluster below this trace's grain.
 #[test]
-fn four_microvm_owners_on_the_largest_quarter_cluster() {
+fn four_workload_owners_on_the_largest_quarter_cluster() {
     let four = busiest_four();
     let mut day = only_owners(recorded(TRACE), &four);
     let node = quarter_cluster(&day);
-    // The precondition, on work the cluster can run: a microVM larger than it is refused.
+    // The precondition, on work the cluster can run: a workload larger than it is refused.
     let mut runnable = day.clone();
     runnable.workloads.retain(|w| node.holds(&w.need));
     for (o, &(c, m)) in asked(&runnable).iter().enumerate() {
@@ -84,7 +86,7 @@ fn four_microvm_owners_on_the_largest_quarter_cluster() {
         background_milli: 0,
     }];
     eprintln!(
-        "AC-T7.5.2 huawei r5 day 30: owners {four:?} (by userID index), {} microVMs, one node of {} millicores and {:.2} GiB",
+        "AC-T7.5.2 huawei r5 day 30: owners {four:?} (by userID index), {} workloads, one node of {} millicores and {:.2} GiB",
         day.workloads.len(),
         node.cpu_milli,
         node.mem_bytes as f64 / GIB
@@ -92,7 +94,9 @@ fn four_microvm_owners_on_the_largest_quarter_cluster() {
     let (hex, refused) = run_with(&day, Policy::Drf, 1_000_000);
     let (drf, _) = run(&day, Policy::Drf);
     let (fifo, _) = run(&day, Policy::Fifo);
-    eprintln!("AC-T7.5.2 huawei: {refused} microVMs larger than the cluster, refused at admission");
+    eprintln!(
+        "AC-T7.5.2 huawei: {refused} workloads larger than the cluster, refused at admission"
+    );
     describe("AC-T7.5.2 huawei hex", &hex);
     describe("AC-T7.5.2 huawei plain DRF", &drf);
     describe("AC-T7.5.2 huawei FIFO", &fifo);
@@ -103,16 +107,16 @@ fn four_microvm_owners_on_the_largest_quarter_cluster() {
     assert!(refused > 0);
 }
 
-/// T-T7.5.1, measured on a recorded microVM day (`bench/sched/g4_microvm.md`): do day 30 of Huawei
+/// T-T7.5.1, measured on a recorded day of workloads (`bench/sched/g4_huawei.md`): do day 30 of Huawei
 /// Cloud's region 5 as recorded (all its owners, on the trace's 10 hosts), then the same day with
-/// 1,000 microVMs from an owner that launched none that day, all at the start of the day's busiest
+/// 1,000 workloads from an owner that launched none that day, all at the start of the day's busiest
 /// hour, each drawn from the day's own sandboxes (`common::burst_rows`); expect, under Hex's policy,
 /// every owner's start p95 with the burst to be at most its p95 without. It holds, but under plain
 /// DRF and submit order too (2026-11-06: no owner slower, nothing preempted): the ten 48-core hosts
 /// take a burst of mostly 0.3-core, short-lived sandboxes without anyone waiting, so this day can't
 /// tell the policies apart. The generated burst of `tests/burst.rs` does.
 #[test]
-fn a_burst_of_microvms_leaves_the_other_owners_start_p95_as_it_was() {
+fn a_burst_of_workloads_leaves_the_other_owners_start_p95_as_it_was() {
     let usual = recorded(TRACE);
     let rows = burst_rows(&usual, "T-T7.5.1 huawei r5 day 30");
     for (name, a, b, preempted) in &rows {

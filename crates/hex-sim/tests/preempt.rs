@@ -1,5 +1,7 @@
 //! G4 step 4 (CP-T7.5, `docs/design/scheduler-fairness.md` F4): preemption that keeps disruption
 //! budgets, over generated clusters with the crash nemesis.
+//! A workload is one of Hex's: an OCI container, a Firecracker microVM or a Shards microVM, and its
+//! owner the tenant or app it runs for.
 
 #![cfg_attr(
     test,

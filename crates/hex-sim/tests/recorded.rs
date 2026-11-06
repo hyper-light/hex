@@ -1,8 +1,9 @@
 //! A side measurement, not of record: G4's bars run on days of kiln's own CI, replayed in hex-sim
-//! as recorded (`bench/sched/kiln_workload.md`). Hex schedules microVMs, not CI jobs (Ada,
-//! 2026-11-06: "You are NOT Kiln's load balancer for jobs, CI, and general work. Your scheduler is
-//! for *microvms*."), so these days stand for no workload of Hex's; G4's bars are met on microVM
-//! days (`tests/fair.rs`, `tests/burst.rs`). Kept for what they showed about the bars' preconditions.
+//! as recorded (`bench/sched/kiln_workload.md`). Hex schedules OCI containers, Firecracker microVMs
+//! and Shards microVMs, not CI jobs (Ada, 2026-11-06: "You are NOT Kiln's load balancer for jobs, CI,
+//! and general work. Your scheduler is for *microvms*."), so these days stand for no workload of
+//! Hex's; G4's bars are measured on days of its workloads (`tests/fair.rs`, `tests/burst.rs`,
+//! `tests/huawei.rs`). Kept for what they showed about the bars' preconditions.
 
 #![cfg_attr(
     test,
