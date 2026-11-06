@@ -34,9 +34,8 @@ pub struct Patience {
 impl Patience {
     /// A wait whose recorded distribution's slowest answer for this host class is `slowest`, cited at the caller.
     pub const fn seeded(slowest: Duration) -> Self {
-        let _ = slowest;
         Self {
-            recorded: 0,
+            recorded: stored(slowest),
             seen: AtomicU64::new(0),
         }
     }
@@ -52,7 +51,7 @@ impl Patience {
 
     /// An answer came `took` after its wait began: this node's slowest if it is slower than any before.
     pub fn answered(&self, took: Duration) {
-        let _ = (took, stored(took), Ordering::Relaxed);
+        self.seen.fetch_max(stored(took), Ordering::Relaxed);
     }
 
     /// The slowest answer, the record's or this node's, whichever is slower: `None` while measuring with none seen.
