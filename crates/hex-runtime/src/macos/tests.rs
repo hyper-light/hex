@@ -336,3 +336,16 @@ fn the_per_uid_process_ceiling_is_read_from_the_kernel() {
     let all = super::sys::max_processes().expect("kern.maxproc");
     assert!(per_uid > 0 && per_uid <= all, "{per_uid} of {all}");
 }
+
+/// Ada's rule (2026-11-06): no picked number stands in for the kernel's. A process or user listing is sized
+/// by `kern.maxproc`; when that can't be read, the listing is refused naming it (CLAUDE.md §3), never sized
+/// by a guess (the 4096 step 1's class and the helper fell back to). Do size a listing from a failed read
+/// and from a read of 7; expect an error naming kern.maxproc, and room for 7.
+#[test]
+fn a_listing_is_sized_by_kern_maxproc_or_refused() {
+    let failed = super::sys::listing_from(Err(std::io::Error::from_raw_os_error(libc::ENOENT)));
+    let refused = failed.expect_err("a listing sized by a guess");
+    assert!(refused.to_string().contains("kern.maxproc"), "{refused}");
+    let sized = super::sys::listing_from(Ok(7)).expect("a listing for 7");
+    assert!(sized.capacity() >= 7 && sized.is_empty());
+}
