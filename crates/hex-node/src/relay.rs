@@ -6,18 +6,20 @@
 //!   connection of its own. Its framed requests go to the node one message each; the node's answers go
 //!   back framed. When either side ends, so does the other: the node's disconnect rule then ends the
 //!   programs the host left.
-//! - **Stdio:** an exec's streams come on connections of their own, named by their first bytes. The relay
-//!   gathers them ([`Gather`]), makes a pipe for each, passes the pipe's end to the node with the exec,
-//!   and copies between the pipe and the connection, one thread and one buffer per stream.
+//! - **Stdio:** an exec's streams come on connections of their own, named by their first bytes, each read
+//!   on the thread that later copies it. The relay gathers them ([`Gather`]), makes a pipe for each,
+//!   passes the pipe's end to the node with the exec, and copies between the pipe and the connection, one
+//!   thread and one buffer per stream. An exec whose streams haven't all come is parked, and the host's
+//!   connection read on, so its set waits on facts alone: its last stream, or its host's end.
 //!
 //! Each resource has a bound, refused past by type (CLAUDE.md §2, §3):
 //! - control connections ([`Limits::connections`], the node's own): one more is sent its token and a
 //!   refusal (`Exhausted`, as the node's socket refuses one) and closed;
 //! - execs and early streams waiting for each other ([`Limits::sets`]): one more is refused, the exec
-//!   answered `Invalid` naming the bound, the stream closed;
-//! - a set's patience ([`Limits::patience`]): an exec whose streams don't all come in it is answered
-//!   `Invalid`, naming them, and the streams that came are closed;
-//! - a stdio connection's name ([`NAME_PATIENCE`]): one that doesn't name itself in it is closed;
+//!   answered `Invalid` naming the bound, the stream closed; a set goes when its host's connection ends,
+//!   which no exec of its can outlive, its streams closed;
+//! - stdio connections yet to name themselves: as many as the sets' streams ([`Limits::unnamed`]); one
+//!   more is refused (`Exhausted`, logged on `hex.guest` as `stdio_unnamed`) and closed;
 //! - staging connections at once (the control connections' bound again): one more is answered
 //!   `Exhausted` and closed; a stage's entries, bytes and path lengths ([`Limits::files`]).
 //!
@@ -31,12 +33,12 @@ use std::net::Shutdown;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use hex_api::Refusal;
 use hex_client::guest::Duplex;
-use hex_core::stream::{self, Complete, Deframer, Exec, Gather, Stray};
+use hex_core::stream::{self, Deframer, Exec, Gather, Stray};
 use hex_core::wire::{self, Answer, Call, Request};
 use rustix::io::Errno;
 use rustix::net::{
@@ -51,40 +53,42 @@ pub struct Limits {
     pub connections: usize,
     /// Execs and early streams waiting for each other at once.
     pub sets: usize,
-    /// Longest an exec waits for its streams.
-    pub patience: Duration,
+    /// Stdio connections accepted and yet to name themselves at once.
+    pub unnamed: usize,
     /// A stage's entries, bytes and path lengths.
     pub files: hex_core::stream::files::Limits,
 }
 
 /// The relay's bounds unless set:
 /// - the node socket's own connections (`crate::serve::LIMITS`), as each holds one of the node's;
-/// - a connection's in-flight bound for every connection, so no host that holds the node's bounds meets
-///   the sets' bound;
-/// - a minute's patience: the host's client dials an exec's streams before it sends the exec, so they
-///   are there unless a dial failed, and a minute is past any vsock connect (Linux gives one 2 s,
-///   `VSOCK_DEFAULT_CONNECT_TIMEOUT`, net/vmw_vsock/af_vsock.c) many times over.
+/// - a connection's in-flight bound for every connection (`crate::serve::LIMITS`, the node's own), so no
+///   host that holds the node's bounds meets the sets' bound;
+/// - every stream of every set naming itself at once: [`STREAMS`] a set.
 pub const LIMITS: Limits = Limits {
     connections: crate::serve::LIMITS.connections,
     sets: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight,
-    patience: Duration::from_secs(60),
+    unnamed: crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight * STREAMS,
     files: hex_core::stream::files::LIMITS,
 };
 /// Where the guest's relay writes staged bundles and roots: the guest's tmpfs `/run`, charged to its
 /// memory (docs/design/shards-guest.md §4).
 pub const STAGED: &str = "/run/hex/staged";
-/// Longest a stdio connection takes to name itself: the host writes its name as soon as it connects.
-pub const NAME_PATIENCE: Duration = Duration::from_secs(5);
-/// Each stdio copier's stack: one copy buffer and little else.
-const COPIER_STACK: usize = 64 << 10;
+/// The most streams an exec has: stdin, stdout and stderr (docs/design/shards-guest.md §3a).
+pub const STREAMS: usize = 3;
+
+/// A host connection as the relay takes it: a [`Duplex`] whose descriptor the stdio copiers splice
+/// through.
+pub trait Conn: Duplex + AsFd {}
+
+impl<T: Duplex + AsFd> Conn for T {}
 
 /// What accepts the host's connections: AF_VSOCK in the guest, a Unix socket in tests.
 pub trait Listen: Send + Sync + 'static {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>>;
+    fn accept(&self) -> io::Result<Box<dyn Conn>>;
 }
 
 impl Listen for std::os::unix::net::UnixListener {
-    fn accept(&self) -> io::Result<Box<dyn Duplex>> {
+    fn accept(&self) -> io::Result<Box<dyn Conn>> {
         Ok(Box::new(std::os::unix::net::UnixListener::accept(self)?.0))
     }
 }
@@ -95,16 +99,32 @@ pub struct Relay {
     staged: PathBuf,
     limits: Limits,
     sets: Mutex<Sets>,
-    came: Condvar,
     tokens: AtomicU64,
     connections: AtomicUsize,
     stagings: AtomicUsize,
+    unnamed: AtomicUsize,
+    /// Stdio connections refused past [`Limits::unnamed`], for the node's counters.
+    refused_unnamed: AtomicU64,
 }
 
-/// Sets under way, and those made whole by a stream, waiting for their exec's thread to take them.
+/// A named stream's thread, waiting for the copier its exec's pipe gives it; dropped, the thread ends
+/// and its connection closes.
+type Waiting = SyncSender<Copier>;
+
+/// Sets under way, and the execs parked until their sets are whole.
 struct Sets {
-    gather: Gather<Box<dyn Duplex>>,
-    whole: BTreeMap<Exec, Vec<Box<dyn Duplex>>>,
+    gather: Gather<Waiting>,
+    parked: BTreeMap<Exec, Parked>,
+}
+
+/// An exec whose streams haven't all come: what to send the node, and where, once they have.
+struct Parked {
+    message: Vec<u8>,
+    version: u16,
+    id: u64,
+    streams: wire::Streams,
+    node: Arc<OwnedFd>,
+    writer: Arc<Mutex<Box<dyn Duplex>>>,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -120,13 +140,19 @@ impl Relay {
             limits,
             sets: Mutex::new(Sets {
                 gather: Gather::new(limits.sets),
-                whole: BTreeMap::new(),
+                parked: BTreeMap::new(),
             }),
-            came: Condvar::new(),
             tokens: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
             stagings: AtomicUsize::new(0),
+            unnamed: AtomicUsize::new(0),
+            refused_unnamed: AtomicU64::new(0),
         })
+    }
+
+    /// Stdio connections refused because more were yet to name themselves than [`Limits::unnamed`].
+    pub fn refused_unnamed(&self) -> u64 {
+        self.refused_unnamed.load(Ordering::Acquire)
     }
 
     fn sets(&self) -> Result<MutexGuard<'_, Sets>, Refusal> {
@@ -206,34 +232,63 @@ impl Relay {
         }
     }
 
-    /// Takes stdio connections as they come, each to its exec's set.
-    fn take_streams(&self, stdio: &dyn Listen) -> Refusal {
+    /// Takes stdio connections as they come, each on a thread of its own that reads its name, joins
+    /// its exec's set and, once the exec has its pipe, copies it; at most [`Limits::unnamed`] at once
+    /// yet to name themselves.
+    fn take_streams(self: &Arc<Self>, stdio: &dyn Listen) -> Refusal {
         loop {
-            let mut conn = match stdio.accept() {
+            let conn = match stdio.accept() {
                 Ok(conn) => conn,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Refusal::os("accepting a host's stdio connection", e),
             };
-            let mut name = [0u8; stream::NAME_BYTES];
-            let named = conn
-                .set_read_timeout(Some(NAME_PATIENCE))
-                .and_then(|()| conn.read_exact(&mut name))
-                .and_then(|()| conn.set_read_timeout(None))
-                .ok()
-                .and_then(|()| stream::read_name(&name).ok());
-            // One that doesn't name itself in time, or names nothing, is closed as it drops: the exec
-            // it was for is answered when its patience ends.
-            let Some(named) = named else { continue };
-            let Ok(mut sets) = self.sets() else { continue };
-            match sets.gather.arrive(named, conn, Instant::now()) {
-                Ok(Some((exec, conns))) => {
-                    sets.whole.insert(exec, conns);
-                    self.came.notify_all();
-                }
-                Ok(None) => {}
-                // Closed as it drops; its exec, if it comes, waits out its patience and is refused.
-                Err(Stray { .. }) => {}
+            let held = self.unnamed.fetch_add(1, Ordering::AcqRel);
+            if held >= self.limits.unnamed {
+                self.unnamed.fetch_sub(1, Ordering::AcqRel);
+                self.refused_unnamed.fetch_add(1, Ordering::AcqRel);
+                log_unnamed(&Refusal::Exhausted {
+                    what: "stdio connections yet to name themselves",
+                    bound: self.limits.unnamed,
+                });
+                continue;
             }
+            let relay = Arc::clone(self);
+            let started = std::thread::Builder::new()
+                .name("hex-relay-stdio-copy".to_owned())
+                .spawn(move || relay.stream(conn));
+            if let Err(e) = started {
+                self.unnamed.fetch_sub(1, Ordering::AcqRel);
+                return Refusal::os("starting a stdio connection's thread", e);
+            }
+        }
+    }
+
+    /// One stdio connection: its name, read as long as the host takes to write it (the host's end ends
+    /// it), its place in its exec's set, then its copy, once its exec has its pipe. A connection that
+    /// names nothing, or a stream its set refuses, is closed as it drops.
+    fn stream(self: Arc<Self>, mut conn: Box<dyn Conn>) {
+        let named = {
+            let _release = Release(&self.unnamed);
+            let mut name = [0u8; stream::NAME_BYTES];
+            conn.read_exact(&mut name)
+                .ok()
+                .and_then(|()| stream::read_name(&name).ok())
+        };
+        let Some(named) = named else { return };
+        let (copier, copy) = std::sync::mpsc::sync_channel(1);
+        let ready = {
+            let Ok(mut sets) = self.sets() else { return };
+            match sets.gather.arrive(named, copier) {
+                Ok(Some((exec, waiting))) => sets.parked.remove(&exec).map(|p| (p, waiting)),
+                Ok(None) => None,
+                Err(Stray { .. }) => return,
+            }
+        };
+        if let Some((parked, waiting)) = ready {
+            let _ = deliver(&parked, waiting);
+        }
+        if let Ok(copy) = copy.recv() {
+            copy.run(conn);
         }
     }
 
@@ -272,7 +327,25 @@ impl Relay {
         };
         let Ok(answers) = answers else { return };
         self.requests(token, host.as_mut(), &node, &writer);
-        // The host has gone: the node sees its connection end and applies its disconnect rule.
+        // The host has gone: its execs can't be answered, nor their streams come, so its sets go, their
+        // streams' threads ending as their connections close.
+        if let Ok(mut sets) = self.sets() {
+            drop(sets.gather.forget(token));
+            let gone: Vec<Exec> = sets
+                .parked
+                .range(
+                    Exec { conn: token, id: 0 }..=Exec {
+                        conn: token,
+                        id: u64::MAX,
+                    },
+                )
+                .map(|(exec, _)| *exec)
+                .collect();
+            for exec in gone {
+                sets.parked.remove(&exec);
+            }
+        }
+        // The node sees its connection end and applies its disconnect rule.
         let _ = rustix::net::shutdown(&*node, rustix::net::Shutdown::Both);
         let _ = answers.join();
     }
@@ -282,11 +355,12 @@ impl Relay {
         &self,
         token: u64,
         host: &mut dyn Duplex,
-        node: &OwnedFd,
-        writer: &Mutex<Box<dyn Duplex>>,
+        node: &Arc<OwnedFd>,
+        writer: &Arc<Mutex<Box<dyn Duplex>>>,
     ) {
         let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-        let mut buf = vec![0u8; 64 << 10];
+        // A read takes at most one whole frame, the most the deframer holds.
+        let mut buf = vec![0u8; stream::MAX_FRAME];
         loop {
             let n = match host.read(&mut buf) {
                 Ok(0) => return,
@@ -309,14 +383,15 @@ impl Relay {
         }
     }
 
-    /// One request to the node: an exec with its streams' pipes, anything else as it came (the node
-    /// refuses what isn't a request itself).
+    /// One request to the node: an exec with its streams' pipes, once they have all come, anything
+    /// else as it came (the node refuses what isn't a request itself). An exec whose streams haven't
+    /// all come is parked, and the host's connection read on.
     fn request(
         &self,
         token: u64,
         message: &[u8],
-        node: &OwnedFd,
-        writer: &Mutex<Box<dyn Duplex>>,
+        node: &Arc<OwnedFd>,
+        writer: &Arc<Mutex<Box<dyn Duplex>>>,
     ) -> Result<(), Gone> {
         let exec = match wire::read_request_apart(message, wire::MAX_MESSAGE) {
             Ok((header, Request::Call(Call::Exec { streams, .. }))) => Some((header, streams)),
@@ -329,66 +404,31 @@ impl Relay {
             conn: token,
             id: header.id,
         };
-        let stdio = self
-            .streams_of(exec, streams)
-            .and_then(|conns| pipes(streams, conns));
-        match stdio {
-            Ok(fds) => send(node, message, &fds),
-            Err(why) => {
-                let answer = wire::answer(
-                    header.version,
-                    header.id,
-                    &Answer::Refused(why),
-                    wire::MAX_MESSAGE,
-                )
-                .ok()
-                .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok());
-                let mut w = writer.lock().map_err(|_| Gone)?;
-                w.write_all(&answer.unwrap_or_default()).map_err(|_| Gone)
-            }
-        }
-    }
-
-    /// The connections of `exec`'s streams, once all have come, or why not.
-    fn streams_of(
-        &self,
-        exec: Exec,
-        streams: wire::Streams,
-    ) -> Result<Vec<Box<dyn Duplex>>, Refusal> {
-        let start = Instant::now();
-        let mut sets = self.sets()?;
-        match sets.gather.expect(exec, streams, start) {
-            Ok(Some((_, conns))) => return Ok(conns),
-            Ok(None) => {}
-            Err(refused) => {
-                return Err(Refusal::Invalid {
+        let parked = Parked {
+            message: message.to_vec(),
+            version: header.version,
+            id: header.id,
+            streams,
+            node: Arc::clone(node),
+            writer: Arc::clone(writer),
+        };
+        let ready = {
+            let mut sets = self.sets().map_err(|_| Gone)?;
+            match sets.gather.expect(exec, streams) {
+                Ok(Some((_, waiting))) => Ok(waiting),
+                Ok(None) => {
+                    sets.parked.insert(exec, parked);
+                    return Ok(());
+                }
+                Err(refused) => Err(Refusal::Invalid {
                     what: "stdio",
                     why: format!("the exec's streams were refused: {}", refused.why),
-                });
+                }),
             }
-        }
-        loop {
-            if let Some(conns) = sets.whole.remove(&exec) {
-                return Ok(conns);
-            }
-            let patience = self.limits.patience;
-            let left = patience.saturating_sub(start.elapsed());
-            if left.is_zero() {
-                let late: Vec<Complete<Box<dyn Duplex>>> =
-                    sets.gather.expire(Instant::now(), patience);
-                let came = late
-                    .iter()
-                    .find(|(e, _)| *e == exec)
-                    .map_or(0, |(_, conns)| conns.len());
-                return Err(Refusal::Invalid {
-                    what: "stdio",
-                    why: format!(
-                        "{came} of the exec's {} streams came in {patience:?}",
-                        streams.count()
-                    ),
-                });
-            }
-            sets = self.came.wait_timeout(sets, left).map_err(poisoned)?.0;
+        };
+        match ready {
+            Ok(waiting) => deliver(&parked, waiting),
+            Err(why) => refuse_exec(&parked, why),
         }
     }
 }
@@ -437,21 +477,52 @@ fn connect(path: &Path) -> Result<OwnedFd, Refusal> {
     Ok(fd)
 }
 
-/// For each stream, in stdin-stdout-stderr order, the pipe end the node takes, with a copier between the
-/// pipe's other end and its connection.
-fn pipes(streams: wire::Streams, conns: Vec<Box<dyn Duplex>>) -> Result<Vec<OwnedFd>, Refusal> {
+/// The parked exec `parked` to the node, with a pipe for each of its streams, whose threads `waiting`
+/// copy them; or refused to its host if a stream's thread has gone.
+fn deliver(parked: &Parked, waiting: Vec<Waiting>) -> Result<(), Gone> {
+    match pipes(parked.streams, waiting) {
+        Ok(fds) => send(&parked.node, &parked.message, &fds),
+        Err(why) => refuse_exec(parked, why),
+    }
+}
+
+/// Answers the parked exec `parked` with `why` on its host's connection.
+fn refuse_exec(parked: &Parked, why: Refusal) -> Result<(), Gone> {
+    let answer = wire::answer(
+        parked.version,
+        parked.id,
+        &Answer::Refused(why),
+        wire::MAX_MESSAGE,
+    )
+    .ok()
+    .and_then(|bytes| stream::frame(&bytes, wire::MAX_MESSAGE).ok());
+    let mut w = parked.writer.lock().map_err(|_| Gone)?;
+    w.write_all(&answer.unwrap_or_default()).map_err(|_| Gone)
+}
+
+/// A stdio connection refused before it named itself, on `hex.guest` (the guest's console), as the
+/// event `stdio_unnamed`.
+fn log_unnamed(why: &Refusal) {
+    let _ = io::stderr()
+        .lock()
+        .write_all(format!("hex.guest event=stdio_unnamed why=\"{why}\"\n").as_bytes());
+}
+
+/// For each stream, in stdin-stdout-stderr order, the pipe end the node takes, with the stream's
+/// thread given the copier between the pipe's other end and its connection.
+fn pipes(streams: wire::Streams, waiting: Vec<Waiting>) -> Result<Vec<OwnedFd>, Refusal> {
     let order = [
         (streams.stdin, true),
         (streams.stdout, false),
         (streams.stderr, false),
     ];
-    let mut conns = conns.into_iter();
+    let mut waiting = waiting.into_iter();
     let mut fds = Vec::with_capacity(streams.count());
     for (on, input) in order {
         if !on {
             continue;
         }
-        let conn = conns.next().ok_or_else(|| Refusal::Invalid {
+        let thread = waiting.next().ok_or_else(|| Refusal::Invalid {
             what: "stdio",
             why: "a stream named by the exec didn't come".to_owned(),
         })?;
@@ -461,11 +532,9 @@ fn pipes(streams: wire::Streams, conns: Vec<Box<dyn Duplex>>) -> Result<Vec<Owne
         } else {
             (OwnedFd::from(w), Copier::Out(r))
         };
-        std::thread::Builder::new()
-            .name("hex-relay-stdio-copy".to_owned())
-            .stack_size(COPIER_STACK)
-            .spawn(move || copy.run(conn))
-            .map_err(|e| Refusal::os("starting a stdio copier", e))?;
+        thread.send(copy).map_err(|_| {
+            Refusal::Broken("a stream's connection ended before its exec started".to_owned())
+        })?;
         fds.push(theirs);
     }
     Ok(fds)
@@ -481,15 +550,40 @@ enum Copier {
 }
 
 impl Copier {
-    fn run(self, mut conn: Box<dyn Duplex>) {
+    /// Moves the stream until either side ends, by splice(2) through the pipe, so no byte passes through
+    /// user space. Pipe to connection: the socket's `splice_write` (`splice_to_socket`, net/socket.c).
+    /// Connection to pipe: the socket's `splice_read`, which for vsock, whose `vsock_stream_ops` names none
+    /// (net/vmw_vsock/af_vsock.c), is the kernel's own copy into the pipe (`sock_splice_read` falls back to
+    /// `copy_splice_read`, net/socket.c, Linux 6.18). Each call moves at most the pipe's capacity
+    /// (`F_GETPIPE_SZ`, fcntl(2)), learned from the pipe itself.
+    fn run(self, conn: Box<dyn Conn>) {
         match self {
-            Self::In(mut to) => {
-                let _ = io::copy(&mut conn, &mut to);
+            Self::In(to) => {
+                let _ = splice_all(conn.as_fd(), &to, &to);
             }
-            Self::Out(mut from) => {
-                let _ = io::copy(&mut from, &mut conn);
+            Self::Out(from) => {
+                let _ = splice_all(&from, conn.as_fd(), &from);
                 let _ = conn.shutdown(Shutdown::Write);
             }
+        }
+    }
+}
+
+/// Splices from `from` into `to` until `from` ends, at most `pipe`'s capacity a call.
+fn splice_all(from: impl AsFd, to: impl AsFd, pipe: impl AsFd) -> io::Result<()> {
+    let unit = rustix::pipe::fcntl_getpipe_size(pipe)?;
+    loop {
+        match rustix::pipe::splice(
+            &from,
+            None,
+            &to,
+            None,
+            unit,
+            rustix::pipe::SpliceFlags::MOVE,
+        ) {
+            Ok(0) => return Ok(()),
+            Ok(_) | Err(Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
         }
     }
 }

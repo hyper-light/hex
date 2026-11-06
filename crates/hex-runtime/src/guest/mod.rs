@@ -10,14 +10,14 @@ pub mod shares;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hex_api::{
     BoxId, BoxInfo, BoxSpec, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal, Stdio,
     Usage,
 };
-use hex_client::ANSWER_PATIENCE;
 use hex_client::guest::shards::{ShardsLink, refusal};
 use hex_client::guest::stage::{self, Item};
 use hex_client::guest::{Client, Link};
@@ -126,6 +126,9 @@ impl GuestConfig {
             .iter()
             .map(|s| if s.read_only { "ro" } else { "rw" })
             .collect();
+        // `panic=-1`: a negative timeout reboots at once on a panic (kernel-parameters.txt, `panic=`;
+        // kernel/panic.c `panic_timeout`), so the VM ends and the host sees it rather than a guest that
+        // hangs.
         let mut cmdline = "console=ttyS0 panic=-1".to_owned();
         if !modes.is_empty() {
             cmdline.push_str(&format!(" {}={}", shares::CMDLINE, modes.join(",")));
@@ -156,13 +159,64 @@ struct Booted {
     client: Client,
 }
 
+/// The slowest recorded value of each wait that seeds a bound, by host class
+/// (bench/native/guest/records.tsv): the input that turns a class on. A class with no row for a measure
+/// has no seed; adding its row, once its record is taken, turns it on with no code change.
+const RECORDS: &str = include_str!("../../../../bench/native/guest/records.tsv");
+
+/// This host's class, as the records name it: the hypervisor Shards boots its guests with here.
+pub const CLASS: &str = if cfg!(target_os = "macos") {
+    "macOS-HVF"
+} else if cfg!(target_os = "windows") {
+    "Windows-WHP"
+} else {
+    "Linux-KVM"
+};
+
+/// The slowest value `table` records for `measure` on host class `class`: each line `measure`, `class`,
+/// microseconds and its record, tab-separated; `#` lines are comments. `None` where no row names both.
+pub fn slowest_in(table: &str, measure: &str, class: &str) -> Option<Duration> {
+    table
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.split('\t'))
+        .find_map(|mut row| {
+            (row.next()? == measure && row.next()? == class)
+                .then(|| row.next()?.parse().ok().map(Duration::from_micros))?
+        })
+}
+
+/// The slowest value recorded for `measure` on this host's class, or the refusal naming the record to take.
+pub fn recorded(measure: &str) -> Result<Duration, Refusal> {
+    slowest_in(RECORDS, measure, CLASS).ok_or_else(|| Refusal::Platform {
+        what: "the oci class's guest",
+        platform: std::env::consts::OS,
+        why: format!(
+            "no {measure} record for {CLASS} yet (bench/native/guest/records.tsv): record one first; \
+             no other class's is borrowed"
+        ),
+    })
+}
+
+/// The slowest boot to ready on record for this host's class, the seed of the first dial's bound before
+/// this node has seen a boot (bench/native/guest/boot-ready/RECORD.md, its row in records.tsv).
+pub fn recorded_boot() -> Result<Duration, Refusal> {
+    recorded("boot_ready")
+}
+
+/// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
+/// boot has another guest to try before its caller is refused.
+const BOOTS: usize = 2;
+
 /// The `oci` class through a Shards guest.
 pub struct GuestRuntime {
     guests: Arc<dyn shards_api::Guests>,
     config: GuestConfig,
-    /// How long a dial waits for the guest's port: its boot, the first time.
-    patience: Duration,
     booted: Mutex<Option<Arc<Booted>>>,
+    /// The slowest boot to ready this node has seen, the learned half of the first dial's bound.
+    slowest: Mutex<Duration>,
+    /// Guests stopped for hanging alive past the bound, never ready.
+    retired: AtomicU64,
 }
 
 fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
@@ -170,15 +224,35 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 }
 
 impl GuestRuntime {
-    /// The class over `guests`, booting `config`'s guest when first asked. Each dial waits at most the
-    /// client's answer patience ([`ANSWER_PATIENCE`]), the boot included.
+    /// The class over `guests`, booting `config`'s guest when first asked. A boot's first dial waits at
+    /// most [`Self::first_dial_bound`] for the guest to listen ([`ShardsLink`]).
     pub fn new(guests: Arc<dyn shards_api::Guests>, config: GuestConfig) -> Self {
         Self {
             guests,
             config,
-            patience: ANSWER_PATIENCE,
             booted: Mutex::new(None),
+            slowest: Mutex::new(Duration::ZERO),
+            retired: AtomicU64::new(0),
         }
+    }
+
+    /// How long a boot may take to be ready (the lead's rule for learned waits): twice (the margin) the slowest of
+    /// the record's and this node's own, so it only rises; before any boot here, twice the record's.
+    pub fn first_dial_bound(&self) -> Result<Duration, Refusal> {
+        let seen = *self.slowest.lock().map_err(poisoned)?;
+        Ok(seen.max(recorded_boot()?).saturating_mul(2))
+    }
+
+    /// A boot to ready this node has seen, taking `took`: the bound rises with it, never falls.
+    pub fn learn(&self, took: Duration) {
+        if let Ok(mut slowest) = self.slowest.lock() {
+            *slowest = (*slowest).max(took);
+        }
+    }
+
+    /// Guests stopped because they stayed alive past the bound without being ready.
+    pub fn retired(&self) -> u64 {
+        self.retired.load(Ordering::Relaxed)
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Option<Arc<Booted>>>, Refusal> {
@@ -198,26 +272,49 @@ impl GuestRuntime {
         self.guests
             .backend()
             .map_err(|why| refusal("finding Shards' backend", &why))?;
-        let guest: Arc<dyn shards_api::Guest> = self
-            .guests
-            .boot(&self.config.spec())
-            .map_err(|why| refusal("booting the node's guest", &why))?
-            .into();
-        let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest), self.patience));
-        let client = match Client::connect(Arc::clone(&link)) {
-            Ok(client) => client,
-            Err(why) => {
-                let _ = guest.stop();
-                return Err(why);
+        let mut hung = Vec::with_capacity(BOOTS);
+        for _ in 0..BOOTS {
+            let bound = self.first_dial_bound()?;
+            let began = Instant::now();
+            let guest: Arc<dyn shards_api::Guest> = self
+                .guests
+                .boot(&self.config.spec())
+                .map_err(|why| refusal("booting the node's guest", &why))?
+                .into();
+            let patience = bound.saturating_sub(began.elapsed());
+            let link: Arc<dyn Link> = Arc::new(ShardsLink::new(Arc::clone(&guest), patience));
+            match Client::connect(Arc::clone(&link)) {
+                Ok(client) => {
+                    self.learn(began.elapsed());
+                    let b = Arc::new(Booted {
+                        guest,
+                        link,
+                        client,
+                    });
+                    *booted = Some(Arc::clone(&b));
+                    return Ok(b);
+                }
+                Err(why) => {
+                    // Alive and not ready within the bound: a hang, retired for another boot. Ended,
+                    // or refused otherwise, the boot's failure is its caller's.
+                    let alive = matches!(guest.wait_for(Duration::ZERO), Ok(None));
+                    let _ = guest.stop();
+                    if !alive {
+                        return Err(why);
+                    }
+                    self.retired.fetch_add(1, Ordering::Relaxed);
+                    hung.push(format!("not ready within {bound:?}: {why}"));
+                }
             }
-        };
-        let b = Arc::new(Booted {
-            guest,
-            link,
-            client,
-        });
-        *booted = Some(Arc::clone(&b));
-        Ok(b)
+        }
+        Err(Refusal::Os {
+            op: "booting the node's guest",
+            why: format!(
+                "{BOOTS} guests booted, each alive and not ready within twice the slowest boot to \
+                 ready seen (bench/native/guest/boot-ready/RECORD.md): {}",
+                hung.join("; ")
+            ),
+        })
     }
 
     /// The guest if it is booted: a call about a box needs no boot, as there's no box before one.

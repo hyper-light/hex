@@ -9,6 +9,7 @@ SCHILY.xattr.* or LIBARCHIVE.xattr.*). Prints counts and up to five examples of 
 """
 import collections, json, sys, tarfile
 
+# Report sizes, not bounds: how many examples and owners the report prints; the census counts all.
 EXAMPLES = 5
 
 

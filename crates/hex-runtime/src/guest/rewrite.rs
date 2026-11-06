@@ -11,8 +11,9 @@ use serde_json::Value;
 
 use super::shares::{self, Share};
 
-/// The most `config.json` a bundle's rewrite reads: the `oci` class's own (`hex_core::bundle`).
-const MAX_CONFIG_BYTES: u64 = 1 << 20;
+// The most `config.json` a bundle's rewrite reads is the `oci` class's own, the one the guest's node
+// parses it under, so no spec passes here that the guest refuses for its size.
+use hex_core::bundle::MAX_CONFIG_BYTES;
 
 /// A spec for the guest, and what to stage for it first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,10 +200,13 @@ fn bundle(dir: &Path, shared: &[Share]) -> Result<(PathBuf, Vec<u8>), Refusal> {
     let file = std::fs::File::open(&path)
         .map_err(|e| invalid(format!("reading {}: {e}", path.display())))?;
     let mut text = Vec::new();
-    file.take(MAX_CONFIG_BYTES.saturating_add(1))
+    let past = u64::try_from(MAX_CONFIG_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    file.take(past)
         .read_to_end(&mut text)
         .map_err(|e| invalid(format!("reading {}: {e}", path.display())))?;
-    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
+    if text.len() > MAX_CONFIG_BYTES {
         return Err(invalid(format!(
             "{} is over the {MAX_CONFIG_BYTES} bytes the runtime reads",
             path.display()

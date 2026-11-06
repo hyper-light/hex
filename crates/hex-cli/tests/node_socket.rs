@@ -491,8 +491,9 @@ fn through_a_simulated_guest(lab: &Lab, agent: &Agent, exe: &str) {
         binary: PathBuf::from("/nonexistent/shards"),
         kernel: PathBuf::from("/nonexistent/kernel"),
         initrd: PathBuf::from("/nonexistent/initrd"),
+        // Shards' least guest: one vCPU and its architecture's least memory (`shards_api::check`).
         vcpus: 1,
-        memory_mib: 256,
+        memory_mib: shards_api::min_memory_mib(std::env::consts::ARCH),
         shares: vec![Share {
             dir: PathBuf::from("/"),
             read_only: false,

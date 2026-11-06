@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::hash::{BuildHasher as _, RandomState};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -21,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::stream::{self, Socket};
-use crate::{End, Guest, GuestSpec, Guests, Init, Refusal, Stream, allowed, backend, check};
+use crate::{End, Guest, GuestSpec, Guests, Init, Refusal, STOP_GRACE, Stream, allowed, backend, check};
 
 /// The guests the `shards` binary boots: [`GuestSpec::binary`], else `SHARDS_BIN`, else
 /// `shards` on `PATH`.
@@ -34,24 +35,26 @@ impl Shards {
     }
 }
 
-/// How much of what shards says on its stdout and stderr is kept, its last bytes: a
-/// refusal's worth, its last few lines.
-const TAIL: usize = 4096;
-/// How long `stop` lets shards end after SIGTERM before SIGKILL: what `shards daemon stop`
-/// gives a run (`daemon.rs` `STOP_GRACE`).
-const STOP_GRACE: Duration = Duration::from_secs(10);
-/// How long an ended shards' stdout and stderr are read for, for its last words, once it has
-/// ended: a child it left holding them (macOS's grants broker until it exits) holds no
-/// refusal back longer.
-const DRAIN_GRACE: Duration = Duration::from_secs(1);
-/// The first wait between handshakes, doubled to [`LAST_BACKOFF`]: a guest that listens is
-/// reached within this of its listening while it boots, and a dial costs the VM process a
-/// connection it closes (chosen, not measured: shards' boots take milliseconds to tens of
-/// them, architecture.md's start-path budget).
-const FIRST_BACKOFF: Duration = Duration::from_millis(1);
-const LAST_BACKOFF: Duration = Duration::from_millis(50);
-/// The longest answer a handshake reads: `OK 4294967295\n`, with room.
-const ANSWER: usize = 32;
+/// What shards-vmm keeps of a guest's console, its last bytes, and a reset's report
+/// quotes: `SAID` (`crates/vmm/src/devices/serial.rs:57`).
+const CONSOLE_SAID: usize = 4096;
+/// The most bytes shards' report writes for one byte of the console: it escapes each control
+/// character (`vm_run.rs:2750` `last_said`, `char::escape_default`): a C0 one or DEL to at
+/// most six (`\u{1f}`, `\u{7f}`), a C1 one (two bytes) to six, a byte that is no UTF-8 to
+/// U+FFFD's three.
+const ESCAPED: usize = "\\u{7f}".len();
+/// How much of what shards says on its stdout and stderr is kept, its last bytes: the longest
+/// report it writes as it ends, a reset's, with `--no-console` its guest's last console page
+/// escaped (`crates/shards/src/vm_run.rs:2730-2737`, `report` at `:1021`), so a refusal quotes it
+/// whole. Its other reports are one error each.
+const TAIL: usize = "shards: guest requested a reset, its console's last lines:\n".len()
+    + CONSOLE_SAID * ESCAPED
+    + "\n".len();
+/// The longest answer a handshake reads, `OK <host port>\n` with the port a u32: Firecracker's
+/// hybrid vsock answer (firecracker `docs/vsock.md`, "Host-Initiated Connections": `OK
+/// <assigned_hostside_port>\n`), as shards' muxer writes it
+/// (`crates/vmm/src/devices/virtio/vsock/conn.rs:372`).
+const ANSWER: usize = "OK ".len() + "4294967295".len() + "\n".len();
 
 impl Guests for Shards {
     fn backend(&self) -> Result<crate::Backend, Refusal> {
@@ -59,65 +62,70 @@ impl Guests for Shards {
     }
 
     fn boot(&self, spec: &GuestSpec) -> Result<Box<dyn Guest>, Refusal> {
-        check(spec)?;
-        backend()?;
-        let dir = PrivateDir::new()?;
-        let vsock = dir.0.join("v");
-        let args = arguments(spec, &vsock)?;
-        let binary = spec
-            .binary
-            .clone()
-            .or_else(|| std::env::var_os("SHARDS_BIN").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("shards"));
-        let mut child = Command::new(&binary)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| Refusal::Boot(format!("{}: {e}", binary.display())))?;
-        let shared = Arc::new(Shared {
-            state: Mutex::new(State {
-                exited: false,
-                stopping: false,
-                ready: false,
-                end: None,
-                said: String::new(),
-                ended_as: String::new(),
-            }),
-            changed: Condvar::new(),
-            tail: Mutex::new(Tail {
-                bytes: VecDeque::new(),
-                open: 0,
-            }),
-            drained: Condvar::new(),
-        });
-        let outputs: [Option<Box<dyn io::Read + Send>>; 2] = [
-            child
-                .stdout
-                .take()
-                .map(|o| Box::new(o) as Box<dyn io::Read + Send>),
-            child
-                .stderr
-                .take()
-                .map(|e| Box::new(e) as Box<dyn io::Read + Send>),
-        ];
-        let started = start_threads(&shared, &child, outputs);
-        if let Err(e) = started {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Refusal::Boot(format!("a thread to watch shards: {e}")));
-        }
-        Ok(Box::new(ShardsGuest {
-            ports: spec.ports.clone(),
-            vsock,
-            #[cfg(unix)]
-            pid: child.id(),
-            child: Mutex::new(child),
-            shared,
-            _dir: dir,
-        }))
+        Ok(Box::new(start(spec)?))
     }
+}
+
+/// Boots `spec`'s guest through shards.
+fn start(spec: &GuestSpec) -> Result<ShardsGuest, Refusal> {
+    check(spec)?;
+    backend()?;
+    let dir = PrivateDir::new()?;
+    let vsock = dir.0.join("v");
+    let args = arguments(spec, &vsock)?;
+    let binary = spec
+        .binary
+        .clone()
+        .or_else(|| std::env::var_os("SHARDS_BIN").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("shards"));
+    // One pipe for both, read in the order shards wrote; this process keeps a writer of
+    // its own to say, after shards' end, where shards' words end.
+    let piped = |e: io::Error| Refusal::Boot(format!("a pipe for shards' output: {e}"));
+    let (output, writer) = io::pipe().map_err(piped)?;
+    let (stdout, stderr) = (
+        writer.try_clone().map_err(piped)?,
+        writer.try_clone().map_err(piped)?,
+    );
+    let mut child = Command::new(&binary)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .map_err(|e| Refusal::Boot(format!("{}: {e}", binary.display())))?;
+    let shared = Arc::new(Shared {
+        state: Mutex::new(State {
+            exited: false,
+            stopping: false,
+            ready: false,
+            end: None,
+            said: String::new(),
+            ended_as: String::new(),
+        }),
+        changed: Condvar::new(),
+        tail: Mutex::new(Tail {
+            bytes: VecDeque::new(),
+            drained: false,
+            output: None,
+        }),
+        drained: Condvar::new(),
+        end_mark: end_mark(),
+    });
+    let started = start_threads(&shared, &child, output, writer);
+    if let Err(e) = started {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Refusal::Boot(format!("a thread to watch shards: {e}")));
+    }
+    Ok(ShardsGuest {
+        ports: spec.ports.clone(),
+        vsock,
+        #[cfg(unix)]
+        pid: child.id(),
+        child: Mutex::new(child),
+        shared,
+        _dir: dir,
+    })
 }
 
 /// `shards run --kernel …` for `spec`, its vsock at `vsock`. `--kernel` comes first, as the
@@ -166,8 +174,9 @@ fn with_mode(what: &'static str, path: &Path, read_only: bool) -> Result<OsStrin
 #[derive(Debug)]
 struct PrivateDir(PathBuf);
 
-/// The longest path a Unix socket may have, less its NUL: macOS's sockaddr_un holds 104
-/// bytes, Linux's 108.
+/// The longest path a Unix socket may have, less its NUL: macOS's `sun_path` holds 104 bytes
+/// (xnu `bsd/sys/un.h`, `char sun_path[104]`), Linux's 108 (unix(7), `sun_path[108]`),
+/// Windows' 108 (afunix.h, `UNIX_PATH_MAX`): the least of them.
 const SOCKET_PATH: usize = 103;
 
 impl PrivateDir {
@@ -178,8 +187,8 @@ impl PrivateDir {
             reason = "a guest's socket directory, made 0700 and removed with its guest, no test's"
         )]
         let tmp = std::env::temp_dir();
-        // `<tmp>/shards-api-<pid>-<n>/v`, short enough to bind, else under /tmp.
-        let longest = "/shards-api-4294967295-18446744073709551615/v".len();
+        // `<tmp>/shards-api-<nonce>-<n>/v`, short enough to bind, else under /tmp.
+        let longest = "/shards-api-ffffffffffffffff-18446744073709551615/v".len();
         #[cfg(unix)]
         let tmp = if tmp.as_os_str().len().saturating_add(longest) <= SOCKET_PATH {
             tmp
@@ -188,31 +197,27 @@ impl PrivateDir {
         };
         #[cfg(not(unix))]
         let _ = (longest, SOCKET_PATH);
-        let mut last = None;
-        // A name an earlier process of the same pid left is passed over, a bounded number
-        // of times.
-        for _ in 0..64 {
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir = tmp.join(format!("shards-api-{}-{n}", std::process::id()));
-            #[cfg(unix)]
-            let builder = {
-                let mut builder = std::fs::DirBuilder::new();
-                std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-                builder
-            };
-            // Windows: the user's own temp folder, whose ACL is the user's (GetTempPath2W).
-            #[cfg(windows)]
-            let builder = std::fs::DirBuilder::new();
-            match builder.create(&dir) {
-                Ok(()) => return Ok(PrivateDir(dir)),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
-                Err(e) => return Err(Refusal::Boot(format!("{}: {e}", dir.display()))),
-            }
-        }
-        Err(Refusal::Boot(format!(
-            "no directory for the guest's socket in {}: {last:?}",
-            tmp.display()
-        )))
+        // Unique in this process by its counter, and apart from every other process's by
+        // the process's nonce: 64 bits of std's `RandomState`, seeded from the OS's random
+        // source, which no earlier process of the same pid shares and no other user can
+        // guess and take first. So one that exists is refused, not passed over.
+        static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let nonce = NONCE.get_or_init(|| RandomState::new().hash_one(std::process::id()));
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = tmp.join(format!("shards-api-{nonce:016x}-{n}"));
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+        };
+        // Windows: the user's own temp folder, whose ACL is the user's (GetTempPath2W).
+        #[cfg(windows)]
+        let builder = std::fs::DirBuilder::new();
+        builder
+            .create(&dir)
+            .map(|()| PrivateDir(dir.clone()))
+            .map_err(|e| Refusal::Boot(format!("{}: {e}", dir.display())))
     }
 }
 
@@ -229,8 +234,10 @@ struct Shared {
     /// Signalled as the process ends.
     changed: Condvar,
     tail: Mutex<Tail>,
-    /// Signalled as each of its outputs ends.
+    /// Signalled as its output is drained.
     drained: Condvar,
+    /// What this process writes into shards' output once shards has ended ([`end_mark`]).
+    end_mark: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -251,57 +258,82 @@ struct State {
 #[derive(Debug)]
 struct Tail {
     bytes: VecDeque<u8>,
-    /// Outputs still being read.
-    open: u8,
+    /// Read to the end mark, or to an end or error before it.
+    drained: bool,
+    /// The read end, once drained: kept open, so the end mark's write meets no closed pipe
+    /// (no SIGPIPE).
+    output: Option<io::PipeReader>,
+}
+
+/// The line that ends shards' words in its output: written by this process after shards has
+/// exited, so after everything shards wrote (a process's writes are in the pipe before it
+/// can exit), and unguessable by what writes there, a guest's console included: 64 bits of
+/// std's `RandomState`, seeded from the OS's random source (std `RandomState::new`).
+fn end_mark() -> Vec<u8> {
+    let nonce = RandomState::new().hash_one(std::process::id());
+    format!("\nshards-api: shards ended {nonce:016x}\n").into_bytes()
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Starts the threads that read shards' outputs into the tail, and the one that waits for it
+/// Starts the thread that reads shards' output into the tail, and the one that waits for it
 /// to exit.
 fn start_threads(
     shared: &Arc<Shared>,
     child: &Child,
-    outputs: [Option<Box<dyn io::Read + Send>>; 2],
+    output: io::PipeReader,
+    writer: io::PipeWriter,
 ) -> io::Result<()> {
-    for output in outputs.into_iter().flatten() {
-        {
-            let mut tail = lock(&shared.tail);
-            tail.open = tail.open.saturating_add(1);
-        }
-        let shared = shared.clone();
-        std::thread::Builder::new()
-            .name("shards-api-drain".into())
-            .spawn(move || drain(&shared, output))?;
-    }
     let exit = Exit::of(child)?;
+    let drainer = shared.clone();
+    std::thread::Builder::new()
+        .name("shards-api-drain".into())
+        .spawn(move || drain(&drainer, output))?;
     let shared = shared.clone();
     std::thread::Builder::new()
         .name("shards-api-wait".into())
-        .spawn(move || exit.watch(&shared))?;
+        .spawn(move || exit.watch(&shared, writer))?;
     Ok(())
 }
 
-/// Reads `output` to its end, keeping its last [`TAIL`] bytes.
-fn drain(shared: &Shared, mut output: Box<dyn io::Read + Send>) {
-    let mut buf = [0u8; 1024];
+/// Reads `output` to the end mark, keeping its last [`TAIL`] bytes before it. What follows the
+/// mark is not shards': a child it left holding its output (macOS's grants broker, until it
+/// exits) holds no refusal back.
+fn drain(shared: &Shared, mut output: io::PipeReader) {
+    let mark = shared.end_mark.as_slice();
+    // A read never returns more than the tail keeps.
+    let mut buf = [0u8; TAIL];
     loop {
         match output.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 let mut tail = lock(&shared.tail);
                 tail.bytes.extend(buf.get(..n).unwrap_or_default());
+                // The mark may have begun in an earlier read.
+                let from = tail.bytes.len().saturating_sub(n.saturating_add(mark.len()));
+                let at = tail
+                    .bytes
+                    .make_contiguous()
+                    .get(from..)
+                    .and_then(|b| b.windows(mark.len()).position(|w| w == mark));
+                if let Some(at) = at {
+                    tail.bytes.truncate(from.saturating_add(at));
+                }
                 let over = tail.bytes.len().saturating_sub(TAIL);
                 tail.bytes.drain(..over);
+                if at.is_some() {
+                    break;
+                }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
     let mut tail = lock(&shared.tail);
-    tail.open = tail.open.saturating_sub(1);
+    tail.drained = true;
+    tail.output = Some(output);
     shared.drained.notify_all();
 }
 
@@ -364,21 +396,21 @@ impl Exit {
         }
     }
 
-    /// Waits for the process to exit, then for its last words, and says how it ended.
-    fn watch(self, shared: &Shared) {
+    /// Waits for the process to exit, then for its last words, and says how it ended. Its
+    /// words end at the end mark this writes after its exit: the drain reaches the mark
+    /// through what is in the pipe ahead of it, which is finite, with no clock.
+    fn watch(self, shared: &Shared, mut writer: io::PipeWriter) {
         let awaited = self.awaited();
-        let deadline = Instant::now().checked_add(DRAIN_GRACE);
+        let drained = lock(&shared.tail).drained;
+        // Where the drain has ended (an error), the pipe holds the mark unread, as its
+        // reader is kept open.
+        if !drained && writer.write_all(&shared.end_mark).is_err() {
+            lock(&shared.tail).drained = true;
+        }
+        drop(writer);
         let mut tail = lock(&shared.tail);
-        while tail.open > 0 {
-            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                break;
-            }
-            tail = shared
-                .drained
-                .wait_timeout(tail, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+        while !tail.drained {
+            tail = shared.drained.wait(tail).unwrap_or_else(PoisonError::into_inner);
         }
         let said = String::from_utf8_lossy(tail.bytes.make_contiguous())
             .trim()
@@ -469,25 +501,53 @@ fn said(what: &str, said: &str) -> String {
     }
 }
 
+/// The wait before dialing again, `p = sqrt(2 c w)`: pacing that balances one dial's cost `c`
+/// against the waiting so far `w`, both measured as this connect runs.
+///
+/// - `c` is the time the last refused dial took, measured each dial: on HVF 5.5 µs at p50 to
+///   a socket not bound yet and 44 µs to a guest that does not listen yet
+///   (`docs/research/platform-measurements.md` M464).
+/// - `w` is how long this connect has waited so far, and stands for the wait still to come.
+/// - Pausing `p` between dials, a wait of `w` takes `w / p` dials, `c w / p` of dialing; and a
+///   guest that starts to listen at a uniform moment within a pause is reached `p / 2` late on
+///   average. Both are seconds, of this thread and of its caller.
+/// - Their sum `f(p) = c w / p + p / 2` is least where `f'(p) = -c w / p² + 1 / 2 = 0`, that
+///   is `p² = 2 c w`: `p = sqrt(2 c w)`.
+///
+/// So a few dials go out early and fewer as the wait grows: at 150 ms waited, 1.3 ms with a
+/// 5.5 µs dial and 3.6 ms with a 44 µs one, which dialing holds 0.4% and 1.2% of. A dial to a
+/// VM that listens waits for the guest's own answer, so the guest paces it. At most `left`.
+fn pause(dialed: Duration, waited: Duration, left: Duration) -> Duration {
+    let product = dialed
+        .as_nanos()
+        .checked_mul(waited.as_nanos())
+        .and_then(|p| p.checked_mul(2))
+        .unwrap_or(u128::MAX);
+    let nanos = u64::try_from(product.isqrt()).unwrap_or(u64::MAX);
+    Duration::from_nanos(nanos).min(left)
+}
+
 /// Why a handshake failed: worth asking again, or not.
 enum Attempt {
     Again(String),
     Refused(String),
 }
 
-/// One `CONNECT <port>` over a new connection to `vsock`, answered by `deadline`.
-fn handshake(vsock: &Path, port: u32, deadline: Instant) -> Result<Socket, Attempt> {
+/// One `CONNECT <port>` over a new connection to `vsock`, its answer awaited at most `wait`
+/// (never zero); with none, as long as the guest takes to answer, which shards' device
+/// bounds: it ends a request the guest leaves unanswered at Firecracker's
+/// `CONN_REQUEST_TIMEOUT_MS` (`crates/vmm/src/devices/virtio/vsock/conn.rs:26-27`), and the
+/// connection with the VM's process.
+fn handshake(vsock: &Path, port: u32, wait: Option<Duration>) -> Result<Socket, Attempt> {
     let mut s = stream::connect(vsock).map_err(|e| match e.kind() {
         // Not yet bound, or bound and not yet listening: the VM is starting.
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Attempt::Again(format!("dialing: {e}")),
         _ => Attempt::Refused(format!("{}: {e}", vsock.display())),
     })?;
-    let left = deadline
-        .saturating_duration_since(Instant::now())
-        .max(Duration::from_millis(1));
-    let timeouts =
-        Stream::set_write_timeout(&s, Some(left)).and_then(|()| Stream::set_read_timeout(&s, Some(left)));
-    timeouts.map_err(|e| Attempt::Refused(format!("its timeouts: {e}")))?;
+    if wait.is_some() {
+        let timeouts = Stream::set_write_timeout(&s, wait).and_then(|()| Stream::set_read_timeout(&s, wait));
+        timeouts.map_err(|e| Attempt::Refused(format!("its timeouts: {e}")))?;
+    }
     s.write_all(format!("CONNECT {port}\n").as_bytes())
         .map_err(|e| Attempt::Again(format!("asking: {e}")))?;
     let mut line = Vec::with_capacity(ANSWER);
@@ -526,33 +586,34 @@ fn handshake(vsock: &Path, port: u32, deadline: Instant) -> Result<Socket, Attem
 impl Guest for ShardsGuest {
     fn connect(&self, port: u32, patience: Duration) -> Result<Box<dyn Stream>, Refusal> {
         allowed(&self.ports, port)?;
-        let start = Instant::now();
-        let deadline = start.checked_add(patience).unwrap_or(start);
-        let mut backoff = FIRST_BACKOFF;
+        // None: past `Instant`'s range (`Duration::MAX`), so no clock: until the guest
+        // listens or ends.
+        let began = Instant::now();
+        let deadline = began.checked_add(patience);
+        let left = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
         let last = loop {
             if let Some(refusal) = self.gone(&mut lock(&self.shared.state)) {
                 return Err(refusal);
             }
-            let left = match handshake(&self.vsock, port, deadline) {
+            let dialed = Instant::now();
+            // One dial is always made, its answer awaited for what patience has left, or,
+            // with none left (a patience of zero) or no clock, for the guest's own answer.
+            let wait = left().filter(|l| !l.is_zero());
+            match handshake(&self.vsock, port, wait) {
                 Ok(s) => {
                     lock(&self.shared.state).ready = true;
                     return Ok(Box::new(s));
                 }
                 Err(Attempt::Refused(why)) => return Err(Refusal::Channel { port, why }),
-                Err(Attempt::Again(why)) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        break why;
-                    }
-                    left
-                }
-            };
-            // Waits out the backoff, woken early by the process's end.
+                Err(Attempt::Again(why)) if left().is_some_and(|l| l.is_zero()) => break why,
+                Err(Attempt::Again(_)) => {}
+            }
+            // Waits out the pause, woken at once by the process's end.
             let state = lock(&self.shared.state);
             if !state.exited {
-                let _ = self.shared.changed.wait_timeout(state, backoff.min(left));
+                let pause = pause(dialed.elapsed(), began.elapsed(), left().unwrap_or(Duration::MAX));
+                let _ = self.shared.changed.wait_timeout(state, pause);
             }
-            backoff = backoff.saturating_mul(2).min(LAST_BACKOFF);
         };
         if let Some(refusal) = self.gone(&mut lock(&self.shared.state)) {
             return Err(refusal);
@@ -564,39 +625,60 @@ impl Guest for ShardsGuest {
     }
 
     fn stop(&self) -> Result<(), Refusal> {
-        let mut state = lock(&self.shared.state);
-        if state.exited {
-            return Ok(());
-        }
-        state.stopping = true;
-        self.signal(&state, false);
-        let deadline = Instant::now().checked_add(STOP_GRACE);
-        while !state.exited {
-            let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
-            if left.is_zero() {
-                self.signal(&state, true);
-                break;
-            }
-            state = self
-                .shared
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-        }
+        // No record of a stop on this host class: no grace, killed at once. A guest's state
+        // is tmpfs and goes with it, so a kill loses nothing a graceful stop would keep;
+        // and a stop is never refused, which would leave the VM running.
+        self.stop_within(STOP_GRACE.ok());
         Ok(())
     }
 
     fn wait_for(&self, timeout: Duration) -> Result<Option<End>, Refusal> {
+        // None: past `Instant`'s range (`Duration::MAX`): until it ends.
         let deadline = Instant::now().checked_add(timeout);
         let mut state = lock(&self.shared.state);
         loop {
             if let Some(end) = self.end(&mut state) {
                 return Ok(Some(end));
             }
+            state = match deadline.map(|d| d.saturating_duration_since(Instant::now())) {
+                Some(left) if left.is_zero() => return Ok(None),
+                Some(left) => {
+                    self.shared
+                        .changed
+                        .wait_timeout(state, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => self
+                    .shared
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
+        }
+    }
+}
+
+impl ShardsGuest {
+    /// Ends it: SIGTERM, then the kill once `grace` is out; with no grace, the kill at once
+    /// (on Windows, the process's end either way, as `signal` ends it).
+    fn stop_within(&self, grace: Option<Duration>) {
+        let mut state = lock(&self.shared.state);
+        if state.exited {
+            return;
+        }
+        state.stopping = true;
+        let Some(grace) = grace else {
+            self.signal(&state, true);
+            return;
+        };
+        self.signal(&state, false);
+        let deadline = Instant::now().checked_add(grace);
+        while !state.exited {
             let left = deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(Instant::now()));
             if left.is_zero() {
-                return Ok(None);
+                self.signal(&state, true);
+                break;
             }
             state = self
                 .shared
@@ -624,6 +706,7 @@ mod tests {
     use super::*;
     use crate::{Disk, Share};
 
+    /// Inputs, each only formatted into a flag: any values show the mapping.
     fn spec() -> GuestSpec {
         GuestSpec {
             kernel: "/k/Image".into(),
@@ -716,5 +799,239 @@ mod tests {
         assert!(path.join("v").as_os_str().len() <= SOCKET_PATH);
         drop(dir);
         assert!(!path.exists());
+    }
+
+    /// The socket directory's name carries no pid, so a directory an earlier process of the
+    /// same pid left, or one another user made to take it first, is never its name (Hex
+    /// HEX-GUEST-9).
+    #[test]
+    fn the_socket_directory_is_named_apart_from_the_pid() {
+        let dir = PrivateDir::new().unwrap();
+        let name = dir.0.file_name().unwrap().to_str().unwrap().to_string();
+        let pid = format!("shards-api-{}-", std::process::id());
+        assert!(!name.starts_with(&pid), "{name}");
+        let again = PrivateDir::new().unwrap();
+        assert_ne!(dir.0, again.0);
+    }
+
+    /// A guest's socket and its muxer's side of one connection, answering `answer` to the
+    /// first `CONNECT` line; the refusal, where the dial is refused.
+    #[cfg(unix)]
+    fn answered(answer: &'static [u8]) -> Option<Attempt> {
+        let dir = PrivateDir::new().unwrap();
+        let path = dir.0.join("v");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let muxer = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            while line.last() != Some(&b'\n') {
+                s.read_exact(&mut byte).unwrap();
+                line.push(byte[0]);
+            }
+            assert_eq!(line, b"CONNECT 5\n");
+            s.write_all(answer).unwrap();
+            s
+        });
+        let got = handshake(&path, 5, None);
+        drop(muxer.join().unwrap());
+        got.err()
+    }
+
+    /// The longest answer Firecracker's protocol gives, `OK 4294967295\n`, is taken; one a
+    /// byte longer is refused as no answer (Hex HEX-GUEST-9).
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_past_the_longest_ok_is_refused() {
+        assert!(answered(b"OK 4294967295\n").is_none());
+        assert!(matches!(answered(b"OK 04294967295\n"), Some(Attempt::Refused(_))));
+    }
+
+    /// A guest booted by a stand-in for shards that runs on until it is stopped, with a
+    /// muxer at its vsock socket that closes its first `refusals` dials unanswered (as a
+    /// guest that does not listen yet), answers the next `OK`, and counts them.
+    #[cfg(unix)]
+    fn listening_after(
+        refusals: usize,
+    ) -> (
+        shards_testdir::TempDir,
+        ShardsGuest,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = shards_testdir::TempDir::new("api-dials").unwrap();
+        let bin = dir.path().join("shards");
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 1000\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guest = start(&GuestSpec {
+            binary: Some(bin),
+            ..spec()
+        })
+        .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&guest.vsock).unwrap();
+        let dials = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = dials.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming() {
+                let mut s = s.unwrap();
+                let mut line = Vec::new();
+                let mut byte = [0u8; 1];
+                while line.last() != Some(&b'\n') && s.read_exact(&mut byte).is_ok() {
+                    line.push(byte[0]);
+                }
+                // Counted before it is closed or answered, which the dial waits for.
+                if counted.fetch_add(1, Ordering::SeqCst) >= refusals {
+                    s.write_all(b"OK 1073741824\n").unwrap();
+                    std::mem::forget(s);
+                }
+            }
+        });
+        (dir, guest, dials)
+    }
+
+    /// A stand-in for shards that ignores SIGTERM, booted, once it does.
+    #[cfg(unix)]
+    fn deaf() -> (shards_testdir::TempDir, ShardsGuest) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = shards_testdir::TempDir::new("api-deaf-unit").unwrap();
+        let (bin, deaf) = (dir.path().join("shards"), dir.path().join("deaf"));
+        assert!(Command::new("mkfifo").arg(&deaf).status().unwrap().success());
+        let body = format!(
+            "#!/bin/sh\ntrap '' TERM; echo > '{}'; while :; do sleep 1; done\n",
+            deaf.display()
+        );
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let guest = start(&GuestSpec {
+            binary: Some(bin),
+            ..spec()
+        })
+        .unwrap();
+        std::fs::read(&deaf).unwrap();
+        (dir, guest)
+    }
+
+    /// With no grace (a host class with no stop record), a stop kills at once, and the guest
+    /// ends `Stopped`, though it ignores SIGTERM: a stop is never refused (Hex HEX-GUEST-9).
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_with_no_grace_kills_at_once() {
+        let (_dir, guest) = deaf();
+        guest.stop_within(None);
+        assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
+    }
+
+    /// Where this host class has no stop record, `stop` kills at once and returns `Ok`, and
+    /// the guest ends `Stopped`: no grace, no number borrowed from another class, and no
+    /// refusal, which would leave the VM running (Hex HEX-GUEST-9).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_stop_without_this_classs_record_kills_at_once() {
+        let (_dir, guest) = deaf();
+        guest.stop().unwrap();
+        assert_eq!(guest.wait_for(Duration::MAX).unwrap(), Some(End::Stopped));
+    }
+
+    /// A patience of zero is one dial, its answer awaited, and no other (Hex HEX-GUEST-9).
+    #[cfg(unix)]
+    #[test]
+    fn a_patience_of_zero_dials_once() {
+        let (_dir, guest, dials) = listening_after(usize::MAX);
+        let refused = guest.connect(1024, Duration::ZERO);
+        assert!(
+            matches!(refused, Err(Refusal::Channel { port: 1024, .. })),
+            "{:?}",
+            refused.err()
+        );
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
+        let (_dir, guest, dials) = listening_after(0);
+        assert!(guest.connect(1024, Duration::ZERO).is_ok());
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
+    }
+
+    /// A patience of `Duration::MAX` is no clock: dials go on until the guest listens
+    /// (Hex HEX-GUEST-9).
+    #[cfg(unix)]
+    #[test]
+    fn a_patience_of_max_dials_until_the_guest_listens() {
+        let (_dir, guest, dials) = listening_after(3);
+        assert!(guest.connect(1024, Duration::MAX).is_ok());
+        assert_eq!(dials.load(Ordering::SeqCst), 4);
+    }
+
+    /// Measures `c` of `pause`: what one refused dial takes, `SHARDS_API_DIALS_N` (default
+    /// 1000) of each kind, printed as n, p50, p90, p99 and max
+    /// (docs/research/measurements/shards-api-waits/run.sh): to a socket not bound yet
+    /// (refused by this host's kernel), and, where `SHARDS_API_REAL=1` boots a real guest as
+    /// tests/real.rs does, to a port it does not serve (refused by the guest).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a measurement, run by its harness"]
+    fn the_cost_of_a_refused_dial() {
+        let n: usize = std::env::var("SHARDS_API_DIALS_N")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1000);
+        let timed = |path: &Path| -> Vec<Duration> {
+            let mut d: Vec<Duration> = (0..n)
+                .map(|_| {
+                    let start = Instant::now();
+                    assert!(matches!(handshake(path, 1236, None), Err(Attempt::Again(_))));
+                    start.elapsed()
+                })
+                .collect();
+            d.sort();
+            d
+        };
+        let dir = PrivateDir::new().unwrap();
+        let mut kinds = vec![("a socket not bound yet", timed(&dir.0.join("v")))];
+        let real = std::env::var_os("SHARDS_API_REAL").is_some_and(|v| v == "1");
+        let guest = real.then(|| {
+            let var = |k: &str| PathBuf::from(std::env::var_os(k).unwrap());
+            start(&GuestSpec {
+                kernel: var("SHARDS_API_KERNEL"),
+                init: Init::Executable(var("SHARDS_API_INIT")),
+                cmdline: "console=ttyS0 quiet shards_test=echo".into(),
+                vcpus: 1,
+                memory_mib: crate::min_memory_mib(std::env::consts::ARCH).max(256),
+                disks: vec![],
+                shares: vec![],
+                ports: vec![1234, 1236],
+                binary: None,
+            })
+            .unwrap()
+        });
+        if let Some(guest) = &guest {
+            drop(guest.connect(1234, Duration::MAX).unwrap());
+            kinds.push(("a real guest's port it does not serve", timed(&guest.vsock)));
+        }
+        for (what, d) in kinds {
+            let q = |p: usize| d[(n - 1) * p / 100];
+            println!(
+                "dial {what}: n={n} p50={:?} p90={:?} p99={:?} max={:?}",
+                q(50),
+                q(90),
+                q(99),
+                d[n - 1]
+            );
+        }
+    }
+
+    /// The wait between dials is `sqrt(2 c w)` of the last dial's time and the wait so far,
+    /// none at first, never past what patience has left (Hex HEX-GUEST-9).
+    #[test]
+    fn a_pause_weighs_the_dials_cost_against_lateness() {
+        let (us, ms) = (Duration::from_micros, Duration::from_millis);
+        assert_eq!(pause(us(5), Duration::ZERO, Duration::MAX), Duration::ZERO);
+        assert_eq!(
+            pause(us(5), ms(150), Duration::MAX),
+            Duration::from_nanos(1_224_744)
+        );
+        assert_eq!(
+            pause(us(50), ms(150), Duration::MAX),
+            Duration::from_nanos(3_872_983)
+        );
+        assert_eq!(pause(us(5), ms(150), ms(1)), ms(1));
+        assert_eq!(pause(Duration::MAX, Duration::MAX, ms(1)), ms(1));
     }
 }

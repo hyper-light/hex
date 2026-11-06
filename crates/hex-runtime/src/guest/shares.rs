@@ -17,10 +17,16 @@ use hex_api::Refusal;
 
 /// The guest's folder holding the shares, `<i>` under it for the `i`th.
 pub const SHARES: &str = "/run/hex/shares";
-/// The most roots a node shares: the guest's init mounts at most 32 (the bound on its
-/// `hex.shares=`, HEX-GUEST-11), so a longer list is refused here by name, before a guest is booted that
-/// would refuse it. Docker Desktop's default list is five.
-pub const MAX_SHARES: usize = 32;
+/// The most roots a node shares: one virtio-fs device each, beside the vsock device, among Shards'
+/// virtio-mmio slots for the guest's architecture, the host's (shards a0cced87
+/// `crates/vmm/src/arch/x86_64/mod.rs:47` `VIRTIO_MMIO_MAX` 18, the free IOAPIC pins;
+/// `crates/vmm/src/arch/aarch64/mod.rs:33`, 32), so one fewer. It is the guest init's bound on its
+/// `hex.shares=` (HEX-GUEST-11), so a longer list is refused here by name, before a guest is booted
+/// that would refuse it.
+#[cfg(target_arch = "x86_64")]
+pub const MAX_SHARES: usize = 18 - 1;
+#[cfg(not(target_arch = "x86_64"))]
+pub const MAX_SHARES: usize = 32 - 1;
 /// The kernel command-line parameter naming each share's mode, in tag order, for the guest's init.
 pub const CMDLINE: &str = "hex.shares";
 /// The environment variable naming the node's shared roots, in place of the default.

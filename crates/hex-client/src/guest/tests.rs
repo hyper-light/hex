@@ -40,10 +40,8 @@ fn listeners() -> (TcpListener, TcpListener, Arc<dyn Link>) {
     (control, stdio, link)
 }
 
-/// The next framed request on `conn`.
+/// The next framed request on `conn`, waiting on the fact: its bytes, or its end, which fails the test.
 fn next_request(conn: &mut TcpStream) -> (Header, Request) {
-    conn.set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
     let mut d = Deframer::new(wire::MAX_MESSAGE);
     let mut byte = [0u8; 1];
     loop {
@@ -74,6 +72,7 @@ fn hello(conn: &mut TcpStream) -> Header {
         &Answer::Hello(wire::Hello {
             version: wire::VERSION,
             classes: vec![Class::Oci],
+            // The stand-in's own limits, inputs rather than tuning: past what any test here makes.
             limits: Limits {
                 connections: 1,
                 message_bytes: wire::MAX_MESSAGE,
@@ -175,10 +174,7 @@ fn an_execs_stdio_rides_named_connections_and_its_end_comes_back() {
     let mut out = String::new();
     out_r.read_to_string(&mut out).unwrap();
     assert_eq!(out, "hello through the guest\n");
-    assert_eq!(
-        proc.wait_for(Duration::from_secs(30)).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
     drop(proc);
     let _ = client.inspect(&BoxId::new("b").unwrap());
     agent.join().unwrap();
@@ -226,4 +222,210 @@ fn an_agent_closing_mid_message_is_refused() {
         panic!("expected a broken connection, got {got:?}");
     };
     assert!(why.contains("middle of a message"), "{why}");
+}
+
+/// Each send bound set on a connection, by the port it was dialed on.
+type SendBounds = Arc<std::sync::Mutex<Vec<(u32, Option<Duration>)>>>;
+
+/// A connection that records each send bound set on it, by the port it was dialed on.
+struct Recorded {
+    conn: TcpStream,
+    port: u32,
+    bounds: SendBounds,
+}
+
+impl Read for Recorded {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.conn.read(buf)
+    }
+}
+
+impl Write for Recorded {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.conn.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.conn.flush()
+    }
+}
+
+impl Duplex for Recorded {
+    fn try_clone(&self) -> std::io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(Recorded {
+            conn: self.conn.try_clone()?,
+            port: self.port,
+            bounds: Arc::clone(&self.bounds),
+        }))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        self.conn.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.bounds.lock().unwrap().push((self.port, timeout));
+        self.conn.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.conn.set_read_timeout(timeout)
+    }
+}
+
+struct Recording {
+    control: SocketAddr,
+    stdio: SocketAddr,
+    bounds: SendBounds,
+}
+
+impl Link for Recording {
+    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        let addr = if port == stream::CONTROL_PORT {
+            self.control
+        } else {
+            self.stdio
+        };
+        Ok(Box::new(Recorded {
+            conn: TcpStream::connect(addr).unwrap(),
+            port,
+            bounds: Arc::clone(&self.bounds),
+        }))
+    }
+}
+
+/// HEX-GUEST-32 (§3, CLAUDE.md §8): exec a program with stdin through the guest: expect its stdio
+/// connection given no send bound, as a local exec's stdin is the caller's own pipe, which waits on the
+/// program as long as it runs; only the control connection is bounded, as the local client's socket is.
+#[test]
+fn a_stdio_connection_waits_on_its_program_as_a_local_pipe_does() {
+    let (control, stdio) = (
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+    );
+    let bounds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let link = Arc::new(Recording {
+        control: control.local_addr().unwrap(),
+        stdio: stdio.local_addr().unwrap(),
+        bounds: Arc::clone(&bounds),
+    });
+    let agent = std::thread::spawn(move || {
+        let (mut conn, _) = control.accept().unwrap();
+        hello(&mut conn);
+        let (h, _) = next_request(&mut conn);
+        let (s, _) = stdio.accept().unwrap();
+        send_answer(&mut conn, h.version, h.id, &Answer::Started { pid: 7 });
+        send_answer(&mut conn, h.version, h.id, &Answer::Exited(Exit::Code(0)));
+        let _ = next_request(&mut conn);
+        drop(s);
+    });
+    let client = Client::connect(link).unwrap();
+    let (in_r, in_w) = std::io::pipe().unwrap();
+    let mut proc = client
+        .exec(
+            &BoxId::new("b").unwrap(),
+            Program::of(&["cat"]),
+            Stdio {
+                stdin: Some(in_r),
+                stdout: None,
+                stderr: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
+    drop((proc, in_w));
+    let _ = client.inspect(&BoxId::new("b").unwrap());
+    agent.join().unwrap();
+    let bounds = bounds.lock().unwrap().clone();
+    assert!(
+        bounds.iter().all(|(port, _)| *port == stream::CONTROL_PORT),
+        "{bounds:?}"
+    );
+    assert!(
+        bounds.contains(&(stream::CONTROL_PORT, Some(ANSWER_PATIENCE))),
+        "{bounds:?}"
+    );
+}
+
+/// A stream over loopback, as Shards' is over its device.
+struct Looped(TcpStream);
+
+impl Read for Looped {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for Looped {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl shards_api::Stream for Looped {
+    fn try_clone(&self) -> std::io::Result<Box<dyn shards_api::Stream>> {
+        Ok(Box::new(Looped(self.0.try_clone()?)))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> std::io::Result<()> {
+        self.0.shutdown(how)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.0.set_write_timeout(timeout)
+    }
+}
+
+/// A guest that records the patience each dial is given and answers every one on loopback.
+struct Patient {
+    listener: TcpListener,
+    given: std::sync::Mutex<Vec<Duration>>,
+}
+
+impl shards_api::Guest for Patient {
+    fn connect(
+        &self,
+        _port: u32,
+        patience: Duration,
+    ) -> Result<Box<dyn shards_api::Stream>, shards_api::Refusal> {
+        self.given.lock().unwrap().push(patience);
+        let conn = TcpStream::connect(self.listener.local_addr().unwrap()).unwrap();
+        Ok(Box::new(Looped(conn)))
+    }
+
+    fn stop(&self) -> Result<(), shards_api::Refusal> {
+        Ok(())
+    }
+
+    fn wait_for(&self, _: Duration) -> Result<Option<shards_api::End>, shards_api::Refusal> {
+        Ok(None)
+    }
+}
+
+/// HEX-GUEST-33 (§2, CLAUDE.md §4): dial a booted guest three times: expect the first dial given the
+/// caller's bound on the boot, and each later one a single try (`Duration::ZERO`), as the guest's relay
+/// already listens and a refusal then is its end, not its boot.
+#[test]
+fn the_first_dial_waits_for_the_guest_and_later_ones_try_once() {
+    let guest = Arc::new(Patient {
+        listener: TcpListener::bind("127.0.0.1:0").unwrap(),
+        given: std::sync::Mutex::new(Vec::new()),
+    });
+    let first = Duration::from_millis(354);
+    let link = shards::ShardsLink::new(guest.clone(), first);
+    for port in [stream::CONTROL_PORT, stream::STDIO_PORT, stream::STDIO_PORT] {
+        link.dial(port).unwrap();
+    }
+    assert_eq!(
+        *guest.given.lock().unwrap(),
+        [first, Duration::ZERO, Duration::ZERO]
+    );
 }

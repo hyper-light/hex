@@ -30,6 +30,8 @@ def root(hex_bin, out, script):
     """Runs `script` (sh) as root beside the host's containerd; returns its stdout."""
     cmd = [
         "docker", "run", "--rm", "--privileged", "--network", "host",
+        # The lead's shared fedora limits for a container (hex-slot, the T7 fedora-unit-limits rule):
+        # an operator's limit, not tuning.
         "--memory", "8g", "--oom-score-adj", "1000",
         "-v", "/run/containerd:/run/containerd",
         "-v", "/var/lib/containerd:/var/lib/containerd",

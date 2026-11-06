@@ -10,7 +10,7 @@
 //! - `SHARDS_BIN`: the `shards` binary (on macOS the signed build, where it is installed);
 //! - `HEX_GUEST_LINUX_HEX`: a static Linux `hex` for the guest's architecture, put at `/hex` in each
 //!   box's root (a tarball, as §4a's roots may be on every host) so the suite's programs (`hex selftest-box`) run there;
-//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else 2 and 1024, this test's own) and
+//! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else the host's CPUs, `shards_api::max_vcpus`, and Shards' least plus twice `PEAK_MIB`) and
 //!   `HEX_GUEST_SHARES` (else the OS's default roots).
 //!
 //! Run: `cargo test -p hex-cli --test guest_real -- --nocapture` with those set.
@@ -30,6 +30,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Network, OciSpec, Program, Rootfs, Runtime};
 use hex_runtime::guest::{GuestConfig, GuestRuntime, shares};
+
+/// The guest VM process's peak resident set under this test's workload, in MiB, the most of three runs
+/// (HEX-GUEST-19 on adas-mac-studio.local-2, aarch64 HVF, 2026-11-06; bench/native/guest/peak-rss/RECORD.md).
+const PEAK_MIB: u64 = 284;
 
 /// `oci` boxes whose root holds the Linux `hex` at `/hex` alone, their programs its selftest acts.
 struct OciBoxes(PathBuf);
@@ -120,8 +124,16 @@ fn the_oci_class_holds_its_contract_through_a_real_shards_guest() {
         binary: given("SHARDS_BIN").unwrap(),
         kernel: given("HEX_GUEST_KERNEL").unwrap(),
         initrd: given("HEX_GUEST_INITRD").unwrap(),
-        vcpus: u32::try_from(number("HEX_GUEST_CPUS", 2)).unwrap(),
-        memory_mib: number("HEX_GUEST_MEMORY_MIB", 1024),
+        // Unset, every CPU Shards gives a guest here (`shards_api::max_vcpus`, the host's): the
+        // fastest run, as a vCPU costs nothing while it idles.
+        vcpus: std::env::var("HEX_GUEST_CPUS")
+            .map_or_else(|_| shards_api::max_vcpus(), |v| v.parse().unwrap()),
+        // Unset, Shards' least guest and twice this workload's measured peak (PEAK_MIB): the margin
+        // C's guest_tree takes, stated as a factor, never below what was measured.
+        memory_mib: number(
+            "HEX_GUEST_MEMORY_MIB",
+            shards_api::min_memory_mib(std::env::consts::ARCH) + 2 * PEAK_MIB,
+        ),
         shares: shares::from_env().unwrap(),
         staged: hex_client::guest::stage::STAGED.to_owned(),
     };

@@ -114,6 +114,42 @@ The node agent's socket is `SOCK_SEQPACKET` and carries an exec's stdio as `SCM_
   `hex.guest` (`event = "stdio_unnamed"`). Shards' muxer holds at most 1023 connections (`muxer.rs:42`), so a
   node's concurrent execs are bounded below that, and the next is refused by name.
 
+### 3a. The channel's formats and ports
+
+These define the channel; they are its specification, not tuning, and the code takes each from here (Ada's
+rule, 2026-11-06: each constant learned, measured or a cited limit; these are the last).
+
+**Ports.** vsock(7) gives a port as a `u32` (`svm_port`); ports below 1024 are privileged ("Only a process
+with the `CAP_NET_BIND_SERVICE` capability may bind to these port numbers"), and `VMADDR_PORT_ANY`
+(`-1U`) is reserved. Firecracker's hybrid vsock, which Shards' muxer speaks, names the port in decimal on its
+`CONNECT <port>` line (firecracker `docs/vsock.md`, "Host-Initiated Connections"), any `u32`. Hex assigns its
+ports above 1024, below `VMADDR_PORT_ANY`, each spelling `HEX` and its number so a capture reads them:
+
+| port | value | carries |
+|---|---|---|
+| `CONTROL_PORT` | `0x4845_5800` | a control connection: the relay's token, then framed wire messages |
+| `STDIO_PORT` | `0x4845_5801` | one stdio stream of one exec, named by its first `NAME_BYTES` |
+| `FILES_PORT` | `0x4845_5802` | a staging or removal connection (§4a) |
+
+**Control.** A connection opens with the relay's token, then carries frames:
+
+| field | bytes | encoding |
+|---|---|---|
+| token (`TOKEN_BYTES`) | 8 | `u64`, little-endian as the wire's integers |
+| frame prefix (`PREFIX`) | 4 | the message's length, `u32` big-endian, at most the reader's bound |
+| frame body | the prefix's | one `hex_core::wire` message |
+
+**Stdio name** (`NAME_BYTES` = 24, the sum below):
+
+| field | bytes | value |
+|---|---|---|
+| magic | 4 | `HEXS` |
+| version | 2 | `u16` little-endian, 1; changes append-only |
+| stream | 1 | stdin 0, stdout 1, stderr 2 |
+| zero | 1 | 0 |
+| control connection's token | 8 | `u64` little-endian |
+| exec's request id | 8 | `u64` little-endian |
+
 ## 4. The guest image
 
 - Kernel: Shards' pinned 6.18.48 (`shards-guest.md` §5), which has every option the class needs.
@@ -403,6 +439,23 @@ Hex's tests of the channel, each citing its ID:
 - HEX-GUEST-20: the OCI runtime-spec validation in the guest (§6a): the host's node boots the guest, makes the lab
   and runs `inside.sh` in it through the seam; each test's result matches the Linux record's
   (`crates/hex-cli/tests/guest_validation.rs`, run where its inputs are set, skipped elsewhere).
+- HEX-GUEST-30: §3a's tables are the code's: each port, the token and prefix widths, and the stdio name's
+  fields summing to `NAME_BYTES` (`hex_core::stream`'s tests, a doc-truth test).
+- HEX-GUEST-31: init reads mountinfo to its end, a line at a time, so a root listed past any fixed cut is still
+  the one read (`hex guest`).
+- HEX-GUEST-32: an exec's stdio connections carry no send bound, as a local exec's stdin is the caller's own
+  pipe; only the control connection is bounded, as the local client's socket is (`hex_client::guest`).
+- HEX-GUEST-33: the first dial to a booted guest is given the caller's bound on the boot; each later dial is one
+  try (`hex_client::guest::shards::ShardsLink`).
+- HEX-GUEST-34: a boot's first dial is bounded, never unbounded: twice the slowest boot to ready on record before
+  any boot is seen (bench/native/guest/boot-ready/RECORD.md), then twice the slowest of the record's and the
+  node's own, only rising; a guest alive and not ready within it is stopped, counted and booted once more, and
+  only a second hang refuses its caller, by type (`hex_runtime::guest::GuestRuntime`).
+- HEX-GUEST-35: the OCI validation reads its lab's end again after waiting as long as the last read took (step 7's
+  learned re-read), no picked interval (`crates/hex-cli/tests/guest_validation.rs`).
+- HEX-GUEST-36: the relay moves an exec's stdio by splice(2) through its pipe, both ways, so no byte passes through
+  user space (vsock's `splice_read` is the kernel's `copy_splice_read`): 1 MiB through `cat` leaves the relay
+  reading only each stream's name and writing nothing (`hex_node::relay`).
 
 ## 7. What would falsify it
 
