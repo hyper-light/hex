@@ -36,10 +36,13 @@ POOL_GROUP=hexbox
 POOL_PREFIX=_hexbox
 # The pool's size, as Nix's 32 build users (install-multi-user.sh:25): one box-user box per pool user.
 COUNT=30
-# The first id: hexnode's gid, then hexbox's, then the pool's uids. sysadminctl's role-user range is
-# 200-400 (Nix's note, install-darwin-multi-user.sh:9-11); Apple's own take 300-308 on macOS 26.2 and Nix's
-# 350-382, measured (§3.1), so Hex's default 320-351 sits between, and any taken id is refused by name.
-FIRST_ID=320
+# Apple's role-account range: sysadminctl's usage, macOS 26.4, "Role accounts require name starting with _
+# and UID in 450-499 range" (§3.1). The pool's ids, hexnode's gid then hexbox's then the users' uids, are
+# learned at install time: the first run of COUNT+2 ids there that no user, group or process holds
+# (free_run), so no release's new system ids are reused. --first-id names a start instead.
+ROLE_FIRST=450
+ROLE_LAST=499
+FIRST_ID=
 # The most processes a box's user may hold (RLIMIT_NPROC, native plan step 2's helper default).
 NPROC=1024
 # How long launchd gets to start the helper: a bounded wait, counted in 0.1 s steps.
@@ -61,6 +64,34 @@ dscl_write() {
     dscl . "$@" && return 0
   done
   die "dscl . $* failed $DSCL_TRIES times"
+}
+
+# The first id f in [first, last] with f..f+need-1 all free of the taken ids (one per line on stdin), or a
+# failure when no such run fits. A counted walk over the range, no larger than it.
+free_run() { # <need> <first> <last>
+  local need=$1 first=$2 last=$3 taken f run=0 id
+  taken=$(sort -un)
+  f=$first
+  for ((id = first; id <= last; id++)); do
+    if grep -qx "$id" <<<"$taken"; then
+      run=0
+      f=$((id + 1))
+    else
+      run=$((run + 1))
+      if [ "$run" = "$need" ]; then
+        echo "$f"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+# The ids the machine holds: every user's uid, group's gid and running process's uid.
+taken_ids() {
+  dscl . -list /Users UniqueID | awk '{print $2}'
+  dscl . -list /Groups PrimaryGroupID | awk '{print $2}'
+  ps -axo uid= | tr -d ' '
 }
 
 node_gid() { echo "$FIRST_ID"; }
@@ -122,6 +153,11 @@ check() {
 # reused (§3.1: the range Apple takes grows from release to release).
 preflight() {
   [ "$(uname -s)" = Darwin ] || die "this is macOS' installer; this machine is $(uname -s)"
+  if [ -z "$FIRST_ID" ]; then
+    FIRST_ID=$(taken_ids | free_run $((COUNT + 2)) "$ROLE_FIRST" "$ROLE_LAST") ||
+      die "no run of $((COUNT + 2)) free ids in Apple's role range $ROLE_FIRST-$ROLE_LAST; name one with --first-id"
+  fi
+  echo "macos.sh: ids $FIRST_ID-$((FIRST_ID + COUNT + 1)): gid $(node_gid) $NODE_GROUP, gid $(pool_gid) $POOL_GROUP, uids $(pool_uid 1)-$(pool_uid "$COUNT")" >&2
   local uids gids taken=0 id i name
   uids=$(dscl . -list /Users UniqueID | awk '{print $2}')
   gids=$(dscl . -list /Groups PrimaryGroupID | awk '{print $2}')
@@ -301,6 +337,7 @@ uninstall_hex() {
   rm -f -- "${saved:?}"
 }
 
+main() {
 [ "$#" -ge 1 ] || usage
 VERB=$1
 shift
@@ -318,7 +355,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [[ $COUNT =~ ^[1-9][0-9]*$ ]] || die "--count must be a positive number"
-[[ $FIRST_ID =~ ^[1-9][0-9]*$ ]] || die "--first-id must be a positive number"
+[ -z "$FIRST_ID" ] || [[ $FIRST_ID =~ ^[1-9][0-9]*$ ]] || die "--first-id must be a positive number"
 
 case $VERB in
   install) install_hex ;;
@@ -339,3 +376,9 @@ case $VERB in
     ;;
   *) usage ;;
 esac
+}
+
+# Run as a command; sourced (bench/install/macos_ids_test.sh), it only defines its functions.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
