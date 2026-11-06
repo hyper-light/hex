@@ -137,7 +137,7 @@ fn hello(node: &OwnedFd) -> OwnedFd {
 
 /// Whether a message, or its end, is waiting on `conn` within `ms` (0: now).
 fn readable(conn: impl AsFd, ms: i64) -> bool {
-    let mut ready = [PollFd::new(conn, PollFlags::IN)];
+    let mut ready = [PollFd::new(&conn, PollFlags::IN)];
     let ts = Timespec {
         tv_sec: 0,
         tv_nsec: ms * 1_000_000,
