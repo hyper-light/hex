@@ -68,8 +68,9 @@ impl Class {
     /// access is a property of the node and the class). An OCI container can: its runtime passes the
     /// device in, as Kubernetes' device plugins and CDI do ([21][55] there). A Firecracker microVM
     /// can't: its mainline emulates six devices and passes none through ([25]-[28] there). Nor, yet,
-    /// can a Shards microVM: Shards' guest spec names disks, shares and vsock ports, and no device
-    /// (shards-api draft, hyper-light/shards a0cced87, `crates/api/src/lib.rs:41-62`).
+    /// can a Shards microVM placed by Hex: Shards' VMM gives a guest a shared Venus GPU, or on Linux
+    /// a PCI function by VFIO, but shards-api, Hex's one seam to it, names no device ([58]-[60]
+    /// there).
     pub fn takes_gpus(self) -> bool {
         matches!(self, Class::Oci)
     }
@@ -111,18 +112,84 @@ impl Classes {
 }
 
 /// What each class costs its node beside what a workload asks, in bytes of memory: its runtime's own
-/// (a container's shim, a microVM's VMM). A workload's need includes its class's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Overheads([u64; 3]);
+/// (a container's shim, a microVM's VMM and the kernel's share of it). A workload's need includes its
+/// class's.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Overheads([Overhead; 3]);
+
+/// One class's overhead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Overhead {
+    /// The same for every workload of the class.
+    Flat(u64),
+    /// By the workload's own memory, where it was measured by guest size: (its memory, the overhead),
+    /// ascending, at most [`Overhead::MAX_SIZES`].
+    BySize(Vec<(u64, u64)>),
+}
+
+impl Default for Overhead {
+    fn default() -> Self {
+        Self::Flat(0)
+    }
+}
+
+impl Overhead {
+    pub const MAX_SIZES: usize = 64;
+}
 
 impl Overheads {
-    pub fn of(self, class: Class) -> u64 {
-        self.0.get(Self::at(class)).copied().unwrap_or(0)
+    /// A workload's overhead, `class`'s for its own memory `mem`; none where the class's overhead goes
+    /// by size and names no row for `mem`.
+    pub fn of(&self, class: Class, mem: u64) -> Option<u64> {
+        match self.0.get(Self::at(class))? {
+            Overhead::Flat(bytes) => Some(*bytes),
+            Overhead::BySize(sizes) => sizes
+                .binary_search_by_key(&mem, |&(m, _)| m)
+                .ok()
+                .and_then(|i| sizes.get(i))
+                .map(|&(_, bytes)| bytes),
+        }
+    }
+
+    /// A workload's own memory, from its need as `class`: what [`Overheads::of`] added taken off.
+    pub fn own(&self, class: Class, need: u64) -> Option<u64> {
+        match self.0.get(Self::at(class))? {
+            Overhead::Flat(bytes) => need.checked_sub(*bytes),
+            Overhead::BySize(sizes) => sizes
+                .iter()
+                .find(|&&(m, bytes)| m.checked_add(bytes) == Some(need))
+                .map(|&(m, _)| m),
+        }
     }
 
     pub fn set(&mut self, class: Class, bytes: u64) {
         if let Some(slot) = self.0.get_mut(Self::at(class)) {
-            *slot = bytes;
+            *slot = Overhead::Flat(bytes);
+        }
+    }
+
+    /// Adds `class`'s overhead for workloads whose own memory is `mem`, making its overhead go by size;
+    /// refused, with why, where `mem` has one already or the class has [`Overhead::MAX_SIZES`].
+    pub fn set_size(&mut self, class: Class, mem: u64, bytes: u64) -> Result<(), &'static str> {
+        let slot = self
+            .0
+            .get_mut(Self::at(class))
+            .ok_or("a class with no slot")?;
+        if let Overhead::Flat(_) = slot {
+            *slot = Overhead::BySize(Vec::new());
+        }
+        let Overhead::BySize(sizes) = slot else {
+            return Err("a class's overhead not by size");
+        };
+        if sizes.len() >= Overhead::MAX_SIZES {
+            return Err("more overhead sizes for a class than Overhead::MAX_SIZES");
+        }
+        match sizes.binary_search_by_key(&mem, |&(m, _)| m) {
+            Ok(_) => Err("a class's overhead given twice for one size"),
+            Err(at) => {
+                sizes.insert(at, (mem, bytes));
+                Ok(())
+            }
         }
     }
 

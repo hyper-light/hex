@@ -194,7 +194,9 @@ host), beside what Hex placed. A node admits a workload only when:
 - the workload needs no GPU, or the node has GPUs and the workload's kind can be given one: only an OCI
   container can (`Class::takes_gpus`), so a Firecracker or Shards microVM that asks for one is admitted
   nowhere and refused at admission. The lead approved this on 2026-11-06, until Shards says otherwise:
-  mainline Firecracker passes no device through, and Shards' API names none;
+  mainline Firecracker passes no device through. Shards' VMM does give a guest a GPU, shared through
+  Venus or, on Linux, a whole PCI function by VFIO (AW[58][59]), but shards-api, the one seam Hex reaches
+  it through, names no device to ask for (AW[60]);
 - it has the room;
 - it isn't a benchmark beside a running build, or a build beside a running benchmark, whatever their
   kinds;
@@ -206,9 +208,8 @@ every placement that broke a filter, apart from the index's own verdicts.
 
 **Sources.** `scheduler-architecture.md` S3 (hard filters on facts, the declare-and-assign contract, GPU
 access a property of the node and runtime class); `AC-T7.6.3`'s 90%; a GPU is a fact of the node (AW[21]);
-mainline Firecracker passes no device through (AW[25]-[28]); Shards' guest spec names disks, shares and
-vsock ports, and no device (shards-api draft, hyper-light/shards `a0cced87`,
-`crates/api/src/lib.rs:41-62`). Where each kind runs: `bench/sched/huawei_workload.md`.
+mainline Firecracker passes no device through (AW[25]-[28]); Shards' device model, read in its source
+at `a0cced87` (AW[58]-[60]): Venus virtio-gpu and VFIO in its VMM, no device in shards-api's `GuestSpec`. Where each kind runs: `bench/sched/huawei_workload.md`.
 
 **Evidence.** `the_hard_filters_keep_every_placement_in_bounds`: 500 generated clusters of Linux, Windows
 and macOS nodes, each running the kinds its platform can, with GPU nodes, background load, every role and
@@ -222,8 +223,9 @@ benchmark/build or the kind filter, or that let a microVM be given a GPU, fail t
 
 **What would falsify it.** A run whose replay counts a violation. A session refused everywhere while
 some node is under 90% with room would also falsify it, and `check_log`'s `LeftPending` refuses that. A
-Firecracker release, or a Shards API, that passes a GPU through would make the GPU rule refuse work that
-could be placed; `Class::takes_gpus` changes with it.
+Firecracker release that passes a GPU through, or a shards-api that carries Shards' VFIO or Venus device
+to Hex, would make the GPU rule refuse work that could be placed; `Class::takes_gpus` changes with it,
+and the node then says which kernels and devices it has.
 
 ### H10. The recorded workload is a day of serverless sandbox launches, each one of Hex's three kinds
 
@@ -243,7 +245,8 @@ keep-alive added), converted by `bench/sched/huawei_trace.py` from raw files it 
   are Hex's own fleet's hosts, five of each: Linux runs all three kinds, x86_64 Windows OCI containers and
   Shards microVMs, and arm64 macOS Shards microVMs alone.
 - Each kind's runtime overhead is added to its requests' memory: OCI 0.42 MiB, Firecracker 5 MiB, and
-  Shards 5 MiB as a stand-in.
+  Shards by guest size, 2.26 to 4.77 MiB, as measured under KVM (`bench/sched/shards_overhead.md`), one
+  trace row per size (`replay`'s `overhead,<class>,<bytes>,<for_mem_bytes>`).
 
 The trace's text, with G4's owner fields and the kinds, is parsed by `replay::parse`, bounded and typed
 (`Limits`, `TraceError`). kiln's own CI, recorded on 2026-11-05 (`bench/sched/kiln_workload.md`), is kept as
@@ -276,7 +279,8 @@ a side measurement, not of record.
   none of which this day has.
 - The kinds are given, not recorded. A real split far from thirds, or by function rather than owner, would
   change the mix's measure; each kind alone doesn't depend on it.
-- Shards' own overhead differing much from the 5 MiB stand-in.
+- Shards' overhead measured idle: a busy guest, or one with Shards' network or share process beside it,
+  costs its host more.
 - The pools' limits are taken as requests; a platform that packs by usage would see smaller ones.
 - A second region or day that packs differently would bound how far this one stands for microVM work.
 
@@ -331,15 +335,15 @@ fully allocated", and its hybrid of best fit and worst fit, which packs "about 3
 `bench/sched/packing.md`. On every one of the 16 seeds of the mix and of each kind alone, on both node
 models, under all three clocks, Hex's scorer strands at least 30% less than both best fits at 90% load.
 - On m5d.metal, Hex strands nothing on any seed, against the best fits' 87-804 per-mille.
-- On the fleet's mix with no completions the least cut is 52.9% against best fit by CPU and 52.6% against
-  `MostAllocated`. Everywhere else on the fleet Hex strands nothing, against the best fits' 36-646
+- On the fleet's mix with no completions the least cut is 53.0% against best fit by CPU and 52.7% against
+  `MostAllocated`. Everywhere else on the fleet Hex strands nothing, against the best fits' 36-647
   per-mille.
 - Every arm reaches 90% on every seed. Under completions, some launches end on the way on every seed.
 - Hex passes over no more launches than either best fit in any set: 2,556 across the seeds on the fleet's
   mix with no completions, against 6,679 and 11,322, and none anywhere else. It passes over none below
   half load and none for room.
 - The bar doesn't hang on the chosen speeds. Of the 179 ladder rows at which every arm reaches 90% on every
-  seed, Hex meets it on every seed of 176. In the other three, one seed has `MostAllocated` stranding
+  seed, Hex meets it on every seed of 177. In the other two, one seed has `MostAllocated` stranding
   nothing either, so no cut is possible.
 - As context, on the fleet as it is (10 hosts), Hex meets the bar at each set's clocks on every seed
   where a best fit strands something. Along the ladder, Firecracker alone at 500x misses on one seed:
@@ -349,10 +353,10 @@ models, under all three clocks, Hex's scorer strands at least 30% less than both
 The bench measures the arms not taken beside it (`packing.md`), and every fragment-aware arm meets the bar.
 - Least stranded then most allocated is Hex's tie without the kinds. On m5d.metal, where every node runs
   every kind, it is Hex's score. On the fleet it strands a little less on the mix with no completions (a
-  least cut of 54.1%), but it passes over 11,195 launches there, 950 of them below half load: Firecracker
+  least cut of 53.5%), but it passes over 11,195 launches there, 950 of them below half load: Firecracker
   microVMs wait for Linux room that the other kinds took.
 - Least stranded then Tetris's alignment (the plan's) passes over 2,397 on the fleet's mix with no
-  completions. Its cuts fall as low as 66.8% on m5d.metal and 31.7% on the fleet (Firecracker alone,
+  completions. Its cuts fall as low as 66.4% on m5d.metal and 31.7% on the fleet (Firecracker alone,
   lifetimes as recorded), and it passes over launches in every set and clock on m5d.metal, and in all but
   one on the fleet (Shards alone, lifetimes as recorded).
 
@@ -368,8 +372,8 @@ completions (`packing.md`, the record at `ad3053c`); least stranded then least a
 - Where every node runs every kind, the tie can't tell nodes apart and is most allocated. That strands
   nothing on m5d.metal, but met the bar on only half of kiln's CI seeds.
 
-**Open.** Shards' own overhead and device model replace the stand-ins when Shards states them, and Hex's
-own launch records replace the given kinds once Hex runs microVMs for its users.
+**Open.** Hex's own launch records replace the given kinds once Hex runs microVMs for its users, and a
+shards-api that carries a device would let Shards microVMs ask for GPUs (H9).
 
 ### H5. Bounded everywhere, no recursion
 

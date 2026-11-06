@@ -102,16 +102,15 @@ pub fn minimal_shapes(cluster: &Cluster) -> Vec<(Resources, Class)> {
 }
 
 /// The same arrivals, every one of `class`: each workload's need moved from its own class's overhead
-/// to `class`'s, so a class can be measured alone on a day recorded with every class.
+/// to `class`'s for its own memory, so a class can be measured alone on a day recorded with every
+/// class.
 pub fn alone(cluster: &Cluster, class: Class) -> Result<Cluster, SimError> {
     let mut out = cluster.clone();
-    let overheads = cluster.overheads;
+    let overheads = &cluster.overheads;
     for w in &mut out.workloads {
-        w.need.mem_bytes = w
-            .need
-            .mem_bytes
-            .checked_sub(overheads.of(w.class))
-            .and_then(|m| m.checked_add(overheads.of(class)))
+        w.need.mem_bytes = overheads
+            .own(w.class, w.need.mem_bytes)
+            .and_then(|own| own.checked_add(overheads.of(class, own)?))
             .ok_or(SimError::Need(w.id))?;
         w.class = class;
     }
@@ -363,7 +362,8 @@ mod tests {
 
     /// Do a day of an OCI container and a Shards microVM, overheads 1 and 5, run as Shards alone;
     /// expect each need moved to Shards' overhead and its class Shards, and a need smaller than its
-    /// own class's overhead refused typed.
+    /// own class's overhead refused typed. Then with Shards' overhead by size (3 for a 2-byte guest, 5
+    /// for a 4-byte one): expect each need moved to its own size's, and a size with no row refused.
     #[test]
     fn alone_moves_each_need_to_its_new_class() {
         let mut c = cluster(1, res(8000, 64), &[res(1000, 3), res(1000, 9)]);
@@ -378,6 +378,17 @@ mod tests {
             .collect();
         assert_eq!(got, vec![(7, Class::Shards), (9, Class::Shards)]);
         c.workloads[0].need.mem_bytes = 0;
+        assert_eq!(alone(&c, Class::Shards), Err(SimError::Need(WorkloadId(0))));
+
+        let mut c = cluster(1, res(8000, 64), &[res(1000, 3), res(1000, 9)]);
+        c.overheads.set(Class::Oci, 1);
+        c.overheads.set_size(Class::Shards, 2, 3).unwrap();
+        c.overheads.set_size(Class::Shards, 4, 5).unwrap();
+        c.workloads[1].class = Class::Shards;
+        let a = alone(&c, Class::Shards).unwrap();
+        let got: Vec<_> = a.workloads.iter().map(|w| w.need.mem_bytes).collect();
+        assert_eq!(got, vec![5, 9]);
+        c.workloads[0].need.mem_bytes = 4;
         assert_eq!(alone(&c, Class::Shards), Err(SimError::Need(WorkloadId(0))));
     }
 

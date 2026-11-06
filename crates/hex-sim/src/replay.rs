@@ -7,7 +7,7 @@
 //! node,<cpu_milli>,<mem_bytes>,<gpus>,<background_milli>[,<classes>]
 //! owner,<weight>
 //! group,<budget>
-//! overhead,<class>,<mem_bytes>
+//! overhead,<class>,<mem_bytes>[,<for_mem_bytes>]
 //! leg,<arrive_ns>,<runs_for_ns>,<cpu_milli>,<mem_bytes>,<gpus>,<plain|build|benchmark|session>[,<owner>,<band>,<gang|->,<group|->[,<class>]]
 //! ```
 //!
@@ -17,9 +17,11 @@
 //! or none; a leg without them is owner 0's, band 0, alone and in no group, and a trace that names no
 //! owner has one, of weight 1, so a trace written before G4 reads as it did. A class (`oci`,
 //! `firecracker` or `shards`) follows a leg's tenancy, `oci` when absent; a node's classes are
-//! joined by `+` (`oci+firecracker`), every class when absent. A class's overhead, at most once each
-//! and before the first leg, is the memory its runtime costs a node; each leg of that class needs it
-//! beside its own, none when absent. The parser is a pure function
+//! joined by `+` (`oci+firecracker`), every class when absent. A class's overhead, before the first
+//! leg, is the memory its runtime costs a node; each leg of that class needs it beside its own, none
+//! when absent. It is one row for the class, or one row per leg memory (`for_mem_bytes`) where it was
+//! measured by guest size, never both; then a leg of that class whose memory has no row is refused.
+//! The parser is a pure function
 //! over bounded input (CLAUDE.md §2): past [`Limits`], and at the first line it can't read, it refuses
 //! with a typed [`TraceError`] naming the line.
 
@@ -83,6 +85,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
     let mut groups: Vec<Group> = Vec::new();
     let mut overheads = Overheads::default();
     let mut overheads_seen = Classes::NONE;
+    let mut overheads_by_size = Classes::NONE;
     for (at, raw) in text.lines().enumerate() {
         let line = at.saturating_add(1);
         let row = raw.trim();
@@ -144,12 +147,29 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                 }
                 let class = class(fields.next().ok_or(bad(line, "a missing field"))?, line)?;
                 let bytes = number(&mut fields, line)?;
-                end(&mut fields, line)?;
-                if overheads_seen.has(class) {
-                    return Err(bad(line, "a class's overhead given twice"));
+                match fields.next() {
+                    None => {
+                        if overheads_seen.has(class) {
+                            return Err(bad(line, "a class's overhead given twice"));
+                        }
+                        if overheads_by_size.has(class) {
+                            return Err(bad(line, "a class's overhead given both by size and not"));
+                        }
+                        overheads_seen = overheads_seen.with(class);
+                        overheads.set(class, bytes);
+                    }
+                    Some(for_mem) => {
+                        let for_mem = whole(for_mem, line)?;
+                        end(&mut fields, line)?;
+                        if overheads_seen.has(class) {
+                            return Err(bad(line, "a class's overhead given both by size and not"));
+                        }
+                        overheads_by_size = overheads_by_size.with(class);
+                        overheads
+                            .set_size(class, for_mem, bytes)
+                            .map_err(|why| bad(line, why))?;
+                    }
                 }
-                overheads_seen = overheads_seen.with(class);
-                overheads.set(class, bytes);
             }
             Some("group") => {
                 if !workloads.is_empty() {
@@ -191,8 +211,12 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                     Some(text) => class(text, line)?,
                 };
                 end(&mut fields, line)?;
+                let overhead = overheads.of(class, mem_bytes).ok_or(bad(
+                    line,
+                    "a leg whose memory its class's overhead has no row for",
+                ))?;
                 let mem_bytes = mem_bytes
-                    .checked_add(overheads.of(class))
+                    .checked_add(overhead)
                     .ok_or(bad(line, "memory past u64 with its class's overhead"))?;
                 if workloads.last().is_some_and(|w| w.arrives > arrives) {
                     return Err(bad(line, "a leg arriving before the one above it"));
@@ -347,7 +371,43 @@ mod tests {
             (c.workloads[0].need.mem_bytes, c.workloads[1].need.mem_bytes),
             (6, 1)
         );
-        assert_eq!(c.overheads.of(Class::Shards), 5);
+        assert_eq!(c.overheads.of(Class::Shards, 1), Some(5));
+    }
+
+    /// Do a class's overhead given by guest size (Shards' measured one): expect each leg of the class
+    /// to need its own size's overhead beside its memory, the other classes theirs, and a leg whose
+    /// memory has no row refused by line.
+    #[test]
+    fn an_overhead_by_size_charges_each_leg_its_own_size() {
+        let text = "node,8,64,0,0
+overhead,oci,1
+overhead,shards,7,20
+overhead,shards,5,10
+leg,0,1,1,10,0,plain,0,0,-,-,shards
+leg,1,1,1,20,0,plain,0,0,-,-,shards
+leg,2,1,1,30,0,plain
+";
+        let c = parse(text, &Limits::default()).unwrap();
+        let needs: Vec<_> = c.workloads.iter().map(|w| w.need.mem_bytes).collect();
+        assert_eq!(needs, vec![15, 27, 31]);
+        assert_eq!(
+            (
+                c.overheads.own(Class::Shards, 27),
+                c.overheads.own(Class::Shards, 26)
+            ),
+            (Some(20), None)
+        );
+        let unmatched = "node,8,64,0,0
+overhead,shards,5,10
+leg,0,1,1,11,0,plain,0,0,-,-,shards
+";
+        assert_eq!(
+            parse(unmatched, &Limits::default()).unwrap_err(),
+            TraceError::Line {
+                line: 3,
+                why: "a leg whose memory its class's overhead has no row for"
+            }
+        );
     }
 
     /// G2 step 3: a well-formed trace reads back as its nodes and legs, ids by position.
@@ -380,6 +440,11 @@ mod tests {
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,-,gvisor\n", 2),
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain,0,0,-,-,oci,1\n", 2),
             ("node,1,1,0,0\noverhead,oci,1\noverhead,oci,2\n", 3),
+            ("node,1,1,0,0\noverhead,oci,1\noverhead,oci,2,10\n", 3),
+            ("node,1,1,0,0\noverhead,oci,2,10\noverhead,oci,1\n", 3),
+            ("node,1,1,0,0\noverhead,oci,2,10\noverhead,oci,3,10\n", 3),
+            ("node,1,1,0,0\noverhead,oci,2,10,7\n", 2),
+            ("node,1,1,0,0\noverhead,oci,2,ten\n", 2),
             ("node,1,1,0,0\nleg,0,1,1,1,0,plain\noverhead,oci,1\n", 3),
             ("node,1,1,0,0\noverhead,lxc,1\n", 2),
             (
@@ -497,6 +562,17 @@ mod tests {
         assert_eq!(parse(SMALL, &limits), Err(TraceError::TooManyNodes(1)));
         let one_node = "node,1,1,0,0\nleg,0,1,1,1,0,plain\nleg,0,1,1,1,0,plain\n";
         assert_eq!(parse(one_node, &limits), Err(TraceError::TooManyLegs(1)));
+        let mut sizes = String::from("node,1,1,0,0\n");
+        for size in 0..=crate::model::Overhead::MAX_SIZES {
+            sizes.push_str(&format!("overhead,shards,1,{size}\n"));
+        }
+        assert_eq!(
+            parse(&sizes, &Limits::default()),
+            Err(TraceError::Line {
+                line: crate::model::Overhead::MAX_SIZES + 2,
+                why: "more overhead sizes for a class than Overhead::MAX_SIZES"
+            })
+        );
     }
 
     proptest::proptest! {

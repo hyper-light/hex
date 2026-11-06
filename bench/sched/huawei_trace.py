@@ -33,12 +33,14 @@ memory, and its owner.
     workload, not per launch. Owners go to classes so each class has a third of the day's launches:
     the owner with the most launches first, each to the class with the fewest so far, ties OCI, then
     Firecracker, then Shards.
-  - overhead: what each class's runtime costs its node beside the sandbox's own memory, an
-    `overhead` row each: OCI 0.42 MiB (Hex's oci class, bench/competitive/RESULT.md:95), Firecracker
-    5 MiB (its specification's bound on the VMM's memory, tested on every pull request, and Agache et
-    al., NSDI 2020: "memory overhead of less than 5MB per container";
-    docs/research/runtime/substrates-and-sandboxes.md §3.3), Shards 5 MiB as a stand-in for its own
-    figure, which no source here states.
+  - overhead: what each class's runtime costs its node beside the sandbox's own memory, in `overhead`
+    rows: OCI 0.42 MiB (Hex's oci class, bench/competitive/RESULT.md:95); Firecracker 5 MiB (its
+    specification's bound on the VMM's memory, tested on every pull request, and Agache et al., NSDI
+    2020: "memory overhead of less than 5MB per container";
+    docs/research/runtime/substrates-and-sandboxes.md §3.3); Shards by guest size, one row per pool's
+    memory, as measured on fedora under KVM (bench/sched/shards_overhead.md): its VMM's own PSS beside
+    the guest's RAM, plus the kernel's memory per guest, the largest over three runs of five idle
+    guests.
   - nodes, one of two models, with no background load:
     - --nodes m5d-metal:N (the main one, N = 10 by default): N EC2 m5d.metal hosts, the host the
       Firecracker paper measured on ("two Intel Xeon Platinum 8175M processors (for a total of 48
@@ -75,7 +77,12 @@ POOL = re.compile(r"pool\d+-(\d+)-(\d+)")
 NS = decimal.Decimal(10**9)
 MIB = 1 << 20
 CLASSES = ("oci", "firecracker", "shards")
-OVERHEAD = {"oci": 440_402, "firecracker": 5 * MIB, "shards": 5 * MIB}
+OVERHEAD = {"oci": 440_402, "firecracker": 5 * MIB}
+# Shards' overhead in bytes by guest memory in MiB, measured (bench/sched/shards_overhead.md, unit
+# hex-sched-shardsmeasure-20261106T131320Z): its VMM's own PSS plus the kernel's memory per guest.
+SHARDS_OVERHEAD = {128: 2_368_512, 256: 2_403_328, 512: 2_423_808, 768: 2_445_312, 1024: 2_452_480,
+                   1280: 2_737_152, 1536: 2_763_776, 1792: 2_741_248, 2048: 2_814_976, 2560: 3_171_328,
+                   3072: 3_131_392, 3584: 3_528_704, 4096: 3_808_256, 8192: 5_006_336}
 RUNS = {"linux": "oci+firecracker+shards", "windows": "oci+shards", "macos": "shards"}
 # EC2 m5d.metal: 48 cores with hyper-threading off, 384 GiB (Agache et al., NSDI 2020 §6).
 M5D_METAL = (48_000, 384 << 30)
@@ -196,6 +203,9 @@ def convert(cold_zip, req_zip, day, keep_alive_s, nodes):
     classes, launches = classes_by_owner(sandboxes, owners)
     t0 = sandboxes[0][0]
     shapes = collections.Counter((cpu, mem) for *_, cpu, mem in sandboxes)
+    unmeasured = sorted({mem for _, mem in shapes} - SHARDS_OVERHEAD.keys())
+    if unmeasured:
+        raise Refused(f"pools of {unmeasured} MB have no measured Shards overhead")
     out = [
         "# source: Huawei Cloud public serverless traces 2025, Region 5, day "
         f"{day}: A. Joosen et al., \"Serverless Cold Starts and Where to Find Them\", EuroSys 2025, "
@@ -214,13 +224,16 @@ def convert(cold_zip, req_zip, day, keep_alive_s, nodes):
         "# classes by owner, a third of the launches each: "
         + ", ".join(f"{c} {launches[c]}" for c in CLASSES),
         "# overheads: oci 0.42 MiB (Hex, bench/competitive/RESULT.md:95), firecracker 5 MiB (its specification "
-        "and Agache et al. NSDI 2020, substrates-and-sandboxes.md §3.3), shards 5 MiB (a stand-in: no source "
-        "states Shards' own)",
+        "and Agache et al. NSDI 2020, substrates-and-sandboxes.md §3.3), shards by guest size, "
+        + ", ".join(f"{mib} MiB: {SHARDS_OVERHEAD[mib] / MIB:.2f}" for mib in sorted(SHARDS_OVERHEAD))
+        + " MiB (measured on fedora under KVM: Shards a0cced87, its VMM's own PSS beside 5 idle guests plus the "
+        "kernel's memory per guest; bench/sched/shards_overhead.md)",
         nodes_line,
     ]
     out += node_rows
     out += ["owner,1"] * len(owners)
-    out += [f"overhead,{c},{OVERHEAD[c]}" for c in CLASSES]
+    out += [f"overhead,{c},{OVERHEAD[c]}" for c in ("oci", "firecracker")]
+    out += [f"overhead,shards,{SHARDS_OVERHEAD[mib]},{mib * MIB}" for mib in sorted(SHARDS_OVERHEAD)]
     for start, _pod, user, _func, life, cpu, mem in sandboxes:
         owner = owners[user]
         out.append(f"leg,{int((start - t0) * NS)},{life},{cpu},{mem * MIB},0,plain,{owner},0,-,-,{classes[owner]}")

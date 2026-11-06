@@ -9,7 +9,7 @@
 # second cold starts of a pod already launched, left out: 2
 # shapes (millicores, MB): 300/128: 16937, 400/256: 2868, 1800/2048: 1184, 600/512: 1157, 3400/4096: 894, 6600/8192: 480, 800/768: 477, 2600/3072: 428, 3000/3584: 150, 1000/1024: 144, 1200/1280: 144, 1400/1536: 144, 1600/1792: 144, 2200/2560: 144
 # classes by owner, a third of the launches each: oci 8432, firecracker 8432, shards 8431
-# overheads: oci 0.42 MiB (Hex, bench/competitive/RESULT.md:95), firecracker 5 MiB (its specification and Agache et al. NSDI 2020, substrates-and-sandboxes.md §3.3), shards 5 MiB (a stand-in: no source states Shards' own)
+# overheads: oci 0.42 MiB (Hex, bench/competitive/RESULT.md:95), firecracker 5 MiB (its specification and Agache et al. NSDI 2020, substrates-and-sandboxes.md §3.3), shards by guest size, 128 MiB: 2.26, 256 MiB: 2.29, 512 MiB: 2.31, 768 MiB: 2.33, 1024 MiB: 2.34, 1280 MiB: 2.61, 1536 MiB: 2.64, 1792 MiB: 2.61, 2048 MiB: 2.68, 2560 MiB: 3.02, 3072 MiB: 2.99, 3584 MiB: 3.37, 4096 MiB: 3.63, 8192 MiB: 4.77 MiB (measured on fedora under KVM: Shards a0cced87, its VMM's own PSS beside 5 idle guests plus the kernel's memory per guest; bench/sched/shards_overhead.md)
 # nodes: 10 x EC2 m5d.metal (48 cores, 384 GiB, no GPU; Agache et al., NSDI 2020 §6), Linux x86_64 with KVM, each running all three classes
 node,48000,412316860416,0,0,oci+firecracker+shards
 node,48000,412316860416,0,0,oci+firecracker+shards
@@ -362,7 +362,20 @@ owner,1
 owner,1
 overhead,oci,440402
 overhead,firecracker,5242880
-overhead,shards,5242880
+overhead,shards,2368512,134217728
+overhead,shards,2403328,268435456
+overhead,shards,2423808,536870912
+overhead,shards,2445312,805306368
+overhead,shards,2452480,1073741824
+overhead,shards,2737152,1342177280
+overhead,shards,2763776,1610612736
+overhead,shards,2741248,1879048192
+overhead,shards,2814976,2147483648
+overhead,shards,3171328,2684354560
+overhead,shards,3131392,3221225472
+overhead,shards,3528704,3758096384
+overhead,shards,3808256,4294967296
+overhead,shards,5006336,8589934592
 leg,0,369255000,600,536870912,0,plain,0,0,-,-,oci
 leg,25000000,45411000,300,134217728,0,plain,1,0,-,-,firecracker
 leg,562000000,17979327000,300,134217728,0,plain,2,0,-,-,oci

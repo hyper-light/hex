@@ -116,15 +116,20 @@ one, the second sits beside it to exercise where each kind may land).
   (Shards' own API draft, hyper-light/shards `a0cced87`, `crates/api/src/lib.rs:172-178`). Its guest
   floor, 128 MiB on x86_64 and 64 MiB on arm64 (`lib.rs:188-191`), never binds: the smallest pool is
   128 MiB.
-- **GPUs.** Only an OCI container can be given one: mainline Firecracker passes no device through, and
-  Shards' guest spec names no device (`hex_sim::model::Class::takes_gpus`; scheduler-architecture.md
-  S3). This day asks for none; the rule is tested on generated clusters (hex-sim.md H9).
+- **GPUs.** Only an OCI container can be given one (`hex_sim::model::Class::takes_gpus`;
+  scheduler-architecture.md S3). Mainline Firecracker passes no device through. Shards' VMM gives a guest
+  a shared GPU through Venus (virtio-gpu, on Linux amd64, macOS arm64 and Windows amd64) or, on Linux, a
+  whole PCI function by VFIO, but shards-api, Hex's one seam to it, names no device to ask for
+  (`docs/research/scheduler/agentic-workloads.md` [58]-[60]). This day asks for none; the rule is tested
+  on generated clusters (hex-sim.md H9).
 - **Overheads**, added to each request's memory (an `overhead` row each): OCI 0.42 MiB, Hex's own
   measurement of an idle container (`bench/competitive/RESULT.md:95`); Firecracker 5 MiB, its
   specification's bound on the VMM's memory, tested on every pull request, and the NSDI 2020 paper's
   "memory overhead of less than 5MB per container" (`docs/research/runtime/substrates-and-sandboxes.md`
-  §3.3); Shards 5 MiB, a stand-in marked as one until Shards states its own. No source gives a resting CPU
-  cost for any of the three, so none is charged.
+  §3.3); Shards by guest size, 2.26 MiB beside a 128 MiB guest to 4.77 MiB beside an 8,192 MiB one, its
+  VMM's own PSS plus the kernel's memory per guest, measured on fedora under KVM with the build native step
+  5 runs (`shards_overhead.md`), one `overhead` row per size. No source gives a resting CPU cost for any of
+  the three, so none is charged.
 
 On the fleet, OCI containers may use 15 of the 50 nodes (480 cores), Firecracker microVMs 10 (320
 cores), and Shards microVMs all 50 (1,105 cores). On either model, a pack's load is measured over the
@@ -166,8 +171,9 @@ Firecracker one 0.47 and 0.34, the mean Shards one 1.09 and 1.11.
   benchmark-beside-build rule are tested on generated clusters instead (hex-sim.md H9).
 - The kinds are given, not recorded. A real split far from thirds, or by function rather than owner,
   would change the mix's measure (not each kind's alone).
-- Shards' overhead is a stand-in. If Shards' own is much larger than 5 MiB, its requests are larger by
-  that much.
+- Shards' overhead is measured on idle guests, on one host, without a network or shares
+  (`shards_overhead.md`, what it doesn't show). A busy guest, or one with Shards' network or share
+  process beside it, costs its host more.
 - The pool's limits are taken as the request. A platform that packs by usage rather than limits would
   see smaller requests.
 - The nodes are two models: m5d.metal, where every kind fits everywhere, and Hex's fleet today, five
