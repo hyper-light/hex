@@ -154,7 +154,8 @@ mod tests {
 
     /// HEX-MNTNS-6: specs a prepared proc can't stand for. Expect each counted under its reason: no pid
     /// namespace of its own (none, or one by path), no proc, two procs, a mount beneath `/proc`, a proc
-    /// that's a bind or another filesystem, a mask of `/proc` itself or through `..`, an oversized key.
+    /// that's a bind or another filesystem, a mask of `/proc` itself or through `..`; and a key past the
+    /// 4,096 bytes once picked for it served, bounded by its spec alone.
     #[test]
     fn specs_a_prepared_proc_cannot_serve_keep_ordinary_setup() {
         assert_eq!(
@@ -193,10 +194,12 @@ mod tests {
             check(&spec(PID, PROC, "[]", r#"["/proc/sys/../../etc"]"#)),
             Err(Unpooled::Beneath)
         );
-        let long = format!(r#"["/proc/{}"]"#, "a".repeat(MAX_KEY_BYTES + 1));
+        // A key is bounded by the spec it comes from (spec::MAX_CONFIG_BYTES), with no bound of its own: one
+        // over the 4,096 bytes once picked for it is served from the pool.
+        let long = format!(r#"["/proc/{}"]"#, "a".repeat(4 * 4096));
         assert_eq!(
-            check(&spec(PID, PROC, &long, "[]")),
-            Err(Unpooled::KeyBytes)
+            check(&spec(PID, PROC, &long, "[]")).map(|(_, k)| k.masked.len()),
+            Ok(1)
         );
         assert_eq!(beneath_proc("//proc/./sys/"), Some("sys".to_owned()));
         assert_eq!(beneath_proc("/procfs/sys"), None);
