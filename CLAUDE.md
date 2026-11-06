@@ -115,7 +115,10 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   (`POSIX_SPAWN_SETPGROUP`, `SETSIGDEF`, `SETSIGMASK`, `POSIX_SPAWN_CLOEXEC_DEFAULT` so only its stdio is
   inherited, `posix_spawnattr_set_qos_class_np` to clamp its QoS, `posix_spawnattr_setjetsam_ext` to arm a
   fatal per-process memory cap at the box's whole bound (step 1's `_ext` backstop: the kernel SIGKILLs a
-  member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions);
+  member that crosses it, rootless, with no overshoot), and `adddup2`/`addchdir` file actions), from a
+  `fork`ed child that first sets the member's `RLIMIT_NOFILE` to the box default (`setrlimit`; posix_spawn
+  sets no rlimit) and then spawns over itself (`POSIX_SPAWN_SETEXEC`), every signal blocked around the fork
+  (`pthread_sigmask`) and a failed spawn's errno written back over a pipe before `_exit`;
   `proc_listpids(PROC_PGRP_ONLY)` lists the group (and `PROC_UID_ONLY` a user, for the box helper's
   membership, step 2) and `proc_pid_rusage` reads each member's footprint, start time and exit; `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` makes the watcher a Mach
   time-constraint thread; `kqueue`/`kevent` carry its one-shot `NOTE_CRITICAL` timer, a user event to wake
@@ -133,7 +136,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
   as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
   (`setgid`/`setuid`), opens a session for a leader (`setsid`), caps the user's processes
-  (`setrlimit(RLIMIT_NPROC)`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
+  (`setrlimit(RLIMIT_NPROC)`) and sets the program's descriptor limit to the box default (`RLIMIT_NOFILE`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
   (`getdtablesize` then `close`, there being no `closefrom` in libc) and `execve`s the program — every
   call async-signal-safe, as the Linux runtime's `pre_exec` is, since between fork and exec a
   multi-threaded process may touch no lock. It then arms each member: `task_for_pid` for the member's
