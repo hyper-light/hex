@@ -23,6 +23,11 @@ use hex_core::helper::START_FDS;
 use super::MacRuntime;
 use super::helper_daemon::{self, Daemon, Member, Privileged};
 
+/// How long a test waits for a fact before calling it a hang: twice the slowest recorded run of the tests
+/// that wait (19.753 s, a kiln pacing stall, which stops a whole run tree and so can meet any wait;
+/// bench/native/macos/records/test-waits-macos.txt). A guard only ends a hang; a passing test waits on its fact.
+const HANG_GUARD: Duration = Duration::from_millis(39_507);
+
 /// A stand-in for the daemon's privileged backend: it tracks a box's members in memory instead of
 /// spawning or arming real processes, so the node→daemon path runs without root or side effects.
 #[derive(Default)]
@@ -206,7 +211,7 @@ impl Proc for ShellProc {
     }
 
     /// As the real one: take the exit event if its watch holds it, then the end, which follows it at once
-    /// (here the shell's status line; there the zombie), up to a bound past any test's run.
+    /// (here the shell's status line; there the zombie), up to the hang guard.
     fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
         if !self.exiting {
             self.kq
@@ -219,7 +224,7 @@ impl Proc for ShellProc {
                 .any(|e| matches!(e, super::sys::Event::Exit { pid, .. } if *pid == me));
         }
         if self.exiting {
-            Ok(self.end.recv_timeout(Duration::from_secs(30)).ok())
+            Ok(self.end.recv_timeout(HANG_GUARD).ok())
         } else {
             Ok(self.end.try_recv().ok())
         }
@@ -378,15 +383,9 @@ fn a_box_user_programs_end_is_its_own_not_unknown() {
         "a running program read as ended"
     );
     drop(hold);
-    assert_eq!(
-        held.wait_for(Duration::from_secs(10)).unwrap(),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(held.wait_for(HANG_GUARD).unwrap(), Some(Exit::Code(0)));
     let mut three = rt.exec(&id, sh("exit 3"), Stdio::null()).expect("exec");
-    assert_eq!(
-        three.wait_for(Duration::from_secs(10)).unwrap(),
-        Some(Exit::Code(3))
-    );
+    assert_eq!(three.wait_for(HANG_GUARD).unwrap(), Some(Exit::Code(3)));
 }
 
 /// CLAUDE.md §5 (the box helper's default process cap is the kernel's, not picked): do read the per-user
@@ -432,8 +431,7 @@ fn try_wait_answers_at_once_running_or_ended() {
             .iter()
             .any(|e| matches!(e, super::sys::Event::Exit { pid: p, .. } if *p == pid))
         {
-            kq.wait(None, Some(Duration::from_secs(30)), &mut events)
-                .expect("wait");
+            kq.wait(None, Some(HANG_GUARD), &mut events).expect("wait");
         }
     }
     assert_eq!(p.try_wait().expect("try_wait"), Some(Exit::Code(3)));
