@@ -271,7 +271,10 @@ impl Peaks {
     pub fn most_bytes() -> usize {
         KEYS.iter()
             .map(|k| k.len().saturating_add(1 + 20 + 1))
-            .fold(HEADER.len() + 1 + END.len() + 1, usize::saturating_add)
+            .fold(
+                HEADER.len().saturating_add(END.len()).saturating_add(2),
+                usize::saturating_add,
+            )
     }
 
     fn values(&self) -> [u64; KEYS.len()] {
@@ -329,10 +332,9 @@ impl Peaks {
                 .map_err(|_| Unread::Line(n.saturating_add(2)))?;
             if let Some(at) = KEYS.iter().position(|k| *k == key)
                 && let Some(slot) = values.get_mut(at)
+                && slot.replace(value).is_some()
             {
-                if slot.replace(value).is_some() {
-                    return Err(Unread::Twice(key.to_owned()));
-                }
+                return Err(Unread::Twice(key.to_owned()));
             }
         }
         if !ended {
