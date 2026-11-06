@@ -17,6 +17,8 @@ pub struct Devfs {
     enabled: (bool, bool),
     /// Whether this is a root node's, which keeps the mask sources.
     root: bool,
+    /// Where each pool's keys and mounts a key start and their bound.
+    shape: Shape,
 }
 struct Shared {
     pool: Mutex<Pool<Key, OwnedFd>>,
@@ -46,7 +48,8 @@ impl Devfs {
     /// The worker for the `/dev` pool, made ahead where `dev`, and the proc pool where `procs`; a disabled
     /// pool counts every take a disabled miss. A `root` node keeps the mask sources whether or not either pool
     /// makes ahead, since every init's masked directories clone its empty tmpfs.
-    pub fn start(dev: bool, procs: bool, root: bool) -> Result<Self, Refusal> {
+    /// Each pool's keys and mounts a key start, and are bounded, as `shape` says: from the node's sizes.
+    pub fn start(dev: bool, procs: bool, root: bool, shape: Shape) -> Result<Self, Refusal> {
         let sources = if root {
             Some(Arc::new(ProcSources::open().map_err(|e| {
                 Refusal::os("opening the prepared procs' mask sources", e)
@@ -54,13 +57,19 @@ impl Devfs {
         } else {
             None
         };
-        Self::over(sources, dev, procs, root)
+        Self::over(sources, dev, procs, root, shape)
     }
 
     /// As [`Devfs::start`], with this one's mask sources: a node keeps one empty tmpfs for its life, so every init's
     /// masked directories and every parked proc's clone the same one, whichever pools are on.
     pub fn restart(&self, dev: bool, procs: bool) -> Result<Self, Refusal> {
-        Self::over(self.shared.sources.clone(), dev, procs, self.root)
+        Self::over(
+            self.shared.sources.clone(),
+            dev,
+            procs,
+            self.root,
+            self.shape,
+        )
     }
 
     fn over(
@@ -68,15 +77,8 @@ impl Devfs {
         dev: bool,
         procs: bool,
         root: bool,
+        shape: Shape,
     ) -> Result<Self, Refusal> {
-        // Each pool's keys and mounts a key start at the host's parallelism and are learned from its misses, up to
-        // the seeds' bound, which is also the most it holds (Ada's rule, 2026-11-06).
-        let sizes = crate::sizes::Sizes::now()?;
-        let shape = Shape {
-            keys: sizes.start,
-            per_key: sizes.start,
-            cap: sizes.seeds.get(),
-        };
         let shared = Arc::new(Shared {
             pool: Mutex::new(Pool::new(dev, shape)),
             procs: Mutex::new(Pool::new(procs, shape)),
@@ -99,6 +101,7 @@ impl Devfs {
             worker,
             enabled: (dev, procs),
             root,
+            shape,
         })
     }
     pub fn counts(&self) -> Result<Counts, Refusal> {
@@ -107,6 +110,14 @@ impl Devfs {
             .lock()
             .map(|p| p.counts())
             .map_err(|_| Refusal::Broken("the prepared /dev pool lock was poisoned".to_owned()))
+    }
+
+    /// What both pools have learned: the most keys either keeps, and the most mounts a key any keeps.
+    pub fn learned(&self) -> Result<(usize, usize), Refusal> {
+        let poisoned = || Refusal::Broken("a prepared mounts pool's lock was poisoned".to_owned());
+        let dev = self.shared.pool.lock().map_err(|_| poisoned())?.learned();
+        let procs = self.shared.procs.lock().map_err(|_| poisoned())?.learned();
+        Ok((dev.0.max(procs.0), dev.1.max(procs.1)))
     }
 
     /// Whether the `/dev` pool and the proc pool make ahead, as started, and whether the node is root's.
@@ -142,13 +153,19 @@ impl DevMounts for Devfs {
     }
 
     fn take(&self, key: Key) -> Result<Option<OwnedFd>, OciError> {
-        let (taken, discarded) = self
-            .shared
-            .pool
-            .lock()
-            .map_err(|_| OciError::Broken("the prepared /dev pool lock was poisoned".to_owned()))?
-            .take(key)
-            .map_err(|e| OciError::Broken(e.to_string()))?;
+        let (taken, discarded) = {
+            let mut pool = self.shared.pool.lock().map_err(|_| {
+                OciError::Broken("the prepared /dev pool lock was poisoned".to_owned())
+            })?;
+            let before = pool.learned();
+            let taken = pool
+                .take(key)
+                .map_err(|e| OciError::Broken(e.to_string()))?;
+            if pool.learned() > before {
+                crate::sizes::rose();
+            }
+            taken
+        };
         drop(discarded);
         self.shared.wake.notify_one();
         Ok(taken)
@@ -159,13 +176,19 @@ impl DevMounts for Devfs {
     }
 
     fn take_proc(&self, key: procmount::Key) -> Result<Option<PreparedProc>, OciError> {
-        let (taken, discarded) = self
-            .shared
-            .procs
-            .lock()
-            .map_err(|_| OciError::Broken("the prepared proc pool lock was poisoned".to_owned()))?
-            .take(key)
-            .map_err(|e| OciError::Broken(e.to_string()))?;
+        let (taken, discarded) = {
+            let mut procs = self.shared.procs.lock().map_err(|_| {
+                OciError::Broken("the prepared proc pool lock was poisoned".to_owned())
+            })?;
+            let before = procs.learned();
+            let taken = procs
+                .take(key)
+                .map_err(|e| OciError::Broken(e.to_string()))?;
+            if procs.learned() > before {
+                crate::sizes::rose();
+            }
+            taken
+        };
         drop(discarded);
         // The worker checks this pool holding `/dev`'s lock, the condition's, so taking that lock before
         // the wake means the wake can't fall between its check and its wait.

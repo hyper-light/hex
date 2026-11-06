@@ -12,8 +12,14 @@
 //! Each resource has a bound (CLAUDE.md §2), refused past by type, naming it (§3):
 //! - connections ([`Limits::connections`]): one more is answered `Exhausted` and closed;
 //! - a message's size ([`Limits::message_bytes`]): a larger one is answered `Invalid`, naming it;
-//! - requests in flight on a connection ([`Limits::in_flight`]): one more is answered `Exhausted`;
-//! - programs a connection watches ([`Limits::programs`]): an exec past them is answered `Exhausted`;
+//! - requests in flight on the node's connections together ([`Limits::in_flight`]): one more is answered
+//!   `Exhausted`;
+//! - programs the node's connections watch together ([`Limits::programs`]): an exec past them is answered
+//!   `Exhausted`.
+//!
+//! Each is a budget for the node, never split among connections (the lead, 2026-11-06): the node's clients are
+//! its own control plane, so no fairness between them is owed. The node derives each from its platform
+//! ([`limits`]);
 //! - answers waiting for room in a connection's socket: while any wait, its requests aren't read, so a
 //!   client that doesn't read its answers stops being read rather than growing the agent's memory.
 //!   By construction they number at most `in_flight + programs + 1`: an answer for each call in
@@ -36,7 +42,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -57,20 +63,23 @@ use rustix::process::{Pid, PidfdFlags, Signal};
 
 pub use hex_core::wire::Limits;
 
-/// The node agent's bounds on its socket unless set ([`Server::bind`]'s `limits`):
-/// - 64 connections: a node's local callers are few (kiln's runner and executor, the command line),
-///   so this is far past them while holding each connection's cost to a known size;
+/// The node's bounds on its socket ([`Server::bind`]'s `limits`), each a budget for the node and each taken from
+/// its platform (Ada's rule and the lead's call, 2026-11-06):
+/// - connections: the descriptors the node may hold (its hard `RLIMIT_NOFILE`, which the agent raises its soft
+///   limit to, getrlimit(2)), one each; the kernel refuses an accept past what remains of them (`EMFILE`), and the
+///   socket pauses accepting until one closes;
 /// - messages of [`wire::MAX_MESSAGE`] bytes, the largest the format sends;
-/// - 64 requests in flight on a connection: twice the bench's most threads sharing one client (32,
-///   seam_oci's throughput phase), so a client's threads don't meet it in use;
-/// - 1,024 programs watched by a connection, each holding a pidfd here: 64 connections' worth is
-///   65,536 descriptors, the supervisor's [`crate::supervise::INIT_BUDGET`].
-pub const LIMITS: Limits = Limits {
-    connections: 64,
-    message_bytes: wire::MAX_MESSAGE,
-    in_flight: 64,
-    programs: 1_024,
-};
+/// - calls in flight: the socket's workers ([`crate::sizes::Sizes::workers`], the thread limit), so a call admitted
+///   has a worker that can exist;
+/// - programs watched: the supervisor's pidfd budget ([`crate::supervise::INIT_BUDGET`]), one pidfd each.
+pub fn limits(sizes: &crate::sizes::Sizes) -> Limits {
+    Limits {
+        connections: sizes.descriptors,
+        message_bytes: wire::MAX_MESSAGE,
+        in_flight: sizes.workers,
+        programs: crate::supervise::INIT_BUDGET,
+    }
+}
 
 /// What [`Refusal::Exhausted`] names for each bound.
 pub const CONNECTIONS: &str = "connections to the node agent's socket";
@@ -125,6 +134,11 @@ struct Shared {
     listener: OwnedFd,
     wake: OwnedFd,
     stopping: AtomicBool,
+    /// Calls in flight on every connection together, at most `limits.in_flight`.
+    in_flight: AtomicUsize,
+    /// Execs under way holding a place among the programs watched, which with the table's watched programs are
+    /// at most `limits.programs`; changed under the table's lock.
+    reserving: AtomicUsize,
     table: Mutex<Table>,
     jobs: Mutex<Jobs>,
     work: Condvar,
@@ -259,6 +273,8 @@ impl Server {
             listener,
             wake,
             stopping: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
+            reserving: AtomicUsize::new(0),
             table: Mutex::new(Table::default()),
             jobs: Mutex::new(Jobs::default()),
             work: Condvar::new(),
@@ -655,16 +671,16 @@ impl Shared {
             ),
             Ok((h, Request::Release)) => self.release(conn, h.id),
             Ok((header, Request::Call(call))) => {
-                let admitted = {
+                let admitted = self
+                    .in_flight
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        n.checked_add(1).filter(|&m| m <= self.limits.in_flight)
+                    })
+                    .is_ok();
+                if admitted {
                     let mut out = conn.out.lock().map_err(poisoned)?;
-                    match out.in_flight.checked_add(1) {
-                        Some(n) if n <= self.limits.in_flight => {
-                            out.in_flight = n;
-                            true
-                        }
-                        _ => false,
-                    }
-                };
+                    out.in_flight = out.in_flight.saturating_add(1);
+                }
                 if !admitted {
                     return self.answer(
                         conn,
@@ -983,9 +999,19 @@ impl Shared {
     }
 
     fn done(&self, conn: &Conn) -> Result<(), Refusal> {
+        self.call_done();
         let mut out = conn.out.lock().map_err(poisoned)?;
         out.in_flight = out.in_flight.saturating_sub(1);
         Ok(())
+    }
+
+    /// One call in flight on the node is done.
+    fn call_done(&self) {
+        let _ = self
+            .in_flight
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            });
     }
 
     /// A list's answer, in as many parts as its boxes need, each sent once the one before has gone.
@@ -1025,21 +1051,28 @@ impl Shared {
             self.done(conn)?;
             self.answer(conn, header.version, header.id, &answer)
         };
-        // A place among the programs the connection watches, taken before the program starts, so
-        // none starts that can't be watched.
+        // A place among the programs the node's connections watch, taken before the program starts, so
+        // none starts that can't be watched: under the table's lock, which every watch is added under.
         {
-            let mut out = conn.out.lock().map_err(poisoned)?;
-            let held = out.programs.len().checked_add(out.reserved);
+            let table = self.table()?;
+            let held = table
+                .watched
+                .len()
+                .checked_add(self.reserving.load(Ordering::Acquire));
             if held.is_none_or(|h| h >= self.limits.programs) {
-                drop(out);
+                drop(table);
                 return reply(Answer::Refused(Refusal::Exhausted {
                     what: PROGRAMS,
                     bound: self.limits.programs,
                 }));
             }
+            self.reserving.fetch_add(1, Ordering::AcqRel);
+            let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_add(1);
         }
         let unreserve = || -> Result<(), Refusal> {
+            let _table = self.table()?;
+            self.reserving.fetch_sub(1, Ordering::AcqRel);
             let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_sub(1);
             Ok(())
@@ -1091,6 +1124,8 @@ impl Shared {
             }));
         }
         let open = {
+            self.reserving.fetch_sub(1, Ordering::AcqRel);
+            self.call_done();
             let mut out = conn.out.lock().map_err(poisoned)?;
             out.reserved = out.reserved.saturating_sub(1);
             out.in_flight = out.in_flight.saturating_sub(1);

@@ -1,16 +1,22 @@
-//! The bounds of the node's pools, derived from the host it starts on (Ada's rule, 2026-11-06: "We do not support
-//! arbitrary constants. We support learned and data derived values"; docs/design/runtime-architecture.md, "Pool
-//! sizes learned from demand"). Each pool learns its size from the demand it sees ([`hex_core::demand`]), starting
-//! at the host's parallelism; these are the bounds that learning stops at, each the count of the pool's items that
-//! fits in an even share of the memory the node may hold, at the item's measured cost (CLAUDE.md §2).
+//! The bounds of the node's pools, derived from the host it starts on, and where their learned sizes start (Ada's
+//! rule, 2026-11-06: "We do not support arbitrary constants. We support learned and data derived values"; the
+//! lead's calls the same day; docs/design/runtime-architecture.md, "Pool sizes learned from demand"). Each pool
+//! learns its size from the demand it sees ([`hex_core::demand`]). It starts at the peak the node's last start
+//! learned, kept in its state ([`Keeper`]), or on a node's first start at the host's parallelism; it stops at its
+//! bound, the count of its items that fits in its share of the memory the node may hold, at the item's measured
+//! cost, each pool's share in proportion to its takes times that cost (CLAUDE.md §2).
 //!
-//! [`Sizes::of`] is pure; [`Host::now`] reads the host's facts.
+//! [`Sizes::of`] is pure; [`Host::now`] reads the host's facts, and [`read_peaks`] the node's last peaks.
 
 use std::num::NonZeroUsize;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 
 use hex_api::Refusal;
-use hex_core::demand::{cgroup_headroom, mem_available, share};
+use hex_core::demand::{MEMORY_POOLS, Peaks, cgroup_headroom, mem_available, weighted};
 
 /// An idle cgroup kept for its owner's next box: what the bench's lifecycle leaves charged to it, at most
 /// 1,748,992 bytes over 256 idle cgroups of fedora's OCI pass 20261103T044133Z
@@ -31,10 +37,10 @@ pub const SEED_BYTES: u64 = 2_547_712;
 /// (bench/competitive/probes/netns_pool.md, goal 5 extended step 4).
 pub const IPC_UTS_BYTES: u64 = 14_438;
 
-/// The pools that hold the node's memory, by their items' cost: they split it evenly, so together they hold no
-/// more than it. The network namespaces are two pools: those made ahead (decision 4) and those kept idle for their
-/// owners.
-const SHARERS: [u64; 6] = [
+/// The pools that hold the node's memory, by their items' cost, in the order [`Peaks::takes`] keeps their takes:
+/// idle cgroups, cgroups made ahead, idle network namespaces, network namespaces made ahead (decision 4), seeds,
+/// and ipc and uts pairs.
+const COSTS: [u64; MEMORY_POOLS] = [
     IDLE_CGROUP_BYTES,
     AHEAD_BYTES,
     NETNS_BYTES,
@@ -55,6 +61,10 @@ pub struct Host {
     /// The most threads the node may have: the least of its soft `RLIMIT_NPROC`, which counts its user's threads
     /// (getrlimit(2)), and `/proc/sys/kernel/threads-max`, the host's (proc(5)); `u64::MAX` where neither bounds it.
     pub threads: u64,
+    /// The most descriptors the node may hold: its hard `RLIMIT_NOFILE`, which the agent raises its soft limit to
+    /// (getrlimit(2)), or where that is unlimited `/proc/sys/fs/nr_open`, the most the kernel lets any process
+    /// open (proc(5)); `u64::MAX` where neither can be read.
+    pub descriptors: u64,
 }
 
 impl Host {
@@ -69,18 +79,25 @@ impl Host {
         let memory = cgroup_headrooms().into_iter().fold(available, u64::min);
         let parallelism = std::thread::available_parallelism()
             .map_err(|e| Refusal::os("reading the host's parallelism", e))?;
+        let number = |path: &str| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| t.trim().parse::<u64>().ok())
+        };
         let nproc = rustix::process::getrlimit(rustix::process::Resource::Nproc).current;
-        let threads_max = std::fs::read_to_string("/proc/sys/kernel/threads-max")
-            .ok()
-            .and_then(|t| t.trim().parse::<u64>().ok());
-        let threads = [nproc, threads_max]
+        let threads = [nproc, number("/proc/sys/kernel/threads-max")]
             .into_iter()
             .flatten()
             .fold(u64::MAX, u64::min);
+        let descriptors = rustix::process::getrlimit(rustix::process::Resource::Nofile)
+            .maximum
+            .or_else(|| number("/proc/sys/fs/nr_open"))
+            .unwrap_or(u64::MAX);
         Ok(Self {
             memory,
             parallelism,
             threads,
+            descriptors,
         })
     }
 }
@@ -94,7 +111,7 @@ fn cgroup_headrooms() -> Vec<u64> {
     let Some(path) = own.lines().find_map(|l| l.strip_prefix("0::")) else {
         return Vec::new();
     };
-    let mut dir = std::path::Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+    let mut dir = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
     let mut out = Vec::new();
     loop {
         let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
@@ -109,12 +126,29 @@ fn cgroup_headrooms() -> Vec<u64> {
     }
 }
 
+/// Where each learned size starts: the peak the node's last start learned, never under the host's parallelism (or,
+/// for the spare, one: the fewest by which a create finds a seed idle rather than waits on a seed's exec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Starts {
+    pub owner_cgroups: usize,
+    pub owner_netns: usize,
+    pub netns: usize,
+    pub ipc_uts: usize,
+    pub ahead: usize,
+    pub devfs_keys: usize,
+    pub devfs_per_key: usize,
+    pub seeds: usize,
+    pub spare: usize,
+}
+
 /// The node's pools' bounds, and where their learned sizes start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sizes {
-    /// Where each learned size starts, before any demand: the host's parallelism (32 on fedora, the bench host,
-    /// so no pool starts smaller there than the constant it replaces).
+    /// The host's parallelism (32 on fedora, the bench host, so no pool starts smaller there than the constant it
+    /// replaces).
     pub start: usize,
+    /// Where each learned size starts.
+    pub starts: Starts,
     /// The most idle cgroups the node keeps, all owners' together, and so the most any owner keeps.
     pub idle_cgroups: usize,
     /// The most idle network namespaces the node keeps, all owners' together.
@@ -127,40 +161,69 @@ pub struct Sizes {
     pub ipc_uts: usize,
     /// The most network namespaces made ahead (decision 4). No more creates take one at once than hold a seed.
     pub netns: usize,
-    /// The most workers the node's socket runs calls on, each started as a call finds none idle and kept: one for
-    /// every call the socket admits at once (its connections times their calls in flight, [`crate::serve::LIMITS`]),
-    /// so no admitted call waits for a worker, at most the threads the kernel lets the node have, one at least.
-    /// The bound the seeds' line of waiting creates is set by.
+    /// The most workers the node's socket runs calls on, each started as a call finds none idle and kept: the
+    /// threads the kernel lets the node have, one at least, and so the most calls the socket admits at once
+    /// ([`crate::serve::limits`]), each with a worker that can exist. The bound the seeds' line of waiting creates
+    /// is set by.
     pub workers: usize,
+    /// The most descriptors the node may hold ([`Host::descriptors`]): the most connections its socket admits, each
+    /// one, the kernel refusing past what remains of them.
+    pub descriptors: usize,
 }
 
 impl Sizes {
-    /// The bounds on `host`.
-    pub fn of(host: Host) -> Self {
-        let each = |cost| share(host.memory, SHARERS.len(), cost);
-        let seeds = NonZeroUsize::new(each(SEED_BYTES)).unwrap_or(NonZeroUsize::MIN);
+    /// The bounds on `host`, and the starts from `peaks`, a node's last start's (none on its first). Each memory
+    /// pool's share follows its takes times its item's cost there, evenly where none was taken ([`weighted`]); its
+    /// bound is what fits in that share, never under its peak nor the host's parallelism (latency first: a pool is
+    /// never bounded below what it was seen to need, or below where a first start starts it).
+    pub fn of(host: Host, peaks: &Peaks) -> Self {
+        let demand: Vec<(u64, u64)> = peaks.takes.iter().copied().zip(COSTS).collect();
+        let shares = weighted(host.memory, &demand);
+        let start = host.parallelism.get();
+        let fit = |pool: usize, peak: usize| {
+            let share = shares.get(pool).copied().unwrap_or(0);
+            let cost = COSTS.get(pool).copied().unwrap_or(u64::MAX);
+            usize::try_from(share.checked_div(cost).unwrap_or(0))
+                .unwrap_or(usize::MAX)
+                .max(peak)
+                .max(start)
+        };
+        let seeds = NonZeroUsize::new(fit(4, peaks.seeds)).unwrap_or(NonZeroUsize::MIN);
+        let at = |peak: usize| start.max(peak);
+        let to_usize = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
         Self {
-            start: host.parallelism.get(),
-            idle_cgroups: each(IDLE_CGROUP_BYTES),
-            idle_netns: each(NETNS_BYTES),
+            start,
+            starts: Starts {
+                owner_cgroups: at(peaks.owner_cgroups),
+                owner_netns: at(peaks.owner_netns),
+                netns: at(peaks.netns),
+                ipc_uts: at(peaks.ipc_uts),
+                ahead: at(peaks.ahead),
+                devfs_keys: at(peaks.devfs_keys),
+                devfs_per_key: at(peaks.devfs_per_key),
+                seeds: at(peaks.seeds),
+                spare: peaks.spare.max(1),
+            },
+            idle_cgroups: fit(0, peaks.owner_cgroups),
+            ahead: fit(1, peaks.ahead).min(seeds.get().max(peaks.ahead)),
+            idle_netns: fit(2, peaks.owner_netns),
+            netns: fit(3, peaks.netns).min(seeds.get().max(peaks.netns)),
             seeds,
-            ahead: each(AHEAD_BYTES).min(seeds.get()),
-            ipc_uts: each(IPC_UTS_BYTES).min(seeds.get()),
-            netns: each(NETNS_BYTES).min(seeds.get()),
-            workers: workers(host.threads),
+            ipc_uts: fit(5, peaks.ipc_uts).min(seeds.get().max(peaks.ipc_uts)),
+            workers: to_usize(host.threads).max(1),
+            descriptors: to_usize(host.descriptors),
         }
     }
 
-    /// The bounds on this host, from its facts as this process first read them: every node a process opens is
-    /// bounded alike, and what a caller reckons from them (the descriptors at the bounds,
-    /// [`crate::netns::FilesBound`]) is what its node holds.
+    /// The bounds on this host as a node's first start has them, from its facts as this process first read them:
+    /// what a caller reckons without a node's state.
     pub fn now() -> Result<Self, Refusal> {
-        static READ: OnceLock<Sizes> = OnceLock::new();
-        if let Some(sizes) = READ.get() {
-            return Ok(*sizes);
-        }
-        let sizes = Host::now().map(Self::of)?;
-        Ok(*READ.get_or_init(|| sizes))
+        host().map(|h| Self::of(h, &Peaks::default()))
+    }
+
+    /// The bounds on this host for a node whose last peaks are `peaks`.
+    pub fn learned(peaks: &Peaks) -> Result<Self, Refusal> {
+        host().map(|h| Self::of(h, peaks))
     }
 
     /// The most procs alive at once with parked inits (decision 8, parked procs): one an init parked, in an idle
@@ -185,14 +248,214 @@ impl Sizes {
     }
 }
 
-/// The socket's workers under a thread limit of `threads` ([`Sizes::workers`]).
-fn workers(threads: u64) -> usize {
-    let limits = crate::serve::LIMITS;
-    let admitted = limits.connections.saturating_mul(limits.in_flight);
-    usize::try_from(threads)
-        .unwrap_or(usize::MAX)
-        .min(admitted)
-        .max(1)
+/// The host's facts as this process first read them: every node a process opens is bounded alike, and what a caller
+/// reckons from them (the descriptors at the bounds, [`crate::netns::FilesBound`]) is what its node holds.
+fn host() -> Result<Host, Refusal> {
+    static READ: OnceLock<Host> = OnceLock::new();
+    if let Some(host) = READ.get() {
+        return Ok(*host);
+    }
+    let host = Host::now()?;
+    Ok(*READ.get_or_init(|| host))
+}
+
+/// Learned sizes that rose in this process: each pool's shell adds one when its size does, which tells the node a
+/// later peak is there to keep. A count, never a wait.
+static RISES: AtomicU64 = AtomicU64::new(0);
+
+/// A pool's learned size rose.
+pub fn rose() {
+    RISES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The rises so far.
+pub fn rises() -> u64 {
+    RISES.load(Ordering::Relaxed)
+}
+
+/// The name of the node's record of its peaks in its state directory.
+const PEAKS: &str = "peaks";
+
+/// What reading a node's last peaks found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Last {
+    /// Its last start's peaks.
+    Peaks(Peaks),
+    /// None: the node's first start.
+    First,
+    /// A record that couldn't be read, and why: the start is a first start, counted ([`Keeper::unread`]).
+    Unread(String),
+}
+
+/// The peaks the node in `state_dir` last kept, read whole: at most twice what this node writes
+/// ([`Peaks::most_bytes`]), room for a later node's as many keys again; past it the record is refused unread.
+pub fn read_peaks(state_dir: &Path) -> Last {
+    use std::io::Read;
+    let path = state_dir.join(PEAKS);
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Last::First,
+        Err(e) => return Last::Unread(format!("{}: {e}", path.display())),
+    };
+    let most = Peaks::most_bytes().saturating_mul(2);
+    let mut text = String::new();
+    let limit = u64::try_from(most).unwrap_or(u64::MAX).saturating_add(1);
+    if let Err(e) = file.take(limit).read_to_string(&mut text) {
+        return Last::Unread(format!("{}: {e}", path.display()));
+    }
+    if text.len() > most {
+        return Last::Unread(format!("{}: longer than {most} bytes", path.display()));
+    }
+    match Peaks::decode(&text) {
+        Ok(peaks) => Last::Peaks(peaks),
+        Err(e) => Last::Unread(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Writes `peaks` as the node in `state_dir`'s record: whole to a temporary file, then renamed into place, so a
+/// crash leaves the last record or this one, never part of one (rename(2)); not synced, as a box's record of the
+/// runtime directory isn't (decision 1): a host crash at worst loses the last peaks, and the next start is a first
+/// start or an earlier one's.
+pub fn write_peaks(state_dir: &Path, peaks: &Peaks) -> Result<(), Refusal> {
+    let tmp = state_dir.join(format!("{PEAKS}.tmp"));
+    std::fs::write(&tmp, peaks.encode()).map_err(|e| Refusal::os("writing the node's peaks", e))?;
+    std::fs::rename(&tmp, state_dir.join(PEAKS))
+        .map_err(|e| Refusal::os("renaming the node's peaks into place", e))
+}
+
+/// Keeps the node's peaks in its state as they rise, off every create's path: a thread of its own writes each one
+/// it is handed, at most one waiting for it (CLAUDE.md §2). An offer that finds one waiting is let go, and the
+/// node offers again at its next create, a later snapshot holding every earlier peak, since none falls.
+pub struct Keeper {
+    dir: PathBuf,
+    /// The peaks the node started from: what it keeps is never under them, and its takes add to theirs.
+    base: Peaks,
+    /// Why the last record couldn't be read, where it couldn't.
+    unread: Option<String>,
+    /// The rises the last peaks handed on held.
+    offered: AtomicU64,
+    writes: Option<SyncSender<Peaks>>,
+    thread: Option<JoinHandle<()>>,
+    last_failure: Arc<Mutex<Option<String>>>,
+    written: Arc<AtomicU64>,
+}
+
+impl Keeper {
+    /// The keeper of the node in `state_dir`, its last peaks read: those, or none on a first start, which an
+    /// unreadable record makes it too, counted.
+    pub fn open(state_dir: &Path) -> Result<Self, Refusal> {
+        let (base, unread) = match read_peaks(state_dir) {
+            Last::Peaks(p) => (p, None),
+            Last::First => (Peaks::default(), None),
+            Last::Unread(why) => (Peaks::default(), Some(why)),
+        };
+        let (writes, queue) = std::sync::mpsc::sync_channel::<Peaks>(1);
+        let dir = state_dir.to_path_buf();
+        let (theirs, last_failure) = (dir.clone(), Arc::new(Mutex::new(None)));
+        let written = Arc::new(AtomicU64::new(0));
+        let (failure, count) = (Arc::clone(&last_failure), Arc::clone(&written));
+        let thread = std::thread::Builder::new()
+            .name("hex-peaks".to_owned())
+            .spawn(move || keep_each(&queue, &theirs, &failure, &count))
+            .map_err(|e| Refusal::os("starting the node's peaks keeper", e))?;
+        Ok(Self {
+            dir,
+            base,
+            unread,
+            offered: AtomicU64::new(0),
+            writes: Some(writes),
+            thread: Some(thread),
+            last_failure,
+            written,
+        })
+    }
+
+    /// The peaks the node started from.
+    pub fn base(&self) -> Peaks {
+        self.base
+    }
+
+    /// Why the last record couldn't be read, where it couldn't: the start was a first start.
+    pub fn unread(&self) -> Option<&str> {
+        self.unread.as_deref()
+    }
+
+    /// Whether a size rose since the last peaks handed on: the node's word to take a snapshot.
+    pub fn behind(&self) -> bool {
+        rises() != self.offered.load(Ordering::Relaxed)
+    }
+
+    /// `now`, this start's peaks and takes as of `rises`, kept: never under the start's peaks, its takes added to
+    /// the start's. Handed to the keeper's thread, never waited for; with one waiting, let go, so the node is still
+    /// behind and offers again.
+    pub fn offer(&self, now: &Peaks, rises: u64) {
+        let Some(writes) = &self.writes else { return };
+        if !matches!(
+            writes.try_send(self.merged(now)),
+            Err(TrySendError::Full(_))
+        ) {
+            self.offered.store(rises, Ordering::Relaxed);
+        }
+    }
+
+    /// `now` kept against the start's peaks.
+    fn merged(&self, now: &Peaks) -> Peaks {
+        let b = &self.base;
+        let mut takes = b.takes;
+        for (t, n) in takes.iter_mut().zip(now.takes) {
+            *t = t.saturating_add(n);
+        }
+        Peaks {
+            owner_cgroups: b.owner_cgroups.max(now.owner_cgroups),
+            owner_netns: b.owner_netns.max(now.owner_netns),
+            netns: b.netns.max(now.netns),
+            ipc_uts: b.ipc_uts.max(now.ipc_uts),
+            ahead: b.ahead.max(now.ahead),
+            devfs_keys: b.devfs_keys.max(now.devfs_keys),
+            devfs_per_key: b.devfs_per_key.max(now.devfs_per_key),
+            seeds: b.seeds.max(now.seeds),
+            spare: b.spare.max(now.spare),
+            takes,
+        }
+    }
+
+    /// `now` written here and now, as the node ends: what a create's offer left waiting is superseded by it.
+    pub fn finish(&mut self, now: &Peaks) -> Result<(), Refusal> {
+        drop(self.writes.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        write_peaks(&self.dir, &self.merged(now))
+    }
+
+    /// Peaks written by the keeper's thread, and the last write's failure, if one failed.
+    pub fn counts(&self) -> (u64, Option<String>) {
+        (
+            self.written.load(Ordering::Relaxed),
+            self.last_failure.lock().ok().and_then(|l| l.clone()),
+        )
+    }
+}
+
+/// The keeper's thread: writes each peaks it is handed until the node's end closes its queue.
+fn keep_each(
+    queue: &Receiver<Peaks>,
+    dir: &Path,
+    failure: &Mutex<Option<String>>,
+    written: &AtomicU64,
+) {
+    while let Ok(peaks) = queue.recv() {
+        match write_peaks(dir, &peaks) {
+            Ok(()) => {
+                written.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                if let Ok(mut last) = failure.lock() {
+                    *last = Some(e.to_string());
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

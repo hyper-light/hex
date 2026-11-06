@@ -405,6 +405,7 @@ impl Ahead {
             && !self.shut.load(Ordering::Relaxed)
             && self.bound.load(Ordering::Relaxed) > 0
         {
+            crate::sizes::rose();
             self.bound.store(
                 u64::try_from(d.size()).unwrap_or(u64::MAX),
                 Ordering::Relaxed,
@@ -575,7 +576,7 @@ impl Cgroups {
         let parking = Parking::default();
         Ok(Self {
             pool: Arc::new(Mutex::new(Pool::new(
-                sizes.start,
+                sizes.starts.owner_cgroups,
                 sizes.idle_cgroups,
                 first,
             ))),
@@ -903,6 +904,14 @@ impl Cgroups {
         }
     }
 
+    /// What it has learned (Ada's rule, 2026-11-06): the most idle cgroups an owner keeps, and how many cgroups are
+    /// kept made ahead for boxes of no owner.
+    pub fn learned(&self) -> Result<(usize, usize), Refusal> {
+        let per_owner = self.pool()?.per_owner();
+        let ahead = usize::try_from(self.ahead.bound.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
+        Ok((per_owner, ahead))
+    }
+
     pub fn counts(&self) -> Result<Counts, Refusal> {
         let mut pool = self.pool()?.counts();
         let no_owner = pool.refused.entry(Refused::NoOwner).or_default();
@@ -1219,11 +1228,15 @@ impl Choose for Choice<'_> {
         // Each refused idle cgroup leaves the pool, so the takes end within the node's bound on them.
         let most = self.cgroups.most_idle;
         for _ in 0..=most {
-            let take = self
-                .cgroups
-                .pool()
-                .map_err(|r| self.refuse_create(r))?
-                .take(whose, &policy);
+            let take = {
+                let mut pool = self.cgroups.pool().map_err(|r| self.refuse_create(r))?;
+                let before = pool.per_owner();
+                let take = pool.take(whose, &policy);
+                if pool.per_owner() > before {
+                    crate::sizes::rose();
+                }
+                take
+            };
             match take {
                 Take::Own(reason) => {
                     // A box of no owner takes a cgroup made ahead, with its init in it, when one is ready.

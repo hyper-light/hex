@@ -140,8 +140,9 @@ impl Pools {
     }
 
     /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
-    /// call the socket's workers run at once ([`Sizes::workers`]), one of each pool's until its box's init joins them. A pool of
-    /// none has no thread. The mounts made ahead the same, where the node keeps them, their mask sources beside.
+    /// create a seed serves at once ([`Sizes::seeds`]), one of each pool's until its box's init joins them through
+    /// the seed's clone. A pool of none has no thread. The mounts made ahead the same, where the node keeps them,
+    /// their mask sources beside.
     fn descriptors(self) -> u64 {
         let pool = |bound: usize, each: u64| {
             if bound == 0 {
@@ -156,13 +157,13 @@ impl Pools {
             devfs_held(self.sizes)
                 .saturating_add(FDS_A_DEVFS_MAKE)
                 .saturating_add(FDS_MASK_SOURCES)
-                .saturating_add(of(self.sizes.workers, FDS_DEVFS_TAKES))
+                .saturating_add(of(self.sizes.seeds.get(), FDS_DEVFS_TAKES))
         } else {
             0
         };
         pool(self.netns, 1)
             .saturating_add(pool(self.ipc_uts, 2))
-            .saturating_add(of(self.sizes.workers, takes))
+            .saturating_add(of(self.sizes.seeds.get(), takes))
             .saturating_add(devfs)
     }
 }
@@ -179,16 +180,16 @@ fn kept_at_most(sizes: Sizes) -> u64 {
 }
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
-/// kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools; the
-/// namespaces and the mounts made ahead under `pools`.
+/// kept namespaces; each live box's own; the programs its socket watches, a pidfd each, at the node's budget for
+/// them ([`crate::serve::limits`]); the seeds of both pools; the namespaces and the mounts made ahead under `pools`.
+/// The socket's connections aren't among them: each is one of what remains, which the kernel refuses an accept
+/// past (`EMFILE`), the socket then pausing its accepts until one closes (the lead, 2026-11-06).
 fn descriptors_of_the_node(pools: Pools) -> u64 {
-    let connections = crate::serve::LIMITS.connections;
     [
         pools.descriptors(),
         kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
         of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
-        of(connections, 1),
-        of(connections.saturating_mul(crate::serve::LIMITS.programs), 1),
+        of(crate::serve::limits(&pools.sizes).programs, 1),
         of(pools.sizes.seeds.get(), FDS_A_SEED),
         EXEC_SEEDS.saturating_mul(FDS_A_SEED),
         FDS_BESIDE,
@@ -345,10 +346,11 @@ impl Netns {
         Self::open(Pool::new(bound), bound, files, sizes)
     }
 
-    /// As [`Netns::start`], the pool starting at the host's parallelism and learning its size from its draws, up to
+    /// As [`Netns::start`], the pool starting where the node's last start peaked (the host's parallelism on its first)
+    /// and learning its size from its draws, up to
     /// `cap` ([`Pool::learning`]; Ada's rule, 2026-11-06): a root node's default, `cap` its [`Sizes::netns`].
     pub fn learning(cap: usize, files: FilesBound, sizes: Sizes) -> Result<Self, Refusal> {
-        Self::open(Pool::learning(sizes.start, cap), cap, files, sizes)
+        Self::open(Pool::learning(sizes.starts.netns, cap), cap, files, sizes)
     }
 
     fn open(
@@ -374,7 +376,7 @@ impl Netns {
             .spawn(move || refill(&filling))
             .map_err(|e| Refusal::os("starting the network-namespace thread", e))?;
         let state = Arc::new(KeptState {
-            idle: Mutex::new(Idle::new(sizes.start, sizes.idle_netns)),
+            idle: Mutex::new(Idle::new(sizes.starts.owner_netns, sizes.idle_netns)),
             held: Mutex::new(BTreeMap::new()),
             given_back: AtomicU64::new(0),
             checked: AtomicU64::new(0),
@@ -521,6 +523,22 @@ impl Netns {
         Ok(ns)
     }
 
+    /// What it has learned (Ada's rule, 2026-11-06): the pool's size, and the most idle namespaces an owner keeps
+    /// (0 on a node that keeps none).
+    pub fn learned(&self) -> Result<(usize, usize), Refusal> {
+        let bound = self.shared.pool().map_err(Refusal::from)?.bound();
+        let per_owner = match &self.kept {
+            None => 0,
+            Some(kept) => kept
+                .state
+                .idle
+                .lock()
+                .map_err(|_| Refusal::Broken("the kept namespaces' lock was poisoned".to_owned()))?
+                .per_owner(),
+        };
+        Ok((bound, per_owner))
+    }
+
     /// What the pool has done. Counted at the take, so a create that fails after it took a namespace,
     /// or found the pool dry, is counted all the same.
     pub fn counts(&self) -> Result<Counts, Refusal> {
@@ -530,11 +548,15 @@ impl Netns {
 
 impl Networks for Netns {
     fn take(&self) -> Result<Option<OwnedFd>, OciError> {
-        let taken = self
-            .shared
-            .pool()?
-            .take()
-            .map_err(|e| OciError::Broken(e.to_string()))?;
+        let taken = {
+            let mut pool = self.shared.pool()?;
+            let before = pool.bound();
+            let taken = pool.take().map_err(|e| OciError::Broken(e.to_string()))?;
+            if pool.bound() > before {
+                crate::sizes::rose();
+            }
+            taken
+        };
         self.shared.wake.notify_one();
         Ok(match taken {
             Take::Pooled(ns) => Some(ns),
@@ -624,7 +646,11 @@ impl Networks for NetChoice<'_> {
         let taken = match self.idle()? {
             None => return self.netns.take(),
             Some(mut idle) => {
+                let before = idle.per_owner();
                 let taken = idle.take(self.whose(may_share));
+                if idle.per_owner() > before {
+                    crate::sizes::rose();
+                }
                 if matches!(taken, Kept::Idle(_)) {
                     // Checked as its box went (`check_returns`), and nothing ran in it since.
                     idle.hand_on();

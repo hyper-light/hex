@@ -268,6 +268,11 @@ impl<T> Idle<T> {
         out
     }
 
+    /// The most idle namespaces an owner keeps now, learned.
+    pub fn per_owner(&self) -> usize {
+        self.per_owner.bound()
+    }
+
     /// How many of `owner`'s namespaces are idle.
     pub fn idle_of(&self, owner: &str) -> usize {
         self.by_owner.get(owner).map_or(0, VecDeque::len)

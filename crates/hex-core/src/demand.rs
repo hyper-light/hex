@@ -207,5 +207,193 @@ pub fn share(memory: u64, sharers: usize, each: u64) -> usize {
         .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX))
 }
 
+/// How many of a node's pools hold its memory, whose shares follow their demand ([`weighted`]).
+pub const MEMORY_POOLS: usize = 6;
+
+/// What a node learned, kept in its state so its next start begins there and takes no cold miss the last one had
+/// learned past (the lead's call, 2026-11-06): each learned size's peak, the seeds' spare, and the takes of each pool
+/// that holds memory, which weight their shares at the next start ([`weighted`]). The record is text, a key and a
+/// number a line between a version line and an `end` line, so a torn one has no end and reads as none; it changes
+/// append-only: a key a later node wrote is passed over, and one an earlier node didn't write reads as none seen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Peaks {
+    pub owner_cgroups: usize,
+    pub owner_netns: usize,
+    pub netns: usize,
+    pub ipc_uts: usize,
+    pub ahead: usize,
+    pub devfs_keys: usize,
+    pub devfs_per_key: usize,
+    pub seeds: usize,
+    pub spare: usize,
+    /// Each memory pool's takes, in the order the node's shell lists them.
+    pub takes: [u64; MEMORY_POOLS],
+}
+
+/// Why a record of peaks wasn't read: the shell counts it and starts as a node's first start does.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Unread {
+    #[error("it isn't a version 1 record of peaks")]
+    Version,
+    #[error("it has no end: torn")]
+    Torn,
+    #[error("line {0} isn't a key and a number")]
+    Line(usize),
+    #[error("key {0} is there twice")]
+    Twice(String),
+}
+
+const HEADER: &str = "hex-peaks 1";
+const END: &str = "end";
+/// The keys a record holds, in the order it writes them.
+const KEYS: [&str; 9 + MEMORY_POOLS] = [
+    "owner-cgroups",
+    "owner-netns",
+    "netns",
+    "ipc-uts",
+    "ahead",
+    "devfs-keys",
+    "devfs-per-key",
+    "seeds",
+    "spare",
+    "takes-0",
+    "takes-1",
+    "takes-2",
+    "takes-3",
+    "takes-4",
+    "takes-5",
+];
+
+impl Peaks {
+    /// The most bytes a record this node writes holds: its version line, each key with the longest number a `u64`
+    /// writes (20 digits), a space and a newline, and its end. A reader takes no more than twice this, room for a
+    /// later node's as many keys again, before it refuses the record.
+    pub fn most_bytes() -> usize {
+        KEYS.iter()
+            .map(|k| k.len().saturating_add(1 + 20 + 1))
+            .fold(
+                HEADER.len().saturating_add(END.len()).saturating_add(2),
+                usize::saturating_add,
+            )
+    }
+
+    fn values(&self) -> [u64; KEYS.len()] {
+        let u = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        let [t0, t1, t2, t3, t4, t5] = self.takes;
+        [
+            u(self.owner_cgroups),
+            u(self.owner_netns),
+            u(self.netns),
+            u(self.ipc_uts),
+            u(self.ahead),
+            u(self.devfs_keys),
+            u(self.devfs_per_key),
+            u(self.seeds),
+            u(self.spare),
+            t0,
+            t1,
+            t2,
+            t3,
+            t4,
+            t5,
+        ]
+    }
+
+    /// The record's text.
+    pub fn encode(&self) -> String {
+        let mut out = format!("{HEADER}\n");
+        for (key, value) in KEYS.iter().zip(self.values()) {
+            out.push_str(&format!("{key} {value}\n"));
+        }
+        out.push_str(END);
+        out.push('\n');
+        out
+    }
+
+    /// The peaks a record's text holds, or why it holds none.
+    pub fn decode(text: &str) -> Result<Self, Unread> {
+        let mut lines = text.lines();
+        if lines.next() != Some(HEADER) {
+            return Err(Unread::Version);
+        }
+        let mut values: [Option<u64>; KEYS.len()] = [None; KEYS.len()];
+        let mut ended = false;
+        for (n, line) in lines.enumerate() {
+            if line == END {
+                ended = true;
+                break;
+            }
+            let mut words = line.split(' ');
+            let (Some(key), Some(value), None) = (words.next(), words.next(), words.next()) else {
+                return Err(Unread::Line(n.saturating_add(2)));
+            };
+            let value: u64 = value
+                .parse()
+                .map_err(|_| Unread::Line(n.saturating_add(2)))?;
+            if let Some(at) = KEYS.iter().position(|k| *k == key)
+                && let Some(slot) = values.get_mut(at)
+                && slot.replace(value).is_some()
+            {
+                return Err(Unread::Twice(key.to_owned()));
+            }
+        }
+        if !ended {
+            return Err(Unread::Torn);
+        }
+        let v = |i: usize| values.get(i).copied().flatten().unwrap_or(0);
+        let z = |i: usize| usize::try_from(v(i)).unwrap_or(usize::MAX);
+        Ok(Self {
+            owner_cgroups: z(0),
+            owner_netns: z(1),
+            netns: z(2),
+            ipc_uts: z(3),
+            ahead: z(4),
+            devfs_keys: z(5),
+            devfs_per_key: z(6),
+            seeds: z(7),
+            spare: z(8),
+            takes: [v(9), v(10), v(11), v(12), v(13), v(14)],
+        })
+    }
+}
+
+/// `memory` split among pools by their demand, each `(takes, cost)`: a pool's share is the memory times its takes
+/// times its item's cost over the sum of those (the lead's call, 2026-11-06), so the pools that were used hold the
+/// memory in proportion to what they used. With no takes at all, as on a node's first start, the split is even.
+/// The shares never sum past `memory`.
+pub fn weighted(memory: u64, pools: &[(u64, u64)]) -> Vec<u64> {
+    // Each weight is under 2^128; shifted together until their sum fits in 64 bits, so the memory times one can't
+    // pass 2^128. Their ratios, which the shares follow, keep.
+    let mut weights: Vec<u128> = pools
+        .iter()
+        .map(|&(takes, cost)| u128::from(takes).saturating_mul(u128::from(cost)))
+        .collect();
+    let sum = |w: &[u128]| w.iter().fold(0u128, |a, &b| a.saturating_add(b));
+    let mut total = sum(&weights);
+    while total > u128::from(u64::MAX) {
+        for w in &mut weights {
+            *w >>= 1;
+        }
+        total = sum(&weights);
+    }
+    if total == 0 {
+        let even = u64::try_from(pools.len())
+            .ok()
+            .and_then(|n| memory.checked_div(n))
+            .unwrap_or(0);
+        return vec![even; pools.len()];
+    }
+    weights
+        .iter()
+        .map(|&w| {
+            let share = u128::from(memory)
+                .saturating_mul(w)
+                .checked_div(total)
+                .unwrap_or(0);
+            u64::try_from(share).unwrap_or(u64::MAX)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests;

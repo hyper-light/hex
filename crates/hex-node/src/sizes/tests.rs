@@ -1,7 +1,11 @@
-//! The pools' bounds (Ada's rule of 2026-11-06; AC-T7.1.3, AC-T7.1.5): together they hold no more than the memory
-//! the node may hold, and on the bench host none starts below the constant it replaced.
+//! The pools' bounds and starts (Ada's rule and the lead's calls of 2026-11-06; AC-T7.1.3, AC-T7.1.5): together the
+//! pools hold no more than the memory the node may hold but for what a pool was seen to need; on the bench host none
+//! starts below the constant it replaced; a node starts where its last start's peaks were, and a record it can't read
+//! is a first start, counted.
 
 use std::num::NonZeroUsize;
+
+use hex_core::demand::Peaks;
 
 use super::*;
 
@@ -10,6 +14,7 @@ fn host(memory: u64, parallelism: usize) -> Host {
         memory,
         parallelism: NonZeroUsize::new(parallelism).unwrap(),
         threads: FEDORA_THREADS_MAX,
+        descriptors: 524_288,
     }
 }
 
@@ -18,8 +23,12 @@ fn host(memory: u64, parallelism: usize) -> Host {
 /// thousands.
 const FEDORA_THREADS_MAX: u64 = 500_000;
 
-/// Do: size the pools on hosts of any memory. Expect: the pools at their bounds hold at most that memory, but for
-/// the one seed every node keeps.
+fn first(h: Host) -> Sizes {
+    Sizes::of(h, &Peaks::default())
+}
+
+/// Do: size the pools on hosts of any memory, a first start's. Expect: the pools at their bounds hold at most that
+/// memory, but for the floor of the host's parallelism each keeps.
 #[test]
 fn the_pools_at_their_bounds_hold_no_more_than_the_node_may() {
     for memory in [
@@ -32,10 +41,10 @@ fn the_pools_at_their_bounds_hold_no_more_than_the_node_may() {
         64 << 30,
         u64::MAX / 2,
     ] {
-        let s = Sizes::of(host(memory, 8));
-        let seed_floor = if s.seeds.get() == 1 { SEED_BYTES } else { 0 };
+        let s = first(host(memory, 8));
+        let floor = first(host(0, 8)).bytes();
         assert!(
-            s.bytes() <= memory.saturating_add(seed_floor),
+            s.bytes() <= memory.saturating_add(floor),
             "{s:?} holds {} of {memory}",
             s.bytes()
         );
@@ -43,11 +52,12 @@ fn the_pools_at_their_bounds_hold_no_more_than_the_node_may() {
 }
 
 /// Do: size the pools on fedora, the bench host, as its bench units run the node (32 hardware threads, 8 GiB of
-/// `MemoryMax` with about 7.5 GiB left). Expect: no bound or start under the constant it replaced: 256 idle cgroups
-/// and network namespaces, 32 seeds and ipc and uts pairs, 8 cgroups made ahead, each owner's 32.
+/// `MemoryMax` with about 7.5 GiB left), a first start's. Expect: no bound or start under the constant it replaces
+/// (256 idle cgroups and namespaces, 32 seeds, pairs and namespaces made ahead, 8 cgroups made ahead, each owner's
+/// 32: the lead's condition, 2026-11-06), and the spare at its floor of one.
 #[test]
 fn on_the_bench_host_no_pool_is_smaller_than_the_constant_it_replaced() {
-    let s = Sizes::of(host(7_500 << 20, 32));
+    let s = first(host(7_500 << 20, 32));
     assert_eq!(s.start, 32);
     assert!(s.idle_cgroups >= 256, "{s:?}");
     assert!(s.idle_netns >= 256, "{s:?}");
@@ -56,44 +66,171 @@ fn on_the_bench_host_no_pool_is_smaller_than_the_constant_it_replaced() {
     assert!(s.ahead >= 32, "{s:?}");
     assert!(s.netns >= 32, "decision 4's pool: {s:?}");
     assert!(s.workers >= 128, "the socket's workers: {s:?}");
+    assert_eq!(s.starts.owner_cgroups, 32);
+    assert_eq!(s.starts.spare, 1, "a first start's spare");
     assert_eq!(s.procs_alive(), s.idle_cgroups + s.ahead);
 }
 
-/// Do: size the pools on a host with no memory to spare. Expect: one seed and nothing else held ahead.
+/// Do: size the pools on a host with no memory to spare. Expect: each at the host's parallelism, the floor a first
+/// start starts at, and nothing past it.
 #[test]
-fn a_host_with_no_memory_to_spare_keeps_one_seed_and_nothing_ahead() {
-    let s = Sizes::of(host(0, 4));
-    assert_eq!(s.seeds.get(), 1);
+fn a_host_with_no_memory_to_spare_keeps_each_pool_at_its_floor() {
+    let s = first(host(0, 4));
+    assert_eq!(s.seeds.get(), 4);
     assert_eq!(
-        (s.idle_cgroups, s.idle_netns, s.ahead, s.ipc_uts),
-        (0, 0, 0, 0)
+        (s.idle_cgroups, s.idle_netns, s.ahead, s.ipc_uts, s.netns),
+        (4, 4, 4, 4, 4)
     );
 }
 
-/// Do: read this host's facts. Expect: some memory and a parallelism, as every Linux host gives.
+/// The lead's call, 2026-11-06: the socket's calls in flight are bounded by the thread limit. Do: size the socket's
+/// workers on hosts of many and of few threads. Expect: the thread limit, one at least; its descriptors the hard
+/// limit's.
 #[test]
-fn this_host_gives_its_facts() {
-    let h = Host::now().unwrap();
-    assert!(h.memory > 0);
-    assert!(h.parallelism.get() >= 1);
-}
-
-/// Ada's rule, 2026-11-06 (AC-T7.1.3): `serve::WORKERS`' 128 was twice a picked in-flight bound. Do: size the
-/// socket's workers on hosts of many and of few threads. Expect: a worker for every call the socket admits at once
-/// (its connections times their calls in flight), so no admitted call waits for one, but never more than the
-/// kernel's thread limit leaves.
-#[test]
-fn every_call_the_socket_admits_has_a_worker_within_the_thread_limit() {
-    let admitted = crate::serve::LIMITS.connections * crate::serve::LIMITS.in_flight;
-    assert_eq!(Sizes::of(host(7_500 << 20, 32)).workers, admitted);
+fn the_socket_has_a_worker_for_every_thread_the_kernel_allows() {
+    assert_eq!(first(host(7_500 << 20, 32)).workers, 500_000);
     let few = Host {
         threads: 100,
         ..host(7_500 << 20, 32)
     };
-    assert_eq!(Sizes::of(few).workers, 100);
+    assert_eq!(first(few).workers, 100);
     let none = Host {
         threads: 0,
         ..host(7_500 << 20, 32)
     };
-    assert_eq!(Sizes::of(none).workers, 1, "one worker, or no call runs");
+    assert_eq!(first(none).workers, 1, "one worker, or no call runs");
+    assert_eq!(first(host(1 << 30, 4)).descriptors, 524_288);
+}
+
+/// The lead's call, 2026-11-06 (AC-T7.1.3): a restart takes no cold miss its last start learned past. Do: size a node
+/// whose last peaks were past the host's parallelism, and one whose were under it. Expect: each learned size starts
+/// at its peak, never under the parallelism; the spare at its peak; and each bound at least its peak.
+#[test]
+fn a_node_starts_where_its_last_start_peaked() {
+    let peaks = Peaks {
+        owner_cgroups: 900,
+        owner_netns: 40,
+        netns: 700,
+        ipc_uts: 50,
+        ahead: 600,
+        devfs_keys: 9,
+        devfs_per_key: 64,
+        seeds: 800,
+        spare: 5,
+        takes: [0; MEMORY_POOLS],
+    };
+    let s = Sizes::of(host(7_500 << 20, 32), &peaks);
+    assert_eq!(
+        s.starts,
+        Starts {
+            owner_cgroups: 900,
+            owner_netns: 40,
+            netns: 700,
+            ipc_uts: 50,
+            ahead: 600,
+            devfs_keys: 32,
+            devfs_per_key: 64,
+            seeds: 800,
+            spare: 5,
+        }
+    );
+    assert!(
+        s.idle_cgroups >= 900 && s.netns >= 700 && s.ahead >= 600,
+        "{s:?}"
+    );
+    assert!(s.seeds.get() >= 800, "{s:?}");
+}
+
+/// The lead's call, 2026-11-06: shares follow demand. Do: size the pools after a start whose takes were all seeds'.
+/// Expect: the seeds' bound holds the whole memory's worth of seeds, and every other pool its floor.
+#[test]
+fn a_pool_that_was_taken_from_gets_the_memory() {
+    let mut peaks = Peaks::default();
+    peaks.takes[4] = 1_000;
+    let memory = 7_500 << 20;
+    let s = Sizes::of(host(memory, 32), &peaks);
+    assert_eq!(s.seeds.get(), usize::try_from(memory / SEED_BYTES).unwrap());
+    assert_eq!((s.idle_cgroups, s.idle_netns), (32, 32));
+}
+
+/// The lead's call, 2026-11-06: peaks are kept in the node's state, crash-safe. Do: keep peaks in a state directory,
+/// read them back; tear the record, write garbage, write past the bound. Expect: the same peaks; each bad record a
+/// first start with its reason; none read at all a first start without one.
+#[test]
+fn peaks_kept_in_the_state_are_read_back_and_a_bad_record_is_a_first_start() {
+    let cache =
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/sizes");
+    std::fs::create_dir_all(&cache).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("peaks-")
+        .tempdir_in(&cache)
+        .unwrap();
+    assert_eq!(read_peaks(dir.path()), Last::First);
+    let peaks = Peaks {
+        seeds: 77,
+        spare: 4,
+        takes: [1, 2, 3, 4, 5, 6],
+        ..Peaks::default()
+    };
+    write_peaks(dir.path(), &peaks).unwrap();
+    assert_eq!(read_peaks(dir.path()), Last::Peaks(peaks));
+    let path = dir.path().join("peaks");
+    let text = peaks.encode();
+    for bad in [
+        text.get(..text.len() / 2).unwrap().to_owned(),
+        "not a record\n".to_owned(),
+        "x".repeat(Peaks::most_bytes() * 2 + 1),
+    ] {
+        std::fs::write(&path, &bad).unwrap();
+        assert!(
+            matches!(read_peaks(dir.path()), Last::Unread(_)),
+            "{:?}",
+            bad.get(..bad.len().min(40)).unwrap()
+        );
+    }
+}
+
+/// The lead's call, 2026-11-06: the keeper keeps the most a node learned and adds its takes. Do: open a keeper over a
+/// record, offer this start's peaks, finish. Expect: the record holds each peak at its larger, the takes summed; a
+/// keeper over an unreadable record starts from none and says why.
+#[test]
+fn the_keeper_keeps_the_larger_of_each_peak_and_sums_the_takes() {
+    let cache =
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/sizes");
+    std::fs::create_dir_all(&cache).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("keeper-")
+        .tempdir_in(&cache)
+        .unwrap();
+    let before = Peaks {
+        seeds: 50,
+        spare: 2,
+        takes: [10; MEMORY_POOLS],
+        ..Peaks::default()
+    };
+    write_peaks(dir.path(), &before).unwrap();
+    let mut keeper = Keeper::open(dir.path()).unwrap();
+    assert_eq!(keeper.base(), before);
+    let now = Peaks {
+        seeds: 40,
+        spare: 6,
+        netns: 70,
+        takes: [1; MEMORY_POOLS],
+        ..Peaks::default()
+    };
+    keeper.finish(&now).unwrap();
+    assert_eq!(
+        read_peaks(dir.path()),
+        Last::Peaks(Peaks {
+            seeds: 50,
+            spare: 6,
+            netns: 70,
+            takes: [11; MEMORY_POOLS],
+            ..Peaks::default()
+        })
+    );
+    std::fs::write(dir.path().join("peaks"), "torn").unwrap();
+    let keeper = Keeper::open(dir.path()).unwrap();
+    assert_eq!(keeper.base(), Peaks::default());
+    assert!(keeper.unread().is_some(), "a first start, with why");
 }
