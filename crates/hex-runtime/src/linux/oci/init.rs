@@ -1311,6 +1311,11 @@ fn do_mount_pruned<'a>(
     Ok(())
 }
 
+/// The data of the empty read-only tmpfs a masked directory gets.
+pub(crate) const EMPTY_TMPFS: &str = "size=0k";
+/// [`EMPTY_TMPFS`] for `mount(2)`.
+const EMPTY_TMPFS_C: &std::ffi::CStr = c"size=0k";
+
 /// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its source, data options and
 /// flags the spec's: a detached mount descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
 /// devpts and cgroup2 this way, since it has no path to mount onto through `/proc/self/fd`; the agent
@@ -1436,7 +1441,7 @@ fn mask_path_pruned(
             Some(empty) => clone_masked_directory(empty.as_fd(), target_fd.as_fd())
                 .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
             None => {
-                let mount = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
+                let mount = make_fs("tmpfs", "tmpfs", EMPTY_TMPFS, MountFlags::RDONLY)
                     .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
                 rustix::mount::move_mount(mount.as_fd(), "", target_fd.as_fd(), "", FD_TO_FD)
                     .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?;
@@ -2003,7 +2008,7 @@ impl ProcSources {
     pub fn open() -> Result<Self, OciError> {
         let null = rustix::fs::open("/dev/null", OFlags::PATH | OFlags::CLOEXEC, Mode::empty())
             .map_err(|e| OciError::os("opening /dev/null for the prepared procs", e))?;
-        let empty = make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)?;
+        let empty = make_fs("tmpfs", "tmpfs", EMPTY_TMPFS, MountFlags::RDONLY)?;
         // One clone, dropped at once, asks the kernel whether it clones a detached mount.
         let empty = match rustix::mount::open_tree(
             &empty,
@@ -2129,7 +2134,7 @@ pub fn prepare_proc_for(
                         | OpenTreeFlags::OPEN_TREE_CLOEXEC,
                 )
                 .map_err(|e| OciError::os("masking a directory", format!("{rel}: {e}")))?,
-                None => make_fs("tmpfs", "tmpfs", "size=0k", MountFlags::RDONLY)
+                None => make_fs("tmpfs", "tmpfs", EMPTY_TMPFS, MountFlags::RDONLY)
                     .map_err(|e| OciError::os("masking a directory", format!("{rel}: {e}")))?,
             }
         } else {
@@ -2415,7 +2420,7 @@ fn mask_path(
             Some(empty) => clone_masked_directory(empty.as_fd(), target.as_fd())
                 .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?,
             None => {
-                rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(c"size=0k"))
+                rustix::mount::mount("tmpfs", &at, "tmpfs", MountFlags::RDONLY, Some(EMPTY_TMPFS_C))
                     .map_err(|e| OciError::os("masking a directory", format!("{path}: {e}")))?
             }
         }
@@ -2501,6 +2506,30 @@ mod tests {
         assert_eq!(fresh_clone_flags(&spec, true, false), rest | pair);
         assert_eq!(fresh_clone_flags(&spec, false, true), rest | net);
         assert_eq!(fresh_clone_flags(&spec, true, true), rest);
+    }
+
+    /// Ada's 2026-11-06 rule (T-T7.1.4, CLAUDE.md §2): do mount a tmpfs with the data of each empty tmpfs Hex makes (a
+    /// masked directory's, both spellings, and the pruned seed's root), read-only, in a user and mount namespace of
+    /// its own (unprivileged); expect its size bounded at one block, a page (`statfs`'s `f_blocks` 1), never 0, which
+    /// is a tmpfs with no bound at all (Documentation/filesystems/tmpfs.rst:94).
+    #[test]
+    fn each_empty_tmpfs_is_bounded_at_one_page() {
+        let point = tempfile::tempdir().unwrap();
+        for data in [
+            EMPTY_TMPFS,
+            EMPTY_TMPFS_C.to_str().unwrap(),
+            super::super::seed::ROOT_TMPFS.to_str().unwrap(),
+        ] {
+            let out = Command::new("unshare")
+                .args(["-Urm", "sh", "-c"])
+                .arg(r#"mount -t tmpfs -o "ro,$1" none "$0" && stat -f -c %b "$0""#)
+                .arg(point.path())
+                .arg(data)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{data}: {out:?}");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1", "{data}");
+        }
     }
 
     /// A root holding `/dev`, and the default nodes' names as plain files, so `mknodat` meets each.

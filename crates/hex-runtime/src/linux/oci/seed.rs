@@ -132,6 +132,9 @@ fn serve() -> Result<(), OciError> {
     }
 }
 
+/// The data of the pruned root's tmpfs.
+pub(crate) const ROOT_TMPFS: &std::ffi::CStr = c"size=64k,mode=755";
+
 /// Prunes the create seed's mount namespace once, at start (goal 5 plan step 2): unshare a mount
 /// namespace, make `/` private, mount a small tmpfs over `mountpoint`, pivot into it, detach the old
 /// root and make the tmpfs read-only. The namespace then holds exactly two mounts — its root and that
@@ -155,7 +158,7 @@ fn prune(mountpoint: &Path) -> Result<(), OciError> {
         mountpoint,
         "tmpfs",
         MountFlags::NOSUID,
-        Some(c"size=64k,mode=755"),
+        Some(ROOT_TMPFS),
     )
     .map_err(|e| OciError::os("the seed's root tmpfs", e))?;
     rustix::process::chdir(mountpoint).map_err(|e| OciError::os("chdir the seed's root", e))?;
