@@ -278,13 +278,20 @@ impl Side for Guest {
                 },
             )
             .unwrap();
-        // The walk's output ends when it does; then its end is waited for within the node's own answer
-        // patience, what any call to it waits.
+        // The walk's output ends when it does (the fact); its end after that is recorded on every run, the
+        // distribution its bound is to come from (the lead's rule for learned waits). Until that record
+        // exists, it waits within the node's own answer patience.
         let text = reader.join().unwrap();
+        let after = std::time::Instant::now();
         let exit = p
             .wait_for(hex_client::ANSWER_PATIENCE)
             .unwrap()
             .expect("the walk ended");
+        eprintln!(
+            "{}: the walk ended {} us after its output did",
+            image.name,
+            after.elapsed().as_micros()
+        );
         self.client.delete(&walker).unwrap();
         stage::unstage(self.link.as_ref(), id).unwrap();
         assert_eq!(exit, Exit::Code(0), "{}: the walk", image.name);
