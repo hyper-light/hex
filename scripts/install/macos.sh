@@ -3,9 +3,9 @@
 # "the installer, per OS"; sources in docs/research/runtime/installer-per-os.md §3). It sets up what the
 # process class's box-user mode needs (native plan step 2), so a user's boxes run as users of their own
 # with no further step:
-#   - the box users' pool, as Nix's installer makes its build users (§3.1): a group `hexbox` and hidden
-#     users `_hexbox1`..`_hexboxN` (shell /sbin/nologin, home /var/empty) in an id range checked free
-#     first, never reusing a taken id;
+#   - the box users' pool, as Nix's installer makes its build users (§3.1): a group `hexbox` and its first
+#     hidden user `_hexbox1` (shell /sbin/nologin, home /var/empty) at ids learned free in Apple's role
+#     range; the helper grows the pool from there as boxes need users, recording each in the manifest;
 #   - a group `hexnode` holding each --user: the users whose nodes may reach the helper;
 #   - the privileged helper (`hex __box-helper`) as a launchd daemon (§3.2-3.4): its binary in
 #     /Library/PrivilegedHelperTools (root's, so no user can replace what runs as root), a plain plist in
@@ -15,7 +15,7 @@
 # Every thing it makes is a line of its plan ("<kind> <target>"), written to the manifest before it is
 # made; uninstall undoes the manifest's lines and then lists what is left, which is nothing.
 #
-# usage: macos.sh install --binary <hex> [--user <name>]... [--count <n>] [--first-id <id>] [--dry-run]
+# usage: macos.sh install --binary <hex> [--user <name>]... [--first-id <id>] [--dry-run]
 #        macos.sh uninstall [--dry-run]
 #        macos.sh check [<plan file>]
 # `--dry-run` prints the plan and makes nothing. `check` lists what of a plan (default: the manifest's,
@@ -34,8 +34,9 @@ MANIFEST=$STATE/manifest
 NODE_GROUP=hexnode
 POOL_GROUP=hexbox
 POOL_PREFIX=_hexbox
-# The pool's size, as Nix's 32 build users (install-multi-user.sh:25): one box-user box per pool user.
-COUNT=30
+# The pool's first user, the one the installer makes; the helper grows the pool on demand from it (the
+# lead's call, 2026-11-06: no picked pool size), recording each account in the manifest.
+COUNT=1
 # Apple's role-account range: sysadminctl's usage, macOS 26.4, "Role accounts require name starting with _
 # and UID in 450-499 range" (§3.1). The pool's ids, hexnode's gid then hexbox's then the users' uids, are
 # learned at install time: the first run of COUNT+2 ids there that no user, group or process holds
@@ -100,11 +101,6 @@ taken_ids() {
 node_gid() { echo "$FIRST_ID"; }
 pool_gid() { echo $((FIRST_ID + 1)); }
 pool_uid() { echo $((FIRST_ID + 1 + $1)); }
-pool_uids() {
-  local i out=
-  for ((i = 1; i <= COUNT; i++)); do out=${out:+$out,}$(pool_uid "$i"); done
-  echo "$out"
-}
 
 # The plan: every thing install makes, one "<kind> <target>" line each.
 plan() {
@@ -148,6 +144,13 @@ check() {
       left=1
     fi
   done <"$list"
+  # Pool users the helper made are the manifest's too; any pool user the directory still lists is left.
+  local name
+  while read -r name; do
+    grep -qx "user $name" "$list" && continue
+    echo "left: user $name"
+    left=1
+  done < <("$DSCL" . -list /Users 2>/dev/null | grep -E "^${POOL_PREFIX}[1-9][0-9]*\$" || true)
   [ "$left" = 0 ] && echo "nothing of Hex's is left"
   return "$left"
 }
@@ -289,8 +292,14 @@ install_hex() {
     <string>__box-helper</string>
     <string>--socket</string>
     <string>$SOCK</string>
-    <string>--users</string>
-    <string>$(pool_uids)</string>
+    <string>--pool-group</string>
+    <string>$POOL_GROUP</string>
+    <string>--pool-gid</string>
+    <string>$(pool_gid)</string>
+    <string>--manifest</string>
+    <string>$MANIFEST</string>
+    <string>--peak-file</string>
+    <string>$SOCKDIR/pool-peak</string>
   </array>
   <key>Umask</key>
   <integer>7</integer>
@@ -331,7 +340,7 @@ uninstall_hex() {
   local kind target uid
   # The helper goes first, so no box starts while the pool empties.
   if present daemon "$LABEL"; then
-    launchctl bootout "system/$LABEL" || die "launchctl bootout system/$LABEL failed"
+    "$LAUNCHCTL" bootout "system/$LABEL" || die "launchctl bootout system/$LABEL failed"
   fi
   while read -r kind target; do
     [ "$kind" = user ] || continue
@@ -382,13 +391,11 @@ while [ "$#" -gt 0 ]; do
   case $1 in
     --binary) BINARY=${2:?--binary needs a path}; shift 2 ;;
     --user) USERS+=("${2:?--user needs a name}"); shift 2 ;;
-    --count) COUNT=${2:?--count needs a number}; shift 2 ;;
     --first-id) FIRST_ID=${2:?--first-id needs an id}; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) [ "$VERB" = check ] && [ "$#" = 1 ] && break; die "unknown argument $1" ;;
   esac
 done
-[[ $COUNT =~ ^[1-9][0-9]*$ ]] || die "--count must be a positive number"
 [ -z "$FIRST_ID" ] || [[ $FIRST_ID =~ ^[1-9][0-9]*$ ]] || die "--first-id must be a positive number"
 
 case $VERB in
