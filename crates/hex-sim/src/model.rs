@@ -49,6 +49,50 @@ pub struct NodeSpec {
     /// CPU in use by what runs there outside Hex's placements (co-tenants, the host itself), which
     /// the 90% CPU rule counts beside what Hex placed.
     pub background_milli: u64,
+    /// The classes it can run.
+    pub classes: Classes,
+}
+
+/// What runs a workload. Hex places three: OCI containers, Firecracker microVMs and Shards
+/// microVMs (Ada, 2026-11-06), each only on a node that can run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Class {
+    #[default]
+    Oci,
+    Firecracker,
+    Shards,
+}
+
+/// The classes a node can run, a bit each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Classes(u8);
+
+impl Classes {
+    pub const ALL: Self = Self(0b111);
+    pub const NONE: Self = Self(0);
+
+    pub fn with(self, class: Class) -> Self {
+        Self(self.0 | Self::bit(class))
+    }
+
+    pub fn has(self, class: Class) -> bool {
+        self.0 & Self::bit(class) != 0
+    }
+
+    fn bit(class: Class) -> u8 {
+        match class {
+            Class::Oci => 1,
+            Class::Firecracker => 2,
+            Class::Shards => 4,
+        }
+    }
+}
+
+impl Default for Classes {
+    /// A node that says nothing runs every class, so a trace written before classes reads as it did.
+    fn default() -> Self {
+        Self::ALL
+    }
 }
 
 /// What a workload is, for the filters that keep work off hosts it would harm or be harmed by
@@ -65,12 +109,13 @@ pub enum Kind {
     Session,
 }
 
-/// A workload's equivalence class: what it needs and what it is. Workloads of one class are
-/// placed alike.
+/// A workload's equivalence class: what it needs, what it is and what runs it. Workloads of one
+/// class are placed alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Demand {
     pub need: Resources,
     pub kind: Kind,
+    pub class: Class,
 }
 
 /// Who a workload's capacity is charged to: a repository or a person (`AC-T7.5.2`).
@@ -105,6 +150,7 @@ pub struct WorkloadSpec {
     /// How long it runs once started; `None` runs until the run ends.
     pub runs_for: Option<Time>,
     pub tenancy: Tenancy,
+    pub class: Class,
 }
 
 impl WorkloadSpec {
@@ -112,6 +158,7 @@ impl WorkloadSpec {
         Demand {
             need: self.need,
             kind: self.kind,
+            class: self.class,
         }
     }
 }

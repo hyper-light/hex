@@ -17,7 +17,7 @@ use hex_sim::SimError;
 use hex_sim::generate::{self, Shape};
 use hex_sim::index::{Sample, Scorer, Shapes};
 use hex_sim::model::{
-    Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
+    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, WorkloadId, WorkloadSpec,
 };
 use hex_sim::packing::{self, Clock};
 use hex_sim::rng::Rng;
@@ -281,11 +281,13 @@ fn two_nodes() -> Vec<NodeSpec> {
             id: NodeId(0),
             capacity: res(1000),
             background_milli: 0,
+            classes: Classes::ALL,
         },
         NodeSpec {
             id: NodeId(1),
             capacity: res(4000),
             background_milli: 0,
+            classes: Classes::ALL,
         },
     ]
 }
@@ -298,6 +300,7 @@ fn work(id: u64, cpu: u64) -> WorkloadSpec {
         arrives: 0,
         runs_for: None,
         tenancy: Tenancy::default(),
+        class: Class::Oci,
     }
 }
 

@@ -3,7 +3,8 @@
 
 use crate::error::SimError;
 use crate::model::{
-    Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId, WorkloadSpec,
+    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Resources, Tenancy, Time, WorkloadId,
+    WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -53,6 +54,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             // Uniform up to the node's CPU: about one node in ten starts above 90% from its
             // co-tenants alone, and placements push others past it.
             background_milli: rng.range(0, cpu_milli),
+            classes: Classes::ALL,
         });
     }
     let mut workloads = Vec::new();
@@ -115,6 +117,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             arrives,
             runs_for,
             tenancy: Tenancy::default(),
+            class: Class::Oci,
         });
     }
     Ok(Cluster::single_owner(nodes, workloads))

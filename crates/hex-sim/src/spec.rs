@@ -261,6 +261,8 @@ pub struct FilterReport {
     pub benchmark_with_build: u64,
     /// A session placed on a node above 90% CPU while another node had the room and wasn't.
     pub hot_sessions: u64,
+    /// A workload placed on a node that can't run its class.
+    pub class_off_node: u64,
 }
 
 impl FilterReport {
@@ -268,6 +270,7 @@ impl FilterReport {
         self.gpu_off_gpu
             .saturating_add(self.benchmark_with_build)
             .saturating_add(self.hot_sessions)
+            .saturating_add(self.class_off_node)
     }
 }
 
@@ -311,6 +314,9 @@ pub fn check_filters(cluster: &Cluster, run: &Run) -> Result<FilterReport, Viola
             r.placements = r.placements.saturating_add(1);
             if spec.need.gpus > 0 && facts.capacity.gpus == 0 {
                 r.gpu_off_gpu = r.gpu_off_gpu.saturating_add(1);
+            }
+            if !facts.classes.has(spec.class) {
+                r.class_off_node = r.class_off_node.saturating_add(1);
             }
             let shares = match spec.kind {
                 Kind::Benchmark => now.builds > 0,

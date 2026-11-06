@@ -32,7 +32,9 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use hex_sim::index::{FitIndex, Sample, Scorer, Shapes};
-use hex_sim::model::{Cluster, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
+use hex_sim::model::{
+    Class, Classes, Cluster, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec,
+};
 use hex_sim::packing::minimal_shapes;
 use hex_sim::store::{Outcome, Store, Write};
 
@@ -55,6 +57,7 @@ fn cluster(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> Clust
             id: NodeId(i),
             capacity: host,
             background_milli: 0,
+            classes: Classes::ALL,
         })
         .collect();
     let mean_cpu = recorded
@@ -75,6 +78,7 @@ fn cluster(recorded: &Cluster, seed: u64, runs: u64, placements: usize) -> Clust
             arrives: i as u64,
             runs_for: None,
             tenancy: Tenancy::default(),
+            class: Class::Oci,
         })
         .collect();
     Cluster::single_owner(nodes, workloads)

@@ -206,7 +206,7 @@ pub fn pack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
+    use crate::model::{Class, Classes, Kind, NodeId, NodeSpec, Tenancy, WorkloadId, WorkloadSpec};
 
     fn res(cpu: u64, mem: u64) -> Resources {
         Resources {
@@ -223,6 +223,7 @@ mod tests {
                     id: NodeId(i),
                     capacity: node,
                     background_milli: 0,
+                    classes: Classes::ALL,
                 })
                 .collect(),
             needs
@@ -235,6 +236,7 @@ mod tests {
                     arrives: id,
                     runs_for: None,
                     tenancy: Tenancy::default(),
+                    class: Class::Oci,
                 })
                 .collect(),
         )

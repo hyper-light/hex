@@ -8,7 +8,7 @@
 //! can't disagree on a tie. Best fit is the baseline the design scores against (Borg's, S1, CM[1]).
 
 use crate::error::SimError;
-use crate::model::{Demand, Kind, NodeId, NodeSpec, Resources};
+use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Resources};
 use crate::trace::TraceHash;
 
 /// A session is refused a node whose CPU in use, background and placed, is above this share of
@@ -175,6 +175,7 @@ impl Sample {
             need.mem_bytes,
             u64::from(need.gpus),
             kind_word(demand.kind),
+            class_word(demand.class),
         ] {
             h.word(word);
         }
@@ -183,6 +184,14 @@ impl Sample {
             .and_then(|n| h.finish().checked_rem(n))
             .and_then(|at| usize::try_from(at).ok())
             .unwrap_or(0)
+    }
+}
+
+fn class_word(class: Class) -> u64 {
+    match class {
+        Class::Oci => 0,
+        Class::Firecracker => 1,
+        Class::Shards => 2,
     }
 }
 
@@ -212,6 +221,8 @@ pub struct Refusals {
     pub shares: u64,
     /// A session, a node above 90% CPU.
     pub hot: u64,
+    /// A workload of a class the node can't run.
+    pub class: u64,
 }
 
 /// A sampled decision: the best fit among the scanned nodes that admit the demand, the window
@@ -240,6 +251,7 @@ impl Sampled {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Admits,
+    NoClass,
     NoGpu,
     NoRoom,
     Shares,
@@ -251,6 +263,7 @@ struct Slot {
     capacity: Resources,
     free: Resources,
     background_milli: u64,
+    classes: Classes,
     builds: u32,
     benchmarks: u32,
 }
@@ -258,6 +271,9 @@ struct Slot {
 impl Slot {
     fn verdict(&self, demand: &Demand) -> Verdict {
         let need = &demand.need;
+        if !self.classes.has(demand.class) {
+            return Verdict::NoClass;
+        }
         if need.gpus > 0 && self.capacity.gpus == 0 {
             return Verdict::NoGpu;
         }
@@ -350,6 +366,7 @@ impl FitIndex {
                 capacity: node.capacity,
                 free: node.capacity,
                 background_milli: node.background_milli,
+                classes: node.classes,
                 builds: 0,
                 benchmarks: 0,
             });
@@ -411,6 +428,10 @@ impl FitIndex {
             match slot.verdict(demand) {
                 Verdict::Admits => {}
                 Verdict::NoRoom => continue,
+                Verdict::NoClass => {
+                    refused.class = refused.class.saturating_add(1);
+                    continue;
+                }
                 Verdict::NoGpu => {
                     refused.gpu = refused.gpu.saturating_add(1);
                     continue;
@@ -530,6 +551,7 @@ mod tests {
         Demand {
             need,
             kind: Kind::Plain,
+            class: Class::Oci,
         }
     }
 
@@ -540,6 +562,7 @@ mod tests {
                 id: NodeId(u32::try_from(i).unwrap()),
                 capacity: *c,
                 background_milli: 0,
+                classes: Classes::ALL,
             })
             .collect()
     }
@@ -578,6 +601,36 @@ mod tests {
     /// AC-T7.6.3 and S3's filters, each alone: a benchmark refused beside a build and a build beside a
     /// benchmark; a session refused a node above 90% CPU, counting its background; GPU work refused a
     /// node without GPUs.
+    /// Do a Firecracker microVM where one node runs only OCI containers and the other every class;
+    /// expect the first to refuse it as NoClass and the scan to count that refusal, and an OCI
+    /// container still to fit both.
+    #[test]
+    fn a_class_the_node_cant_run_is_refused() {
+        let mut nodes = nodes(&[res(8_000, 8, 0), res(8_000, 8, 0)]);
+        nodes[0].classes = Classes::NONE.with(Class::Oci);
+        let index = FitIndex::new(&nodes).unwrap();
+        let microvm = Demand {
+            need: res(1_000, 1, 0),
+            kind: Kind::Plain,
+            class: Class::Firecracker,
+        };
+        assert_eq!(
+            index.verdict(NodeId(0), &microvm).unwrap(),
+            Verdict::NoClass
+        );
+        assert_eq!(index.verdict(NodeId(1), &microvm).unwrap(), Verdict::Admits);
+        let s = index.sampled_fit(&microvm, &Sample::whole());
+        assert_eq!(
+            (s.best.map(|k| k.node), s.refused.class),
+            (Some(NodeId(1)), 1)
+        );
+        let container = plain(res(1_000, 1, 0));
+        assert_eq!(
+            index.verdict(NodeId(0), &container).unwrap(),
+            Verdict::Admits
+        );
+    }
+
     #[test]
     fn each_filter_refuses_what_it_names() {
         let mut ns = nodes(&[res(10_000, 100, 0), res(10_000, 100, 2)]);
@@ -586,6 +639,7 @@ mod tests {
         let session = Demand {
             need: res(1_000, 1, 0),
             kind: Kind::Session,
+            class: Class::Oci,
         };
         assert_eq!(index.verdict(NodeId(0), &session).unwrap(), Verdict::Hot);
         assert_eq!(index.verdict(NodeId(1), &session).unwrap(), Verdict::Admits);
@@ -594,10 +648,12 @@ mod tests {
         let build = Demand {
             need: res(1, 1, 0),
             kind: Kind::Build,
+            class: Class::Oci,
         };
         let bench = Demand {
             need: res(1, 1, 0),
             kind: Kind::Benchmark,
+            class: Class::Oci,
         };
         index.take(NodeId(1), &build).unwrap();
         assert_eq!(index.verdict(NodeId(1), &bench).unwrap(), Verdict::Shares);
@@ -687,10 +743,10 @@ mod tests {
             let mut index = FitIndex::new(&ns).unwrap();
             for (node, c, m, g, k) in ops {
                 let node = NodeId(node % u32::try_from(caps.len()).unwrap());
-                let _ = index.take(node, &Demand { need: res(c, m, g), kind: kind(k) });
+                let _ = index.take(node, &Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci });
             }
             for (c, m, g, k) in needs {
-                let demand = Demand { need: res(c, m, g), kind: kind(k) };
+                let demand = Demand { need: res(c, m, g), kind: kind(k), class: Class::Oci };
                 proptest::prop_assert_eq!(index.sampled_fit(&demand, &Sample::whole()).best, oracle(&index, &demand));
             }
         }
