@@ -41,8 +41,7 @@ pub fn join_cgroup_on_exec(cmd: &mut Command, procs: Arc<OwnedFd>, nofile: Rlimi
                 Ok(_) => return Err(std::io::Error::from(rustix::io::Errno::IO)),
                 Err(e) => return Err(std::io::Error::from(e)),
             }
-            rustix::process::setrlimit(Resource::Nofile, nofile.clone())
-                .map_err(std::io::Error::from)
+            rustix::process::setrlimit(Resource::Nofile, nofile).map_err(std::io::Error::from)
         });
     }
 }
@@ -310,7 +309,7 @@ unsafe fn child(spawn: &Spawn, argv: &[*const c_char], envp: &[*const c_char], e
             fail(err, errno());
         }
     }
-    if let Err(e) = rustix::process::setrlimit(Resource::Nofile, spawn.nofile.clone()) {
+    if let Err(e) = rustix::process::setrlimit(Resource::Nofile, spawn.nofile) {
         fail(err, e.raw_os_error());
     }
     if let Some(cwd) = &spawn.cwd {

@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # Hex's installer for Linux: the one admin step (native plan step 6; docs/design/runtime.md, decision
-# "the installer, per OS"; sources in docs/research/runtime/installer-per-os.md). It sets up what the
-# process and oci classes' cgroup v2 delegation needs, so a user's node runs with no further step:
+# "the installer, per OS"; sources in docs/research/runtime/installer-per-os.md and nofile-limit.md). It
+# sets up what the process and oci classes' cgroup v2 delegation needs, so each named user's node runs
+# with no further step:
 #   - the `hex` binary at /usr/local/bin/hex;
-#   - a drop-in delegating cpu, io, memory and pids to every user's manager (user@.service);
-#   - the `hex-node` user service (Delegate=yes, DelegateSubgroup=agent: the node runs in a leaf and its
-#     boxes in a sibling), enabled for every user;
-#   - for each --user, lingering (their manager, and so their node, runs without a session), the
-#     service started now.
+#   - the `hex-node@.service` system template: a node per user, run as that user (User=), its cgroup
+#     delegated to it (Delegate=yes, every controller the system has; DelegateSubgroup=agent, so the node
+#     runs in a leaf and its boxes in a sibling), its descriptor limit set by root (LimitNOFILE=);
+#   - for each --user, `hex-node@<user>.service` enabled and started, serving /run/hex/<user>/node.sock.
+# No user's own manager (user@.service) is touched: one that already runs can't take a new hard limit
+# without a restart, which would end what runs under it (measured in the lab; the lead, 2026-11-05).
 # Every thing it makes is a line of its plan ("<kind> <target>"), written to the manifest before it is
 # made; uninstall undoes the manifest's lines and then lists what is left, which is nothing.
 #
-# usage: linux.sh install --binary <hex> [--user <name>]... [--dry-run]
+# usage: linux.sh install --binary <hex> --user <name> [--user <name>]... [--dry-run]
 #        linux.sh uninstall [--dry-run]
 #        linux.sh check [<plan file>]
 # `--dry-run` prints the plan and makes nothing. `check` lists what of a plan (default: the manifest's,
@@ -19,16 +21,17 @@
 set -euo pipefail
 
 BIN=/usr/local/bin/hex
-DROPIN=/etc/systemd/system/user@.service.d/50-hex-delegate.conf
-UNIT=/etc/systemd/user/hex-node.service
-WANTS=/etc/systemd/user/default.target.wants/hex-node.service
+UNIT=/etc/systemd/system/hex-node@.service
+WANTS=/etc/systemd/system/multi-user.target.wants
+RUN=/run/hex
+LIB=/var/lib/hex
 STATE=/var/lib/hex-install
 MANIFEST=$STATE/manifest
 # The node's descriptor limit, soft and hard (the unit below says why).
 NOFILE=1048576
 # DelegateSubgroup= is systemd 254's (systemd.resource-control(5)).
 SYSTEMD_MIN=254
-# How long a user's manager and node get to come up: a bounded wait, counted in 0.1 s steps.
+# How long a node gets to come up: a bounded wait, counted in 0.1 s steps.
 WAIT_STEPS=300
 
 die() { echo "linux.sh: $*" >&2; exit 1; }
@@ -38,40 +41,20 @@ usage() {
   exit 2
 }
 
-user_uid() { id -u "$1"; }
-
-# systemctl --user as user $1 against their running manager, through its private socket under
-# XDG_RUNTIME_DIR (setpriv: no PAM session or machined needed, unlike runuser or -M user@), each call
-# bounded by the installer's wait.
-user_ctl() {
-  local u=$1 uid
-  shift
-  uid=$(id -u "$u")
-  setpriv --reuid="$uid" --regid="$(id -g "$u")" --init-groups -- \
-    env XDG_RUNTIME_DIR="/run/user/$uid" timeout $((WAIT_STEPS / 10)) systemctl --user "$@"
-}
-user_home() { getent passwd "$1" | cut -d: -f6; }
-
 # The plan: every thing install makes, one "<kind> <target>" line each.
 plan() {
-  local d
-  for d in "$(dirname "$BIN")" "$(dirname "$DROPIN")" "$(dirname "$WANTS")"; do
+  local d u
+  for d in "$(dirname "$BIN")" "$WANTS" "$RUN" "$LIB"; do
     [ -d "$d" ] || echo "folder $d"
   done
   echo "file $BIN"
-  echo "file $DROPIN"
   echo "file $UNIT"
-  echo "link $WANTS"
-  local u uid home
   for u in "${USERS[@]}"; do
-    uid=$(user_uid "$u")
-    home=$(user_home "$u")
-    [ -e "/var/lib/systemd/linger/$u" ] || echo "linger $u"
+    echo "link $WANTS/hex-node@$u.service"
     echo "service $u"
-    echo "dir $home/.local/state/hex"
-    echo "dir /run/user/$uid/hex"
-    echo "dir /run/user/$uid/hex-node"
-    echo "cgroup /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/app.slice/hex-node.service"
+    echo "dir $RUN/$u"
+    echo "dir $LIB/$u"
+    echo 'cgroup /sys/fs/cgroup/system.slice/system-hex\x2dnode.slice/hex-node@'"$u"'.service'
   done
   [ -d "$STATE" ] || echo "folder $STATE"
   echo "file $MANIFEST"
@@ -84,13 +67,7 @@ present() {
     file) [ -f "$target" ] ;;
     link) [ -L "$target" ] ;;
     dir | folder | cgroup) [ -d "$target" ] ;;
-    linger) [ -e "/var/lib/systemd/linger/$target" ] ;;
-    service)
-      local uid
-      uid=$(id -u "$target" 2>/dev/null) || return 1
-      [ -d "/run/user/$uid/systemd" ] || return 1
-      user_ctl "$target" is-active --quiet hex-node.service 2>/dev/null
-      ;;
+    service) systemctl is-active --quiet "hex-node@$target.service" ;;
     *) die "unknown plan line kind $kind" ;;
   esac
 }
@@ -136,19 +113,10 @@ wait_for() {
   return 1
 }
 
-# Re-executes every running user manager (user@.service's reload), keeping its processes: a manager
-# reads the controllers it may hand on only when it starts, so daemon-reload alone leaves a running one
-# without the new delegation (docs/research/runtime/installer-per-os.md §1.4; measured in the lab).
-reload_user_managers() {
-  local unit
-  for unit in $(systemctl list-units 'user@*.service' --state=running --plain --no-legend | awk '{print $1}'); do
-    timeout $((WAIT_STEPS / 10)) systemctl reload "$unit"
-  done
-}
-
 install_hex() {
   [ -n "$BINARY" ] || die "install needs --binary <hex>"
   [ -x "$BINARY" ] || die "$BINARY isn't an executable"
+  [ "${#USERS[@]}" -gt 0 ] || die "install needs --user <name>: whose node it starts"
   preflight
   local u
   for u in "${USERS[@]}"; do id -u "$u" >/dev/null 2>&1 || die "no user $u"; done
@@ -161,58 +129,44 @@ install_hex() {
   # The plan is the manifest from the start, so an install cut short is undone by uninstall too.
   printf '%s\n' "$made" >"$MANIFEST"
   install -D -m 0755 "$BINARY" "$BIN"
-  write_file "$DROPIN" 0644 <<EOF
-# Installed by Hex's installer (scripts/install/linux.sh): every user's manager is delegated the
-# controllers Hex's boxes use, so a user's hex-node service hands them on to its boxes, and a hard
-# descriptor limit its hex-node service may take up to (a user unit can't exceed its manager's; the soft
-# limit everything else starts with stays systemd's 1024). docs/research/runtime/nofile-limit.md.
-[Service]
-Delegate=cpu io memory pids
-LimitNOFILE=1024:$NOFILE
-EOF
   write_file "$UNIT" 0644 <<EOF
-# Installed by Hex's installer (scripts/install/linux.sh): the node agent, serving its socket at
-# \$XDG_RUNTIME_DIR/hex/node.sock. It runs in the leaf "agent" and its boxes in "hex" beside it.
+# Installed by Hex's installer (scripts/install/linux.sh): user %i's node agent, serving its socket at
+# $RUN/%i/node.sock. It runs as %i in the leaf "agent" of a cgroup delegated to %i, its boxes in "hex"
+# beside it; its containers' state is on the tmpfs under $RUN/%i.
 [Unit]
-Description=Hex node agent
+Description=Hex node agent for %i
 Documentation=https://github.com/hyper-light/hex
 
 [Service]
 Type=exec
-ExecStart=$BIN node --socket %t/hex/node.sock --state %S/hex
-RuntimeDirectory=hex
-StateDirectory=hex
+User=%i
+ExecStart=$BIN node --socket $RUN/%i/node.sock --state $LIB/%i
+Environment=XDG_RUNTIME_DIR=$RUN/%i
+RuntimeDirectory=hex/%i
+RuntimeDirectoryMode=0700
+StateDirectory=hex/%i
+StateDirectoryMode=0700
 Delegate=yes
 DelegateSubgroup=agent
 # Room for the node's own descriptors at its bounds (330,112) and every kept network namespace's held
 # /proc/net files (4 x 66,048): 594,304. 1,048,576 is the kernel's default fs.nr_open, the most a hard
 # limit may be without that sysctl changed, and dockerd's before moby dropped infinity
-# (docs/research/runtime/nofile-limit.md §2-§3, §5).
+# (docs/research/runtime/nofile-limit.md §2-§3, §5). A system unit's limit is root's to set, where a user
+# unit's is capped at its manager's (§1.3).
 LimitNOFILE=$NOFILE
 Restart=on-failure
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl --global enable hex-node.service
-  local u uid
-  for u in "${USERS[@]}"; do loginctl enable-linger "$u"; done
-  reload_user_managers
   for u in "${USERS[@]}"; do
-    uid=$(user_uid "$u")
-    # The user's manager is up once its private socket is.
-    wait_for "$u's manager starting" test -S "/run/user/$uid/systemd/private" || die "$u's manager didn't start"
-    # The manager finishes starting (bounded) before it is asked for the node.
-    user_ctl "$u" is-system-running --wait >/dev/null || true
-    user_ctl "$u" daemon-reload
-    user_ctl "$u" start hex-node.service
-    if ! wait_for "$u's node serving /run/user/$uid/hex/node.sock" test -S "/run/user/$uid/hex/node.sock"; then
-      user_ctl "$u" status hex-node.service --no-pager >&2 || true
-      journalctl --no-pager -n 5 _UID="$uid" _COMM=hex >&2 || true
+    systemctl enable --now "hex-node@$u.service"
+    if ! wait_for "$u's node serving $RUN/$u/node.sock" test -S "$RUN/$u/node.sock"; then
+      systemctl status "hex-node@$u.service" --no-pager >&2 || true
       die "$u's node didn't come up (its status is above)"
     fi
-    echo "$u's node serves /run/user/$uid/hex/node.sock"
+    echo "$u's node serves $RUN/$u/node.sock"
   done
   echo "installed; uninstall with: sudo bash $0 uninstall"
 }
@@ -226,24 +180,19 @@ uninstall_hex() {
   # The services stop first, so their boxes and runtime directories go with them.
   while read -r kind target; do
     [ "$kind" = service ] || continue
-    if present service "$target"; then
-      user_ctl "$target" stop hex-node.service
-    fi
+    systemctl disable --now "hex-node@$target.service" 2>/dev/null || true
   done <<<"$list"
-  [ -L "$WANTS" ] && systemctl --global disable hex-node.service
   while read -r kind target; do
     case $kind in
       file | link) [ "$target" = "$MANIFEST" ] || rm -f -- "${target:?}" ;;
       dir)
-        # Only Hex's own directories, by name: a manifest line never removes anything else.
-        case ${target##*/} in
-          hex | hex-node) rm -rf -- "${target:?}" ;;
+        # Only a user's own directory under Hex's two, by place: a manifest line removes nothing else.
+        case $(dirname "$target") in
+          "$RUN" | "$LIB") rm -rf -- "${target:?}" ;;
           *) die "refusing to remove $target: not one of Hex's directories" ;;
         esac
         ;;
-      folder) ;;
-      linger) loginctl disable-linger "$target" ;;
-      service | cgroup) ;;
+      folder | service | cgroup) ;;
       *) die "unknown manifest line kind $kind" ;;
     esac
   done <<<"$list"
@@ -252,7 +201,6 @@ uninstall_hex() {
     [ "$kind" = folder ] && [ -d "$target" ] && rmdir --ignore-fail-on-non-empty -- "$target"
   done <<<"$list"
   systemctl daemon-reload
-  reload_user_managers
   rm -f -- "${MANIFEST:?}"
   rmdir --ignore-fail-on-non-empty "$STATE"
   local saved

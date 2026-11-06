@@ -77,7 +77,7 @@ fn the_seam_holds_its_contract_over_the_node_agents_socket() {
 }
 
 /// HEX-INST-3 (native plan step 6): on a machine where Hex's installer ran its one admin step, the
-/// node it installed (the `hex-node` user service) serves every Linux class with no further step: the
+/// node it installed (the user's `hex-node@<user>` service) serves every Linux class with no further step: the
 /// conformance suite passes over its socket, `HEX_INSTALLED_SOCKET`, on `oci` and `process` boxes.
 /// Run by the installer's lab (bench/install/linux_lab.sh); elsewhere it prints SKIP.
 #[test]

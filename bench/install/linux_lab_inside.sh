@@ -80,16 +80,22 @@ bash $INSTALL install --binary "$HEX" --user $U --dry-run | tee /tmp/plan
 grep -q "^linger " /tmp/plan && { echo "FAIL: the lab's linger isn't install's"; exit 1; }
 
 step "install: the one admin step"
+MANAGER_BEFORE=$(systemctl show -p MainPID --value user@$UID_.service)
 bash $INSTALL install --binary "$HEX" --user $U
-systemctl show user@$UID_.service -p DelegateControllers
 bash $INSTALL check /tmp/plan || true
+
+step "HEX-INST-7: install leaves $U's running manager as it was (a CI runner's work runs under it)"
+MANAGER_AFTER=$(systemctl show -p MainPID --value user@$UID_.service)
+echo "user@$UID_.service main pid: $MANAGER_BEFORE before, $MANAGER_AFTER after"
+[ "$MANAGER_BEFORE" = "$MANAGER_AFTER" ] || { echo "FAIL: install restarted $U's manager"; exit 1; }
+echo "PASS: the manager wasn't restarted"
 
 # The node's descriptors at its bounds (330,112) and the four /proc/net files each of up to 66,048 kept
 # network namespaces may hold (cp/t7-ext-s6 crates/hex-node/src/netns.rs, FilesBound: 256 x 2 + 65,536
 # kept, four files each): 330,112 + 264,192.
 NOFILE_NEED=594304
 step "HEX-INST-5: the installed node's soft descriptor limit covers its own and every kept namespace's files"
-NODE_PID=$(as_user systemctl --user show -p MainPID --value hex-node.service)
+NODE_PID=$(systemctl show -p MainPID --value hex-node@$U.service)
 grep "Max open files" /proc/$NODE_PID/limits
 soft=$(awk '/Max open files/ {print $4}' /proc/$NODE_PID/limits)
 if [ "$soft" = unlimited ] || [ "$soft" -ge "$NOFILE_NEED" ]; then
@@ -100,7 +106,7 @@ fi
 
 step "HEX-INST-3: the installed node serves every class to $U with no further step"
 set +e
-as_user env HEX_INSTALLED_SOCKET=/run/user/$UID_/hex/node.sock \
+as_user env HEX_INSTALLED_SOCKET=/run/hex/$U/node.sock \
   "$TESTBIN" an_installed_node_serves_every_class --exact --nocapture --test-threads=1 2>&1 | tail -20
 rc=${PIPESTATUS[0]}
 set -e
