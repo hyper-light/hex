@@ -22,7 +22,10 @@ containers are removed: its units' and the one its directory's root-owned files 
 
   python3 -I check_containers.py
 """
+import ctypes
 import os
+import re
+import select
 import shutil
 import socket
 import subprocess
@@ -33,9 +36,10 @@ import unittest
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 IMAGE = "registry.fedoraproject.org/fedora:44"
-DEADLINE_S = 180  # the lab image's start and oci_inside.sh's set-up before seam_oci, on a loaded host
 
-# seam_oci's stand-in: says it started (the fact the check waits on), then holds the pass where it is.
+# seam_oci's stand-in: says it started (the fact the check waits on), then holds the pass where it is. The hold's 600 s
+# is the stand-in's own end, not a measure: the check ends the unit long before it, and a check that dies leaves the
+# pass to end by itself then. A wait on the pass ends when the fact holds or the unit's main process ends.
 SEAM_OCI = """#!/usr/bin/env bash
 touch /opt/out/seam.started
 exec sleep 600
@@ -60,14 +64,74 @@ def why_not():
     return None
 
 
-def until(fact, what):
-    """Waits for `fact()` to hold, at most DEADLINE_S; fails naming `what` if it never does."""
-    end = time.monotonic() + DEADLINE_S
-    while time.monotonic() < end:
-        if fact():
-            return
-        time.sleep(0.5)
-    raise AssertionError(f"{what} didn't happen in {DEADLINE_S} s")
+def until(fact, what, watch, ends=None, bound_s=None):
+    """Waits for `fact()` to hold, looked at again each time `watch` (a descriptor that reads ready when the fact may
+    have changed: docker's events, an inotify watch) says so, never on a clock's guess (Ada's 2026-11-06 rule). It
+    fails naming `what` when `ends` (a pidfd: the unit whose work it waits for) reads ready first, or past `bound_s`,
+    where the work's bound is systemd's own (a unit's stop timeout)."""
+    end = None if bound_s is None else time.monotonic() + bound_s
+    poller = select.poll()
+    poller.register(watch, select.POLLIN)
+    if ends is not None:
+        poller.register(ends, select.POLLIN)
+    while not fact():
+        left = None if end is None else max(0, int((end - time.monotonic()) * 1000))
+        ready = dict(poller.poll(left))
+        if not ready:
+            raise AssertionError(f"{what} didn't happen within its bound, {bound_s} s")
+        if watch in ready:
+            try:
+                os.read(watch, 1 << 16)
+            except BlockingIOError:
+                pass
+        if ends is not None and ends in ready and not fact():
+            raise AssertionError(f"{what} didn't happen before its unit ended")
+
+
+def unit_pidfd(unit):
+    """A pidfd of the unit's main process, which reads ready once it has ended (pidfd_open(2))."""
+    pid = int(quiet("systemctl", "--user", "show", "-p", "MainPID", "--value", unit).stdout.strip() or 0)
+    if pid == 0:
+        raise AssertionError(f"{unit} has no main process: it ended as it started")
+    return os.pidfd_open(pid)
+
+
+def stop_bound_s(unit):
+    """How long systemd lets the unit's stop take (its TimeoutStopUSec, DefaultTimeoutStopSec unless set:
+    systemd-system.conf(5)), read from the unit, in seconds: the bound of its ExecStop's work."""
+    raw = quiet("systemctl", "--user", "show", "-p", "TimeoutStopUSec", "--value", unit).stdout.strip()
+    total = timespan_s(raw)
+    if not total:
+        raise AssertionError(f"{unit}'s stop timeout {raw!r} isn't a bound")
+    return total
+
+
+def timespan_s(text):
+    """A systemd time span as `systemctl show` writes one ("1min 30s", "90s", "500ms"), in seconds
+    (systemd.time(7)); 0 for none ("infinity", empty)."""
+    scale = {"h": 3600, "min": 60, "s": 1, "ms": 1e-3, "us": 1e-6}
+    return sum(float(n) * scale[u] for n, u in re.findall(r"(\d+(?:\.\d+)?)(min|ms|us|s|h)\b", text))
+
+
+def inotify_creates(directory):
+    """A descriptor that reads ready when a file is made in `directory` (inotify(7), IN_CREATE 0x100 in
+    include/uapi/linux/inotify.h)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0 or libc.inotify_add_watch(fd, os.fsencode(directory), 0x100) < 0:
+        raise OSError(ctypes.get_errno(), f"inotify on {directory}")
+    return fd
+
+
+def docker_events(since, *filters):
+    """docker's events since `since` (its own clock's seconds) that match `filters`, as a stream: its stdout reads
+    ready as one comes. The caller stops it."""
+    args = ["docker", "events", "--since", str(since), "--format", "{{.Status}} {{.ID}}"]
+    for f in filters:
+        args += ["--filter", f]
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    os.set_blocking(proc.stdout.fileno(), False)
+    return proc
 
 
 def ended(unit):
@@ -97,6 +161,9 @@ class RunEnd(unittest.TestCase):
             f.write("#!/bin/sh\nexit 1\n")
         os.chmod(os.path.join(tmp, "hex"), 0o755)
         out = os.path.join(tmp, "out")
+        os.makedirs(out)
+        made = inotify_creates(out)
+        self.addCleanup(os.close, made)
         env = {"PATH": os.environ["PATH"], "BENCH_HOST_OK": socket.gethostname(), "LOAD_GATE": "0", "FETCH": "0",
                "PHASES": "oci", "RUNTIMES": " ", "STANDIN": "0", "ROUNDS": "1",
                "CPUSET": str(min(os.sched_getaffinity(0))), "HEX_BENCH": os.path.join(tmp, "base"), "OUT_DIR": out,
@@ -108,7 +175,9 @@ class RunEnd(unittest.TestCase):
         cmd += ["bash", os.path.join(HERE, "host.sh"), os.path.join(tmp, "hex")]
         started = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(started.returncode, 0, started.stderr)
-        until(lambda: os.path.exists(os.path.join(out, "seam.started")), "the pass's seam_oci starting")
+        main = unit_pidfd(unit)
+        self.addCleanup(os.close, main)
+        until(lambda: os.path.exists(os.path.join(out, "seam.started")), "the pass's seam_oci starting", made, main)
         pid = quiet("systemctl", "--user", "show", "-p", "MainPID", "--value", unit).stdout.strip()
         name = f"hexbench-oci-{pid}"
         running = containers(f"name=^/{name}$", "status=running")
@@ -129,14 +198,21 @@ class RunEnd(unittest.TestCase):
 
     def test_a_sigkilled_units_containers_are_removed_by_its_reaper(self):
         # Do: SIGKILL every process of the unit at once mid-pass (its cgroup.kill; no trap of host.sh's runs). Expect:
-        # once the unit and its reaper have ended, no container of the run is left, and it was labelled with the run.
+        # its reaper removes the run's container (docker's destroy event, within the reaper's stop timeout), and it was
+        # labelled with the run.
         unit, name, labelled = self.pass_in_unit("kill", reaper=True)
         try:
             cgroup = quiet("systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit).stdout.strip()
-            with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
-                f.write("1")
-            until(lambda: ended(unit) and ended(f"reap-{unit}"), f"{unit} and its reaper ending")
-            self.assertEqual(containers(f"name=^/{name}$"), [], f"{name} left running after {unit}'s SIGKILL")
+            gone = docker_events(int(time.time()), f"container={name}", "event=destroy")
+            try:
+                with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
+                    f.write("1")
+                # The reaper removes it as systemd stops the reaper, within the reaper's stop timeout.
+                until(lambda: containers(f"name=^/{name}$") == [], f"{name} removed after {unit}'s SIGKILL",
+                      gone.stdout.fileno(), bound_s=stop_bound_s(f"reap-{unit}"))
+            finally:
+                gone.kill()
+                gone.wait()
         finally:
             quiet("docker", "rm", "-f", name)
         self.assertEqual(len(labelled), 1, f"{name} carried no hex.bench.run={unit} label")
@@ -146,8 +222,9 @@ class RunEnd(unittest.TestCase):
         # container of it.
         unit, name, _ = self.pass_in_unit("term", reaper=False)
         try:
+            # systemctl stop returns once the stop's job is done, the trap's removal within it.
             quiet("systemctl", "--user", "stop", unit)
-            until(lambda: ended(unit), f"{unit} ending")
+            self.assertTrue(ended(unit), f"{unit} still runs after its stop")
             self.assertEqual(containers(f"name=^/{name}$"), [], f"{name} left running after {unit}'s stop")
         finally:
             quiet("docker", "rm", "-f", name)
@@ -188,17 +265,23 @@ class OciValidation(unittest.TestCase):
         cmd += [f"--setenv={k}={v}" for k, v in env.items()]
         cmd += ["bash", os.path.join(os.path.dirname(HERE), "oci-validation", script)]
         cmd += [a.replace("{tmp}", tmp) for a in args]
+        events = docker_events(int(time.time()), f"label=hexcheck.case={case}")
+        self.addCleanup(events.wait)
+        self.addCleanup(events.kill)
         started = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(started.returncode, 0, started.stderr)
+        main = unit_pidfd(unit)
+        self.addCleanup(os.close, main)
         until(lambda: containers(f"label=hexcheck.case={case}", "status=running"),
-              f"{script}'s first container running")
+              f"{script}'s first container running", events.stdout.fileno(), main)
         labelled = containers(f"label=hexcheck.case={case}", f"label=hex.bench.run={unit}")
         cgroup = quiet("systemctl", "--user", "show", "-p", "ControlGroup", "--value", unit).stdout.strip()
         with open(f"/sys/fs/cgroup{cgroup}/cgroup.kill", "w") as f:
             f.write("1")
-        until(lambda: ended(unit) and ended(f"reap-{unit}"), f"{unit} and its reaper ending")
-        self.assertEqual(containers(f"label=hexcheck.case={case}"), [],
-                         f"{script}'s containers left after its unit's SIGKILL")
+        # The reaper removes them as systemd stops the reaper, within the reaper's stop timeout.
+        until(lambda: containers(f"label=hexcheck.case={case}") == [],
+              f"{script}'s containers removed after its unit's SIGKILL", events.stdout.fileno(),
+              bound_s=stop_bound_s(f"reap-{unit}"))
         self.assertNotEqual(labelled, [], f"{script}'s container carried no hex.bench.run={unit} label")
 
     def clear(self, tmp, unit, case):
@@ -232,6 +315,50 @@ class OciValidation(unittest.TestCase):
         if not had:
             self.addCleanup(quiet, "docker", "volume", "rm", volume)
         self.killed("docker_lab.sh", [sha, "oci_box"])
+
+
+@unittest.skipIf(sys.platform != "linux", "needs Linux (pidfds)")
+class Waits(unittest.TestCase):
+    """The waits themselves, without docker or systemd: each ends on its fact, never on a clock's guess."""
+
+    def test_a_wait_looks_again_when_its_watch_reads_ready(self):
+        # Do: a fact that holds once its watch has been written to. Expect: the wait returns, the write read.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        os.set_blocking(r, False)
+        seen = []
+        os.write(w, b"x")
+        until(lambda: seen.append(1) or len(seen) > 1, "the second look", r)
+        self.assertEqual(len(seen), 2)
+
+    def test_a_wait_fails_when_its_unit_ends_first(self):
+        # Do: a fact that never holds, its unit's process ended. Expect: the wait fails, naming what didn't happen.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        child = subprocess.Popen(["true"])
+        ends = os.pidfd_open(child.pid)
+        self.addCleanup(os.close, ends)
+        child.wait()
+        with self.assertRaisesRegex(AssertionError, "never-fact didn't happen before its unit ended"):
+            until(lambda: False, "never-fact", r, ends)
+
+    def test_a_wait_bounded_by_a_stop_timeout_fails_past_it(self):
+        # Do: a fact that never holds, with a bound and no unit. Expect: it fails past the bound, saying the bound.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        with self.assertRaisesRegex(AssertionError, "within its bound, 0.01 s"):
+            until(lambda: False, "never-fact", r, bound_s=0.01)
+
+    def test_systemds_time_spans_read_in_seconds(self):
+        # Do: read systemctl show's spans. Expect: their seconds; none for infinity.
+        self.assertEqual(timespan_s("1min 30s"), 90)
+        self.assertEqual(timespan_s("90s"), 90)
+        self.assertAlmostEqual(timespan_s("500ms"), 0.5)
+        self.assertEqual(timespan_s("2h 1min"), 7260)
+        self.assertEqual(timespan_s("infinity"), 0)
 
 
 if __name__ == "__main__":
