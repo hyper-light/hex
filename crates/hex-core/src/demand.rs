@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 
 /// A size learned from demand: at least its start, at most its bound, raised to each demand reported, never
-/// lowered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// lowered. The default holds none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Learned {
     size: usize,
     cap: usize,
