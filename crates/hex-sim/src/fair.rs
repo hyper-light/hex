@@ -470,6 +470,7 @@ mod tests {
                 gpus: 0,
             },
             kind: crate::model::Kind::Plain,
+            class: None,
             arrives: 0,
             runs_for: Some(10),
             tenancy: crate::model::Tenancy {

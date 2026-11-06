@@ -486,6 +486,7 @@ fn work(id: u64, cpu: u64) -> WorkloadSpec {
         id: WorkloadId(id),
         need: res(cpu),
         kind: Kind::Plain,
+        class: None,
         arrives: 0,
         runs_for: None,
         tenancy: Tenancy::default(),

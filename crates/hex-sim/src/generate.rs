@@ -3,8 +3,8 @@
 
 use crate::error::SimError;
 use crate::model::{
-    Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources, Tenancy,
-    Time, WorkloadId, WorkloadSpec,
+    Class, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources,
+    Tenancy, Time, WorkloadId, WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -113,6 +113,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             id: WorkloadId(id),
             need,
             kind,
+            class: None,
             arrives,
             runs_for,
             tenancy: Tenancy::default(),
@@ -148,7 +149,8 @@ pub fn tenants(
 }
 
 /// `cluster` with a burst (`T-T7.5.1`): `count` workloads of `owner`'s, all arriving at `at`, each of
-/// 1 to `max_cores` cores and 2 GiB a core, running 1 minute to `2 * mean_run` less a minute. The
+/// 1 to `max_cores` cores and 2 GiB a core, running 1 minute to `2 * mean_run` less a minute, and
+/// OCI containers, Firecracker microVMs and Shards microVMs in turn ([`Class::nth`]). The
 /// workloads are put back in arrival order (the burst after what arrived at `at` before it) and their
 /// ids made dense again.
 pub fn burst(
@@ -171,7 +173,7 @@ pub fn burst(
         .workloads
         .try_reserve_exact(extra)
         .map_err(|_| SimError::Config("no memory for the burst"))?;
-    for _ in 0..count {
+    for i in 0..count {
         let cores = rng.range(1, max_cores.max(1));
         cluster.workloads.push(WorkloadSpec {
             id: WorkloadId(u64::MAX),
@@ -184,6 +186,7 @@ pub fn burst(
                 gpus: 0,
             },
             kind: Kind::Plain,
+            class: Some(Class::nth(i)),
             arrives: at,
             runs_for: Some(rng.range(minute, longest)),
             tenancy: Tenancy {
@@ -332,7 +335,8 @@ pub struct Day {
     pub max_vms: usize,
 }
 
-/// A generated day of workloads ([`Day`]): every tenant an owner.
+/// A generated day of workloads ([`Day`]): every tenant an owner, and the workloads OCI containers,
+/// Firecracker microVMs and Shards microVMs in turn by id ([`Class::nth`]), a third of each.
 pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
     if day.nodes == 0 || day.tenants.is_empty() {
         return Err(SimError::Config("a day has nodes and tenants"));
@@ -420,6 +424,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             id: WorkloadId(id),
             need,
             kind: Kind::Plain,
+            class: Some(Class::nth(id)),
             arrives,
             runs_for: Some(runs_for),
             tenancy: Tenancy {

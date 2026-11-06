@@ -164,6 +164,7 @@ fn work(id: u64, cpu: u64, band: u8, group: Option<u32>) -> WorkloadSpec {
             gpus: 0,
         },
         kind: Kind::Plain,
+        class: None,
         arrives: 0,
         runs_for: None,
         tenancy: Tenancy {
@@ -277,4 +278,23 @@ fn a_disruption_ended_by_a_placement_reopens_its_queue() {
         let run = sim::run(&cluster, &preempting(nemesis)).unwrap();
         assert_eq!(holds_up(&cluster, &run), Ok(()), "seed {seed}");
     }
+}
+
+/// Found by `preemption_never_breaks_a_budget` (seed 2869266174429984972, nemesis seed
+/// 1647584078049989115): a node reported workload 32's run done after the store had preempted it,
+/// before the node saw the order to stop it; the plane's completion write met a record back in
+/// pending and stopped the run with `UnexpectedConflict`. Do that run; expect it to finish and its
+/// log to be one the specification makes, nothing lost or started twice.
+#[test]
+fn a_run_reported_done_as_it_is_preempted_is_dropped() {
+    let crash = 1647584078049989115u64;
+    let cluster = contested(2869266174429984972);
+    let nemesis = Nemesis::Random {
+        seed: crash,
+        first: crash % 40,
+        per_mille: 30,
+        max_crashes: 3,
+    };
+    let run = sim::run(&cluster, &preempting(nemesis)).unwrap();
+    assert_eq!(holds_up(&cluster, &run), Ok(()));
 }

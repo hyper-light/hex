@@ -144,6 +144,8 @@ pub struct Report {
     pub budget_passes: u64,
     /// Preemptions not made because the run's budget of them was spent.
     pub preemptions_refused: u64,
+    /// Completion reports dropped because the store had preempted the run they report.
+    pub reports_superseded: u64,
     /// Sampled decisions made, by deciders and again at commit.
     pub decisions: u64,
     /// Over those decisions' scans, nodes with room that a filter refused, by filter.
@@ -1816,7 +1818,27 @@ impl Sim<'_> {
                 self.plane.versions.remove(&id);
                 Ok(())
             }
-            Outcome::Conflict(_) => Err(SimError::UnexpectedConflict(id)),
+            Outcome::Conflict(_) => {
+                // The store preempted this run after it started (its record back in pending, or
+                // placed again since) before the node saw the order to stop it: the run was
+                // stopped, not done, and the workload runs again. Any other conflict is a bug.
+                let superseded = self.store.record(id).is_some_and(|r| {
+                    r.placements > run
+                        || (r.placements == run && r.preempted && r.state == State::Pending)
+                });
+                if !superseded {
+                    return Err(SimError::UnexpectedConflict(id));
+                }
+                if let Some(stopped) = self.stopped.get_mut(at) {
+                    *stopped = (*stopped).max(run);
+                }
+                self.report.reports_superseded = self
+                    .report
+                    .reports_superseded
+                    .checked_add(1)
+                    .ok_or(SimError::StepBudget(self.config.max_steps))?;
+                Ok(())
+            }
         }
     }
 }

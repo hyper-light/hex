@@ -635,6 +635,7 @@ mod tests {
                 gpus: 0,
             },
             kind: crate::model::Kind::Plain,
+            class: None,
             arrives: 0,
             runs_for: None,
             tenancy: crate::model::Tenancy::default(),

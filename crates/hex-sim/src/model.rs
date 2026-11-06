@@ -65,6 +65,29 @@ pub enum Kind {
     Session,
 }
 
+/// Which of Hex's runtimes a workload runs in: an OCI container, a Firecracker microVM or a Shards
+/// microVM (CP-T7.2's classes). The scheduler places all three alike by need and kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Class {
+    Oci,
+    Firecracker,
+    Shards,
+}
+
+impl Class {
+    /// The three, in order: a generator cycles through them by a workload's index.
+    pub const ALL: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
+
+    /// The `n`th of [`Class::ALL`], cycling.
+    pub fn nth(n: u64) -> Class {
+        match n % 3 {
+            0 => Class::Oci,
+            1 => Class::Firecracker,
+            _ => Class::Shards,
+        }
+    }
+}
+
 /// A workload's equivalence class: what it needs and what it is. Workloads of one class are
 /// placed alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,6 +124,9 @@ pub struct WorkloadSpec {
     pub id: WorkloadId,
     pub need: Resources,
     pub kind: Kind,
+    /// Which of Hex's three workloads it is, where its source records it: a recorded trace that
+    /// doesn't has `None`, and places the same.
+    pub class: Option<Class>,
     /// When its client first submits it.
     pub arrives: Time,
     /// How long it runs once started; `None` runs until the run ends.

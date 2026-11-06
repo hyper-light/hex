@@ -122,6 +122,7 @@ mod tests {
             id: WorkloadId(id),
             need,
             kind: Kind::Plain,
+            class: None,
             arrives: 0,
             runs_for: None,
             tenancy: Tenancy::default(),

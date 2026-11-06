@@ -18,7 +18,7 @@
 use hex_sim::fair::{self, Policy};
 use hex_sim::generate::{self, Day, Tenant};
 use hex_sim::model::Resources;
-use hex_sim::model::{Cluster, Kind};
+use hex_sim::model::{Class, Cluster, Kind};
 use hex_sim::replay;
 use hex_sim::sim::{self, Config};
 use hex_sim::spec;
@@ -61,13 +61,23 @@ fn four_tenants() -> Day {
     }
 }
 
-/// AC-T7.5.2: do a generated day of four equal-weight owners, each asking for more than its
+/// AC-T7.5.2: do a generated day of four equal-weight owners (its workloads a third each OCI
+/// containers, Firecracker microVMs and Shards microVMs), each asking for more than its
 /// quarter for ten hours; expect each owner's part of the capacity held while all four wait to
 /// be within 2% of 25% (0.5 percentage points) under bands-then-DRF, over at least eight contended
 /// hours; and (non-vacuity) submit order alone to miss that bar on the same day.
 #[test]
 fn four_equal_weight_owners_each_hold_a_quarter_under_contention() {
     let day = generate::day(4, &four_tenants()).unwrap();
+    // The day carries all three of Hex's workloads, a third each.
+    for class in Class::ALL {
+        let n = day
+            .workloads
+            .iter()
+            .filter(|w| w.class == Some(class))
+            .count();
+        assert!(n * 3 + 3 > day.workloads.len(), "{class:?}: {n}");
+    }
     let base = Config {
         workers: 4,
         max_events: 1 << 22,
@@ -235,7 +245,12 @@ fn four_equal_weight_owners_over_a_recorded_day() {
     }
     let day = generate::day(4, &four_tenants()).unwrap();
     let read = replay::parse(&as_trace(&day), &replay::Limits::default()).unwrap();
-    assert_eq!(read, day);
+    // The format records no class: read back, each workload's is unrecorded.
+    let mut unclassed = day.clone();
+    for w in &mut unclassed.workloads {
+        w.class = None;
+    }
+    assert_eq!(read, unclassed);
     let run = sim::run(&read, &config).unwrap();
     let shares = fair::measure(&read, &run.ran, &run.refused, run.report.end).unwrap();
     assert!(shares.worst_from_equal_ppm() <= 5_000, "{shares:?}");

@@ -174,6 +174,7 @@ pub fn parse(text: &str, limits: &Limits) -> Result<Cluster, TraceError> {
                         gpus,
                     },
                     kind,
+                    class: None,
                     arrives,
                     runs_for: Some(runs_for),
                     tenancy,
