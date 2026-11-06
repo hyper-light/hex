@@ -273,7 +273,6 @@ impl Node {
         fs::create_dir_all(&bundles)
             .and_then(|()| fs::set_permissions(&bundles, fs::Permissions::from_mode(0o700)))
             .map_err(|e| Refusal::os("making the bundles directory", e))?;
-        let supervisor = Supervisor::start(root.dir(), store.clone())?;
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
         // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
@@ -284,6 +283,7 @@ impl Node {
         // crate::sizes).
         let keeper = Keeper::open(state_dir)?;
         let sizes = Sizes::learned(&keeper.base())?;
+        let supervisor = Supervisor::start(root.dir(), store.clone(), sizes.descriptors)?;
         let pools = match owner {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
@@ -422,8 +422,9 @@ impl Node {
         self.devfs.proc_counts()
     }
 
-    /// Sets how many `oci` boxes' inits the node watches at once, [`supervise::INIT_BUDGET`] unless
-    /// set: past it `create` of an `oci` box is refused with [`Refusal::Exhausted`].
+    /// Sets how many `oci` boxes' inits the node watches at once, the node's hard `RLIMIT_NOFILE` unless set
+    /// ([`Sizes::descriptors`]): past it `create` of an `oci` box is refused with [`Refusal::Exhausted`]. A test
+    /// control, with no production caller: the budget-exhausted test needs a budget it can reach.
     pub fn with_init_budget(self, budget: usize) -> Result<Self, Refusal> {
         self.supervisor.set_budget(budget)?;
         Ok(self)

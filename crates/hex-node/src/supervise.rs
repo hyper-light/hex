@@ -24,14 +24,6 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, WaitIdStatus};
 
 use crate::store::Store;
 
-/// Most inits whose pidfds one node agent holds: one fd per live `oci` box. Past it `create` refuses
-/// with [`Refusal::Exhausted`] before making anything. It sits under the fd limit systemd gives a
-/// service (`DefaultLimitNOFILE=1024:524288`, systemd-system.conf(5)) once the agent raises its soft
-/// limit to the hard one, with room left for the agent's own files; and above the density the
-/// runtime design targets on one node (10,560 idle containers per GiB held). An operator sets
-/// another with [`crate::Node::with_init_budget`].
-pub const INIT_BUDGET: usize = 65_536;
-
 /// Most exec'd programs the agent watches for one box at once (to reap on its delete), past which exec
 /// is refused ([`Refusal::Exhausted`]), so the per-box tracking is bounded (CLAUDE.md §2). A program
 /// the caller reaps is forgotten at once, so this bounds concurrent unreaped execs, not a box's total;
@@ -60,7 +52,7 @@ static SPAWNING: RwLock<()> = RwLock::new(());
 
 /// The pids some node in this process still reaps itself: programs whose [`Proc`] may wait on them,
 /// and watched inits. A sweep leaves them alone. Bounded by the live programs and inits, each held
-/// to its own bound ([`INIT_BUDGET`], a box's process bound).
+/// to its own bound (the supervisor's init budget, a box's process bound).
 static OWNED: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 
 fn owned() -> Result<MutexGuard<'static, BTreeSet<u32>>, Refusal> {
@@ -145,8 +137,12 @@ fn poisoned<T>(_: std::sync::PoisonError<T>) -> Refusal {
 
 impl Supervisor {
     /// Makes this process a child subreaper and starts the supervising thread. `box_root` is the
-    /// node's box root under the cgroup root; records of reaped inits go to `store`.
-    pub fn start(box_root: &Path, store: Store) -> Result<Arc<Self>, Refusal> {
+    /// node's box root under the cgroup root; records of reaped inits go to `store`. `budget` is the most
+    /// inits whose pidfds it holds, one fd per live `oci` box, past which `create` refuses with
+    /// [`Refusal::Exhausted`] before making anything: the node's hard `RLIMIT_NOFILE`, read at run time
+    /// ([`crate::sizes::Sizes::descriptors`], getrlimit(2)), which the agent raises its soft limit to. It was
+    /// 65,536, systemd's figure copied (Ada's 2026-11-06 constants rule).
+    pub fn start(box_root: &Path, store: Store, budget: usize) -> Result<Arc<Self>, Refusal> {
         rustix::process::set_child_subreaper(Some(rustix::process::getpid()))
             .map_err(|e| Refusal::os("making the node agent a child subreaper", e))?;
         let rel = box_root
@@ -162,7 +158,7 @@ impl Supervisor {
         let supervisor = Arc::new(Self {
             epoll: Arc::clone(&epoll),
             inits: Mutex::new(Inits {
-                budget: INIT_BUDGET,
+                budget,
                 ..Inits::default()
             }),
             box_root: Path::new("/").join(rel).to_string_lossy().into_owned(),

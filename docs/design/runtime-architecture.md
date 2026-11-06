@@ -215,7 +215,9 @@ containers' state costing more than 0.015 ms of filesystem work in the create br
   - **Watching each init.** `create` opens the init's pidfd and checks that the process is the agent's child
     with the start time `create` recorded (`/proc/<pid>/stat` fields 4 and 22), so a recycled pid is never
     taken for it.
-  - **The budget.** The pidfds are held within a budget (`INIT_BUDGET`, 65,536 by default; set per node).
+  - **The budget.** The pidfds are held within a budget: the node's hard `RLIMIT_NOFILE`, read at run time
+    (getrlimit(2); `/proc/sys/fs/nr_open` where it is unlimited). It was `INIT_BUDGET`, 65,536, systemd's figure
+    copied, until Ada's 2026-11-06 constants rule.
     Past it, `create` refuses with `Refusal::Exhausted` naming the budget before anything is made, so no
     init is left unwatched.
   - **Recording exits.** One thread waits on every pidfd through an epoll set. When one turns readable it
@@ -1915,8 +1917,8 @@ cause a miss under the demand seen, and each counts its cold takes. The pure cor
     have (the least of `RLIMIT_NPROC`, getrlimit(2), and `/proc/sys/kernel/threads-max`, proc(5)). Workers start as
     calls find none idle and are kept, so an admitted call has a worker that can exist. `Sizes::workers` is the one
     accessor (the seeds' line of waiting creates is set by it).
-  - programs watched, by every connection together: the supervisor's pidfd budget (`INIT_BUDGET`, under systemd's
-    hard `DefaultLimitNOFILE`, systemd-system.conf(5)).
+  - programs watched, by every connection together: the supervisor's pidfd budget, the node's hard `RLIMIT_NOFILE`
+    read at run time (getrlimit(2)), as the connections' is.
   - connections: the node's hard `RLIMIT_NOFILE` (or `/proc/sys/fs/nr_open` where that is unlimited), one descriptor
     each; the kernel refuses an accept past what remains (`EMFILE`), and the socket pauses accepting until one closes.
   `wire::Limits`' `in_flight` and `programs` name node-wide budgets from here on, a bound no stricter for a client to
