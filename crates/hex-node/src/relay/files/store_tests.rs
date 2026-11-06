@@ -316,3 +316,33 @@ fn a_stage_out_of_room_evicts_unreferenced_layers_as_a_last_resort() {
         "a layer a box names is never evicted"
     );
 }
+
+/// HEX-GUEST-14 (§4a; HEX-GUEST-22's 2x run at 8232a8f: the budget said 5 MiB, what the file system had free,
+/// and the packer refused alpine before the relay could make room, though the cache held hundreds of MiB
+/// its last resort could take): a store holding an unreferenced layer of 7 entries and 4096 bytes and a
+/// referenced one: expect a stage's budget the file system's free room plus the unreferenced layer's, never
+/// the referenced one's.
+#[test]
+fn a_stages_budget_counts_what_the_last_resort_can_take() {
+    let dir = lab();
+    let store = dir.path().join(STORE);
+    let spare = layer(&store, 'a', 1_000, 4096);
+    std::fs::write(store.join(format!("{spare}{SIZE}")), "7 4096\n").unwrap();
+    let kept = layer(&store, 'c', 500, 1 << 30);
+    std::fs::create_dir(dir.path().join("kept")).unwrap();
+    std::fs::write(dir.path().join("kept").join(RECORD), format!("{kept}\n")).unwrap();
+    let (stage, budget) = Stage::begin(dir.path(), BoxId::new("t").unwrap(), &[]).unwrap();
+    let free = stage.free;
+    assert!(
+        budget.entries >= free.entries + 7 && budget.entries < free.entries + 7 + (1 << 10),
+        "{} of {} free",
+        budget.entries,
+        free.entries
+    );
+    assert!(
+        budget.bytes >= free.bytes + 4096 && budget.bytes < free.bytes + (1 << 30),
+        "{} of {} free",
+        budget.bytes,
+        free.bytes
+    );
+}

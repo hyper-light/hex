@@ -262,7 +262,8 @@ const LAYER_BYTES: usize = 1 + DIGEST_BYTES;
 const BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
 /// A stage's answer to its opening, before the packer sends an entry: what the staged root's file system
-/// has free for it (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`), which of the opening's layers the
+/// has free for it (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`, with what the layers no box names
+/// hold, which the relay takes as a last resort when it runs out of room), which of the opening's layers the
 /// guest already holds, and how many layers its store can hold: one each per inode its file system holds
 /// (`f_files`; its bytes where it keeps no count), since a layer is at least its folder. The host bounds what
 /// it remembers of layers' digests by it.

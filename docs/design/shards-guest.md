@@ -346,7 +346,9 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
       another relay process left, and a layer it was reclaiming (`.gone-<pid>-<n>`), is removed when a stage
       opens, and what this process left with its stage.
     - **The budget:** the relay answers a stage's opening with what its staged folder's file system has free
-      (statvfs(3)), and both sides spend against it: free inodes for entries, bytes free to an unprivileged
+      (statvfs(3)), with what the layers no box names hold (their size files), which its last resort can
+      take, so the packer never refuses a stage whole-root staging would have staged (it did, alpine's, at
+      8232a8f, with 5 MiB free and the cache holding hundreds), and both sides spend against it: free inodes for entries, bytes free to an unprivileged
       writer for file and xattr bytes; inodes in use bound what a removal visits, and its inodes how many
       layers its store can hold. A file system that keeps no inode count (btrfs: statfs(2), "fields that are
       undefined for a particular filesystem are set to 0") bounds entries by its bytes instead, free, in use

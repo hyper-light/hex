@@ -624,6 +624,7 @@ impl Stage {
         let mut present = Vec::with_capacity(wanted.len());
         let mut absent = VecDeque::new();
         let need;
+        let mut spare = Spend::default();
         {
             let _lock = lock(&store)?;
             // The record first, so no reclaim takes a layer this stage names while it stages.
@@ -664,6 +665,14 @@ impl Stage {
                 present.push(held);
             }
             need = read_spend(&store, NEED);
+            // What the last resort can take for this stage: every layer no box names (this stage's own
+            // record is written, so its layers aren't among them), as their size files say.
+            let held = referenced(&staged)?;
+            for name in names(&store)? {
+                if is_layer_name(&name) && !held.contains(&name) {
+                    spare = spare.plus(read_spend(&store, &format!("{name}{SIZE}")));
+                }
+            }
         }
         let free = free(&staged)?;
         let opaque_xattr = if rustix::process::geteuid().is_root() {
@@ -693,9 +702,11 @@ impl Stage {
                 opaque_xattr,
                 seq: 0,
             },
+            // What the stage may spend: what's free, and what the last resort can take ([`Stage::room`]),
+            // so the packer never refuses a stage whole-root staging would have staged.
             files::Budget {
-                entries: free.entries,
-                bytes: free.bytes,
+                entries: free.entries.saturating_add(spare.entries),
+                bytes: free.bytes.saturating_add(spare.bytes),
                 present,
                 capacity: free.capacity,
             },
