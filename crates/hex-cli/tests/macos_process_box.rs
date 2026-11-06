@@ -326,3 +326,44 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
         "ends not seen as the bound's kill when they happened: {late:?}"
     );
 }
+
+/// HEX-INST-6 (native plan step 6, Ada 2026-11-06), as on Linux: do run a program in a box whose spec
+/// names no RLIMIT_NOFILE, the leader and then an exec'd one, and have each print its soft and hard
+/// descriptor limits; expect Docker 29's 1024:524288, capped at the node's hard limit, never the node's
+/// own (`hex_core::limits`).
+#[test]
+fn a_box_naming_no_nofile_gets_dockers_default() {
+    let rt = runtime();
+    let id = BoxId::new("mac-nofile").unwrap();
+    let _ = rt.delete(&id);
+    rt.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Process,
+    })
+    .expect("create");
+    let hard = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    let want = hex_core::limits::default_nofile(hard);
+    let want = format!("{}:{}", want.soft, want.hard);
+    for which in ["leader", "exec'd"] {
+        let (mut out, w) = std::io::pipe().expect("pipe");
+        let mut p = rt
+            .exec(
+                &id,
+                Program::of(&["/bin/sh", "-c", r#"echo "$(ulimit -Sn):$(ulimit -Hn)""#]),
+                Stdio {
+                    stdout: Some(w),
+                    ..Stdio::null()
+                },
+            )
+            .expect("exec");
+        let mut seen = String::new();
+        std::io::Read::read_to_string(&mut out, &mut seen).expect("read");
+        assert_eq!(
+            p.wait_for(Duration::from_secs(10)).expect("wait"),
+            Some(Exit::Code(0))
+        );
+        assert_eq!(seen.trim(), want, "the {which} program's limits");
+    }
+    rt.delete(&id).expect("delete");
+}
