@@ -342,7 +342,7 @@ real class held to the simulator's trace), runs as each OS's own tests. Where it
 | Linux arm64 | **Built and linted**: the Linux clippy gate checks `aarch64-unknown-linux-gnu` and `-musl` with `-D warnings` (gates 7/7 at e1b4c01, fedora unit hex-native-s7-gates-20261106T132708Z); the musl aarch64 `hex` is what step 5's Shards guest runs. The suite isn't run natively: no Linux arm64 machine in the lab | As `process` |
 | macOS arm64 (the Mac Studio) | **Passes** (rootless; `macos_process_box.rs` 7/7 on adas-mac-studio-2 at abdbfd0, a launchd job outside kiln's pacing) | Linux images through a Shards guest: native step 5, integrated into `cp/t7-native` (ebf01f7); its record is step 5's |
 | macOS amd64 (Intel) | **Built and linted**: the macOS clippy gate checks `x86_64-apple-darwin` with `-D warnings` (gates 7/7 at a7670e0, fedora unit hex-native-s7-gates-20261106T135145Z), and `cargo build --workspace --target x86_64-apple-darwin` at a7670e0 exits 0 on adalundhe-macbook-pro (Apple M5 Max, macOS 26.5.2; a launchd one-shot, a fresh target dir, 2026-11-06 13:52Z), an x86_64 Mach-O `hex`. Not run: no Intel Mac in the lab | Refused by name: Shards has no x86_64 macOS backend |
-| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | **Passes** (HCS, native step 4): `windows_oci_box` 2/2 on jupiter, no skips (step 4's log `suite-20261106T134045Z.log`, nanoserver:ltsc2025 layers), built from the code of `cp/t7-native-s4` 22a7741, which c4961c1 shares; jupiter's `cargo test --workspace` at c4961c1 exits 0 (`wstest-20261106T134416Z.log`): conformance and HEX-DIFF-1..6 match the oracle, TERM ending the init as `Signal(15)`, and the step's criteria pass |
+| Windows amd64 (jupiter) | **Passes** (job objects; `windows_process_box` 9/9 on jupiter at 1a2e1eb and e322d7b, the Windows agent's record `bench/install/records/windows-jupiter-20261105.txt` on `cp/t7-native-windows`) | **Passes** (HCS, native step 4): `windows_oci_box` 2/2 on jupiter at `cp/t7-native-s4` 5f712ff, real layers, no skips, HEX-RT-14 included (step 4's log `suite-20261106T191231Z.log`); jupiter's `cargo test --workspace` at 5f712ff exits 0 (`wstest-20261106T191231Z.log`): conformance and HEX-DIFF-1..6 match the oracle, TERM ending the init as `Signal(15)`, and the step's criteria pass |
 | Windows arm64 | Skipped for now (Ada, 2026-11-03) | Skipped |
 
 The suite's divergences so far, each fixed where the contract says: a Windows box with nothing running took a
@@ -363,7 +363,7 @@ Intel macOS built on adalundhe-macbook-pro at a7670e0, and the musl aarch64 `hex
 Windows arm64 is skipped (Ada). Every OS's `process` class is benchmarked against its competitors (`bench/native/RESULT.md`).
 Its CLAUDE.md changes are approved by Ada, 2026-11-06, as written: the Gates block's Linux and macOS lint lines
 (1b1fea3, 47a9683) and §12's `sysctlbyname("kern.argmax")` for the exec bound (08d52a0).
-Final once fedora's gates pass at 81c6ad8 (unit hex-native-s4-gates-20261106T144702Z): at c4961c1 gate 4 refused an `unreachable!` in step 4's device test, and 81c6ad8 changes only that test line (plus a bench script).
+Final once fedora's 7 gates pass at 5f712ff (step 4's run; 6 of 7 already pass on adas-mac-studio-2, all but Linux `cargo test`).
 
 ## Next
 
