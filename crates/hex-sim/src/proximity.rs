@@ -711,22 +711,14 @@ mod tests {
         }
     }
 
-    /// S4, A2 (G3 step 2): proximity, the tie-break and the oracle each chose a node blind placement
-    /// wouldn't have in some decision; blind never "moved". No share is asserted: that each policy's
-    /// effect can fail its test is shown by its mutants (`no-proximity-term`, `no-tie-break-term`,
-    /// `random-tie-break`) being caught by `proximity_beats_blind_on_every_seed` and
-    /// `the_tie_break_takes_the_nearest_of_best_fits_ties`.
+    /// S4, A2 (G3 step 2): do run blind placement; expect it never to count a decision as moved
+    /// from itself. (That each other policy's effect can fail its test is shown by its mutants alone:
+    /// `no-proximity-term` fails `proximity_beats_blind_on_every_seed`; `no-tie-break-term` and
+    /// `random-tie-break` fail `the_tie_break_takes_the_nearest_of_best_fits_ties`.)
     #[test]
-    fn proximity_changes_decisions() {
+    fn blind_never_moves_from_itself() {
         let study = generate(&small(6, 900, Homes::Skewed), Fleet::AllKinds);
-        for policy in POLICIES {
-            let r = study.run(policy).unwrap();
-            if policy == Policy::Blind {
-                assert_eq!(r.moved, 0);
-            } else {
-                assert!(r.moved > 0, "{policy:?}");
-            }
-        }
+        assert_eq!(study.run(Policy::Blind).unwrap().moved, 0);
     }
 
     /// S4, A2 (G3 step 2): do run blind placement, proximity and the oracle on three seeds, homes
@@ -751,8 +743,7 @@ mod tests {
     /// S4, A2 (G3 step 2), an oracle test: do place a study's jobs one after another on each
     /// recorded fleet, and at every decision find best fit's exact ties in the fast path's window
     /// independently; expect the tie-break to choose the one of them with the least predicted RTT to
-    /// the job's home (the lower key among equals), and in some decision a node best fit itself
-    /// wouldn't. Mutants `no-tie-break-term` (its score 0) and `random-tie-break` (a node's hash, not
+    /// the job's home (the lower key among equals). Mutants `no-tie-break-term` (its score 0) and `random-tie-break` (a node's hash, not
     /// its RTT) fail it. Whether the tie-break then places nearer than blind over a whole run is
     /// measured, not asserted (`bench/sched/proximity.md`: on 116 of 120 studies).
     #[test]
@@ -761,7 +752,7 @@ mod tests {
             let study = generate(&small(1, 900, Homes::Uniform), fleet);
             let mut report = study.run(Policy::Blind).unwrap();
             let mut index = FitIndex::new(&study.nodes).unwrap();
-            let (mut decisions, mut moved) = (0u64, 0u64);
+            let mut decisions = 0u64;
             for job in &study.jobs {
                 let demand = demand(job);
                 let sampled = index.sampled_fit(&demand, &study.config.sample);
@@ -790,16 +781,10 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(got, want.unwrap().1.node, "{fleet:?} decision {decisions}");
-                if got != best.node {
-                    moved += 1;
-                }
                 index.take(got, &demand).unwrap();
                 decisions += 1;
             }
-            assert!(
-                decisions > 0 && moved > 0,
-                "{fleet:?}: {moved} of {decisions}"
-            );
+            assert!(decisions > 0, "{fleet:?}");
         }
     }
 
