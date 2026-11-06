@@ -278,11 +278,13 @@ impl Side for Guest {
                 },
             )
             .unwrap();
+        // The walk's output ends when it does; then its end is waited for within the node's own answer
+        // patience, what any call to it waits.
+        let text = reader.join().unwrap();
         let exit = p
-            .wait_for(std::time::Duration::from_secs(600))
+            .wait_for(hex_client::ANSWER_PATIENCE)
             .unwrap()
             .expect("the walk ended");
-        let text = reader.join().unwrap();
         self.client.delete(&walker).unwrap();
         stage::unstage(self.link.as_ref(), id).unwrap();
         assert_eq!(exit, Exit::Code(0), "{}: the walk", image.name);
@@ -294,7 +296,24 @@ fn given(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
 }
 
-fn guest() -> Option<Guest> {
+/// The bytes of `layers` unpacked: their tar streams' lengths, at least what the staged root's files hold.
+fn unpacked(layers: &[PathBuf]) -> u64 {
+    layers
+        .iter()
+        .map(|l| {
+            std::io::copy(
+                &mut flate2::read::GzDecoder::new(std::fs::File::open(l).unwrap()),
+                &mut std::io::sink(),
+            )
+            .unwrap()
+        })
+        .sum()
+}
+
+/// A guest of Shards' least size (one vCPU, `min_memory_mib`), and memory for the largest image staged in
+/// it: the guest's staged folder is a tmpfs, which holds half its memory by default (tmpfs(5)), so twice
+/// that image's unpacked bytes more.
+fn guest(images: &[Image]) -> Option<Guest> {
     use shards_api::Guests;
     let (kernel, initrd, binary) = (
         given("HEX_GUEST_KERNEL")?,
@@ -305,8 +324,16 @@ fn guest() -> Option<Guest> {
         binary,
         kernel,
         initrd,
-        vcpus: 2,
-        memory_mib: 2048,
+        vcpus: 1,
+        memory_mib: {
+            let largest = images
+                .iter()
+                .map(|i| unpacked(&i.layers))
+                .max()
+                .unwrap_or(0);
+            let mib = (2 * largest).div_ceil(1 << 20);
+            (shards_api::min_memory_mib(std::env::consts::ARCH) + mib).next_multiple_of(2)
+        },
         shares: Vec::new(),
         staged: hex_client::guest::stage::STAGED.to_owned(),
     };
@@ -349,7 +376,7 @@ fn each_images_staged_root_holds_what_containerds_unpack_holds() {
             return;
         }
     } else {
-        match guest() {
+        match guest(&images(&reference)) {
             Some(g) => Box::new(g),
             None => {
                 eprintln!(
@@ -388,7 +415,7 @@ fn each_images_staged_root_holds_what_containerds_unpack_holds() {
                 ""
             }
         );
-        for d in diffs.iter().take(40) {
+        for d in &diffs {
             eprintln!("  {d}");
         }
         if !diffs.is_empty() {

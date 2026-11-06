@@ -139,8 +139,57 @@ fn a_stage_past_its_bounds_is_refused_before_it_is_sent() {
     assert_eq!(
         pack(&mut Vec::new(), &id(), &items, &small),
         Err(Refusal::Exhausted {
-            what: "file bytes in one stage",
+            what: "file and xattr bytes in one stage",
             bound: 9
         })
     );
+}
+
+/// A relay stand-in: each dial a socket pair whose far end answers a stage's opening with `budget`, then
+/// reads to the end and answers `Done`.
+#[cfg(unix)]
+struct Budgeted {
+    budget: (u64, u64),
+}
+
+#[cfg(unix)]
+impl super::super::Link for Budgeted {
+    fn dial(&self, _port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        use std::os::unix::net::UnixStream;
+        let (near, mut far) = UnixStream::pair().unwrap();
+        let (entries, bytes) = self.budget;
+        std::thread::spawn(move || {
+            let mut open = [0u8; 10 + 5];
+            far.read_exact(&mut open).unwrap();
+            let budget =
+                hex_core::stream::frame(&files::budget(entries, bytes), wire::MAX_MESSAGE).unwrap();
+            far.write_all(&budget).unwrap();
+            let mut rest = Vec::new();
+            let _ = far.read_to_end(&mut rest);
+            let done = wire::answer(wire::FIRST, 0, &Answer::Done, wire::MAX_MESSAGE).unwrap();
+            let _ = far.write_all(&hex_core::stream::frame(&done, wire::MAX_MESSAGE).unwrap());
+        });
+        Ok(Box::new(near))
+    }
+}
+
+/// HEX-GUEST-15 (Ada's rule on constants: a learned bound): stage through a relay whose budget is 4 bytes,
+/// what its file system has free, an item of 5: expect it refused by type, naming the budget, before its
+/// bytes are sent; and one of 4 staged.
+#[cfg(unix)]
+#[test]
+fn a_stage_spends_the_relays_learned_budget() {
+    let relay = Budgeted { budget: (8, 4) };
+    let item = |n: usize| Item {
+        name: "config.json".to_owned(),
+        source: Source::Bytes(vec![b'x'; n]),
+    };
+    assert_eq!(
+        stage(&relay, &id(), &[item(5)], &LIMITS),
+        Err(Refusal::Exhausted {
+            what: "file and xattr bytes in one stage",
+            bound: 4
+        })
+    );
+    assert_eq!(stage(&relay, &id(), &[item(4)], &LIMITS), Ok(()));
 }

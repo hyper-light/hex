@@ -179,7 +179,7 @@ fn a_tarball_past_its_bounds_is_refused() {
     assert_eq!(
         pack_tar("r.tar", &three, &small),
         Err(Refusal::Exhausted {
-            what: "file bytes in one stage",
+            what: "file and xattr bytes in one stage",
             bound: 7
         })
     );
@@ -517,16 +517,18 @@ fn global(pairs: &[(&str, &str)]) -> Vec<u8> {
     ])
 }
 
-/// HEX-GUEST-15 (the lead's question on global PAX records): pack a global record past 64 KiB, one with
-/// GNU sparse keys, and one setting `path`, `linkpath` or `size`: expect each refused by name, never held
-/// whole nor ignored; and one with only keys that don't change what's staged (times, ids, names, a
-/// comment, charsets) packed.
+/// HEX-GUEST-15 (the lead's question on global PAX records): pack a global record whose comment is past
+/// its key's longest line, one with GNU sparse keys, and one setting `path`, `linkpath` or `size`: expect
+/// each refused by name, never held whole nor ignored; and one with only keys that don't change what's
+/// staged (times, ids, names, a comment, charsets) packed.
 #[test]
 fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies() {
     let big = "c".repeat(70 << 10);
     let got = refused("r.tar", &global(&[("comment", &big)]));
     assert!(
-        got.contains("a PAX record") && got.contains("past 65536 bytes"),
+        got.contains("a PAX record")
+            && got.contains("its comment line of")
+            && got.contains("past the"),
         "{got}"
     );
     let got = refused("r.tar", &global(&[("GNU.sparse.major", "1")]));
@@ -695,16 +697,17 @@ fn a_tarballs_owners_times_and_xattrs_are_carried() {
     );
 }
 
-/// HEX-GUEST-15 (§4a): pack an entry whose PAX record holds more xattrs than an entry carries, one whose
-/// LIBARCHIVE value isn't base64, and one whose uid isn't a number: expect each refused by name.
+/// HEX-GUEST-15 (§4a): pack an entry whose PAX record's xattr names together pass Linux's
+/// `XATTR_LIST_MAX`, one whose LIBARCHIVE value isn't base64, and one whose uid isn't a number: expect
+/// each refused by name.
 #[test]
 fn hostile_owners_and_xattrs_in_a_tarball_are_refused_by_name() {
-    let many: Vec<(String, String)> = (0..=files::XATTRS_MAX)
-        .map(|i| (format!("SCHILY.xattr.user.{i}"), "v".to_owned()))
+    let many: Vec<(String, String)> = (0..=files::XATTR_LIST_MAX / (files::XATTR_NAME_MAX + 1))
+        .map(|i| (format!("SCHILY.xattr.user.{i:0>250}"), "v".to_owned()))
         .collect();
     let many: Vec<(&str, &str)> = many.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     for (pairs, why) in [
-        (many, "more than 64 extended attributes"),
+        (many, "XATTR_LIST_MAX"),
         (vec![("LIBARCHIVE.xattr.user.x", "%%%")], "isn't base64"),
         (vec![("uid", "root")], "its uid isn't an id"),
     ] {
@@ -842,4 +845,168 @@ fn a_git_archive_made_here_stages_with_every_entry_exact() {
             .collect();
         assert_eq!(got, want, "{format}");
     }
+}
+
+/// A PAX line, `<len> <key>=<value>\n`, its length counting itself.
+fn pax_line(key: &str, value: &[u8]) -> Vec<u8> {
+    let body = key.len() + value.len() + 3;
+    let mut n = body + 1;
+    while format!("{n}").len() + body != n {
+        n += 1;
+    }
+    let mut out = format!("{n} {key}=").into_bytes();
+    out.extend_from_slice(value);
+    out.push(b'\n');
+    out
+}
+
+fn read_pax(record: &[u8], global: bool) -> Result<Pax, String> {
+    let bad = |what: &str, why: &dyn std::fmt::Display| Refusal::Invalid {
+        what: "staged files",
+        why: format!("{what}: {why}"),
+    };
+    pax_record(&mut &record[..], global, &bad).map_err(|e| e.to_string())
+}
+
+/// Standard base64 (RFC 4648 §4) of `bytes`, padded.
+fn base64(bytes: &[u8]) -> Vec<u8> {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(A[((n >> (18 - 6 * i)) & 63) as usize]);
+            } else {
+                out.push(b'=');
+            }
+        }
+    }
+    out
+}
+
+/// HEX-GUEST-15 (Ada's rule on constants: each PAX line bounded by its key's longest, from cited limits):
+/// for every key staging reads, read a record of its largest legal line: expect it accepted; and the same
+/// line one byte longer: expect it refused by name, as past what its key allows, before its value is read.
+#[test]
+fn each_pax_keys_largest_line_is_read_and_one_byte_more_is_refused() {
+    let path = vec![b'p'; 4095];
+    let value = vec![7u8; files::XATTR_SIZE_MAX];
+    let name = format!("user.{}", "n".repeat(files::XATTR_NAME_MAX - 5));
+    let cases: Vec<(bool, String, Vec<u8>)> = vec![
+        (false, "path".into(), path.clone()),
+        (false, "linkpath".into(), path.clone()),
+        (false, "uid".into(), b"4294967295".to_vec()),
+        (false, "gid".into(), b"4294967295".to_vec()),
+        (
+            false,
+            "mtime".into(),
+            b"-9223372036854775808.999999999".to_vec(),
+        ),
+        (
+            false,
+            "atime".into(),
+            b"-9223372036854775808.999999999".to_vec(),
+        ),
+        (false, format!("SCHILY.xattr.{name}"), value.clone()),
+        (
+            false,
+            format!(
+                "LIBARCHIVE.xattr.{}",
+                name.bytes()
+                    .map(|b| format!("%{b:02X}"))
+                    .collect::<String>()
+            ),
+            base64(&value),
+        ),
+        (
+            true,
+            "atime".into(),
+            b"-9223372036854775808.999999999".to_vec(),
+        ),
+        (
+            true,
+            "ctime".into(),
+            b"-9223372036854775808.999999999".to_vec(),
+        ),
+        (true, "uname".into(), vec![b'u'; 256]),
+        (true, "gname".into(), vec![b'g'; 256]),
+        (true, "comment".into(), vec![b'c'; 64]),
+        (true, "charset".into(), b"ISO-IR 10646 2000 UTF-8".to_vec()),
+        (
+            true,
+            "hdrcharset".into(),
+            b"ISO-IR 10646 2000 UTF-8".to_vec(),
+        ),
+    ];
+    for (global, key, value) in cases {
+        let line = pax_line(&key, &value);
+        let pax = read_pax(&line, global).unwrap_or_else(|e| panic!("{key}: {e}"));
+        assert_eq!(pax.peak, line.len(), "{key}");
+        let mut longer = value.clone();
+        longer.insert(0, b'0');
+        let got = read_pax(&pax_line(&key, &longer), global).unwrap_err();
+        assert!(
+            got.contains(&format!("its {key} line of")) && got.contains("past the"),
+            "{key}: {got}"
+        );
+    }
+}
+
+/// HEX-GUEST-15 (bounded memory): read a record of 40 xattr lines of `XATTR_SIZE_MAX` each, 2.6 MB in all:
+/// expect every one read and the reader never holding more than one line.
+#[test]
+fn a_record_of_many_maximal_lines_streams_a_line_at_a_time() {
+    let value = vec![1u8; files::XATTR_SIZE_MAX];
+    let record: Vec<u8> = (0..40)
+        .flat_map(|i| pax_line(&format!("SCHILY.xattr.user.{i:02}"), &value))
+        .collect();
+    let pax = read_pax(&record, false).unwrap();
+    assert_eq!(pax.xattrs.len(), 40);
+    assert_eq!(pax.peak, pax_line("SCHILY.xattr.user.00", &value).len());
+    assert!(pax.peak * 40 <= record.len());
+}
+
+/// HEX-GUEST-15 (Linux's xattr bounds, each counted): read records whose xattr names together pass
+/// `XATTR_LIST_MAX` (names in no Linux namespace count too), that set a key twice, that set a key staging
+/// doesn't apply, and whose time is finer than a nanosecond: expect each refused by name.
+#[test]
+fn pax_records_past_linuxs_bounds_or_repeating_or_unknown_keys_are_refused() {
+    let names: Vec<u8> = (0..=files::XATTR_LIST_MAX / (files::XATTR_NAME_MAX + 1))
+        .flat_map(|i| pax_line(&format!("SCHILY.xattr.com.apple.{i:0>245}"), b""))
+        .collect();
+    assert!(
+        read_pax(&names, false)
+            .unwrap_err()
+            .contains("XATTR_LIST_MAX")
+    );
+    let twice = [pax_line("path", b"a"), pax_line("path", b"b")].concat();
+    assert!(
+        read_pax(&twice, false)
+            .unwrap_err()
+            .contains("it sets path twice")
+    );
+    let twice = [
+        pax_line("SCHILY.xattr.user.a", b"1"),
+        pax_line("SCHILY.xattr.user.a", b"2"),
+    ]
+    .concat();
+    assert!(read_pax(&twice, false).unwrap_err().contains("twice"));
+    for key in ["comment", "ctime", "uname", "SCHILY.dev"] {
+        let got = read_pax(&pax_line(key, b"1"), false).unwrap_err();
+        assert!(
+            got.contains(&format!(
+                "a PAX record sets {key}, which staging doesn't apply"
+            )),
+            "{key}: {got}"
+        );
+    }
+    let fine = pax_line("mtime", b"1.0000000001");
+    assert!(
+        read_pax(&fine, false)
+            .unwrap_err()
+            .contains("its mtime isn't a time")
+    );
 }

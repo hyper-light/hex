@@ -60,10 +60,26 @@ pub fn staged_path(staged: &str, id: &BoxId, name: &str) -> String {
 /// Stages `items` for `id` through `link`, waiting for the relay's answer.
 pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Result<(), Refusal> {
     let mut conn = dial(link)?;
+    let mut deframer = Deframer::new(wire::MAX_MESSAGE);
+    conn.write_all(&files::open(Op::Stage, id.as_str()).map_err(refused)?)
+        .map_err(|e| Refusal::os("sending staged files", e))?;
+    // The relay answers the opening with the stage's budget, what its file system has free, or refuses.
+    let first = message(conn.as_mut(), &mut deframer)?;
+    let Some((entries, bytes)) = files::read_budget(&first) else {
+        return Err(answer_of(&first).err().unwrap_or_else(|| {
+            Refusal::Broken("the relay answered a stage's opening with no budget".to_owned())
+        }));
+    };
+    let learned = Limits {
+        entries: limits.entries.min(entries),
+        bytes: limits.bytes.min(bytes),
+        path: limits.path,
+    };
     let sent = {
         let mut out = BufWriter::with_capacity(64 << 10, Writer(conn.as_mut()));
-        pack(&mut out, id, items, limits).and_then(|()| {
-            out.flush()
+        pack_items(&mut out, items, &learned).and_then(|()| {
+            out.write_all(&files::END)
+                .and_then(|()| out.flush())
                 .map_err(|e| Refusal::os("sending staged files", e))
         })
     };
@@ -73,7 +89,7 @@ pub fn stage(link: &dyn Link, id: &BoxId, items: &[Item], limits: &Limits) -> Re
     // The answer is read first, so the relay has removed a partial copy before this returns. Its
     // answer names a stream cut short when the packer refused part way; the packer's own refusal names
     // the entry, and is the one returned, unless it was only the connection failing.
-    let answered = answer(conn.as_mut());
+    let answered = message(conn.as_mut(), &mut deframer).and_then(|m| answer_of(&m));
     match (answered, sent) {
         (_, Err(why)) if !matches!(&why, Refusal::Os { op, .. } if op.starts_with("sending")) => {
             Err(why)
@@ -90,7 +106,8 @@ pub fn unstage(link: &dyn Link, id: &BoxId) -> Result<(), Refusal> {
     conn.write_all(&open)
         .map_err(|e| Refusal::os("asking for a staged copy's removal", e))?;
     let _ = conn.shutdown(Shutdown::Write);
-    answer(conn.as_mut())
+    let mut deframer = Deframer::new(wire::MAX_MESSAGE);
+    message(conn.as_mut(), &mut deframer).and_then(|m| answer_of(&m))
 }
 
 fn dial(link: &dyn Link) -> Result<Box<dyn Duplex>, Refusal> {
@@ -121,10 +138,10 @@ impl Write for Writer<'_> {
     }
 }
 
-/// The relay's one answer: `Done`, or the refusal it carries.
-fn answer(conn: &mut dyn Duplex) -> Result<(), Refusal> {
-    let mut deframer = Deframer::new(wire::MAX_MESSAGE);
-    let mut buf = [0u8; 4096];
+/// The relay's next framed message.
+fn message(conn: &mut dyn Duplex, deframer: &mut Deframer) -> Result<Vec<u8>, Refusal> {
+    // A whole message's bound, so one read can hold an answer.
+    let mut buf = vec![0u8; wire::MAX_MESSAGE];
     loop {
         let n = match conn.read(&mut buf) {
             Ok(0) => {
@@ -142,24 +159,35 @@ fn answer(conn: &mut dyn Duplex) -> Result<(), Refusal> {
                 Refusal::Broken(format!("the relay's staging answer isn't a message: {f}"))
             })?;
             input = input.get(took..).unwrap_or_default();
-            let Some(message) = whole else { continue };
-            let received = Received {
-                bytes: &message,
-                size: message.len(),
-                descriptors: 0,
-                descriptors_cut: false,
-            };
-            return match wire::read_answer(&received, wire::MAX_MESSAGE) {
-                Ok((_, Answer::Done)) => Ok(()),
-                Ok((_, Answer::Refused(why))) => Err(why),
-                Ok((_, other)) => Err(Refusal::Broken(format!(
-                    "the relay answered a stage with {other:?}"
-                ))),
-                Err(f) => Err(Refusal::Broken(format!(
-                    "the relay's staging answer isn't one: {f}"
-                ))),
-            };
+            if let Some(message) = whole {
+                if !input.is_empty() {
+                    return Err(Refusal::Broken(
+                        "the relay sent more than one message at once".to_owned(),
+                    ));
+                }
+                return Ok(message);
+            }
         }
+    }
+}
+
+/// The relay's answer in `message`: `Done`, or the refusal it carries.
+fn answer_of(message: &[u8]) -> Result<(), Refusal> {
+    let received = Received {
+        bytes: message,
+        size: message.len(),
+        descriptors: 0,
+        descriptors_cut: false,
+    };
+    match wire::read_answer(&received, wire::MAX_MESSAGE) {
+        Ok((_, Answer::Done)) => Ok(()),
+        Ok((_, Answer::Refused(why))) => Err(why),
+        Ok((_, other)) => Err(Refusal::Broken(format!(
+            "the relay answered a stage with {other:?}"
+        ))),
+        Err(f) => Err(Refusal::Broken(format!(
+            "the relay's staging answer isn't one: {f}"
+        ))),
     }
 }
 
@@ -171,17 +199,25 @@ fn never(path: &Path, why: &str) -> Refusal {
     }
 }
 
-/// A file's mode, its permission bits. NTFS holds none, so on Windows every entry is staged 0755, as
-/// WSL's DrvFs shows a file without metadata (its default `umask` 022 over 0777).
+/// The permission bits of a mode (inode(7)): its low 16 bits, masked to [`files::MODE_BITS`].
+fn permissions(mode: u32) -> u16 {
+    let [low, high, ..] = mode.to_le_bytes();
+    u16::from_le_bytes([low, high]) & files::MODE_BITS
+}
+
+/// A file's mode, its permission bits.
 #[cfg(unix)]
 fn mode(meta: &fs::Metadata) -> u16 {
     use std::os::unix::fs::PermissionsExt;
-    u16::try_from(meta.permissions().mode() & u32::from(files::MODE_BITS)).unwrap_or(0o755)
+    permissions(meta.permissions().mode())
 }
 
+/// NTFS holds no mode, so on Windows every entry is staged as WSL's DrvFs shows a file without metadata:
+/// 0777 under its default `umask` of 022, 0755 (learn.microsoft.com/windows/wsl/file-permissions, "Default
+/// permissions with no metadata").
 #[cfg(not(unix))]
 fn mode(_meta: &fs::Metadata) -> u16 {
-    0o755
+    0o777 & !0o022
 }
 
 /// What kind of file a host path is, or why it's never staged.
@@ -234,6 +270,16 @@ pub fn pack(
             .map_err(|e| Refusal::os("sending staged files", e))
     };
     send(out, &files::open(Op::Stage, id.as_str()).map_err(refused)?)?;
+    pack_items(out, items, limits)?;
+    send(out, &files::END)
+}
+
+/// Writes every entry of `items` to `out`, within `limits`.
+fn pack_items(out: &mut dyn Write, items: &[Item], limits: &Limits) -> Result<(), Refusal> {
+    let send = |out: &mut dyn Write, bytes: &[u8]| {
+        out.write_all(bytes)
+            .map_err(|e| Refusal::os("sending staged files", e))
+    };
     let mut counts = Counts::default();
     for item in items {
         match &item.source {
@@ -260,7 +306,7 @@ pub fn pack(
             Source::Layers(layers) => tarball(out, &item.name, layers, limits, &mut counts)?,
         }
     }
-    send(out, &files::END)
+    Ok(())
 }
 
 /// Entries and bytes sent so far, refused past the stage's bounds before they are sent.
@@ -285,7 +331,7 @@ impl Counts {
             .bytes
             .checked_add(size)
             .filter(|n| *n <= limits.bytes)
-            .ok_or_else(|| over("file bytes in one stage", limits.bytes))?;
+            .ok_or_else(|| over("file and xattr bytes in one stage", limits.bytes))?;
         Ok(())
     }
 }
@@ -402,15 +448,14 @@ fn copy(out: &mut dyn Write, path: &Path, size: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// The most bytes read past a tarball's end-of-archive block, to reach a gzip stream's trailer and check
-/// it: tar pads an archive to its record, 10,240 bytes by default (GNU tar's `--blocking-factor` 20), and
-/// one this much longer is refused rather than read without end (CLAUDE.md §2).
-const TRAILING: u64 = 1 << 20;
-
-/// The most bytes of one PAX record read: it carries a path and a link target (each at most the path bound,
-/// 4,095 bytes) and times, ids and names, so 64 KiB holds any a root needs eight times over; one longer is
-/// refused (CLAUDE.md §2).
-const PAX_RECORD: usize = 64 << 10;
+/// A tar block: an archive is a sequence of 512-octet blocks, its end two blocks of zeros (POSIX.1-2024,
+/// pax, "ustar Interchange Format").
+const TAR_BLOCK: u64 = 512;
+/// The most bytes read past a tarball's end-of-archive blocks, to reach a gzip stream's trailer and check
+/// it: an archive is padded to its record, whose size POSIX's pax supports up to 32,256 bytes (POSIX.1-2024,
+/// pax, `-b blocksize`: "all blocksize values less than or equal to 32256 that are multiples of 512"); one
+/// longer is refused rather than read without end (CLAUDE.md §2).
+const TRAILING: u64 = 32_256;
 
 /// An extension record's whole text, at most `bound` bytes; `None` past it.
 fn record(entry: &mut dyn Read, bound: usize) -> io::Result<Option<Vec<u8>>> {
@@ -424,9 +469,107 @@ fn record(entry: &mut dyn Read, bound: usize) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(text))
 }
 
+/// A path's or link target's longest text: Linux's `PATH_MAX` (include/uapi/linux/limits.h, 4096 bytes)
+/// less its NUL.
+const PATH_TEXT_MAX: usize = 4096 - 1;
+/// A uid's or gid's longest text: an id is a `u32` (chown(2)), `u32::MAX` = 4294967295, 10 digits.
+const ID_TEXT_MAX: usize = 10;
+/// A time's longest text: `i64::MIN` seconds, "-9223372036854775808" (20), a `.`, and nanoseconds, 9
+/// digits (utimensat(2)'s `tv_nsec` is under 10^9; a finer fraction is refused).
+const TIME_TEXT_MAX: usize = 20 + 1 + 9;
+/// A user or group name's longest: glibc's `LOGIN_NAME_MAX` (sysdeps/unix/sysv/linux/bits/local_lim.h, 256).
+const LOGIN_NAME_MAX: usize = 256;
+/// A global `comment`'s longest: `git archive` writes its commit's id there, at most 64 hex digits
+/// (SHA-256 object names, git's Documentation/technical/hash-function-transition.adoc).
+const COMMENT_MAX: usize = 64;
+/// A `charset` or `hdrcharset` value's longest: "ISO-IR 10646 2000 UTF-8", 23 bytes, the longest the POSIX
+/// pax format's charset table names (POSIX.1-2024, pax, "pax Extended Header Keyword Descriptions").
+const CHARSET_MAX: usize = 23;
+/// The xattr keys' prefixes: star's (value raw) and libarchive's (name percent-encoded, value base64).
+const SCHILY_XATTR: &str = "SCHILY.xattr.";
+const LIBARCHIVE_XATTR: &str = "LIBARCHIVE.xattr.";
+/// A base64 value's longest: an xattr value's, `XATTR_SIZE_MAX`, in 4 characters per 3 bytes (RFC 4648
+/// §4): 4 × ⌈65,536 / 3⌉ = 87,384.
+const BASE64_SIZE_MAX: usize = files::XATTR_SIZE_MAX.div_ceil(3) * 4;
+/// The longest key staging reads: libarchive's xattr prefix and a name of `XATTR_NAME_MAX` bytes, each
+/// percent-encoded as `%XX`: 17 + 3 × 255 = 782.
+const KEY_MAX: usize = LIBARCHIVE_XATTR.len() + 3 * files::XATTR_NAME_MAX;
+
+/// The decimal digits of `n`.
+fn digits(n: usize) -> usize {
+    let mut d: usize = 1;
+    let mut rest = n;
+    while rest >= 10 {
+        rest = rest.checked_div(10).unwrap_or(0);
+        d = d.saturating_add(1);
+    }
+    d
+}
+
+/// The longest PAX line, `<len> <key>=<value>\n`, of a key of `key` bytes and a value of at most `value`:
+/// `<len>` counts the line, its own digits included.
+fn line_max(key: usize, value: usize) -> usize {
+    let body = key.saturating_add(value).saturating_add(3);
+    body.saturating_add(digits(body.saturating_add(digits(body))))
+}
+
+/// The longest line staging reads (libarchive's longest xattr), whose `<len>` bounds every line's digits.
+fn any_line_max() -> usize {
+    line_max(KEY_MAX, BASE64_SIZE_MAX)
+}
+
+/// The longest value staging accepts for `key` in a record, or why it refuses the key outright.
+fn value_max(key: &[u8], global: bool) -> Result<usize, String> {
+    let named = |key: &[u8]| String::from_utf8_lossy(key).into_owned();
+    if key.starts_with(b"GNU.sparse.") {
+        return Err(
+            "a sparse entry is never staged (none of the roots it serves holds one, §4a)"
+                .to_owned(),
+        );
+    }
+    if global {
+        // What staging doesn't carry and so can't get wrong (atime, which Go's archive/tar leaves
+        // unapplied for containerd, returning the record as an entry of its own; ctime, the kernel's;
+        // owner names, which numeric ids stand for; a comment; the character sets the record's texts are
+        // in). Any other key would apply to every entry after it, and is refused rather than ignored
+        // (CLAUDE.md §3; docs/design/shards-guest.md §4a): `uid`, `gid` and `mtime` among them, since
+        // staging carries those.
+        return match key {
+            b"atime" | b"ctime" => Ok(TIME_TEXT_MAX),
+            b"uname" | b"gname" => Ok(LOGIN_NAME_MAX),
+            b"comment" => Ok(COMMENT_MAX),
+            b"charset" | b"hdrcharset" => Ok(CHARSET_MAX),
+            other => Err(format!(
+                "a global PAX record sets {}, which staging doesn't apply",
+                named(other)
+            )),
+        };
+    }
+    match key {
+        b"path" | b"linkpath" => Ok(PATH_TEXT_MAX),
+        b"uid" | b"gid" => Ok(ID_TEXT_MAX),
+        b"mtime" | b"atime" => Ok(TIME_TEXT_MAX),
+        b"size" => Err("a PAX size (a file past 8 GiB) is never staged".to_owned()),
+        key if key.starts_with(SCHILY_XATTR.as_bytes()) => {
+            if key.len().saturating_sub(SCHILY_XATTR.len()) > files::XATTR_NAME_MAX {
+                return Err(format!(
+                    "an xattr's name is past Linux's XATTR_NAME_MAX, {}",
+                    files::XATTR_NAME_MAX
+                ));
+            }
+            Ok(files::XATTR_SIZE_MAX)
+        }
+        key if key.starts_with(LIBARCHIVE_XATTR.as_bytes()) => Ok(BASE64_SIZE_MAX),
+        other => Err(format!(
+            "a PAX record sets {}, which staging doesn't apply",
+            named(other)
+        )),
+    }
+}
+
 /// What an entry's PAX record says of it: its name and link target past what a header holds, its owner
-/// and mtime past what a header holds, and its extended attributes.
-#[derive(Default)]
+/// and times past what a header holds, and its extended attributes.
+#[derive(Debug, Default)]
 struct Pax {
     path: Option<Vec<u8>>,
     link: Option<Vec<u8>>,
@@ -435,93 +578,170 @@ struct Pax {
     mtime: Option<Mtime>,
     atime: Option<Mtime>,
     xattrs: Vec<Xattr>,
+    /// The longest line read, the most any one read held (non-vacuity for the bound, in tests).
+    peak: usize,
 }
 
-/// An entry's PAX record, refusing by name what staging can't honour: a `size` (a file past the 8 GiB a
-/// header's size field holds) and GNU's sparse keys. Extended attributes come as `SCHILY.xattr.<name>`
-/// (the value raw) or `LIBARCHIVE.xattr.<name, percent-encoded>` (the value base64); one in no namespace
-/// Linux holds (`com.apple.*`, from macOS bsdtar) can't exist on a Linux file, so it is left out, which
-/// loses nothing Linux's own unpack would hold (docs/design/shards-guest.md §4a). Other keys (ctime,
-/// owner names, a comment) staging doesn't carry.
-fn pax_keys(
-    text: &[u8],
+/// One byte of `entry`, or `None` at its end.
+fn byte(entry: &mut dyn Read) -> io::Result<Option<u8>> {
+    let mut b = [0u8; 1];
+    loop {
+        match entry.read(&mut b) {
+            Ok(0) => return Ok(None),
+            Ok(_) => {
+                let [v] = b;
+                return Ok(Some(v));
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Reads a PAX record (`global` or an entry's) from `entry` a line at a time, never holding more than one
+/// line, each bounded by its key's longest before any of its value is read; a key staging doesn't apply,
+/// one set twice, and an xattr past Linux's bounds are refused by name. An entry's record says what
+/// [`Pax`] holds; a global one sets nothing staging carries.
+fn pax_record(
+    entry: &mut dyn Read,
+    global: bool,
     bad: &dyn Fn(&str, &dyn std::fmt::Display) -> Refusal,
 ) -> Result<Pax, Refusal> {
+    let refuse = |why: &dyn std::fmt::Display| bad("a PAX record", why);
+    let io = |e: io::Error| bad("a PAX record", &e);
     let mut pax = Pax::default();
-    let number = |key: &str, value: &[u8]| {
-        std::str::from_utf8(value)
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .ok_or_else(|| bad("a PAX record", &format!("its {key} isn't an id")))
-    };
-    for ext in tar::PaxExtensions::new(text) {
-        let ext = ext.map_err(|e| bad("a PAX record", &e))?;
-        let value = ext.value_bytes();
-        match ext.key_bytes() {
-            b"path" => pax.path = Some(value.to_vec()),
-            b"linkpath" => pax.link = Some(value.to_vec()),
-            b"uid" => pax.uid = Some(number("uid", value)?),
-            b"gid" => pax.gid = Some(number("gid", value)?),
+    let mut seen: BTreeSet<Vec<u8>> = BTreeSet::new();
+    // Every xattr name, each with its NUL, within Linux's XATTR_LIST_MAX, carried or not.
+    let mut names: usize = 0;
+    let len_digits = digits(any_line_max());
+    loop {
+        // `<len> `: at most the digits of the longest line.
+        let mut len: usize = 0;
+        let mut taken: usize = 0;
+        loop {
+            match byte(entry).map_err(io)? {
+                None if taken == 0 => return Ok(pax),
+                None => return Err(refuse(&"it ends inside a line")),
+                Some(b' ') if taken > 0 => break,
+                Some(d @ b'0'..=b'9') if taken < len_digits => {
+                    len = len
+                        .saturating_mul(10)
+                        .saturating_add(usize::from(d.saturating_sub(b'0')));
+                    taken = taken.saturating_add(1);
+                }
+                Some(_) => return Err(refuse(&"a line's length isn't one")),
+            }
+        }
+        // `<key>=`: at most the longest key staging reads.
+        let mut key: Vec<u8> = Vec::new();
+        loop {
+            match byte(entry).map_err(io)? {
+                None => return Err(refuse(&"it ends inside a line")),
+                Some(b'=') => break,
+                Some(_) if key.len() >= KEY_MAX => {
+                    return Err(refuse(&format!(
+                        "a key starting {:?} is longer than any staging reads",
+                        String::from_utf8_lossy(&key)
+                    )));
+                }
+                Some(b) => key.push(b),
+            }
+        }
+        let shown = String::from_utf8_lossy(&key).into_owned();
+        let most = value_max(&key, global).map_err(|why| refuse(&why))?;
+        let bound = line_max(key.len(), most);
+        if len > bound {
+            return Err(refuse(&format!(
+                "its {shown} line of {len} bytes is past the {bound} its key allows"
+            )));
+        }
+        if !seen.insert(key.clone()) {
+            return Err(refuse(&format!("it sets {shown} twice")));
+        }
+        // What's left of the line: its value and its newline.
+        let head = taken
+            .saturating_add(1)
+            .saturating_add(key.len())
+            .saturating_add(1);
+        let rest = len.checked_sub(head).filter(|n| *n >= 1).ok_or_else(|| {
+            refuse(&format!(
+                "its {shown} line's length is shorter than the line"
+            ))
+        })?;
+        let mut value = vec![0u8; rest];
+        entry.read_exact(&mut value).map_err(io)?;
+        pax.peak = pax.peak.max(len);
+        if value.pop() != Some(b'\n') {
+            return Err(refuse(&format!(
+                "its {shown} line doesn't end where its length says"
+            )));
+        }
+        if global {
+            continue;
+        }
+        let number = |what: &str, value: &[u8]| {
+            std::str::from_utf8(value)
+                .ok()
+                .filter(|v| v.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or_else(|| refuse(&format!("its {what} isn't an id")))
+        };
+        match key.as_slice() {
+            b"path" => pax.path = Some(value),
+            b"linkpath" => pax.link = Some(value),
+            b"uid" => pax.uid = Some(number("uid", &value)?),
+            b"gid" => pax.gid = Some(number("gid", &value)?),
             b"mtime" => {
-                pax.mtime = Some(
-                    pax_time(value)
-                        .ok_or_else(|| bad("a PAX record", &"its mtime isn't a time"))?,
-                );
+                pax.mtime =
+                    Some(pax_time(&value).ok_or_else(|| refuse(&"its mtime isn't a time"))?);
             }
             b"atime" => {
-                pax.atime = Some(
-                    pax_time(value)
-                        .ok_or_else(|| bad("a PAX record", &"its atime isn't a time"))?,
-                );
-            }
-            b"size" => {
-                return Err(bad(
-                    "a PAX record",
-                    &"a PAX size (a file past 8 GiB) is never staged",
-                ));
-            }
-            key if key.starts_with(b"GNU.sparse.") => {
-                return Err(bad(
-                    "a PAX record",
-                    &"a sparse entry is never staged (none of the roots it serves holds one, §4a)",
-                ));
+                pax.atime =
+                    Some(pax_time(&value).ok_or_else(|| refuse(&"its atime isn't a time"))?);
             }
             key => {
-                let xattr = if let Some(name) = key.strip_prefix(b"SCHILY.xattr.") {
-                    Some((name.to_vec(), value.to_vec()))
-                } else if let Some(name) = key.strip_prefix(b"LIBARCHIVE.xattr.") {
-                    let name = percent_decoded(name).ok_or_else(|| {
-                        bad("a PAX record", &"an xattr's name isn't percent-encoded")
-                    })?;
-                    let value = base64_decoded(value)
-                        .ok_or_else(|| bad("a PAX record", &"an xattr's value isn't base64"))?;
-                    Some((name, value))
+                let (name, value) = if let Some(name) = key.strip_prefix(SCHILY_XATTR.as_bytes()) {
+                    (name.to_vec(), value)
+                } else if let Some(name) = key.strip_prefix(LIBARCHIVE_XATTR.as_bytes()) {
+                    let name = percent_decoded(name)
+                        .ok_or_else(|| refuse(&"an xattr's name isn't percent-encoded"))?;
+                    let value = base64_decoded(&value)
+                        .ok_or_else(|| refuse(&"an xattr's value isn't base64"))?;
+                    (name, value)
                 } else {
-                    None
+                    return Err(refuse(&format!(
+                        "a PAX record sets {shown}, which staging doesn't apply"
+                    )));
                 };
-                if let Some((name, value)) = xattr {
-                    if pax.xattrs.len() >= files::XATTRS_MAX {
-                        return Err(bad(
-                            "a PAX record",
-                            &format!(
-                                "it holds more than {} extended attributes",
-                                files::XATTRS_MAX
-                            ),
-                        ));
-                    }
-                    let name = String::from_utf8(name)
-                        .map_err(|_| bad("a PAX record", &"an xattr's name isn't UTF-8"))?;
-                    if files::XATTR_NAMESPACES
-                        .iter()
-                        .any(|ns| name.starts_with(ns))
-                    {
-                        pax.xattrs.push(Xattr { name, value });
-                    }
+                if name.is_empty()
+                    || name.len() > files::XATTR_NAME_MAX
+                    || value.len() > files::XATTR_SIZE_MAX
+                {
+                    return Err(refuse(&format!(
+                        "xattr {:?} is past Linux's XATTR_NAME_MAX or XATTR_SIZE_MAX",
+                        String::from_utf8_lossy(&name)
+                    )));
+                }
+                names = names.saturating_add(name.len()).saturating_add(1);
+                if names > files::XATTR_LIST_MAX {
+                    return Err(refuse(&format!(
+                        "its xattrs' names together are past Linux's XATTR_LIST_MAX, {}",
+                        files::XATTR_LIST_MAX
+                    )));
+                }
+                let name =
+                    String::from_utf8(name).map_err(|_| refuse(&"an xattr's name isn't UTF-8"))?;
+                // One in no namespace Linux holds (`com.apple.*`, from macOS bsdtar) can't exist on a
+                // Linux file: left out, which loses nothing Linux's own unpack would hold (§4a).
+                if files::XATTR_NAMESPACES
+                    .iter()
+                    .any(|ns| name.starts_with(ns))
+                {
+                    pax.xattrs.push(Xattr { name, value });
                 }
             }
         }
     }
-    Ok(pax)
 }
 
 /// A PAX time, `seconds[.fraction]`, possibly negative.
@@ -529,10 +749,11 @@ fn pax_time(value: &[u8]) -> Option<Mtime> {
     let text = std::str::from_utf8(value).ok()?;
     let (secs, frac) = text.split_once('.').unwrap_or((text, ""));
     let secs: i64 = secs.parse().ok()?;
-    let digits: String = frac.chars().take(9).collect();
-    if !digits.chars().all(|c| c.is_ascii_digit()) {
+    // Nanoseconds at most: utimensat(2) takes no finer a time.
+    if frac.len() > 9 || !frac.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
+    let digits = frac;
     let nanos: u32 = if digits.is_empty() {
         0
     } else {
@@ -591,51 +812,6 @@ fn base64_decoded(text: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(bytes.get(1..1usize.checked_add(n)?)?);
     }
     Some(out)
-}
-
-/// The keys a global PAX record may set: what staging doesn't carry and so can't get wrong (atime, which
-/// Go's archive/tar leaves unapplied for containerd, returning the record as an entry of its own; ctime,
-/// the kernel's; owner names, which numeric ids stand for; a
-/// comment; the character sets the record's texts are in). Any other key would apply to every entry after
-/// it, and is refused rather than ignored (CLAUDE.md §3; docs/design/shards-guest.md §4a): `uid`, `gid`
-/// and `mtime` among them, since staging carries those.
-const GLOBAL_KEYS: [&[u8]; 7] = [
-    b"atime",
-    b"ctime",
-    b"uname",
-    b"gname",
-    b"comment",
-    b"charset",
-    b"hdrcharset",
-];
-
-/// A global PAX record's keys, each one staging may ignore ([`GLOBAL_KEYS`]), or the refusal of the
-/// first that isn't: GNU's sparse keys, and every key that would change what's staged (`path`,
-/// `linkpath`, `size`, or one Hex doesn't know).
-fn global_keys(
-    text: &[u8],
-    bad: &dyn Fn(&str, &dyn std::fmt::Display) -> Refusal,
-) -> Result<(), Refusal> {
-    for ext in tar::PaxExtensions::new(text) {
-        let ext = ext.map_err(|e| bad("a PAX record", &e))?;
-        let key = ext.key_bytes();
-        if key.starts_with(b"GNU.sparse.") {
-            return Err(bad(
-                "a PAX record",
-                &"a sparse entry is never staged (none of the roots it serves holds one, §4a)",
-            ));
-        }
-        if !GLOBAL_KEYS.contains(&key) {
-            return Err(bad(
-                "a PAX record",
-                &format!(
-                    "a global PAX record sets {}, which staging doesn't apply",
-                    String::from_utf8_lossy(key)
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// A tarball's bytes, counted as they're read, so its end is checked against its last entry's.
@@ -826,7 +1002,7 @@ fn layer(
     // so it reads raw entries and Hex reads the records.
     let mut long_name: Option<Vec<u8>> = None;
     let mut long_link: Option<Vec<u8>> = None;
-    let mut pax: Option<Vec<u8>> = None;
+    let mut pax: Option<Pax> = None;
     let entries = archive
         .entries()
         .map_err(|e| bad("reading it", &e))?
@@ -837,7 +1013,7 @@ fn layer(
         let size = entry.size();
         end = entry
             .raw_file_position()
-            .checked_add(size.div_ceil(512).saturating_mul(512))
+            .checked_add(size.div_ceil(TAR_BLOCK).saturating_mul(TAR_BLOCK))
             .ok_or_else(|| bad("an entry", &"its size is past any archive's"))?;
         match kind {
             tar::EntryType::GNULongName | tar::EntryType::GNULongLink => {
@@ -860,27 +1036,19 @@ fn layer(
                 continue;
             }
             tar::EntryType::XHeader | tar::EntryType::XGlobalHeader => {
-                let text = record(&mut entry, PAX_RECORD)
-                    .map_err(|e| bad("a PAX record", &e))?
-                    .ok_or_else(|| {
-                        bad("a PAX record", &format!("it is past {PAX_RECORD} bytes"))
-                    })?;
                 if kind == tar::EntryType::XHeader {
                     if pax.is_some() {
                         return Err(bad("a PAX record", &"two describe one entry"));
                     }
-                    pax = Some(text);
+                    pax = Some(pax_record(&mut entry, false, &bad)?);
                 } else {
-                    global_keys(&text, &bad)?;
+                    pax_record(&mut entry, true, &bad)?;
                 }
                 continue;
             }
             _ => {}
         }
-        let mut ext = match pax.take() {
-            Some(text) => pax_keys(&text, &bad)?,
-            None => Pax::default(),
-        };
+        let mut ext = pax.take().unwrap_or_default();
         let raw = match long_name.take().or(ext.path.take()) {
             Some(name) => name,
             None => entry.header().path_bytes().into_owned(),
@@ -958,10 +1126,7 @@ fn layer(
             continue;
         }
         let header = entry.header();
-        let mode = u16::try_from(
-            header.mode().map_err(|e| bad(&shown, &e))? & u32::from(files::MODE_BITS),
-        )
-        .unwrap_or(0o755);
+        let mode = permissions(header.mode().map_err(|e| bad(&shown, &e))?);
         // A numeric field of NULs and spaces alone reads as 0, as GNU tar and Python's tarfile read it
         // (tar-rs refuses it); anything else that isn't a number is refused by name.
         let numeric = |value: io::Result<u64>, field: &[u8]| match value {
@@ -1078,16 +1243,20 @@ fn layer(
             }
             _ => return Err(bad(&shown, &"an entry of a kind staging carries not")),
         };
-        let size = match what {
-            What::File { size } => size,
-            _ => 0,
-        };
-        counts.add(size, limits)?;
         // A hard link shares its target's inode, owner, mode, xattrs and times: it carries none of its own.
         let meta = match what {
             What::Hardlink { .. } => None,
             _ => Some(meta),
         };
+        // A file's bytes and its xattrs' spend the stage's byte budget, as the relay counts them.
+        let size = match what {
+            What::File { size } => size,
+            _ => 0,
+        };
+        counts.add(
+            size.saturating_add(meta.as_ref().map_or(0, files::xattr_bytes)),
+            limits,
+        )?;
         let staged = Entry {
             path: under_root(rel),
             mode,
@@ -1131,7 +1300,7 @@ fn layer(
         return Err(bad("its end", &"an extension record has no entry after it"));
     }
     let mut counted = archive.into_inner();
-    if counted.read < end.saturating_add(512) {
+    if counted.read < end.saturating_add(TAR_BLOCK) {
         return Err(bad("its end", &"it ends without its end-of-archive block"));
     }
     // Read to the stream's end, so a gzip trailer that lies about the archive is caught.

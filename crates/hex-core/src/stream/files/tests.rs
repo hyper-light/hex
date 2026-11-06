@@ -265,7 +265,7 @@ fn every_count_past_its_bound_is_refused_from_its_head() {
     assert_eq!(
         read(tight, head_only, 64),
         Err(Refused::Over {
-            what: "the stage's file bytes",
+            what: "the stage's file and xattr bytes",
             bound: 10
         })
     );
@@ -394,9 +394,9 @@ fn version_2_entries_read_back_with_owners_times_xattrs_and_hard_links() {
 }
 
 /// HEX-GUEST-13 (version 2): refuse, by type, an entry's id of u32::MAX, a time's nanoseconds of a second,
-/// too many xattrs, a name past 255 bytes, one in no Linux namespace, a value past 64 KiB, values together
-/// past 64 KiB, a hard link to itself or to no staged path, and a hard link with a size; each refused by the
-/// packer, as the unpacker would.
+/// names together past Linux's `XATTR_LIST_MAX`, a name past 255 bytes, one in no Linux namespace, a value
+/// past `XATTR_SIZE_MAX`, a hard link to itself or to no staged path, and a hard link with a size; each
+/// refused by the packer, as the unpacker would.
 #[test]
 fn hostile_version_2_metadata_and_hard_links_are_refused_by_type() {
     let file = |m: Meta| Entry {
@@ -404,10 +404,10 @@ fn hostile_version_2_metadata_and_hard_links_are_refused_by_type() {
         ..entry("f", What::File { size: 0 })
     };
     let big = vec![0u8; XATTR_SIZE_MAX + 1];
-    let half = vec![0u8; XATTR_SIZE_MAX / 2 + 1];
     let long = format!("user.{}", "n".repeat(XATTR_NAME_MAX));
-    let many: Vec<(String, Vec<u8>)> = (0..=XATTRS_MAX)
-        .map(|i| (format!("user.{i}"), vec![]))
+    // Names of XATTR_NAME_MAX bytes, each with its NUL, one more than XATTR_LIST_MAX holds.
+    let many: Vec<(String, Vec<u8>)> = (0..=XATTR_LIST_MAX / (XATTR_NAME_MAX + 1))
+        .map(|i| (format!("user.{i:0>250}"), vec![]))
         .collect();
     let many: Vec<(&str, &[u8])> = many
         .iter()
@@ -423,7 +423,6 @@ fn hostile_version_2_metadata_and_hard_links_are_refused_by_type() {
         meta(0, 0, &[(long.as_str(), b"")]),
         meta(0, 0, &[("com.apple.provenance", b"x")]),
         meta(0, 0, &[("user.big", &big)]),
-        meta(0, 0, &[("user.a", &half), ("user.b", &half)]),
     ] {
         assert!(
             matches!(head(&file(m.clone()), &LIMITS), Err(Refused::Meta { .. })),
@@ -535,4 +534,82 @@ fn layers_whiteouts_and_opaque_markers_read_back_and_carry_nothing_else() {
             "kind {kind}"
         );
     }
+}
+
+/// HEX-GUEST-13 (version 2, Ada's rule on constants): an entry's xattrs are bounded by Linux's own limits
+/// alone (include/uapi/linux/limits.h): stage one with more xattrs than the old count of 64, and one whose
+/// values together pass `XATTR_SIZE_MAX` while each is within it: expect both read back as written.
+#[test]
+fn an_entrys_xattrs_are_bounded_by_linux_alone() {
+    let names: Vec<String> = (0..65).map(|i| format!("user.{i}")).collect();
+    let many: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"v"[..])).collect();
+    let half = vec![7u8; XATTR_SIZE_MAX / 2 + 1];
+    for m in [
+        meta(0, 0, &many),
+        meta(0, 0, &[("user.a", &half), ("user.b", &half)]),
+    ] {
+        let e = Entry {
+            meta: Some(m.clone()),
+            ..entry("f", What::File { size: 0 })
+        };
+        let got = read(LIMITS, &stage("b", &[(e.clone(), vec![])]), 4096).unwrap();
+        assert_eq!(got[1].0, Step::Entry(e));
+    }
+}
+
+/// HEX-GUEST-13 (version 2): an entry's xattr bytes spend the stage's byte budget, as file bytes do: stage
+/// an entry whose xattrs pass what is left of it: expect it refused as over the budget from its metadata's
+/// fixed part, before its xattrs are held.
+#[test]
+fn xattr_bytes_spend_the_stages_byte_budget() {
+    let tight = Limits {
+        entries: 4,
+        bytes: 10,
+        path: 64,
+    };
+    let e = Entry {
+        meta: Some(meta(0, 0, &[("user.a", &[1u8; 6])])),
+        ..entry("f", What::File { size: 0 })
+    };
+    let mut bytes = open(Op::Stage, "b").unwrap();
+    bytes.extend(head(&e, &LIMITS).unwrap());
+    // Cut at the end of the metadata's fixed part: the refusal comes before any xattr byte is taken.
+    let fixed = bytes.len() - (1 + 4 + "user.a".len() + 6);
+    assert!(matches!(
+        read(tight, &bytes[..fixed], 4096),
+        Err(Refused::Over {
+            what: "the stage's file and xattr bytes",
+            bound: 10
+        })
+    ));
+}
+
+/// HEX-GUEST-13 (version 2, a learned budget): a stage's budget reads back as written, and anything else
+/// isn't one; an unpacker that learns a budget refuses an entry past it by type.
+#[test]
+fn a_stages_learned_budget_bounds_it() {
+    assert_eq!(read_budget(&budget(7, 1 << 40)), Some((7, 1 << 40)));
+    assert_eq!(read_budget(b"HEXB"), None);
+    assert_eq!(read_budget(&[budget(1, 2), vec![0]].concat()), None);
+    let three: Vec<(Entry, Vec<u8>)> = ["a", "b", "c"]
+        .iter()
+        .map(|p| (entry(p, What::Dir), vec![]))
+        .collect();
+    let bytes = stage("b", &three);
+    let mut u = Unpack::new(LIMITS);
+    u.learn(2, 1 << 20);
+    let mut input = bytes.as_slice();
+    let refused = loop {
+        match u.take(input) {
+            Ok((took, _)) => input = &input[took..],
+            Err(why) => break why,
+        }
+    };
+    assert_eq!(
+        refused,
+        Refused::Over {
+            what: "the stage's entries",
+            bound: 2
+        }
+    );
 }

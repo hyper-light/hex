@@ -11,7 +11,9 @@
 //! flags (version 1: a zero byte), its mode, its path's length, a link's target's length, a file's size),
 //! its path, a link's target, in version 2 its [`Meta`] when its flags say so ([`META_BYTES`] then its
 //! xattrs), and a file's bytes; an end head (kind 0, every field zero) closes it. The relay answers once,
-//! with a framed [`crate::wire`] answer: `Done`, or `Refused` saying why.
+//! with a framed [`crate::wire`] answer: `Done`, or `Refused` saying why. From version 2 a stage's opening
+//! is answered first with its budget ([`budget`]): the entries and bytes the staged root's file system has
+//! free, which both sides spend against.
 //!
 //! Version 2 (docs/design/shards-guest.md §4a) adds, append-only, an entry's owner, mtime and extended
 //! attributes, and hard links to an earlier entry, what Linux's own unpack of a tarball root holds.
@@ -33,17 +35,21 @@ const HAS_META: u8 = 1;
 /// A [`Meta`]'s fixed part: uid, gid (`u32`), mtime and atime each as seconds (`i64`) and nanoseconds
 /// (`u32`), the xattr count (`u16`), a zero `u16`, and the xattrs' bytes (`u32`), little-endian.
 pub const META_BYTES: usize = 40;
-/// The most extended attributes an entry carries: Linux bounds them by bytes (below), not count; 64 is
-/// past any image's (one, in §9's census of six) and bounds the parse.
-pub const XATTRS_MAX: usize = 64;
 /// Linux's `XATTR_NAME_MAX` (include/uapi/linux/limits.h): a name's longest, in bytes.
 pub const XATTR_NAME_MAX: usize = 255;
-/// Linux's `XATTR_SIZE_MAX`: a value's longest, and Hex's bound on an entry's values together, as
-/// Linux's `XATTR_LIST_MAX` bounds its names together (both 65,536 bytes).
+/// Linux's `XATTR_SIZE_MAX` (include/uapi/linux/limits.h): one value's longest, in bytes.
 pub const XATTR_SIZE_MAX: usize = 65_536;
-/// The most bytes an entry's xattrs take on the stream: each a name length (`u8`), a value length
-/// (`u32`), its name and its value, within the bounds above.
-const XATTR_BLOCK_MAX: usize = XATTRS_MAX * (5 + XATTR_NAME_MAX) + XATTR_SIZE_MAX;
+/// Linux's `XATTR_LIST_MAX` (include/uapi/linux/limits.h): an inode's names together, each with its NUL,
+/// as listxattr(2) returns them. Linux bounds xattrs by these bytes, not by a count.
+pub const XATTR_LIST_MAX: usize = 65_536;
+/// The most xattrs an entry carries: names within [`XATTR_LIST_MAX`], each at least one byte and its NUL.
+const XATTRS_IN_LIST: usize = XATTR_LIST_MAX / 2;
+/// The most bytes an entry's xattrs take on the stream, from the limits above: each a name length (`u8`) and
+/// a value length (`u32`), its name and its value, so the names and a byte each within [`XATTR_LIST_MAX`]
+/// and the rest `4 + XATTR_SIZE_MAX` each: 65,536 + 32,768 × 65,540 = 2,147,680,256 bytes, within the
+/// stream's `u32`. The bytes themselves spend the stage's byte budget ([`Limits::bytes`]) before any is
+/// held.
+const XATTR_BLOCK_MAX: usize = XATTR_LIST_MAX + XATTRS_IN_LIST * (4 + XATTR_SIZE_MAX);
 /// The extended-attribute namespaces Linux holds (xattr(7)): an attribute in any other can't exist on a
 /// Linux file, so a packer leaves it out (§4a) and the stream refuses it.
 pub const XATTR_NAMESPACES: [&str; 4] = ["security.", "system.", "trusted.", "user."];
@@ -232,27 +238,51 @@ pub enum Refused {
     Trailing(usize),
 }
 
+/// A version-2 stage's budget message: `HEXB`, then the entries and the bytes (`u64` each, little-endian).
+const BUDGET_MAGIC: [u8; 4] = *b"HEXB";
+const BUDGET_BYTES: usize = 4 + 8 + 8;
+
+/// A stage's budget as the relay sends it, before the packer sends an entry: `entries` and `bytes`, what
+/// the staged root's file system has free (statvfs(3)'s `f_ffree`, and `f_bavail` × `f_frsize`).
+pub fn budget(entries: u64, bytes: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BUDGET_BYTES);
+    out.extend_from_slice(&BUDGET_MAGIC);
+    out.extend_from_slice(&entries.to_le_bytes());
+    out.extend_from_slice(&bytes.to_le_bytes());
+    out
+}
+
+/// The entries and bytes of a budget message, or `None` when `message` isn't one.
+pub fn read_budget(message: &[u8]) -> Option<(u64, u64)> {
+    let rest = message.strip_prefix(&BUDGET_MAGIC)?;
+    let entries = u64::from_le_bytes(rest.get(..8)?.try_into().ok()?);
+    let bytes = u64::from_le_bytes(rest.get(8..16)?.try_into().ok()?);
+    if rest.len() != 16 {
+        return None;
+    }
+    Some((entries, bytes))
+}
+
 /// A staging stream's bounds (CLAUDE.md §2), each refused past by type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Entries in one stage.
     pub entries: u64,
-    /// File bytes in one stage, every file's together.
+    /// File and xattr bytes in one stage, every entry's together.
     pub bytes: u64,
     /// One entry's path, and a symbolic link's target, in bytes.
     pub path: usize,
 }
 
-/// The bounds unless the relay is given others:
-/// - a path and a link's target of Linux's `PATH_MAX` (limits.h, 4096 bytes, its terminating NUL
-///   included, so 4095 of text), the longest any path the guest's kernel takes;
-/// - 2^20 entries and 64 GiB: the relay holds one path per directory to set its mode last, so the
-///   entries bound its memory; the bytes are what the guest's tmpfs holds, whose own size and inodes
-///   (half the guest's memory each by default, tmpfs(5)) refuse the rest as `ENOSPC`, which the relay
-///   returns typed. Either is past any image a guest whose memory the node budgets can hold.
+/// The bounds a stage starts from:
+/// - a path and a link's target of Linux's `PATH_MAX` (include/uapi/linux/limits.h, 4096 bytes, its
+///   terminating NUL included, so 4095 of text), the longest any path the guest's kernel takes;
+/// - entries and bytes no further than the stage's budget, learned when it opens: what the staged root's
+///   file system has free ([`budget`]), refused past by type, and `ENOSPC` refused typed if it fills
+///   anyway. Until then these stand for no bound but that one.
 pub const LIMITS: Limits = Limits {
-    entries: 1 << 20,
-    bytes: 64 << 30,
+    entries: u64::MAX,
+    bytes: u64::MAX,
     path: 4095,
 };
 
@@ -318,6 +348,16 @@ pub fn head(entry: &Entry, limits: &Limits) -> Result<Vec<u8>, Refused> {
     Ok(out)
 }
 
+/// The bytes `meta`'s xattrs take on the stream, which spend the stage's byte budget: each a name length
+/// (`u8`) and a value length (`u32`), its name and its value (past `u64`, past any budget too).
+pub fn xattr_bytes(meta: &Meta) -> u64 {
+    meta.xattrs.iter().fold(0u64, |n, x| {
+        n.saturating_add(5)
+            .saturating_add(u64::try_from(x.name.len()).unwrap_or(u64::MAX))
+            .saturating_add(u64::try_from(x.value.len()).unwrap_or(u64::MAX))
+    })
+}
+
 /// A checked [`Meta`] as the stream carries it: its fixed part, then each xattr's name length, value
 /// length, name and value.
 fn meta_bytes(meta: &Meta) -> Vec<u8> {
@@ -372,13 +412,7 @@ pub fn check_meta(path: &str, meta: &Meta) -> Result<(), Refused> {
             meta.mtime.nanos, meta.atime.nanos
         ));
     }
-    if meta.xattrs.len() > XATTRS_MAX {
-        return refuse(format!(
-            "{} extended attributes are over the {XATTRS_MAX} an entry carries",
-            meta.xattrs.len()
-        ));
-    }
-    let mut values: usize = 0;
+    let mut names: usize = 0;
     for x in &meta.xattrs {
         if x.name.is_empty() || x.name.len() > XATTR_NAME_MAX || x.name.contains('\0') {
             return refuse(format!(
@@ -398,11 +432,12 @@ pub fn check_meta(path: &str, meta: &Meta) -> Result<(), Refused> {
                 x.name
             ));
         }
-        values = values.saturating_add(x.value.len());
+        names = names.saturating_add(x.name.len()).saturating_add(1);
     }
-    if values > XATTR_SIZE_MAX {
+    if names > XATTR_LIST_MAX {
         return refuse(format!(
-            "its extended attributes' values together are over {XATTR_SIZE_MAX} bytes"
+            "its extended attributes' names together, each with its NUL, are over Linux's \
+             XATTR_LIST_MAX, {XATTR_LIST_MAX} bytes"
         ));
     }
     Ok(())
@@ -606,6 +641,17 @@ impl Unpack {
 
     /// Whether the stream may end here: a remove's opening, or a stage's end head, is whole. Else its
     /// end is refused as [`Refused::Truncated`], saying where.
+    /// The stream's version, once its opening is read (0 before).
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Bounds the stage's entries and bytes by its learned budget too, from its opening on.
+    pub fn learn(&mut self, entries: u64, bytes: u64) {
+        self.limits.entries = self.limits.entries.min(entries);
+        self.limits.bytes = self.limits.bytes.min(bytes);
+    }
+
     pub fn finish(&self) -> Result<(), Refused> {
         if let Some(why) = &self.broken {
             return Err(why.clone());
@@ -806,7 +852,7 @@ impl Unpack {
             .checked_add(head.size)
             .filter(|n| *n <= self.limits.bytes)
             .ok_or(Refused::Over {
-                what: "the stage's file bytes",
+                what: "the stage's file and xattr bytes",
                 bound: self.limits.bytes,
             })?;
         let len = head.path.saturating_add(head.target);
@@ -939,14 +985,24 @@ impl Unpack {
         }
         let count = usize::from(u16::from_le_bytes([c0, c1]));
         let len = usize::try_from(u32::from_le_bytes([b0, b1, b2, b3])).unwrap_or(usize::MAX);
-        if count > XATTRS_MAX || len > XATTR_BLOCK_MAX {
+        if count > XATTRS_IN_LIST || len > XATTR_BLOCK_MAX {
             return Err(Refused::Meta {
                 path,
                 why: format!(
-                    "{count} extended attributes in {len} bytes are over the {XATTRS_MAX} in {XATTR_BLOCK_MAX} an entry carries"
+                    "{count} extended attributes in {len} bytes are over the {XATTRS_IN_LIST} in \
+                     {XATTR_BLOCK_MAX} Linux's XATTR_LIST_MAX and XATTR_SIZE_MAX allow"
                 ),
             });
         }
+        // The xattrs' bytes spend the stage's byte budget, as a file's do, before any is held.
+        self.bytes = self
+            .bytes
+            .checked_add(u64::try_from(len).unwrap_or(u64::MAX))
+            .filter(|n| *n <= self.limits.bytes)
+            .ok_or(Refused::Over {
+                what: "the stage's file and xattr bytes",
+                bound: self.limits.bytes,
+            })?;
         entry.meta = Some(Meta {
             uid: u32::from_le_bytes([u0, u1, u2, u3]),
             gid: u32::from_le_bytes([g0, g1, g2, g3]),

@@ -8,9 +8,10 @@
 //! `,`-joined, else `-`) and a regular file's sha256 (else `-`). atime isn't written: reading a file
 //! moves it. `dir` itself isn't an entry: its owner and times are whoever made it.
 //!
-//! Flat (CLAUDE.md §11): a list of directories to read. Bounded (§2): at most [`ENTRIES`] entries, an
-//! entry's xattr names within Linux's `XATTR_LIST_MAX` and each value within `XATTR_SIZE_MAX`; past any,
-//! the act fails naming the bound.
+//! Flat (CLAUDE.md §11): a list of directories to read. Bounded (§2) by what the file system says: each
+//! directory inode read once (one met again is a loop, refused), each inode's names at most its own link
+//! count (`st_nlink`), an entry's xattr names within Linux's `XATTR_LIST_MAX` and each value within
+//! `XATTR_SIZE_MAX`; past any, the act fails naming the bound.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,8 +21,6 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-/// The most entries a manifest holds: the staging stream's own bound (`hex_core::stream::files::LIMITS`).
-const ENTRIES: usize = 1 << 20;
 /// Linux's bounds on an inode's xattr names together and on one value (`XATTR_LIST_MAX`,
 /// `XATTR_SIZE_MAX`, include/uapi/linux/limits.h).
 const XATTR_LIST_MAX: usize = 1 << 16;
@@ -30,6 +29,10 @@ const XATTR_SIZE_MAX: usize = 1 << 16;
 /// One entry's line, but its hard-link group, which is known once every entry is.
 struct Line {
     dir: bool,
+    /// Its inode's link count: the most names the walk may meet it by.
+    links: u64,
+    /// Its device and inode number.
+    id: (u64, u64),
     head: String,
     tail: String,
     inode: Option<(u64, u64)>,
@@ -49,13 +52,13 @@ pub fn tree(dir: &str) -> u8 {
 fn manifest(root: &Path) -> Result<String, String> {
     let mut lines: BTreeMap<String, Line> = BTreeMap::new();
     let mut dirs: Vec<(PathBuf, String)> = vec![(root.to_owned(), String::new())];
+    // Each inode met, by device and number, and by how many names: a directory has one, so one met again
+    // is a loop.
+    let mut met: BTreeMap<(u64, u64), u64> = BTreeMap::new();
     while let Some((dir, rel)) = dirs.pop() {
         let listing = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in listing {
             let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
-            if lines.len() >= ENTRIES {
-                return Err(format!("more than {ENTRIES} entries"));
-            }
             let name = entry.file_name();
             let name = name
                 .to_str()
@@ -67,6 +70,14 @@ fn manifest(root: &Path) -> Result<String, String> {
                 format!("{rel}/{name}")
             };
             let line = one(&path, &rel)?;
+            let names = met.entry(line.id).or_insert(0);
+            *names = names.saturating_add(1);
+            if *names > line.links {
+                return Err(format!(
+                    "{rel}: its inode is met by more names than its link count, {}",
+                    line.links
+                ));
+            }
             if line.dir {
                 dirs.push((path, rel.clone()));
             }
@@ -137,6 +148,9 @@ fn one(path: &Path, rel: &str) -> Result<Line, String> {
     );
     Ok(Line {
         dir: t.is_dir(),
+        // A directory has one name (link(2) refuses one more); its st_nlink counts its children's `..`.
+        links: if t.is_dir() { 1 } else { meta.nlink() },
+        id: (meta.dev(), meta.ino()),
         head,
         tail: format!(
             "{}\t{sha}",
@@ -153,7 +167,11 @@ fn one(path: &Path, rel: &str) -> Result<Line, String> {
 fn sha256(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
-    let mut buf = vec![0u8; 1 << 16];
+    // Read in the file's own preferred block (st_blksize, stat(2)).
+    let block = usize::try_from(file.metadata()?.blksize())
+        .unwrap_or(1)
+        .max(1);
+    let mut buf = vec![0u8; block];
     loop {
         let n = match file.read(&mut buf) {
             Ok(0) => break,

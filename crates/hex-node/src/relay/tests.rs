@@ -302,10 +302,13 @@ fn stage_raw(lab: &Lab, bytes: &[u8]) -> Answer {
     conn.read_to_end(&mut back).unwrap();
     let mut d = Deframer::new(wire::MAX_MESSAGE);
     let mut rest = &back[..];
+    // A version-2 stage's budget comes first; the answer is the message after it.
     let message = loop {
         let (took, whole) = d.take(rest).unwrap();
         rest = &rest[took..];
-        if let Some(m) = whole {
+        if let Some(m) = whole
+            && hf::read_budget(&m).is_none()
+        {
             break m;
         }
     };
@@ -783,6 +786,36 @@ fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
     let sh2 = std::fs::symlink_metadata(root.join("sh2")).unwrap();
     assert!(sh2.file_type().is_symlink());
     assert_eq!(sh.ino(), sh2.ino());
+}
+
+/// HEX-GUEST-14 (Ada's rule on constants: a learned bound): open a stage: expect the relay's first answer
+/// its budget, the free inodes and bytes statvfs(3) reports for the staged folder, which a stage spends
+/// against (within what the folder's file system holds, read again beside it).
+#[test]
+fn a_stages_first_answer_is_the_staged_folders_free_space() {
+    let (lab, staged) = staged_lab();
+    let mut conn = UnixStream::connect(lab.dir.path().join("files.sock")).unwrap();
+    conn.write_all(&hf::open(hf::Op::Stage, "b").unwrap())
+        .unwrap();
+    let mut d = Deframer::new(wire::MAX_MESSAGE);
+    let mut buf = [0u8; 256];
+    let message = loop {
+        let n = conn.read(&mut buf).unwrap();
+        assert!(n > 0, "the relay closed before its budget");
+        let (_, whole) = d.take(&buf[..n]).unwrap();
+        if let Some(m) = whole {
+            break m;
+        }
+    };
+    let (entries, bytes) = hf::read_budget(&message).expect("a budget");
+    let st = rustix::fs::statvfs(&staged).unwrap();
+    assert!(
+        entries > 0 && entries <= st.f_files,
+        "{entries} of {}",
+        st.f_files
+    );
+    assert!(bytes > 0 && bytes <= st.f_blocks * st.f_frsize, "{bytes}");
+    drop(conn);
 }
 
 /// HEX-GUEST-14 (§4a, as ctr fails lab:hardlink's unpack): send the relay, raw, a layer making `r/q` and

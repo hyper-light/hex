@@ -34,22 +34,32 @@ const RESOLVE: ResolveFlags = ResolveFlags::IN_ROOT
 const WITHIN: ResolveFlags = ResolveFlags::IN_ROOT
     .union(ResolveFlags::NO_MAGICLINKS)
     .union(ResolveFlags::NO_XDEV);
-/// How many times an openat2 that the kernel answers `EAGAIN` is tried: it does so when a rename or
-/// mount ran during the lookup (openat2(2), "EAGAIN ... RESOLVE_IN_ROOT"), which nothing but the relay
-/// does under a staged root, so a few tries are past any race and the last `EAGAIN` is returned typed.
-const RESOLVE_TRIES: usize = 8;
+/// How many times an openat2 that the kernel answers `EAGAIN` is tried: it does so when a rename or mount
+/// anywhere on the host crossed a `..` during the lookup (openat2(2); fs/namei.c v6.19 :2195-2206), and
+/// leaves the retry to the caller. The oci class's resolver's budget (`IN_ROOT_TRIES`,
+/// crates/hex-runtime/src/linux/oci/inroot.rs on cp/t7-inroot-eagain): libpathrs's (src/syscalls.rs:864-873),
+/// as runc v1.5.2 cites it (`internal/pathrs/retry.go`); measured on fedora under 16 mount and 16 rename
+/// loops, no resolve needed more than 5 (unit hex-inroot-storm-20261105T130241Z,
+/// docs/research/runtime/inroot-eagain.md). The last `EAGAIN` is returned typed.
+const RESOLVE_TRIES: usize = 128;
 /// The most links a layer's path follows, as Linux's own lookup (`MAXSYMLINKS`, include/linux/namei.h).
 const MAX_LINKS: usize = 40;
 /// Linux's bounds on an inode's xattr names together and on one value (`XATTR_LIST_MAX`,
 /// `XATTR_SIZE_MAX`, include/uapi/linux/limits.h): what a copied directory's xattrs are read within.
-const XATTR_LIST_MAX: usize = 1 << 16;
-const XATTR_SIZE_MAX: usize = 1 << 16;
-/// A staged root's mode once whole: the node and a container's mapped users traverse it.
+const XATTR_LIST_MAX: usize = files::XATTR_LIST_MAX;
+const XATTR_SIZE_MAX: usize = files::XATTR_SIZE_MAX;
+/// A staged root's mode once whole: the relay writes it, and the node and a container's mapped users read
+/// and search it, which every path through it needs (path_resolution(7), "Permission"): `S_IRWXU` and
+/// read and search for group and others (inode(7)).
 const ROOT_MODE: u16 = 0o755;
-/// Each removal visits at most this many entries per entry a stage may hold: a container writes into
-/// its root, so its copy may hold more than was staged, but not without bound (CLAUDE.md §2); past it the
-/// removal is refused by type, the copy left for the next try.
-const REMOVE_FACTOR: u64 = 4;
+/// A directory or file the relay alone writes while a stage is under way (`S_IRWXU`, `S_IRUSR | S_IWUSR`,
+/// inode(7)): its staged mode is set once its contents are whole, and a removal makes a read-only one its
+/// own again to empty it.
+const OWNER_DIR: u32 = 0o700;
+const OWNER_FILE: u32 = 0o600;
+/// A directory mkparent makes: `mkdir` 0755 then an explicit chmod past the umask (containerd v2.3.6,
+/// `pkg/archive/tar_unix.go:90-97`).
+const MKPARENT_MODE: u32 = 0o755;
 
 fn os(op: &'static str) -> impl Fn(Errno) -> Refusal {
     move |e| Refusal::os(op, e)
@@ -102,10 +112,19 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Ref
                 (Step::Open { op, id }, None) => {
                     let id = BoxId::new(&id)?;
                     match op {
-                        Op::Remove => remove(staged, &id, limits),
+                        Op::Remove => remove(staged, &id),
                         Op::Stage => {
-                            stage = Some(Stage::begin(staged, id, limits)?);
-                            Ok(())
+                            let begun = Stage::begin(staged, id)?;
+                            let learned = begun.free;
+                            stage = Some(begun);
+                            // From version 2 the packer learns the stage's budget first, and both sides
+                            // spend against it.
+                            unpack.learn(learned.entries, learned.bytes);
+                            if unpack.version() >= 2 {
+                                send_budget(conn, learned)
+                            } else {
+                                Ok(())
+                            }
                         }
                     }
                 }
@@ -126,6 +145,35 @@ fn take(conn: &mut dyn Duplex, staged: &Path, limits: &Limits) -> Result<(), Ref
         return fail(stage, refused(why));
     }
     Ok(())
+}
+
+/// What a file system has free and holds, as statvfs(3) reads it: what a stage may spend, learned when
+/// it begins (CLAUDE.md §2: a bound the system says, not a number Hex picks).
+#[derive(Debug, Clone, Copy)]
+struct Free {
+    /// Free inodes (`f_ffree`): the entries a stage may make.
+    entries: u64,
+    /// Bytes free to an unprivileged writer (`f_bavail` × `f_frsize`; past `u64`, no bound short of it).
+    bytes: u64,
+    /// Inodes in use (`f_files` − `f_ffree`): the most entries a removal can visit.
+    used: u64,
+}
+
+fn free(dir: &OwnedFd) -> Result<Free, Refusal> {
+    let st = rustix::fs::fstatvfs(dir).map_err(os("reading the staged folder's free space"))?;
+    Ok(Free {
+        entries: st.f_ffree,
+        bytes: st.f_bavail.saturating_mul(st.f_frsize),
+        used: st.f_files.saturating_sub(st.f_ffree),
+    })
+}
+
+/// Sends a stage's budget, framed as the relay's answers are.
+fn send_budget(conn: &mut dyn Duplex, free: Free) -> Result<(), Refusal> {
+    let bytes = stream::frame(&files::budget(free.entries, free.bytes), wire::MAX_MESSAGE)
+        .map_err(|e| Refusal::Broken(format!("framing a stage's budget: {e}")))?;
+    conn.write_all(&bytes)
+        .map_err(|e| Refusal::os("sending a stage's budget", e))
 }
 
 /// Removes a stage's partial copy, then returns why it failed.
@@ -155,6 +203,8 @@ struct Stage {
     entries: usize,
     /// What removals during the stage (a replaced entry, a whiteout, an opaque directory) may visit.
     removals: Budget,
+    /// What the staged folder's file system had free when the stage began.
+    free: Free,
 }
 
 /// A layer under way (§4a): its root, which its entries' names resolve within as containerd's
@@ -271,14 +321,14 @@ fn join(dir: &str, leaf: &str) -> String {
 impl Stage {
     /// Makes `<staged>/<id>`, which must not exist: one there is another box's, or a copy the host
     /// hasn't removed, and staging over it would change what that box runs.
-    fn begin(staged: &Path, id: BoxId, limits: &Limits) -> Result<Self, Refusal> {
+    fn begin(staged: &Path, id: BoxId) -> Result<Self, Refusal> {
         let staged = rustix::fs::open(
             staged,
             OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(os("opening the staged folder"))?;
-        match rustix::fs::mkdirat(&staged, id.as_str(), Mode::from_raw_mode(0o700)) {
+        match rustix::fs::mkdirat(&staged, id.as_str(), Mode::from_raw_mode(OWNER_DIR)) {
             Ok(()) => {}
             Err(Errno::EXIST) => return Err(Refusal::Exists(id)),
             Err(e) => return Err(Refusal::os("making a box's staged root", e)),
@@ -291,6 +341,7 @@ impl Stage {
         )
         .map_err(os("opening a box's staged root"))?;
         let root_path = fd_path(&root)?;
+        let free = free(&staged)?;
         Ok(Self {
             staged,
             id,
@@ -300,9 +351,9 @@ impl Stage {
             dirs: BTreeMap::new(),
             layer: None,
             entries: 0,
-            removals: Budget::new(
-                usize::try_from(limits.entries.saturating_mul(REMOVE_FACTOR)).unwrap_or(usize::MAX),
-            ),
+            // A removal visits no more entries than the file system holds.
+            removals: Budget::new(usize::try_from(free.used).unwrap_or(usize::MAX)),
+            free,
         })
     }
 
@@ -428,7 +479,7 @@ impl Stage {
                     // directory; then the earlier layer's link or file goes.
                     let below_dir = within(&top, &below).ok();
                     self.remove(&fd, &part, &path)?;
-                    rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(0o755))
+                    rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(MKPARENT_MODE))
                         .map_err(|e| invalid(format!("making {path:?}, a parent: {e}")))?;
                     let dir = rustix::fs::openat(
                         &fd,
@@ -439,7 +490,7 @@ impl Stage {
                     .map_err(os("opening a parent directory staging made"))?;
                     match below_dir {
                         Some(from) => copy_dir_info(&from, &dir)?,
-                        None => rustix::fs::fchmod(&dir, Mode::from_raw_mode(0o755))
+                        None => rustix::fs::fchmod(&dir, Mode::from_raw_mode(MKPARENT_MODE))
                             .map_err(os("setting a made parent's mode"))?,
                     }
                 }
@@ -519,7 +570,7 @@ impl Stage {
         match &entry.what {
             What::Dir => {
                 // Writable by the relay until its layer ends, whatever its mode: its entries come after it.
-                match rustix::fs::mkdirat(&parent, leaf, Mode::from_raw_mode(0o700)) {
+                match rustix::fs::mkdirat(&parent, leaf, Mode::from_raw_mode(OWNER_DIR)) {
                     Err(Errno::EXIST) if layered => {}
                     done => done.map_err(exists)?,
                 }
@@ -544,7 +595,7 @@ impl Stage {
                         | OFlags::WRONLY
                         | OFlags::NOFOLLOW
                         | OFlags::CLOEXEC,
-                    Mode::from_raw_mode(0o600),
+                    Mode::from_raw_mode(OWNER_FILE),
                 )
                 .map_err(exists)?;
                 if *size > 0 {
@@ -780,8 +831,11 @@ fn copy_dir_info(from: &OwnedFd, to: &OwnedFd) -> Result<(), Refusal> {
         Some(Gid::from_raw(st.st_gid)),
     )
     .map_err(os("copying a lower directory's owner"))?;
-    rustix::fs::fchmod(to, Mode::from_raw_mode(st.st_mode & 0o7777))
-        .map_err(os("copying a lower directory's mode"))?;
+    rustix::fs::fchmod(
+        to,
+        Mode::from_raw_mode(st.st_mode & u32::from(files::MODE_BITS)),
+    )
+    .map_err(os("copying a lower directory's mode"))?;
     let mut names = vec![0u8; XATTR_LIST_MAX];
     let n = match rustix::fs::flistxattr(from, &mut names) {
         Ok(n) => n,
@@ -914,16 +968,15 @@ fn in_the_way(root: &OwnedFd, path: &str, err: Errno) -> Refusal {
 }
 
 /// Removes `<staged>/<id>` and everything under it.
-pub fn remove(staged: &Path, id: &BoxId, limits: &Limits) -> Result<(), Refusal> {
+pub fn remove(staged: &Path, id: &BoxId) -> Result<(), Refusal> {
     let staged = rustix::fs::open(
         staged,
         OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(os("opening the staged folder"))?;
-    let mut budget = Budget::new(
-        usize::try_from(limits.entries.saturating_mul(REMOVE_FACTOR)).unwrap_or(usize::MAX),
-    );
+    // A removal visits no more entries than the file system holds.
+    let mut budget = Budget::new(usize::try_from(free(&staged)?.used).unwrap_or(usize::MAX));
     match rustix::fs::statat(&staged, id.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
         Err(Errno::NOENT) => return Err(Refusal::NoSuchBox(id.clone())),
         Err(e) => return Err(Refusal::os("opening a box's staged root", e)),
@@ -949,7 +1002,7 @@ fn remove_tree(parent: &OwnedFd, leaf: &str, budget: &mut Budget) -> Result<(), 
         next = next.saturating_add(1);
         let fd = open_in(&root, &dir)?;
         // A directory may be read-only (its staged mode, or the container's): the relay empties it.
-        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700))
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(OWNER_DIR))
             .map_err(os("opening a staged directory to removal"))?;
         let reader = Dir::read_from(&fd).map_err(os("listing a staged directory"))?;
         for entry in reader {
