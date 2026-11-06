@@ -14,7 +14,10 @@ edition's does. Its user's manager runs before install (lingering), as a CI runn
 Record `records/linux-fb2e5ca-20261106T054108Z.txt`: commit fb2e5ca, 2026-11-06T05:41Z, unit
 `hex-native-s6-final-fb2e5ca-20261106T054108Z` on fedora (i9-14900HX), load average 12.52, 8 co-tenant
 containers, the lab's container capped at 8 GiB with OOM score 1000. The same unit, tree and target dir passed
-the 7 gates first (249 tests).
+the 7 gates first (249 tests). Again at b837a3f (`records/linux-b837a3f-20261106T204730Z.txt`, 2026-11-06T20:52Z, unit
+`hex-native-s6-gates-b837a3f-20261106T204730Z`, load average 24.54, 6 co-tenant containers), every check below
+passing the same way, after the same unit, tree and target dir passed the 7 gates (254 tests) and the reds failed:
+09b853a (listing bound 4096), c070508 (no patience constants), b9ca5f1 (no `hex setup features`), c4ede69 (no READY=1).
 
 | Check | Result |
 |---|---|
