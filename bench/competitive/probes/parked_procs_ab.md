@@ -408,10 +408,10 @@ root lab 7 of 7 test binaries, in one unit.
 | A-L12-r4 | 208/607 | 0.731/2.018 | 0.509/1.458 | 0, 0, 0, 0, 0, 0 |
 | B-L12-r4 | 33/242 | 0.545/1.562 | 0.724/1.513 | 2000, 1992, 0, 0, 0, 8 |
 
-- Part 19's p50 falls about 6x (188-208 µs off, 31-33 on) and its p99 2-5x (495-667 off, 111-242 on), in every pair.
+- Part 19's p50 falls about 6x (188-208 µs off, 31-33 on) and its p99 2.2-4.5x (495-667 off, 111-242 on), in every pair.
 - The create's p50 falls about 24% (0.671-0.731 ms off, 0.522-0.545 on) in every pair, and its p99 in 7 of 8.
 - The delete pays for it: its p50 rises about 40% (0.460-0.509 ms off, 0.655-0.724 on) in every pair, and its p99 in
-  7 of 8. The proc is made at the delete (reuse on), so its work moves off the create, as the in-process runs found.
+  all 8. The proc is made at the delete (reuse on), so its work moves off the create, as the in-process runs found.
 - Each B node: 2,000 procs made, every claim but the 8 idle slots' a hit, none dry; 8 alive at its end, the idle
   slots' own. B-L12-r3's 14 misses are as B-L6-r3's at 1e5e956: by the reading there, its ipc and uts pair pool ran dry
   and those creates' flags no longer matched the parked init's (decision 8's flag match, not the proc). Not

@@ -2074,7 +2074,8 @@ move to the delete, off create's path; the delete's cost is measured beside the 
   host decision for Ada, not Hex's.
 
 **Parked procs: a parked init with its proc made ahead (the tail agent's design, built behind a node setting, off by default
-until measured, on by default for a root node since 2026-11-06; the g6 agent reviews and owns part 19's measurement; 2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
+until measured, on by default for a root node since 2026-11-06; the g6 agent reviews and owns part 19's measurement;
+2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
 That proc is made with a pid namespace of its own, which the seed clones the init into, and a parked init is pid 1 of
 the pid namespace it was parked in. So on 7.x with prepared procs on, every create clones fresh. On 6.19 there is no
 prepared proc at all: through 7.0 the kernel won't hand over a pid namespace with no process in it (`goal6-mntns.md`
