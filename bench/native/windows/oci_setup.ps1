@@ -38,7 +38,8 @@ if (-not ([string]$sum).ToLower().Contains((Get-FileHash -Algorithm SHA256 $tgz)
 }
 $cbin = Join-Path $Root "containerd"
 New-Item -ItemType Directory -Force -Path $cbin | Out-Null
-tar.exe -xzf $tgz -C $cbin
+# System32's bsdtar by path: under kiln's Git Bash, PATH finds GNU tar first, which reads "C:" as a remote host.
+& "$env:SystemRoot\System32\tar.exe" -xzf $tgz -C $cbin
 foreach ($exe in "containerd.exe", "ctr.exe", "containerd-shim-runhcs-v1.exe") {
     if (-not (Test-Path (Join-Path $cbin "bin\$exe"))) { throw "containerd $v's archive has no bin\$exe" }
 }
