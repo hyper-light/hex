@@ -1,5 +1,13 @@
 # Stranded capacity at 90% load on the recorded microVM workload (AC-T7.4.3)
 
+> **Superseded in part (2026-11-06, 21:50Z).** The tables below are the run at `680116a`: 16 seeds spread
+> evenly, the speed ladder, kube-scheduler's sample floors. Since then the branch has 59 seeds drawn
+> uniformly, each set's exact slowest speed and refusals counted by kind (`b1e88bd`), and the sample's
+> floors are being derived (below). The record reruns on the release-build traces; until then these
+> tables are context. At `b1e88bd` the test holds the bar on all 59 seeds at the exact speeds: m5d.metal
+> 35x as recorded and 14x with the keep-alive; the fleet's mix 126x and 42x, OCI 35x and 14x,
+> Firecracker 22x and 8x, Shards 122x and 37x.
+
 **Bar:** "stranded capacity at 90% load, against best fit alone falls by at least 30% compared with best fit
 alone, measured by hex-sim with a recorded workload of OCI containers, Firecracker microVMs and Shards
 microVMs" (`AC-T7.4.3`, T7's plan, version 4; G2 step 4). The workload of record is a day of Huawei Cloud's serverless
@@ -8,7 +16,7 @@ microVM), on two node models (`huawei_workload.md`): EC2 m5d.metal hosts, each r
 one), and Hex's own fleet's host types beside it, each running the kinds its OS runs. **Result: MET on every
 one of 16 seeds on both node models, for the mix of kinds and for each kind alone, with no completions and
 with completions (lifetimes as recorded, and with Huawei's one-minute keep-alive). On m5d.metal, Hex's scorer
-strands nothing on any seed. On the fleet it strands at least 52.9% less than best fit by CPU and 52.6% less
+strands nothing on any seed. On the fleet it strands at least 53.0% less than best fit by CPU and 52.7% less
 than best fit across resources (Kubernetes' `MostAllocated`), and outside the mix with no completions it
 strands nothing.**
 
@@ -20,7 +28,8 @@ holds the bar on every seed of every node model, set and clock. This is hex-sim'
 wall-clock: the same trace gives the same tables on any machine.
 
 - **Workload.** 25,295 launches of 339 owners. Each launch's kind is its owner's, a third of the launches
-  each, and each kind's runtime overhead is in its memory (`huawei_workload.md`).
+  each, and each kind's runtime overhead is in its memory (`huawei_workload.md`). Shards' overhead is
+  measured, by guest size (`shards_overhead.md`).
 - **Node models.**
   - `huawei-r5-day30.trace`, the main one: 10 EC2 m5d.metal hosts (48 cores, 384 GiB), each running all
     three kinds, so every request may use every node.
@@ -70,7 +79,7 @@ The bench walks the ladder for every node model, set and trace, and prints each 
 | node model, set | lifetimes as recorded | with the keep-alive |
 |---|---|---|
 | m5d.metal, every set | 40x; fewest completions on the way, by seed, 2,673. At 30x, no arm reaches 90% on any seed | 20x; 301. From 30x up, some seed has none end |
-| fleet, mix | 150x; 4,963 (Hex), 5,112 and 5,101 (the best fits). At 100x, Hex reaches 90% on 3 seeds and the best fits on none | 50x; 312, 469 and 842. At 40x, the best fits reach 90% on 15 seeds; from 75x up, some seed has none end |
+| fleet, mix | 150x; 4,963 (Hex), 5,112 and 5,099 (the best fits). At 100x, Hex reaches 90% on 3 seeds and the best fits on none | 50x; 312, 469 and 842. At 40x, the best fits reach 90% on 15 seeds; from 75x up, some seed has none end |
 | fleet, OCI | 40x; 2,673 | 20x; 301. From 30x up, some seed has none end |
 | fleet, Firecracker | 30x; 1,110 | 10x; 535. From 20x up, some seed has none end |
 | fleet, Shards | 150x; 4,963 | 40x; 1,084. From 75x up, some seed has none end |
@@ -87,9 +96,9 @@ the day and ran out of arrivals before 90%; wrapping gives each the whole day. E
 the next speed down falls short.
 
 The bar doesn't hang on these speeds. Of the 179 ladder rows at which Hex and both best fits reach 90% on
-every seed, Hex meets the bar on every seed of 176. In the other three (m5d.metal at 60x, lifetimes as
-recorded: the mix, Firecracker alone and Shards alone), one seed falls short only because `MostAllocated`
-strands nothing there either, so no cut is possible. Hex strands nothing on it too. The ladder's last
+every seed, Hex meets the bar on every seed of 177. In the other two (m5d.metal at 60x, lifetimes as
+recorded: the mix and Firecracker alone), one seed falls short only because `MostAllocated` strands
+nothing there either, so no cut is possible. Hex strands nothing on it too. The ladder's last
 column counts those seeds.
 
 ## Hex against the best fits
@@ -102,8 +111,8 @@ On m5d.metal, the main node model:
 | set and clock | `BestFit` | `MostAllocated` | Hex | least cut vs `BestFit`, vs `MostAllocated` | passed over: `BestFit`, `MostAllocated`, Hex |
 |---|---|---|---|---|---|
 | mix, no completions | 708-804 | 708-804 | 0 | 100%, 100% | 0, 0, 0 |
-| mix, 40x, as recorded | 175-700 | 87-700 | 0 | 100%, 100% | 0, 0, 0 |
-| mix, 20x, with the keep-alive | 261-793 | 261-792 | 0 | 100%, 100% | 0, 0, 0 |
+| mix, 40x, as recorded | 262-700 | 87-702 | 0 | 100%, 100% | 0, 0, 0 |
+| mix, 20x, with the keep-alive | 261-793 | 264-792 | 0 | 100%, 100% | 0, 0, 0 |
 | OCI, no completions | 708-804 | 708-804 | 0 | 100%, 100% | 0, 0, 0 |
 | OCI, 40x, as recorded | 261-701 | 174-615 | 0 | 100%, 100% | 0, 0, 0 |
 | OCI, 20x, with the keep-alive | 266-793 | 262-794 | 0 | 100%, 100% | 0, 0, 0 |
@@ -111,8 +120,8 @@ On m5d.metal, the main node model:
 | Firecracker, 40x, as recorded | 261-700 | 87-700 | 0 | 100%, 100% | 0, 0, 0 |
 | Firecracker, 20x, with the keep-alive | 266-793 | 177-792 | 0 | 100%, 100% | 0, 0, 0 |
 | Shards, no completions | 708-804 | 708-804 | 0 | 100%, 100% | 0, 0, 0 |
-| Shards, 40x, as recorded | 261-700 | 87-700 | 0 | 100%, 100% | 0, 0, 0 |
-| Shards, 20x, with the keep-alive | 266-793 | 177-792 | 0 | 100%, 100% | 0, 0, 0 |
+| Shards, 40x, as recorded | 261-700 | 88-700 | 0 | 100%, 100% | 0, 0, 0 |
+| Shards, 20x, with the keep-alive | 267-793 | 262-792 | 0 | 100%, 100% | 0, 0, 0 |
 
 Every m5d.metal node runs every kind, so nothing is refused for its kind, and Hex's fewest-kinds tie can't
 tell the nodes apart: Hex is least stranded, then most allocated, here.
@@ -121,18 +130,18 @@ On Hex's fleet:
 
 | set and clock | `BestFit` | `MostAllocated` | Hex | least cut vs `BestFit`, vs `MostAllocated` | passed over: `BestFit`, `MostAllocated`, Hex |
 |---|---|---|---|---|---|
-| mix, no completions | 651-665 | 637-661 | 0-312 | 52.9%, 52.6% | 6,679, 11,322, 2,556 |
-| mix, 150x, as recorded | 441-563 | 280-478 | 0 | 100%, 100% | 1,669, 2,975, 0 |
-| mix, 50x, with the keep-alive | 503-635 | 300-574 | 0 | 100%, 100% | 7,001, 8,100, 0 |
+| mix, no completions | 651-665 | 637-661 | 0-312 | 53.0%, 52.7% | 6,679, 11,322, 2,556 |
+| mix, 150x, as recorded | 429-611 | 282-544 | 0 | 100%, 100% | 1,917, 2,502, 0 |
+| mix, 50x, with the keep-alive | 473-636 | 357-587 | 0 | 100%, 100% | 7,305, 8,043, 0 |
 | OCI, no completions | 591-608 | 591-608 | 0 | 100%, 100% | 0, 0, 0 |
 | OCI, 40x, as recorded | 236-472 | 162-454 | 0 | 100%, 100% | 0, 0, 0 |
 | OCI, 20x, with the keep-alive | 144-587 | 113-589 | 0 | 100%, 100% | 0, 0, 0 |
 | Firecracker, no completions | 474-602 | 474-602 | 0 | 100%, 100% | 0, 0, 0 |
 | Firecracker, 30x, as recorded | 36-528 | 131-387 | 0 | 100%, 100% | 0, 0, 0 |
 | Firecracker, 10x, with the keep-alive | 226-492 | 110-469 | 0 | 100%, 100% | 0, 0, 0 |
-| Shards, no completions | 626-646 | 626-646 | 0 | 100%, 100% | 0, 0, 0 |
-| Shards, 150x, as recorded | 333-566 | 241-511 | 0 | 100%, 100% | 0, 0, 0 |
-| Shards, 40x, with the keep-alive | 484-617 | 395-589 | 0 | 100%, 100% | 0, 0, 0 |
+| Shards, no completions | 626-647 | 626-647 | 0 | 100%, 100% | 0, 0, 0 |
+| Shards, 150x, as recorded | 383-573 | 286-510 | 0 | 100%, 100% | 0, 0, 0 |
+| Shards, 40x, with the keep-alive | 470-611 | 366-599 | 0 | 100%, 100% | 0, 0, 0 |
 
 On either model, Hex refuses nothing below half load and no arrival for room: a node always had the room.
 On the fleet's mix with no completions, Hex's refusals all come from the kind filter. They are OCI
@@ -144,18 +153,18 @@ cell is stranded per-mille, with arrivals passed over in brackets.
 
 | seed | from | `BestFit` | `MostAllocated` | the plan's | Hex | cut vs `BestFit` | cut vs `MostAllocated` |
 |---:|---:|---|---|---|---|---:|---:|
-| 0 | 0 | 659 (245) | 637 (440) | 0 (0) | 0 (0) | 100.0% | 100.0% |
+| 0 | 0 | 660 (245) | 637 (440) | 0 (0) | 0 (0) | 100.0% | 100.0% |
 | 1 | 1,580 | 651 (193) | 649 (386) | 0 (1) | 0 (0) | 100.0% | 100.0% |
-| 2 | 3,161 | 657 (208) | 651 (523) | 0 (0) | 0 (0) | 100.0% | 100.0% |
-| 3 | 4,742 | 659 (289) | 654 (564) | 26 (1) | 0 (0) | 100.0% | 100.0% |
-| 4 | 6,323 | 664 (278) | 659 (703) | 54 (4) | 0 (0) | 100.0% | 100.0% |
+| 2 | 3,161 | 658 (208) | 651 (523) | 0 (0) | 0 (0) | 100.0% | 100.0% |
+| 3 | 4,742 | 659 (289) | 655 (564) | 26 (1) | 0 (0) | 100.0% | 100.0% |
+| 4 | 6,323 | 664 (278) | 660 (703) | 54 (4) | 0 (0) | 100.0% | 100.0% |
 | 5 | 7,904 | 662 (224) | 656 (514) | 0 (0) | 0 (0) | 100.0% | 100.0% |
 | 6 | 9,485 | 660 (225) | 653 (550) | 0 (0) | 0 (0) | 100.0% | 100.0% |
 | 7 | 11,066 | 660 (345) | 655 (722) | 203 (14) | 310 (21) | 53.0% | 52.7% |
-| 8 | 12,647 | 659 (394) | 657 (648) | 312 (91) | 309 (118) | 53.1% | 53.0% |
-| 9 | 14,228 | 659 (471) | 654 (880) | 311 (144) | 310 (165) | 53.0% | 52.6% |
-| 10 | 15,809 | 658 (505) | 657 (643) | 310 (175) | 310 (186) | 52.9% | 52.8% |
-| 11 | 17,390 | 657 (553) | 655 (933) | 307 (277) | 308 (286) | 53.1% | 53.0% |
+| 8 | 12,647 | 659 (394) | 658 (648) | 312 (91) | 309 (118) | 53.1% | 53.0% |
+| 9 | 14,228 | 659 (471) | 655 (880) | 311 (144) | 310 (165) | 53.0% | 52.7% |
+| 10 | 15,809 | 659 (505) | 657 (643) | 310 (175) | 310 (186) | 53.0% | 52.8% |
+| 11 | 17,390 | 658 (553) | 656 (933) | 307 (277) | 308 (286) | 53.2% | 53.0% |
 | 12 | 18,971 | 664 (629) | 657 (1,002) | 308 (447) | 307 (464) | 53.8% | 53.3% |
 | 13 | 20,552 | 661 (754) | 659 (932) | 307 (444) | 306 (460) | 53.7% | 53.6% |
 | 14 | 22,133 | 665 (754) | 661 (1,091) | 314 (428) | 312 (446) | 53.1% | 52.8% |
@@ -175,9 +184,9 @@ On m5d.metal:
 |---|---:|---:|---:|---:|---:|
 | `BestFit` | (baseline) | - | 0 | 0 | - |
 | `MostAllocated` | (baseline) | - | 0 | 0 | - |
-| `Align` (Tetris) | 12 | 66.4% | 46 | 0 | 88.0% |
-| least stranded, then alignment (the plan's) | 12 | 66.8% | 46 | 0 | 88.0% |
-| least stranded, then least allocated | 12 | 50.3% | 30 | 0 | 88.3% |
+| `Align` (Tetris) | 12 | 66.4% | 42 | 0 | 88.0% |
+| least stranded, then alignment (the plan's) | 12 | 66.4% | 42 | 0 | 88.0% |
+| least stranded, then least allocated | 12 | 67.0% | 29 | 0 | 88.3% |
 | least stranded, then most allocated | 12 | 100% | 0 | 0 | - |
 | **least stranded, then fewest kinds, then most allocated (Hex's)** | **12** | **100%** | **0** | **0** | **-** |
 
@@ -185,13 +194,13 @@ On the fleet:
 
 | arm | sets and clocks at the bar on 16/16 | least cut, any set and clock | passed over: mix, no completions | passed over: the other 11 | passed over below half load | earliest refusal for room |
 |---|---:|---:|---:|---:|---:|---:|
-| `BestFit` | (baseline) | - | 6,679 | 8,670 | 419 | - |
-| `MostAllocated` | (baseline) | - | 11,322 | 11,075 | 2,257 | - |
-| `Align` (Tetris) | 12 | 45.7% | 2,406 | 141 | 0 | 87.4% |
-| least stranded, then alignment (the plan's) | 12 | 31.7% | 2,397 | 143 | 0 | 87.9% |
-| least stranded, then least allocated | 12 | 50.7% | 3,619 | 123 | 0 | 80.7% |
-| least stranded, then most allocated | 12 | 51.9% | 11,195 | 7,429 | 1,925 | - |
-| **least stranded, then fewest kinds, then most allocated (Hex's)** | **12** | **52.6%** | **2,556** | **0** | **0** | **-** |
+| `BestFit` | (baseline) | - | 6,679 | 9,222 | 421 | - |
+| `MostAllocated` | (baseline) | - | 11,322 | 10,545 | 2,244 | - |
+| `Align` (Tetris) | 12 | 45.7% | 2,406 | 138 | 0 | 88.1% |
+| least stranded, then alignment (the plan's) | 12 | 31.7% | 2,397 | 142 | 0 | 87.8% |
+| least stranded, then least allocated | 12 | 50.7% | 3,683 | 109 | 0 | 82.0% |
+| least stranded, then most allocated | 12 | 53.0% | 11,195 | 7,433 | 1,910 | - |
+| **least stranded, then fewest kinds, then most allocated (Hex's)** | **12** | **52.7%** | **2,556** | **0** | **0** | **-** |
 
 "Earliest refusal for room" is the lowest load, over all sets, clocks and seeds, at which an arrival found no
 node with room for it; `-` means none ever did.
@@ -200,15 +209,15 @@ node with room for it; `-` means none ever did.
   both best fits by at least 30% on every seed of both node models. What sets them apart is how much they
   cut and what they refuse.
 - **The plan's score is not Hex's.** Least stranded, then alignment, the plan's score, cuts less: as little
-  as 66.8% on m5d.metal and 31.7% on the fleet, against `MostAllocated` on Firecracker alone with lifetimes
-  as recorded. It passes over 46 launches on m5d.metal and 143 across the fleet's other sets and clocks,
-  where Hex passes over none, and refuses for room from 87.9% load. On the fleet's mix with no completions
+  as 66.4% on m5d.metal, and 31.7% on the fleet (against `MostAllocated`, Firecracker alone with lifetimes
+  as recorded). It passes over 42 launches on m5d.metal and 142 across the fleet's other sets and clocks,
+  where Hex passes over none, and refuses for room from 87.8% load. On the fleet's mix with no completions
   it passes over a little less than Hex (2,397 against 2,556).
 - **The most-allocated tie is Hex's on m5d.metal, and only there.** On m5d.metal every node runs every
   kind, so Hex's tie reduces to most allocated, and the two arms are one: nothing stranded, nothing passed
   over. On the fleet the most-allocated tie strands the least on the mix with no completions (a least cut
-  of 54.1%), but it passes over 11,195 launches there and 7,429 in the other sets, 1,925 of them below half
-  load. It spreads the Shards microVMs over the Linux and Windows nodes, and the Firecracker microVMs that
+  of 53.5%, against Hex's 52.7%), but it passes over 11,195 launches there and 7,433 in the other sets,
+  1,910 of them below half load. It spreads the Shards microVMs over the Linux and Windows nodes, and the Firecracker microVMs that
   only Linux runs then find no room: every early refusal the bench lists for it is Firecracker-shaped,
   refused while a Mac had room.
 - **Hex's score keeps the nodes only some kinds can use for those kinds.** Ranking first the node that
@@ -226,18 +235,18 @@ one node's state (the lead, 2026-11-06). The bench measures it the same way, at 
 
 | set and clock | `BestFit` | `MostAllocated` | Hex | seeds where Hex meets the bar | passed over: `BestFit`, `MostAllocated`, Hex |
 |---|---|---|---|---|---|
-| mix, no completions | 499-657 | 493-653 | 0-316 | 16/16 (least cuts 38.9%, 38.5%) | 1,423, 2,317, 505 |
-| mix, 20x, as recorded | 118-511 | 107-481 | 0 | 16/16 | 898, 1,462, 7 |
-| mix, 10x, with the keep-alive | 192-536 | 153-518 | 0 | 16/16 | 8,611, 8,943, 272 |
+| mix, no completions | 499-658 | 493-654 | 0-316 | 16/16 (least cuts 38.9%, 38.5%) | 1,423, 2,317, 505 |
+| mix, 20x, as recorded | 118-511 | 107-343 | 0 | 16/16 | 898, 1,475, 7 |
+| mix, 10x, with the keep-alive | 192-536 | 100-481 | 0 | 16/16 | 8,668, 9,248, 272 |
 | OCI, no completions | 115-446 | 115-446 | 0 | 16/16 | 0, 0, 0 |
 | OCI, 10x, as recorded | 0-400 | 0-404 | 0 | 8/16; on the other 8 the best fits strand nothing either | 0, 0, 0 |
 | OCI, 10x, with the keep-alive | 115-446 | 115-446 | 0 | 16/16, but no launch ends on the way | 0, 0, 0 |
 | Firecracker, no completions | 157-687 | 157-687 | 0 | 16/16 | 0, 0, 1 |
 | Firecracker, 10x, as recorded | 0-175 | 0-175 | 0 | 4/16; on the other 12 the best fits strand nothing either | 0, 0, 0 |
 | Firecracker, 10x, with the keep-alive | 157-687 | 157-687 | 0 | 16/16, but no launch ends on the way | 0, 0, 1 |
-| Shards, no completions | 484-623 | 484-623 | 0 | 16/16 | 0, 0, 0 |
-| Shards, 20x, as recorded | 166-475 | 108-329 | 0 | 16/16 | 0, 0, 0 |
-| Shards, 10x, with the keep-alive | 114-613 | 136-607 | 0 | 16/16 | 0, 0, 0 |
+| Shards, no completions | 484-624 | 484-624 | 0 | 16/16 | 0, 0, 0 |
+| Shards, 20x, as recorded | 167-475 | 79-278 | 0 | 16/16 | 0, 0, 0 |
+| Shards, 10x, with the keep-alive | 115-615 | 148-607 | 0 | 16/16 | 0, 0, 0 |
 
 What differs from the two node models:
 - **Seeds with nothing to cut.** OCI alone and Firecracker alone, with lifetimes as recorded, leave 8 and 12
@@ -268,19 +277,17 @@ Its 10,000-node latency is the fleet's above: the same host types in the same pr
 
 ## The run of record
 
-- Commit: `5374202` (cp/t7-sched), release (`cargo bench` profile), from a `git archive` of the commit.
+- Commit: `680116a` (cp/t7-sched), release (`cargo bench` profile), from a `git archive` of the commit.
 - Host: fedora, `kiln-a094a12d.attlocal.net`, CPUs 16-31. The unit is untimed: hex-sim's packing is
   virtual, so neither load nor the timed lock bears on it.
-- Date: 2026-11-06. Units: hex-sched-models2-20261106T100201Z, on the working tree that became `5374202`
-  (fmt, the hex-sim tests in release and debug, and this bench, all exit 0; its clippy flagged a test
-  type, which `5374202` names instead, a change to the test alone); and
-  hex-sched-packrec-20261106T101856Z, this bench at `5374202` itself, which printed the same 3,046 lines of
-  tables.
-- The fleet's tables are the same as at `1d72fd5` (hex-sched-ladder-20261106T093934Z and
-  hex-sched-packrec-20261106T094936Z): its traces moved to `.fleet.trace` byte for byte.
-- The fleet as it is: unit hex-sched-asis-20261106T102358Z, on `5374202` and the bench's context model
-  (fmt, clippy and this bench, all exit 0). The two node models' tables there are those above, line for
-  line.
+- Date: 2026-11-06. Units: hex-sched-measured-20261106T134534Z, on the working tree that became
+  `680116a` (clippy, the hex-sim tests in release and this bench, all exit 0; rustfmt then reflowed two of
+  the parser's lines, formatting alone); and PACKREC_UNIT, this bench at `680116a` itself, which printed
+  the same tables.
+- The traces were regenerated on fedora with Shards' measured overhead (hex-sched-traces-20261106T134334Z,
+  `shards_overhead.md`). With the 5 MiB stand-in before it, at `5374202`, the bar held on every seed too
+  (hex-sched-models2-20261106T100201Z). Of what moved, the fleet's mix with no completions gives the least
+  cuts, 52.9% and 52.6% then, 53.0% and 52.7% now. OCI alone and Firecracker alone are unchanged.
 
 ## Side measurement: kiln CI, not of record
 
@@ -294,9 +301,30 @@ record is `packing.md` at `ad3053c`. It isn't re-run: kiln's CI is the load bala
 
 ## What it doesn't show
 
-- The kinds are given, not recorded, and Shards' overhead is a stand-in (`huawei_workload.md`, what would
-  make it wrong).
+- The kinds are given, not recorded, and Shards' overhead is measured on idle guests
+  (`huawei_workload.md`, what would make it wrong; `shards_overhead.md`).
 - Time: packing to one load, not a schedule over the day. A launch passed over here is refused for good;
   in a schedule it waits for room.
 - Devices: this day asks for none. GPU placement by kind, and a benchmark never beside a build, are held
   on generated clusters (hex-sim.md H9).
+
+## The sample's floors, derived (in progress)
+
+Ada's rule (2026-11-06) makes kube-scheduler's floors, 100 nodes or 5%, a pick to replace. The lead
+(17:14Z): derive them from the fewest sampled nodes that hold the bar on every seed. `sched_packing
+floors MODEL:COPIES` finds, on copies of a node model's hosts, the fewest admitting nodes a decision can
+sample with Hex still meeting the bar on every one of the 59 seeds, set and clock, at that sample and
+every larger one. Each sample runs at its own slowest speeds, as the record finds them. Deterministic;
+measured on adas-mac-studio-3 at `0bb1521`'s code:
+
+| cluster | nodes | fewest sampled | least cut there | below it |
+|---|---:|---:|---:|---|
+| m5d.metal x10 (the record's) | 10 | 6 | 63.0% | at 5, a best fit strands nothing (OCI, seed 19) and Firecracker is under 30% (seed 4) |
+| fleet x5 (the record's) | 50 | 9 | 36.5% | at 8, a best fit strands nothing (Firecracker at 22x, seed 33); the cut stays near 52% down to 14 |
+
+On jupiter, before each sample re-found its speeds (whole-scan speeds throughout): m5d.metal x20 needs
+7 and x50 needs 16, each missing below with the mix under 30% with no completions, where speed doesn't
+enter. m5d.metal x100 and the fleet x10 were still running at the pause (kiln runs r32 on
+adalundhe-macbook-pro and r33 on adas-mac-studio-3; logs `~/.cache/hex-t7/sched/out/floors-mbp.log` and
+`floors-s3b.log` there).
+
