@@ -417,6 +417,9 @@ fn refill_ahead(
     parker: &Parker,
 ) {
     let mut after_failure = false;
+    // Every file the create that takes a cgroup made ahead reads or writes, opened with it here, so that create looks
+    // none up (goal 16: its lookups queued behind this thread's next mkdir).
+    let files = root.ahead_files();
     loop {
         let flags = {
             let Ok(mut ready) = ahead.ready() else { return };
@@ -448,7 +451,8 @@ fn refill_ahead(
             .and_then(|n| {
                 let cg = root
                     .create_slot(n, &Bounds::default())
-                    .map_err(|e| OciError::Broken(e.to_string()))?;
+                    .map_err(|e| OciError::Broken(e.to_string()))?
+                    .open_ahead(&files);
                 match park_counted(parking, parker, cg.dir(), flags) {
                     Ok(mut p) => {
                         parking.with_proc(&mut p.0, key.as_ref(), MadeBy::Refill);
@@ -651,12 +655,25 @@ impl Cgroups {
                 _ => self.remove_later(cg),
             }
         };
-        self.ahead.want.notify_all();
+        // A take wakes the refill once its create has done its cgroup's file work ([`Cgroups::wake_refill`]): the refill's
+        // mkdir takes the hierarchy's lock to write, and a lookup the create made after it would queue behind it
+        // (goal16_ab.md, "Whose work the no-owner tail waits on"). With none ready it is woken now.
         match &taken {
-            Some(_) => self.ahead.taken.fetch_add(1, Ordering::Relaxed),
-            None => self.ahead.dry.fetch_add(1, Ordering::Relaxed),
-        };
+            Some(_) => {
+                self.ahead.taken.fetch_add(1, Ordering::Relaxed);
+            }
+            None => {
+                self.ahead.dry.fetch_add(1, Ordering::Relaxed);
+                self.ahead.want.notify_all();
+            }
+        }
         taken
+    }
+
+    /// The refill is told a cgroup made ahead was taken, to make another: by the create that took it, once that
+    /// create's own work on the cgroup's files is done.
+    fn wake_refill(&self) {
+        self.ahead.want.notify_all();
     }
 
     fn pool(&self) -> Result<MutexGuard<'_, Pool<Policy>>, Refusal> {
@@ -1148,7 +1165,9 @@ impl Choose for Choice<'_> {
                     if reason == Refused::NoOwner
                         && let Some((n, cg, parked)) = self.cgroups.take_ahead()
                     {
-                        match self.ready_ahead(n, cg) {
+                        let ready = self.ready_ahead(n, cg);
+                        self.cgroups.wake_refill();
+                        match ready {
                             Ok((cgroup, held)) => {
                                 self.record(Made::Slot(held))?;
                                 self.gave_parked.store(true, Ordering::Relaxed);
