@@ -43,12 +43,19 @@ COUNT=30
 ROLE_FIRST=450
 ROLE_LAST=499
 FIRST_ID=
-# How long launchd gets to start the helper: a bounded wait, counted in 0.1 s steps.
+# Uninstall's wait for a pool user's processes to end after SIGKILL, counted in 0.1 s steps: picked, not yet
+# measured (bench/native/macos/constants-audit.md, to be derived from measured kill-to-empty times).
 WAIT_STEPS=300
 # The directory tool, by absolute path. A write is made once: any failure is refused naming dscl's own
 # error. Nix retries eNotYetImplemented (install-darwin-multi-user.sh:149), never seen here (§3.1); a
 # retry comes only with a measured case of it.
 DSCL=/usr/bin/dscl
+LAUNCHCTL=/bin/launchctl
+# The helper's start: twice the max of its measured bootstrap-to-accepting time, 37.680 ms over 20 starts of
+# a user LaunchAgent proxy at load ~35 (bench/native/macos/records/agentstart-40454fe-20261106T150233Z.txt;
+# the x2 is the lead's margin). It bounds only a helper running but never accepting: accepting is success
+# and launchd's report of an exit is failure, each a fact (wait_serving). Ada's lab records the real time.
+START_BOUND_S=0.075360
 
 die() { echo "macos.sh: $*" >&2; exit 1; }
 
@@ -192,6 +199,39 @@ make_pool_user() { # <index>
   dseditgroup -o edit -t user -a "$name" "$POOL_GROUP" || die "adding $name to $POOL_GROUP"
 }
 
+now() { perl -MTime::HiRes=time -e 'printf "%.6f\n", time'; }
+
+# Whether the helper's socket accepts a connect(2). macOS's `nc -U -z` can't say: it exits 1 even against a
+# listening socket (measured, the record above).
+helper_accepts() {
+  perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Type => SOCK_STREAM(), Peer => $ARGV[0]) or exit 1' "$SOCK"
+}
+
+# Waits for the helper launchd just bootstrapped: succeeds when its socket accepts, fails when launchd shows
+# the job exited (with its status), and fails when it runs without accepting past START_BOUND_S.
+wait_serving() {
+  local t0 shown state code elapsed
+  t0=$(now)
+  while :; do
+    if helper_accepts; then
+      echo "macos.sh: the helper accepted after $(perl -e "printf '%.6f', $(now) - $t0") s"
+      return 0
+    fi
+    shown=$("$LAUNCHCTL" print "system/$LABEL" 2>/dev/null || true)
+    state=$(sed -n 's/^[[:space:]]state = //p' <<<"$shown" | head -1)
+    code=$(sed -n 's/^[[:space:]]last exit code = //p' <<<"$shown" | head -1)
+    if [ "$state" != running ] && [ -n "$code" ] && [ "$code" != "(never exited)" ]; then
+      echo "macos.sh: launchd reports the helper exited: last exit code $code" >&2
+      return 1
+    fi
+    elapsed=$(perl -e "printf '%.6f', $(now) - $t0")
+    if perl -e "exit !($elapsed >= $START_BOUND_S)"; then
+      echo "macos.sh: the helper runs but never accepted on $SOCK in $elapsed s (bound $START_BOUND_S s, twice its measured start)" >&2
+      return 1
+    fi
+  done
+}
+
 # Waits (bounded) for a condition; says which and fails when it doesn't come.
 wait_for() {
   local what=$1 i
@@ -267,8 +307,8 @@ EOF
   chmod 0644 "$PLIST"
   plutil -lint "$PLIST" >/dev/null || die "$PLIST isn't a valid property list"
   # bootstrap's exit says whether it loaded, where load's is always 0 (launchctl.1:527-528, §3.3).
-  launchctl bootstrap system "$PLIST" || die "launchctl bootstrap system $PLIST failed"
-  if ! wait_for "the helper serving $SOCK" test -S "$SOCK"; then
+  "$LAUNCHCTL" bootstrap system "$PLIST" || die "launchctl bootstrap system $PLIST failed"
+  if ! wait_serving; then
     tail -n 5 "$LOG" >&2 || true
     die "the helper didn't come up (its log's last lines are above)"
   fi
