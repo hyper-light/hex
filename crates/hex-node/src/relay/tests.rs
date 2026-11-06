@@ -421,8 +421,8 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
     }
 }
 
-/// HEX-GUEST-14: stage an entry of a device's kind, and an entry twice: expect each refused by type
-/// and the partial copy removed; and a stream cut before its end head refused as truncated.
+/// HEX-GUEST-14: stage an entry of a device's kind, an entry twice, and an entry under a file: expect
+/// each refused by type (the file by its name) and the partial copy removed; and a stream cut before its end head refused as truncated.
 #[test]
 fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     let (lab, staged) = staged_lab();
@@ -446,6 +446,13 @@ fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
         panic!("expected a refusal");
     };
     assert!(why.contains("came twice"), "{why}");
+    assert!(!staged.join("b").exists());
+    // A file in the way of a later entry's parent is refused by its name, and the copy removed.
+    let through_a_file = raw_stage(&[("f", hf::What::File { size: 0 }), ("f/x", hf::What::Dir)]);
+    let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &through_a_file) else {
+        panic!("expected a refusal");
+    };
+    assert!(why.contains("\"f\", which isn't a directory"), "{why}");
     assert!(!staged.join("b").exists());
     let whole = raw_stage(&[("d", hf::What::Dir)]);
     let Answer::Refused(Refusal::Invalid { why, .. }) = stage_raw(&lab, &whole[..whole.len() - 1])
