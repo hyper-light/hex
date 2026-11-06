@@ -25,7 +25,9 @@ HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 COMMIT=$(git -C "$HERE" rev-parse --short HEAD)
 DIRTY=$(git -C "$HERE" status --porcelain | wc -l)
 
-out=$(docker run --rm --privileged --security-opt label=disable --network=none \
+NAME=hex-sched-g5-drill-$(date -u +%Y%m%dT%H%M%SZ)
+echo "container $NAME" >&2
+out=$(docker run --rm --name "$NAME" --privileged --security-opt label=disable --network=none \
   --memory "${BENCH_MEMORY:-8g}" --oom-score-adj "${BENCH_OOM:-1000}" --cpuset-cpus "${BENCH_CPUS:-4-15}" \
   -v /usr:/usr:ro -v /dev:/dev -v "$DRILL:/opt/disk_drill:ro" -v "$FSYNC:/opt/fsync_latency:ro" -v "$LAB:/lab" \
   -e DM_DISABLE_UDEV=1 -e REPLACE_MS="${REPLACE_MS:-194}" "$IMAGE" bash -c '
@@ -97,7 +99,7 @@ drained_on=$(sed -n "s/.* drained_ms=\([0-9a-z]*\).*/\1/p" <<<"$on")
   echo "$off"
   echo '```'
   echo
-  echo "Probe on: failed=$failed_on, drained ${drained_on} ms after the stall (deadline 10000 ms)."
+  echo "Probe on: failed=$failed_on, drained ${drained_on} ms after the stall (deadline 10000 ms), $(grep -o "cordoned_before_stall=[a-z]*" <<<"$on")."
   echo "Probe off: failed=$failed_off (non-vacuity: the same stall fails work)."
 } >"$RECORD"
-[ "$failed_on" = 0 ] && [ "$drained_on" != none ] && [ "$drained_on" -lt 10000 ] && [ "$failed_off" -gt 0 ]
+grep -q "cordoned_before_stall=false" <<<"$on" && [ "$failed_on" = 0 ] && [ "$drained_on" != none ] && [ "$drained_on" -lt 10000 ] && [ "$failed_off" -gt 0 ]

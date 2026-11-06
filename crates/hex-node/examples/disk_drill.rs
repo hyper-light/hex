@@ -123,6 +123,8 @@ fn main() {
     let start = Instant::now();
     let mut stalled_at: Option<Instant> = None;
     let mut timeout_at_stall = Duration::ZERO;
+    // A cordon the probe made before the stall: a false drain of a healthy disk.
+    let mut cordoned_before_stall = false;
     let (mut marked, mut drained): (Option<Duration>, Option<Duration>) = (None, None);
     let mut failed = vec![false; units];
     let mut moved = 0usize;
@@ -131,6 +133,7 @@ fn main() {
         if stalled_at.is_none() && now - start >= warm {
             if let Some(p) = &prober {
                 timeout_at_stall = p.drain_age().unwrap();
+                cordoned_before_stall = !p.schedulable();
             }
             stalled_at = Some(Instant::now());
             sh(&stall_cmd);
@@ -169,7 +172,7 @@ fn main() {
     let ms = |d: Option<Duration>| d.map_or("none".to_string(), |d| d.as_millis().to_string());
     let writes: u64 = all.iter().map(|u| u.writes.load(Ordering::Relaxed)).sum();
     println!(
-        "drill probe={} units={units} deadline_ms={} period_ms={} drain_age_at_stall_ms={} marked_ms={} drained_ms={} moved={moved} writes={writes} failed={}",
+        "drill probe={} units={units} deadline_ms={} period_ms={} drain_age_at_stall_ms={} cordoned_before_stall={cordoned_before_stall} marked_ms={} drained_ms={} moved={moved} writes={writes} failed={}",
         if probe_on { "on" } else { "off" },
         deadline.as_millis(),
         period.as_millis(),
