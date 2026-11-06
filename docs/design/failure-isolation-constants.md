@@ -65,8 +65,8 @@ is a typed refusal.
 | `antagonist::BEST_EFFORT_CAP_MILLI`, `CAP_MILLI` | 0.01, 0.1 CPU | `antagonist.rs:42-43` | (d) CPI² | (a): the cap that brings the victims' CPI back under their spec, learned per throttle. |
 | `antagonist::THROTTLE_NS` | 5 min | `antagonist.rs:44` | (d) CPI² | (a): until the victims' CPI is back under spec. |
 | `antagonist::HISTORY` | 64 samples | `antagonist.rs:47` | bound | Derived from the correlation window at the sampling rate. |
-| `agent::REPEAT_LIMIT` | 3 | `crates/hex-health/src/agent.rs:21` | (d) picked | (b): kiln's recorded agent traces (A4); none recorded yet. **Can't convert without them.** |
-| `agent::MAX_DISTINCT_CALLS` | 256 | `agent.rs:24` | bound, picked | (b): the distinct calls between progress events in kiln's traces. **Same.** |
+| `agent::REPEAT_LIMIT` | 3 | `crates/hex-health/src/agent.rs:21` | (d) picked | **Stays (d).** kiln keeps every session's tool calls, and `conversations_search` returns them, but each with its arguments: the rule counts *identical* calls (same tool, same arguments) between progress events, and telling identical calls apart needs the arguments, which are content, ruled out (the lead, 2026-11-06). Tool names alone can't: consecutive calls of one tool are mostly different calls. A source that gives each call's argument hash without its content (kiln could compute it) would make it (b). |
+| `agent::MAX_DISTINCT_CALLS` | 256 | `agent.rs:24` | bound, picked | **Stays (d)**, for the same reason: distinct calls are counted by their arguments. |
 | `agent` "half its calls failing", "a majority of callers" | ½ | `agent.rs:227,230` | (c) logic for the majority; (d) for "half" | (a): above the learned per-node error rate. |
 
 ## hex-sim's models and nemesis
