@@ -243,6 +243,26 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     wrappers; no new `unsafe`.
   - **User namespaces:** the ids are staged as the image holds them, as Linux's unpack stores them; mapping them for a
     box in a user namespace is the runtime's, as on any Linux host.
+  - **atime** is the later of the archive's atime and mtime, as containerd's unpack sets it (`pkg/archive/tar.go:335,
+    445` at containerd v2.3.6, `ee273536`): the entry's metadata carries it beside mtime.
+  - **A multi-layer image is its layers' own tarballs, applied in order into one staged root**, by containerd's
+    rules (`applyNaive`, `pkg/archive/tar.go:161-340` at v2.3.6): a layer's entry replaces whatever was at its path,
+    of any kind, except a directory onto a directory, which merges and takes the later header's owner, mode,
+    xattrs and times (`:304-311`); `.wh.<name>` removes `<name>` (`:218-222`); `.wh..wh..opq` removes every entry of
+    its directory this layer hasn't made (`:184-216`); a directory's mode and times are its latest header's, set
+    when the stage ends, after everything in it. The stream marks each layer's start, and carries a whiteout and an
+    opaque marker as kinds of their own, never as files; one staging can't apply is refused by name. At most 500
+    layers (`hex_core::bundle::MAX_LAYERS`); the relay's set of what this layer made is bounded by the stage's
+    entries, and a removal by a counted walk. An `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest as
+    `Rootfs::Layers` of the one staged root, under the box's own writable layer; a bundle's `root.path` is one path,
+    so one tarball. The packer keeps the same state across layers, so a hard link can't name what a later layer
+    removed or replaced.
+  - **One difference from containerd, stated:** containerd resolves an entry's parent through symbolic links, scoped
+    to the root (`fs.RootPath`, `:268-270`); staging refuses an entry written through a link, by name. No surveyed
+    image writes through one (research §9: 0 in debian, ubuntu, alpine, fedora, caddy, grafana, python:3.12-slim,
+    nginx and node:22-slim, in the same or a later layer: a Docker build's diff records real paths). Falsified the
+    day a real layer needs it: then the parent is resolved within the root, as `RootPath` does
+    (`RESOLVE_IN_ROOT` without `RESOLVE_NO_SYMLINKS`).
   - A directory root (a `Path` source) carries none of these: a host directory holds no Linux owners (and on Windows
     is refused, above). The test that holds it: HEX-GUEST-21, each image staged as a tarball root in a real guest,
     compared entry by entry with the same image unpacked as root on Linux.

@@ -155,3 +155,19 @@ What each is, by example:
 So owners, hard links, mtimes and capabilities are in nearly every image, and a staged root without them differs
 from what Linux's own unpack holds: every non-root image's files would be root's, perl and fedora's macros would be
 copies, and caddy would lose `cap_net_bind_service`.
+
+Writes through a link and whiteouts, the same day (`bench/native/tarball-census` and an ad-hoc probe over `docker
+save`, on fedora): an entry whose parent path is a symbolic link made by the same or an earlier layer, and `.wh.`
+entries, counted over every layer of caddy, grafana, debian:bookworm-slim, fedora:44 (digests above),
+python:3.12-slim (`sha256:4840d514c583a4d3d8cad3940e68dee6f0f6f3635c12fcd0a3d74c21a5b93a54`), nginx:latest
+(`sha256:165ddde8751e75a1c907d24ef10d9f6deb08b57e0fe56caf67512486aff76d82`) and node:22-slim
+(`sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d`): none in any. A Docker build's diff is
+overlay's upper directory, which holds real paths, and these images remove what they don't keep within the `RUN` that
+made it, so their layers carry no whiteouts. An image with whiteouts and an opaque directory is built in HEX-GUEST-21's
+lab.
+
+containerd's unpack, read at v2.3.6 (`ee2735368117d2eb259779949d5e75cdafec9761`, fedora's): `pkg/archive/tar.go`
+`applyNaive` (`:161-340`) and `createTarFile` (`:343-445`): whiteouts `:180-225`, replace-or-merge `:304-311`, parent
+through `fs.RootPath` `:268-270`, Lchown `:410`, xattrs from `SCHILY.xattr.*` `:419-435`, chmod after lchown `:440`,
+times `chtimes(path, boundTime(latestTime(hdr.AccessTime, hdr.ModTime)), boundTime(hdr.ModTime))` `:335,445`, directory
+times after the layer `:330-337`.
