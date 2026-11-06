@@ -126,8 +126,9 @@ engage on the bar's own boxes as scoped. Hex's create p99.9 stays at 1.6 to 2.0 
 
 ## Whose work the no-owner tail waits on (the lead's follow-up 3, 2026-11-06)
 
-create_tail at the bar's conditions: no owner, Hex as it ships (parked procs and memory slots off, the 256 MiB bound),
-the build of 3cf5ad6, 3 rounds of 10,000 after 100, 15,000 traced creates, CPUs 4-15 under the timed lock. The harness
+create_tail at the bar's conditions: no owner, Hex with the defaults of 3cf5ad6's build (parked procs off, as the
+record tree had them before 5a2a8d6 turned them on for a root node; memory slots off; the 256 MiB bound). Lever 1's
+create_tail above is the one with parked procs on. The build of 3cf5ad6, 3 rounds of 10,000 after 100, 15,000 traced creates, CPUs 4-15 under the timed lock. The harness
 (this tree's create_tail, first at cp/t7-g16-memslot a081cf4) adds an fprobe on each controller's offline and
 release callback (the cgroup id its css is of), joined to
 `cgroup_rmdir`'s and `cgroup_release`'s paths, so each teardown work item is named by whose cgroup it took apart (this
