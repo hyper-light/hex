@@ -133,7 +133,7 @@ invariant. The files that use `unsafe` (each with `#![allow(unsafe_code)]` at it
   `process` class's box-user mode, decision "each OS runs its own boxes natively"; step 2). The daemon,
   as root, starts a box's programs as the box's pool user: a `fork` whose child drops to the user
   (`setgid`/`setuid`), opens a session for a leader (`setsid`), caps the user's processes
-  (`setrlimit(RLIMIT_NPROC)`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
+  (`setrlimit(RLIMIT_NPROC)`) and the program's descriptors (`RLIMIT_NOFILE`), puts the three stdio descriptors on 0/1/2 (`dup2`), closes the rest
   (`getdtablesize` then `close`, there being no `closefrom` in libc) and `execve`s the program — every
   call async-signal-safe, as the Linux runtime's `pre_exec` is, since between fork and exec a
   multi-threaded process may touch no lock. It then arms each member: `task_for_pid` for the member's
