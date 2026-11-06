@@ -36,7 +36,7 @@ each named below.
 | Stuck tool loop | a session repeats a call without progress | the third identical call (F5) | the session stopped at it | at the 3rd call: 0 after it |
 | Quota shown as slowness | a provider answers rate limit or quota exhausted | the first typed error (F5) | the account held | at the first error; node suspicions = 0 |
 | Partial provider outage | a provider fails for most of its callers | the provider marked degraded (F5) | no work needing it placed | ≤ 2 windows (2 s); node suspicions = 0 |
-| Dangerous | a seccomp kill, ungranted egress or refused privilege gain, in an OCI container, a Firecracker or a Shards microVM | the signal (F7) | stopped; an OCI container restarted as the first microVM its node runs that holds it (Firecracker, then Shards), else refused; a microVM's trip refused | at the signal: 0 after it |
+| Dangerous | a seccomp kill, ungranted egress or refused privilege gain, in an OCI container, a Firecracker or a Shards microVM | the signal (F7) | stopped (the isolation); then an OCI container re-placed by the scheduler, anywhere in the cell, as the first microVM some node admits (Firecracker, then Shards), else refused; a microVM's trip refused | stopped at the signal: 0 after it; re-placement measured apart |
 
 And across classes (F6):
 
@@ -252,14 +252,17 @@ moves work faster than the rate; retries growing load past 1.1x.
 
 **The choice.** Hex places three kinds of workload: OCI containers, Firecracker microVMs and Shards
 microVMs (G2's `model::Class`; Ada, 2026-11-06). A workload that trips a runtime security signal is
-stopped at once. A tripped OCI container starts again only as a microVM on its node: the first of
-Firecracker, then Shards, that the node runs and that will hold it, its own need plus that microVM's
-overhead in what the node has free once the container's need and overhead are given back
-(`hex_sim::danger`). A GPU workload fits neither, since neither microVM takes a device. Otherwise it is
-refused, typed: its node runs no microVM (`NoMicroVmOnNode`), or none it runs holds it (`DoesNotFit`). A
-trip inside a Firecracker or Shards microVM is refused (`InMicroVm`): no kind Hex places isolates more
-strongly. What trips: a seccomp kill, an egress attempt no grant names, a refused privilege gain. A call
-failed with an errno doesn't: profiles answer calls they don't support that way, and programs fall back.
+stopped at once, its node's share given back: that is its isolation, and the bound is from the signal
+to the stop. Then the scheduler re-places it, as a separate step: a tripped OCI container as the first
+of Firecracker, then Shards, that some node of the cell admits, through G2's own fast path
+(`FitIndex::sampled_fit`) and its filters, the class filter among them, its need counted with that
+microVM's overhead (`hex_sim::danger`). Nothing ties it to the node it tripped on: it starts again either
+way, so any node that runs the kind and holds it will do, its own included. A GPU workload fits no
+microVM, since neither takes a device. Refused only when no node admits it, typed: no node of the cell
+runs a microVM (`NoMicroVmInCell`), or none that does holds it (`NoneHolds`). A trip inside a Firecracker
+or Shards microVM is refused (`InMicroVm`): no kind Hex places isolates more strongly. What trips: a
+seccomp kill, an egress attempt no grant names, a refused privilege gain. A call failed with an errno
+doesn't: profiles answer calls they don't support that way, and programs fall back.
 
 **How the two microVMs rank.** Firecracker first. Both run their own guest kernel under KVM, unlike an OCI
 container on its host's (FI[19]). Firecracker's isolation surface is published and measured: a minimal
@@ -278,14 +281,20 @@ the node's. So those are measured once, for every kind on the node.
 (FI[19]); Firecracker's device model [SUB-11]; the kinds and their overheads, G2 (`hex-sim.md` H10);
 the simulator's side, `hex-sim.md` H40-H42. Which signals should trip is unresearched (FI §8): this is Hex's own choice.
 
-**Evidence.** `hex-sim` `danger` tests (the move counts both overheads, to the byte; refusals typed);
-`faults.rs` over 1,000 seeds of each kind against an oracle from the rule's statement, no wrong verdict
-(fedora unit `hex-sched-g5-main-kinds2-20261106T130519Z`): OCI, 500 moved to Firecracker, 209 to
-Shards, 152 refused for a node without a microVM, 139 for none that holds it; Firecracker and Shards,
-1,000 refused each, in a microVM.
+**Evidence.** `hex-sim` `danger` tests: re-placed on another node of the cell, as Shards where only
+Shards is run; the move counts both overheads, to the byte; refusals typed, the stopped container's
+share given back. `faults.rs` over 1,000 seeds of each kind, in a cell of 4-32 nodes of G2's node models
+under a seeded load, against an oracle on the cell as it stood once stopped, no wrong verdict (fedora
+unit `hex-sched-g5-main-cell3-20261106T141202Z`): OCI, 737 re-placed as Firecracker and 119 as Shards,
+517 of them on another node than the one they tripped on (the fast path's best fit), scanning p50 18
+and at most 32 nodes; 144 refused, none holding it; none refused for a cell without a microVM, since
+every one of G2's node models runs Shards (that refusal is the unit test's). Firecracker and Shards,
+1,000 refused each. Kept to its own node, as F7 had it until 2026-11-06, 3 of the 856 would have been
+refused: on G2's node models the node it tripped on nearly always holds it as a microVM, its share
+given back and every model running Shards. The cell-wide rule costs nothing there and rescues those.
 
-**What would falsify it.** A tripped workload started again as an OCI container, or in a kind its node
-doesn't run or that doesn't hold it; a microVM's trip moved; a benign workload refused for errno'd calls.
+**What would falsify it.** A tripped workload started again as an OCI container, or on a node that
+doesn't run its new kind or doesn't hold it; one refused while some node admits it; a microVM's trip moved; a benign workload refused for errno'd calls.
 
 ## Constants
 

@@ -415,8 +415,8 @@ published behaviour.
 **The choice.** `faults.rs` injects the other classes (gray and fail-slow, disk stall, antagonist, the
 agent faults, dangerous signals, correlated faults against the ejection cap and eviction rate), each
 driving `hex-health`. `danger.rs` says where a tripped workload may run again, on G2's `model::Class`,
-the node's kinds and their overheads (H10's figures): an OCI container to Firecracker, then Shards, on
-its node if it holds; a microVM's trip refused (F7).
+its overheads (H10's figures) and its fast path: a tripped OCI container stopped, then re-placed anywhere
+in the cell as Firecracker, then Shards, wherever a node admits it; a microVM's trip refused (F7).
 
 **Evidence.** `tests/faults.rs`: each class over 1,000 seeds, the dangerous class per kind (F2-F7).
 

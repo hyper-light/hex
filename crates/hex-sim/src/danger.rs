@@ -1,13 +1,15 @@
 //! Where a dangerous workload may run again (S8; F7 in `docs/design/failure-isolation.md`, `hex-sim.md`
 //! H42): by the kinds Hex places, G2's [`Class`]. A workload that trips a security signal
-//! ([`hex_health::danger::trips`]) is stopped, and starts again only in a stronger kind on its node, or
-//! is refused, typed.
+//! ([`hex_health::danger::trips`]) is stopped at once, its node's share given back; that is its
+//! isolation. Then the scheduler re-places it, in a stronger kind, anywhere in the cell, or refuses it,
+//! typed.
 //!
 //! - An OCI container shares its host's kernel; a Firecracker or Shards microVM runs its own under a
-//!   hypervisor (Agache et al., NSDI '20, FI[19]). So a tripped OCI container moves to a microVM: the
-//!   first of [`STRONGER`] its node runs and that will hold it, its own need plus that kind's overhead
-//!   in what the node has free once the container's share is given back. A GPU workload fits no
-//!   microVM: neither takes one ([`Class::takes_gpus`]).
+//!   hypervisor (Agache et al., NSDI '20, FI[19]). So a tripped OCI container is re-placed as a
+//!   microVM: the first of [`STRONGER`] that some node of the cell admits, by G2's own fast path
+//!   ([`FitIndex::sampled_fit`]) and its filters, the class filter among them, with its need plus that
+//!   kind's overhead. Nothing ties it to the node it tripped on: it starts again either way. A GPU
+//!   workload fits no microVM: neither takes one ([`Class::takes_gpus`]).
 //! - Firecracker before Shards: Firecracker's isolation is published and measured (a minimal device
 //!   model, NSDI '20, `docs/research/runtime/substrates-and-sandboxes.md` [SUB-11]); Shards' device
 //!   model isn't public in the sources read (`docs/research/scheduler/agentic-workloads.md`, the
@@ -16,18 +18,35 @@
 
 use hex_health::danger::{self, Signal};
 
-use crate::model::{Class, Classes, Overheads, Resources};
+use crate::SimError;
+use crate::index::{FitIndex, Sample, Verdict};
+use crate::model::{Class, Demand, Kind, NodeId, Overheads, Resources};
 
-/// The kinds a tripped OCI container may move to, in the order it tries them.
+/// The kinds a tripped OCI container may be re-placed as, in the order it tries them.
 pub const STRONGER: [Class; 2] = [Class::Firecracker, Class::Shards];
+
+/// A placed workload that raised a signal: where, its own need (its kind's overhead not counted), its
+/// kind of work and the kind it runs as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tripped {
+    pub node: NodeId,
+    pub need: Resources,
+    pub kind: Kind,
+    pub class: Class,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isolation {
     /// Not a trip: nothing to do.
     None,
-    /// Stop it, and start it again only as `to`, on its node.
-    Move { from: Class, to: Class },
-    /// Stop it, and start it nowhere.
+    /// Stopped, and re-placed as `to` on `node`; `scanned` the nodes the fast path looked at.
+    Move {
+        from: Class,
+        to: Class,
+        node: NodeId,
+        scanned: usize,
+    },
+    /// Stopped, and started nowhere.
     Refuse { from: Class, why: Refusal },
 }
 
@@ -35,76 +54,116 @@ pub enum Isolation {
 pub enum Refusal {
     /// It tripped in a microVM: no kind isolates more strongly.
     InMicroVm,
-    /// Its node runs no microVM.
-    NoMicroVmOnNode,
-    /// Its node runs a microVM that won't hold it: too little memory or CPU free, or GPUs it can't
-    /// take.
-    DoesNotFit,
+    /// No node of the cell runs a microVM.
+    NoMicroVmInCell,
+    /// Nodes run a microVM, and none admits it: too little room, or GPUs no microVM takes.
+    NoneHolds,
 }
 
-/// Whether `node`'s room holds `need` run as `class`, its overhead counted.
-fn holds(room: &Resources, need: &Resources, class: Class, overheads: Overheads) -> bool {
-    if need.gpus > 0 && !class.takes_gpus() {
-        return false;
-    }
-    let with = Resources {
+/// `need` with `class`'s overhead counted, as G2 counts it in a workload's need.
+fn with_overhead(
+    need: &Resources,
+    class: Class,
+    overheads: Overheads,
+) -> Result<Resources, SimError> {
+    need.checked_add(&Resources {
         mem_bytes: overheads.of(class),
         ..Resources::default()
-    };
-    need.checked_add(&with).is_some_and(|n| room.holds(&n))
+    })
+    .ok_or(SimError::Config("a need past u64"))
 }
 
-/// What to do with a workload running as `from` that raised `signal`, on a node running `classes`
-/// with `free` unplaced, the workload's own need `need` (its kind's overhead not counted) and the
-/// kinds' `overheads`.
+/// Isolate `tripped`, which raised `signal`, in the cell `index` holds: stop it (its share given back
+/// to its node) and re-place it by `sample`, taking its new place in `index`.
 pub fn isolate(
-    from: Class,
+    tripped: &Tripped,
     signal: Signal,
-    classes: Classes,
-    free: Resources,
-    need: Resources,
+    index: &mut FitIndex,
     overheads: Overheads,
-) -> Isolation {
+    sample: &Sample,
+) -> Result<Isolation, SimError> {
     if !danger::trips(signal) {
-        return Isolation::None;
+        return Ok(Isolation::None);
     }
+    let from = tripped.class;
+    let running = Demand {
+        need: with_overhead(&tripped.need, from, overheads)?,
+        kind: tripped.kind,
+        class: from,
+    };
+    index.give(tripped.node, &running)?;
     if from != Class::Oci {
-        return Isolation::Refuse {
+        return Ok(Isolation::Refuse {
             from,
             why: Refusal::InMicroVm,
-        };
+        });
     }
-    if !STRONGER.iter().any(|c| classes.has(*c)) {
-        return Isolation::Refuse {
-            from,
-            why: Refusal::NoMicroVmOnNode,
+    let mut runs_one = false;
+    for to in STRONGER {
+        let demand = Demand {
+            need: with_overhead(&tripped.need, to, overheads)?,
+            kind: tripped.kind,
+            class: to,
         };
+        let fit = index.sampled_fit(&demand, sample);
+        if let Some(key) = fit.best {
+            index.take(key.node, &demand)?;
+            return Ok(Isolation::Move {
+                from,
+                to,
+                node: key.node,
+                scanned: fit.span,
+            });
+        }
+        // The scan found none, so it passed over every node; it ran this kind unless every one
+        // refused it for its class.
+        runs_one |= usize::try_from(fit.refused.class).map_or(true, |c| c < index.len());
     }
-    // Stopped, the container gives back its need and its own overhead.
-    let own = Resources {
-        mem_bytes: overheads.of(from),
-        ..Resources::default()
-    };
-    let room = need
-        .checked_add(&own)
-        .and_then(|back| free.checked_add(&back));
-    let to = room.and_then(|room| {
-        STRONGER
-            .into_iter()
-            .find(|c| classes.has(*c) && holds(&room, &need, *c, overheads))
-    });
-    match to {
-        Some(to) => Isolation::Move { from, to },
-        None => Isolation::Refuse {
-            from,
-            why: Refusal::DoesNotFit,
+    Ok(Isolation::Refuse {
+        from,
+        why: if runs_one {
+            Refusal::NoneHolds
+        } else {
+            Refusal::NoMicroVmInCell
         },
+    })
+}
+
+/// Whether some node of `index` admits `tripped`'s need as `to` now (an oracle's question).
+pub fn admitted_as(
+    index: &FitIndex,
+    tripped: &Tripped,
+    to: Class,
+    overheads: Overheads,
+) -> Result<bool, SimError> {
+    let demand = Demand {
+        need: with_overhead(&tripped.need, to, overheads)?,
+        kind: tripped.kind,
+        class: to,
+    };
+    Ok(index.admitted_anywhere(&demand))
+}
+
+/// Whether some node of `index` runs `to` (an oracle's question).
+pub fn runs(index: &FitIndex, to: Class) -> Result<bool, SimError> {
+    let probe = Demand {
+        need: Resources::default(),
+        kind: Kind::Plain,
+        class: to,
+    };
+    for at in 0..index.len() {
+        let id = u32::try_from(at).map_err(|_| SimError::Config("a node id past u32"))?;
+        if index.verdict(NodeId(id), &probe)? != Verdict::NoClass {
+            return Ok(true);
+        }
     }
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Classes, NodeSpec};
 
     const MIB: u64 = 1 << 20;
 
@@ -128,150 +187,229 @@ mod tests {
         classes.iter().fold(Classes::NONE, |c, k| c.with(*k))
     }
 
-    /// S8 dangerous (F7): a tripped OCI container moves to Firecracker where its node runs it, to
-    /// Shards where the node runs Shards alone; never to a kind its node doesn't run.
+    /// A cell of nodes with these classes and capacities; the tripped OCI container on node 0, placed.
+    fn cell(nodes: &[(Classes, Resources)], need: Resources) -> (FitIndex, Tripped) {
+        let specs: Vec<NodeSpec> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, (classes, capacity))| NodeSpec {
+                id: NodeId(u32::try_from(i).unwrap()),
+                capacity: *capacity,
+                background_milli: 0,
+                classes: *classes,
+            })
+            .collect();
+        let mut index = FitIndex::new(&specs).unwrap();
+        let t = Tripped {
+            node: NodeId(0),
+            need,
+            kind: Kind::Plain,
+            class: Class::Oci,
+        };
+        let running = Demand {
+            need: with_overhead(&need, Class::Oci, overheads()).unwrap(),
+            kind: Kind::Plain,
+            class: Class::Oci,
+        };
+        index.take(NodeId(0), &running).unwrap();
+        (index, t)
+    }
+
+    /// S8 dangerous (F7): a tripped OCI container whose own node runs no microVM is re-placed on
+    /// another node of the cell that runs Firecracker; where only Shards is run, as Shards.
     #[test]
-    fn an_oci_trip_moves_to_the_first_microvm_its_node_runs() {
+    fn an_oci_trip_is_re_placed_anywhere_in_the_cell_as_the_first_microvm_that_holds_it() {
         let need = res(500, 512, 0);
         for s in [
             Signal::SeccompKill,
             Signal::EgressRefused,
             Signal::PrivilegeEscalation,
         ] {
-            let iso = |classes| {
-                isolate(
-                    Class::Oci,
-                    s,
-                    classes,
-                    res(4000, 4096, 0),
-                    need,
-                    overheads(),
-                )
-            };
-            assert_eq!(
-                iso(Classes::ALL),
-                Isolation::Move {
-                    from: Class::Oci,
-                    to: Class::Firecracker
-                }
+            let (mut index, t) = cell(
+                &[
+                    (only(&[Class::Oci]), res(4000, 4096, 0)),
+                    (only(&[Class::Shards]), res(4000, 4096, 0)),
+                    (only(&[Class::Firecracker]), res(4000, 4096, 0)),
+                ],
+                need,
             );
-            assert_eq!(
-                iso(only(&[Class::Oci, Class::Shards])),
-                Isolation::Move {
-                    from: Class::Oci,
-                    to: Class::Shards
-                }
+            let iso = isolate(&t, s, &mut index, overheads(), &Sample::whole()).unwrap();
+            assert!(
+                matches!(
+                    iso,
+                    Isolation::Move {
+                        from: Class::Oci,
+                        to: Class::Firecracker,
+                        node: NodeId(2),
+                        ..
+                    }
+                ),
+                "{iso:?}"
+            );
+            let (mut index, t) = cell(
+                &[
+                    (only(&[Class::Oci]), res(4000, 4096, 0)),
+                    (only(&[Class::Shards]), res(4000, 4096, 0)),
+                ],
+                need,
+            );
+            let iso = isolate(&t, s, &mut index, overheads(), &Sample::whole()).unwrap();
+            assert!(
+                matches!(
+                    iso,
+                    Isolation::Move {
+                        to: Class::Shards,
+                        node: NodeId(1),
+                        ..
+                    }
+                ),
+                "{iso:?}"
             );
         }
     }
 
-    /// The move counts the container's share given back and the microVM's overhead: with exactly its
-    /// need plus 5 MiB less the 0.42 MiB it gives back free, it fits; a byte less, it doesn't.
+    /// Re-placed on its own node, the move counts the container's share given back and the
+    /// microVM's overhead: with exactly room for both it fits, a byte less and it doesn't.
     #[test]
     fn the_move_counts_both_overheads() {
         let need = res(500, 512, 0);
-        let exact = Resources {
-            cpu_milli: 0,
-            mem_bytes: 5 * MIB - 440_402,
-            gpus: 0,
-        };
-        let iso = |free| {
-            isolate(
-                Class::Oci,
+        // Capacity: the container's share plus 5 MiB less its 0.42 MiB overhead.
+        let exact = need.mem_bytes + 5 * MIB;
+        for (mem, fits) in [(exact, true), (exact - 1, false)] {
+            let capacity = Resources {
+                cpu_milli: 500,
+                mem_bytes: mem,
+                gpus: 0,
+            };
+            let (mut index, t) = cell(&[(Classes::ALL, capacity)], need);
+            let iso = isolate(
+                &t,
                 Signal::SeccompKill,
-                Classes::ALL,
-                free,
-                need,
+                &mut index,
                 overheads(),
+                &Sample::whole(),
             )
-        };
-        assert_eq!(
-            iso(exact),
-            Isolation::Move {
-                from: Class::Oci,
-                to: Class::Firecracker
+            .unwrap();
+            if fits {
+                assert!(
+                    matches!(
+                        iso,
+                        Isolation::Move {
+                            to: Class::Firecracker,
+                            node: NodeId(0),
+                            ..
+                        }
+                    ),
+                    "{iso:?}"
+                );
+            } else {
+                assert_eq!(
+                    iso,
+                    Isolation::Refuse {
+                        from: Class::Oci,
+                        why: Refusal::NoneHolds
+                    }
+                );
             }
-        );
-        let short = Resources {
-            mem_bytes: exact.mem_bytes - 1,
-            ..exact
-        };
-        assert_eq!(
-            iso(short),
-            Isolation::Refuse {
-                from: Class::Oci,
-                why: Refusal::DoesNotFit
-            }
-        );
+        }
     }
 
-    /// Refusals, typed: a trip in either microVM; a node running no microVM; a GPU workload, which no
-    /// microVM takes.
+    /// Refusals, typed: a trip in either microVM; a cell running no microVM; a GPU workload, which
+    /// no microVM takes. A refused container stays stopped: its share is given back either way.
     #[test]
-    fn a_trip_with_no_stronger_kind_that_holds_it_is_refused() {
-        let free = res(4000, 4096, 1);
+    fn a_trip_with_no_microvm_in_the_cell_that_holds_it_is_refused() {
         let need = res(500, 512, 0);
         for from in [Class::Firecracker, Class::Shards] {
+            let (mut index, mut t) = cell(&[(Classes::ALL, res(4000, 4096, 0))], need);
+            index
+                .give(
+                    NodeId(0),
+                    &Demand {
+                        need: with_overhead(&need, Class::Oci, overheads()).unwrap(),
+                        kind: Kind::Plain,
+                        class: Class::Oci,
+                    },
+                )
+                .unwrap();
+            let running = Demand {
+                need: with_overhead(&need, from, overheads()).unwrap(),
+                kind: Kind::Plain,
+                class: from,
+            };
+            index.take(NodeId(0), &running).unwrap();
+            t.class = from;
             assert_eq!(
                 isolate(
-                    from,
+                    &t,
                     Signal::SeccompKill,
-                    Classes::ALL,
-                    free,
-                    need,
-                    overheads()
-                ),
+                    &mut index,
+                    overheads(),
+                    &Sample::whole()
+                )
+                .unwrap(),
                 Isolation::Refuse {
                     from,
                     why: Refusal::InMicroVm
                 }
             );
+            assert_eq!(index.key(NodeId(0)).unwrap().mem_bytes, 4096 * MIB);
         }
-        assert_eq!(
-            isolate(
-                Class::Oci,
-                Signal::EgressRefused,
-                only(&[Class::Oci]),
-                free,
-                need,
-                overheads()
-            ),
-            Isolation::Refuse {
-                from: Class::Oci,
-                why: Refusal::NoMicroVmOnNode
-            }
+        let (mut index, t) = cell(
+            &[
+                (only(&[Class::Oci]), res(4000, 4096, 0)),
+                (only(&[Class::Oci]), res(4000, 4096, 0)),
+            ],
+            need,
         );
         assert_eq!(
             isolate(
-                Class::Oci,
-                Signal::PrivilegeEscalation,
-                Classes::ALL,
-                free,
-                res(500, 512, 1),
-                overheads()
-            ),
+                &t,
+                Signal::EgressRefused,
+                &mut index,
+                overheads(),
+                &Sample::whole()
+            )
+            .unwrap(),
             Isolation::Refuse {
                 from: Class::Oci,
-                why: Refusal::DoesNotFit
+                why: Refusal::NoMicroVmInCell
+            }
+        );
+        let gpu = res(500, 512, 1);
+        let (mut index, t) = cell(&[(Classes::ALL, res(4000, 4096, 1))], gpu);
+        assert_eq!(
+            isolate(
+                &t,
+                Signal::PrivilegeEscalation,
+                &mut index,
+                overheads(),
+                &Sample::whole()
+            )
+            .unwrap(),
+            Isolation::Refuse {
+                from: Class::Oci,
+                why: Refusal::NoneHolds
             }
         );
     }
 
-    /// An errno'd call is not a trip, in any kind.
+    /// An errno'd call is not a trip, in any kind: nothing is stopped.
     #[test]
     fn an_errno_is_not_a_trip() {
-        for from in [Class::Oci, Class::Firecracker, Class::Shards] {
-            assert_eq!(
-                isolate(
-                    from,
-                    Signal::SeccompErrno,
-                    Classes::ALL,
-                    res(0, 0, 0),
-                    res(1, 1, 0),
-                    overheads()
-                ),
-                Isolation::None
-            );
-        }
+        let need = res(500, 512, 0);
+        let (mut index, t) = cell(&[(Classes::ALL, res(4000, 4096, 0))], need);
+        let before = index.key(NodeId(0)).unwrap();
+        assert_eq!(
+            isolate(
+                &t,
+                Signal::SeccompErrno,
+                &mut index,
+                overheads(),
+                &Sample::whole()
+            )
+            .unwrap(),
+            Isolation::None
+        );
+        assert_eq!(index.key(NodeId(0)).unwrap(), before);
     }
 }

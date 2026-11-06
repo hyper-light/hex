@@ -21,8 +21,9 @@ use hex_health::penalty::{Ejector, EvictionLimiter};
 use hex_health::probe::{self, DiskProbe};
 use hex_health::{HealthError, Level};
 
-use crate::danger::{self, Isolation, Refusal, STRONGER};
-use crate::model::{Class, Classes, Overheads, Resources};
+use crate::danger::{self, Isolation, Refusal, STRONGER, Tripped};
+use crate::index::{FitIndex, Sample as Placement, Verdict};
+use crate::model::{Class, Classes, Demand, Kind, NodeId, NodeSpec, Overheads, Resources};
 use crate::rng::Rng;
 
 pub const MS: u64 = 1_000_000;
@@ -37,6 +38,8 @@ pub enum FaultError {
     StepBudget(u64),
     #[error("virtual time overflowed")]
     TimeOverflow,
+    #[error("the simulated cell refused: {0}")]
+    Sim(crate::SimError),
 }
 
 /// One injected fault's measured times, from its onset.
@@ -437,17 +440,110 @@ pub fn kind_overheads() -> Overheads {
     o
 }
 
-/// Dangerous (F7): a workload of kind `kind` raises a seeded trip signal on a node that runs its kind
-/// and a seeded set of the others, with seeded free capacity and a seeded need (GPUs only for an OCI
-/// container, the one kind that takes them). Isolated at the signal: moved to the first stronger kind
-/// the node runs that holds it, or refused for the reason that holds; anything else is wrong.
-pub fn dangerous(seed: u64, kind: Class) -> Result<(Measured, Isolation), FaultError> {
+/// What a dangerous run did: its isolation (the stop) measured, the verdict, and where the scheduler
+/// re-placed it, measured apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dangerous {
+    pub measured: Measured,
+    pub isolation: Isolation,
+    /// Re-placed on another node than the one it tripped on.
+    pub elsewhere: bool,
+    /// Re-placed, where the on-node rule (the first microVM its own node admits) would have refused it.
+    pub rescued: bool,
+}
+
+/// Dangerous (F7): a cell of 4-32 nodes, each one of G2's node models (an m5d.metal host running all
+/// three kinds; Hex's fleet's Linux hosts, all three; its Windows hosts, OCI and Shards; its macOS
+/// hosts, Shards alone: `hex-sim.md` H10), with seeded capacity and a seeded load placed through G2's
+/// fast path. A workload of kind `kind` on node 0 raises a seeded trip signal. Isolated at the signal
+/// (stopped); then re-placed through the fast path as the first stronger kind some node admits, or
+/// refused for the reason that holds, against an oracle on the cell as it stood once stopped.
+pub fn dangerous(seed: u64, kind: Class) -> Result<Dangerous, FaultError> {
     const MIB: u64 = 1 << 20;
+    const GIB: u64 = 1 << 30;
     let mut rng = Rng::new(seed);
-    let mut classes = Classes::NONE.with(kind);
-    for c in [Class::Oci, Class::Firecracker, Class::Shards] {
-        if rng.chance(600) {
-            classes = classes.with(c);
+    let n = rng.range(4, 32);
+    let overheads = kind_overheads();
+    let need = Resources {
+        cpu_milli: rng.range(250, 8_000),
+        mem_bytes: rng.range(128, 16_384).saturating_mul(MIB),
+        gpus: u32::from(kind == Class::Oci && rng.chance(150)),
+    };
+    let mut specs = Vec::new();
+    for id in 0..n {
+        let model = rng.range(0, 3);
+        let mut classes = match model {
+            0 | 1 => Classes::ALL,
+            2 => Classes::NONE.with(Class::Oci).with(Class::Shards),
+            _ => Classes::NONE.with(Class::Shards),
+        };
+        let mut capacity = if model == 0 {
+            Resources {
+                cpu_milli: 48_000,
+                mem_bytes: 384 * GIB,
+                gpus: 0,
+            }
+        } else {
+            Resources {
+                cpu_milli: rng.range(4, 48).saturating_mul(1000),
+                mem_bytes: rng.range(8, 384).saturating_mul(GIB),
+                gpus: u32::try_from(rng.range(0, 2)).unwrap_or(0),
+            }
+        };
+        if id == 0 {
+            // The tripped workload's node runs its kind and holds it.
+            classes = classes.with(kind);
+            capacity.cpu_milli = capacity.cpu_milli.max(need.cpu_milli);
+            capacity.mem_bytes = capacity
+                .mem_bytes
+                .max(add(need.mem_bytes, overheads.of(kind))?);
+            capacity.gpus = capacity.gpus.max(need.gpus);
+        }
+        specs.push(NodeSpec {
+            id: NodeId(
+                u32::try_from(id)
+                    .map_err(|_| FaultError::Sim(crate::SimError::Config("a node id past u32")))?,
+            ),
+            capacity,
+            background_milli: 0,
+            classes,
+        });
+    }
+    let mut index = FitIndex::new(&specs).map_err(FaultError::Sim)?;
+    let tripped = Tripped {
+        node: NodeId(0),
+        need,
+        kind: Kind::Plain,
+        class: kind,
+    };
+    let running = Demand {
+        need: Resources {
+            mem_bytes: add(need.mem_bytes, overheads.of(kind))?,
+            ..need
+        },
+        kind: Kind::Plain,
+        class: kind,
+    };
+    index.take(NodeId(0), &running).map_err(FaultError::Sim)?;
+    // A seeded load: up to 4 workloads a node, each placed through the fast path where it fits.
+    let sample = Placement::default();
+    for _ in 0..n.saturating_mul(4) {
+        let class = match rng.range(0, 2) {
+            0 => Class::Oci,
+            1 => Class::Firecracker,
+            _ => Class::Shards,
+        };
+        let filler = Demand {
+            need: Resources {
+                cpu_milli: rng.range(1_000, 24_000),
+                mem_bytes: add(rng.range(1, 192).saturating_mul(GIB), overheads.of(class))?,
+                gpus: 0,
+            },
+            kind: Kind::Plain,
+            class,
+        };
+        if let Some(key) = index.sampled_fit(&filler, &sample).best {
+            index.take(key.node, &filler).map_err(FaultError::Sim)?;
         }
     }
     let signal = match rng.range(0, 2) {
@@ -455,65 +551,80 @@ pub fn dangerous(seed: u64, kind: Class) -> Result<(Measured, Isolation), FaultE
         1 => Signal::EgressRefused,
         _ => Signal::PrivilegeEscalation,
     };
-    let need = Resources {
-        cpu_milli: rng.range(250, 8_000),
-        mem_bytes: rng.range(128, 16_384).saturating_mul(MIB),
-        gpus: u32::from(kind == Class::Oci && rng.chance(150)),
-    };
-    // What the node has free beside the workload: from nothing to plenty, so some moves fit and some
-    // don't.
-    let free = Resources {
-        cpu_milli: rng.range(0, 16_000),
-        mem_bytes: rng.range(0, 32_768).saturating_mul(MIB),
-        gpus: u32::try_from(rng.range(0, 1)).unwrap_or(0),
-    };
-    let overheads = kind_overheads();
     let onset = rng.range(S, 100 * S);
-    let iso = danger::isolate(kind, signal, classes, free, need, overheads);
-    // The oracle, from the rule's statement: room is what's free once the workload gives back its need
-    // and its kind's overhead; a microVM holds it when it takes its GPUs and its need plus the
-    // microVM's overhead fits in the room.
-    let room = Resources {
-        cpu_milli: free.cpu_milli.saturating_add(need.cpu_milli),
-        mem_bytes: free
-            .mem_bytes
-            .saturating_add(need.mem_bytes)
-            .saturating_add(overheads.of(kind)),
-        gpus: free.gpus.saturating_add(need.gpus),
+    // The oracle's cell: as it stands once the workload is stopped.
+    let mut stopped = index.clone();
+    stopped.give(NodeId(0), &running).map_err(FaultError::Sim)?;
+    let isolation = danger::isolate(&tripped, signal, &mut index, overheads, &sample)
+        .map_err(FaultError::Sim)?;
+    let first = if kind == Class::Oci {
+        let mut first = None;
+        for to in STRONGER {
+            if danger::admitted_as(&stopped, &tripped, to, overheads).map_err(FaultError::Sim)? {
+                first = Some(to);
+                break;
+            }
+        }
+        first
+    } else {
+        None
     };
-    let fits = |c: Class| {
-        classes.has(c)
-            && (need.gpus == 0 || c.takes_gpus())
-            && need.cpu_milli <= room.cpu_milli
-            && need.mem_bytes.saturating_add(overheads.of(c)) <= room.mem_bytes
-    };
-    let first = STRONGER.into_iter().find(|c| fits(*c));
-    let right = match iso {
-        Isolation::Move { from, to } => from == kind && kind == Class::Oci && first == Some(to),
+    let mut any_microvm = false;
+    for to in STRONGER {
+        any_microvm |= danger::runs(&stopped, to).map_err(FaultError::Sim)?;
+    }
+    let right = match isolation {
+        Isolation::Move { from, to, node, .. } => {
+            let at = Demand {
+                need: Resources {
+                    mem_bytes: add(need.mem_bytes, overheads.of(to))?,
+                    ..need
+                },
+                kind: Kind::Plain,
+                class: to,
+            };
+            from == kind
+                && first == Some(to)
+                && stopped.verdict(node, &at).map_err(FaultError::Sim)? == Verdict::Admits
+        }
         Isolation::Refuse { from, why } => {
             from == kind
+                && first.is_none()
                 && match why {
                     Refusal::InMicroVm => kind != Class::Oci,
-                    Refusal::NoMicroVmOnNode => {
-                        kind == Class::Oci && !STRONGER.iter().any(|c| classes.has(*c))
-                    }
-                    Refusal::DoesNotFit => {
-                        kind == Class::Oci
-                            && STRONGER.iter().any(|c| classes.has(*c))
-                            && first.is_none()
-                    }
+                    Refusal::NoMicroVmInCell => kind == Class::Oci && !any_microvm,
+                    Refusal::NoneHolds => kind == Class::Oci && any_microvm,
                 }
         }
         Isolation::None => false,
     };
-    let mut m = Measured::default();
+    let mut measured = Measured::default();
     if right {
-        m.detected_after_ns = after(onset, onset);
-        m.isolated_after_ns = after(onset, onset);
+        measured.detected_after_ns = after(onset, onset);
+        measured.isolated_after_ns = after(onset, onset);
     } else {
-        m.wrong_verdicts = 1;
+        measured.wrong_verdicts = 1;
     }
-    Ok((m, iso))
+    let elsewhere = matches!(isolation, Isolation::Move { node, .. } if node != NodeId(0));
+    let mut on_node = false;
+    for to in STRONGER {
+        let at = Demand {
+            need: Resources {
+                mem_bytes: add(need.mem_bytes, overheads.of(to))?,
+                ..need
+            },
+            kind: Kind::Plain,
+            class: to,
+        };
+        on_node |= stopped.verdict(NodeId(0), &at).map_err(FaultError::Sim)? == Verdict::Admits;
+    }
+    let rescued = matches!(isolation, Isolation::Move { .. }) && !on_node;
+    Ok(Dangerous {
+        measured,
+        isolation,
+        elsewhere,
+        rescued,
+    })
 }
 
 /// What a correlated fault did to a cell.

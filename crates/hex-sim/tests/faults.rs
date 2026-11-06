@@ -159,46 +159,67 @@ fn the_mutant_that_reads_provider_errors_as_slowness_suspects_nodes() {
     assert!(wrong > 0);
 }
 
-/// S8 dangerous (F7), per kind Hex places: do 1,000 trips of each kind; expect each isolated at its
-/// signal by the rule (no wrong verdict); an OCI container moved to Firecracker and to Shards, and
-/// refused both for a node without a microVM and for one that won't hold it (non-vacuity); every
-/// trip in a Firecracker or Shards microVM refused.
+/// S8 dangerous (F7), per kind Hex places: do 1,000 trips of each kind in a seeded cell; expect each
+/// isolated (stopped) at its signal and re-placed or refused by the rule, against the oracle (no
+/// wrong verdict); an OCI container re-placed as Firecracker and as Shards, on its own node and on
+/// another, and refused where none holds it (non-vacuity; every node model of G2's runs Shards, so
+/// no cell is without a microVM); every trip in a Firecracker or Shards microVM refused.
 #[test]
-fn a_dangerous_workload_moves_to_a_stronger_kind_or_is_refused_at_its_signal() {
+fn a_dangerous_workload_is_re_placed_in_a_stronger_kind_or_refused_at_its_signal() {
     for kind in [Class::Oci, Class::Firecracker, Class::Shards] {
-        let (mut to_fc, mut to_shards, mut none_on_node, mut no_fit, mut in_vm) = (0, 0, 0, 0, 0);
+        let (mut to_fc, mut to_shards, mut elsewhere, mut none_in_cell, mut no_fit, mut in_vm) =
+            (0, 0, 0, 0, 0, 0);
+        let mut rescued = 0u64;
+        let mut scanned = Vec::new();
         for seed in 0..SEEDS {
-            let (m, iso) = faults::dangerous(seed, kind).unwrap();
-            assert_eq!(m.wrong_verdicts, 0, "{kind:?} seed {seed}: {iso:?}");
-            assert_eq!(m.isolated_after_ns, Some(0));
-            match iso {
-                Isolation::Move {
-                    to: Class::Firecracker,
-                    ..
-                } => to_fc += 1,
-                Isolation::Move {
-                    to: Class::Shards, ..
-                } => to_shards += 1,
+            let d = faults::dangerous(seed, kind).unwrap();
+            assert_eq!(d.measured.wrong_verdicts, 0, "{kind:?} seed {seed}: {d:?}");
+            assert_eq!(d.measured.isolated_after_ns, Some(0));
+            elsewhere += u64::from(d.elsewhere);
+            rescued += u64::from(d.rescued);
+            match d.isolation {
+                Isolation::Move { to, scanned: s, .. } => {
+                    scanned.push(s as u64);
+                    if to == Class::Firecracker {
+                        to_fc += 1;
+                    } else {
+                        to_shards += 1;
+                    }
+                }
                 Isolation::Refuse {
-                    why: Refusal::NoMicroVmOnNode,
+                    why: Refusal::NoMicroVmInCell,
                     ..
-                } => none_on_node += 1,
+                } => none_in_cell += 1,
                 Isolation::Refuse {
-                    why: Refusal::DoesNotFit,
+                    why: Refusal::NoneHolds,
                     ..
                 } => no_fit += 1,
                 Isolation::Refuse {
                     why: Refusal::InMicroVm,
                     ..
                 } => in_vm += 1,
-                other => panic!("{kind:?} seed {seed}: {other:?}"),
+                Isolation::None => panic!("{kind:?} seed {seed}"),
             }
         }
+        let span = if scanned.is_empty() {
+            (0, 0)
+        } else {
+            (p(&mut scanned, 50), p(&mut scanned, 100))
+        };
         println!(
-            "dangerous {kind:?}: to Firecracker {to_fc}, to Shards {to_shards}, refused: no microVM on the node {none_on_node}, none holds it {no_fit}, in a microVM {in_vm}"
+            "dangerous {kind:?}: re-placed as Firecracker {to_fc}, as Shards {to_shards} ({elsewhere} on another node, {rescued} the on-node rule would have refused; nodes scanned p50 {} max {}); refused: no microVM in the cell {none_in_cell}, none holds it {no_fit}, in a microVM {in_vm}",
+            span.0, span.1
         );
         if kind == Class::Oci {
-            assert!(to_fc > 0 && to_shards > 0 && none_on_node > 0 && no_fit > 0);
+            // Every one of G2's node models runs Shards, so no cell lacks a microVM; that refusal is
+            // `danger`'s unit test's, on an OCI-only cell.
+            assert!(
+                to_fc > 0 && to_shards > 0 && no_fit > 0,
+                "{to_fc} {to_shards} {no_fit}"
+            );
+            assert_eq!(none_in_cell, 0);
+            assert!(rescued > 0 && rescued <= elsewhere);
+            assert!(elsewhere > 0 && elsewhere < to_fc + to_shards);
         } else {
             assert_eq!(in_vm, SEEDS);
         }
