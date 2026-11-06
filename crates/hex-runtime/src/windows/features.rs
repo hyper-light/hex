@@ -28,7 +28,11 @@ const ENVIRONMENT: [&str; 5] = ["SystemRoot", "windir", "TEMP", "TMP", "PATH"];
 
 /// The installer's features that are off on this machine of `processors` logical processors.
 pub fn off(processors: NonZeroU32) -> Result<BTreeSet<WindowsFeature>, Refusal> {
-    let deadline = Instant::now().checked_add(PATIENCE);
+    setup::features_off(&listing(processors, &powershell(setup::FEATURE_QUERY)?)?)
+}
+
+/// Windows PowerShell running `command`, with the environment it and WMI read ([`ENVIRONMENT`]).
+fn powershell(command: &str) -> Result<Program, Refusal> {
     let root = std::env::var("SystemRoot").map_err(|e| Refusal::Os {
         op: "finding PowerShell to read the Windows features",
         why: format!("SystemRoot: {e}"),
@@ -39,17 +43,24 @@ pub fn off(processors: NonZeroU32) -> Result<BTreeSet<WindowsFeature>, Refusal> 
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        setup::FEATURE_QUERY,
+        command,
     ]);
     program.env = ENVIRONMENT
         .iter()
         .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v)))
         .collect();
+    Ok(program)
+}
+
+/// What `program` writes, run as the member of a job-object box of its own within [`PATIENCE`]: past it
+/// the box ends and the read is refused by name.
+fn listing(processors: NonZeroU32, program: &Program) -> Result<String, Refusal> {
+    let deadline = Instant::now().checked_add(PATIENCE);
     let id = BoxId::new(&format!("hex-features-{}", std::process::id()))?;
     let b = JobBox::create(id, &Bounds::default(), processors)?;
     let (out, w) = std::io::pipe().map_err(|e| Refusal::os("making a pipe", e))?;
     let spawn = build_spawn(
-        &program,
+        program,
         Stdio {
             stdout: Some(w),
             ..Stdio::null()
@@ -58,7 +69,7 @@ pub fn off(processors: NonZeroU32) -> Result<BTreeSet<WindowsFeature>, Refusal> 
     let read = run(&b, spawn, out, deadline);
     // The box ends whatever the query left, read or not.
     b.delete()?;
-    setup::features_off(&read?)
+    read
 }
 
 /// Runs the query in `b` and reads its listing from `out` by `deadline`, its exit a success.
@@ -106,5 +117,24 @@ fn run(
             why: format!("PowerShell's Win32_OptionalFeature query ended {exit:?}"),
         }),
         None => Err(late()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HEX-INST-9 (native plan step 6): a query that runs past the bound is ended and refused by name, not
+    /// waited on. The fake query is PowerShell sleeping twice [`PATIENCE`], so the case derives from the
+    /// bound itself.
+    #[test]
+    fn a_query_past_the_bound_is_refused_by_name() {
+        let processors = NonZeroU32::new(super::super::sys::active_processors()).unwrap();
+        let sleep = format!("Start-Sleep -Milliseconds {}", PATIENCE.as_millis() * 2);
+        let refused = listing(processors, &powershell(&sleep).unwrap()).unwrap_err();
+        assert!(
+            matches!(&refused, Refusal::Os { why, .. } if why.contains("didn't finish within")),
+            "{refused:?}"
+        );
     }
 }

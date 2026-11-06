@@ -70,6 +70,14 @@ fn main() -> ExitCode {
             return ExitCode::from(hex_cli::box_run::main(&box_args));
         }
     }
+    // `hex setup features`: the Windows features' state for the installer (hex_cli::setup).
+    if let [Some(first), rest @ ..] = args.as_slice()
+        && first == "setup"
+        && rest.iter().all(Option::is_some)
+    {
+        let rest: Vec<String> = rest.iter().flatten().cloned().collect();
+        return ExitCode::from(hex_cli::setup::main(&rest));
+    }
     let reply = hex_cli::reply(&args);
     let wrote = if reply.to_stderr {
         std::io::stderr().lock().write_all(reply.text.as_bytes())

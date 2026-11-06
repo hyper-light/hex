@@ -199,6 +199,22 @@ pub fn features_off(listing: &str) -> Result<BTreeSet<WindowsFeature>, Refusal> 
         .collect())
 }
 
+/// The features' state as `hex setup features` prints it for the Windows installer: one `<name> on|off`
+/// line per feature of [`WindowsFeature::ALL`], in its order, `off` for each in `off`.
+#[must_use]
+pub fn render_features(off: &BTreeSet<WindowsFeature>) -> String {
+    WindowsFeature::ALL
+        .iter()
+        .map(|f| {
+            format!(
+                "{} {}\n",
+                f.name(),
+                if off.contains(f) { "off" } else { "on" }
+            )
+        })
+        .collect()
+}
+
 /// The Windows `oci` class's refusal: the features it needs that are `off`, by name, and that the
 /// installer turns them on; with none off, that the class itself is still to build (`not_built`).
 #[must_use]
@@ -370,6 +386,22 @@ mod tests {
         assert_eq!(
             FEATURE_QUERY_PATIENCE,
             std::time::Duration::from_millis(4_842)
+        );
+    }
+
+    /// HEX-INST-9 (native plan step 6): `hex setup features` prints each feature the installer turns on,
+    /// one `<name> on|off` line in [`WindowsFeature::ALL`]'s order, which the Windows installer reads in
+    /// place of a query of its own.
+    #[test]
+    fn the_features_state_renders_one_line_each_in_order() {
+        let off: BTreeSet<WindowsFeature> = [WindowsFeature::HypervisorPlatform].into();
+        assert_eq!(
+            render_features(&off),
+            "Containers on\nHypervisorPlatform off\n"
+        );
+        assert_eq!(
+            render_features(&BTreeSet::new()),
+            "Containers on\nHypervisorPlatform on\n"
         );
     }
 

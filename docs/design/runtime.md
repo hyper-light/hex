@@ -622,8 +622,10 @@ lacking any of it "refuses that class by name, saying what's missing", and "Unin
   the installer turns it on (HEX-INST-2), the state read without elevation from `Win32_OptionalFeature`
   (§2.4: Microsoft lists no restriction on reading it, to be measured as a standard user on jupiter) by
   PowerShell run as the member of a job-object box of its own, so its wait is the class's bounded one and the
-  box's end takes whatever it left; `hex_core::setup::features_off` parses its listing and refuses anything
-  else by name.
+  box's end takes whatever it left, within `hex_core::setup::FEATURE_QUERY_PATIENCE` (twice the slowest
+  recorded run); `hex_core::setup::features_off` parses its listing and refuses anything else by name. The
+  installer asks the same query through `hex setup features` (one `<name> on|off` line each) rather than
+  querying Windows itself, so there is one query and one bound (HEX-INST-9).
 - **Done when** (the plan's criterion): on a machine fresh of Hex the one admin step leaves every class working
   with no further step, and uninstall leaves nothing of Hex's behind, checked by listing what install made.
   The bar is not narrowed per OS: on Windows the `oci` class is native plan steps 4 and 5, so Windows' part is

@@ -31,6 +31,11 @@ socket2.workspace = true
 [target.'cfg(target_os = "windows")'.dependencies]
 hex-runtime.workspace = true
 
+# `hex setup features` runs the Windows node's own bounded feature query for the installer.
+[target.'cfg(target_os = "windows")'.dependencies]
+hex-core.workspace = true
+hex-runtime.workspace = true
+
 [dev-dependencies]
 hex-api.workspace = true
 # The oci class through a Shards guest (docs/design/shards-guest.md): its simulator on Linux

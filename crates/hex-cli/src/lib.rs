@@ -15,6 +15,7 @@
 )]
 
 pub mod selftest;
+pub mod setup;
 
 #[cfg(target_os = "linux")]
 pub mod box_run;

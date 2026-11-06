@@ -58,7 +58,7 @@ Step "the machine: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ
 switch ($Phase) {
   'before' {
     Step 'fresh of Hex: check lists nothing'
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Install check
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $Install check -Binary $Binary
     if ($LASTEXITCODE -ne 0) { Fail 'the machine is not fresh of Hex' }
     Step 'the plan (install -DryRun)'
     & powershell -NoProfile -ExecutionPolicy Bypass -File $Install install -Binary $Binary -DryRun | Tee-Object -FilePath $Plan
@@ -68,7 +68,7 @@ switch ($Phase) {
   }
   'installed' {
     Step 'every line of the plan is on the machine'
-    $left = & powershell -NoProfile -ExecutionPolicy Bypass -File $Install check $Plan 6>&1 | Out-String
+    $left = & powershell -NoProfile -ExecutionPolicy Bypass -File $Install check $Plan -Binary $Binary 6>&1 | Out-String
     Write-Output $left
     $lines = @(Get-Content -LiteralPath $Plan | Where-Object { $_ })
     $present = @($left -split "`n" | Where-Object { $_ -like 'left: *' })
@@ -87,7 +87,7 @@ switch ($Phase) {
   }
   'uninstalled' {
     Step "HEX-INST-4: none of the plan's lines is on the machine"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $Install check $Plan
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $Install check $Plan -Binary $Binary
     if ($LASTEXITCODE -ne 0) { Fail 'uninstall left the lines above' }
     Write-Output 'PASS'
   }
