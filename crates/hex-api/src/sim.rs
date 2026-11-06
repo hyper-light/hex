@@ -27,6 +27,7 @@ pub const SIM_BOXES: usize = 10_000;
 pub const SIM_EXEC_LIMIT: crate::ExecLimit = crate::ExecLimit {
     block: 131_072,
     string: None,
+    unit: crate::StringUnit::Bytes,
     source: "the simulator (Linux's ARG_MAX floor, include/uapi/linux/limits.h:8)",
 };
 /// Most programs a simulated box holds, running or ended; past it `exec` is refused.

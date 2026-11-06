@@ -321,32 +321,63 @@ impl Program {
         let Some(most) = limit.string else {
             return Ok(());
         };
-        let long = |len: usize| len.saturating_add(1) > most;
-        if let Some(a) = self.args.iter().find(|a| long(a.len())) {
+        let unit = limit.unit;
+        // Each string with its NUL, in the OS's own unit.
+        let arg_size = |a: &str| unit.of(a).saturating_add(1);
+        let var_size = |k: &str, v: &str| {
+            unit.of(k)
+                .saturating_add(unit.of(v))
+                .saturating_add(2)
+        };
+        if let Some(a) = self.args.iter().find(|a| arg_size(a) > most) {
             return Err(Refusal::Invalid {
                 what: "program",
                 why: format!(
-                    "an argument of {} bytes; {} allows {most} for one string",
-                    a.len().saturating_add(1),
+                    "an argument of {} {}; {} allows {most} for one string",
+                    arg_size(a),
+                    unit.name(),
                     limit.source
                 ),
             });
         }
-        if let Some((k, v)) = self
-            .env
-            .iter()
-            .find(|(k, v)| long(k.len().saturating_add(v.len()).saturating_add(1)))
-        {
+        if let Some((k, v)) = self.env.iter().find(|(k, v)| var_size(k, v) > most) {
             return Err(Refusal::Invalid {
                 what: "program",
                 why: format!(
-                    "environment variable {k:?} takes {} bytes; {} allows {most} for one string",
-                    k.len().saturating_add(v.len()).saturating_add(2),
+                    "environment variable {k:?} takes {} {}; {} allows {most} for one string",
+                    var_size(k, v),
+                    unit.name(),
                     limit.source
                 ),
             });
         }
         Ok(())
+    }
+}
+
+/// The unit an OS counts one string of a program in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringUnit {
+    /// UTF-8 bytes (Linux's `MAX_ARG_STRLEN`).
+    Bytes,
+    /// UTF-16 code units (Windows' 32,767 characters a variable).
+    Utf16,
+}
+
+impl StringUnit {
+    /// `s`'s length in this unit.
+    pub fn of(self, s: &str) -> usize {
+        match self {
+            Self::Bytes => s.len(),
+            Self::Utf16 => s.encode_utf16().count(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Bytes => "bytes",
+            Self::Utf16 => "UTF-16 units",
+        }
     }
 }
 
@@ -356,8 +387,10 @@ impl Program {
 pub struct ExecLimit {
     /// Bytes for every string and its pointer together, as [`Program::exec_size`] counts them.
     pub block: usize,
-    /// Bytes for any one string with its NUL, where the OS bounds that too.
+    /// Any one string with its NUL, in [`ExecLimit::unit`], where the OS bounds that too.
     pub string: Option<usize>,
+    /// What [`ExecLimit::string`] counts: Linux and macOS bound a string in bytes, Windows in UTF-16 units.
+    pub unit: StringUnit,
     /// Where the bound was read, for the refusal.
     pub source: &'static str,
 }
@@ -417,6 +450,7 @@ mod tests {
         let fits = ExecLimit {
             block: size,
             string: None,
+            unit: StringUnit::Bytes,
             source: "a test",
         };
         assert_eq!(p.fits(&fits), Ok(()));

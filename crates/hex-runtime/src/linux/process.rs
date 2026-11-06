@@ -33,6 +33,7 @@ pub fn exec_limit() -> ExecLimit {
     ExecLimit {
         block: usize::try_from(block).unwrap_or(usize::MAX),
         string: Some(rustix::param::page_size().saturating_mul(MAX_ARG_STRLEN_PAGES)),
+        unit: hex_api::StringUnit::Bytes,
         source: "Linux's execve (a quarter of RLIMIT_STACK, fs/exec.c)",
     }
 }

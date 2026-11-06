@@ -468,6 +468,7 @@ fn unexpected(call: &str, answer: &Answer) -> Refusal {
 pub const WIRE_EXEC_LIMIT: ExecLimit = ExecLimit {
     block: wire::MAX_MESSAGE,
     string: None,
+    unit: hex_api::StringUnit::Bytes,
     source: "the node agent's wire (one message, hex_core::wire::MAX_MESSAGE)",
 };
 
