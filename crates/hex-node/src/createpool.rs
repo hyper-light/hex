@@ -140,7 +140,8 @@ impl CreatePool {
         )
     }
 
-    /// A pool with `limits`, every slot from the start.
+    /// A pool with `limits`, every slot from the start: the tests', which set each bound.
+    #[cfg(test)]
     pub fn with_limits(
         exe: PathBuf,
         limits: Limits,
