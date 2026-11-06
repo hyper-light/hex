@@ -600,6 +600,7 @@ fn a_stages_learned_budget_bounds_it() {
     u.learn(2, 1 << 20);
     let mut input = bytes.as_slice();
     let refused = loop {
+        assert!(!input.is_empty(), "the stage was read whole past its budget");
         match u.take(input) {
             Ok((took, _)) => input = &input[took..],
             Err(why) => break why,

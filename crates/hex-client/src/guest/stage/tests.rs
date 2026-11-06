@@ -175,7 +175,8 @@ impl super::super::Link for Budgeted {
 
 /// HEX-GUEST-15 (Ada's rule on constants: a learned bound): stage through a relay whose budget is 4 bytes,
 /// what its file system has free, an item of 5: expect it refused by type, naming the budget, before its
-/// bytes are sent; and one of 4 staged.
+/// bytes are sent; and one of 4 staged. Through one with one inode free, two entries: expect the second
+/// refused.
 #[cfg(unix)]
 #[test]
 fn a_stage_spends_the_relays_learned_budget() {
@@ -192,4 +193,13 @@ fn a_stage_spends_the_relays_learned_budget() {
         })
     );
     assert_eq!(stage(&relay, &id(), &[item(4)], &LIMITS), Ok(()));
+    // The entries too: a file system with one inode free takes one entry, not two.
+    let relay = Budgeted { budget: (1, 100) };
+    assert_eq!(
+        stage(&relay, &id(), &[item(1), item(1)], &LIMITS),
+        Err(Refusal::Exhausted {
+            what: "entries in one stage",
+            bound: 1
+        })
+    );
 }
