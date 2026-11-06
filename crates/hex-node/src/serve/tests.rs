@@ -781,30 +781,108 @@ fn calls_in_flight_are_bounded_for_the_node_not_each_connection() {
     ));
 }
 
-/// HEX-SOCK-7, the lead's call of 2026-11-06: the programs watched are one budget for the node. Do: two connections
-/// under a node-wide bound of 1, an exec on each. Expect: the second refused naming the bound, though its
-/// connection watches none.
+/// HEX-SOCK-7 and the lead's ruling of 2026-11-06 (AC-T7.1.3): the programs watched are one budget for the node, and
+/// each admitted connection keeps the one its hello promised. Do: two connections under a node-wide budget of 3, an
+/// exec on the first until refused, then one on the second. Expect: the first starts two, its third refused naming
+/// the node's budget, since the second connection's one is kept for it; the second's starts.
 #[test]
-fn programs_watched_are_bounded_for_the_node_not_each_connection() {
+fn programs_watched_are_bounded_for_the_node_and_each_connection_keeps_its_one() {
     let lab = Lab::new(Limits {
-        programs: 1,
+        programs: 3,
         ..limits()
     });
     let (a, c) = (lab.client(), lab.client());
-    let mut first = a
-        .exec(&b(), Program::of(&["sleep", "1000"]), Stdio::null())
-        .unwrap();
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            a.exec(&b(), Program::of(&["sleep", "1000"]), Stdio::null())
+                .unwrap(),
+        );
+    }
     assert_eq!(
-        c.exec(&b(), Program::of(&["true"]), Stdio::null()).err(),
+        a.exec(&b(), Program::of(&["true"]), Stdio::null()).err(),
         Some(Refusal::Exhausted {
             what: PROGRAMS,
-            bound: 1
+            bound: 3
         })
     );
-    rustix::process::kill_process(
-        Pid::from_raw(i32::try_from(first.pid()).unwrap()).unwrap(),
-        Signal::KILL,
-    )
-    .unwrap();
-    assert_eq!(first.wait_for(PATIENCE).unwrap(), Some(Exit::Signal(9)));
+    let mut theirs = c.exec(&b(), Program::of(&["true"]), Stdio::null()).unwrap();
+    assert_eq!(theirs.wait_for(PATIENCE).unwrap(), Some(Exit::Code(0)));
+    for mut p in held {
+        rustix::process::kill_process(
+            Pid::from_raw(i32::try_from(p.pid()).unwrap()).unwrap(),
+            Signal::KILL,
+        )
+        .unwrap();
+        assert_eq!(p.wait_for(PATIENCE).unwrap(), Some(Exit::Signal(9)));
+    }
+}
+
+/// HEX-SOCK-2 and HEX-SOCK-5, the lead's ruling of 2026-11-06: a client of an older version is told only what the
+/// node keeps for each connection, and is never refused within it, however much of the node's budgets other
+/// connections hold. Do: a hello in version 3 and one in version 4; then, under a node-wide budget of 3 calls held at
+/// the gate, one connection taking all it can before an old client's call. Expect: version 3 told one call and one
+/// program a connection and no budgets; version 4 told the same and the node's budgets beside; the first connection
+/// refused past two calls, naming the node's budget; the old client's call admitted and answered.
+#[test]
+fn an_older_client_within_what_it_was_told_is_never_refused() {
+    let lab = Lab::new(Limits {
+        in_flight: 3,
+        ..limits()
+    });
+    let hello = |version: u16| {
+        let fd = lab.raw();
+        send_raw(
+            &fd,
+            &wire::request(version, 9, &Request::Hello, wire::MAX_MESSAGE).unwrap(),
+            &[],
+        );
+        match answer_of(&fd).1 {
+            Answer::Hello(h) => h,
+            other => panic!("{other:?}"),
+        }
+    };
+    let old = hello(3);
+    assert_eq!((old.limits.in_flight, old.limits.programs), (1, 1));
+    assert_eq!(old.budgets, None);
+    let new = hello(4);
+    assert_eq!((new.limits.in_flight, new.limits.programs), (1, 1));
+    assert_eq!(
+        new.budgets,
+        Some(wire::Budgets {
+            in_flight: 3,
+            programs: limits().programs
+        })
+    );
+    // Each connection holds its one call from its admission, so the hellos' are let go first, and both of these are
+    // admitted before either asks.
+    wait_until("the hellos' connections to close", || {
+        lab.connections() == 0
+    });
+    let (greedy, older) = (lab.raw(), lab.raw());
+    wait_until("both connections to be admitted", || lab.connections() == 2);
+    lab.host.gate.set(true);
+    for id in 1..=3 {
+        send_raw(&greedy, &request(id, Call::Inspect(b())), &[]);
+    }
+    assert_eq!(
+        answer_of(&greedy).1,
+        Answer::Refused(Refusal::Exhausted {
+            what: IN_FLIGHT,
+            bound: 3
+        })
+    );
+    send_raw(
+        &older,
+        &wire::request(3, 7, &Request::Call(Call::Inspect(b())), wire::MAX_MESSAGE).unwrap(),
+        &[],
+    );
+    lab.host.gate.set(false);
+    assert!(matches!(
+        answer_of(&older),
+        (Header { id: 7, .. }, Answer::Info(_))
+    ));
+    for _ in 0..2 {
+        assert!(matches!(answer_of(&greedy).1, Answer::Info(_)));
+    }
 }
