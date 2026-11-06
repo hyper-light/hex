@@ -109,6 +109,55 @@ itself, which is 2 and 3's.
   - cpu, io and pids reporting are untouched.
 - Not built. It needs Ada's or the lead's word on losing per-box memory reporting for such boxes.
 
+### 4. Sketch, if 1 doesn't reach the bar: a memory slot made once, under a fresh leaf without memory
+
+Not built and not decided; it is the next lever if 1 leaves the no-owner p99.9 over, with 3 held (the lead,
+2026-11-06). It keeps what 3 gives up, per-box memory reporting and per-box OOM confinement, and takes away the memory
+cgroup's offline, the costly css in a box's teardown.
+
+- **The kernel's rule it rests on.** A cgroup's effective css for a controller is "the matching css of the nearest
+  ancestor including self which has @ss enabled" (`cgroup_e_css_by_mask`, `kernel/cgroup/cgroup.c:534-560`). So a
+  leaf whose parent's `subtree_control` leaves memory out has no memcg of its own: its tasks are charged to the
+  parent's, and its removal queues no memory offline. The parent's other controllers still reach the leaf
+  (`cgroup-v2.rst:472-491`).
+- **The layout.** Each box of no owner gets a slot `M`, made once and handed from one box to the next, and a fresh leaf
+  `C` inside it, made ahead as today. `M` enables memory and hands the leaf cpu, io and pids, not memory. `M` holds one
+  box at a time, so:
+  - memory is bounded and reported per box. The box's memory bounds go on `M`; Hex reads the box's memory from `M`, as
+    deltas from a baseline taken at the hand-over, with the peak through a `memory.peak` descriptor written then. That
+    is what reuse within one owner already does (decision 5, "Usage", in `docs/design/runtime-architecture.md`).
+  - `memory.oom.group` on `M` still confines an OOM kill to that one box.
+  - cpu, io and pids are the leaf's own, fresh for each box, so their counters start at zero.
+- **What the box sees.** Its cgroup namespace's root is the leaf, so `M`, and the counters earlier boxes left in it,
+  are outside its namespace, and the kernel contains a delegated sub-hierarchy ("processes can't be moved into or out of the
+  sub-hierarchy by the delegatee", `cgroup-v2.rst:574-576`). This is the part reuse
+  across owners lacks today: there, the box reads the whole reused cgroup (`goal5-cgroup-lock.md`, f34).
+- **What a box's delete still tears down:** the leaf's cpu, io and pids css and its own, at about 0.08 ms each
+  (`create_tail.md`). The memory offline goes: 0.388 ms of 0.795, plus its own work item, and its hold of
+  `list_lrus_mutex` and `shrinker_mutex`. So that is about half to 60% of a box's css teardown time, if the 0.08 ms
+  each holds.
+- **What it costs:**
+  - **A box sees no `memory.*` files.** Inside, the leaf has no `memory.max` or `memory.current`. A runtime that sizes
+    itself from `memory.max` (a JVM's container support, for one) then sees no limit. This has to be decided, or the
+    lever limited to boxes whose spec sets no memory limit, where the box would read `max` today.
+  - **What the last box left stays charged to `M`.** That is page cache and reclaimable slab; anon and tmpfs memory go
+    with its processes and mounts. It counts against the next box's `memory.max` until reclaim takes it (inferred, as
+    for reuse within one owner, `goal5-cgroup-lock.md` f82). A `memory.reclaim` write by the remover at the hand-over
+    would clear it, at a cost to be measured.
+  - **A slot whose box was killed through `cgroup.kill` is never handed on** (the `kill_seq` rule, `goal5-cgroup-lock.md`). The leaf
+    takes the kill, so `M` is unaffected: to be checked by the kill_seq probe.
+  - **Bounds.** There is one `M` per box in flight plus those made ahead, under `reuse::PER_NODE`.
+- **What the gain depends on (lever 2's probe).** In 6.19 a memcg offline locks and stores into the xarray of every
+  memcg-aware list_lru on the host (`mm/list_lru.c:467-503`). It also walks every shrinker id up to the high-water mark
+  (`mm/shrinker.c:285-311`). Each superblock adds two list_lrus and a shrinker (`fs/super.c:378-390`). So the 0.388 ms
+  grows with the host's superblocks, other tenants' included, and lever 2's kprobes split it. If that walk is most of
+  it, this lever removes it on every kernel, and 7.2's skip only shortens it.
+- **What would falsify it:**
+  - a box's css teardown time with the leaf doesn't fall by about memory's share;
+  - no-owner p99.9 doesn't fall with it;
+  - the hand-over (`memory.max` write, peak descriptor, baseline read) costs more at create p50 than the fresh slot's
+    path.
+
 ## What would falsify each
 
 - 1: no-owner p99.9 doesn't fall with parked procs on and no pool dry, or `create_tail` still shows a create blocked
@@ -116,3 +165,4 @@ itself, which is 2 and 3's.
 - 2: `css_cost`'s memory offline in the 7.2 guest isn't below 6.19's.
 - 3: a box without a memcg doesn't cut its css teardown time by about memory's share, or no-owner p99.9 doesn't fall
   with it.
+- 4: as its own list above.
