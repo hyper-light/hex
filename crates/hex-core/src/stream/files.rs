@@ -7,10 +7,14 @@
 //!
 //! A connection opens with [`OPEN_BYTES`] bytes: `HEXF`, the version (`u16`, little-endian as the wire's
 //! integers), the [`Op`], a zero byte and the box id's length (`u16`), then the id. A [`Op::Remove`]
-//! ends there. A [`Op::Stage`] is followed by entries, each a [`HEAD_BYTES`]-byte head (its kind, a
-//! zero byte, its mode, its path's length, a symlink's target's length, a file's size), its path, a
-//! symlink's target and a file's bytes; an end head (kind 0, every field zero) closes it. The relay
-//! answers once, with a framed [`crate::wire`] answer: `Done`, or `Refused` saying why.
+//! ends there. A [`Op::Stage`] is followed by entries, each a [`HEAD_BYTES`]-byte head (its kind, its
+//! flags (version 1: a zero byte), its mode, its path's length, a link's target's length, a file's size),
+//! its path, a link's target, in version 2 its [`Meta`] when its flags say so ([`META_BYTES`] then its
+//! xattrs), and a file's bytes; an end head (kind 0, every field zero) closes it. The relay answers once,
+//! with a framed [`crate::wire`] answer: `Done`, or `Refused` saying why.
+//!
+//! Version 2 (docs/design/shards-guest.md §4a) adds, append-only, an entry's owner, mtime and extended
+//! attributes, and hard links to an earlier entry, what Linux's own unpack of a tarball root holds.
 
 use std::fmt;
 
@@ -19,8 +23,30 @@ use std::fmt;
 pub const FILES_PORT: u32 = 0x4845_5802;
 
 const MAGIC: [u8; 4] = *b"HEXF";
-/// The staging stream's only version. It changes append-only, as the wire's.
-const VERSION: u16 = 1;
+/// The staging stream's newest version, which this side writes; it reads every one from [`FIRST`]. It
+/// changes append-only, as the wire's.
+const VERSION: u16 = 2;
+/// The first version: a path, a mode and a link text an entry.
+const FIRST: u16 = 1;
+/// A version-2 head's flag: a [`Meta`] follows the entry's names.
+const HAS_META: u8 = 1;
+/// A [`Meta`]'s fixed part: uid, gid (`u32`), mtime seconds (`i64`) and nanoseconds (`u32`), the xattr
+/// count (`u16`), a zero `u16`, and the xattrs' bytes (`u32`), little-endian.
+pub const META_BYTES: usize = 28;
+/// The most extended attributes an entry carries: Linux bounds them by bytes (below), not count; 64 is
+/// past any image's (one, in §9's census of six) and bounds the parse.
+pub const XATTRS_MAX: usize = 64;
+/// Linux's `XATTR_NAME_MAX` (include/uapi/linux/limits.h): a name's longest, in bytes.
+pub const XATTR_NAME_MAX: usize = 255;
+/// Linux's `XATTR_SIZE_MAX`: a value's longest, and Hex's bound on an entry's values together, as
+/// Linux's `XATTR_LIST_MAX` bounds its names together (both 65,536 bytes).
+pub const XATTR_SIZE_MAX: usize = 65_536;
+/// The most bytes an entry's xattrs take on the stream: each a name length (`u8`), a value length
+/// (`u32`), its name and its value, within the bounds above.
+const XATTR_BLOCK_MAX: usize = XATTRS_MAX * (5 + XATTR_NAME_MAX) + XATTR_SIZE_MAX;
+/// The extended-attribute namespaces Linux holds (xattr(7)): an attribute in any other can't exist on a
+/// Linux file, so a packer leaves it out (§4a) and the stream refuses it.
+pub const XATTR_NAMESPACES: [&str; 4] = ["security.", "system.", "trusted.", "user."];
 /// A connection's first bytes, before the box id.
 pub const OPEN_BYTES: usize = 10;
 /// An entry's head, before its path.
@@ -56,6 +82,8 @@ pub enum Kind {
     Dir,
     File,
     Symlink,
+    /// Version 2: another name for an earlier regular file of the same stage.
+    Hardlink,
 }
 
 impl Kind {
@@ -64,26 +92,53 @@ impl Kind {
             Self::Dir => 1,
             Self::File => 2,
             Self::Symlink => 3,
+            Self::Hardlink => 4,
         }
     }
 
-    fn of_tag(tag: u8) -> Result<Option<Self>, Refused> {
+    fn of_tag(tag: u8, version: u16) -> Result<Option<Self>, Refused> {
         match tag {
             0 => Ok(None),
             1 => Ok(Some(Self::Dir)),
             2 => Ok(Some(Self::File)),
             3 => Ok(Some(Self::Symlink)),
+            4 if version >= 2 => Ok(Some(Self::Hardlink)),
             other => Err(Refused::Kind(other)),
         }
     }
 }
 
-/// One entry to stage: its path under the box's staged root, its mode, and what it is.
+/// One entry to stage: its path under the box's staged root, its mode, what it is, and (version 2, from a
+/// tarball root) its owner, mtime and extended attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub path: String,
     pub mode: u16,
     pub what: What,
+    pub meta: Option<Meta>,
+}
+
+/// What Linux's unpack of a tarball holds of an entry beyond its mode (§4a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Meta {
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime: Mtime,
+    pub xattrs: Vec<Xattr>,
+}
+
+/// A time, as utimensat(2) takes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mtime {
+    pub secs: i64,
+    pub nanos: u32,
+}
+
+/// An extended attribute: its full name (`security.capability`) and its value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Xattr {
+    pub name: String,
+    pub value: Vec<u8>,
 }
 
 /// An entry's kind, with what that kind carries.
@@ -98,6 +153,10 @@ pub enum What {
     Symlink {
         target: String,
     },
+    /// Another name for `target`, an earlier regular file of the same stage, named as a staged path is.
+    Hardlink {
+        target: String,
+    },
 }
 
 impl What {
@@ -106,6 +165,7 @@ impl What {
             Self::Dir => Kind::Dir,
             Self::File { .. } => Kind::File,
             Self::Symlink { .. } => Kind::Symlink,
+            Self::Hardlink { .. } => Kind::Hardlink,
         }
     }
 }
@@ -115,12 +175,12 @@ impl What {
 pub enum Refused {
     #[error("it doesn't start with HEXF")]
     Magic,
-    #[error("version {got}: this side speaks {VERSION}")]
+    #[error("version {got}: this side speaks {FIRST} to {VERSION}")]
     Version { got: u16 },
     #[error("op {0} is neither stage (1) nor remove (2)")]
     Op(u8),
     #[error(
-        "kind {0} is none of directory (1), file (2) and symbolic link (3): devices, FIFOs and sockets are never staged"
+        "kind {0} is none of directory (1), file (2), symbolic link (3) and, from version 2, hard link (4): devices, FIFOs and sockets are never staged"
     )]
     Kind(u8),
     #[error("a pad byte is {0}, not 0")]
@@ -136,8 +196,10 @@ pub enum Refused {
     Id(String),
     #[error("{path:?} can't be staged: {why}")]
     Name { path: String, why: &'static str },
-    #[error("symbolic link {path:?}'s target can't be staged: {why}")]
+    #[error("link {path:?}'s target can't be staged: {why}")]
     Target { path: String, why: &'static str },
+    #[error("{path:?}'s owner, time or extended attributes can't be staged: {why}")]
+    Meta { path: String, why: String },
     #[error("{what} is over its bound of {bound}")]
     Over { what: &'static str, bound: u64 },
     #[error("the stream ended {0}")]
@@ -195,6 +257,17 @@ pub fn head(entry: &Entry, limits: &Limits) -> Result<Vec<u8>, Refused> {
             check_target(&entry.path, target, limits)?;
             (target, 0)
         }
+        What::Hardlink { target } => {
+            check_link(&entry.path, target, limits)?;
+            (target, 0)
+        }
+    };
+    let meta = match &entry.meta {
+        Some(meta) => {
+            check_meta(&entry.path, meta)?;
+            Some(meta_bytes(meta))
+        }
+        None => None,
     };
     let over_path = || Refused::Over {
         what: "a path",
@@ -208,14 +281,120 @@ pub fn head(entry: &Entry, limits: &Limits) -> Result<Vec<u8>, Refused> {
             .saturating_add(target.len()),
     );
     out.push(entry.what.kind().tag());
-    out.push(0);
+    out.push(if meta.is_some() { HAS_META } else { 0 });
     out.extend_from_slice(&entry.mode.to_le_bytes());
     out.extend_from_slice(&path_len.to_le_bytes());
     out.extend_from_slice(&target_len.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
     out.extend_from_slice(entry.path.as_bytes());
     out.extend_from_slice(target.as_bytes());
+    if let Some(meta) = meta {
+        out.extend_from_slice(&meta);
+    }
     Ok(out)
+}
+
+/// A checked [`Meta`] as the stream carries it: its fixed part, then each xattr's name length, value
+/// length, name and value.
+fn meta_bytes(meta: &Meta) -> Vec<u8> {
+    let mut xattrs = Vec::new();
+    for x in &meta.xattrs {
+        xattrs.push(u8::try_from(x.name.len()).unwrap_or(u8::MAX));
+        xattrs.extend_from_slice(
+            &u32::try_from(x.value.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        xattrs.extend_from_slice(x.name.as_bytes());
+        xattrs.extend_from_slice(&x.value);
+    }
+    let mut out = Vec::with_capacity(META_BYTES.saturating_add(xattrs.len()));
+    out.extend_from_slice(&meta.uid.to_le_bytes());
+    out.extend_from_slice(&meta.gid.to_le_bytes());
+    out.extend_from_slice(&meta.mtime.secs.to_le_bytes());
+    out.extend_from_slice(&meta.mtime.nanos.to_le_bytes());
+    out.extend_from_slice(
+        &u16::try_from(meta.xattrs.len())
+            .unwrap_or(u16::MAX)
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(xattrs.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(&xattrs);
+    out
+}
+
+/// Whether a [`Meta`] can be staged: real ids (`u32::MAX` means "unchanged" to chown(2)), a time's
+/// nanoseconds under a second, and its xattrs within Linux's bounds and namespaces.
+pub fn check_meta(path: &str, meta: &Meta) -> Result<(), Refused> {
+    let refuse = |why: String| {
+        Err(Refused::Meta {
+            path: path.to_owned(),
+            why,
+        })
+    };
+    if meta.uid == u32::MAX || meta.gid == u32::MAX {
+        return refuse(format!("an id of {} means no id to chown(2)", u32::MAX));
+    }
+    if meta.mtime.nanos >= 1_000_000_000 {
+        return refuse(format!(
+            "its mtime's nanoseconds, {}, are a second or more",
+            meta.mtime.nanos
+        ));
+    }
+    if meta.xattrs.len() > XATTRS_MAX {
+        return refuse(format!(
+            "{} extended attributes are over the {XATTRS_MAX} an entry carries",
+            meta.xattrs.len()
+        ));
+    }
+    let mut values: usize = 0;
+    for x in &meta.xattrs {
+        if x.name.is_empty() || x.name.len() > XATTR_NAME_MAX || x.name.contains('\0') {
+            return refuse(format!(
+                "extended attribute name {:?} is empty, over {XATTR_NAME_MAX} bytes or holds a NUL",
+                x.name
+            ));
+        }
+        if !XATTR_NAMESPACES.iter().any(|ns| x.name.starts_with(ns)) {
+            return refuse(format!(
+                "extended attribute {:?} is in no namespace Linux holds",
+                x.name
+            ));
+        }
+        if x.value.len() > XATTR_SIZE_MAX {
+            return refuse(format!(
+                "extended attribute {:?}'s value is over {XATTR_SIZE_MAX} bytes",
+                x.name
+            ));
+        }
+        values = values.saturating_add(x.value.len());
+    }
+    if values > XATTR_SIZE_MAX {
+        return refuse(format!(
+            "its extended attributes' values together are over {XATTR_SIZE_MAX} bytes"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a hard link's `target` names another staged entry: a staged path, not the link itself.
+fn check_link(path: &str, target: &str, limits: &Limits) -> Result<(), Refused> {
+    check_path(target, limits).map_err(|_| Refused::Target {
+        path: path.to_owned(),
+        why: "it names no staged path",
+    })?;
+    if target == path {
+        return Err(Refused::Target {
+            path: path.to_owned(),
+            why: "it names itself",
+        });
+    }
+    Ok(())
 }
 
 /// The head that closes a stage.
@@ -318,6 +497,13 @@ enum At {
         head: Head,
         len: usize,
     },
+    /// An entry's names read; its [`Meta`]'s fixed part comes.
+    Meta,
+    /// Its fixed part read; its xattrs, `len` bytes, `count` of them, come.
+    Xattrs {
+        count: usize,
+        len: usize,
+    },
     /// A file's bytes, `left` of them to come.
     Data {
         left: u64,
@@ -331,6 +517,7 @@ struct Head {
     path: usize,
     target: usize,
     size: u64,
+    meta: bool,
 }
 
 /// Reads a staging stream as it comes. It holds at most a head and its names, never more than its
@@ -339,6 +526,10 @@ pub struct Unpack {
     limits: Limits,
     at: At,
     op: Option<Op>,
+    /// The stream's version, once its opening is read.
+    version: u16,
+    /// An entry whose [`Meta`] is under way: its names read, its owner and xattrs to come.
+    pending: Option<Entry>,
     held: Vec<u8>,
     entries: u64,
     bytes: u64,
@@ -362,6 +553,8 @@ impl Unpack {
             limits,
             at: At::Open,
             op: None,
+            version: VERSION,
+            pending: None,
             held: Vec::new(),
             entries: 0,
             bytes: 0,
@@ -395,6 +588,9 @@ impl Unpack {
             At::Closed => Ok(()),
             At::Open | At::Id { .. } => Err(Refused::Truncated("before its opening was whole")),
             At::Head | At::Names { .. } => Err(Refused::Truncated("before its end head")),
+            At::Meta | At::Xattrs { .. } => {
+                Err(Refused::Truncated("in the middle of an entry's metadata"))
+            }
             At::Data { .. } => Err(Refused::Truncated("in the middle of a file")),
         }
     }
@@ -446,7 +642,22 @@ impl Unpack {
                 if !whole {
                     return Ok((n, None));
                 }
-                Ok((n, Some(self.named(head)?)))
+                Ok((n, self.named(head)?))
+            }
+            At::Meta => {
+                let (n, whole) = self.fill(input, META_BYTES);
+                if !whole {
+                    return Ok((n, None));
+                }
+                Ok((n, self.meta_fixed()?))
+            }
+            At::Xattrs { count, len } => {
+                let (n, whole) = self.fill(input, len);
+                if !whole {
+                    return Ok((n, None));
+                }
+                let xattrs = self.xattrs(count)?;
+                Ok((n, Some(self.whole(xattrs)?)))
             }
             At::Data { left } => {
                 let n = usize::try_from(left).unwrap_or(usize::MAX).min(input.len());
@@ -470,9 +681,10 @@ impl Unpack {
             return Err(Refused::Magic);
         }
         let version = u16::from_le_bytes([v0, v1]);
-        if version != VERSION {
+        if !(FIRST..=VERSION).contains(&version) {
             return Err(Refused::Version { got: version });
         }
+        self.version = version;
         self.op = Some(match op {
             1 => Op::Stage,
             2 => Op::Remove,
@@ -496,7 +708,7 @@ impl Unpack {
             .get(..HEAD_BYTES)
             .and_then(|b| <[u8; HEAD_BYTES]>::try_from(b).ok())
             .ok_or(Refused::Truncated("in the middle of a head"))?;
-        let Some(kind) = Kind::of_tag(k)? else {
+        let Some(kind) = Kind::of_tag(k, self.version)? else {
             if held.iter().any(|b| *b != 0) {
                 return Err(Refused::Field {
                     what: "the end head",
@@ -506,7 +718,9 @@ impl Unpack {
             self.at = At::Closed;
             return Ok(Some(Step::End));
         };
-        if pad != 0 {
+        // Version 1's pad byte is version 2's flags, of which [`HAS_META`] alone is defined.
+        let allowed = if self.version >= 2 { HAS_META } else { 0 };
+        if pad & !allowed != 0 {
             return Err(Refused::Pad(pad));
         }
         let head = Head {
@@ -515,6 +729,7 @@ impl Unpack {
             path: usize::from(u16::from_le_bytes([p0, p1])),
             target: usize::from(u16::from_le_bytes([t0, t1])),
             size: u64::from_le_bytes(size),
+            meta: pad & HAS_META != 0,
         };
         let path_bound = u64::try_from(self.limits.path).unwrap_or(u64::MAX);
         if head.path > self.limits.path {
@@ -536,9 +751,9 @@ impl Unpack {
                     field: "target",
                 });
             }
-            Kind::Dir | Kind::Symlink if head.size != 0 => {
+            Kind::Dir | Kind::Symlink | Kind::Hardlink if head.size != 0 => {
                 return Err(Refused::Field {
-                    what: "a directory or symbolic link",
+                    what: "a directory or link",
                     field: "size",
                 });
             }
@@ -563,13 +778,13 @@ impl Unpack {
         let len = head.path.saturating_add(head.target);
         if len == 0 {
             // No names to wait for: the entry is whole now, and refused or taken as it is.
-            return self.named(head).map(Some);
+            return self.named(head);
         }
         self.at = At::Names { head, len };
         Ok(None)
     }
 
-    fn named(&mut self, head: Head) -> Result<Step, Refused> {
+    fn named(&mut self, head: Head) -> Result<Option<Step>, Refused> {
         let held = std::mem::take(&mut self.held);
         let (path, target) = held
             .split_at_checked(head.path)
@@ -582,29 +797,181 @@ impl Unpack {
             .to_owned();
         check_path(&path, &self.limits)?;
         check_mode(&path, head.mode)?;
+        let text = |path: &str| {
+            std::str::from_utf8(target)
+                .map(str::to_owned)
+                .map_err(|_| Refused::Target {
+                    path: path.to_owned(),
+                    why: "it isn't UTF-8",
+                })
+        };
         let what = match head.kind {
             Kind::Dir => What::Dir,
             Kind::File => What::File { size: head.size },
             Kind::Symlink => {
-                let target = std::str::from_utf8(target)
-                    .map_err(|_| Refused::Target {
-                        path: path.clone(),
-                        why: "it isn't UTF-8",
-                    })?
-                    .to_owned();
+                let target = text(&path)?;
                 check_target(&path, &target, &self.limits)?;
                 What::Symlink { target }
             }
+            Kind::Hardlink => {
+                let target = text(&path)?;
+                check_link(&path, &target, &self.limits)?;
+                What::Hardlink { target }
+            }
         };
-        self.at = match what {
-            What::File { size } if size > 0 => At::Data { left: size },
-            _ => At::Head,
-        };
-        Ok(Step::Entry(Entry {
+        let entry = Entry {
             path,
             mode: head.mode,
             what,
-        }))
+            meta: None,
+        };
+        if head.meta {
+            self.pending = Some(entry);
+            self.at = At::Meta;
+            return Ok(None);
+        }
+        self.done(entry).map(Some)
+    }
+
+    /// An entry is whole: the next state is its file's bytes, or the next head.
+    fn done(&mut self, entry: Entry) -> Result<Step, Refused> {
+        self.at = match entry.what {
+            What::File { size } if size > 0 => At::Data { left: size },
+            _ => At::Head,
+        };
+        Ok(Step::Entry(entry))
+    }
+
+    /// A [`Meta`]'s fixed part read: its owner and time held, its xattrs' bytes to come, refused past
+    /// their bounds from the counts alone.
+    fn meta_fixed(&mut self) -> Result<Option<Step>, Refused> {
+        let held = std::mem::take(&mut self.held);
+        let fixed = held
+            .get(..META_BYTES)
+            .and_then(|b| <[u8; META_BYTES]>::try_from(b).ok())
+            .ok_or(Refused::Truncated("in the middle of an entry's metadata"))?;
+        let [
+            u0,
+            u1,
+            u2,
+            u3,
+            g0,
+            g1,
+            g2,
+            g3,
+            s0,
+            s1,
+            s2,
+            s3,
+            s4,
+            s5,
+            s6,
+            s7,
+            n0,
+            n1,
+            n2,
+            n3,
+            c0,
+            c1,
+            z0,
+            z1,
+            b0,
+            b1,
+            b2,
+            b3,
+        ] = fixed;
+        let entry = self
+            .pending
+            .as_mut()
+            .ok_or(Refused::Truncated("before an entry's names"))?;
+        let path = entry.path.clone();
+        if [z0, z1] != [0, 0] {
+            return Err(Refused::Pad(z0 | z1));
+        }
+        let count = usize::from(u16::from_le_bytes([c0, c1]));
+        let len = usize::try_from(u32::from_le_bytes([b0, b1, b2, b3])).unwrap_or(usize::MAX);
+        if count > XATTRS_MAX || len > XATTR_BLOCK_MAX {
+            return Err(Refused::Meta {
+                path,
+                why: format!(
+                    "{count} extended attributes in {len} bytes are over the {XATTRS_MAX} in {XATTR_BLOCK_MAX} an entry carries"
+                ),
+            });
+        }
+        entry.meta = Some(Meta {
+            uid: u32::from_le_bytes([u0, u1, u2, u3]),
+            gid: u32::from_le_bytes([g0, g1, g2, g3]),
+            mtime: Mtime {
+                secs: i64::from_le_bytes([s0, s1, s2, s3, s4, s5, s6, s7]),
+                nanos: u32::from_le_bytes([n0, n1, n2, n3]),
+            },
+            xattrs: Vec::new(),
+        });
+        if len == 0 && count == 0 {
+            return self.whole(Vec::new()).map(Some);
+        }
+        self.at = At::Xattrs { count, len };
+        Ok(None)
+    }
+
+    /// The xattrs' bytes read: exactly `count` of them, filling them.
+    fn xattrs(&mut self, count: usize) -> Result<Vec<Xattr>, Refused> {
+        let held = std::mem::take(&mut self.held);
+        let path = self
+            .pending
+            .as_ref()
+            .map(|e| e.path.clone())
+            .unwrap_or_default();
+        let bad = |why: &str| Refused::Meta {
+            path: path.clone(),
+            why: why.to_owned(),
+        };
+        let mut rest = held.as_slice();
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (&name_len, after) = rest
+                .split_first()
+                .ok_or_else(|| bad("its extended attributes end early"))?;
+            let (value_len, after) = after
+                .split_at_checked(4)
+                .ok_or_else(|| bad("its extended attributes end early"))?;
+            let value_len = usize::try_from(u32::from_le_bytes(
+                <[u8; 4]>::try_from(value_len)
+                    .map_err(|_| bad("its extended attributes end early"))?,
+            ))
+            .unwrap_or(usize::MAX);
+            let (name, after) = after
+                .split_at_checked(usize::from(name_len))
+                .ok_or_else(|| bad("its extended attributes end early"))?;
+            let (value, after) = after
+                .split_at_checked(value_len)
+                .ok_or_else(|| bad("its extended attributes end early"))?;
+            let name = std::str::from_utf8(name)
+                .map_err(|_| bad("an extended attribute's name isn't UTF-8"))?
+                .to_owned();
+            out.push(Xattr {
+                name,
+                value: value.to_vec(),
+            });
+            rest = after;
+        }
+        if !rest.is_empty() {
+            return Err(bad("bytes follow its extended attributes"));
+        }
+        Ok(out)
+    }
+
+    /// The pending entry with its xattrs, checked whole.
+    fn whole(&mut self, xattrs: Vec<Xattr>) -> Result<Step, Refused> {
+        let mut entry = self
+            .pending
+            .take()
+            .ok_or(Refused::Truncated("before an entry's names"))?;
+        if let Some(meta) = entry.meta.as_mut() {
+            meta.xattrs = xattrs;
+            check_meta(&entry.path, meta)?;
+        }
+        self.done(entry)
     }
 }
 

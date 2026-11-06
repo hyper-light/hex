@@ -385,6 +385,7 @@ fn raw_stage(entries: &[(&str, hf::What)]) -> Vec<u8> {
             path: (*path).to_owned(),
             mode: 0o755,
             what: what.clone(),
+            meta: None,
         };
         out.extend(hf::head(&e, &hf::LIMITS).unwrap());
     }
@@ -427,8 +428,8 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
 fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     let (lab, staged) = staged_lab();
     let mut device = hf::open(hf::Op::Stage, "b").unwrap();
-    // A head of kind 4, mode 0644, a one-byte path and no size, then its path.
-    device.extend([4u8, 0]);
+    // A head of kind 5 (a device's in tar, none on the stream), mode 0644, a one-byte path and no size.
+    device.extend([5u8, 0]);
     device.extend(0o644u16.to_le_bytes());
     device.extend(1u16.to_le_bytes());
     device.extend([0u8; 10]);
@@ -498,4 +499,98 @@ fn a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothi
     assert!(!Path::new("/escaped").exists());
     assert!(!staged.join("escaped").exists());
     assert!(!staged.join("box-1").exists(), "the partial copy was left");
+}
+
+/// HEX-GUEST-14 (§4a as amended): stage a tarball root, end to end through the host's packer and the relay,
+/// whose file is owned by this test's own uid and gid (all a rootless relay may give), has a fractional mtime,
+/// a `user.` xattr and a setuid mode, with a hard link to it and a directory with its own mtime: expect each
+/// on disk as the archive says, the link the same inode, the mode kept though the owner was set after it was
+/// written, and the directory's mtime unmoved by its children. Other owners and `security.capability` take
+/// the guest's root: HEX-GUEST-21 holds those.
+#[test]
+fn a_tarball_roots_owners_times_xattrs_and_hard_links_land_on_disk() {
+    use hex_client::guest::stage::{Item, Source, stage};
+    use std::os::unix::fs::MetadataExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let tarball = host.path().join("root.tar");
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    {
+        let mut b = tar::Builder::new(File::create(&tarball).unwrap());
+        let mut dir = tar::Header::new_ustar();
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_mode(0o750);
+        dir.set_uid(u64::from(uid));
+        dir.set_gid(u64::from(gid));
+        dir.set_mtime(1_600_000_000);
+        dir.set_size(0);
+        b.append_data(&mut dir, "bin/", std::io::empty()).unwrap();
+        // A PAX record (`%d key=value\n`, its length counting itself) before the file.
+        let mut record = Vec::new();
+        for (k, v) in [
+            ("mtime", "1700000000.25"),
+            ("SCHILY.xattr.user.hex", "staged"),
+        ] {
+            let body = format!(" {k}={v}\n");
+            let mut n = body.len() + 1;
+            while format!("{n}").len() + body.len() != n {
+                n += 1;
+            }
+            record.extend(format!("{n}{body}").into_bytes());
+        }
+        let mut pax = tar::Header::new_ustar();
+        pax.set_entry_type(tar::EntryType::XHeader);
+        pax.set_mode(0o644);
+        pax.set_size(record.len() as u64);
+        b.append_data(&mut pax, "PaxHeaders/perl5", record.as_slice())
+            .unwrap();
+        let mut file = tar::Header::new_ustar();
+        file.set_entry_type(tar::EntryType::Regular);
+        file.set_mode(0o4755);
+        file.set_uid(u64::from(uid));
+        file.set_gid(u64::from(gid));
+        file.set_mtime(1_700_000_000);
+        file.set_size(4);
+        b.append_data(&mut file, "bin/perl5", &b"perl"[..]).unwrap();
+        let mut link = tar::Header::new_ustar();
+        link.set_entry_type(tar::EntryType::Link);
+        link.set_mode(0o4755);
+        link.set_size(0);
+        b.append_link(&mut link, "bin/perl", "bin/perl5").unwrap();
+        b.into_inner().unwrap();
+    }
+    let id = BoxId::new("box-1").unwrap();
+    let items = [Item {
+        name: "root".to_owned(),
+        source: Source::Tar(tarball),
+    }];
+    stage(lab.link().as_ref(), &id, &items, &hf::LIMITS).unwrap();
+    let root = staged.join("box-1/root");
+    let perl5 = std::fs::symlink_metadata(root.join("bin/perl5")).unwrap();
+    let perl = std::fs::symlink_metadata(root.join("bin/perl")).unwrap();
+    assert_eq!((perl5.uid(), perl5.gid()), (uid, gid));
+    assert_eq!(
+        perl5.mode() & 0o7777,
+        0o4755,
+        "setuid kept: the mode follows the owner"
+    );
+    assert_eq!(
+        (perl5.mtime(), perl5.mtime_nsec()),
+        (1_700_000_000, 250_000_000)
+    );
+    assert_eq!(perl.ino(), perl5.ino(), "the hard link is the same inode");
+    assert_eq!(perl5.nlink(), 2);
+    let mut value = [0u8; 16];
+    let n = rustix::fs::getxattr(root.join("bin/perl5"), "user.hex", &mut value).unwrap();
+    assert_eq!(&value[..n], b"staged");
+    let bin = std::fs::symlink_metadata(root.join("bin")).unwrap();
+    assert_eq!(bin.mode() & 0o7777, 0o750);
+    assert_eq!(
+        bin.mtime(),
+        1_600_000_000,
+        "the directory's mtime is set after its children"
+    );
 }

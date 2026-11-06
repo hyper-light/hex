@@ -137,7 +137,7 @@ fn a_tarball_with_a_device_fifo_hard_link_or_unknown_kind_is_refused_by_name() {
         (b'3', "a device node is never staged"),
         (b'4', "a device node is never staged"),
         (b'6', "a FIFO is never staged"),
-        (b'1', "a hard link is never staged"),
+        (b'1', "which is no earlier regular file of this root"),
         (b'Z', "an entry of a kind staging carries not"),
     ] {
         let bytes = archive(&[(header(b"x", kind, 0o644, 0, b"y"), b"")]);
@@ -246,18 +246,44 @@ fn an_entry_written_through_a_link_in_the_archive_is_refused_by_name() {
     assert!(pack_tar("r.tar", &links, &LIMITS).is_ok());
 }
 
-/// HEX-GUEST-15 (2): pack a hard link whose target escapes the root, names a later entry, and names none:
-/// expect each refused the same, by name, whatever its target.
+/// HEX-GUEST-15 (2, §4a as amended): pack a hard link to an earlier regular file of the root: expect it
+/// staged as another name for that file, carrying nothing of its own; and one whose target escapes the
+/// root, names a later entry or none, or a directory: expect each refused naming the target, whatever it is.
 #[test]
-fn a_hard_link_is_refused_whatever_its_target() {
-    for (target, later) in [(&b"/etc/passwd"[..], false), (b"z", true), (b"nope", false)] {
-        let mut entries = vec![(header(b"x", b'1', 0o644, 0, target), &b""[..])];
-        if later {
-            entries.push((header(b"z", b'0', 0o644, 1, b""), b"z"));
+fn a_hard_link_stages_to_an_earlier_file_and_is_refused_to_anything_else() {
+    let ok = archive(&[
+        (header(b"usr/", b'5', 0o755, 0, b""), &b""[..]),
+        (header(b"usr/perl5.36.0", b'0', 0o755, 4, b""), b"perl"),
+        (header(b"usr/perl", b'1', 0o755, 0, b"usr/perl5.36.0"), b""),
+    ]);
+    let entries = unpack(&pack_tar("r.tar", &ok, &LIMITS).unwrap());
+    let link = entries
+        .iter()
+        .find(|e| e.0.path == "root/usr/perl")
+        .unwrap();
+    assert_eq!(
+        link.0.what,
+        What::Hardlink {
+            target: "root/usr/perl5.36.0".to_owned()
         }
-        let got = refused("r.tar", &archive(&entries));
+    );
+    assert_eq!(
+        link.0.meta, None,
+        "a hard link carries its target's, not its own"
+    );
+    for (target, entries) in [
+        (&b"/etc/passwd"[..], vec![]),
+        (b"../x", vec![]),
+        (b"z", vec![(header(b"z", b'0', 0o644, 1, b""), &b"z"[..])]),
+        (b"nope", vec![]),
+        (b"d", vec![]),
+    ] {
+        let mut all = vec![(header(b"d/", b'5', 0o755, 0, b""), &b""[..])];
+        all.push((header(b"x", b'1', 0o644, 0, target), b""));
+        all.extend(entries);
+        let got = refused("r.tar", &archive(&all));
         assert!(
-            got.contains("a hard link is never staged"),
+            got.contains("which is no earlier regular file of this root"),
             "{target:?}: {got}"
         );
     }
@@ -401,7 +427,7 @@ fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies(
     );
     let got = refused("r.tar", &global(&[("GNU.sparse.major", "1")]));
     assert!(got.contains("a sparse entry"), "{got}");
-    for key in ["path", "linkpath", "size"] {
+    for key in ["path", "linkpath", "size", "uid", "gid", "mtime"] {
         let got = refused("r.tar", &global(&[(key, "1")]));
         assert!(
             got.contains(&format!(
@@ -411,11 +437,8 @@ fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies(
         );
     }
     let quiet = global(&[
-        ("mtime", "1700000000.5"),
         ("atime", "1700000000"),
         ("ctime", "1700000000"),
-        ("uid", "0"),
-        ("gid", "0"),
         ("uname", "root"),
         ("gname", "root"),
         ("comment", "made by git archive"),
@@ -476,4 +499,102 @@ fn a_git_archive_tarball_stages_with_every_entry_exact() {
         ),
     ];
     assert_eq!(got, want);
+}
+
+/// HEX-GUEST-15 (§4a as amended): pack entries owned 472:0 and 1001:1001 by their headers, one whose PAX
+/// record sets a uid, gid and fractional mtime past what a header holds, and xattrs as SCHILY (raw) and
+/// LIBARCHIVE (percent-encoded name, base64 value), with one in macOS's namespace: expect each staged with
+/// its owner, mtime and Linux xattrs exact, and the macOS one left out.
+#[test]
+fn a_tarballs_owners_times_and_xattrs_are_carried() {
+    let mut owned = header(b"data", b'5', 0o750, 0, b"");
+    let octal = |field: &mut [u8], v: u64| {
+        let s = format!("{:0width$o}\0", v, width = field.len() - 1);
+        field.copy_from_slice(s.as_bytes());
+    };
+    octal(&mut owned[108..116], 472);
+    octal(&mut owned[136..148], 1_700_000_123);
+    let resum = |h: &mut [u8; 512]| {
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    };
+    resum(&mut owned);
+    let record = pax(&[
+        ("uid", "70000"),
+        ("gid", "1001"),
+        ("mtime", "1700000000.25"),
+        ("SCHILY.xattr.security.capability", "\u{1}\0\0\u{2}"),
+        ("LIBARCHIVE.xattr.user.n%61me", "dmFsdWU="),
+        ("SCHILY.xattr.com.apple.provenance", "x"),
+    ]);
+    let bytes = archive(&[
+        (owned, &b""[..]),
+        (
+            header(b"PaxHeaders/caddy", b'x', 0o644, record.len() as u64, b""),
+            &record,
+        ),
+        (header(b"caddy", b'0', 0o755, 3, b""), b"bin"),
+    ]);
+    let entries = unpack(&pack_tar("r.tar", &bytes, &LIMITS).unwrap());
+    let by: BTreeMap<&str, &(Entry, Vec<u8>)> =
+        entries.iter().map(|e| (e.0.path.as_str(), e)).collect();
+    let data = by["root/data"].0.meta.clone().unwrap();
+    assert_eq!((data.uid, data.gid), (472, 0));
+    assert_eq!(
+        data.mtime,
+        Mtime {
+            secs: 1_700_000_123,
+            nanos: 0
+        }
+    );
+    assert!(data.xattrs.is_empty());
+    let caddy = by["root/caddy"].0.meta.clone().unwrap();
+    assert_eq!((caddy.uid, caddy.gid), (70_000, 1001));
+    assert_eq!(
+        caddy.mtime,
+        Mtime {
+            secs: 1_700_000_000,
+            nanos: 250_000_000
+        }
+    );
+    assert_eq!(
+        caddy.xattrs,
+        vec![
+            Xattr {
+                name: "security.capability".to_owned(),
+                value: vec![1, 0, 0, 2],
+            },
+            Xattr {
+                name: "user.name".to_owned(),
+                value: b"value".to_vec(),
+            },
+        ]
+    );
+}
+
+/// HEX-GUEST-15 (§4a): pack an entry whose PAX record holds more xattrs than an entry carries, one whose
+/// LIBARCHIVE value isn't base64, and one whose uid isn't a number: expect each refused by name.
+#[test]
+fn hostile_owners_and_xattrs_in_a_tarball_are_refused_by_name() {
+    let many: Vec<(String, String)> = (0..=files::XATTRS_MAX)
+        .map(|i| (format!("SCHILY.xattr.user.{i}"), "v".to_owned()))
+        .collect();
+    let many: Vec<(&str, &str)> = many.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    for (pairs, why) in [
+        (many, "more than 64 extended attributes"),
+        (vec![("LIBARCHIVE.xattr.user.x", "%%%")], "isn't base64"),
+        (vec![("uid", "root")], "its uid isn't an id"),
+    ] {
+        let record = pax(&pairs);
+        let bytes = archive(&[
+            (
+                header(b"PaxHeaders/f", b'x', 0o644, record.len() as u64, b""),
+                &record,
+            ),
+            (header(b"f", b'0', 0o644, 1, b""), b"x"),
+        ]);
+        let got = refused("r.tar", &bytes);
+        assert!(got.contains(why), "{why}: {got}");
+    }
 }

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, Refusal};
 use hex_core::stream::Deframer;
-use hex_core::stream::files::{self, Entry, Limits, Op, What};
+use hex_core::stream::files::{self, Entry, Limits, Meta, Mtime, Op, What, Xattr};
 use hex_core::wire::{self, Answer, Received};
 
 use super::{Duplex, Link};
@@ -239,6 +239,7 @@ pub fn pack(
                     path: item.name.clone(),
                     mode: 0o644,
                     what: What::File { size },
+                    meta: None,
                 };
                 counts.add(size, limits)?;
                 send(out, &files::head(&entry, limits).map_err(refused)?)?;
@@ -350,10 +351,12 @@ fn one(
         }
     };
     counts.add(size, limits)?;
+    // A host directory holds no Linux owners, times or xattrs to carry (§4a).
     let entry = Entry {
         path: name.to_owned(),
         mode,
         what,
+        meta: None,
     };
     let head = files::head(&entry, limits).map_err(refused)?;
     out.write_all(&head)
@@ -361,7 +364,7 @@ fn one(
     match entry.what {
         What::Dir => dirs.push((path.to_owned(), name.to_owned())),
         What::File { size } if size > 0 => copy(out, path, size)?,
-        What::File { .. } | What::Symlink { .. } => {}
+        What::File { .. } | What::Symlink { .. } | What::Hardlink { .. } => {}
     }
     Ok(())
 }
@@ -405,22 +408,49 @@ fn record(entry: &mut dyn Read, bound: usize) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(text))
 }
 
-/// A PAX record's `path` and `linkpath`, each when it names one.
-type PaxNames = (Option<Vec<u8>>, Option<Vec<u8>>);
+/// What an entry's PAX record says of it: its name and link target past what a header holds, its owner
+/// and mtime past what a header holds, and its extended attributes.
+#[derive(Default)]
+struct Pax {
+    path: Option<Vec<u8>>,
+    link: Option<Vec<u8>>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    mtime: Option<Mtime>,
+    xattrs: Vec<Xattr>,
+}
 
-/// A PAX record's `path` and `linkpath`, refusing by name what staging can't honour: a `size` (a file past
-/// the 8 GiB a header's size field holds) and GNU's sparse keys; the rest (times, ids, names) staging
-/// doesn't carry.
+/// An entry's PAX record, refusing by name what staging can't honour: a `size` (a file past the 8 GiB a
+/// header's size field holds) and GNU's sparse keys. Extended attributes come as `SCHILY.xattr.<name>`
+/// (the value raw) or `LIBARCHIVE.xattr.<name, percent-encoded>` (the value base64); one in no namespace
+/// Linux holds (`com.apple.*`, from macOS bsdtar) can't exist on a Linux file, so it is left out, which
+/// loses nothing Linux's own unpack would hold (docs/design/shards-guest.md §4a). Other keys (atime,
+/// ctime, owner names, a comment) staging doesn't carry.
 fn pax_keys(
     text: &[u8],
     bad: &dyn Fn(&str, &dyn std::fmt::Display) -> Refusal,
-) -> Result<PaxNames, Refusal> {
-    let (mut path, mut link) = (None, None);
+) -> Result<Pax, Refusal> {
+    let mut pax = Pax::default();
+    let number = |key: &str, value: &[u8]| {
+        std::str::from_utf8(value)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .ok_or_else(|| bad("a PAX record", &format!("its {key} isn't an id")))
+    };
     for ext in tar::PaxExtensions::new(text) {
         let ext = ext.map_err(|e| bad("a PAX record", &e))?;
+        let value = ext.value_bytes();
         match ext.key_bytes() {
-            b"path" => path = Some(ext.value_bytes().to_vec()),
-            b"linkpath" => link = Some(ext.value_bytes().to_vec()),
+            b"path" => pax.path = Some(value.to_vec()),
+            b"linkpath" => pax.link = Some(value.to_vec()),
+            b"uid" => pax.uid = Some(number("uid", value)?),
+            b"gid" => pax.gid = Some(number("gid", value)?),
+            b"mtime" => {
+                pax.mtime = Some(
+                    pax_time(value)
+                        .ok_or_else(|| bad("a PAX record", &"its mtime isn't a time"))?,
+                );
+            }
             b"size" => {
                 return Err(bad(
                     "a PAX record",
@@ -433,22 +463,121 @@ fn pax_keys(
                     &"a sparse entry is never staged (none of the roots it serves holds one, §4a)",
                 ));
             }
-            _ => {}
+            key => {
+                let xattr = if let Some(name) = key.strip_prefix(b"SCHILY.xattr.") {
+                    Some((name.to_vec(), value.to_vec()))
+                } else if let Some(name) = key.strip_prefix(b"LIBARCHIVE.xattr.") {
+                    let name = percent_decoded(name).ok_or_else(|| {
+                        bad("a PAX record", &"an xattr's name isn't percent-encoded")
+                    })?;
+                    let value = base64_decoded(value)
+                        .ok_or_else(|| bad("a PAX record", &"an xattr's value isn't base64"))?;
+                    Some((name, value))
+                } else {
+                    None
+                };
+                if let Some((name, value)) = xattr {
+                    if pax.xattrs.len() >= files::XATTRS_MAX {
+                        return Err(bad(
+                            "a PAX record",
+                            &format!(
+                                "it holds more than {} extended attributes",
+                                files::XATTRS_MAX
+                            ),
+                        ));
+                    }
+                    let name = String::from_utf8(name)
+                        .map_err(|_| bad("a PAX record", &"an xattr's name isn't UTF-8"))?;
+                    if files::XATTR_NAMESPACES
+                        .iter()
+                        .any(|ns| name.starts_with(ns))
+                    {
+                        pax.xattrs.push(Xattr { name, value });
+                    }
+                }
+            }
         }
     }
-    Ok((path, link))
+    Ok(pax)
 }
 
-/// The keys a global PAX record may set: what staging doesn't carry and so can't get wrong (times, ids
-/// and owner names, a comment, the character sets the record's texts are in). Any other key would apply
-/// to every entry after it, and is refused rather than ignored (CLAUDE.md §3; docs/design/shards-guest.md
-/// §4a).
-const GLOBAL_KEYS: [&[u8]; 10] = [
-    b"mtime",
+/// A PAX time, `seconds[.fraction]`, possibly negative.
+fn pax_time(value: &[u8]) -> Option<Mtime> {
+    let text = std::str::from_utf8(value).ok()?;
+    let (secs, frac) = text.split_once('.').unwrap_or((text, ""));
+    let secs: i64 = secs.parse().ok()?;
+    let digits: String = frac.chars().take(9).collect();
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let nanos: u32 = if digits.is_empty() {
+        0
+    } else {
+        let scale = 10u32.checked_pow(u32::try_from(9_usize.checked_sub(digits.len())?).ok()?)?;
+        digits.parse::<u32>().ok()?.checked_mul(scale)?
+    };
+    Some(Mtime { secs, nanos })
+}
+
+/// `%XX`-decoded bytes (libarchive's encoding of an xattr's name), or `None` when malformed.
+fn percent_decoded(text: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((&b, after)) = rest.split_first() {
+        if b == b'%' {
+            let hex = after.get(..2)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = after.get(2..)?;
+        } else {
+            out.push(b);
+            rest = after;
+        }
+    }
+    Some(out)
+}
+
+/// Standard base64 (RFC 4648 §4), padding optional, or `None` when malformed.
+fn base64_decoded(text: &[u8]) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(u32::from(match c {
+            b'A'..=b'Z' => c.checked_sub(b'A')?,
+            b'a'..=b'z' => c.checked_sub(b'a')?.checked_add(26)?,
+            b'0'..=b'9' => c.checked_sub(b'0')?.checked_add(52)?,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        }))
+    };
+    let text: Vec<u8> = text.iter().copied().filter(|c| *c != b'=').collect();
+    let mut out = Vec::with_capacity(text.len().saturating_mul(3) / 4);
+    for chunk in text.chunks(4) {
+        let mut acc: u32 = 0;
+        for &c in chunk {
+            acc = (acc << 6) | value(c)?;
+        }
+        let bits = chunk.len().checked_mul(6)?;
+        acc <<= 24usize.checked_sub(bits)?;
+        let bytes = acc.to_be_bytes();
+        let n = match chunk.len() {
+            4 => 3,
+            3 => 2,
+            2 => 1,
+            _ => return None,
+        };
+        out.extend_from_slice(bytes.get(1..1usize.checked_add(n)?)?);
+    }
+    Some(out)
+}
+
+/// The keys a global PAX record may set: what staging doesn't carry and so can't get wrong (atime and
+/// ctime, which staging sets from mtime and the kernel; owner names, which numeric ids stand for; a
+/// comment; the character sets the record's texts are in). Any other key would apply to every entry after
+/// it, and is refused rather than ignored (CLAUDE.md §3; docs/design/shards-guest.md §4a): `uid`, `gid`
+/// and `mtime` among them, since staging carries those.
+const GLOBAL_KEYS: [&[u8]; 7] = [
     b"atime",
     b"ctime",
-    b"uid",
-    b"gid",
     b"uname",
     b"gname",
     b"comment",
@@ -526,18 +655,22 @@ fn tarball(
         inner: reader,
         read: 0,
     });
-    // The root itself: the archive's own `./` entry, if it has one, names nothing more.
+    // The root itself, 0755 and the relay's: the archive's own `./` entry, if it has one, names nothing
+    // more (the root is the box's mount point, whose owner and times are the runtime's).
     counts.add(0, limits)?;
     let root = Entry {
         path: name.to_owned(),
         mode: 0o755,
         what: What::Dir,
+        meta: None,
     };
     out.write_all(&files::head(&root, limits).map_err(refused)?)
         .map_err(|e| Refusal::os("sending staged files", e))?;
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     // The archive's own symbolic links: an entry written through one is refused, wherever it points.
     let mut links: BTreeSet<String> = BTreeSet::new();
+    // The archive's regular files so far: what a hard link may name.
+    let mut regular: BTreeSet<String> = BTreeSet::new();
     // Where the last entry's data ends: the archive must go on past it to its end-of-archive block.
     let mut end: u64 = 0;
     // The extension records before an entry (GNU long name and link, PAX), each read within its bound:
@@ -596,15 +729,15 @@ fn tarball(
             }
             _ => {}
         }
-        let (pax_path, pax_link) = match pax.take() {
+        let mut ext = match pax.take() {
             Some(text) => pax_keys(&text, &bad)?,
-            None => (None, None),
+            None => Pax::default(),
         };
-        let raw = match long_name.take().or(pax_path) {
+        let raw = match long_name.take().or(ext.path.take()) {
             Some(name) => name,
             None => entry.header().path_bytes().into_owned(),
         };
-        let link = long_link.take().or(pax_link).or_else(|| {
+        let link = long_link.take().or(ext.link.take()).or_else(|| {
             entry
                 .header()
                 .link_name_bytes()
@@ -651,6 +784,38 @@ fn tarball(
             header.mode().map_err(|e| bad(&shown, &e))? & u32::from(files::MODE_BITS),
         )
         .unwrap_or(0o755);
+        // A numeric field of NULs and spaces alone reads as 0, as GNU tar and Python's tarfile read it
+        // (tar-rs refuses it); anything else that isn't a number is refused by name.
+        let numeric = |value: io::Result<u64>, field: &[u8]| match value {
+            Ok(v) => Some(v),
+            Err(_) if field.iter().all(|b| *b == 0 || *b == b' ') => Some(0),
+            Err(_) => None,
+        };
+        let id = |value: io::Result<u64>, field: &[u8], what: &str| {
+            numeric(value, field)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| bad(&shown, &format!("its {what} isn't an id")))
+        };
+        let meta = Meta {
+            uid: match ext.uid {
+                Some(uid) => uid,
+                None => id(header.uid(), &header.as_old().uid, "uid")?,
+            },
+            gid: match ext.gid {
+                Some(gid) => gid,
+                None => id(header.gid(), &header.as_old().gid, "gid")?,
+            },
+            mtime: match ext.mtime {
+                Some(mtime) => mtime,
+                None => Mtime {
+                    secs: numeric(header.mtime(), &header.as_old().mtime)
+                        .and_then(|t| i64::try_from(t).ok())
+                        .ok_or_else(|| bad(&shown, &"its mtime isn't a time"))?,
+                    nanos: 0,
+                },
+            },
+            xattrs: std::mem::take(&mut ext.xattrs),
+        };
         let what = match header.entry_type() {
             tar::EntryType::Directory => What::Dir,
             tar::EntryType::Regular | tar::EntryType::Continuous => What::File { size },
@@ -676,22 +841,46 @@ fn tarball(
             }
             tar::EntryType::Fifo => return Err(bad(&shown, &"a FIFO is never staged")),
             tar::EntryType::Link => {
-                return Err(bad(
-                    &shown,
-                    &"a hard link is never staged (none of the roots it serves holds one, §4a)",
-                ));
+                // Another name for an earlier regular file of this root, named as an entry is: never
+                // an escaping name, a later or missing entry, a directory, or one through a link.
+                let target = link
+                    .clone()
+                    .ok_or_else(|| bad(&shown, &"a hard link with no target"))?;
+                let target = String::from_utf8(target)
+                    .map_err(|_| bad(&shown, &"its target isn't UTF-8"))?;
+                let mut to = target.trim_end_matches('/');
+                while let Some(rest) = to.strip_prefix("./") {
+                    to = rest;
+                }
+                if !regular.contains(to) {
+                    return Err(bad(
+                        &shown,
+                        &format!(
+                            "a hard link names {target:?}, which is no earlier regular file of this root"
+                        ),
+                    ));
+                }
+                What::Hardlink {
+                    target: format!("{name}/{to}"),
+                }
             }
             _ => return Err(bad(&shown, &"an entry of a kind staging carries not")),
         };
         let size = match what {
             What::File { size } => size,
-            What::Dir | What::Symlink { .. } => 0,
+            What::Dir | What::Symlink { .. } | What::Hardlink { .. } => 0,
         };
         counts.add(size, limits)?;
+        // A hard link shares its target's inode, owner, mode, xattrs and times: it carries none of its own.
+        let meta = match what {
+            What::Hardlink { .. } => None,
+            _ => Some(meta),
+        };
         let staged = Entry {
             path: format!("{name}/{rel}"),
             mode,
             what,
+            meta,
         };
         out.write_all(&files::head(&staged, limits).map_err(refused)?)
             .map_err(|e| Refusal::os("sending staged files", e))?;
@@ -702,14 +891,17 @@ fn tarball(
             What::Symlink { .. } => {
                 links.insert(rel.to_owned());
             }
-            What::File { size } if size > 0 => {
-                let sent =
-                    io::copy(&mut (&mut entry).take(size), out).map_err(|e| bad(&shown, &e))?;
-                if sent != size {
-                    return Err(bad(&shown, &"the archive ends inside it"));
+            What::File { size } => {
+                regular.insert(rel.to_owned());
+                if size > 0 {
+                    let sent =
+                        io::copy(&mut (&mut entry).take(size), out).map_err(|e| bad(&shown, &e))?;
+                    if sent != size {
+                        return Err(bad(&shown, &"the archive ends inside it"));
+                    }
                 }
             }
-            What::File { .. } => {}
+            What::Hardlink { .. } => {}
         }
     }
     if long_name.is_some() || long_link.is_some() || pax.is_some() {

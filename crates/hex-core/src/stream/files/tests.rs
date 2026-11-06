@@ -1,6 +1,8 @@
 //! The staging stream's tests (docs/design/shards-guest.md §4a, HEX-GUEST-13; native plan step 5): a
 //! stage's entries read back as written however the stream cuts them; hostile names, kinds, modes and
 //! fields are refused by type; and every count past its bound is refused before its bytes are held.
+//! Version 2 (§4a): an entry's owner, mtime and extended attributes, and hard links, read back as written,
+//! hostile ones refused by type; a version-1 stream still reads, and refuses what only version 2 has.
 
 use super::*;
 use proptest::prelude::*;
@@ -10,6 +12,7 @@ fn entry(path: &str, what: What) -> Entry {
         path: path.to_owned(),
         mode: 0o755,
         what,
+        meta: None,
     }
 }
 
@@ -176,7 +179,7 @@ fn hostile_names_are_refused_by_name() {
 /// with no target: expect each refused by its type.
 #[test]
 fn hostile_kinds_modes_and_fields_are_refused_by_type() {
-    for kind in [4, 5, 6, 0xff] {
+    for kind in [5, 6, 0xff] {
         assert_eq!(
             read(LIMITS, &raw(kind, 0, 0o644, b"dev/null", b"", 0), 64),
             Err(Refused::Kind(kind))
@@ -223,7 +226,7 @@ fn hostile_openings_are_refused_by_type() {
         read(LIMITS, &b, 64).unwrap_err()
     };
     assert_eq!(with(0, b'X'), Refused::Magic);
-    assert_eq!(with(4, 2), Refused::Version { got: 2 });
+    assert_eq!(with(4, 3), Refused::Version { got: 3 });
     assert_eq!(with(6, 3), Refused::Op(3));
     assert_eq!(with(7, 1), Refused::Pad(1));
     let mut empty = good.clone();
@@ -308,4 +311,180 @@ proptest! {
             }
         }
     }
+}
+
+fn meta(uid: u32, gid: u32, xattrs: &[(&str, &[u8])]) -> Meta {
+    Meta {
+        uid,
+        gid,
+        mtime: Mtime {
+            secs: 1_700_000_000,
+            nanos: 500,
+        },
+        xattrs: xattrs
+            .iter()
+            .map(|(n, v)| Xattr {
+                name: (*n).to_owned(),
+                value: v.to_vec(),
+            })
+            .collect(),
+    }
+}
+
+/// HEX-GUEST-13 (version 2): stage a directory, a file and a symlink each with an owner, an mtime and
+/// extended attributes, and a hard link to the file: expect each read back as written, cut anywhere.
+#[test]
+fn version_2_entries_read_back_with_owners_times_xattrs_and_hard_links() {
+    let with = |mut e: Entry, m: Meta| {
+        e.meta = Some(m);
+        e
+    };
+    let entries = vec![
+        (with(entry("root", What::Dir), meta(472, 0, &[])), vec![]),
+        (
+            with(
+                entry("root/caddy", What::File { size: 3 }),
+                meta(
+                    1001,
+                    1001,
+                    &[("security.capability", &[1, 0, 0, 2, 0, 4, 0, 0])],
+                ),
+            ),
+            b"bin".to_vec(),
+        ),
+        (
+            entry(
+                "root/perl5",
+                What::Hardlink {
+                    target: "root/caddy".to_owned(),
+                },
+            ),
+            vec![],
+        ),
+        (
+            with(
+                entry(
+                    "root/lib",
+                    What::Symlink {
+                        target: "/usr/lib".to_owned(),
+                    },
+                ),
+                meta(0, 42, &[("trusted.x", b"y"), ("user.a", b"")]),
+            ),
+            vec![],
+        ),
+    ];
+    let bytes = stage("b", &entries);
+    let mut want = vec![(
+        Step::Open {
+            op: Op::Stage,
+            id: "b".to_owned(),
+        },
+        vec![],
+    )];
+    want.extend(entries.into_iter().map(|(e, b)| (Step::Entry(e), b)));
+    want.push((Step::End, vec![]));
+    for cut in [1, 7, 29, bytes.len()] {
+        assert_eq!(read(LIMITS, &bytes, cut).unwrap(), want, "cut {cut}");
+    }
+}
+
+/// HEX-GUEST-13 (version 2): refuse, by type, an entry's id of u32::MAX, a time's nanoseconds of a second,
+/// too many xattrs, a name past 255 bytes, one in no Linux namespace, a value past 64 KiB, values together
+/// past 64 KiB, a hard link to itself or to no staged path, and a hard link with a size; each refused by the
+/// packer, as the unpacker would.
+#[test]
+fn hostile_version_2_metadata_and_hard_links_are_refused_by_type() {
+    let file = |m: Meta| Entry {
+        meta: Some(m),
+        ..entry("f", What::File { size: 0 })
+    };
+    let big = vec![0u8; XATTR_SIZE_MAX + 1];
+    let half = vec![0u8; XATTR_SIZE_MAX / 2 + 1];
+    let long = format!("user.{}", "n".repeat(XATTR_NAME_MAX));
+    let many: Vec<(String, Vec<u8>)> = (0..=XATTRS_MAX)
+        .map(|i| (format!("user.{i}"), vec![]))
+        .collect();
+    let many: Vec<(&str, &[u8])> = many
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_slice()))
+        .collect();
+    let mut late = meta(0, 0, &[]);
+    late.mtime.nanos = 1_000_000_000;
+    for m in [
+        meta(u32::MAX, 0, &[]),
+        meta(0, u32::MAX, &[]),
+        late,
+        meta(0, 0, &many),
+        meta(0, 0, &[(long.as_str(), b"")]),
+        meta(0, 0, &[("com.apple.provenance", b"x")]),
+        meta(0, 0, &[("user.big", &big)]),
+        meta(0, 0, &[("user.a", &half), ("user.b", &half)]),
+    ] {
+        assert!(
+            matches!(head(&file(m.clone()), &LIMITS), Err(Refused::Meta { .. })),
+            "{m:?}"
+        );
+    }
+    let link = |target: &str| {
+        entry(
+            "a",
+            What::Hardlink {
+                target: target.to_owned(),
+            },
+        )
+    };
+    for target in ["a", "../x", "/etc/passwd", ""] {
+        assert!(
+            matches!(head(&link(target), &LIMITS), Err(Refused::Target { .. })),
+            "{target}"
+        );
+    }
+    // A hard link with a size is refused from its head.
+    let mut raw = open(Op::Stage, "b").unwrap();
+    raw.extend([4u8, 0]);
+    raw.extend(0o644u16.to_le_bytes());
+    raw.extend(1u16.to_le_bytes());
+    raw.extend(1u16.to_le_bytes());
+    raw.extend(5u64.to_le_bytes());
+    assert!(matches!(
+        read(LIMITS, &raw, 64),
+        Err(Refused::Field { field: "size", .. })
+    ));
+}
+
+/// HEX-GUEST-13: a version-1 stream (no metadata flag, no hard links) still reads as before; in version 1 a
+/// head's metadata flag is a pad byte and kind 4 is no kind, each refused by type.
+#[test]
+fn a_version_1_stream_reads_and_refuses_what_only_version_2_has() {
+    let v1 = |body: &[u8]| {
+        let mut out = open(Op::Stage, "b").unwrap();
+        out[4..6].copy_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(body);
+        out
+    };
+    let mut plain = head(&entry("d", What::Dir), &LIMITS).unwrap();
+    plain.extend(END);
+    let got = read(LIMITS, &v1(&plain), 3).unwrap();
+    assert_eq!(got[1].0, Step::Entry(entry("d", What::Dir)));
+    let flagged = head(
+        &Entry {
+            meta: Some(meta(1, 1, &[])),
+            ..entry("d", What::Dir)
+        },
+        &LIMITS,
+    )
+    .unwrap();
+    assert_eq!(read(LIMITS, &v1(&flagged), 64), Err(Refused::Pad(HAS_META)));
+    let linked = head(
+        &entry(
+            "l",
+            What::Hardlink {
+                target: "d".to_owned(),
+            },
+        ),
+        &LIMITS,
+    )
+    .unwrap();
+    assert_eq!(read(LIMITS, &v1(&linked), 64), Err(Refused::Kind(4)));
 }

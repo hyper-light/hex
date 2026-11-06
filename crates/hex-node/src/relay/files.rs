@@ -6,17 +6,19 @@
 
 use std::io::{self, Write};
 use std::net::Shutdown;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 
 use hex_api::{BoxId, Refusal};
 use hex_client::guest::Duplex;
 use hex_core::stream::{
     self,
-    files::{self, Entry, Limits, Op, Step, Unpack, What},
+    files::{self, Entry, Limits, Meta, Mtime, Op, Step, Unpack, What},
 };
 use hex_core::wire::{self, Answer};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
+use rustix::fs::{
+    AtFlags, Dir, FileType, Gid, Mode, OFlags, ResolveFlags, Timespec, Timestamps, Uid,
+};
 use rustix::io::Errno;
 
 /// How a name under a staged root resolves: inside it, through no symbolic link or magic link and no
@@ -126,10 +128,74 @@ struct Stage {
     staged: OwnedFd,
     id: BoxId,
     root: OwnedFd,
-    file: Option<std::fs::File>,
-    dirs: Vec<(String, u16)>,
+    /// The file being written, with what's applied once its last byte is (§4a's order).
+    file: Option<(std::fs::File, String, u16, Option<Meta>)>,
+    /// Each directory's path, mode and mtime, set when the stage ends: deepest first, after everything
+    /// in it, so neither a read-only mode nor writing its children undoes them.
+    dirs: Vec<(String, u16, Option<Mtime>)>,
     /// Entries made so far: what an abandoned stage's removal visits.
     entries: usize,
+}
+
+/// A staged entry's time, as utimensat(2) takes it: atime set to mtime, as containerd's unpack does.
+fn times(mtime: Mtime) -> Timestamps {
+    let at = Timespec {
+        tv_sec: mtime.secs,
+        tv_nsec: i64::from(mtime.nanos),
+    };
+    Timestamps {
+        last_access: at,
+        last_modification: at,
+    }
+}
+
+fn owner(meta: &Meta) -> (Option<Uid>, Option<Gid>) {
+    (Some(Uid::from_raw(meta.uid)), Some(Gid::from_raw(meta.gid)))
+}
+
+/// An extended attribute the guest refused to set, by name: the stage is refused rather than staged
+/// without it (CLAUDE.md §3).
+fn refused_xattr(path: &str, name: &str, e: Errno) -> Refusal {
+    Refusal::Invalid {
+        what: "staged files",
+        why: format!("{path:?}: the guest refused extended attribute {name}: {e}"),
+    }
+}
+
+/// Applies a file's or directory's owner and xattrs, then (for a file) its mode and times, on its open
+/// descriptor, in §4a's order: owner, mode, xattrs, times. A directory's mode and times wait for the
+/// stage's end (`mode_and_time` false).
+fn apply(
+    fd: &OwnedFd,
+    path: &str,
+    mode: u16,
+    meta: Option<&Meta>,
+    mode_and_time: bool,
+) -> Result<(), Refusal> {
+    if let Some(meta) = meta {
+        let (uid, gid) = owner(meta);
+        rustix::fs::fchown(fd, uid, gid).map_err(os("setting a staged entry's owner"))?;
+    }
+    if mode_and_time {
+        rustix::fs::fchmod(fd, Mode::from_raw_mode(mode.into()))
+            .map_err(os("setting a staged entry's mode"))?;
+    }
+    if let Some(meta) = meta {
+        for x in &meta.xattrs {
+            rustix::fs::fsetxattr(
+                fd,
+                x.name.as_str(),
+                &x.value,
+                rustix::fs::XattrFlags::empty(),
+            )
+            .map_err(|e| refused_xattr(path, &x.name, e))?;
+        }
+        if mode_and_time {
+            rustix::fs::futimens(fd, &times(meta.mtime))
+                .map_err(os("setting a staged entry's times"))?;
+        }
+    }
+    Ok(())
 }
 
 impl Stage {
@@ -189,11 +255,17 @@ impl Stage {
                 why: format!("{:?}: {e}", entry.path),
             },
         };
+        let meta = entry.meta.as_ref();
         match &entry.what {
             What::Dir => {
                 // Writable by the relay until the stage ends, whatever its mode: its entries come after it.
                 rustix::fs::mkdirat(&parent, leaf, Mode::from_raw_mode(0o700)).map_err(exists)?;
-                self.dirs.push((entry.path.clone(), entry.mode));
+                if meta.is_some() {
+                    let dir = open_in(&self.root, &entry.path)?;
+                    apply(&dir, &entry.path, entry.mode, meta, false)?;
+                }
+                self.dirs
+                    .push((entry.path.clone(), entry.mode, meta.map(|m| m.mtime)));
             }
             What::File { size } => {
                 let fd = rustix::fs::openat(
@@ -207,40 +279,99 @@ impl Stage {
                     Mode::from_raw_mode(0o600),
                 )
                 .map_err(exists)?;
-                rustix::fs::fchmod(&fd, Mode::from_raw_mode(entry.mode.into()))
-                    .map_err(os("setting a staged file's mode"))?;
                 if *size > 0 {
-                    self.file = Some(std::fs::File::from(fd));
+                    self.file = Some((
+                        std::fs::File::from(fd),
+                        entry.path.clone(),
+                        entry.mode,
+                        entry.meta.clone(),
+                    ));
+                } else {
+                    apply(&fd, &entry.path, entry.mode, meta, true)?;
                 }
             }
             What::Symlink { target } => {
                 rustix::fs::symlinkat(target.as_str(), &parent, leaf).map_err(exists)?;
+                if let Some(meta) = meta {
+                    let (uid, gid) = owner(meta);
+                    rustix::fs::chownat(&parent, leaf, uid, gid, AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(os("setting a staged link's owner"))?;
+                    // A link has no descriptor to set an xattr through: its path through the parent's
+                    // descriptor, which the relay alone writes under.
+                    let at = format!("/proc/self/fd/{}/{leaf}", parent.as_raw_fd());
+                    for x in &meta.xattrs {
+                        rustix::fs::lsetxattr(
+                            at.as_str(),
+                            x.name.as_str(),
+                            &x.value,
+                            rustix::fs::XattrFlags::empty(),
+                        )
+                        .map_err(|e| refused_xattr(&entry.path, &x.name, e))?;
+                    }
+                    rustix::fs::utimensat(
+                        &parent,
+                        leaf,
+                        &times(meta.mtime),
+                        AtFlags::SYMLINK_NOFOLLOW,
+                    )
+                    .map_err(os("setting a staged link's times"))?;
+                }
+            }
+            What::Hardlink { target } => {
+                // The target, an earlier entry, is opened inside the root through no symbolic link and
+                // must be a regular file; linkat(2) follows no link at its last component.
+                let (from, from_leaf) = self.parent(target)?;
+                let st = rustix::fs::statat(&from, from_leaf, AtFlags::SYMLINK_NOFOLLOW).map_err(
+                    |e| Refusal::Invalid {
+                        what: "staged files",
+                        why: format!(
+                            "hard link {:?} names {target:?}, which isn't staged: {e}",
+                            entry.path
+                        ),
+                    },
+                )?;
+                if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+                    return Err(Refusal::Invalid {
+                        what: "staged files",
+                        why: format!(
+                            "hard link {:?} names {target:?}, which isn't a regular file",
+                            entry.path
+                        ),
+                    });
+                }
+                rustix::fs::linkat(&from, from_leaf, &parent, leaf, AtFlags::empty())
+                    .map_err(exists)?;
             }
         }
         Ok(())
     }
 
     fn data(&mut self, bytes: &[u8], done: bool) -> Result<(), Refusal> {
-        let file = self.file.as_mut().ok_or_else(|| Refusal::Invalid {
+        let (file, ..) = self.file.as_mut().ok_or_else(|| Refusal::Invalid {
             what: "staged files",
             why: "file bytes came with no file under way".to_owned(),
         })?;
         // A full tmpfs (`ENOSPC`) is the guest's memory bound on staged files, returned as the error it is.
         file.write_all(bytes)
             .map_err(|e| Refusal::os("writing a staged file", e))?;
-        if done {
-            self.file = None;
+        if done && let Some((file, path, mode, meta)) = self.file.take() {
+            let fd = OwnedFd::from(file);
+            apply(&fd, &path, mode, meta.as_ref(), true)?;
         }
         Ok(())
     }
 
-    /// Sets each directory's mode, deepest first so a directory made read-only doesn't stop its
-    /// children's, then the root's.
+    /// Sets each directory's mode and mtime, deepest first so a directory made read-only doesn't stop its
+    /// children's and writing them doesn't move its time, then the root's mode.
     fn end(&mut self) -> Result<(), Refusal> {
-        for (path, mode) in self.dirs.iter().rev() {
+        for (path, mode, mtime) in self.dirs.iter().rev() {
             let dir = open_in(&self.root, path)?;
             rustix::fs::fchmod(&dir, Mode::from_raw_mode((*mode).into()))
                 .map_err(os("setting a staged directory's mode"))?;
+            if let Some(mtime) = mtime {
+                rustix::fs::futimens(&dir, &times(*mtime))
+                    .map_err(os("setting a staged directory's times"))?;
+            }
         }
         self.dirs = Vec::new();
         rustix::fs::fchmod(&self.root, Mode::from_raw_mode(ROOT_MODE.into()))
