@@ -193,8 +193,13 @@ copy there shows ~20 bench scripts as modified: line endings from the sync, no c
    ("FEATURES: Containers on"), a_linux_image_is_refused_naming_what_its_guest_waits_on ("FEATURES: HypervisorPlatform
    on"), a_windows_image_stays_the_hosts_and_a_linux_image_goes_to_the_guest, windows_process_boxes_hold_the_contract.
    NOT RUN: step 4's oci suite on the image (windows_oci_boxes_hold_the_contract_and_the_steps_criteria): step 4 found
-   it stalls after HEX-DIFF-2's TERM and is tracing it; Hex stays installed until its fix, then the suite runs on
-   layers.txt here, then uninstall and the lab's uninstalled phase. The Linux-image class's runs through the guest are
+   it stalls after HEX-DIFF-2's TERM and is tracing it.
+   Uninstall at 2e1ab3f, 2026-11-06T12:08:31Z, from kiln (elevated, no prompt): windows.ps1 uninstall -NoRestart:
+   "nothing of Hex's is left", exit 0, no reboot; C:\Program Files\Hex and C:\ProgramData\Hex gone
+   (windows-uninstall-2e1ab3f-20261106T120831Z.txt). The lab's uninstalled phase (HEX-INST-4,
+   windows-uninstalled-d515078-20261106T120832Z): none of the plan's lines on the machine; PASS.
+   The run of record repeats every phase at one SHA, from a stage with step 4's fix (its stall is likely in hex.exe's
+   delete path), with the oci suite on layers.txt among the installed checks (the lead, 12:08Z). The Linux-image class's runs through the guest are
    entries 13, 15-16 (the test binaries', not the installed hex.exe's).
 
 What HCS reports as a Windows oci box's Exit at its end, against the oracle's Signal(15), for HEX-DIFF-1 step 12
