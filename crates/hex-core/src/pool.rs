@@ -62,6 +62,10 @@ mod tests {
     /// The rarest kind's share of [`an_account_is_always_in_range_untaken_and_new`]'s cases, as measured by
     /// `records_the_rarest_case_shares` (bench/native/macos/records/case-shares-pool.txt).
     const RAREST_SHARE: f64 = 0.08403;
+    /// The case by which proptest's deterministic sequence has met every kind, as the recorder measured it: a
+    /// fixed sequence meets each kind every run or never, so the test runs at least this many (step 2's
+    /// finding, 7785ad3).
+    const DETERMINISTIC_FIRST_MEET: u32 = 19;
 
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| (*s).to_owned()).collect()
@@ -202,7 +206,8 @@ mod tests {
         // proptest's deterministic RNG, not a fresh seed a run: a random draw sized to meet each kind with
         // probability 0.95 misses one in up to 5% of runs, and the non-vacuity check below would fail them
         // spuriously (proptest's own note on `TestRng::deterministic_rng`).
-        let config = ProptestConfig::with_cases(cases_to_meet(RAREST_SHARE));
+        let config =
+            ProptestConfig::with_cases(cases_to_meet(RAREST_SHARE).max(DETERMINISTIC_FIRST_MEET));
         let rng = TestRng::deterministic_rng(config.rng_algorithm);
         let mut runner = TestRunner::new_with_rng(config, rng);
         runner
@@ -216,7 +221,8 @@ mod tests {
     }
 
     /// Records the share of each kind of case [`an_account_is_always_in_range_untaken_and_new`]'s generator
-    /// makes (bench/native/macos/records/case-shares-pool.txt). Ignored: a measurement, not a check.
+    /// makes, and the case by which proptest's deterministic sequence has met every kind
+    /// (bench/native/macos/records/case-shares-pool.txt). Ignored: a measurement, not a check.
     #[test]
     #[ignore = "a measurement; run by hand and recorded in bench/native/macos/records"]
     fn records_the_rarest_case_shares() {
@@ -243,5 +249,22 @@ mod tests {
             "{test}: rarest share {share:.5} -> {} cases",
             cases_to_meet(share)
         );
+        let seen = Met::default();
+        let case = Cell::new(0u32);
+        let first_meet = Cell::new(None);
+        let config = ProptestConfig::with_cases(RECORD_CASES);
+        let rng = TestRng::deterministic_rng(config.rng_algorithm);
+        TestRunner::new_with_rng(config, rng)
+            .run(&arb_case(), |(pool, taken)| {
+                case.set(case.get() + 1);
+                account_holds(&pool, &taken, &seen)?;
+                if first_meet.get().is_none() && seen.kinds().iter().all(|(_, n)| *n > 0) {
+                    first_meet.set(Some(case.get()));
+                }
+                Ok(())
+            })
+            .unwrap();
+        let first_meet = first_meet.get();
+        println!("{test}: the deterministic sequence meets every kind by case {first_meet:?}");
     }
 }

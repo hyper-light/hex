@@ -11,3 +11,10 @@ an_account_is_always_in_range_untaken_and_new: a pool holding none: 8403 of 1000
 an_account_is_always_in_range_untaken_and_new: the first role uid taken: 26687 of 100000 (0.26687)
 an_account_is_always_in_range_untaken_and_new: the first role uid free: 73313 of 100000 (0.73313)
 an_account_is_always_in_range_untaken_and_new: rarest share 0.08403 -> 35 cases
+# The case by which proptest's deterministic sequence (TestRng::deterministic_rng, which the test draws from) has
+# met every kind: a fixed sequence meets each kind every run or never, so the test runs max(the share's count,
+# this) (native step 2's finding, 7785ad3). Recorder rerun, launchd hex-macos-poolmeet-20261106T174452Z,
+# adas-mac-studio-2, 2026-11-06T17:44Z, load 2.61 (its random-draw shares: 0.91543 / 0.08457 / 0.26841 /
+# 0.73159, rarest 0.08457 -> 34, within the first run's standard error):
+an_account_is_always_in_range_untaken_and_new: the deterministic sequence meets every kind by case 19
+# So the test runs max(35, 19) = 35 cases.
