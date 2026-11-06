@@ -1,6 +1,6 @@
 [toolchain]
 # An exact version: the gates must mean the same on every machine and CI runner. The arm64 Linux,
-# macOS and Windows targets are for the gates' lints of those platforms (scripts/gates.sh).
+# both macOS and the Windows targets are for the gates' lints of those platforms (scripts/gates.sh).
 channel = "1.99.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
@@ -8,5 +8,6 @@ targets = [
   "aarch64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",
   "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
   "x86_64-pc-windows-msvc",
 ]
