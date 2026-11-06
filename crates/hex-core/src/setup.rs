@@ -198,6 +198,13 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Every controller fedora's kernel (6.19.10) lists at its cgroup v2 root, as the installer lab's record
+    /// reads it (bench/install/records/linux-fb2e5ca-20261106T054108Z.txt, "/: controllers [...]"): the
+    /// names a parent's `cgroup.controllers` can hold, the model's whole input space.
+    const KERNEL_CONTROLLERS: [&str; 9] = [
+        "cpuset", "cpu", "io", "memory", "hugetlb", "pids", "rdma", "misc", "dmem",
+    ];
+
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| (*s).to_owned()).collect()
     }
@@ -267,11 +274,8 @@ mod tests {
         #[test]
         fn the_refusal_names_exactly_the_missing_controllers(
             have in proptest::collection::btree_set(
-                prop_oneof![
-                    Just("cpu"), Just("io"), Just("memory"), Just("pids"),
-                    Just("cpuset"), Just("hugetlb"), Just("rdma"), Just("misc"),
-                ],
-                0..8,
+                proptest::sample::select(&KERNEL_CONTROLLERS[..]),
+                0..=KERNEL_CONTROLLERS.len(),
             )
         ) {
             let available: BTreeSet<String> = have.iter().map(|s| (*s).to_owned()).collect();
@@ -324,11 +328,25 @@ mod tests {
         assert!(features_off(&"x".repeat(FEATURE_LISTING_MAX + 1)).is_err());
     }
 
+    /// HEX-INST-2: the listing's bound is its format's own size, every feature's `<name> <state>\r\n`
+    /// line: the 36 bytes jupiter's PowerShell wrote, 20 runs of 20 (2026-11-06, Windows 11 26200), fit
+    /// exactly, and a byte past them is refused rather than read.
+    #[test]
+    fn the_listing_bound_is_the_formats_own_size() {
+        let jupiter = "HypervisorPlatform 1\r\nContainers 1\r\n";
+        assert_eq!(jupiter.len(), 36);
+        assert_eq!(FEATURE_LISTING_MAX, jupiter.len());
+        assert_eq!(features_off(jupiter), Ok(BTreeSet::new()));
+        assert!(features_off(&format!("{jupiter} ")).is_err());
+    }
+
     proptest! {
         /// HEX-INST-2, hostile input to the parser (CLAUDE.md §6): any bytes, never a panic; what it
         /// accepts names only features it asked for.
         #[test]
-        fn the_feature_listing_parser_never_panics(text in "(?s).{0,600}") {
+        fn the_feature_listing_parser_never_panics(text in proptest::string::string_regex(
+            &format!("(?s).{{0,{}}}", 2 * FEATURE_LISTING_MAX)
+        ).unwrap()) {
             if let Ok(off) = features_off(&text) {
                 prop_assert!(off.iter().all(|f| WindowsFeature::ALL.contains(f)));
             }
