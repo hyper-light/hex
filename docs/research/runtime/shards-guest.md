@@ -103,3 +103,21 @@ host's `/` is never shared by default).
 
 What would falsify it: Docker Desktop changing its default list (then Hex's default follows it, or says why not), or
 a host whose users or temporary folders are not where those calls say.
+
+## 8. The tarball roots' tests can fail: a mutation check (2026-11-06)
+
+The hostile-archive tests (`crates/hex-client/src/guest/stage/tar_tests.rs`, HEX-GUEST-15) were written before
+`stage::Source::Tar` and first ran with it, never red. So each check they cover was disabled in turn, in a scratch copy
+of `c230d0a` never committed, and its test run and seen to fail, then restored. On fedora, units
+`hex-ns5route-mut-20261106T110202Z` and `hex-ns5route-mut2-20261106T110229Z`; the Windows refusal on jupiter.
+
+| check disabled | test | failure |
+|---|---|---|
+| absolute and `..` names | `a_tarball_naming_its_way_out_or_out_of_order_is_refused_by_name` | `tar_tests.rs:126:9` (the refusal no longer says why) |
+| device and FIFO entries staged as files | `a_tarball_with_a_device_fifo_hard_link_or_unknown_kind_is_refused_by_name` | `tar_tests.rs:70:36` (`unwrap_err` on `Ok`: packed) |
+| hard links staged as files | the same test | `tar_tests.rs:70:36` |
+| the gzip trailer not read | `a_lying_or_truncated_tarball_is_refused` | `tar_tests.rs:70:36` |
+| the end-of-archive block not required | the same test | `tar_tests.rs:70:36` |
+| a Windows directory root not refused | `a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows` (`crates/hex-runtime/src/guest/tests.rs`), on jupiter | `tests.rs:457:13`, "expected a Windows directory root refused, got Ok(…)" |
+
+Each test passed again with the check restored.
