@@ -684,6 +684,22 @@ mod tests {
         );
     }
 
+    /// The rule for a learned wait: before any sample its bound is twice the slowest answer on record;
+    /// then twice the slowest of the record and what it has seen; and it only rises. Do: seed one at
+    /// 100 ms, see 30 ms, then 300 ms, then 50 ms. Expect 200 ms, 200 ms, 600 ms, 600 ms.
+    #[test]
+    fn a_learned_wait_starts_at_twice_its_record_and_only_rises() {
+        let ms = Duration::from_millis;
+        let wait = conformance::LearnedWait::new(ms(100));
+        assert_eq!(wait.bound(), ms(200));
+        wait.saw(ms(30));
+        assert_eq!(wait.bound(), ms(200));
+        wait.saw(ms(300));
+        assert_eq!(wait.bound(), ms(600));
+        wait.saw(ms(50));
+        assert_eq!(wait.bound(), ms(600));
+    }
+
     /// Do: read with a look that takes a measurable time and never shows the oracle's answer, for a
     /// patience. Expect: each re-read waits at least as long as the read before it took, so reading holds
     /// at most half the time, at whatever a read costs on this platform (no picked interval).
