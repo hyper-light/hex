@@ -67,11 +67,6 @@ tests = [
   { id = "T-T7.4.1", text = "A model-based test: placements equal the serial specification's on generated clusters and workloads" },
 ]
 
-# CP-T7.5 is about the owners (tenants or apps) of Hex's workloads, OCI containers, Firecracker microVMs
-# and Shards microVMs, not CI repositories: Ada, 2026-11-06, "You are NOT Kiln's load balancer for jobs,
-# CI, and general work. Your scheduler is for *microvms*." and "Your goals are still wrong and list
-# containers when we work with OCI containers, Firecracker, and Shards Microvms." The texts below say so
-# in place of kiln's plan's CI wording.
 [[goal]]
 id = "CP-T7.5"
 title = "Priority, quotas, fair share, preemption and gangs"
@@ -81,7 +76,7 @@ criteria = [
   { id = "AC-T7.5.3", text = "disruption budgets broken by preemption is exactly 0, measured by a property test" },
 ]
 tests = [
-  { id = "T-T7.5.1", text = "A burst of 1,000 OCI containers, Firecracker microVMs or Shards microVMs from one owner — passes when the other owners' workloads still start within their usual p95" },
+  { id = "T-T7.5.1", text = "A burst of 1,000 legs from one repository — passes when the others' legs still start within their usual p95" },
 ]
 
 [[goal]]
