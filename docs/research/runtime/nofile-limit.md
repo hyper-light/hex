@@ -239,6 +239,12 @@ Ada's call (2026-11-06, native plan step 6): a box whose spec names no `RLIMIT_N
   which isn't async-signal-safe (it may take a malloc or libc lock another thread held at the fork): a
   deadlock hazard (CLAUDE.md §3), so not done (the lead, 2026-11-06). Lowering the node's own limit
   around a spawn would give its other threads `EMFILE`.
+- **Measured, the fork path failed outright.** Built once (c205566, reverted at 1c8309f), its merge into
+  cp/t7-native (e048975, `crates/hex-runtime/src/macos` byte for byte d14bc2a's) failed every spawn on
+  adas-mac-studio-2 with `Bad file descriptor (os error 9)` at each test's first exec. That was
+  `macos_process_box` 0 passed, 8 failed, twice, in a launchd one-shot outside kiln's run tree
+  (`hex-integrate-mac-e048975-20261106T092002Z`). With the revert (6ef0169) the same suite passed 7/7 three
+  times on adas-mac-studio.local-2.
 - **The safe route, if plain boxes must have it:** move their spawn into a single-threaded helper process,
   as box-user mode does, whose child can call `setrlimit` before `execve`. Not built; the lead's call.
 
