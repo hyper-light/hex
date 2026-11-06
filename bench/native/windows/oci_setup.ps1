@@ -20,6 +20,8 @@ $Ctrd = "\\.\pipe\hex-native-s4-containerd"
 $Dock = "npipe:////./pipe/hex-native-s4-docker"
 $versions = Join-Path $Root "versions.txt"
 
+function Must([string]$what) { if ($LASTEXITCODE -ne 0) { throw "$what exited $LASTEXITCODE" } }
+
 function Fetch([string]$url, [string]$to) {
     if (-not (Test-Path $to)) { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $to }
     "$url sha256=$((Get-FileHash -Algorithm SHA256 $to).Hash)" | Add-Content $versions
@@ -58,29 +60,38 @@ $zip = ([regex]::Matches($index, 'docker-(\d+\.\d+\.\d+)\.zip') | ForEach-Object
 $dz = Join-Path $Root "docker-$zip.zip"
 Fetch "https://download.docker.com/win/static/stable/x86_64/docker-$zip.zip" $dz
 Expand-Archive -Force -Path $dz -DestinationPath $Root
+Remove-Item -ErrorAction SilentlyContinue "$Root\dockerd.pid.engine"
 $d = Start-Process -PassThru -WindowStyle Hidden -FilePath "$Root\docker\dockerd.exe" `
     -ArgumentList "--data-root", "$Root\docker-data", "--exec-root", "$Root\docker-exec", "-H", $Dock, `
     "--pidfile", "$Root\dockerd.pid.engine", "--exec-opt", "isolation=process" `
     -RedirectStandardError "$Root\dockerd.log"
 $d.Id | Set-Content "$Root\dockerd.pid"
-for ($i = 0; $i -lt 60; $i++) { & "$Root\docker\docker.exe" -H $Dock version *> $null; if ($?) { break }; Start-Sleep 1 }
+# The pipe, not `docker version`: a redirected native error is terminating under ErrorActionPreference Stop.
+$DockPipe = "\\.\pipe\hex-native-s4-docker"
+for ($i = 0; $i -lt 60 -and -not (Test-Path $DockPipe); $i++) { Start-Sleep -Seconds 1 }
+if (-not (Test-Path $DockPipe)) { throw "dockerd made no pipe in 60 s: see $Root\dockerd.log" }
 & "$Root\docker\docker.exe" -H $Dock version | Add-Content $versions
+Must "docker version"
 
 # The image, into both stores.
 & ctr -a $Ctrd images pull --platform windows/amd64 $Image
+Must "ctr images pull"
 & "$Root\docker\docker.exe" -H $Dock pull $Image
+Must "docker pull"
 
 # The image's layer folders: a prepared snapshot's mount names its parents, topmost first.
 $chain = (& ctr -a $Ctrd images ls --quiet) | Select-Object -First 1
 $top = (& ctr -a $Ctrd snapshots --snapshotter windows ls) | Select-String -Pattern "Committed" |
     ForEach-Object { ($_ -split '\s+')[0] }
 $key = "hex-native-s4-layers"
-& ctr -a $Ctrd snapshots --snapshotter windows rm $key 2>$null
+cmd /c "ctr -a $Ctrd snapshots --snapshotter windows rm $key 2>nul"
 # The topmost committed snapshot is the one no other committed snapshot names as its parent.
 $parents = (& ctr -a $Ctrd snapshots --snapshotter windows ls) | ForEach-Object { ($_ -split '\s+')[1] }
 $head = $top | Where-Object { $parents -notcontains $_ } | Select-Object -First 1
 $mount = (& ctr -a $Ctrd snapshots --snapshotter windows prepare --mounts $key $head) -join " "
+Must "ctr snapshots prepare"
 & ctr -a $Ctrd snapshots --snapshotter windows rm $key
+Must "ctr snapshots rm"
 "image $Image chain $chain head $head mount $mount" | Add-Content $versions
 $m = [regex]::Match($mount, 'parentLayerPaths=(\[[^\]]*\])')
 if (-not $m.Success) { throw "no parentLayerPaths in ctr's mount: $mount" }
