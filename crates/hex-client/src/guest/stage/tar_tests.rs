@@ -477,3 +477,125 @@ fn a_git_archive_tarball_stages_with_every_entry_exact() {
     ];
     assert_eq!(got, want);
 }
+
+/// Runs `git` in `dir` with `args`, feeding it `input`; its stdout. A commit is made by a fixed author with
+/// signing off, so it runs on any host's git as configured.
+fn git(dir: &Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=hex-test",
+            "-c",
+            "user.email=hex-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "git {args:?} failed");
+    out.stdout
+}
+
+/// HEX-GUEST-15 (the lead's 'g' list, 4, generated): make a scratch repo with an executable, a file and a
+/// symlink (written as git objects, so no host needs filesystem symlinks or modes), commit it, and stage
+/// `git archive --format=tar HEAD` and `--format=tar.gz`, each beginning with a global record holding only
+/// `comment=<commit>`: expect every entry staged exact, its mode as git writes it (tar.umask 002), its bytes
+/// and its link text. Where no `git` runs, the committed fixture's test stands for it.
+#[test]
+fn a_git_archive_made_here_stages_with_every_entry_exact() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!(
+            "SKIP: no git here; a_git_archive_tarball_stages_with_every_entry_exact covers its bytes"
+        );
+        return;
+    }
+    let repo = tempfile::tempdir().unwrap();
+    let dir = repo.path();
+    git(dir, &["init", "-q", "-b", "main", "."], b"");
+    let script = git(
+        dir,
+        &["hash-object", "-w", "--stdin"],
+        b"#!/bin/sh\necho hi\n",
+    );
+    let conf = git(dir, &["hash-object", "-w", "--stdin"], b"name=lab\n");
+    let link = git(dir, &["hash-object", "-w", "--stdin"], b"../bin/hello");
+    for (mode, blob, path) in [
+        ("100755", &script, "bin/hello"),
+        ("100644", &conf, "etc/conf"),
+        ("120000", &link, "link"),
+    ] {
+        let blob = String::from_utf8(blob.clone()).unwrap();
+        let info = format!("{mode},{},{path}", blob.trim());
+        git(dir, &["update-index", "--add", "--cacheinfo", &info], b"");
+    }
+    git(dir, &["commit", "-q", "-m", "fixture"], b"");
+    let commit = String::from_utf8(git(dir, &["rev-parse", "HEAD"], b"")).unwrap();
+    let want = vec![
+        ("root".to_owned(), 0o755, What::Dir, vec![]),
+        ("root/bin".to_owned(), 0o775, What::Dir, vec![]),
+        (
+            "root/bin/hello".to_owned(),
+            0o775,
+            What::File { size: 18 },
+            b"#!/bin/sh\necho hi\n".to_vec(),
+        ),
+        ("root/etc".to_owned(), 0o775, What::Dir, vec![]),
+        (
+            "root/etc/conf".to_owned(),
+            0o664,
+            What::File { size: 9 },
+            b"name=lab\n".to_vec(),
+        ),
+        (
+            "root/link".to_owned(),
+            0o777,
+            What::Symlink {
+                target: "../bin/hello".to_owned(),
+            },
+            vec![],
+        ),
+    ];
+    for (format, file) in [("tar", "r.tar"), ("tar.gz", "r.tar.gz")] {
+        let bytes = git(
+            dir,
+            &["archive", &format!("--format={format}"), "HEAD"],
+            b"",
+        );
+        let plain = if format == "tar" {
+            bytes.clone()
+        } else {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut out)
+                .unwrap();
+            out
+        };
+        assert_eq!(
+            plain[156], b'g',
+            "{format}: git's first header is its global record"
+        );
+        let record = String::from_utf8_lossy(&plain[512..1024]).into_owned();
+        assert!(
+            record.contains(&format!("comment={}", commit.trim())),
+            "{format}: {record}"
+        );
+        let entries = unpack(&pack_tar(file, &bytes, &LIMITS).unwrap());
+        let got: Vec<(String, u16, What, Vec<u8>)> = entries
+            .into_iter()
+            .map(|(e, data)| (e.path, e.mode, e.what, data))
+            .collect();
+        assert_eq!(got, want, "{format}");
+    }
+}
