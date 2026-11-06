@@ -21,9 +21,7 @@ use super::os_err;
 
 /// Where cgroup v2 is mounted.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
-/// Most boxes one root holds; past it `create` is refused with [`Refusal::Full`]. The kernel's own
-/// default bound on descendants is unlimited; this is Hex's, well above a node's useful load.
-pub const MAX_BOXES: usize = 65_536;
+pub use crate::MAX_BOXES;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
 /// kernel delivers to the whole box at once through `cgroup.kill`), and the kill sweep collects: no box
 /// holds more than there are pids ([`PID_MAX_LIMIT`]).
@@ -613,6 +611,22 @@ impl BoxCgroup {
         Ok(())
     }
 
+    /// The most cgroups a walk of this box's subtree meets ([`sweep_budget`]): what the kill's sweep is bounded
+    /// by, and the node's other walks of a box's subtree with it.
+    pub fn subtree_budget(&self) -> Result<usize, Refusal> {
+        sweep_budget(
+            &self.read("cgroup.stat")?,
+            &self.read("cgroup.max.descendants")?,
+        )
+        .ok_or_else(|| Refusal::Os {
+            op: "reading a box's cgroup count",
+            why: format!(
+                "{}: cgroup.stat or cgroup.max.descendants doesn't parse",
+                self.dir.display()
+            ),
+        })
+    }
+
     /// Kills every process in the box. `cgroup.kill` (Linux 5.14) kills the whole subtree in one write,
     /// but signals thread-group *leaders*, so a leaderless group — its leader thread exited while a
     /// non-leader thread lives — survives it and holds the box populated (proven on Linux 7.2.9 and
@@ -627,17 +641,7 @@ impl BoxCgroup {
         if !self.populated()? {
             return Ok(());
         }
-        let budget = sweep_budget(
-            &self.read("cgroup.stat")?,
-            &self.read("cgroup.max.descendants")?,
-        )
-        .ok_or_else(|| Refusal::Os {
-            op: "reading a box's cgroup count",
-            why: format!(
-                "{}: cgroup.stat or cgroup.max.descendants doesn't parse",
-                self.dir.display()
-            ),
-        })?;
+        let budget = self.subtree_budget()?;
         for (dir, pid) in sweep_targets(&self.dir, &FsTree, budget, MAX_SIGNALLED)? {
             sigkill_box_process(&dir, pid)?;
         }

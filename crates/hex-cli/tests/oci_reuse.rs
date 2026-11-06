@@ -1540,6 +1540,7 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
         hex_node::netns::FilesBound::now(hex_node::netns::Pools::root(
             hex_node::sizes::Sizes::now().unwrap(),
         ))
+        .unwrap()
         .own + room,
     ) else {
         eprintln!(
@@ -1800,6 +1801,7 @@ fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path)
     let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::root(
         hex_node::sizes::Sizes::now().unwrap(),
     ))
+    .unwrap()
     .own + 2 * 4
         + 3;
     let Some(_limit) = soft_limit(soft) else {

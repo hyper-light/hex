@@ -78,11 +78,6 @@ const FILES_A_KEPT: u64 = 4;
 const FDS_A_BOX: u64 = 2;
 /// A seed's: its socket and its pidfd.
 const FDS_A_SEED: u64 = 2;
-/// The most exec seeds a node keeps (`seed::default_budget`'s ceiling).
-const EXEC_SEEDS: u64 = 128;
-/// What the agent holds open past those bounds, its listener, its polls and what its threads open for a moment:
-/// a margin, stated rather than measured, well past the few dozen it is.
-const FDS_BESIDE: u64 = 1_024;
 /// A pool's descriptors past what it holds: its refill thread's own namespace, which it goes back to, and the one
 /// it is making.
 const FDS_A_REFILL: u64 = 2;
@@ -181,18 +176,20 @@ fn kept_at_most(sizes: Sizes) -> u64 {
 
 /// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound: the
 /// kept namespaces; each live box's own; the programs its socket watches, a pidfd each, at the node's budget for
-/// them ([`crate::serve::limits`]); the seeds of both pools; the namespaces and the mounts made ahead under `pools`.
-/// The socket's connections aren't among them: each is one of what remains, which the kernel refuses an accept
-/// past (`EMFILE`), the socket then pausing its accepts until one closes (the lead, 2026-11-06).
-fn descriptors_of_the_node(pools: Pools) -> u64 {
+/// them ([`crate::serve::limits`]); the seeds of both pools (the exec seeds at their most, [`crate::seed::most`]);
+/// the namespaces and the mounts made ahead under `pools`; and `beside`, what the agent held open as the bound was
+/// taken (its listener, its polls, its standard streams). The socket's connections aren't among them: each is one
+/// of what remains, which the kernel refuses an accept past (`EMFILE`), the socket then pausing its accepts until
+/// one closes (the lead, 2026-11-06).
+fn descriptors_of_the_node(pools: Pools, beside: u64) -> u64 {
     [
         pools.descriptors(),
         kept_at_most(pools.sizes).saturating_mul(FDS_A_KEPT),
         of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         of(crate::serve::limits(&pools.sizes).programs, 1),
         of(pools.sizes.seeds.get(), FDS_A_SEED),
-        EXEC_SEEDS.saturating_mul(FDS_A_SEED),
-        FDS_BESIDE,
+        of(crate::seed::most(&pools.sizes), FDS_A_SEED),
+        beside,
     ]
     .into_iter()
     .fold(0, u64::saturating_add)
@@ -208,17 +205,18 @@ fn descriptors_of_the_node(pools: Pools) -> u64 {
 pub struct FilesBound {
     /// The soft limit, `None` where it is unlimited.
     pub soft: Option<u64>,
-    /// The node's own descriptors at its bounds, without the files ([`descriptors_of_the_node`]).
+    /// The node's own descriptors at its bounds, without the files ([`descriptors_of_the_node`]), those it held
+    /// as the bound was taken among them.
     pub own: u64,
     /// The namespaces that may hold their files at once.
     pub namespaces: u64,
 }
 
 impl FilesBound {
-    /// The bound under `limit` for a node whose pools are `pools`, an unlimited one holding them for every
-    /// namespace there may be.
-    pub fn of(limit: &rustix::process::Rlimit, pools: Pools) -> Self {
-        let own = descriptors_of_the_node(pools);
+    /// The bound under `limit` for a node whose pools are `pools` and that holds `beside` descriptors past its
+    /// bounds, an unlimited one holding them for every namespace there may be.
+    pub fn of(limit: &rustix::process::Rlimit, pools: Pools, beside: u64) -> Self {
+        let own = descriptors_of_the_node(pools, beside);
         let namespaces = match limit.current {
             None => kept_at_most(pools.sizes),
             Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most(pools.sizes)),
@@ -230,13 +228,33 @@ impl FilesBound {
         }
     }
 
-    /// The bound under this process's descriptor limit now, for a node whose pools are `pools`.
-    pub fn now(pools: Pools) -> Self {
-        Self::of(
-            &rustix::process::getrlimit(rustix::process::Resource::Nofile),
-            pools,
-        )
+    /// The bound under this process's descriptor limit now, for a node whose pools are `pools`, with the
+    /// descriptors it holds now counted ([`open_descriptors`]): learned, not stated (Ada's 2026-11-06 rule).
+    pub fn now(pools: Pools) -> Result<Self, Refusal> {
+        let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+        Ok(Self::of(&limit, pools, open_descriptors(&limit)?))
     }
+}
+
+/// How many descriptors this process holds now: the entries of `/proc/self/fd` (proc(5)), less the one the
+/// listing itself opens. The listing ends within the soft limit's entries, since no process holds more
+/// (getrlimit(2), `RLIMIT_NOFILE`), and refuses by type past it. Linux's alone, as this module is: macOS
+/// and Windows nodes keep no namespaces to bound files for.
+pub fn open_descriptors(limit: &rustix::process::Rlimit) -> Result<u64, Refusal> {
+    let listing = |e| Refusal::os("counting the agent's open descriptors in /proc/self/fd", e);
+    let most = limit.current.unwrap_or(u64::MAX);
+    let mut count = 0u64;
+    for entry in std::fs::read_dir("/proc/self/fd").map_err(listing)? {
+        entry.map_err(listing)?;
+        count = count.saturating_add(1);
+        if count > most.saturating_add(1) {
+            return Err(Refusal::Os {
+                op: "counting the agent's open descriptors in /proc/self/fd",
+                why: format!("more than the soft limit's {most} listed"),
+            });
+        }
+    }
+    Ok(count.saturating_sub(1))
 }
 
 /// A place under the [`FilesBound`], taken before a check opens a namespace's files and given back as it drops

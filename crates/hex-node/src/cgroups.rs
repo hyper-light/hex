@@ -13,7 +13,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
 
 use hex_api::{Bounds, BoxId, BoxOwner, Refusal, Usage};
 use hex_core::cgroup::Baseline;
@@ -40,9 +39,6 @@ use crate::sizes::Sizes;
 /// f27), which the next box would be charged for, so its cgroup goes. 16 MiB sits above the first two
 /// and under the third (the lead, 2026-11-03T04:50Z).
 pub const RESIDUAL: u64 = 16 << 20;
-
-/// How long the remover waits for a cgroup it ended to empty, as [`crate::node::EMPTY_PATIENCE`].
-const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
 /// The device policy a cgroup's own program is under: `None` when it carries none.
 type Policy = Option<Vec<Insn>>;
@@ -981,12 +977,15 @@ fn end_and_remove(cg: &BoxCgroup) -> Result<(), Refusal> {
         return Ok(());
     }
     if cg.populated()? {
+        let killed = std::time::Instant::now();
         cg.kill()?;
-        if !cg.wait_empty(REMOVE_PATIENCE)? {
+        // The same learned wait as a delete's for its box to empty, which this answer teaches too.
+        let (emptied, patience) = crate::node::wait_empty(cg, killed)?;
+        if !emptied {
             return Err(Refusal::Os {
                 op: "removing an idle cgroup",
                 why: format!(
-                    "{} still holds processes {REMOVE_PATIENCE:?} after cgroup.kill",
+                    "{} still holds processes {patience:?} after cgroup.kill",
                     cg.dir().display()
                 ),
             });

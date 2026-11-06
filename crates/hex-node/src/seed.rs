@@ -62,20 +62,20 @@ struct Seed {
     pidfd: OwnedFd,
 }
 
-/// The default seed budget: one per hardware thread, so a node that runs many execs at once rarely
-/// waits, clamped to a range that keeps a laptop's memory small and a big node's seed set bounded. An
-/// idle seed holds little (a `hex` process's pages, shared copy-on-write with the agent).
-fn default_budget() -> usize {
-    std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4)
-        .clamp(4, 128)
+/// The most exec seeds a node keeps on its host (`sizes`; Ada's rule, 2026-11-06): as many as fit in the
+/// node's share for seeds, which are the same `hex __oci-seed` process a create seed is
+/// ([`crate::sizes::Sizes::seeds`], at [`crate::sizes::SEED_BYTES`] each), and no more than the calls its
+/// socket runs at once ([`crate::sizes::Sizes::workers`]), since an exec holds its seed only for its call.
+/// The pool starts none and starts one as an exec finds none idle, so it grows to the execs it has seen at
+/// once from the structural minimum, none, and this is only its ceiling.
+pub(crate) fn most(sizes: &crate::sizes::Sizes) -> usize {
+    sizes.seeds.get().min(sizes.workers)
 }
 
 impl SeedPool {
-    /// A pool that re-execs `exe` as `hex __oci-seed`, up to [`default_budget`] seeds.
-    pub fn new(exe: PathBuf) -> Self {
-        Self::with_budget(exe, default_budget())
+    /// A pool that re-execs `exe` as `hex __oci-seed`, up to [`most`] seeds on the node's host.
+    pub fn new(exe: PathBuf, sizes: &crate::sizes::Sizes) -> Self {
+        Self::with_budget(exe, most(sizes))
     }
 
     /// A pool bounded to `budget` seeds.

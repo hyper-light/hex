@@ -35,7 +35,7 @@ mod other;
 pub use other::Client;
 
 /// Longest a call waits for the node agent's answer, and a send for room in its socket: five times the
-/// agent's own longest wait (a delete's 60 s for its box to empty, `hex_node`'s `EMPTY_PATIENCE`), so
+/// 60 s a delete once waited for its box to empty (learned now, so this is picked until it is too), so
 /// only a wedged agent misses it, and a call to one is refused rather than waited on forever.
 pub const ANSWER_PATIENCE: Duration = Duration::from_secs(300);
 

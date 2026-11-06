@@ -28,9 +28,11 @@ use hex_api::{
 use hex_core::bundle::{self, Bundle, Owner, Place};
 use hex_core::cgroup::Dev;
 use hex_core::netns;
+use hex_core::patience::Patience;
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
+use hex_core::wire;
 use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
@@ -57,27 +59,56 @@ use crate::turns::{Turn, Turns};
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
 const OVERLAYFS_SUPER_MAGIC: i128 = 0x794c_7630;
 
-/// How long [`Runtime::delete`] waits for a box to empty after killing it before it reports the
-/// kernel is wedged. A `cgroup.kill` empties a box in milliseconds; a minute is far past any real
-/// delay, so missing it is a fault to report, not a limit to raise (CLAUDE.md §4).
-pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
+/// How long a killed box takes to empty, from its kill (decision 9; Ada's 2026-11-06 rule, the lead's
+/// failure-bound rule): twice the slowest emptying recorded by this process's nodes, from every delete, scrub
+/// and removal, since all wait on one kernel. A wait that runs out is a fault to report (the kernel is
+/// wedged), not a limit to raise (CLAUDE.md §4). Its programs' reaping and its init's end, which a box's
+/// emptying waits on, share the wait. The calibration read is the first emptying a node waits for, unbounded:
+/// a recovery's scrub of a stray slot at start where there is one, else the first delete's. An emptying made
+/// only to calibrate would be of a cgroup with nothing in it, which empties at once and so would arm a bound
+/// no kill of a running box meets.
+static EMPTYING: Mutex<Patience> = Mutex::new(Patience::new());
+
+/// What is left at the time of asking of the wait for a box killed at `killed` to empty ([`EMPTYING`]):
+/// `Duration::MAX`, unbounded, while it is uncalibrated.
+pub(crate) fn empty_patience(killed: Instant) -> Duration {
+    EMPTYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deadline()
+        .map_or(Duration::MAX, |wait| wait.saturating_sub(killed.elapsed()))
+}
+
+/// Waits for `cg`, killed at `killed`, to empty within the learned wait ([`EMPTYING`]), which it teaches
+/// when it empties: the time from its kill. Says whether it emptied, and the wait it had from the kill.
+pub(crate) fn wait_empty(cg: &BoxCgroup, killed: Instant) -> Result<(bool, Duration), Refusal> {
+    let learned = || {
+        EMPTYING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let wait = learned().deadline();
+    let emptied = cg.wait_empty(empty_patience(killed))?;
+    if emptied {
+        learned().answered(killed.elapsed());
+    }
+    Ok((emptied, wait.unwrap_or(Duration::MAX)))
+}
 
 /// How long [`Runtime::delete`] spends taking a box's directories apart before it refuses, leaving
 /// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
 
-/// How long a create or delete of a box waits for the one under way for the same box before it refuses:
-/// a create or delete takes milliseconds, and one that ends a box waits at most [`EMPTY_PATIENCE`] for it
-/// to empty and [`REMOVE_PATIENCE`] for its directories to go, so past their sum is a fault to report,
-/// not a limit to raise (CLAUDE.md §4).
-pub const TURN_PATIENCE: Duration = EMPTY_PATIENCE.saturating_add(REMOVE_PATIENCE);
-
-/// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
-/// runtime directory is shared with every node of this user on the host, so its entries are theirs as
-/// well as this node's. A bound on a restart's wait, as [`REMOVE_PATIENCE`] is on a delete's, not a
-/// guess at a directory's size (CLAUDE.md §2, §4).
-pub const LIST_PATIENCE: Duration = Duration::from_secs(60);
+/// How long [`Node::recover`] spends on each entry of a directory it lists for the parts of boxes before it
+/// refuses: the runtime directory is shared with every node of this user on the host, so its entries are
+/// theirs as well as this node's, and a listing's time grows with them. So the sample is a listing's time per
+/// entry, and the wait for a listing's first `k` entries is `k` times twice the slowest recorded (decision 9;
+/// Ada's 2026-11-06 rule, the lead's failure-bound rule), refused by type past it (CLAUDE.md §2, §4). The
+/// calibration read is recovery's first listing, the state directory's, unbounded but for its entries, which
+/// are finite: a directory listed only to calibrate would be an empty one, whose time is the call's own and no
+/// entry's, so it would measure nothing the listings after it spend.
+static LISTING: Mutex<Patience> = Mutex::new(Patience::new());
 
 /// A point of an `oci` box's create where a debug build's node, once armed ([`Node::with_crash_point`]),
 /// ends its own process as a kill there would: T-T7.1.2's crash test kills the real agent at the points
@@ -176,8 +207,10 @@ pub struct Node {
     /// step 5), so this is what tells a box being made: a second create of its id, or a delete, waits
     /// for the create under way and then finds the box made or not, rather than make or remove parts at
     /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
-    /// at once, the node's box budget, a wait at most [`TURN_PATIENCE`]; past either the call is refused
-    /// by type, a create past the budget as [`Refusal::Full`] ([`create_turn`]).
+    /// at once, the node's box budget, a wait learned from how long creates and deletes held their turns
+    /// (decision 9: twice the longest held; the first create's or delete's is the calibration, and a wait
+    /// before it lasts until the turn is let go); past either the call is refused by type, a create past
+    /// the budget as [`Refusal::Full`] ([`create_turn`]).
     turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
@@ -263,7 +296,7 @@ impl Node {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
         };
-        let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools), sizes)?;
+        let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools)?, sizes)?;
         let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
@@ -321,7 +354,6 @@ impl Node {
             turns: Turns::new(
                 "making or removing a box",
                 "creates and deletes under way",
-                TURN_PATIENCE,
                 MAX_BOXES,
             ),
             #[cfg(debug_assertions)]
@@ -473,7 +505,7 @@ impl Node {
         self.pools.netns = bound;
         self.netns = Netns::start(
             bound,
-            crate::netns::FilesBound::now(self.pools),
+            crate::netns::FilesBound::now(self.pools)?,
             self.pools.sizes,
         )?;
         Ok(self)
@@ -497,7 +529,7 @@ impl Node {
         // with the bound they leave.
         self.netns = Netns::start(
             self.pools.netns,
-            crate::netns::FilesBound::now(self.pools),
+            crate::netns::FilesBound::now(self.pools)?,
             self.pools.sizes,
         )?;
         Ok(self)
@@ -931,15 +963,15 @@ impl Node {
         // removed first, so nothing of them is left (T-T7.1.2).
         for n in recovery::strays(&seen, &slots) {
             if let Some(cg) = self.oci_boxes.slot(n) {
+                let killed = Instant::now();
                 cg.kill()?;
-                if !cg.wait_empty(EMPTY_PATIENCE)? {
-                    return Err(Refusal::Os {
-                        op: "removing an idle cgroup",
-                        why: format!(
-                            "slot {n} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
-                            survivors(&cg)
-                        ),
-                    });
+                let (emptied, patience) = wait_empty(&cg, killed)?;
+                if !emptied {
+                    let op = "removing an idle cgroup";
+                    let mut why =
+                        format!("slot {n} still holds processes {patience:?} after cgroup.kill:");
+                    why.push_str(&survivors(&cg, why_room(op, &why)));
+                    return Err(Refusal::Os { op, why });
                 }
                 cg.remove()?;
             }
@@ -1058,19 +1090,21 @@ impl Node {
         if let Ending::Init(init) = ending
             && init.pid_namespace
         {
+            let killed = Instant::now();
             init.kill()?;
-            self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
-            if !init.ended_within(EMPTY_PATIENCE)? {
+            self.supervisor.reap_programs(id, empty_patience(killed))?;
+            if !init.ended_within(empty_patience(killed))? {
                 return Err(Refusal::Os {
                     op: "emptying a box",
                     why: format!(
-                        "box {id}'s init still runs {EMPTY_PATIENCE:?} after SIGKILL through its pidfd"
+                        "box {id}'s init still runs {:?} after SIGKILL through its pidfd",
+                        killed.elapsed()
                     ),
                 });
             }
             // The init leaves its cgroup at its last switch, after its pidfd reads as ended (Linux v6.19,
             // kernel/sched/core.c:5156), so a cgroup that holds nothing else empties without a kill.
-            if !cg.populated()? || (!outsiders(cg, init.pid()) && cg.wait_empty(EMPTY_PATIENCE)?) {
+            if !cg.populated()? || (!outsiders(cg, init.pid()) && wait_empty(cg, killed)?.0) {
                 self.cgroups.ended_through_init();
                 return Ok(false);
             }
@@ -1078,19 +1112,18 @@ impl Node {
         } else {
             self.cgroups.killed();
         }
+        let killed = Instant::now();
         cg.kill()?;
         // The kill reaches every process in the box; now reap the exec'd programs the agent watches for
         // it, so an `oci` box's init — which the kernel holds in its pid-namespace teardown until the
         // programs in that namespace are reaped — can finish exiting and the box empty.
-        self.supervisor.reap_programs(id, EMPTY_PATIENCE)?;
-        if !cg.wait_empty(EMPTY_PATIENCE)? {
-            return Err(Refusal::Os {
-                op: "emptying a box",
-                why: format!(
-                    "box {id} still holds processes {EMPTY_PATIENCE:?} after cgroup.kill:{}",
-                    survivors(cg)
-                ),
-            });
+        self.supervisor.reap_programs(id, empty_patience(killed))?;
+        let (emptied, patience) = wait_empty(cg, killed)?;
+        if !emptied {
+            let op = "emptying a box";
+            let mut why = format!("box {id} still holds processes {patience:?} after cgroup.kill:");
+            why.push_str(&survivors(cg, why_room(op, &why)));
+            return Err(Refusal::Os { op, why });
         }
         Ok(true)
     }
@@ -1413,7 +1446,7 @@ impl Node {
                 std::env::current_exe().map_err(|e| Refusal::os("finding the hex binary", e))?
             }
         };
-        let _ = self.seeds.set(SeedPool::new(exe));
+        let _ = self.seeds.set(SeedPool::new(exe, &self.pools.sizes));
         self.seeds
             .get()
             .ok_or_else(|| Refusal::Broken("the exec seed pool wasn't built".to_owned()))
@@ -1705,20 +1738,41 @@ impl crate::serve::Host for Node {
     }
 }
 
+/// What a refusal named `op` may say past `said`, its reason so far, for the answer carrying it to fit
+/// one message of the node's socket: [`wire::MAX_MESSAGE`] less the header ([`wire::HEADER_BYTES`]),
+/// the refusal's tag byte and its two strings' `u32` lengths (`hex_core::wire`'s encoding of
+/// [`Refusal::Os`]), `op` and `said`. Past it the socket would answer the call's refusal with another,
+/// losing what it named (CLAUDE.md §3).
+fn why_room(op: &str, said: &str) -> usize {
+    // A tag byte and two u32 lengths.
+    const TAG_AND_LENGTHS: usize = 9;
+    wire::MAX_MESSAGE
+        .saturating_sub(wire::HEADER_BYTES)
+        .saturating_sub(TAG_AND_LENGTHS)
+        .saturating_sub(op.len())
+        .saturating_sub(said.len())
+}
+
 /// What a box still holds when a delete can't empty it: each surviving process with its command,
-/// state and parent, so the refusal names what is stuck, not only that something is (§3). Bounded to a
-/// few: enough to see what it is. A descendant cgroup's are named under its path. `cgroup.procs`
-/// leaves out a process whose leader has ended while another of its threads hasn't (Linux v6.19,
-/// `kernel/cgroup/cgroup.c:5112-5121`), so with no process listed the box's threads are named
-/// instead, each with its process, state and where it waits.
-fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
+/// state and parent, so the refusal names what is stuck, not only that something is (§3). As many as
+/// fit in `room` bytes ([`why_room`]), so the refusal reaches its caller whole. A descendant cgroup's are
+/// named under its path. `cgroup.procs` leaves out a process whose leader has ended while another of its
+/// threads hasn't (Linux v6.19, `kernel/cgroup/cgroup.c:5112-5121`), so with no process listed the box's
+/// threads are named instead, each with its process, state and where it waits.
+fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup, room: usize) -> String {
+    const NO_PROCESS: &str = " (no process listed, only threads:)";
     let root = cg.dir().to_path_buf();
     let (mut out, mut threads) = (String::new(), String::new());
+    let thread_room = room.saturating_sub(NO_PROCESS.len());
+    // Where the count can't be read, the box's own cgroup alone, which is always there.
+    let walk = cg.subtree_budget().unwrap_or(1);
     let mut queue = vec![root.clone()];
     let mut dirs_seen = 0usize;
-    // A flat walk of the box's cgroup subtree (CLAUDE.md §11), bounded in cgroups and pids (§2).
+    // A flat walk of the box's cgroup subtree (CLAUDE.md §11), bounded in cgroups as the kill sweep is
+    // (its `subtree_budget`, from its `cgroup.stat`, past which a delete is refused anyway) and in what the text holds
+    // (§2).
     while let Some(dir) = queue.pop() {
-        if dirs_seen >= 256 {
+        if dirs_seen >= walk || (out.len() >= room && threads.len() >= thread_room) {
             break;
         }
         dirs_seen = dirs_seen.saturating_add(1);
@@ -1729,11 +1783,7 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| ".".to_owned());
         if let Ok(text) = fs::read_to_string(dir.join("cgroup.procs")) {
-            for pid in text
-                .lines()
-                .filter_map(|l| l.trim().parse::<u32>().ok())
-                .take(16)
-            {
+            for pid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
                 let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                     .map(|s| s.trim().to_owned())
                     .unwrap_or_default();
@@ -1745,17 +1795,15 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
                         Some((f.next()?.to_owned(), f.next()?.to_owned()))
                     })
                     .unwrap_or_default();
-                out.push_str(&format!(
-                    " [{rel}/{pid} {comm:?} state {state} ppid {ppid}]"
-                ));
+                let named = format!(" [{rel}/{pid} {comm:?} state {state} ppid {ppid}]");
+                if out.len().saturating_add(named.len()) > room {
+                    break;
+                }
+                out.push_str(&named);
             }
         }
         if let Ok(text) = fs::read_to_string(dir.join("cgroup.threads")) {
-            for tid in text
-                .lines()
-                .filter_map(|l| l.trim().parse::<u32>().ok())
-                .take(16)
-            {
+            for tid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
                 let status = fs::read_to_string(format!("/proc/{tid}/status")).unwrap_or_default();
                 let field = |name: &str| {
                     status
@@ -1767,16 +1815,23 @@ fn survivors(cg: &hex_runtime::linux::cgroup::BoxCgroup) -> String {
                 let wchan = fs::read_to_string(format!("/proc/{tid}/wchan"))
                     .map(|s| s.trim().to_owned())
                     .unwrap_or_default();
-                threads.push_str(&format!(
+                let named = format!(
                     " [{rel}/{tid} of {} {:?} state {} wchan {wchan}]",
                     field("Tgid:"),
                     field("Name:"),
                     field("State:")
-                ));
+                );
+                if threads.len().saturating_add(named.len()) > thread_room {
+                    break;
+                }
+                threads.push_str(&named);
             }
         }
         if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten().take(256) {
+            for entry in entries.flatten() {
+                if dirs_seen.saturating_add(queue.len()) >= walk {
+                    break;
+                }
                 let path = entry.path();
                 if path.is_dir() {
                     queue.push(path);
@@ -1810,7 +1865,7 @@ enum Ending<'a> {
 /// A create's turn for box `id` ([`Node::turns`]): past the turns' bound, [`MAX_BOXES`] creates and deletes at once,
 /// the node's box budget, the create is refused as [`Refusal::Full`], as the node refuses a box past its budget
 /// (CLAUDE.md §2; the bound step 6's claim held creates to). A wait for a create or delete of the same box is refused
-/// past [`TURN_PATIENCE`] as [`Turns::take`] refuses it.
+/// past its learned patience as [`Turns::take`] refuses it.
 fn create_turn<'a>(turns: &'a Turns, id: &BoxId) -> Result<Turn<'a>, Refusal> {
     turns.take(id).map_err(|e| match e {
         Refusal::Exhausted { bound, .. } => Refusal::Full(bound),
@@ -1829,22 +1884,38 @@ fn slots_in(root: &BoxRoot) -> Result<Vec<u64>, Refusal> {
     Ok(slots)
 }
 
-/// Most cgroups and threads [`outsiders`] reads: past either, it says there are, so the box is ended by
-/// `cgroup.kill` as before.
-const OUTSIDERS_DIRS: usize = 256;
-const OUTSIDERS_THREADS: usize = 4096;
+/// The threads there may be on the host: the kernel's `pid_max` (Documentation/admin-guide/sysctl/kernel.rst,
+/// "pid_max"), read at runtime, since every thread holds a pid. [`outsiders`] reads at most this many, so its
+/// walk ends by what the box holds, never by a picked count; `None` where it can't be read, and then the walk
+/// takes the box for holding outsiders, ending it by `cgroup.kill` as before.
+fn pid_max() -> Option<usize> {
+    static PID_MAX: OnceLock<Option<usize>> = OnceLock::new();
+    *PID_MAX.get_or_init(|| {
+        fs::read_to_string("/proc/sys/kernel/pid_max")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    })
+}
 
 /// Whether `cg`'s subtree holds a thread of a live process other than `init`, whose own threads may
 /// stay listed until each is gone: once a pid namespace's init has ended, the namespace's processes
 /// have all been released (Linux v6.19, kernel/pid_namespace.c:263-265), so such a thread is outside it
 /// (research f47). A listed thread whose process is gone from /proc is on its way out. A flat walk,
-/// bounded in cgroups and threads (CLAUDE.md §11, §2).
+/// bounded in cgroups and threads (CLAUDE.md §11, §2): in cgroups as the kill sweep is (hex-runtime's
+/// `subtree_budget`, from its `cgroup.stat`, past which a delete is refused anyway), in threads by the pids the host has
+/// ([`pid_max`]). Past either it says there are, so the box is ended by `cgroup.kill` as before.
 fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
+    let Some(most_threads) = pid_max() else {
+        return true;
+    };
+    let Ok(walk) = cg.subtree_budget() else {
+        return true;
+    };
     let mut queue = vec![cg.dir().to_path_buf()];
     let (mut dirs, mut threads) = (0usize, 0usize);
     while let Some(dir) = queue.pop() {
         dirs = dirs.saturating_add(1);
-        if dirs > OUTSIDERS_DIRS {
+        if dirs > walk {
             return true;
         }
         let Ok(text) = fs::read_to_string(dir.join("cgroup.threads")) else {
@@ -1852,7 +1923,7 @@ fn outsiders(cg: &BoxCgroup, init: i32) -> bool {
         };
         for tid in text.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
             threads = threads.saturating_add(1);
-            if threads > OUTSIDERS_THREADS {
+            if threads > most_threads {
                 return true;
             }
             let tgid = fs::read_to_string(format!("/proc/{tid}/status"))
@@ -1909,7 +1980,8 @@ fn why_text(why: &Why) -> String {
 
 /// The box ids named by the directories in `dir` whose names start with `prefix`, the rest of each name
 /// the id, or none when `dir` isn't there: a box's parts there are directories, so any other entry is no
-/// box's. The listing ends at [`LIST_PATIENCE`], refused past it by type.
+/// box's. The listing ends at the wait learned from the listings before it, for as many entries as it has
+/// listed ([`LISTING`]), refused past it by type.
 fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
     let listing = |e| Refusal::os("listing a directory for boxes' parts", e);
     let entries = match fs::read_dir(dir) {
@@ -1917,15 +1989,26 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(e) => return Err(listing(e)),
     };
-    let deadline = Instant::now().checked_add(LIST_PATIENCE);
+    let learned = || {
+        LISTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let per_entry = learned().deadline();
+    let began = Instant::now();
+    let mut listed = 0u32;
     let mut ids = BTreeSet::new();
     for entry in entries {
-        if deadline.is_none_or(|d| Instant::now() >= d) {
+        listed = listed.saturating_add(1);
+        if let Some(per_entry) = per_entry
+            && began.elapsed() > per_entry.saturating_mul(listed)
+        {
             return Err(Refusal::Os {
                 op: "listing a directory for boxes' parts",
                 why: format!(
-                    "{} was still being listed after {LIST_PATIENCE:?}",
-                    dir.display()
+                    "{} took {:?} for {listed} entries, past twice the slowest a listing has taken an entry",
+                    dir.display(),
+                    began.elapsed()
                 ),
             });
         }
@@ -1942,6 +2025,12 @@ fn ids_in(dir: &Path, prefix: &str) -> Result<BTreeSet<BoxId>, Refusal> {
             ids.insert(id);
         }
     }
+    learned().answered(
+        began
+            .elapsed()
+            .checked_div(listed.max(1))
+            .unwrap_or_default(),
+    );
     Ok(ids)
 }
 
@@ -2105,6 +2194,38 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
 mod tests {
     use super::*;
 
+    /// CLAUDE.md §3 (Ada's 2026-11-06 rule): what a refusal names of a box's survivors is bounded by the wire,
+    /// derived, not picked. Do: fill a delete's refusal to its room past what it says first, then one byte past
+    /// it. Expect: the first answer is one message of the node's socket; the second is refused as oversized.
+    #[test]
+    fn a_refusal_filled_to_its_room_fits_one_message() {
+        let op = "emptying a box";
+        let said = "box b still holds processes 1s after cgroup.kill:";
+        let room = why_room(op, said);
+        let fits = |n: usize| {
+            let why = format!("{said}{}", "x".repeat(n));
+            let refused = wire::Answer::Refused(Refusal::Os { op, why });
+            wire::answer(wire::FIRST, u64::MAX, &refused, wire::MAX_MESSAGE).is_ok()
+        };
+        assert!(fits(room), "a refusal filled to its room of {room} fits");
+        assert!(!fits(room + 1), "one byte past its room doesn't");
+    }
+
+    /// Decision 9 (Ada's 2026-11-06 rule, the lead's failure-bound rule; T-T7.1.2): a recovery's listing teaches
+    /// the next its wait. Do: list a directory holding two boxes' parts and a file. Expect: the two ids, and the
+    /// listings' slowest time per entry recorded, so the next listing's bound is armed (this one, or one before,
+    /// was its calibration read).
+    #[test]
+    fn a_listing_teaches_the_next_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("hex-a")).unwrap();
+        fs::create_dir(dir.path().join("hex-b")).unwrap();
+        fs::write(dir.path().join("hex-c"), b"").unwrap();
+        let ids = ids_in(dir.path(), "hex-").unwrap();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(LISTING.lock().unwrap().slowest().is_some());
+    }
+
     /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
     /// never queued. Do: turns bounded at two, two boxes' turns held, a third box's create turn asked. Expect:
     /// `Full(2)`; with one let go, the third box's turn given.
@@ -2113,7 +2234,6 @@ mod tests {
         let turns = Turns::new(
             "making or removing a box",
             "creates and deletes under way",
-            TURN_PATIENCE,
             2,
         );
         let id = |n: &str| BoxId::new(n).unwrap();

@@ -35,7 +35,6 @@ use std::sync::Arc;
 #[cfg(all(debug_assertions, target_os = "linux"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use hex_api::{BoxId, Refusal};
 use hex_core::record::BoxRecord;
@@ -59,16 +58,10 @@ pub const SHARDS: usize = 64;
 /// The bits of a box id's hash that name its shard, [`SHARDS`] of them.
 const SHARD_MASK: u64 = 0x3f;
 
-/// How long a change to a box's record waits for the change of the same box before it to finish:
-/// that one's write and its fsyncs, which take milliseconds. A minute is far past any real delay, so
-/// missing it is a fault to report (a disk that has stopped answering), not a limit to raise
-/// (CLAUDE.md §4).
-pub const WRITE_PATIENCE: Duration = Duration::from_secs(60);
-
 /// Most boxes whose records are being changed at once: one for each box the node can hold, its box
-/// budget (hex-runtime's `MAX_BOXES`), so the changes of the boxes a node holds never reach it. Past it
+/// budget ([`hex_runtime::MAX_BOXES`]), so the changes of the boxes a node holds never reach it. Past it
 /// a change is refused by type ([`Refusal::Exhausted`]), never kept waiting (CLAUDE.md §2).
-pub const TURNS: usize = 65_536;
+pub const TURNS: usize = hex_runtime::MAX_BOXES;
 
 /// Box records, one file each, named `<id>.json`, in the place each belongs ([`Store`]).
 #[derive(Debug, Clone)]
@@ -131,23 +124,28 @@ impl Store {
                 .and_then(|()| owner_only(&shard))
                 .map_err(|e| Refusal::os("making a shard of the runtime record directory", e))?;
         }
-        Ok(Self {
+        let calibration = calibrate(disk)?;
+        let store = Self {
             disk: disk.to_owned(),
             run: run.to_owned(),
             #[cfg(target_os = "linux")]
             disk_fd: Arc::new(open_directory(disk)?),
             #[cfg(target_os = "linux")]
             run_fd: Arc::new(open_directory(run)?),
+            // A change waits for the change of the same box before it: that one's write and its fsyncs.
+            // How long is learned from the changes made (decision 9), calibrated as the store opens, so a disk
+            // that has stopped answering is reported as a fault, never waited on for ever (CLAUDE.md §4).
             turns: Arc::new(Turns::new(
                 "changing a box's record",
                 "record changes under way",
-                WRITE_PATIENCE,
                 TURNS,
             )),
             synced: Arc::default(),
             #[cfg(all(debug_assertions, target_os = "linux"))]
             crash_before_write: Arc::default(),
-        })
+        };
+        store.turns.calibrate(calibration);
+        Ok(store)
     }
 
     /// Arms this store's one crash point ([`Store::crash_before_write`]): a debug build's node ends its
@@ -159,7 +157,8 @@ impl Store {
     }
 
     /// Box `id`'s turn to change its record: waits for a change of the same box under way, never for
-    /// another box's, and refuses past [`WRITE_PATIENCE`], or past [`TURNS`] boxes changed at once.
+    /// another box's, and refuses past the wait the store's changes taught it, or past [`TURNS`] boxes
+    /// changed at once.
     fn claim(&self, id: &BoxId) -> Result<Turn<'_>, Refusal> {
         self.turns.take(id)
     }
@@ -466,6 +465,29 @@ impl Store {
         self.synced.dirs.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// The store's calibration read for its turns' wait (decision 9): one write as a durable record's is made, to a
+/// file of its own in the state directory `disk` (written, fsynced, renamed into place, the directory fsynced),
+/// timed and removed, as the store opens, off every create's path. A durable write is the slowest a turn holds,
+/// so the wait it arms is twice the slowest kind of change. Its name is no record's (`<id>.json`), so a crash
+/// mid-write leaves nothing recovery reads as one, and the next open writes over it.
+fn calibrate(disk: &Path) -> Result<std::time::Duration, Refusal> {
+    let calibrating = |e| Refusal::os("calibrating the record store's writes", e);
+    let (temp, file) = (disk.join(".calibration.tmp"), disk.join(".calibration"));
+    let began = std::time::Instant::now();
+    let mut f = File::create(&temp).map_err(calibrating)?;
+    f.write_all(b"{}\n")
+        .and_then(|()| f.sync_all())
+        .map_err(calibrating)?;
+    drop(f);
+    fs::rename(&temp, &file).map_err(calibrating)?;
+    File::open(disk)
+        .and_then(|d| d.sync_all())
+        .map_err(calibrating)?;
+    let took = began.elapsed();
+    fs::remove_file(&file).map_err(calibrating)?;
+    Ok(took)
 }
 
 /// Retain a close-on-exec directory descriptor for relative record writes and durable renames.
@@ -819,11 +841,14 @@ mod tests {
     /// Goal 5 plan step 2: writes of two boxes never wait on each other; two of one box do. While one
     /// box's turn is held, as its write holds it across the fsyncs, 31 other boxes' records are written
     /// from 31 threads at once, none of them waiting; a second write of the held box waits, its record
-    /// not written, until the turn is let go, and then is.
+    /// not written, until the turn is let go, and then is. The test holds the turn as long as it takes to
+    /// see the second write wait, so the turns are calibrated with the test's own patience, within which
+    /// the hold ends (decision 9: a hold past twice the slowest recorded is a fault the store refuses).
     #[test]
     fn writes_of_two_boxes_never_wait_on_each_other_and_of_one_box_do() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path());
+        store.turns.calibrate(hex_api::conformance::PATIENCE);
         let held = record("held");
         let turn = store.claim(&held.spec.id).unwrap();
         let (done, written) = std::sync::mpsc::channel();
@@ -846,7 +871,7 @@ mod tests {
             let second = s.spawn(|| store.put(&held));
             let deadline = Instant::now() + hex_api::conformance::PATIENCE;
             while store.waited() == 0 && Instant::now() < deadline {
-                std::thread::park_timeout(Duration::from_millis(1));
+                std::thread::yield_now();
             }
             assert_eq!(store.waited(), 1, "the second write of the held box waits");
             assert_eq!(
@@ -883,7 +908,8 @@ mod tests {
         store.put(&past).unwrap();
     }
 
-    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget.
+    /// Doc-truth (CLAUDE.md §6): the bound on record changes under way is the node's box budget, the one
+    /// the cgroup root refuses past.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_turns_bound_is_the_box_budget() {
@@ -1013,7 +1039,8 @@ mod tests {
 
     /// Goal 5 extended step 6: the runtime directory's records are spread over its shards by their box's id, each
     /// where [`runtime_record`] says, none in the directory itself, so the boxes made and deleted at once rarely
-    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards.
+    /// take one directory's lock; got, listed and removed from there. Non-vacuity: 256 ids reach most shards,
+    /// at least [`shards_256_ids_reach`] of them.
     #[test]
     fn records_are_spread_over_the_shards_by_their_ids() {
         let dir = tempfile::tempdir().unwrap();
@@ -1036,9 +1063,10 @@ mod tests {
             .iter()
             .filter_map(|id| runtime_record(&run, id).parent().map(Path::to_owned))
             .collect();
+        let least = shards_256_ids_reach();
         assert!(
-            used.len() >= 48,
-            "256 ids took {} of the shards",
+            used.len() >= least,
+            "256 ids took {} of the shards, fewer than {least}",
             used.len()
         );
         assert_eq!(store.all().unwrap().len(), 256);
@@ -1048,6 +1076,36 @@ mod tests {
             assert!(!runtime_record(&run, id).exists());
         }
         assert!(sharded(&run).is_empty());
+    }
+
+    /// The fewest of the [`SHARDS`] shards 256 ids reach but once in 2^32 sets of ids, were the id hash
+    /// uniform. Each shard is missed by all 256 with chance (63/64)^256, so the missed shards number μ =
+    /// 64·(63/64)^256 ≈ 1.14 on average and the ids reach 64·(1 − (63/64)^256) ≈ 62.9. The misses are
+    /// negatively associated (balls in bins: Dubhashi and Ranjan, "Balls and Bins: A Study in Negative
+    /// Dependence", Random Structures & Algorithms 13(2), 1998, §2), so Chernoff's bound holds for their count:
+    /// P(misses ≥ t) ≤ (e^δ / (1+δ)^(1+δ))^μ with t = (1+δ)μ. This is the least t that bound puts under 2^-32,
+    /// taken from [`SHARDS`]. Derived, not picked: a hash that spreads ids worse than chance fails it.
+    fn shards_256_ids_reach() -> usize {
+        let shards = SHARDS as f64;
+        let mu = shards * ((shards - 1.0) / shards).powi(256);
+        let tail = |t: f64| {
+            let delta = t / mu - 1.0;
+            mu * (delta - (1.0 + delta) * (1.0 + delta).ln())
+        };
+        let misses = (1..SHARDS)
+            .find(|&t| t as f64 > mu && tail(t as f64) <= -32.0 * std::f64::consts::LN_2)
+            .unwrap();
+        SHARDS - misses
+    }
+
+    /// Doc-truth for the bound above (CLAUDE.md §6): do derive it; expect the ids' average reach, about 62.9 of
+    /// 64, and a least reach of 50: 14 shards missed is the first count Chernoff's bound puts under 2^-32.
+    #[test]
+    fn the_shards_256_ids_reach_follow_from_the_hash_being_uniform() {
+        let shards = SHARDS as f64;
+        let reach = shards * (1.0 - ((shards - 1.0) / shards).powi(256));
+        assert!((reach - 62.86).abs() < 0.01, "{reach}");
+        assert_eq!(shards_256_ids_reach(), 50);
     }
 
     /// Goal 5 extended step 6, T-T7.1.2 across the shards' upgrade: a node before them kept the runtime
