@@ -5,11 +5,12 @@
 
 use std::cell::Cell;
 use std::io::Write as _;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use rustix::event::{PollFd, PollFlags};
 use rustix::fs::OFlags;
 
 use crate::linux::oci::OciError;
@@ -130,6 +131,20 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
         .spawn()
         .map_err(|e| failed(format!("{:?} didn't start: {e}", hook.path)))?;
     let limit = timeout(op, hook)?;
+    // Its pidfd turns readable once it has ended (pidfd_open(2)); its pid stays its own until it's reaped here.
+    let pidfd = match i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or(rustix::io::Errno::SRCH)
+        .and_then(|pid| rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()))
+    {
+        Ok(pidfd) => pidfd,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(OciError::os("pidfd_open of a hook", e));
+        }
+    };
     // The state goes in as the hook takes it, never blocking: a hook that doesn't read its stdin can't hold
     // the runtime past its timeout.
     let mut stdin = child.stdin.take();
@@ -160,18 +175,42 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
             Some(status) => return Err(failed(format!("{:?} exited {status}", hook.path))),
             None => {
                 // A timeout past what an Instant holds is no earlier deadline.
-                if deadline.is_some_and(|d| Instant::now() >= d) {
+                let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+                if left.is_some_and(|l| l.is_zero()) {
                     let _ = child.kill();
+                    let _ = child.wait();
                     return Err(failed(format!(
                         "{:?} outlived its {limit:?} timeout",
                         hook.path
                     )));
                 }
-                // park_timeout (not the disallowed thread::sleep) yields the CPU between polls.
-                std::thread::park_timeout(Duration::from_millis(5));
-                woke();
+                wait_on(&pidfd, stdin.as_ref(), left)?;
             }
         }
+    }
+}
+
+/// Waits until the hook behind `pidfd` has ended, its stdin `stdin` (while the state isn't all in) takes more, or
+/// `left` passes (`None`: no deadline).
+fn wait_on(
+    pidfd: &OwnedFd,
+    stdin: Option<&std::process::ChildStdin>,
+    left: Option<Duration>,
+) -> Result<(), OciError> {
+    let ts = left.map(|left| rustix::event::Timespec {
+        tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(left.subsec_nanos()),
+    });
+    let mut fds = vec![PollFd::new(pidfd, PollFlags::IN)];
+    if let Some(pipe) = stdin {
+        fds.push(PollFd::new(pipe, PollFlags::OUT));
+    }
+    match rustix::event::poll(&mut fds, ts.as_ref()) {
+        Ok(_) | Err(rustix::io::Errno::INTR) => {
+            woke();
+            Ok(())
+        }
+        Err(e) => Err(OciError::os("waiting for a hook", e)),
     }
 }
 
