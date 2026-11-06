@@ -3,22 +3,19 @@
 //!
 //! **Workloads and nodes are recorded data** (`hex-sim.md` H10). [`Study::generate`] takes a recorded
 //! workload, G2's of record (Huawei Cloud's Region 5, day 30, `bench/sched/huawei-r5-day30.trace`, and
-//! its `.fleet` twin), and draws each job as one of its launches, uniformly: the launch's owner, its
-//! kind (an OCI container, a Firecracker microVM or a Shards microVM, given by G2's rule: a kind per
-//! owner, in thirds of the day's launches) and its need, its kind's overhead included as the trace
-//! states it (Shards' a 5 MiB stand-in until Shards' own is measured). The study's nodes repeat the
-//! recorded cluster's node rows in order, each with its capacity and the kinds it runs: ten EC2
-//! m5d.metal hosts running all three kinds in the main trace, Hex's own fleet's Linux, Windows and
-//! macOS hosts in the `.fleet` one. A job is placed only on a node that runs its kind.
+//! its `.fleet` twin), and runs it as it is: its node rows, each with its capacity and the kinds it
+//! runs (ten EC2 m5d.metal hosts running all three kinds in the main trace, Hex's own fleet's Linux,
+//! Windows and macOS hosts in the `.fleet` one), and every launch with its owner, its kind (an OCI
+//! container, a Firecracker microVM or a Shards microVM, given by G2's rule: a kind per owner, in
+//! thirds of the day's launches) and its need, its kind's overhead included as the trace states it. A
+//! job is placed only on a node that runs its kind.
 //!
-//! Each job talks to a home, the node holding its data or service, and makes its round
-//! trips to it in sequence, each after a step of compute: it runs `round_trips × (step + RTT)`, the
-//! RTT the WAN's true one from the node it was placed on to its home. Agent sessions are such
-//! workloads: TraceLab counts 101.4 tool calls a session on average, p50 25 and p99 1,438
-//! (`docs/research/scheduler/agentic-workloads.md` §1, its [5]), and tool calls are 30-85% of
-//! production requests' latency (its [34]); round trips are drawn log-normal through that p50 and p99.
-//! Homes sit in a region drawn uniformly, or skewed, half of them in the first region and the rest
-//! spread evenly, so that proximity has to choose between near and free.
+//! Each job talks to a home, the node holding its data or service, and makes its round trips to it,
+//! their waits each the WAN's true RTT from the node it was placed on to its home, added to its
+//! compute. Agent sessions are such workloads: TraceLab counts 101.4 tool calls a session on average,
+//! p50 25 and p99 1,438 (`docs/research/scheduler/agentic-workloads.md` §1, its [5]), and tool calls
+//! are 30-85% of production requests' latency (its [34]); round trips are drawn log-normal through
+//! that p50 and p99. Homes sit in a region drawn uniformly over the regions some node is in.
 //!
 //! **Policies**, each over the fast path's own sample ([`FitIndex::sampled_fit`]'s window and its
 //! admitting nodes, so they see the same candidates):
@@ -30,10 +27,13 @@
 //!   least predicted RTT: what S4's falsifier would leave.
 //! - [`Policy::Oracle`]: as `Proximity` with the true RTT: the most a perfect coordinate could buy.
 //!
-//! **Measures.** Arrivals are uniform order statistics over `[0, horizon]` (a Poisson process given
-//! its count), at a rate that offers `load_per_mille` of the cluster's CPU to blind placement's
-//! expected occupancy. Goodput is the work finished by the horizon: workloads, and useful CPU time
-//! (CPU × compute, the round trips' waits excluded). Completion time is arrival to end, every
+//! **Load and compute are the day's own.** Every launch of the recorded day runs, in its order, at
+//! its recorded arrival; its compute is its recorded lifetime, and its round trips' waits are added to
+//! it, each the WAN's true RTT from its node to its home (Azure's table), so the RTT-to-compute ratio
+//! is the data's. The study runs at the recorded day's size, on its own node model.
+//!
+//! **Measures.** The horizon is the day's last arrival. Goodput is the work finished by it:
+//! workloads, and useful CPU time (CPU × compute, the round trips' waits excluded). Completion time is arrival to end, every
 //! workload run to its end. The queue is first come, first served: the head waits until it fits.
 //! Each measure is reported for all workloads and for each kind.
 
@@ -46,17 +46,18 @@ use crate::index::{FitIndex, Key, Sample, Verdict};
 use crate::model::{Class, Cluster, Demand, Kind, NodeId, NodeSpec, OwnerId, Resources, Time};
 use crate::rng::Rng;
 use crate::trace::{Latencies, Quantiles, TraceHash};
-use crate::wan::{Coordinates, Wan, WanConfig, node_id};
+use crate::wan::{Access, Coordinates, INPUT_MARGIN, REGIONS, Wan, WanConfig, node_id};
 
 /// TraceLab's tool calls per session, p50 and p99 (agentic-workloads.md §1, [5]).
 pub const ROUND_TRIPS_P50: f64 = 25.0;
 pub const ROUND_TRIPS_P99: f64 = 1_438.0;
 /// The standard normal's 99th percentile.
 const Z99: f64 = 2.326_347_874;
-/// The most round trips a workload makes: ten times TraceLab's p99, a bound, not a measurement.
-pub const MAX_ROUND_TRIPS: u64 = 14_380;
-/// The most workloads a study runs; the queue and the event heap are bounded by it.
-pub const MAX_WORKLOADS: usize = 1 << 20;
+/// The census's largest recorded day: `huawei-r5-day30.trace`'s 25,295 launches (its header).
+pub const CENSUS_LAUNCHES: usize = 25_295;
+/// The most workloads a study runs, by the input-bound rule; the queue and the event heap are
+/// bounded by it.
+pub const MAX_WORKLOADS: usize = CENSUS_LAUNCHES * INPUT_MARGIN;
 /// Hex's three kinds, in the order reports give them.
 pub const CLASSES: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
 
@@ -71,42 +72,19 @@ pub enum Policy {
 /// Where workloads' homes are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Homes {
-    /// A region drawn uniformly.
+    /// A region drawn uniformly: the record's, which claims nothing about where homes sit.
     Uniform,
-    /// Half in the first region, the rest uniformly over all of them.
+    /// Sensitivity only, never the record: half in the first region (a modelled share), the rest
+    /// uniformly over all of them.
     Skewed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StudyConfig {
-    pub wan: WanConfig,
-    pub workloads: usize,
-    /// Offered CPU, per mille of the cluster's, against blind placement's expected occupancy.
-    pub load_per_mille: u64,
-    /// Compute before each round trip.
-    pub step_ns: Time,
+    pub access: Access,
     pub homes: Homes,
     pub sample: Sample,
     pub seed: u64,
-}
-
-impl Default for StudyConfig {
-    /// 400 nodes over the eight regions; 5,000 workloads at 90% load, 100 ms of compute a step.
-    /// Chosen for test runs, not measured.
-    fn default() -> Self {
-        Self {
-            wan: WanConfig {
-                nodes: 400,
-                ..WanConfig::default()
-            },
-            workloads: 5_000,
-            load_per_mille: 900,
-            step_ns: 100_000_000,
-            homes: Homes::Uniform,
-            sample: Sample::default(),
-            seed: 1,
-        }
-    }
 }
 
 /// One workload of a study.
@@ -119,6 +97,8 @@ pub struct Job {
     pub home: NodeId,
     pub round_trips: u64,
     pub arrives: Time,
+    /// Its recorded lifetime, taken as its compute.
+    pub compute: Time,
 }
 
 /// A study's cluster: its WAN, the coordinates its nodes learned, and its workloads, shared by every
@@ -188,35 +168,36 @@ impl PolicyReport {
 }
 
 impl Study {
-    /// A study whose nodes repeat `recorded`'s and whose jobs are its launches, drawn uniformly.
+    /// A study of `recorded` as it is: its node rows, and every launch at its arrival.
     pub fn generate(config: &StudyConfig, recorded: &Cluster) -> Result<Self, SimError> {
-        if config.workloads == 0 || config.workloads > MAX_WORKLOADS {
-            return Err(SimError::Config(
-                "a study runs 1 to MAX_WORKLOADS workloads",
-            ));
-        }
-        if config.load_per_mille == 0 || config.step_ns == 0 {
-            return Err(SimError::Config(
-                "a study offers some load, steps of some compute",
-            ));
-        }
         if recorded.nodes.is_empty() || recorded.workloads.is_empty() {
             return Err(SimError::Config(
                 "a recorded workload with nodes and launches",
             ));
         }
+        if recorded.workloads.len() > MAX_WORKLOADS {
+            return Err(SimError::Config(
+                "a study runs at most MAX_WORKLOADS launches",
+            ));
+        }
         let mut rng = Rng::new(config.seed);
-        let wan = Wan::generate(&config.wan, &mut rng)?;
-        let coordinates = Coordinates::converge(&wan, &config.wan, &mut rng)?;
+        let wan_config = WanConfig {
+            nodes: recorded.nodes.len(),
+            regions: REGIONS.len(),
+            access: config.access,
+            seed: config.seed,
+        };
+        let wan = Wan::generate(&wan_config, &mut rng)?;
+        let coordinates = Coordinates::converge(&wan, config.seed, &mut rng)?;
         let mut nodes = Vec::with_capacity(wan.len());
-        for (at, row) in (0..wan.len()).zip(recorded.nodes.iter().cycle()) {
+        for (at, row) in recorded.nodes.iter().enumerate() {
             nodes.push(NodeSpec {
                 id: node_id(at)?,
                 ..*row
             });
         }
         // Each region's nodes, to draw a home in a region.
-        let regions = config.wan.regions;
+        let regions = REGIONS.len();
         let mut by_region: Vec<Vec<NodeId>> = vec![Vec::new(); regions];
         for node in &nodes {
             let site = wan.site(node.id)?;
@@ -225,27 +206,18 @@ impl Study {
                 .ok_or(SimError::UnknownNode(node.id))?
                 .push(node.id);
         }
-        let sigma = (ROUND_TRIPS_P99 / ROUND_TRIPS_P50).ln() / Z99;
-        let last_launch = u64::try_from(recorded.workloads.len())
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .ok_or(SimError::Config("launches"))?;
-        let mut jobs = Vec::with_capacity(config.workloads);
-        // Blind placement's expected occupancy: milli-CPU nanoseconds over all jobs, each with the
-        // mean RTT from its home to every node that runs its kind.
-        let mut occupancy: u128 = 0;
-        let last_region = u64::try_from(regions)
+        // Regions some node is in (a small node model leaves some empty).
+        by_region.retain(|members| !members.is_empty());
+        let last_region = u64::try_from(by_region.len())
             .ok()
             .and_then(|r| r.checked_sub(1))
             .ok_or(SimError::Config("regions"))?;
-        for _ in 0..config.workloads {
-            let launch = recorded
-                .workloads
-                .get(
-                    usize::try_from(rng.range(0, last_launch))
-                        .map_err(|_| SimError::Config("launches"))?,
-                )
-                .ok_or(SimError::Config("launches"))?;
+        let sigma = (ROUND_TRIPS_P99 / ROUND_TRIPS_P50).ln() / Z99;
+        let mut jobs = Vec::with_capacity(recorded.workloads.len());
+        for launch in &recorded.workloads {
+            let compute = launch
+                .runs_for
+                .ok_or(SimError::Config("a launch with no recorded lifetime"))?;
             let region = match config.homes {
                 Homes::Skewed if rng.chance(500) => 0,
                 Homes::Uniform | Homes::Skewed => rng.range(0, last_region),
@@ -260,39 +232,27 @@ impl Study {
             let home = *members
                 .get(usize::try_from(rng.range(0, last)).map_err(|_| SimError::Config("ids"))?)
                 .ok_or(SimError::Config("regions"))?;
-            let z = normal(&mut rng);
-            let round_trips = whole(ROUND_TRIPS_P50 * (sigma * z).exp())
-                .unwrap_or(MAX_ROUND_TRIPS)
-                .clamp(1, MAX_ROUND_TRIPS);
-            let mean_rtt = mean_rtt_ns(&wan, &nodes, home, launch.class)?;
-            let run = run_ns(round_trips, config.step_ns, mean_rtt)?;
-            occupancy = occupancy
-                .checked_add(u128::from(run).saturating_mul(u128::from(launch.need.cpu_milli)))
-                .ok_or(SimError::TimeOverflow)?;
+            // Bounded without a clamp: `normal`'s uniforms are at least 2^-53, so |z| is at most
+            // √(106·ln 2) ≈ 8.57 and the draw at most 25·e^(σ·8.57) ≈ 7.7·10^7.
+            let round_trips = whole(ROUND_TRIPS_P50 * (sigma * normal(&mut rng)).exp())
+                .ok_or(SimError::Config("a round-trip draw past u64"))?
+                .max(1);
             jobs.push(Job {
                 need: launch.need,
                 owner: launch.tenancy.owner,
                 class: launch.class,
                 home,
                 round_trips,
-                arrives: 0,
+                arrives: launch.arrives,
+                compute,
             });
         }
-        // horizon = occupancy / (capacity × load).
-        let cpu: u128 = nodes.iter().map(|n| u128::from(n.capacity.cpu_milli)).sum();
-        let capacity = cpu
-            .checked_mul(u128::from(config.load_per_mille))
-            .ok_or(SimError::TimeOverflow)?;
-        let horizon = occupancy
-            .checked_mul(1_000)
-            .and_then(|o| o.checked_div(capacity))
-            .and_then(|h| Time::try_from(h).ok())
-            .ok_or(SimError::TimeOverflow)?;
-        let mut arrivals: Vec<Time> = (0..jobs.len()).map(|_| rng.range(0, horizon)).collect();
-        arrivals.sort_unstable();
-        for (job, at) in jobs.iter_mut().zip(arrivals) {
-            job.arrives = at;
-        }
+        jobs.sort_by_key(|j| j.arrives);
+        let horizon = jobs
+            .last()
+            .map(|j| j.arrives)
+            .filter(|&h| h > 0)
+            .ok_or(SimError::Config("a recorded day of some length"))?;
         Ok(Self {
             config: *config,
             wan,
@@ -356,7 +316,7 @@ impl Study {
                 index.take(node, &demand)?;
                 let rtt = self.wan.rtt_ns(node, spec.home)?;
                 let ends_at = now
-                    .checked_add(run_ns(spec.round_trips, self.config.step_ns, rtt)?)
+                    .checked_add(run_ns(spec.round_trips, spec.compute, rtt)?)
                     .ok_or(SimError::TimeOverflow)?;
                 ends.push(Reverse((ends_at, job, node)));
                 let took = ends_at
@@ -380,9 +340,8 @@ impl Study {
                 report.rtt_sum_ns = report.rtt_sum_ns.saturating_add(u128::from(rtt));
                 if ends_at <= self.horizon {
                     report.done_by_horizon = report.done_by_horizon.saturating_add(1);
-                    let compute = u128::from(spec.round_trips)
-                        .saturating_mul(u128::from(self.config.step_ns))
-                        .saturating_mul(u128::from(spec.need.cpu_milli));
+                    let compute =
+                        u128::from(spec.compute).saturating_mul(u128::from(spec.need.cpu_milli));
                     report.useful_by_horizon = report.useful_by_horizon.saturating_add(compute);
                 }
                 for word in [
@@ -481,11 +440,11 @@ impl Study {
     }
 }
 
-/// `round_trips × (step + rtt)`.
-fn run_ns(round_trips: u64, step_ns: Time, rtt_ns: Time) -> Result<Time, SimError> {
-    step_ns
-        .checked_add(rtt_ns)
-        .and_then(|per| per.checked_mul(round_trips))
+/// `compute + round_trips × rtt`.
+fn run_ns(round_trips: u64, compute: Time, rtt_ns: Time) -> Result<Time, SimError> {
+    rtt_ns
+        .checked_mul(round_trips)
+        .and_then(|waits| waits.checked_add(compute))
         .ok_or(SimError::TimeOverflow)
 }
 
@@ -505,24 +464,6 @@ fn class_at(class: Class) -> usize {
         Class::Firecracker => 1,
         Class::Shards => 2,
     }
-}
-
-/// The mean true RTT from `home` to every node that runs `class`.
-fn mean_rtt_ns(
-    wan: &Wan,
-    nodes: &[NodeSpec],
-    home: NodeId,
-    class: Class,
-) -> Result<Time, SimError> {
-    let mut sum: u128 = 0;
-    let mut count: u128 = 0;
-    for node in nodes.iter().filter(|n| n.classes.has(class)) {
-        sum = sum.saturating_add(u128::from(wan.rtt_ns(home, node.id)?));
-        count = count.saturating_add(1);
-    }
-    sum.checked_div(count)
-        .and_then(|m| Time::try_from(m).ok())
-        .ok_or(SimError::Config("a kind no node runs"))
 }
 
 /// A standard normal draw (Box and Muller, 1958).
@@ -582,19 +523,13 @@ mod tests {
         Study::generate(config, recorded(fleet)).unwrap()
     }
 
-    fn small(seed: u64, load_per_mille: u64, homes: Homes) -> StudyConfig {
+    /// The record's study: Azure's zone bound, no heights or jitter, uniform homes.
+    fn config(seed: u64) -> StudyConfig {
         StudyConfig {
-            wan: WanConfig {
-                nodes: 200,
-                rounds: 48,
-                seed,
-                ..WanConfig::default()
-            },
-            workloads: 3_000,
-            load_per_mille,
-            homes,
+            access: Access::Bound,
+            homes: Homes::Uniform,
+            sample: Sample::default(),
             seed,
-            ..StudyConfig::default()
         }
     }
 
@@ -602,16 +537,17 @@ mod tests {
     /// every job placed once, the queue drained, and completion quantiles for all of them.
     #[test]
     fn every_policy_runs_every_job_deterministically() {
-        let study = generate(&small(5, 900, Homes::Uniform), Fleet::AllKinds);
-        let again = generate(&small(5, 900, Homes::Uniform), Fleet::AllKinds);
+        let study = generate(&config(5), Fleet::AllKinds);
+        let again = generate(&config(5), Fleet::AllKinds);
+        let n = study.jobs.len();
         assert_eq!(study.jobs, again.jobs);
         for policy in POLICIES {
             let a = study.run(policy).unwrap();
             let b = again.run(policy).unwrap();
             assert_eq!(a, b, "{policy:?}");
-            assert_eq!(a.placements, 3_000);
-            assert_eq!(a.completion.unwrap().count, 3_000);
-            assert!(a.done_by_horizon > 0 && a.done_by_horizon < 3_000);
+            assert_eq!(a.placements, u64::try_from(n).unwrap());
+            assert_eq!(a.completion.unwrap().count, n);
+            assert!(a.done_by_horizon > 0 && a.done_by_horizon < a.placements);
             for (class, got) in CLASSES.iter().zip(&a.classes) {
                 let jobs = study.jobs.iter().filter(|j| j.class == *class).count();
                 assert!(jobs > 0, "{class:?}");
@@ -625,28 +561,31 @@ mod tests {
         }
     }
 
-    /// AC-T7.4.3's kinds (H10), S4: do generate a study on each recorded fleet; expect every job to
-    /// be one of the recorded day's launches (its owner, kind and need, overhead included), every node
-    /// the recorded cluster's row at its position, repeated, and on the fleet trace some nodes that
+    /// AC-T7.4.3's kinds (H10), S4: do generate a study of each recorded fleet; expect its jobs to be
+    /// the recorded day's launches, every one (owner, kind, need with overhead, arrival, and lifetime
+    /// as compute), its nodes the recorded node rows in order, and on the fleet trace some nodes that
     /// run only some kinds, every kind on some node.
     #[test]
     fn jobs_and_nodes_are_the_recorded_ones() {
         for fleet in [Fleet::AllKinds, Fleet::Mixed] {
             let rec = recorded(fleet);
-            let launches: std::collections::BTreeSet<_> = rec
+            let study = generate(&config(3), fleet);
+            let mut want: Vec<_> = rec
                 .workloads
                 .iter()
-                .map(|w| (w.tenancy.owner, w.class, w.need))
+                .map(|w| (w.arrives, w.tenancy.owner, w.class, w.need, w.runs_for))
                 .collect();
-            let study = generate(&small(3, 900, Homes::Uniform), fleet);
-            for job in &study.jobs {
-                assert!(
-                    launches.contains(&(job.owner, job.class, job.need)),
-                    "{fleet:?}"
-                );
-            }
-            for (at, node) in study.nodes.iter().enumerate() {
-                let row = rec.nodes[at % rec.nodes.len()];
+            let mut got: Vec<_> = study
+                .jobs
+                .iter()
+                .map(|j| (j.arrives, j.owner, j.class, j.need, Some(j.compute)))
+                .collect();
+            want.sort();
+            got.sort();
+            assert_eq!(got, want, "{fleet:?}");
+            assert_eq!(study.horizon, want.last().unwrap().0);
+            assert_eq!(study.nodes.len(), rec.nodes.len());
+            for (node, row) in study.nodes.iter().zip(&rec.nodes) {
                 assert_eq!((node.capacity, node.classes), (row.capacity, row.classes));
             }
             for class in CLASSES {
@@ -670,6 +609,18 @@ mod tests {
         );
     }
 
+    /// The census constant is the trace's own (a doc-truth test).
+    #[test]
+    fn the_census_is_the_traces() {
+        assert_eq!(
+            CENSUS_LAUNCHES,
+            recorded(Fleet::AllKinds)
+                .workloads
+                .len()
+                .max(recorded(Fleet::Mixed).workloads.len())
+        );
+    }
+
     /// AC-T7.4.3's kinds (H10): do read the recorded day; expect G2's rule in it: each owner's
     /// launches one kind, the kinds in the thirds the trace's header records (oci 8432, firecracker
     /// 8432, shards 8431); and a study drawn from it keeps each owner's jobs one kind.
@@ -682,7 +633,7 @@ mod tests {
             got[class_at(w.class)] += 1;
         }
         assert_eq!(got, [8432, 8432, 8431]);
-        let study = generate(&small(7, 900, Homes::Uniform), Fleet::AllKinds);
+        let study = generate(&config(7), Fleet::AllKinds);
         for job in &study.jobs {
             assert_eq!(kind_of[&job.owner], job.class);
         }
@@ -693,7 +644,7 @@ mod tests {
     /// never placed on a node that can't run them.
     #[test]
     fn a_kind_no_node_runs_is_refused_not_misplaced() {
-        let mut study = generate(&small(4, 500, Homes::Uniform), Fleet::Mixed);
+        let mut study = generate(&config(4), Fleet::Mixed);
         for node in &mut study.nodes {
             node.classes = Classes::NONE.with(Class::Oci).with(Class::Shards);
         }
@@ -707,43 +658,37 @@ mod tests {
 
     /// S4, A2 (G3 step 2): do run blind placement; expect it never to count a decision as moved
     /// from itself. (That each other policy's effect can fail its test is shown by its mutants alone:
-    /// `no-proximity-term` fails `proximity_beats_blind_on_every_seed`; `no-tie-break-term` and
+    /// `no-proximity-term` fails `proximity_beats_blind`; `no-tie-break-term` and
     /// `random-tie-break` fail `the_tie_break_takes_the_nearest_of_best_fits_ties`.)
     #[test]
     fn blind_never_moves_from_itself() {
-        let study = generate(&small(6, 900, Homes::Skewed), Fleet::AllKinds);
+        let study = generate(&config(6), Fleet::AllKinds);
         assert_eq!(study.run(Policy::Blind).unwrap().moved, 0);
     }
 
-    /// S4, A2 (G3 step 2): do run blind placement, proximity and the oracle on three seeds, homes
-    /// uniform and skewed; expect proximity and the oracle each to place nearer home on average than
-    /// blind on every one. (How near proximity comes to the oracle is measured, not asserted:
-    /// `bench/sched/proximity.md`.)
+    /// S4, A2 (G3 step 2): do run blind placement, proximity and the oracle over the recorded day on
+    /// each fleet; expect proximity and the oracle each to place nearer home on average than blind.
+    /// (How near proximity comes to the oracle is measured, not asserted: `bench/sched/proximity.md`.)
     #[test]
     fn proximity_and_the_oracle_place_nearer_than_blind() {
-        for seed in 1..=3 {
-            for homes in [Homes::Uniform, Homes::Skewed] {
-                let study = generate(&small(seed, 500, homes), Fleet::AllKinds);
-                let [blind, near, _, oracle] = POLICIES.map(|p| study.run(p).unwrap());
-                assert!(near.mean_rtt_ms() < blind.mean_rtt_ms(), "{seed} {homes:?}");
-                assert!(
-                    oracle.mean_rtt_ms() < blind.mean_rtt_ms(),
-                    "{seed} {homes:?}"
-                );
-            }
+        for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+            let study = generate(&config(1), fleet);
+            let [blind, near, _, oracle] = POLICIES.map(|p| study.run(p).unwrap());
+            assert!(near.mean_rtt_ms() < blind.mean_rtt_ms(), "{fleet:?}");
+            assert!(oracle.mean_rtt_ms() < blind.mean_rtt_ms(), "{fleet:?}");
         }
     }
 
     /// S4, A2 (G3 step 2), an oracle test: do place a study's jobs one after another on each
     /// recorded fleet, and at every decision find best fit's exact ties in the fast path's window
     /// independently; expect the tie-break to choose the one of them with the least predicted RTT to
-    /// the job's home (the lower key among equals). Mutants `no-tie-break-term` (its score 0) and `random-tie-break` (a node's hash, not
-    /// its RTT) fail it. Whether the tie-break then places nearer than blind over a whole run is
-    /// measured, not asserted (`bench/sched/proximity.md`: on 116 of 120 studies).
+    /// the job's home (the lower key among equals). Mutants `no-tie-break-term` (its score 0) and
+    /// `random-tie-break` (a node's hash, not its RTT) fail it. Whether the tie-break then places
+    /// nearer than blind over a whole run is measured, not asserted (`bench/sched/proximity.md`).
     #[test]
     fn the_tie_break_takes_the_nearest_of_best_fits_ties() {
         for fleet in [Fleet::AllKinds, Fleet::Mixed] {
-            let study = generate(&small(1, 900, Homes::Uniform), fleet);
+            let study = generate(&config(1), fleet);
             let mut report = study.run(Policy::Blind).unwrap();
             let mut index = FitIndex::new(&study.nodes).unwrap();
             let mut decisions = 0u64;
@@ -782,69 +727,57 @@ mod tests {
         }
     }
 
-    /// S4, A2 (G3 step 3): do run blind and proximity-scored placement of Hex's three kinds on five
-    /// seeds, both fleets, homes uniform and skewed, at 50% and 90% load; expect proximity's goodput
-    /// higher and its p99 completion time lower on every one, over all workloads and for each kind,
-    /// the direction `bench/sched/proximity.md` records at full size. Mutant `no-proximity-term`
-    /// (proximity scored as 0) fails it.
+    /// S4, A2 (G3 step 3): do run blind and proximity-scored placement over the recorded day on each
+    /// fleet; expect what the record finds on every seed: the completion time's p99 and p50 lower over
+    /// all workloads, and goodput, overall and for each kind, no lower (at the day's own load every
+    /// launch finishes within it under either policy, so goodput does not move:
+    /// `bench/sched/proximity.md`). Mutant `no-proximity-term` (proximity scored as 0) fails it.
     #[test]
-    fn proximity_beats_blind_on_every_seed() {
-        for seed in 1..=5 {
-            for fleet in [Fleet::AllKinds, Fleet::Mixed] {
-                for homes in [Homes::Uniform, Homes::Skewed] {
-                    for load in [500, 900] {
-                        let study = generate(&small(seed, load, homes), fleet);
-                        let blind = study.run(Policy::Blind).unwrap();
-                        let near = study.run(Policy::Proximity).unwrap();
-                        let at = format!("seed {seed} {fleet:?} {homes:?} load {load}");
-                        assert!(near.goodput_per_s() > blind.goodput_per_s(), "{at}");
-                        assert!(
-                            near.completion.unwrap().p99 < blind.completion.unwrap().p99,
-                            "{at}"
-                        );
-                        for (class, (b, n)) in
-                            CLASSES.iter().zip(blind.classes.iter().zip(&near.classes))
-                        {
-                            assert!(n.done_by_horizon > b.done_by_horizon, "{at} {class:?}");
-                            assert!(
-                                n.completion.unwrap().p99 < b.completion.unwrap().p99,
-                                "{at} {class:?}"
-                            );
-                        }
-                    }
-                }
+    fn proximity_beats_blind() {
+        for fleet in [Fleet::AllKinds, Fleet::Mixed] {
+            let study = generate(&config(1), fleet);
+            let blind = study.run(Policy::Blind).unwrap();
+            let near = study.run(Policy::Proximity).unwrap();
+            let (b, n) = (blind.completion.unwrap(), near.completion.unwrap());
+            assert!(n.p99 < b.p99, "{fleet:?}");
+            assert!(n.p50 < b.p50, "{fleet:?}");
+            assert!(near.done_by_horizon >= blind.done_by_horizon, "{fleet:?}");
+            for (class, (b, n)) in CLASSES.iter().zip(blind.classes.iter().zip(&near.classes)) {
+                assert!(
+                    n.done_by_horizon >= b.done_by_horizon,
+                    "{fleet:?} {class:?}"
+                );
             }
         }
     }
 
+    /// Hostile recorded workloads are refused, typed: no launches, no nodes, a launch with no
+    /// recorded lifetime, and more launches than the input bound.
     #[test]
-    fn hostile_configurations_are_refused() {
+    fn hostile_recorded_workloads_are_refused() {
+        let rec = recorded(Fleet::AllKinds);
+        let mut no_lifetime = rec.clone();
+        no_lifetime.workloads[0].runs_for = None;
+        let mut too_many = rec.clone();
+        while too_many.workloads.len() <= MAX_WORKLOADS {
+            too_many.workloads.extend_from_slice(&rec.workloads);
+        }
         for bad in [
-            StudyConfig {
-                workloads: 0,
-                ..StudyConfig::default()
+            Cluster {
+                workloads: Vec::new(),
+                ..rec.clone()
             },
-            StudyConfig {
-                load_per_mille: 0,
-                ..StudyConfig::default()
+            Cluster {
+                nodes: Vec::new(),
+                ..rec.clone()
             },
-            StudyConfig {
-                step_ns: 0,
-                ..StudyConfig::default()
-            },
+            no_lifetime,
+            too_many,
         ] {
             assert!(matches!(
-                Study::generate(&bad, recorded(Fleet::AllKinds)),
+                Study::generate(&config(1), &bad),
                 Err(SimError::Config(_))
             ));
         }
-        let empty = Cluster {
-            workloads: Vec::new(),
-            ..recorded(Fleet::AllKinds).clone()
-        };
-        assert!(matches!(
-            Study::generate(&StudyConfig::default(), &empty),
-            Err(SimError::Config(_))
-        ));
     }
 }

@@ -10,15 +10,20 @@
 //!
 //! **Zones and nodes.** A region has three zones; Azure's stated bound between zones is "less than
 //! approximately 2 milliseconds" ("What are Azure availability zones?", Inter-zone networking), and
-//! only that bound is published, so each pair of zones gets a term drawn below it. A node has an access
-//! height, the time between it and its zone's network, drawn from [`HEIGHT_NS`]: a modelled range, not
-//! a measurement. A true round trip is the two heights plus the zones' term (same region) or the
-//! regions' (different regions); a probe sees it stretched by up to [`WanConfig::jitter_per_mille`].
+//! only that bound is published. The record's WAN ([`Access::Bound`]) takes the bound itself as every
+//! pair of zones' round trip, the worst case Azure allows, and gives nodes no access height and probes
+//! no jitter: nothing measured states either, so the record claims inter-region and inter-zone
+//! structure only, and two nodes of one zone are 0 apart. [`Access::Modelled`] is for a labelled
+//! sensitivity run, never the record: zone terms drawn below the bound, heights drawn from
+//! [`HEIGHT_NS`] and probes stretched by up to [`JITTER_PER_MILLE`], each modelled, not measured.
 //!
-//! **Coordinates.** Every node runs [`CoordinateEngine`], hyper-swim's update, probing
-//! `probes` peers a round drawn from the whole membership, as SWIM's probe target is (Das, Gupta and
-//! Motivala, DSN 2002), for `rounds` rounds; each probe moves the prober by its sample against the
-//! peer's coordinate as it stood. Order within a round is node order, so a seed names the result.
+//! **Coordinates.** Every node runs [`CoordinateEngine`], hyper-swim's update, on hyper-swim's own
+//! probe schedule: one probe a protocol period, each round a fresh shuffled permutation of the other
+//! members, so every member is probed once a round (its detector's `RandomizedOrder`, SWIM §4.3).
+//! Each probe moves the prober by its sample against the peer's coordinate as it stood. Rounds run
+//! until the median relative error over every pair stops falling from one round to the next
+//! ([`Coordinates::history`] holds it after each), so no round count is chosen; [`MAX_ROUNDS`] only
+//! bounds it. A seed names the result.
 
 use std::time::Duration;
 
@@ -57,44 +62,44 @@ pub const INTER_MS: [[u64; 8]; 8] = [
 pub const ZONES: usize = 3;
 /// Azure's stated bound on a round trip between zones of one region, nanoseconds.
 pub const ZONE_BOUND_NS: u64 = 2_000_000;
-/// A node's access height, nanoseconds: modelled, 25 µs to 250 µs, so two nodes of one zone are
-/// 0.05-0.5 ms apart, below the zones' bound.
+/// Sensitivity only ([`Access::Modelled`]), not of record: a node's access height, nanoseconds,
+/// modelled at 25 µs to 250 µs.
 pub const HEIGHT_NS: (u64, u64) = (25_000, 250_000);
-/// The most nodes a WAN holds: hex-sim's 10,000-node runs, with room.
-pub const MAX_NODES: usize = 1 << 17;
-/// The most probes a node makes a round, and rounds a convergence runs: together they bound the
-/// updates a convergence makes at `MAX_NODES · MAX_PROBES · MAX_ROUNDS`.
-pub const MAX_PROBES: usize = 64;
-pub const MAX_ROUNDS: u32 = 1_024;
+/// Sensitivity only ([`Access::Modelled`]), not of record: the most a probe's round trip exceeds the
+/// true one, per mille, modelled.
+pub const JITTER_PER_MILLE: u64 = 100;
+/// The input-bound rule's margin (the lead, 2026-11-06): a bound is the largest value in the census
+/// of inputs times this.
+pub const INPUT_MARGIN: usize = 2;
+/// The census's largest node model: `bench/sched/huawei-r5-day30.fleet.trace`'s 50 node rows (Hex's
+/// fleet's hosts, five of each); the m5d.metal trace has 10.
+pub const CENSUS_NODE_ROWS: usize = 50;
+/// The most nodes a WAN holds, by the input-bound rule.
+pub const MAX_NODES: usize = CENSUS_NODE_ROWS * INPUT_MARGIN;
+/// The census's longest convergence: the most rounds any convergence of the record and its
+/// sensitivity runs took before its median error stopped falling, 22 (`bench/sched/proximity.md`).
+pub const CENSUS_ROUNDS: usize = 22;
+/// The most rounds a convergence runs, by the input-bound rule; past it, a typed refusal.
+pub const MAX_ROUNDS: usize = CENSUS_ROUNDS * INPUT_MARGIN;
 const NS_PER_MS: u64 = 1_000_000;
 const NS_PER_SEC: f64 = 1e9;
+
+/// What lies between a node and its zone's network, and between zones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// The record's: no heights, no jitter, every pair of zones at Azure's stated bound.
+    Bound,
+    /// A labelled sensitivity run's, never the record's: modelled heights, jitter and zone terms.
+    Modelled,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WanConfig {
     pub nodes: usize,
     /// How many of [`REGIONS`] the nodes spread over, round-robin, from the first.
     pub regions: usize,
-    /// Peers each node probes a round.
-    pub probes: usize,
-    pub rounds: u32,
-    /// The most a probe's round trip exceeds the true one, per mille of it.
-    pub jitter_per_mille: u64,
+    pub access: Access,
     pub seed: u64,
-}
-
-impl Default for WanConfig {
-    /// One probe a protocol period and a round of eight periods; 64 rounds; up to 10% jitter.
-    /// Chosen for test runs, not measured.
-    fn default() -> Self {
-        Self {
-            nodes: 1_000,
-            regions: REGIONS.len(),
-            probes: 8,
-            rounds: 64,
-            jitter_per_mille: 100,
-            seed: 1,
-        }
-    }
 }
 
 /// Where a node is.
@@ -123,15 +128,17 @@ impl Wan {
         if config.regions == 0 || config.regions > REGIONS.len() {
             return Err(SimError::Config("a WAN spans 1 to 8 regions"));
         }
-        if config.jitter_per_mille > 1_000 {
-            return Err(SimError::Config("jitter is at most the round trip itself"));
-        }
+        let modelled = config.access == Access::Modelled;
         let mut zone_terms = Vec::with_capacity(config.regions);
         for _ in 0..config.regions {
             let mut terms = [[0u64; ZONES]; ZONES];
             for a in 0..ZONES {
                 for b in a.saturating_add(1)..ZONES {
-                    let term = rng.range(1, ZONE_BOUND_NS);
+                    let term = if modelled {
+                        rng.range(1, ZONE_BOUND_NS)
+                    } else {
+                        ZONE_BOUND_NS
+                    };
                     set(&mut terms, a, b, term)?;
                     set(&mut terms, b, a, term)?;
                 }
@@ -147,16 +154,21 @@ impl Wan {
                 .checked_div(config.regions)
                 .and_then(|n| n.checked_rem(ZONES))
                 .ok_or(SimError::Config("zones"))?;
+            let height_ns = if modelled {
+                rng.range(HEIGHT_NS.0, HEIGHT_NS.1)
+            } else {
+                0
+            };
             sites.push(Site {
                 region,
                 zone,
-                height_ns: rng.range(HEIGHT_NS.0, HEIGHT_NS.1),
+                height_ns,
             });
         }
         Ok(Self {
             sites,
             zone_terms,
-            jitter_per_mille: config.jitter_per_mille,
+            jitter_per_mille: if modelled { JITTER_PER_MILLE } else { 0 },
         })
     }
 
@@ -228,62 +240,76 @@ pub struct Coordinates {
     /// Samples taken (the engine's `update` said so), and offered.
     pub taken: u64,
     pub offered: u64,
+    /// The median relative error over every pair after each round run, the first entry before any:
+    /// it falls each round but the last, which did not.
+    pub history: Vec<f64>,
 }
 
 impl Coordinates {
-    /// Each node starts at the origin, its engine's stream seeded by the run's seed and its id, and
-    /// probes `config.probes` peers a round for `config.rounds` rounds.
-    pub fn converge(wan: &Wan, config: &WanConfig, rng: &mut Rng) -> Result<Self, SimError> {
-        if config.probes == 0 || config.probes > MAX_PROBES {
-            return Err(SimError::Config("a round is 1 to MAX_PROBES probes"));
-        }
-        if config.rounds > MAX_ROUNDS {
-            return Err(SimError::Config(
-                "a convergence is at most MAX_ROUNDS rounds",
-            ));
-        }
-        let n = wan.len();
-        let last = u64::try_from(n)
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .ok_or(SimError::Config("a WAN of no nodes"))?;
+    /// Each node at the origin, its engine's stream seeded by the run's seed and its id.
+    fn fresh(n: usize, seed: u64) -> Result<Self, SimError> {
         let mut engines = Vec::with_capacity(n);
         for node in 0..n {
             let id = u64::try_from(node).map_err(|_| SimError::Config("node ids"))?;
-            engines.push(CoordinateEngine::new(config.seed ^ id.rotate_left(32)));
+            engines.push(CoordinateEngine::new(seed ^ id.rotate_left(32)));
         }
-        let mut coordinates = Self {
+        Ok(Self {
             engines,
             taken: 0,
             offered: 0,
-        };
-        if n < 2 {
+            history: Vec::new(),
+        })
+    }
+
+    /// Runs hyper-swim's schedule from the origin, round after round, until the median relative
+    /// error over every pair stops falling; refused past [`MAX_ROUNDS`].
+    pub fn converge(wan: &Wan, seed: u64, rng: &mut Rng) -> Result<Self, SimError> {
+        let n = wan.len();
+        let mut coordinates = Self::fresh(n, seed)?;
+        let Some(mut last) = median_error(wan, &coordinates)? else {
+            // No pair is apart: nothing to learn.
             return Ok(coordinates);
-        }
-        for _ in 0..config.rounds {
+        };
+        coordinates.history.push(last);
+        let probes = n.saturating_sub(1);
+        let mut order: Vec<NodeId> = Vec::with_capacity(probes);
+        for _ in 0..MAX_ROUNDS {
             for node in 0..n {
                 let me = node_id(node)?;
-                for _ in 0..config.probes {
-                    let mut peer = rng.range(0, last.saturating_sub(1));
-                    if peer >= u64::from(me.0) {
-                        peer = peer.saturating_add(1);
-                    }
-                    let peer = NodeId(u32::try_from(peer).map_err(|_| SimError::Config("ids"))?);
+                order.clear();
+                for peer in (0..n).filter(|&p| p != node) {
+                    order.push(node_id(peer)?);
+                }
+                shuffle(&mut order, rng)?;
+                for &peer in &order {
                     let rtt = Duration::from_nanos(wan.sample_ns(me, peer, rng)?);
                     let theirs = *coordinates.coordinate(peer)?;
                     let engine = coordinates
                         .engines
                         .get_mut(node)
                         .ok_or(SimError::UnknownNode(me))?;
-                    let took = engine.update(&theirs, rtt, config.probes);
+                    let took = engine.update(&theirs, rtt, probes);
                     coordinates.offered = coordinates.offered.saturating_add(1);
                     if took {
                         coordinates.taken = coordinates.taken.saturating_add(1);
                     }
                 }
             }
+            let now = median_error(wan, &coordinates)?.ok_or(SimError::Config("pairs"))?;
+            coordinates.history.push(now);
+            if now >= last {
+                return Ok(coordinates);
+            }
+            last = now;
         }
-        Ok(coordinates)
+        Err(SimError::StepBudget(
+            u64::try_from(MAX_ROUNDS).unwrap_or(u64::MAX),
+        ))
+    }
+
+    /// Rounds run.
+    pub fn rounds(&self) -> usize {
+        self.history.len().saturating_sub(1)
     }
 
     pub fn coordinate(&self, node: NodeId) -> Result<&NetworkCoordinate, SimError> {
@@ -317,81 +343,93 @@ impl Coordinates {
     }
 }
 
-/// How well the coordinates predict the WAN, over a bounded sample of pairs.
+/// A Fisher–Yates pass, as hyper-swim's `RandomizedOrder` shuffles its probe order.
+fn shuffle(items: &mut [NodeId], rng: &mut Rng) -> Result<(), SimError> {
+    for i in (1..items.len()).rev() {
+        let j =
+            usize::try_from(rng.range(0, u64::try_from(i).map_err(|_| SimError::Config("ids"))?))
+                .map_err(|_| SimError::Config("ids"))?;
+        if j < items.len() && i < items.len() {
+            items.swap(i, j);
+        }
+    }
+    Ok(())
+}
+
+/// Every pair of distinct nodes apart (a true round trip above zero): `(a, b, truth seconds)`.
+fn pairs_apart(wan: &Wan) -> Result<Vec<(NodeId, NodeId, f64)>, SimError> {
+    let n = wan.len();
+    let mut out = Vec::with_capacity(
+        n.saturating_mul(n.saturating_sub(1))
+            .checked_div(2)
+            .unwrap_or(0),
+    );
+    for a in 0..n {
+        for b in a.saturating_add(1)..n {
+            let (x, y) = (node_id(a)?, node_id(b)?);
+            let truth = wan.rtt_ns(x, y)?;
+            if truth > 0 {
+                out.push((x, y, seconds(truth)));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The median of `|predicted − true| / true` over every pair apart, or none if no pair is.
+fn median_error(wan: &Wan, coordinates: &Coordinates) -> Result<Option<f64>, SimError> {
+    let mut errors = Vec::new();
+    for (a, b, truth) in pairs_apart(wan)? {
+        errors.push((coordinates.predict(a, b)? - truth).abs() / truth);
+    }
+    errors.sort_by(f64::total_cmp);
+    Ok(errors
+        .get(errors.len().checked_div(2).unwrap_or(0))
+        .copied())
+}
+
+/// How well the coordinates predict the WAN, over every pair.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Accuracy {
     pub pairs: usize,
-    /// The median of `|predicted − true| / true` over the pairs.
+    /// The median of `|predicted − true| / true` over every pair apart.
     pub median_relative_error: f64,
-    /// Of the sampled nodes given one peer in their region and one outside it, how many predicted the
-    /// one in their region nearer; of how many.
+    /// Of every trial of a node, a peer apart from it in its region and a peer outside it, how many
+    /// predicted the one in its region nearer; of how many.
     pub region_ranked_first: usize,
     pub region_trials: usize,
 }
 
 impl Accuracy {
-    /// Measures `pairs` random pairs (at most [`MAX_NODES`]) and as many region trials.
-    pub fn measure(
-        wan: &Wan,
-        coordinates: &Coordinates,
-        pairs: usize,
-        rng: &mut Rng,
-    ) -> Result<Self, SimError> {
-        if pairs == 0 || pairs > MAX_NODES {
-            return Err(SimError::Config("accuracy measures 1 to MAX_NODES pairs"));
-        }
-        let last = u64::try_from(wan.len())
-            .ok()
-            .and_then(|n| n.checked_sub(1))
-            .ok_or(SimError::Config("a WAN of no nodes"))?;
-        let draw = |rng: &mut Rng| -> Result<NodeId, SimError> {
-            u32::try_from(rng.range(0, last))
-                .map(NodeId)
-                .map_err(|_| SimError::Config("ids"))
-        };
-        let mut errors = Vec::with_capacity(pairs);
+    pub fn measure(wan: &Wan, coordinates: &Coordinates) -> Result<Self, SimError> {
+        let pairs = pairs_apart(wan)?.len();
+        let median_relative_error =
+            median_error(wan, coordinates)?.ok_or(SimError::Config("no pair of nodes is apart"))?;
+        let n = wan.len();
         let mut region_ranked_first = 0usize;
         let mut region_trials = 0usize;
-        for _ in 0..pairs {
-            let (a, b) = (draw(rng)?, draw(rng)?);
-            if a != b {
-                let truth = seconds(wan.rtt_ns(a, b)?);
-                let predicted = coordinates.predict(a, b)?;
-                errors.push((predicted - truth).abs() / truth);
-            }
-            // A region trial: the first node drawn in a's region, and the first outside it, within
-            // a bounded number of draws.
-            let home = wan.site(a)?.region;
-            let mut near = None;
-            let mut far = None;
-            for _ in 0..64 {
-                let c = draw(rng)?;
-                if c == a {
+        for a in 0..n {
+            let me = node_id(a)?;
+            let home = wan.site(me)?.region;
+            for near in 0..n {
+                let near = node_id(near)?;
+                if near == me || wan.site(near)?.region != home || wan.rtt_ns(me, near)? == 0 {
                     continue;
                 }
-                if wan.site(c)?.region == home {
-                    near = near.or(Some(c));
-                } else {
-                    far = far.or(Some(c));
-                }
-                if near.is_some() && far.is_some() {
-                    break;
-                }
-            }
-            if let (Some(near), Some(far)) = (near, far) {
-                region_trials = region_trials.saturating_add(1);
-                if coordinates.predict(a, near)? < coordinates.predict(a, far)? {
-                    region_ranked_first = region_ranked_first.saturating_add(1);
+                for far in 0..n {
+                    let far = node_id(far)?;
+                    if wan.site(far)?.region == home {
+                        continue;
+                    }
+                    region_trials = region_trials.saturating_add(1);
+                    if coordinates.predict(me, near)? < coordinates.predict(me, far)? {
+                        region_ranked_first = region_ranked_first.saturating_add(1);
+                    }
                 }
             }
         }
-        errors.sort_by(f64::total_cmp);
-        let median_relative_error = errors
-            .get(errors.len().checked_div(2).unwrap_or(0))
-            .copied()
-            .ok_or(SimError::Config("no pairs of distinct nodes were drawn"))?;
         Ok(Self {
-            pairs: errors.len(),
+            pairs,
             median_relative_error,
             region_ranked_first,
             region_trials,
@@ -413,11 +451,35 @@ pub(crate) fn node_id(node: usize) -> Result<NodeId, SimError> {
 mod tests {
     use super::*;
 
+    /// Vivaldi's median relative error over 1,740 Internet hosts (PF[1]).
+    const VIVALDI_MEDIAN_ERROR: f64 = 0.11;
+
+    /// The record's WANs: the two node models' sizes (10 m5d.metal hosts, 50 fleet hosts).
+    fn record(nodes: usize, seed: u64) -> WanConfig {
+        WanConfig {
+            nodes,
+            regions: REGIONS.len(),
+            access: Access::Bound,
+            seed,
+        }
+    }
+
     fn converged(config: &WanConfig) -> (Wan, Coordinates) {
         let mut rng = Rng::new(config.seed);
         let wan = Wan::generate(config, &mut rng).unwrap();
-        let coordinates = Coordinates::converge(&wan, config, &mut rng).unwrap();
+        let coordinates = Coordinates::converge(&wan, config.seed, &mut rng).unwrap();
         (wan, coordinates)
+    }
+
+    /// The census constants are the traces' own (a doc-truth test): the fleet trace's node rows.
+    #[test]
+    fn the_census_is_the_traces() {
+        let rows = |text: &str| text.lines().filter(|l| l.starts_with("node,")).count();
+        let fleet = rows(include_str!(
+            "../../../bench/sched/huawei-r5-day30.fleet.trace"
+        ));
+        let m5d = rows(include_str!("../../../bench/sched/huawei-r5-day30.trace"));
+        assert_eq!(CENSUS_NODE_ROWS, fleet.max(m5d));
     }
 
     /// The matrix is Azure's table as the module says: symmetric, zero on the diagonal, and every
@@ -436,95 +498,111 @@ mod tests {
         }
     }
 
-    /// Do: build a 1,000-node, 8-region WAN. Expect every true round trip symmetric, inside a region
-    /// below the zones' bound plus two heights, and across regions at least the table's.
+    /// Do: build the record's WAN at the fleet's size. Expect every true round trip symmetric, 0 within
+    /// a zone, Azure's zone bound between zones of a region, the table's between regions, and every
+    /// probe the truth. The sensitivity WAN keeps zone terms below the bound and probes within the
+    /// jitter of the truth.
     #[test]
     fn true_round_trips_follow_the_model() {
-        let config = WanConfig::default();
         let mut rng = Rng::new(3);
-        let wan = Wan::generate(&config, &mut rng).unwrap();
-        for a in (0..1_000u32).step_by(37) {
-            for b in (0..1_000u32).step_by(41) {
+        let wan = Wan::generate(&record(CENSUS_NODE_ROWS, 3), &mut rng).unwrap();
+        let modelled = Wan::generate(
+            &WanConfig {
+                access: Access::Modelled,
+                ..record(CENSUS_NODE_ROWS, 3)
+            },
+            &mut rng,
+        )
+        .unwrap();
+        let n = u32::try_from(CENSUS_NODE_ROWS).unwrap();
+        for a in 0..n {
+            for b in 0..n {
                 let (x, y) = (NodeId(a), NodeId(b));
                 let rtt = wan.rtt_ns(x, y).unwrap();
                 assert_eq!(rtt, wan.rtt_ns(y, x).unwrap());
                 let (sx, sy) = (wan.site(x).unwrap(), wan.site(y).unwrap());
-                if a == b {
-                    assert_eq!(rtt, 0);
+                let want = if a == b || (sx.region == sy.region && sx.zone == sy.zone) {
+                    0
                 } else if sx.region == sy.region {
-                    assert!(rtt < ZONE_BOUND_NS + 2 * HEIGHT_NS.1);
+                    ZONE_BOUND_NS
                 } else {
-                    assert!(rtt >= INTER_MS[sx.region][sy.region] * NS_PER_MS);
+                    INTER_MS[sx.region][sy.region] * NS_PER_MS
+                };
+                assert_eq!(rtt, want, "{a} {b}");
+                assert_eq!(wan.sample_ns(x, y, &mut rng).unwrap(), rtt);
+                let truth = modelled.rtt_ns(x, y).unwrap();
+                let sample = modelled.sample_ns(x, y, &mut rng).unwrap();
+                assert!(sample >= truth && sample <= truth + truth * JITTER_PER_MILLE / 1_000);
+                if a != b && sx.region == sy.region {
+                    assert!(truth < ZONE_BOUND_NS + 2 * HEIGHT_NS.1);
                 }
-                let sample = wan.sample_ns(x, y, &mut rng).unwrap();
-                assert!(sample >= rtt && sample <= rtt + rtt / 10);
             }
         }
         assert_eq!(
-            wan.rtt_ns(NodeId(0), NodeId(1_000)),
-            Err(SimError::UnknownNode(NodeId(1_000)))
+            wan.rtt_ns(NodeId(0), NodeId(n)),
+            Err(SimError::UnknownNode(NodeId(n)))
         );
     }
 
     /// S4, A2 (G3 step 1): one seed names one set of coordinates, bit for bit; another seed another.
+    /// Each round every node probes every other once: offered = rounds × n × (n − 1), and every probe
+    /// of a peer apart is a sample.
     #[test]
     fn a_seed_names_one_set_of_coordinates() {
-        let config = WanConfig {
-            rounds: 16,
-            ..WanConfig::default()
-        };
-        let (_, a) = converged(&config);
+        let config = record(10, 1);
+        let (wan, a) = converged(&config);
         let (_, b) = converged(&config);
         let (_, c) = converged(&WanConfig { seed: 2, ..config });
         assert_eq!(a.hash(), b.hash());
         assert_ne!(a.hash(), c.hash());
-        assert_eq!(a.offered, 1_000 * 8 * 16);
-        assert_eq!(
-            a.taken, a.offered,
-            "every probe of a distinct live peer is a sample"
-        );
+        let n = u64::try_from(wan.len()).unwrap();
+        assert_eq!(a.offered, u64::try_from(a.rounds()).unwrap() * n * (n - 1));
+        let apart = u64::try_from(pairs_apart(&wan).unwrap().len()).unwrap();
+        assert_eq!(a.taken, u64::try_from(a.rounds()).unwrap() * apart * 2);
     }
 
-    /// S4, A2 (G3 step 1): do converge hyper-swim's coordinates on a 1,000-node 8-region WAN;
-    /// expect the median relative error no worse than Vivaldi's own evaluation measured over 1,740
-    /// Internet hosts, 11% (Dabek et al., SIGCOMM 2004; `proximity-and-failure-containment.md` §1,
-    /// PF[1]), and a node's own region predicted nearer than another region's in more of the trials
-    /// than chance, which is half: each trial is one node of its region against one outside it.
+    /// S4, A2 (G3 step 1): do converge on each node model's WAN; expect the median relative error to
+    /// fall every round but the last, which didn't (the stopping rule), to end no worse than
+    /// Vivaldi's own evaluation over 1,740 Internet hosts, 11% (Dabek et al., SIGCOMM 2004;
+    /// `proximity-and-failure-containment.md` §1, PF[1]), and a node's own region predicted nearer
+    /// than another region's in more of the trials than chance, which is half.
     #[test]
     fn coordinates_learn_the_wan() {
-        let config = WanConfig::default();
-        let (wan, coordinates) = converged(&config);
-        let mut rng = Rng::new(99);
-        let accuracy = Accuracy::measure(&wan, &coordinates, 20_000, &mut rng).unwrap();
-        eprintln!("G3 coordinates: {accuracy:?}");
-        assert!(accuracy.pairs > 0 && accuracy.region_trials > 0);
-        assert!(
-            accuracy.median_relative_error <= VIVALDI_MEDIAN_ERROR,
-            "median relative error {:.3}",
-            accuracy.median_relative_error
-        );
-        assert!(
-            accuracy.region_ranked_first * 2 > accuracy.region_trials,
-            "{} of {}",
-            accuracy.region_ranked_first,
-            accuracy.region_trials
-        );
+        for nodes in [10, CENSUS_NODE_ROWS] {
+            let (wan, coordinates) = converged(&record(nodes, 1));
+            let h = &coordinates.history;
+            assert!(coordinates.rounds() > 0);
+            for w in h.windows(2).take(h.len() - 2) {
+                assert!(w[1] < w[0], "{nodes}: {h:?}");
+            }
+            assert!(h[h.len() - 1] >= h[h.len() - 2], "{nodes}: {h:?}");
+            let accuracy = Accuracy::measure(&wan, &coordinates).unwrap();
+            eprintln!(
+                "G3 coordinates {nodes} nodes, {} rounds: {accuracy:?}",
+                coordinates.rounds()
+            );
+            assert!(
+                accuracy.median_relative_error <= VIVALDI_MEDIAN_ERROR,
+                "{nodes}: median relative error {:.3}",
+                accuracy.median_relative_error
+            );
+            assert!(accuracy.region_trials > 0);
+            assert!(
+                accuracy.region_ranked_first * 2 > accuracy.region_trials,
+                "{nodes}: {} of {}",
+                accuracy.region_ranked_first,
+                accuracy.region_trials
+            );
+        }
     }
 
-    /// Non-vacuity for the test above: with no rounds every coordinate is the origin, and the same
-    /// measure fails both of its bounds.
-    /// Vivaldi's median relative error over 1,740 Internet hosts (PF[1]).
-    const VIVALDI_MEDIAN_ERROR: f64 = 0.11;
-
+    /// Non-vacuity for the test above: coordinates still at the origin fail both of its bounds.
     #[test]
     fn unconverged_coordinates_fail_the_same_measure() {
-        let config = WanConfig {
-            rounds: 0,
-            ..WanConfig::default()
-        };
-        let (wan, coordinates) = converged(&config);
-        let mut rng = Rng::new(99);
-        let accuracy = Accuracy::measure(&wan, &coordinates, 2_000, &mut rng).unwrap();
+        let config = record(CENSUS_NODE_ROWS, 1);
+        let wan = Wan::generate(&config, &mut Rng::new(1)).unwrap();
+        let origin = Coordinates::fresh(wan.len(), 1).unwrap();
+        let accuracy = Accuracy::measure(&wan, &origin).unwrap();
         assert!(accuracy.median_relative_error > VIVALDI_MEDIAN_ERROR);
         assert!(accuracy.region_ranked_first * 2 <= accuracy.region_trials);
     }
@@ -534,41 +612,19 @@ mod tests {
     fn out_of_bounds_configurations_are_refused() {
         let mut rng = Rng::new(1);
         for bad in [
+            record(0, 1),
+            record(MAX_NODES + 1, 1),
             WanConfig {
-                nodes: 0,
-                ..WanConfig::default()
+                regions: 0,
+                ..record(10, 1)
             },
             WanConfig {
-                nodes: MAX_NODES + 1,
-                ..WanConfig::default()
-            },
-            WanConfig {
-                regions: 9,
-                ..WanConfig::default()
-            },
-            WanConfig {
-                jitter_per_mille: 1_001,
-                ..WanConfig::default()
+                regions: REGIONS.len() + 1,
+                ..record(10, 1)
             },
         ] {
             assert!(matches!(
                 Wan::generate(&bad, &mut rng),
-                Err(SimError::Config(_))
-            ));
-        }
-        let wan = Wan::generate(&WanConfig::default(), &mut rng).unwrap();
-        for bad in [
-            WanConfig {
-                probes: 0,
-                ..WanConfig::default()
-            },
-            WanConfig {
-                rounds: MAX_ROUNDS + 1,
-                ..WanConfig::default()
-            },
-        ] {
-            assert!(matches!(
-                Coordinates::converge(&wan, &bad, &mut rng),
                 Err(SimError::Config(_))
             ));
         }
