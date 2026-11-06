@@ -221,8 +221,20 @@ impl FilesBound {
 /// (getrlimit(2), `RLIMIT_NOFILE`), and refuses by type past it. Linux's alone, as this module is: macOS
 /// and Windows nodes keep no namespaces to bound files for.
 pub fn open_descriptors(limit: &rustix::process::Rlimit) -> Result<u64, Refusal> {
-    let _ = limit;
-    Ok(0)
+    let listing = |e| Refusal::os("counting the agent's open descriptors in /proc/self/fd", e);
+    let most = limit.current.unwrap_or(u64::MAX);
+    let mut count = 0u64;
+    for entry in std::fs::read_dir("/proc/self/fd").map_err(listing)? {
+        entry.map_err(listing)?;
+        count = count.saturating_add(1);
+        if count > most.saturating_add(1) {
+            return Err(Refusal::Os {
+                op: "counting the agent's open descriptors in /proc/self/fd",
+                why: format!("more than the soft limit's {most} listed"),
+            });
+        }
+    }
+    Ok(count.saturating_sub(1))
 }
 
 /// A place under the [`FilesBound`], taken before a check opens a namespace's files and given back as it drops
