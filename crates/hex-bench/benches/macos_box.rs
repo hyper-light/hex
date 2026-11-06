@@ -5,6 +5,12 @@
 //! class's, not a standalone probe's (bench/native/macos/box_probe.c measures the raw interfaces).
 //!
 //!   macos_box [passes]           both measurements, `passes` times each (default 3)
+//!   macos_box readcost [passes]  the watcher's read-cost curve: CPU against reads a second, by box size
+//!   macos_box events [passes]    the most events one kqueue wait takes, by box size
+//!
+//! `readcost` and `events` size the watcher's ceiling and its event batch (the lead's calls 1 and 2,
+//! 2026-11-06, under Ada's rule): each drives the watcher's own calls (`hex_runtime::macos::sys`) on a group
+//! of `/bin/sleep` members, so nothing else in the process spends CPU or takes events.
 //!
 //! The record is `bench/native/macos/RESULT.md`; run it on adas-mac-studio-3 and capture its rows.
 #![allow(
@@ -33,7 +39,9 @@ fn main() {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::num::NonZeroU64;
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio as Piped};
     use std::time::{Duration, Instant};
 
     use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Program, Runtime, Stdio};
@@ -169,18 +177,179 @@ mod macos {
         cpu.as_secs_f64() / secs as f64 * 100.0
     }
 
-    pub fn main() {
-        let passes: usize = std::env::args_os()
-            .nth(1)
-            .and_then(|a| a.into_string().ok())
+    /// The box sizes the overshoot pass measures: one member up to twice the cores of the record's Mac.
+    const COUNTS: [usize; 5] = [1, 4, 8, 14, 28];
+
+    /// `members` `/bin/sleep` processes in one new process group, the first its leader; returns them and
+    /// the group's id.
+    fn sleepers(members: usize) -> (Vec<Child>, i32) {
+        let mut kids: Vec<Child> = Vec::new();
+        let mut pgid = 0;
+        for _ in 0..members {
+            let child = Command::new("/bin/sleep")
+                .arg("600")
+                .stdin(Piped::null())
+                .stdout(Piped::null())
+                .stderr(Piped::null())
+                .process_group(pgid)
+                .spawn()
+                .expect("spawn a sleeper");
+            if pgid == 0 {
+                pgid = i32::try_from(child.id()).unwrap();
+            }
+            kids.push(child);
+        }
+        (kids, pgid)
+    }
+
+    fn end(mut kids: Vec<Child>) {
+        for k in &mut kids {
+            let _ = k.kill();
+            let _ = k.wait();
+        }
+    }
+
+    /// The watcher's read at one pace: for `secs` seconds a time-constraint thread, as the watcher is,
+    /// waits a one-shot `NOTE_CRITICAL` timer of `pace` and reads the group of `members` (its listing and
+    /// each member's rusage), the calls a watcher read makes. Returns reads a second and the process's CPU
+    /// over the window as a percentage of a core (only this thread runs).
+    fn read_cost(members: usize, pace: Duration, secs: u64) -> (f64, f64) {
+        let (kids, pgid) = sleepers(members);
+        let window = Duration::from_secs(secs);
+        let (reads, cpu) = std::thread::spawn(move || {
+            let tb = sys::Timebase::get().expect("timebase");
+            let _ = sys::time_constraint(
+                &tb,
+                Duration::from_micros(250),
+                Duration::from_micros(150),
+                Duration::from_micros(250),
+            );
+            let kq = sys::Kqueue::new().expect("kqueue");
+            let mut pids = sys::listing().expect("listing");
+            let mut events = Vec::new();
+            let c0 = sys::process_cpu().expect("process cpu");
+            let t0 = Instant::now();
+            let mut reads = 0u64;
+            while t0.elapsed() < window {
+                kq.wait(Some(pace), None, &mut events).expect("wait");
+                sys::group(pgid, &mut pids).expect("group");
+                for &pid in &pids {
+                    let _ = sys::rusage(pid).expect("rusage");
+                }
+                reads += 1;
+            }
+            let cpu = sys::process_cpu().expect("process cpu").saturating_sub(c0);
+            (
+                reads as f64 / t0.elapsed().as_secs_f64(),
+                cpu.as_secs_f64() / t0.elapsed().as_secs_f64(),
+            )
+        })
+        .join()
+        .expect("the reader");
+        end(kids);
+        (reads, cpu * 100.0)
+    }
+
+    /// The most events one kqueue wait takes from a box of `members` whose members all end at once, the
+    /// largest burst the overshoot pass makes (its watcher kills the whole group): each member watched for
+    /// its forks and end as the watcher watches them, the group killed in one `kill(2)`, then
+    /// - `first`: what the first wait after the kill takes, as the watcher's wake does;
+    /// - `settled`: what one wait takes once every member has ended, every event pending.
+    ///
+    /// The wait takes at most `sys::EVENTS`, so a count at it may have left events for the next call.
+    fn events_per_wait(members: usize) -> (usize, usize) {
+        let mut most = (0, 0);
+        for settle in [false, true] {
+            let (kids, pgid) = sleepers(members);
+            let pids: Vec<i32> = kids
+                .iter()
+                .map(|k| i32::try_from(k.id()).unwrap())
+                .collect();
+            let kq = sys::Kqueue::new().expect("kqueue");
+            let gone = kq.watch(&pids, 0).expect("watch");
+            assert!(gone.is_empty(), "a sleeper ended before it was watched");
+            let killed = Command::new("/bin/kill")
+                .args(["-KILL", "--", &format!("-{pgid}")])
+                .status()
+                .expect("kill the group");
+            assert!(killed.success(), "kill -KILL -{pgid}");
+            if settle {
+                // Every member a zombie: each one's end is queued.
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !pids
+                    .iter()
+                    .all(|&p| sys::rusage(p).expect("rusage").is_none_or(|r| r.ended))
+                {
+                    assert!(Instant::now() < deadline, "the group never ended");
+                    std::thread::yield_now();
+                }
+            }
+            let mut events = Vec::new();
+            kq.wait(None, Some(Duration::from_secs(30)), &mut events)
+                .expect("wait");
+            let n = events.len();
+            if settle {
+                most.1 = n;
+            } else {
+                most.0 = n;
+            }
+            end(kids);
+        }
+        most
+    }
+
+    fn passes() -> usize {
+        std::env::args_os()
+            .skip(1)
+            .filter_map(|a| a.into_string().ok())
             .filter(|a| a != "--bench")
-            .and_then(|a| a.parse().ok())
-            .unwrap_or(3);
+            .find_map(|a| a.parse().ok())
+            .unwrap_or(3)
+    }
+
+    pub fn main() {
+        let mode = std::env::args_os()
+            .skip(1)
+            .filter_map(|a| a.into_string().ok())
+            .find(|a| a == "readcost" || a == "events");
+        let passes = passes();
+        match mode.as_deref() {
+            Some("readcost") => {
+                // The floor, the derived ceilings' range, and the ceiling now.
+                let paces_us = [250u64, 1_000, 2_500, 10_000, 25_000, 50_000, 100_000];
+                println!("macos_box readcost passes={passes} hold_seconds=2");
+                for pass in 1..=passes {
+                    for &n in &[1usize, 14, 28] {
+                        for &us in &paces_us {
+                            let (rate, pct) = read_cost(n, Duration::from_micros(us), 2);
+                            println!(
+                                "pass={pass} members={n} pace_us={us} reads_per_s={rate:.1} cpu_pct_of_core={pct:.4} load1={:.2}",
+                                sys::loadavg().unwrap_or(-1.0)
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+            Some(_) => {
+                println!("macos_box events passes={passes} batch={}", sys::EVENTS);
+                for pass in 1..=passes {
+                    for &n in &COUNTS {
+                        let (first, settled) = events_per_wait(n);
+                        println!(
+                            "pass={pass} members={n} first_wait_events={first} settled_wait_events={settled} load1={:.2}",
+                            sys::loadavg().unwrap_or(-1.0)
+                        );
+                    }
+                }
+                return;
+            }
+            None => {}
+        }
         let hex = hex_binary();
-        let counts = [1usize, 4, 8, 14, 28];
         println!("macos_box bound_mib={} passes={passes}", BOUND / MIB);
         for pass in 1..=passes {
-            for &n in &counts {
+            for &n in &COUNTS {
                 let over = overshoot(&hex, n);
                 println!(
                     "pass={pass} members={n} overshoot_mib={:.1} load1={:.2}",
