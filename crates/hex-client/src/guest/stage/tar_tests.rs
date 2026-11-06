@@ -146,7 +146,7 @@ fn a_tarball_with_a_device_fifo_hard_link_or_unknown_kind_is_refused_by_name() {
         (b'3', "a device node is never staged"),
         (b'4', "a device node is never staged"),
         (b'6', "a FIFO is never staged"),
-        (b'1', "which is no earlier file or link of this root"),
+        (b'1', "which is no earlier file or link this layer made"),
         (b'Z', "an entry of a kind staging carries not"),
     ] {
         let bytes = archive(&[(header(b"x", kind, 0o644, 0, b"y"), b"")]);
@@ -261,8 +261,9 @@ fn an_entry_written_through_a_link_in_the_archive_is_packed_for_the_relay_to_res
 
 /// HEX-GUEST-15 (§4a): pack two layers, the second whiting out `etc/a`, making `d` opaque and replacing
 /// `f`: expect a layer marker before each layer's entries, the whiteout and opaque marker as kinds of
-/// their own (never files), a hard link to what the whiteout or opaque marker removed refused, and to a
-/// kept file staged; and a whiteout naming nothing refused.
+/// their own (never files), a hard link to what the whiteout or opaque marker removed, or to an earlier
+/// layer's file, refused (overlay's unpack fails it), and to this layer's file staged; and a whiteout
+/// naming nothing refused.
 #[test]
 fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
     let dir = tempfile::tempdir().unwrap();
@@ -290,7 +291,7 @@ fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
         (header(b"d/.wh..wh..opq", b'0', 0o644, 0, b""), b""),
         (header(b"d/new", b'0', 0o644, 1, b""), b"n"),
         (header(b"f/", b'5', 0o755, 0, b""), b""),
-        (header(b"h", b'1', 0o644, 0, b"etc/b"), b""),
+        (header(b"h", b'1', 0o644, 0, b"d/new"), b""),
     ];
     let packed = unpack(&pack_layers(two).unwrap());
     let kinds: Vec<(&str, &What)> = packed
@@ -313,11 +314,13 @@ fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
         (
             "root/h",
             &What::Hardlink {
-                target: "root/etc/b".to_owned()
+                target: "root/d/new".to_owned()
             }
         )
     );
-    for gone in [&b"etc/a"[..], b"d/old", b"f"] {
+    // What a whiteout or opaque marker removed, and a file an earlier layer made and nothing removed:
+    // overlay's unpack fails a hard link to any of them.
+    for gone in [&b"etc/a"[..], b"d/old", b"f", b"etc/b"] {
         let mut two = vec![
             (header(b"etc/.wh.a", b'0', 0o644, 0, b""), &b""[..]),
             (header(b"d/.wh..wh..opq", b'0', 0o644, 0, b""), b""),
@@ -325,10 +328,12 @@ fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
         ];
         two.push((header(b"h", b'1', 0o644, 0, gone), b""));
         let got = pack_layers(two).unwrap_err().to_string();
-        assert!(
-            got.contains("which is no earlier file or link of this root"),
-            "{gone:?}: {got}"
-        );
+        let why = if gone == b"etc/b" {
+            "a file an earlier layer made"
+        } else {
+            "which is no earlier file or link this layer made"
+        };
+        assert!(got.contains(why), "{gone:?}: {got}");
     }
     let got = pack_layers(vec![(header(b"etc/.wh.", b'0', 0o644, 0, b""), &b""[..])])
         .unwrap_err()
@@ -382,7 +387,7 @@ fn a_hard_link_stages_to_an_earlier_file_and_is_refused_to_anything_else() {
         all.extend(entries);
         let got = refused("r.tar", &archive(&all));
         assert!(
-            got.contains("which is no earlier file or link of this root"),
+            got.contains("which is no earlier file or link this layer made"),
             "{target:?}: {got}"
         );
     }

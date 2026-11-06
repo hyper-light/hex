@@ -495,6 +495,7 @@ fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
 /// link and its target.
 enum T<'a> {
     Dir(&'a str),
+    DirMode(&'a str, u32),
     File(&'a str, &'a [u8]),
     Link(&'a str, &'a str),
     Hard(&'a str, &'a str),
@@ -510,9 +511,12 @@ fn layer_tar(path: &Path, mtime: u64, entries: &[T]) {
         h.set_mtime(mtime);
         h.set_size(0);
         match e {
-            T::Dir(name) => {
+            T::Dir(name) | T::DirMode(name, _) => {
                 h.set_entry_type(tar::EntryType::Directory);
-                h.set_mode(0o755);
+                h.set_mode(match e {
+                    T::DirMode(_, mode) => *mode,
+                    _ => 0o755,
+                });
                 b.append_data(&mut h, format!("{name}/"), std::io::empty())
                     .unwrap();
             }
@@ -599,10 +603,14 @@ fn a_tarball_writing_through_its_own_link_lands_inside_its_root() {
     );
 }
 
-/// HEX-GUEST-14 (the lead's ruling, §4a): stage `bin` as a link to `usr/bin` in one layer and `bin/tool`
-/// in the next, as merged-usr images do: expect the tool at `usr/bin/tool`, and `bin` still the link.
+/// HEX-GUEST-14 (the lead's ruling after ctr's snapshot, §4a; containerd's overlay applier,
+/// `core/diff/apply/apply_linux.go:36-55`, and `mkparent`, `pkg/archive/tar.go:448-503`): stage `bin` as a
+/// link to `usr/bin` (mode 0750) in one layer and `bin/tool` in the next: expect `bin` a directory holding
+/// `tool`, with `usr/bin`'s owner and mode copied as mkparent copies them, and `usr/bin` without it, as
+/// ctr's snapshot of the same layers holds (bench/native/guest-tree, lab:tree).
 #[test]
-fn a_later_layers_entry_under_a_linked_directory_lands_where_the_link_points() {
+fn a_later_layers_entry_under_an_earlier_layers_link_makes_a_directory_as_overlay_does() {
+    use std::os::unix::fs::PermissionsExt;
     let (lab, staged) = staged_lab();
     let host = tempfile::tempdir().unwrap();
     stage_layers(
@@ -611,20 +619,70 @@ fn a_later_layers_entry_under_a_linked_directory_lands_where_the_link_points() {
         &[
             (
                 1_600_000_000,
-                vec![T::Dir("usr"), T::Dir("usr/bin"), T::Link("bin", "usr/bin")],
+                vec![
+                    T::Dir("usr"),
+                    T::DirMode("usr/bin", 0o750),
+                    T::Link("bin", "usr/bin"),
+                ],
             ),
             (1_600_000_100, vec![T::File("bin/tool", b"tool")]),
         ],
     )
     .unwrap();
     let root = staged.join("box-1/root");
-    assert_eq!(std::fs::read(root.join("usr/bin/tool")).unwrap(), b"tool");
-    assert!(
-        std::fs::symlink_metadata(root.join("bin"))
-            .unwrap()
-            .file_type()
-            .is_symlink()
+    let bin = std::fs::symlink_metadata(root.join("bin")).unwrap();
+    assert!(bin.is_dir(), "bin became a directory");
+    assert_eq!(bin.permissions().mode() & 0o7777, 0o750, "usr/bin's mode");
+    assert_eq!(std::fs::read(root.join("bin/tool")).unwrap(), b"tool");
+    assert!(!root.join("usr/bin/tool").exists(), "usr/bin is unchanged");
+}
+
+/// HEX-GUEST-14 (§4a, as ctr's snapshot of lab:file holds): stage a file `p` in one layer and `p/inner`
+/// in the next: expect `p` a directory 0755 holding `inner`, as overlay's mkparent makes it.
+#[test]
+fn a_later_layers_entry_under_an_earlier_layers_file_makes_a_directory_as_overlay_does() {
+    use std::os::unix::fs::PermissionsExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[
+            (1_600_000_000, vec![T::File("p", b"p")]),
+            (1_600_000_100, vec![T::File("p/inner", b"inner")]),
+        ],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    let p = std::fs::symlink_metadata(root.join("p")).unwrap();
+    assert!(p.is_dir());
+    assert_eq!(p.permissions().mode() & 0o7777, 0o755);
+    assert_eq!(std::fs::read(root.join("p/inner")).unwrap(), b"inner");
+}
+
+/// HEX-GUEST-14 (§4a, as ctr fails lab:hardlink's unpack, `link .../q .../h: no such file or
+/// directory`): stage a hard link in one layer to a file an earlier layer made: expect the stage
+/// refused naming the link and the file, and the partial copy gone. (The relay refuses it likewise
+/// where the packer can't tell, a target named through a link: `Stage::entry`.)
+#[test]
+fn a_hard_link_to_an_earlier_layers_file_is_refused_as_overlay_fails_it() {
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let got = stage_layers(
+        &lab,
+        host.path(),
+        &[
+            (1_600_000_000, vec![T::File("q", b"q")]),
+            (1_600_000_100, vec![T::Hard("h", "q")]),
+        ],
     );
+    let why = got.unwrap_err().to_string();
+    // The packer refuses it first, naming the archive's entry `h` and its target `q`.
+    assert!(
+        why.contains(": h: ") && why.contains("\"q\"") && why.contains("an earlier layer made"),
+        "{why}"
+    );
+    assert!(!staged.join("box-1").exists(), "the partial copy was left");
 }
 
 /// HEX-GUEST-14 (the lead's ruling, §4a): stage a hard link whose target is named through the root's own
@@ -725,6 +783,37 @@ fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
     let sh2 = std::fs::symlink_metadata(root.join("sh2")).unwrap();
     assert!(sh2.file_type().is_symlink());
     assert_eq!(sh.ino(), sh2.ino());
+}
+
+/// HEX-GUEST-14 (§4a, as ctr fails lab:hardlink's unpack): send the relay, raw, a layer making `r/q` and
+/// a later layer linking `r/h` to it: expect the stage refused naming both and the earlier layer, and the
+/// partial copy gone, the relay holding the rule where no packer stands before it.
+#[test]
+fn the_relay_refuses_a_hard_link_to_an_earlier_layers_file() {
+    let (lab, staged) = staged_lab();
+    let answer = stage_raw(
+        &lab,
+        &raw_stage(&[
+            ("r", hf::What::Dir),
+            ("r", hf::What::Layer),
+            ("r/q", hf::What::File { size: 0 }),
+            ("r", hf::What::Layer),
+            (
+                "r/h",
+                hf::What::Hardlink {
+                    target: "r/q".to_owned(),
+                },
+            ),
+        ]),
+    );
+    let Answer::Refused(Refusal::Invalid { why, .. }) = answer else {
+        panic!("expected a refusal, got {answer:?}");
+    };
+    assert!(
+        why.contains("\"r/h\"") && why.contains("\"r/q\"") && why.contains("an earlier layer made"),
+        "{why}"
+    );
+    assert!(!staged.join("b").exists(), "the partial copy was left");
 }
 
 /// HEX-GUEST-14 (§4a, containerd's `applyNaive`): stage two layers, the second whiting out `etc/a`,

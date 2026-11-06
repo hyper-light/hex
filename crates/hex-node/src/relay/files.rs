@@ -5,7 +5,7 @@
 //! resolves it; any other through no link, so a stream that names its way out through one is refused.
 //! Every count is bounded by the core's [`Limits`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -38,6 +38,12 @@ const WITHIN: ResolveFlags = ResolveFlags::IN_ROOT
 /// mount ran during the lookup (openat2(2), "EAGAIN ... RESOLVE_IN_ROOT"), which nothing but the relay
 /// does under a staged root, so a few tries are past any race and the last `EAGAIN` is returned typed.
 const RESOLVE_TRIES: usize = 8;
+/// The most links a layer's path follows, as Linux's own lookup (`MAXSYMLINKS`, include/linux/namei.h).
+const MAX_LINKS: usize = 40;
+/// Linux's bounds on an inode's xattr names together and on one value (`XATTR_LIST_MAX`,
+/// `XATTR_SIZE_MAX`, include/uapi/linux/limits.h): what a copied directory's xattrs are read within.
+const XATTR_LIST_MAX: usize = 1 << 16;
+const XATTR_SIZE_MAX: usize = 1 << 16;
 /// A staged root's mode once whole: the node and a container's mapped users traverse it.
 const ROOT_MODE: u16 = 0o755;
 /// Each removal visits at most this many entries per entry a stage may hold: a container writes into
@@ -312,21 +318,148 @@ impl Stage {
         Ok(rest.trim_start_matches('/').to_owned())
     }
 
-    /// The directory that holds `path` and `path`'s last component: inside the layer's root, through its
-    /// links, when `path` is a layer's entry (its missing parents made when `make`, as an entry's are and
-    /// a hard link's target's aren't), else inside the stage's root through none.
-    fn parent<'p>(&self, path: &'p str, make: bool) -> Result<(OwnedFd, &'p str), Refusal> {
-        if let Some((layer, rel)) = self.in_layer(path) {
+    /// The directory that holds `path` and `path`'s last component: as the layer's overlay unpack finds it
+    /// when `path` is a layer's entry ([`Stage::walk`]; its parents made when `make`, as an entry's are and
+    /// a hard link's target's aren't), else inside the stage's root through no link.
+    fn parent<'p>(&mut self, path: &'p str, make: bool) -> Result<(OwnedFd, &'p str), Refusal> {
+        if let Some(rel) = self.in_layer(path).map(|(_, rel)| rel) {
             let (parent, leaf) = split(rel);
-            let dir = if make {
-                make_within(&layer.fd, parent)?
-            } else {
-                open_within(&layer.fd, parent)?
-            };
-            return Ok((dir, leaf));
+            return Ok((self.walk(parent, make)?, leaf));
         }
         let (parent, leaf) = path.rsplit_once('/').unwrap_or((".", path));
         Ok((open_in(&self.root, parent)?, leaf))
+    }
+
+    /// The directory `rel` within the layer's root, as containerd's overlay applier finds it: it unpacks a
+    /// layer into the snapshot's upper directory alone (`core/diff/apply/apply_linux.go:36-55` at v2.3.6),
+    /// so `fs.RootPath` follows only links this layer made, inside the root; an earlier layer's link or
+    /// file in the way isn't in that directory, and mkparent makes a directory there
+    /// (`pkg/archive/tar.go:448-503`), copying the owner, mode, times and xattrs but `trusted.*` of what
+    /// the name resolves to below when that is a directory (`WithParents`, `:482-500`; `copyDirInfo`,
+    /// `copyUpXAttrs`, `tar_unix.go:143-203`), else 0755; in the merged view it replaces the link or file.
+    /// ctr's own snapshot holds exactly this (bench/native/guest-tree, lab:tree and lab:file). A name
+    /// missing, or (when not `make`) not in this layer's view, is refused. Flat: one step per component,
+    /// at most [`MAX_LINKS`] links followed, each component opened `O_NOFOLLOW`.
+    fn walk(&mut self, rel: &str, make: bool) -> Result<OwnedFd, Refusal> {
+        let top = self
+            .layer
+            .as_ref()
+            .ok_or_else(|| invalid(format!("{rel:?} is in no layer")))?
+            .fd
+            .try_clone()
+            .map_err(|e| Refusal::os("opening a layer's root", e))?;
+        let base = self.resolved(&top)?;
+        let mut fd = top
+            .try_clone()
+            .map_err(|e| Refusal::os("opening a layer's root", e))?;
+        // The components below the layer's root reached so far, and those still to walk.
+        let mut at: Vec<String> = Vec::new();
+        let mut todo: VecDeque<String> = rel.split('/').map(str::to_owned).collect();
+        let mut links: usize = 0;
+        while let Some(part) = todo.pop_front() {
+            if part.is_empty() || part == "." {
+                continue;
+            }
+            if part == ".." {
+                // Inside the root, as RESOLVE_IN_ROOT holds it: `..` at the root stays there.
+                at.pop();
+                fd = if at.is_empty() {
+                    top.try_clone()
+                        .map_err(|e| Refusal::os("opening a layer's root", e))?
+                } else {
+                    open_in(&self.root, &format!("{base}/{}", at.join("/")))?
+                };
+                continue;
+            }
+            let below = if at.is_empty() {
+                part.clone()
+            } else {
+                format!("{}/{part}", at.join("/"))
+            };
+            let path = join(&base, &below);
+            let made = self
+                .layer
+                .as_ref()
+                .is_some_and(|layer| layer.made.contains(&path));
+            match rustix::fs::statat(&fd, part.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+                .map(|st| FileType::from_raw_mode(st.st_mode))
+            {
+                Ok(FileType::Directory) => {}
+                Ok(FileType::Symlink) if made => {
+                    links = links.saturating_add(1);
+                    if links > MAX_LINKS {
+                        return Err(invalid(format!(
+                            "{rel:?} follows more than {MAX_LINKS} links"
+                        )));
+                    }
+                    let target = rustix::fs::readlinkat(&fd, part.as_str(), Vec::new())
+                        .map_err(os("reading a staged link"))?
+                        .into_string()
+                        .map_err(|_| invalid(format!("{path:?}'s target isn't UTF-8")))?;
+                    if target.starts_with('/') {
+                        at.clear();
+                        fd = top
+                            .try_clone()
+                            .map_err(|e| Refusal::os("opening a layer's root", e))?;
+                    }
+                    for (i, step) in target.split('/').enumerate() {
+                        todo.insert(i, step.to_owned());
+                    }
+                    continue;
+                }
+                Ok(_) if made => {
+                    return Err(invalid(format!(
+                        "{rel:?} leads through {path:?}, which this layer made a file"
+                    )));
+                }
+                Ok(_) if !make => {
+                    return Err(invalid(format!(
+                        "{rel:?} leads through {path:?}, which an earlier layer made and this layer's \
+                         unpack doesn't see"
+                    )));
+                }
+                Err(Errno::NOENT) if !make => {
+                    return Err(invalid(format!(
+                        "{rel:?} isn't staged: {path:?} is missing"
+                    )));
+                }
+                Ok(_) | Err(Errno::NOENT) => {
+                    // What the name resolves to below, whose attributes mkparent copies when it's a
+                    // directory; then the earlier layer's link or file goes.
+                    let below_dir = within(&top, &below).ok();
+                    self.remove(&fd, &part, &path)?;
+                    rustix::fs::mkdirat(&fd, part.as_str(), Mode::from_raw_mode(0o755))
+                        .map_err(|e| invalid(format!("making {path:?}, a parent: {e}")))?;
+                    let dir = rustix::fs::openat(
+                        &fd,
+                        part.as_str(),
+                        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(os("opening a parent directory staging made"))?;
+                    match below_dir {
+                        Some(from) => copy_dir_info(&from, &dir)?,
+                        None => rustix::fs::fchmod(&dir, Mode::from_raw_mode(0o755))
+                            .map_err(os("setting a made parent's mode"))?,
+                    }
+                }
+                Err(e) => {
+                    return Err(Refusal::Os {
+                        op: "walking a staged path",
+                        why: format!("{path:?}: {e}"),
+                    });
+                }
+            }
+            fd = rustix::fs::openat(
+                &fd,
+                part.as_str(),
+                OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(os("opening a staged directory"))?;
+            at.push(part);
+        }
+        Ok(fd)
     }
 
     /// The layer under way and `path` within its root, when `path` is under it.
@@ -448,8 +581,8 @@ impl Stage {
                 }
             }
             What::Hardlink { target } => {
-                // The target is resolved as an entry's path is (within a layer's root through its links,
-                // as containerd's `hardlinkRootPath` does, `tar.go:795-807`); linkat(2) follows no link at
+                // The target is resolved as an entry's path is (within this layer's view, as containerd's
+                // `hardlinkRootPath` does in the upper directory, `tar.go:795-807`); linkat(2) follows no link at
                 // its last component, as containerd's `link` (os.Link) doesn't, so a link names the link
                 // itself. A directory, which link(2) refuses, is refused by name.
                 let (from, from_leaf) = self.parent(target, false)?;
@@ -461,6 +594,22 @@ impl Stage {
                         ))
                     },
                 )?;
+                // In a layer, only what this layer made: overlay's unpack links within the layer's own
+                // directory, and fails a link to an earlier layer's file (ENOENT; ctr, lab:hardlink).
+                if layered {
+                    let source = join(&self.resolved(&from)?, from_leaf);
+                    if !self
+                        .layer
+                        .as_ref()
+                        .is_some_and(|layer| layer.made.contains(&source))
+                    {
+                        return Err(invalid(format!(
+                            "hard link {:?} names {target:?}, a file an earlier layer made, which \
+                             containerd's overlay unpack can't link (ENOENT in this layer)",
+                            entry.path
+                        )));
+                    }
+                }
                 if !matches!(
                     FileType::from_raw_mode(st.st_mode),
                     FileType::RegularFile | FileType::Symlink
@@ -529,10 +678,10 @@ impl Stage {
     /// everything under it, as containerd's walk does (`tar.go:184-216`): flat, a list of the directories
     /// this layer made to look into, every visit counted.
     fn opaque(&mut self, path: &str) -> Result<(), Refusal> {
-        let Some((layer, rel)) = self.in_layer(path) else {
+        let Some(rel) = self.in_layer(path).map(|(_, rel)| rel) else {
             return Err(invalid(format!("opaque marker {path:?} is in no layer")));
         };
-        let top = open_within(&layer.fd, rel)?;
+        let top = self.walk(rel, true)?;
         let mut look = vec![self.resolved(&top)?];
         drop(top);
         while let Some(dir) = look.pop() {
@@ -620,6 +769,59 @@ impl Stage {
     }
 }
 
+/// What mkparent copies to a directory it makes from the one below (`copyDirInfo`, `copyUpXAttrs`,
+/// containerd `pkg/archive/tar_unix.go:143-203`): owner, mode, atime and mtime, and every xattr but
+/// `trusted.*`.
+fn copy_dir_info(from: &OwnedFd, to: &OwnedFd) -> Result<(), Refusal> {
+    let st = rustix::fs::fstat(from).map_err(os("reading a lower directory's attributes"))?;
+    rustix::fs::fchown(
+        to,
+        Some(Uid::from_raw(st.st_uid)),
+        Some(Gid::from_raw(st.st_gid)),
+    )
+    .map_err(os("copying a lower directory's owner"))?;
+    rustix::fs::fchmod(to, Mode::from_raw_mode(st.st_mode & 0o7777))
+        .map_err(os("copying a lower directory's mode"))?;
+    let mut names = vec![0u8; XATTR_LIST_MAX];
+    let n = match rustix::fs::flistxattr(from, &mut names) {
+        Ok(n) => n,
+        Err(Errno::NOTSUP) => 0,
+        Err(e) => return Err(Refusal::os("listing a lower directory's xattrs", e)),
+    };
+    let mut value = vec![0u8; XATTR_SIZE_MAX];
+    for name in names.get(..n).unwrap_or_default().split(|b| *b == 0) {
+        if name.is_empty() || name.starts_with(b"trusted.") {
+            continue;
+        }
+        let len = match rustix::fs::fgetxattr(from, name, &mut value) {
+            Ok(len) => len,
+            Err(Errno::NODATA | Errno::NOTSUP) => continue,
+            Err(e) => return Err(Refusal::os("reading a lower directory's xattr", e)),
+        };
+        rustix::fs::fsetxattr(
+            to,
+            name,
+            value.get(..len).unwrap_or_default(),
+            rustix::fs::XattrFlags::empty(),
+        )
+        .map_err(os("copying a lower directory's xattr"))?;
+    }
+    rustix::fs::futimens(
+        to,
+        &Timestamps {
+            last_access: Timespec {
+                tv_sec: st.st_atime,
+                tv_nsec: st.st_atime_nsec.try_into().unwrap_or(0),
+            },
+            last_modification: Timespec {
+                tv_sec: st.st_mtime,
+                tv_nsec: st.st_mtime_nsec.try_into().unwrap_or(0),
+            },
+        },
+    )
+    .map_err(os("copying a lower directory's times"))
+}
+
 /// The path the kernel holds for the directory `fd` (proc(5), `/proc/self/fd/<n>`).
 fn fd_path(fd: &OwnedFd) -> Result<String, Refusal> {
     let link = format!("/proc/self/fd/{}", fd.as_raw_fd());
@@ -629,9 +831,10 @@ fn fd_path(fd: &OwnedFd) -> Result<String, Refusal> {
         .map_err(|_| invalid("a staged directory's path isn't UTF-8".to_owned()))
 }
 
-/// `path` within `root`, a layer's root, opened as containerd's `fs.RootPath` resolves it: through its
-/// symbolic links, an absolute one or a `..` resolved inside `root` (`RESOLVE_IN_ROOT`, openat2(2)),
-/// through no magic link or mount. `""` is `root` itself.
+/// `path` within `root`, a layer's root, opened through every link in it, an absolute one or a `..`
+/// resolved inside `root` (`RESOLVE_IN_ROOT`, openat2(2)), through no magic link or mount: what an earlier
+/// layer's name resolves to in the layers below, whose attributes mkparent copies (`WithParents`,
+/// `pkg/archive/tar.go:482-500`). `""` is `root` itself.
 fn within(root: &OwnedFd, path: &str) -> Result<OwnedFd, Errno> {
     let path = if path.is_empty() { "." } else { path };
     let mut tries = 0;
@@ -647,62 +850,6 @@ fn within(root: &OwnedFd, path: &str) -> Result<OwnedFd, Errno> {
             done => return done,
         }
     }
-}
-
-/// Why `path` within a layer's root couldn't be opened, by the open's `err`.
-fn within_refused(path: &str, err: Errno) -> Refusal {
-    match err {
-        Errno::XDEV => invalid(format!("{path:?} leads through a mount")),
-        Errno::NOENT => invalid(format!("{path:?} isn't staged")),
-        Errno::NOTDIR => invalid(format!("{path:?} leads through a non-directory")),
-        e => Refusal::Os {
-            op: "opening a staged directory",
-            why: format!("{path:?}: {e}"),
-        },
-    }
-}
-
-fn open_within(root: &OwnedFd, path: &str) -> Result<OwnedFd, Refusal> {
-    within(root, path).map_err(|e| within_refused(path, e))
-}
-
-/// The directory `path` within a layer's root, each of its directories no layer made made as
-/// containerd's `mkparent` makes it (`pkg/archive/tar.go:448-503`): `mkdir` 0755 then an explicit chmod
-/// past the umask (`tar_unix.go:90-97`), owned by the relay and timed when it's made, since no layer
-/// says otherwise. Flat: one step per component of `path`, which the path bound bounds.
-fn make_within(root: &OwnedFd, path: &str) -> Result<OwnedFd, Refusal> {
-    match within(root, path) {
-        Err(Errno::NOENT) => {}
-        done => return done.map_err(|e| within_refused(path, e)),
-    }
-    let mut dir = open_within(root, "")?;
-    let mut end: usize = 0;
-    for part in path.split('/') {
-        end = end.saturating_add(part.len());
-        let prefix = path.get(..end).unwrap_or(path);
-        end = end.saturating_add(1);
-        dir = match within(root, prefix) {
-            Ok(fd) => fd,
-            Err(Errno::NOENT) => {
-                // A name in the way that resolves nowhere (a link to nothing) isn't made over.
-                rustix::fs::mkdirat(&dir, part, Mode::from_raw_mode(0o755)).map_err(|e| {
-                    invalid(format!("making {prefix:?}, a parent no layer made: {e}"))
-                })?;
-                let made = rustix::fs::openat(
-                    &dir,
-                    part,
-                    OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(os("opening a parent directory staging made"))?;
-                rustix::fs::fchmod(&made, Mode::from_raw_mode(0o755))
-                    .map_err(os("setting a made parent's mode"))?;
-                made
-            }
-            Err(e) => return Err(within_refused(prefix, e)),
-        };
-    }
-    Ok(dir)
 }
 
 /// `path` under `root`, a directory, opened inside it through no symbolic link.

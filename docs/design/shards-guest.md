@@ -260,37 +260,45 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     `Rootfs::Layers` of the one staged root, under the box's own writable layer; a bundle's `root.path` is one path,
     so one tarball. The packer keeps the same state across layers, so a hard link can't name what a later layer
     removed or replaced.
-  - **An entry's name resolves within its root, as containerd's does** (the lead's ruling, 2026-11-06): its
-    parent through the root's own symbolic links, an absolute link or a `..` resolved inside the root
-    (`fs.RootPath`, `:268-270`), and a hard link's target the same way (`hardlinkRootPath`, `:795-807`). The relay
-    opens the parent with openat2's `RESOLVE_IN_ROOT` (without `RESOLVE_NO_SYMLINKS`; with `RESOLVE_NO_MAGICLINKS`
-    and `RESOLVE_NO_XDEV`) on the layer's root, through rustix, the kernel holding the bound; a hard link's
-    target must resolve to a regular file staged. So `bin` → `usr/bin` in one layer and `bin/tool` in the next
-    lands at `usr/bin/tool`, and `a` → `/etc` then `a/x` lands at the root's `etc/x`, never the guest's. No
-    surveyed image writes through a link (research §9: 0 in debian, ubuntu, alpine, fedora, caddy, grafana,
-    python:3.12-slim, nginx and node:22-slim), but merged-usr layering may, and a refusal would refuse it.
-    Outside a layer (a directory root's walk, a bundle's `config.json`) a name still resolves through no link,
-    which a host walk never writes through.
-  - **A parent no layer made is made as containerd makes it** (the lead's ruling, 2026-11-06): hand-made and
-    Bazel layers, written straight from package archives, may omit parent directories, and containerd makes
-    each (`mkparent`, `pkg/archive/tar.go:448-503`: `mkdir` 0755 then an explicit chmod past the umask,
-    `tar_unix.go:90-97`; its attributes copied only from a lower layer that has the directory, which in one
-    merged root is never the case for a missing one). The relay makes each missing component within the layer's
-    root, 0755, owned by itself (root in the guest, as containerd's unpack runs) and timed when it's made, as
-    containerd's are; such a directory's times are the wall clock's on both sides, so HEX-GUEST-21 leaves them
-    out of its comparison. A name in the way that resolves nowhere (a link to nothing) is refused rather than
-    made through.
-  - **A hard link is another name for what its target resolves to, unfollowed**, as containerd's `link`
-    (os.Link, linkat(2) without `AT_SYMLINK_FOLLOW`, `:386-394`): a regular file or a symbolic link itself. A
-    directory, which link(2) refuses, and a target that resolves to nothing are refused, as containerd's unpack
-    fails them.
+  - **A layer applies as containerd's overlay applier applies it** (the lead's ruling, 2026-11-06, after ctr's
+    snapshot): with the overlayfs snapshotter (ctr's and Docker's default) containerd unpacks each layer into the
+    snapshot's upper directory alone, the layers below given only as `WithParents`
+    (`core/diff/apply/apply_linux.go:36-55` at v2.3.6), not onto the full root as the native snapshotter does; Hex
+    follows overlay, the unpack every overlayfs Linux host makes. So, by `fs.RootPath` in that directory
+    (`pkg/archive/tar.go:268-270`):
+    - a link **this layer made** is followed, inside the root (an absolute link or a `..` stays in it): `a` →
+      `/etc` then `a/x` lands at the root's `etc/x`, never the guest's;
+    - an **earlier layer's** link or file in a path isn't in that directory, so mkparent makes a directory there
+      (`:448-503`), copying the owner, mode, atime and mtime and every xattr but `trusted.*` of what the name
+      resolves to below when that is a directory (`:482-500`; `copyDirInfo`, `copyUpXAttrs`,
+      `tar_unix.go:143-203`), else 0755; in the merged view it replaces the link or file. So `bin` → `usr/bin`
+      in one layer and `bin/tool` in the next makes `bin` a directory holding `tool`, with `usr/bin`'s
+      attributes, and `usr/bin` unchanged (the lead's first example, `usr/bin/tool`, was the native
+      snapshotter's result, not overlay's);
+    - a **parent no layer made** is made the same way: `mkdir` 0755 then an explicit chmod past the umask
+      (`tar_unix.go:90-97`), owned by the relay (root in the guest, as containerd's unpack runs), timed when made;
+    - a **hard link** names what this layer made (`hardlinkRootPath` in the upper directory, `:795-807`): a
+      regular file or a link itself, unfollowed, as containerd's `link` (os.Link, `:386-394`); one to an earlier
+      layer's file, a directory or nothing is refused by name, as overlay's unpack fails it (ENOENT, EPERM).
+    ctr's own snapshots hold each of these (`bench/native/guest-tree`: lab:tree, lab:file; lab:hardlink's unpack
+    fails, "link …/q …/h: no such file or directory"). The relay walks a layer's path a component at a time,
+    each opened `O_NOFOLLOW`, following only links this layer made, at most 40 (Linux's `MAXSYMLINKS`);
+    rustix's safe calls, no `unsafe`. One approximation, stated: the attributes copied are those of what the
+    name resolves to in the merged root below, where containerd resolves it in each lower layer alone; the two
+    differ only when a link and its target directory come from different layers. Outside a layer (a directory
+    root's walk, a bundle's `config.json`) a name resolves through no link, which a host walk never writes
+    through.
   - **One difference from containerd, stated:** a literal absolute name or a `..` component, of an entry or a
     hard link's target, is refused by name, where containerd clamps it to the root (`filepath.Clean`, then
     `RootPath`): a layer a Docker or BuildKit build writes never holds one, and one that does is hostile or
     broken. Falsified the day a real image holds one, which HEX-GUEST-21 would show.
+  - **HEX-GUEST-21** stages each image as a tarball root in a real guest and compares it, entry by entry, with
+    ctr's own snapshot of the same layers on Linux (`bench/native/guest-tree`). Its stated differences, and no
+    others: atime; the root directory itself; the mtime of directories mkparent made or made a child in (both
+    sides stamp them when the unpack runs); and security.selinux labels the host assigned, which the image's
+    layers don't carry.
   - A directory root (a `Path` source) carries none of these: a host directory holds no Linux owners (and on Windows
-    is refused, above). The test that holds it: HEX-GUEST-21, each image staged as a tarball root in a real guest,
-    compared entry by entry with the same image unpacked as root on Linux.
+    is refused, above).
 - A non-bind mount (`proc`, `tmpfs`, …) names no host path and passes unchanged; hooks run in the guest's runtime
   namespace, so their paths are the guest's.
 

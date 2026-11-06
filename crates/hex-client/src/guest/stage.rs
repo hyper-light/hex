@@ -1033,11 +1033,11 @@ fn layer(
             }
             tar::EntryType::Fifo => return Err(bad(&shown, &"a FIFO is never staged")),
             tar::EntryType::Link => {
-                // Another name for a regular file or symbolic link of this root (linkat(2) follows no
-                // link, as containerd's `link` doesn't, `tar.go:386-394`), named as an entry is: never
-                // an escaping name, nor one this root doesn't hold now (a later or missing entry, a
-                // directory, one a layer removed). One named through the root's own link is resolved
-                // within the root by the relay, which refuses it there if it's missing or a directory.
+                // Another name for a regular file or symbolic link this layer made (linkat(2) follows
+                // no link, as containerd's `link` doesn't, `tar.go:386-394`; overlay's unpack links
+                // within the layer's own directory, so an earlier layer's file fails, ENOENT), named as
+                // an entry is: never an escaping name, a later or missing entry, or a directory. One
+                // named through a link is the relay's to resolve, which refuses it there likewise.
                 let target = link
                     .clone()
                     .ok_or_else(|| bad(&shown, &"a hard link with no target"))?;
@@ -1053,12 +1053,21 @@ fn layer(
                         &format!("a hard link names {target:?}, which names its way out"),
                     ));
                 }
-                if !tree.regular.contains(to) && !tree.links.contains(to) && !tree.through_link(to)
-                {
+                let named = tree.regular.contains(to) || tree.links.contains(to);
+                if named && !tree.made.contains(to) && !tree.through_link(to) {
                     return Err(bad(
                         &shown,
                         &format!(
-                            "a hard link names {target:?}, which is no earlier file or link of this root"
+                            "a hard link names {target:?}, a file an earlier layer made, which \
+                             containerd's overlay unpack can't link (ENOENT in this layer)"
+                        ),
+                    ));
+                }
+                if !named && !tree.through_link(to) {
+                    return Err(bad(
+                        &shown,
+                        &format!(
+                            "a hard link names {target:?}, which is no earlier file or link this layer made"
                         ),
                     ));
                 }
