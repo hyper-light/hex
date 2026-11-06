@@ -885,6 +885,13 @@ pub fn layer_id(folder: &str) -> String {
     )
 }
 
+/// A volume's root, `\\?\Volume{GUID}\`, with its trailing backslash whether `volume` had one or not:
+/// `HcsGetLayerVhdMountPath` gives the volume without it (jupiter, 2026-11-06), runhcs passes HCS the root
+/// with it, and a path joined under the root needs it.
+pub fn volume_root(volume: &str) -> String {
+    format!("{}\\", volume.trim_end_matches('\\'))
+}
+
 /// The `LayerData` the storage calls take (`SchemaReference.md:2252-2259`, note §3).
 pub fn layer_data(layers: &[(String, String)]) -> Value {
     json!({
@@ -901,10 +908,12 @@ pub fn document(container: &Container, storage: &Storage, launcher: &str) -> Val
         .iter()
         .map(|m| json!({"HostPath": m.host, "ContainerPath": m.container, "ReadOnly": m.read_only}))
         .collect();
+    // A host path HCS maps is a Windows path: `/` (a Git Bash or Cargo path's) is `\`.
+    let launcher = launcher.replace('/', "\\");
     mapped.push(json!({"HostPath": launcher, "ContainerPath": LAUNCHER_DIR, "ReadOnly": true}));
     let mut c = json!({
         "Storage": {
-            "Path": storage.volume,
+            "Path": volume_root(&storage.volume),
             "Layers": storage.layers.iter().map(|(id, path)| json!({"Id": id, "Path": path})).collect::<Vec<_>>(),
         },
         "MappedDirectories": mapped,
@@ -1379,6 +1388,34 @@ mod tests {
                 other => panic!("{field}: {other:?}"),
             }
         }
+    }
+
+    /// HEX-HCS-6 (note §2, jupiter 2026-11-06): do: render a document on the volume path
+    /// `HcsGetLayerVhdMountPath` gave (no trailing backslash) with a launcher folder holding `/` (as a
+    /// Git Bash CARGO_TARGET_DIR leaves it). Expect: `Storage.Path` is the volume's root, with its trailing
+    /// backslash as runhcs passes it, and the launcher's host path uses `\` only; a root given with its
+    /// backslash keeps exactly one.
+    #[test]
+    fn the_document_names_the_volume_root_and_a_windows_launcher_path() {
+        let c = from_bundle(&bundle()).unwrap();
+        let s = Storage {
+            volume: r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}".to_owned(),
+            layers: vec![("L1".to_owned(), r"D:\layers\app".to_owned())],
+        };
+        let d = document(&c, &s, r"C:\Users\corph/.cache/hex-native-s4/target\debug");
+        let k = &d["Container"];
+        assert_eq!(
+            k["Storage"]["Path"],
+            r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}\"
+        );
+        assert_eq!(
+            k["MappedDirectories"][2]["HostPath"],
+            r"C:\Users\corph\.cache\hex-native-s4\target\debug"
+        );
+        assert_eq!(
+            volume_root(r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}\"),
+            r"\\?\Volume{7b88d036-aeb7-4880-9530-fdfaff8337a0}\"
+        );
     }
 
     /// HEX-HCS-6 (note §2): the document is HCS v2's for a process-isolated container: schema 2.1, Hex's

@@ -367,7 +367,10 @@ fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
 /// Appends `lines` to the container's `hosts` file on its scratch volume, before it starts.
 fn append_hosts(volume: &str, lines: &str) -> Result<(), Refusal> {
     use std::io::Write;
-    let path = format!(r"{}Windows\System32\drivers\etc\hosts", volume);
+    let path = format!(
+        r"{}Windows\System32\drivers\etc\hosts",
+        hcs::volume_root(volume)
+    );
     std::fs::OpenOptions::new()
         .append(true)
         .open(&path)

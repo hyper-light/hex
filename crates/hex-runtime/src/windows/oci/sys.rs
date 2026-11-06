@@ -608,7 +608,8 @@ pub fn attach_vhd(path: &str) -> io::Result<AttachedVhd> {
 }
 
 impl AttachedVhd {
-    /// Its volume's path (`HcsGetLayerVhdMountPath`), `\\?\Volume{GUID}\`.
+    /// Its volume's path (`HcsGetLayerVhdMountPath`), `\\?\Volume{GUID}`, given without the trailing
+    /// backslash of its root (`hex_core::hcs::volume_root` adds it).
     pub fn volume(&self) -> Result<String, HcsFailure> {
         let api = api().map_err(|m| HcsFailure {
             code: 0x8037_0114,
