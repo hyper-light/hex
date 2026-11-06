@@ -48,6 +48,26 @@ pub const WIRE_FIXED: usize = 140;
 pub const MAX_WIRE: usize =
     WIRE_FIXED + 6 * COMMAND_LINE_UNITS + 3 * crate::bundle::MAX_CONFIG_BYTES;
 
+/// The longest folder a member may start in, in UTF-16 units: Windows' longest path, 32,767 with its NUL
+/// (Microsoft's "Maximum Path Length Limitation"). Longer is refused by name.
+pub const FOLDER_UNITS: usize = 32_766;
+
+/// The longest environment variable, `KEY=VALUE` with its NUL, in UTF-16 units: "The maximum size of a
+/// user-defined environment variable is 32,767 characters" (Microsoft's "Environment Variables").
+pub const ENV_VAR_UNITS: usize = 32_767;
+
+/// The most a Windows program's environment may hold, in UTF-16 units (each `KEY=VALUE` and its NUL),
+/// derived (the lead's decision, 2026-11-06): Windows sets no limit on the block (Vista on), and an `oci`
+/// box's program crosses the launcher's wire in one message, so the block is what [`MAX_WIRE`] leaves
+/// once the fixed part, the worst command line and the worst folder are paid. That leftover is
+/// `3 × MAX_CONFIG_BYTES − (6 × FOLDER_UNITS + 2 − 4)` bytes (a folder's quotes and escapes in place of the
+/// fixed part's `null`), and an entry costs at most six JSON bytes per counted unit (its text at the
+/// `\u00XX` escape's six, its eight bytes of brackets, quotes and comma against its `=` and NUL's two), so
+/// the block is the leftover over six and always fits; `encode`'s refusal by name stays the backstop. The
+/// `process` class takes the same block: one Windows rule for both classes, so a program moves between
+/// them unchanged (a stated policy; nothing in CreateProcessW bounds it).
+pub const ENV_BLOCK_UNITS: usize = (3 * crate::bundle::MAX_CONFIG_BYTES - 6 * FOLDER_UNITS + 2) / 6;
+
 /// Refuses a command line past [`COMMAND_LINE_UNITS`], naming the limit.
 fn command_line_fits(field: &str, line: &str) -> Result<(), Refusal> {
     let units = line.encode_utf16().count();
@@ -313,6 +333,12 @@ fn container_path(field: &str, path: &str) -> Result<String, Refusal> {
     };
     if windows.split(['\\', '/']).any(|p| p == "..") {
         return Err(invalid(format!("{field} {path:?} has a '..' component")));
+    }
+    let units = windows.encode_utf16().count();
+    if units > FOLDER_UNITS {
+        return Err(invalid(format!(
+            "{field} is {units} UTF-16 units, past Windows' longest path of 32,766 (32,767 with its NUL)"
+        )));
     }
     Ok(normal(&windows))
 }
@@ -1565,6 +1591,46 @@ mod tests {
         let mut b = bundle();
         b["process"] = json!({"commandLine": past, "cwd": "C:\\"});
         match from_bundle(&b) {
+            Err(Refusal::Invalid { why, .. }) => assert!(why.contains("32,766"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// HEX-RT-14 on Windows (the lead's decision, 2026-11-06): the environment block's bound is what the
+    /// wire leaves. Do: encode a launch at every worst at once: CreateProcessW's command line, the longest
+    /// folder, and ENV_BLOCK_UNITS of environment (KEY=VALUE and its NUL counted in UTF-16 units), all in
+    /// control characters, JSON's six-byte escape. Expect: it fits MAX_WIRE; and the block is the
+    /// leftover over six, nothing picked.
+    #[test]
+    fn the_environment_block_is_what_the_wire_leaves() {
+        assert_eq!(
+            ENV_BLOCK_UNITS,
+            (3 * crate::bundle::MAX_CONFIG_BYTES - 6 * FOLDER_UNITS + 2) / 6
+        );
+        // One-unit keys and values: KEY=VALUE\0 is four units, its JSON `["k","v"],` 10 bytes plus
+        // the escapes, the worst case per unit.
+        let entries = ENV_BLOCK_UNITS / 4;
+        let worst = Launch {
+            job: u64::MAX,
+            stdio: [u64::MAX; 3],
+            command_line: "\u{1}".repeat(COMMAND_LINE_UNITS),
+            env: vec![("\u{1}".to_owned(), "\u{1}".to_owned()); entries],
+            cwd: Some("\u{1}".repeat(FOLDER_UNITS)),
+        };
+        let line = encode(&worst).unwrap();
+        assert!(line.len() <= MAX_WIRE, "{} > {MAX_WIRE}", line.len());
+    }
+
+    /// HEX-HCS-4 (Windows' longest path, 32,767 units with its NUL): do: a program whose folder is one unit
+    /// past it. Expect: refused naming the limit.
+    #[test]
+    fn a_folder_past_the_longest_path_is_refused_by_name() {
+        let past = format!("C:\\{}", "a".repeat(FOLDER_UNITS));
+        let p = Program {
+            cwd: Some(past),
+            ..Program::of(&["a"])
+        };
+        match process("program", &p) {
             Err(Refusal::Invalid { why, .. }) => assert!(why.contains("32,766"), "{why}"),
             other => panic!("{other:?}"),
         }
