@@ -159,10 +159,11 @@ struct Booted {
     client: Client,
 }
 
-/// The slowest boot to ready on record before this node has seen one: HVF's, the most of N=40 on
-/// adas-mac-studio.local-2 (bench/native/guest/boot-ready/RECORD.md). KVM and WHP aren't recorded yet,
-/// so they take it too, as that record states.
-pub const RECORDED_BOOT: Duration = Duration::from_millis(177);
+/// The slowest boot to ready on record before this node has seen one: HVF's, the most of every run on
+/// record, quiet and under its hosts' own load, across both Mac Studios (N=40 each;
+/// bench/native/guest/boot-ready/RECORD.md). KVM and WHP aren't recorded yet, so they take it too, as
+/// that record states.
+pub const RECORDED_BOOT: Duration = Duration::from_millis(214);
 
 /// Boots of one guest: the first, and one more where the first hung alive past its bound, as a hung
 /// boot has another guest to try before its caller is refused.
