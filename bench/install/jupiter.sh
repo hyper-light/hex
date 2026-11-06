@@ -55,7 +55,10 @@ lab() {
     local layers
     layers=$(tr -d '\r\n' < "$(cygpath -u "$root")/layers.txt") \
       || { echo "no layers.txt under $root: run bench/native/windows/oci_setup.ps1 first"; return 1; }
-    args+=(-Layers "$layers")
+    local mismatch
+    mismatch=$(tr -d '\r\n' < "$(cygpath -u "$root")/mismatch-layers.txt") \
+      || { echo "no mismatch-layers.txt under $root: run bench/native/windows/oci_setup.ps1 first"; return 1; }
+    args+=(-Layers "$layers" -MismatchLayers "$mismatch")
   fi
   powershell.exe "${args[@]}"
 }
