@@ -5,7 +5,8 @@
 # libcrun exec they are set against. TRACE=1 adds, after the rounds, a run of each build with the scheduler's events
 # traced (exec_ab.py sched reads it). Every binary is copied into the run's directory. On fedora:
 #   exec_ab.sh <name>=<hex release binary>:<seam_oci release binary> ...
-# Env: N (600), WARMUP (60), ROUNDS (3), TRACE (0), TRACE_N (300), CPUSET (4-31); BENCH_HOST_OK names another host,
+# Env: N (600), WARMUP (60), ROUNDS (3), TRACE (0), TRACE_N (300), CPUSET (4-31), BENCH_MEMORY and BENCH_OOM (the
+# container's --memory, 40g, and --oom-score-adj, none, as host.sh's); BENCH_HOST_OK names another host,
 # as host.sh takes it. No load gate: the comparisons are within the run, as exec_breakdown.sh's LOAD_GATE=0.
 set -euo pipefail
 HERE=$(dirname "$(realpath "${BASH_SOURCE[0]}")"); LAB=$(dirname "$HERE")
@@ -38,7 +39,7 @@ done
 } > "$OUT/env.txt"
 NAME=hexbench-execab-$$
 bench_trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true'
-timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory=40g \
+timeout 7200 docker run --rm --name "$NAME" "${BENCH_LABELS[@]}" --cpuset-cpus="${CPUSET:-4-31}" --memory="${BENCH_MEMORY:-40g}" ${BENCH_OOM:+--oom-score-adj="$BENCH_OOM"} \
   --privileged --security-opt label=disable --cgroupns=private --network=none \
   -v /usr:/usr:ro -v "$OUT/bin:/opt/bin:ro" -v "$LAB:/opt/lab:ro" -v "$OUT:/opt/out" \
   -e N -e WARMUP -e ROUNDS -e TRACE -e TRACE_N -e BUILDS="${NAMES[*]}" \
