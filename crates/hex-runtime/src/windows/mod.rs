@@ -20,10 +20,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hex_api::{
-    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Runtime, Signal,
-    Stdio, Usage,
+    BoxId, BoxInfo, BoxSpec, BoxState, Class, ClassSpec, Proc, Program, Refusal, Rootfs, Runtime,
+    Signal, Stdio, Usage,
 };
 
+use crate::guest::Side;
 use hex_core::setup::{self, WindowsFeature};
 use oci::OciBox;
 use process::JobBox;
@@ -36,9 +37,10 @@ enum Held {
     Oci(Arc<OciBox>),
 }
 
-/// What a Linux image waits on once the Windows Hypervisor Platform is on: the Shards guest that carries
-/// it (native plan step 5; docs/design/shards-guest.md), which this node doesn't boot yet.
-const LINUX_IN_GUEST: &str = "a Linux image runs in a Shards guest through the Windows Hypervisor Platform (native plan step 5), which this node doesn't boot yet";
+/// Why this runtime alone refuses a Linux image once the Windows Hypervisor Platform is on: a Linux image
+/// runs in the node's Shards guest, where a node built with [`crate::guest::WithGuest::routing`] by
+/// [`WinRuntime::oci_side`] sends it (native plan step 5; docs/design/shards-guest.md).
+const LINUX_IN_GUEST: &str = "a Linux image runs in the node's Shards guest through the Windows Hypervisor Platform, which this runtime alone doesn't boot (hex_runtime::guest::WithGuest routes it there)";
 
 /// The Windows node's runtime, its boxes held in memory, keyed by id.
 pub struct WinRuntime {
@@ -94,6 +96,24 @@ impl WinRuntime {
             .filter(|f| *f == feature)
             .collect();
         Ok(setup::windows_oci(&off, waits))
+    }
+
+    /// Where a node whose Linux images are its Shards guest's runs a box ([`crate::guest::WithGuest::routing`]):
+    /// a `process` box and a Windows image here, a Linux image in the guest once the Windows Hypervisor
+    /// Platform it needs is on, refused naming it before then. A bundle is a Windows image when its
+    /// config has a `windows` section (config.md:530 makes it a Windows container's MUST); a spec, when its
+    /// root is layers, as step 4's class reads one (a plain folder is a Linux root).
+    pub fn oci_side(&self, class: &ClassSpec) -> Result<Side, Refusal> {
+        let windows = match class {
+            ClassSpec::Process => true,
+            ClassSpec::Bundle(dir) => oci::bundle_config(dir)?.get("windows").is_some(),
+            ClassSpec::Oci(o) => matches!(o.rootfs, Rootfs::Layers(_)),
+        };
+        if windows {
+            return Ok(Side::Host);
+        }
+        self.refused_without(WindowsFeature::HypervisorPlatform)?;
+        Ok(Side::Guest)
     }
 
     /// `Ok` while `feature` is on, else the class refused naming it.
