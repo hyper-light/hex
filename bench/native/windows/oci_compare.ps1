@@ -1,14 +1,18 @@
-# oci_compare.ps1: native plan step 4's second criterion, the competitors' half. Times create, start and
-# delete of a container whose program waits, through Docker's engine (process isolation) and containerd's
-# runhcs shim, on the image oci_setup.ps1 pulled, each operation alone, N times after W untimed rounds. The
-# program is the one Hex's bench runs (`C:\hex\hex.exe selftest-box wait`), from the same folder mapped
-# read-only at C:\hex, so the three run the same work (crates/hex-bench/benches/windows_oci.rs is Hex's
-# half). Each CLI call is a process start, so the CLIs' own cost is timed too (`version` alone, per
-# runtime) and recorded beside, for the record to state, never subtracted silently.
+# oci_compare.ps1: native plan step 4's second criterion. Times create, start and delete of a container
+# whose program waits, through Docker's engine (process isolation), containerd's runhcs shim and Hex's seam
+# (crates/hex-bench/benches/windows_oci.rs, one untimed and one timed lifecycle per call), on the image
+# oci_setup.ps1 pulled, each operation alone, N rounds after W untimed ones. The three are interleaved: each
+# round runs one lifecycle of each, the order rotating by round, so none gets a quieter machine (the lead,
+# 2026-11-06). The program is the same (`C:\hex\hex.exe selftest-box wait`), from the same folder mapped
+# read-only at C:\hex. Each CLI call is a process start, so the CLIs' own cost is timed too (`version`
+# alone) and recorded beside, never subtracted silently; the background load is recorded per round.
 #
-#   powershell -NoProfile -File oci_compare.ps1 -HexBin <dir with hex.exe> -Out <json> [-N 50] [-W 3]
+#   powershell -NoProfile -File oci_compare.ps1 -HexBin <dir with hex.exe> -HexBench <windows_oci.exe>
+#       -Layers <layer;...> -Out <json> [-N 50] [-W 3]
 param(
     [Parameter(Mandatory = $true)][string]$HexBin,
+    [Parameter(Mandatory = $true)][string]$HexBench,
+    [Parameter(Mandatory = $true)][string]$Layers,
     [Parameter(Mandatory = $true)][string]$Out,
     [int]$N = 50,
     [int]$W = 3,
@@ -58,28 +62,57 @@ $runs = [ordered]@{
     }
 }
 
+$hexOut = Join-Path $Root "hex-round.json"
+$hexRound = @{}
+$runs["hex"] = @{
+    # One untimed then one timed lifecycle in the bench, its timed samples read back per operation.
+    create = { param($i)
+        & $HexBench $hexOut 1 1 $HexBin $Layers | Out-Null
+        $j = Get-Content $hexOut -Raw | ConvertFrom-Json
+        $script:hexRound = @{ create = $j.create_ms.samples[0]; start = $j.start_ms.samples[0]; delete = $j.delete_ms.samples[0] } }
+}
+
+function Load() {
+    [ordered]@{
+        cpu_pct = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
+        system_pct = [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount)
+    }
+}
+
 $record = [ordered]@{
     host     = (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, BuildNumber)
     cpu      = (Get-CimInstance Win32_Processor | Select-Object -First 1 Name, NumberOfLogicalProcessors)
-    load_pct = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
     busiest  = (Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 Name, Id, CPU)
     image    = $Image
     n        = $N
     warmup   = $W
+    load     = @()
 }
-foreach ($name in $runs.Keys) {
-    $r = $runs[$name]
-    $t = @{ create = @(); start = @(); delete = @(); cli = @() }
-    for ($i = 0; $i -lt $W + $N; $i++) {
-        $c = Timed { & $r.create $i }
-        $s = Timed { & $r.start $i }
-        $d = Timed { & $r.delete $i }
-        $k = Timed { & $r.cli }
-        if ($i -ge $W) { $t.create += $c; $t.start += $s; $t.delete += $d; $t.cli += $k }
+$names = @("docker", "containerd", "hex")
+$t = @{}
+foreach ($name in $names) { $t[$name] = @{ create = @(); start = @(); delete = @(); cli = @() } }
+for ($i = 0; $i -lt $W + $N; $i++) {
+    if ($i -ge $W) { $record.load += (Load) }
+    for ($k = 0; $k -lt $names.Count; $k++) {
+        $name = $names[($i + $k) % $names.Count]
+        $r = $runs[$name]
+        if ($name -eq "hex") {
+            & $r.create $i
+            if ($LASTEXITCODE -ne 0) { throw "Hex's bench failed ($LASTEXITCODE) at round $i" }
+            $c = $script:hexRound.create; $s = $script:hexRound.start; $d = $script:hexRound.delete; $q = 0
+        } else {
+            $c = Timed { & $r.create $i }
+            $s = Timed { & $r.start $i }
+            $d = Timed { & $r.delete $i }
+            $q = Timed { & $r.cli }
+        }
+        if ($i -ge $W) { $t[$name].create += $c; $t[$name].start += $s; $t[$name].delete += $d; $t[$name].cli += $q }
     }
+}
+foreach ($name in $names) {
     $record[$name] = [ordered]@{
-        create_ms = Stats $t.create; start_ms = Stats $t.start; delete_ms = Stats $t.delete
-        cli_alone_ms = Stats $t.cli
+        create_ms = Stats $t[$name].create; start_ms = Stats $t[$name].start; delete_ms = Stats $t[$name].delete
+        cli_alone_ms = Stats $t[$name].cli
     }
 }
 $record | ConvertTo-Json -Depth 6 | Set-Content $Out

@@ -296,6 +296,18 @@ fn a_mismatched_image_is_refused_by_name(lab: &Lab) {
     ))
     .unwrap();
     let host = hex_runtime::windows::oci::sys::host();
+    // Both halves of the table on this host: the lab's own image is accepted (on jupiter, Windows 11 25H2
+    // at 26200 runs nanoserver:ltsc2025 at 26100, the half a host-ntdll premise got wrong), the other
+    // refused.
+    let own_base = lab.layers.last().expect("the lab's image layers");
+    let own = hex_runtime::windows::oci::sys::file_build(&format!(
+        r"{own_base}\Files\Windows\System32\ntdll.dll"
+    ))
+    .unwrap();
+    assert!(
+        hex_core::hcs::image_runs(host, own).is_ok(),
+        "the lab's image (build {own}) is refused on this host ({host:?})"
+    );
     assert!(
         hex_core::hcs::image_runs(host, image).is_err(),
         "the mismatched image (build {image}) runs on this host ({host:?}): pick another"
