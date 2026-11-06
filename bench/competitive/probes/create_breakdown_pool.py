@@ -42,6 +42,7 @@ def whole_rounds(run):
 
 
 def main(argv):
+    # 2,000 resamples, seeded, a convention as interleaved_pool.py's, not a measure.
     window, boot, runs = 0.02, 2000, []
     args = iter(argv)
     for a in args:

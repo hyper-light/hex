@@ -92,6 +92,8 @@ def pinned(p):
 
 
 def main(argv):
+    # 2,000 resamples, seeded, a convention (Efron and Tibshirani, An Introduction to the Bootstrap, 1993: a standard
+    # error settles within some hundreds; the seed makes a re-read print the same figure), not a measure.
     boot, runs = 2000, []
     args = iter(argv)
     for a in args:
