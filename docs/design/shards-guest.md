@@ -140,8 +140,13 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   both ways on all three host OSes (D38, `docs/design/architecture.md:2774-2853`; Windows D197, `:7482-7518`), and
   a plain `shards run` takes a share another process serves (`--slates-fs-fd N`, `crates/shards/src/vm_run.rs:390-401`).
   So `shards-api`'s `GuestSpec` carries `shares: Vec<Share { dir, read_only }>`, served from boot (the interface
-  that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with
-  (default `/`, writable) at the guest's boot; the guest's init mounts each as `virtiofs` at
+  that starts the server is Shards' call, asked 2026-11-06). The node shares the roots it's configured with at the
+  guest's boot, never the host's `/` by default: that would hand any guest process, a container's escape included,
+  everything the node's user can write, and undo the VM boundary (the lead, 2026-11-06). The default is Docker
+  Desktop's file-sharing list: on macOS `/Users`, `/Volumes`, `/private`, `/tmp` and `/var/folders`; on Windows the
+  users folder and the temp folder; read-write, served as the node's own user, never root. Any other root is the
+  operator's configuration (`HEX_GUEST_SHARES`). The OCI validation run sets the roots its tests bind (its `mounts`
+  test binds `/etc`), and its record says so; the guest's init mounts each as `virtiofs` at
   `/run/hex/shares/<i>` (the guest kernel has `CONFIG_VIRTIO_FS`, `resources/kernel/shards.config:19-24`); the host
   rewrites each bind mount's source to its path under the share that holds it, and a source under no share is
   refused by name (`Refusal::Unsupported`, naming the mount and the shared roots). Shares are fixed at boot, as
