@@ -30,9 +30,9 @@ const VERSION: u16 = 2;
 const FIRST: u16 = 1;
 /// A version-2 head's flag: a [`Meta`] follows the entry's names.
 const HAS_META: u8 = 1;
-/// A [`Meta`]'s fixed part: uid, gid (`u32`), mtime seconds (`i64`) and nanoseconds (`u32`), the xattr
-/// count (`u16`), a zero `u16`, and the xattrs' bytes (`u32`), little-endian.
-pub const META_BYTES: usize = 28;
+/// A [`Meta`]'s fixed part: uid, gid (`u32`), mtime and atime each as seconds (`i64`) and nanoseconds
+/// (`u32`), the xattr count (`u16`), a zero `u16`, and the xattrs' bytes (`u32`), little-endian.
+pub const META_BYTES: usize = 40;
 /// The most extended attributes an entry carries: Linux bounds them by bytes (below), not count; 64 is
 /// past any image's (one, in §9's census of six) and bounds the parse.
 pub const XATTRS_MAX: usize = 64;
@@ -84,6 +84,13 @@ pub enum Kind {
     Symlink,
     /// Version 2: another name for an earlier regular file of the same stage.
     Hardlink,
+    /// Version 2: a layer of an image begins; what follows applies over what came before (§4a).
+    Layer,
+    /// Version 2: an OCI whiteout, `.wh.<name>`: the entry at its path is removed.
+    Whiteout,
+    /// Version 2: an OCI opaque directory, `.wh..wh..opq`: what its directory holds that this layer didn't
+    /// make is removed.
+    Opaque,
 }
 
 impl Kind {
@@ -93,6 +100,9 @@ impl Kind {
             Self::File => 2,
             Self::Symlink => 3,
             Self::Hardlink => 4,
+            Self::Layer => 5,
+            Self::Whiteout => 6,
+            Self::Opaque => 7,
         }
     }
 
@@ -103,6 +113,9 @@ impl Kind {
             2 => Ok(Some(Self::File)),
             3 => Ok(Some(Self::Symlink)),
             4 if version >= 2 => Ok(Some(Self::Hardlink)),
+            5 if version >= 2 => Ok(Some(Self::Layer)),
+            6 if version >= 2 => Ok(Some(Self::Whiteout)),
+            7 if version >= 2 => Ok(Some(Self::Opaque)),
             other => Err(Refused::Kind(other)),
         }
     }
@@ -124,6 +137,8 @@ pub struct Meta {
     pub uid: u32,
     pub gid: u32,
     pub mtime: Mtime,
+    /// The later of the archive's atime and mtime, as containerd's unpack sets it (§4a).
+    pub atime: Mtime,
     pub xattrs: Vec<Xattr>,
 }
 
@@ -157,6 +172,12 @@ pub enum What {
     Hardlink {
         target: String,
     },
+    /// A layer begins (its entry's path is the root it applies to).
+    Layer,
+    /// The entry at this path is removed.
+    Whiteout,
+    /// What this directory holds that the current layer didn't make is removed.
+    Opaque,
 }
 
 impl What {
@@ -166,6 +187,9 @@ impl What {
             Self::File { .. } => Kind::File,
             Self::Symlink { .. } => Kind::Symlink,
             Self::Hardlink { .. } => Kind::Hardlink,
+            Self::Layer => Kind::Layer,
+            Self::Whiteout => Kind::Whiteout,
+            Self::Opaque => Kind::Opaque,
         }
     }
 }
@@ -251,7 +275,7 @@ pub fn head(entry: &Entry, limits: &Limits) -> Result<Vec<u8>, Refused> {
     check_path(&entry.path, limits)?;
     check_mode(&entry.path, entry.mode)?;
     let (target, size): (&str, u64) = match &entry.what {
-        What::Dir => ("", 0),
+        What::Dir | What::Layer | What::Whiteout | What::Opaque => ("", 0),
         What::File { size } => ("", *size),
         What::Symlink { target } => {
             check_target(&entry.path, target, limits)?;
@@ -313,6 +337,8 @@ fn meta_bytes(meta: &Meta) -> Vec<u8> {
     out.extend_from_slice(&meta.gid.to_le_bytes());
     out.extend_from_slice(&meta.mtime.secs.to_le_bytes());
     out.extend_from_slice(&meta.mtime.nanos.to_le_bytes());
+    out.extend_from_slice(&meta.atime.secs.to_le_bytes());
+    out.extend_from_slice(&meta.atime.nanos.to_le_bytes());
     out.extend_from_slice(
         &u16::try_from(meta.xattrs.len())
             .unwrap_or(u16::MAX)
@@ -340,10 +366,10 @@ pub fn check_meta(path: &str, meta: &Meta) -> Result<(), Refused> {
     if meta.uid == u32::MAX || meta.gid == u32::MAX {
         return refuse(format!("an id of {} means no id to chown(2)", u32::MAX));
     }
-    if meta.mtime.nanos >= 1_000_000_000 {
+    if meta.mtime.nanos >= 1_000_000_000 || meta.atime.nanos >= 1_000_000_000 {
         return refuse(format!(
-            "its mtime's nanoseconds, {}, are a second or more",
-            meta.mtime.nanos
+            "its time's nanoseconds, {} or {}, are a second or more",
+            meta.mtime.nanos, meta.atime.nanos
         ));
     }
     if meta.xattrs.len() > XATTRS_MAX {
@@ -757,6 +783,14 @@ impl Unpack {
                     field: "size",
                 });
             }
+            Kind::Layer | Kind::Whiteout | Kind::Opaque
+                if head.size != 0 || head.target != 0 || head.meta =>
+            {
+                return Err(Refused::Field {
+                    what: "a layer, whiteout or opaque marker",
+                    field: "size, target or metadata",
+                });
+            }
             _ => {}
         }
         self.entries = self
@@ -818,6 +852,9 @@ impl Unpack {
                 check_link(&path, &target, &self.limits)?;
                 What::Hardlink { target }
             }
+            Kind::Layer => What::Layer,
+            Kind::Whiteout => What::Whiteout,
+            Kind::Opaque => What::Opaque,
         };
         let entry = Entry {
             path,
@@ -871,6 +908,18 @@ impl Unpack {
             n1,
             n2,
             n3,
+            a0,
+            a1,
+            a2,
+            a3,
+            a4,
+            a5,
+            a6,
+            a7,
+            m0,
+            m1,
+            m2,
+            m3,
             c0,
             c1,
             z0,
@@ -904,6 +953,10 @@ impl Unpack {
             mtime: Mtime {
                 secs: i64::from_le_bytes([s0, s1, s2, s3, s4, s5, s6, s7]),
                 nanos: u32::from_le_bytes([n0, n1, n2, n3]),
+            },
+            atime: Mtime {
+                secs: i64::from_le_bytes([a0, a1, a2, a3, a4, a5, a6, a7]),
+                nanos: u32::from_le_bytes([m0, m1, m2, m3]),
             },
             xattrs: Vec::new(),
         });

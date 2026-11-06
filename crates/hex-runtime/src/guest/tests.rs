@@ -129,7 +129,8 @@ fn mount(source: &str, destination: &str, read_only: bool) -> Mount {
 }
 
 /// HEX-GUEST-16: rewrite an OciSpec with a root folder and with layers, and a writable and a read-only
-/// bind: expect its root named by the staged copy and staged from the host path, each bind's source
+/// bind: expect its root named by the staged copy and staged from the host path (an image's tarball
+/// layers one root staged from them all, and tarballs mixed with directories refused), each bind's source
 /// its path under its share (writable binds pass), and a bind under no share refused naming it and the
 /// shared roots.
 #[test]
@@ -182,13 +183,32 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     let ClassSpec::Oci(spec) = &layered.spec.class else {
         panic!("not oci");
     };
+    // An image's tarball layers are applied in order into one staged root (§4a), its one lower layer.
     assert_eq!(
         spec.rootfs,
-        Rootfs::Layers(vec![
-            PathBuf::from("/run/hex/staged/box-1/layer0"),
-            PathBuf::from("/run/hex/staged/box-1/layer1"),
+        Rootfs::Layers(vec![PathBuf::from("/run/hex/staged/box-1/root")])
+    );
+    assert_eq!(
+        layered.items[0].source,
+        Source::Layers(vec![
+            PathBuf::from("/Users/l0.tar"),
+            PathBuf::from("/Users/l1.tar"),
         ])
     );
+    let Err(Refusal::Invalid { why, .. }) = rewrite(
+        oci(
+            Rootfs::Layers(vec![
+                PathBuf::from("/Users/l0.tar"),
+                PathBuf::from("/Users/l1"),
+            ]),
+            vec![],
+        ),
+        &shared,
+        STAGED,
+    ) else {
+        panic!("expected tarballs and directories together refused");
+    };
+    assert!(why.contains("mixes tarballs and directories"), "{why}");
 
     let Err(Refusal::Platform { why, .. }) = rewrite(
         oci(

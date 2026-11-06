@@ -3,7 +3,8 @@
 //! hostile archives are refused by name before anything past the fault is sent: absolute names, `..`,
 //! names and counts past the bounds, device, FIFO and hard-link entries, an unknown entry type, an entry
 //! before its directory, a gzip stream whose trailer lies, an archive cut short; and, from the lead's list,
-//! an entry written through a link the archive made, hard links whatever their target, GNU and PAX long
+//! an entry written through a link the archive made (now packed, for the relay to resolve within the root:
+//! the lead's ruling, §4a), hard links whatever their target, GNU and PAX long
 //! names (whole within the path bound, refused past it), a PAX size, a dangling long-name record, sparse
 //! entries. Tar has no entry type for a socket, so an unknown typeflag stands in for one.
 
@@ -92,8 +93,11 @@ fn sample() -> Vec<u8> {
 fn a_tarball_root_packs_to_its_own_entries_modes_and_link_texts_exact() {
     for (file, bytes) in [("root.tar", sample()), ("root.tar.gz", gzip(&sample()))] {
         let entries = unpack(&pack_tar(file, &bytes, &LIMITS).unwrap());
-        let by: BTreeMap<&str, &(Entry, Vec<u8>)> =
-            entries.iter().map(|e| (e.0.path.as_str(), e)).collect();
+        let by: BTreeMap<&str, &(Entry, Vec<u8>)> = entries
+            .iter()
+            .filter(|e| e.0.what != What::Layer)
+            .map(|e| (e.0.path.as_str(), e))
+            .collect();
         assert_eq!(by["root"].0.what, What::Dir, "{file}");
         assert_eq!(by["root/bin/busybox"].0.mode, 0o4755, "{file}");
         assert_eq!(by["root/bin/busybox"].1, b"#!bb\n", "{file}");
@@ -110,23 +114,28 @@ fn a_tarball_root_packs_to_its_own_entries_modes_and_link_texts_exact() {
             What::File { size: 0 },
             "{file}"
         );
-        assert_eq!(entries.len(), 6, "{file}");
+        assert_eq!(by["root"].0.what, What::Dir, "{file}");
+        assert_eq!(entries[1].0.what, What::Layer, "{file}: the layer's marker");
+        assert_eq!(entries.len(), 7, "{file}");
     }
 }
 
-/// HEX-GUEST-15: pack archives naming their way out (an absolute name, a `..` component) and one whose
-/// entry comes before its directory: expect each refused naming the archive's entry and why.
+/// HEX-GUEST-15: pack archives naming their way out (an absolute name, a `..` component): expect each
+/// refused naming the archive's entry and why; and one whose entry's directory no entry makes: expect it
+/// packed as named, for the relay to make its parents as containerd's `mkparent` does (§4a).
 #[test]
-fn a_tarball_naming_its_way_out_or_out_of_order_is_refused_by_name() {
+fn a_tarball_naming_its_way_out_is_refused_by_name() {
     for (name, why) in [
         (&b"/etc/passwd"[..], "is absolute"),
         (b"a/../../etc/passwd", "has a '..' component"),
-        (b"nodir/file", "comes before its directory"),
     ] {
         let bytes = archive(&[(header(name, b'0', 0o644, 1, b""), b"x")]);
         let got = refused("r.tar", &bytes);
         assert!(got.contains(why), "{name:?}: {got}");
     }
+    let bytes = archive(&[(header(b"nodir/file", b'0', 0o644, 1, b""), &b"x"[..])]);
+    let packed = unpack(&pack_tar("r.tar", &bytes, &LIMITS).unwrap());
+    assert_eq!(packed[2].0.path, "root/nodir/file");
 }
 
 /// HEX-GUEST-15: pack archives holding a character device, a block device, a FIFO, a hard link and an entry
@@ -137,7 +146,7 @@ fn a_tarball_with_a_device_fifo_hard_link_or_unknown_kind_is_refused_by_name() {
         (b'3', "a device node is never staged"),
         (b'4', "a device node is never staged"),
         (b'6', "a FIFO is never staged"),
-        (b'1', "which is no earlier regular file of this root"),
+        (b'1', "which is no earlier file or link of this root"),
         (b'Z', "an entry of a kind staging carries not"),
     ] {
         let bytes = archive(&[(header(b"x", kind, 0o644, 0, b"y"), b"")]);
@@ -215,35 +224,116 @@ fn pax(pairs: &[(&str, &str)]) -> Vec<u8> {
     out
 }
 
-/// HEX-GUEST-15 (the lead's list, 1): pack an entry written through a symbolic link the archive made (`a`
-/// to `/`, to `../..`, and through a chain `a` to `b` to `/`): expect each refused by name, naming the
-/// link. The links themselves are legal: a root's absolute links resolve inside it when used.
+/// HEX-GUEST-15 (the lead's ruling, §4a): pack an entry written through a symbolic link the archive made
+/// (`a` to `/`, to `../..`, and through a chain `a` to `b` to `/`): expect each packed as named, for the
+/// relay to resolve within the root as containerd does.
 #[test]
-fn an_entry_written_through_a_link_in_the_archive_is_refused_by_name() {
-    for entries in [
-        vec![
-            (header(b"a", b'2', 0o777, 0, b"/"), &b""[..]),
-            (header(b"a/x/", b'5', 0o755, 0, b""), b""),
-        ],
-        vec![
-            (header(b"a", b'2', 0o777, 0, b"../.."), &b""[..]),
-            (header(b"a/x", b'0', 0o644, 1, b""), b"x"),
-        ],
-        vec![
-            (header(b"b", b'2', 0o777, 0, b"/"), &b""[..]),
-            (header(b"a", b'2', 0o777, 0, b"b"), b""),
-            (header(b"a/x", b'0', 0o644, 1, b""), b"x"),
-        ],
+fn an_entry_written_through_a_link_in_the_archive_is_packed_for_the_relay_to_resolve() {
+    for (entries, under) in [
+        (
+            vec![
+                (header(b"a", b'2', 0o777, 0, b"/"), &b""[..]),
+                (header(b"a/x/", b'5', 0o755, 0, b""), b""),
+            ],
+            What::Dir,
+        ),
+        (
+            vec![
+                (header(b"a", b'2', 0o777, 0, b"../.."), &b""[..]),
+                (header(b"a/x", b'0', 0o644, 1, b""), b"x"),
+            ],
+            What::File { size: 1 },
+        ),
+        (
+            vec![
+                (header(b"b", b'2', 0o777, 0, b"/"), &b""[..]),
+                (header(b"a", b'2', 0o777, 0, b"b"), b""),
+                (header(b"a/x", b'0', 0o644, 1, b""), b"x"),
+            ],
+            What::File { size: 1 },
+        ),
     ] {
-        let got = refused("r.tar", &archive(&entries));
-        assert!(got.contains("through the symbolic link \"a\""), "{got}");
+        let packed = unpack(&pack_tar("r.tar", &archive(&entries), &LIMITS).unwrap());
+        let x = packed.iter().find(|e| e.0.path == "root/a/x").unwrap();
+        assert_eq!(x.0.what, under);
     }
-    // The links alone pack, their texts as written.
-    let links = archive(&[
-        (header(b"b", b'2', 0o777, 0, b"/"), &b""[..]),
-        (header(b"a", b'2', 0o777, 0, b"../.."), b""),
+}
+
+/// HEX-GUEST-15 (§4a): pack two layers, the second whiting out `etc/a`, making `d` opaque and replacing
+/// `f`: expect a layer marker before each layer's entries, the whiteout and opaque marker as kinds of
+/// their own (never files), a hard link to what the whiteout or opaque marker removed refused, and to a
+/// kept file staged; and a whiteout naming nothing refused.
+#[test]
+fn layers_pack_in_order_with_whiteouts_and_opaque_markers_as_their_own_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let one = archive(&[
+        (header(b"etc/", b'5', 0o755, 0, b""), &b""[..]),
+        (header(b"etc/a", b'0', 0o644, 1, b""), b"a"),
+        (header(b"etc/b", b'0', 0o644, 1, b""), b"b"),
+        (header(b"d/", b'5', 0o755, 0, b""), b""),
+        (header(b"d/old", b'0', 0o644, 1, b""), b"o"),
+        (header(b"f", b'0', 0o644, 1, b""), b"f"),
     ]);
-    assert!(pack_tar("r.tar", &links, &LIMITS).is_ok());
+    let pack_layers = |two: Vec<([u8; 512], &[u8])>| {
+        std::fs::write(dir.path().join("1.tar"), &one).unwrap();
+        std::fs::write(dir.path().join("2.tar"), archive(&two)).unwrap();
+        let items = [Item {
+            name: "root".to_owned(),
+            source: Source::Layers(vec![dir.path().join("1.tar"), dir.path().join("2.tar")]),
+        }];
+        let mut out = Vec::new();
+        pack(&mut out, &id(), &items, &LIMITS).map(|()| out)
+    };
+    let two = vec![
+        (header(b"etc/.wh.a", b'0', 0o644, 0, b""), &b""[..]),
+        (header(b"d/", b'5', 0o755, 0, b""), b""),
+        (header(b"d/.wh..wh..opq", b'0', 0o644, 0, b""), b""),
+        (header(b"d/new", b'0', 0o644, 1, b""), b"n"),
+        (header(b"f/", b'5', 0o755, 0, b""), b""),
+        (header(b"h", b'1', 0o644, 0, b"etc/b"), b""),
+    ];
+    let packed = unpack(&pack_layers(two).unwrap());
+    let kinds: Vec<(&str, &What)> = packed
+        .iter()
+        .map(|e| (e.0.path.as_str(), &e.0.what))
+        .collect();
+    let layers: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| *k.1 == What::Layer)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(layers, [1, 8], "{kinds:?}");
+    assert_eq!(kinds[9], ("root/etc/a", &What::Whiteout));
+    assert_eq!(kinds[10], ("root/d", &What::Dir));
+    assert_eq!(kinds[11], ("root/d", &What::Opaque));
+    assert_eq!(kinds[13], ("root/f", &What::Dir));
+    assert_eq!(
+        kinds[14],
+        (
+            "root/h",
+            &What::Hardlink {
+                target: "root/etc/b".to_owned()
+            }
+        )
+    );
+    for gone in [&b"etc/a"[..], b"d/old", b"f"] {
+        let mut two = vec![
+            (header(b"etc/.wh.a", b'0', 0o644, 0, b""), &b""[..]),
+            (header(b"d/.wh..wh..opq", b'0', 0o644, 0, b""), b""),
+            (header(b"f/", b'5', 0o755, 0, b""), b""),
+        ];
+        two.push((header(b"h", b'1', 0o644, 0, gone), b""));
+        let got = pack_layers(two).unwrap_err().to_string();
+        assert!(
+            got.contains("which is no earlier file or link of this root"),
+            "{gone:?}: {got}"
+        );
+    }
+    let got = pack_layers(vec![(header(b"etc/.wh.", b'0', 0o644, 0, b""), &b""[..])])
+        .unwrap_err()
+        .to_string();
+    assert!(got.contains("a whiteout that names nothing"), "{got}");
 }
 
 /// HEX-GUEST-15 (2, §4a as amended): pack a hard link to an earlier regular file of the root: expect it
@@ -271,10 +361,19 @@ fn a_hard_link_stages_to_an_earlier_file_and_is_refused_to_anything_else() {
         link.0.meta, None,
         "a hard link carries its target's, not its own"
     );
+    for (target, why) in [(&b"/etc/passwd"[..]), b"../x"]
+        .into_iter()
+        .map(|t| (t, "which names its way out"))
+    {
+        let all = vec![(header(b"x", b'1', 0o644, 0, target), &b""[..])];
+        let got = refused("r.tar", &archive(&all));
+        assert!(got.contains(why), "{target:?}: {got}");
+    }
     for (target, entries) in [
-        (&b"/etc/passwd"[..], vec![]),
-        (b"../x", vec![]),
-        (b"z", vec![(header(b"z", b'0', 0o644, 1, b""), &b"z"[..])]),
+        (
+            &b"z"[..],
+            vec![(header(b"z", b'0', 0o644, 1, b""), &b"z"[..])],
+        ),
         (b"nope", vec![]),
         (b"d", vec![]),
     ] {
@@ -283,7 +382,7 @@ fn a_hard_link_stages_to_an_earlier_file_and_is_refused_to_anything_else() {
         all.extend(entries);
         let got = refused("r.tar", &archive(&all));
         assert!(
-            got.contains("which is no earlier regular file of this root"),
+            got.contains("which is no earlier file or link of this root"),
             "{target:?}: {got}"
         );
     }
@@ -446,7 +545,11 @@ fn a_global_pax_record_is_bounded_and_refused_when_it_sets_what_staging_applies(
         ("hdrcharset", "ISO-IR 10646 2000 UTF-8"),
     ]);
     let entries = unpack(&pack_tar("r.tar", &quiet, &LIMITS).unwrap());
-    assert_eq!(entries.len(), 2, "the root and its file");
+    assert_eq!(
+        entries.len(),
+        3,
+        "the root, its layer's marker and its file"
+    );
 }
 
 /// HEX-GUEST-15 (the lead's 'g' list, 5): pack a global record setting a key on neither list (neither one
@@ -475,6 +578,7 @@ fn a_git_archive_tarball_stages_with_every_entry_exact() {
         .collect();
     let want = vec![
         ("root".to_owned(), 0o755, What::Dir, vec![]),
+        ("root".to_owned(), 0, What::Layer, vec![]),
         ("root/bin".to_owned(), 0o775, What::Dir, vec![]),
         (
             "root/bin/hello".to_owned(),
@@ -502,7 +606,7 @@ fn a_git_archive_tarball_stages_with_every_entry_exact() {
 }
 
 /// HEX-GUEST-15 (§4a as amended): pack entries owned 472:0 and 1001:1001 by their headers, one whose PAX
-/// record sets a uid, gid and fractional mtime past what a header holds, and xattrs as SCHILY (raw) and
+/// record sets a uid, gid, fractional mtime and later atime past what a header holds, and xattrs as SCHILY (raw) and
 /// LIBARCHIVE (percent-encoded name, base64 value), with one in macOS's namespace: expect each staged with
 /// its owner, mtime and Linux xattrs exact, and the macOS one left out.
 #[test]
@@ -524,6 +628,7 @@ fn a_tarballs_owners_times_and_xattrs_are_carried() {
         ("uid", "70000"),
         ("gid", "1001"),
         ("mtime", "1700000000.25"),
+        ("atime", "1800000000.5"),
         ("SCHILY.xattr.security.capability", "\u{1}\0\0\u{2}"),
         ("LIBARCHIVE.xattr.user.n%61me", "dmFsdWU="),
         ("SCHILY.xattr.com.apple.provenance", "x"),
@@ -548,6 +653,10 @@ fn a_tarballs_owners_times_and_xattrs_are_carried() {
             nanos: 0
         }
     );
+    assert_eq!(
+        data.atime, data.mtime,
+        "no atime: the mtime, as containerd's"
+    );
     assert!(data.xattrs.is_empty());
     let caddy = by["root/caddy"].0.meta.clone().unwrap();
     assert_eq!((caddy.uid, caddy.gid), (70_000, 1001));
@@ -557,6 +666,14 @@ fn a_tarballs_owners_times_and_xattrs_are_carried() {
             secs: 1_700_000_000,
             nanos: 250_000_000
         }
+    );
+    assert_eq!(
+        caddy.atime,
+        Mtime {
+            secs: 1_800_000_000,
+            nanos: 500_000_000
+        },
+        "a later atime is kept"
     );
     assert_eq!(
         caddy.xattrs,
@@ -666,6 +783,7 @@ fn a_git_archive_made_here_stages_with_every_entry_exact() {
     let commit = String::from_utf8(git(dir, &["rev-parse", "HEAD"], b"")).unwrap();
     let want = vec![
         ("root".to_owned(), 0o755, What::Dir, vec![]),
+        ("root".to_owned(), 0, What::Layer, vec![]),
         ("root/bin".to_owned(), 0o775, What::Dir, vec![]),
         (
             "root/bin/hello".to_owned(),

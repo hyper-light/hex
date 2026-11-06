@@ -11,6 +11,7 @@ use std::net::Shutdown;
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, Refusal};
+use hex_core::bundle::MAX_LAYERS;
 use hex_core::stream::Deframer;
 use hex_core::stream::files::{self, Entry, Limits, Meta, Mtime, Op, What, Xattr};
 use hex_core::wire::{self, Answer, Received};
@@ -39,6 +40,9 @@ pub enum Source {
     /// A tarball (`.tar`, or gzip's `.tar.gz` or `.tgz`), staged from its own entries: their Linux modes
     /// and symlink texts exact, which a root unpacked on a host that keeps neither would lose (§4a).
     Tar(PathBuf),
+    /// An image's layers, each a tarball, applied in order into one root by containerd's rules: a later
+    /// entry replaces an earlier one, and OCI's whiteouts and opaque markers remove (§4a).
+    Layers(Vec<PathBuf>),
 }
 
 /// Whether `path` names a tarball root, by its name: `.tar`, `.tar.gz` or `.tgz`.
@@ -246,7 +250,14 @@ pub fn pack(
                 send(out, bytes)?;
             }
             Source::Path(path) => walk(out, &item.name, path, limits, &mut counts)?,
-            Source::Tar(path) => tarball(out, &item.name, path, limits, &mut counts)?,
+            Source::Tar(path) => tarball(
+                out,
+                &item.name,
+                std::slice::from_ref(path),
+                limits,
+                &mut counts,
+            )?,
+            Source::Layers(layers) => tarball(out, &item.name, layers, limits, &mut counts)?,
         }
     }
     send(out, &files::END)
@@ -364,7 +375,12 @@ fn one(
     match entry.what {
         What::Dir => dirs.push((path.to_owned(), name.to_owned())),
         What::File { size } if size > 0 => copy(out, path, size)?,
-        What::File { .. } | What::Symlink { .. } | What::Hardlink { .. } => {}
+        What::File { .. }
+        | What::Symlink { .. }
+        | What::Hardlink { .. }
+        | What::Layer
+        | What::Whiteout
+        | What::Opaque => {}
     }
     Ok(())
 }
@@ -417,6 +433,7 @@ struct Pax {
     uid: Option<u32>,
     gid: Option<u32>,
     mtime: Option<Mtime>,
+    atime: Option<Mtime>,
     xattrs: Vec<Xattr>,
 }
 
@@ -424,8 +441,8 @@ struct Pax {
 /// header's size field holds) and GNU's sparse keys. Extended attributes come as `SCHILY.xattr.<name>`
 /// (the value raw) or `LIBARCHIVE.xattr.<name, percent-encoded>` (the value base64); one in no namespace
 /// Linux holds (`com.apple.*`, from macOS bsdtar) can't exist on a Linux file, so it is left out, which
-/// loses nothing Linux's own unpack would hold (docs/design/shards-guest.md §4a). Other keys (atime,
-/// ctime, owner names, a comment) staging doesn't carry.
+/// loses nothing Linux's own unpack would hold (docs/design/shards-guest.md §4a). Other keys (ctime,
+/// owner names, a comment) staging doesn't carry.
 fn pax_keys(
     text: &[u8],
     bad: &dyn Fn(&str, &dyn std::fmt::Display) -> Refusal,
@@ -449,6 +466,12 @@ fn pax_keys(
                 pax.mtime = Some(
                     pax_time(value)
                         .ok_or_else(|| bad("a PAX record", &"its mtime isn't a time"))?,
+                );
+            }
+            b"atime" => {
+                pax.atime = Some(
+                    pax_time(value)
+                        .ok_or_else(|| bad("a PAX record", &"its atime isn't a time"))?,
                 );
             }
             b"size" => {
@@ -570,8 +593,9 @@ fn base64_decoded(text: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The keys a global PAX record may set: what staging doesn't carry and so can't get wrong (atime and
-/// ctime, which staging sets from mtime and the kernel; owner names, which numeric ids stand for; a
+/// The keys a global PAX record may set: what staging doesn't carry and so can't get wrong (atime, which
+/// Go's archive/tar leaves unapplied for containerd, returning the record as an entry of its own; ctime,
+/// the kernel's; owner names, which numeric ids stand for; a
 /// comment; the character sets the record's texts are in). Any other key would apply to every entry after
 /// it, and is refused rather than ignored (CLAUDE.md §3; docs/design/shards-guest.md §4a): `uid`, `gid`
 /// and `mtime` among them, since staging carries those.
@@ -630,17 +654,157 @@ impl<R: Read> Read for Counted<R> {
     }
 }
 
-/// Sends the tarball at `path` as `name`, a directory holding its entries in the archive's order: each one
-/// counted against the stage's bounds before it is sent, each directory before what it holds, and every
-/// fault refused naming the archive and the entry.
+/// OCI's whiteout prefix: `.wh.<name>` in a layer removes `<name>` from the layers below (image-spec
+/// `layer.md`, "Whiteouts"; containerd `pkg/archive/tar.go:123`).
+const WHITEOUT: &str = ".wh.";
+/// OCI's opaque marker: what its directory holds from the layers below is removed (`tar.go:131`).
+const OPAQUE: &str = ".wh..wh..opq";
+
+/// What the packer knows of a root as its layers apply, by the names its entries give (never resolved
+/// through a link: the relay resolves within the root, §4a). It refuses early what the relay would, a
+/// hard link to nothing of the root; a name through one of the root's own links is the relay's to
+/// resolve.
+#[derive(Default)]
+struct Tree {
+    dirs: BTreeSet<String>,
+    links: BTreeSet<String>,
+    regular: BTreeSet<String>,
+    /// What the current layer has made: what an opaque marker keeps (containerd's `unpackedPaths`).
+    made: BTreeSet<String>,
+}
+
+/// `rel`'s proper prefixes, nearest the root first: `a`, `a/b` for `a/b/c`.
+fn prefixes(rel: &str) -> impl Iterator<Item = &str> {
+    rel.match_indices('/').filter_map(|(i, _)| rel.get(..i))
+}
+
+/// The names in `set` under `dir` (`dir/…`), or every name when `dir` is the root's `""`.
+fn under<'s>(set: &'s BTreeSet<String>, dir: &str) -> Vec<&'s String> {
+    if dir.is_empty() {
+        return set.iter().collect();
+    }
+    let from = format!("{dir}/");
+    set.range(from.clone()..)
+        .take_while(|k| k.starts_with(&from))
+        .collect()
+}
+
+impl Tree {
+    /// Whether `rel` is reached through one of the root's own symbolic links.
+    fn through_link(&self, rel: &str) -> bool {
+        prefixes(rel).any(|p| self.links.contains(p))
+    }
+
+    /// Forgets `rel` and everything under it: removed by a whiteout, or replaced.
+    fn forget(&mut self, rel: &str) {
+        for set in [&mut self.dirs, &mut self.links, &mut self.regular] {
+            set.remove(rel);
+            let gone: Vec<String> = under(set, rel).into_iter().cloned().collect();
+            for k in gone {
+                set.remove(&k);
+            }
+        }
+    }
+
+    /// Forgets what `dir` holds that this layer didn't make, with everything under it, as containerd's
+    /// walk removes it (`tar.go:184-216`).
+    fn forget_unmade(&mut self, dir: &str) {
+        let skip = if dir.is_empty() {
+            0
+        } else {
+            dir.len().saturating_add(1)
+        };
+        let made = &self.made;
+        // Kept only when it and each directory between it and `dir` were made by this layer.
+        let kept = |k: &str| {
+            made.contains(k)
+                && prefixes(k)
+                    .filter(|p| p.len() >= skip)
+                    .all(|p| made.contains(p))
+        };
+        for set in [&mut self.dirs, &mut self.links, &mut self.regular] {
+            let gone: Vec<String> = under(set, dir)
+                .into_iter()
+                .filter(|k| !kept(k))
+                .cloned()
+                .collect();
+            for k in gone {
+                set.remove(&k);
+            }
+        }
+    }
+}
+
+/// Sends the tarball root at `layers` as `name`: one directory, each layer's entries applied over those
+/// before it in order, by containerd's rules (§4a): each counted against the stage's bounds before it
+/// is sent, and every fault refused naming the archive and the entry.
 fn tarball(
+    out: &mut dyn Write,
+    name: &str,
+    layers: &[PathBuf],
+    limits: &Limits,
+    counts: &mut Counts,
+) -> Result<(), Refusal> {
+    if layers.len() > MAX_LAYERS {
+        return Err(Refusal::Invalid {
+            what: "staged files",
+            why: format!(
+                "{name} has {} layers, over overlayfs's {MAX_LAYERS}",
+                layers.len()
+            ),
+        });
+    }
+    // The root itself, 0755 and the relay's: an archive's own `./` entry, if it has one, names nothing
+    // more (the root is the box's mount point, whose owner and times are the runtime's).
+    counts.add(0, limits)?;
+    let root = Entry {
+        path: name.to_owned(),
+        mode: 0o755,
+        what: What::Dir,
+        meta: None,
+    };
+    out.write_all(&files::head(&root, limits).map_err(refused)?)
+        .map_err(|e| Refusal::os("sending staged files", e))?;
+    let mut tree = Tree::default();
+    for path in layers {
+        counts.add(0, limits)?;
+        let marker = Entry {
+            path: name.to_owned(),
+            mode: 0,
+            what: What::Layer,
+            meta: None,
+        };
+        out.write_all(&files::head(&marker, limits).map_err(refused)?)
+            .map_err(|e| Refusal::os("sending staged files", e))?;
+        tree.made = BTreeSet::new();
+        layer(out, name, path, limits, counts, &mut tree)?;
+    }
+    Ok(())
+}
+
+/// The later of two times: containerd sets atime so (`latestTime`, `tar.go:335,445`).
+fn later(a: Mtime, b: Mtime) -> Mtime {
+    if (a.secs, a.nanos) > (b.secs, b.nanos) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Sends one layer's entries, the archive at `path`, under `name`.
+fn layer(
     out: &mut dyn Write,
     name: &str,
     path: &Path,
     limits: &Limits,
     counts: &mut Counts,
+    tree: &mut Tree,
 ) -> Result<(), Refusal> {
     let bad = |what: &str, why: &dyn std::fmt::Display| never(path, &format!("{what}: {why}"));
+    let send = |out: &mut dyn Write, entry: &Entry| {
+        out.write_all(&files::head(entry, limits).map_err(refused)?)
+            .map_err(|e| Refusal::os("sending staged files", e))
+    };
     let file = File::open(path).map_err(|e| bad("opening it", &e))?;
     let gzip = path
         .file_name()
@@ -655,22 +819,6 @@ fn tarball(
         inner: reader,
         read: 0,
     });
-    // The root itself, 0755 and the relay's: the archive's own `./` entry, if it has one, names nothing
-    // more (the root is the box's mount point, whose owner and times are the runtime's).
-    counts.add(0, limits)?;
-    let root = Entry {
-        path: name.to_owned(),
-        mode: 0o755,
-        what: What::Dir,
-        meta: None,
-    };
-    out.write_all(&files::head(&root, limits).map_err(refused)?)
-        .map_err(|e| Refusal::os("sending staged files", e))?;
-    let mut dirs: BTreeSet<String> = BTreeSet::new();
-    // The archive's own symbolic links: an entry written through one is refused, wherever it points.
-    let mut links: BTreeSet<String> = BTreeSet::new();
-    // The archive's regular files so far: what a hard link may name.
-    let mut regular: BTreeSet<String> = BTreeSet::new();
     // Where the last entry's data ends: the archive must go on past it to its end-of-archive block.
     let mut end: u64 = 0;
     // The extension records before an entry (GNU long name and link, PAX), each read within its bound:
@@ -748,6 +896,8 @@ fn tarball(
         }
         let shown = String::from_utf8_lossy(&raw).into_owned();
         let text = std::str::from_utf8(&raw).map_err(|_| bad(&shown, &"its name isn't UTF-8"))?;
+        // A literal absolute or `..` name is refused, where containerd clamps it to the root (§4a); a
+        // name through one of the root's own links is resolved within it by the relay.
         if text.starts_with('/') {
             return Err(bad(&shown, &"its name is absolute"));
         }
@@ -761,23 +911,51 @@ fn tarball(
         if rel.is_empty() || rel == "." {
             continue;
         }
-        // Written through one of the archive's own links: refused whatever the link's text, which stays
-        // legal itself (a root's absolute links resolve inside it when used).
-        let mut prefix_end: usize = 0;
-        for part in rel.split('/') {
-            prefix_end = prefix_end.saturating_add(part.len());
-            let prefix = rel.get(..prefix_end).unwrap_or(rel);
-            if prefix.len() < rel.len() && links.contains(prefix) {
-                return Err(bad(
-                    &shown,
-                    &format!("it's written through the symbolic link {prefix:?}"),
-                ));
+        let (parent, leaf) = rel.rsplit_once('/').unwrap_or(("", rel));
+        // A parent no layer made, the relay makes 0755 as containerd's `mkparent` does (`tar.go:448-503`).
+        if !tree.through_link(rel) {
+            for p in prefixes(rel) {
+                if !tree.dirs.contains(p) {
+                    tree.dirs.insert(p.to_owned());
+                }
             }
-            prefix_end = prefix_end.saturating_add(1);
         }
-        let parent = rel.rsplit_once('/').map_or("", |(p, _)| p);
-        if !parent.is_empty() && !dirs.contains(parent) {
-            return Err(bad(&shown, &"it comes before its directory"));
+        let under_root = |rel: &str| {
+            if rel.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{name}/{rel}")
+            }
+        };
+        // A whiteout or opaque marker, whatever its kind in the archive, as containerd reads it
+        // (`tar.go:180-225`): never a file of its own.
+        if let Some(gone) = leaf.strip_prefix(WHITEOUT) {
+            counts.add(0, limits)?;
+            let (what, at) = if leaf == OPAQUE {
+                tree.forget_unmade(parent);
+                (What::Opaque, parent.to_owned())
+            } else {
+                if gone.is_empty() {
+                    return Err(bad(&shown, &"a whiteout that names nothing"));
+                }
+                let at = if parent.is_empty() {
+                    gone.to_owned()
+                } else {
+                    format!("{parent}/{gone}")
+                };
+                tree.forget(&at);
+                (What::Whiteout, at)
+            };
+            send(
+                out,
+                &Entry {
+                    path: under_root(&at),
+                    mode: 0,
+                    what,
+                    meta: None,
+                },
+            )?;
+            continue;
         }
         let header = entry.header();
         let mode = u16::try_from(
@@ -796,6 +974,26 @@ fn tarball(
                 .and_then(|v| u32::try_from(v).ok())
                 .ok_or_else(|| bad(&shown, &format!("its {what} isn't an id")))
         };
+        let mtime = match ext.mtime {
+            Some(mtime) => mtime,
+            None => Mtime {
+                secs: numeric(header.mtime(), &header.as_old().mtime)
+                    .and_then(|t| i64::try_from(t).ok())
+                    .ok_or_else(|| bad(&shown, &"its mtime isn't a time"))?,
+                nanos: 0,
+            },
+        };
+        // An archive's atime is PAX `atime`, or a GNU header's own field when it isn't zero, as Go's
+        // archive/tar reads them for containerd; absent, it's the mtime.
+        let atime = match ext.atime {
+            Some(atime) => atime,
+            None => header
+                .as_gnu()
+                .filter(|gnu| gnu.atime.first().is_some_and(|b| *b != 0))
+                .and_then(|gnu| numeric(gnu.atime(), &gnu.atime))
+                .and_then(|t| i64::try_from(t).ok())
+                .map_or(mtime, |secs| Mtime { secs, nanos: 0 }),
+        };
         let meta = Meta {
             uid: match ext.uid {
                 Some(uid) => uid,
@@ -805,17 +1003,11 @@ fn tarball(
                 Some(gid) => gid,
                 None => id(header.gid(), &header.as_old().gid, "gid")?,
             },
-            mtime: match ext.mtime {
-                Some(mtime) => mtime,
-                None => Mtime {
-                    secs: numeric(header.mtime(), &header.as_old().mtime)
-                        .and_then(|t| i64::try_from(t).ok())
-                        .ok_or_else(|| bad(&shown, &"its mtime isn't a time"))?,
-                    nanos: 0,
-                },
-            },
+            mtime,
+            atime: later(atime, mtime),
             xattrs: std::mem::take(&mut ext.xattrs),
         };
+        let mut hardlinks_a_link = false;
         let what = match header.entry_type() {
             tar::EntryType::Directory => What::Dir,
             tar::EntryType::Regular | tar::EntryType::Continuous => What::File { size },
@@ -841,8 +1033,11 @@ fn tarball(
             }
             tar::EntryType::Fifo => return Err(bad(&shown, &"a FIFO is never staged")),
             tar::EntryType::Link => {
-                // Another name for an earlier regular file of this root, named as an entry is: never
-                // an escaping name, a later or missing entry, a directory, or one through a link.
+                // Another name for a regular file or symbolic link of this root (linkat(2) follows no
+                // link, as containerd's `link` doesn't, `tar.go:386-394`), named as an entry is: never
+                // an escaping name, nor one this root doesn't hold now (a later or missing entry, a
+                // directory, one a layer removed). One named through the root's own link is resolved
+                // within the root by the relay, which refuses it there if it's missing or a directory.
                 let target = link
                     .clone()
                     .ok_or_else(|| bad(&shown, &"a hard link with no target"))?;
@@ -852,23 +1047,31 @@ fn tarball(
                 while let Some(rest) = to.strip_prefix("./") {
                     to = rest;
                 }
-                if !regular.contains(to) {
+                if to.starts_with('/') || to.split('/').any(|part| part == "..") {
+                    return Err(bad(
+                        &shown,
+                        &format!("a hard link names {target:?}, which names its way out"),
+                    ));
+                }
+                if !tree.regular.contains(to) && !tree.links.contains(to) && !tree.through_link(to)
+                {
                     return Err(bad(
                         &shown,
                         &format!(
-                            "a hard link names {target:?}, which is no earlier regular file of this root"
+                            "a hard link names {target:?}, which is no earlier file or link of this root"
                         ),
                     ));
                 }
+                hardlinks_a_link = tree.links.contains(to);
                 What::Hardlink {
-                    target: format!("{name}/{to}"),
+                    target: under_root(to),
                 }
             }
             _ => return Err(bad(&shown, &"an entry of a kind staging carries not")),
         };
         let size = match what {
             What::File { size } => size,
-            What::Dir | What::Symlink { .. } | What::Hardlink { .. } => 0,
+            _ => 0,
         };
         counts.add(size, limits)?;
         // A hard link shares its target's inode, owner, mode, xattrs and times: it carries none of its own.
@@ -877,22 +1080,27 @@ fn tarball(
             _ => Some(meta),
         };
         let staged = Entry {
-            path: format!("{name}/{rel}"),
+            path: under_root(rel),
             mode,
             what,
             meta,
         };
-        out.write_all(&files::head(&staged, limits).map_err(refused)?)
-            .map_err(|e| Refusal::os("sending staged files", e))?;
+        send(out, &staged)?;
+        // It replaces whatever was at its name, but a directory onto a directory merges (`tar.go:304-311`).
+        let merges = matches!(staged.what, What::Dir) && tree.dirs.contains(rel);
+        if !merges {
+            tree.forget(rel);
+        }
+        tree.made.insert(rel.to_owned());
         match staged.what {
             What::Dir => {
-                dirs.insert(rel.to_owned());
+                tree.dirs.insert(rel.to_owned());
             }
             What::Symlink { .. } => {
-                links.insert(rel.to_owned());
+                tree.links.insert(rel.to_owned());
             }
             What::File { size } => {
-                regular.insert(rel.to_owned());
+                tree.regular.insert(rel.to_owned());
                 if size > 0 {
                     let sent =
                         io::copy(&mut (&mut entry).take(size), out).map_err(|e| bad(&shown, &e))?;
@@ -901,7 +1109,13 @@ fn tarball(
                     }
                 }
             }
-            What::Hardlink { .. } => {}
+            What::Hardlink { .. } if hardlinks_a_link => {
+                tree.links.insert(rel.to_owned());
+            }
+            What::Hardlink { .. } => {
+                tree.regular.insert(rel.to_owned());
+            }
+            What::Layer | What::Whiteout | What::Opaque => {}
         }
     }
     if long_name.is_some() || long_link.is_some() || pax.is_some() {

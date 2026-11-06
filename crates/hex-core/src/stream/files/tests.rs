@@ -179,7 +179,7 @@ fn hostile_names_are_refused_by_name() {
 /// with no target: expect each refused by its type.
 #[test]
 fn hostile_kinds_modes_and_fields_are_refused_by_type() {
-    for kind in [5, 6, 0xff] {
+    for kind in [8, 9, 0xff] {
         assert_eq!(
             read(LIMITS, &raw(kind, 0, 0o644, b"dev/null", b"", 0), 64),
             Err(Refused::Kind(kind))
@@ -320,6 +320,10 @@ fn meta(uid: u32, gid: u32, xattrs: &[(&str, &[u8])]) -> Meta {
         mtime: Mtime {
             secs: 1_700_000_000,
             nanos: 500,
+        },
+        atime: Mtime {
+            secs: 1_700_000_001,
+            nanos: 0,
         },
         xattrs: xattrs
             .iter()
@@ -487,4 +491,48 @@ fn a_version_1_stream_reads_and_refuses_what_only_version_2_has() {
     )
     .unwrap();
     assert_eq!(read(LIMITS, &v1(&linked), 64), Err(Refused::Kind(4)));
+}
+
+/// HEX-GUEST-13 (version 2, §4a's layers): stage two layers of one root, the second with a whiteout and an
+/// opaque directory: expect each marker read back as written, cut anywhere; and a marker carrying a size,
+/// a target or metadata refused by type.
+#[test]
+fn layers_whiteouts_and_opaque_markers_read_back_and_carry_nothing_else() {
+    let entries = vec![
+        (entry("root", What::Layer), vec![]),
+        (entry("root/etc", What::Dir), vec![]),
+        (
+            entry("root/etc/motd", What::File { size: 2 }),
+            b"hi".to_vec(),
+        ),
+        (entry("root", What::Layer), vec![]),
+        (entry("root/etc/motd", What::Whiteout), vec![]),
+        (entry("root/etc", What::Opaque), vec![]),
+    ];
+    let bytes = stage("b", &entries);
+    let mut want = vec![(
+        Step::Open {
+            op: Op::Stage,
+            id: "b".to_owned(),
+        },
+        vec![],
+    )];
+    want.extend(entries.into_iter().map(|(e, b)| (Step::Entry(e), b)));
+    want.push((Step::End, vec![]));
+    for cut in [1, 5, bytes.len()] {
+        assert_eq!(read(LIMITS, &bytes, cut).unwrap(), want, "cut {cut}");
+    }
+    for (kind, size, target, flags) in [(5u8, 1u64, 0u16, 0u8), (6, 0, 1, 0), (7, 0, 0, HAS_META)] {
+        let mut raw = open(Op::Stage, "b").unwrap();
+        raw.extend([kind, flags]);
+        raw.extend(0u16.to_le_bytes());
+        raw.extend(1u16.to_le_bytes());
+        raw.extend(target.to_le_bytes());
+        raw.extend(size.to_le_bytes());
+        raw.push(b'r');
+        assert!(
+            matches!(read(LIMITS, &raw, 64), Err(Refused::Field { .. })),
+            "kind {kind}"
+        );
+    }
 }

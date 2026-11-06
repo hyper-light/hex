@@ -394,8 +394,9 @@ fn raw_stage(entries: &[(&str, hf::What)]) -> Vec<u8> {
 }
 
 /// HEX-GUEST-14: stage a symlink `a` to `/` and then a directory `a/escaped` under it, and a symlink
-/// to the staged folder's parent then a file under it: expect each refused as leading through a
-/// symbolic link, nothing made outside the box's root, and the partial copy removed.
+/// to the staged folder's parent then a file under it, outside any layer: expect each refused as leading
+/// through a symbolic link, nothing made outside the box's root, and the partial copy removed; and the same
+/// within a layer: expect each inside the layer's root, as containerd resolves it (§4a).
 #[test]
 fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing() {
     let (lab, staged) = staged_lab();
@@ -420,6 +421,32 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
         assert!(!lab.dir.path().join("escaped").exists());
         assert!(!staged.join("b").exists(), "the partial copy was left");
     }
+    // In a layer, the same names resolve within the layer's root (§4a, the lead's ruling): inside it.
+    for (link_to, under) in [("/", hf::What::Dir), ("../..", hf::What::File { size: 0 })] {
+        let answer = stage_raw(
+            &lab,
+            &raw_stage(&[
+                ("r", hf::What::Dir),
+                ("r", hf::What::Layer),
+                (
+                    "r/a",
+                    hf::What::Symlink {
+                        target: link_to.to_owned(),
+                    },
+                ),
+                ("r/a/escaped", under),
+            ]),
+        );
+        assert_eq!(answer, Answer::Done);
+        assert!(!Path::new("/escaped").exists());
+        assert!(!lab.dir.path().join("escaped").exists());
+        assert!(!staged.join("escaped").exists());
+        assert!(
+            std::fs::symlink_metadata(staged.join("b/r/escaped")).is_ok(),
+            "it lands at the layer's root"
+        );
+        hex_client::guest::stage::unstage(lab.link().as_ref(), &BoxId::new("b").unwrap()).unwrap();
+    }
 }
 
 /// HEX-GUEST-14: stage an entry of a device's kind, an entry twice, and an entry under a file: expect
@@ -428,8 +455,8 @@ fn a_stage_that_names_its_way_out_through_a_link_is_refused_and_leaves_nothing()
 fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     let (lab, staged) = staged_lab();
     let mut device = hf::open(hf::Op::Stage, "b").unwrap();
-    // A head of kind 5 (a device's in tar, none on the stream), mode 0644, a one-byte path and no size.
-    device.extend([5u8, 0]);
+    // A head of kind 8 (none on the stream: a device has none), mode 0644, a one-byte path and no size.
+    device.extend([8u8, 0]);
     device.extend(0o644u16.to_le_bytes());
     device.extend(1u16.to_le_bytes());
     device.extend([0u8; 10]);
@@ -464,46 +491,316 @@ fn a_hostile_or_cut_stage_is_refused_and_leaves_nothing() {
     assert!(!staged.join("b").exists());
 }
 
-/// HEX-GUEST-14 with the host's packer (the lead's list, 1): stage a tarball root whose entry is written
-/// through a symbolic link it made (`a` to `/`, then `a/escaped/`), end to end through the relay: expect it
-/// refused naming the link, nothing made outside the box's staged root, and the partial copy gone.
-#[test]
-fn a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothing() {
-    use hex_client::guest::stage::{Item, Source, stage};
-    let (lab, staged) = staged_lab();
-    let host = tempfile::tempdir().unwrap();
-    let tarball = host.path().join("root.tar");
-    {
-        let mut b = tar::Builder::new(File::create(&tarball).unwrap());
-        let mut link = tar::Header::new_gnu();
-        link.set_entry_type(tar::EntryType::Symlink);
-        link.set_mode(0o777);
-        link.set_size(0);
-        b.append_link(&mut link, "a", "/").unwrap();
-        let mut dir = tar::Header::new_gnu();
-        dir.set_entry_type(tar::EntryType::Directory);
-        dir.set_mode(0o755);
-        dir.set_size(0);
-        b.append_data(&mut dir, "a/escaped/", std::io::empty())
-            .unwrap();
-        b.into_inner().unwrap();
+/// One entry of a test layer: a directory, a file and its bytes, a symbolic link and its text, a hard
+/// link and its target.
+enum T<'a> {
+    Dir(&'a str),
+    File(&'a str, &'a [u8]),
+    Link(&'a str, &'a str),
+    Hard(&'a str, &'a str),
+}
+
+/// Writes a layer of `entries` at `path`, each owned by this test's own uid and gid, mtime `mtime`.
+fn layer_tar(path: &Path, mtime: u64, entries: &[T]) {
+    let mut b = tar::Builder::new(File::create(path).unwrap());
+    for e in entries {
+        let mut h = tar::Header::new_ustar();
+        h.set_uid(u64::from(rustix::process::getuid().as_raw()));
+        h.set_gid(u64::from(rustix::process::getgid().as_raw()));
+        h.set_mtime(mtime);
+        h.set_size(0);
+        match e {
+            T::Dir(name) => {
+                h.set_entry_type(tar::EntryType::Directory);
+                h.set_mode(0o755);
+                b.append_data(&mut h, format!("{name}/"), std::io::empty())
+                    .unwrap();
+            }
+            T::File(name, data) => {
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_mode(0o644);
+                h.set_size(data.len() as u64);
+                b.append_data(&mut h, name, *data).unwrap();
+            }
+            T::Link(name, to) => {
+                h.set_entry_type(tar::EntryType::Symlink);
+                h.set_mode(0o777);
+                b.append_link(&mut h, name, to).unwrap();
+            }
+            T::Hard(name, to) => {
+                h.set_entry_type(tar::EntryType::Link);
+                h.set_mode(0o644);
+                b.append_link(&mut h, name, to).unwrap();
+            }
+        }
     }
-    let id = BoxId::new("box-1").unwrap();
+    b.into_inner().unwrap();
+}
+
+/// Stages `layers` (each its mtime and entries) as one root through the host's packer and the relay.
+fn stage_layers(lab: &Lab, host: &Path, layers: &[(u64, Vec<T>)]) -> Result<(), Refusal> {
+    use hex_client::guest::stage::{Item, Source, stage};
+    let paths: Vec<PathBuf> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, (mtime, entries))| {
+            let path = host.join(format!("layer{i}.tar"));
+            layer_tar(&path, *mtime, entries);
+            path
+        })
+        .collect();
     let items = [Item {
         name: "root".to_owned(),
-        source: Source::Tar(tarball),
+        source: Source::Layers(paths),
     }];
-    let got = stage(lab.link().as_ref(), &id, &items, &hf::LIMITS);
+    stage(
+        lab.link().as_ref(),
+        &BoxId::new("box-1").unwrap(),
+        &items,
+        &hf::LIMITS,
+    )
+}
+
+/// HEX-GUEST-14 with the host's packer (the lead's ruling, §4a): stage a tarball root whose entries are
+/// written through links it made, end to end through the relay: `a` to `/etc` then `a/x`, and `c` to
+/// `../../..` (the lab's folder, from the staged root) then `c/x`, with a sentinel `x` in that folder:
+/// expect each where containerd's `fs.RootPath` puts it, inside the root (`etc/x`, `x`), and the sentinel
+/// untouched.
+#[test]
+fn a_tarball_writing_through_its_own_link_lands_inside_its_root() {
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    let sentinel = lab.dir.path().join("x");
+    std::fs::write(&sentinel, b"sentinel").unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[(
+            1_600_000_000,
+            vec![
+                T::Dir("etc"),
+                T::Link("a", "/etc"),
+                T::File("a/x", b"in etc"),
+                T::Link("c", "../../.."),
+                T::File("c/x", b"at the top"),
+            ],
+        )],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    assert_eq!(std::fs::read(root.join("etc/x")).unwrap(), b"in etc");
+    assert_eq!(std::fs::read(root.join("x")).unwrap(), b"at the top");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
+    assert!(!lab.dir.path().join("staged/x").exists());
+    assert_eq!(
+        std::fs::read_link(root.join("a")).unwrap(),
+        Path::new("/etc"),
+        "the link itself is kept as written"
+    );
+}
+
+/// HEX-GUEST-14 (the lead's ruling, §4a): stage `bin` as a link to `usr/bin` in one layer and `bin/tool`
+/// in the next, as merged-usr images do: expect the tool at `usr/bin/tool`, and `bin` still the link.
+#[test]
+fn a_later_layers_entry_under_a_linked_directory_lands_where_the_link_points() {
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[
+            (
+                1_600_000_000,
+                vec![T::Dir("usr"), T::Dir("usr/bin"), T::Link("bin", "usr/bin")],
+            ),
+            (1_600_000_100, vec![T::File("bin/tool", b"tool")]),
+        ],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    assert_eq!(std::fs::read(root.join("usr/bin/tool")).unwrap(), b"tool");
+    assert!(
+        std::fs::symlink_metadata(root.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// HEX-GUEST-14 (the lead's ruling, §4a): stage a hard link whose target is named through the root's own
+/// link (`bin` to `/usr/bin`, `usr/bin/perl` to `bin/perl5`): expect it the target's inode; and one named
+/// through a link to `../../..`, where a file of that name sits outside the root: expect it refused as
+/// containerd's unpack fails it, for the same reason: the target resolves inside the root
+/// (`hardlinkRootPath`, `pkg/archive/tar.go:795-807`), where nothing of that name is (`ENOENT`), and the
+/// outside file is never linked.
+#[test]
+fn a_hard_link_through_the_roots_own_link_resolves_inside_it() {
+    use std::os::unix::fs::MetadataExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[(
+            1_600_000_000,
+            vec![
+                T::Dir("usr"),
+                T::Dir("usr/bin"),
+                T::File("usr/bin/perl5", b"perl"),
+                T::Link("bin", "/usr/bin"),
+                T::Hard("usr/bin/perl", "bin/perl5"),
+            ],
+        )],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    let perl5 = std::fs::metadata(root.join("usr/bin/perl5")).unwrap();
+    let perl = std::fs::symlink_metadata(root.join("usr/bin/perl")).unwrap();
+    assert_eq!(perl.ino(), perl5.ino());
+    hex_client::guest::stage::unstage(lab.link().as_ref(), &BoxId::new("box-1").unwrap()).unwrap();
+
+    let secret = lab.dir.path().join("secret");
+    std::fs::write(&secret, b"outside").unwrap();
+    let got = stage_layers(
+        &lab,
+        host.path(),
+        &[(
+            1_600_000_000,
+            vec![T::Link("d", "../../.."), T::Hard("h", "d/secret")],
+        )],
+    );
     let why = got.unwrap_err().to_string();
-    assert!(why.contains("through the symbolic link \"a\""), "{why}");
-    assert!(!Path::new("/escaped").exists());
-    assert!(!staged.join("escaped").exists());
+    assert!(
+        why.contains("which isn't staged") && why.contains("No such file or directory"),
+        "{why}"
+    );
+    assert_eq!(std::fs::metadata(&secret).unwrap().nlink(), 1);
     assert!(!staged.join("box-1").exists(), "the partial copy was left");
 }
 
+/// HEX-GUEST-14 (the lead's ruling, §4a; containerd's `mkparent`, `pkg/archive/tar.go:448-503`): stage a
+/// layer holding `usr/local/bin/x` with no entry for `usr/local` or `usr/local/bin`, as hand-made and
+/// Bazel layers are: expect the file staged and each missing parent made 0755, as containerd makes it.
+#[test]
+fn an_entry_whose_parents_no_layer_made_gets_them_made_as_containerd_does() {
+    use std::os::unix::fs::PermissionsExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[(
+            1_600_000_000,
+            vec![T::Dir("usr"), T::File("usr/local/bin/x", b"x")],
+        )],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    assert_eq!(std::fs::read(root.join("usr/local/bin/x")).unwrap(), b"x");
+    for made in ["usr/local", "usr/local/bin"] {
+        let meta = std::fs::symlink_metadata(root.join(made)).unwrap();
+        assert!(meta.is_dir(), "{made}");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o755, "{made}");
+    }
+}
+
+/// HEX-GUEST-14 (§4a; containerd's `link`, os.Link, `pkg/archive/tar.go:386-394`): stage a hard link to a
+/// symbolic link: expect another name for the link itself, as linkat(2) without `AT_SYMLINK_FOLLOW` makes.
+#[test]
+fn a_hard_link_to_a_symbolic_link_names_the_link_itself() {
+    use std::os::unix::fs::MetadataExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[(
+            1_600_000_000,
+            vec![T::Link("sh", "bash"), T::Hard("sh2", "sh")],
+        )],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    let sh = std::fs::symlink_metadata(root.join("sh")).unwrap();
+    let sh2 = std::fs::symlink_metadata(root.join("sh2")).unwrap();
+    assert!(sh2.file_type().is_symlink());
+    assert_eq!(sh.ino(), sh2.ino());
+}
+
+/// HEX-GUEST-14 (§4a, containerd's `applyNaive`): stage two layers, the second whiting out `etc/a`,
+/// making `d` opaque and adding `d/new`, and replacing a file with a directory, a directory with a file
+/// and a link with a directory: expect `etc/a` gone and `etc/b` kept, `d` holding `d/new` alone with the
+/// second layer's mtime, and each replaced path of its new kind.
+#[test]
+fn a_later_layer_whites_out_makes_opaque_and_replaces() {
+    use std::os::unix::fs::MetadataExt;
+    let (lab, staged) = staged_lab();
+    let host = tempfile::tempdir().unwrap();
+    stage_layers(
+        &lab,
+        host.path(),
+        &[
+            (
+                1_600_000_000,
+                vec![
+                    T::Dir("etc"),
+                    T::File("etc/a", b"a"),
+                    T::File("etc/b", b"b"),
+                    T::Dir("d"),
+                    T::File("d/old", b"old"),
+                    T::Dir("d/keep"),
+                    T::File("d/keep/k", b"k"),
+                    T::File("f", b"file"),
+                    T::Dir("g"),
+                    T::File("g/inner", b"inner"),
+                    T::Link("s", "etc"),
+                ],
+            ),
+            (
+                1_600_000_100,
+                vec![
+                    T::File("etc/.wh.a", b""),
+                    T::Dir("d"),
+                    T::File("d/.wh..wh..opq", b""),
+                    T::File("d/new", b"new"),
+                    T::Dir("f"),
+                    T::File("g", b"now a file"),
+                    T::Dir("s"),
+                ],
+            ),
+        ],
+    )
+    .unwrap();
+    let root = staged.join("box-1/root");
+    assert!(!root.join("etc/a").exists());
+    assert!(
+        !root.join("etc/.wh.a").exists(),
+        "a whiteout is never a file"
+    );
+    assert_eq!(std::fs::read(root.join("etc/b")).unwrap(), b"b");
+    let mut d: Vec<String> = std::fs::read_dir(root.join("d"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    d.sort();
+    assert_eq!(d, ["new"]);
+    assert_eq!(
+        std::fs::metadata(root.join("d")).unwrap().mtime(),
+        1_600_000_100
+    );
+    assert!(std::fs::symlink_metadata(root.join("f")).unwrap().is_dir());
+    assert_eq!(std::fs::read(root.join("g")).unwrap(), b"now a file");
+    assert!(std::fs::symlink_metadata(root.join("s")).unwrap().is_dir());
+    assert_eq!(
+        std::fs::read(root.join("etc/b")).unwrap(),
+        b"b",
+        "the link's target is untouched when the link is replaced"
+    );
+}
+
 /// HEX-GUEST-14 (§4a as amended): stage a tarball root, end to end through the host's packer and the relay,
-/// whose file is owned by this test's own uid and gid (all a rootless relay may give), has a fractional mtime,
-/// a `user.` xattr and a setuid mode, with a hard link to it and a directory with its own mtime: expect each
+/// whose file is owned by this test's own uid and gid (all a rootless relay may give), has a fractional mtime
+/// and a later atime, a `user.` xattr and a setuid mode, with a hard link to it and a directory with its own mtime: expect each
 /// on disk as the archive says, the link the same inode, the mode kept though the owner was set after it was
 /// written, and the directory's mtime unmoved by its children. Other owners and `security.capability` take
 /// the guest's root: HEX-GUEST-21 holds those.
@@ -532,6 +829,7 @@ fn a_tarball_roots_owners_times_xattrs_and_hard_links_land_on_disk() {
         let mut record = Vec::new();
         for (k, v) in [
             ("mtime", "1700000000.25"),
+            ("atime", "1800000000.5"),
             ("SCHILY.xattr.user.hex", "staged"),
         ] {
             let body = format!(" {k}={v}\n");
@@ -580,6 +878,11 @@ fn a_tarball_roots_owners_times_xattrs_and_hard_links_land_on_disk() {
     assert_eq!(
         (perl5.mtime(), perl5.mtime_nsec()),
         (1_700_000_000, 250_000_000)
+    );
+    assert_eq!(
+        (perl5.atime(), perl5.atime_nsec()),
+        (1_800_000_000, 500_000_000),
+        "its own atime, the later"
     );
     assert_eq!(perl.ino(), perl5.ino(), "the hard link is the same inode");
     assert_eq!(perl5.nlink(), 2);

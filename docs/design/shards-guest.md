@@ -185,10 +185,11 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   silent corruption (CLAUDE.md §3). So on Windows a directory root is refused by name (`Refusal::Platform`), pointing
   at the tarball form; on macOS and Linux, whose file systems keep both, a directory stays a root. OCI image layers
   are tarballs to begin with. The archive is read flat, one entry at a time, within the stage's bounds (entries,
-  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, an entry before its
-  directory, a corrupt or truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending
-  mid-entry) are refused by name. A hard link was refused by name too, since none of the lab's inputs holds one; that
-  was falsified the same day by real images (below) and is superseded by what a tarball root carries.
+  bytes, path length); an absolute name or a `..` component, a device, FIFO or socket entry, a corrupt or
+  truncated archive (a gzip stream whose CRC or length doesn't match, an archive ending mid-entry) are refused by
+  name. A hard link was refused by name too, since none of the lab's inputs holds one; that was falsified the same day
+  by real images (below) and is superseded by what a tarball root carries. So was an entry before its directory,
+  superseded by containerd's `mkparent` (below).
   - **The reader is the `tar` crate**, 0.4.46 from crates.io (alexcrichton's tar-rs), already a workspace
     dependency (`Cargo.toml:40`), used as it is rather than a reader of Hex's own; not vendored, since Hex changes
     nothing in it (CLAUDE.md "Vendoring"). Hex's checks wrap what it yields, and every hostile-input test runs
@@ -202,18 +203,19 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     `EntryFields::read_all`, called at `src/archive.rs:418,429,440`), so a few MB of gzip can make it buffer
     gigabytes. tar-rs leaves bounding the stream to its callers, so this is no bug to patch, vendor or report;
     Hex bounds it. A global PAX record (`g`) is read within the same 64 KiB and may set only keys staging doesn't
-    carry, so can't get wrong: `atime`, `ctime`, `uname`, `gname`, `comment`, `charset`, `hdrcharset` (staging
-    sets atime from mtime, never ctime (the kernel's), ignores owner names for numeric ids, and a root's texts are
+    carry, so can't get wrong: `atime`, `ctime`, `uname`, `gname`, `comment`, `charset`, `hdrcharset` (a global
+    atime is left unapplied, as Go's archive/tar leaves it for containerd, never ctime (the kernel's), ignores owner names for numeric ids, and a root's texts are
     UTF-8 either way; `uid`, `gid` and `mtime` left the list when staging began carrying them, below); any other key (`path`, `linkpath`, `size`, sparse keys, one Hex doesn't know) would apply to
     every later entry, and is refused by name, never ignored (CLAUDE.md §3); a key on neither list is refused naming
     it, so a real archive that meets one shows exactly what to weigh before it is added. `git archive`'s tarballs,
     which begin with a global record holding only `comment=<commit>`, stage with every entry exact (a real one,
-    git 2.56.0, is the test's fixture: `crates/hex-client/src/guest/stage/fixtures/git-archive.tar`). Refused by name: an entry written through one of the archive's own symbolic
-    links (whatever its text, which stays legal: a root's absolute links resolve inside it when used), a PAX
+    git 2.56.0, is the test's fixture: `crates/hex-client/src/guest/stage/fixtures/git-archive.tar`). Refused by name: a PAX
     `size` (a file past a header's 8 GiB), sparse entries (GNU `S` and PAX `GNU.sparse.*`, which none of the
-    roots it serves holds: `tar -tv`), and an extension record with no entry after it. The tests that pin this
-    handling are `crates/hex-client/src/guest/stage/tar_tests.rs` and the relay's end-to-end
-    `a_tarball_writing_through_its_own_link_is_refused_end_to_end_and_leaves_nothing` (HEX-GUEST-14, -15).
+    roots it serves holds: `tar -tv`), and an extension record with no entry after it. An entry written through
+    one of the archive's own symbolic links was refused too, until the lead's ruling of 2026-11-06 (below): it
+    is now resolved within the root, as containerd does. The tests that pin this handling are
+    `crates/hex-client/src/guest/stage/tar_tests.rs` and the relay's end-to-end tests in
+    `crates/hex-node/src/relay/tests.rs` (HEX-GUEST-14, -15).
 - **A tarball root carries what Linux's own unpack holds** (amended 2026-11-06, the lead's call): owners, times,
   extended attributes and hard links, not only a path, a mode and a link text. The evidence
   (`docs/research/runtime/shards-guest.md` §9, six public images pinned by digest): every image but alpine has hard
@@ -221,11 +223,12 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
   grafana has 16,280 entries owned by 1000:1000 or 472:0, the shadow group owns `etc/shadow` in debian, ubuntu and
   alpine, and caddy's binary holds `security.capability`. Dropping them would make every non-root image's files
   root's and copies of hard links, and strip capabilities; refusing them would refuse nearly every image. So:
-  - **The staging stream's entry gains, append-only** (its version 2; a version-1 stream reads as before): a numeric
+  - **The staging stream's entry gains, append-only** (its version 2, first released with this follow-up and its
+    layers' kinds below; a version-1 stream reads as before): a numeric
     uid and gid (names ignored, as containerd does: the layers carry none), an mtime (seconds and nanoseconds), up to
     a bound of extended attributes (name, value), and a hard-link kind whose target is an earlier entry of the same
-    root, a regular file, named as a staged path is and refused if it names its way out, a later or missing entry, or
-    a directory. Bounds (CLAUDE.md §2), from Linux's own: at most 64 xattrs an entry, a name at most 255 bytes
+    root, a regular file or a link (below), named as a staged path is and refused if it names its way out, a later
+    or missing entry, or a directory. Bounds (CLAUDE.md §2), from Linux's own: at most 64 xattrs an entry, a name at most 255 bytes
     (`XATTR_NAME_MAX`), a value at most 64 KiB (`XATTR_SIZE_MAX`) and all of an entry's at most 64 KiB
     (`XATTR_LIST_MAX`); a link target within the path bound.
   - **Where they come from:** the tar header's uid, gid and mtime, or PAX `uid`, `gid`, `mtime` past what a header
@@ -236,10 +239,9 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     global record's allowed keys and are refused by name there.
   - **The relay applies them in Linux's order** for each entry, since a chown and a write each clear setuid, setgid and
     `security.capability`: contents written and closed, then the owner (`fchownat` with `AT_SYMLINK_NOFOLLOW`), the
-    mode, the xattrs, and last the times (`utimensat` with `AT_SYMLINK_NOFOLLOW`, atime set to mtime as containerd's
-    unpack does). A directory's are applied when the stage ends, deepest first, after everything in it, so writing its
-    children doesn't move its mtime. A hard link is `linkat` from the target's directory, opened inside the root
-    through no symbolic link. An xattr the guest refuses to set is refused by name. All through rustix's safe
+    mode, the xattrs, and last the times (`utimensat` with `AT_SYMLINK_NOFOLLOW`, atime as below). A directory's are
+    applied when its layer ends, deepest first, after everything in it, so writing its children doesn't move its
+    mtime. A hard link is `linkat` from the target's directory, resolved as an entry's parent is (below). An xattr the guest refuses to set is refused by name. All through rustix's safe
     wrappers; no new `unsafe`.
   - **User namespaces:** the ids are staged as the image holds them, as Linux's unpack stores them; mapping them for a
     box in a user namespace is the runtime's, as on any Linux host.
@@ -250,19 +252,42 @@ host `/etc` writable eight ways, bind and rbind under each propagation (runtime-
     of any kind, except a directory onto a directory, which merges and takes the later header's owner, mode,
     xattrs and times (`:304-311`); `.wh.<name>` removes `<name>` (`:218-222`); `.wh..wh..opq` removes every entry of
     its directory this layer hasn't made (`:184-216`); a directory's mode and times are its latest header's, set
-    when the stage ends, after everything in it. The stream marks each layer's start, and carries a whiteout and an
+    when its layer ends, after everything in it (`:330-337`; a later layer that writes into it without a header
+    of its own moves its mtime, there as here). The stream marks each layer's start, and carries a whiteout and an
     opaque marker as kinds of their own, never as files; one staging can't apply is refused by name. At most 500
     layers (`hex_core::bundle::MAX_LAYERS`); the relay's set of what this layer made is bounded by the stage's
     entries, and a removal by a counted walk. An `OciSpec`'s `Rootfs::Layers` of tarballs reaches the guest as
     `Rootfs::Layers` of the one staged root, under the box's own writable layer; a bundle's `root.path` is one path,
     so one tarball. The packer keeps the same state across layers, so a hard link can't name what a later layer
     removed or replaced.
-  - **One difference from containerd, stated:** containerd resolves an entry's parent through symbolic links, scoped
-    to the root (`fs.RootPath`, `:268-270`); staging refuses an entry written through a link, by name. No surveyed
-    image writes through one (research §9: 0 in debian, ubuntu, alpine, fedora, caddy, grafana, python:3.12-slim,
-    nginx and node:22-slim, in the same or a later layer: a Docker build's diff records real paths). Falsified the
-    day a real layer needs it: then the parent is resolved within the root, as `RootPath` does
-    (`RESOLVE_IN_ROOT` without `RESOLVE_NO_SYMLINKS`).
+  - **An entry's name resolves within its root, as containerd's does** (the lead's ruling, 2026-11-06): its
+    parent through the root's own symbolic links, an absolute link or a `..` resolved inside the root
+    (`fs.RootPath`, `:268-270`), and a hard link's target the same way (`hardlinkRootPath`, `:795-807`). The relay
+    opens the parent with openat2's `RESOLVE_IN_ROOT` (without `RESOLVE_NO_SYMLINKS`; with `RESOLVE_NO_MAGICLINKS`
+    and `RESOLVE_NO_XDEV`) on the layer's root, through rustix, the kernel holding the bound; a hard link's
+    target must resolve to a regular file staged. So `bin` → `usr/bin` in one layer and `bin/tool` in the next
+    lands at `usr/bin/tool`, and `a` → `/etc` then `a/x` lands at the root's `etc/x`, never the guest's. No
+    surveyed image writes through a link (research §9: 0 in debian, ubuntu, alpine, fedora, caddy, grafana,
+    python:3.12-slim, nginx and node:22-slim), but merged-usr layering may, and a refusal would refuse it.
+    Outside a layer (a directory root's walk, a bundle's `config.json`) a name still resolves through no link,
+    which a host walk never writes through.
+  - **A parent no layer made is made as containerd makes it** (the lead's ruling, 2026-11-06): hand-made and
+    Bazel layers, written straight from package archives, may omit parent directories, and containerd makes
+    each (`mkparent`, `pkg/archive/tar.go:448-503`: `mkdir` 0755 then an explicit chmod past the umask,
+    `tar_unix.go:90-97`; its attributes copied only from a lower layer that has the directory, which in one
+    merged root is never the case for a missing one). The relay makes each missing component within the layer's
+    root, 0755, owned by itself (root in the guest, as containerd's unpack runs) and timed when it's made, as
+    containerd's are; such a directory's times are the wall clock's on both sides, so HEX-GUEST-21 leaves them
+    out of its comparison. A name in the way that resolves nowhere (a link to nothing) is refused rather than
+    made through.
+  - **A hard link is another name for what its target resolves to, unfollowed**, as containerd's `link`
+    (os.Link, linkat(2) without `AT_SYMLINK_FOLLOW`, `:386-394`): a regular file or a symbolic link itself. A
+    directory, which link(2) refuses, and a target that resolves to nothing are refused, as containerd's unpack
+    fails them.
+  - **One difference from containerd, stated:** a literal absolute name or a `..` component, of an entry or a
+    hard link's target, is refused by name, where containerd clamps it to the root (`filepath.Clean`, then
+    `RootPath`): a layer a Docker or BuildKit build writes never holds one, and one that does is hostile or
+    broken. Falsified the day a real image holds one, which HEX-GUEST-21 would show.
   - A directory root (a `Path` source) carries none of these: a host directory holds no Linux owners (and on Windows
     is refused, above). The test that holds it: HEX-GUEST-21, each image staged as a tarball root in a real guest,
     compared entry by entry with the same image unpacked as root on Linux.

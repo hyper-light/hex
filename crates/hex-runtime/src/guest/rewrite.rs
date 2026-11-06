@@ -32,15 +32,9 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
                 Rootfs::Dir(dir) => {
                     Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir)?)
                 }
-                Rootfs::Layers(layers) => Rootfs::Layers(
-                    layers
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, layer)| {
-                            stage(staged, &id, &mut items, format!("layer{i}"), layer)
-                        })
-                        .collect::<Result<_, _>>()?,
-                ),
+                Rootfs::Layers(layers) => {
+                    Rootfs::Layers(stage_layers(staged, &id, &mut items, layers)?)
+                }
             };
             for mount in &mut oci.mounts {
                 let guest = shares::in_guest(shared, &mount.source)
@@ -129,6 +123,42 @@ fn stage(
         source: root_source(path)?,
     });
     Ok(guest)
+}
+
+/// Adds an image's layers to stage, and returns their copies' paths in the guest. Tarballs are an
+/// image's own layers, applied in order into one root as containerd unpacks them, whiteouts and all
+/// (§4a), which the guest mounts as its one lower layer; directories are each staged as they are, an
+/// overlay's layers already. A list of both is refused by name: a tarball's whiteouts would have to
+/// apply over a directory staged apart from it.
+fn stage_layers(
+    staged: &str,
+    id: &BoxId,
+    items: &mut Vec<Item>,
+    layers: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>, Refusal> {
+    let tarballs = layers.iter().filter(|l| is_tarball(l)).count();
+    if tarballs == 0 {
+        return layers
+            .into_iter()
+            .enumerate()
+            .map(|(i, layer)| stage(staged, id, items, format!("layer{i}"), layer))
+            .collect();
+    }
+    if tarballs != layers.len() {
+        return Err(Refusal::Invalid {
+            what: "oci spec",
+            why: "rootfs.layers mixes tarballs and directories; give an image's layers as one or \
+                  the other"
+                .to_owned(),
+        });
+    }
+    let name = "root".to_owned();
+    let guest = PathBuf::from(staged_path(staged, id, &name));
+    items.push(Item {
+        name,
+        source: Source::Layers(layers),
+    });
+    Ok(vec![guest])
 }
 
 /// What the root at `path` is staged from (§4a): a tarball's own entries (`.tar`, `.tar.gz`, `.tgz`), or
