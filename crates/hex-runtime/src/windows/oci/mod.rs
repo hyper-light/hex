@@ -33,7 +33,25 @@ struct Mounted {
     activated: Option<String>,
     prepared: bool,
     made: Vec<PathBuf>,
+    /// The marker naming this scratch for a node that starts after this one was killed ([`reclaim`]),
+    /// removed last, once everything else is.
+    marker: Option<PathBuf>,
 }
+
+/// What a box's scratch marker records, written before Hex makes anything: the folder vmcompute activates,
+/// and what of it Hex made (removed at delete, or by the next node's [`reclaim`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScratchMarker {
+    folder: String,
+    made: Vec<PathBuf>,
+}
+
+/// The largest marker a reclaim reads: a folder and two paths, each at most Windows' longest path in
+/// UTF-8 (32,767 units × 3 bytes), with the JSON around them (CLAUDE.md §2).
+const MAX_MARKER: u64 = 3 * 3 * 32_767 + 4096;
+
+/// The scratch markers under `root`, one per box, `<id>.scratch.json`.
+const MARKER_SUFFIX: &str = ".scratch.json";
 
 impl Mounted {
     /// Takes the filter off, detaches the volume and removes what Hex made; the first failure is returned,
@@ -67,8 +85,92 @@ impl Mounted {
                 first.get_or_insert(Refusal::os("removing a container's scratch", e));
             }
         }
+        if first.is_none()
+            && let Some(m) = self.marker.take()
+            && let Err(e) = std::fs::remove_file(&m)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            first.get_or_insert(Refusal::os("removing a container's scratch marker", e));
+        }
         first.map_or(Ok(()), Err)
     }
+}
+
+/// Reclaims the scratch a killed node left under `root` (each `<id>.scratch.json` marker's folder):
+/// detaches its volume where it is still activated (UnprepareLayer, then DeactivateLayer, which detaches it
+/// whether or not the unprepare took: jupiter, 2026-11-06) and removes what Hex made, then the marker. The
+/// containers ended with the node (ShouldTerminateOnLastHandleClosed, the job's kill-on-close), so the
+/// scratch is all a crash leaves. Bounded by `root`'s entries, read once; each failure is returned, typed,
+/// and its marker kept so the next start tries again.
+pub fn reclaim(root: &Path) -> Vec<Refusal> {
+    let mut failures = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return failures,
+        Err(e) => {
+            failures.push(Refusal::os("listing the scratch markers", e));
+            return failures;
+        }
+    };
+    for entry in entries {
+        let path = match entry {
+            Ok(e) => e.path(),
+            Err(e) => {
+                failures.push(Refusal::os("listing the scratch markers", e));
+                continue;
+            }
+        };
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(MARKER_SUFFIX))
+        {
+            continue;
+        }
+        if let Err(r) = reclaim_one(&path) {
+            failures.push(r);
+        }
+    }
+    failures
+}
+
+fn reclaim_one(marker: &Path) -> Result<(), Refusal> {
+    let mut text = String::new();
+    std::fs::File::open(marker)
+        .and_then(|f| f.take(MAX_MARKER).read_to_string(&mut text))
+        .map_err(|e| Refusal::os("reading a scratch marker", e))?;
+    let m: ScratchMarker = serde_json::from_str(&text).map_err(|e| Refusal::Invalid {
+        what: "scratch marker",
+        why: format!("{}: {e}", marker.display()),
+    })?;
+    if sys::layer_mount_path(&m.folder).is_ok() {
+        let unprepared = sys::unprepare_layer(&m.folder);
+        sys::deactivate_layer(&m.folder).map_err(|f| {
+            failure(
+                "detaching a killed node's scratch",
+                HcsFailure {
+                    message: Some(format!(
+                        "{} (unprepare: {unprepared:?})",
+                        f.message.clone().unwrap_or_default()
+                    )),
+                    ..f
+                },
+            )
+        })?;
+    }
+    for p in m.made.iter().rev() {
+        let gone = if p.is_dir() {
+            std::fs::remove_dir(p)
+        } else {
+            std::fs::remove_file(p)
+        };
+        if let Err(e) = gone
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(Refusal::os("removing a killed node's scratch", e));
+        }
+    }
+    std::fs::remove_file(marker).map_err(|e| Refusal::os("removing a scratch marker", e))
 }
 
 impl Drop for Mounted {
@@ -144,6 +246,7 @@ impl OciBox {
         processors: NonZeroU32,
         container: &Container,
         launcher: &Path,
+        marker: Option<PathBuf>,
     ) -> Result<Self, Refusal> {
         available()?;
         let host = sys::host();
@@ -156,7 +259,7 @@ impl OciBox {
             .map_err(|e| Refusal::os("reading the image's Windows build from its base layer", e))?;
         hcs::image_runs(host, image)?;
         let job = JobBox::create(id.clone(), bounds, processors)?;
-        let mut mounted = scratch(container, base)?;
+        let mut mounted = scratch(container, base, marker)?;
         if !container.hosts.is_empty() {
             append_hosts(&mounted.volume, &hcs::hosts_lines(&container.hosts))?;
         }
@@ -323,7 +426,7 @@ impl OciBox {
 /// a volume and puts the storage filter over, the layers its parents, as hcsshim and runhcs do; the
 /// documented storage calls made a writable layer no container finished starting on (note §3, §9); a
 /// volume the caller mounted is used as it is.
-fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
+fn scratch(container: &Container, base: &str, marker: Option<PathBuf>) -> Result<Mounted, Refusal> {
     let folder = match &container.scratch {
         Scratch::Volume(v) => {
             return Ok(Mounted {
@@ -331,6 +434,7 @@ fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
                 activated: None,
                 prepared: false,
                 made: Vec::new(),
+                marker: None,
             });
         }
         Scratch::Folder(f) => PathBuf::from(f),
@@ -340,13 +444,39 @@ fn scratch(container: &Container, base: &str) -> Result<Mounted, Refusal> {
         activated: None,
         prepared: false,
         made: Vec::new(),
+        marker: None,
     };
+    let sandbox = folder.join(SANDBOX);
+    // The marker first, naming what Hex is about to make, so a node killed at any later point leaves
+    // nothing the next start can't find (reclaim).
+    if let Some(m) = marker {
+        let mut made = Vec::new();
+        if !folder.exists() {
+            made.push(folder.clone());
+        }
+        if !sandbox.exists() {
+            made.push(sandbox.clone());
+        }
+        let record = ScratchMarker {
+            folder: folder
+                .to_str()
+                .ok_or_else(|| Refusal::os("naming a container's scratch", "not UTF-8"))?
+                .to_owned(),
+            made,
+        };
+        let text = serde_json::to_string(&record)
+            .map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        if let Some(dir) = m.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        }
+        std::fs::write(&m, text).map_err(|e| Refusal::os("writing a scratch marker", e))?;
+        mounted.marker = Some(m);
+    }
     if !folder.exists() {
         std::fs::create_dir_all(&folder)
             .map_err(|e| Refusal::os("making a container's scratch", e))?;
         mounted.made.push(folder.clone());
     }
-    let sandbox = folder.join(SANDBOX);
     if !sandbox.exists() {
         std::fs::copy(Path::new(base).join("blank.vhdx"), &sandbox)
             .map_err(|e| Refusal::os("copying the base layer's blank.vhdx as a scratch", e))?;

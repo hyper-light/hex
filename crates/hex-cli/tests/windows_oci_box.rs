@@ -549,7 +549,12 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
             "{phase}: the killed node left no scratch to reclaim"
         );
         // A node starting on the same scratch root reclaims what the killed one made.
-        let _rt = WinRuntime::with(4, root.join("scratch")).with_launcher(lab.bin.clone());
+        let rt = WinRuntime::with(4, root.join("scratch")).with_launcher(lab.bin.clone());
+        assert!(
+            rt.reclaim_failures().is_empty(),
+            "{phase}: {:?}",
+            rt.reclaim_failures()
+        );
         assert!(
             !scratch.join("sandbox.vhdx").exists(),
             "{phase}: the scratch copy outlived its node"

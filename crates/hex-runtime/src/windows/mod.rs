@@ -45,6 +45,9 @@ pub struct WinRuntime {
     /// own folder unless told otherwise.
     launcher: Option<PathBuf>,
     boxes: Mutex<BTreeMap<BoxId, Held>>,
+    /// What reclaiming a killed node's scratch at start failed to do, each typed (its markers kept for
+    /// the next start).
+    reclaim_failures: Vec<Refusal>,
 }
 
 impl WinRuntime {
@@ -55,14 +58,21 @@ impl WinRuntime {
     }
 
     /// A runtime told the machine has `processors` logical processors (at least one), keeping `oci`
-    /// scratch under `scratch_root`.
+    /// scratch under `scratch_root`, first reclaiming what a killed node left there ([`oci::reclaim`]).
     pub fn with(processors: u32, scratch_root: PathBuf) -> Self {
+        let reclaim_failures = oci::reclaim(&scratch_root);
         Self {
             processors: NonZeroU32::new(processors).unwrap_or(NonZeroU32::MIN),
             scratch_root,
             launcher: None,
             boxes: Mutex::new(BTreeMap::new()),
+            reclaim_failures,
         }
+    }
+
+    /// What this runtime's start-time reclaim of a killed node's scratch couldn't do.
+    pub fn reclaim_failures(&self) -> &[Refusal] {
+        &self.reclaim_failures
     }
 
     /// This runtime with `oci` boxes' launcher taken from `dir` (which holds `hex.exe`), not the node's
@@ -138,6 +148,7 @@ impl WinRuntime {
             self.processors,
             &container,
             &launcher,
+            Some(self.scratch_root.join(format!("{}.scratch.json", spec.id))),
         )
     }
 }
