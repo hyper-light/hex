@@ -232,12 +232,14 @@ pub trait Privileged {
         kill_user(uid, signal)
     }
 
-    /// Watch each of the live members `pids` for its forks and its end (`EVFILT_PROC`, which root may place
-    /// on any process); a pid already watched is watched once. Returns those already gone.
-    fn watch_members(&self, pids: &[i32]) -> io::Result<Vec<i32>>;
+    /// Watch each of the live members `pids` of user `uid`'s box for its forks and its end (`EVFILT_PROC`,
+    /// which root may place on any process), each watch tagged with `uid`; a pid already watched is
+    /// watched once. Returns those already gone.
+    fn watch_members(&self, pids: &[i32], uid: u32) -> io::Result<Vec<i32>>;
 
-    /// Blocks until a watched member forks or ends.
-    fn next_member_event(&self) -> io::Result<()>;
+    /// Blocks until a watched member forks or ends; returns the users (boxes) whose members did, by their
+    /// watches' tags.
+    fn next_member_event(&self) -> io::Result<Vec<u32>>;
 
     /// Blocks until a member's `EXC_RESOURCE` crossing arrives on the daemon's port.
     fn next_crossing(&self) -> io::Result<()>;
@@ -309,28 +311,38 @@ impl<P: Privileged> Daemon<P> {
         self.sweep()
     }
 
-    /// One membership turn: blocks until a watched member forks or ends, then re-reads every box, so a
+    /// One membership turn: blocks until a watched member forks or ends, then re-reads its box, so a
     /// forked member is armed at its fork's notice and an ended one's share goes to the rest. This is the
     /// layer beneath the ledger, a box the ledger didn't hold — a member unarmed in the fork window — caught
     /// on the fork's own event, with no period to pick (the lead's call, 2026-11-06, under Ada's rule that
     /// no constant is picked). The daemon runs this on a thread of its own.
     pub fn pump_members(&self) -> Result<(), Refusal> {
-        self.ops
+        let touched = self
+            .ops
             .next_member_event()
             .map_err(|e| Refusal::os("receiving a member's fork or end", e))?;
-        self.sweep()
+        self.sweep_users(Some(&touched))
     }
 
     /// Re-apportions every box (`rearm`: a box grows a member's share where headroom is free, and ends where
     /// the footprints reach the bound), watching each member it finds, and reaps the programs that ended.
     /// A per-box failure (a box ended since) is skipped, not fatal.
     fn sweep(&self) -> Result<(), Refusal> {
+        self.sweep_users(None)
+    }
+
+    /// [`Daemon::sweep`] over the boxes of `users` only, or every box with `None`: a member's fork or end
+    /// names its box by its watch's tag, so it costs that box's listing, not every box's.
+    fn sweep_users(&self, users: Option<&[u32]>) -> Result<(), Refusal> {
         let boxes: Vec<(BoxId, u32)> = {
             let map = self
                 .boxes
                 .lock()
                 .map_err(|_| Refusal::Broken("the daemon's boxes lock is poisoned".to_owned()))?;
-            map.iter().map(|(id, t)| (id.clone(), t.uid())).collect()
+            map.iter()
+                .map(|(id, t)| (id.clone(), t.uid()))
+                .filter(|(_, uid)| users.is_none_or(|u| u.contains(uid)))
+                .collect()
         };
         for (id, uid) in boxes {
             let _ = self.rearm(&id, uid);
@@ -356,7 +368,7 @@ impl<P: Privileged> Daemon<P> {
         for _ in 0..=self.nproc {
             let pids: Vec<i32> = live.iter().map(|m| m.pid).collect();
             self.ops
-                .watch_members(&pids)
+                .watch_members(&pids, uid)
                 .map_err(|e| os("watching a box's members", &e))?;
             let seen: BTreeSet<i32> = pids.into_iter().collect();
             let again = list(uid)?;

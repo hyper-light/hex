@@ -77,20 +77,25 @@ struct SimState {
     armed: Vec<i32>,
     /// The members watched for their forks and ends.
     watched: BTreeSet<i32>,
-    /// Member events posted and not yet taken.
-    events: u32,
+    /// Member events posted and not yet taken, each the uid of the box its member is in.
+    events: Vec<u32>,
+    /// Each member's user (its box's uid).
+    owner: BTreeMap<i32, u32>,
+    /// How often each user's members were listed.
+    listed: BTreeMap<u32, u32>,
     /// A member that forks between the daemon's listing and its watch, once (the race the re-list closes).
     fork_in_watch: Option<i32>,
 }
 
-/// The stand-in's fork: member `child` joins the box, and its parent's watch posts the event.
-fn fork(state: &Arc<Mutex<SimState>>, posted: &Condvar, child: i32) {
+/// The stand-in's fork: member `child` joins user `uid`'s box, and its parent's watch posts the event.
+fn fork(state: &Arc<Mutex<SimState>>, posted: &Condvar, child: i32, uid: u32) {
     let mut s = state.lock().expect("sim lock");
     s.members.push(Member {
         pid: child,
         footprint: 0,
     });
-    s.events += 1;
+    s.owner.insert(child, uid);
+    s.events.push(uid);
     posted.notify_all();
 }
 
@@ -122,7 +127,7 @@ impl Proc for SimProc {
 impl Privileged for Sim {
     fn spawn(
         &self,
-        _uid: u32,
+        uid: u32,
         _program: &Program,
         fds: [OwnedFd; START_FDS],
         _leader: bool,
@@ -134,6 +139,7 @@ impl Privileged for Sim {
         s.next_pid += 1;
         let pid = 1000 + s.next_pid;
         s.members.push(Member { pid, footprint: 0 });
+        s.owner.insert(pid, uid);
         Ok(pid)
     }
 
@@ -151,15 +157,23 @@ impl Privileged for Sim {
         Ok(())
     }
 
-    fn list(&self, _uid: u32) -> std::io::Result<Vec<Member>> {
-        Ok(self.inner.lock().expect("sim lock").members.clone())
+    fn list(&self, uid: u32) -> std::io::Result<Vec<Member>> {
+        let mut s = self.inner.lock().expect("sim lock");
+        *s.listed.entry(uid).or_default() += 1;
+        let owner = s.owner.clone();
+        Ok(s.members
+            .iter()
+            .filter(|m| owner.get(&m.pid) == Some(&uid))
+            .copied()
+            .collect())
     }
 
-    fn watch_members(&self, pids: &[i32]) -> std::io::Result<Vec<i32>> {
+    fn watch_members(&self, pids: &[i32], uid: u32) -> std::io::Result<Vec<i32>> {
         let mut s = self.inner.lock().expect("sim lock");
         s.watched.extend(pids.iter().copied());
         // A fork that lands after the daemon listed the members and before this watch reached the child.
         if let Some(child) = s.fork_in_watch.take() {
+            s.owner.insert(child, uid);
             s.members.push(Member {
                 pid: child,
                 footprint: 0,
@@ -168,13 +182,12 @@ impl Privileged for Sim {
         Ok(Vec::new())
     }
 
-    fn next_member_event(&self) -> std::io::Result<()> {
+    fn next_member_event(&self) -> std::io::Result<Vec<u32>> {
         let mut s = self.inner.lock().expect("sim lock");
-        while s.events == 0 {
+        while s.events.is_empty() {
             s = self.posted.wait(s).expect("sim lock");
         }
-        s.events -= 1;
-        Ok(())
+        Ok(std::mem::take(&mut s.events))
     }
 
     fn next_crossing(&self) -> std::io::Result<()> {
@@ -184,12 +197,14 @@ impl Privileged for Sim {
         ))
     }
 
-    fn kill(&self, _uid: u32, signal: i32) -> std::io::Result<usize> {
+    fn kill(&self, uid: u32, signal: i32) -> std::io::Result<usize> {
         let mut s = self.inner.lock().expect("sim lock");
-        let n = s.members.len();
+        let owner = s.owner.clone();
+        let mine = |m: &Member| owner.get(&m.pid) == Some(&uid);
+        let n = s.members.iter().filter(|m| mine(m)).count();
         // KILL (9) ends them; another signal is delivered but leaves them running (the stand-in's model).
         if signal == 9 {
-            s.members.clear();
+            s.members.retain(|m| !mine(m));
         }
         Ok(n)
     }
@@ -416,7 +431,7 @@ fn shared(nproc: u32) -> Shared {
     let _ = rustix::net::sockopt::set_socket_nosigpipe(&server, true);
     let sim = Sim::default();
     let (state, posted) = (Arc::clone(&sim.inner), Arc::clone(&sim.posted));
-    let daemon = Arc::new(Daemon::new(sim, vec![7000], nproc));
+    let daemon = Arc::new(Daemon::new(sim, vec![7000, 7001], nproc));
     let serving = Arc::clone(&daemon);
     thread::spawn(move || {
         let _ = serving.serve(server.as_fd());
@@ -431,12 +446,12 @@ fn shared(nproc: u32) -> Shared {
 fn a_forked_member_is_armed_on_its_fork_event() {
     let (client, daemon, state, posted) = shared(64);
     let b1 = BoxId::new("b1").expect("box id");
-    client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let uid = client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
     let leader = start(&client, &b1, true);
     assert!(state.lock().unwrap().watched.contains(&leader));
     let pumping = Arc::clone(&daemon);
     let turn = thread::spawn(move || pumping.pump_members());
-    fork(&state, &posted, 4242);
+    fork(&state, &posted, 4242, uid);
     turn.join().expect("pump thread").expect("one turn");
     let s = state.lock().unwrap();
     assert!(
@@ -448,6 +463,30 @@ fn a_forked_member_is_armed_on_its_fork_event() {
         s.watched.contains(&4242),
         "the child isn't watched for its own forks"
     );
+}
+
+/// HEX-MAC-14, the lead's rule on skipped wins: do run two boxes and fork a member of one; expect the
+/// sweep that fork wakes to list that box's user alone, the event naming its box (its watch's tag), so a
+/// fork costs one box's listing however many boxes the node runs.
+#[test]
+fn a_fork_sweeps_only_its_own_box() {
+    let (client, daemon, state, posted) = shared(64);
+    let (b1, b2) = (BoxId::new("b1").expect("id"), BoxId::new("b2").expect("id"));
+    let u1 = client.acquire(&b1, 256 * MIB, 16 * MIB).unwrap();
+    let u2 = client.acquire(&b2, 256 * MIB, 16 * MIB).unwrap();
+    start(&client, &b1, true);
+    start(&client, &b2, true);
+    let before = state.lock().unwrap().listed.clone();
+    let pumping = Arc::clone(&daemon);
+    let turn = thread::spawn(move || pumping.pump_members());
+    fork(&state, &posted, 4343, u1);
+    turn.join().expect("pump thread").expect("one turn");
+    let s = state.lock().unwrap();
+    let grew =
+        |u: u32| s.listed.get(&u).copied().unwrap_or(0) - before.get(&u).copied().unwrap_or(0);
+    assert!(grew(u1) > 0, "the forking box wasn't swept");
+    assert_eq!(grew(u2), 0, "a box with no event was listed");
+    assert!(s.armed.contains(&4343));
 }
 
 /// HEX-MAC-14 (the fork window's race): do fork a member after the daemon lists the box and before its

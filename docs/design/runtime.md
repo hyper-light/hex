@@ -535,8 +535,9 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
       process) and the helper (the whole tree) catch. With the helper, this layer is event-driven, with no
       period (the lead's call, 2026-11-06, under Ada's rule that no constant is picked): the daemon watches
       every member for its forks and its end (`EVFILT_PROC`, which root may place on any process), and each
-      fork or end, like each crossing, wakes a sweep that re-reads every box, arms a forked member at once,
-      and ends a box past its bound (`Daemon::pump_members`, `Daemon::pump_crossings`). A member that forks
+      fork or end wakes a sweep of its own box (its watch's tag names the box), while a crossing, whose
+      corpse doesn't name one, re-reads every box; each sweep arms a forked member at once and ends a box
+      past its bound (`Daemon::pump_members`, `Daemon::pump_crossings`). A member that forks
       before its watch is placed is caught by the sweep listing the box again after each watch, until a
       listing finds no member it hadn't watched; from then on every fork posts an event.
     - **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no

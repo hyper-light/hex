@@ -66,11 +66,11 @@ impl Privileged for Sim {
         }))
     }
 
-    fn watch_members(&self, _pids: &[i32]) -> io::Result<Vec<i32>> {
+    fn watch_members(&self, _pids: &[i32], _uid: u32) -> io::Result<Vec<i32>> {
         Ok(Vec::new())
     }
 
-    fn next_member_event(&self) -> io::Result<()> {
+    fn next_member_event(&self) -> io::Result<Vec<u32>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the stand-in posts no member events",
@@ -300,11 +300,11 @@ impl Privileged for Shells {
         }))
     }
 
-    fn watch_members(&self, _pids: &[i32]) -> io::Result<Vec<i32>> {
+    fn watch_members(&self, _pids: &[i32], _uid: u32) -> io::Result<Vec<i32>> {
         Ok(Vec::new())
     }
 
-    fn next_member_event(&self) -> io::Result<()> {
+    fn next_member_event(&self) -> io::Result<Vec<u32>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the stand-in posts no member events",
