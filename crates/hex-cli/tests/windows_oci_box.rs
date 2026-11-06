@@ -536,7 +536,9 @@ fn a_killed_nodes_scratch_is_reclaimed_at_the_next_start(lab: &Lab) {
             line.clear();
             let n = std::io::BufRead::read_line(&mut out, &mut line).unwrap();
             assert!(n > 0, "the child node ended before READY");
-            if line.trim() == "READY" {
+            // The harness writes `test crash_child_node ... ` with no newline before it, so READY ends
+            // the line rather than filling it.
+            if line.trim_end().ends_with("READY") {
                 break;
             }
         }
