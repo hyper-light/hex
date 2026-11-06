@@ -1601,10 +1601,10 @@ impl Runtime {
         state.poststart = Some(!spec.hooks.poststart.is_empty());
         state.pid_namespace = Some(spec.makes_namespace("pid"));
         if !spec.hooks.start_container.is_empty() {
-            state.start_container = Some(hooks::budget(
-                "startContainer",
-                &spec.hooks.start_container,
-            )?);
+            // A hook naming no timeout is waited for as long as it runs: recorded as the most seconds there are.
+            state.start_container = Some(
+                hooks::budget("startContainer", &spec.hooks.start_container)?.unwrap_or(u64::MAX),
+            );
         }
         making.dir.put(&state)?;
         if let Some(path) = making.pid_file {

@@ -17,9 +17,6 @@ use crate::linux::oci::OciError;
 use crate::linux::oci::spec::{Hook, Hooks, MAX_CONFIG_BYTES};
 use crate::linux::oci::state::State;
 
-/// Longest a hook may run when it names no timeout; a bound so a stuck hook can't wedge the runtime.
-pub const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The most a state handed to the init may hold: its annotations are the config's (at most
 /// [`MAX_CONFIG_BYTES`]), and its other fields are an id, a path and numbers, which the second half bounds.
 pub const MAX_STATE_BYTES: usize = 2 * MAX_CONFIG_BYTES;
@@ -73,23 +70,35 @@ impl Hooks {
     }
 }
 
-/// The seconds `hooks` may take together, each its timeout or [`HOOK_TIMEOUT`]; refused, naming `kind`,
-/// where a timeout isn't above zero (config.md:559-560) or the sum overflows.
-pub fn budget(kind: &str, hooks: &[Hook]) -> Result<u64, OciError> {
-    hooks.iter().try_fold(0_u64, |sum, hook| {
-        let secs = timeout(kind, hook)?.as_secs();
-        sum.checked_add(secs)
-            .ok_or_else(|| OciError::Config(format!("the {kind} hooks' timeouts overflow")))
+/// The seconds `hooks` may take together, the sum of their timeouts; `None` where one names none, which is waited
+/// for as long as it runs. Refused, naming `kind`, where a timeout isn't above zero (config.md:559-560) or the sum
+/// overflows.
+pub fn budget(kind: &str, hooks: &[Hook]) -> Result<Option<u64>, OciError> {
+    hooks.iter().try_fold(Some(0_u64), |sum, hook| {
+        let Some(limit) = timeout(kind, hook)? else {
+            return Ok(None);
+        };
+        match sum {
+            None => Ok(None),
+            Some(sum) => sum
+                .checked_add(limit.as_secs())
+                .map(Some)
+                .ok_or_else(|| OciError::Config(format!("the {kind} hooks' timeouts overflow"))),
+        }
     })
 }
 
-fn timeout(kind: &str, hook: &Hook) -> Result<Duration, OciError> {
+/// How long `hook` may run: the timeout it names, or `None` where it names none. The spec gives no default
+/// (config.md:559-560), and runc waits for such a hook as long as it runs (`Command.Run`, runc 1.6.0-rc.1
+/// libcontainer/configs/config.go:620-635), as crun does (`run_process_with_stdin_timeout_envp`, crun 1.30.1
+/// src/libcrun/utils.c:1902, a timeout of 0 waits): so does Hex, and its caller's own patience bounds the whole.
+fn timeout(kind: &str, hook: &Hook) -> Result<Option<Duration>, OciError> {
     match hook.timeout {
-        None => Ok(HOOK_TIMEOUT),
+        None => Ok(None),
         Some(t) => u64::try_from(t)
             .ok()
             .filter(|t| *t > 0)
-            .map(Duration::from_secs)
+            .map(|t| Some(Duration::from_secs(t)))
             .ok_or_else(|| {
                 OciError::Config(format!(
                     "a {kind} hook's timeout is {t}: it must be above zero"
@@ -153,7 +162,8 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
             .map_err(|e| OciError::os("making a hook's stdin non-blocking", e))?;
     }
     let mut left = state_json;
-    let deadline = Instant::now().checked_add(limit);
+    // None where the hook names no timeout, or one past what an Instant holds.
+    let deadline = limit.and_then(|limit| Instant::now().checked_add(limit));
     loop {
         if let Some(pipe) = stdin.as_mut() {
             match pipe.write(left) {
@@ -174,14 +184,14 @@ fn run_one(op: &'static str, hook: &Hook, state_json: &[u8]) -> Result<(), OciEr
             Some(status) if status.success() => return Ok(()),
             Some(status) => return Err(failed(format!("{:?} exited {status}", hook.path))),
             None => {
-                // A timeout past what an Instant holds is no earlier deadline.
                 let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
                 if left.is_some_and(|l| l.is_zero()) {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(failed(format!(
-                        "{:?} outlived its {limit:?} timeout",
-                        hook.path
+                        "{:?} outlived its {:?} timeout",
+                        hook.path,
+                        limit.unwrap_or_default()
                     )));
                 }
                 wait_on(&pidfd, stdin.as_ref(), left)?;
@@ -477,7 +487,7 @@ mod tests {
         let ok = spec(r#"{"startContainer":[{"path":"/bin/sh","timeout":5}]}"#).unwrap();
         assert_eq!(
             budget("startContainer", &ok.hooks.start_container).unwrap(),
-            5
+            Some(5)
         );
         assert!(ok.hooks.sync_init());
     }
