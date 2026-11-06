@@ -933,7 +933,10 @@ mod linux {
                     .unwrap_or_else(|e| panic!("{var}={v:?}: {e}"))
             })
         };
-        let (boxes, lists) = (count("HEXBENCH_LIST_BOXES", n), count("HEXBENCH_LISTS", 100));
+        let (boxes, lists) = (
+            count("HEXBENCH_LIST_BOXES", n),
+            count("HEXBENCH_LISTS", 100),
+        );
         let ids: Vec<BoxId> = (0..boxes)
             .map(|i| BoxId::new(&format!("list{i}")).map_err(|e| e.to_string()))
             .collect::<Result<_, _>>()?;
@@ -974,7 +977,10 @@ mod linux {
         n: usize,
     ) -> (Driver, Result<Value, String>) {
         let Driver::Socket { client, agent } = driver else {
-            return (driver, Err("the restart arm needs HEXBENCH_DRIVER=socket".to_owned()));
+            return (
+                driver,
+                Err("the restart arm needs HEXBENCH_DRIVER=socket".to_owned()),
+            );
         };
         let boxes = std::env::var("HEXBENCH_RESTART_BOXES").map_or(n, |v| {
             v.trim()
@@ -1002,9 +1008,10 @@ mod linux {
             .iter()
             .take(made)
             .try_for_each(|id| client.delete(id).map_err(|e| format!("delete {id}: {e}")));
-        let result = created.and(ended.map(|_| ())).and(deleted).map(|()| {
-            json!({ "boxes": boxes, "ready_ms": ready_ms })
-        });
+        let result = created
+            .and(ended.map(|_| ()))
+            .and(deleted)
+            .map(|()| json!({ "boxes": boxes, "ready_ms": ready_ms }));
         (Driver::Socket { client, agent }, result)
     }
 

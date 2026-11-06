@@ -1546,11 +1546,8 @@ impl Runtime {
         let made_with = super::mntns::clone_flags(flags, way);
         let claimed = match parked {
             // A failed claim falls back to a seed's clone of the same request, which the claim only borrowed;
-            // the seeds count it by why ([`CloneInit::claim`]).
-            Some(p) if p.flags == made_with && takes_parked => match seeds.claim(p, &req) {
-                Ok(started) => Some(started),
-                Err(_counted) => None,
-            },
+            // the seeds count it by why, hung or refused, where they know it ([`CloneInit::claim`]).
+            Some(p) if p.flags == made_with && takes_parked => seeds.claim(p, &req).ok(),
             _ => None,
         };
         // A parked init's proc shows that init's pid namespace, so a create its init didn't take mounts its own:
