@@ -496,7 +496,7 @@ threads, Docker's paths, the whole create's p99 improving with it, and no priori
   bound, reuse on, 8 inits ahead (the record at 3402c55 cites each). **One setting differs: the descriptor limit.** The
   shipped node runs with its soft limit raised to the hard one, as the installer sets it, so its kept network
   namespaces hold their `/proc/net` files. An in-process node at the container's 1,024 holds none, and enters each
-  namespace to check it.
+  namespace to check it. At this code that doesn't change part 19 (the two in-process A/Bs below).
 
 **In process it is met too, at this code, at either descriptor limit.** The older in-process figures (part 19's p99
 351-761 us at 2caebe2, 508-1,373 us at 1e5e956, below) came from older trees, not from the limit. The lead asked
