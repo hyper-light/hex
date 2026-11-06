@@ -745,13 +745,6 @@ impl Node {
             .to_path_buf()
     }
 
-    /// Where a node before the shards kept box `id`'s container state: in the runtime directory itself.
-    fn unsharded_container_dir(&self, id: &BoxId) -> PathBuf {
-        state::Dir::unsharded(&self.oci_root, &self.container(id))
-            .path()
-            .to_path_buf()
-    }
-
     /// The runtime directory the node keeps its containers' state in ([`oci_root`]).
     pub fn oci_root(&self) -> &Path {
         &self.oci_root
@@ -926,11 +919,10 @@ impl Node {
                 seen.entry(id).or_default();
             }
         }
-        // This node's containers, `<key>-<id>` among every node's in the runtime directory's shards and, where
-        // a node before the shards kept them, in the runtime directory itself (goal 5 extended, step 6); and its
-        // rendered bundles, `<id>` under its bundles directory.
+        // This node's containers, `<key>-<id>` among every node's in the runtime directory's shards (goal 5
+        // extended, step 6); and its rendered bundles, `<id>` under its bundles directory.
         let prefix = format!("{}-", self.key);
-        let mut state_dirs = ids_in(&self.oci_root, &prefix)?;
+        let mut state_dirs = BTreeSet::new();
         for n in 0..state::SHARDS {
             state_dirs.extend(ids_in(&self.oci_root.join(format!("{n:02x}")), &prefix)?);
         }
@@ -1055,17 +1047,11 @@ impl Node {
                 self.root.forget(id.as_str());
             }
         }
-        // The directories the box owns: those its record names (a box made before its node kept
-        // container state under the runtime directory names `<state>/oci/<id>`), or, with no record to
-        // read, those at the paths its id fixes, which a box caught mid-create left: its container's in its
-        // shard or, made by a node before the shards, in the runtime directory itself.
+        // The directories the box owns: those its record names, or, with no record to read, those at the paths its
+        // id fixes, which a box caught mid-create left: its container's in its shard and its rendered bundle.
         let dirs = match record {
             Some(r) => r.dirs,
-            None => vec![
-                self.container_dir(id),
-                self.unsharded_container_dir(id),
-                self.bundles.join(id.as_str()),
-            ],
+            None => vec![self.container_dir(id), self.bundles.join(id.as_str())],
         };
         for dir in &dirs {
             remove_tree(dir, REMOVE_PATIENCE)?;

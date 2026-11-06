@@ -716,17 +716,12 @@ impl Runtime {
         PathBuf::from("/run/hex-oci")
     }
 
-    /// Container `id`'s directory: in its shard of the root, unless a runtime before the shards left it in the
-    /// root itself and it isn't in its shard (goal 5 extended, step 6), so a create is refused over one made
-    /// before an upgrade as over one made after it.
+    /// Container `id`'s directory: in its shard of the root (goal 5 extended, step 6). A runtime from before the
+    /// shards kept it in the root itself; none such was ever deployed, so nothing looks there (the lead's ruling of
+    /// 2026-11-06 under Ada's rule).
     fn dir(&self, id: &str) -> Result<Dir, OciError> {
         check_id(id)?;
-        let dir = Dir::new(&self.root, id);
-        if dir.path().exists() {
-            return Ok(dir);
-        }
-        let before = Dir::unsharded(&self.root, id);
-        Ok(if before.exists() { before } else { dir })
+        Ok(Dir::new(&self.root, id))
     }
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
@@ -2641,7 +2636,6 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::linux::oci::state::shard;
 
     // Hostile input (CLAUDE.md §6): a container id is a directory name under the state root, so one
     // that could name another place is refused before anything is touched; `delete ../../x` would
@@ -3079,34 +3073,6 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// (this process's own stands in for it). Expect: none of the stand-in's descriptors is a network
     /// namespace, the path it was handed names the namespace, and the agent's descriptor is
     /// close-on-exec while the stand-in runs.
-    /// Goal 5 extended step 6, lever 3 (T-T7.1.2): a root a runtime before the shards kept containers in, each
-    /// directly under it, is read as it is by today's, which makes its own in the root's shards. Do: leave a
-    /// container's state at `<root>/old` as the runtime before the shards wrote it; then read its state, and
-    /// place a new container `new`. Expect: `old`'s state read from where it is, its directory that one, and
-    /// `new`'s directory in its shard; once `old`'s is gone, `old` is placed in its shard too.
-    #[test]
-    fn a_container_kept_in_the_root_itself_is_read_there_and_new_ones_go_to_their_shards() {
-        let lab = tempfile::tempdir().unwrap();
-        let rt = Runtime::new(lab.path().to_path_buf());
-        let before = Dir::unsharded(lab.path(), "old");
-        before.create("old").unwrap();
-        let mut st = State::new("old", "/bundle");
-        st.status = Status::Created;
-        st.pid = 4321;
-        before.put(&st).unwrap();
-        assert_eq!(rt.state("old").unwrap().pid, 4321);
-        assert_eq!(rt.dir("old").unwrap().path(), lab.path().join("old"));
-        assert_eq!(
-            rt.dir("new").unwrap().path(),
-            lab.path().join(shard("new")).join("new")
-        );
-        before.remove().unwrap();
-        assert_eq!(
-            rt.dir("old").unwrap().path(),
-            lab.path().join(shard("old")).join("old")
-        );
-    }
-
     #[test]
     fn a_namespace_made_ahead_reaches_the_shim_by_path_and_no_process_inherits_it() {
         let lab = tempfile::tempdir().unwrap();

@@ -133,17 +133,15 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-/// The state root `dir`, a container's directory, is under, and the container's id: its shard's parent when its
-/// parent is its shard ([`Dir::new`]), else its parent, where a runtime before the shards kept it
-/// ([`Dir::unsharded`]). `None` for a path with no parent or a name that isn't UTF-8.
+/// The state root `dir`, a container's directory, is under, and the container's id: its shard's parent
+/// ([`Dir::new`]). `None` for a path with no parent, a name that isn't UTF-8, or a directory not in its shard.
 pub fn root_of(dir: &Path) -> Option<(PathBuf, String)> {
     let id = dir.file_name()?.to_str()?.to_owned();
     let parent = dir.parent()?;
-    let root = match parent.file_name().and_then(|n| n.to_str()) {
-        Some(n) if n == shard(&id) => parent.parent()?,
-        _ => parent,
-    };
-    Some((root.to_path_buf(), id))
+    if parent.file_name()?.to_str()? != shard(&id) {
+        return None;
+    }
+    Some((parent.parent()?.to_path_buf(), id))
 }
 
 /// A container's directory: its `state.json` and its `exec.fifo`.
@@ -159,12 +157,6 @@ impl Dir {
         Self {
             dir: root.join(shard(id)).join(id),
         }
-    }
-
-    /// Where a runtime before the shards kept container `id`'s directory: under `root` itself (goal 5 extended,
-    /// step 6). Read there for as long as it lasts, so a container made before an upgrade is managed as any other.
-    pub fn unsharded(root: &Path, id: &str) -> Self {
-        Self { dir: root.join(id) }
     }
 
     /// The container directory at `path` directly (it already points at `<root>/<id>`).
@@ -351,14 +343,20 @@ mod tests {
     /// mkdir and rmdir of containers in different shards don't wait on one parent's lock. Do: place containers
     /// `c1`, `c2` and `a` under a root. Expect: each under the shard two hex digits of FNV-1a over its id name,
     /// `19`, `00` and `0c` (draft-eastlake-fnv's 64-bit offset basis and prime, worked by hand), the same in every
-    /// run; and the place a node before the shards kept it, the root itself, beside.
+    /// run; and `root_of` reads the root and id back from it, and nothing from a directory outside its shard (the
+    /// place a runtime before the shards kept it, which none deployed had).
     #[test]
-    fn a_containers_directory_is_in_its_shard_and_the_old_place_is_the_root_itself() {
+    fn a_containers_directory_is_in_its_shard_and_only_there() {
         let root = Path::new("/run/hex-oci");
         for (id, want) in [("c1", "19"), ("c2", "00"), ("a", "0c")] {
             assert_eq!(shard(id), want, "{id}");
             assert_eq!(Dir::new(root, id).path(), root.join(want).join(id), "{id}");
-            assert_eq!(Dir::unsharded(root, id).path(), root.join(id), "{id}");
+            assert_eq!(
+                root_of(Dir::new(root, id).path()),
+                Some((root.to_path_buf(), id.to_owned())),
+                "{id}"
+            );
+            assert_eq!(root_of(&root.join(id)), None, "{id}");
         }
     }
 
