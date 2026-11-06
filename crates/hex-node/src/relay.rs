@@ -97,6 +97,8 @@ pub struct Relay {
     connections: AtomicUsize,
     stagings: AtomicUsize,
     unnamed: AtomicUsize,
+    /// Stdio connections refused past [`Limits::unnamed`], for the node's counters.
+    refused_unnamed: AtomicU64,
 }
 
 /// A named stream's thread, waiting for the copier its exec's pipe gives it; dropped, the thread ends
@@ -138,7 +140,13 @@ impl Relay {
             connections: AtomicUsize::new(0),
             stagings: AtomicUsize::new(0),
             unnamed: AtomicUsize::new(0),
+            refused_unnamed: AtomicU64::new(0),
         })
+    }
+
+    /// Stdio connections refused because more were yet to name themselves than [`Limits::unnamed`].
+    pub fn refused_unnamed(&self) -> u64 {
+        self.refused_unnamed.load(Ordering::Acquire)
     }
 
     fn sets(&self) -> Result<MutexGuard<'_, Sets>, Refusal> {
@@ -231,6 +239,7 @@ impl Relay {
             let held = self.unnamed.fetch_add(1, Ordering::AcqRel);
             if held >= self.limits.unnamed {
                 self.unnamed.fetch_sub(1, Ordering::AcqRel);
+                self.refused_unnamed.fetch_add(1, Ordering::AcqRel);
                 log_unnamed(&Refusal::Exhausted {
                     what: "stdio connections yet to name themselves",
                     bound: self.limits.unnamed,

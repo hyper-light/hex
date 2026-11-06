@@ -395,12 +395,152 @@ fn a_silent_stdio_connection_holds_no_other_exec_up() {
     drop(agent.join().unwrap());
 }
 
+/// A lab as [`Lab::new`] makes it, with the relay kept for the test to read.
+fn kept_lab(limits: Limits) -> (Lab, Arc<Relay>) {
+    let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/hex-t7/relay");
+    std::fs::create_dir_all(&cache).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("relay-")
+        .tempdir_in(&cache)
+        .unwrap();
+    let node_path = dir.path().join("node.sock");
+    let node = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::SEQPACKET,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    rustix::net::bind(&node, &SocketAddrUnix::new(&node_path).unwrap()).unwrap();
+    rustix::net::listen(&node, 4).unwrap();
+    let control = UnixListener::bind(dir.path().join("control.sock")).unwrap();
+    let stdio = UnixListener::bind(dir.path().join("stdio.sock")).unwrap();
+    let files = UnixListener::bind(dir.path().join("files.sock")).unwrap();
+    let staged = dir.path().join("staged");
+    std::fs::create_dir(&staged).unwrap();
+    let relay = Relay::new(&node_path, &staged, limits);
+    let served = Arc::clone(&relay);
+    std::thread::spawn(move || served.serve(Box::new(control), Box::new(stdio), Box::new(files)));
+    (Lab { dir, node }, relay)
+}
+
+/// Reads `look` until it holds, re-reading after as long as the last read took (step 7's learned re-read).
+fn until(mut look: impl FnMut() -> bool) {
+    loop {
+        let read = std::time::Instant::now();
+        if look() {
+            return;
+        }
+        let took = read.elapsed();
+        let end = std::time::Instant::now() + took;
+        while std::time::Instant::now() < end {
+            std::thread::park_timeout(end - std::time::Instant::now());
+        }
+    }
+}
+
+/// A stdio connection whose name reaches the relay only once its exec is parked there.
+struct Late {
+    conn: UnixStream,
+    relay: Arc<Relay>,
+}
+
+impl Read for Late {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.conn.read(buf)
+    }
+}
+
+impl Write for Late {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let (mut conn, relay, name) = (
+            self.conn.try_clone()?,
+            Arc::clone(&self.relay),
+            buf.to_vec(),
+        );
+        // The name is the connection's first write: held until the exec it names is parked.
+        std::thread::spawn(move || {
+            until(|| relay.sets().map(|s| !s.parked.is_empty()).unwrap_or(false));
+            conn.write_all(&name).unwrap();
+        });
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Duplex for Late {
+    fn try_clone(&self) -> io::Result<Box<dyn Duplex>> {
+        Ok(Box::new(self.conn.try_clone()?))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+        self.conn.shutdown(how)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.conn.set_write_timeout(timeout)
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.conn.set_read_timeout(timeout)
+    }
+}
+
+/// The relay's ports, each stdio connection [`Late`].
+struct LatePorts {
+    dir: PathBuf,
+    relay: Arc<Relay>,
+}
+
+impl Link for LatePorts {
+    fn dial(&self, port: u32) -> Result<Box<dyn Duplex>, Refusal> {
+        if port == stream::CONTROL_PORT {
+            return Ok(Box::new(
+                UnixStream::connect(self.dir.join("control.sock")).unwrap(),
+            ));
+        }
+        Ok(Box::new(Late {
+            conn: UnixStream::connect(self.dir.join("stdio.sock")).unwrap(),
+            relay: Arc::clone(&self.relay),
+        }))
+    }
+}
+
+/// HEX-GUEST-7: exec with stdin whose connection names itself only once the exec is parked at the relay:
+/// expect the parked exec to reach the node with its pipe as soon as its set is whole, and to run.
+#[test]
+fn a_parked_exec_goes_to_the_node_when_its_set_is_whole() {
+    let (lab, relay) = kept_lab(LIMITS);
+    let node = lab.node.try_clone().unwrap();
+    let agent = std::thread::spawn(move || {
+        let conn = hello(&node);
+        let (h, r, fds) = next_request(&conn);
+        assert!(matches!(r, Request::Call(Call::Exec { .. })), "{r:?}");
+        assert_eq!(fds.len(), 1);
+        answer(&conn, h, &Answer::Started { pid: 10 });
+        answer(&conn, h, &Answer::Exited(Exit::Code(0)));
+        conn
+    });
+    let client = Client::connect(Arc::new(LatePorts {
+        dir: lab.dir.path().to_owned(),
+        relay: Arc::clone(&relay),
+    }))
+    .unwrap();
+    let mut proc = exec_stdin(&client).unwrap();
+    assert_eq!(proc.wait_for(Duration::MAX).unwrap(), Some(Exit::Code(0)));
+    assert!(relay.sets().unwrap().parked.is_empty());
+    drop(agent.join().unwrap());
+}
+
 /// HEX-GUEST-7 (CLAUDE.md §2): on a relay bounded at two unnamed stdio connections, connect three that
-/// never name themselves: expect the third refused and closed (its end is what it reads), the two
-/// within the bound still open.
+/// never name themselves: expect the third refused by type and counted, then closed (its end is what it
+/// reads), the two within the bound still open.
 #[test]
 fn an_unnamed_connection_past_the_bound_is_refused() {
-    let lab = Lab::new(Limits {
+    let (lab, relay) = kept_lab(Limits {
         unnamed: 2,
         ..LIMITS
     });
@@ -412,6 +552,8 @@ fn an_unnamed_connection_past_the_bound_is_refused() {
     let mut past = UnixStream::connect(&path).unwrap();
     let mut byte = [0u8; 1];
     assert_eq!(past.read(&mut byte).unwrap(), 0);
+    // Refused by type, counted and logged on `hex.guest` (event `stdio_unnamed`) before it closed.
+    assert_eq!(relay.refused_unnamed(), 1);
     for conn in &held {
         assert!(
             !readable(conn, 0),
