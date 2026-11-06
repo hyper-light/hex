@@ -132,7 +132,9 @@ fn vsock(port: u32) -> Result<VsockListener, String> {
     socket
         .bind(&SockAddr::vsock(u32::MAX, port))
         .map_err(fail)?;
-    socket.listen(128).map_err(fail)?;
+    // The most the kernel queues: listen(2) truncates a larger backlog to `net.core.somaxconn`
+    // (net/socket.c, `__sys_listen_socket`), so asking for `i32::MAX` takes the guest's own.
+    socket.listen(i32::MAX).map_err(fail)?;
     Ok(VsockListener(socket))
 }
 
@@ -238,6 +240,7 @@ fn init() -> Result<(), (u8, String)> {
             "--box-root".as_ref(),
             BOX_ROOT.as_ref(),
         ],
+        &format!("ready {}\n", socket.display()),
     )
     .map_err(fail)?;
     let relay = start(
@@ -249,6 +252,7 @@ fn init() -> Result<(), (u8, String)> {
             socket.as_os_str(),
             "--vsock".as_ref(),
         ],
+        "ready\n",
     )
     .map_err(fail)?;
     let mut out = std::io::stdout().lock();
@@ -302,9 +306,6 @@ fn mounts() -> [Mount; 6] {
     ]
 }
 
-/// The most of `/proc/self/mountinfo` read: a fresh guest's lists a handful of mounts.
-const MOUNTINFO_BOUND: u64 = 64 * 1024;
-
 /// Where `init` mounts the tmpfs that becomes the root.
 const NEW_ROOT: &str = "/hex-root";
 
@@ -316,15 +317,18 @@ fn leave_rootfs() -> Result<(), String> {
     let quiet = MountFlags::NOSUID | MountFlags::NOEXEC | MountFlags::NODEV;
     std::fs::create_dir_all("/proc").map_err(|e| format!("making /proc: {e}"))?;
     mount("proc", "/proc", "proc", quiet, None).map_err(|e| format!("mounting /proc: {e}"))?;
-    let mut info = String::new();
-    let read = std::fs::File::open("/proc/self/mountinfo")
-        .and_then(|f| f.take(MOUNTINFO_BOUND).read_to_string(&mut info));
+    let root = std::fs::File::open("/proc/self/mountinfo")
+        .and_then(|f| root_fs(io::BufReader::new(f)));
     unmount("/proc", UnmountFlags::empty()).map_err(|e| format!("unmounting /proc: {e}"))?;
-    read.map_err(|e| format!("reading /proc/self/mountinfo: {e}"))?;
-    if root_fs(&info) != Some("rootfs") {
+    let root = root.map_err(|e| format!("reading /proc/self/mountinfo: {e}"))?;
+    if root.as_deref() != Some("rootfs") {
         return Ok(());
     }
     std::fs::create_dir_all(NEW_ROOT).map_err(|e| format!("making {NEW_ROOT}: {e}"))?;
+    // 0755: search on `/` for every user, as resolving any path needs (path_resolution(7)), and
+    // writes for root alone, the mode of ramfs's root, the kernel's rootfs without tmpfs
+    // (fs/ramfs/inode.c `RAMFS_DEFAULT_MODE`); a tmpfs left to itself is 01777 (tmpfs(5) `mode=`),
+    // which would let any user make names in `/`.
     mount(
         "tmpfs",
         NEW_ROOT,
@@ -347,15 +351,24 @@ fn leave_rootfs() -> Result<(), String> {
 }
 
 /// The file system mounted at `/` in `mountinfo` (proc(5)): the last mount on `/`, as each covers the
-/// one before; `None` where no line names `/`.
-fn root_fs(mountinfo: &str) -> Option<&str> {
-    mountinfo
-        .lines()
-        .filter_map(|line| {
-            let (mount, fs) = line.split_once(" - ")?;
-            (mount.split(' ').nth(4)? == "/").then(|| fs.split(' ').next())?
-        })
-        .next_back()
+/// one before; `None` where no line names `/`. It is read to its end a line at a time, holding one line
+/// and the answer: its length is the kernel's, a line per mount in the namespace, which the kernel bounds
+/// (`fs.mount-max`, Documentation/admin-guide/sysctl/fs.rst), and here, before init mounts anything but
+/// this `/proc`, it lists the initramfs and that.
+fn root_fs(mut mountinfo: impl io::BufRead) -> io::Result<Option<String>> {
+    let (mut line, mut root) = (String::new(), None);
+    loop {
+        line.clear();
+        if mountinfo.read_line(&mut line)? == 0 {
+            return Ok(root);
+        }
+        let fs = line.split_once(" - ").and_then(|(mount, fs)| {
+            (mount.split(' ').nth(4)? == "/").then(|| fs.split([' ', '\n']).next())?
+        });
+        if let Some(fs) = fs {
+            root = Some(fs.to_owned());
+        }
+    }
 }
 
 /// One of Shards' shares (docs/design/shards-guest.md §4a): whether the guest mounts it read-only.
@@ -364,9 +377,9 @@ struct Share {
     read_only: bool,
 }
 
-/// The most shares a guest mounts: a bound of Hex's own, as the node shares a handful of roots (by
-/// default one, `/`); a longer list is refused by name.
-const MAX_SHARES: usize = 32;
+// The most shares a guest mounts: the host's bound, one virtio-fs device each among Shards' slots
+// (`hex_runtime::guest::shares::MAX_SHARES`); a longer list is refused by name.
+use hex_runtime::guest::shares::MAX_SHARES;
 
 /// The parameter on the kernel's command line that names the guest's shares: `hex.shares=` and a mode
 /// per share, `rw` or `ro`, joined by commas, in the order of their tags (`shards0`, `shards1`, …).
@@ -376,9 +389,14 @@ const SHARES_PARAMETER: &str = "hex.shares=";
 /// Where share `i` is mounted: `/run/hex/shares/<i>`.
 const SHARES: &str = "/run/hex/shares";
 
-/// The most read of `/proc/cmdline`: the kernel's own bound on a command line is smaller (`COMMAND_LINE_SIZE`,
-/// 2048 on x86_64 and arm64).
-const CMDLINE_BOUND: u64 = 4096;
+/// The most read of `/proc/cmdline`: the kernel's bound on its command line, `COMMAND_LINE_SIZE` with
+/// its terminating zero, which `/proc/cmdline` prints as a newline (fs/proc/cmdline.c): 2048 on x86_64
+/// (arch/x86/include/asm/setup.h:7) and arm64 (arch/arm64/include/uapi/asm/setup.h), the generic 512
+/// elsewhere (include/uapi/asm-generic/setup.h:5).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+const CMDLINE_BOUND: u64 = 2048;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const CMDLINE_BOUND: u64 = 512;
 
 /// The shares the kernel's command line names, in tag order. Only the kernel's own parameters count:
 /// what follows `--` is init's arguments.
@@ -450,11 +468,9 @@ fn mount_all() -> Result<(), String> {
     Ok(())
 }
 
-/// The most read of a started process's first line: `ready` and its socket's path.
-const LINE_BOUND: u64 = 4096;
-
-/// Starts `/init` with `args` and waits for its `ready` line.
-fn start(exe: &Path, args: &[&std::ffi::OsStr]) -> Result<u32, String> {
+/// Starts `/init` with `args` and waits for its first line, `ready`: read as far as its length and no
+/// further, as nothing else is that line.
+fn start(exe: &Path, args: &[&std::ffi::OsStr], ready: &str) -> Result<u32, String> {
     let what = args
         .iter()
         .take(2)
@@ -470,11 +486,17 @@ fn start(exe: &Path, args: &[&std::ffi::OsStr]) -> Result<u32, String> {
         .stdout
         .take()
         .ok_or_else(|| format!("hex {what}'s stdout wasn't kept"))?;
-    let mut line = String::new();
-    io::BufRead::read_line(&mut io::BufReader::new(stdout.take(LINE_BOUND)), &mut line)
+    let mut line = Vec::new();
+    let bound = u64::try_from(ready.len()).map_err(|_| format!("hex {what}'s ready line"))?;
+    stdout
+        .take(bound)
+        .read_to_end(&mut line)
         .map_err(|e| format!("reading hex {what}'s first line: {e}"))?;
-    if !line.starts_with("ready") {
-        return Err(format!("hex {what} said {line:?}, not ready"));
+    if line != ready.as_bytes() {
+        return Err(format!(
+            "hex {what} said {:?}, not {ready:?}",
+            String::from_utf8_lossy(&line)
+        ));
     }
     Ok(child.id())
 }
@@ -542,12 +564,13 @@ mod tests {
     /// initramfs (`rootfs`) once and never again; hostile or short lines name no root.
     #[test]
     fn the_root_file_system_is_read_from_mountinfo() {
+        let root_fs = |text: &str| root_fs(text.as_bytes()).unwrap();
         let initramfs = "1 1 0:2 / / rw - rootfs rootfs rw,size=1000k\n";
-        assert_eq!(root_fs(initramfs), Some("rootfs"));
+        assert_eq!(root_fs(initramfs).as_deref(), Some("rootfs"));
         let moved = "1 1 0:2 / / rw - rootfs rootfs rw\n\
                      20 1 0:20 / / rw,relatime - tmpfs tmpfs rw,mode=755\n\
                      21 20 0:21 / /proc rw - proc proc rw\n";
-        assert_eq!(root_fs(moved), Some("tmpfs"));
+        assert_eq!(root_fs(moved).as_deref(), Some("tmpfs"));
         for hostile in [
             "",
             "\n\n",
@@ -558,7 +581,20 @@ mod tests {
         ] {
             assert_eq!(root_fs(hostile), None, "{hostile:?}");
         }
-        assert_eq!(root_fs("1 1 0:2 / / rw - \n"), Some(""));
+        assert_eq!(root_fs("1 1 0:2 / / rw - \n").as_deref(), Some(""));
+    }
+
+    /// HEX-GUEST-31 (§4): mountinfo is read whole, a line at a time, as long as the kernel makes it: a
+    /// root mount listed past 64 KiB of other mounts is still the one read.
+    #[test]
+    fn mountinfo_is_read_to_its_end() {
+        let mut info = String::from("1 1 0:2 / / rw - tmpfs tmpfs rw\n");
+        for i in 0..2_000 {
+            info.push_str(&format!("{i} 1 0:3 / /mnt/{i:040} rw - tmpfs tmpfs rw\n"));
+        }
+        info.push_str("9 1 0:2 / / rw - rootfs rootfs rw\n");
+        assert!(info.len() > 64 * 1024);
+        assert_eq!(root_fs(info.as_bytes()).unwrap().as_deref(), Some("rootfs"));
     }
 
     /// HEX-GUEST-11 (§4a): `hex.shares=` on the kernel's command line names Shards' shares in tag order,

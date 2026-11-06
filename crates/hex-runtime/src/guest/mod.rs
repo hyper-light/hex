@@ -126,6 +126,9 @@ impl GuestConfig {
             .iter()
             .map(|s| if s.read_only { "ro" } else { "rw" })
             .collect();
+        // `panic=-1`: a negative timeout reboots at once on a panic (kernel-parameters.txt, `panic=`;
+        // kernel/panic.c `panic_timeout`), so the VM ends and the host sees it rather than a guest that
+        // hangs.
         let mut cmdline = "console=ttyS0 panic=-1".to_owned();
         if !modes.is_empty() {
             cmdline.push_str(&format!(" {}={}", shares::CMDLINE, modes.join(",")));
