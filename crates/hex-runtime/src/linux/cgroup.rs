@@ -1080,6 +1080,35 @@ mod tests {
         assert!(root.slot(9).is_none(), "and none that isn't there");
     }
 
+    /// AC-T7.1.4 (delete ends every process), CLAUDE.md §2; Ada's 2026-11-06 rule (no picked constants): the kill
+    /// sweep's bound on cgroups is the box's own, learned from the kernel, not a number picked for every box: its
+    /// `cgroup.max.descendants` where it sets one, which the kernel never lets its subtree pass, else its
+    /// `cgroup.stat`'s `nr_descendants` as the sweep begins. Do: kill a box still populated after `cgroup.kill`, two
+    /// cgroups under it, its `cgroup.stat` counting one and its `cgroup.max.descendants` `max`; then again with
+    /// `cgroup.max.descendants` 2. Expect: the first refused past the box and the one it counted (`Full(2)`), not
+    /// walked on; the second swept. Plain files stand in for the cgroup's.
+    #[test]
+    fn the_kill_sweeps_bound_is_the_boxs_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("box");
+        for sub in ["", "a", "b"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+            std::fs::write(dir.join(sub).join("cgroup.procs"), "").unwrap();
+        }
+        std::fs::write(dir.join("cgroup.kill"), "").unwrap();
+        std::fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        std::fs::write(
+            dir.join("cgroup.stat"),
+            "nr_descendants 1\nnr_dying_descendants 0\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("cgroup.max.descendants"), "max\n").unwrap();
+        let cg = BoxCgroup::at(dir.clone());
+        assert_eq!(cg.kill(), Err(Refusal::Full(2)));
+        std::fs::write(dir.join("cgroup.max.descendants"), "2\n").unwrap();
+        assert_eq!(cg.kill(), Ok(()));
+    }
+
     #[test]
     fn sweep_collects_every_process_in_the_subtree() {
         let tree = Mock {
