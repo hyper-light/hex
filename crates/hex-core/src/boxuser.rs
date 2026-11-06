@@ -159,7 +159,7 @@ mod tests {
     use proptest::test_runner::TestRunner;
 
     use super::*;
-    use crate::meet::cases_to_meet;
+    use crate::meet::{cases_to_meet, sized_runner};
 
     const MIB: u64 = 1 << 20;
 
@@ -325,6 +325,11 @@ mod tests {
     /// (bench/native/macos/records/case-shares-boxuser.txt).
     const APPORTION_RAREST_SHARE: f64 = 0.03897;
     const ARMED_TREE_RAREST_SHARE: f64 = 0.01562;
+    /// The case by which proptest's deterministic sequence, the one these tests draw from
+    /// ([`sized_runner`]), has met every kind, by the same recorder: a fixed sequence meets each kind or
+    /// never does, so each test runs at least this many cases, as well as the count its rarest share asks.
+    const APPORTION_DETERMINISTIC_MEETS_ALL: u32 = 93;
+    const ARMED_TREE_DETERMINISTIC_MEETS_ALL: u32 = 27;
 
     /// HEX-MAC-7/8 (model-based, CLAUDE.md §6): for any bound and any members, the plan holds the
     /// apportionment's invariants —
@@ -336,9 +341,9 @@ mod tests {
     #[test]
     fn apportioning_holds_its_invariants() {
         let met = Met::default();
-        let mut runner = TestRunner::new(ProptestConfig::with_cases(cases_to_meet(
-            APPORTION_RAREST_SHARE,
-        )));
+        let mut runner = sized_runner(
+            cases_to_meet(APPORTION_RAREST_SHARE).max(APPORTION_DETERMINISTIC_MEETS_ALL),
+        );
         runner
             .run(&(arb_bound(), arb_members()), |(b, members)| {
                 apportion_holds(b, &members, &met)
@@ -400,9 +405,9 @@ mod tests {
     #[test]
     fn the_armed_tree_never_passes_the_bound() {
         let grown = Grown::default();
-        let mut runner = TestRunner::new(ProptestConfig::with_cases(cases_to_meet(
-            ARMED_TREE_RAREST_SHARE,
-        )));
+        let mut runner = sized_runner(
+            cases_to_meet(ARMED_TREE_RAREST_SHARE).max(ARMED_TREE_DETERMINISTIC_MEETS_ALL),
+        );
         runner
             .run(&armed_tree_scenario(), |(b, growths)| {
                 armed_tree_holds(b, growths, &grown)
@@ -534,5 +539,36 @@ mod tests {
                 cases_to_meet(share)
             );
         }
+        // Where proptest's deterministic sequence, the one the tests draw from, first meets every kind.
+        let (met, at, first) = (Met::default(), Cell::new(0u32), Cell::new(None));
+        sized_runner(RECORD_CASES)
+            .run(&(arb_bound(), arb_members()), |(b, members)| {
+                let held = apportion_holds(b, &members, &met);
+                at.set(at.get() + 1);
+                if first.get().is_none() && met.kinds().iter().all(|(_, n)| *n > 0) {
+                    first.set(Some(at.get()));
+                }
+                held
+            })
+            .unwrap();
+        println!(
+            "apportioning_holds_its_invariants: the deterministic sequence meets every kind by case {:?}",
+            first.get()
+        );
+        let (grown, at, first) = (Grown::default(), Cell::new(0u32), Cell::new(None));
+        sized_runner(RECORD_CASES)
+            .run(&armed_tree_scenario(), |(b, growths)| {
+                let held = armed_tree_holds(b, growths, &grown);
+                at.set(at.get() + 1);
+                if first.get().is_none() && grown.kinds().iter().all(|(_, n)| *n > 0) {
+                    first.set(Some(at.get()));
+                }
+                held
+            })
+            .unwrap();
+        println!(
+            "the_armed_tree_never_passes_the_bound: the deterministic sequence meets every kind by case {:?}",
+            first.get()
+        );
     }
 }

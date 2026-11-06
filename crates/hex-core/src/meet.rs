@@ -20,6 +20,16 @@ pub(crate) fn cases_to_meet(share: f64) -> u32 {
     n
 }
 
+/// A runner for `cases` cases drawn from proptest's deterministic RNG, so every run checks the same cases. A
+/// run sized to meet each kind with probability [`MEET`] under a fresh seed would miss one in up to
+/// `1 - MEET` of runs, and the test's non-vacuity check would fail them spuriously (proptest names this case
+/// for `TestRng::deterministic_rng`); drawn deterministically, the derived count meets each kind every run.
+pub(crate) fn sized_runner(cases: u32) -> proptest::test_runner::TestRunner {
+    let config = proptest::test_runner::Config::with_cases(cases);
+    let rng = proptest::test_runner::TestRng::deterministic_rng(config.rng_algorithm);
+    proptest::test_runner::TestRunner::new_with_rng(config, rng)
+}
+
 /// Do size a run for a share of 5%; expect 59 cases (0.95^59 = 4.8% <= 5% < 0.95^58), the arithmetic step 7
 /// cites for its sixty runs.
 #[test]

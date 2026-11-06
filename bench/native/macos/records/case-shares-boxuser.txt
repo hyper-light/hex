@@ -14,3 +14,12 @@ the_armed_tree_never_passes_the_bound: a box ended at its start: 1562 of 100000 
 the_armed_tree_never_passes_the_bound: a box ended as it grew: 7850 of 100000 (0.07850)
 the_armed_tree_never_passes_the_bound: a box held through its growth: 90588 of 100000 (0.90588)
 the_armed_tree_never_passes_the_bound: rarest share 0.01562 -> 191 cases
+
+# proptest's deterministic sequence (TestRng::deterministic_rng, the one the tests draw from since the
+# lead's 2026-11-06 call): the case by which it has met every kind. Same recorder, extended;
+# Adas-MacBook-Pro-2, 2026-11-06T17:11Z, tree da097e2 + the deterministic runner. (Its random-seed shares that
+# run: apportioning 0.03709, armed tree 0.01540, within the 100000-case record's error of the above.)
+apportioning_holds_its_invariants: the deterministic sequence meets every kind by case Some(93)
+the_armed_tree_never_passes_the_bound: the deterministic sequence meets every kind by case Some(27)
+# Each test runs max(cases_to_meet(rarest share), that case): apportioning max(76, 93) = 93; the armed tree
+# max(191, 27) = 191.

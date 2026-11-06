@@ -5,10 +5,9 @@
 
 use hex_api::{BoxId, Exit, Program, User};
 use proptest::prelude::*;
-use proptest::test_runner::TestRunner;
 
 use super::*;
-use crate::meet::cases_to_meet;
+use crate::meet::{cases_to_meet, sized_runner};
 
 fn box_id(s: &str) -> BoxId {
     BoxId::new(s).expect("a valid box id")
@@ -249,7 +248,7 @@ fn malformed_headers_and_bodies_are_typed_faults() {
 fn the_parser_never_panics_on_hostile_input() {
     let short = cases_to_meet(16.0 / 2048.0);
     let known_kind = cases_to_meet(15.0 / f64::from(0x9000_u32));
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(short));
+    let mut runner = sized_runner(short);
     // Any bytes at all.
     runner
         .run(&prop::collection::vec(any::<u8>(), 0..2048), |bytes| {
@@ -271,7 +270,7 @@ fn the_parser_never_panics_on_hostile_input() {
             m.extend_from_slice(&body);
             m
         });
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(known_kind));
+    let mut runner = sized_runner(known_kind);
     runner
         .run(&framed, |bytes| {
             let _ = read_request(&bytes, 0);
