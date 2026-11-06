@@ -298,6 +298,99 @@ fn a_mismatched_image_is_refused_by_name(lab: &Lab) {
     assert!(rt.inspect(&id).is_err(), "a refused create made a box");
 }
 
+/// The volumes attached on this host (`mountvol`'s `\\?\Volume{..}` lines).
+fn volumes() -> Vec<String> {
+    let out = std::process::Command::new("mountvol").output().unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with(r"\\?\Volume{"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether HCS holds a compute system named `id` (`hcsdiag list`).
+fn hcs_holds(id: &BoxId) -> bool {
+    let out = std::process::Command::new("hcsdiag")
+        .arg("list")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(id.as_str())
+}
+
+/// Native step 4's teardown (the lead's condition, 2026-11-06): do: start a box, write in it, delete it.
+/// Expect: nothing left — no compute system, no volume beyond those attached before, no scratch folder;
+/// `UnprepareLayer`'s ERROR_FLT_DO_NOT_DETACH is matched alone, so any other failure fails the delete.
+fn a_deleted_box_leaves_nothing(lab: &Lab) {
+    let before = volumes();
+    let rt = lab.runtime();
+    let id = made(
+        &rt,
+        lab.spec(BoxId::new("hex-oci-teardown").unwrap(), Bounds::default()),
+    );
+    let wrote = run(&rt, lab, &id, &["write", r"C:\scratch-was-here"]);
+    assert_eq!(wrote.0, Exit::Code(0), "{wrote:?}");
+    assert!(
+        volumes().len() > before.len(),
+        "the started box shows no volume of its own"
+    );
+    rt.delete(&id).expect("delete");
+    assert!(!hcs_holds(&id), "HCS still holds {id}");
+    assert_eq!(volumes(), before, "a volume outlived its box");
+    assert!(
+        !lab.root.path().join(format!("scratch-{id}")).exists(),
+        "the scratch folder outlived its box"
+    );
+}
+
+/// Native step 4 (the lead's condition, 2026-11-06): copies of one `blank.vhdx` share a volume identity, so
+/// do: create and start `n` boxes at once (8 and 32, as oci_compare runs them), each writing a file of its
+/// own. Expect: every one starts, and none sees another's file — each runs on a volume of its own.
+fn boxes_started_at_once_each_have_their_own_volume(lab: &Lab, n: usize) {
+    let rt = lab.runtime();
+    let ids: Vec<BoxId> = (0..n)
+        .map(|i| BoxId::new(&format!("hex-oci-at-once-{n}-{i}")).unwrap())
+        .collect();
+    let specs: Vec<BoxSpec> = ids
+        .iter()
+        .map(|id| lab.spec(id.clone(), Bounds::default()))
+        .collect();
+    std::thread::scope(|s| {
+        let started: Vec<_> = specs
+            .into_iter()
+            .map(|spec| {
+                let rt = &rt;
+                s.spawn(move || {
+                    let id = spec.id.clone();
+                    let _ = rt.delete(&id);
+                    rt.create(spec).and_then(|_| rt.start(&id))
+                })
+            })
+            .collect();
+        for (id, h) in ids.iter().zip(started) {
+            let got = h.join().unwrap();
+            assert!(got.is_ok(), "box {id} of {n} started at once: {got:?}");
+        }
+    });
+    for (i, id) in ids.iter().enumerate() {
+        let wrote = run(&rt, lab, id, &["write", &format!(r"C:\mark-{i}")]);
+        assert_eq!(wrote.0, Exit::Code(0), "{id}: {wrote:?}");
+    }
+    for (i, id) in ids.iter().enumerate() {
+        let other = (i + 1) % n;
+        let (exit, seen) = run(&rt, lab, id, &["exists", &format!(r"C:\mark-{other}")]);
+        assert_eq!(exit, Exit::Code(0));
+        assert_eq!(
+            seen.trim(),
+            "no",
+            "{id} sees box {other}'s file: they share a volume"
+        );
+    }
+    for id in &ids {
+        rt.delete(id).expect("delete");
+    }
+}
+
 /// AC-T7.1.1 and native step 4: the Windows oci class end to end on this host's image, in order (one
 /// runtime's boxes at a time, so the cases don't contend for one container image's scratch copies).
 #[test]
@@ -308,6 +401,9 @@ fn windows_oci_boxes_hold_the_contract_and_the_steps_criteria() {
     };
     eprintln!("RUN: layers {:?}", lab.layers);
     a_mismatched_image_is_refused_by_name(&lab);
+    a_deleted_box_leaves_nothing(&lab);
+    boxes_started_at_once_each_have_their_own_volume(&lab, 8);
+    boxes_started_at_once_each_have_their_own_volume(&lab, 32);
     contract(&lab);
     a_device_not_granted_isnt_visible(&lab);
     a_read_only_mount_refuses_writes(&lab);
