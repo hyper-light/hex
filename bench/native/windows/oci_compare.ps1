@@ -72,13 +72,15 @@ $runs["hex"] = @{
     create = { param($i)
         & $HexBench $hexOut 1 1 $HexBin $Layers | Out-Null
         $j = Get-Content $hexOut -Raw | ConvertFrom-Json
-        $script:hexRound = @{ create = $j.create_ms.samples[0]; start = $j.start_ms.samples[0]; delete = $j.delete_ms.samples[0] } }
+        $script:hexRound = @{ create = $j.create_ms.samples[0]; start = $j.start_ms.samples[0]; delete = $j.delete_ms.samples[0]
+            copy = $j.blank_copy_ms.samples[0]; exec = $j.exec_ms.samples[0] } }
 }
 
 function Load() {
     [ordered]@{
         cpu_pct = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
         system_pct = [int]((Get-Counter '\Process(System)\% Processor Time' -SampleInterval 1 -MaxSamples 1).CounterSamples[0].CookedValue / [Environment]::ProcessorCount)
+        c_free_gb = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
     }
 }
 
@@ -104,6 +106,7 @@ foreach ($c in ((& $ctr -a $Ctrd containers ls -q) | Where-Object { $_ -like "he
 $names = @("docker", "containerd", "hex")
 $t = @{}
 foreach ($name in $names) { $t[$name] = @{ create = @(); start = @(); delete = @(); cli = @() } }
+$t.hex.copy = @(); $t.hex.exec = @()
 for ($i = 0; $i -lt $W + $N; $i++) {
     if ($i -ge $W) { $record.load += (Load) }
     for ($k = 0; $k -lt $names.Count; $k++) {
@@ -113,6 +116,7 @@ for ($i = 0; $i -lt $W + $N; $i++) {
             & $r.create $i
             if ($LASTEXITCODE -ne 0) { throw "Hex's bench failed ($LASTEXITCODE) at round $i" }
             $c = $script:hexRound.create; $s = $script:hexRound.start; $d = $script:hexRound.delete; $q = 0
+            if ($i -ge $W) { $t.hex.copy += $script:hexRound.copy; $t.hex.exec += $script:hexRound.exec }
         } else {
             $c = Timed { & $r.create $i }
             $s = Timed { & $r.start $i }
@@ -128,5 +132,7 @@ foreach ($name in $names) {
         cli_alone_ms = Stats $t[$name].cli
     }
 }
+$record.hex.blank_copy_ms = Stats $t.hex.copy
+$record.hex.exec_ms = Stats $t.hex.exec
 $record | ConvertTo-Json -Depth 6 | Set-Content $Out
 Get-Content $Out
