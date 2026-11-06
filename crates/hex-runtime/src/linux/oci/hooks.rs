@@ -405,6 +405,21 @@ mod tests {
         assert!(wakes <= 2, "woke {wakes} times");
     }
 
+    /// AC-T7.1.4, config.md:559-560; the lead's call of 2026-11-06 under Ada's rule (no picked constants): a hook
+    /// that names no timeout has no deadline of the runtime's choosing, as runc's (`Command.Run`,
+    /// libcontainer/configs/config.go:620-635: a nil `Timeout` waits for the command). Do: ask the deadline of a
+    /// hook naming none and of one naming 5 s, and the budget of lists holding each. Expect: no deadline and no
+    /// budget for the first, 5 s for the second.
+    #[test]
+    fn a_hook_naming_no_timeout_has_no_deadline() {
+        let none = sh("true", None);
+        let five = sh("true", Some(5));
+        assert_eq!(timeout("a", &none).unwrap(), None);
+        assert_eq!(timeout("a", &five).unwrap(), Some(Duration::from_secs(5)));
+        assert_eq!(budget("a", &[five.clone(), none]).unwrap(), None);
+        assert_eq!(budget("a", &[five.clone(), five]).unwrap(), Some(10));
+    }
+
     /// config.md:592. Do: a hook that copies its stdin out, and one that fails. Expect: the state as
     /// JSON, and the failure named by its list.
     #[test]
