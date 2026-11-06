@@ -268,6 +268,16 @@ impl<K: PartialEq + Clone> Pool<K> {
         self.fresh()
     }
 
+    /// A slot number for a cgroup the shell makes ahead for boxes of no owner, each with an init in it (decision
+    /// 8, "The p99.9 that stayed"), counted fresh; such a slot is removed with its box, never given back. `None`
+    /// once every slot number is spent.
+    pub fn ahead(&mut self) -> Option<u64> {
+        match self.fresh() {
+            Take::Fresh(n) => Some(n),
+            _ => None,
+        }
+    }
+
     /// The idle slot taken last passed its check and is the box's.
     pub fn hand_on(&mut self) {
         self.counts.handed_on = self.counts.handed_on.saturating_add(1);
@@ -402,8 +412,30 @@ pub struct Files {
 /// (research f27-f30) is at most `threshold`, which is under the box's memory bound. The first file that
 /// says otherwise is the reason (f81).
 pub fn check(f: &Files, memory_max: Option<u64>, threshold: u64) -> Result<(), Refused> {
+    check_with(f, memory_max, threshold, None)
+}
+
+/// [`check`] for an idle cgroup an init was made ahead in (decision 8, "The p99.9 that stayed"): it is populated,
+/// by that init alone (the shell holds the cgroup's `cgroup.procs` to its one pid), and `parked` bytes of what is
+/// charged to it are the init's own, measured when it was made, which go with it to the box that claims it.
+/// Everything else as [`check`] holds it.
+pub fn check_parked(
+    f: &Files,
+    memory_max: Option<u64>,
+    threshold: u64,
+    parked: u64,
+) -> Result<(), Refused> {
+    check_with(f, memory_max, threshold, Some(parked))
+}
+
+fn check_with(
+    f: &Files,
+    memory_max: Option<u64>,
+    threshold: u64,
+    parked: Option<u64>,
+) -> Result<(), Refused> {
     let number = |text: &str, key: &str| flat(text, key).ok_or(Refused::Unreadable);
-    if number(&f.events, "populated")? != 0 {
+    if number(&f.events, "populated")? != u64::from(parked.is_some()) {
         return Err(Refused::Populated);
     }
     if number(&f.events, "frozen")? != 0 {
@@ -439,6 +471,7 @@ pub fn check(f: &Files, memory_max: Option<u64>, threshold: u64) -> Result<(), R
     }
     if let Some(current) = &f.memory_current {
         let charged: u64 = current.trim().parse().map_err(|_| Refused::Unreadable)?;
+        let charged = charged.saturating_sub(parked.unwrap_or(0));
         if charged > threshold || memory_max.is_some_and(|max| threshold >= max) {
             return Err(Refused::Charged);
         }

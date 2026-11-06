@@ -319,6 +319,7 @@ def calls(trace, ops=OPS):
                     raise Missing("its cuts in order")
                 call["parts"] = [window[b].ts - window[a].ts for a, b in zip(at, at[1:])]
                 call["record_kinds"] = getattr(cuts, "record_kinds", [])
+                call["cgroups"] = getattr(cuts, "cgroups", [])
             except Missing as m:
                 call["missing"] = str(m)
             out.append(call)

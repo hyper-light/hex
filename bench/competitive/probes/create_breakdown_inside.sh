@@ -6,15 +6,21 @@
 #   seam     seam_oci's lifecycle phase, the oci class through the seam in process: its measured create p50;
 #   traced   the same with the breakdown's tracer on around create (seam_oci's HEXBENCH_TRACE and
 #            HEXBENCH_TRACE_OPS=create): an ftrace instance of this run's own records every other timed create and
-#            what it ran, cut into parts by create_breakdown.py; the creates between are its untraced twins.
+#            what it ran, cut into parts by create_breakdown.py; the creates between are its untraced twins;
 #   seam_idle, libcrun_idle  with IDLE_AB set: the seam's and libcrun's lifecycle phases with that many idle threads
 #            up in this container (with_idle), so the same rounds time each with and without them (goal 5 plan
 #            step 2's AC-c within one run); libcrun's pivot_root walks them, the control that they are walked.
+#   seam_drained, traced_drained, pairs  with IPCUTS_AB=1: seam and traced with the node's ipc and uts pool drained
+#            (seam_oci's HEXBENCH_IPCUTS=0), so the same rounds read the pool on against drained (goal 5 extended
+#            step 4), the whole create and the init's clone with what follows it; and seam_oci's ipc_uts_pairs phase,
+#            the two interleaved lifecycle by lifecycle, which reads a whole create's difference under load.
+#   before, traced-before   with a binary from before a change staged (/opt/bin/before), its seam and traced
+#            rounds likewise, so the change's parts are set against the before binary's in the same run.
 # Then create_breakdown.py writes summary.md and summary.json. A round's item that fails is logged and skipped (the
 # summary names what's missing); a probe that fails ends the run before any round. The probes include a detailed
 # trace, which adds each open's entry with its path, so create_breakdown.py can hold the rounds' cuts to the files
 # they stand for.
-# Env: N (1000), WARMUP (100), ROUNDS (3), IDLE_AB (0: no idle kinds).
+# Env: N (1000), WARMUP (100), ROUNDS (3), IDLE_AB (0: no idle kinds), IPCUTS_AB (0: no drained kinds).
 set -uo pipefail
 N=${N:-1000}; WARMUP=${WARMUP:-100}; ROUNDS=${ROUNDS:-3}
 OUT=/opt/out; mkdir -p /run/err
@@ -131,7 +137,8 @@ EVENTS="sched/sched_process_fork sched/sched_process_exec sched/sched_process_ex
   syscalls/sys_enter_chroot syscalls/sys_exit_chroot
   syscalls/sys_enter_open_tree syscalls/sys_exit_open_tree
   syscalls/sys_enter_write syscalls/sys_exit_poll syscalls/sys_exit_ppoll syscalls/sys_exit_wait4
-  syscalls/sys_exit_waitid"
+  syscalls/sys_exit_waitid syscalls/sys_enter_close syscalls/sys_exit_close
+  syscalls/sys_exit_pread64"
 DETAIL="syscalls/sys_enter_openat syscalls/sys_enter_open"
 filter() { # filter <event>: the processes it's kept for
   case $1 in
@@ -142,7 +149,7 @@ filter() { # filter <event>: the processes it's kept for
 untrace() { # the instance's events off and the instance gone, whatever state it's in
   [ -d "$I" ] || return 0
   echo 0 > "$I/tracing_on" 2>/dev/null
-  for ev in $EVENTS $DETAIL; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
+  for ev in $EVENTS $DETAIL $PROBES; do echo 0 > "$I/events/$ev/enable" 2>/dev/null; done
   rmdir "$I" 2>/dev/null || echo "the trace instance $I wouldn't go" >&2
 }
 unprobe() { # this run's kprobes gone, once no instance has them on
@@ -154,23 +161,23 @@ trap unprobe EXIT
 { echo "p:$KG/openat_in ${SYS}_openat" >> "$T/kprobe_events" && echo "p:$KG/open_in ${SYS}_open" >> "$T/kprobe_events"; } \
   || { echo "refusing: the opens' entry kprobes couldn't be defined" >&2; exit 4; }
 
-# traced <out name> <n> <warmup> [detail]: seam_oci's lifecycle phase with the tracer on around create, its trace in
-# <out name>.txt and the instance's per-CPU counts in <out name>.stats (create_breakdown.py refuses a trace that lost
-# events); `detail` adds the opens' entries.
+# traced <out name> <n> <warmup> [detail|-] [bin dir]: seam_oci's lifecycle phase with the tracer on around create,
+# its trace in <out name>.txt and the instance's per-CPU counts in <out name>.stats (create_breakdown.py refuses a
+# trace that lost events); `detail` adds the opens' entries; the binaries are the bin dir's (/opt/bin unless named).
 traced() {
-  local name=$1 n=$2 warmup=$3 events=$EVENTS rc=0
+  local name=$1 n=$2 warmup=$3 events=$EVENTS rc=0 bin=${5:-/opt/bin}
   [ "${4:-}" = detail ] && events="$EVENTS $DETAIL"
   mkdir "$I" && echo mono > "$I/trace_clock" && echo 0 > "$I/tracing_on" && echo 4096 > "$I/buffer_size_kb" \
     || { echo "the trace instance $I couldn't be made" >&2; untrace; return 1; }
-  for ev in $events; do
+  for ev in $events $PROBES; do
     { filter "$ev" > "$I/events/$ev/filter" && echo 1 > "$I/events/$ev/enable"; } \
       || { echo "event $ev couldn't be filtered and enabled" >&2; untrace; return 1; }
   done
   rm -f /run/hexcb.stop
   python3 -I /opt/lab/probes/create_breakdown.py drain "$I/trace_pipe" "$OUT/$name.txt" /run/hexcb.stop &
   local drain=$!
-  HEXBENCH_TRACE=$I HEXBENCH_TRACE_OPS=create HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/$name.json" "$n" \
-    "$warmup" 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true 2>&1 | tee -a "$OUT/traced.log" || rc=1
+  HEXBENCH_TRACE=$I HEXBENCH_TRACE_OPS=create HEXBENCH_PHASES=lifecycle "$bin/seam_oci" "$OUT/$name.json" "$n" \
+    "$warmup" 0 "$bin/hex" /run/bundle-sleep /run/bundle-true 2>&1 | tee -a "$OUT/traced.log" || rc=1
   echo 0 > "$I/tracing_on"
   touch /run/hexcb.stop
   wait "$drain" || rc=1
@@ -402,15 +409,22 @@ HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun "$OUT/probe.l
 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam.json" 2 0 0 /opt/bin/hex /run/bundle-sleep /run/bundle-true \
   >> "$OUT/probe.log" 2>&1 || { echo "refusing: seam_oci's probe failed ($OUT/probe.log)" >&2; exit 5; }
 KINDS="libcrun seam traced"
-if [ -x /opt/bin/before-hex ]; then
-  KINDS="$KINDS before"
-  HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/probe.before.json" 2 0 0 /opt/bin/before-hex /run/bundle-sleep \
+if [ -x /opt/bin/before/hex ]; then
+  KINDS="$KINDS before traced-before"
+  HEXBENCH_PHASES=lifecycle /opt/bin/before/seam_oci "$OUT/probe.before.json" 2 0 0 /opt/bin/before/hex /run/bundle-sleep \
     /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the before binary's probe failed ($OUT/probe.log)" >&2; exit 5; }
+  traced probe.traced-before 3 1 - /opt/bin/before >> "$OUT/probe.log" 2>&1 \
+    || { echo "refusing: the before binary's traced probe failed ($OUT/probe.log)" >&2; exit 5; }
 fi
 if [ "${IDLE_AB:-0}" -gt 0 ]; then
   KINDS="$KINDS seam_idle libcrun_idle"
   with_idle env HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam_idle.json" 2 0 0 /opt/bin/hex /run/bundle-sleep \
     /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the probe with idle threads failed ($OUT/probe.log)" >&2; exit 5; }
+fi
+if [ "${IPCUTS_AB:-0}" = 1 ]; then
+  KINDS="$KINDS seam_drained traced_drained pairs"
+  HEXBENCH_IPCUTS=0 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/probe.seam_drained.json" 2 0 0 /opt/bin/hex /run/bundle-sleep \
+    /run/bundle-true >> "$OUT/probe.log" 2>&1 || { echo "refusing: the drained pool's probe failed ($OUT/probe.log)" >&2; exit 5; }
 fi
 traced probe.traced 3 1 >> "$OUT/probe.log" 2>&1 || { echo "refusing: the traced probe failed ($OUT/probe.log)" >&2; exit 5; }
 traced probe.detail 20 1 detail >> "$OUT/probe.log" 2>&1 \
@@ -435,8 +449,14 @@ for round in $(seq 1 "$ROUNDS"); do
       seam) HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
               /run/bundle-sleep /run/bundle-true >> "$OUT/seam.log" 2>&1 ;;
       traced) traced "traced.r$round" "$N" "$WARMUP" ;;
-      before) HEXBENCH_PHASES=lifecycle /opt/bin/before-seam_oci "$OUT/before.r$round.json" "$N" "$WARMUP" 0 \
-                /opt/bin/before-hex /run/bundle-sleep /run/bundle-true >> "$OUT/before.log" 2>&1 ;;
+      seam_drained) HEXBENCH_IPCUTS=0 HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam_drained.r$round.json" "$N" "$WARMUP" 0 \
+                      /opt/bin/hex /run/bundle-sleep /run/bundle-true >> "$OUT/seam_drained.log" 2>&1 ;;
+      traced_drained) HEXBENCH_IPCUTS=0 traced "traced_drained.r$round" "$N" "$WARMUP" ;;
+      pairs) HEXBENCH_PHASES=ipc_uts_pairs /opt/bin/seam_oci "$OUT/pairs.r$round.json" "$N" "$WARMUP" 0 /opt/bin/hex \
+               /run/bundle-sleep /run/bundle-true >> "$OUT/pairs.log" 2>&1 ;;
+      before) HEXBENCH_PHASES=lifecycle /opt/bin/before/seam_oci "$OUT/before.r$round.json" "$N" "$WARMUP" 0 \
+                /opt/bin/before/hex /run/bundle-sleep /run/bundle-true >> "$OUT/before.log" 2>&1 ;;
+      traced-before) traced "traced-before.r$round" "$N" "$WARMUP" - /opt/bin/before ;;
       seam_idle) with_idle env HEXBENCH_PHASES=lifecycle /opt/bin/seam_oci "$OUT/seam_idle.r$round.json" "$N" "$WARMUP" 0 \
                    /opt/bin/hex /run/bundle-sleep /run/bundle-true >> "$OUT/seam_idle.log" 2>&1 ;;
       libcrun_idle) with_idle env HEXBENCH_PHASES=lifecycle python3 -I /opt/lab/oci_bench.py libcrun \

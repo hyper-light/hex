@@ -130,6 +130,19 @@ pub fn order(record: &str) -> Result<Vec<MountNamespace>, OciError> {
     Ok(all.into_iter().map(|(w, _)| w).collect())
 }
 
+/// The `clone3` namespace flags of an init whose mount namespace is made `way`, from the spec's `flags`, which hold
+/// `CLONE_NEWNS` (the seed's namespace copied): from its tree, the init is cloned without it and joins the namespace
+/// the agent made; empty, `CLONE_EMPTY_MNTNS` takes its place. What a fresh clone takes ([`super::seed`]'s
+/// `clone_pruned`), and so what an init parked for that way is cloned with and a claim is held to (decision 8).
+pub fn clone_flags(flags: u64, way: MountNamespace) -> u64 {
+    let newns = u64::try_from(libc::CLONE_NEWNS).unwrap_or(0);
+    match way {
+        MountNamespace::FromTree => flags & !newns,
+        MountNamespace::Empty => (flags & !newns) | CLONE_EMPTY_MNTNS,
+        MountNamespace::Copy => flags,
+    }
+}
+
 /// The way a node takes unless asked for another: the first in `record`'s order ([`order`]) that this node can
 /// take. The copy it always can; from its tree where the probe finds the call; empty where the probe finds
 /// Linux 7.0's call too, since a 7.0 kernel serves it with the copy after one refused clone a seed.

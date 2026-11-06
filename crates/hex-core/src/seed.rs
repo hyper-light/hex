@@ -76,16 +76,34 @@ pub const MAX_BINDS: usize = 253 - CREATE_FDS - 1 - PRUNED_FIXED_FDS - MAX_PATH_
 pub const MAX_REQUEST_FDS: usize = CREATE_FDS + 1 + PRUNED_FIXED_FDS + MAX_BINDS + MAX_PATH_JOINS;
 /// Descriptors a started answer carries: the pidfd of the process the seed started.
 pub const STARTED_FDS: usize = 1;
+/// Descriptors a create carries last when it carries the spec its runtime checked ([`Create::config`]): a sealed memfd
+/// of the exact `config.json` bytes the runtime parsed and checked, which the seed makes the container from in place
+/// of reading the bundle again.
+pub const CONFIG_FDS: usize = 1;
+/// Descriptors of an ipc and a uts namespace made ahead, which ride last in a create that says so
+/// ([`Create::ipc_uts`]).
+pub const IPC_UTS_FDS: usize = 2;
+
+/// A park's descriptors: the idle cgroup the init is cloned into, then the init's end of the socket its
+/// claim comes on.
+pub const PARK_FDS: usize = 2;
 
 /// The kinds of version 1.
 mod kind {
     pub const EXEC: u16 = 0x0001;
     pub const CREATE: u16 = 0x0002;
     pub const CREATE_PREPARED: u16 = 0x0003;
-    /// A pruned create that names how its mount namespace is made or carries a prepared proc: the
-    /// prepared kind's body with its `/dev` index as an option, then its proc's index as an option, then
-    /// the way (decision 6's update). A create with neither keeps its old kind and bytes.
-    pub const CREATE_MOUNT_NAMESPACE: u16 = 0x0004;
+    pub const CREATE_AHEAD: u16 = 0x0004;
+    pub const CREATE_CONFIG: u16 = 0x0005;
+    pub const EXEC_CHECKED: u16 = 0x0006;
+    /// A create that names how its pruned mount namespace is made or carries a prepared proc or the masked
+    /// directories' source: CREATE_CONFIG's body, then its proc's index as an option, then the way, then the
+    /// masked directories' flag (decision 6's update). It carries the checked spec, as CREATE_CONFIG does. A
+    /// create with none of these keeps CREATE_CONFIG's kind and bytes.
+    pub const CREATE_MOUNT_NAMESPACE: u16 = 0x0007;
+    /// A request that parks an init ahead in a slot's cgroup, its flags and its two descriptors (decision 8). Appended
+    /// after goal 6's CREATE_MOUNT_NAMESPACE, which took 0x0007 first on this tree.
+    pub const PARK: u16 = 0x0008;
     pub const STARTED: u16 = 0x8001;
     pub const REFUSED: u16 = 0x8002;
     /// A started answer, then how the init's mount namespace was made.
@@ -114,11 +132,16 @@ pub struct Request {
     pub env: Vec<String>,
     /// Overrides the process's user: a uid, and a gid (the process's own when absent).
     pub user: Option<(u32, Option<u32>)>,
+    /// New EXEC_CHECKED kind (AC-T7.1.1, found 2026-11-04): the container's state directory, where its create kept
+    /// the spec it checked (`checked.json`), which the program's process settings are taken from, never the
+    /// bundle's `config.json` as it is now. Absent in the older EXEC kind, whose bytes are unchanged; the seed then
+    /// checks the bundle's spec again, with the same checks.
+    pub dir: Option<String>,
 }
 
 /// A container for the seed to make (decision 5): its init cloned into its cgroup and the namespaces its
-/// spec asks for, set up to the exec FIFO. On the classic path the seed reads the spec from the bundle's
-/// `config.json` by path and opens the cgroup the create names, as `hex __oci-exec` does; the descriptors
+/// spec asks for, set up to the exec FIFO. On the classic path the seed opens the cgroup the create names, as
+/// `hex __oci-exec` does, and takes the spec from the create's last descriptor ([`Create::config`]); the descriptors
 /// that ride with it ([`CREATE_FDS`]) are the init's sync pipe (the write end) and the map pipe (the read
 /// end), and, when `network` says so, the network namespace made ahead the init joins.
 ///
@@ -126,7 +149,8 @@ pub struct Request {
 /// host, so what it read by path comes as descriptors instead: after the network namespace ride
 /// [`PRUNED_FIXED_FDS`] (the bundle directory, the cgroup directory, the state directory and the rootfs
 /// tree), then `binds` bind-source trees in the order the spec lists its bind mounts. The agent cloned
-/// each with `open_tree` in its own mount namespace and sends them here.
+/// each with `open_tree` in its own mount namespace and sends them here. Last ride an ipc and a uts namespace made
+/// ahead, when `ipc_uts` says so (goal 5 extended, step 4).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Create {
     /// The container's bundle, whose `config.json` gives its namespaces and the init's set-up.
@@ -155,6 +179,17 @@ pub struct Create {
     /// New CREATE_PREPARED kind: mount-plan index of a prepared `/dev`; its fd rides last. Old
     /// CREATE bytes stay unchanged and readers without this kind refuse it explicitly.
     pub dev_mount: Option<u32>,
+    /// New CREATE_AHEAD kind (goal 5 extended, step 4): an ipc and a uts namespace made ahead ride last, which the
+    /// init joins in place of its clone making them. Pruned creates only: a seed that isn't pruned belongs to a
+    /// rootless node, whose containers' namespaces belong to user namespaces of their own. Older kinds' bytes
+    /// stay unchanged, and readers without this kind refuse it explicitly.
+    pub ipc_uts: bool,
+    /// New CREATE_CONFIG kind (AC-T7.1.1, found 2026-11-04): the spec the runtime parsed and checked rides last, a
+    /// sealed memfd of its `config.json` bytes, and the seed makes the container from it, never from a later read
+    /// of the bundle, which could have been swapped for a spec nobody checked. Its body is every field above, the
+    /// prepared `/dev`'s index an option and the pair a flag. Older kinds' bytes stay unchanged, readers without
+    /// this kind refuse it explicitly, and a seed of this build refuses a create that doesn't carry it.
+    pub config: bool,
     /// How a pruned create's mount namespace is made (decision 6's update): the seed's namespace copied,
     /// empty (`CLONE_EMPTY_MNTNS`), or the agent's namespace made from the rootfs's tree
     /// (`OPEN_TREE_NAMESPACE`), which then rides in the rootfs tree's place. [`MountNamespace::Copy`]
@@ -163,7 +198,7 @@ pub struct Create {
     /// The mount-plan index of a proc made ahead (decision 6's update, part 2): its pid namespace and its
     /// tree ride after the prepared `/dev`'s, and the init is cloned into that pid namespace.
     pub proc_mount: Option<u32>,
-    /// Whether the node's one empty read-only tmpfs rides last, which the init clones for each masked
+    /// Whether the node's one empty read-only tmpfs rides after the proc, which the init clones for each masked
     /// directory in place of a tmpfs of its own (decision 6's update): no superblock per mask.
     pub masked_directory: bool,
 }
@@ -209,7 +244,7 @@ impl MountNamespace {
 impl Create {
     /// How many descriptors this create carries: the two pipes always, then a network namespace made
     /// ahead when there is one, then on the pruned path the four fixed descriptors, one tree per bind
-    /// mount, and one descriptor per namespace joined by path.
+    /// mount, one descriptor per namespace joined by path, a prepared `/dev` and an ipc and uts pair.
     pub fn fds(&self) -> usize {
         let mut n = CREATE_FDS.saturating_add(usize::from(self.network));
         if self.pruned {
@@ -218,6 +253,7 @@ impl Create {
                 .saturating_add(self.binds as usize)
                 .saturating_add(self.path_joins as usize)
                 .saturating_add(usize::from(self.dev_mount.is_some()))
+                .saturating_add(if self.ipc_uts { IPC_UTS_FDS } else { 0 })
                 .saturating_add(if self.proc_mount.is_some() {
                     PROC_FDS
                 } else {
@@ -225,15 +261,38 @@ impl Create {
                 })
                 .saturating_add(usize::from(self.masked_directory));
         }
+        if self.config {
+            n = n.saturating_add(CONFIG_FDS);
+        }
         n
     }
 }
 
-/// A request a seed reads: an exec into a container, or a container to make.
+/// An init to make ahead into an idle cgroup (decision 8, "The p99.9 that stayed"): the seed clones it into the
+/// cgroup with `flags`, the namespaces the owner's last box made fresh, as the agent's own child, and the init
+/// waits on its socket for the [`Create`] of the box that claims it, which it then makes as a freshly cloned
+/// init does, or refuses by type when the create asks for other namespaces. The kind is added (append-only):
+/// readers without it refuse it explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Park {
+    /// The `clone3` flags of the namespaces the init is made in: `CLONE_NEW*` bits only.
+    pub flags: u64,
+}
+
+/// A request a seed reads: an exec into a container, a container to make, or an init to make ahead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     Exec(Request),
     Create(Create),
+    Park(Park),
+}
+
+/// A park as a message.
+pub fn park(park: &Park) -> Result<Vec<u8>, Fault> {
+    let mut w = Writer::new(MAX_REQUEST);
+    header(&mut w, kind::PARK);
+    w.u64(park.flags);
+    w.done()
 }
 
 /// What failed when a seed refuses, so the agent reports a typed refusal and knows whether to replace
@@ -306,7 +365,14 @@ impl Answer {
 /// An exec request as a message.
 pub fn request(req: &Request) -> Result<Vec<u8>, Fault> {
     let mut w = Writer::new(MAX_REQUEST);
-    header(&mut w, kind::EXEC);
+    header(
+        &mut w,
+        if req.dir.is_some() {
+            kind::EXEC_CHECKED
+        } else {
+            kind::EXEC
+        },
+    );
     w.i32(req.init_pid);
     w.string(&req.bundle)?;
     w.option_with(req.cgroup.as_deref(), |w, c| w.string(c))?;
@@ -317,6 +383,9 @@ pub fn request(req: &Request) -> Result<Vec<u8>, Fault> {
         w.u32(uid);
         w.option(gid, Writer::u32);
     });
+    if let Some(dir) = &req.dir {
+        w.string(dir)?;
+    }
     w.done()
 }
 
@@ -331,7 +400,7 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
     }
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
-    if kind != kind::EXEC {
+    if kind != kind::EXEC && kind != kind::EXEC_CHECKED {
         return Err(Fault::Kind {
             kind,
             version,
@@ -346,8 +415,13 @@ pub fn read_request(bytes: &[u8], size: usize) -> Result<Request, Fault> {
         cwd: r.option(|r| r.string("cwd"))?,
         env: r.list(|r| r.string("env"))?,
         user: r.option(|r| Ok((r.u32()?, r.option(Reader::u32)?)))?,
+        dir: if kind == kind::EXEC_CHECKED {
+            Some(r.string("dir")?)
+        } else {
+            None
+        },
     };
-    r.end(kind::EXEC, version)?;
+    r.end(kind, version)?;
     if req.args.is_empty() {
         return Err(Fault::value("args", "an exec needs a program"));
     }
@@ -360,14 +434,21 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     let named = create.mount_namespace != MountNamespace::Copy
         || create.proc_mount.is_some()
         || create.masked_directory;
+    // That kind is CREATE_CONFIG's with more, so it carries the checked spec, as every create of this build does.
+    if named && !create.config {
+        return Err(Fault::value(
+            "config",
+            "a create that names its mount namespace carries the spec its runtime checked",
+        ));
+    }
     header(
         &mut w,
-        if named {
-            kind::CREATE_MOUNT_NAMESPACE
-        } else if create.dev_mount.is_some() {
-            kind::CREATE_PREPARED
-        } else {
-            kind::CREATE
+        match (named, create.config, create.ipc_uts, create.dev_mount) {
+            (true, _, _, _) => kind::CREATE_MOUNT_NAMESPACE,
+            (false, true, _, _) => kind::CREATE_CONFIG,
+            (false, false, true, _) => kind::CREATE_AHEAD,
+            (false, false, false, Some(_)) => kind::CREATE_PREPARED,
+            (false, false, false, None) => kind::CREATE,
         },
     );
     w.string(&create.bundle)?;
@@ -377,11 +458,25 @@ pub fn create(create: &Create) -> Result<Vec<u8>, Fault> {
     w.bool(create.pruned);
     w.u32(create.binds);
     w.u32(create.path_joins);
-    if named {
-        w.option(create.dev_mount, Writer::u32);
-        w.option(create.proc_mount, Writer::u32);
-        w.u8(create.mount_namespace.code());
-        w.bool(create.masked_directory);
+    // CREATE_PREPARED's index is bare, as that kind's bytes have it; CREATE_AHEAD's is an option, since a pair rides
+    // with or without a prepared `/dev`; CREATE_CONFIG's is an option, then the pair's flag; CREATE_MOUNT_NAMESPACE's
+    // is CREATE_CONFIG's, then the proc's index, the way and the masked directories' flag.
+    if create.config || named {
+        w.option_with(create.dev_mount, |w, mount| {
+            w.u32(mount);
+            Ok(())
+        })?;
+        w.bool(create.ipc_uts);
+        if named {
+            w.option(create.proc_mount, Writer::u32);
+            w.u8(create.mount_namespace.code());
+            w.bool(create.masked_directory);
+        }
+    } else if create.ipc_uts {
+        w.option_with(create.dev_mount, |w, mount| {
+            w.u32(mount);
+            Ok(())
+        })?;
     } else if let Some(mount) = create.dev_mount {
         w.u32(mount);
     }
@@ -400,7 +495,11 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
     let (version, kind) = read_header(&mut r)?;
     if !matches!(
         kind,
-        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_MOUNT_NAMESPACE
+        kind::CREATE
+            | kind::CREATE_PREPARED
+            | kind::CREATE_AHEAD
+            | kind::CREATE_CONFIG
+            | kind::CREATE_MOUNT_NAMESPACE
     ) {
         return Err(Fault::Kind {
             kind,
@@ -416,33 +515,40 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
         pruned: r.bool("pruned")?,
         binds: r.u32()?,
         path_joins: r.u32()?,
-        dev_mount: None,
+        dev_mount: match kind {
+            kind::CREATE_PREPARED => Some(r.u32()?),
+            kind::CREATE_AHEAD | kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE => {
+                r.option(|r| r.u32())?
+            }
+            _ => None,
+        },
+        ipc_uts: match kind {
+            kind::CREATE_AHEAD => true,
+            kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE => r.bool("ipc_uts")?,
+            _ => false,
+        },
+        config: matches!(kind, kind::CREATE_CONFIG | kind::CREATE_MOUNT_NAMESPACE),
         mount_namespace: MountNamespace::Copy,
         proc_mount: None,
         masked_directory: false,
     };
-    match kind {
-        kind::CREATE_PREPARED => create.dev_mount = Some(r.u32()?),
-        kind::CREATE_MOUNT_NAMESPACE => {
-            create.dev_mount = r.option(Reader::u32)?;
-            create.proc_mount = r.option(Reader::u32)?;
-            create.mount_namespace = MountNamespace::of(r.u8()?).ok_or_else(|| {
-                Fault::value("mount_namespace", "no mount namespace is made that way")
-            })?;
-            create.masked_directory = r.bool("masked_directory")?;
-            // A create with none of these has its old kinds: one encoding a value, so it is refused here.
-            if create.mount_namespace == MountNamespace::Copy
-                && create.proc_mount.is_none()
-                && !create.masked_directory
-            {
-                return Err(Fault::value(
-                    "mount_namespace",
-                    "a create in this kind is made empty or from its tree, or carries a proc or a \
-                     masked directory's source",
-                ));
-            }
+    if kind == kind::CREATE_MOUNT_NAMESPACE {
+        create.proc_mount = r.option(Reader::u32)?;
+        create.mount_namespace = MountNamespace::of(r.u8()?).ok_or_else(|| {
+            Fault::value("mount_namespace", "no mount namespace is made that way")
+        })?;
+        create.masked_directory = r.bool("masked_directory")?;
+        // A create with none of these has its old kinds: one encoding a value, so it is refused here.
+        if create.mount_namespace == MountNamespace::Copy
+            && create.proc_mount.is_none()
+            && !create.masked_directory
+        {
+            return Err(Fault::value(
+                "mount_namespace",
+                "a create in this kind is made empty or from its tree, or carries a proc or a \
+                 masked directory's source",
+            ));
         }
-        _ => {}
     }
     r.end(kind, version)?;
     if create.bundle.is_empty() || create.dir.is_empty() {
@@ -472,6 +578,12 @@ pub fn read_create(bytes: &[u8], size: usize) -> Result<Create, Fault> {
             "only a pruned create carries bind-source trees or path-joined namespaces",
         ));
     }
+    if !create.pruned && create.ipc_uts {
+        return Err(Fault::value(
+            "ipc_uts",
+            "only a pruned create carries ipc and uts namespaces made ahead",
+        ));
+    }
     if !create.pruned
         && (create.mount_namespace != MountNamespace::Copy
             || create.proc_mount.is_some()
@@ -497,17 +609,32 @@ pub fn read_message(bytes: &[u8], size: usize, fds: usize) -> Result<Message, Fa
     let mut r = Reader::new(bytes);
     let (version, kind) = read_header(&mut r)?;
     let (message, want) = match kind {
-        kind::EXEC => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
-        kind::CREATE | kind::CREATE_PREPARED | kind::CREATE_MOUNT_NAMESPACE => {
+        kind::EXEC | kind::EXEC_CHECKED => (Message::Exec(read_request(bytes, size)?), REQUEST_FDS),
+        kind::CREATE
+        | kind::CREATE_PREPARED
+        | kind::CREATE_AHEAD
+        | kind::CREATE_CONFIG
+        | kind::CREATE_MOUNT_NAMESPACE => {
             let create = read_create(bytes, size)?;
             let want = create.fds();
             (Message::Create(create), want)
+        }
+        kind::PARK => {
+            if size > MAX_REQUEST {
+                return Err(Fault::Oversized {
+                    bytes: size,
+                    bound: MAX_REQUEST,
+                });
+            }
+            let flags = r.u64()?;
+            r.end(kind, version)?;
+            (Message::Park(Park { flags }), PARK_FDS)
         }
         _ => {
             return Err(Fault::Kind {
                 kind,
                 version,
-                expected: "an exec or a create",
+                expected: "an exec, a create or a park",
             });
         }
     };

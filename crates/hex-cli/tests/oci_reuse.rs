@@ -7,7 +7,9 @@
 //!   `cgroup.kill` (an inotify watch on the file sees none), its cgroup gone and the program reaped, its
 //!   end read as SIGKILL. A box with a process from outside its namespace moved into its cgroup: expect
 //!   the delete to fall back to `cgroup.kill` (the watch sees the write), counted, and the outsider
-//!   killed. A `process` box: expect `cgroup.kill` (the watch sees it), counted;
+//!   killed. A `process` box: expect `cgroup.kill` (the watch sees it), counted. A box whose init ended
+//!   before its delete, read first, and 2,048 of one owner whose inits end at once, each deleted right after
+//!   its start from 32 threads: expect each ended through its init, none by `cgroup.kill`;
 //! - test 2, a cgroup reused within one owner: box A of owner O burns CPU, holds 64 MiB, has a program
 //!   OOM-killed and forks refused, and is deleted; box B of owner O is created: expect B in A's slot, B's
 //!   reported CPU under 1% of A's, its peak under A's and its event counts its own (0) while the cgroup's
@@ -314,11 +316,19 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     }
     a_delete_ends_a_box_through_its_inits_pidfd(&lab, own);
     a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(&lab, own);
+    an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(&lab, own);
+    a_parked_init_made_with_other_namespaces_is_ended_and_counted(&lab, own);
+    parked_procs_stop_at_their_bound_and_none_drops_inline(&lab, own);
+    parked_procs_are_on_unless_turned_off_and_a_rootless_node_makes_none(&lab, own);
+    a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(&lab, own);
     a_reused_cgroups_cpu_max_is_written_only_when_its_values_differ(&lab, own);
     each_guard_gives_a_fresh_cgroup_and_counts_why(&lab, own);
     a_boxs_network_namespace_is_reused_within_its_owner_when_clean(&lab, own);
     a_box_can_not_send_to_the_socket_the_check_keeps_in_its_namespace(&lab, own);
     a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(&lab, own);
+    a_node_past_its_files_bound_checks_by_entering_counted(&lab, own);
+    // Last: the node it abandons leaves its seeds running in this process.
+    recovery_removes_an_init_parked_by_a_node_that_crashed(&lab, own);
 }
 
 /// A watch on a cgroup's directory for writes to one of its files (`cgroup.kill`, `cpu.max`): every
@@ -528,6 +538,48 @@ fn a_delete_ends_a_box_through_its_inits_pidfd(lab: &Lab, own: &Path) {
     );
     assert!(!cg.exists(), "the box's cgroup is gone");
     eprintln!("test 1, init ended before the delete: no kill, no cgroup.kill write");
+
+    // The fifth, as the bench's throughput and sustained phases run them (the lead's finding 3(a),
+    // 2026-11-05T07:50Z): one owner's boxes whose init ends at once, each deleted right after its start,
+    // from many threads, so some deletes come as the supervisor collects the init's exit into the box's
+    // record (supervise.rs, collect).
+    let o = BoxOwner::named("owner-ends").unwrap();
+    let bundle = lab.bundle_running(Caps::Docker, &["/hex", "selftest-box", "fail", "0"]);
+    let (threads, each) = (32, 64);
+    let before = node.kills();
+    std::thread::scope(|s| {
+        for t in 0..threads {
+            let (node, bundle, o) = (&node, &bundle, &o);
+            s.spawn(move || {
+                for n in 0..each {
+                    let id = BoxId::new(&format!("ends-{t}-{n}")).unwrap();
+                    node.create(BoxSpec {
+                        id: id.clone(),
+                        bounds: Bounds::default(),
+                        class: ClassSpec::Bundle(bundle.clone()),
+                        owner: Some(o.clone()),
+                    })
+                    .unwrap();
+                    node.start(&id).unwrap();
+                    node.delete(&id).unwrap();
+                }
+            });
+        }
+    });
+    let after = node.kills();
+    assert_eq!(
+        (after.through_init, after.fell_back, after.cgroup_kill),
+        (
+            before.through_init + threads * each,
+            before.fell_back,
+            before.cgroup_kill
+        ),
+        "every box whose init ended at once was ended without a kill: {before:?} -> {after:?}"
+    );
+    eprintln!(
+        "test 1, {} inits ending at their deletes: no kill",
+        threads * each
+    );
 }
 
 /// A cgroup file's value, trimmed.
@@ -664,6 +716,421 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
     node.delete(&b).unwrap();
     node.release_idle().unwrap();
     assert!(!slot.exists(), "released, no idle cgroup is left");
+}
+
+/// The processes in a cgroup, by pid, sorted.
+fn procs(cg: &Path) -> Vec<u32> {
+    let mut pids: Vec<u32> = read(cg, "cgroup.procs")
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
+/// The processes in cgroup `cg` once it holds any, waiting on the fact through `cgroup.events`, which the kernel
+/// marks changed (`POLLPRI`) when the cgroup is populated (cgroup-v2.rst, "cgroup.events"); whatever it holds
+/// at `patience`'s end, perhaps none.
+fn populated_within(cg: &Path, patience: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + patience;
+    loop {
+        // Opened before the read, so a change after the read is seen by the poll.
+        let events = std::fs::File::open(cg.join("cgroup.events")).unwrap();
+        let now = procs(cg);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !now.is_empty() || left.is_zero() {
+            return now;
+        }
+        let mut fds = [PollFd::new(&events, PollFlags::PRI)];
+        let timeout = Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap(),
+            tv_nsec: left.subsec_nanos().into(),
+        };
+        let _ = rustix::event::poll(&mut fds, Some(&timeout));
+    }
+}
+
+/// Goal 5's p99.9 tail (decision 8, "The p99.9 that stayed"; AC-T7.1.3): an owner's idle cgroup holds an init
+/// made ahead, so the owner's next create clones nothing into a cgroup and takes no `cgroup_mutex`. Do: A of O
+/// created, started and deleted; wait for the fact that A's idle slot holds one process; create B of O. Expect:
+/// the slot holds that one process, with no effective capability, before B's create and the same one after it,
+/// so B's init is the parked one; B starts and runs a program; the node counts one init claimed. Then delete B and release the idle
+/// cgroups: none is left, so a parked init is ended with its cgroup. With parked procs (root only), B's create
+/// takes the proc made for that init at A's delete, counted a hit (decision 8, parked procs).
+fn an_owners_next_box_is_made_by_the_init_parked_in_its_idle_cgroup(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-parked"));
+    let node = node.with_parked_procs(true).unwrap();
+    let o = BoxOwner::named("owner-p").unwrap();
+    let a = BoxId::new("pa").unwrap();
+    node.create(lab.oci("pa", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    node.start(&a).unwrap();
+    let slot = node.cgroup_dir(&a).expect("A's cgroup");
+    node.delete(&a).unwrap();
+    // With parked procs (root only), A's delete made the init's proc itself, before it returned: the park's own
+    // thread, never a create's (the lead's 15:40Z).
+    if !lab.rootless {
+        let made = node.cgroup_reuse().unwrap().parked;
+        assert_eq!(
+            (
+                made.procs_made,
+                made.procs_made_at_delete,
+                made.procs_made_at_refill,
+                made.procs_held
+            ),
+            (1, 1, 0, 1),
+            "A's delete made the parked init's proc before it returned: {made:?}"
+        );
+    }
+    let parked = populated_within(&slot, PATIENCE);
+    assert_eq!(
+        parked.len(),
+        1,
+        "A's idle slot holds one init made ahead for O's next box: {parked:?}, {:?}",
+        node.cgroup_reuse().unwrap().parked
+    );
+    // Parked, it exercises no capability: its effective set is empty (proc(5), /proc/<pid>/status `CapEff`).
+    let status = std::fs::read_to_string(format!("/proc/{}/status", parked[0])).unwrap();
+    let eff = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .map(str::trim)
+        .unwrap();
+    assert_eq!(
+        u64::from_str_radix(eff, 16).unwrap(),
+        0,
+        "a parked init holds no effective capability"
+    );
+    // Nor can another process take its claim socket or any descriptor of its: it is non-dumpable, so a caller
+    // without CAP_SYS_PTRACE is refused pidfd_getfd (ptrace(2), "Ptrace access mode checking"). This process is
+    // one when rootless; as root it holds CAP_SYS_PTRACE, which reaches any process, the node's own included.
+    if lab.rootless {
+        let init = pidfd(parked[0]);
+        for fd in 0..64 {
+            assert_eq!(
+                rustix::process::pidfd_getfd(&init, fd, rustix::process::PidfdGetfdFlags::empty())
+                    .map(drop)
+                    .map_err(|e| e == rustix::io::Errno::PERM),
+                Err(true),
+                "another process took descriptor {fd} of a parked init"
+            );
+        }
+    }
+    let before = node.cgroup_reuse().unwrap();
+    let b = BoxId::new("pb").unwrap();
+    node.create(lab.oci("pb", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    let after = node.cgroup_reuse().unwrap();
+    assert_eq!(node.cgroup_dir(&b).as_deref(), Some(slot.as_path()));
+    assert_eq!(
+        procs(&slot),
+        parked,
+        "B's init is the one parked in the slot, not a clone of B's create"
+    );
+    assert_eq!(after.parked.claimed, before.parked.claimed + 1, "{after:?}");
+    if !lab.rootless {
+        assert_eq!(
+            (after.parked.proc_hits, after.parked.proc_misses),
+            (before.parked.proc_hits + 1, before.parked.proc_misses),
+            "B took the proc made at A's delete: {:?}",
+            after.parked
+        );
+    }
+    node.start(&b).unwrap();
+    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&b).unwrap();
+    node.release_idle().unwrap();
+    assert!(
+        !slot.exists(),
+        "released, no idle cgroup nor parked init is left"
+    );
+    eprintln!("test 2b: B made by the init parked in A's slot (pid {parked:?})");
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): an init parked for an owner's next box with namespaces its spec
+/// doesn't ask for is never used. Do: A of O, which has an ipc namespace of its own, created and deleted, so its
+/// slot holds an init parked for one; B of O, whose spec makes no ipc namespace, created. Expect: B in A's slot,
+/// the parked init ended, not claimed, and counted ended unclaimed; B starts and runs a program.
+fn a_parked_init_made_with_other_namespaces_is_ended_and_counted(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-parkflags"));
+    let o = BoxOwner::named("owner-f").unwrap();
+    let a = BoxId::new("fa").unwrap();
+    node.create(lab.oci("fa", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    let slot = node.cgroup_dir(&a).expect("A's cgroup");
+    node.delete(&a).unwrap();
+    let parked = populated_within(&slot, PATIENCE);
+    assert_eq!(
+        parked.len(),
+        1,
+        "A's idle slot holds a parked init: {parked:?}"
+    );
+    let init = pidfd(parked[0]);
+    // B's bundle: A's, its ipc namespace taken out (a pid namespace can't be: rootless, proc mounts only for a pid
+    // namespace of the container's own user namespace).
+    let bundle = lab.bundle(Caps::Docker);
+    let config = std::fs::read_to_string(bundle.join("config.json")).unwrap();
+    assert!(config.contains(r#"{"type":"ipc"},"#));
+    std::fs::write(
+        bundle.join("config.json"),
+        config.replace(r#"{"type":"ipc"},"#, ""),
+    )
+    .unwrap();
+    let before = node.cgroup_reuse().unwrap().parked;
+    let b = BoxId::new("fb").unwrap();
+    node.create(BoxSpec {
+        id: b.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+        owner: Some(o.clone()),
+    })
+    .unwrap();
+    let after = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        node.cgroup_dir(&b).as_deref(),
+        Some(slot.as_path()),
+        "B in A's slot"
+    );
+    assert_eq!(
+        (after.claimed, after.ended_unclaimed),
+        (before.claimed, before.ended_unclaimed + 1),
+        "the parked init, made for an ipc namespace B's spec doesn't ask for, ended unclaimed: {after:?}"
+    );
+    assert!(has_ended(&init), "the parked init has ended");
+    node.start(&b).unwrap();
+    assert_eq!(run(&node, &b, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&b).unwrap();
+    node.release_idle().unwrap();
+    eprintln!("parked init made with other namespaces: ended, counted");
+}
+
+/// Decision 8, parked procs (AC-T7.1.3; the lead's 15:57Z): at most a bound of procs alive at once, held with parked
+/// inits or waiting for the dropper, whose queue holds as many, so a tree handed to it never finds it full. Root
+/// only. Do: on a node bounded at 2, four owners each create and delete a box, so four inits park. Expect 2 procs made
+/// and 2 parks capped, 2 alive. Then release the idle cgroups: expect the 2 trees queued to the dropper and dropped
+/// there, none inline, none alive. Then a fifth owner's delete: its proc made, the bound free again.
+/// Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: in a
+/// node opened with no setting, A of O created, started and deleted; then the same in a node opened with
+/// `with_parked_procs(false)`. Expect: as root, the first node's delete made the parked init's proc (one made, at
+/// the delete), the second's made none; rootless, neither made one (a rootless node parks no proc).
+fn parked_procs_are_on_unless_turned_off_and_a_rootless_node_makes_none(lab: &Lab, own: &Path) {
+    let made_by = |node: &Node, tag: &str| {
+        let o = BoxOwner::named(&format!("owner-{tag}")).unwrap();
+        let a = BoxId::new(tag).unwrap();
+        node.create(lab.oci(tag, Some(&o), Caps::Docker, Bounds::default()))
+            .unwrap();
+        node.start(&a).unwrap();
+        node.delete(&a).unwrap();
+        let parked = node.cgroup_reuse().unwrap().parked;
+        node.release_idle().unwrap();
+        (parked.procs_made, parked.procs_made_at_delete)
+    };
+    let (node, _state) = lab.node(&own.join("hex-reuse-ppdefault"));
+    let by_default = made_by(&node, "ppd");
+    drop(node);
+    let (node, _state_off) = lab.node(&own.join("hex-reuse-ppoff"));
+    let node = node.with_parked_procs(false).unwrap();
+    let turned_off = made_by(&node, "ppo");
+    let want = if lab.rootless { (0, 0) } else { (1, 1) };
+    assert_eq!(
+        (by_default, turned_off),
+        (want, (0, 0)),
+        "procs made (in all, at the delete): by default, then turned off (rootless {})",
+        lab.rootless
+    );
+}
+
+fn parked_procs_stop_at_their_bound_and_none_drops_inline(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    let (node, _state) = lab.node(&own.join("hex-reuse-procbound"));
+    let node = node.with_parked_procs_bound(2).unwrap();
+    let cycle = |owner: &str, id: &str| {
+        let o = BoxOwner::named(owner).unwrap();
+        node.create(lab.oci(id, Some(&o), Caps::Docker, Bounds::default()))
+            .unwrap();
+        node.delete(&BoxId::new(id).unwrap()).unwrap();
+    };
+    for n in 1..=4 {
+        cycle(&format!("owner-b{n}"), &format!("pb{n}"));
+    }
+    let full = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (
+            full.parked,
+            full.procs_made,
+            full.procs_capped,
+            full.procs_alive,
+            full.procs_held
+        ),
+        (4, 2, 2, 2, 2),
+        "two procs at the bound, two parks capped: {full:?}"
+    );
+    node.release_idle().unwrap();
+    wait_for(
+        || node.cgroup_reuse().unwrap().parked.procs_dropped == 2,
+        "the two trees dropped by the dropper",
+    );
+    let drained = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (
+            drained.procs_queued,
+            drained.procs_dropped_inline,
+            drained.procs_alive,
+            drained.procs_held
+        ),
+        (2, 0, 0, 0),
+        "at the bound, every tree went to the dropper, none inline: {drained:?}"
+    );
+    cycle("owner-b5", "pb5");
+    let again = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (again.procs_made, again.procs_capped, again.procs_alive),
+        (3, 2, 1),
+        "the bound free again: {again:?}"
+    );
+    node.release_idle().unwrap();
+    eprintln!("parked procs at their bound: 2 made, 2 capped, none dropped inline");
+}
+
+/// Each slot cgroup under `root` that holds a process, with its processes.
+fn populated_slots(root: &Path) -> Vec<(PathBuf, Vec<u32>)> {
+    let mut out: Vec<(PathBuf, Vec<u32>)> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        })
+        .map(|e| (e.path(), procs(&e.path())))
+        .filter(|(_, p)| !p.is_empty())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3), reuse off: a node keeps cgroups made ahead for boxes of no
+/// owner, each with an init parked in it. Do: on a node keeping one, create and delete box N1 of no owner (which
+/// finds none ready, and says the namespaces its init was made with); wait for the fact that one is ready; create
+/// N2 of no owner. Expect: N2's cgroup is the slot made ahead and its init the one parked there; it starts and runs
+/// a program; one taken and one claimed counted, N1's create counted dry. Then delete N2 and release the idle
+/// cgroups: N2's slot is removed with it, never kept, and nothing made ahead is left.
+fn a_box_of_no_owner_is_made_by_an_init_parked_in_a_cgroup_made_ahead(lab: &Lab, own: &Path) {
+    let (node, _state) = lab.node(&own.join("hex-reuse-ahead"));
+    let node = node.with_inits_ahead(1);
+    let n1 = BoxId::new("n1").unwrap();
+    node.create(lab.oci("n1", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let root = node
+        .cgroup_dir(&n1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n1).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while node.cgroup_reuse().unwrap().ahead.ready == 0 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let before = node.cgroup_reuse().unwrap();
+    assert_eq!(
+        before.ahead.ready, 1,
+        "one cgroup made ahead: {:?}",
+        before.ahead
+    );
+    assert!(
+        before.ahead.dry >= 1,
+        "N1 found none ready: {:?}",
+        before.ahead
+    );
+    let ready = populated_slots(&root);
+    assert_eq!(
+        ready.len(),
+        1,
+        "the one made ahead holds its parked init: {ready:?}"
+    );
+    let n2 = BoxId::new("n2").unwrap();
+    node.create(lab.oci("n2", None, Caps::Docker, Bounds::default()))
+        .unwrap();
+    let after = node.cgroup_reuse().unwrap();
+    let slot = node.cgroup_dir(&n2).unwrap();
+    assert_eq!(
+        (slot.clone(), procs(&slot)),
+        ready[0].clone(),
+        "N2 is made in the cgroup made ahead, by the init parked there"
+    );
+    assert_eq!(
+        after.ahead.taken,
+        before.ahead.taken + 1,
+        "{:?}",
+        after.ahead
+    );
+    assert_eq!(
+        after.parked.claimed,
+        before.parked.claimed + 1,
+        "{:?}",
+        after.parked
+    );
+    node.start(&n2).unwrap();
+    assert_eq!(run(&node, &n2, Program::of(&["/bin/true"])), Exit::Code(0));
+    node.delete(&n2).unwrap();
+    assert!(
+        !slot.exists(),
+        "a box of no owner's slot is removed with it, never kept"
+    );
+    node.release_idle().unwrap();
+    assert_eq!(populated_slots(&root), vec![], "nothing made ahead is left");
+    eprintln!("test 2c: N2 made by the init parked in {}", slot.display());
+}
+
+/// Decision 8, "The p99.9 that stayed" (AC-T7.1.3): recovery removes the inits a node parked. Do: A of O created and
+/// deleted, so A's idle slot holds a parked init; the node abandoned as a crash leaves it (none of its teardown
+/// runs: `ManuallyDrop`); a node opened again over the same box root and state, and its recovery run. Expect: the
+/// idle slot is gone and the parked init has ended. With parked procs (root only), the init's proc was made at A's
+/// delete; its tree is the crashed node's descriptor, gone with that process, and its pid namespace with the init.
+fn recovery_removes_an_init_parked_by_a_node_that_crashed(lab: &Lab, own: &Path) {
+    let box_root = own.join("hex-reuse-recover");
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let open = || {
+        Node::open(&box_root, state.path(), state.path())
+            .expect("open a node")
+            .with_oci_helper(PathBuf::from(&lab.exe))
+            .with_parked_procs(true)
+            .unwrap()
+    };
+    let node = open();
+    let o = BoxOwner::named("owner-r").unwrap();
+    let a = BoxId::new("ra").unwrap();
+    node.create(lab.oci("ra", Some(&o), Caps::Docker, Bounds::default()))
+        .unwrap();
+    let slot = node.cgroup_dir(&a).unwrap();
+    node.delete(&a).unwrap();
+    let parked = populated_within(&slot, PATIENCE);
+    assert_eq!(
+        parked.len(),
+        1,
+        "A's idle slot holds a parked init: {parked:?}"
+    );
+    if !lab.rootless {
+        let held = node.cgroup_reuse().unwrap().parked;
+        assert_eq!(held.procs_held, 1, "its proc made with it: {held:?}");
+    }
+    let init = pidfd(parked[0]);
+    let _abandoned = std::mem::ManuallyDrop::new(node);
+    let node = open();
+    node.recover().unwrap();
+    assert!(!slot.exists(), "recovery removed the idle slot");
+    let mut fds = [PollFd::new(&init, PollFlags::IN)];
+    let patience = Timespec {
+        tv_sec: i64::try_from(PATIENCE.as_secs()).unwrap(),
+        tv_nsec: 0,
+    };
+    let _ = rustix::event::poll(&mut fds, Some(&patience));
+    assert!(has_ended(&init), "recovery ended the parked init");
+    node.release_idle().unwrap();
+    eprintln!("test 2d: recovery removed the slot and ended the init parked in it");
 }
 
 /// With test 2, the lead's ruling on `cpu.max` (2026-11-03T01:19Z): a reused cgroup's `cpu.max` is
@@ -990,7 +1457,8 @@ fn a_boxs_network_namespace_is_reused_within_its_owner_when_clean(lab: &Lab, own
 }
 
 /// Goal 5 extended, step 6 (a kept namespace's `/proc/net` files, so a later check needn't enter it; the lead's
-/// conditions: closed on every path, counted; CLAUDE.md §2). Do: keep one owner's namespace, reuse it, leave an
+/// conditions: closed on every path, counted; CLAUDE.md §2). Do: give the node a soft descriptor limit with room for
+/// the namespaces it keeps, as an installer would, keep one owner's namespace, reuse it, leave an
 /// address in it, a socket in the next, release what's idle, give one past the owner's bound, take and give back
 /// each of the bound's again, then let the node go with a box's namespace held and recover over its state, counting
 /// the files open in this process by the names their links show, and all its descriptors at the end. Expect: the
@@ -1004,6 +1472,17 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
         eprintln!("SKIP held files: a rootless node keeps no network namespaces");
         return;
     }
+    // The node holds files within the soft limit it is given, never raising it; a lab's container starts at
+    // dockerd's 1024, which holds none, so this test gives it room for the namespaces it keeps, as an installer would.
+    let room = u64::try_from(4 * (2 * hex_core::netns_reuse::PER_OWNER + 8)).unwrap();
+    let Some(_limit) =
+        soft_limit(hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT).own + room)
+    else {
+        eprintln!(
+            "SKIP held files: the hard descriptor limit leaves no room for them past the node's own"
+        );
+        return;
+    };
     // Its sockstat and dev, and each iptables file its host's modules make.
     let files = 2 + ["ip_tables_names", "ip6_tables_names"]
         .iter()
@@ -1219,6 +1698,148 @@ fn a_kept_namespace_holds_its_proc_net_files_and_they_close_with_it(lab: &Lab, o
     );
     eprintln!(
         "netns: a kept namespace's files held across a reuse, closed when refused, released, put out or let go"
+    );
+}
+
+/// Goal 5 extended step 6, the held files' bound (the lead, 2026-11-03T23:07Z and 2026-11-04T09:15Z; CLAUDE.md §2,
+/// §3): a node holds kept namespaces' files for at most what the soft descriptor limit it was given leaves past its
+/// own descriptors at its bounds, four a namespace, and never raises the limit. Do: lower this process's soft limit to
+/// the node's own and room for two namespaces' files, open a node, give back four boxes' namespaces of one owner,
+/// take and give back all four again, release them, and let the node go; then put the limit back. Expect: the node's
+/// bound two, the limit as it was set; two namespaces hold their files and two don't, whose checks entered, counted;
+/// in the second round two checks through files and two more entered, counted; none failed; after the release no
+/// file held; and every descriptor back to the count before the node.
+fn a_node_past_its_files_bound_checks_by_entering_counted(lab: &Lab, own: &Path) {
+    use rustix::process::{Resource, getrlimit};
+
+    if lab.rootless {
+        eprintln!("SKIP held files' bound: a rootless node keeps no network namespaces");
+        return;
+    }
+    let files = 2 + ["ip_tables_names", "ip6_tables_names"]
+        .iter()
+        .filter(|table| Path::new("/proc/net").join(table).exists())
+        .count();
+    let held = || {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .filter(|link| {
+                let link = link.to_string_lossy();
+                let link = link.strip_suffix(" (deleted)").unwrap_or(&link);
+                ["sockstat", "dev", "ip_tables_names", "ip6_tables_names"]
+                    .iter()
+                    .any(|name| link.ends_with(&format!("/net/{name}")))
+            })
+            .count()
+    };
+    let open_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let box_root = own.join("hex-reuse-files-bound");
+    let (first_node, _first_state) = lab.node(&box_root);
+    drop(first_node);
+    let soft = hex_node::netns::FilesBound::now(hex_node::netns::Pools::ROOT).own + 2 * 4 + 3;
+    let Some(_limit) = soft_limit(soft) else {
+        eprintln!("SKIP held files' bound: the hard descriptor limit is under the node's own");
+        return;
+    };
+    let before_all = open_fds();
+    let (node, _state) = lab.node(&box_root);
+    let o = BoxOwner::named("owner-files-bound").unwrap();
+    let wait = ["/hex", "selftest-box", "wait"];
+    let make = |id: &str| BoxSpec {
+        id: BoxId::new(id).unwrap(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(lab.bundle_with(Caps::Docker, &wait, true, true)),
+        owner: Some(o.clone()),
+    };
+    let counts = || {
+        node.netns_reuse()
+            .unwrap()
+            .expect("a root node keeps namespaces")
+    };
+    let ruled = || {
+        wait_for(
+            || {
+                let c = counts();
+                c.checked + c.unchecked == c.given_back
+            },
+            "the checker's ruling on every namespace given back",
+        );
+        counts()
+    };
+    let start = counts();
+    let bound = start.files_bound.expect("a root node's bound");
+    assert_eq!(bound.namespaces, 2, "{bound:?}");
+    assert_eq!(
+        bound.soft,
+        Some(soft),
+        "the limit as it was set, never raised"
+    );
+    assert_eq!(getrlimit(Resource::Nofile).current, Some(soft));
+    let ids: Vec<String> = (0..4).map(|n| format!("files-bound-{n}")).collect();
+    for round in 0..2 {
+        // Each namespace's count settled before its check: a fresh one's (round 0) at none once its loopback
+        // request's socket is freed after a grace period (net/netlink/af_netlink.c:794-796, :703-715), a kept one's
+        // (round 1) at the check's own socket. Each check then reads `sockstat`'s count alone.
+        let settled = if round == 0 {
+            "sockets: used 0\n"
+        } else {
+            "sockets: used 1\n"
+        };
+        for id in &ids {
+            node.create(make(id)).unwrap();
+        }
+        for id in &ids {
+            let sockstat = format!(
+                "/proc/{}/net/sockstat",
+                std::fs::read_to_string(
+                    node.cgroup_dir(&BoxId::new(id).unwrap())
+                        .unwrap()
+                        .join("cgroup.procs")
+                )
+                .unwrap()
+                .lines()
+                .next()
+                .expect("the box's init")
+            );
+            wait_for(
+                || {
+                    std::fs::read_to_string(&sockstat)
+                        .unwrap()
+                        .starts_with(settled)
+                },
+                "the namespace's count settled",
+            );
+        }
+        let before = ruled();
+        for id in &ids {
+            node.delete(&BoxId::new(id).unwrap()).unwrap();
+        }
+        let after = ruled();
+        assert_eq!(after.files_held, 2, "round {round}: {after:?}");
+        assert_eq!(held(), 2 * files, "round {round}: {after:?}");
+        assert_eq!(
+            after.files_bounded,
+            before.files_bounded + 2,
+            "round {round}: two past the bound entered, counted: {after:?}"
+        );
+        assert_eq!(
+            after.through_files,
+            before.through_files + if round == 0 { 0 } else { 2 },
+            "round {round}: {after:?}"
+        );
+        assert_eq!(after.files_failed, 0, "{after:?}");
+    }
+    node.release_idle().unwrap();
+    wait_for(
+        || held() == 0,
+        "the namespaces released closing their files",
+    );
+    assert_eq!(counts().files_held, 0);
+    drop(node);
+    wait_for(
+        || open_fds() <= before_all,
+        "every descriptor the node held let go",
     );
 }
 
@@ -1469,6 +2090,36 @@ fn new_route() -> Vec<u8> {
 }
 
 /// Waits for `cond`, a fact, at most [`PATIENCE`].
+/// This process's descriptor limit as it was, put back as this drops.
+struct LimitPutBack(rustix::process::Rlimit);
+
+impl Drop for LimitPutBack {
+    fn drop(&mut self) {
+        let _ = rustix::process::setrlimit(rustix::process::Resource::Nofile, self.0);
+    }
+}
+
+/// Sets this process's soft descriptor limit to `soft` for a node a test opens after, as an installer sets the one a
+/// node is given (the node never changes it), and puts it back as the guard drops; `None` where the hard limit is
+/// under `soft`.
+fn soft_limit(soft: u64) -> Option<LimitPutBack> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+
+    let given = getrlimit(Resource::Nofile);
+    if given.maximum.is_some_and(|hard| hard < soft) {
+        return None;
+    }
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(soft),
+            maximum: given.maximum,
+        },
+    )
+    .ok()?;
+    Some(LimitPutBack(given))
+}
+
 fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {

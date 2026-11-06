@@ -31,24 +31,26 @@ use hex_core::netns;
 use hex_core::record::{BoxRecord, Phase, ProcId, Slot};
 use hex_core::recovery::{self, Decision, Parts, Seen, Why};
 use hex_core::reuse;
-use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot};
+use hex_runtime::linux::cgroup::{BoxCgroup, BoxRoot, MAX_BOXES};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::devshare::MAX_PROGRAMS;
 use hex_runtime::linux::oci::programs::{self, Programs};
 use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
 use hex_runtime::linux::oci::seed::{Direct, Specs, exec_direct, open_cgroup};
-use hex_runtime::linux::oci::state::{Status, start_time};
+use hex_runtime::linux::oci::state::{self, Status, start_time};
 use hex_runtime::linux::proc::PidfdProc;
 use hex_runtime::linux::{disks, process};
 
 use crate::cgroups::{self, Cgroups, Choice, Made};
 use crate::createpool::CreatePool;
 use crate::devfs::Devfs;
-use crate::netns::Netns;
+use crate::ipcuts::IpcUtsPool;
+use crate::netns::{Netns, Pools};
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
 use crate::store::Store;
 use crate::supervise::{self, Forgotten, Live, Supervisor};
+use crate::turns::{Turn, Turns};
 
 /// overlayfs's magic number (include/uapi/linux/magic.h): a node whose state is on overlayfs can't
 /// keep a layered box's writable layer there, since overlayfs can't be an overlay's upper layer.
@@ -63,6 +65,12 @@ pub const EMPTY_PATIENCE: Duration = Duration::from_secs(60);
 /// the rest for a later delete or recovery to finish where it stopped: a bound on a caller's wait, not
 /// a guess at how long a layer takes, so a layer of any size goes, over as many calls as it needs.
 pub const REMOVE_PATIENCE: Duration = Duration::from_secs(60);
+
+/// How long a create or delete of a box waits for the one under way for the same box before it refuses:
+/// a create or delete takes milliseconds, and one that ends a box waits at most [`EMPTY_PATIENCE`] for it
+/// to empty and [`REMOVE_PATIENCE`] for its directories to go, so past their sum is a fault to report,
+/// not a limit to raise (CLAUDE.md §4).
+pub const TURN_PATIENCE: Duration = EMPTY_PATIENCE.saturating_add(REMOVE_PATIENCE);
 
 /// How long [`Node::recover`] spends listing a directory for the parts of boxes before it refuses: the
 /// runtime directory is shared with every node of this user on the host, so its entries are theirs as
@@ -104,6 +112,13 @@ impl CrashPoint {
 /// box id starts with `.`, so it can't be a box's.
 pub const OCI_BOXES: &str = ".oci";
 
+/// The cgroups a node makes ahead for boxes of no owner unless [`Node::with_inits_ahead`] says, each with an init
+/// parked in it (decision 8, "The p99.9 that stayed"), about 262 KB each on fedora, so about 2.1 MB a node. Eight:
+/// one per box in flight at the seam bench's concurrency 8, and at the bar's concurrency 1 eight never ran dry but
+/// for each round's first create (1 in 10,100: bench/competitive/probes/create_tail.md, "The parked init, A/B
+/// against 60b2e38"). More in flight than this finds none ready and makes its own, counted dry.
+pub const INITS_AHEAD: usize = 8;
+
 /// A node agent over the `process` and `oci` classes.
 pub struct Node {
     /// The `process` boxes' cgroups, and the `oci` boxes' root among them ([`OCI_BOXES`]).
@@ -117,10 +132,6 @@ pub struct Node {
     /// The `oci` boxes' cgroups that may be handed from box to box of one owner, and how the node's
     /// deletes ended their boxes (goal 5 extended, step 6).
     cgroups: Cgroups,
-    /// The ids of the creates under way: a second create of one is refused as [`Refusal::Exists`] before
-    /// it makes anything, whatever its cgroup is named, since an owned box's is named by its slot and its
-    /// `mkdir` claims no id. At most [`hex_runtime::linux::cgroup::MAX_BOXES`].
-    making: Mutex<BTreeSet<BoxId>>,
     store: Store,
     /// The state root the `oci` class keeps each container's `state.json` and exec FIFO under
     /// ([`oci_root`]), shared with the other nodes on the host that run as this one's user.
@@ -169,9 +180,20 @@ pub struct Node {
     /// The network namespaces the node makes ahead for its containers, and what it counts of every
     /// container's (decision 4; [`Node::netns`]).
     netns: Netns,
+    /// Each box's turn to be made or removed. A box has no record until it's whole (goal 5 extended,
+    /// step 5), so this is what tells a box being made: a second create of its id, or a delete, waits
+    /// for the create under way and then finds the box made or not, rather than make or remove parts at
+    /// the paths the id fixes; so neither scrubs what the other is making. At most [`MAX_BOXES`] turns
+    /// at once, the node's box budget, a wait at most [`TURN_PATIENCE`]; past either the call is refused
+    /// by type, a create past the budget as [`Refusal::Full`] ([`create_turn`]).
+    turns: Turns,
     /// The debug-only crash point the caller armed ([`Node::with_crash_point`]), `None` unless one did.
     #[cfg(debug_assertions)]
     crash_at: Option<CrashPoint>,
+    /// The ipc and uts namespaces it makes ahead (goal 5 extended, step 4; [`Node::ipc_uts`]).
+    ipc_uts: IpcUtsPool,
+    /// Both pools' bounds, which the kept namespaces' files are bounded past ([`crate::netns::FilesBound`]).
+    pools: Pools,
     devfs: Devfs,
 }
 
@@ -235,14 +257,18 @@ impl Node {
         let supervisor = Supervisor::start(root.dir(), store.clone())?;
         // A namespace made ahead belongs to the agent's user namespace, so only a node whose
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
-        // user namespace of their own (decision 4).
-        if owner == Owner::Root {
-            crate::netns::room_for_the_node()?;
-        }
-        let netns = Netns::start(match owner {
-            Owner::Root => netns::BOUND,
-            Owner::Rootless { .. } => 0,
-        })?;
+        // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
+        // limit the node was given, never raised, past what both pools hold.
+        let pools = match owner {
+            Owner::Root => Pools::ROOT,
+            Owner::Rootless { .. } => Pools {
+                netns: 0,
+                ipc_uts: 0,
+                devfs: false,
+            },
+        };
+        let netns = Netns::start(pools.netns, crate::netns::FilesBound::now(pools))?;
+        let ipc_uts = IpcUtsPool::start(pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
@@ -253,12 +279,14 @@ impl Node {
                 Refusal::Broken("the oci boxes' root holds the last slot a u64 numbers".to_owned())
             })?;
         let cgroups = Cgroups::start(first)?;
-        Ok(Self {
+        cgroups.set_ahead(INITS_AHEAD);
+        // Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06): a rootless
+        // node's devfs makes none, so it parks none.
+        Self {
             root,
             oci_boxes,
             devices,
             cgroups,
-            making: Mutex::new(BTreeSet::new()),
             store,
             oci_root,
             key,
@@ -276,20 +304,25 @@ impl Node {
             lsm: hex_runtime::linux::oci::lsm::Policy::default(),
             specs: Mutex::new(Specs::default()),
             netns,
-            devfs: Devfs::start(
-                owner == Owner::Root,
-                owner == Owner::Root,
-                owner == Owner::Root,
-            )?,
+            ipc_uts,
+            pools,
+            devfs: Devfs::start(pools.devfs, pools.devfs, pools.devfs)?,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
                 rustix::fs::Mode::empty(),
             )
             .map_err(|e| Refusal::os("opening /dev/null", e))?,
+            turns: Turns::new(
+                "making or removing a box",
+                "creates and deletes under way",
+                TURN_PATIENCE,
+                MAX_BOXES,
+            ),
             #[cfg(debug_assertions)]
             crash_at: None,
-        })
+        }
+        .with_parked_procs(true)
     }
 
     /// Arms a debug-only crash point (T-T7.1.2): at `point` of each `oci` box's create from now on, the
@@ -308,6 +341,18 @@ impl Node {
         self
     }
 
+    /// Whether the node ends abruptly once a box's own cgroup is made (a debug build's crash point).
+    #[cfg(debug_assertions)]
+    fn crashes_at_cgroup_made(&self) -> bool {
+        self.crash_at == Some(CrashPoint::CgroupMade)
+    }
+
+    /// A release build has no crash points.
+    #[cfg(not(debug_assertions))]
+    fn crashes_at_cgroup_made(&self) -> bool {
+        false
+    }
+
     /// Ends this process here as a kill would, when the caller armed `point`.
     #[cfg(debug_assertions)]
     fn crash_point(&self, point: CrashPoint) {
@@ -323,7 +368,7 @@ impl Node {
     /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
     pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (_, procs, root) = self.devfs.enabled();
-        self.devfs = Devfs::start(enabled && root, procs, root)?;
+        self.devfs = self.devfs.restart(enabled && root, procs)?;
         Ok(self)
     }
 
@@ -331,7 +376,7 @@ impl Node {
     /// the bench's A/B; disabled creates mount their own proc. Root nodes only, as `/dev`'s.
     pub fn with_prepared_procs(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (dev, _, root) = self.devfs.enabled();
-        self.devfs = Devfs::start(dev, enabled && root, root)?;
+        self.devfs = self.devfs.restart(dev, enabled && root)?;
         Ok(self)
     }
 
@@ -426,7 +471,67 @@ impl Node {
                 ),
             });
         }
-        self.netns = Netns::start(bound)?;
+        self.pools.netns = bound;
+        self.netns = Netns::start(bound, crate::netns::FilesBound::now(self.pools))?;
+        Ok(self)
+    }
+
+    /// Sets the most ipc and uts namespace pairs a root node makes ahead, [`netns::IPC_UTS_BOUND`] unless set,
+    /// in place of the pool it opened with, which closes what it held. With 0 it makes none, and every
+    /// container's clone makes its own, counted. A rootless node makes none, so a bound above 0 there is refused.
+    pub fn with_ipc_uts_bound(mut self, bound: usize) -> Result<Self, Refusal> {
+        if bound > 0 && self.owner != Owner::Root {
+            return Err(Refusal::Invalid {
+                what: "ipc and uts namespace bound",
+                why: format!(
+                    "a rootless node makes no ipc or uts namespaces ahead, so it can't hold {bound}"
+                ),
+            });
+        }
+        self.ipc_uts = IpcUtsPool::start(bound)?;
+        self.pools.ipc_uts = bound;
+        // The kept namespaces' files are bounded past this pool too, so the network-namespace pool starts again
+        // with the bound they leave.
+        self.netns = Netns::start(self.pools.netns, crate::netns::FilesBound::now(self.pools))?;
+        Ok(self)
+    }
+
+    /// The node keeps at most `bound` cgroups made ahead for boxes of no owner, each with an init parked in it
+    /// (decision 8, "The p99.9 that stayed"), so such a box's create takes neither the cgroup's `mkdir` nor its
+    /// init's clone, nor their waits for the host-wide `cgroup_mutex`; [`INITS_AHEAD`] unless set. 0 keeps none:
+    /// each such box makes its own cgroup, named by its id. Each costs an idle cgroup and a parked process charged
+    /// to it.
+    pub fn with_inits_ahead(self, bound: usize) -> Self {
+        self.cgroups.set_ahead(bound);
+        self
+    }
+
+    /// Each init the node parks ahead (decision 8, "The p99.9 that stayed") has the proc of its own pid namespace
+    /// made with it when `enabled`, with the masks and read-only paths of the spec it is parked for: a claim whose
+    /// spec has the same key attaches it, mounting no proc of its own (decision 8, parked procs). On by default
+    /// (the lead, 2026-11-06); `false` turns it off. Root nodes only, as [`Node::with_prepared_procs`]; set before
+    /// the node's first create.
+    pub fn with_parked_procs(self, enabled: bool) -> Result<Self, Refusal> {
+        if enabled {
+            self.with_parked_procs_bound(crate::cgroups::PROCS_ALIVE)
+        } else {
+            self.cgroups.stop_parked_procs();
+            Ok(self)
+        }
+    }
+
+    /// Whether the node parks procs with its inits now (decision 8, parked procs): a root node unless turned off.
+    pub fn parked_procs(&self) -> bool {
+        self.cgroups.makes_parked_procs()
+    }
+
+    /// As [`Node::with_parked_procs`] on, with at most `bound` procs alive at once in place of
+    /// [`crate::cgroups::PROCS_ALIVE`]: the dropper's queue holds as many, so a tree handed to it never finds it full.
+    /// Refused when the dropper can't be started.
+    pub fn with_parked_procs_bound(self, bound: usize) -> Result<Self, Refusal> {
+        if let Some(maker) = self.devfs.proc_maker() {
+            self.cgroups.set_parked_procs(maker, bound)?;
+        }
         Ok(self)
     }
 
@@ -490,25 +595,6 @@ impl Node {
         self.oci_boxes.get(id).or_else(|| self.root.get(id))
     }
 
-    /// Takes `id` for a create under way, refused as [`Refusal::Exists`] while another holds it; released
-    /// when the claim drops.
-    fn claim(&self, id: &BoxId) -> Result<Claim<'_>, Refusal> {
-        let mut making = self
-            .making
-            .lock()
-            .map_err(|_| Refusal::Broken("the node's creates' lock was poisoned".to_owned()))?;
-        if making.len() >= hex_runtime::linux::cgroup::MAX_BOXES {
-            return Err(Refusal::Full(hex_runtime::linux::cgroup::MAX_BOXES));
-        }
-        if !making.insert(id.clone()) {
-            return Err(Refusal::Exists(id.clone()));
-        }
-        Ok(Claim {
-            making: &self.making,
-            id: id.clone(),
-        })
-    }
-
     /// The `oci` runtime, over the node's state root and helper binary.
     fn oci(&self) -> OciRuntime {
         self.oci_in(self.oci_root.clone())
@@ -529,9 +615,8 @@ impl Node {
     /// whose record names `<state>/oci/<id>`, is found there and managed as any other (T-T7.1.2 across
     /// the upgrade). `None` for a record that names no directory: a `process` box's.
     fn container_of(&self, record: &BoxRecord) -> Option<(OciRuntime, String)> {
-        let dir = record.dirs.first()?;
-        let name = dir.file_name()?.to_str()?.to_owned();
-        Some((self.oci_in(dir.parent()?.to_path_buf()), name))
+        let (root, name) = state::root_of(record.dirs.first()?)?;
+        Some((self.oci_in(root), name))
     }
 
     /// Box `id`'s container's name under the node's oci root ([`container_name`]).
@@ -539,10 +624,24 @@ impl Node {
         container_name(&self.key, id)
     }
 
-    /// Where box `id`'s container keeps its state, its `state.json` and exec FIFO: on tmpfs, under the
-    /// runtime directory ([`oci_root`]).
+    /// Where box `id`'s container keeps its state, its `state.json` and exec FIFO: on tmpfs, in its shard of
+    /// the runtime directory ([`oci_root`], [`state::shard`]; goal 5 extended, step 6).
     pub fn container_dir(&self, id: &BoxId) -> PathBuf {
-        self.oci_root.join(self.container(id))
+        state::Dir::new(&self.oci_root, &self.container(id))
+            .path()
+            .to_path_buf()
+    }
+
+    /// Where a node before the shards kept box `id`'s container state: in the runtime directory itself.
+    fn unsharded_container_dir(&self, id: &BoxId) -> PathBuf {
+        state::Dir::unsharded(&self.oci_root, &self.container(id))
+            .path()
+            .to_path_buf()
+    }
+
+    /// The runtime directory the node keeps its containers' state in ([`oci_root`]).
+    pub fn oci_root(&self) -> &Path {
+        &self.oci_root
     }
 
     /// What the node's record store has fsynced since it opened ([`crate::store::Syncs`]).
@@ -563,6 +662,19 @@ impl Node {
     /// ([`crate::serve::Host::netns`]).
     pub fn netns(&self) -> Result<netns::Counts, Refusal> {
         self.netns.counts()
+    }
+
+    /// What the node has counted of its containers' ipc and uts namespaces since its pool opened (goal 5
+    /// extended, step 4): pairs made ahead, taken by a create, made on a create's path (the pool dry, or a
+    /// container the pool can't serve), discarded at shutdown, and makes that failed. Read in process, as the
+    /// seeds' counts are.
+    pub fn ipc_uts(&self) -> Result<netns::Counts, Refusal> {
+        self.ipc_uts.counts()
+    }
+
+    /// How many creates and deletes have waited for one of the same box under way ([`Node::turns`]).
+    pub fn waited_for_a_box(&self) -> u64 {
+        self.turns.waited()
     }
 
     fn record(&self, id: &BoxId) -> Result<Option<BoxRecord>, Refusal> {
@@ -701,9 +813,14 @@ impl Node {
                 seen.entry(id).or_default();
             }
         }
-        // This node's containers, `<key>-<id>` among every node's under the runtime directory, and its
+        // This node's containers, `<key>-<id>` among every node's in the runtime directory's shards and, where
+        // a node before the shards kept them, in the runtime directory itself (goal 5 extended, step 6); and its
         // rendered bundles, `<id>` under its bundles directory.
-        let state_dirs = ids_in(&self.oci_root, &format!("{}-", self.key))?;
+        let prefix = format!("{}-", self.key);
+        let mut state_dirs = ids_in(&self.oci_root, &prefix)?;
+        for n in 0..state::SHARDS {
+            state_dirs.extend(ids_in(&self.oci_root.join(format!("{n:02x}")), &prefix)?);
+        }
         let bundles = ids_in(&self.bundles, "")?;
         for id in state_dirs.iter().chain(&bundles) {
             seen.entry(id.clone()).or_default();
@@ -730,6 +847,8 @@ impl Node {
                 && record.spec.class.class() == Class::Oci
             {
                 s.init_alive = Some(record.init.is_some_and(init_alive));
+                s.start_interrupted =
+                    hex_runtime::linux::oci::state::start_interrupted(&self.container_dir(id));
             }
         }
         let mut summary = RecoverySummary::default();
@@ -816,10 +935,15 @@ impl Node {
         }
         // The directories the box owns: those its record names (a box made before its node kept
         // container state under the runtime directory names `<state>/oci/<id>`), or, with no record to
-        // read, those at the paths its id fixes, which a box caught mid-create left.
+        // read, those at the paths its id fixes, which a box caught mid-create left: its container's in its
+        // shard or, made by a node before the shards, in the runtime directory itself.
         let dirs = match record {
             Some(r) => r.dirs,
-            None => vec![self.container_dir(id), self.bundles.join(id.as_str())],
+            None => vec![
+                self.container_dir(id),
+                self.unsharded_container_dir(id),
+                self.bundles.join(id.as_str()),
+            ],
         };
         for dir in &dirs {
             remove_tree(dir, REMOVE_PATIENCE)?;
@@ -920,7 +1044,7 @@ impl Node {
     /// A box whose spec names an owner has its cgroup chosen once the runtime has read its spec
     /// ([`Choice`]): its owner's idle cgroup under the box's device policy when one reads clean, else a
     /// fresh slot, else a cgroup of its own (goal 5 extended, step 6). Its bundle comes first, and the id is
-    /// the create's claim's ([`Node::claim`]).
+    /// held by the create's turn ([`Node::turns`]).
     fn create_oci(&self, spec: BoxSpec, source: Source) -> Result<BoxInfo, Refusal> {
         // A place for the init's pidfd first: past the budget nothing is made, so no init is ever
         // left unwatched.
@@ -937,6 +1061,8 @@ impl Node {
             dirs.push(dir.clone());
         }
         let cgroup = match &spec.owner {
+            // With cgroups made ahead, a box of no owner's is chosen once its spec is read, as an owner's is.
+            None if self.cgroups.takes_ahead() => None,
             None => {
                 let cg = self.oci_boxes.create(&id, &spec.bounds)?;
                 self.cgroups.no_owner();
@@ -960,10 +1086,16 @@ impl Node {
                 }
             },
         };
-        let choice = spec
-            .owner
-            .as_ref()
-            .map(|owner| Choice::new(&self.cgroups, &self.oci_boxes, &id, owner, &spec.bounds));
+        let choice = (spec.owner.is_some() || self.cgroups.takes_ahead()).then(|| {
+            Choice::new(
+                &self.cgroups,
+                &self.oci_boxes,
+                &id,
+                spec.owner.as_ref(),
+                &spec.bounds,
+            )
+            .crashing_on_own(self.crashes_at_cgroup_made())
+        });
         // A container that makes a network namespace of its own in the agent's user namespace joins one
         // the node made ahead, and the pool counts every container's (decision 4); a box that may share
         // its owner's is given one its owner's earlier box left, or one the node keeps for the owner
@@ -976,6 +1108,7 @@ impl Node {
                 networks: Some(&networks),
                 devices: Some(&self.devices),
                 dev_mounts: Some(&self.devfs),
+                ipc_uts: Some(&self.ipc_uts),
             };
             let name = self.container(&id);
             match (cgroup, &choice) {
@@ -1146,6 +1279,7 @@ impl Node {
             cwd: program.cwd,
             env,
             user,
+            dir: Some(self.container_dir(id).to_string_lossy().into_owned()),
         };
         // Each stream the caller gave, else the null device the node holds open, so an exec opens and
         // duplicates nothing for its stdio. The caller's pipes are closed here once the program has its
@@ -1212,6 +1346,8 @@ impl Node {
     /// losing pool, whose drop stops its starting thread and ends the spare it started.
     fn create_pool(&self) -> Result<&CreatePool, Refusal> {
         if let Some(pool) = self.create_seeds.get() {
+            // Its seeds make inits ahead in idle cgroups too (decision 8, "The p99.9 that stayed").
+            self.cgroups.start_parker(pool.parker(), &self.oci_boxes)?;
             return Ok(pool);
         }
         let exe = match &self.oci_helper {
@@ -1227,9 +1363,12 @@ impl Node {
             #[cfg(debug_assertions)]
             self.inject.clone(),
         )?);
-        self.create_seeds
+        let pool = self
+            .create_seeds
             .get()
-            .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))
+            .ok_or_else(|| Refusal::Broken("the create seed pool wasn't built".to_owned()))?;
+        self.cgroups.start_parker(pool.parker(), &self.oci_boxes)?;
+        Ok(pool)
     }
 
     /// What the node's create seeds have done since the pool opened (decision 5): the counts the bench
@@ -1294,7 +1433,8 @@ impl Runtime for Node {
         // and an owner not well formed, is refused by name whether or not the id is taken (HEX-RT-13,
         // HEX-RT-14).
         spec.check()?;
-        let _claim = self.claim(&spec.id)?;
+        // Held until the create is done, made or scrubbed: a box being made has no record yet.
+        let _turn: Turn<'_> = create_turn(&self.turns, &spec.id)?;
         // A cgroup under either root is a box's, recorded or not: a failed create's scrub would end it.
         if self.record(&spec.id)?.is_some() || self.cgroup(&spec.id).is_some() {
             return Err(Refusal::Exists(spec.id));
@@ -1433,18 +1573,27 @@ impl Runtime for Node {
     }
 
     fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+        // After a create or delete of the box under way, so it removes what that one made, or finds it
+        // gone, and scrubs nothing it's doing.
+        let _turn: Turn<'_> = self.turns.take(id)?;
         let record = self.record(id)?;
         if record.is_none() && self.cgroup(id).is_none() {
             return Err(Refusal::NoSuchBox(id.clone()));
         }
-        // An `oci` box whose init the supervisor reaped already, its exit in the record, has no init to
-        // forget: it ended on its own (`true` does).
-        let ended = record
-            .as_ref()
-            .is_some_and(|r| r.spec.class.class() == Class::Oci && r.exit.is_some());
         // Unwatched first, so the supervisor stops collecting the init; an exit it's recording as it's
         // unwatched goes into this box's record alone, which the scrub removes.
         let init = self.supervisor.forget(id)?;
+        // An `oci` box whose init the supervisor reaped already, its exit in the record, has no init to
+        // forget: it ended on its own (`true` does). The supervisor writes the exit before it stops
+        // watching the init, so with none watched the record is read again: one read before the forget
+        // may predate the exit.
+        let record = match (&init, record) {
+            (None, Some(_)) => self.record(id)?,
+            (_, record) => record,
+        };
+        let ended = record
+            .as_ref()
+            .is_some_and(|r| r.spec.class.class() == Class::Oci && r.exit.is_some());
         if let Some(mut record) = record {
             record.phase = Phase::Deleting;
             self.store.put(&record)?;
@@ -1577,18 +1726,15 @@ enum Ending<'a> {
     Kill,
 }
 
-/// A create's claim on its box's id ([`Node::claim`]), let go when it drops.
-struct Claim<'a> {
-    making: &'a Mutex<BTreeSet<BoxId>>,
-    id: BoxId,
-}
-
-impl Drop for Claim<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut making) = self.making.lock() {
-            making.remove(&self.id);
-        }
-    }
+/// A create's turn for box `id` ([`Node::turns`]): past the turns' bound, [`MAX_BOXES`] creates and deletes at once,
+/// the node's box budget, the create is refused as [`Refusal::Full`], as the node refuses a box past its budget
+/// (CLAUDE.md §2; the bound step 6's claim held creates to). A wait for a create or delete of the same box is refused
+/// past [`TURN_PATIENCE`] as [`Turns::take`] refuses it.
+fn create_turn<'a>(turns: &'a Turns, id: &BoxId) -> Result<Turn<'a>, Refusal> {
+    turns.take(id).map_err(|e| match e {
+        Refusal::Exhausted { bound, .. } => Refusal::Full(bound),
+        e => e,
+    })
 }
 
 /// The slots under the oci boxes' root, by number, lowest first ([`reuse::slot_of`]).
@@ -1673,6 +1819,10 @@ fn why_text(why: &Why) -> String {
             )
         }
         Why::Unreadable(w) => format!("its record couldn't be read: {w}"),
+        Why::StartInterrupted => {
+            "the node agent stopped while it started the box, in its startContainer hooks"
+                .to_owned()
+        }
     }
 }
 
@@ -1873,6 +2023,28 @@ fn node_key(state_dir: &Path) -> Result<String, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CLAUDE.md §2 (T-T7.1.2): creates under way are bounded, and past the bound a create is refused as `Full`,
+    /// never queued. Do: turns bounded at two, two boxes' turns held, a third box's create turn asked. Expect:
+    /// `Full(2)`; with one let go, the third box's turn given.
+    #[test]
+    fn a_create_past_the_turns_bound_is_refused_full() {
+        let turns = Turns::new(
+            "making or removing a box",
+            "creates and deletes under way",
+            TURN_PATIENCE,
+            2,
+        );
+        let id = |n: &str| BoxId::new(n).unwrap();
+        let a = create_turn(&turns, &id("a")).unwrap();
+        let _b = create_turn(&turns, &id("b")).unwrap();
+        assert_eq!(create_turn(&turns, &id("c")).err(), Some(Refusal::Full(2)));
+        drop(a);
+        assert!(
+            create_turn(&turns, &id("c")).is_ok(),
+            "a turn let go is free again"
+        );
+    }
 
     /// Decision 2: an oci box's init is told from a process given its pid since by its start time, as
     /// crun's `process-start-time` does. A record naming the running test process is alive; one

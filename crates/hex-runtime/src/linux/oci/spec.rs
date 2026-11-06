@@ -529,11 +529,31 @@ impl Spec {
             && self.holds_capability("CAP_SYS_ADMIN")
         {
             return Err(OciError::Config(
-                "a container in a user namespace that holds CAP_SYS_ADMIN without a network namespace \
-                 of its own could reach the host's cgroup tree through the /sys it must bind: give it \
-                 a network namespace of its own or drop CAP_SYS_ADMIN"
+                "a container in a user namespace that holds CAP_SYS_ADMIN (named, or kept from its \
+                 creator where the spec names no capabilities) without a network namespace of its own \
+                 could reach the host's cgroup tree through the /sys it must bind: give it a network \
+                 namespace of its own, or capabilities without CAP_SYS_ADMIN"
                     .to_owned(),
             ));
+        }
+        // Each hook's path is absolute and its timeout above zero (config.md:556, :559-560), and the
+        // startContainer hooks' timeouts sum to the seconds `start` waits on them besides its own.
+        let hooks = &self.hooks;
+        for (kind, list) in [
+            ("prestart", &hooks.prestart),
+            ("createRuntime", &hooks.create_runtime),
+            ("createContainer", &hooks.create_container),
+            ("startContainer", &hooks.start_container),
+            ("poststart", &hooks.poststart),
+            ("poststop", &hooks.poststop),
+        ] {
+            if let Some(hook) = list.iter().find(|h| !h.path.starts_with('/')) {
+                return Err(OciError::Config(format!(
+                    "a {kind} hook's path {:?} isn't absolute",
+                    hook.path
+                )));
+            }
+            super::hooks::budget(kind, list)?;
         }
         Ok(())
     }
@@ -596,12 +616,11 @@ impl Spec {
         Ok(())
     }
 
-    /// Whether any of the process's capability sets names `cap`.
+    /// Whether the process may hold `cap`: one of its capability sets names it, or the spec names no
+    /// capabilities, so the init changes none (init.rs, `caps`) and it keeps every one of its creator's.
     fn holds_capability(&self, cap: &str) -> bool {
-        self.process
-            .as_ref()
-            .and_then(|p| p.capabilities.as_ref())
-            .is_some_and(|c| {
+        self.process.as_ref().is_some_and(|p| {
+            p.capabilities.as_ref().is_none_or(|c| {
                 [
                     &c.bounding,
                     &c.effective,
@@ -612,6 +631,7 @@ impl Spec {
                 .iter()
                 .any(|set| set.iter().any(|name| name == cap))
             })
+        })
     }
 
     /// Whether the spec asks for a namespace of `kind` (made fresh, no `path`).
@@ -843,6 +863,42 @@ mod tests {
             spec(own_network, "bounding", "CAP_SYS_ADMIN"),
             spec(host_network, "bounding", "CAP_CHOWN"),
             spec(no_user_namespace, "bounding", "CAP_SYS_ADMIN"),
+        ] {
+            assert!(Spec::parse(ok.as_bytes()).is_ok(), "{ok} should parse");
+        }
+    }
+
+    // T-T7.1.4: a process whose spec names no capabilities keeps every one of its creator's (the init
+    // changes none: init.rs, `caps`), CAP_SYS_ADMIN in its user namespace among them, so in a user
+    // namespace on a borrowed network it is refused as a spec naming CAP_SYS_ADMIN is. With a network
+    // namespace of its own, outside a user namespace, or with no process to run, it parses.
+    #[test]
+    fn a_user_namespaced_container_naming_no_capabilities_on_a_borrowed_network_is_refused() {
+        let spec = |namespaces: &str, process: &str| {
+            format!(
+                r#"{{"ociVersion":"1.0.0","root":{{"path":"rootfs"}}{process},
+                    "linux":{{"namespaces":[{namespaces}]}}}}"#
+            )
+        };
+        let runs = r#","process":{"args":["/bin/sh"]}"#;
+        for namespaces in [
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"}"#,
+            r#"{"type":"user"},{"type":"mount"},{"type":"network","path":"/proc/1/ns/net"}"#,
+        ] {
+            let r = Spec::parse(spec(namespaces, runs).as_bytes());
+            assert!(
+                matches!(&r, Err(OciError::Config(why))
+                    if why.contains("CAP_SYS_ADMIN") && why.contains("names no capabilities")),
+                "no capabilities with {namespaces} should be refused by name, got {r:?}"
+            );
+        }
+        for ok in [
+            spec(
+                r#"{"type":"user"},{"type":"network"},{"type":"mount"}"#,
+                runs,
+            ),
+            spec(r#"{"type":"pid"},{"type":"mount"}"#, runs),
+            spec(r#"{"type":"user"},{"type":"pid"},{"type":"mount"}"#, ""),
         ] {
             assert!(Spec::parse(ok.as_bytes()).is_ok(), "{ok} should parse");
         }

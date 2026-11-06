@@ -68,6 +68,12 @@ pub struct State {
     /// 6). Absent in state written before, which reads as no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_namespace: Option<bool>,
+    /// The seconds the bundle's startContainer hooks may take together, recorded at create where it names
+    /// any: Hex's own field, so `start` waits for them as well as for the init, and reads what the init
+    /// wrote on the exec FIFO. Absent where it names none, and in state written before, whose init ran no
+    /// startContainer hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_container: Option<u64>,
 }
 
 impl State {
@@ -83,6 +89,7 @@ impl State {
             start_time: None,
             poststart: None,
             pid_namespace: None,
+            start_container: None,
         }
     }
 
@@ -101,6 +108,43 @@ impl State {
     }
 }
 
+/// How many shards a state root's containers are spread over by their id: 64, each named by two hex digits of
+/// [`SHARD_MASK`]. A create's mkdir and a delete's rmdir of a container's directory hold its parent's `i_rwsem`
+/// exclusively (Linux v6.19 `fs/namei.c:2860-2873`, through `start_dirop`, `:4888` and `:5293`), so under one
+/// parent every create and delete waits on every other's; `create_serial` run 25 measured that wait at 0.043 ms a
+/// lifecycle at concurrency 32. 64 is the node's record shards' count (`hex_node::store::SHARDS`), whose waits
+/// went at that concurrency in run 20 (docs/research/runtime/goal5-cgroup-lock.md).
+pub const SHARDS: usize = 64;
+/// The bits of a container id's hash that name its shard, [`SHARDS`] of them.
+const SHARD_MASK: u64 = 0x3f;
+
+/// Container `id`'s shard of its state root: two hex digits of FNV-1a over its id, the same in every run of every
+/// build, so the CLI (`hex oci --root`) and the node find a container where the other put it.
+pub fn shard(id: &str) -> String {
+    format!("{:02x}", fnv1a(id.as_bytes()) & SHARD_MASK)
+}
+
+/// FNV-1a, 64-bit (draft-eastlake-fnv, "FNV Basics" and "FNV Constants"): its arithmetic is modulo 2^64 by
+/// definition, so the multiply wraps.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// The state root `dir`, a container's directory, is under, and the container's id: its shard's parent when its
+/// parent is its shard ([`Dir::new`]), else its parent, where a runtime before the shards kept it
+/// ([`Dir::unsharded`]). `None` for a path with no parent or a name that isn't UTF-8.
+pub fn root_of(dir: &Path) -> Option<(PathBuf, String)> {
+    let id = dir.file_name()?.to_str()?.to_owned();
+    let parent = dir.parent()?;
+    let root = match parent.file_name().and_then(|n| n.to_str()) {
+        Some(n) if n == shard(&id) => parent.parent()?,
+        _ => parent,
+    };
+    Some((root.to_path_buf(), id))
+}
+
 /// A container's directory: its `state.json` and its `exec.fifo`.
 #[derive(Debug, Clone)]
 pub struct Dir {
@@ -108,8 +152,17 @@ pub struct Dir {
 }
 
 impl Dir {
-    /// The directory for container `id` under `root` (the runtime's per-user state root).
+    /// The directory for container `id` under `root` (the runtime's per-user state root): in its shard
+    /// ([`shard`]), made with it if it isn't there yet and never removed.
     pub fn new(root: &Path, id: &str) -> Self {
+        Self {
+            dir: root.join(shard(id)).join(id),
+        }
+    }
+
+    /// Where a runtime before the shards kept container `id`'s directory: under `root` itself (goal 5 extended,
+    /// step 6). Read there for as long as it lasts, so a container made before an upgrade is managed as any other.
+    pub fn unsharded(root: &Path, id: &str) -> Self {
         Self { dir: root.join(id) }
     }
 
@@ -125,7 +178,7 @@ impl Dir {
     }
 
     pub fn fifo(&self) -> PathBuf {
-        self.dir.join("exec.fifo")
+        self.dir.join(EXEC_FIFO)
     }
 
     /// Whether the exec FIFO is still there: `start` removes it once the init has its byte. A failure to
@@ -238,6 +291,18 @@ fn parse_start_time(stat: &str) -> Option<u64> {
     }
 }
 
+/// The exec FIFO's name in a container's state directory.
+const EXEC_FIFO: &str = "exec.fifo";
+
+/// Whether a start of the container whose state directory is `dir` was under way when its node agent
+/// stopped: it had begun ([`crate::linux::oci::hooks::START_BEGUN`], made only for a container with
+/// startContainer hooks) and never took the exec FIFO's byte (the FIFO still named). Recovery removes such
+/// a box by that reason.
+pub fn start_interrupted(dir: &Path) -> bool {
+    let named = |name: &str| std::fs::symlink_metadata(dir.join(name)).is_ok();
+    named(crate::linux::oci::hooks::START_BEGUN) && named(EXEC_FIFO)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +344,21 @@ mod tests {
         assert!(dir.exists());
         dir.remove().unwrap();
         assert!(dir.get("c1").is_err());
+    }
+
+    /// Goal 5 extended step 6, lever 3 (T-T7.1.2): a container's directory is in one of its root's shards, so the
+    /// mkdir and rmdir of containers in different shards don't wait on one parent's lock. Do: place containers
+    /// `c1`, `c2` and `a` under a root. Expect: each under the shard two hex digits of FNV-1a over its id name,
+    /// `19`, `00` and `0c` (draft-eastlake-fnv's 64-bit offset basis and prime, worked by hand), the same in every
+    /// run; and the place a node before the shards kept it, the root itself, beside.
+    #[test]
+    fn a_containers_directory_is_in_its_shard_and_the_old_place_is_the_root_itself() {
+        let root = Path::new("/run/hex-oci");
+        for (id, want) in [("c1", "19"), ("c2", "00"), ("a", "0c")] {
+            assert_eq!(shard(id), want, "{id}");
+            assert_eq!(Dir::new(root, id).path(), root.join(want).join(id), "{id}");
+            assert_eq!(Dir::unsharded(root, id).path(), root.join(id), "{id}");
+        }
     }
 
     // AC-T7.1.4, append-only wire format: state written before the cgroup field reads as having none,
@@ -386,6 +466,69 @@ mod tests {
         with.poststart = Some(false);
         let back: State = serde_json::from_slice(&with.to_json().unwrap()).unwrap();
         assert_eq!(back, with);
+    }
+
+    /// The state as ca6dc80 read it, its fields and their serde attributes as they were there, before the
+    /// startContainer field: an old reader.
+    #[derive(Debug, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BeforeStartContainer {
+        oci_version: String,
+        id: String,
+        status: Status,
+        pid: i32,
+        bundle: String,
+        #[serde(default)]
+        annotations: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        cgroup: Option<String>,
+        #[serde(default)]
+        start_time: Option<u64>,
+        #[serde(default)]
+        poststart: Option<bool>,
+        #[serde(default)]
+        pid_namespace: Option<bool>,
+    }
+
+    /// Append-only (CLAUDE.md "wire formats change append-only"; AC-T7.1.4): the startContainer field. Do:
+    /// write a state that has it, and read it as a reader from before it did (ca6dc80's fields), and read state
+    /// from before it as today's. Expect: the old reader reads every field it knows, unchanged; today's reads
+    /// the old state with no startContainer hooks (`None`); and the field round-trips.
+    #[test]
+    fn the_start_container_field_is_read_by_an_old_reader_and_absent_reads_as_none() {
+        let mut st = State::new("c1", "/b");
+        st.status = Status::Created;
+        st.pid = 7;
+        st.start_time = Some(9);
+        st.poststart = Some(false);
+        st.pid_namespace = Some(true);
+        st.start_container = Some(30);
+        let json = st.to_json().unwrap();
+        assert!(
+            String::from_utf8_lossy(&json).contains(r#""startContainer":30"#),
+            "the field is written"
+        );
+        let old: BeforeStartContainer = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            old,
+            BeforeStartContainer {
+                oci_version: st.oci_version.clone(),
+                id: "c1".to_owned(),
+                status: Status::Created,
+                pid: 7,
+                bundle: "/b".to_owned(),
+                annotations: std::collections::BTreeMap::new(),
+                cgroup: None,
+                start_time: Some(9),
+                poststart: Some(false),
+                pid_namespace: Some(true),
+            }
+        );
+        let before = br#"{"ociVersion":"1.3.0","id":"c1","status":"created","pid":7,"bundle":"/b","poststart":false}"#;
+        let today: State = serde_json::from_slice(before).unwrap();
+        assert_eq!(today.start_container, None);
+        let back: State = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, st);
     }
 
     #[test]

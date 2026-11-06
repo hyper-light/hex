@@ -10,8 +10,8 @@ and why the fix holds.
 
 Sources were read at fixed revisions: Linux `cgroup-v2.rst` at v6.19
 (`raw.githubusercontent.com/torvalds/linux/v6.19/Documentation/admin-guide/cgroup-v2.rst`); the man
-pages `mount_namespaces(7)`, `mount_setattr(2)` and `cgroup_namespaces(7)` at man-pages-5.13
-(`raw.githubusercontent.com/mkerrisk/man-pages/man-pages-5.13/`), downloaded into
+pages `mount_namespaces(7)`, `mount_setattr(2)`, `cgroup_namespaces(7)` and `user_namespaces(7)` at
+man-pages-5.13 (`raw.githubusercontent.com/mkerrisk/man-pages/man-pages-5.13/`), downloaded into
 `~/.cache/hex-t7/goal5-cgfs-src/`. The behaviour was measured on fedora (kiln-a094a12d, Linux
 6.19.10) by `crates/hex-cli/tests/oci_cgroupfs_box.rs`, run with the fix off and on.
 
@@ -91,6 +91,15 @@ cgroup tree. Ada chose that (2026-10-31): `Spec::check` refuses a container in a
 tree to read it; the read-only remount stays beneath that, so a box that ever reached it couldn't change
 it.
 
+A spec that names no capabilities holds `CAP_SYS_ADMIN` too, and is refused alike (found 2026-11-03).
+The container's init is cloned into its user namespace, so it starts with every capability there
+(`user_namespaces(7):122`: "flag starts out with a complete set"), and with no `process.capabilities`
+it changes none (`init.rs`, `caps`): the program it becomes keeps the full set, the bounding set
+included. The check read only the sets a spec names, so such a spec passed it with `CAP_SYS_ADMIN` in
+hand; it now counts a process with no capabilities object as holding every capability. The bundles the
+node renders always name Docker's default sets (`bundle.rs`, `CAPABILITIES`), which leave
+`CAP_SYS_ADMIN` out, so they still run.
+
 ## 5. What would falsify this
 
 - A kernel where a read-only recursive bind already covers its submounts (then the top-only remount
@@ -101,3 +110,6 @@ it.
   namespace (`cgroup-v2.rst:554-555`).
 - A way to remove or empty the host `cgroup2` beneath the box (then reads could be closed by mounts):
   refuted by the submount's lock (`mount_namespaces(7):1076`).
+- A process whose spec names no capabilities lacking `CAP_SYS_ADMIN` in its user namespace (then the
+  refusal of such a spec would be needless): refuted by the init's clone into that namespace
+  (`user_namespaces(7):122`) and by its leaving the sets unchanged when none are named (`init.rs`).

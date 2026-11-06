@@ -89,14 +89,47 @@ over 64 subdirectories by the box's id so the boxes made and deleted at once rar
 (goal 5 extended, step 6; recovery moves a record an older node left in the directory itself to its shard). Until the
 record is written, each part a create makes lies at a path the box's id fixes: its cgroup (`<box root>/.oci/<id>`,
 or `<box root>/<id>` for a process box), its rendered bundle (`<state>/bundles/<id>`) and its container's state
-directory (`<node key>-<id>` under the runtime directory), the init inside the cgroup. So recovery
+directory (`<node key>-<id>` in its shard of the runtime directory, below), the init inside the cgroup. So recovery
 finds a box caught mid-create by listing those places, and removes what it left, naming the parts it found; it
 still removes a box whose record says it was being made, as nodes before the step marked one before making it, and
 moves a record such a node left in the state directory to its place. The oci runtime hands the node the state it
 wrote, so create reads none back, and the box's info is what create made. The record was what claimed a box's id
 while it was made; now its cgroup does, made first (mkdir is atomic): a create of an id another create has taken
 since its check fails at that mkdir, having made nothing, and is refused as `Exists` without removing anything,
-where before such a create's failure scrubbed the other's box.
+where before such a create's failure scrubbed the other's box. And a box's create or delete takes the box's turn in
+the node's memory (`crates/hex-node/src/turns.rs`, the record store's per-box turns, shared): a second create of its
+id, or a delete, waits for the create under way and then finds the box made or not. So a second create is refused
+as `Exists` only once a box was made, never while a create that will fail is under way, and a delete removes the box
+the create made rather than answer no such box while it's being made, which would leave a box its caller thinks gone.
+The wait ends at 120 s (`TURN_PATIENCE`, a delete's longest wait for a box to empty and its directories to go),
+refused past it by type, and at most `MAX_BOXES` turns are taken at once, the node's box budget: past it a create
+is refused as `Full`, as step 6's claim refused it, and a delete as `Exhausted`; other boxes'
+creates and deletes never wait. A box whose owner's create takes a slot-named cgroup (goal 5 extended,
+step 6, decision 5) has no cgroup named by its id either, so its turn is all that says it's being made. Step 6 had
+given the node a set of the ids being made for that, which refused a second create at once as `Exists`. In the
+integrated tree the turn replaces it (the lead's call, 2026-11-04): the second create waits and then finds the box
+made, or goes ahead if the first failed, and a delete waits too, which the set never covered. A second create of an
+owned box being made takes no second slot (`oci_box.rs`,
+`a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot`).
+
+A container's state directory is kept in one of 64 shards of its state root, `<root>/<shard>/<id>`, the shard two hex
+digits of FNV-1a over the container's id (goal 5 extended, step 6, lever 3). A create's mkdir and a delete's rmdir of
+it hold its parent's `i_rwsem` exclusively (Linux v6.19 `fs/namei.c:2860-2873`, `:4888`, `:5293`), so under one parent
+every create and delete waited on every other's: 0.043 ms a lifecycle at concurrency 32, none at 1 (`create_serial.md`
+run 25). The records' shards took the same wait away in run 20. The layout is the oci runtime's, so `hex oci --root`
+and the node find each other's containers. A runtime before the shards kept a container directly under the root: one
+there, and not in its shard, is read and removed where it is, and a create over it is refused as over any other;
+recovery lists both places, adopting or removing what each holds (T-T7.1.2, `oci_box`'s upgrade test). The shard
+directories are made as their first container needs them and never removed. An old-layout container whose id is
+itself two hex digits shares its name with a shard; the node's containers are named `<node key>-<id>`, so none of its
+own can. Records and the wire are unchanged. **What would falsify it:** the `i_rwsem` wait on the state root not
+falling at concurrency 32, or a lifecycle's p50 or p99 at 1 or 32 rising against the one parent
+(`docs/research/runtime/goal5-cgroup-lock.md`). **Measured, and kept:** the root's mkdirs and rmdirs, one each a
+lifecycle under its `i_rwsem` at 32, are off the lock table, no shard waited on (`create_serial.md` run 27); in
+host.sh's reading, the one goal 5's bar is measured by, <!-- record: bench/competitive/probes/reuse_pass.md -->a
+lifecycle's p99 at 1 and 32 is 0.835 to 0.884 of the one parent's at both descriptor limits and its p50 at 32 0.88 to
+0.90<!-- /record --> (`reuse_pass.md` run 20); the other readings are mixed within the host's noise, and the
+lever's own cost is a second stat for a new id, about 9 us a lifecycle.
 
 The Linux record store opens its two directories once, retaining two close-on-exec descriptors
 shared by its clones. Each write opens only `.<id>.tmp` relative to its directory and renames that
@@ -1321,10 +1354,19 @@ lifecycle without changing what a box may do.
     its `/proc/<pid>/fd` shows them only to a process with ptrace access to it (kernel/ptrace.c:276), which a box
     short of the agent's capabilities hasn't (security/commoncap.c:164-182), where a box sees the agent's pid at all; and
     what they read is that one namespace's counts, its owner's.
-    The conditions: at most four such files a kept namespace, six descriptors with its own and the socket, inside the
-    namespaces' bounds. As the node starts, `RLIMIT_NOFILE` is checked against all the node may hold, those bounds with
-    each live box's, its connections' and the seeds', raised to that where it's short (a root node may, up to
-    `fs.nr_open`), and where it can't be the refusal names the shortfall, never a silent cap. They close with the
+    The conditions: at most four such files a kept namespace, besides its own descriptor and the socket's. The
+    descriptor limit stays as the node was given it, never raised: a box without an rlimit of its own sees the limit it
+    would without the files (the lead, 2026-11-03T23:07Z). As the node starts it works out how many namespaces may hold
+    them, what the soft `RLIMIT_NOFILE` leaves past the node's own descriptors at its bounds (the kept namespaces', each
+    live box's, its connections' and programs', the seeds', the network namespaces and ipc and uts pairs its two pools
+    make ahead and step 3's prepared `/dev` mounts at their bounds, with their makers' and each call's takes), four a
+    namespace (`FilesBound`), and says so on the agent's stderr with both numbers. A namespace past that bound holds
+    none and each of its checks enters, counted
+    (`files_bounded`); a limit too small for the node's own work shows where it runs out, as that call's typed refusal.
+    At systemd's default soft limit of 1024 the bound is 0, so where nodes run today no namespace holds its files and
+    the saving can't appear: what lets it is the node's soft limit, past its own descriptors at its bounds (about 330
+    thousand), which the installer sets. Every bench record says which bound its node ran with and how many checks went
+    through the files and how many through the protocols (`interleaved_pool.py`). They close with the
     namespace on every path, tested by counting them by their links: refused by way of the files or of entering,
     released, put out by the owner's bound, with the node's end while a box's namespace holds them; a node recovered
     holds none; and all the process's descriptors are back where they began (root lab). A failed read drops them and
@@ -1408,11 +1450,18 @@ lifecycle without changing what a box may do.
     owner's box takes `cgroup_mutex` 1.087 times a lifecycle at concurrency 32, 1.023 at concurrency 1 and 1.092
     without a network namespace: its init's clone into the cgroup it was handed. The lock is held 12.4% of the time. A
     box of no owner takes it 15.000 times, where run 6's took 15.999, its delete now through its init's pidfd, and
-    holds it 87.1% of the time (runs 7 and 8).<!-- /record -->
-  - *The rate* (the second, at least 8x, a minimum: not met). The bar is 8x on 4-15 with interleaved pairs the
-    method of record, since they control the load's drift that makes the criterion's own phases swing (the lead,
-    2026-11-03T17:47Z). Option 1, each pair's concurrency 1 on 4-15 and its 32 on all of 4-31, is measured beside it
-    for Ada's choice of the bar, and neither is called met until she makes it.
+    holds it 87.1% of the time (runs 7 and 8). At the step's final tip, 1.089 at concurrency 32 and 1.023 at 1,
+    on 4-15 (run 26).<!-- /record -->
+  - *The rate* (the second, at least 8x, a minimum: met as its text reads it, on the tree the plan's steps compose).
+    <!-- record: bench/competitive/probes/reuse_pass.md -->As the criterion reads it, host.sh's pass on its own CPUs,
+    4-31, in process, one owner's boxes, best of 2: the step's final tip in step 7's tree reads 8.39x at the installed
+    descriptor limit and 9.72x at the given, 11.92x and 6.52x over the socket; interleaved on the same CPUs,
+    9.72x and 10.62x. Option 1 reads 8.00x and 6.91x, 4-15 alone 5.48x and 5.89x. The step alone reads 2.29x to 3.35x:
+    its classic root's pivot_root walks every host thread under the mount namespace's lock (runs 18 and
+    19).<!-- /record --> The criterion names no branch, so it counts on the tree with step 6 in (the lead,
+    2026-11-05T07:30Z), and host.sh's own CPUs are its text's (the lead, 2026-11-03T16:50Z). Whether a stricter
+    reading is the bar, 8x on 4-15 with interleaved pairs (the lead, 2026-11-03T17:47Z) or option 1, is Ada's call,
+    open. The records below are how the rate got here.
     <!-- record: bench/competitive/probes/reuse_pass.md -->The merge of steps 2, 3 and 6 reads 4.78x in process and
     4.92x over the socket on 4-15, and 7.55x and 7.16x as option 1, every task of each half on its CPUs as read back
     (run 12). Step 6 alone read 1.84x and 1.59x in that hour, under about 7,500 host threads (runs 12,
@@ -1639,6 +1688,29 @@ This takes it off create's path on a root node, with no new kernel version (deci
   `createpool` tests read them; they become `hex_*` metrics once kiln's Observe owner agrees their names. This joins
   the `needs_shim` reasons decision 5 already counts (a pid or user namespace by path, made through the shim on either
   node).
+- **The init's ipc and uts namespaces are made ahead** (goal 5 extended, step 4). Making an ipc namespace mounts a mqueue
+  filesystem of its own and registers two sysctl tables of its own (Linux v6.19 `ipc/namespace.c:38-90`,
+  `ipc/mqueue.c:469-489`, `ipc/mq_sysctl.c:146`, `ipc/ipc_sysctl.c:293`), the costliest namespace a clone makes (f88-f91).
+  So a root node's pool makes pairs ahead, as decision 4's makes network namespaces (`hex_core::netns::Pool`, bounded at
+  `IPC_UTS_BOUND`, a pair taken never handed out again, one thread making them off the path), and a create routed to a
+  pruned seed takes one, which rides last in the seed's `CREATE_AHEAD` kind; the init joins it by `setns` before it
+  mounts `/dev/mqueue`, sets the hostname or writes a sysctl, and its clone leaves out `CLONE_NEWIPC | CLONE_NEWUTS`. A
+  dry pool, or a create with no room under `SCM_MAX_FD`, leaves the clone's flags as they were, counted, and so does
+  every container the pool can't serve: one that makes only one of the two, or is routed through the shim, or is in a
+  user namespace of its own, which `setns` would refuse a pair the node made (`ipc/namespace.c:233-244`,
+  `kernel/utsname.c:127-140`). <!-- record: bench/competitive/probes/create_breakdown.md -->Pool on against drained in
+  one run, part 16's pooled p50 is 0.104 ms against 0.143 (0.727); part 17, which holds the joins, 0.052 against 0.041;
+  and interleaved lifecycle by lifecycle the create is 0.0171 to 0.0373 ms faster in every one of 8 rounds, with the
+  pool dry for at most 30 of 10,000 creates at concurrency 32<!-- /record --> (`probes/create_breakdown.md`, "The ipc and
+  uts namespaces made ahead"; the kernel's side in `docs/research/runtime/goal5-ipcuts.md`).
+  <!-- record: bench/competitive/probes/netns_pool.md -->A pair costs 6.9 KiB charged
+  and about 21 us of the refill thread's time<!-- /record --> (`probes/netns_pool.md`). The refill thread is woken only
+  once the pool is half empty, since a wake is a system call on create's path, and the init leaves the pair for its
+  exec to close, so the close isn't on create's path either. Linux only: macOS and Windows have no ipc or uts namespace
+  for a box to be given.
+  What would falsify it (fedora, pool on against drained in one run): part 16 not falling by 15%, the whole create not
+  faster in the interleaved pairs, the pool dry for more than 1% of a sustained phase's creates, or a box seeing
+  another's or the node's System V objects, queues or hostname (`oci_ipcuts.rs`).
 - **What would falsify it** (each on fedora 6.19, in the same run as libcrun): the root-escape test reaching the marker
   or any host path from a pruned-path container; a nested proc mount succeeding past a mask in one; the pruned root's
   switch growing more than 10% between 0 and 24,000 extra host threads; create p50 through the seam not dropping by at
@@ -1658,6 +1730,100 @@ research `01a190c51f137042a9697949c8fe2c7a`, f6-f17 and f66-f84. Linux v6.19 `fs
 (`chroot`), `fs/namei.c` (`follow_dotdot`), `kernel/user_namespace.c` (`create_user_ns`); v7.0 and v7.1 `fs/namespace.c`
 (`create_new_namespace`, `copy_mnt_ns` with `CLONE_EMPTY_MNTNS`). runc v1.5.2 `libcontainer/rootfs_linux.go`
 (`msMoveRoot`) and crun 1.30.1 `src/libcrun/linux.c` (`move_root`, the `OPEN_TREE_NAMESPACE` path).
+
+**Goal 5's create measured against its bar** (goal 5 extended step 7, 2026-11-05, the final integrated tree f58a101,
+fedora, CPUs 4-15, noisy; `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7 again"). The bar is
+Hex's create and create+start of `true` through the seam at most a quarter of libcrun's, at p50 and p99.9. host.sh's
+OCI pass, best of two rounds of ten thousand, against libcrun in the same run, every round read whole:
+<!-- record: bench/competitive/probes/create_breakdown.md -->
+
+| run | reuse | create p50 | create p99.9 | create+start of `true` p50 | create+start of `true` p99.9 |
+|---|---|---|---|---|---|
+| out/20261105T114658Z | on | 0.41 / 2.56 ms, 0.160x | 11.19 / 17.07 ms, 0.656x | 0.47 / 2.52 ms, 0.187x | 1.75 / 11.83 ms, 0.148x |
+| out/20261105T120118Z | off | 0.50 / 2.27 ms, 0.220x | 11.72 / 27.99 ms, 0.419x | 0.50 / 2.38 ms, 0.210x | 3.44 / 14.32 ms, 0.240x |
+
+<!-- /record -->
+Three of the four are under the bar in each mode; create's p99.9 in process is over it in both. The table takes the
+round with the better create p50, and in both passes that round carries create's tail: in the other round create's
+p99.9 is <!-- record: bench/competitive/probes/create_breakdown.md -->3.54 ms (reuse on) and 2.91 ms (reuse
+off)<!-- /record -->, and over the socket the table's own round reads
+<!-- record: bench/competitive/probes/create_breakdown.md -->0.99 and 3.48<!-- /record --> ms. So the tail is a few
+creates per ten thousand, at loads of 23 to 37. The host's clock (`host_clock.sh`) wasn't read for these runs. It
+guards against an idle host clocking short bursts down, and at loads of 23 to 37 the host wasn't idle, so that effect
+doesn't apply to them. On 1714f72 (out/20261104T170413Z, out/20261104T172313Z) the same pass
+read 0.150x, 0.036x, 0.219x, 0.267x with reuse on and 0.356x, 0.938x, 0.264x, 0.833x with it off. Every box of both
+passes ended through its init, none by `cgroup.kill`, where 1714f72's reuse-off pass killed a few in `start_true`:
+a delete that read its box's record before forgetting its init missed an exit the supervisor collected between the
+two (fixed in this tree; `oci_reuse.rs` test 1's fifth case). The create breakdown (seed path, pruned) ran four times,
+alternating reuse on and off, best of N; every run cut every create whole and lost no event. The parts' p50s summed,
+against create's p50 in the same run:
+<!-- record: bench/competitive/probes/create_breakdown.md -->102.9% (on, create-breakdown-20261105T113309Z), 98.4%
+(off, -113700Z), 104.5% (on, -113940Z) and 100.5% (off, -114315Z) at loads of 23 to 42<!-- /record -->: step 7's
+criterion, within 10%, met by all four. What's left, part by part, pooled p50 in ms (reuse on / off):
+<!-- record: bench/competitive/probes/create_breakdown.md -->the init's set-up to the exec FIFO 0.188 / 0.192; the
+cgroup, made and bounded 0.104 / 0.135; the node's and the runtime's own work 0.102 / 0.124; the seed, the request and
+its clone's preparing 0.044 / 0.047; the box's record 0.021 / 0.025; the handshake 0.011 / 0.014<!-- /record -->. What's over the bar, part by part:
+- create's p99.9 in process, in both reuse modes, from the round the table takes, which has 14 or 15 creates over 5 ms
+  in ten thousand. The next lever is the tail agent's parked inits (`cp/t7-g5-tail` 8998ab5), which take the
+  `cgroup_mutex` holds behind that tail off create's path and land through the goal 5 record tree;
+- with reuse off, each box's teardown runs on the CPUs its creates use: what reuse within one owner takes away.
+
+The levers that would take what's left of the parts, for Ada:
+- goal 6's 7.x namespace (`OPEN_TREE_NAMESPACE`, `CLONE_EMPTY_MNTNS`), which takes the mount namespace's copy out of
+  the init's clone, the largest part;
+- the shared empty-directory masks (`cp/t7-g6`), which take mounts off the init's root;
+- the record's fsync on disk: zero here with `/run` on tmpfs, but on a `/run` on the container's overlay the record's
+  two fsyncs are most of create (the hooks agent's `create_load-20261104.md` on `cp/t7-hooks`);
+- step 6's two levers, the init's pidfd end and the cgroup reused within one owner, both in this tree. What's left of
+  the cgroup on reuse is the idle cgroup's check, read file by file.
+
+**The spec a container is made from** (found 2026-11-04, AC-T7.1.1). The runtime reads a bundle's `config.json`,
+parses it and checks it: among the rest, `Spec::check` refuses a container in a user namespace holding CAP_SYS_ADMIN
+without a network namespace of its own. The create seed then read `config.json` again, by path on a rootless node
+and through the bundle's descriptor on a root one, and so did the shim, and each made the container from what it
+read. A bundle whose `config.json` was swapped between the two reads got a container from a spec the runtime never
+checked: a time-of-check-to-time-of-use hole, CWE-367's class. Now nothing reads the bundle after the runtime's one
+read. The runtime puts the bytes it parsed in a memfd sealed against every change (`F_SEAL_WRITE`, `F_SEAL_SHRINK`,
+`F_SEAL_GROW`, `F_SEAL_SEAL`: memfd_create(2), fcntl(2) "File Sealing"). The seed takes it as a create's last
+descriptor (the wire's kind 5, `CREATE_CONFIG`, append-only), the shim by its `/proc/<pid>/fd` path as it takes its
+pipes, and each refuses one that isn't sealed so (`linux::oci::checked`). A seed refuses a create of an older kind,
+which carries no spec. runc makes the same choice: its init is sent the config runc built (`newInitConfig`, v1.5.2
+`libcontainer/container_linux.go:680`) as JSON over its init socket (`libcontainer/process_linux.go:508`, `:905`),
+never the bundle's path to read again. Test:
+`oci_box.rs`, `a_config_swapped_after_the_check_never_makes_the_container`. It holds a create on a FIFO config, gives
+the runtime the lab's spec and any later read the same spec holding CAP_SYS_ADMIN, through the node (a seed) and
+through the runtime alone (the shim). Before the fix the root lab's node made the container with CAP_SYS_ADMIN. What
+would falsify it: a container whose capabilities, namespaces or mounts differ from the spec the runtime read.
+The same holds after create. An exec takes its program's process settings (capabilities, seccomp, user, rlimits)
+from the container's spec, and a start's poststart hooks and a delete's poststop hooks come from it too, and the
+agent runs those on the host. So create keeps the checked bytes with the container's state (`checked.json`, written
+once, 0600, in the state directory the runtime alone writes), as runc keeps the config it built in its state. Every
+later reader takes the spec from there: `hex __oci-exec` (its request names the state directory), the exec seed (the
+wire's kind 6, `EXEC_CHECKED`, append-only, with the directory) and an exec straight from the agent, and the start's
+and the delete's hooks. A container made before its spec was kept has its bundle's `config.json` read and checked
+again with the same checks, never taken unchecked: a spec they refuse refuses the exec, the start or the delete by
+type. Tests: `an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create` and
+`a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create` (`oci_box.rs`). What would falsify it: an
+exec'd program, or a hook, acting on a spec the create didn't check.
+
+**What the integrated tree holds** (goal 5 extended, 2026-11-04; branch `cp/t7-g5x-integrate`, the tree step 7
+measures). Each step's work, merged in one tree, each merge's resolutions in its message:
+- step 1, a box's device program loaded once per policy and held by the node (decision 2);
+- step 2, the pruned seed's root, with no `pivot_root` (above);
+- step 3, the init's mounts made on descriptors at the system calls' cost (`docs/research/runtime/goal5-mounts.md`);
+- step 4, the init's ipc and uts namespaces made ahead (above);
+- step 5, a box's record written once, when the box is whole, and kept off create's path (decision 1);
+- step 6, fewer `cgroup_mutex` holds per lifecycle: a box ended through its init's pidfd, its cgroup and network
+  namespace handed on within one owner, the records spread over shards (above);
+- the fixes found on the way: a descriptor reaches a program only on purpose (decision 3, main's code), a hook swept
+  too (held for Ada: CLAUDE.md §12, one merge of its own), a path with a `..` tried again where Linux can't vouch for
+  it, a start holding both of the exec FIFO's ends, a spec naming no capabilities refused in a user namespace on a
+  borrowed network as CAP_SYS_ADMIN is, a box killed through a pidfd for each of its processes, a create or delete
+  of a box being made waiting for it by the box's turn, in place of step 6's claim on its id (decision 1), a container
+  made from the spec the runtime checked, never a later read of its bundle (above), and createContainer and
+  startContainer hooks run in the container at the spec's points (`docs/design/runtime.md`), the kept namespaces'
+  files bounded past what both pools of namespaces made ahead hold, and a delete that reads its box's record again
+  after forgetting the init, so an exit collected between the two ends the box through its init, not `cgroup.kill`.
 
 ### 6. Mount namespaces without copying, where the kernel has it
 
@@ -1823,6 +1989,208 @@ could do instead. Decisions 1, 4 and 5 are how. Every phase is benchmarked at 10
 - **What's left.** Create's max was still 27.75 ms in one tmpfs pass, so other tail sources remain.
 
 **What would falsify it.** Tails that stay after decisions 1, 4 and 5 land.
+
+**The p99.9 that stayed: the host-wide `cgroup_mutex`** (goal 5's tail, 2026-11-05;
+`bench/competitive/probes/create_tail.md`, sources in `docs/research/runtime/goal5-tails.md`). Decisions 1, 4 and 5 landed,
+and the tails stayed.
+- In host.sh's passes on the integrated tree, 0.05% to 0.26% of creates take 9 to 23 ms against a p50 of 0.5. When that
+  mode passes 0.1% of a round, it is the round's p99.9.
+  <!-- record: bench/competitive/probes/create_tail.md -->Reuse on, create+start of `true` p99.9 12.91 against libcrun's
+  17.50 ms (out/20261105T024612Z)<!-- /record -->.
+- A wake-up-chain walk of every traced create (`create_tail.py`) names the wait. A create takes `cgroup_mutex` once: for
+  the init's `CLONE_INTO_CGROUP` clone with reuse on, and for the cgroup's `mkdir` with reuse off. Each slow create
+  waited there.
+- Each holder was another tenant's task migration (Docker's `runc`, `podman`, a shell), released right after its
+  `cgroup_attach_task`. A migration write-locks `cgroup_threadgroup_rwsem` under `cgroup_mutex`, and that waits out an
+  RCU grace period (Linux v6.19 `kernel/cgroup/cgroup.c:2536-2546`, `kernel/rcu/sync.c:133`). Hex measured the wait on
+  this host at 10 to 12 ms p50 (`docs/design/runtime.md`, "Born in its cgroup").
+- So the tail is set by how often the host migrates a task, not by Hex. libcrun pays it too: crun also clones into the cgroup.
+
+**The choice, being prototyped: the init made ahead into its cgroup, reuse on.** An owner's box, deleted, leaves an idle
+cgroup that step 6 hands to the owner's next box. Before the pool can hand it to one, the delete has a create seed
+clone an init into it, with the namespaces the owner's last box was made with (`init::fresh_clone_flags`, as the
+runtime reports them to the node: `Choose::init_made`). It is the delete, not a thread after it, because creates come
+back to back: a park left to a thread after the delete was still under way at the next create in 511 of 519
+lifecycles (`seam_oci`, fedora, 2026-11-05), so the create waited out the clone it was meant to skip. The init does nothing but wait on
+its socket. The next create for that owner sends the parked init its create, the same message a seed takes today
+(`seed::send_create`), with the checked spec's sealed memfd and the trees and namespaces made for it. The init then
+builds the container as a freshly cloned one does. The `CLONE_INTO_CGROUP` clone, and its wait for `cgroup_mutex`,
+move to the delete, off create's path; the delete's cost is measured beside the create's. So does the clone's own cost, the largest part of a create under load
+(part 11 above).
+- **Precedent.** runc's init is a process parked before its program: it waits at the exec FIFO between create and start
+  (v1.5.2 `libcontainer/standard_init_linux.go:255`). Android's zygote and SOCK's zygotes fork from a process made
+  ahead ([OCI-12], [OCI-27] p.63). AFaaS keeps cgroups made ahead, and warns that a pool still jitters while another
+  tenant holds the cgroup lock ([OCI-35] p.511-512), which is what is measured here. A parked init holds that lock only when it is made.
+- **Reuse off.** A box of no owner gets a cgroup of its own, so the node makes cgroups ahead for such boxes
+  (`Node::with_inits_ahead`, a bound, 8 by default: below). Each is a fresh slot, with default bounds and an init parked in
+  it, refilled by a thread of the node's own (`hex-ahead`) off every create's path. A box of no owner takes the
+  oldest ready one, is given its own bounds there, and is the parked init. Its slot is removed with the box, never
+  kept: such a box could have left anything in it. The parked init's namespaces are those the last box of no owner was
+  made with. With none ready, the create makes its own cgroup named by its id and clones its init, as before.
+- **Each pool is bounded and counted.** The parked inits in idle slots are bounded by the idle slots
+  (`hex_core::reuse::PER_OWNER` 32, `PER_NODE` 256), one init each; those made ahead for boxes of no owner by the
+  node's bound. `cgroups::ParkCounts` counts inits made, claimed, ended unclaimed and failed, and the bytes charged
+  for them. `cgroups::AheadCounts` counts cgroups made ahead, taken, creates that found none ready (dry), failed
+  makes and those ready now. `seam_oci` writes both with its phase's cgroup counts.
+- **What a parked init costs.** One process and its pages, charged to the idle cgroup. The init is the claiming
+  box's pid 1, so its `pids.current` of 1 is the one the box would take at its clone anyway. The memory a park
+  charges is measured each time and counted (`ParkCounts::charged_bytes`; the idle check sets it apart:
+  `reuse::check_parked`). On fedora it was about 24.7 KB an init in a handed-on slot and about 262 KB in a fresh
+  one made ahead (`create_tail.md`, "The parked init, A/B against 60b2e38"). Reuse on, a delete pays the clone (and the init's
+  word that it is parked) the next create no longer pays. With reuse off, the clone and the cgroup's `mkdir` move
+  to the refill thread.
+- **What a dry pool costs.** Nothing more than today. A reuse-on create whose idle cgroup holds no parked init (the
+  park failed, counted) clones its init into it, as before. A reuse-off create that finds none ready makes its own
+  cgroup and clones its init, as before, counted dry.
+- **Security: "holds no spec, privileges or capabilities until a create claims it" (the lead's reading, 2026-11-05).**
+  The parked init keeps its permitted capabilities, since it must still build the container as root, and a
+  capability dropped from the permitted set can't be regained (capabilities(7), "Thread capability sets"). So the
+  criterion holds only if nothing but the node can make it use them. Each of these holds:
+  - *It exercises none.* Its effective set is empty from before it says it is parked (the set the kernel checks:
+    capabilities(7)). Test 2b reads `CapEff` 0 while it waits.
+  - *Nothing else can reach into it.* It is non-dumpable while it waits (`PR_SET_DUMPABLE` 0, prctl(2)). A target that
+    isn't dumpable refuses ptrace access to a caller without `CAP_SYS_PTRACE` in its user namespace (ptrace(2), "Ptrace
+    access mode checking", step 4). That covers attaching, `/proc/<pid>/mem`, `/proc/<pid>/fd` and `pidfd_getfd(2)`,
+    which checks `PTRACE_MODE_ATTACH_REALCREDS`. Test 2b has an unprivileged process of the same uid refused every one
+    of its descriptors. A process holding `CAP_SYS_PTRACE` can reach any process, the node's own included, so it is
+    outside this boundary as it is outside the node's.
+  - *It takes a spec only on the channel it inherited from the node.* Its claim socket is one end of a socketpair made
+    by the agent (`seed::socketpair`), handed to it over the seed's socket, with no name in the filesystem or the
+    abstract namespace, so no process can connect to it. The other end stays the agent's alone (`run::Parked`).
+  - *It runs no code but Hex's until claimed.* It is a fork of the create seed, the `hex` binary, which execs nothing
+    until the claimed container's program.
+  - Its dumpable state is restored once it is claimed: a rootless node writes the claimed init's user-namespace maps
+    through its `/proc` files.
+  If any of these stopped holding, its permitted set would go empty too, and the design would change. It also holds
+  nothing of the next box until it is claimed: no spec, no rootfs, no network, ipc or uts namespace, and its fresh pid
+  and mount namespaces are empty of the box's. A claim whose spec asks for other namespaces than it was made with is
+  refused by type: the init is ended and the create clones a fresh one (CLAUDE.md §3).
+- **The default ships on (the lead, 2026-11-05: the bar measures what ships).** `hex_node::INITS_AHEAD` is 8: one per
+  box in flight at the seam bench's concurrency 8. At the bar's concurrency 1, eight never ran dry but for each round's
+  first create (1 in 10,100: the A/B below). That is about 2.1 MB a node at about 262 KB an init. It is a pool like
+  decision 4's network namespaces made ahead, on by default; `Node::with_inits_ahead(0)` keeps none. The socket's node
+  and the bench take the default.
+- **Recovery.** A parked init ends when the agent's end of its socket closes, so a node's crash ends every one. The
+  idle slots and those made ahead are named by no box's record, and recovery removes them, `cgroup.kill` first, as it
+  removes idle slots today.
+- **Not chosen: `favordynmods`.** It makes a migration take the thread group's own rwsem, not the grace period under the
+  global lock (`cgroup.c:2547-2549`). But it is a mount option of the whole hierarchy, and it adds a barrier and an atomic to every fork and
+  exit on the host. Once on, it can't be fully turned off without a reboot (`cgroup.c:1341-1356`). It is a
+  host decision for Ada, not Hex's.
+
+**Parked procs: a parked init with its proc made ahead (the tail agent's design, built behind a node setting, off by default
+until measured, on by default for a root node since 2026-11-06; the g6 agent reviews and owns part 19's measurement;
+2026-11-05).** On `cp/t7-g5-record` (26aafad), a parked init can't take goal 6's prepared proc.
+That proc is made with a pid namespace of its own, which the seed clones the init into, and a parked init is pid 1 of
+the pid namespace it was parked in. So on 7.x with prepared procs on, every create clones fresh. On 6.19 there is no
+prepared proc at all: through 7.0 the kernel won't hand over a pid namespace with no process in it (`goal6-mntns.md`
+§7), so part 19's init makes its proc and masks on the path. With Docker's paths that is 28 write holds and 4
+superblocks a create (`goal5-mounts.md` §11, as decision 6's update cites it), and about 314 µs of the init's CPU: the
+proc's `fsconfig` and most of part 19's 22 `openat2`, 13 `open_tree` and 17 `move_mount` (`goal6-mntns.md` §11).
+- **The fact it rests on.** A parked init's pid namespace has a process in it, and procfs mounts for any pid namespace
+  given by descriptor (`pidns=`). That option came in Linux 6.18, so 6.19 has it (v6.19 `fs/proc/root.c:48`,
+  `:115-160`), and it asks only for `CAP_SYS_ADMIN` over the target namespace's user namespace and a target descended
+  from the mounter's active pid namespace (`:153-159`). It doesn't care whether the namespace has processes. Goal 6's
+  pool needs 7.1 only because it opens a namespace with none yet (`goal6-mntns.md` §7). So the proc and its masks can
+  be made at park time, off create's path, on both kernels.
+- **Opening the namespace.** By the parked init's pid, `/proc/<pid>/ns/pid`, then held to the init by its pidfd
+  (`run::Parked::pid_namespace`; the lead's 14:37Z ruling, so no new `unsafe`). The open comes first and the poll
+  second. A pidfd reads ready once its process has exited or been reaped (v6.19 `fs/pidfs.c:261-265`, `pidfd_poll`;
+  pidfd_open(2)), and a process that has ended doesn't run again. So a pidfd that reads not ready after the open
+  means the init was running at the open, and a running process's pid names that process alone (a pid is freed only
+  when its process is reaped, and the init is the agent's own child). One that reads ready is refused, whoever
+  reaped it. The proposal's `ioctl(PIDFD_GET_PID_NAMESPACE)` (`include/uapi/linux/pidfd.h:111`) gives the same
+  guarantee, but rustix 1.1.5 wraps it only through its `unsafe` generic `ioctl`, so it would add an `unsafe` use
+  to CLAUDE.md §12's list. Built that way (d8f49f3) and taken back out (its revert).
+- **At park.** The park job carries the proc key the owner's last box would have had (`procmount::Key`: the proc
+  mount's data and flags and the masked and read-only paths beneath `/proc`, in the spec's order, from
+  `procmount::eligible`; given in `Wants` when the box chooses its cgroup, so its slot keeps it for the park at its
+  delete; for a box of no owner, the last such box's, set before its take wakes the refill, so the refill reads
+  that box's, not the one before). A box `procmount::eligible` refuses (no pid namespace of its own, another mount at or beneath `/proc`, a
+  `..`, or a `linux.mountLabel`: a labelled container takes nothing the node made ahead) parks with no proc. Once the init says it is
+  parked, the thread that parked it makes the proc for the parked init's pid namespace (`ProcMaker`,
+  `init::prepare_proc_for`): the delete (reuse on) or the `hex-ahead` refill (reuse off), off every create's path.
+  One worker thread fed by the park was built and measured (195e86a, `parked_procs_ab.md`): at 8 creates in flight
+  it fell behind, and 67-80% of claims found no proc. So the delete pays for the proc, and the A/B reports the
+  delete's p50 and p99 beside the create's (the lead's 14:23Z: move it, or show the delete doesn't grow): the second half of `init::prepare_proc` (`fsopen("proc")`, `pidns=` that namespace, the key's options
+  and flags, `fsmount`, then the masks and read-only paths), with the same `ProcSources`. The parked slot keeps the
+  init, its proc tree, the key, and the bytes charged.
+- **At claim.** A create whose `procmount::eligible` key equals the parked one is sent the tree in goal 6's
+  prepared-proc place in the create message. The parked init attaches it with one `move_mount`, as part 19 attaches a
+  prepared proc, and checks first that the tree's pid namespace is its own. A proc's `self` names the reader's pid
+  in the namespace the proc shows (proc(5)), so `readlinkat(tree, "self")` reads `1` only in the init's own: anything
+  else is refused by type. A create with another
+  key still claims the parked init, which mounts its own proc as part 19 does now. The parked tree is dropped then,
+  counted a miss. A create no prepared proc can serve (`Unpooled`) claims the parked init as today.
+- **Mount namespaces.** One code path on both kernels; only the mount namespace's way differs. A park clones with
+  the flags its way's fresh init takes (`mntns::clone_flags`): Copy (6.19, and 7.x where chosen) with `CLONE_NEWNS`
+  as now; Empty (7.1) with `CLONE_EMPTY_MNTNS` in its place; from the tree (7.0) without either, the claimed init
+  joining the namespace the agent made from the rootfs with `setns(CLONE_NEWNS)` in its build, as a fresh one does.
+  A claim's flags are held to the parked ones, so a create of another way is refused by type and clones fresh. A
+  node asked for Empty on a kernel without it parks with the flag the kernel refuses: each park fails, counted, and
+  creates clone fresh.
+- **On 7.x with the proc pool on**, a parked init's proc comes from this, not from the pool. The pool keeps serving
+  the creates no parked init is ready for: each create goes one way or the other, never both.
+- **A node setting, on by default for a root node** (the lead's decision, 2026-11-06T01:52Z; it was off until then).
+  `Node::with_parked_procs(false)` turns it off, `hex node --parked-procs on|off` sets it for the socket's node, and the
+  bench's `HEXBENCH_PARKED_PROCS` (1 on, 0 off, unset the node's default) reaches both drivers' nodes. A rootless
+  node parks none (its devfs has no mask sources). Off, nothing changes on either kernel. A node keeps one empty
+  tmpfs for its life (`Devfs::restart`), so a parked proc's masks clone the same one every init's do, whichever pools
+  are on. `hex node` says its setting on stderr as it starts, and on SIGTERM one line of its parked procs' counts
+  (made, hits, misses, dry, capped, alive), exiting 143 with its boxes left as a SIGKILL leaves them.
+- **Decided (the lead, 2026-11-05T17:00Z, on the measurements in `parked_procs_ab.md`).** The proc is made on the
+  parking thread, and the setting stays off by default (superseded 2026-11-06: on by default, below).
+  - On, part 19's p50 is about 5.6x faster and the create's p50 0.10-0.40 ms faster at 8 in flight (1e5e956), with
+    every claim a hit. The under-load bar's part 19 p99 (0.5 ms) is approached, not met.
+  - The cost moves to the delete: its p50 is up in 6 of 8 pairs at 8 in flight, and serially it is flat with the c32
+    rate 1-3% lower.
+  - One worker and eight workers both failed (195e86a, 6dcd731: 31-44% hits at best). The cost is the host-wide
+    `namespace_sem`, which more threads only share (a reading, not measured apart).
+  - The after-reply arm (1890f85: the delete's serving thread makes the proc after it has answered) is a measured
+    trade, not merged. Unlike the workers, it keeps part 19's p50 (42-49 µs), and it lowers the delete and raises the
+    rate. It falls short only at its dry claims (22-36% at 8 in flight), where the same caller's next create arrives
+    before its after-reply turn: create p50 0.06-0.25 ms worse than on-park, and part 19 p99 higher in 6 of 8 rounds,
+    the under-load bar's own measure (the lead, 2026-11-05T19:19Z).
+  - On by default since 2026-11-06 (the lead), on the socket driver's A/B (`parked_procs_ab.md`, "On by default:
+    the socket A/B"): part 19's p50 about 6x faster and the create's p50 about 24% faster, the delete's p50 about 40%
+    slower, at 8 in flight.
+- **Dropped off the path (the g6 agent's review).** A detached tree dropped unattached is unmounted, masks and
+  all, on its last close. That takes the host's `namespace_sem` for write, then waits for an expedited RCU grace
+  period (`namespace_unlock`, v6.19 `fs/namespace.c:1680-1721`; the wait at `:1715`). So no create's thread drops
+  one. A miss, the tree of a claim that failed, and the tree of an init ended unclaimed all go to the node's
+  `hex-proc-drop` thread, by a queue bounded at `PER_NODE` (`run::ProcSink`). Past the bound a tree is dropped where
+  it is, counted (`procs_dropped_inline`).
+- **Costs.** The proc's superblock is made off every create's path, on the parking thread, and so are the
+  `list_lrus` and shrinker registrations a new superblock takes (step 6's run 23, as the g6 agent cites it). One proc superblock per parked init, with its masks (each a clone of the shared empty tmpfs or of the
+  host's `/dev/null`: no superblock each), bounded as the parked inits are (`PER_NODE` idle slots plus `INITS_AHEAD`),
+  never reused: it ends with its init. The refill worker does the work beside the clone the delete already pays.
+- **Counted** (`ParkCounts`). Made, hits (claimed with the key), misses (another key, no room, or the claim refused),
+  dry (a claimed init with no proc, for a create one could have served), failed makes, the procs held now, and
+  the unattached procs dropped (by the dropper, and inline).
+- **The A/B, of record, on fedora (6.19)**, under the under-load bar's conditions: 8 in flight, 8,000 idle threads,
+  6 and 12 busy loops, Docker's paths, no priority change. Interleaved, the setting on against off, both with parked
+  inits. Beside it: part 19's p50 and p99, the whole create's p50 and p99, mount holds a create (the mounts trace's
+  holds by holder and its unpreempted p99: cp/t7-g6 92443a8's reader), and the predicted key's hits and misses. The g6
+  agent owns part 19's harness and its numbers. The 7.2 guest (Fedora's 7.2.15 kernel, the image
+  `vm7_build.sh` made, driven by `bench/oci-validation/vm7_breakdown.sh` with the tree way) runs the same, indicative
+  only. There, goal 6's procs made ahead took part 19's p50 down about 3x.
+- **What would falsify it.** Part 19's p99 under the bar's conditions not falling with the setting on. Or the whole
+  create's p99 not falling. Or misses making the setting cost more than it saves.
+
+**What the A/B measured** (`create_tail.md`, "The parked init, A/B against 60b2e38", six interleaved passes, loads 13
+to 59, not of record):
+- In process, B's create max was 2.84 to 3.81 ms in every pass, against A's 15.35 to 59.89, and no B create waited
+  on `cgroup_mutex` (`create_tail.md`, run 5).
+- Reuse on, create p50 0.34 and 0.41 ms against A's 0.40 and 0.41. Both met the bar at p99.9 in these passes (B
+  0.140x-0.205x for create, 0.075x-0.148x for create+start), A's mode staying under 0.1%.
+- Reuse off, create p99.9 2.71 against 17.75 ms and p50 0.39 against 0.57, but 0.337x and 0.322x of libcrun: over the
+  bar. What is left there, and in reuse on's slowest 0.1%, is the kernel's work for earlier boxes on the creates'
+  CPUs (RCU callbacks, cgroup and network-namespace teardown).
+- The delete pays the clone: reuse on, its p50 rose from 0.17-0.18 to 0.33-0.34 ms, and its max reached 85.34.
+
+**What would falsify it.** A reuse-on create with a parked init that still blocks on `cgroup_mutex` in `create_tail`
+(some other call on its path takes it). Or a claim that costs more at p50 than the clone it saves. Or a parked init's
+memory charge pushing an owner's box past bounds the fresh path keeps.
 
 ## Axes that can't reach 4x, and why
 

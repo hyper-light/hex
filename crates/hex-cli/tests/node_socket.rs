@@ -114,16 +114,29 @@ impl Agent {
     /// A `hex node` whose records are in `dir`'s `state` and whose socket is `dir`'s `node.sock`, its
     /// boxes under `box_root`, with `runtime` its `XDG_RUNTIME_DIR` when given; `dir` is the caller's.
     fn over(exe: &str, dir: &Path, box_root: PathBuf, runtime: Option<&Path>) -> Self {
-        Self::armed(exe, dir, box_root, runtime, None)
+        Self::armed(exe, dir, box_root, runtime, None, &[])
     }
 
-    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given.
+    /// As [`Agent::start`], with `flags` among the agent's arguments.
+    fn flagged(exe: &str, cache: &Path, box_root: PathBuf, flags: &[&str]) -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("agent-")
+            .tempdir_in(cache)
+            .unwrap();
+        let mut agent = Self::armed(exe, dir.path(), box_root, None, None, flags);
+        agent._dir = Some(dir);
+        agent
+    }
+
+    /// As [`Agent::over`], armed at a debug build's crash point (`hex node --crash-at`) when one's given, with
+    /// `flags` among its arguments.
     fn armed(
         exe: &str,
         dir: &Path,
         box_root: PathBuf,
         runtime: Option<&Path>,
         crash_at: Option<&str>,
+        flags: &[&str],
     ) -> Self {
         let socket = dir.join("node.sock");
         let mut command = Command::new(exe);
@@ -140,6 +153,7 @@ impl Agent {
         if let Some(point) = crash_at {
             command.arg("--crash-at").arg(point);
         }
+        command.args(flags);
         if let Some(runtime) = runtime {
             command.env("XDG_RUNTIME_DIR", runtime);
         }
@@ -284,6 +298,7 @@ impl Lab {
     "args": {args:?},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {capabilities},
     "noNewPrivileges": true
   }},
   "mounts": [
@@ -297,25 +312,9 @@ impl Lab {
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
+            capabilities = capabilities(),
         );
         std::fs::write(dir.join("config.json"), config).expect("config.json");
-        dir
-    }
-
-    /// A bundle whose container runs `args` holding Docker's default capabilities (no CAP_SYS_ADMIN), so
-    /// its box's cgroup may be handed to its owner's next box (goal 5 extended, step 6).
-    fn bundle_owned(&self, args: &[String]) -> PathBuf {
-        let dir = self.bundle(args);
-        let caps = r#"["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"]"#;
-        let config = std::fs::read_to_string(dir.join("config.json")).unwrap();
-        let config = config.replace(
-            r#""noNewPrivileges": true"#,
-            &format!(
-                r#""capabilities": {{"bounding": {caps}, "effective": {caps}, "permitted": {caps}}},
-    "noNewPrivileges": true"#
-            ),
-        );
-        std::fs::write(dir.join("config.json"), config).unwrap();
         dir
     }
 
@@ -419,6 +418,7 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         return;
     }
     namespaces_counted(&lab, &client);
+    the_agent_parks_procs_unless_told_not_to(&lab, own, cache, exe);
     let failures = conformance::run(&client, &OciBoxes(&lab, false));
     assert!(
         failures.is_empty(),
@@ -432,8 +432,40 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     );
     disconnect(&lab, &agent, &client);
     a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(&lab, own, exe);
+    a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(&lab, own, exe);
     crash_at_each_point_of_a_create(&lab, own, exe);
     assert!(client.list().unwrap().is_empty(), "a box is left");
+}
+
+/// Parked procs are the socket agent's default too, and `hex node --parked-procs off` turns them off (decision 8,
+/// parked procs; the lead, 2026-11-06, AC-T7.1.3). Do: an agent started with no setting, then one with
+/// `--parked-procs off`. Expect: the first says on stderr, from its node's own state, that it parks procs (root)
+/// or that a rootless node parks none; the second that it parks none.
+fn the_agent_parks_procs_unless_told_not_to(lab: &Lab, own: &Path, cache: &Path, exe: &str) {
+    let by_default = if lab.rootless {
+        "hex node: parked procs: off: a rootless node parks none"
+    } else {
+        "hex node: parked procs: on"
+    };
+    for (flags, said) in [
+        (&[][..], by_default),
+        (
+            &["--parked-procs", "off"][..],
+            "hex node: parked procs: off",
+        ),
+    ] {
+        let agent = Agent::flagged(exe, cache, own.join("hex-sock-pp"), flags);
+        wait_for(&format!("hex node {flags:?} saying {said:?}"), || {
+            agent.errors().lines().any(|l| l.starts_with(said))
+        });
+        let said_on = agent.errors().contains("hex node: parked procs: on");
+        assert_eq!(
+            said_on,
+            said.ends_with(": on"),
+            "{flags:?}: {}",
+            agent.errors()
+        );
+    }
 }
 
 /// HEX-SOCK-9, the plan's example: a `Bundle` box made, started, and `/usr/bin/true` exec'd in it
@@ -577,7 +609,8 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
             owner: None,
         })
         .unwrap();
-    let init = procs(&agent.box_root.join(OCI_BOXES), &oci);
+    let oci_cg = oci_cgroup(&agent.box_root.join(OCI_BOXES), &oci);
+    let init = procs_in(&oci_cg);
     assert_eq!(init.len(), 1, "the oci box holds its init alone: {init:?}");
     let caller = raw(&agent.socket);
     let mut pids = Vec::new();
@@ -608,8 +641,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         }
     }
     wait_for("each program to run in its box", || {
-        procs(&agent.box_root.join(OCI_BOXES), &oci).len() == 2
-            && procs(&agent.box_root, &process).len() == 1
+        procs_in(&oci_cg).len() == 2 && procs(&agent.box_root, &process).len() == 1
     });
     drop(caller);
     for id in [&oci, &process] {
@@ -618,8 +650,7 @@ fn disconnect(lab: &Lab, agent: &Agent, client: &Client) {
         });
     }
     wait_for("the programs to be ended", || {
-        procs(&agent.box_root.join(OCI_BOXES), &oci) == init
-            && procs(&agent.box_root, &process).is_empty()
+        procs_in(&oci_cg) == init && procs(&agent.box_root, &process).is_empty()
     });
     for pid in &pids {
         wait_for(&format!("program {pid} to be reaped"), || {
@@ -662,9 +693,13 @@ enum At {
     /// Its cgroup and its container's state directory made: the create held reading its bundle's
     /// config.json, a FIFO no one has opened.
     StateDir,
-    /// Its init cloned, waiting at the exec FIFO, and its container's state written: the create held in
-    /// its createRuntime hook.
+    /// Its init cloned and stopped before its root switch, its container's state not yet written: the
+    /// create held in its createRuntime hook, which runs there (OCI config.md:607).
     Init,
+    /// Past that stop: the init handed its state and running its createContainer hook, in its own
+    /// namespaces before its root switch (config.md:618-622), the agent waiting for its ready signal; its
+    /// container's state not yet written. The create held in that hook.
+    CreateContainer,
     /// In the record write that marks it ready, a durable record's (so one written to a temp file and
     /// renamed): the box made, the write held opening its temp file, a FIFO no one has opened. A
     /// non-durable record's first write takes no temp ([`At::TornRecord`]).
@@ -677,6 +712,11 @@ enum At {
     TornRecord,
     /// After it: the create done.
     Made,
+    /// The box made, and its start under way in its startContainer hook, the start waiting on the exec
+    /// FIFO the init hands its byte to only once its hooks have run. The agent's restart finds the start
+    /// begun and never taken, and removes the box by that reason; its init, released, finds the start gone
+    /// and ends with its own status (hex_runtime's `hooks::START_ABANDONED`).
+    StartContainer,
 }
 
 impl At {
@@ -689,7 +729,12 @@ impl At {
             Self::BundleRendered => Some("bundle-rendered"),
             #[cfg(debug_assertions)]
             Self::TornRecord => Some("record-first-write"),
-            Self::StateDir | Self::Init | Self::Ready | Self::Made => None,
+            Self::StateDir
+            | Self::Init
+            | Self::CreateContainer
+            | Self::Ready
+            | Self::Made
+            | Self::StartContainer => None,
         }
     }
 }
@@ -701,17 +746,19 @@ impl At {
 /// the write, leaving a torn record: no file it opens can hold it at any of these. Elsewhere it is held
 /// at a point by a FIFO no one has opened, or by the box's createRuntime hook, and killed once the
 /// kernel shows it waiting there: with the cgroup and the container's state directory made; with the
-/// init cloned and the container's state written; inside a durable record's write, opening the temp
-/// file it renames; and after the create. Restarted, the agent removes the box killed mid-create by
-/// what it finds of it — a torn record it reads as unreadable, and says so — and takes back the one
-/// made, which then deletes, so at every point nothing of the box is left: no record in either place,
-/// no temp file, no cgroup, no container state, no bundle.
+/// init cloned and stopped for its create-time hooks; with the init past that stop, in its createContainer
+/// hook; inside a durable record's write, opening the temp
+/// file it renames; after the create; and, the box made, with its start in its startContainer hook.
+/// Restarted, the agent removes the box killed mid-create by what it finds of it — a torn record it
+/// reads as unreadable, and says so — and the one whose start it cut, saying the start was interrupted in
+/// its startContainer hooks; and takes back the one made, which then deletes, so at every point nothing of
+/// the box is left: no record in either place, no temp file, no cgroup, no container state, no bundle.
 fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
     for kept in [Kept::Tmpfs, Kept::Disk] {
         let mut points = Vec::new();
         #[cfg(debug_assertions)]
         points.extend([At::CgroupMade, At::BundleRendered]);
-        points.extend([At::StateDir, At::Init]);
+        points.extend([At::StateDir, At::Init, At::CreateContainer]);
         // The record write that marks a box ready is held by where its record is kept: a durable
         // record (on disk) is written to a temp file and renamed, so a FIFO holds the agent opening the
         // temp ([`At::Ready`]); a non-durable record (on tmpfs) is written once, straight to its file,
@@ -723,7 +770,7 @@ fn crash_at_each_point_of_a_create(lab: &Lab, own: &Path, exe: &str) {
             }
             Kept::Disk => points.push(At::Ready),
         }
-        points.push(At::Made);
+        points.extend([At::Made, At::StartContainer]);
         for at in &points {
             crash_at(lab, own, exe, kept, *at);
         }
@@ -781,7 +828,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             mkfifo(&bundle.join("config.json"));
             ClassSpec::Bundle(bundle)
         }
-        At::Init | At::Ready => {
+        At::Init | At::CreateContainer | At::Ready => {
             mkfifo(&go);
             hook_release = Some(
                 std::fs::OpenOptions::new()
@@ -790,12 +837,18 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
                     .open(&go)
                     .unwrap(),
             );
-            // The create waits in its createRuntime hook, its container made, until this test
-            // writes a line, or closes the writer on an assertion failure.
+            // The create waits in its createRuntime hook (or, past the init's stop for the hooks, in its
+            // createContainer hook), its container made, until this test writes a line, or closes the
+            // writer on an assertion failure.
             let script = crash_hook_script(&hooked, &go);
+            let list = if at == At::CreateContainer {
+                "createContainer"
+            } else {
+                "createRuntime"
+            };
             let hooks = format!(
                 r#",
-  "hooks": {{"createRuntime": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
+  "hooks": {{"{list}": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
             );
             ClassSpec::Bundle(lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks))
         }
@@ -804,6 +857,33 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         #[cfg(debug_assertions)]
         At::TornRecord => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
         At::Made => ClassSpec::Bundle(lab.bundle(&Lab::act(&Act::Wait))),
+        At::StartContainer => {
+            mkfifo(&go);
+            hook_release = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&go)
+                    .unwrap(),
+            );
+            // The hook runs inside the box's root, so this case's directory is bound in at /crash, where
+            // it touches `hooked` and waits for a line on `go`.
+            let script = crash_hook_script(Path::new("/crash/hooked"), Path::new("/crash/go"));
+            let hooks = format!(
+                r#",
+  "hooks": {{"startContainer": [{{"path": "/bin/sh", "args": ["sh", "-c", {script:?}], "env": ["PATH=/usr/bin:/bin"]}}]}}"#
+            );
+            let bundle = lab.bundle_hooked(&Lab::act(&Act::Wait), false, &hooks);
+            std::fs::create_dir_all(lab.rootfs.join("crash")).unwrap();
+            let config = bundle.join("config.json");
+            let mut spec: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+            spec["mounts"].as_array_mut().unwrap().push(serde_json::json!(
+                {"destination": "/crash", "type": "bind", "source": dir.path(), "options": ["rbind", "rw"]}
+            ));
+            std::fs::write(&config, spec.to_string()).unwrap();
+            ClassSpec::Bundle(bundle)
+        }
     };
     let spec = BoxSpec {
         id: id.clone(),
@@ -818,6 +898,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         own.join(&name),
         runtime.as_deref(),
         at.armed(),
+        &[],
     );
     if on_tmpfs(&oci_root) != matches!(kept, Kept::Tmpfs) {
         eprintln!("SKIP {name}: {} isn't where it's kept", oci_root.display());
@@ -842,6 +923,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     };
     let socket = agent.socket.clone();
     let create = std::thread::spawn(move || Client::connect(&socket).and_then(|c| c.create(spec)));
+    let mut start = None;
     match at {
         #[cfg(debug_assertions)]
         At::CgroupMade | At::BundleRendered | At::TornRecord => {
@@ -854,13 +936,26 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             );
         }
         At::StateDir => {}
-        At::Init => wait_for("the create's hook to hold it", || hooked.exists()),
+        At::Init | At::CreateContainer => {
+            wait_for("the create's hook to hold it", || hooked.exists())
+        }
         At::Ready => {
             wait_for("the create's hook to hold it", || hooked.exists());
             mkfifo(&temp);
             hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
         }
         At::Made => wait_for("the create", || create.is_finished()),
+        At::StartContainer => {
+            wait_for("the create", || create.is_finished());
+            let socket = agent.socket.clone();
+            let id = id.clone();
+            start = Some(std::thread::spawn(move || {
+                Client::connect(&socket).and_then(|c| c.start(&id))
+            }));
+            wait_for("the start's startContainer hook to hold it", || {
+                hooked.exists()
+            });
+        }
     }
     if matches!(at, At::StateDir | At::Ready) {
         wait_for("the agent to wait opening a FIFO", || {
@@ -868,7 +963,7 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         });
     }
     // What the kill leaves, as the point says: a record only once the box is made, its container's
-    // state directory from the runtime's create on, its state written from its init's clone on.
+    // state directory from the runtime's create on, its state written once its init is past its hooks.
     let containers = || containers_of(&oci_root, &id);
     // A record counts as written only once it decodes whole: a crash between a non-durable record's
     // open and its write leaves a torn file, which reads as no record (At::TornRecord).
@@ -878,28 +973,32 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
             .and_then(|bytes| BoxRecord::decode(&bytes).ok())
             .map(|record| record.phase)
     };
-    let made = if at == At::Made {
+    let made = if matches!(at, At::Made | At::StartContainer) {
         Some(Phase::Ready)
     } else {
         None
     };
     assert_eq!(written(), made, "{name}: the record at the kill");
-    // The container's state directory is made by every point but the two before it (the cgroup made,
-    // the bundle rendered); the record write that marks the box ready comes after it is all made.
+    // A box of no owner has its cgroup chosen once the runtime has read its spec, as an owner's has, since the
+    // node keeps cgroups made ahead for it (decision 8): the bundle is rendered, then the runtime makes the
+    // container's state directory, then the cgroup is made. So every point but the bundle rendered has the
+    // state directory, and every point past the state directory the cgroup; the record write that marks the
+    // box ready comes after it is all made.
     let state_dir_made = match at {
         #[cfg(debug_assertions)]
-        At::CgroupMade | At::BundleRendered => false,
+        At::BundleRendered => false,
         _ => true,
     };
+    let cgroup_made = state_dir_made && at != At::StateDir;
     assert_eq!(
         (containers().len(), cgroup.exists()),
-        (usize::from(state_dir_made), true),
+        (usize::from(state_dir_made), cgroup_made),
         "{name}: (container states, the cgroup) at the kill"
     );
     #[cfg(debug_assertions)]
     assert_eq!(
         rendered.exists(),
-        at == At::BundleRendered,
+        matches!(at, At::BundleRendered | At::CgroupMade),
         "{name}: the bundle at the kill"
     );
     let state_written = containers()
@@ -907,20 +1006,30 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
         .is_some_and(|c| c.join("state.json").exists());
     assert_eq!(
         state_written,
-        state_dir_made && at != At::StateDir,
+        state_dir_made
+            && !matches!(at, At::StateDir | At::Init | At::CreateContainer)
+            && !at_cgroup_made(at),
         "{name}: the container's state at the kill"
     );
     drop(agent);
-    if at == At::Init {
-        // The hook outlives the agent it ran under; let it end.
+    if matches!(at, At::Init | At::CreateContainer | At::StartContainer) {
+        // The hook may outlive the agent it ran under; let it end. Released, a startContainer hook's init
+        // goes on to hand its byte to the start that is gone.
         hook_release.as_mut().unwrap().write_all(b"\n").unwrap();
     }
     let created = create.join().unwrap();
     assert_eq!(
         created.is_ok(),
-        at == At::Made,
+        matches!(at, At::Made | At::StartContainer),
         "{name}: the create: {created:?}"
     );
+    if let Some(start) = start {
+        let started = start.join().unwrap();
+        assert!(
+            started.is_err(),
+            "{name}: the start the kill cut: {started:?}"
+        );
+    }
 
     let agent = Agent::over(exe, dir.path(), own.join(&name), runtime.as_deref());
     let client = agent.client();
@@ -937,6 +1046,16 @@ fn crash_at(lab: &Lab, own: &Path, exe: &str, kept: Kept, at: At) {
     }
     // A torn first write leaves a record that can't be read; recovery removed its box and said so
     // (hex_core::recovery's Why::Unreadable). The reason is the point of the case.
+    // A start cut in its startContainer hooks: recovery removed the box by that reason, and said so
+    // (hex_core::recovery's Why::StartInterrupted), never as a box merely stopped.
+    if at == At::StartContainer {
+        wait_for("recovery to report the box's start interrupted", || {
+            agent
+                .errors()
+                .lines()
+                .any(|l| l.contains(id.as_str()) && l.contains("startContainer hooks"))
+        });
+    }
     #[cfg(debug_assertions)]
     if at == At::TornRecord {
         wait_for("recovery to report the box removed as unreadable", || {
@@ -1086,6 +1205,126 @@ fn slots_under(oci: &Path) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
+/// The slots under `oci` holding a process that isn't an init parked ahead (a fork of the create seed, `hex
+/// __oci-seed`, until claimed: decision 8): the slots boxes hold.
+fn box_slots(oci: &Path) -> std::collections::BTreeSet<String> {
+    let parked = |pid: &String| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|b| b.split(|&c| c == 0).any(|a| a == b"__oci-seed"))
+    };
+    slots_under(oci)
+        .into_iter()
+        .filter(|name| {
+            let p = procs_in(&oci.join(name));
+            !p.is_empty() && !p.iter().all(parked)
+        })
+        .collect()
+}
+
+/// `hex node` ends on SIGTERM saying its parked procs (decision 8, parked procs; the lead, 2026-11-06, AC-T7.1.3,
+/// T-T7.1.2): one line of counts on stderr, then it exits 143, and nothing else of its end differs from a
+/// SIGKILL's. Do: over the socket, make and start A of owner O, delete A, make and start B of O; SIGTERM the
+/// agent; start it again over the same state. Expect: it said `parked procs at exit:` with made, hits, misses,
+/// dry, capped and alive, as root B's create a hit of the proc A's delete made (rootless none made); it exited 143;
+/// its socket's file and B's processes are left as a SIGKILL leaves them; the restarted agent takes B back
+/// running, and once B is deleted no box is listed.
+fn a_sigterm_says_the_parked_procs_and_leaves_the_boxes_as_a_sigkill_does(
+    lab: &Lab,
+    own: &Path,
+    exe: &str,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("agent-term-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap();
+    let box_root = own.join("hex-sock-term");
+    let mut agent = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = agent.client();
+    let o = BoxOwner::named("owner-term").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let id = |name: &str| BoxId::new(name).unwrap();
+    for name in ["term-a", "term-b"] {
+        client
+            .create(BoxSpec {
+                id: id(name),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
+                owner: Some(o.clone()),
+            })
+            .unwrap();
+        client.start(&id(name)).unwrap();
+        if name == "term-a" {
+            client.delete(&id(name)).unwrap();
+        }
+    }
+    drop(client);
+    let term = Command::new("kill")
+        .args(["-TERM", &agent.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(term.success(), "kill -TERM {}", agent.pid());
+    let ended = agent.child.wait().unwrap();
+    assert_eq!(
+        ended.code(),
+        Some(143),
+        "hex node ended on SIGTERM: {ended:?}"
+    );
+    wait_for("the agent's parked procs line", || {
+        agent.errors().contains("hex node: parked procs at exit:")
+    });
+    let said = agent.errors();
+    let line = said
+        .lines()
+        .find_map(|l| l.strip_prefix("hex node: parked procs at exit: "))
+        .unwrap()
+        .to_owned();
+    let counts: Vec<(String, u64)> = line
+        .split(", ")
+        .map(|kv| {
+            let (k, v) = kv.split_once(' ').unwrap();
+            (k.to_owned(), v.parse().unwrap())
+        })
+        .collect();
+    let names: Vec<&str> = counts.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        names,
+        ["made", "hits", "misses", "dry", "capped", "alive"],
+        "{line}"
+    );
+    let count = |k: &str| counts.iter().find(|(n, _)| n == k).unwrap().1;
+    if lab.rootless {
+        assert_eq!(
+            (count("made"), count("hits")),
+            (0, 0),
+            "a rootless node parks none: {line}"
+        );
+    } else {
+        assert!(
+            count("hits") >= 1 && count("made") >= count("hits"),
+            "B took A's delete's proc: {line}"
+        );
+    }
+    assert!(
+        agent.socket.exists(),
+        "the socket's file is left, as a SIGKILL leaves it"
+    );
+    assert!(
+        !procs_in(&oci_cgroup(&box_root.join(OCI_BOXES), &id("term-b"))).is_empty(),
+        "B runs on after its agent's SIGTERM"
+    );
+    drop(agent);
+    let again = Agent::over(exe, dir.path(), box_root.clone(), None);
+    let client = again.client();
+    assert_eq!(
+        client.inspect(&id("term-b")).unwrap().state,
+        BoxState::Running,
+        "B is taken back running"
+    );
+    client.delete(&id("term-b")).unwrap();
+    assert!(client.list().unwrap().is_empty(), "no box is listed");
+    eprintln!("T-T7.1.2, parked procs: SIGTERM said {line:?}, exited 143, B taken back");
+}
+
 /// Goal 5 extended, step 6 (T-T7.1.2). Do: over the socket, make and start boxes A and B of owner O and a
 /// box U of none, delete A (its slot goes idle), SIGKILL the agent, and start it again over the same
 /// state. Expect: the restarted agent removes A's idle slot and says so; takes B back in its recorded
@@ -1111,23 +1350,27 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
             .create(BoxSpec {
                 id: id(name),
                 bounds: Bounds::default(),
-                class: ClassSpec::Bundle(lab.bundle_owned(&wait)),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
                 owner: owner.cloned(),
             })
             .unwrap();
         client.start(&id(name)).unwrap();
     }
     let oci = box_root.join(OCI_BOXES);
-    let slots = slots_under(&oci);
+    // The slots a box holds: those with a process in them that isn't an init parked ahead (decision 8), whose
+    // slots made ahead are slots too.
+    let slots = box_slots(&oci);
     assert_eq!(slots.len(), 2, "A and B each hold a slot: {slots:?}");
     assert!(
         oci.join("crash-u").is_dir(),
         "U's cgroup is its own, named by its id"
     );
     client.delete(&id("crash-a")).unwrap();
-    assert_eq!(
-        slots_under(&oci),
-        slots,
+    let b_slot = box_slots(&oci);
+    assert_eq!(b_slot.len(), 1, "B's slot alone holds a box: {b_slot:?}");
+    let a_slot = slots.difference(&b_slot).next().unwrap().clone();
+    assert!(
+        oci.join(&a_slot).is_dir(),
         "A's slot is kept idle for its owner"
     );
     drop(client);
@@ -1145,9 +1388,8 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     );
     let left = slots_under(&oci);
     assert_eq!(
-        left.len(),
-        1,
-        "A's idle slot is removed, B's kept: {left:?}"
+        left, b_slot,
+        "A's idle slot is removed with every one made ahead, B's kept: {left:?}"
     );
     let client = again.client();
     for name in ["crash-b", "crash-u"] {
@@ -1184,11 +1426,24 @@ fn a_crash_with_idle_cgroups_and_live_boxes_leaves_nothing(lab: &Lab, own: &Path
     );
 }
 
+/// Whether `at` is the point the box's own cgroup is made at, before its state is written (a debug build's).
+fn at_cgroup_made(at: At) -> bool {
+    #[cfg(debug_assertions)]
+    if at == At::CgroupMade {
+        return true;
+    }
+    let _ = at;
+    false
+}
+
 fn containers_of(oci_root: &Path, id: &BoxId) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(oci_root) else {
-        return Vec::new();
-    };
-    entries
+    // In the runtime directory's shards, or in the directory itself where a node before them kept them (goal 5
+    // extended, step 6).
+    (0..hex_runtime::linux::oci::state::SHARDS)
+        .map(|n| oci_root.join(format!("{n:02x}")))
+        .chain([oci_root.to_path_buf()])
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -1267,11 +1522,50 @@ fn answer(fd: &std::os::fd::OwnedFd) -> (wire::Header, Answer) {
 
 /// The processes in a box's cgroup (an ended one leaves it as it ends).
 fn procs(box_root: &Path, id: &BoxId) -> Vec<String> {
-    std::fs::read_to_string(box_root.join(id.as_str()).join("cgroup.procs"))
+    procs_in(&box_root.join(id.as_str()))
+}
+
+/// The processes in cgroup `dir`, by pid.
+fn procs_in(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("cgroup.procs"))
         .unwrap_or_default()
         .split_whitespace()
         .map(str::to_owned)
         .collect()
+}
+
+/// Started oci box `id`'s cgroup under the oci boxes' root `oci`: one named by its id, else the one slot holding a
+/// process that isn't an init parked ahead (a fork of the create seed, `hex __oci-seed`, until claimed; decision 8),
+/// the box's init having exec'd its program.
+fn oci_cgroup(oci: &Path, id: &BoxId) -> PathBuf {
+    let named = oci.join(id.as_str());
+    if named.exists() {
+        return named;
+    }
+    let parked = |pid: &String| {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|b| b.split(|&c| c == 0).any(|a| a == b"__oci-seed"))
+    };
+    let found: Vec<PathBuf> = std::fs::read_dir(oci)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        })
+        .map(|e| e.path())
+        .filter(|dir| {
+            let p = procs_in(dir);
+            !p.is_empty() && !p.iter().all(parked)
+        })
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "box {id}'s cgroup, by its processes: {found:?}"
+    );
+    found.into_iter().next().unwrap()
 }
 
 /// The agent's children that have ended and aren't reaped.
@@ -1304,6 +1598,14 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
         std::thread::park_timeout(Duration::from_millis(10));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec
+/// naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the host's
+/// network may not hold (spec.rs refuses it).
+fn capabilities() -> String {
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
+    format!(r#"{{"bounding": {set}, "effective": {set}, "permitted": {set}}}"#)
 }
 
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it.

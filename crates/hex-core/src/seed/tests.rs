@@ -16,6 +16,7 @@ fn full() -> Request {
         cwd: Some("/work".to_owned()),
         env: vec!["PATH=/usr/bin".to_owned(), "HOME=/root".to_owned()],
         user: Some((1000, Some(100))),
+        dir: None,
     }
 }
 
@@ -53,6 +54,8 @@ fn creates() -> Vec<Create> {
             binds: 0,
             path_joins: 0,
             dev_mount: None,
+            ipc_uts: false,
+            config: false,
             mount_namespace: MountNamespace::Copy,
             proc_mount: None,
             masked_directory: false,
@@ -66,6 +69,8 @@ fn creates() -> Vec<Create> {
             binds: 0,
             path_joins: 0,
             dev_mount: None,
+            ipc_uts: false,
+            config: false,
             mount_namespace: MountNamespace::Copy,
             proc_mount: None,
             masked_directory: false,
@@ -81,6 +86,8 @@ fn creates() -> Vec<Create> {
             binds: 2,
             path_joins: 1,
             dev_mount: None,
+            ipc_uts: false,
+            config: false,
             mount_namespace: MountNamespace::Copy,
             proc_mount: None,
             masked_directory: false,
@@ -501,16 +508,207 @@ fn a_prepared_create_appends_only_in_its_new_kind() {
     assert!(read_create(&wrong_path, wrong_path.len()).is_err());
 }
 
+/// HEX-IPCUTS-7 (goal 5 extended, step 4): a create with a pair is a kind of its own, every older kind's bytes as they
+/// were. Do: write a create with a pair, with and without a prepared `/dev`, read each back, and read hostile ones.
+/// Expect: its bytes are the ordinary create's, its kind apart, with an option appended; it says two descriptors more;
+/// it reads back whole; a cut one, one with trailing bytes, one short of its descriptors, one that isn't pruned and one
+/// past `SCM_MAX_FD` are each refused by type; and one without a pair still writes the older kinds.
+#[test]
+fn a_create_with_a_pair_appends_only_in_its_new_kind() {
+    let ordinary = creates()[2].clone();
+    let old = create(&ordinary).unwrap();
+    let ahead = Create {
+        ipc_uts: true,
+        ..ordinary.clone()
+    };
+    let bytes = create(&ahead).unwrap();
+    assert_eq!(&bytes[..6], &old[..6]);
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+    assert_eq!(&bytes[8..old.len()], &old[8..]);
+    assert_eq!(&bytes[old.len()..], &[0u8]);
+    assert_eq!(ahead.fds(), ordinary.fds() + IPC_UTS_FDS);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), ahead.fds()).unwrap(),
+        Message::Create(ahead.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_create(&bytes[..len], len).is_err());
+    }
+    assert!(matches!(
+        read_message(&bytes, bytes.len(), ordinary.fds()),
+        Err(Fault::Descriptors { .. })
+    ));
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(read_create(&trailing, trailing.len()).is_err());
+
+    let both = Create {
+        dev_mount: Some(7),
+        ..ahead.clone()
+    };
+    let bytes = create(&both).unwrap();
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+    assert_eq!(both.fds(), ordinary.fds() + IPC_UTS_FDS + 1);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), both.fds()).unwrap(),
+        Message::Create(both)
+    );
+
+    let not_pruned = create(&Create {
+        pruned: false,
+        binds: 0,
+        path_joins: 0,
+        ipc_uts: true,
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(matches!(
+        read_create(&not_pruned, not_pruned.len()),
+        Err(Fault::Value {
+            what: "ipc_uts",
+            ..
+        })
+    ));
+    let over = create(&Create {
+        binds: u32::try_from(MAX_BINDS).unwrap(),
+        path_joins: u32::try_from(MAX_PATH_JOINS).unwrap(),
+        network: true,
+        ipc_uts: true,
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert!(read_create(&over, over.len()).is_err());
+
+    let prepared = create(&Create {
+        dev_mount: Some(7),
+        ..ordinary.clone()
+    })
+    .unwrap();
+    assert_eq!(u16::from_le_bytes(prepared[6..8].try_into().unwrap()), 3);
+    assert_eq!(u16::from_le_bytes(old[6..8].try_into().unwrap()), 2);
+}
+
+/// HEX-SEED-3, append-only (AC-T7.1.1, T-T7.1.4: the spec the runtime checked, never a later read of the bundle).
+/// Do: write a create carrying its checked spec, of each shape (ordinary, pruned, with a prepared `/dev` and a pair).
+/// Expect: kind 5, its body the older kinds' fields with the `/dev` index an option and the pair a flag; one descriptor
+/// more, last; it reads back whole; every cut, trailing bytes and one short of its descriptors are refused by type;
+/// an exec reader refuses its kind; and a create without it still writes the older kinds, byte for byte.
+#[test]
+fn a_create_with_its_checked_spec_appends_only_in_its_new_kind() {
+    let shapes = [
+        creates()[0].clone(),
+        creates()[2].clone(),
+        Create {
+            dev_mount: Some(7),
+            ipc_uts: true,
+            ..creates()[2].clone()
+        },
+    ];
+    for older in shapes {
+        let old = create(&older).unwrap();
+        let checked = Create {
+            config: true,
+            ..older.clone()
+        };
+        let bytes = create(&checked).unwrap();
+        assert_eq!(&bytes[..6], &old[..6], "magic and version");
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 5);
+        assert_eq!(checked.fds(), older.fds() + CONFIG_FDS);
+        assert_eq!(read_create(&bytes, bytes.len()).unwrap(), checked);
+        assert_eq!(
+            read_message(&bytes, bytes.len(), checked.fds()).unwrap(),
+            Message::Create(checked.clone())
+        );
+        for len in 0..bytes.len() {
+            assert!(read_create(&bytes[..len], len).is_err(), "cut at {len}");
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(read_create(&trailing, trailing.len()).is_err());
+        assert!(matches!(
+            read_message(&bytes, bytes.len(), older.fds()),
+            Err(Fault::Descriptors { .. })
+        ));
+        assert!(matches!(
+            read_request(&bytes, bytes.len()),
+            Err(Fault::Kind { .. })
+        ));
+    }
+    assert_eq!(hex(&create(&creates()[0]).unwrap()), GOLDEN_CREATE);
+    assert_eq!(hex(&create(&creates()[2]).unwrap()), GOLDEN_CREATE_PRUNED);
+    // Past SCM_MAX_FD with its spec, as with a pair: refused by type.
+    let over = create(&Create {
+        binds: u32::try_from(MAX_BINDS).unwrap(),
+        path_joins: u32::try_from(MAX_PATH_JOINS).unwrap(),
+        network: true,
+        config: true,
+        ..creates()[2].clone()
+    })
+    .unwrap();
+    assert!(read_create(&over, over.len()).is_err());
+}
+
+/// HEX-SEED-2, append-only (AC-T7.1.1: an exec's process settings from the spec its create checked and kept, never
+/// the bundle as it is now). Do: write an exec naming the container's state directory. Expect: kind 6, its body the
+/// older exec's bytes with the directory appended; it reads back whole, through read_request and read_message with
+/// the exec's four descriptors; every cut and trailing bytes are refused; a create reader refuses its kind; and an
+/// exec naming none still writes the older kind, byte for byte (its recorded bytes).
+#[test]
+fn an_exec_naming_its_state_directory_appends_only_in_its_new_kind() {
+    let older = full();
+    let old = request(&older).unwrap();
+    let checked = Request {
+        dir: Some("/run/hex-node/0123456789abcdef-box-1".to_owned()),
+        ..older.clone()
+    };
+    let bytes = request(&checked).unwrap();
+    assert_eq!(&bytes[..6], &old[..6], "magic and version");
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 6);
+    assert_eq!(
+        &bytes[8..old.len()],
+        &old[8..],
+        "the older exec's body, unchanged"
+    );
+    assert_eq!(read_request(&bytes, bytes.len()).unwrap(), checked);
+    assert_eq!(
+        read_message(&bytes, bytes.len(), REQUEST_FDS).unwrap(),
+        Message::Exec(checked.clone())
+    );
+    for len in 0..bytes.len() {
+        assert!(read_request(&bytes[..len], len).is_err(), "cut at {len}");
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(read_request(&trailing, trailing.len()).is_err());
+    assert!(matches!(
+        read_create(&bytes, bytes.len()),
+        Err(Fault::Kind { .. })
+    ));
+    assert_eq!(hex(&old), GOLDEN_FULL);
+}
+
 /// HEX-MNTNS-2/3 (decision 6's update), HEX-SEED-2/3: a pruned create that says how its mount namespace is
-/// made, from its tree or empty, does so in a new kind whose bytes are the old create's with the prepared
-/// `/dev`'s option and the way appended, so a create made the old way keeps its bytes. Expect each to read
+/// made, from its tree or empty, does so in a new kind (7) whose bytes are the create carrying its checked spec
+/// (kind 5) with the proc's option, the way and the masked directories' flag appended, so a create made the old
+/// way keeps its bytes; one that doesn't carry its checked spec isn't written. Expect each to read
 /// back as written with the descriptors it always carried, every truncation and a trailing byte refused, an
 /// unknown way refused, the old way in the new kind refused (one encoding a value), and a way named by a
 /// create that isn't pruned refused.
 #[test]
 fn a_create_naming_its_mount_namespace_appends_only_in_its_new_kind() {
-    let ordinary = creates()[2].clone();
+    let ordinary = Create {
+        config: true,
+        ..creates()[2].clone()
+    };
     let old = create(&ordinary).unwrap();
+    assert!(matches!(
+        create(&Create {
+            config: false,
+            mount_namespace: MountNamespace::Empty,
+            ..ordinary.clone()
+        }),
+        Err(Fault::Value { what: "config", .. })
+    ));
     for (way, code) in [(MountNamespace::Empty, 1u8), (MountNamespace::FromTree, 2)] {
         let named = Create {
             mount_namespace: way,
@@ -518,12 +716,12 @@ fn a_create_naming_its_mount_namespace_appends_only_in_its_new_kind() {
         };
         let bytes = create(&named).unwrap();
         assert_eq!(&bytes[..6], &old[..6]);
-        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 7);
         assert_eq!(&bytes[8..old.len()], &old[8..]);
         assert_eq!(
             &bytes[old.len()..],
-            &[0, 0, code, 0],
-            "no prepared /dev, no prepared proc, the way, no masked directory's source"
+            &[0, code, 0],
+            "no prepared proc, the way, no masked directory's source"
         );
         assert_eq!(
             named.fds(),
@@ -545,7 +743,13 @@ fn a_create_naming_its_mount_namespace_appends_only_in_its_new_kind() {
             ..named.clone()
         };
         let bytes = create(&with_dev).unwrap();
-        assert_eq!(&bytes[old.len()..], &[1, 5, 0, 0, 0, 0, code, 0]);
+        let old_dev = create(&Create {
+            mount_namespace: MountNamespace::Copy,
+            ..with_dev.clone()
+        })
+        .unwrap();
+        assert_eq!(&bytes[8..old_dev.len()], &old_dev[8..]);
+        assert_eq!(&bytes[old_dev.len()..], &[0, code, 0]);
         assert_eq!(with_dev.fds(), ordinary.fds() + 1);
         assert_eq!(read_create(&bytes, bytes.len()).unwrap(), with_dev);
     }
@@ -626,8 +830,15 @@ fn a_started_answer_names_how_its_namespace_was_made() {
 /// refused.
 #[test]
 fn a_create_carrying_a_prepared_proc_counts_its_two_descriptors() {
-    let ordinary = creates()[2].clone();
-    let old = create(&ordinary).unwrap();
+    let ordinary = Create {
+        config: true,
+        ..creates()[2].clone()
+    };
+    let old = create(&Create {
+        dev_mount: Some(4),
+        ..ordinary.clone()
+    })
+    .unwrap();
     for way in [MountNamespace::Copy, MountNamespace::FromTree] {
         let with_proc = Create {
             proc_mount: Some(3),
@@ -636,11 +847,9 @@ fn a_create_carrying_a_prepared_proc_counts_its_two_descriptors() {
             ..ordinary.clone()
         };
         let bytes = create(&with_proc).unwrap();
-        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
-        assert_eq!(
-            &bytes[old.len()..],
-            &[1, 4, 0, 0, 0, 1, 3, 0, 0, 0, way.code(), 0]
-        );
+        assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 7);
+        assert_eq!(&bytes[8..old.len()], &old[8..]);
+        assert_eq!(&bytes[old.len()..], &[1, 3, 0, 0, 0, way.code(), 0]);
         assert_eq!(with_proc.fds(), ordinary.fds() + 1 + PROC_FDS);
         assert_eq!(
             read_message(&bytes, bytes.len(), with_proc.fds()).unwrap(),
@@ -667,15 +876,19 @@ fn a_create_carrying_a_prepared_proc_counts_its_two_descriptors() {
 /// that isn't pruned refused.
 #[test]
 fn a_create_carrying_the_masked_directory_source_counts_its_descriptor() {
-    let ordinary = creates()[2].clone();
+    let ordinary = Create {
+        config: true,
+        ..creates()[2].clone()
+    };
     let old = create(&ordinary).unwrap();
     let with = Create {
         masked_directory: true,
         ..ordinary.clone()
     };
     let bytes = create(&with).unwrap();
-    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 4);
-    assert_eq!(&bytes[old.len()..], &[0, 0, 0, 1]);
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), 7);
+    assert_eq!(&bytes[8..old.len()], &old[8..]);
+    assert_eq!(&bytes[old.len()..], &[0, 0, 1]);
     assert_eq!(with.fds(), ordinary.fds() + 1);
     assert_eq!(
         read_message(&bytes, bytes.len(), with.fds()).unwrap(),
@@ -696,4 +909,37 @@ fn a_create_carrying_the_masked_directory_source_counts_its_descriptor() {
     })
     .unwrap();
     assert!(read_create(&unpruned, unpruned.len()).is_err());
+}
+
+/// HEX-SEED-4 (decision 8, "The p99.9 that stayed"; AC-T7.1.3): a park reads back as written, with its two
+/// descriptors and no other count; its bytes are the ones recorded here (append-only: kind 8, after goal 6's 7);
+/// every truncation of it and a byte past its end are refused by type.
+#[test]
+fn a_park_reads_back_as_written_and_its_bytes_are_recorded() {
+    // CLONE_NEWNS | CLONE_NEWPID, the namespaces an owner's box on the pruned path makes fresh.
+    let want = Park { flags: 0x2002_0000 };
+    let bytes = park(&want).unwrap();
+    assert_eq!(hex(&bytes), "48455853020008000000022000000000");
+    assert_eq!(
+        read_message(&bytes, bytes.len(), PARK_FDS).unwrap(),
+        Message::Park(want)
+    );
+    for got in [0, 1, 3] {
+        assert!(
+            matches!(
+                read_message(&bytes, bytes.len(), got),
+                Err(Fault::Descriptors { .. })
+            ),
+            "a park with {got} descriptors"
+        );
+    }
+    for n in 0..bytes.len() {
+        assert!(
+            read_message(&bytes[..n], n, PARK_FDS).is_err(),
+            "{n} bytes read"
+        );
+    }
+    let mut long = bytes.clone();
+    long.push(0);
+    assert!(read_message(&long, long.len(), PARK_FDS).is_err());
 }

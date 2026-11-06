@@ -23,12 +23,13 @@ use rustix::pipe::PipeFlags;
 use rustix::process::PidfdFlags;
 
 use crate::linux::cgroup::{BoxCgroup, CGROUP_ROOT, write_file};
-use crate::linux::oci::init;
+use crate::linux::oci::checked;
 use crate::linux::oci::programs::{self, Programs};
 use crate::linux::oci::resources::{self, Insn, Plan};
 use crate::linux::oci::spec::{IdMapping, Resources, Spec};
 use crate::linux::oci::state::{self, Dir, State, Status};
 use crate::linux::oci::{OciError, devshare, sys};
+use crate::linux::oci::{hooks, init};
 
 /// The controllers a container's cgroup gets, beyond those its resources need, where its parent has
 /// them: what Hex's boxes get ([`hex_core::cgroup::CONTROLLERS`]), so a container's memory, CPU, IO
@@ -91,6 +92,9 @@ struct Making<'a> {
     bundle: &'a Path,
     dir: &'a Dir,
     pid_file: Option<&'a Path>,
+    /// The `config.json` bytes the runtime parsed and checked, sealed ([`checked::seal`]): what the shim or a
+    /// seed makes the container from, never a later read of the bundle (AC-T7.1.1).
+    config: BorrowedFd<'a>,
 }
 
 /// The network namespaces a node agent makes ahead (decision 4's pool), which a create asks once it
@@ -135,6 +139,19 @@ pub trait DevMounts {
     fn masked_directory(&self) -> Option<BorrowedFd<'_>>;
 }
 
+/// The ipc and uts namespaces a node agent makes ahead (goal 5 extended, step 4), which a create routed to a
+/// pruned seed asks for.
+pub trait IpcUtsAhead {
+    /// A pair made ahead, now the container's: the caller keeps no copy. `None` when there is none to give, and
+    /// the init's clone makes them.
+    fn take(&self) -> Result<Option<super::ipcuts::Pair>, OciError>;
+
+    /// A container that makes either namespace but can't take a pair: its user namespace isn't this process's
+    /// and a namespace belongs to its maker's (user_namespaces(7)), or it makes one of the two alone, or its
+    /// create has no room for the descriptors. Its clone, or its shim, makes them on the path.
+    fn on_path(&self) -> Result<(), OciError>;
+}
+
 /// What a node agent holds ready for its creates: the network namespaces it makes ahead (decision 4's
 /// pool), asked once the spec is read, and the device programs it keeps loaded, one per policy
 /// ([`Programs::attach`]; goal 5 extended, step 1). A create given neither makes its container's
@@ -144,6 +161,17 @@ pub struct Held<'a> {
     pub networks: Option<&'a dyn Networks>,
     pub devices: Option<&'a Programs>,
     pub dev_mounts: Option<&'a dyn DevMounts>,
+    pub ipc_uts: Option<&'a dyn IpcUtsAhead>,
+}
+
+/// What a seed's create may take from the node once it knows its route.
+struct SeedPools<'a> {
+    dev_mounts: Option<&'a dyn DevMounts>,
+    ipc_uts: Option<&'a dyn IpcUtsAhead>,
+    /// The init parked in a handed-on cgroup, and the caller that chose it, told what the init was made with
+    /// (decision 8, "The p99.9 that stayed").
+    parked: Option<Parked>,
+    chooser: Option<&'a dyn Choose>,
 }
 
 /// How a create makes its container: where its cgroup comes from, the network namespaces made ahead it
@@ -153,6 +181,7 @@ struct Route<'a> {
     networks: Option<&'a dyn Networks>,
     devices: Option<&'a Programs>,
     dev_mounts: Option<&'a dyn DevMounts>,
+    ipc_uts: Option<&'a dyn IpcUtsAhead>,
     start: Start<'a>,
 }
 
@@ -198,6 +227,11 @@ pub trait CloneInit {
     /// writes). Returns the init's pid in this process's pid namespace and a pidfd for it, the caller's to
     /// own.
     fn clone_init(&self, req: CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
+
+    /// Hands the create `req` to the init `parked` in its cgroup (decision 8, "The p99.9 that stayed"), in place
+    /// of a clone: the same message a seed takes, on the init's own socket. Returns its pid and pidfd as
+    /// [`CloneInit::clone_init`] does, or the refusal, after which the parked init is gone and `req` unused.
+    fn claim(&self, parked: Parked, req: &CloneReq<'_>) -> Result<(i32, OwnedFd), OciError>;
 
     /// Whether this node's create seeds prune their mount namespace (goal 5 plan step 2): true on a root
     /// node, so a pruned-eligible container takes the pruned root path (no `pivot_root`) and the rest go
@@ -275,6 +309,9 @@ pub struct CloneReq<'a> {
     pub network: Option<OwnedFd>,
     pub sync_w: OwnedFd,
     pub map_r: OwnedFd,
+    /// The spec the runtime checked, sealed ([`checked::seal`]), which the seed makes the container from in place
+    /// of reading the bundle (AC-T7.1.1).
+    pub config: BorrowedFd<'a>,
     /// On the pruned root path (goal 5 plan step 2): the bundle, cgroup and state directories as
     /// descriptors and the rootfs and bind-source trees the runtime cloned in its own mount namespace,
     /// which the seed hands the init to build the root from. `None` on the classic seed path (a rootless
@@ -296,8 +333,14 @@ pub struct PrunedCreate {
     /// How the init's mount namespace is made: asked of the seed, which answers how it was.
     pub mount_namespace: super::mntns::MountNamespace,
     pub dev_mount: Option<PreparedDev>,
+    /// An ipc and uts pair made ahead, which the init joins in place of its clone making them (goal 5 extended,
+    /// step 4).
+    pub ipc_uts: Option<super::ipcuts::Pair>,
     /// A proc made ahead, its index in the mount plan (decision 6's update, part 2).
     pub proc_mount: Option<(u32, init::PreparedProc)>,
+    /// Where `proc_mount` goes unattached when it is the one made for the init parked in the cgroup (decision 8,
+    /// parked procs): set only then, so only a claim of that init takes it.
+    pub proc_sink: Option<ProcSink>,
     /// The node's empty read-only tmpfs, which the init clones for each masked directory.
     pub masked_directory: Option<OwnedFd>,
     pub binds: Vec<OwnedFd>,
@@ -360,6 +403,19 @@ fn duplicate(fd: BorrowedFd<'_>) -> Result<OwnedFd, OciError> {
     rustix::io::fcntl_dupfd_cloexec(fd, 0).map_err(|e| OciError::os("duplicating a descriptor", e))
 }
 
+/// An init parked in the create's cgroup, if any, and the caller that chose the cgroup (decision 8, "The p99.9
+/// that stayed"). Dropped unused, the parked init is ended ([`Parked`]).
+struct Parking<'a> {
+    parked: Option<Parked>,
+    chooser: Option<&'a dyn Choose>,
+}
+
+/// Who starts a seed create's init: the node's create seeds, or the init parked in its cgroup ([`Parking`]).
+struct Via<'a> {
+    seeds: &'a dyn CloneInit,
+    parking: Parking<'a>,
+}
+
 /// Where a container's cgroup comes from.
 enum Cgroup<'a> {
     /// Made from the spec's `cgroupsPath` under the cgroup root (the command line).
@@ -381,6 +437,20 @@ pub struct Wants<'a> {
     /// Whether its process could change its own cgroup or what is attached to it
     /// ([`Spec::could_change_its_cgroup`]), so the cgroup it leaves can't be handed on.
     pub privileged: bool,
+    /// The spec's prepared-proc key ([`super::procmount::eligible`]), `None` where no proc made ahead can serve it:
+    /// what the init parked for the owner's next box has its proc made for (decision 8, parked procs).
+    pub proc_key: Option<&'a super::procmount::Key>,
+}
+
+/// What came of the proc made for the init parked in a create's cgroup (decision 8, parked procs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedProc {
+    /// The claimed init attached it, mounting no proc of its own.
+    Hit,
+    /// It ended unused (another key, no room for it, the claim refused): the init mounted its own.
+    Miss,
+    /// The claimed init had none, for a create one could have served: it mounted its own.
+    Dry,
 }
 
 /// A cgroup a caller chose for a container: made or handed on, its bounds in force either way, and
@@ -390,6 +460,8 @@ pub struct Wants<'a> {
 pub struct Chosen {
     pub cgroup: BoxCgroup,
     pub attached: bool,
+    /// An init made ahead in the cgroup, waiting to be claimed (decision 8, "The p99.9 that stayed").
+    pub parked: Option<Parked>,
 }
 
 /// A caller that chooses a container's cgroup once its spec is read: the node agent, over the idle
@@ -397,6 +469,218 @@ pub struct Chosen {
 /// provided one is.
 pub trait Choose {
     fn choose(&self, wants: &Wants<'_>) -> Result<Chosen, OciError>;
+
+    /// The container's init was made with the namespaces `flags` (`clone3`'s `CLONE_NEW*` bits), by a claim of
+    /// the init parked in its cgroup when `claimed`, else by a clone: what the caller parks for the owner's next
+    /// box, and counts.
+    fn init_made(&self, flags: u64, claimed: bool);
+
+    /// What came of the proc made for the init parked in the cgroup (decision 8, parked procs): counted.
+    fn parked_proc(&self, outcome: ParkedProc);
+}
+
+/// An init made ahead in an idle cgroup (decision 8, "The p99.9 that stayed"): its pid in this process's pid
+/// namespace, its pidfd, this end of the socket its claim goes on, and the namespaces it was made with. One
+/// that isn't claimed is ended and reaped when dropped, so none is left running or a zombie.
+pub struct Parked {
+    held: Option<(i32, OwnedFd, OwnedFd)>,
+    pub flags: u64,
+    /// The proc made for this init's own pid namespace and its key (decision 8, parked procs), held by the node alone
+    /// until a claim with the key takes it; it ends with the init otherwise.
+    proc: Option<(super::procmount::Key, init::PreparedProc, ProcSink)>,
+}
+
+/// Where a parked init's proc goes when no init attaches it (decision 8, parked procs): a thread of the node's, by a
+/// queue of a bound the node sets. A detached tree's last close unmounts it and its masks, which takes the host's
+/// `namespace_sem` for write and then waits for an expedited RCU grace period (`namespace_unlock`, v6.19
+/// `fs/namespace.c:1680-1721`; the wait at `:1715`), so that is never a create's to pay. Past the bound the tree is
+/// dropped where it is, counted.
+#[derive(Clone, Debug)]
+pub struct ProcSink {
+    queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+    queued: std::sync::Arc<AtomicU64>,
+    inline: std::sync::Arc<AtomicU64>,
+    alive: std::sync::Arc<AtomicU64>,
+}
+
+impl ProcSink {
+    /// A sink onto `queue`, counting in `queued` each tree handed to it and in `inline` each dropped where it was,
+    /// its queue full or closed; `alive` counts the node's procs not yet dropped, which one dropped here leaves.
+    pub fn new(
+        queue: std::sync::mpsc::SyncSender<init::PreparedProc>,
+        queued: std::sync::Arc<AtomicU64>,
+        inline: std::sync::Arc<AtomicU64>,
+        alive: std::sync::Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            queue,
+            queued,
+            inline,
+            alive,
+        }
+    }
+
+    /// `proc`, unattached, handed to the node's thread to drop.
+    pub fn discard(&self, proc: init::PreparedProc) {
+        match self.queue.try_send(proc) {
+            Ok(()) => {
+                self.queued.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(
+                std::sync::mpsc::TrySendError::Full(proc)
+                | std::sync::mpsc::TrySendError::Disconnected(proc),
+            ) => {
+                self.inline.fetch_add(1, Ordering::Relaxed);
+                drop(proc);
+                let _ = self
+                    .alive
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                        Some(n.saturating_sub(1))
+                    });
+            }
+        }
+    }
+}
+
+/// A create's proc taken from the init parked in its cgroup goes back to the node's dropper if the create ends before
+/// its claim hands it over: never dropped, and unmounted, on the create's thread (decision 8, parked procs).
+impl Drop for PrunedCreate {
+    fn drop(&mut self) {
+        if let (Some(sink), Some((_, proc))) = (self.proc_sink.take(), self.proc_mount.take()) {
+            sink.discard(proc);
+        }
+    }
+}
+
+impl std::fmt::Debug for Parked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Parked")
+            .field("pid", &self.pid())
+            .field("flags", &self.flags)
+            .field("proc", &self.proc.as_ref().map(|(k, ..)| k))
+            .finish()
+    }
+}
+
+impl Parked {
+    pub fn new(pid: i32, pidfd: OwnedFd, socket: OwnedFd, flags: u64) -> Self {
+        Self {
+            held: Some((pid, pidfd, socket)),
+            flags,
+            proc: None,
+        }
+    }
+
+    /// The init's own pid namespace, opened by its pid in this process's `/proc` and then held to the init by its
+    /// pidfd (decision 8, parked procs: the lead's 14:37Z, no new `unsafe`). Opened first, polled second: a pidfd
+    /// reads ready once its process has exited or been reaped (v6.19 `fs/pidfs.c:261-265`; pidfd_open(2)), and a
+    /// process doesn't come back, so one that reads not ready after the open was running at the open, and its pid
+    /// (a running process's, never reused, the init being this process's child) named it. One that reads ready is
+    /// refused, whoever reaped it.
+    pub fn pid_namespace(&self) -> Result<OwnedFd, OciError> {
+        let Some((pid, pidfd, _)) = &self.held else {
+            return Err(OciError::Broken("a parked init no longer held".to_owned()));
+        };
+        let ns = rustix::fs::open(
+            format!("/proc/{pid}/ns/pid").as_str(),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|e| OciError::os("opening a parked init's pid namespace", e))?;
+        let mut fds = [rustix::event::PollFd::new(
+            pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        let now = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let ended = rustix::event::poll(&mut fds, Some(&now))
+            .map_err(|e| OciError::os("asking whether a parked init runs", e))?;
+        if ended != 0 {
+            return Err(OciError::Broken(
+                "a parked init ended before its pid namespace was opened".to_owned(),
+            ));
+        }
+        Ok(ns)
+    }
+
+    /// The proc made for this init's pid namespace, for `key`, held with it until a claim takes it; `sink` drops it
+    /// if none does.
+    pub fn set_proc(
+        &mut self,
+        key: super::procmount::Key,
+        proc: init::PreparedProc,
+        sink: ProcSink,
+    ) {
+        self.proc = Some((key, proc, sink));
+    }
+
+    /// The key this init's proc was made for, if one was.
+    pub fn proc_key(&self) -> Option<&super::procmount::Key> {
+        self.proc.as_ref().map(|(k, ..)| k)
+    }
+
+    /// This init's proc, the caller's from here: taken once, so no second init is ever handed it.
+    pub fn take_proc(&mut self) -> Option<(super::procmount::Key, init::PreparedProc, ProcSink)> {
+        self.proc.take()
+    }
+
+    /// The init's pid, if it is still held.
+    pub fn pid(&self) -> Option<i32> {
+        self.held.as_ref().map(|h| h.0)
+    }
+
+    /// Waits up to `patience` for the init to say on its socket that it is parked: its effective capabilities
+    /// emptied, waiting for its claim (`seed::parked`).
+    pub fn wait_parked(&self, patience: std::time::Duration) -> Result<(), OciError> {
+        let Some((_, _, socket)) = &self.held else {
+            return Err(OciError::Broken("a parked init no longer held".to_owned()));
+        };
+        let mut fds = [rustix::event::PollFd::new(
+            socket,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: i64::try_from(patience.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: patience.subsec_nanos().into(),
+        };
+        let ready = rustix::event::poll(&mut fds, Some(&timeout))
+            .map_err(|e| OciError::os("waiting for an init to park", e))?;
+        if ready == 0 {
+            return Err(OciError::Broken(format!(
+                "an init didn't say it was parked within {patience:?}"
+            )));
+        }
+        match super::seed::recv_answer(socket.as_fd())? {
+            (hex_core::seed::Answer::Started { .. }, Some(_)) => Ok(()),
+            _ => Err(OciError::Broken(
+                "an init said something other than that it was parked".to_owned(),
+            )),
+        }
+    }
+
+    /// The init's pid, pidfd and claim socket, the caller's from here.
+    pub fn take(mut self) -> Option<(i32, OwnedFd, OwnedFd)> {
+        self.held.take()
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        if let Some((_, pidfd, socket)) = self.held.take() {
+            drop(socket);
+            let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+            let _ = rustix::process::waitid(
+                rustix::process::WaitId::PidFd(pidfd.as_fd()),
+                rustix::process::WaitIdOptions::EXITED,
+            );
+        }
+        // Its proc, if no create took it, goes to the node's thread to drop ([`ProcSink`]).
+        if let Some((_, proc, sink)) = self.proc.take() {
+            sink.discard(proc);
+        }
+    }
 }
 
 impl Runtime {
@@ -446,9 +730,17 @@ impl Runtime {
         PathBuf::from("/run/hex-oci")
     }
 
+    /// Container `id`'s directory: in its shard of the root, unless a runtime before the shards left it in the
+    /// root itself and it isn't in its shard (goal 5 extended, step 6), so a create is refused over one made
+    /// before an upgrade as over one made after it.
     fn dir(&self, id: &str) -> Result<Dir, OciError> {
         check_id(id)?;
-        Ok(Dir::new(&self.root, id))
+        let dir = Dir::new(&self.root, id);
+        if dir.path().exists() {
+            return Ok(dir);
+        }
+        let before = Dir::unsharded(&self.root, id);
+        Ok(if before.exists() { before } else { dir })
     }
 
     /// Makes the container (OCI `create`): sets up its directory and the init blocked at the exec
@@ -471,6 +763,7 @@ impl Runtime {
                 networks: None,
                 devices: None,
                 dev_mounts: None,
+                ipc_uts: None,
                 start: Start::Shim,
             },
         )
@@ -503,6 +796,7 @@ impl Runtime {
                 networks: held.networks,
                 devices: held.devices,
                 dev_mounts: held.dev_mounts,
+                ipc_uts: held.ipc_uts,
                 start: Start::Shim,
             },
         )
@@ -535,6 +829,7 @@ impl Runtime {
                 networks: held.networks,
                 devices: held.devices,
                 dev_mounts: held.dev_mounts,
+                ipc_uts: held.ipc_uts,
                 start: Start::Seed(seeds),
             },
         )
@@ -561,6 +856,7 @@ impl Runtime {
                 networks: held.networks,
                 devices: held.devices,
                 dev_mounts: held.dev_mounts,
+                ipc_uts: held.ipc_uts,
                 start: Start::Seed(seeds),
             },
         )
@@ -595,6 +891,7 @@ impl Runtime {
             networks,
             devices,
             dev_mounts,
+            ipc_uts,
             start,
         } = route;
         let config = std::fs::read(bundle.join("config.json"))
@@ -617,6 +914,13 @@ impl Runtime {
             }
             pools => pools,
         };
+        // Kept with the container's state, so its execs and its start's and delete's hooks take this spec too,
+        // never the bundle as it is by then (checked::spec_of).
+        checked::keep(dir.path(), &config)?;
+        // The bytes just parsed and checked, sealed, so whatever starts the init makes the container from this
+        // spec and never reads the bundle again: a config.json swapped after this read is never the container's
+        // (AC-T7.1.1).
+        let config = checked::seal(&config)?;
         // A spec without resources still gets the default device policy, as runc's does. crun's attaches
         // no device program to a spec without devices (cgroup-resources.c, update_cgroup_v2_resources);
         // Hex keeps the guarantee and shares one program per policy (devshare): a node's oci boxes' root
@@ -631,6 +935,8 @@ impl Runtime {
         // A caller-provided cgroup is already made and bounded, so only the spec's device program is
         // attached to it; one made from the spec takes the whole plan (its resource writes and device
         // program). The provided cgroup is the caller's to remove, so a failure here leaves it.
+        let mut parked = None;
+        let mut chosen_by: Option<&dyn Choose> = None;
         let (cgroup, caller_owns) = match cgroup {
             Cgroup::FromSpec => (make_cgroup(&spec, id, &plan, &self.root)?, false),
             Cgroup::Provided(cg) => {
@@ -650,15 +956,22 @@ impl Runtime {
                     )
                 })?;
                 let program = held.wants(&plan, spec.in_user_namespace())?;
+                let proc_key = super::mount::plan(&spec.mounts)
+                    .ok()
+                    .and_then(|mounts| super::procmount::eligible(&spec, &mounts).ok())
+                    .map(|(_, key)| key);
                 let chosen = chooser.choose(&Wants {
                     program: program.as_deref(),
                     privileged: spec.could_change_its_cgroup(),
+                    proc_key: proc_key.as_ref(),
                 })?;
                 if let Some(insns) = program
                     && !chosen.attached
                 {
                     held.attach_program(&chosen.cgroup, insns)?;
                 }
+                parked = chosen.parked;
+                chosen_by = Some(chooser);
                 (chosen.cgroup, true)
             }
         };
@@ -667,24 +980,37 @@ impl Runtime {
             bundle,
             dir,
             pid_file,
+            config: config.as_fd(),
         };
         // Asked last, just before the init that joins it, so a create refused before it takes none.
         let result = network_for(&spec, networks).and_then(|network| match start {
-            Start::Shim => self.start_shim(
+            Start::Shim => ipc_uts_on_path(&spec, ipc_uts).and_then(|()| {
+                self.start_shim(
+                    &making,
+                    &spec,
+                    &cgroup,
+                    Ahead {
+                        network,
+                        dev: None,
+                        masked_directory: shim_masked_directory(&spec, dev_mounts)?,
+                    },
+                    ShimStdio::Inherited,
+                    &Command::spawn,
+                )
+            }),
+            Start::Seed(seeds) => self.start_seeded(
                 &making,
                 &spec,
                 &cgroup,
-                Ahead {
-                    network,
-                    dev: None,
-                    masked_directory: shim_masked_directory(&spec, dev_mounts)?,
+                network,
+                seeds,
+                SeedPools {
+                    dev_mounts,
+                    ipc_uts,
+                    parked,
+                    chooser: chosen_by,
                 },
-                ShimStdio::Inherited,
-                &Command::spawn,
             ),
-            Start::Seed(seeds) => {
-                self.start_seeded(&making, &spec, &cgroup, network, seeds, dev_mounts)
-            }
         });
         if result.is_err() && !caller_owns {
             // A create that fails leaves no cgroup behind either: whatever ran in it is killed first.
@@ -708,6 +1034,7 @@ impl Runtime {
             bundle,
             dir,
             pid_file: _,
+            config,
         } = *making;
         let Ahead {
             network,
@@ -732,7 +1059,11 @@ impl Runtime {
             .env(init::ENV_MAP_R, by_path(&map_r))
             .env(init::ENV_DIR, dir.path())
             .env(init::ENV_BUNDLE, bundle)
-            .env(init::ENV_CGROUP, cgroup.dir());
+            .env(init::ENV_CGROUP, cgroup.dir())
+            .env(
+                init::ENV_CONFIG,
+                format!("/proc/{}/fd/{}", std::process::id(), config.as_raw_fd()),
+            );
         if let Some(network) = &network {
             cmd.env(init::ENV_NETWORK, by_path(network));
         }
@@ -769,7 +1100,7 @@ impl Runtime {
 
         let mut container_pid = None;
         let outcome = self
-            .handshake(id, spec, sync_r, map_w, &mut container_pid)
+            .handshake(making, spec, sync_r, map_w, &mut container_pid)
             .and_then(|pid| {
                 // The container is blocked at the exec FIFO, so its start time is its own.
                 let start_time = state::start_time(pid).ok_or_else(|| {
@@ -815,10 +1146,20 @@ impl Runtime {
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
         seeds: &dyn CloneInit,
-        dev_mounts: Option<&dyn DevMounts>,
+        pools: SeedPools<'_>,
     ) -> Result<State, OciError> {
+        let SeedPools {
+            dev_mounts,
+            ipc_uts,
+            parked,
+            chooser,
+        } = pools;
+        let mut parking = Parking { parked, chooser };
         if init::needs_shim(spec) {
+            // A parked init is ended before the shim's is cloned beside it in the cgroup.
+            drop(parking);
             seeds.classic(ClassicReason::NamespaceByPath);
+            ipc_uts_on_path(spec, ipc_uts)?;
             let dev = shim_dev(spec, dev_mounts)?;
             return self.start_shim(
                 making,
@@ -848,6 +1189,7 @@ impl Runtime {
                                     hex_core::seed::CREATE_FDS
                                         + 1
                                         + hex_core::seed::PRUNED_FIXED_FDS
+                                        + hex_core::seed::CONFIG_FDS
                                         + 1,
                                 )
                             })
@@ -864,7 +1206,18 @@ impl Runtime {
                                 Err(reason) => pool.unpooled(reason)?,
                             }
                         }
-                        // A proc made ahead adds its pid namespace and its tree, within the same bound.
+                        // A proc made ahead adds its pid namespace and its tree, within the same bound. None is
+                        // taken from the pool where an init is parked in the cgroup, whatever the way: the parked
+                        // init, which has its pid namespace already, takes the create (decision 8), and a pool's
+                        // proc would keep it from doing so: a create takes one or the other, never both. The proc made for that init's own pid
+                        // namespace, if the node made one (parked procs), is the create's when its key is the
+                        // spec's and it fits; otherwise it ends unused, a miss, and the init mounts its own.
+                        let parked_takes = parking.parked.is_some();
+                        let parked_proc = if parked_takes {
+                            parking.parked.as_mut().and_then(Parked::take_proc)
+                        } else {
+                            None
+                        };
                         let room = pruned
                             .binds
                             .len()
@@ -874,12 +1227,35 @@ impl Runtime {
                                     hex_core::seed::CREATE_FDS
                                         + 1
                                         + hex_core::seed::PRUNED_FIXED_FDS
+                                        + hex_core::seed::CONFIG_FDS
                                         + hex_core::seed::PROC_FDS,
                                 )
                             })
                             .and_then(|n| n.checked_add(usize::from(pruned.dev_mount.is_some())))
                             .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS);
-                        if !room {
+                        if parked_takes {
+                            let eligible = super::procmount::eligible(spec, &plan).ok();
+                            let outcome = match (parked_proc, eligible) {
+                                (Some((made, proc, sink)), Some((mount, key)))
+                                    if room && made == key =>
+                                {
+                                    pruned.proc_mount = Some((mount, proc));
+                                    pruned.proc_sink = Some(sink);
+                                    // Counted once the claim is known (start_via_seed).
+                                    None
+                                }
+                                (None, Some(_)) if room => Some(ParkedProc::Dry),
+                                // None made, for a create none could serve: neither.
+                                (None, _) => None,
+                                (Some((_, proc, sink)), _) => {
+                                    sink.discard(proc);
+                                    Some(ParkedProc::Miss)
+                                }
+                            };
+                            if let (Some(outcome), Some(chooser)) = (outcome, parking.chooser) {
+                                chooser.parked_proc(outcome);
+                            }
+                        } else if !room {
                             pool.unpooled_proc(hex_core::devfs::Unpooled::Capacity)?;
                         } else {
                             match super::procmount::eligible(spec, &plan) {
@@ -902,6 +1278,7 @@ impl Runtime {
                                     hex_core::seed::CREATE_FDS
                                         + 1
                                         + hex_core::seed::PRUNED_FIXED_FDS
+                                        + hex_core::seed::CONFIG_FDS
                                         + 1,
                                 )
                             })
@@ -918,10 +1295,31 @@ impl Runtime {
                             pruned.masked_directory = Some(duplicate(empty)?);
                         }
                     }
-                    self.start_via_seed(making, spec, cgroup, network, seeds, Some(pruned))
+                    // Asked last, as a network namespace is, so a create routed elsewhere takes none.
+                    // A count past usize reads as no room.
+                    let ahead = usize::from(pruned.dev_mount.is_some())
+                        .checked_add(if pruned.proc_mount.is_some() {
+                            hex_core::seed::PROC_FDS
+                        } else {
+                            0
+                        })
+                        .and_then(|n| n.checked_add(usize::from(pruned.masked_directory.is_some())))
+                        .unwrap_or(usize::MAX);
+                    let fits = pair_fits(pruned.binds.len(), pruned.path_joins.len(), ahead);
+                    pruned.ipc_uts = ipc_uts_for(spec, ipc_uts, fits)?;
+                    self.start_via_seed(
+                        making,
+                        spec,
+                        cgroup,
+                        network,
+                        Some(pruned),
+                        Via { seeds, parking },
+                    )
                 }
                 Err(reason) => {
+                    drop(parking);
                     seeds.classic(reason);
+                    ipc_uts_on_path(spec, ipc_uts)?;
                     let dev = shim_dev(spec, dev_mounts)?;
                     self.start_shim(
                         making,
@@ -939,7 +1337,8 @@ impl Runtime {
             }
         } else {
             seeds.classic(ClassicReason::Rootless);
-            self.start_via_seed(making, spec, cgroup, network, seeds, None)
+            ipc_uts_on_path(spec, ipc_uts)?;
+            self.start_via_seed(making, spec, cgroup, network, None, Via { seeds, parking })
         }
     }
 
@@ -984,10 +1383,9 @@ impl Runtime {
         if spec.makes_namespace("user") {
             return Err(ClassicReason::UserNamespace);
         }
-        if !spec.hooks.prestart.is_empty()
-            || !spec.hooks.create_runtime.is_empty()
-            || !spec.hooks.create_container.is_empty()
-        {
+        // Create-time hooks stop the init before its root switch, and the init runs createContainer and
+        // startContainer itself, over the map pipe the pruned init doesn't hold.
+        if spec.hooks.sync_init() {
             return Err(ClassicReason::Hooks);
         }
         let plan =
@@ -1092,12 +1490,14 @@ impl Runtime {
         let cgroup_dir = open_cgroup_dir(cgroup.dir()).map_err(|_| ClassicReason::Source)?;
         let container_dir = open_dir(making.dir.path()).map_err(|_| ClassicReason::Source)?;
         Ok(PrunedCreate {
+            proc_sink: None,
             bundle_dir,
             cgroup_dir,
             container_dir,
             rootfs,
             mount_namespace: way,
             dev_mount: None,
+            ipc_uts: None,
             proc_mount: None,
             masked_directory: None,
             binds,
@@ -1119,9 +1519,10 @@ impl Runtime {
         spec: &Spec,
         cgroup: &BoxCgroup,
         network: Option<OwnedFd>,
-        seeds: &dyn CloneInit,
         pruned: Option<PrunedCreate>,
+        via: Via<'_>,
     ) -> Result<State, OciError> {
+        let Via { seeds, parking } = via;
         // Two pipes, close-on-exec: the init writes the sync pipe, the runtime writes the map pipe. The
         // seed hands the init's ends over `SCM_RIGHTS`, so they never need their close-on-exec cleared;
         // they close in the init only when it execs the container's program.
@@ -1129,19 +1530,81 @@ impl Runtime {
             || rustix::pipe::pipe_with(PipeFlags::CLOEXEC).map_err(|e| OciError::os("pipe", e));
         let (sync_r, sync_w) = pipe()?;
         let (map_r, map_w) = pipe()?;
-        let (pid, pidfd) = seeds.clone_init(CloneReq {
+        // The namespaces the init is made in, as the seed works them out (`seed::serve_create`): a parked init
+        // made with these takes the create, in place of a clone into the cgroup and its wait for the host-wide
+        // `cgroup_mutex` (decision 8, "The p99.9 that stayed"); one made with others is ended, never used.
+        let flags = init::fresh_clone_flags(
+            spec,
+            network.is_some(),
+            pruned.as_ref().is_some_and(|p| p.ipc_uts.is_some()),
+        );
+        let mut req = CloneReq {
             bundle: making.bundle,
             dir: making.dir.path(),
             cgroup,
             network,
             sync_w,
             map_r,
+            config: making.config,
             pruned,
-        })?;
+        };
+        let Parking { parked, chooser } = parking;
+        // A parked init was cloned with its own pid namespace: it can't take a create that carries a pool's proc
+        // made ahead (whose pid namespace the init would be cloned into), so such a create is cloned fresh and the
+        // parked init ended. The proc made for the parked init's own pid namespace is the one it takes.
+        let takes_parked = req
+            .pruned
+            .as_ref()
+            .is_none_or(|p| p.proc_mount.is_none() || p.proc_sink.is_some());
+        // Its mount namespace's way changes the flags it is cloned with, so a parked init is made, and held, to the
+        // way's (decision 6's update, decision 8).
+        let way = req
+            .pruned
+            .as_ref()
+            .map_or(super::mntns::MountNamespace::Copy, |p| p.mount_namespace);
+        let made_with = super::mntns::clone_flags(flags, way);
+        let claimed = match parked {
+            Some(p) if p.flags == made_with && takes_parked => seeds.claim(p, &req).ok(),
+            _ => None,
+        };
+        // A parked init's proc shows that init's pid namespace, so a create its init didn't take mounts its own:
+        // the proc goes unused, to the node's thread to drop, as the init it was made for has ended.
+        if let Some(p) = req.pruned.as_mut()
+            && let Some(sink) = &p.proc_sink
+        {
+            if claimed.is_none()
+                && let Some((_, proc)) = p.proc_mount.take()
+            {
+                sink.discard(proc);
+            }
+            // Claimed, the init holds its own copies of the tree: these close as any descriptor, unmounting nothing.
+            if claimed.is_some() {
+                p.proc_sink = None;
+            }
+            if let Some(chooser) = chooser {
+                chooser.parked_proc(if claimed.is_some() {
+                    ParkedProc::Hit
+                } else {
+                    ParkedProc::Miss
+                });
+            }
+        }
+        if let Some(chooser) = chooser {
+            chooser.init_made(made_with, claimed.is_some());
+        }
+        let (pid, pidfd) = match claimed {
+            Some(started) => {
+                // The init holds its ends of the pipes now; the runtime's copies go, as a seed's do once it has
+                // cloned, so the sync pipe reads its end when the init does.
+                drop(req);
+                started
+            }
+            None => seeds.clone_init(req)?,
+        };
         // The runtime holds the read end of sync and the write end of map; the seed closed its copies of
         // the init's ends once it had cloned, so the init alone holds them now.
         let outcome = self
-            .handshake_seed(&sync_r, &map_w, pid, spec)
+            .handshake_seed(making, &sync_r, &map_w, pid, spec)
             .and_then(|()| {
                 // The init is blocked at the exec FIFO, so its start time is its own.
                 state::start_time(pid).ok_or_else(|| {
@@ -1162,9 +1625,8 @@ impl Runtime {
         }
     }
 
-    /// Writes the `created` state for a container whose init is at the exec FIFO, its pid file (if asked)
-    /// and its create-time hooks: the tail both the shim and the seed paths share. Returns the state as
-    /// written.
+    /// Writes the `created` state for a container whose init is at the exec FIFO, and its pid file (if
+    /// asked): the tail both the shim and the seed paths share. Returns the state as written.
     fn record_created(
         &self,
         making: &Making<'_>,
@@ -1181,24 +1643,29 @@ impl Runtime {
         state.cgroup = Some(cgroup.dir().to_string_lossy().into_owned());
         state.poststart = Some(!spec.hooks.poststart.is_empty());
         state.pid_namespace = Some(spec.makes_namespace("pid"));
+        if !spec.hooks.start_container.is_empty() {
+            state.start_container = Some(hooks::budget(
+                "startContainer",
+                &spec.hooks.start_container,
+            )?);
+        }
         making.dir.put(&state)?;
         if let Some(path) = making.pid_file {
             std::fs::write(path, format!("{pid}\n"))
                 .map_err(|e| OciError::os("writing the pid file", e))?;
         }
-        // The create-time hooks run in the runtime's namespace while the container waits at the exec
-        // FIFO (OCI §Lifecycle): prestart (deprecated) then createRuntime.
-        run_hooks(&spec.hooks.prestart, &state)?;
-        run_hooks(&spec.hooks.create_runtime, &state)?;
+        // The create-time hooks ran while the init waited before its root switch ([`answer_hooks`]).
         Ok(state)
     }
 
     /// The sync handshake for a create through a seed: the init writes the sync pipe, as the shim's child
     /// does, but its pid came back from the seed, so the protocol carries no pid line. A `U` asks for the
     /// user namespace's maps, which the runtime writes against `pid` (the init's) and acks on the map
-    /// pipe; `R` is the ready signal; `E` a setup failure. Returns once the init is ready, or the error.
+    /// pipe; `H` stops the init before its root switch for the create-time hooks ([`answer_hooks`]); `R`
+    /// is the ready signal; `E` a setup failure. Returns once the init is ready, or the error.
     fn handshake_seed(
         &self,
+        making: &Making<'_>,
         sync_r: &OwnedFd,
         map_w: &OwnedFd,
         pid: i32,
@@ -1214,6 +1681,7 @@ impl Runtime {
                 .try_clone()
                 .map_err(|e| OciError::os("duplicating the map pipe", e))?,
         );
+        let mut hooked = false;
         let mut line = String::new();
         loop {
             line.clear();
@@ -1233,6 +1701,11 @@ impl Runtime {
                         .write_all(&[1])
                         .map_err(|e| OciError::os("acking the maps", e))?;
                 }
+                Some('H') => {
+                    answer_hooks(making, spec, pid, &mut map_w)?;
+                    hooked = true;
+                }
+                Some('R') if spec.hooks.sync_init() && !hooked => return Err(unhooked(making.id)),
                 Some('R') => return Ok(()),
                 Some('E') => {
                     return Err(OciError::Os {
@@ -1246,12 +1719,13 @@ impl Runtime {
         }
     }
 
-    /// Reads the sync pipe: writes the user-namespace maps when asked, then returns the container
-    /// pid once the init has sent both it and its ready signal. `container_pid` holds the pid as
+    /// Reads the sync pipe: writes the user-namespace maps when asked, runs the create-time hooks when
+    /// the init stops for them ([`answer_hooks`]), then returns the container pid once the init has sent
+    /// both it and its ready signal. `container_pid` holds the pid as
     /// soon as it is known, so a create that fails can still end the container.
     fn handshake(
         &self,
-        id: &str,
+        making: &Making<'_>,
         spec: &Spec,
         sync_r: OwnedFd,
         map_w: OwnedFd,
@@ -1261,12 +1735,16 @@ impl Runtime {
         let mut map_w = std::fs::File::from(map_w);
         read_sync(
             &mut reader,
-            id,
-            |pid| {
-                write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
-                map_w
-                    .write_all(&[1])
-                    .map_err(|e| OciError::os("acking the maps", e))
+            making.id,
+            spec.hooks.sync_init(),
+            |ask| match ask {
+                Ask::Maps(pid) => {
+                    write_id_maps(pid, &spec.linux.uid_mappings, &spec.linux.gid_mappings)?;
+                    map_w
+                        .write_all(&[1])
+                        .map_err(|e| OciError::os("acking the maps", e))
+                }
+                Ask::Hooks(pid) => answer_hooks(making, spec, pid, &mut map_w),
             },
             container_pid,
         )
@@ -1286,6 +1764,28 @@ impl Runtime {
     pub fn start_with(&self, id: &str, init: Option<OwnedFd>) -> Result<(), OciError> {
         let dir = self.dir(id)?;
         let state = dir.get(id)?;
+        // A container with startContainer hooks is marked as starting while the start waits for them, so a
+        // node agent that stops meanwhile leaves its restart a fact to remove the box by
+        // ([`state::start_interrupted`]); the mark goes when the start returns, however it ends.
+        if state.start_container.is_none() {
+            return self.take_start(id, &dir, state, init);
+        }
+        let begun = dir.path().join(hooks::START_BEGUN);
+        std::fs::File::create(&begun).map_err(|e| OciError::os("marking the start begun", e))?;
+        let started = self.take_start(id, &dir, state, init);
+        let unmarked =
+            std::fs::remove_file(&begun).map_err(|e| OciError::os("unmarking the start", e));
+        started.and(unmarked)
+    }
+
+    /// The start itself: [`Runtime::start_with`]'s, the FIFO opened, its byte waited for and the FIFO removed.
+    fn take_start(
+        &self,
+        id: &str,
+        dir: &Dir,
+        state: State,
+        init: Option<OwnedFd>,
+    ) -> Result<(), OciError> {
         if !matches!(state.status, Status::Created | Status::Running) {
             return Err(OciError::WrongState(
                 id.to_owned(),
@@ -1317,14 +1817,26 @@ impl Runtime {
         // The init writes one byte as it takes the start. An init that ended without it (killed, or
         // OOM'd, before or after it opened its end) is stopped, not running: refused, never reported
         // running (CLAUDE.md §3); the FIFO stays, and the init's end says stopped.
-        match wait_for_byte(&fifo, &init, START_PATIENCE)? {
+        // The init runs its startContainer hooks before it writes, so the start waits for them too, as
+        // long as they may take, saturating where that is past what a Duration holds.
+        let patience = state.start_container.map_or(START_PATIENCE, |secs| {
+            START_PATIENCE.saturating_add(Duration::from_secs(secs))
+        });
+        match wait_for_byte(&fifo, &init, patience)? {
             Took::Byte => {}
             Took::End => return Err(stopped()),
             Took::Nothing => {
                 return Err(OciError::Broken(format!(
-                    "container {id} did not take the start within {START_PATIENCE:?}"
+                    "container {id} did not take the start within {patience:?}"
                 )));
             }
+        }
+        // A startContainer hook that failed wrote why in place of the byte, and its init ends: the start
+        // fails, naming it (runtime.md:69-70). Read without taking it, as another start may be waiting.
+        if state.start_container.is_some()
+            && let Some(why) = hooks::peek_start(fifo.as_fd())?
+        {
+            return Err(OciError::Os { op: "start", why });
         }
         // From here the FIFO's absence is what says the container runs. Of two starts at once, both
         // see the byte, and the one whose removal finds the FIFO gone finds the container running.
@@ -1338,11 +1850,11 @@ impl Runtime {
         // poststart hooks run after the workload has started (OCI §Lifecycle), with the state they see as
         // running; the config is read only when create found hooks there (or state from before it looked).
         if state.poststart != Some(false)
-            && let Some(hooks) = load_hooks(&state)
+            && let Some(hooks) = load_hooks(dir.path(), &state)?
         {
             let mut running = state;
             running.status = Status::Running;
-            run_hooks(&hooks.poststart, &running)?;
+            hooks::run("poststart hook", &hooks.poststart, &running)?;
         }
         Ok(())
     }
@@ -1360,7 +1872,8 @@ impl Runtime {
         user: Option<(u32, Option<u32>)>,
         seam: bool,
     ) -> Result<Command, OciError> {
-        let state = self.dir(id)?.get(id)?;
+        let dir = self.dir(id)?;
+        let state = dir.get(id)?;
         if !matches!(state.status, Status::Created | Status::Running) {
             return Err(OciError::WrongState(
                 id.to_owned(),
@@ -1387,6 +1900,7 @@ impl Runtime {
             env,
             user,
             seam,
+            dir: Some(dir.path().to_string_lossy().into_owned()),
         };
         let json = serde_json::to_string(&request)
             .map_err(|e| OciError::Broken(format!("the exec request: {e}")))?;
@@ -1468,10 +1982,10 @@ impl Runtime {
             }
         }
         // poststop hooks run after the container is stopped, before its directory is removed.
-        if let Some(hooks) = load_hooks(&state) {
+        if let Some(hooks) = load_hooks(dir.path(), &state)? {
             let mut stopped = state.clone();
             stopped.status = Status::Stopped;
-            run_hooks(&hooks.poststop, &stopped)?;
+            hooks::run("poststop hook", &hooks.poststop, &stopped)?;
         }
         dir.remove()
     }
@@ -1897,13 +2411,26 @@ fn signal_cgroup(cg: &BoxCgroup, sig: i32) -> Result<(), OciError> {
 fn read_sync(
     reader: &mut impl BufRead,
     id: &str,
-    mut on_map: impl FnMut(i32) -> Result<(), OciError>,
+    hooks: bool,
+    mut on: impl FnMut(Ask) -> Result<(), OciError>,
     container_pid: &mut Option<i32>,
 ) -> Result<i32, OciError> {
     let mut ready = false;
+    // The shim's `P` and its child's `H` race on the pipe, so the hooks wait for the pid either way.
+    let (mut asked, mut answered) = (false, false);
     let mut line = String::new();
     loop {
+        if asked
+            && !answered
+            && let Some(pid) = *container_pid
+        {
+            on(Ask::Hooks(pid))?;
+            answered = true;
+        }
         if ready && let Some(pid) = *container_pid {
+            if hooks && !answered {
+                return Err(unhooked(id));
+            }
             return Ok(pid);
         }
         line.clear();
@@ -1929,8 +2456,9 @@ fn read_sync(
                 let pid: i32 = rest
                     .parse()
                     .map_err(|_| OciError::Broken(format!("bad map request {msg:?}")))?;
-                on_map(pid)?;
+                on(Ask::Maps(pid))?;
             }
+            Some('H') => asked = true,
             Some('P') => {
                 *container_pid = Some(
                     rest.parse()
@@ -1950,96 +2478,53 @@ fn read_sync(
     }
 }
 
-/// The hooks from a container's bundle (`state.bundle/config.json`); `None` when the config can no
-/// longer be read (the bundle is gone), so `delete`/`start` still proceed.
-fn load_hooks(state: &State) -> Option<crate::linux::oci::spec::Hooks> {
-    let bytes = std::fs::read(Path::new(&state.bundle).join("config.json")).ok()?;
-    Spec::parse(&bytes).ok().map(|s| s.hooks)
+/// What the init asks of the runtime on the sync pipe, with the pid the runtime knows it by.
+enum Ask {
+    /// A user namespace's id maps (`U`).
+    Maps(i32),
+    /// The create-time hooks (`H`), the init stopped before its root switch.
+    Hooks(i32),
 }
 
-/// Runs each hook in order with the container state JSON on its stdin (OCI §POSIX hooks); a hook
-/// that exits non-zero, or outlives its timeout (default [`HOOK_TIMEOUT`]), is an error.
-fn run_hooks(hooks: &[crate::linux::oci::spec::Hook], state: &State) -> Result<(), OciError> {
-    if hooks.is_empty() {
-        return Ok(());
-    }
-    let json = serde_json::to_vec(state)
-        .map_err(|e| OciError::Broken(format!("encoding state for a hook: {e}")))?;
-    for hook in hooks {
-        run_one_hook(hook, &json)?;
-    }
-    Ok(())
+/// The init's `H`: it stops before its root switch, its mounts made, for the runtime to run the prestart
+/// then the createRuntime hooks in the runtime's namespace, given `created` (lifecycle steps 3 and 4 come
+/// after step 2, runtime.md:20, :62-65; crun's and runtime-tools' reading) and the init's pid as the
+/// runtime sees it (config.md:598, :607-610; runtime.md:26). Then the init is handed that state, for the
+/// createContainer hooks it runs before the switch and the startContainer hooks it runs at `start`, each
+/// given the pid the container sees (runtime.md:27; docs/research/runtime/oci-hooks.md). A hook that fails
+/// fails the create, which ends the init.
+fn answer_hooks(
+    making: &Making<'_>,
+    spec: &Spec,
+    pid: i32,
+    map_w: &mut impl Write,
+) -> Result<(), OciError> {
+    let mut state = State::new(making.id, &making.bundle.to_string_lossy());
+    state.status = Status::Created;
+    state.pid = pid;
+    state.annotations = spec.annotations.clone();
+    hooks::run("prestart hook", &spec.hooks.prestart, &state)?;
+    hooks::run("createRuntime hook", &spec.hooks.create_runtime, &state)?;
+    hooks::send_state(map_w, &state)
 }
 
-/// Longest a hook may run when it names no timeout; a bound so a stuck hook can't wedge the runtime.
-pub const HOOK_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn run_one_hook(hook: &crate::linux::oci::spec::Hook, state_json: &[u8]) -> Result<(), OciError> {
-    use std::io::Write as _;
-    use std::os::unix::process::CommandExt as _;
-    let mut cmd = Command::new(&hook.path);
-    if let Some(argv0) = hook.args.first() {
-        cmd.arg0(argv0);
-        cmd.args(hook.args.get(1..).unwrap_or_default());
-    }
-    cmd.env_clear();
-    for entry in &hook.env {
-        if let Some((k, v)) = entry.split_once('=') {
-            cmd.env(k, v);
-        }
-    }
-    cmd.stdin(std::process::Stdio::piped());
-    crate::linux::sys::sweep_on_exec(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| OciError::os("starting a hook", e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(state_json);
-    }
-    let timeout = hook
-        .timeout
-        .and_then(|t| u64::try_from(t).ok())
-        .map(Duration::from_secs)
-        .unwrap_or(HOOK_TIMEOUT);
-    match wait_timeout(&mut child, timeout)? {
-        Some(status) if status.success() => Ok(()),
-        Some(status) => Err(OciError::Os {
-            op: "hook",
-            why: format!("{:?} exited {status}", hook.path),
-        }),
-        None => {
-            let _ = child.kill();
-            Err(OciError::Os {
-                op: "hook",
-                why: format!("{:?} outlived its {timeout:?} timeout", hook.path),
-            })
-        }
-    }
+/// An init that said it was ready without stopping for the create-time hooks its spec names: refused,
+/// never a create whose hooks didn't run (CLAUDE.md §3).
+fn unhooked(id: &str) -> OciError {
+    OciError::Broken(format!(
+        "the container init for {id} was ready without stopping for its create-time hooks"
+    ))
 }
 
-/// Waits at most `timeout` for `child`; `Ok(None)` when it is still running (a reaper thread then
-/// collects it after the kill).
-fn wait_timeout(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> Result<Option<std::process::ExitStatus>, OciError> {
-    let deadline = std::time::Instant::now().checked_add(timeout);
-    loop {
-        match child
-            .try_wait()
-            .map_err(|e| OciError::os("waiting for a hook", e))?
-        {
-            Some(status) => return Ok(Some(status)),
-            None => {
-                let past = deadline.is_none_or(|d| std::time::Instant::now() >= d);
-                if past {
-                    return Ok(None);
-                }
-                // park_timeout (not the disallowed thread::sleep) yields the CPU between polls.
-                std::thread::park_timeout(Duration::from_millis(5));
-            }
-        }
-    }
+/// The hooks of container `dir` (its state directory): from the spec its create checked and kept, never its
+/// bundle as it is now, since the agent runs them on the host (AC-T7.1.1). A container made before its spec was
+/// kept has its bundle's spec checked again ([`checked::spec_of`]); one the checks refuse refuses the start or the
+/// delete by type, and `None` only where there is no spec at all (its bundle gone), so `delete`/`start` proceed.
+fn load_hooks(
+    dir: &Path,
+    state: &State,
+) -> Result<Option<crate::linux::oci::spec::Hooks>, OciError> {
+    Ok(checked::spec_of(Some(dir), Path::new(&state.bundle))?.map(|s| s.hooks))
 }
 
 /// Makes the exec FIFO, world-writable so a container that has dropped to a non-root user (or a
@@ -2141,6 +2626,51 @@ fn first_word(sync_r: &OwnedFd, shim: &std::process::Child) -> Result<(), OciErr
     }
 }
 
+/// Whether a pruned create with `binds` trees, `path_joins` namespaces joined by path and `ahead` descriptors made
+/// ahead (a prepared `/dev`, a prepared proc's two, the masked directories' source) has room for a pair under
+/// `SCM_MAX_FD`, as those are held to it, leaving the older limits as they were: a create with no room makes its
+/// namespaces in its clone, counted.
+fn pair_fits(binds: usize, path_joins: usize, ahead: usize) -> bool {
+    const FIXED: usize = hex_core::seed::CREATE_FDS
+        + 1
+        + hex_core::seed::PRUNED_FIXED_FDS
+        + hex_core::seed::CONFIG_FDS
+        + hex_core::seed::IPC_UTS_FDS;
+    binds
+        .checked_add(path_joins)
+        .and_then(|n| n.checked_add(FIXED))
+        .and_then(|n| n.checked_add(ahead))
+        .is_some_and(|n| n <= hex_core::seed::MAX_REQUEST_FDS)
+}
+
+/// The ipc and uts pair a pruned create takes (goal 5 extended, step 4): taken for a container that makes both
+/// namespaces, when its create has room (`fits`); counted as made on the path for one that makes one of the two or
+/// has no room, whose clone makes them; and nothing asked for one that makes neither.
+fn ipc_uts_for(
+    spec: &Spec,
+    pool: Option<&dyn IpcUtsAhead>,
+    fits: bool,
+) -> Result<Option<super::ipcuts::Pair>, OciError> {
+    let Some(pool) = pool else {
+        return Ok(None);
+    };
+    match (spec.makes_namespace("ipc"), spec.makes_namespace("uts")) {
+        (false, false) => Ok(None),
+        (true, true) if fits => pool.take(),
+        _ => pool.on_path().map(|()| None),
+    }
+}
+
+/// Counts a container routed where no pair goes, through the shim or a rootless node's seed, that makes either
+/// namespace: as a container in a user namespace of its own must be, since a namespace belongs to its maker's user
+/// namespace, and `setns` into a pair the node made would be refused it (`ipc/namespace.c:233-244`).
+fn ipc_uts_on_path(spec: &Spec, pool: Option<&dyn IpcUtsAhead>) -> Result<(), OciError> {
+    match pool {
+        Some(pool) if spec.makes_namespace("ipc") || spec.makes_namespace("uts") => pool.on_path(),
+        _ => Ok(()),
+    }
+}
+
 /// Writes a user namespace's uid and gid maps for process `pid` (OCI `uidMappings`/`gidMappings`).
 /// `setgroups` is denied before the gid map, as the kernel requires when mapping without privilege.
 fn write_id_maps(pid: i32, uids: &[IdMapping], gids: &[IdMapping]) -> Result<(), OciError> {
@@ -2178,6 +2708,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::linux::oci::state::shard;
 
     // Hostile input (CLAUDE.md §6): a container id is a directory name under the state root, so one
     // that could name another place is refused before anything is touched; `delete ../../x` would
@@ -2220,18 +2751,55 @@ mod tests {
     }
 
     fn read(wire: &str) -> (Result<i32, OciError>, Option<i32>, Vec<i32>) {
-        let mut maps = Vec::new();
+        let (got, pid, maps, _) = read_hooked(wire, false);
+        (got, pid, maps)
+    }
+
+    /// `read`, for a spec with create-time hooks when `hooks` is set: also the pids the hooks were asked
+    /// for, in order.
+    fn read_hooked(
+        wire: &str,
+        hooks: bool,
+    ) -> (Result<i32, OciError>, Option<i32>, Vec<i32>, Vec<i32>) {
+        let (mut maps, mut hooked) = (Vec::new(), Vec::new());
         let mut pid = None;
         let got = read_sync(
             &mut Cursor::new(wire.as_bytes()),
             "c1",
-            |p| {
-                maps.push(p);
+            hooks,
+            |ask| {
+                match ask {
+                    Ask::Maps(p) => maps.push(p),
+                    Ask::Hooks(p) => hooked.push(p),
+                }
                 Ok(())
             },
             &mut pid,
         );
-        (got, pid, maps)
+        (got, pid, maps, hooked)
+    }
+
+    /// The create-time hooks (AC-T7.1.4; config.md:607, :619): the shim's child stops for them before
+    /// its root switch, and its `H` and the shim's `P` race on the pipe. Do: read each order. Expect: the
+    /// hooks run once, with the pid, whichever came first, before the ready signal is taken.
+    #[test]
+    fn the_hooks_run_once_with_the_pid_whichever_line_comes_first() {
+        for wire in ["H\nP42\nR\n", "P42\nH\nR\n"] {
+            let (got, _, _, hooked) = read_hooked(wire, true);
+            assert_eq!((got.unwrap(), hooked), (42, vec![42]), "{wire:?}");
+        }
+    }
+
+    /// CLAUDE.md §3: a create whose spec names create-time hooks is never reported made without them. Do:
+    /// an init that says it's ready without stopping for them. Expect: the create refused, by type.
+    #[test]
+    fn an_init_ready_without_stopping_for_its_hooks_is_refused() {
+        let (got, _, _, hooked) = read_hooked("P42\nR\n", true);
+        assert!(
+            matches!(&got, Err(OciError::Broken(why)) if why.contains("create-time hooks")),
+            "{got:?}"
+        );
+        assert!(hooked.is_empty());
     }
 
     #[test]
@@ -2576,6 +3144,34 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
     /// (this process's own stands in for it). Expect: none of the stand-in's descriptors is a network
     /// namespace, the path it was handed names the namespace, and the agent's descriptor is
     /// close-on-exec while the stand-in runs.
+    /// Goal 5 extended step 6, lever 3 (T-T7.1.2): a root a runtime before the shards kept containers in, each
+    /// directly under it, is read as it is by today's, which makes its own in the root's shards. Do: leave a
+    /// container's state at `<root>/old` as the runtime before the shards wrote it; then read its state, and
+    /// place a new container `new`. Expect: `old`'s state read from where it is, its directory that one, and
+    /// `new`'s directory in its shard; once `old`'s is gone, `old` is placed in its shard too.
+    #[test]
+    fn a_container_kept_in_the_root_itself_is_read_there_and_new_ones_go_to_their_shards() {
+        let lab = tempfile::tempdir().unwrap();
+        let rt = Runtime::new(lab.path().to_path_buf());
+        let before = Dir::unsharded(lab.path(), "old");
+        before.create("old").unwrap();
+        let mut st = State::new("old", "/bundle");
+        st.status = Status::Created;
+        st.pid = 4321;
+        before.put(&st).unwrap();
+        assert_eq!(rt.state("old").unwrap().pid, 4321);
+        assert_eq!(rt.dir("old").unwrap().path(), lab.path().join("old"));
+        assert_eq!(
+            rt.dir("new").unwrap().path(),
+            lab.path().join(shard("new")).join("new")
+        );
+        before.remove().unwrap();
+        assert_eq!(
+            rt.dir("old").unwrap().path(),
+            lab.path().join(shard("old")).join("old")
+        );
+    }
+
     #[test]
     fn a_namespace_made_ahead_reaches_the_shim_by_path_and_no_process_inherits_it() {
         let lab = tempfile::tempdir().unwrap();
@@ -2595,11 +3191,13 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         )
         .unwrap();
         let named = std::fs::read_link("/proc/self/ns/net").unwrap();
+        let checked = checked::seal(b"{}").unwrap();
         let making = Making {
             id: "c1",
             bundle: lab.path(),
             dir: &dir,
             pid_file: None,
+            config: checked.as_fd(),
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         assert!(
@@ -2627,6 +3225,84 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         assert_ne!(flags & 0o2_000_000, 0, "O_CLOEXEC in {report}");
     }
 
+    /// The kernel rule [`stand_in_at`] works around (execve(2), ETXTBSY; AC-T7.1.4, CLAUDE.md §4). Do: write a
+    /// stand-in, have another process open it to write and keep it open, run the stand-in; then end that process and
+    /// run it again. Expect: refused with "Text file busy" while the other process holds it open to write, and run
+    /// once none does. A process another test forks while this one's descriptor is open holds it the same way until
+    /// its exec, which is how the namespace test failed when it wrote its stand-in itself (unit
+    /// hex-native-s7-gates-20261105T110236Z).
+    #[test]
+    fn a_file_another_process_holds_open_to_write_is_refused_to_run() {
+        use std::io::BufRead as _;
+
+        let lab = tempfile::tempdir().unwrap();
+        let path = lab.path().join("stand-in");
+        stand_in_at(&path, "#!/bin/sh\nexit 0\n");
+        let mut holder = Command::new("sh")
+            .args(["-c", "exec 3>>\"$0\" && echo ready && exec sleep 30"])
+            .arg(&path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(
+            ready.trim(),
+            "ready",
+            "the holder opened the stand-in to write"
+        );
+        let busy = Command::new(&path).status();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert_eq!(
+            busy.as_ref().err().and_then(std::io::Error::raw_os_error),
+            Some(libc::ETXTBSY),
+            "refused while another process holds it open to write: {busy:?}"
+        );
+        assert!(Command::new(&path).status().unwrap().success());
+    }
+
+    /// [`stand_in_at`] under the overlap that flaked (AC-T7.1.4, CLAUDE.md §4). Do: while another thread starts
+    /// processes without pause, as the other tests do, write a stand-in through [`stand_in_at`] and run it, 200
+    /// times. Expect: every one runs, none refused "Text file busy", and the other thread started processes
+    /// meanwhile (so the overlap was there to meet).
+    #[test]
+    fn a_stand_in_written_by_a_child_runs_while_other_threads_start_processes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+
+        let lab = tempfile::tempdir().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(AtomicU32::new(0));
+        let spawner = {
+            let (stop, started) = (Arc::clone(&stop), Arc::clone(&started));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = Command::new("true").status();
+                    started.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        let mut refused = Vec::new();
+        for i in 0..200 {
+            let path = lab.path().join(format!("stand-in-{i}"));
+            stand_in_at(&path, "#!/bin/sh\nexit 0\n");
+            match Command::new(&path).status() {
+                Ok(status) => assert!(status.success(), "stand-in {i}: {status}"),
+                Err(e) => refused.push((i, e)),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert!(refused.is_empty(), "stand-ins refused: {refused:?}");
+        assert!(
+            started.load(Ordering::Relaxed) > 0,
+            "the other thread started processes meanwhile"
+        );
+    }
+
     /// A process another of the agent's threads starts while a create starts its shim (another create's
     /// shim, an exec'd program, a hook) inherits none of the create's descriptors: the shim's pipes stay
     /// close-on-exec in the agent (CVE-2024-21626's class: runc v1.5.2 `libcontainer/container_linux.go:341-349`).
@@ -2641,11 +3317,13 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         let dir = rt.dir("c1").unwrap();
         dir.create("c1").unwrap();
         let spec = Spec::parse(br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"}}"#).unwrap();
+        let checked = checked::seal(b"{}").unwrap();
         let making = Making {
             id: "c1",
             bundle: lab.path(),
             dir: &dir,
             pid_file: None,
+            config: checked.as_fd(),
         };
         let cgroup = BoxCgroup::at(lab.path().to_owned());
         // What the bystander holds is read, and it is ended, inside the spawn: a pipe it inherited would
@@ -2722,7 +3400,7 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
             env: Vec::new(),
             timeout: None,
         };
-        run_hooks(&[hook], &State::new("c1", "/bundle")).unwrap();
+        hooks::run("a hook", &[hook], &State::new("c1", "/bundle")).unwrap();
         let held = std::fs::read_to_string(&report).unwrap();
         assert!(held.lines().count() >= 3, "its stdio: {held}");
         assert!(!held.contains("stray"), "the hook inherited it: {held}");
@@ -2785,6 +3463,99 @@ sed -n 's/^flags:[[:space:]]*/flags /p' "$(echo "$HEX_OCI_NETWORK" | sed 's#/fd/
         Err(OciError::Broken(
             "the network-namespace pool is shut down".to_owned(),
         ))
+    }
+
+    /// A pool of pairs as a create meets it, recording what it's asked.
+    struct Pairs {
+        takes: std::cell::Cell<u32>,
+        on_paths: std::cell::Cell<u32>,
+        dry: bool,
+    }
+
+    impl Pairs {
+        fn new(dry: bool) -> Self {
+            Self {
+                takes: std::cell::Cell::new(0),
+                on_paths: std::cell::Cell::new(0),
+                dry,
+            }
+        }
+
+        fn asked(&self) -> (u32, u32) {
+            (self.takes.get(), self.on_paths.get())
+        }
+    }
+
+    impl IpcUtsAhead for Pairs {
+        fn take(&self) -> Result<Option<crate::linux::oci::ipcuts::Pair>, OciError> {
+            self.takes.set(self.takes.get() + 1);
+            if self.dry {
+                return Ok(None);
+            }
+            crate::linux::oci::ipcuts::Pair::of_this_thread().map(Some)
+        }
+
+        fn on_path(&self) -> Result<(), OciError> {
+            self.on_paths.set(self.on_paths.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// HEX-IPCUTS-8 (goal 5 extended, step 4). Do: ask for each kind of container, on the pruned route and off it.
+    /// Expect: one that makes both takes a pair, or none from a dry pool; one that makes one of the two, or has no
+    /// room, is counted on the path; one that makes neither asks nothing; off the route, one in a user namespace of
+    /// its own, or any that makes either, is counted on the path and takes none.
+    #[test]
+    fn a_pair_goes_only_to_a_pruned_create_that_makes_both_and_has_room() {
+        let both = spec_with(r#"{"type":"pid"},{"type":"ipc"},{"type":"uts"}"#);
+        let pool = Pairs::new(false);
+        assert!(ipc_uts_for(&both, Some(&pool), true).unwrap().is_some());
+        assert_eq!(pool.asked(), (1, 0));
+        assert!(ipc_uts_for(&both, Some(&pool), false).unwrap().is_none());
+        assert_eq!(pool.asked(), (1, 1));
+        let dry = Pairs::new(true);
+        assert!(ipc_uts_for(&both, Some(&dry), true).unwrap().is_none());
+        assert_eq!(dry.asked(), (1, 0));
+        assert!(ipc_uts_for(&both, None, true).unwrap().is_none());
+        for one in [
+            r#"{"type":"ipc"}"#,
+            r#"{"type":"uts"}"#,
+            r#"{"type":"ipc"},{"type":"uts","path":"/proc/1/ns/uts"}"#,
+        ] {
+            let pool = Pairs::new(false);
+            assert!(
+                ipc_uts_for(&spec_with(one), Some(&pool), true)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(pool.asked(), (0, 1), "{one}");
+        }
+        let neither = spec_with(r#"{"type":"pid"},{"type":"mount"}"#);
+        let pool = Pairs::new(false);
+        assert!(ipc_uts_for(&neither, Some(&pool), true).unwrap().is_none());
+        ipc_uts_on_path(&neither, Some(&pool)).unwrap();
+        assert_eq!(pool.asked(), (0, 0));
+        let user = spec_with(r#"{"type":"user"},{"type":"ipc"},{"type":"uts"}"#);
+        ipc_uts_on_path(&user, Some(&pool)).unwrap();
+        assert_eq!(pool.asked(), (0, 1));
+    }
+
+    /// HEX-IPCUTS-8's room: do ask at `SCM_MAX_FD`'s edge; expect the pair to fit up to it and not past it, a prepared
+    /// `/dev` counted.
+    #[test]
+    fn a_pair_fits_up_to_the_most_descriptors_a_create_carries() {
+        use hex_core::seed::{
+            CONFIG_FDS, CREATE_FDS, IPC_UTS_FDS, MAX_REQUEST_FDS, PRUNED_FIXED_FDS,
+        };
+        let most = MAX_REQUEST_FDS - CREATE_FDS - 1 - PRUNED_FIXED_FDS - CONFIG_FDS - IPC_UTS_FDS;
+        assert!(pair_fits(most, 0, 0));
+        assert!(!pair_fits(most + 1, 0, 0));
+        assert!(!pair_fits(most, 0, 1));
+        assert!(pair_fits(most - 4, 3, 1));
+        // A prepared `/dev`, a prepared proc's two and the masked directories' source count alike.
+        assert!(pair_fits(most - 4, 0, 4));
+        assert!(!pair_fits(most - 4, 0, 5));
+        assert!(!pair_fits(usize::MAX, 1, 0));
     }
 
     fn spec_with(namespaces: &str) -> Spec {

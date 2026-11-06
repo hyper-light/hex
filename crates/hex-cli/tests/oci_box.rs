@@ -24,7 +24,9 @@
 //!   box's where it belongs, the boxes whose directories all lie on tmpfs among its runtime directory's
 //!   records and one with its rendered bundle's writable layer on disk in its state directory,
 //!   fsynced; it takes back the live ones and removes the one whose init ended, and leaves nothing once
-//!   they're deleted;
+//!   they're deleted; a delete of a box while a create of the same id is under way leaves the node
+//!   consistent, the create completing and the box then removed, and a second create of a box being made,
+//!   or a delete, waits for the create under way (the follow-on fix, §4);
 //!
 //! Rootless where the caller isn't root, in a delegated cgroup v2 subtree, as oci_seccomp.rs; where
 //! neither is possible it prints SKIP and why rather than pass falsely. The crash runs first, before
@@ -49,14 +51,15 @@ use std::time::{Duration, Instant};
 
 use hex_api::conformance::{self, Act, Fixture};
 use hex_api::{
-    Bounds, BoxId, BoxInfo, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec, Refusal, Rootfs,
-    Runtime,
+    Bounds, BoxId, BoxInfo, BoxOwner, BoxSpec, BoxState, ClassSpec, Exit, Network, OciSpec,
+    Refusal, Rootfs, Runtime,
 };
 use hex_core::record::{BoxRecord, Phase, ProcId};
 use hex_node::{Node, OCI_BOXES, records_dir};
 use hex_runtime::linux::cgroup::BoxRoot;
 use hex_runtime::linux::disks;
 use hex_runtime::linux::oci::run::{ClassicReason, Held, Runtime as OciRuntime};
+use hex_runtime::linux::oci::state::shard;
 
 const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 /// Runs just the prepared-device oracle through the existing root/delegation fixture, in a fresh
@@ -64,6 +67,9 @@ const TEST: &str = "oci_boxes_report_their_inits_exit_through_the_seam";
 const PREPARED_DEV_ENV: &str = "HEX_OCI_BOX_PREPARED_DEV";
 const PREPARED_DEV_PASS: &str = "prepared /dev oracle completed with actual pooled takes";
 const PROPAGATION_ENV: &str = "HEX_OCI_BOX_SHARED_SOURCES";
+/// Set by hand to run HEX-MNTNS-8's case alone, as root: a focused run on a kernel that differs (a guest's lab),
+/// where a refusal's own text is the record.
+const MASKED_DIRS_ENV: &str = "HEX_OCI_BOX_MASKED_DIRS";
 const PROPAGATION_PASS: &str =
     "shared-source propagation oracle completed with four pruned creates";
 /// Both entry points can move the test process between cgroups. Serialize their parent fixtures;
@@ -85,30 +91,62 @@ fn oci_boxes_report_their_inits_exit_through_the_seam() {
     match prepare_cgroup(&cache) {
         Ok(own) => exercise(&own, &cache, &exe),
         Err(direct) if std::env::var_os("HEX_DELEGATED").is_none() => {
-            let has_systemd = Command::new("systemd-run")
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if !has_systemd {
-                eprintln!(
-                    "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user for a private scope"
-                );
-                return;
-            }
-            let status = Command::new("systemd-run")
-                .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes"])
-                .arg(std::env::current_exe().expect("test binary path"))
-                .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
-                .env("HEX_DELEGATED", "1")
-                .status()
-                .expect("run the test in a delegated scope");
-            assert!(status.success(), "the delegated re-run failed");
+            rerun_delegated(TEST, &direct)
         }
         Err(direct) => {
             eprintln!("SKIP: no usable cgroup v2 delegation ({direct}); run on a cgroup-v2 host")
         }
     }
+}
+
+/// How long a delegated re-run may take: it runs this suite once more, each wait of its own already bounded
+/// (conformance's PATIENCE), and the suite took 5.57 s as root and 4.70 s in the gates on fedora at 5e0082e
+/// (hex-g5rec-gates-20261105T113718Z), so past this it is stuck, not slow. As oci_lsm's and oci_seccomp's
+/// (cp/t7-g6-lsm 1cadab7).
+const RERUN_BOUND: Duration = Duration::from_secs(300);
+
+/// Re-runs the test `name` in a transient systemd --user scope with `Delegate=yes`, so it gets a cgroup of its
+/// own to subdivide. Only where a user manager answers (its `$XDG_RUNTIME_DIR/systemd/private` socket is
+/// there): a `systemd-run` binary with no manager running, as in a guest whose PID 1 isn't systemd, would wait
+/// on a manager that never comes. Prints the reason and returns where there's none. The re-run is waited on
+/// for at most [`RERUN_BOUND`], then killed and failed by name.
+fn rerun_delegated(name: &str, direct: &str) {
+    let manager = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|d| Path::new(&d).join("systemd/private"))
+        .is_some_and(|p| p.exists());
+    if !manager {
+        eprintln!(
+            "SKIP: own cgroup isn't ours to subdivide ({direct}) and no systemd --user manager answers for a private scope"
+        );
+        return;
+    }
+    let test_bin = std::env::current_exe().expect("test binary path");
+    let mut child = Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "-p", "Delegate=yes"])
+        .arg(&test_bin)
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env("HEX_DELEGATED", "1")
+        .spawn()
+        .expect("run the test in a delegated scope");
+    // The wait runs on a thread that sends the status when the child ends, so the test waits on that fact
+    // for at most RERUN_BOUND, and a hung re-run is killed by its pid.
+    let pid = child.id();
+    let (sent, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(child.wait());
+    });
+    let status = match ended.recv_timeout(RERUN_BOUND) {
+        Ok(status) => status.expect("wait on the delegated re-run"),
+        Err(_) => {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+            panic!(
+                "the delegated re-run of {name} was still running after {RERUN_BOUND:?}, so it was killed"
+            );
+        }
+    };
+    assert!(status.success(), "the delegated re-run failed");
 }
 
 /// AC-T7.1.4, goal 5 step 3: run the prepared-/dev ordering and isolation oracle independently of
@@ -296,6 +334,7 @@ impl Lab {
     "args": {args},
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {capabilities},
     "noNewPrivileges": true
   }},
   "mounts": [
@@ -309,6 +348,7 @@ impl Lab {
 }}"#,
             rootfs = self.rootfs.display(),
             exe = self.exe,
+            capabilities = capabilities(),
         )
     }
 
@@ -395,6 +435,11 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
         eprintln!("{PREPARED_DEV_PASS}");
         return;
     }
+    if std::env::var_os(MASKED_DIRS_ENV).is_some() {
+        assert!(!lab.rootless, "HEX-MNTNS-8's case needs root");
+        masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
+        return;
+    }
     // First, while this process is no node's and so no subreaper; it also finds out whether a
     // container runs here at all (rootless needs unprivileged user namespaces).
     if let Err(e) = crash_and_restart(&lab, own) {
@@ -414,7 +459,14 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     two_nodes_one_box_id(&lab, own);
     a_box_made_before_the_move_is_adopted(&lab, own);
     a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(&lab, own);
+    a_node_upgraded_over_state_dirs_in_the_one_parent_recovers_both_layouts(&lab, own);
     records_in_both_places_are_found_after_a_restart(&lab, own);
+    a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(&lab, own);
+    a_config_swapped_after_the_check_never_makes_the_container(&lab, own);
+    an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create(&lab, own);
+    a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create(&lab, own);
+    a_create_or_delete_of_a_box_being_made_waits_for_it(&lab, own);
+    a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(&lab, own);
     created_through_a_seed_in_its_cgroup_and_namespaces(&lab, own);
     each_seed_cloned_container_is_randomized_afresh(&lab, own);
     a_seed_that_dies_mid_create_is_refused_and_restarted(&lab, own);
@@ -423,10 +475,15 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     escapes_are_contained(&lab, own);
     mount_namespaces_made_each_way(&lab, own);
     procs_made_ahead_carry_their_masks(&lab, own);
+    a_parked_inits_proc_is_its_own_and_taken_once(&lab, own);
+    a_parked_init_takes_a_create_made_each_way(&lab, own);
     masked_directories_are_the_nodes_one_empty_filesystem(&lab, own);
     create_seeds_share_the_nodes_one_pruned_namespace(&lab, own);
     a_bind_and_a_volume_are_present_the_host_unreachable(&lab, own);
     classic_reasons_are_counted(&lab, own);
+    create_and_start_container_hooks_run_in_the_containers_namespaces(&lab, own);
+    a_failing_create_container_hook_fails_the_create_naming_it(&lab, own);
+    a_failing_start_container_hook_fails_the_start_naming_it(&lab, own);
     an_init_that_refuses_or_dies_mid_build_leaves_nothing(&lab, own);
     rootfs_propagation_shows_in_the_box_not_the_agent(&lab, own);
     every_mount_kind_is_in_the_box_as_its_spec_asks(&lab, own);
@@ -1045,6 +1102,18 @@ fn escapes_held_on(lab: &Lab, node: &Node, tag: &str) {
                 marker.clone(),
             ],
         );
+        // Full capabilities, as the escapes need (E3 masks /proc/kcore with a mount): the lab's bundles
+        // name Docker's default sets (b1c8e99), so this one names none and keeps its creator's.
+        let ClassSpec::Bundle(bundle) = &spec.class else {
+            panic!("lab.running makes a bundle")
+        };
+        let config = std::fs::read_to_string(bundle.join("config.json")).unwrap();
+        let config: String = config
+            .lines()
+            .filter(|l| !l.trim_start().starts_with(r#""capabilities":"#))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        std::fs::write(bundle.join("config.json"), config).unwrap();
         node.create(spec).expect("create the escape box");
         node.start(&id).expect("start the escape box");
         let info = wait_exit(node, &id);
@@ -1193,7 +1262,11 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
         return;
     }
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let node = lab.node(&own.join("hex-oci-procs"), state.path());
+    // No inits parked ahead (decision 8): a parked init has its pid namespace already, so a create that claims one
+    // asks the proc pool nothing, and this case is the pool's own.
+    let node = lab
+        .node(&own.join("hex-oci-procs"), state.path())
+        .with_inits_ahead(0);
     let paths = r#","maskedPaths":["/proc/kcore","/proc/keys","/proc/timer_list","/proc/acpi","/proc/scsi","/proc/not-there"],"readonlyPaths":["/proc/sys","/proc/sysrq-trigger","/proc/bus"]"#;
     let dir = tempfile::Builder::new()
         .prefix("bundle-")
@@ -1314,6 +1387,513 @@ fn procs_made_ahead_carry_their_masks(lab: &Lab, own: &Path) {
     );
 }
 
+/// Decision 8, parked procs (AC-T7.1.3; T-T7.1.4): on a root node made with parked procs and one cgroup made ahead
+/// for boxes of no owner, procs made ahead off, so the only procs the node holds are its parked inits'. Do: create
+/// and delete N0, which mounts no proc, so the init parked next has none; create N1 with key K: expect it to claim
+/// that init, counted dry. Delete N1, whose spec masks and makes read-only paths beneath `/proc` (key K), so the init parked next has a
+/// proc made for K. Create N2 with K. Expect: before N2, the node alone holds that proc (this process has one proc
+/// root open, the parked init none); N2's init is the parked one, its `/proc` that proc's superblock, which the
+/// node holds no more; in N2 `/proc/self` is the reader's own pid and pid 1 the box's init; its mounts beneath
+/// `/proc` exactly K's, the read-only ones read-only; one hit counted. Then delete N2 (the next park's proc made for
+/// K; its slot removed with it) and create N3 with another key, K2. Expect: N3's init the parked one, claimed, but its
+/// `/proc` its own, its mounts exactly K2's, which K's tree doesn't carry; one miss counted. Then delete N3 and release the idle cgroups:
+/// expect no proc held and no proc root open in this process, the parked init ended. Each proc no init attached (N3's
+/// miss, the last one released) is dropped by the node's dropper thread, never on a create's: its unmount waits on
+/// the host's `namespace_sem` and an RCU grace period. None failed to be made.
+fn a_parked_inits_proc_is_its_own_and_taken_once(lab: &Lab, own: &Path) {
+    if lab.rootless {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab
+        .node(&own.join("hex-oci-parkproc"), state.path())
+        .with_prepared_procs(false)
+        .unwrap()
+        .with_inits_ahead(1)
+        .with_parked_procs(true)
+        .unwrap();
+    let k = (
+        &[
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/timer_list",
+            "/proc/acpi",
+            "/proc/not-there",
+        ][..],
+        &["/proc/sys", "/proc/sysrq-trigger", "/proc/bus"][..],
+    );
+    let k2 = (&["/proc/kcore", "/proc/keys"][..], &["/proc/sys"][..]);
+    let bundle = |(masked, readonly): (&[&str], &[&str])| {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let paths = format!(r#","maskedPaths":{masked:?},"readonlyPaths":{readonly:?}"#);
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(
+                &Lab::act(&Act::Wait),
+                r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+                "",
+                "",
+                "",
+                &paths,
+            ),
+        )
+        .unwrap();
+        dir
+    };
+    let (with_k, with_k2) = (bundle(k), bundle(k2));
+    // A box with no proc of its own: no proc made ahead can serve it.
+    let no_proc = {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = lab.config_ex(
+            &Lab::act(&Act::Wait),
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            "",
+            "",
+            "",
+            "",
+        );
+        let proc_mount = r#"{"destination": "/proc", "type": "proc", "source": "proc"},"#;
+        assert!(config.contains(proc_mount));
+        std::fs::write(dir.join("config.json"), config.replace(proc_mount, "")).unwrap();
+        dir
+    };
+    let create = |id: &BoxId, dir: &Path| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir.to_path_buf()),
+            owner: None,
+        })
+        .expect("create a box of no owner with masks beneath /proc");
+    };
+    // The mounts a key's box has beneath `/proc`: each path the kernel makes, read-only where it says so.
+    let expected = |(masked, readonly): (&[&str], &[&str])| -> BTreeSet<String> {
+        masked
+            .iter()
+            .chain(readonly)
+            .filter(|p| Path::new(p).exists())
+            .map(|p| (*p).to_owned())
+            .collect()
+    };
+    // What a box sees beneath its proc, and whether `/proc/self` is the reader (the shell opens it itself, by a
+    // redirection, so it names the shell) and pid 1 its init.
+    let seen = |id: &BoxId| {
+        let (_, mi) = run_in(&node, id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let beneath: BTreeSet<(String, bool)> = mountinfo(&mi)
+            .into_iter()
+            .filter(|(point, ..)| point.starts_with("/proc/"))
+            .map(|(point, opts, ..)| (point, opts.split(',').any(|o| o == "ro")))
+            .collect();
+        let own_pidns = exit_in(
+            &node,
+            id,
+            &[
+                "/usr/bin/sh",
+                "-c",
+                r#"read -r me _ < /proc/self/stat && [ "$me" = "$$" ] && [ "$(cat /proc/1/comm)" = hex ]"#,
+            ],
+        );
+        (beneath, own_pidns)
+    };
+    let check = |which: &str, beneath: &BTreeSet<(String, bool)>, key: (&[&str], &[&str])| {
+        let points: BTreeSet<String> = beneath.iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(
+            points,
+            expected(key),
+            "{which}: its mounts beneath /proc are its key's"
+        );
+        for point in key.1.iter().filter(|p| Path::new(p).exists()) {
+            assert!(
+                beneath.contains(&((*point).to_owned(), true)),
+                "{which}: {point} is read-only: {beneath:?}"
+            );
+        }
+    };
+    let ready = |made: u64| {
+        wait_for(
+            || {
+                let c = node.cgroup_reuse().unwrap();
+                c.ahead.ready == 1 && c.parked.procs_made + c.parked.procs_failed >= made
+            },
+            "an init parked ahead with its proc",
+        );
+    };
+    let me = std::process::id().to_string();
+    let init_of = |id: &BoxId| {
+        let procs =
+            std::fs::read_to_string(node.cgroup_dir(id).unwrap().join("cgroup.procs")).unwrap();
+        procs.lines().next().unwrap().trim().to_owned()
+    };
+    let proc_dev = |pid: &str| {
+        std::fs::metadata(format!("/proc/{pid}/root/proc"))
+            .unwrap()
+            .dev()
+    };
+
+    // N0 has no proc, so the init parked after it has none made; N1, with K, claims it: dry.
+    let n0 = BoxId::new("parkproc-0").unwrap();
+    create(&n0, &no_proc);
+    let root = node
+        .cgroup_dir(&n0)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    node.delete(&n0).unwrap();
+    ready(0);
+    let start = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        start.procs_made, 0,
+        "no proc made for a box with none: {start:?}"
+    );
+    let n1 = BoxId::new("parkproc-1").unwrap();
+    create(&n1, &with_k);
+    let dry = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (dry.claimed, dry.proc_dry, dry.proc_hits, dry.proc_misses),
+        (start.claimed + 1, start.proc_dry + 1, 0, 0),
+        "N1 claimed the parked init, which had no proc for K: {dry:?}"
+    );
+    node.delete(&n1).unwrap();
+    ready(1);
+    let before = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(
+        (before.procs_made, before.procs_failed, before.procs_held),
+        (1, 0, 1),
+        "{before:?}"
+    );
+    // A box of no owner's delete parks nothing: the hex-ahead refill parked this init and made its proc.
+    assert_eq!(
+        (before.procs_made_at_refill, before.procs_made_at_delete),
+        (1, 0),
+        "the refill made it: {before:?}"
+    );
+    let held = held_procs(&me);
+    assert_eq!(
+        held.len(),
+        1,
+        "the node holds the parked init's proc: {held:?}"
+    );
+    let parked = parked_inits(&root);
+    assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
+    assert_eq!(
+        held_procs(&parked[0]),
+        BTreeSet::new(),
+        "the parked init holds no proc of its own before its claim"
+    );
+
+    let n2 = BoxId::new("parkproc-2").unwrap();
+    create(&n2, &with_k);
+    let after = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(init_of(&n2), parked[0], "N2's init is the parked one");
+    assert_eq!(after.claimed, before.claimed + 1, "{after:?}");
+    assert_eq!(
+        after.proc_hits,
+        before.proc_hits + 1,
+        "N2 took the parked proc: {after:?}"
+    );
+    assert_eq!(after.proc_misses, before.proc_misses, "{after:?}");
+    node.start(&n2).unwrap();
+    assert!(
+        held.contains(&proc_dev(&parked[0])),
+        "N2's /proc is the proc made for its parked init"
+    );
+    assert!(
+        !held_procs(&me).iter().any(|d| held.contains(d)),
+        "the node holds that proc no more: it was handed to one init"
+    );
+    let (beneath, own_pidns) = seen(&n2);
+    check("N2", &beneath, k);
+    assert_eq!(
+        own_pidns,
+        Exit::Code(0),
+        "N2's /proc shows its own pid namespace"
+    );
+
+    // N2's create told the refill K; the next init parked ahead has its proc made for K. N2 goes first, its slot
+    // with it, so the only slot left holds the parked init.
+    ready(2);
+    node.delete(&n2).unwrap();
+    let before = node.cgroup_reuse().unwrap().parked;
+    let parked = parked_inits(&root);
+    assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
+    let n3 = BoxId::new("parkproc-3").unwrap();
+    create(&n3, &with_k2);
+    let after = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(init_of(&n3), parked[0], "N3's init is the parked one");
+    assert_eq!(after.claimed, before.claimed + 1, "{after:?}");
+    assert_eq!(
+        after.proc_misses,
+        before.proc_misses + 1,
+        "N3's key isn't K: {after:?}"
+    );
+    assert_eq!(after.proc_hits, before.proc_hits, "{after:?}");
+    // The missed tree goes to the node's dropper, never unmounted on N3's create: queued by the create, dropped by
+    // the dropper, none inline.
+    assert_eq!(
+        (after.procs_queued, after.procs_dropped_inline),
+        (before.procs_queued + 1, before.procs_dropped_inline),
+        "N3's create queued its missed proc: {after:?}"
+    );
+    wait_for(
+        || node.cgroup_reuse().unwrap().parked.procs_dropped == before.procs_dropped + 1,
+        "the missed proc dropped by the node's dropper",
+    );
+    node.start(&n3).unwrap();
+    // N3's /proc is its own, not the one made for K: its mounts are exactly K2's, which K's tree doesn't carry. (Its
+    // `st_dev` says nothing here: a proc's is an anonymous device number, which the kernel hands out again once the
+    // missed tree's superblock is freed.)
+    let (beneath, own_pidns) = seen(&n3);
+    check("N3", &beneath, k2);
+    assert_eq!(
+        own_pidns,
+        Exit::Code(0),
+        "N3's /proc shows its own pid namespace"
+    );
+
+    ready(3);
+    node.delete(&n3).unwrap();
+    let parked = parked_inits(&root);
+    assert_eq!(parked.len(), 1, "one init parked ahead: {parked:?}");
+    let last = rustix::process::pidfd_open(
+        rustix::process::Pid::from_raw(parked[0].parse().unwrap()).unwrap(),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .unwrap();
+    node.release_idle().unwrap();
+    // Every proc no init attached is dropped by the dropper, none where it was.
+    wait_for(
+        || {
+            let c = node.cgroup_reuse().unwrap().parked;
+            c.procs_dropped + c.procs_dropped_inline == c.procs_made - c.proc_hits
+        },
+        "every unattached proc dropped",
+    );
+    let end = node.cgroup_reuse().unwrap().parked;
+    assert_eq!(end.procs_held, 0, "released, no proc is held: {end:?}");
+    assert_eq!(
+        end.procs_dropped_inline, 0,
+        "none dropped on its caller's thread: {end:?}"
+    );
+    assert_eq!(
+        held_procs(&me),
+        BTreeSet::new(),
+        "no proc root is open in the node"
+    );
+    wait_for(
+        || {
+            let mut fds = [rustix::event::PollFd::new(
+                &last,
+                rustix::event::PollFlags::IN,
+            )];
+            let now = rustix::event::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            rustix::event::poll(&mut fds, Some(&now)).unwrap() > 0
+        },
+        "the last parked init to end",
+    );
+    assert_eq!(end.procs_failed, 0, "{end:?}");
+    eprintln!(
+        "parked procs: made {}, hits {}, misses {}, held after release {}",
+        end.procs_made, end.proc_hits, end.proc_misses, end.procs_held
+    );
+}
+
+/// Decision 8, parked procs, on 7.x's ways (AC-T7.1.3; T-T7.1.4): an init parked for a node whose mount namespaces
+/// are made from the tree (Linux 7.0) or empty (7.1) is cloned with that way's flags, so it takes the way's creates,
+/// its proc with it. Do, on a root node of each way the kernel has, with one cgroup made ahead and parked procs on:
+/// create and delete N1 with masks beneath `/proc` (key K), wait for an init parked with its proc, create N2 with K.
+/// Expect: N2's init the parked one, claimed; one hit; one mount namespace made the node's way, counted; in N2 its
+/// mounts beneath `/proc` exactly K's and `/proc/self` the reader. A way the kernel lacks is skipped, said.
+fn a_parked_init_takes_a_create_made_each_way(lab: &Lab, own: &Path) {
+    use hex_runtime::linux::oci::mntns::{self, MountNamespace, OpenTreeNamespace};
+    if lab.rootless {
+        return;
+    }
+    let tree_here = mntns::probe().expect("probe open_tree(OPEN_TREE_NAMESPACE)")
+        == OpenTreeNamespace::Available;
+    let empty_here = kernel_at_least(7, 1);
+    let paths = r#","maskedPaths":["/proc/kcore","/proc/keys","/proc/timer_list"],"readonlyPaths":["/proc/sys","/proc/sysrq-trigger"]"#;
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(
+        dir.join("config.json"),
+        lab.config_ex(
+            &Lab::act(&Act::Wait),
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            "",
+            "",
+            "",
+            paths,
+        ),
+    )
+    .unwrap();
+    for (asked, way, here) in [
+        ("tree", MountNamespace::FromTree, tree_here),
+        ("empty", MountNamespace::Empty, empty_here),
+    ] {
+        if !here {
+            eprintln!("SKIP parked init, way {asked}: this kernel hasn't it");
+            continue;
+        }
+        let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+        let node = Node::open(
+            &own.join(format!("hex-oci-parkway-{asked}")),
+            state.path(),
+            state.path(),
+        )
+        .expect("open a node")
+        // The way is set before the seeds are built, which with_oci_helper does.
+        .with_mount_namespace(asked)
+        .with_oci_helper(PathBuf::from(&lab.exe))
+        .with_prepared_procs(false)
+        .unwrap()
+        .with_inits_ahead(1)
+        .with_parked_procs(true)
+        .unwrap();
+        let create = |id: &BoxId| {
+            node.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(dir.clone()),
+                owner: None,
+            })
+            .expect("create a box of no owner")
+        };
+        let n1 = BoxId::new(&format!("parkway-{asked}-1")).unwrap();
+        create(&n1);
+        let root = node
+            .cgroup_dir(&n1)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        node.delete(&n1).unwrap();
+        wait_for(
+            || {
+                let c = node.cgroup_reuse().unwrap();
+                c.ahead.ready == 1 && c.parked.procs_made + c.parked.procs_failed >= 1
+            },
+            "an init parked ahead with its proc",
+        );
+        let before = node.cgroup_reuse().unwrap().parked;
+        assert_eq!(
+            (before.procs_made, before.procs_failed),
+            (1, 0),
+            "{asked}: {before:?}"
+        );
+        let parked = parked_inits(&root);
+        assert_eq!(
+            parked.len(),
+            1,
+            "{asked}: one init parked ahead: {parked:?}"
+        );
+        let made_before = node.mount_namespaces_made(way);
+        let n2 = BoxId::new(&format!("parkway-{asked}-2")).unwrap();
+        create(&n2);
+        let after = node.cgroup_reuse().unwrap().parked;
+        let procs =
+            std::fs::read_to_string(node.cgroup_dir(&n2).unwrap().join("cgroup.procs")).unwrap();
+        assert_eq!(
+            procs.lines().next().map(str::trim),
+            Some(parked[0].as_str()),
+            "{asked}: N2's init is the parked one"
+        );
+        assert_eq!(
+            (after.claimed, after.proc_hits),
+            (before.claimed + 1, before.proc_hits + 1),
+            "{asked}: {after:?}"
+        );
+        assert_eq!(
+            node.mount_namespaces_made(way),
+            made_before + 1,
+            "{asked}: N2's mount namespace made the node's way"
+        );
+        node.start(&n2).unwrap();
+        let (_, mi) = run_in(&node, &n2, &["/usr/bin/cat", "/proc/self/mountinfo"]);
+        let beneath: BTreeSet<String> = mountinfo(&mi)
+            .into_iter()
+            .map(|(point, ..)| point)
+            .filter(|point| point.starts_with("/proc/"))
+            .collect();
+        let want: BTreeSet<String> = [
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/timer_list",
+            "/proc/sys",
+            "/proc/sysrq-trigger",
+        ]
+        .into_iter()
+        .filter(|p| Path::new(p).exists())
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(beneath, want, "{asked}: N2's mounts beneath /proc are K's");
+        assert_eq!(
+            exit_in(
+                &node,
+                &n2,
+                &[
+                    "/usr/bin/sh",
+                    "-c",
+                    r#"read -r me _ < /proc/self/stat && [ "$me" = "$$" ]"#
+                ],
+            ),
+            Exit::Code(0),
+            "{asked}: N2's /proc shows its own pid namespace"
+        );
+        node.delete(&n2).unwrap();
+        node.release_idle().unwrap();
+        eprintln!("parked init, way {asked}: N2 claimed it, its proc a hit");
+    }
+}
+
+/// The proc superblocks (`st_dev`) whose root process `pid` holds a descriptor to, read through `/proc/<pid>/fd`:
+/// each link followed to what it names, a proc root (`PROC_SUPER_MAGIC`, proc(5); its root inode 1).
+fn held_procs(pid: &str) -> BTreeSet<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let path = e.path();
+            let fs = rustix::fs::statfs(&path).ok()?;
+            let meta = std::fs::metadata(&path).ok()?;
+            (u64::try_from(fs.f_type).ok() == Some(0x9fa0) && meta.ino() == 1).then(|| meta.dev())
+        })
+        .collect()
+}
+
+/// The processes of the slot cgroups under `root`: the inits parked in those made ahead.
+fn parked_inits(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap().filter_map(Result::ok) {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| hex_core::reuse::slot_of(n).is_some())
+        {
+            let procs =
+                std::fs::read_to_string(entry.path().join("cgroup.procs")).unwrap_or_default();
+            out.extend(procs.lines().map(|l| l.trim().to_owned()));
+        }
+    }
+    out
+}
+
 /// HEX-MNTNS-8 (decision 6's update; T-T7.1.4): on a root node, make two boxes on the pruned path and two through
 /// the shim (a createRuntime hook), each masking Docker's directories beneath `/proc`, with procs made ahead off
 /// so each init masks them itself. Expect every masked directory of all four boxes on one filesystem, the node's
@@ -1333,6 +1913,9 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
     let hooks = r#","hooks":{"createRuntime":[{"path":"/usr/bin/true","args":["true"]}]}"#;
     let mut devs = BTreeSet::new();
     let mut masked = 0;
+    // Each box's masked directories' devices, apart: a box's filesystems end at its delete, and the kernel gives
+    // a freed anonymous device's number to the next one it makes, so only within a box do distinct ones show.
+    let mut each_box: Vec<(usize, BTreeSet<String>)> = Vec::new();
     for (n, (path, hook)) in [
         ("pruned", ""),
         ("pruned", ""),
@@ -1376,6 +1959,7 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
         node.start(&id).expect("start");
         let (_, mi) = run_in(&node, &id, &["/usr/bin/cat", "/proc/self/mountinfo"]);
         node.delete(&id).expect("delete");
+        let (mut here, mut its) = (0, BTreeSet::new());
         // proc_pid_mountinfo(5): the third field is the filesystem's major:minor, the fifth the mount point.
         for line in mi.lines() {
             let fields: Vec<&str> = line.split(' ').collect();
@@ -1389,23 +1973,29 @@ fn masked_directories_are_the_nodes_one_empty_filesystem(lab: &Lab, own: &Path) 
                     "{point} in box {n} is masked by a read-only tmpfs: {line}"
                 );
                 devs.insert((*dev).to_owned());
+                its.insert((*dev).to_owned());
                 masked += 1;
+                here += 1;
             }
         }
+        each_box.push((here, its));
     }
     assert!(masked >= 4, "masked directories to compare: {masked}");
     if kernel_clones_a_detached_mount() {
         assert_eq!(
             devs.len(),
             1,
-            "one empty filesystem for every masked directory of every box: {devs:?}"
+            "one empty filesystem for every masked directory of every box: {devs:?}; by box {each_box:?}; parked {:?}",
+            node.cgroup_reuse().map(|c| c.parked)
         );
     } else {
-        assert_eq!(
-            devs.len(),
-            masked,
-            "a tmpfs of its own for every masked directory: {devs:?}"
-        );
+        for (n, (here, its)) in each_box.iter().enumerate() {
+            assert_eq!(
+                its.len(),
+                *here,
+                "a tmpfs of its own for every masked directory of box {n}: {its:?}"
+            );
+        }
     }
     eprintln!("masked directories: {masked} across 4 boxes, on {devs:?}");
 }
@@ -1830,6 +2420,356 @@ fn classic_reasons_are_counted(lab: &Lab, own: &Path) {
     eprintln!(
         "classic reasons: a user namespace (UserNamespace), createContainer hooks (Hooks) and a mount namespace by path (JoinsByPath) each counted, none pruned, none under Rootless"
     );
+}
+
+/// OCI hooks (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3; docs/design/runtime.md, "createContainer and
+/// startContainer hooks run in the container"; OCI runtime-spec v1.3.0 config.md:607-634, runtime.md:26-27
+/// and :62-73). Do: create a box whose bundle names a createRuntime, a createContainer and a startContainer
+/// hook, each writing what it sees to a directory the box binds, then start it. Expect: after create, the
+/// createRuntime hook saw `created` (runtime.md:20: after lifecycle step 2) and the init's host pid; the
+/// createContainer hook ran after it and before the root switch (the bundle's host path in view), in
+/// every one of the init's namespaces, given `created` and the pid the container sees (1: the spec makes
+/// a pid namespace); the startContainer hook
+/// has not run. After start it has, in the init's namespaces inside the root (the host path out of view),
+/// given `created` and pid 1, before the program, which finds its record. Neither holds a descriptor but
+/// its stdio. A box with a startContainer hook alone takes the classic path, counted as the create-time
+/// hooks are (`Hooks` as root, `Rootless` rootless), and its hook runs.
+fn create_and_start_container_hooks_run_in_the_containers_namespaces(lab: &Lab, own: &Path) {
+    const KINDS: [&str; 7] = ["mnt", "pid", "ipc", "uts", "net", "cgroup", "user"];
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hooks"), state.path());
+    std::fs::create_dir_all(lab.rootfs.join("obs")).unwrap();
+    let (namespaces, mappings) = if lab.rootless {
+        (
+            r#"{"type":"user"},{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            format!(
+                r#","uidMappings":[{{"containerID":0,"hostID":{},"size":1}}],"gidMappings":[{{"containerID":0,"hostID":{},"size":1}}]"#,
+                lab.uid, lab.gid
+            ),
+        )
+    } else {
+        (
+            r#"{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}"#,
+            String::new(),
+        )
+    };
+    let classic = if lab.rootless {
+        ClassicReason::Rootless
+    } else {
+        ClassicReason::Hooks
+    };
+    let sh = |script: String| serde_json::json!({"path": "/bin/sh", "args": ["sh", "-c", script], "env": ["PATH=/usr/bin:/bin"]});
+    // A fresh bundle directory and the directory its box binds at /obs.
+    let fresh = || {
+        let dir = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let obs = dir.join("obs");
+        std::fs::create_dir(&obs).unwrap();
+        (dir, obs)
+    };
+    // What a container-namespace hook writes under `at` (/obs as it sees it): its state, its namespaces,
+    // the descriptors its `ls` holds (`/proc/self` resolves in the host's procfs before the switch, where
+    // the shell's `$$`, its pid in the container's pid namespace, names another process), and whether the
+    // bundle's host path is in view.
+    let sees = |at: &str, tag: &str, dir: &Path| {
+        format!(
+            "cat > {at}/{tag}.state; for n in {kinds}; do echo $n $(readlink /proc/self/ns/$n); done > {at}/{tag}.ns; \
+             ls -l /proc/self/fd/ > {at}/{tag}.fds; if test -e {bundle}; then echo host; else echo container; fi > {at}/{tag}.root",
+            kinds = KINDS.join(" "),
+            bundle = dir.join("config.json").display(),
+        )
+    };
+    // Writes the bundle's config with `hooks`; its program records whether the startContainer hook ran
+    // before it, then waits.
+    let write = |dir: &Path, obs: &Path, hooks: serde_json::Value| {
+        let bind = format!(
+            r#",
+    {{"destination": "/obs", "type": "bind", "source": "{}", "options": ["rbind","rw"]}}"#,
+            obs.display()
+        );
+        let program = strings(&[
+            "/bin/sh",
+            "-c",
+            "if test -e /obs/sc.state; then echo after; else echo before; fi > /obs/program; exec /usr/bin/sleep 600",
+        ]);
+        let hooks = format!(r#","hooks":{hooks}"#);
+        std::fs::write(
+            dir.join("config.json"),
+            lab.config_ex(&program, namespaces, &mappings, &bind, &hooks, ""),
+        )
+        .unwrap();
+    };
+    let make = |id: &BoxId, dir: PathBuf| {
+        node.create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+    };
+    let read =
+        |p: PathBuf| std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    let json = |p: PathBuf| -> serde_json::Value { serde_json::from_str(&read(p)).unwrap() };
+    let ns_of = |pid: i64| -> Vec<String> {
+        KINDS
+            .iter()
+            .map(|n| {
+                let link = std::fs::read_link(format!("/proc/{pid}/ns/{n}")).unwrap();
+                format!("{n} {}", link.display())
+            })
+            .collect()
+    };
+    // The hook's `ls` holds what the hook did: its stdio, and besides only the directory it lists.
+    let only_stdio = |fds: String, what: &str| {
+        let held: Vec<(&str, &str)> = fds
+            .lines()
+            .filter_map(|l| l.split_once(" -> "))
+            .filter_map(|(head, target)| Some((head.rsplit(' ').next()?, target)))
+            .collect();
+        let numbers: BTreeSet<&str> = held.iter().map(|(fd, _)| *fd).collect();
+        assert!(
+            ["0", "1", "2"].iter().all(|fd| numbers.contains(fd)),
+            "the {what} hook has its stdio: {fds}"
+        );
+        for (fd, target) in held {
+            assert!(
+                ["0", "1", "2"].contains(&fd)
+                    || (target.starts_with("/proc/") && target.ends_with("/fd")),
+                "the {what} hook holds {fd} -> {target}, which it didn't ask for: {fds}"
+            );
+        }
+    };
+
+    // Every create- and start-time hook at once.
+    let (dir, obs) = fresh();
+    let o = obs.display().to_string();
+    write(
+        &dir,
+        &obs,
+        serde_json::json!({
+            "createRuntime": [sh(format!("cat > {o}/rt.state"))],
+            "createContainer": [sh(format!(
+                "if test -e {o}/rt.state; then echo after-createRuntime > {o}/cc.order; fi; {}",
+                sees(&o, "cc", &dir)
+            ))],
+            "startContainer": [sh(sees("/obs", "sc", &dir))],
+        }),
+    );
+    let id = BoxId::new("hooked").unwrap();
+    let before = node.classic_creates_for(classic);
+    make(&id, dir).expect("create a box with createContainer and startContainer hooks");
+    assert_eq!(
+        node.classic_creates_for(classic),
+        before + 1,
+        "it took the classic path, under {classic:?}"
+    );
+    let container = node.container_dir(&id);
+    let init = i64::from(init_pid(&container));
+    let rt = json(obs.join("rt.state"));
+    assert_eq!(
+        (rt["status"].as_str(), rt["pid"].as_i64()),
+        (Some("created"), Some(init)),
+        "createRuntime's state: {rt}"
+    );
+    assert_eq!(
+        read(obs.join("cc.order")).trim(),
+        "after-createRuntime",
+        "createContainer ran after createRuntime"
+    );
+    assert_eq!(
+        read(obs.join("cc.root")).trim(),
+        "host",
+        "createContainer ran before the root switch"
+    );
+    let cc = json(obs.join("cc.state"));
+    assert_eq!(
+        (cc["status"].as_str(), cc["pid"].as_i64(), cc["id"].as_str()),
+        (
+            Some("created"),
+            Some(1),
+            container.file_name().and_then(|n| n.to_str())
+        ),
+        "createContainer's state: {cc}"
+    );
+    let init_ns = ns_of(init);
+    assert_eq!(
+        read(obs.join("cc.ns")).lines().collect::<Vec<_>>(),
+        init_ns,
+        "createContainer ran in the init's namespaces"
+    );
+    let ours = ns_of(i64::from(std::process::id()));
+    for (at, kind) in KINDS.iter().enumerate().take(4) {
+        assert_ne!(
+            init_ns[at], ours[at],
+            "the container's {kind} namespace is its own, not the agent's"
+        );
+    }
+    only_stdio(read(obs.join("cc.fds")), "createContainer");
+    assert!(
+        !obs.join("sc.state").exists(),
+        "startContainer waits for start"
+    );
+    // The init waits for start with SIGPIPE ignored (a `hex` process, as Rust's runtime leaves it), so a
+    // start gone before it hands the byte is an EPIPE it ends on by its own status, never the signal
+    // (hex_runtime's hooks::START_ABANDONED).
+    let status = read(PathBuf::from(format!("/proc/{init}/status")));
+    let ignored = status
+        .lines()
+        .find_map(|l| l.strip_prefix("SigIgn:"))
+        .map(|m| u64::from_str_radix(m.trim(), 16).unwrap())
+        .unwrap();
+    const SIGPIPE: u32 = 13; // signal(7), on every Linux architecture Hex runs on
+    assert_ne!(
+        ignored & (1 << (SIGPIPE - 1)),
+        0,
+        "the init ignores SIGPIPE: SigIgn {ignored:#x}"
+    );
+
+    node.start(&id).expect("start the hooked box");
+    wait_for(|| obs.join("program").exists(), "the program to run");
+    assert_eq!(
+        read(obs.join("program")).trim(),
+        "after",
+        "startContainer ran before the program"
+    );
+    assert_eq!(
+        read(obs.join("sc.root")).trim(),
+        "container",
+        "startContainer ran inside the root"
+    );
+    let sc = json(obs.join("sc.state"));
+    assert_eq!(
+        (sc["status"].as_str(), sc["pid"].as_i64()),
+        (Some("created"), Some(1)),
+        "startContainer's state: {sc}"
+    );
+    assert_eq!(
+        read(obs.join("sc.ns")).lines().collect::<Vec<_>>(),
+        init_ns,
+        "startContainer ran in the init's namespaces"
+    );
+    only_stdio(read(obs.join("sc.fds")), "startContainer");
+    node.delete(&id).expect("delete the hooked box");
+
+    // A startContainer hook alone routes the create classic as well, and runs.
+    let (dir, obs) = fresh();
+    write(
+        &dir,
+        &obs,
+        serde_json::json!({"startContainer": [sh("echo ran > /obs/sc.state".to_owned())]}),
+    );
+    let id = BoxId::new("hooked-start").unwrap();
+    let before = node.classic_creates_for(classic);
+    make(&id, dir).expect("create a box with a startContainer hook alone");
+    assert_eq!(
+        node.classic_creates_for(classic),
+        before + 1,
+        "a startContainer hook takes the classic path"
+    );
+    node.start(&id).expect("start it");
+    wait_for(|| obs.join("program").exists(), "the program to run");
+    assert_eq!(
+        read(obs.join("program")).trim(),
+        "after",
+        "its startContainer hook ran first"
+    );
+    node.delete(&id).expect("delete it");
+
+    eprintln!(
+        "hooks: createRuntime, createContainer and startContainer each ran at its point and in its namespaces"
+    );
+}
+
+/// A bundle whose box binds a fresh directory at /obs, runs a program that writes /obs/program, and names
+/// `hooks`: the failing-hook tests' (AC-T7.1.4).
+fn hooked_bundle(lab: &Lab, hooks: serde_json::Value) -> (PathBuf, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix("bundle-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    let obs = dir.join("obs");
+    std::fs::create_dir(&obs).unwrap();
+    std::fs::create_dir_all(lab.rootfs.join("obs")).unwrap();
+    let program = strings(&[
+        "/bin/sh",
+        "-c",
+        "echo ran > /obs/program; exec /usr/bin/sleep 600",
+    ]);
+    let mut spec: serde_json::Value = serde_json::from_str(&lab.config(&program, false)).unwrap();
+    spec["mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(
+            {"destination": "/obs", "type": "bind", "source": obs, "options": ["rbind", "rw"]}
+        ));
+    spec["hooks"] = hooks;
+    std::fs::write(dir.join("config.json"), spec.to_string()).unwrap();
+    (dir, obs)
+}
+
+/// A hook that exits 3, run by `/bin/sh` (found in the runtime's namespace and in the box's root alike).
+fn failing_hook() -> serde_json::Value {
+    serde_json::json!([{"path": "/bin/sh", "args": ["sh", "-c", "exit 3"], "env": ["PATH=/usr/bin:/bin"]}])
+}
+
+/// runtime.md:66-67 (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3). Do: create a box whose createContainer hook exits 3.
+/// Expect: the create refused by type, an `Os` refusal naming the createContainer hook, never the refusal a
+/// stopped box gets (`NotRunning`); the box isn't there afterwards and its program never ran.
+fn a_failing_create_container_hook_fails_the_create_naming_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hook-create-fails"), state.path());
+    let (dir, obs) = hooked_bundle(lab, serde_json::json!({"createContainer": failing_hook()}));
+    let id = BoxId::new("hooked-create-fails").unwrap();
+    let refused = node
+        .create(BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(dir),
+            owner: None,
+        })
+        .expect_err("a failing createContainer hook fails the create");
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("createContainer hook failed") && !why.contains("stopped")),
+        "the refusal is typed and names the hook: {refused:?}"
+    );
+    assert_eq!(
+        node.inspect(&id),
+        Err(Refusal::NoSuchBox(id.clone())),
+        "a refused create leaves no box"
+    );
+    assert!(!obs.join("program").exists(), "the program never ran");
+    eprintln!("hooks: a failing createContainer hook failed the create, naming it: {refused:?}");
+}
+
+/// runtime.md:69-70 (AC-T7.1.4, T-T7.1.4; CLAUDE.md §3). Do: create a box whose startContainer hook exits 3,
+/// then start it. Expect: the create made, the start refused by type, an `Os` refusal naming the
+/// startContainer hook, never `NotRunning` (the refusal a stopped box's start gets); its program never ran.
+fn a_failing_start_container_hook_fails_the_start_naming_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-hook-start-fails"), state.path());
+    let (dir, obs) = hooked_bundle(lab, serde_json::json!({"startContainer": failing_hook()}));
+    let id = BoxId::new("hooked-start-fails").unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(dir),
+        owner: None,
+    })
+    .expect("create a box whose startContainer hook fails");
+    let refused = node
+        .start(&id)
+        .expect_err("a failing startContainer hook fails the start");
+    assert!(
+        matches!(&refused, Refusal::Os { why, .. } if why.contains("startContainer hook failed") && !why.contains("stopped")),
+        "the refusal is typed and names the hook: {refused:?}"
+    );
+    assert!(!obs.join("program").exists(), "the program never ran");
+    node.delete(&id).expect("delete the box");
+    eprintln!("hooks: a failing startContainer hook failed the start, naming it: {refused:?}");
 }
 
 /// Goal 5 plan step 2 (T-T7.1.4): rootfsPropagation shared, slave and private each show on the box's
@@ -2724,6 +3664,17 @@ fn program_alone(lab: &Lab, own: &Path) {
         children.iter().any(|&c| cmdline_has(c, "__oci-seed")),
         "a create seed is up, having made the box"
     );
+    // The node makes inits ahead for boxes of no owner, each the agent's child (decision 8): their refill is
+    // waited out first, its queue full (or a make failed), so the diff is the exec's alone.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let ahead = node.cgroup_reuse().unwrap().ahead;
+        if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let children = children_of(agent);
     let before: std::collections::BTreeSet<u32> = children.into_iter().collect();
     let second = node
         .exec(
@@ -2902,9 +3853,14 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
     })
     .unwrap();
     let (mut out, w) = std::io::pipe().unwrap();
-    // stdout and stderr go before the FIFO opens (which blocks), so the orphan never holds the pipe
-    // the test reads to its end.
-    let script = format!("read x >/dev/null 2>&1 < {} & echo $!", fifo.display());
+    // The orphan's stdout and stderr go for good (`exec`) before the FIFO opens (which blocks), so it never
+    // holds the pipe the test reads to its end. A builtin's own redirections wouldn't do: dash keeps a copy
+    // of each fd they replace, to restore it after (dash 0.5.12 `src/eval.c:836-837`, `src/redir.c:134-155`,
+    // `:444-449`), so `read x >/dev/null < go &` holds the pipe while it waits.
+    let script = format!(
+        "(exec >/dev/null 2>&1; read x < {}) & echo $!",
+        fifo.display()
+    );
     let mut proc = node
         .exec(
             &id,
@@ -2919,8 +3875,22 @@ fn orphans_are_reaped(lab: &Lab, own: &Path) {
         proc.wait_for(conformance::PATIENCE).unwrap(),
         Some(Exit::Code(0))
     );
-    let mut text = String::new();
-    std::io::Read::read_to_string(&mut out, &mut text).unwrap();
+    // Read to the pipe's end on a thread of its own, within the patience: an orphan still holding the pipe
+    // fails the test by name rather than hang it.
+    let (got, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = got.send(std::io::Read::read_to_string(&mut out, &mut text).map(|_| text));
+    });
+    let text = read
+        .recv_timeout(conformance::PATIENCE)
+        .unwrap_or_else(|_| {
+            panic!(
+                "the program's stdout didn't end within {:?}: the orphan holds the pipe the test reads",
+                conformance::PATIENCE
+            )
+        })
+        .unwrap();
     let orphan: i32 = text.trim().parse().unwrap();
     assert_eq!(
         parent_of(orphan),
@@ -3051,7 +4021,7 @@ fn held_record_write(lab: &Lab, own: &Path) {
         ),
         "the held write, let go, failed at its fsync: {held_made:?}"
     );
-    if on_tmpfs(node.container_dir(&held).parent().unwrap()) {
+    if on_tmpfs(node.oci_root()) {
         assert_eq!(
             synced_beside, synced,
             "the 31 boxes' records, their container state on tmpfs alone, were not synced"
@@ -3096,7 +4066,7 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
         .expect("create in b");
     let (in_a, in_b) = (a.container_dir(&id), b.container_dir(&id));
     assert_ne!(in_a.file_name(), in_b.file_name(), "two containers' names");
-    if in_a.parent() != in_b.parent() {
+    if a.oci_root() != b.oci_root() {
         eprintln!(
             "two_nodes_one_box_id: no runtime directory here, so each node keeps its containers in its state directory"
         );
@@ -3121,6 +4091,538 @@ fn two_nodes_one_box_id(lab: &Lab, own: &Path) {
     assert!(!in_b.exists(), "b's container state is left");
 }
 
+/// What a call made while another box's create is held does with the same id.
+#[derive(Clone, Copy, Debug)]
+enum Second {
+    Create,
+    Delete,
+}
+
+/// AC-T7.1.1, T-T7.1.4 (a time-of-check-to-time-of-use hole, found 2026-11-04): the runtime parses and checks the
+/// spec in a bundle's config.json, and whatever then starts the container's init, a create seed or the shim, must
+/// make the container from that spec, never from a later read of the bundle. Do: hold a create reading its config.json
+/// (a FIFO); once the agent has it open, give the agent the lab's spec and put in its place, for any later read, the
+/// same spec holding CAP_SYS_ADMIN, which rootless (a user namespace on the host's network) spec.rs refuses. Through
+/// the node (a seed starts the init) and through the runtime alone (the shim). Expect: the create refused, or its init
+/// without CAP_SYS_ADMIN, as the spec the runtime checked has it.
+fn a_config_swapped_after_the_check_never_makes_the_container(lab: &Lab, own: &Path) {
+    let wait = Lab::act(&Act::Wait);
+    let checked = lab.config(&wait, false);
+    let swapped = checked.replace(r#""CAP_CHOWN""#, r#""CAP_SYS_ADMIN", "CAP_CHOWN""#);
+    assert_ne!(checked, swapped, "the swapped spec names CAP_SYS_ADMIN");
+    let held_bundle = || {
+        let bundle = tempfile::Builder::new()
+            .prefix("swap-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        assert!(
+            Command::new("mkfifo")
+                .arg(bundle.join("config.json"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        bundle
+    };
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+
+    // Through the node: a seed starts the init.
+    let node = lab.node(&own.join("hex-oci-swap"), state.path());
+    let id = BoxId::new("swap-node").unwrap();
+    let bundle = held_bundle();
+    let config = bundle.join("config.json");
+    let made = std::thread::scope(|s| {
+        let made = s.spawn(|| {
+            node.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(bundle.clone()),
+                owner: None,
+            })
+        });
+        wait_for(
+            blocked_opening_a_fifo,
+            "the create to wait reading its config",
+        );
+        swap_the_held_config(&config, &checked, &swapped);
+        made.join().unwrap()
+    });
+    if made.is_ok() {
+        let pid = u32::try_from(init_pid(&node.container_dir(&id))).unwrap();
+        let held = holds_sys_admin(pid);
+        node.delete(&id).unwrap();
+        assert!(
+            !held,
+            "the node's container was made from the swapped spec, not the one checked"
+        );
+    }
+
+    // Through the runtime alone: the shim starts the init.
+    let root = BoxRoot::open(
+        &own.join("hex-oci-swap-shim"),
+        disks::under(state.path()).unwrap(),
+    )
+    .unwrap();
+    let id = BoxId::new("swap-shim").unwrap();
+    let cgroup = root.create(&id, &Bounds::default()).unwrap();
+    let _cleanup = Killing(&root, id.clone());
+    let runtime = OciRuntime::with_helper(state.path().join("shim-oci"), PathBuf::from(&lab.exe));
+    let bundle = held_bundle();
+    let config = bundle.join("config.json");
+    let made = std::thread::scope(|s| {
+        let made = s.spawn(|| {
+            runtime.create_in_cgroup(id.as_str(), &bundle, None, cgroup, Held::default())
+        });
+        wait_for(
+            blocked_opening_a_fifo,
+            "the runtime's create to wait reading its config",
+        );
+        swap_the_held_config(&config, &checked, &swapped);
+        made.join().unwrap()
+    });
+    if made.is_ok() {
+        let pid = u32::try_from(runtime.state(id.as_str()).unwrap().pid).unwrap();
+        assert!(
+            !holds_sys_admin(pid),
+            "the shim's container was made from the swapped spec, not the one checked"
+        );
+    }
+}
+
+/// AC-T7.1.1, T-T7.1.4 (the same class as the create's hole, found 2026-11-04): an exec takes its program's process
+/// settings from the spec its box's create checked, never the bundle's config.json as it is by then. Do: make and
+/// start a box from the lab's spec; then write in its bundle the same spec holding CAP_SYS_ADMIN (which rootless, in a
+/// user namespace on the host's network, the checks refuse); exec a program. Expect: the program runs, without
+/// CAP_SYS_ADMIN, as the checked spec has it. Then, as a box made before its spec was kept: its kept spec removed and
+/// a spec the checks refuse in its bundle. Expect: the exec refused by type, never run from that spec unchecked.
+fn an_exec_takes_the_checked_spec_not_the_bundle_swapped_after_create(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-swap-exec"), state.path());
+    let id = BoxId::new("swap-exec").unwrap();
+    let sleep = ["/usr/bin/sleep".to_owned(), "600".to_owned()];
+    let spec = lab.running(id.clone(), &sleep);
+    let ClassSpec::Bundle(bundle) = &spec.class else {
+        panic!("lab.running makes a bundle")
+    };
+    let bundle = bundle.clone();
+    node.create(spec).expect("create");
+    node.start(&id).expect("start");
+    let checked = std::fs::read_to_string(bundle.join("config.json")).unwrap();
+    let swapped = checked.replace(r#""CAP_CHOWN""#, r#""CAP_SYS_ADMIN", "CAP_CHOWN""#);
+    assert_ne!(checked, swapped, "the swapped spec names CAP_SYS_ADMIN");
+    std::fs::write(bundle.join("config.json"), &swapped).unwrap();
+    let exec = node.exec(
+        &id,
+        hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+        hex_api::Stdio::null(),
+    );
+    let held = exec.as_ref().ok().map(|exec| {
+        let pid = exec.pid();
+        wait_for(
+            || cmdline_has(pid, "/usr/bin/sleep"),
+            "the exec'd program to run",
+        );
+        holds_sys_admin(pid)
+    });
+    drop(exec);
+    // A box made before its spec was kept, its bundle's spec one the checks refuse.
+    match std::fs::remove_file(node.container_dir(&id).join("checked.json")) {
+        Ok(()) => {}
+        // A tree that keeps no spec (before AC-T7.1.1's fix): the box is an older one as it is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("removing the kept spec: {e}"),
+    }
+    std::fs::write(bundle.join("config.json"), r#"{"ociVersion":""}"#).unwrap();
+    let older = node.exec(
+        &id,
+        hex_api::Program::of(&["/usr/bin/sleep", "300"]),
+        hex_api::Stdio::null(),
+    );
+    let older_ran = older.is_ok();
+    drop(older);
+    node.delete(&id).expect("delete");
+    assert_eq!(
+        held,
+        Some(false),
+        "the exec'd program held the swapped spec's capabilities, or didn't run"
+    );
+    assert!(
+        !older_ran,
+        "an exec ran from a bundle spec the checks refuse"
+    );
+}
+
+/// AC-T7.1.1, T-T7.1.4: a start's poststart hooks, which the agent runs on the host, are the ones the box's create
+/// checked, never the bundle's config.json's as it is by then. Do: make a box whose spec names a poststart hook that
+/// marks file A; then write in its bundle the same spec, its hook marking file B; start the box. Expect: A marked, B
+/// not.
+fn a_start_runs_the_checked_specs_hooks_not_the_bundle_swapped_after_create(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let node = lab.node(&own.join("hex-oci-swap-start"), state.path());
+    let id = BoxId::new("swap-start").unwrap();
+    let marks = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let (checked_mark, swapped_mark) = (marks.path().join("checked"), marks.path().join("swapped"));
+    let with_hook = |mark: &Path| {
+        let config = lab.config(&Lab::act(&Act::Wait), false);
+        let end = config.rfind('}').unwrap();
+        format!(
+            r#"{},"hooks":{{"poststart":[{{"path":"/bin/sh","args":["sh","-c","touch {}"]}}]}}}}"#,
+            config.get(..end).unwrap().trim_end(),
+            mark.display()
+        )
+    };
+    let bundle = tempfile::Builder::new()
+        .prefix("swap-start-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    std::fs::write(bundle.join("config.json"), with_hook(&checked_mark)).unwrap();
+    node.create(BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle.clone()),
+        owner: None,
+    })
+    .expect("create");
+    std::fs::write(bundle.join("config.json"), with_hook(&swapped_mark)).unwrap();
+    let started = node.start(&id);
+    node.delete(&id).expect("delete");
+    started.expect("start");
+    assert!(
+        checked_mark.exists(),
+        "the checked spec's poststart hook didn't run"
+    );
+    assert!(
+        !swapped_mark.exists(),
+        "the swapped spec's poststart hook ran on the host"
+    );
+}
+
+/// Goal 5 extended step 5 (T-T7.1.2): a box being made has no record yet, so a second create of its id,
+/// or a delete, waits for the create under way rather than make or remove parts at the paths the id
+/// fixes. Do: hold a create reading its bundle's config.json, a FIFO no one has opened, once its cgroup
+/// and its container's state directory are made; while it's held, create the same id from a second
+/// thread, or delete it; then let the first go ([`let_the_held_create_go`]). Expect: the second
+/// call waits (the node counts it) until the first is done; the first makes its box whole; then the
+/// second create is refused as `Exists`, the box running on as made, or the delete removes the box,
+/// leaving nothing of it.
+fn a_create_or_delete_of_a_box_being_made_waits_for_it(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-turns");
+    let node = lab.node(&box_root, state.path());
+    let wait = Lab::act(&Act::Wait);
+    for second in [Second::Create, Second::Delete] {
+        let id = BoxId::new(&format!("being-made-{second:?}").to_lowercase()).unwrap();
+        let bundle = tempfile::Builder::new()
+            .prefix("held-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = bundle.join("config.json");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&config)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(bundle),
+            owner: None,
+        };
+        let waited = node.waited_for_a_box();
+        let (made, then, both_waited) = std::thread::scope(|s| {
+            let first = s.spawn(|| node.create(spec));
+            wait_for(
+                blocked_opening_a_fifo,
+                "the create to wait reading its config",
+            );
+            let then = s.spawn(|| match second {
+                Second::Create => node.create(lab.running(id.clone(), &wait)).map(|_| ()),
+                Second::Delete => node.delete(&id),
+            });
+            // The second waits, or (a node without the turn) ends at once; either way the first is let
+            // go before anything is asserted, so a failure is reported rather than leaving it blocked.
+            wait_for(
+                || node.waited_for_a_box() > waited || then.is_finished(),
+                "the second call to wait for the create under way, or end",
+            );
+            let both_waited = !first.is_finished() && !then.is_finished();
+            let_the_held_create_go(&config, &lab.config(&wait, false));
+            (first.join().unwrap(), then.join().unwrap(), both_waited)
+        });
+        assert!(both_waited, "{second:?}: both wait: {then:?}");
+        assert_eq!(
+            node.waited_for_a_box(),
+            waited + 1,
+            "{second:?}: one call waited"
+        );
+        // The held create makes its box whole; what the second call then finds is that box.
+        let made = made.expect("the held create makes its box");
+        assert_eq!(
+            made.state,
+            BoxState::Created,
+            "the held create made its box"
+        );
+        match second {
+            Second::Create => {
+                assert_eq!(
+                    then,
+                    Err(Refusal::Exists(id.clone())),
+                    "the second create sees the box"
+                );
+                assert_eq!(
+                    node.inspect(&id).unwrap().state,
+                    BoxState::Created,
+                    "the box runs on as made"
+                );
+                node.delete(&id).unwrap();
+            }
+            Second::Delete => {
+                assert_eq!(then, Ok(()), "the delete removes the box the create made");
+            }
+        }
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "a record is left"
+        );
+        assert!(
+            !box_root.join(OCI_BOXES).join(id.as_str()).exists(),
+            "{id}'s cgroup is left"
+        );
+        assert!(
+            !node.container_dir(&id).exists(),
+            "{id}'s container state is left"
+        );
+    }
+}
+
+/// Goal 5 extended step 5's turn with step 6's reuse on (T-T7.1.2; the turn in place of step 6's claim, the lead's
+/// call of 2026-11-04): an owned box's create takes a slot-named cgroup, so while it's being made no cgroup and no
+/// record carry its id, and only its turn says it's being made. Do: hold the create of a box of owner O reading its
+/// bundle's config.json (a FIFO no one has opened); while it's held, create the same id for O from a second thread;
+/// then let the first go. Expect: the second waits for the first (the node counts it); once the first has made the box
+/// in a slot, the second is refused as `Exists`; one slot is taken, never two: one more slot under the oci boxes' root
+/// and one cgroup given out (fresh or handed on).
+fn a_second_create_of_an_owned_box_being_made_waits_and_takes_no_slot(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-turns-owned");
+    let node = lab.node(&box_root, state.path());
+    let owner = BoxOwner::named("owner-turns").unwrap();
+    let id = BoxId::new("being-made-owned").unwrap();
+    let wait = Lab::act(&Act::Wait);
+    let bundle = tempfile::Builder::new()
+        .prefix("held-")
+        .tempdir_in(lab.bundles.path())
+        .unwrap()
+        .keep();
+    let config = bundle.join("config.json");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&config)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let slots = || {
+        std::fs::read_dir(box_root.join(OCI_BOXES))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| hex_core::reuse::slot_of(&e.file_name().to_string_lossy()).is_some())
+            .count()
+    };
+    let given = |n: &Node| {
+        let c = n.cgroup_reuse().unwrap();
+        c.pool.fresh + c.pool.handed_on
+    };
+    let (slots_before, given_before) = (slots(), given(&node));
+    let waited = node.waited_for_a_box();
+    let spec = BoxSpec {
+        id: id.clone(),
+        bounds: Bounds::default(),
+        class: ClassSpec::Bundle(bundle),
+        owner: Some(owner.clone()),
+    };
+    let (made, then, both_waited) = std::thread::scope(|s| {
+        let first = s.spawn(|| node.create(spec));
+        wait_for(
+            blocked_opening_a_fifo,
+            "the create to wait reading its config",
+        );
+        let then = s.spawn(|| {
+            node.create(BoxSpec {
+                id: id.clone(),
+                bounds: Bounds::default(),
+                class: ClassSpec::Bundle(lab.bundle(&wait)),
+                owner: Some(owner.clone()),
+            })
+        });
+        // The second waits, or (a node without the turn) ends at once; either way the first is let go below,
+        // so a failure is reported rather than leaving it blocked.
+        wait_for(
+            || node.waited_for_a_box() > waited || then.is_finished(),
+            "the second create to wait for the one under way, or end",
+        );
+        let both_waited = !first.is_finished() && !then.is_finished();
+        let_the_held_create_go(&config, &lab.config(&wait, false));
+        (first.join().unwrap(), then.join().unwrap(), both_waited)
+    });
+    assert!(
+        both_waited,
+        "the second create waits for the one under way: {then:?}"
+    );
+    assert_eq!(node.waited_for_a_box(), waited + 1, "one create waited");
+    let made = made.expect("the held create makes its box");
+    assert_eq!(
+        made.state,
+        BoxState::Created,
+        "the held create made its box"
+    );
+    assert_eq!(
+        then.map(|_| ()),
+        Err(Refusal::Exists(id.clone())),
+        "the second create sees the box"
+    );
+    let dir = node.cgroup_dir(&id).expect("the box's cgroup");
+    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        hex_core::reuse::slot_of(&name).is_some(),
+        "the box's cgroup is a slot: {name}"
+    );
+    assert_eq!(slots(), slots_before + 1, "one slot more, not two");
+    assert_eq!(given(&node), given_before + 1, "one cgroup given out");
+    if node.inspect(&id).is_ok() {
+        node.delete(&id).unwrap();
+    }
+    assert_eq!(
+        node.inspect(&id),
+        Err(Refusal::NoSuchBox(id.clone())),
+        "nothing of the box is left"
+    );
+}
+
+/// §4, goal 5 extended step 5's follow-on fix: a delete of a box while a create of the same id is under
+/// way must leave the node consistent, whatever outcome the node lawfully gives. The create's cgroup, made
+/// first, claims the id, but with no record until the box is whole; a delete that arrives while the create
+/// is held could take that cgroup for a made box and scrub it, so the create then builds into the removed
+/// cgroup and is refused, or writes a Ready record over nothing. Force the race by a fact, not a sleep:
+/// hold a create reading its bundle's config.json (a FIFO no one has opened), its cgroup already made; run
+/// a delete of the same id; wait until the delete has had its chance to race — the cgroup gone (the
+/// un-fixed node scrubs it) or a wait for the create's turn registered (the fixed node) — then let the
+/// create go ([`let_the_held_create_go`]). Over a few rounds, require: in each, the delete waited for the
+/// create's turn (the raced path ran, and the fix is present — non-vacuity); a lawful result (the create
+/// made the box or the node refused it by type, never refused building into a scrubbed cgroup; the delete
+/// removed the box or found none); and nothing of the box left in any place, no Ready over nothing; and
+/// across them, the create making its box and the delete removing it at least once (non-vacuity). Without the per-box turn the delete does not wait — it scrubs the
+/// create's cgroup — so `waited_for_a_box` never rises and the test fails. The turn (the follow-on fix)
+/// makes the delete wait for the create and then remove the box it made.
+fn a_delete_racing_a_create_of_one_id_leaves_the_node_consistent(lab: &Lab, own: &Path) {
+    /// Rounds of the race, each a box of its own: enough that the box-made outcome is seen (below).
+    const ROUNDS: usize = 3;
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-delete-race");
+    let node = lab.node(&box_root, state.path());
+    let wait = Lab::act(&Act::Wait);
+    let mut made_then_removed = 0usize;
+    for round in 0..ROUNDS {
+        let id = BoxId::new(&format!("delete-race-{round}")).unwrap();
+        let bundle = tempfile::Builder::new()
+            .prefix("held-")
+            .tempdir_in(lab.bundles.path())
+            .unwrap()
+            .keep();
+        let config = bundle.join("config.json");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&config)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cgroup = box_root.join(OCI_BOXES).join(id.as_str());
+        let spec = BoxSpec {
+            id: id.clone(),
+            bounds: Bounds::default(),
+            class: ClassSpec::Bundle(bundle),
+            owner: None,
+        };
+        let waited = node.waited_for_a_box();
+        let (created, deleted) = std::thread::scope(|s| {
+            let create = s.spawn(|| node.create(spec));
+            wait_for(
+                blocked_opening_a_fifo,
+                "the create to block reading its config",
+            );
+            let delete = s.spawn(|| node.delete(&id));
+            // Wait on a fact, not a clock: the delete has had its chance to race the held create — it took
+            // the box's cgroup (scrubbed it: the un-fixed node), it waited for the create's turn (the fixed
+            // node), or it ended. Only then is the create let go, so the race is always forced, and it is let
+            // go before anything is asserted, so a failure is reported rather than leaving it blocked.
+            wait_for(
+                || !cgroup.exists() || node.waited_for_a_box() > waited || delete.is_finished(),
+                "the delete to take the box's cgroup, wait for the create's turn, or end",
+            );
+            let_the_held_create_go(&config, &lab.config(&wait, false));
+            (create.join().unwrap(), delete.join().unwrap())
+        });
+        // Non-vacuity, and the fix: the delete waited for the create's turn. The un-fixed node does not
+        // wait — it scrubs the create's half-made cgroup — so this stays at `waited` there and the test
+        // fails, which is the bug. A run where the delete never contended (it ran after the create) also
+        // leaves it unchanged, so that fails too: the raced path never ran.
+        assert!(
+            node.waited_for_a_box() > waited,
+            "round {round}: the delete did not wait for the create's turn (the raced path never ran, or the \
+             fix is absent): created {created:?}, deleted {deleted:?}"
+        );
+        // Every lawful outcome: the create made its box, or the node refused it by type; the delete removed
+        // the box, or found none. The delete waited (above), so the create was never refused building into a
+        // cgroup a delete scrubbed from under it.
+        if let Ok(made) = &created {
+            assert_eq!(
+                made.state,
+                BoxState::Created,
+                "round {round}: the create made its box"
+            );
+        }
+        match &deleted {
+            Ok(()) => {
+                if created.is_ok() {
+                    made_then_removed += 1;
+                }
+            }
+            Err(refusal) => assert!(
+                matches!(refusal, Refusal::NoSuchBox(_)),
+                "round {round}: the delete was refused unlawfully: {refusal:?}"
+            ),
+        }
+        // Consistent in every case: nothing of the box left in any place, and no Ready over nothing.
+        assert_eq!(
+            node.inspect(&id),
+            Err(Refusal::NoSuchBox(id.clone())),
+            "round {round}: a record is left"
+        );
+        assert!(
+            node.list().unwrap().is_empty(),
+            "round {round}: a box is left"
+        );
+        assert!(!cgroup.exists(), "round {round}: its cgroup is left");
+        assert!(
+            !node.container_dir(&id).exists(),
+            "round {round}: its container state is left"
+        );
+    }
+    // Non-vacuity of the outcomes (CLAUDE.md §6): the box-made outcome, the create making its box and the
+    // waiting delete removing it, ran at least once across the rounds; refusals alone would leave it untried.
+    assert!(
+        made_then_removed >= 1,
+        "in none of {ROUNDS} rounds did the create make its box and the waiting delete remove it"
+    );
+}
+
 /// T-T7.1.2 (goal 5 extended step 5): a node restarted over records in both its places. Do: make two
 /// boxes whose directories all lie on tmpfs (from bundles, their container state under the runtime
 /// directory) and one from an `OciSpec` of layers (its rendered bundle's writable layer on disk, in the
@@ -3137,7 +4639,7 @@ fn records_in_both_places_are_found_after_a_restart(lab: &Lab, own: &Path) {
     let (on_tmpfs_live, on_tmpfs_ended, on_disk) =
         (id("on-tmpfs-live"), id("on-tmpfs-ended"), id("on-disk"));
     let node = lab.node(&box_root, state.path());
-    let runtime = node.container_dir(&on_disk).parent().unwrap().to_owned();
+    let runtime = node.oci_root().to_owned();
     if !on_tmpfs(&runtime) {
         eprintln!(
             "SKIP records_in_both_places_are_found_after_a_restart: the runtime directory {} isn't tmpfs here",
@@ -3341,6 +4843,7 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
         .create(lab.running(new_live.clone(), &Lab::act(&Act::Wait)))
         .expect("create at the new place");
     let container = first.container_dir(&old_live);
+    let containers = first.oci_root().to_owned();
     drop(first);
     let oci_boxes = BoxRoot::open(&oci_dir, disks::under(state.path()).unwrap()).unwrap();
     let _new = Killing(&oci_boxes, new_live.clone());
@@ -3350,10 +4853,7 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
     let root = BoxRoot::open(&box_root, disks::under(state.path()).unwrap()).unwrap();
     let _old = Killing(&root, old_live.clone());
     let bundle = lab.bundle(&Lab::act(&Act::Wait));
-    let runtime = OciRuntime::with_helper(
-        container.parent().unwrap().to_owned(),
-        PathBuf::from(&lab.exe),
-    );
+    let runtime = OciRuntime::with_helper(containers, PathBuf::from(&lab.exe));
     let name = container.file_name().unwrap().to_str().unwrap();
     let cgroup = root.create(&old_live, &Bounds::default()).unwrap();
     runtime
@@ -3425,6 +4925,94 @@ fn a_node_upgraded_over_boxes_at_the_old_place_recovers_both_places(lab: &Lab, o
     );
 }
 
+/// T-T7.1.2 across goal 5 extended step 6's shards of the containers' state directories (lever 3): a node before
+/// them kept each container's directory in the runtime directory itself, `<runtime>/<key>-<id>`; today's keeps it
+/// in one of the runtime directory's shards, `<runtime>/<shard>/<key>-<id>`. Do: with today's node, make a box
+/// whose init waits (`new-live`) and leave a state directory in its shard with no record (`new-orphan`); as the
+/// node before the shards made them, move a box whose init waits to the runtime directory itself, its record
+/// naming that directory (`old-live`), and leave a state directory there with no record (`old-orphan`); then open
+/// today's node again and recover. Expect: today's node keeps a container in its shard; the two live boxes taken
+/// back, each read where its directory is; the two orphans removed, their directories gone; and, the two deleted,
+/// nothing of any box left in either layout.
+fn a_node_upgraded_over_state_dirs_in_the_one_parent_recovers_both_layouts(lab: &Lab, own: &Path) {
+    let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
+    let box_root = own.join("hex-oci-shards");
+    let id = |n: &str| BoxId::new(n).unwrap();
+    let (old_live, old_orphan) = (id("old-live"), id("old-orphan"));
+    let (new_live, new_orphan) = (id("new-live"), id("new-orphan"));
+
+    let first = lab.node(&box_root, state.path());
+    let runtime = first.oci_root().to_owned();
+    let in_shard = first.container_dir(&new_live);
+    let name = |dir: &Path| dir.file_name().unwrap().to_str().unwrap().to_owned();
+    assert_eq!(
+        in_shard.parent().unwrap(),
+        runtime.join(shard(&name(&in_shard))),
+        "today's node keeps a container's directory in its shard"
+    );
+    first
+        .create(lab.running(new_live.clone(), &Lab::act(&Act::Wait)))
+        .expect("create in the shards");
+    // A box made as today's node makes it, its directory then moved to where the node before the shards kept
+    // it: its init holds the directory open and reaches its exec FIFO through it, so it waits on as it was.
+    first
+        .create(lab.running(old_live.clone(), &Lab::act(&Act::Wait)))
+        .expect("create the box to move");
+    drop(first);
+    // Its record, wherever the store keeps it here (the runtime directory's records on tmpfs, else the state
+    // directory's), rewritten to name the moved directory where a node before the shards wrote it.
+    let records = [
+        hex_node::store::runtime_record(&records_dir(&runtime, state.path()).unwrap(), &old_live),
+        state.path().join(format!("{old_live}.json")),
+    ];
+    let file = records.iter().find(|f| f.exists()).unwrap();
+    let mut old = BoxRecord::decode(&std::fs::read(file).unwrap()).unwrap();
+    std::fs::remove_file(file).unwrap();
+    let moved_from = old.dirs.first().unwrap().clone();
+    let old_dir = runtime.join(name(&moved_from));
+    std::fs::rename(&moved_from, &old_dir).unwrap();
+    old.dirs[0] = old_dir.clone();
+    as_an_older_node_wrote(state.path(), &old);
+    let new_orphan_dir = {
+        let node = lab.node(&box_root, state.path());
+        node.container_dir(&new_orphan)
+    };
+    let old_orphan_dir = runtime.join(name(&new_orphan_dir).replace("new-orphan", "old-orphan"));
+    std::fs::create_dir_all(&new_orphan_dir).unwrap();
+    std::fs::create_dir_all(&old_orphan_dir).unwrap();
+
+    let node = lab.node(&box_root, state.path());
+    let summary = node.recover().expect("recover");
+    let adopted: BTreeSet<BoxId> = summary.adopted.iter().cloned().collect();
+    let removed: BTreeSet<BoxId> = summary.removed.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(
+        (adopted, removed),
+        (
+            [old_live.clone(), new_live.clone()].into_iter().collect(),
+            [old_orphan.clone(), new_orphan.clone()]
+                .into_iter()
+                .collect()
+        ),
+        "{summary:?}"
+    );
+    for gone in [&new_orphan_dir, &old_orphan_dir] {
+        assert!(!gone.exists(), "{} is left", gone.display());
+    }
+    for id in [&old_live, &new_live] {
+        assert_eq!(node.inspect(id).unwrap().state, BoxState::Created, "{id}");
+        node.delete(id)
+            .unwrap_or_else(|e| panic!("delete {id}: {e}"));
+    }
+    for gone in [&old_dir, &in_shard] {
+        assert!(!gone.exists(), "{} is left", gone.display());
+    }
+    assert!(node.list().unwrap().is_empty(), "a box is left");
+    eprintln!(
+        "oci_box state shards: adopted {old_live} in the runtime directory and {new_live} in its shard; removed \
+         {old_orphan} and {new_orphan}; nothing left after the deletes"
+    );
+}
+
 /// Goal 5 plan step 4 (T-T7.1.4), the lab test as root and rootless: a container made through a seed has
 /// its init in its own cgroup and the namespaces its spec asks for, and no `hex` binary was exec'd for
 /// the create. Do: create and start a box whose init is a non-hex program (`/usr/bin/sleep`) with a
@@ -3449,11 +5037,22 @@ fn created_through_a_seed_in_its_cgroup_and_namespaces(lab: &Lab, own: &Path) {
         owner: None,
     })
     .expect("create through a seed");
+    // The inits the node then makes ahead for boxes of no owner go through its create seeds too (decision 8):
+    // their refill is waited out, its queue full (or a make failed), and they are taken out of the counts.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        let ahead = node.cgroup_reuse().unwrap().ahead;
+        if ahead.ready >= hex_node::INITS_AHEAD || ahead.failed > 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    let parks = node.cgroup_reuse().unwrap().parked.parked;
     let after = node.create_seeds().unwrap();
     assert_eq!(
         (
-            after.handed - before.handed,
-            after.done - before.done,
+            after.handed - before.handed - parks,
+            after.done - before.done - parks,
             node.creates_through_shim()
         ),
         (1, 1, 0),
@@ -3570,7 +5169,11 @@ fn each_seed_cloned_container_is_randomized_afresh(lab: &Lab, own: &Path) {
 /// death and the create its death refused; the third create succeeds and the pool counts a restart.
 fn a_seed_that_dies_mid_create_is_refused_and_restarted(lab: &Lab, own: &Path) {
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let node = lab.node(&own.join("hex-oci-seedcrash"), state.path());
+    // The seed path: a node that keeps no cgroups made ahead, whose creates each go to a seed (decision 8's
+    // dry path, which a node keeping them takes when none is ready).
+    let node = lab
+        .node(&own.join("hex-oci-seedcrash"), state.path())
+        .with_inits_ahead(0);
     let agent = std::process::id();
     let first = BoxId::new("crash-a").unwrap();
     node.create(lab.running(first.clone(), &Lab::act(&Act::Wait)))
@@ -3690,6 +5293,38 @@ fn as_an_older_node_wrote(state: &Path, record: &BoxRecord) {
 
 /// Whether a thread of this process is blocked opening a FIFO no one has opened the other end of: the
 /// kernel shows it waiting in `wait_for_partner` (fs/pipe.c), or in `fifo_open` where that's inlined.
+/// Lets a create held reading its bundle's config.json, a FIFO, go with `text`, as [`swap_the_held_config`] does
+/// with the same text for whatever reads the config after the agent.
+fn let_the_held_create_go(config: &Path, text: &str) {
+    swap_the_held_config(config, text, text);
+}
+
+/// Lets a create held reading its bundle's config.json, a FIFO, go: once the agent has the FIFO open to read, a
+/// file of `later` takes its name, for whatever opens config.json after the agent's read, and the agent's own
+/// read gets `agent`. Since the seed and the shim take the spec the runtime checked, nothing of a create reads the
+/// file after the agent (a_config_swapped_after_the_check_never_makes_the_container holds it so); before, the
+/// seed's open of the FIFO alone waited for a writer and the create ended in the seed's patience.
+fn swap_the_held_config(config: &Path, agent: &str, later: &str) {
+    let mut fifo = std::fs::OpenOptions::new()
+        .write(true)
+        .open(config)
+        .unwrap();
+    let file = config.with_extension("file");
+    std::fs::write(&file, later).unwrap();
+    std::fs::rename(&file, config).unwrap();
+    std::io::Write::write_all(&mut fifo, agent.as_bytes()).unwrap();
+}
+
+/// Whether process `pid` holds CAP_SYS_ADMIN (capability 21) in its effective set, as /proc/<pid>/status says.
+fn holds_sys_admin(pid: u32) -> bool {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let eff = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .expect("a CapEff line");
+    u64::from_str_radix(eff.trim(), 16).unwrap() & (1 << 21) != 0
+}
+
 fn blocked_opening_a_fifo() -> bool {
     std::fs::read_dir("/proc/self/task")
         .unwrap()
@@ -3770,6 +5405,14 @@ fn kill(pid: i32, sig: i32) {
 fn json_args(args: &[String]) -> String {
     assert!(args.iter().all(|a| a.is_ascii() && !a.contains('\\')));
     format!("{args:?}")
+}
+
+/// The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A spec
+/// naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the host's
+/// network may not hold (spec.rs refuses it).
+fn capabilities() -> String {
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
+    format!(r#"{{"bounding": {set}, "effective": {set}, "permitted": {set}}}"#)
 }
 
 /// A rootfs of the host's `/usr`, bound in by each bundle, with the host's top-level links into it

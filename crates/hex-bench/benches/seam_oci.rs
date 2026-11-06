@@ -43,8 +43,22 @@
 //! device program is an eBPF program, and its namespaces are made without a user namespace), so this
 //! runs in the OCI pass's privileged container, where the cgroup root is vacated to a leaf and its
 //! controllers handed down, as oci_inside.sh leaves it; off that it refuses, naming why.
+//! In process it reads the node's ipc and uts namespace counts the same way (`Node::ipc_uts`, goal 5 extended
+//! step 4), and HEXBENCH_IPCUTS=0 drains that pool (bound 0), so a run can time creates with it and without it. The
+//! `ipc_uts_pairs` phase, run only when named, in process: the lifecycle on a node with the pool and one with it
+//! drained, interleaved one by one, the first of each pair alternating, so a pair meets one host and a difference
+//! of a percent or two shows under other tenants' load; create, start, exec and delete each, so work that moved
+//! from one to another shows too.
 //! HEXBENCH_TRACE turns on the breakdown probes' markers, around the ops HEXBENCH_TRACE_OPS
 //! names (`Trace`, bench/competitive/probes/exec_breakdown.md and create_breakdown.md).
+//! HEXBENCH_AHEAD is how many cgroups the node makes ahead for boxes of no owner, each with an init parked in it
+//! (decision 8, "The p99.9 that stayed"), the node's default (`hex_node::INITS_AHEAD`) unless set; 0 makes none.
+//! HEXBENCH_PARKED_PROCS=1 has each parked init's proc made with it and 0 has none made (decision 8, parked procs;
+//! unset, the node's default, on for a root node), in process and in the socket driver's `hex node`
+//! (`--parked-procs`). In process the phase's `parked` counts say how many were made, taken by their create (hits),
+//! left (misses), wanted with none made (dry) or failed; the socket driver ends its node with SIGTERM and records
+//! the line of counts it says then as the result's `parked_at_exit` (made, hits, misses, dry, capped, alive), the
+//! run's own node's.
 //! HEXBENCH_OWNER names one owner for every box the run makes (goal 5 extended, step 6): a box's cgroup
 //! is handed to the owner's next box when it reads clean, so its bundles' processes must hold no
 //! CAP_SYS_ADMIN (oci_inside.sh gives them Docker's default capabilities when it's set). In process it
@@ -280,6 +294,59 @@ mod linux {
         delete: Vec<f64>,
     }
 
+    /// The p50, the p99 and, against `other`'s lifecycles in the same pairs, the median difference of one operation.
+    fn paired(on: &[f64], drained: &[f64]) -> Value {
+        let at = |sorted: &[f64], pct: usize| sorted[(sorted.len() - 1) * pct / 100];
+        let sorted = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            v
+        };
+        let (a, b) = (sorted(on), sorted(drained));
+        let diffs: Vec<f64> = on.iter().zip(drained).map(|(x, y)| x - y).collect();
+        let faster = diffs.iter().filter(|d| **d < 0.0).count();
+        json!({"on_p50": at(&a, 50), "drained_p50": at(&b, 50), "on_p99": at(&a, 99), "drained_p99": at(&b, 99),
+               "median_difference": at(&sorted(&diffs), 50), "on_faster": faster as f64 / diffs.len() as f64})
+    }
+
+    /// The `ipc_uts_pairs` phase (goal 5 extended, step 4): the module's header says what it times. `on` is the node
+    /// under test, with the pool; the drained node is made here beside it, with its own box root and state.
+    fn ipc_uts_pairs(
+        on: &dyn Runtime,
+        parent: &Path,
+        hex: &str,
+        bundle: &Path,
+        n: usize,
+        warmup: usize,
+    ) -> Result<Value, String> {
+        let state = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let drained = Node::open(
+            &parent.join("hex-oci-seam-drained"),
+            state.path(),
+            state.path(),
+        )
+        .map_err(|e| e.to_string())?
+        .with_oci_helper(PathBuf::from(hex))
+        .with_ipc_uts_bound(0)
+        .map_err(|e| e.to_string())?;
+        let (mut a, mut b) = (Ops::default(), Ops::default());
+        for i in 0..n + warmup {
+            let timed = i >= warmup;
+            let first_on = i % 2 == 0;
+            for with_pool in [first_on, !first_on] {
+                if with_pool {
+                    lifecycle_once(on, bundle, &format!("pa{i}"), &mut a, timed, None)?;
+                } else {
+                    lifecycle_once(&drained, bundle, &format!("pd{i}"), &mut b, timed, None)?;
+                }
+            }
+        }
+        Ok(
+            json!({"pairs": n, "create": paired(&a.create, &b.create), "start": paired(&a.start, &b.start),
+                  "exec": paired(&a.exec, &b.exec), "delete": paired(&a.delete, &b.delete)}),
+        )
+    }
+
     /// n timed lifecycles after `warmup` untimed ones, each operation timed alone, its boxes named
     /// `tag` and their number.
     fn lifecycle(
@@ -337,7 +404,7 @@ mod linux {
         for conc in throughput_concurrency() {
             let per = (lifecycles / conc).max(1);
             let start = Barrier::new(conc + 1);
-            let (wall, cpu_s, errs, create_ms) = {
+            let (wall, cpu_s, errs, create_ms, delete_ms) = {
                 std::thread::scope(|s| {
                     let threads: Vec<_> = (0..conc)
                         .map(|w| {
@@ -345,27 +412,33 @@ mod linux {
                             s.spawn(move || {
                                 start.wait();
                                 let mut create_ms = Vec::with_capacity(per);
+                                let mut delete_ms = Vec::with_capacity(per);
                                 for j in 0..per {
-                                    let d = run_true_container_timed(
+                                    let (c, d) = run_true_container_timed(
                                         node,
                                         bundle,
                                         &format!("t{conc}-{w}-{j:06}"),
                                     )?;
-                                    create_ms.push(d.as_secs_f64() * 1e3);
+                                    create_ms.push(c.as_secs_f64() * 1e3);
+                                    delete_ms.push(d.as_secs_f64() * 1e3);
                                 }
-                                Ok::<_, String>(create_ms)
+                                Ok::<_, String>((create_ms, delete_ms))
                             })
                         })
                         .collect();
                     start.wait();
                     let (c0, t0) = (cpu_usec(own), Instant::now());
-                    let (mut errs, mut create_ms) = (Vec::new(), Vec::new());
+                    let (mut errs, mut create_ms, mut delete_ms) =
+                        (Vec::new(), Vec::new(), Vec::new());
                     for t in threads {
                         match t
                             .join()
                             .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
                         {
-                            Ok(samples) => create_ms.extend(samples),
+                            Ok((c, d)) => {
+                                create_ms.extend(c);
+                                delete_ms.extend(d);
+                            }
                             Err(e) => errs.push(e),
                         }
                     }
@@ -374,6 +447,7 @@ mod linux {
                         (cpu_usec(own) - c0) as f64 / 1e6,
                         errs,
                         create_ms,
+                        delete_ms,
                     )
                 })
             };
@@ -384,6 +458,7 @@ mod linux {
             out.insert(
                 conc.to_string(),
                 json!({"lifecycles": total, "wall_s": wall.as_secs_f64(), "create_ms": create_ms,
+                       "delete_ms": delete_ms,
                        "per_s": total as f64 / wall.as_secs_f64(),
                        "cpu_s_per_lifecycle": cpu_s / total as f64}),
             );
@@ -476,43 +551,55 @@ mod linux {
         conc: usize,
         lifecycles: usize,
         tag: &str,
-    ) -> Result<(Duration, f64), String> {
+    ) -> Result<(Duration, f64, Vec<f64>), String> {
         let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
         let start = Barrier::new(conc + 1);
         std::thread::scope(|s| {
             let threads: Vec<_> = (0..conc)
                 .map(|_| {
                     s.spawn(|| {
+                        let mut took = Vec::new();
                         start.wait();
                         while !failed.load(Ordering::Relaxed) {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             if i >= lifecycles {
                                 break;
                             }
+                            let began = Instant::now();
                             if let Err(e) =
                                 run_true_container(node, bundle, &format!("{tag}{i:06}"))
                             {
                                 failed.store(true, Ordering::Relaxed);
                                 return Err(e);
                             }
+                            took.push(began.elapsed().as_secs_f64() * 1e3);
                         }
-                        Ok(())
+                        Ok(took)
                     })
                 })
                 .collect();
             start.wait();
             let (c0, t0) = (cpu_usec(own), Instant::now());
-            let errs: Vec<String> = threads
-                .into_iter()
-                .filter_map(|t| {
-                    t.join()
-                        .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
-                        .err()
-                })
-                .collect();
+            let (mut took, mut errs) = (Vec::with_capacity(lifecycles), Vec::new());
+            for t in threads {
+                match t
+                    .join()
+                    .unwrap_or_else(|_| Err("a thread panicked".to_owned()))
+                {
+                    Ok(each) => took.extend(each),
+                    Err(e) => errs.push(e),
+                }
+            }
             let (wall, cpu_s) = (t0.elapsed(), (cpu_usec(own) - c0) as f64 / 1e6);
-            errs.into_iter().next().map_or(Ok((wall, cpu_s)), Err)
+            took.sort_by(f64::total_cmp);
+            errs.into_iter().next().map_or(Ok((wall, cpu_s, took)), Err)
         })
+    }
+
+    /// The `per_mille` quantile of `sorted`, ascending, by its nearest rank; `None` for none.
+    fn quantile(sorted: &[f64], per_mille: usize) -> Option<f64> {
+        let n = sorted.len();
+        (n > 0).then(|| sorted[(n * per_mille).div_ceil(1000).clamp(1, n) - 1])
     }
 
     /// The host's 1-minute load average and its CPU pressure, the share of the last 10 s some task waited
@@ -560,10 +647,10 @@ mod linux {
         for p in 0..pairs {
             let at_start = host_load();
             let c1_pinned = pin_to(&cpus1)?;
-            let (one, one_cpu) =
+            let (one, one_cpu, one_took) =
                 at_concurrency(node, bundle, own, 1, INTERLEAVED_C1, &format!("i{p:03}a"))?;
             let c32_pinned = pin_to(&cpus32)?;
-            let (many, many_cpu) = at_concurrency(
+            let (many, many_cpu, many_took) = at_concurrency(
                 node,
                 bundle,
                 own,
@@ -583,6 +670,10 @@ mod linux {
                              "c32_cpu_ms_per_lifecycle": many_cpu * 1e3 / INTERLEAVED_C32 as f64,
                              "c1_cpus_busy": one_cpu / one.as_secs_f64(),
                              "c32_cpus_busy": many_cpu / many.as_secs_f64(),
+                             "c1_p50_ms": quantile(&one_took, 500),
+                             "c1_p99_ms": quantile(&one_took, 990),
+                             "c32_p50_ms": quantile(&many_took, 500),
+                             "c32_p99_ms": quantile(&many_took, 990),
                              "c1_pinned": c1_pinned, "c32_pinned": c32_pinned,
                              "at_start": at_start, "at_end": host_load()}));
         }
@@ -714,23 +805,26 @@ mod linux {
 
     /// create+start+delete of a `true` container, with no exec: the throughput lifecycle.
     fn run_true_container(node: &dyn Runtime, bundle: &Path, id: &str) -> Result<(), String> {
-        run_true_container_timed(node, bundle, id).map(|_| ())
+        run_true_container_timed(node, bundle, id).map(drop)
     }
 
-    /// The complete create is timed alongside part 19, under the same concurrency and host load.
+    /// The complete create is timed alongside part 19, under the same concurrency and host load, and so is the
+    /// delete, which pays for what a park does (decision 8).
     fn run_true_container_timed(
         node: &dyn Runtime,
         bundle: &Path,
         id: &str,
-    ) -> Result<Duration, String> {
+    ) -> Result<(Duration, Duration), String> {
         let bid = BoxId::new(id).map_err(|e| e.to_string())?;
         let spec = spec(&bid, bundle);
         let t = Instant::now();
         node.create(spec).map_err(|e| format!("create {id}: {e}"))?;
         let create = t.elapsed();
         let started = node.start(&bid).map_err(|e| format!("start {id}: {e}"));
+        let t = Instant::now();
         node.delete(&bid).map_err(|e| format!("delete {id}: {e}"))?;
-        started.map(|_| create)
+        let delete = t.elapsed();
+        started.map(|_| (create, delete))
     }
 
     /// Inspect of one running `sleep` container, `n` times after `warmup`, each timed alone: a call
@@ -756,15 +850,36 @@ mod linux {
         Ok(json!({ "ms": timed? }))
     }
 
-    /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; killed when
-    /// dropped.
-    struct Agent(Child);
+    /// HEXBENCH_PARKED_PROCS: `Some(true)` for 1, `Some(false)` for 0, `None` unset (the node's default).
+    fn parked_procs() -> Option<bool> {
+        match std::env::var("HEXBENCH_PARKED_PROCS").as_deref() {
+            Ok("1") => Some(true),
+            Ok("0") => Some(false),
+            Ok(v) => panic!("HEXBENCH_PARKED_PROCS={v:?}: 1 or 0"),
+            Err(_) => None,
+        }
+    }
+
+    /// How long a socket agent has to end on SIGTERM before it's SIGKILLed: its counts line and exit are a
+    /// write and an exit, so seconds are slack under any load the bench meets.
+    const AGENT_END: Duration = Duration::from_secs(30);
+
+    /// A `hex node` serving its socket for the socket driver, its boxes under `box_root`; ended with SIGTERM
+    /// ([`Agent::end`]), else killed when dropped. It takes HEX_OCI_MNTNS and HEXBENCH_PARKED_PROCS
+    /// (`--parked-procs`): HEXBENCH_DEVFS, _PROCFS, _AHEAD and _IPCUTS set only the in-process node, and it raises its
+    /// soft descriptor limit to the hard one as it starts, undoing HEXBENCH_NOFILE's `ulimit -Sn`; so an A/B of any of
+    /// those reads the in-process figures, never the socket's. Its stderr is passed on as it comes and kept.
+    struct Agent {
+        child: Child,
+        said: std::sync::Arc<std::sync::Mutex<String>>,
+        drain: Option<std::thread::JoinHandle<()>>,
+    }
 
     impl Agent {
         fn start(hex: &str, state: &Path, box_root: &Path) -> (Self, PathBuf) {
             let socket = state.join("node.sock");
-            let mut child = Command::new(hex)
-                .arg("node")
+            let mut cmd = Command::new(hex);
+            cmd.arg("node")
                 .arg("--socket")
                 .arg(&socket)
                 .arg("--state")
@@ -772,21 +887,88 @@ mod linux {
                 .arg("--box-root")
                 .arg(box_root)
                 .stdout(Std::piped())
-                .spawn()
-                .expect("start hex node");
+                .stderr(Std::piped());
+            if let Some(on) = parked_procs() {
+                cmd.arg("--parked-procs").arg(if on { "on" } else { "off" });
+            }
+            let mut child = cmd.spawn().expect("start hex node");
+            let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let drain = {
+                let said = std::sync::Arc::clone(&said);
+                let err = child.stderr.take().expect("hex node's stderr");
+                std::thread::spawn(move || {
+                    for line in BufReader::new(err).lines().map_while(Result::ok) {
+                        eprintln!("{line}");
+                        let mut said = said.lock().expect("hex node's stderr kept");
+                        said.push_str(&line);
+                        said.push('\n');
+                    }
+                })
+            };
             let mut line = String::new();
             BufReader::new(child.stdout.take().expect("hex node's stdout"))
                 .read_line(&mut line)
                 .expect("hex node's ready line");
             assert!(line.starts_with("ready "), "hex node said {line:?}");
-            (Self(child), socket)
+            (
+                Self {
+                    child,
+                    said,
+                    drain: Some(drain),
+                },
+                socket,
+            )
+        }
+
+        /// Ends the node with SIGTERM, waits at most [`AGENT_END`] for it (SIGKILLed past it), and returns the
+        /// parked procs' counts it said as it ended, each by name.
+        fn end(mut self) -> Result<Value, String> {
+            let pid = rustix::process::Pid::from_child(&self.child);
+            rustix::process::kill_process(pid, rustix::process::Signal::TERM)
+                .map_err(|e| format!("SIGTERM to hex node: {e}"))?;
+            let deadline = Instant::now() + AGENT_END;
+            let ended = loop {
+                match self.child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::park_timeout(Duration::from_millis(20));
+                    }
+                    _ => break None,
+                }
+            };
+            let Some(status) = ended else {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(format!(
+                    "hex node didn't end in {AGENT_END:?} of SIGTERM: SIGKILLed"
+                ));
+            };
+            if let Some(drain) = self.drain.take() {
+                let _ = drain.join();
+            }
+            let said = self.said.lock().expect("hex node's stderr kept").clone();
+            let line = said
+                .lines()
+                .find_map(|l| l.strip_prefix("hex node: parked procs at exit: "))
+                .ok_or_else(|| format!("hex node ended {status} saying no parked procs line"))?;
+            let mut counts = Map::new();
+            for kv in line.split(", ") {
+                let (k, v) = kv
+                    .split_once(' ')
+                    .ok_or_else(|| format!("hex node's parked procs line {line:?}"))?;
+                let v: u64 = v
+                    .parse()
+                    .map_err(|e| format!("hex node's parked procs line {line:?}: {e}"))?;
+                counts.insert(k.to_owned(), json!(v));
+            }
+            Ok(Value::Object(counts))
         }
     }
 
     impl Drop for Agent {
         fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
@@ -796,7 +978,7 @@ mod linux {
         InProcess(Box<Node>),
         /// A `hex node` of its own, reached through its socket. The client is dropped before the agent
         /// it holds a connection to, which is kept for its drop alone.
-        Socket { client: Client, _agent: Agent },
+        Socket { client: Client, agent: Agent },
     }
 
     impl Driver {
@@ -840,6 +1022,14 @@ mod linux {
         fn dev_mounts(&self) -> Result<Option<hex_core::devfs::Counts>, String> {
             match self {
                 Self::InProcess(node) => node.dev_mounts().map(Some).map_err(|e| e.to_string()),
+                Self::Socket { .. } => Ok(None),
+            }
+        }
+
+        /// The node's ipc and uts namespace counts, read in process, as its create seeds' are.
+        fn ipc_uts(&self) -> Result<Option<netns::Counts>, String> {
+            match self {
+                Self::InProcess(node) => node.ipc_uts().map(Some).map_err(|e| e.to_string()),
                 Self::Socket { .. } => Ok(None),
             }
         }
@@ -946,6 +1136,11 @@ mod linux {
                "protocols": after.protocols - before.protocols,
                "through_files": after.through_files - before.through_files,
                "files_failed": after.files_failed - before.files_failed,
+               "files_bounded": after.files_bounded - before.files_bounded,
+               "files_held": after.files_held,
+               "files_bound": after.files_bound.map(|f| f.namespaces),
+               "descriptors_soft": after.files_bound.and_then(|f| f.soft),
+               "descriptors_own": after.files_bound.map(|f| f.own),
                "check_us_mean": (after.check_ns - before.check_ns) as f64
                    / 1e3 / ((after.checked - before.checked).max(1)) as f64})
     }
@@ -973,7 +1168,32 @@ mod linux {
                "removals_failed": after.0.removals_failed - before.0.removals_failed,
                "ended_through_init": after.1.through_init - before.1.through_init,
                "fell_back_to_cgroup_kill": after.1.fell_back - before.1.fell_back,
-               "cgroup_kill": after.1.cgroup_kill - before.1.cgroup_kill})
+               "cgroup_kill": after.1.cgroup_kill - before.1.cgroup_kill,
+               "parked": parked_rise(&before.0.parked, &after.0.parked),
+               "ahead": {"made": after.0.ahead.made - before.0.ahead.made,
+                         "taken": after.0.ahead.taken - before.0.ahead.taken,
+                         "dry": after.0.ahead.dry - before.0.ahead.dry,
+                         "failed": after.0.ahead.failed - before.0.ahead.failed,
+                         "ready": after.0.ahead.ready}})
+    }
+
+    /// What the inits made ahead in idle cgroups did over a phase (decision 8, "The p99.9 that stayed").
+    fn parked_rise(b: &hex_node::cgroups::ParkCounts, a: &hex_node::cgroups::ParkCounts) -> Value {
+        json!({"parked": a.parked - b.parked, "claimed": a.claimed - b.claimed,
+               "ended_unclaimed": a.ended_unclaimed - b.ended_unclaimed,
+               "failed": a.failed - b.failed,
+               "charged_bytes": a.charged_bytes - b.charged_bytes,
+               "procs_made": a.procs_made - b.procs_made,
+               "procs_made_at_delete": a.procs_made_at_delete - b.procs_made_at_delete,
+               "procs_made_at_refill": a.procs_made_at_refill - b.procs_made_at_refill,
+               "proc_hits": a.proc_hits - b.proc_hits,
+               "proc_misses": a.proc_misses - b.proc_misses,
+               "proc_dry": a.proc_dry - b.proc_dry,
+               "procs_failed": a.procs_failed - b.procs_failed,
+               "procs_held": a.procs_held,
+               "procs_queued": a.procs_queued - b.procs_queued,
+               "procs_dropped": a.procs_dropped - b.procs_dropped,
+               "procs_dropped_inline": a.procs_dropped_inline - b.procs_dropped_inline})
     }
 
     pub(super) fn main() -> ExitCode {
@@ -1062,10 +1282,7 @@ mod linux {
             let (agent, path) = Agent::start(hex, state.path(), &root);
             let client = Client::connect(&path)
                 .unwrap_or_else(|e| panic!("connecting to hex node at {}: {e}", path.display()));
-            Driver::Socket {
-                client,
-                _agent: agent,
-            }
+            Driver::Socket { client, agent }
         } else {
             let node = Node::open(&root, state.path(), state.path())
                 .unwrap_or_else(|e| {
@@ -1087,6 +1304,28 @@ mod linux {
                 // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
                 .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
                 .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
+            let node = match parked_procs() {
+                Some(on) => node
+                    .with_parked_procs(on)
+                    .unwrap_or_else(|e| panic!("parked procs: {e}")),
+                None => node,
+            };
+            // Cgroups made ahead for boxes of no owner, each with an init in it (decision 8): the node's default,
+            // as it ships, unless HEXBENCH_AHEAD says.
+            let node = match std::env::var("HEXBENCH_AHEAD") {
+                Ok(v) => node.with_inits_ahead(
+                    v.trim()
+                        .parse()
+                        .unwrap_or_else(|e| panic!("HEXBENCH_AHEAD={v:?}: {e}")),
+                ),
+                Err(_) => node,
+            };
+            let node = match std::env::var("HEXBENCH_IPCUTS").as_deref() {
+                Ok("0") => node
+                    .with_ipc_uts_bound(0)
+                    .unwrap_or_else(|e| panic!("draining the ipc and uts pool: {e}")),
+                _ => node,
+            };
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();
@@ -1106,6 +1345,7 @@ mod linux {
             "sustained",
             "interleaved",
             "rtt",
+            "ipc_uts_pairs",
         ] {
             if !wanted.split_whitespace().any(|w| w == phase) {
                 continue;
@@ -1117,6 +1357,7 @@ mod linux {
                 let reuse_before = driver.reuse();
                 let netns_reuse_before = driver.netns_reuse();
                 let dev_before = driver.dev_mounts()?;
+                let ipc_uts_before = driver.ipc_uts()?;
                 let proc_before = driver.proc_mounts()?;
                 let mut v = match phase {
                     "lifecycle" => lifecycle(node, &sleep_bundle, n, warmup, "l", trace.as_ref()),
@@ -1130,6 +1371,7 @@ mod linux {
                     "throughput" => throughput(node, &true_bundle, &parent, lifecycles),
                     "sustained" => sustained(node, &true_bundle, &parent, sustained_lifecycles),
                     "interleaved" => interleaved(node, &true_bundle, &parent, interleaved_pairs),
+                    "ipc_uts_pairs" => ipc_uts_pairs(node, &parent, hex, &sleep_bundle, n, warmup),
                     _ => rtt(node, &sleep_bundle, n, warmup),
                 }?;
                 let rose = rise(before, driver.netns()?);
@@ -1147,6 +1389,9 @@ mod linux {
                 };
                 if let Value::Object(fields) = &mut v {
                     fields.insert("netns".to_owned(), rose);
+                    if let (Some(before), Some(after)) = (ipc_uts_before, driver.ipc_uts()?) {
+                        fields.insert("ipc_uts".to_owned(), rise(before, after));
+                    }
                     if let (Some(before), Some(after)) = (dev_before, driver.dev_mounts()?) {
                         fields.insert("dev_mounts".to_owned(), json!({
                             "made":after.made-before.made, "taken":after.taken-before.taken,
@@ -1232,12 +1477,25 @@ mod linux {
         {
             errors.insert("release_idle".to_owned(), Value::String(e.to_string()));
         }
-        drop(driver);
+        // The socket's node says its parked procs' counts as it ends on SIGTERM: this run's own.
+        let mut parked_at_exit = Value::Null;
+        if let Driver::Socket { client, agent } = driver {
+            drop(client);
+            match agent.end() {
+                Ok(counts) => parked_at_exit = counts,
+                Err(e) => {
+                    errors.insert("parked_at_exit".to_owned(), Value::String(e));
+                }
+            }
+        } else {
+            drop(driver);
+        }
         let _ = std::fs::remove_dir(root.join(hex_node::OCI_BOXES));
         let _ = std::fs::remove_dir(&root);
         let result = json!({"runtime": runtime, "n": n, "warmup": warmup,
                             "owner": owner.map(|o| o.name),
-                            "phases": phases, "errors": errors, "cgroup": parent});
+                            "phases": phases, "errors": errors, "cgroup": parent,
+                            "parked_at_exit": parked_at_exit});
         std::fs::write(out, result.to_string()).expect("writing the result");
         ExitCode::SUCCESS
     }

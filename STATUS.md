@@ -105,7 +105,8 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   so a box that reached it would find a read-only host tree. Reads of that tree stayed open to such a box
   (the host cgroup submount is locked and can't be removed, only made read-only), so on Ada's call
   (2026-10-31) the spec's check now refuses the combination by name: a container in a user namespace
-  holding `CAP_SYS_ADMIN` without a network namespace of its own (`Spec::check`). The lab test
+  holding `CAP_SYS_ADMIN` without a network namespace of its own (`Spec::check`), named in a capability
+  set or kept from its creator where the spec names no capabilities (found 2026-11-03). The lab test
   (`a_rootless_host_network_box_cannot_change_another_boxs_cgroup`) expects that refusal, and a plain
   host-network box's carried host cgroup filesystem read-only. Built on cp/t7-seed, not merged: it
   reaches main with goal 5's merge, on Ada's call.
@@ -120,6 +121,33 @@ macOS and Windows lints) and the evidence its requirement names is recorded.
   change. Today it reads 1.081-1.835 ms at 6 loops and 1.519-2.313 at 12 (without Docker's paths 0.454-0.580 and 0.702-1.068;
   `docs/research/runtime/goal5-mounts.md` §11). The masked directories' tmpfs made ahead was built and measured: part 19's p50
   about 15% lower with Docker's paths, no gain on either p99 or the whole create, so it stays on `cp/t7-ext-s3-maskpool` (§13).
+
+- **Goal 5 extended, one integrated tree** (2026-11-04, `cp/t7-g5x-integrate`, not merged). Steps 1 to 6 of goal 5
+  extended in one tree, with main's fd-leak fix (c4963f9), the EAGAIN retry for a `..` in a container's root, the exec
+  FIFO's two ends held at start, the CAP_SYS_ADMIN refusal for a spec naming no capabilities, the rootless delete
+  flake's pidfd kill, a box's turn for a create or delete of a box being made (in place of step 6's claim), a
+  container made from the spec the runtime checked, and its execs and its start's and delete's hooks too (kept with its
+  state; nothing reads the bundle's config.json after create's check),
+  and createContainer and startContainer hooks run in the container (cp/t7-hooks a4e0261). The hook sweep (bc8684b) is in by a merge of its own, its CLAUDE.md §12 words held for Ada. The
+  seven gates pass at each merge and the root lab at the tip (fedora). It is the tree step 7 measures, and goal 5
+  lands from it once the native work is done, on Ada's word. Decision 5 lists what it holds.
+  - goal 5x step 7, goal 5's create against its bar on the final tree (f58a101, fedora, 2026-11-05, noisy;
+    `bench/competitive/probes/create_breakdown.md`, "Goal 5 extended step 7 again"; decision 5). host.sh's OCI pass,
+    best of 2, Hex over libcrun, every round read whole: reuse on (out/20261105T114658Z) create p50 0.160x, p99.9
+    0.656x, create+start of `true` p50 0.187x, p99.9 0.148x; reuse off (out/20261105T120118Z) 0.220x, 0.419x, 0.210x,
+    0.240x. Create's p99.9 in process is the one over the bar, in the round the table takes; the other round reads 3.54
+    and 2.91 ms, and the socket 0.99 and 3.48. Every box ended through its init, none by `cgroup.kill`. The breakdown,
+    four runs: the parts' p50s summed are 98.4% to 104.5% of create's p50 (step 7's 10% met by all four). The levers
+    for what's left are named for Ada: goal 6's 7.x namespace, the shared empty-directory masks (cp/t7-g6), the
+    record's fsync on disk, step 6's reuse.
+  - the tree since 1714f72: step 6's final code (a12e526) and records (e943880), the held files' bound counting both
+    pools of namespaces made ahead (e31256b), a delete reading its box's record again after forgetting the init
+    (3428ddc; 758afc9's Ended-path wait reverted by 2a4a806 on an A/B), host.sh's fetch from the pinned tarball and its
+    refusal of a pass with a crashed round. Gates 7 of 7, root lab 8 of 8 at f58a101.
+  - goal 5x step 4: ipc/uts pairs made ahead; part 16 0.727 of drained, create 17-37 us faster pairwise, dry <=0.30% at
+    c32; cp/t7-ext-s4 209cea4.
+  - goal 5x step 3: closed on its written bars by Ada's ruling (2026-11-03), with the under-load bar moved to goal 6;
+    tip a600107.
 
 ## Design decided, implementation under way (2026-10-24)
 

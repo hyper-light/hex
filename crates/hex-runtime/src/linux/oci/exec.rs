@@ -15,7 +15,6 @@
 //! Run by the node agent (seam mode), the program dies with the helper, so the agent ending the helper
 //! ends the program too.
 
-use std::fs;
 use std::io::Write;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
@@ -25,7 +24,7 @@ use rustix::fs::{Mode, OFlags};
 use rustix::pipe::PipeFlags;
 use serde::{Deserialize, Serialize};
 
-use crate::linux::oci::spec::{Process, Seccomp, Spec};
+use crate::linux::oci::spec::{Process, Seccomp};
 use crate::linux::oci::{OciError, init, sys};
 
 /// The request the runtime hands `hex __oci-exec`, as JSON.
@@ -53,6 +52,11 @@ pub struct Request {
     /// exits the helper with its code either way. Absent in a request from the command line.
     #[serde(default)]
     pub seam: bool,
+    /// The container's state directory, where its create kept the spec it checked: the program's process settings
+    /// come from that spec, never the bundle's `config.json` as it is now (AC-T7.1.1). Absent in a request from
+    /// before it was named; the bundle's spec is then checked again, with the same checks.
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 /// A helper that fails before the program can start exits as a shell does for a program it can't run
@@ -96,11 +100,16 @@ fn helper() -> Result<u8, (u8, OciError)> {
         .map_err(|e| cannot(OciError::os("reading the exec request", e)))?;
     let req: Request = serde_json::from_str(&raw)
         .map_err(|e| cannot(OciError::Broken(format!("the exec request: {e}"))))?;
-    let spec = Spec::parse(
-        &fs::read(Path::new(&req.bundle).join("config.json"))
-            .map_err(|e| cannot(OciError::os("reading config.json", e)))?,
+    let spec = crate::linux::oci::checked::spec_of(
+        req.dir.as_deref().map(Path::new),
+        Path::new(&req.bundle),
     )
-    .map_err(cannot)?;
+    .map_err(cannot)?
+    .ok_or_else(|| {
+        cannot(OciError::Config(
+            "the container's spec is neither kept with its state nor in its bundle".to_owned(),
+        ))
+    })?;
     let process = process_for(spec.process.unwrap_or_default(), &req);
 
     // The cgroup is opened before any namespace changes, as the shim opens it (init.rs): its path
@@ -380,6 +389,7 @@ mod tests {
             env: env.iter().map(|s| (*s).to_owned()).collect(),
             user,
             seam: false,
+            dir: None,
         }
     }
 
@@ -430,5 +440,20 @@ mod tests {
         let r = req(&["A=b"], Some("/x"), Some((7, Some(8))));
         let back: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);
+    }
+
+    /// Append-only (AC-T7.1.1): a request from before the state directory was named, as an older node writes it,
+    /// reads as one naming none, which checks the bundle's spec again; one naming it reads back with it.
+    #[test]
+    fn an_older_request_reads_without_a_state_directory() {
+        let older = r#"{"pid":1,"bundle":"/b","cgroup":null,"args":["true"],"cwd":null,"env":[],"user":null,"seam":true}"#;
+        let read: Request = serde_json::from_str(older).unwrap();
+        assert_eq!(read.dir, None);
+        let named = Request {
+            dir: Some("/run/hex-node/k-c".to_owned()),
+            ..req(&[], None, None)
+        };
+        let back: Request = serde_json::from_str(&serde_json::to_string(&named).unwrap()).unwrap();
+        assert_eq!(back, named);
     }
 }

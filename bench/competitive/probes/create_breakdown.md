@@ -968,6 +968,170 @@ With Docker's paths, medians over 17 pairs, off → on:
 
 So it stays on `cp/t7-ext-s3-maskpool`. Every cell, the pairs, the trace and the reasons are in `docs/research/runtime/goal5-mounts.md` §13.
 
+## The ipc and uts namespaces made ahead: the pool on against drained (goal 5 extended plan step 4)
+
+`IPCUTS_AB=1` adds, to every round, the seam and traced items again on a node whose ipc and uts pool is drained
+(`seam_drained`, `traced_drained`: seam_oci's `HEXBENCH_IPCUTS=0`), and `pairs`, seam_oci's `ipc_uts_pairs` phase: the
+lifecycle on a node with the pool and one with it drained, interleaved one by one, the first of each pair alternating.
+All on fedora, Linux 6.19.10, `CPUSET=4-15`, N=1000, WARMUP=100, `LOAD_GATE=0` with Focal's and others' containers up
+beside it; every round's counts confirm which it was: each pooled create took a pair, each drained one made its own.
+
+**Run A**, create-breakdown-20261103T230157Z (unit hex-s4-job3-20261103T225951Z, tree 53330b0, 6 rounds, 23:01:57Z to
+23:05:25Z, load 74.10 at the start, 38.45 at the end). Step 6's profile ran beside it: bpftrace on every context switch
+and futex call, with perf, on CPUs 4-31 from 23:00:29Z to 23:03:15Z (unit hex-g5x-s6-fdh13-20261103T225919Z), then its
+interleaved pairs pinned to 4-15 to about 23:06:30Z (hex-g5x-s6-v24-20261103T225919Z). Part 16, the init's clone into
+its cgroup and namespaces, pooled p50 0.105 ms on against 0.123 drained, 0.854, short of the bar; part 17, which holds
+the pair's two joins, 0.053 against 0.036; the whole create 0.818 against 0.831, 0.985, its rounds 0.913 to 1.045.
+
+**Run B**, create-breakdown-20261103T231406Z (unit hex-s4-job4-20261103T231047Z, the tree of step 4's next commit, hex
+e924de4229967190, seam_oci 6b751ac622d96411, 8 rounds, load 77.67 at the start, 38.36 at the end), with the refill thread
+woken only once the pool is half empty and the pair left for the init's exec to close, as the pipes are. No timed part
+of step 6's overlapped it; only its untimed gates and root lab ran, on 16-31 (hex-g5x-s6-fdh23-20261103T231544Z):
+
+| | on p50 (ms) | drained p50 | on over drained, p50 | on p99 | drained p99 | on over drained, p99 |
+|---|---|---|---|---|---|---|
+| create | 0.816 | 0.978 | 0.834 | 2.763 | 3.561 | 0.776 |
+| part 16 | 0.104 | 0.143 | 0.727 | 1.171 | 1.345 | 0.871 |
+| part 17 | 0.052 | 0.041 | 1.268 | 0.204 | 0.168 | 1.214 |
+| parts 16+17 | 0.157 | 0.186 | 0.844 | 1.365 | 1.425 | 0.958 |
+
+Part 16 by round, on over drained: 0.708, 0.639, 0.561, 0.543, 0.777, 0.992, 0.844, 0.692. Interleaved, by round, the
+median of the pairs' create differences, on minus drained, and the share of pairs the pool won: -0.0293 ms (0.58),
+-0.0220 (0.57), -0.0275 (0.59), -0.0208 (0.57), -0.0343 (0.52), -0.0373 (0.63), -0.0171 (0.53), -0.0318 (0.55). Start's,
+exec's and delete's medians stayed within -0.0025 to +0.0095 ms of zero, so nothing moved to them. So the clone sheds
+about 39 us of the pair's making, the joins add about 11 back, and a create is 17 to 37 us faster in every round.
+
+The two runs side by side, pooled p50 (ms):
+
+| | run A on | run A drained | run A ratio | run B on | run B drained | run B ratio |
+|---|---|---|---|---|---|---|
+| part 16 | 0.105 | 0.123 | 0.854 | 0.104 | 0.143 | 0.727 |
+| part 17 | 0.053 | 0.036 | 1.472 | 0.052 | 0.041 | 1.268 |
+| create | 0.818 | 0.831 | 0.985 | 0.816 | 0.978 | 0.834 |
+
+The pool's side was the same in both runs, part for part; what moved is the drained side: its clone took 0.123 ms in run
+A and 0.143 in run B, at like loads at each run's start and end. So the ratio's gain from run A to run B came from the
+drained creates, not from the pooled path getting faster, and the two changes between the runs left the pooled parts
+where they were. That the drained clone's cost moves with the host is what its work predicts: making an ipc namespace
+mounts its mqueue filesystem, and every new mount takes the global mount lock (Linux v6.19 `fs/namespace.c:1154-1166`,
+`setup_mnt`), as it registers two sysctl tables under the sysctl lock, so it waits on whatever else mounts or registers
+then. The criterion compares creates within one run, which run B meets and run A misses by 0.004.
+
+The sustained phase at concurrency 32 through host.sh (`PHASES=oci RUNTIMES=libcrun HEXBENCH_PHASES=sustained`, 10,000
+lifecycles a round, in process, `CPUSET=4-15`): the pool was dry for 0, 0 and 30 creates in run A's tree
+(out/20261103T225951Z) and 0, 25 and 0 in run B's (out/20261103T231112Z), at most 0.30% of creates. The socket driver's
+node runs the same pool, whose counts the socket doesn't carry (as the prepared `/dev` pool's).
+
+## The reader on the integrated tree, reuse on and off (goal 5 extended, the tree step 7 measures; 2026-11-04)
+
+Step 7 measures on `cp/t7-g5x-integrate`, so its reader must cut that tree's creates. At fcdad98 it cut none. e2c130d
+(cp/t7-ext-s3 into step 6) had taken step 3's breakdown files whole, losing step 5's record-once cuts and the
+opens' kprobes, and the reader took an owner's create's first mkdir for its cgroup. Two probe runs on fedora showed
+it, each refusing every traced create:
+- reuse off: create-breakdown-20261104T143904Z, "lacks record write 2's file's open entry";
+- reuse on (`HEXBENCH_OWNER`): create-breakdown-20261104T143859Z, "the first mkdir is the box's cgroup (it made
+  '/run/hex-node/<key>-l000001')".
+
+With step 5's three commits re-applied (cherry-picks -x of f99b755, 933cfa0, 50bd7a2), the kprobes enabled again
+(fd11626) and the chosen cgroup cut (2c72226), both kinds of run cut every traced create whole. Fedora, CPUs 4-15,
+N=1000, WARMUP=100, 3 rounds, the tree's release binaries (hex sha256 633cb8d3658e908e, dynamically linked, so not of
+record; seam_oci 87def3de2a860cf1). Load 45-57 and Docker's co-tenants as each env.txt lists. The figures are a
+check of the reader, not a measure of the tree.
+
+| run | reuse | path the reader took | probes cut whole | rounds' traced creates cut whole | cgroups |
+|---|---|---|---|---|---|
+| create-breakdown-20261104T144934Z | on | pruned, record once, chosen cgroup | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one handed on |
+| create-breakdown-20261104T145145Z | off | pruned, record once, the cgroup's mkdir | 2 of 2, 10 of 10 | 1,500 of 1,500 | made, each its own |
+
+In the reuse-on run every traced create was handed its owner's idle cgroup. Only the warm-up's first box makes a fresh
+slot, and it isn't traced, so a fresh slot's cut rests on the selftest (`create_breakdown.py test`).
+
+Since 5bc0a2c a pruned seed reads the spec the runtime checked with a pread of its sealed memfd, and opens no
+config.json. The reader then found no cut there and refused every create on the tree's own binaries (the hooks
+agent's create-breakdown-20261104T160938Z at 891245f). At 0b2e18b the rounds trace pread64's exit and the seed's part
+ends at its last pread before the clone. Two runs on that tree's binaries (hex sha256 8ae605e02c4e63b2, dynamically
+linked; seam_oci dff934f4187caac9; CPUs 4-15, N=1000, 3 rounds, load 47-60), again a check of the reader, not of
+record:
+
+| run | reuse | path the reader took | probes cut whole | rounds' traced creates cut whole | seed reads cut at a pread |
+|---|---|---|---|---|---|
+| create-breakdown-20261104T162204Z | on | pruned, record once, chosen cgroup (handed on) | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one |
+| create-breakdown-20261104T162704Z | off | pruned, record once, the cgroup's mkdir | 2 of 2, 10 of 10 | 1,500 of 1,500 | every one |
+
+## Goal 5 extended step 7: goal 5's create measured against its bar (2026-11-04, the integrated tree 1714f72)
+
+Fedora (kiln-a094a12d, i9-14900HX, Linux 6.19.10), the integrated tree at 1714f72 (steps 1-6, main's fd fix, the turns,
+the hooks, the checked spec), static-glibc hex sha256 5c2fc732d92a41ee (static-pie linked), seam_oci decb8a6e69dc67e4,
+libcrun 1.30.1 in process. Every timed part ran on CPUs 4-15 under the shared lock, --tmpfs /run as host.sh has it,
+containers at 8 GB and oom-score-adj 1000, noisy (LOAD_GATE=0), one after another in unit
+hex-integrate-step7-20261104T165634Z. Step 6's reuse on means HEXBENCH_OWNER set, every box of one owner; off, no owner.
+The host's clock (host_clock.sh, a 100,000-step burst, p50): before, P-cores 0.112 ms at rest and 0.110 held, E-cores
+0.201 and 0.199, load 31.64; after, P-cores 0.098 and 0.101, E-cores 0.187 and 0.189, load 12.72.
+
+### host.sh's OCI pass: lifecycle and start_true, 2 rounds of 10,000, best of 2
+
+| run | reuse | load at start, end | Hex create p50 / libcrun | ratio | Hex create p99.9 / libcrun | ratio | Hex create+start of `true` p50 / libcrun | ratio | Hex create+start of `true` p99.9 / libcrun | ratio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| out/20261104T170413Z | on | 106.50, 20.28 | 0.50 / 3.34 ms | 0.150x | 0.88 / 24.36 ms | 0.036x | 0.53 / 2.42 ms | 0.219x | 1.25 / 4.69 ms | 0.267x |
+| out/20261104T172313Z | off | 20.28, 12.72 | 0.83 / 2.33 ms | 0.356x | 3.94 / 4.20 ms | 0.938x | 0.66 / 2.50 ms | 0.264x | 4.23 / 5.08 ms | 0.833x |
+
+The ratios are Hex's figure over libcrun's as table.md prints them (ms to two places). Both passes recorded 0 errors
+in every round's driver (libcrun, the seam in process and over the socket). The reuse-on pass handed on 10,098 of
+10,100 cgroups a round (2 fresh); the reuse-off pass took 10,100 and 10,099 network namespaces from the pool, 1 made on
+the path. Over the socket (hex-seam-socket), reuse on: create p50 0.83, p99.9 2.41 ms; create+start of `true` p50 0.83,
+p99.9 2.12. Reuse off: create p50 0.73, p99.9 3.53; create+start of `true` p50 0.76, p99.9 4.53.
+
+### The create breakdown, seed path (pruned), N=1000, 3 rounds
+
+| run | reuse | load at start, end | Hex create p50 (seam, pooled) | libcrun's | ratio | parts' p50s summed | over the creates between (p50) | events lost |
+|---|---|---|---|---|---|---|---|---|
+| create-breakdown-20261104T165844Z | on | 31.59, 47.75 | 1.924 | 14.241 | 0.135x | 1.571 | 0.808 (1.945) | 0 |
+| create-breakdown-20261104T170123Z | off | 47.75, 106.50 | 1.989 | 14.551 | 0.137x | 1.731 | 0.868 (1.994) | 0 |
+
+The parts' p50s summed are 80.8% and 86.8% of create's p50 in the same run: outside step 7's 10%, its criterion not
+met at this load. Their means sum to the creates' mean span exactly (2.381 and 2.257 ms), so every part is cut; what
+the p50s miss is skew. The init's clone (part 11) has a mean of 0.840 and 0.631 against p50s of 0.555 and 0.527, and the
+handshake (part 17) 0.356 against 0.138 with reuse on. A sum of medians undercounts a sum of skewed parts. Both
+breakdowns ran at loads of 31 to 106, where Hex's create through the breakdown's seam was about 2 ms and libcrun's
+about 14, against 0.50 to 0.83 and 2.33 to 3.34 in the passes at 12 to 28 after them.
+
+The parts by group, pooled p50 (ms), reuse on / off: the box's record 0.046 / 0.033; the cgroup, made and bounded (on:
+an idle one read clean and handed on; off: mkdir and bounds) 0.264 / 0.174; the seed, the request and its clone's
+preparing 0.110 / 0.094; the init's set-up to the exec FIFO 0.804 / 0.720, of it the init's clone into its cgroup and
+namespaces 0.555 / 0.527 and its root's mounts 0.127 / 0.108; the handshake 0.138 / 0.511; the node's and the runtime's
+own work 0.209 / 0.199.
+
+### The parts criterion, best of N (the lead's call, 2026-11-04)
+
+Two more breakdowns per reuse mode, alternating, at the same binaries (hex 5c2fc732d92a41ee, seam_oci decb8a6e69dc67e4),
+each under the lock on CPUs 4-15, noisy, in unit hex-integrate-step7more-20261104T173958Z. The host's clock before:
+P-cores 0.101 ms at rest and 0.107 held, E-cores 0.182 and 0.201, load 16.06; after: P-cores 0.106 and 0.101, E-cores
+0.196 and 0.182, load 30.76. Every run is here, the two above among them. "Parts" is the pooled part p50s summed, "%" is
+that over the creates between the traced ones (p50), and "means" is the part means summed beside the creates' mean
+span, marker to marker.
+
+| run | reuse | load at start, end | Hex create p50 (seam) / libcrun's | ratio | parts | creates between p50 | % | means / mean span | events lost | within 10% |
+|---|---|---|---|---|---|---|---|---|---|---|
+| create-breakdown-20261104T165844Z | on | 31.59, 47.75 | 1.924 / 14.241 | 0.135x | 1.571 | 1.945 | 80.8% | 2.381 / 2.381 | 0 | no |
+| create-breakdown-20261104T170123Z | off | 47.75, 106.50 | 1.989 / 14.551 | 0.137x | 1.731 | 1.994 | 86.8% | 2.257 / 2.257 | 0 | no |
+| create-breakdown-20261104T174001Z | on | 15.98, 20.95 | 0.656 / 2.635 | 0.249x | 0.780 | 0.742 | 105.1% | 0.928 / 0.928 | 0 | yes |
+| create-breakdown-20261104T174116Z | off | 20.79, 23.86 | 0.639 / 2.175 | 0.294x | 0.692 | 0.675 | 102.5% | 0.855 / 0.855 | 0 | yes |
+| create-breakdown-20261104T174221Z | on | 23.86, 22.38 | 0.419 / 1.858 | 0.226x | 0.475 | 0.456 | 104.2% | 0.519 / 0.519 | 0 | yes |
+| create-breakdown-20261104T174319Z | off | 22.38, 31.95 | 0.631 / 3.158 | 0.200x | 0.617 | 0.597 | 103.3% | 0.960 / 0.960 | 0 | yes |
+
+Step 7's criterion, the parts summed within 10% of create's p50 in the same run, is met: four of the six runs land
+inside it (102.5% to 105.1%), in both reuse modes, at loads of 16 to 32. The two outside it ran at loads of 31 to 106,
+where the parts' p50s sum short of the p50 (80.8%, 86.8%) while their means sum to the mean span exactly. The tracer
+cuts every create whole at any load; the sum of medians undercounts once a few parts' tails grow (the init's clone,
+the handshake).
+
+The parts by group in the run closest to 100% in each mode, pooled p50 (ms): reuse on, create-breakdown-20261104T174221Z:
+the box's record 0.024, the cgroup (an idle one read clean and handed on) 0.106, the seed's request 0.045, the init's
+set-up 0.185, of it the init's clone 0.056 and its root's mounts 0.065, the handshake 0.012, the node's and the
+runtime's own work 0.103. Reuse off, create-breakdown-20261104T174116Z: the record 0.031, the cgroup (mkdir 0.123,
+bounds 0.035) 0.168, the seed's request 0.060, the init's set-up 0.249, of it the clone 0.096 and the mounts 0.085, the
+handshake 0.018, the node's and the runtime's own work 0.166.
+
 ## Masked directories cloned from the node's one empty tmpfs: a host A/B of record (goal 6, 2026-11-04)
 
 A = ca6dc80 (hex 5e81afc74796948f, seam_oci b977d36c69ba11b0), B = 1333092 (hex e781c85262a49a7f, seam_oci
@@ -1052,3 +1216,47 @@ no idle threads; create-breakdown-20261104T145958Z A, 150010Z B, none lost). Per
 - What would falsify it: a pair-for-pair rerun at a lower load with B's part 19 p99 not lower in most pairs. One A/B at
   load 50-70 holds what the 6.19 change is meant for (the p50, by the superblocks) and suggests the tail; the create's
   own gain needs a quieter host or many more rounds.
+
+## Goal 5 extended step 7 again, on the final integrated tree f58a101 (2026-11-05)
+
+Fedora (kiln-a094a12d, i9-14900HX, Linux 6.19.10), the integrated tree at f58a101: 1714f72's, with step 6's final code
+(a12e526) and records (e943880), the held files' bound counting both pools (e31256b), a delete reading its box's record
+again after forgetting the init (3428ddc), and host.sh refusing a pass with a crashed round (f58a101). Static-glibc hex
+sha256 9a060daf025a003b, seam_oci 6853dca004bd6b60, libcrun 1.30.1 in process. Every timed part ran on CPUs 4-15 under
+the shared lock, --tmpfs /run, containers at 8 GB and oom-score-adj 1000, noisy (LOAD_GATE=0), one after another in
+unit hex-integrate-measure-20261105T113116Z, after the gates (7 of 7), the root lab (8 of 8) and oci_reuse's test 1 as
+root passed at f58a101 in unit hex-integrate-final-20261105T100839Z. The host's clock wasn't read this time.
+
+### host.sh's OCI pass: lifecycle and start_true, 2 rounds of 10,000, best of 2
+
+| run | reuse | load at start, end | Hex create p50 / libcrun | ratio | Hex create p99.9 / libcrun | ratio | Hex create+start of `true` p50 / libcrun | ratio | Hex create+start of `true` p99.9 / libcrun | ratio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| out/20261105T114658Z | on | 37.03, 37.50 | 0.41 / 2.56 ms | 0.160x | 11.19 / 17.07 ms | 0.656x | 0.47 / 2.52 ms | 0.187x | 1.75 / 11.83 ms | 0.148x |
+| out/20261105T120118Z | off | 23.75, 22.83 | 0.50 / 2.27 ms | 0.220x | 11.72 / 27.99 ms | 0.419x | 0.50 / 2.38 ms | 0.210x | 3.44 / 14.32 ms | 0.240x |
+
+The ratios are Hex's figure over libcrun's as table.md prints them (ms to two places). Every round of both passes,
+libcrun's and the seam's in process and over the socket, read whole: n 10,000 and no errors in its JSON, and no log
+naming a panic or a 101 (the lead's check, 2026-11-05T09:00Z). Every box of both passes ended through its init:
+ended_through_init 10,100 of 10,100 in each phase of each round, 0 fell back and 0 cgroup.kill, where 1714f72's
+reuse-off pass killed 4 and 2 in start_true (finding 3(a)'s cause, 3428ddc). The reuse-on pass handed on 10,099 and
+10,100 cgroups a round. Over the socket (hex-seam-socket), reuse on: create p50 0.41, p99.9 0.99 ms; create+start of
+`true` p50 0.44, p99.9 1.64. Reuse off: create p50 0.52, p99.9 3.48; create+start of `true` p50 0.52, p99.9 3.19.
+
+The table takes the round with the better create p50 and prints its percentiles. In both passes that round carries
+create's tail in process: 15 and 14 creates over 5 ms, against 5 and 2 in the other round, whose create p99.9 is 3.54
+ms (reuse on) and 2.91 ms (reuse off), read from its JSON's samples by rank.
+
+### The create breakdown, seed path (pruned), N=1000, 3 rounds, four runs alternating
+
+| run | reuse | load at start, end | Hex create p50 (seam, pooled) | libcrun's | ratio | parts' p50s summed | over the creates between (p50) | events lost |
+|---|---|---|---|---|---|---|---|---|
+| create-breakdown-20261105T113309Z | on | 33.10, 26.48 | 0.424 | 2.416 | 0.175x | 0.470 | 1.029 (0.457) | 0 |
+| create-breakdown-20261105T113700Z | off | 23.15, 24.13 | 0.505 | 2.243 | 0.225x | 0.537 | 0.984 (0.545) | 0 |
+| create-breakdown-20261105T113940Z | on | 41.98, 36.35 | 0.527 | 2.774 | 0.190x | 0.581 | 1.045 (0.556) | 0 |
+| create-breakdown-20261105T114315Z | off | 41.74, 39.59 | 0.575 | 2.485 | 0.231x | 0.581 | 1.005 (0.578) | 0 |
+
+The parts' p50s summed are 102.9%, 98.4%, 104.5% and 100.5% of create's p50 in the same run: step 7's 10% met by all
+four, at loads of 23 to 42. The parts by group, pooled p50 (ms), in the first run of each mode (reuse on / off): the
+box's record 0.021 / 0.025; the cgroup, made and bounded 0.104 / 0.135; the seed, the request and its clone's
+preparing 0.044 / 0.047; the init's set-up to the exec FIFO 0.188 / 0.192; the handshake 0.011 / 0.014; the node's and
+the runtime's own work 0.102 / 0.124.

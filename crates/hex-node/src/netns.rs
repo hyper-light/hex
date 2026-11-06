@@ -24,7 +24,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use hex_api::{BoxId, BoxOwner, Refusal};
-use hex_core::netns::{Counts, Pool, Take};
+use hex_core::netns::{BOUND, Counts, IPC_UTS_BOUND, Pool, Take};
 use hex_core::netns_reuse::{self, Idle, Refused as Why, Take as Kept, Whose};
 use hex_runtime::linux::oci::OciError;
 use hex_runtime::linux::oci::net;
@@ -58,15 +58,20 @@ struct Keeping {
 
 /// A namespace kept for an owner, the netlink socket the checks keep in it from its first check on, so they
 /// never close one of their own there, and its `/proc/net` files they hold from its first clean check on
-/// ([`netcheck::check`]), so they needn't enter it: closed together.
+/// ([`netcheck::check`]), so they needn't enter it, with the place under the node's [`FilesBound`] they take:
+/// closed together.
 pub struct KeptNet {
     ns: OwnedFd,
     socket: Option<OwnedFd>,
     files: Option<netcheck::Files>,
+    slot: Option<FilesSlot>,
 }
 
-/// The descriptors a kept namespace holds at most: its own, the check's socket and four `/proc/net` files.
-const FDS_A_KEPT: u64 = 6;
+/// A kept namespace's own descriptors: the namespace and the check's socket.
+const FDS_A_KEPT: u64 = 2;
+/// The `/proc/net` files a kept namespace may hold besides ([`netcheck::Files`]): `sockstat`, `dev` and the two
+/// iptables files.
+const FILES_A_KEPT: u64 = 4;
 /// A live box's besides its kept namespace's: the supervisor's pidfd of its init and its cgroup's directory.
 const FDS_A_BOX: u64 = 2;
 /// A seed's: its socket and its pidfd.
@@ -78,30 +83,98 @@ const FDS_PRUNED: u64 = 1;
 /// What the agent holds open past those bounds, its listener, its polls and what its threads open for a moment:
 /// a margin, stated rather than measured, well past the few dozen it is.
 const FDS_BESIDE: u64 = 1_024;
+/// A pool's descriptors past what it holds: its refill thread's own namespace, which it goes back to, and the one
+/// it is making.
+const FDS_A_REFILL: u64 = 2;
 
-/// The descriptors this node may hold at once, each by its bound and named: kept namespaces idle, on the
-/// checkers' line and one for each live box; each live box's own; a connection and the programs it watches; the
-/// seeds of both pools and the create seeds' pruned namespace.
-fn descriptor_bounds() -> [(&'static str, u64); 9] {
-    let of = |count: usize, each: u64| {
-        u64::try_from(count)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(each)
+/// The mounts made ahead's (crate::devfs): the prepared `/dev` pool's at its bound, one descriptor each, and the
+/// proc pool's, two each (its pid namespace and its tree), four keys of eight each (`hex_core::devfs::KEYS`,
+/// `PER_KEY`).
+fn devfs_held() -> u64 {
+    let each_pool = hex_core::devfs::KEYS.saturating_mul(hex_core::devfs::PER_KEY);
+    of(each_pool, 1).saturating_add(of(each_pool, 2))
+}
+/// The one maker of both pools at its peak, a proc's (init::prepare_proc): the worker's own pid namespace, the one
+/// made, proc's context and its tree, and a mask's target and its clone.
+const FDS_A_DEVFS_MAKE: u64 = 6;
+/// The mask sources a root node keeps (init::ProcSources): the host's `/dev/null` and the empty read-only tmpfs.
+const FDS_MASK_SOURCES: u64 = 2;
+/// A call's takes of the mounts made ahead until its box's init has them: a `/dev` and a proc's two.
+const FDS_DEVFS_TAKES: u64 = 3;
+
+/// The bounds of the node's pools made ahead: decision 4's network namespaces, one descriptor each, and step 4's
+/// ipc and uts pairs, two each; and whether it keeps the mounts made ahead ([`crate::devfs::Devfs`]), a root
+/// node's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pools {
+    /// The most network namespaces the pool holds.
+    pub netns: usize,
+    /// The most ipc and uts pairs the pool holds.
+    pub ipc_uts: usize,
+    /// Whether the node keeps step 3's prepared `/dev` pool, goal 6's prepared proc pool and their mask sources.
+    pub devfs: bool,
+}
+
+impl Pools {
+    /// A root node's, each pool at its bound unless set.
+    pub const ROOT: Self = Self {
+        netns: BOUND,
+        ipc_uts: IPC_UTS_BOUND,
+        devfs: true,
     };
-    let boxes = hex_runtime::linux::cgroup::MAX_BOXES;
+
+    /// The descriptors the pools hold at their bounds, each pool's refill thread's beside, and the takes of every
+    /// call [`crate::serve::WORKERS`] runs at once, one of each pool's until its box's init joins them. A pool of
+    /// none has no thread. The mounts made ahead the same, where the node keeps them, their mask sources beside.
+    fn descriptors(self) -> u64 {
+        let pool = |bound: usize, each: u64| {
+            if bound == 0 {
+                0
+            } else {
+                of(bound, each).saturating_add(FDS_A_REFILL.saturating_mul(each))
+            }
+        };
+        let takes =
+            u64::from(self.netns > 0).saturating_add(u64::from(self.ipc_uts > 0).saturating_mul(2));
+        let devfs = if self.devfs {
+            devfs_held()
+                .saturating_add(FDS_A_DEVFS_MAKE)
+                .saturating_add(FDS_MASK_SOURCES)
+                .saturating_add(of(crate::serve::WORKERS, FDS_DEVFS_TAKES))
+        } else {
+            0
+        };
+        pool(self.netns, 1)
+            .saturating_add(pool(self.ipc_uts, 2))
+            .saturating_add(of(crate::serve::WORKERS, takes))
+            .saturating_add(devfs)
+    }
+}
+
+fn of(count: usize, each: u64) -> u64 {
+    u64::try_from(count)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(each)
+}
+
+/// The kept namespaces there may be at once: idle, on the checkers' line, and one for each live box.
+fn kept_at_most() -> u64 {
+    of(netns_reuse::PER_NODE, 2).saturating_add(of(hex_runtime::linux::cgroup::MAX_BOXES, 1))
+}
+
+/// The descriptors this node may hold at once without the namespaces' `/proc/net` files, each by its bound and named:
+/// the kept namespaces; each live box's own; a connection and the programs it watches; the seeds of both pools; the
+/// namespaces and the mounts made ahead under `pools`; and the create seeds' one pruned mount namespace, which a root
+/// node holds for its life (`goal6-mntns.md` §12). That one is counted for every node: a rootless node holds none,
+/// and a bound may be one over, never under.
+fn descriptor_terms(pools: Pools) -> [(&'static str, u64); 9] {
     let connections = crate::serve::LIMITS.connections;
     [
-        (
-            "kept namespaces idle",
-            of(netns_reuse::PER_NODE, FDS_A_KEPT),
-        ),
-        (
-            "kept namespaces on the checkers' line",
-            of(netns_reuse::PER_NODE, FDS_A_KEPT),
-        ),
+        ("the pools made ahead", pools.descriptors()),
+        ("kept namespaces", kept_at_most().saturating_mul(FDS_A_KEPT)),
         (
             "live boxes",
-            of(boxes, FDS_A_KEPT.saturating_add(FDS_A_BOX)),
+            of(hex_runtime::linux::cgroup::MAX_BOXES, FDS_A_BOX),
         ),
         ("connections", of(connections, 1)),
         (
@@ -115,50 +188,74 @@ fn descriptor_bounds() -> [(&'static str, u64); 9] {
     ]
 }
 
-/// All the descriptors this node may hold at once ([`descriptor_bounds`]).
-fn descriptors_a_node_may_hold() -> u64 {
-    descriptor_bounds()
+/// All the descriptors this node may hold at once without the namespaces' files ([`descriptor_terms`]).
+fn descriptors_of_the_node(pools: Pools) -> u64 {
+    descriptor_terms(pools)
         .into_iter()
         .map(|(_, n)| n)
         .fold(0, u64::saturating_add)
 }
 
-/// The descriptor limit a node that may hold `needs` must have, from the one it has: `None` where that holds
-/// them already. A soft limit is raised, and a hard one under `needs` with it, which a root node may
-/// (setrlimit(2), up to `fs.nr_open`), and only a root node keeps namespaces.
-fn raised_limit(needs: u64, limit: &rustix::process::Rlimit) -> Option<rustix::process::Rlimit> {
-    if limit.current.is_none_or(|soft| soft >= needs) {
-        return None;
+/// How many kept namespaces may hold their `/proc/net` files at once: what the soft descriptor limit the node was
+/// given leaves past its own descriptors at its bounds, four a namespace, none where it leaves none. The limit
+/// stays as given: a box without an rlimit of its own sees the limit it would without the files (the lead,
+/// 2026-11-03T23:07Z). A namespace past the bound is checked by entering it, counted (`files_bounded`), as one
+/// whose files couldn't be read is, and as a rootless node's are; a limit too small for the node's own work
+/// shows where it runs out, as each call's own typed refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilesBound {
+    /// The soft limit, `None` where it is unlimited.
+    pub soft: Option<u64>,
+    /// The node's own descriptors at its bounds, without the files ([`descriptors_of_the_node`]).
+    pub own: u64,
+    /// The namespaces that may hold their files at once.
+    pub namespaces: u64,
+}
+
+impl FilesBound {
+    /// The bound under `limit` for a node whose pools are `pools`, an unlimited one holding them for every
+    /// namespace there may be.
+    pub fn of(limit: &rustix::process::Rlimit, pools: Pools) -> Self {
+        let own = descriptors_of_the_node(pools);
+        let namespaces = match limit.current {
+            None => kept_at_most(),
+            Some(soft) => (soft.saturating_sub(own) / FILES_A_KEPT).min(kept_at_most()),
+        };
+        Self {
+            soft: limit.current,
+            own,
+            namespaces,
+        }
     }
-    Some(rustix::process::Rlimit {
-        current: Some(needs),
-        maximum: limit.maximum.map(|hard| hard.max(needs)),
-    })
+
+    /// The bound under this process's descriptor limit now, for a node whose pools are `pools`.
+    pub fn now(pools: Pools) -> Self {
+        Self::of(
+            &rustix::process::getrlimit(rustix::process::Resource::Nofile),
+            pools,
+        )
+    }
 }
 
-/// The refusal of a node whose descriptor limit can't be raised to what it may hold (CLAUDE.md §2, §3), naming
-/// the shortfall: never a silent cap.
-fn short_of(needs: u64, limit: &rustix::process::Rlimit, why: impl std::fmt::Display) -> Refusal {
-    let have = limit.maximum.or(limit.current).unwrap_or(u64::MAX);
-    Refusal::os(
-        "keeping network namespaces",
-        format!(
-            "this node may hold {needs} descriptors, and its limit of {have} is {} short of them and can't be raised: {why}",
-            needs.saturating_sub(have)
-        ),
-    )
+/// A place under the [`FilesBound`], taken before a check opens a namespace's files and given back as it drops
+/// with them, so at most the bound's namespaces hold files at once.
+struct FilesSlot(Arc<AtomicU64>);
+
+impl FilesSlot {
+    /// One of `held`'s places, `None` with all `bound` of them taken.
+    fn take(held: &Arc<AtomicU64>, bound: u64) -> Option<Self> {
+        held.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < bound).then(|| n.checked_add(1)).flatten()
+        })
+        .ok()
+        .map(|_| Self(Arc::clone(held)))
+    }
 }
 
-/// Room in this process's descriptor limit for all a root node may hold, checked as it starts, before its pool's
-/// thread or anything that holds one starts.
-pub fn room_for_the_node() -> Result<(), Refusal> {
-    let needs = descriptors_a_node_may_hold();
-    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
-    let Some(raised) = raised_limit(needs, &limit) else {
-        return Ok(());
-    };
-    rustix::process::setrlimit(rustix::process::Resource::Nofile, raised)
-        .map_err(|e| short_of(needs, &limit, e))
+impl Drop for FilesSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct KeptState {
@@ -185,6 +282,12 @@ struct KeptState {
     through_files: AtomicU64,
     /// Checks in which a read or an open of those files failed, which looked by entering instead.
     files_failed: AtomicU64,
+    /// Checks that entered because the namespace held no files with the [`FilesBound`] all taken.
+    files_bounded: AtomicU64,
+    /// The namespaces that may hold their files at once.
+    files_bound: FilesBound,
+    /// The namespaces holding them now ([`FilesSlot`]).
+    files_held: Arc<AtomicU64>,
     /// The time the checks took, all together, in nanoseconds: each check's wall time on the checker.
     check_ns: AtomicU64,
 }
@@ -206,6 +309,12 @@ pub struct ReuseCounts {
     pub through_files: u64,
     /// Checks in which a read or an open of those files failed, which looked by entering instead.
     pub files_failed: u64,
+    /// Checks that entered because the namespace held no files with the [`FilesBound`] all taken.
+    pub files_bounded: u64,
+    /// The bound the node runs with.
+    pub files_bound: Option<FilesBound>,
+    /// The namespaces holding their files now.
+    pub files_held: u64,
     /// The checks' time, all together, in nanoseconds.
     pub check_ns: u64,
 }
@@ -226,10 +335,11 @@ impl Shared {
 }
 
 impl Netns {
-    /// A pool that holds at most `bound` namespaces, and the thread that starts filling it at once.
-    /// With a bound of 0 there is no thread, and every container that makes a network namespace makes
-    /// it on its create's path, counted, as a rootless node's containers do (decision 4).
-    pub fn start(bound: usize) -> Result<Self, Refusal> {
+    /// A pool that holds at most `bound` namespaces, and the thread that starts filling it at once, its kept
+    /// namespaces holding their `/proc/net` files under `files`. With a bound of 0 there is no thread, and every
+    /// container that makes a network namespace makes it on its create's path, counted, as a rootless node's
+    /// containers do (decision 4).
+    pub fn start(bound: usize, files: FilesBound) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
             pool: Mutex::new(Pool::new(bound)),
             wake: Condvar::new(),
@@ -257,6 +367,9 @@ impl Netns {
             protocols: AtomicU64::new(0),
             through_files: AtomicU64::new(0),
             files_failed: AtomicU64::new(0),
+            files_bounded: AtomicU64::new(0),
+            files_bound: files,
+            files_held: Arc::new(AtomicU64::new(0)),
             check_ns: AtomicU64::new(0),
         });
         let (returns, line) = std::sync::mpsc::sync_channel(netns_reuse::PER_NODE);
@@ -357,6 +470,9 @@ impl Netns {
             protocols: kept.state.protocols.load(Ordering::Acquire),
             through_files: kept.state.through_files.load(Ordering::Acquire),
             files_failed: kept.state.files_failed.load(Ordering::Acquire),
+            files_bounded: kept.state.files_bounded.load(Ordering::Acquire),
+            files_bound: Some(kept.state.files_bound),
+            files_held: kept.state.files_held.load(Ordering::Acquire),
             check_ns: kept.state.check_ns.load(Ordering::Acquire),
         }))
     }
@@ -499,12 +615,12 @@ impl Networks for NetChoice<'_> {
                 taken
             }
         };
-        let (ns, socket, files) = match taken {
+        let (ns, socket, files, slot) = match taken {
             Kept::Own(_) => return self.netns.take(),
-            Kept::Idle(kept) => (kept.ns, kept.socket, kept.files),
+            Kept::Idle(kept) => (kept.ns, kept.socket, kept.files, kept.slot),
             Kept::Fresh => match self.netns.take()? {
-                Some(ns) => (ns, None, None),
-                None => (self.netns.make_on_path()?, None, None),
+                Some(ns) => (ns, None, None, None),
+                None => (self.netns.make_on_path()?, None, None, None),
             },
         };
         let keep = KeptNet {
@@ -513,6 +629,7 @@ impl Networks for NetChoice<'_> {
                 .map_err(|e| OciError::os("keeping a box's network namespace", e))?,
             socket,
             files,
+            slot,
         };
         *self.kept.lock().map_err(|_| {
             OciError::Broken("a create's kept namespace's lock was poisoned".to_owned())
@@ -550,6 +667,14 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
         let (verdict, lost) = match (&home, &proc_net, &fresh) {
             (Some(home), Some(proc_net), Some(fresh)) => {
                 let started = std::time::Instant::now();
+                // A namespace holding no files takes a place under the bound before its check may open them,
+                // and gives it back below unless it holds them after.
+                if kept.files.is_none() && kept.slot.is_none() {
+                    kept.slot = FilesSlot::take(&state.files_held, state.files_bound.namespaces);
+                    if kept.slot.is_none() {
+                        state.files_bounded.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
                 let checked = netcheck::check(
                     kept.ns.as_fd(),
                     home.as_fd(),
@@ -557,8 +682,15 @@ fn check_returns(state: &KeptState, line: &Mutex<Receiver<(String, KeptNet)>>) {
                     fresh,
                     &mut scratch,
                     &mut kept.socket,
-                    &mut kept.files,
+                    if kept.slot.is_some() {
+                        Some(&mut kept.files)
+                    } else {
+                        None
+                    },
                 );
+                if kept.files.is_none() {
+                    kept.slot = None;
+                }
                 let took = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 state.check_ns.fetch_add(took, Ordering::AcqRel);
                 if checked.protocols {

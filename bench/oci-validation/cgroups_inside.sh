@@ -138,7 +138,9 @@ bundle "$W/kernel" '["true"]' ', "resources": {"memory": {"kernel": 1048576}}' "
 if err=$(/opt/hex oci create --bundle "$W/kernel" kernel 2>&1); then fail "memory.kernel was accepted"
 else case "$err" in *memory.kernel*) pass "memory.kernel refused by name: $err" ;; *) fail "memory.kernel refused without naming it: $err" ;; esac; fi
 [ -d "$CG/kernel" ] && fail "a refused create left its cgroup" || pass "a refused create left no cgroup"
-[ -e "$HEX_OCI_ROOT/kernel/state.json" ] && fail "a refused create left state" || pass "a refused create left no state"
+# Its state would be in its shard, 18 (two hex digits of FNV-1a over "kernel"; state::shard), or where a runtime
+# before the shards kept it.
+[ -e "$HEX_OCI_ROOT/18/kernel/state.json" ] || [ -e "$HEX_OCI_ROOT/kernel/state.json" ] && fail "a refused create left state" || pass "a refused create left no state"
 bundle "$W/occupied" '["true"]' ', "cgroupsPath": "/lab"' ""
 if err=$(/opt/hex oci create --bundle "$W/occupied" occupied 2>&1); then fail "an occupied cgroup was accepted"
 else pass "an occupied cgroup refused: $err"; fi

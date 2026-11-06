@@ -16,12 +16,15 @@
 //! [`sys`].
 
 pub mod caps;
+pub mod checked;
 pub mod devmount;
 pub mod devshare;
 pub mod escape;
 pub mod exec;
+pub mod hooks;
 pub mod init;
 pub mod inroot;
+pub mod ipcuts;
 pub mod lsm;
 pub mod mntns;
 pub mod mount;

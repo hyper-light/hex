@@ -23,8 +23,24 @@ struct Shared {
     procs: Mutex<Pool<procmount::Key, PreparedProc>>,
     /// What masks bind, opened once for the node's life on a root node (a rootless one can't make the empty
     /// tmpfs): a prepared proc's masks, and every init's masked directories ([`DevMounts::masked_directory`]).
-    sources: Option<ProcSources>,
+    sources: Option<Arc<ProcSources>>,
     wake: Condvar,
+}
+
+/// Makes the proc of a parked init's own pid namespace (decision 8, parked procs) from a root node's mask sources,
+/// on the thread that parked it: the tree is the node's alone until a create claims the init.
+#[derive(Clone)]
+pub struct ProcMaker(Arc<ProcSources>);
+
+impl ProcMaker {
+    /// The proc for `pid_namespace` with `key`'s masks and read-only paths on it.
+    pub fn make(
+        &self,
+        pid_namespace: OwnedFd,
+        key: &procmount::Key,
+    ) -> Result<PreparedProc, OciError> {
+        init::prepare_proc_for(pid_namespace, key, &self.0)
+    }
 }
 impl Devfs {
     /// The worker for the `/dev` pool, made ahead where `dev`, and the proc pool where `procs`; a disabled
@@ -32,13 +48,27 @@ impl Devfs {
     /// makes ahead, since every init's masked directories clone its empty tmpfs.
     pub fn start(dev: bool, procs: bool, root: bool) -> Result<Self, Refusal> {
         let sources = if root {
-            Some(
-                ProcSources::open()
-                    .map_err(|e| Refusal::os("opening the prepared procs' mask sources", e))?,
-            )
+            Some(Arc::new(ProcSources::open().map_err(|e| {
+                Refusal::os("opening the prepared procs' mask sources", e)
+            })?))
         } else {
             None
         };
+        Self::over(sources, dev, procs, root)
+    }
+
+    /// As [`Devfs::start`], with this one's mask sources: a node keeps one empty tmpfs for its life, so every init's
+    /// masked directories and every parked proc's clone the same one, whichever pools are on.
+    pub fn restart(&self, dev: bool, procs: bool) -> Result<Self, Refusal> {
+        Self::over(self.shared.sources.clone(), dev, procs, self.root)
+    }
+
+    fn over(
+        sources: Option<Arc<ProcSources>>,
+        dev: bool,
+        procs: bool,
+        root: bool,
+    ) -> Result<Self, Refusal> {
         let shared = Arc::new(Shared {
             pool: Mutex::new(Pool::new(dev)),
             procs: Mutex::new(Pool::new(procs)),
@@ -76,6 +106,14 @@ impl Devfs {
         (self.enabled.0, self.enabled.1, self.root)
     }
 
+    /// What makes parked inits' procs, on a root node, which alone has the mask sources.
+    pub fn proc_maker(&self) -> Option<ProcMaker> {
+        self.shared
+            .sources
+            .as_ref()
+            .map(|s| ProcMaker(Arc::clone(s)))
+    }
+
     /// What the prepared proc pool has done (decision 6's update, part 2).
     pub fn proc_counts(&self) -> Result<Counts, Refusal> {
         self.shared
@@ -109,7 +147,7 @@ impl DevMounts for Devfs {
     }
 
     fn masked_directory(&self) -> Option<BorrowedFd<'_>> {
-        self.shared.sources.as_ref().and_then(ProcSources::empty)
+        self.shared.sources.as_deref().and_then(ProcSources::empty)
     }
 
     fn take_proc(&self, key: procmount::Key) -> Result<Option<PreparedProc>, OciError> {

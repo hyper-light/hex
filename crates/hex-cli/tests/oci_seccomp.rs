@@ -174,6 +174,10 @@ fn build_bundle(
         }
     }
     let seccomp_field = if seccomp { DENY_MKDIR } else { "" };
+    // The capability sets the node renders a bundle with (Docker's defaults, `hex_core::bundle`). A
+    // spec naming none keeps its creator's, CAP_SYS_ADMIN among them, which a rootless box on the
+    // host's network may not hold (spec.rs refuses it).
+    let set = format!("{:?}", hex_core::bundle::CAPABILITIES);
     // Rootless needs a user namespace and the caller-to-0 maps; root runs without them.
     let (namespaces, mappings) = if rootless {
         (
@@ -198,6 +202,7 @@ fn build_bundle(
     "args": ["/bin/sh", "-c", "sleep 1000000"],
     "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
     "user": {{"uid": 0, "gid": 0}},
+    "capabilities": {{"bounding": {set}, "effective": {set}, "permitted": {set}}},
     "noNewPrivileges": true
   }},
   "mounts": [

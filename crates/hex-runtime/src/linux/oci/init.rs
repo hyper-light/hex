@@ -6,11 +6,11 @@
 //! when it forks (see [`super::sys`]).
 //!
 //! It talks to the `create` runtime over two inherited pipes (fd numbers in the environment): a sync
-//! pipe the init writes (`U`ser-ns map request, container `P`id, `R`eady, or `E`rror), and a map
-//! pipe the runtime writes its acknowledgement on.
+//! pipe the init writes (`U`ser-ns map request, container `P`id, `H`ooks, `R`eady, or `E`rror), and a
+//! map pipe the runtime writes its acknowledgement on, and, for the hooks, the container's state.
 
 use std::fs;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, IntoRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,8 +23,10 @@ use rustix::mount::{
 use rustix::thread::UnshareFlags;
 
 use crate::linux::oci::inroot::{self, Make};
+use crate::linux::oci::ipcuts::Pair;
 use crate::linux::oci::spec::{Device, Process, Seccomp, Spec};
-use crate::linux::oci::{Failure, OciError, caps, net, seccomp, sys};
+use crate::linux::oci::state::State;
+use crate::linux::oci::{Failure, OciError, caps, hooks, net, seccomp, sys};
 
 /// Environment the `create` runtime sets for `hex __oci-init`.
 pub const ENV_SYNC_W: &str = "HEX_OCI_SYNC_W";
@@ -43,6 +45,10 @@ pub const ENV_NETWORK: &str = "HEX_OCI_NETWORK";
 /// mount's index in the spec's mounts: the container attaches it in place of making its own.
 pub const ENV_DEV: &str = "HEX_OCI_DEV";
 pub const ENV_DEV_MOUNT: &str = "HEX_OCI_DEV_MOUNT";
+/// The spec the runtime parsed and checked, a sealed memfd (`checked::seal`), by the path of the runtime's
+/// descriptor for it (`/proc/<pid>/fd/<n>`), which stays close-on-exec: the shim makes the container from it, never
+/// from the bundle's `config.json`, which may since hold a spec nobody checked (AC-T7.1.1).
+pub const ENV_CONFIG: &str = "HEX_OCI_CONFIG";
 /// The node's one empty read-only tmpfs (decision 6's update), by the path of the runtime's descriptor for it,
 /// which the shim opens as it opens the `/dev` made ahead: the container clones it for each masked directory in
 /// place of a tmpfs of its own.
@@ -92,10 +98,9 @@ pub fn run() -> u8 {
 fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
     let container_dir = PathBuf::from(env_var(ENV_DIR)?);
     let bundle = env_var(ENV_BUNDLE)?;
-    let spec = Spec::parse(
-        &fs::read(Path::new(&bundle).join("config.json"))
-            .map_err(|e| OciError::os("reading config.json", e))?,
-    )?;
+    let checked = handed_fd(ENV_CONFIG, OFlags::RDONLY)?;
+    let spec = Spec::parse(&super::checked::read(checked.as_fd())?)?;
+    drop(checked);
     // The cgroup, opened before any namespace changes: its directory, for the container to be born in
     // (`clone3` with `CLONE_INTO_CGROUP`), and its `cgroup.procs`, for it to join by migration where it
     // can't be. The kernel checks a migration against the credentials and cgroup namespace the file was
@@ -155,8 +160,8 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
         None => None,
     };
 
-    // The map pipe's end is read only for a user namespace's maps, and is the shim's to close either
-    // way, before the container is forked.
+    // The map pipe's end is read for a user namespace's maps, here, and for the hooks' state, by the
+    // container; the shim closes it before the fork where the container has no hooks to stop for.
     let map = handed_fd(ENV_MAP_R, OFlags::RDONLY)?;
     if spec.makes_namespace("user") {
         sys::unshare(UnshareFlags::NEWUSER)?;
@@ -165,7 +170,11 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
         rustix::io::read(&map, &mut ack).map_err(|e| OciError::os("reading the map ack", e))?;
         become_userns_root()?;
     }
-    drop(map);
+    let map = if spec.hooks.sync_init() {
+        Some(map)
+    } else {
+        None
+    };
 
     join_namespace_paths(&spec)?;
     // The network namespace made ahead is joined in place of a fresh one, and the shim's copy closed
@@ -204,6 +213,7 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
                     Root::Classic {
                         dev: dev.as_ref(),
                         masked_directory: masked_directory.as_ref(),
+                        map,
                     },
                 )
             }) {
@@ -215,7 +225,7 @@ fn shim(sync: BorrowedFd<'_>) -> Result<u8, OciError> {
             },
         ),
         sys::Fork::Parent(container_pid) => {
-            drop(procs);
+            drop((procs, map));
             msg(sync, &format!("P{container_pid}"));
             Ok(0)
         }
@@ -245,11 +255,12 @@ pub(crate) fn clone_child(
 ) -> Result<(), OciError> {
     lead_session()?;
     if spec.makes_namespace("user") {
-        let map =
-            map.ok_or_else(|| OciError::Broken("a user namespace needs the map pipe".to_owned()))?;
+        let map = map
+            .as_ref()
+            .ok_or_else(|| OciError::Broken("a user namespace needs the map pipe".to_owned()))?;
         msg(sync, "U");
         let mut ack = [0u8; 1];
-        rustix::io::read(&map, &mut ack).map_err(|e| OciError::os("reading the map ack", e))?;
+        rustix::io::read(map, &mut ack).map_err(|e| OciError::os("reading the map ack", e))?;
         become_userns_root()?;
     }
     join_namespace_paths(spec)?;
@@ -270,6 +281,7 @@ pub(crate) fn clone_child(
         Root::Classic {
             dev: None,
             masked_directory: None,
+            map: map.filter(|_| spec.hooks.sync_init()),
         },
     )
 }
@@ -281,6 +293,8 @@ pub(crate) fn clone_child(
 /// path is only taken on a root node for a container that makes its own mount namespace and joins no user
 /// or mount namespace by path (the runtime's routing), so no user-namespace map handshake runs here, and
 /// a network, ipc, uts or cgroup namespace joined by path is joined by the descriptor the agent opened.
+/// An ipc and uts pair made ahead (`ipc_uts`, goal 5 extended, step 4) is joined before all that lives in it: the
+/// mqueue mount, the hostname and the sysctls [`container`] makes.
 pub(crate) fn clone_child_pruned(
     spec: &Spec,
     bundle: &str,
@@ -288,6 +302,7 @@ pub(crate) fn clone_child_pruned(
     mut sources: PrunedSources,
     sync: BorrowedFd<'_>,
     network: Option<OwnedFd>,
+    ipc_uts: Option<Pair>,
 ) -> Result<(), OciError> {
     lead_session()?;
     // A namespace made from the rootfs's tree is joined first, before anything else the init does, so
@@ -319,6 +334,12 @@ pub(crate) fn clone_child_pruned(
             OciError::Broken("a path-joined namespace has no descriptor from the agent".to_owned())
         })?;
         sys::setns(fd.as_fd(), flag)?;
+    }
+    if let Some(pair) = ipc_uts {
+        pair.join()?;
+        // Left for the exec to close, as the pipes are (close-on-exec): closed here, the init's copies are the
+        // last, and the last close frees each namespace's file, dentry and inode on create's path.
+        let _ = (pair.ipc.into_raw_fd(), pair.uts.into_raw_fd());
     }
     let made_ahead = match network {
         Some(network) => {
@@ -362,7 +383,8 @@ impl FifoDir<'_> {
 
 /// How the container's root is built. The classic path binds the rootfs in a copy of the agent's full
 /// mount namespace and `pivot_root`s into it, with the `/dev` the node made ahead if the shim was handed
-/// one; the pruned path (goal 5 plan step 2) attaches the rootfs and bind sources the agent cloned (here)
+/// one, holding the map pipe's read end where the spec names create- or start-time hooks, for the
+/// state they are given ([`create_hooks`]); the pruned path (goal 5 plan step 2) attaches the rootfs and bind sources the agent cloned (here)
 /// in a copy of the seed's two-mount namespace and ends with `chroot`, with no `pivot_root` walk of the
 /// host's threads.
 pub(crate) enum Root<'a> {
@@ -370,6 +392,8 @@ pub(crate) enum Root<'a> {
         dev: Option<&'a super::run::PreparedDev>,
         /// The node's empty read-only tmpfs, cloned for each masked directory where the shim was handed it.
         masked_directory: Option<&'a OwnedFd>,
+        /// The map pipe's read end, held where the spec names create- or start-time hooks.
+        map: Option<OwnedFd>,
     },
     Pruned(&'a PrunedSources),
 }
@@ -456,13 +480,32 @@ pub(crate) fn container(
     if spec.makes_namespace("network") && !network_made_ahead {
         net::loopback_up()?;
     }
-    if spec.makes_namespace("mount") {
-        match root {
-            Root::Classic {
-                dev,
-                masked_directory,
-            } => setup_rootfs(spec, bundle, dev, masked_directory)?,
-            Root::Pruned(sources) => setup_rootfs_pruned(spec, sources)?,
+    // The create-time hooks run with the mounts made, before the root switch (config.md:607, :618); a
+    // container with no mount namespace of its own has no switch, and runs them once its world is made.
+    let mut hooked = None;
+    match root {
+        Root::Classic {
+            dev,
+            masked_directory,
+            map,
+        } => {
+            let mut before_switch = || {
+                hooked = create_hooks(spec, sync, map.as_ref())?;
+                Ok(())
+            };
+            if spec.makes_namespace("mount") {
+                setup_rootfs(spec, bundle, dev, masked_directory, &mut before_switch)?;
+            } else {
+                before_switch()?;
+            }
+        }
+        // The runtime routes a spec with hooks classic; one that came here anyway is refused, as the
+        // pruned init holds no map pipe.
+        Root::Pruned(sources) => {
+            hooked = create_hooks(spec, sync, None)?;
+            if spec.makes_namespace("mount") {
+                setup_rootfs_pruned(spec, sources)?;
+            }
         }
     }
     if spec.makes_namespace("uts")
@@ -478,7 +521,8 @@ pub(crate) fn container(
         msg(sync, "R");
         let fifo = rustix::fs::openat(&fifo_dir, "exec.fifo", OFlags::WRONLY, Mode::empty())
             .map_err(|e| OciError::os("opening the exec fifo", e))?;
-        let _ = rustix::io::write(&fifo, b"0");
+        start_hooks(spec, hooked.as_ref(), &fifo)?;
+        let _ = rustix::io::write(&fifo, &[hooks::START_TAKEN]);
         return Ok(());
     };
     become_process(&process, spec.linux.seccomp.as_ref())?;
@@ -487,10 +531,74 @@ pub(crate) fn container(
     msg(sync, "R");
     let fifo = rustix::fs::openat(&fifo_dir, "exec.fifo", OFlags::WRONLY, Mode::empty())
         .map_err(|e| OciError::os("opening the exec fifo", e))?;
-    rustix::io::write(&fifo, b"0").map_err(|e| OciError::os("writing the exec fifo", e))?;
+    start_hooks(spec, hooked.as_ref(), &fifo)?;
+    if let Taken::Abandoned = take_start(&fifo)? {
+        sys::exit_child(hooks::START_ABANDONED);
+    }
     drop(fifo);
 
     exec(&process)
+}
+
+/// What the init's write of the start's byte on the exec FIFO found.
+#[derive(Debug, PartialEq, Eq)]
+enum Taken {
+    /// The start has the byte.
+    Taken,
+    /// The start that opened the FIFO had ended: the write found its reader gone (EPIPE). The init, a
+    /// `hex` process, has SIGPIPE ignored (Rust's runtime ignores it in every program it starts), so the
+    /// write returns the error rather than the signal ending the init; it then ends with
+    /// [`hooks::START_ABANDONED`].
+    Abandoned,
+}
+
+/// Writes the start's byte on the exec FIFO `fifo`, or finds the start gone ([`Taken`]).
+fn take_start(fifo: &OwnedFd) -> Result<Taken, OciError> {
+    match rustix::io::write(fifo, &[hooks::START_TAKEN]) {
+        Ok(_) => Ok(Taken::Taken),
+        Err(rustix::io::Errno::PIPE) => Ok(Taken::Abandoned),
+        Err(e) => Err(OciError::os("writing the exec fifo", e)),
+    }
+}
+
+/// Stops for the runtime before the root switch, where the spec names create- or start-time hooks
+/// (`H`): it runs prestart and createRuntime and hands back the container's state
+/// ([`super::run`]'s `answer_hooks`), `created`. Then runs the createContainer hooks here, in the
+/// container's namespaces, given that state with the pid the container sees (config.md:618-622;
+/// runtime.md:27). Returns the state the startContainer hooks are given at `start`, the same; `None`
+/// where the spec names no such hooks.
+fn create_hooks(
+    spec: &Spec,
+    sync: BorrowedFd<'_>,
+    map: Option<&OwnedFd>,
+) -> Result<Option<State>, OciError> {
+    if !spec.hooks.sync_init() {
+        return Ok(None);
+    }
+    let map =
+        map.ok_or_else(|| OciError::Broken("the create-time hooks need the map pipe".to_owned()))?;
+    msg(sync, "H");
+    let mut state = hooks::read_state(map.as_fd())?;
+    state.pid = rustix::process::getpid().as_raw_pid();
+    hooks::run("createContainer hook", &spec.hooks.create_container, &state)?;
+    Ok(Some(state))
+}
+
+/// Runs the startContainer hooks once `start` has opened the exec FIFO (`fifo`), in the container
+/// before its process (config.md:630-634), given `created` and the pid the container sees. They come
+/// before the FIFO's byte, so `start` returns, and runs poststart, only after them (runtime.md:69-73);
+/// one that fails writes why in its place ([`hooks::start_failure`]), for `start` to report, and the
+/// init ends.
+fn start_hooks(spec: &Spec, hooked: Option<&State>, fifo: &OwnedFd) -> Result<(), OciError> {
+    if spec.hooks.start_container.is_empty() {
+        return Ok(());
+    }
+    let state = hooked.ok_or_else(|| {
+        OciError::Broken("the startContainer hooks were handed no state".to_owned())
+    })?;
+    hooks::run("startContainer hook", &spec.hooks.start_container, state).inspect_err(|e| {
+        let _ = rustix::io::write(fifo, &hooks::start_failure(e));
+    })
 }
 
 /// Becomes the container's process as its spec gives it: its OOM score, limits, AppArmor profile, seccomp
@@ -761,17 +869,18 @@ pub fn needs_shim(spec: &Spec) -> bool {
 /// namespace the spec makes (not one joined by `path`, which [`clone_child`] joins), as `clone3` flags,
 /// but the cgroup namespace, which [`container`] unshares once the child is in its cgroup, and the
 /// network namespace when one is made ahead (`made_ahead`), which [`clone_child`] joins by `setns` in
-/// its place.
-pub(crate) fn fresh_clone_flags(spec: &Spec, made_ahead: bool) -> u64 {
+/// its place, and the ipc and uts namespaces when a pair is made ahead (`ipc_uts_ahead`), which
+/// [`clone_child_pruned`] joins in theirs.
+pub(crate) fn fresh_clone_flags(spec: &Spec, made_ahead: bool, ipc_uts_ahead: bool) -> u64 {
     let mut flags: u64 = 0;
-    for (kind, flag) in [
-        ("mount", libc::CLONE_NEWNS),
-        ("uts", libc::CLONE_NEWUTS),
-        ("ipc", libc::CLONE_NEWIPC),
-        ("pid", libc::CLONE_NEWPID),
-        ("user", libc::CLONE_NEWUSER),
+    for (kind, flag, ahead) in [
+        ("mount", libc::CLONE_NEWNS, false),
+        ("uts", libc::CLONE_NEWUTS, ipc_uts_ahead),
+        ("ipc", libc::CLONE_NEWIPC, ipc_uts_ahead),
+        ("pid", libc::CLONE_NEWPID, false),
+        ("user", libc::CLONE_NEWUSER, false),
     ] {
-        if spec.makes_namespace(kind) {
+        if spec.makes_namespace(kind) && !ahead {
             flags |= u64::try_from(flag).unwrap_or(0);
         }
     }
@@ -811,6 +920,7 @@ fn setup_rootfs(
     bundle: &str,
     dev: Option<&super::run::PreparedDev>,
     masked_directory: Option<&OwnedFd>,
+    before_switch: &mut dyn FnMut() -> Result<(), OciError>,
 ) -> Result<(), OciError> {
     let rootfs = {
         let p = Path::new(&spec.root.path);
@@ -871,6 +981,10 @@ fn setup_rootfs(
     if !ready {
         make_dev(&root, spec, in_userns)?;
     }
+    // The mounts and /dev made, the masks and read-only remounts not yet, as runc runs them
+    // (rootfs_linux.go:205-232; docs/research/runtime/oci-hooks.md §2): a createContainer hook can still
+    // write the root and reach the host's paths.
+    before_switch()?;
     for path in &spec.linux.masked_paths {
         mask_path(&root, path, masked_directory, spec.mount_label())?;
     }
@@ -1994,7 +2108,6 @@ pub fn prepare_proc(
     key: &super::procmount::Key,
     sources: &ProcSources,
 ) -> Result<PreparedProc, OciError> {
-    let null = sources.null.as_fd();
     let own = rustix::fs::open(
         "/proc/thread-self/ns/pid",
         OFlags::RDONLY | OFlags::CLOEXEC,
@@ -2009,8 +2122,19 @@ pub fn prepare_proc(
     )
     .map_err(|e| OciError::os(PID_NAMESPACE_AHEAD, e));
     sys::setns(own.as_fd(), libc::CLONE_NEWPID)?;
-    let pid_namespace = made?;
+    prepare_proc_for(made?, key, sources)
+}
 
+/// The proc for `pid_namespace`, with the masks and read-only paths `key` puts beneath `/proc` on it, as
+/// [`prepare_proc`] makes it for a pid namespace made ahead. Also for the live pid namespace of an init parked ahead
+/// (decision 8, "Proposal: a parked init with its proc made ahead"): `pidns=` takes any pid namespace the mounter
+/// may administer and descends from, whether or not a process is in it (v6.19 `fs/proc/root.c:115-160`).
+pub fn prepare_proc_for(
+    pid_namespace: OwnedFd,
+    key: &super::procmount::Key,
+    sources: &ProcSources,
+) -> Result<PreparedProc, OciError> {
+    let null = sources.null.as_fd();
     let fs = rustix::mount::fsopen("proc", FsOpenFlags::FSOPEN_CLOEXEC)
         .map_err(|e| OciError::os("fsopen", e))?;
     rustix::mount::fsconfig_set_string(fs.as_fd(), "source", "proc")
@@ -2407,7 +2531,7 @@ fn env_var(name: &str) -> Result<String, OciError> {
 fn handed_fd(name: &str, flags: OFlags) -> Result<OwnedFd, OciError> {
     let path = env_var(name)?;
     rustix::fs::open(path.as_str(), flags | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|e| OciError::os("opening a pipe the runtime holds", e))
+        .map_err(|e| OciError::os("opening a descriptor the runtime holds", e))
 }
 
 /// Writes one newline-terminated sync message; a broken pipe is ignored (the runtime has gone).
@@ -2426,6 +2550,24 @@ mod tests {
     //! `CAP_MKNOD`, so no node is ever made here.
     use super::*;
     use std::os::unix::fs::symlink;
+
+    /// HEX-IPCUTS-9 (goal 5 extended, step 4): do ask for a container's clone flags with each kind made ahead and
+    /// without; expect each made ahead left out, and only those.
+    #[test]
+    fn the_clone_leaves_out_what_is_made_ahead() {
+        let spec = Spec::parse(
+            br#"{"ociVersion":"1.2.0","root":{"path":"rootfs"},"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"},{"type":"network"}]}}"#,
+        )
+        .unwrap();
+        let flag = |f: i32| u64::try_from(f).unwrap();
+        let rest = flag(libc::CLONE_NEWPID) | flag(libc::CLONE_NEWNS);
+        let pair = flag(libc::CLONE_NEWIPC) | flag(libc::CLONE_NEWUTS);
+        let net = flag(libc::CLONE_NEWNET);
+        assert_eq!(fresh_clone_flags(&spec, false, false), rest | pair | net);
+        assert_eq!(fresh_clone_flags(&spec, true, false), rest | pair);
+        assert_eq!(fresh_clone_flags(&spec, false, true), rest | net);
+        assert_eq!(fresh_clone_flags(&spec, true, true), rest);
+    }
 
     /// A root holding `/dev`, and the default nodes' names as plain files, so `mknodat` meets each.
     fn dev_root() -> tempfile::TempDir {
@@ -2647,5 +2789,16 @@ mod tests {
             matches!(&through, Err(OciError::Os { why, .. }) if why.starts_with("/file/data (file/data): ")),
             "{through:?}"
         );
+    }
+
+    /// T-T7.1.2 (CLAUDE.md §3): the init's end when its start is gone. Do: write the start's byte on a
+    /// pipe whose reader has closed, in a process with SIGPIPE ignored as every `hex` process has it. Expect:
+    /// `Abandoned`, the EPIPE taken, never the signal; and on a pipe with its reader, `Taken`.
+    #[test]
+    fn a_start_whose_reader_is_gone_is_abandoned_not_a_sigpipe() {
+        let (r, w) = rustix::pipe::pipe().unwrap();
+        assert_eq!(take_start(&w).unwrap(), Taken::Taken);
+        drop(r);
+        assert_eq!(take_start(&w).unwrap(), Taken::Abandoned);
     }
 }
