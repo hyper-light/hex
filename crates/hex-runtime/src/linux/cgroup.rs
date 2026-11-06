@@ -26,9 +26,16 @@ pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 pub const MAX_BOXES: usize = 65_536;
 /// Most processes a signal is sent to one by one in a box (signals other than KILL, which the
 /// kernel delivers to the whole box at once through `cgroup.kill`), and the kill sweep collects: no box
-/// holds more than there are pids, `PID_MAX_LIMIT` on a 64-bit kernel, the ceiling `pid_max` may be set to
+/// holds more than there are pids ([`PID_MAX_LIMIT`]).
+pub const MAX_SIGNALLED: usize = PID_MAX_LIMIT;
+
+/// `PID_MAX_LIMIT` on a 64-bit kernel, the most pids there are: the ceiling `pid_max` may be set to
 /// (include/linux/threads.h; proc(5), /proc/sys/kernel/pid_max).
-pub const MAX_SIGNALLED: usize = 4 * 1024 * 1024;
+const PID_MAX_LIMIT: usize = 4 * 1024 * 1024;
+
+/// The most bytes a box's `cgroup.procs` holds: a line for each of [`MAX_SIGNALLED`] processes, each pid at most
+/// `PID_MAX_LIMIT - 1`, seven digits, and a newline.
+const MAX_PROCS_FILE: usize = MAX_SIGNALLED * 8;
 
 thread_local! {
     /// This thread's cgroupfs lookups so far ([`lookups_on_this_thread`]).
@@ -510,12 +517,18 @@ impl BoxCgroup {
         }
     }
 
-    /// The text of the cgroup's file `file` ([`read_fd`]).
+    /// The text of the cgroup's file `file` ([`read_fd`]), bounded by [`MAX_PROCS_FILE`] for its `cgroup.procs`,
+    /// which grows with its processes, and by [`MAX_CGROUP_FILE`] for the rest.
     fn read(&self, file: &str) -> Result<String, Refusal> {
         let fd = self
             .open_file(file, OFlags::RDONLY)
             .map_err(|e| os_err("reading a cgroup file", &self.dir.join(file), e))?;
-        read_fd(fd.as_fd(), || self.dir.join(file))
+        let max = if file == "cgroup.procs" {
+            MAX_PROCS_FILE
+        } else {
+            MAX_CGROUP_FILE
+        };
+        read_fd(fd.as_fd(), max, || self.dir.join(file))
     }
 
     /// Writes `value` to the cgroup's file `file` ([`write_fd`]).
@@ -823,8 +836,8 @@ fn cpu_max_holds(cg: &BoxCgroup, want: &str) -> bool {
 
 /// A cgroup file's text from its open descriptor `fd`, in as few reads as it takes, no stat
 /// (`fs::read_to_string` takes one per file to size its buffer): an idle cgroup's check and baseline read a
-/// dozen on create's path. Refused past [`MAX_CGROUP_FILE`]; `path` names the file in a refusal.
-fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
+/// dozen on create's path. Refused past `max` bytes; `path` names the file in a refusal.
+fn read_fd(fd: BorrowedFd<'_>, max: usize, path: impl Fn() -> PathBuf) -> Result<String, Refusal> {
     let mut out = Vec::new();
     let mut buf = [0u8; READ_CHUNK];
     // From the file's start whatever its offset: a descriptor opened ahead is read more than once, through copies that
@@ -837,10 +850,10 @@ fn read_fd(fd: BorrowedFd<'_>, path: impl Fn() -> PathBuf) -> Result<String, Ref
             break;
         }
         out.extend_from_slice(buf.get(..n).unwrap_or_default());
-        if out.len() > MAX_CGROUP_FILE {
+        if out.len() > max {
             return Err(Refusal::Os {
                 op: "reading a cgroup file",
-                why: format!("{} is over {MAX_CGROUP_FILE} bytes", path().display()),
+                why: format!("{} is over {max} bytes", path().display()),
             });
         }
     }
