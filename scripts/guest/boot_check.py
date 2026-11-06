@@ -5,6 +5,11 @@ HEX_GUEST_INITRD; retries the handshake with backoff until the deadline, as the 
 and fails when the VM process ends first.
 
     python3 -I scripts/guest/boot_check.py WORKDIR [--console] [--deadline SECONDS]
+        [--share DIR[:ro]]... [--cmdline-extra WORDS]
+
+Each --share is given to Shards and named on the command line (`hex.shares=`), so READY proves init
+mounted it: a share init can't mount ends the guest. --cmdline-extra adds kernel parameters, as a
+`hex.shares=` naming a share no device backs, which must end the guest.
 """
 
 import os
@@ -47,19 +52,30 @@ def handshake(path, patience):
         conn.close()
 
 
+def values(argv, flag):
+    return [argv[i + 1] for i, word in enumerate(argv) if word == flag]
+
+
 def main(argv):
     if not argv:
-        sys.exit("usage: boot_check.py WORKDIR [--console] [--deadline SECONDS]")
+        sys.exit(__doc__)
     work = argv[0]
     console = "--console" in argv
-    deadline_s = float(argv[argv.index("--deadline") + 1]) if "--deadline" in argv else 60.0
+    deadline_s = float((values(argv, "--deadline") or [60.0])[0])
+    shares = values(argv, "--share")
+    cmdline = " ".join([CMDLINE] + values(argv, "--cmdline-extra"))
+    if shares:
+        modes = ",".join("ro" if share.endswith(":ro") else "rw" for share in shares)
+        cmdline += f" hex.shares={modes}"
     shards, kernel, initrd = (os.environ[k] for k in ("SHARDS_BIN", "HEX_GUEST_KERNEL", "HEX_GUEST_INITRD"))
     os.makedirs(work, exist_ok=True)
     vsock = os.path.join(work, "vsock.sock")
     if os.path.exists(vsock):
         os.unlink(vsock)
     args = [shards, "run", "vm", "--kernel", kernel, "--initrd", initrd, "--vsock", vsock,
-            "--cpus", "2", "--memory", "1024", "--cmdline", CMDLINE]
+            "--cpus", "2", "--memory", "1024", "--cmdline", cmdline]
+    for share in shares:
+        args += ["--share", share]
     if not console:
         args.append("--no-console")
     print("running:", " ".join(args), flush=True)
