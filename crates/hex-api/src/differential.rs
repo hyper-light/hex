@@ -708,6 +708,95 @@ mod tests {
         }
     }
 
+    /// A program that is the simulator's, but ends on its own `after` its start (as a waiting program
+    /// that is killed late, or a box that ends slowly under load, would look).
+    struct EndsAfter {
+        inner: Box<dyn Proc>,
+        started: Instant,
+        after: Duration,
+    }
+
+    impl Proc for EndsAfter {
+        fn pid(&self) -> u32 {
+            self.inner.pid()
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>, Refusal> {
+            match self.inner.try_wait()? {
+                Some(e) => Ok(Some(e)),
+                None if self.started.elapsed() >= self.after => Ok(Some(Exit::Signal(9))),
+                None => Ok(None),
+            }
+        }
+        fn wait_for(&mut self, timeout: Duration) -> Result<Option<Exit>, Refusal> {
+            if let Some(e) = self.try_wait()? {
+                return Ok(Some(e));
+            }
+            let left = self.after.saturating_sub(self.started.elapsed());
+            if timeout < left {
+                conformance::rest(timeout);
+                return self.try_wait();
+            }
+            conformance::rest(left);
+            self.try_wait()
+        }
+    }
+
+    /// The simulator, but every program it starts ends on its own 770 ms after its start.
+    struct LateEnds(SimRuntime);
+
+    impl Runtime for LateEnds {
+        fn classes(&self) -> Vec<Class> {
+            self.0.classes()
+        }
+        fn create(&self, spec: crate::BoxSpec) -> Result<BoxInfo, Refusal> {
+            self.0.create(spec)
+        }
+        fn start(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.0.start(id)
+        }
+        fn exec(&self, id: &BoxId, p: Program, s: Stdio) -> Result<Box<dyn Proc>, Refusal> {
+            Ok(Box::new(EndsAfter {
+                inner: self.0.exec(id, p, s)?,
+                started: Instant::now(),
+                // The slowest end measured on adalundhe-macbook-pro at load 21 (2026-11-06): a real end
+                // that late, well inside the slowest on record, must not read as still running.
+                after: Duration::from_millis(770),
+            }))
+        }
+        fn signal(&self, id: &BoxId, signal: Signal) -> Result<(), Refusal> {
+            self.0.signal(id, signal)
+        }
+        fn inspect(&self, id: &BoxId) -> Result<BoxInfo, Refusal> {
+            self.0.inspect(id)
+        }
+        fn usage(&self, id: &BoxId) -> Result<Usage, Refusal> {
+            self.0.usage(id)
+        }
+        fn list(&self) -> Result<Vec<BoxInfo>, Refusal> {
+            self.0.list()
+        }
+        fn delete(&self, id: &BoxId) -> Result<(), Refusal> {
+            self.0.delete(id)
+        }
+    }
+
+    /// HEX-DIFF-1 (the negative watch rests on the record across hosts): do a runtime whose waiting
+    /// programs end 770 ms after they start, a real end seen under load. Expect HEX-DIFF-1 to fail at its
+    /// first `Running(1)`: a watch that says a program does not end must outlast the slowest end on record.
+    #[test]
+    fn a_program_that_ends_late_is_not_read_as_still_running() {
+        let s = SCENARIOS.iter().find(|s| s.id == "HEX-DIFF-1").unwrap();
+        let why = differ(
+            &LateEnds(SimRuntime::new()),
+            &SimFixture::Process,
+            &SimFixture::Process,
+            s,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(why.contains("(Running(1))"), "{why}");
+    }
+
     /// Do a scenario whose box the runtime shows late; expect it to pass, since a reading waits for the
     /// oracle's answer (bounded by PATIENCE) rather than taking the first.
     #[test]
