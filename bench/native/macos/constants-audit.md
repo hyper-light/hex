@@ -25,7 +25,7 @@ asm-generic.
 | Box user's process cap | the box's `pids_max`, else `kern.maxprocperuid` read at start | helper_daemon.rs, box_helper.rs, sys.rs | (c)/(a) | Was NPROC=1024. Linux sets no default either. dea5772 test, 6bbd791; §12 1c701ed held |
 | Helper start wait | success: a connect accepted; failure: launchd's exit report; bound only while running and not accepting: 0.075360 s | macos.sh `wait_serving`, `START_BOUND_S` | (b) | 2 x the max of 20 proxy starts (record agentstart-40454fe-20261106T150233Z). f023f4b, 63e701c. Ada's lab prints the real daemon's time to confirm |
 | dscl writes | once; a failure refused naming dscl's error | macos.sh `dscl_write` | none | No retry (was DSCL_TRIES=3, Nix's): eNotYetImplemented never seen. d0d8291, 8ba8ef5 |
-| Uninstall's process wait | by the fact (pgrep finds none), bound 2 x (0.883 ms + 0.298 ms x (n-1)) | macos.sh `end_pool_processes`, `drain_bound_s` | (b) | Was WAIT_STEPS 30 s. Record killscale-a84e094-20261106T160339Z. 3af15a2, 925771c |
+| Uninstall's process wait | by the fact (pgrep finds none), bound 2 x (0.883 ms + 0.298 ms x (n-1)) | macos.sh `end_pool_processes`, `drain_bound_s` | (b) | Was WAIT_STEPS 30 s. Record killscale-a84e094-20261106T160339Z. 3af15a2, 925771c. One wait per uninstall, so the record's bound is its whole learned bound; a learned one kept across installs would outlive the uninstall that removes everything |
 | File modes | 0750 folder, Umask 7 (socket 0770), 0755, 0644 | macos.sh | (c) | Access policy; research §3.6 cites open.2:117, launchd.plist.5:293-296 |
 | Lab watchdog | 1800 s | bench/install/macos_lab.sh | (d) | A hang guard for an admin run; to (b) from Ada's recorded lab duration |
 
@@ -44,7 +44,7 @@ asm-generic.
 | Watcher floor | 250 µs | hex-core watch.rs | (b) | RESULT.md, 9694770 |
 | Watcher ceiling | 100 ms | watch.rs | (b), weak | RESULT.md says a box read this often costs "next to nothing", but no measurement fixes 100. Open: needs a read-cost curve (reads per second against CPU) to derive the ceiling as the slowest pace whose cost is under the stated budget. Step 1's code; the lead's call whether this line measures it |
 | RT computation budget | 150 µs per 250 µs | process.rs | (b) | rtbudget on studio-3 |
-| Group drain | 2 x (0.883 ms + 0.298 ms x (n-1)) | hex_core::drain, process.rs | (b) | Was DRAIN_PATIENCE 10 s. Record killscale-a84e094. ffcec11 test, 9c72dac |
+| Group drain | 2 x (0.883 ms + 0.298 ms x (n-1)) to start, then raised by this node's slower drains | hex_core::drain::Learned, process.rs | (b)/(a) | Was DRAIN_PATIENCE 10 s. Record killscale-a84e094. ffcec11 test, 9c72dac; only rises (the learned-waits rule): 2bc6963 test, d1c004e, 25652c9 |
 | Listing size | kern.maxproc, or refused naming it | sys::listing | (c) | Was a 4096 fallback at five sites. 54e8ad0 test, 4f41305 |
 | Event batch | EVENTS = 64, also the registration chunk | sys.rs | (d) | A batch size that changes no outcome: more events wait one more call (EV_CLEAR coalesces a process's events, kern_event.c:1139). The second 64 merged into it (c376bc2). Open: derive it from measured events per wait under the largest box, or accept it as a batch size; the lead's call |
 | Background clamp | cpu_weight < 100 | process.rs | (c) | 100 is cgroup v2's default cpu.weight |
@@ -58,7 +58,7 @@ asm-generic.
 |---|---|---|---|---|
 | Ledger reserve | 16 MiB, capped at bound/4 | macos/mod.rs | (d) | Step 2 derives it from Ada's root lab record (armlat); its SHA comes before the lab is re-pinned |
 | Sweep pace | none | helper | none | Was pump(500). Event-driven: crossings and member forks and ends wake it (step 2's b05d3a0, merged) |
-| End drain | hex_core::drain::bound | helper_daemon.rs | (b) | As the group drain. Step 2 checks Ada's box-user drain record against it |
+| End drain | hex_core::drain::Learned, the helper's own | helper_daemon.rs | (b)/(a) | As the group drain, learned per helper (25652c9). Step 2 checks Ada's box-user drain record against it |
 | Reap wait | none | helper_daemon.rs | none | Was REAP_PATIENCE 100 ms. Wait answers at once, try_wait (step 2's 469b093) |
 | Listen backlog | SOMAXCONN | helper_daemon.rs | (c) | `bsd/sys/socket.h:597` (step 2) |
 | Message cap | from ARG_MAX, PATH_MAX, NGROUPS_MAX | hex-core helper.rs | (c) | Step 2's 469b093 |
