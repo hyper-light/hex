@@ -48,7 +48,13 @@ use crate::turns::{Turn, Turns};
 /// fs/namei.c:4545-4546 for an open that may create, :2873 for an unlink, from :5429), so with every record in
 /// one directory the boxes made and deleted at once queued on it: 0.548 ms a lifecycle waiting to write it and
 /// 0.189 to read it at concurrency 32 on fedora's E-cores (bench/competitive/probes/create_serial.md, run 19).
-/// A stated bound, not a tuning: 64 directories, made as the store opens.
+/// Derived from a record, not learned (Ada's rule, 2026-11-06): over 64 shards those waits were 0.000 ms at the same
+/// concurrency (run 20), a shard's lock no longer measurable among the lifecycle's waits. It can't be learned as
+/// the node starts: where a record lives is its id's hash over this count, so a node restarted on a host of another
+/// parallelism, or recovery after a crash, must find each record where the last node put it, and a count that
+/// changed would need every record moved first (the store's layout, like a wire format, changes append-only).
+/// What would falsify it: a shard's directory measurable in `create_serial.md`'s locks table at the most writers a
+/// node runs at once; the remedy then is a layout change with its migration, not a learned count.
 pub const SHARDS: usize = 64;
 /// The bits of a box id's hash that name its shard, [`SHARDS`] of them.
 const SHARD_MASK: u64 = 0x3f;
