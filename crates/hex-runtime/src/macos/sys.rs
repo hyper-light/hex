@@ -532,9 +532,13 @@ const NOTE_EXITSTATUS: u32 = 0x0400_0000;
 const TIMER: usize = 1;
 const USER: usize = 2;
 
-/// Most events one [`Kqueue::wait`] takes; a watched process's forks and end coalesce into one event until
-/// it is taken (XNU sets `EV_CLEAR` on them, `bsd/kern/kern_event.c:1139`), so more just wait a call.
-pub const EVENTS: usize = 64;
+/// Most events one [`Kqueue::wait`] takes: the most one wait met in the bench, 28 (one a member of its
+/// largest box, all killed at once; bench/native/macos/records/watcher-readcost-events-a7d13c6-20261106T165609Z.txt),
+/// and the [`TIMER`] and [`USER`] events, which can be pending beside them, so one call takes such a box's
+/// events (the lead's call 2, 2026-11-06). A watched process's forks and end coalesce into one event until
+/// it is taken (XNU sets `EV_CLEAR` on them, `bsd/kern/kern_event.c:1139`), so a larger box's further events
+/// wait for the next call, none lost.
+pub const EVENTS: usize = 28 + 2;
 
 /// A kqueue (kqueue(2)): timers, a user event other threads trigger, and processes' forks and ends.
 #[derive(Debug)]
