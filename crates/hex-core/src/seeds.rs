@@ -505,6 +505,11 @@ impl Seeds {
         }
     }
 
+    /// How many slots it has: the most creates it has seen at once, for a growing pool.
+    pub fn slots(&self) -> usize {
+        self.slots.len()
+    }
+
     /// How many seeds are up and serve no create.
     pub fn idle(&self) -> usize {
         self.count(|h| matches!(h, Holds::Idle { .. }))

@@ -771,8 +771,14 @@ fn calls_in_flight_are_bounded_for_the_node_not_each_connection() {
         })
     );
     lab.host.gate.set(false);
-    assert!(matches!(answer_of(&one), (Header { id: 1, .. }, Answer::Info(_))));
-    assert!(matches!(answer_of(&two), (Header { id: 2, .. }, Answer::Info(_))));
+    assert!(matches!(
+        answer_of(&one),
+        (Header { id: 1, .. }, Answer::Info(_))
+    ));
+    assert!(matches!(
+        answer_of(&two),
+        (Header { id: 2, .. }, Answer::Info(_))
+    ));
 }
 
 /// HEX-SOCK-7, the lead's call of 2026-11-06: the programs watched are one budget for the node. Do: two connections

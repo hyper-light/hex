@@ -100,6 +100,11 @@ impl IpcUtsPool {
         })
     }
 
+    /// Its size now, learned from its draws.
+    pub fn bound(&self) -> Result<usize, Refusal> {
+        Ok(self.shared.pool().map_err(Refusal::from)?.bound())
+    }
+
     /// What the pool has done. Counted at the take, so a create that fails after it took a pair, or found the
     /// pool dry, is counted all the same.
     pub fn counts(&self) -> Result<Counts, Refusal> {
@@ -110,7 +115,11 @@ impl IpcUtsPool {
 impl IpcUtsAhead for IpcUtsPool {
     fn take(&self) -> Result<Option<Pair>, OciError> {
         let mut pool = self.shared.pool()?;
+        let before = pool.bound();
         let taken = pool.take().map_err(|_| shut_down())?;
+        if pool.bound() > before {
+            crate::sizes::rose();
+        }
         let wake = self.refill.is_some() && pool.held() <= low(pool.bound());
         drop(pool);
         if wake {

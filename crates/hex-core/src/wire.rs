@@ -226,9 +226,10 @@ pub struct Limits {
     pub connections: usize,
     /// Bytes in one message, at most [`MAX_MESSAGE`].
     pub message_bytes: usize,
-    /// Requests one connection has asked and not yet had answered.
+    /// Requests asked and not yet answered, on the node's connections together (a node-wide budget since
+    /// 2026-11-06; a node before it counted them per connection, a bound no stricter for a client to keep).
     pub in_flight: usize,
-    /// Programs one connection's execs started that it still watches.
+    /// Programs execs started that the node's connections still watch, together (node-wide likewise).
     pub programs: usize,
 }
 

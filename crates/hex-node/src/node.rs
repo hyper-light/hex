@@ -48,7 +48,7 @@ use crate::ipcuts::IpcUtsPool;
 use crate::netns::{Netns, Pools};
 use crate::remove::remove_tree;
 use crate::seed::SeedPool;
-use crate::sizes::Sizes;
+use crate::sizes::{Keeper, Sizes};
 use crate::store::Store;
 use crate::supervise::{self, Forgotten, Live, Supervisor};
 use crate::turns::{Turn, Turns};
@@ -187,6 +187,8 @@ pub struct Node {
     /// Both pools' bounds, which the kept namespaces' files are bounded past ([`crate::netns::FilesBound`]).
     pools: Pools,
     devfs: Devfs,
+    /// Keeps what the pools learned in the node's state, for its next start ([`crate::sizes::Keeper`]).
+    keeper: Keeper,
 }
 
 /// Each box's abandoned programs not yet in its record ([`Node::abandoned`]).
@@ -251,15 +253,18 @@ impl Node {
         // containers are in it, a root node's, makes them; a rootless node's containers each have a
         // user namespace of their own (decision 4). The kept ones hold their files within the descriptor
         // limit the node was given, never raised, past what both pools hold.
-        // Every pool's bound is derived from this host, and its size learned from the demand it sees from the
-        // host's parallelism up (Ada's rule, 2026-11-06; crate::sizes).
-        let sizes = Sizes::now()?;
+        // Every pool's bound is derived from this host and its last start's demand, and its size learned from the
+        // demand it sees from where the last start peaked (the host's parallelism on a first start), so a restart
+        // takes no cold miss the last start had learned past (Ada's rule and the lead's calls, 2026-11-06;
+        // crate::sizes).
+        let keeper = Keeper::open(state_dir)?;
+        let sizes = Sizes::learned(&keeper.base())?;
         let pools = match owner {
             Owner::Root => Pools::root(sizes),
             Owner::Rootless { .. } => Pools::rootless(sizes),
         };
         let netns = Netns::learning(pools.netns, crate::netns::FilesBound::now(pools), sizes)?;
-        let ipc_uts = IpcUtsPool::learning(sizes.start, pools.ipc_uts)?;
+        let ipc_uts = IpcUtsPool::learning(sizes.starts.ipc_uts, pools.ipc_uts)?;
         let oci_boxes = BoxRoot::open(&root.dir().join(OCI_BOXES), root.disks().to_vec())?;
         let devices = device_programs(owner, &oci_boxes, MAX_PROGRAMS)?;
         // Fresh slots are numbered past every slot already under the root, so none is made twice.
@@ -270,7 +275,7 @@ impl Node {
                 Refusal::Broken("the oci boxes' root holds the last slot a u64 numbers".to_owned())
             })?;
         let cgroups = Cgroups::start(first, sizes)?;
-        cgroups.learn_ahead(sizes.start, sizes.ahead);
+        cgroups.learn_ahead(sizes.starts.ahead, sizes.ahead);
         // Parked procs are a root node's default (decision 8, parked procs; the lead, 2026-11-06): a rootless
         // node's devfs makes none, so it parks none.
         Self {
@@ -296,7 +301,17 @@ impl Node {
             netns,
             ipc_uts,
             pools,
-            devfs: Devfs::start(pools.devfs, pools.devfs, pools.devfs)?,
+            devfs: Devfs::start(
+                pools.devfs,
+                pools.devfs,
+                pools.devfs,
+                hex_core::devfs::Shape {
+                    keys: sizes.starts.devfs_keys,
+                    per_key: sizes.starts.devfs_per_key,
+                    cap: sizes.seeds.get(),
+                },
+            )?,
+            keeper,
             null: rustix::fs::open(
                 "/dev/null",
                 rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC,
@@ -541,6 +556,67 @@ impl Node {
     /// The node's pools' bounds on its host, and where their learned sizes start (Ada's rule, 2026-11-06).
     pub fn sizes(&self) -> Sizes {
         self.pools.sizes
+    }
+
+    /// Why the node's last peaks couldn't be read, where they couldn't: its start was a first start (the lead,
+    /// 2026-11-06). And the peaks its keeper has written since, with the last write's failure if one failed.
+    pub fn peaks_kept(&self) -> (Option<String>, u64, Option<String>) {
+        let (written, failure) = self.keeper.counts();
+        (self.keeper.unread().map(str::to_owned), written, failure)
+    }
+
+    /// What the pools have learned now, and each memory pool's takes in this start, as [`hex_core::demand::Peaks`]
+    /// keeps them: idle cgroups, cgroups made ahead, idle network namespaces, network namespaces made ahead, seeds,
+    /// and ipc and uts pairs. A pool whose lock was poisoned reads as having learned nothing more.
+    fn peaks_now(&self) -> hex_core::demand::Peaks {
+        let (owner_cgroups, ahead) = self.cgroups.learned().unwrap_or((0, 0));
+        let (netns, owner_netns) = self.netns.learned().unwrap_or((0, 0));
+        let (devfs_keys, devfs_per_key) = self.devfs.learned().unwrap_or((0, 0));
+        let (seeds, spare) = self
+            .create_seeds
+            .get()
+            .and_then(|p| p.learned().ok())
+            .unwrap_or((0, 0));
+        let cg = self.cgroups.counts().ok();
+        let kept = self.netns.reuse_counts().ok().flatten();
+        let made = self.netns.counts().ok();
+        let ipc = self.ipc_uts.counts().ok();
+        let served = self
+            .create_seeds
+            .get()
+            .and_then(|p| p.counts().ok())
+            .map_or(0, |c| c.handed);
+        hex_core::demand::Peaks {
+            owner_cgroups,
+            owner_netns,
+            netns,
+            ipc_uts: self.ipc_uts.bound().unwrap_or(0),
+            ahead,
+            devfs_keys,
+            devfs_per_key,
+            seeds,
+            spare,
+            takes: [
+                cg.as_ref()
+                    .map_or(0, |c| c.pool.handed_on.saturating_add(c.pool.fresh)),
+                cg.as_ref()
+                    .map_or(0, |c| c.ahead.taken.saturating_add(c.ahead.dry)),
+                kept.as_ref()
+                    .map_or(0, |k| k.pool.handed_on.saturating_add(k.pool.fresh)),
+                made.map_or(0, |c| c.taken.saturating_add(c.made_on_path)),
+                served,
+                ipc.map_or(0, |c| c.taken.saturating_add(c.made_on_path)),
+            ],
+        }
+    }
+
+    /// Hands what the pools learned to the keeper when a size rose since it last did: off the create's own work,
+    /// the snapshot taken only after a rise, which no draw already seen makes again.
+    fn keep_peaks(&self) {
+        if self.keeper.behind() {
+            let rises = crate::sizes::rises();
+            self.keeper.offer(&self.peaks_now(), rises);
+        }
     }
 
     /// What the node's device programs have done since it opened them: the loads, attaches and closes
@@ -1447,7 +1523,9 @@ impl Runtime for Node {
             ClassSpec::Bundle(bundle) => Source::Given(bundle.clone()),
             ClassSpec::Oci(oci) => self.render(&spec.id, oci)?,
         };
-        self.create_oci(spec, source)
+        let made = self.create_oci(spec, source);
+        self.keep_peaks();
+        made
     }
 
     fn start(&self, id: &BoxId) -> Result<(), Refusal> {
@@ -2313,5 +2391,14 @@ mod rendered {
                 "{shape}: the box's own, on top"
             );
         }
+    }
+}
+
+impl Drop for Node {
+    /// What the pools learned is kept for the node's next start, with this start's takes (the lead, 2026-11-06): a
+    /// node that can't write it starts the next time from the last it kept.
+    fn drop(&mut self) {
+        let now = self.peaks_now();
+        let _ = self.keeper.finish(&now);
     }
 }

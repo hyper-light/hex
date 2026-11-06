@@ -12,17 +12,22 @@ use crate::sizes::{Host, Sizes};
 /// The pools' bounds on fedora, the bench host, as its bench units run the node: 32 hardware threads, about 7.5 GiB
 /// of memory to hold, and a thread limit past the socket's need (`crate::sizes`).
 fn bench() -> Sizes {
-    Sizes::of(Host {
-        memory: 7_500 << 20,
-        parallelism: std::num::NonZeroUsize::new(32).unwrap(),
-        threads: 500_000,
-    })
+    Sizes::of(
+        Host {
+            memory: 7_500 << 20,
+            parallelism: std::num::NonZeroUsize::new(32).unwrap(),
+            threads: 500_000,
+            descriptors: 524_288,
+        },
+        &hex_core::demand::Peaks::default(),
+    )
 }
 
-/// Ada's rule, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a root node holds at
-/// its learned pools' bounds on fedora's figures. Do: bound the files under no limit at the bench host's sizes.
-/// Expect: the node's own 364,442 (331,086 at the old constants), and every kept namespace there may be holding its
-/// files four each past that, 640,018 in all.
+/// Ada's rule and the lead's calls, 2026-11-06 (CLAUDE.md §2; goal 6 step 6's installer reads it): the descriptors a
+/// root node holds at its learned pools' bounds on fedora's figures, a first start's. Do: bound the files under no
+/// limit at the bench host's sizes. Expect: the node's own 342,886 (331,086 at the old constants, the socket's
+/// connections then among them), and every kept namespace there may be holding its files four each past that,
+/// 618,462 in all.
 #[test]
 fn the_nodes_own_descriptors_on_fedoras_figures() {
     let unlimited = rustix::process::Rlimit {
@@ -30,8 +35,8 @@ fn the_nodes_own_descriptors_on_fedoras_figures() {
         maximum: None,
     };
     let b = FilesBound::of(&unlimited, root_pools());
-    assert_eq!(b.own, 364_442, "{:?}", bench());
-    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 640_018);
+    assert_eq!(b.own, 342_886, "{:?}", bench());
+    assert_eq!(b.own + b.namespaces * FILES_A_KEPT, 618_462);
 }
 
 /// A root node's pools on the bench host.
@@ -123,7 +128,7 @@ fn the_refill_thread_fills_the_pool_or_counts_each_make_that_fails() {
 #[test]
 fn a_dry_take_for_an_owners_box_is_made_by_the_node_and_counted() {
     let state = Arc::new(KeptState {
-        idle: Mutex::new(Idle::new(bench().start, bench().idle_netns)),
+        idle: Mutex::new(Idle::new(bench().starts.owner_netns, bench().idle_netns)),
         held: Mutex::new(BTreeMap::new()),
         given_back: AtomicU64::new(0),
         checked: AtomicU64::new(0),
@@ -259,19 +264,19 @@ fn the_files_bound_counts_the_namespaces_both_pools_make_ahead() {
     };
     let none = at(0, 0);
     let n = |count: usize| u64::try_from(count).unwrap();
-    let workers = n(bench().workers);
+    let takers = n(bench().seeds.get());
     assert_eq!(
         at(bench().netns, 0).own - none.own,
-        n(bench().netns) + 2 + workers
+        n(bench().netns) + 2 + takers
     );
     assert_eq!(
         at(0, bench().ipc_uts).own - none.own,
-        2 * (n(bench().ipc_uts) + 2) + 2 * workers
+        2 * (n(bench().ipc_uts) + 2) + 2 * takers
     );
     let root = at(bench().netns, bench().ipc_uts);
     assert_eq!(
         root.own - none.own,
-        n(bench().netns) + 2 + 2 * (n(bench().ipc_uts) + 2) + 3 * workers
+        n(bench().netns) + 2 + 2 * (n(bench().ipc_uts) + 2) + 3 * takers
     );
     assert_eq!(
         root,
@@ -342,7 +347,7 @@ fn the_files_bound_counts_the_mounts_made_ahead() {
     let held = n(bench().seeds.get());
     assert_eq!(
         at(true).own - at(false).own,
-        held + 2 * held + 6 + 2 + 3 * n(bench().workers)
+        held + 2 * held + 6 + 2 + 3 * n(bench().seeds.get())
     );
     assert!(
         root_pools().devfs,
@@ -373,7 +378,7 @@ fn the_files_bound_counts_the_prepared_dev_mounts() {
         )
     };
     let n = |count: usize| u64::try_from(count).unwrap();
-    let dev = n(bench().seeds.get()) + 2 + n(bench().workers);
+    let dev = n(bench().seeds.get()) + 2 + n(bench().seeds.get());
     let grown = at(true).own - at(false).own;
     assert!(
         grown >= dev,
@@ -410,10 +415,10 @@ fn a_files_slot_is_taken_up_to_the_bound_and_given_back_as_it_drops() {
 /// itself, as each such copy closes.
 #[test]
 fn a_kept_namespaces_socket_is_held_in_its_bound_and_closed_when_the_bound_puts_it_out() {
-    let mut idle = Idle::new(bench().start, bench().idle_netns);
+    let mut idle = Idle::new(bench().starts.owner_netns, bench().idle_netns);
     let mut ends = Vec::new();
     let mut out = Vec::new();
-    for _ in 0..=bench().start {
+    for _ in 0..=bench().starts.owner_netns {
         let (read, write) = rustix::pipe::pipe_with(
             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
         )

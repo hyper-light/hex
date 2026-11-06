@@ -357,6 +357,17 @@ impl<K: Clone + Eq, T> Pool<K, T> {
         held
     }
 
+    /// What it has learned: the keys it keeps, and the most mounts any key it keeps keeps.
+    pub fn learned(&self) -> (usize, usize) {
+        let per_key = self
+            .entries
+            .iter()
+            .map(|e| e.depth.size())
+            .max()
+            .unwrap_or(0);
+        (self.keys.size(), per_key)
+    }
+
     pub fn closed(&self) -> bool {
         self.closed
     }

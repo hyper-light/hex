@@ -131,8 +131,9 @@ impl CreatePool {
         };
         Self::open(
             exe,
-            Seeds::growing(limits, sizes.start),
+            Seeds::growing(limits, sizes.starts.seeds),
             limits,
+            sizes.starts.spare,
             prune,
             asked,
             #[cfg(debug_assertions)]
@@ -153,6 +154,7 @@ impl CreatePool {
             exe,
             Seeds::new(limits),
             limits,
+            1,
             prune,
             asked,
             #[cfg(debug_assertions)]
@@ -164,6 +166,7 @@ impl CreatePool {
         exe: PathBuf,
         seeds: Seeds,
         limits: Limits,
+        spare: usize,
         prune: Option<PathBuf>,
         asked: Option<&str>,
         #[cfg(debug_assertions)] inject: Option<String>,
@@ -186,7 +189,7 @@ impl CreatePool {
                 procs: (0..slots).map(|_| None).collect(),
                 start_failure: None,
                 shut: false,
-                spare: Learned::new(1, slots),
+                spare: Learned::new(spare, slots),
             }),
             free: Condvar::new(),
             wake: Condvar::new(),
@@ -248,6 +251,12 @@ impl CreatePool {
     }
 
     /// What the pool has done, as the bench and the node's metrics read it.
+    /// What it has learned (Ada's rule, 2026-11-06): its slots, the most creates it has seen at once, and its spare.
+    pub fn learned(&self) -> Result<(usize, usize), Refusal> {
+        let inner = self.shared.lock().map_err(Refusal::from)?;
+        Ok((inner.seeds.slots(), inner.spare.size()))
+    }
+
     pub fn counts(&self) -> Result<Counts, Refusal> {
         Ok(self.shared.lock().map_err(Refusal::from)?.seeds.counts())
     }
@@ -536,13 +545,17 @@ impl Shared {
         // freed for a restart, so a wedged seed never holds a slot for ever.
         self.reap_hung(&mut inner);
         let now = self.now();
+        let slots_before = inner.seeds.slots();
         let admit = inner
             .seeds
             .create(now)
             .map_err(|r| refused(r, inner.start_failure.as_deref()))?;
         if matches!(admit, Admit::Wait { .. }) {
             let waiting = inner.seeds.waiting();
-            inner.spare.observe(waiting);
+            // A slot added, or the spare raised, is a peak the node keeps for its next start.
+            if inner.spare.observe(waiting) || inner.seeds.slots() > slots_before {
+                crate::sizes::rose();
+            }
         }
         if wants_start(&inner) {
             self.wake_starter();

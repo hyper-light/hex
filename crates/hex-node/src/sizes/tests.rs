@@ -177,7 +177,7 @@ fn peaks_kept_in_the_state_are_read_back_and_a_bad_record_is_a_first_start() {
     let path = dir.path().join("peaks");
     let text = peaks.encode();
     for bad in [
-        text[..text.len() / 2].to_owned(),
+        text.get(..text.len() / 2).unwrap().to_owned(),
         "not a record\n".to_owned(),
         "x".repeat(Peaks::most_bytes() * 2 + 1),
     ] {
@@ -185,7 +185,7 @@ fn peaks_kept_in_the_state_are_read_back_and_a_bad_record_is_a_first_start() {
         assert!(
             matches!(read_peaks(dir.path()), Last::Unread(_)),
             "{:?}",
-            &bad[..bad.len().min(40)]
+            bad.get(..bad.len().min(40)).unwrap()
         );
     }
 }
