@@ -544,6 +544,9 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
       deleted box's ends for as many boxes as the pool has users. The node waits on the program's `NOTE_EXIT`
       on a kqueue of its own and then asks for its end (`Wait`), so a wait is the fact, never a poll, and no
       end is made up as `Unknown` because the node couldn't reap a program it doesn't parent.
+    - The helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
+      `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
+      crossing receive) were approved by Ada on 2026-11-06, as written.
 
     CPU is bounded by priority alone: a QoS class, and background priority where the box's weight is low. A
     box that asks for confinement gets App Sandbox's, which every child inherits (§3). A node with no helper
