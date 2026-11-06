@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
 
@@ -30,12 +30,6 @@ use super::sys;
 
 mod kids;
 use kids::{Full, Kids, Taken};
-
-/// How long a [`Request::Wait`] waits for its program's zombie. Not a tuning: the node asks once it has
-/// seen the program's `NOTE_EXIT`, so the daemon's own watch has that event queued and its reap waits for
-/// the zombie the same exit path makes (`proc::BoxProc`); this bounds only a wait asked of a program
-/// still running, which answers `None` and holds the daemon's connection no longer than this.
-const REAP_PATIENCE: Duration = Duration::from_millis(100);
 
 /// One live member of a box's user: its pid and its physical footprint in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,12 +231,15 @@ pub trait Privileged {
         kill_user(uid, signal)
     }
 
-    /// Waits up to `timeout_ms` for a member's `EXC_RESOURCE` crossing on the daemon's port; `Ok(true)`
-    /// when one arrived, `Ok(false)` on timeout. The default never fires (no exception port): for a
-    /// backend with no kernel arming, the simulator and the poll-only fallback.
-    fn next_crossing(&self, _timeout_ms: u32) -> io::Result<bool> {
-        Ok(false)
-    }
+    /// Watch each of the live members `pids` for its forks and its end (`EVFILT_PROC`, which root may place
+    /// on any process); a pid already watched is watched once. Returns those already gone.
+    fn watch_members(&self, pids: &[i32]) -> io::Result<Vec<i32>>;
+
+    /// Blocks until a watched member forks or ends.
+    fn next_member_event(&self) -> io::Result<()>;
+
+    /// Blocks until a member's `EXC_RESOURCE` crossing arrives on the daemon's port.
+    fn next_crossing(&self) -> io::Result<()>;
 
     /// The pool's users now, each name and uid, as the directory lists them: the users named by
     /// [`hex_core::pool::pool_index`] in the pool's group (default: none, a fixed pool).
@@ -424,22 +421,33 @@ impl<P: Privileged> Daemon<P> {
         }
     }
 
-    /// One turn of the daemon's two layers (Ada's call, 2026-11-01): it waits up to `timeout_ms` for a
-    /// member's `EXC_RESOURCE` crossing, then re-apportions **every** box (`rearm`: a box grows a member's
-    /// share where headroom is free, and ends where the footprints reach the bound). A crossing wakes it at
-    /// once — the kernel ledger is the **primary** bound, event-driven; the timeout paces it otherwise, so
-    /// the same sweep is the **defense-in-depth** polling layer beneath, catching a box the ledger didn't
-    /// hold (a member unarmed in the fork window, a missed exception). A crossing isn't mapped to one box —
-    /// a non-fatal crossing arrives via a corpse whose pid isn't the member's — so every box is re-read,
-    /// cheap at a node's box count (`rearm` re-arms only a member whose share changed). A per-box failure
-    /// (a box ended since) is skipped, not fatal. The daemon runs this on a thread beside its socket.
-    pub fn pump(&self, timeout_ms: u32) -> Result<(), Refusal> {
-        // Wakes early on a crossing (the event-driven primary); else the timeout is the poll floor (the
-        // defense-in-depth layer). Either way, the box sweep below runs.
-        let _ = self
-            .ops
-            .next_crossing(timeout_ms)
+    /// One crossing turn: blocks until a member's `EXC_RESOURCE` crossing (the kernel ledger, the primary
+    /// bound), then re-reads every box ([`Daemon::sweep`]). A crossing isn't mapped to one box — a non-fatal
+    /// crossing arrives via a corpse whose pid isn't the member's — so every box is re-read, cheap at a
+    /// node's box count. The daemon runs this on a thread of its own, beside its socket.
+    pub fn pump_crossings(&self) -> Result<(), Refusal> {
+        self.ops
+            .next_crossing()
             .map_err(|e| Refusal::os("receiving a box crossing", e))?;
+        self.sweep()
+    }
+
+    /// One membership turn: blocks until a watched member forks or ends, then re-reads every box, so a
+    /// forked member is armed at its fork's notice and an ended one's share goes to the rest. This is the
+    /// layer beneath the ledger, a box the ledger didn't hold — a member unarmed in the fork window — caught
+    /// on the fork's own event, with no period to pick (the lead's call, 2026-11-06, under Ada's rule that
+    /// no constant is picked). The daemon runs this on a thread of its own.
+    pub fn pump_members(&self) -> Result<(), Refusal> {
+        self.ops
+            .next_member_event()
+            .map_err(|e| Refusal::os("receiving a member's fork or end", e))?;
+        self.sweep()
+    }
+
+    /// Re-apportions every box (`rearm`: a box grows a member's share where headroom is free, and ends where
+    /// the footprints reach the bound), watching each member it finds, and reaps the programs that ended.
+    /// A per-box failure (a box ended since) is skipped, not fatal.
+    fn sweep(&self) -> Result<(), Refusal> {
         let boxes: Vec<(BoxId, u32)> = {
             let map = self
                 .boxes
@@ -453,6 +461,35 @@ impl<P: Privileged> Daemon<P> {
         // Reap the programs that ended, so none stays a zombie under its user.
         self.kids()?.sweep();
         Ok(())
+    }
+
+    /// The box user's live members, each watched for its forks and its end. A member may fork after the
+    /// listing and before its watch is placed, leaving a child whose forks post nothing; so it lists again
+    /// after each watch until a listing finds no member it hadn't watched. Each further round watches a
+    /// member new since the last, so it ends within the platform's per-uid process ceiling of rounds
+    /// (`per_uid`, which no box's `RLIMIT_NPROC` passes); past that, the newest children's forks wake the next turn through their parents'
+    /// watches.
+    fn watched_members(&self, uid: u32) -> Result<Vec<Member>, Answer> {
+        let list = |uid| {
+            self.ops
+                .list(uid)
+                .map_err(|e| os("reading a box's members", &e))
+        };
+        let mut live = list(uid)?;
+        for _ in 0..=self.per_uid {
+            let pids: Vec<i32> = live.iter().map(|m| m.pid).collect();
+            self.ops
+                .watch_members(&pids)
+                .map_err(|e| os("watching a box's members", &e))?;
+            let seen: BTreeSet<i32> = pids.into_iter().collect();
+            let again = list(uid)?;
+            let fresh = again.iter().any(|m| !seen.contains(&m.pid));
+            live = again;
+            if !fresh {
+                break;
+            }
+        }
+        Ok(live)
     }
 
     /// Serves one node connection until it closes: reads each framed request and answers it. A request it
@@ -610,13 +647,9 @@ impl<P: Privileged> Daemon<P> {
     }
 
     /// Re-apportions a box against its live members and arms each one whose share changed; ends the box if
-    /// its tree reached the bound. Called after a member starts (and, with the exception server, on a
-    /// crossing).
+    /// its tree reached the bound. Called after a member starts, and on a crossing or a member's fork or end.
     fn rearm(&self, box_id: &BoxId, uid: u32) -> Result<(), Answer> {
-        let live = self
-            .ops
-            .list(uid)
-            .map_err(|e| os("reading a box's members", &e))?;
+        let live = self.watched_members(uid)?;
         let plan = {
             let mut boxes = self.boxes()?;
             let Some(tracked) = boxes.get_mut(box_id) else {
@@ -759,7 +792,9 @@ impl<P: Privileged> Daemon<P> {
             Some(Some(Taken::Ended(exit))) => return Answer::Waited(Some(exit)),
             Some(Some(Taken::Live(p))) => p,
         };
-        let got = proc.wait_for(REAP_PATIENCE);
+        // At once: the node asks after the program's exit event, which the daemon's own watch holds too,
+        // so the reap finds the zombie its exit path makes; a running program answers `None`.
+        let got = proc.try_wait();
         if !matches!(got, Ok(Some(_))) {
             let back = match self.kids() {
                 Ok(mut k) => k.put_back(box_id, pid, proc),
@@ -786,7 +821,10 @@ pub fn bind(path: &Path) -> Result<OwnedFd, Refusal> {
         .map_err(|e| Refusal::os("making the helper socket", e))?;
     let addr = SocketAddrUnix::new(path).map_err(|e| Refusal::os("naming the helper socket", e))?;
     rustix::net::bind(&fd, &addr).map_err(|e| Refusal::os("binding the helper socket", e))?;
-    rustix::net::listen(&fd, 16).map_err(|e| Refusal::os("listening on the helper socket", e))?;
+    // The platform's own backlog bound (`SOMAXCONN`, `bsd/sys/socket.h:597`): a node keeps one connection, and
+    // the kernel caps any larger request at `kern.ipc.somaxconn`.
+    rustix::net::listen(&fd, libc::SOMAXCONN)
+        .map_err(|e| Refusal::os("listening on the helper socket", e))?;
     Ok(fd)
 }
 

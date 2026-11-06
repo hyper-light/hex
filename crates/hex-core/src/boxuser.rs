@@ -159,6 +159,7 @@ mod tests {
     use proptest::test_runner::TestRunner;
 
     use super::*;
+    use crate::meet::cases_to_meet;
 
     const MIB: u64 = 1 << 20;
 
@@ -289,6 +290,42 @@ mod tests {
         end: Cell<u64>,
     }
 
+    impl Met {
+        fn kinds(&self) -> [(&'static str, u64); 5] {
+            [
+                ("an empty arm", self.arm_empty.get()),
+                ("a one-member arm", self.arm_one.get()),
+                ("a many-member arm", self.arm_many.get()),
+                ("an arm with a remainder", self.arm_with_remainder.get()),
+                ("an end", self.end.get()),
+            ]
+        }
+    }
+
+    /// The outcomes the armed-tree test met (non-vacuity, CLAUDE.md §6).
+    #[derive(Default)]
+    struct Grown {
+        ended_at_start: Cell<u64>,
+        ended_growing: Cell<u64>,
+        held: Cell<u64>,
+    }
+
+    impl Grown {
+        fn kinds(&self) -> [(&'static str, u64); 3] {
+            [
+                ("a box ended at its start", self.ended_at_start.get()),
+                ("a box ended as it grew", self.ended_growing.get()),
+                ("a box held through its growth", self.held.get()),
+            ]
+        }
+    }
+
+    /// The rarest kind's share of [`apportioning_holds_its_invariants`]'s cases, and of
+    /// [`the_armed_tree_never_passes_the_bound`]'s, as measured by `records_the_rarest_case_shares`
+    /// (bench/native/macos/records/case-shares-boxuser.txt).
+    const APPORTION_RAREST_SHARE: f64 = 0.03897;
+    const ARMED_TREE_RAREST_SHARE: f64 = 0.01562;
+
     /// HEX-MAC-7/8 (model-based, CLAUDE.md §6): for any bound and any members, the plan holds the
     /// apportionment's invariants —
     /// - an Arm's limits sum to at most the apportionable bound (so the armed tree can't pass the
@@ -299,59 +336,60 @@ mod tests {
     #[test]
     fn apportioning_holds_its_invariants() {
         let met = Met::default();
-        let bump = |c: &Cell<u64>| c.set(c.get() + 1);
-        let mut runner = TestRunner::new(ProptestConfig::with_cases(2048));
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(cases_to_meet(
+            APPORTION_RAREST_SHARE,
+        )));
         runner
             .run(&(arb_bound(), arb_members()), |(b, members)| {
-                let used = total(&members);
-                let apportionable = b.apportionable();
-                let plan = apportion(b, &members);
-                match &plan {
-                    Plan::Arm(shares) => {
-                        prop_assert!(members.is_empty() || used < apportionable);
-                        prop_assert_eq!(shares.len(), members.len());
-                        let sum: u64 = shares.iter().map(|s| s.limit).sum();
-                        prop_assert!(sum <= apportionable, "sum {} > {}", sum, apportionable);
-                        for (s, m) in shares.iter().zip(&members) {
-                            prop_assert_eq!(s.pid, m.pid);
-                            prop_assert!(s.limit >= m.footprint);
-                        }
-                        if members.is_empty() {
-                            bump(&met.arm_empty);
-                        } else {
-                            // Non-empty: every byte of headroom handed out.
-                            prop_assert_eq!(sum, apportionable);
-                            match members.len() {
-                                1 => bump(&met.arm_one),
-                                _ => bump(&met.arm_many),
-                            }
-                            if !(apportionable - used)
-                                .is_multiple_of(u64::try_from(members.len()).unwrap())
-                            {
-                                bump(&met.arm_with_remainder);
-                            }
-                        }
-                    }
-                    Plan::End { footprint, bound } => {
-                        prop_assert_eq!(*footprint, used);
-                        prop_assert_eq!(*bound, b.limit);
-                        prop_assert!(!members.is_empty());
-                        prop_assert!(used >= apportionable);
-                        bump(&met.end);
-                    }
-                }
-                Ok(())
+                apportion_holds(b, &members, &met)
             })
             .unwrap();
-        for (kind, n) in [
-            ("an empty arm", &met.arm_empty),
-            ("a one-member arm", &met.arm_one),
-            ("a many-member arm", &met.arm_many),
-            ("an arm with a remainder", &met.arm_with_remainder),
-            ("an end", &met.end),
-        ] {
-            assert!(n.get() > 0, "the cases met no {kind}");
+        for (kind, n) in met.kinds() {
+            assert!(n > 0, "the cases met no {kind}");
         }
+    }
+
+    /// One case of [`apportioning_holds_its_invariants`], counting the kind of plan it met.
+    fn apportion_holds(b: Bound, members: &[Use], met: &Met) -> Result<(), TestCaseError> {
+        let bump = |c: &Cell<u64>| c.set(c.get() + 1);
+        let members = members.to_vec();
+        let used = total(&members);
+        let apportionable = b.apportionable();
+        let plan = apportion(b, &members);
+        match &plan {
+            Plan::Arm(shares) => {
+                prop_assert!(members.is_empty() || used < apportionable);
+                prop_assert_eq!(shares.len(), members.len());
+                let sum: u64 = shares.iter().map(|s| s.limit).sum();
+                prop_assert!(sum <= apportionable, "sum {} > {}", sum, apportionable);
+                for (s, m) in shares.iter().zip(&members) {
+                    prop_assert_eq!(s.pid, m.pid);
+                    prop_assert!(s.limit >= m.footprint);
+                }
+                if members.is_empty() {
+                    bump(&met.arm_empty);
+                } else {
+                    // Non-empty: every byte of headroom handed out.
+                    prop_assert_eq!(sum, apportionable);
+                    match members.len() {
+                        1 => bump(&met.arm_one),
+                        _ => bump(&met.arm_many),
+                    }
+                    if !(apportionable - used).is_multiple_of(u64::try_from(members.len()).unwrap())
+                    {
+                        bump(&met.arm_with_remainder);
+                    }
+                }
+            }
+            Plan::End { footprint, bound } => {
+                prop_assert_eq!(*footprint, used);
+                prop_assert_eq!(*bound, b.limit);
+                prop_assert!(!members.is_empty());
+                prop_assert!(used >= apportionable);
+                bump(&met.end);
+            }
+        }
+        Ok(())
     }
 
     /// HEX-MAC-7 (the bound holds): members grow, and as long as each stays within the limit the
@@ -361,72 +399,140 @@ mod tests {
     /// the kernel's per-task ledger limits turn into a tree-wide bound.
     #[test]
     fn the_armed_tree_never_passes_the_bound() {
-        let mut runner = TestRunner::new(ProptestConfig::with_cases(512));
-        let scenario = (
+        let grown = Grown::default();
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(cases_to_meet(
+            ARMED_TREE_RAREST_SHARE,
+        )));
+        runner
+            .run(&armed_tree_scenario(), |(b, growths)| {
+                armed_tree_holds(b, growths, &grown)
+            })
+            .unwrap();
+        for (kind, n) in grown.kinds() {
+            assert!(n > 0, "the cases met no {kind}");
+        }
+    }
+
+    fn armed_tree_scenario() -> impl Strategy<Value = (Bound, Vec<(u32, Vec<u64>)>)> {
+        (
             arb_bound(),
             prop::collection::vec(
                 (1u32..64, prop::collection::vec(0u64..(64 * MIB), 1..16)),
                 1..8,
             ),
-        );
+        )
+    }
+
+    /// One case of [`the_armed_tree_never_passes_the_bound`], counting its outcome.
+    fn armed_tree_holds(
+        b: Bound,
+        growths: Vec<(u32, Vec<u64>)>,
+        grown: &Grown,
+    ) -> Result<(), TestCaseError> {
+        let bump = |c: &Cell<u64>| c.set(c.get() + 1);
+        // Distinct pids with a series of growth steps each.
+        let mut seen = BTreeSet::new();
+        let members: Vec<(u32, Vec<u64>)> = growths
+            .into_iter()
+            .filter(|(pid, _)| seen.insert(*pid))
+            .collect();
+        // Each member's footprint and the limit it is armed at now.
+        let mut footprint: Vec<u64> = members.iter().map(|_| 0).collect();
+        let mut armed: Vec<u64> = members.iter().map(|_| 0).collect();
+        let rearm = |footprint: &[u64], armed: &mut [u64]| -> Option<(u64, u64)> {
+            let uses: Vec<Use> = footprint
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| use_(u32::try_from(i).unwrap(), f))
+                .collect();
+            match apportion(b, &uses) {
+                Plan::Arm(shares) => {
+                    for (i, s) in shares.iter().enumerate() {
+                        armed[i] = s.limit;
+                    }
+                    None
+                }
+                Plan::End { footprint, bound } => Some((footprint, bound)),
+            }
+        };
+        // Arm once at the start.
+        if let Some((fp, bnd)) = rearm(&footprint, &mut armed) {
+            // Ended before anything grew: the start already reached the bound.
+            prop_assert!(fp >= b.apportionable());
+            prop_assert_eq!(bnd, b.limit);
+            bump(&grown.ended_at_start);
+            return Ok(());
+        }
+        let steps = members.iter().map(|(_, g)| g.len()).max().unwrap_or(0);
+        for step in 0..steps {
+            for (i, (_, growth)) in members.iter().enumerate() {
+                if let Some(&g) = growth.get(step) {
+                    // A member grows, but the kernel holds it at the limit it was armed at:
+                    // it can't pass `armed[i]`.
+                    footprint[i] = (footprint[i].saturating_add(g)).min(armed[i]);
+                }
+            }
+            // The armed tree never passes the bound, whatever the members did.
+            let sum: u64 = footprint.iter().copied().fold(0, u64::saturating_add);
+            prop_assert!(sum <= b.limit, "armed sum {} > bound {}", sum, b.limit);
+            // A member at its limit asks to be re-apportioned.
+            if footprint.iter().zip(&armed).any(|(f, a)| f >= a)
+                && let Some((fp, _)) = rearm(&footprint, &mut armed)
+            {
+                // Ended: the footprint reached the apportionable bound, still under the real
+                // bound (the reserve is the gap).
+                prop_assert!(fp <= b.limit);
+                bump(&grown.ended_growing);
+                return Ok(());
+            }
+        }
+        bump(&grown.held);
+        Ok(())
+    }
+
+    /// Records the rarest kind's share of each model test's cases, which sizes its case count
+    /// ([`cases_to_meet`]): run with `--ignored --nocapture`, its output is
+    /// bench/native/macos/records/case-shares-boxuser.txt.
+    #[test]
+    #[ignore = "a recorder: its output sizes the model tests' case counts"]
+    fn records_the_rarest_case_shares() {
+        // Enough to know a share near the rarest (about 0.016) to about 2.5% relative: its standard error,
+        // sqrt((1 - p) / (n p)).
+        const RECORD_CASES: u32 = 100_000;
+        let met = Met::default();
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(RECORD_CASES));
         runner
-            .run(&scenario, |(b, growths)| {
-                // Distinct pids with a series of growth steps each.
-                let mut seen = BTreeSet::new();
-                let members: Vec<(u32, Vec<u64>)> = growths
-                    .into_iter()
-                    .filter(|(pid, _)| seen.insert(*pid))
-                    .collect();
-                // Each member's footprint and the limit it is armed at now.
-                let mut footprint: Vec<u64> = members.iter().map(|_| 0).collect();
-                let mut armed: Vec<u64> = members.iter().map(|_| 0).collect();
-                let rearm = |footprint: &[u64], armed: &mut [u64]| -> Option<(u64, u64)> {
-                    let uses: Vec<Use> = footprint
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &f)| use_(u32::try_from(i).unwrap(), f))
-                        .collect();
-                    match apportion(b, &uses) {
-                        Plan::Arm(shares) => {
-                            for (i, s) in shares.iter().enumerate() {
-                                armed[i] = s.limit;
-                            }
-                            None
-                        }
-                        Plan::End { footprint, bound } => Some((footprint, bound)),
-                    }
-                };
-                // Arm once at the start.
-                if let Some((fp, bnd)) = rearm(&footprint, &mut armed) {
-                    // Ended before anything grew: the start already reached the bound.
-                    prop_assert!(fp >= b.apportionable());
-                    prop_assert_eq!(bnd, b.limit);
-                    return Ok(());
-                }
-                let steps = members.iter().map(|(_, g)| g.len()).max().unwrap_or(0);
-                for step in 0..steps {
-                    for (i, (_, growth)) in members.iter().enumerate() {
-                        if let Some(&g) = growth.get(step) {
-                            // A member grows, but the kernel holds it at the limit it was armed at:
-                            // it can't pass `armed[i]`.
-                            footprint[i] = (footprint[i].saturating_add(g)).min(armed[i]);
-                        }
-                    }
-                    // The armed tree never passes the bound, whatever the members did.
-                    let sum: u64 = footprint.iter().copied().fold(0, u64::saturating_add);
-                    prop_assert!(sum <= b.limit, "armed sum {} > bound {}", sum, b.limit);
-                    // A member at its limit asks to be re-apportioned.
-                    if footprint.iter().zip(&armed).any(|(f, a)| f >= a)
-                        && let Some((fp, _)) = rearm(&footprint, &mut armed)
-                    {
-                        // Ended: the footprint reached the apportionable bound, still under the real
-                        // bound (the reserve is the gap).
-                        prop_assert!(fp <= b.limit);
-                        return Ok(());
-                    }
-                }
-                Ok(())
+            .run(&(arb_bound(), arb_members()), |(b, members)| {
+                apportion_holds(b, &members, &met)
             })
             .unwrap();
+        let grown = Grown::default();
+        let mut runner = TestRunner::new(ProptestConfig::with_cases(RECORD_CASES));
+        runner
+            .run(&armed_tree_scenario(), |(b, growths)| {
+                armed_tree_holds(b, growths, &grown)
+            })
+            .unwrap();
+        for (test, kinds) in [
+            ("apportioning_holds_its_invariants", met.kinds().to_vec()),
+            (
+                "the_armed_tree_never_passes_the_bound",
+                grown.kinds().to_vec(),
+            ),
+        ] {
+            let total: u64 = RECORD_CASES.into();
+            for (kind, n) in &kinds {
+                println!(
+                    "{test}: {kind}: {n} of {total} ({:.5})",
+                    *n as f64 / total as f64
+                );
+            }
+            let rarest = kinds.iter().map(|(_, n)| *n).min().unwrap_or(0);
+            let share = rarest as f64 / total as f64;
+            println!(
+                "{test}: rarest share {share:.5} -> {} cases",
+                cases_to_meet(share)
+            );
+        }
     }
 }

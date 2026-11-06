@@ -117,8 +117,15 @@ TESTBIN="$(find "$USERTARGET/debug/deps" -maxdepth 1 -name 'macos_process_box-*'
     if make_user; then
         "$PROBE" uid "$LABUID" "$N"
 
+        # What derives the helper's reserve and its drain bound, recorded in this one run (each the max of
+        # K=19 trials: a 20th draw exceeds the max of 19 with probability 1/20, so the max covers 95%).
+        echo "## derive RESERVE_BYTES: the fork window, member fork to child armed (x2 the max growth)"
+        "$PROBE" armlat "$LABUID" 19
+        echo "## derive DRAIN_PATIENCE: kill-to-empty for the box sizes the box probe runs (x2 the max)"
+        for n in 1 4 8 14 28; do "$PROBE" drain "$LABUID" "$n" 19; done
+
         echo "## box-user class end to end: a real 'hex __box-helper' + box-user HEX-RT conformance + helper CPU"
-        "$HEXBIN" __box-helper --socket "$SOCK" --users "$LABUID" &
+        "$HEXBIN" __box-helper --socket "$SOCK" --users "$LABUID" &  # its process cap: kern.maxprocperuid
         HELPER_PID=$!
         for _ in $(seq 1 100); do [ -S "$SOCK" ] && break; sleep 0.05; done
         if [ -S "$SOCK" ] && [ -n "$TESTBIN" ]; then

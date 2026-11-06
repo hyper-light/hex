@@ -14,6 +14,12 @@
 //   box B N kind       a box of bound B MiB across N members each allocating at full speed, per-task FATAL limits
 //                      apportioned to sum to B; kind=steady spawns them, kind=burst forks them at once: the box's
 //                      total overshoot past B, and the watcher/helper CPU
+//   armlat UID K       the fork window the helper's reserve must cover: K times, a member running as UID forks a
+//                      child that allocates at full speed; the probe arms the child as the helper does (the
+//                      member's NOTE_FORK, a PROC_UID_ONLY listing, task_for_pid, the footprint limit) and
+//                      reads how far the child grew before the limit was set. Prints each trial and the max.
+//   drain UID N K      the delete's drain: K times, N members as UID are killed (SIGKILL, as kill_user) and
+//                      timed until a PROC_UID_ONLY listing holds none alive. Prints each trial and the max.
 // Build on the Mac: clang -O2 -Wall -Wextra -o boxuser_probe boxuser_probe.c
 #include <errno.h>
 #include <libproc.h>
@@ -28,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -422,6 +429,139 @@ static int do_box(uint64_t b_mib, int n, const char *kind) {
 }
 
 // cputime PID: print the process's cumulative CPU time (user+system) and a monotonic clock, both in
+// A process of `uid` other than `not`, alive (not ended), from a PROC_UID_ONLY listing; 0 when none.
+static pid_t uid_other(uid_t uid, pid_t not) {
+    static pid_t pids[MAX_PIDS];
+    int bytes = proc_listpids(PROC_UID_ONLY, uid, pids, (int)sizeof pids);
+    int n = bytes > 0 ? bytes / (int)sizeof(pid_t) : 0;
+    for (int i = 0; i < n; i++)
+        if (pids[i] != 0 && pids[i] != not && footprint(pids[i]) != 0) return pids[i];
+    return 0;
+}
+
+// How many processes of `uid` are alive (not ended), from a PROC_UID_ONLY listing.
+static int uid_alive(uid_t uid) {
+    static pid_t pids[MAX_PIDS];
+    int bytes = proc_listpids(PROC_UID_ONLY, uid, pids, (int)sizeof pids);
+    int n = bytes > 0 ? bytes / (int)sizeof(pid_t) : 0, alive = 0;
+    for (int i = 0; i < n; i++)
+        if (pids[i] != 0 && footprint(pids[i]) != 0) alive++;
+    return alive;
+}
+
+// armlat: the fork window, from a member's fork to its child armed, and the child's growth in it.
+static int do_armlat(uid_t uid, int k) {
+    if (geteuid() != 0) { fprintf(stderr, "armlat: needs root (another user's members; task_for_pid)\n"); return 1; }
+    uint64_t max_win = 0, max_grow = 0;
+    int ok = 0;
+    for (int t = 0; t < k; t++) {
+        int go[2];
+        if (pipe(go) != 0) return 1;
+        // The member stamps the time just before its fork into a shared page.
+        volatile uint64_t *stamp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
+        if (stamp == MAP_FAILED) return 1;
+        pid_t m = fork();
+        if (m == 0) {
+            if (setgid(20) != 0 || setuid(uid) != 0) _exit(3);
+            char b;
+            if (read(go[0], &b, 1) != 1) _exit(4);
+            *stamp = now_ns();
+            pid_t c = fork();
+            if (c == 0) {
+                // The child allocates and touches at full speed until it is killed (at most 64 GiB).
+                for (int i = 0; i < 65536; i++) {
+                    char *p = malloc(MIB);
+                    if (p == NULL) break;
+                    memset(p, 1, MIB);
+                }
+                for (;;) pause();
+            }
+            for (;;) pause();
+        }
+        int kq = kqueue();
+        struct kevent ev;
+        EV_SET(&ev, m, EVFILT_PROC, EV_ADD, NOTE_FORK, 0, NULL);
+        if (kq < 0 || kevent(kq, &ev, 1, NULL, 0, NULL) != 0) { kill(m, SIGKILL); waitpid(m, NULL, 0); return 1; }
+        if (write(go[1], "g", 1) != 1) { kill(m, SIGKILL); waitpid(m, NULL, 0); return 1; }
+        struct kevent got;
+        struct timespec patience = {.tv_sec = 30, .tv_nsec = 0};
+        int n = kevent(kq, NULL, 0, &got, 1, &patience);
+        pid_t c = 0;
+        task_t task;
+        int armed = 0;
+        if (n == 1 && (got.fflags & NOTE_FORK)) {
+            // As the helper: list the user, find the new member, arm it.
+            c = uid_other(uid, m);
+            if (c != 0 && task_of(c, &task) == 0) {
+                int old = 0;
+                armed = task_set_phys_footprint_limit(task, 64 * 1024, &old) == KERN_SUCCESS;
+            }
+        }
+        uint64_t t_armed = now_ns();
+        uint64_t grow = c != 0 ? footprint(c) : 0;
+        uint64_t win = t_armed > *stamp ? t_armed - *stamp : 0;
+        if (armed) {
+            ok++;
+            if (win > max_win) max_win = win;
+            if (grow > max_grow) max_grow = grow;
+        }
+        printf("armlat trial %d: %s, window %.1f us, child footprint at arm %.2f MiB\n", t,
+               armed ? "armed" : "NOT armed", (double)win / 1e3, (double)grow / (double)MIB);
+        if (c != 0) kill(c, SIGKILL);
+        kill(m, SIGKILL);
+        waitpid(m, NULL, 0);
+        close(kq);
+        close(go[0]);
+        close(go[1]);
+        munmap((void *)stamp, 4096);
+    }
+    printf("armlat: %d of %d armed; max window %.1f us; max child footprint at arm %.2f MiB; "
+           "reserve (x2 the max) %.2f MiB\n",
+           ok, k, (double)max_win / 1e3, (double)max_grow / (double)MIB, 2.0 * (double)max_grow / (double)MIB);
+    return ok == k ? 0 : 1;
+}
+
+// drain: N members as UID, killed as kill_user kills them, timed until none is alive.
+static int do_drain(uid_t uid, int n, int k) {
+    if (geteuid() != 0) { fprintf(stderr, "drain: needs root (members as another user)\n"); return 1; }
+    uint64_t max_ns = 0;
+    int ok = 0;
+    for (int t = 0; t < k; t++) {
+        pid_t kids[MAX_PIDS];
+        int made = 0;
+        for (int i = 0; i < n && i < MAX_PIDS; i++) {
+            pid_t c = fork();
+            if (c == 0) {
+                if (setgid(20) != 0 || setuid(uid) != 0) _exit(3);
+                for (;;) pause();
+            }
+            if (c > 0) kids[made++] = c;
+        }
+        // Wait for the fact: every member listed alive as the user.
+        uint64_t start = now_ns();
+        while (uid_alive(uid) < made && now_ns() - start < 30ULL * 1000000000ULL) usleep(100);
+        static pid_t pids[MAX_PIDS];
+        uint64_t t0 = now_ns();
+        int bytes = proc_listpids(PROC_UID_ONLY, uid, pids, (int)sizeof pids);
+        int listed = bytes > 0 ? bytes / (int)sizeof(pid_t) : 0;
+        for (int i = 0; i < listed; i++)
+            if (pids[i] != 0) kill(pids[i], SIGKILL);
+        while (uid_alive(uid) > 0 && now_ns() - t0 < 30ULL * 1000000000ULL) {}
+        uint64_t t1 = now_ns();
+        int left = uid_alive(uid);
+        for (int i = 0; i < made; i++) waitpid(kids[i], NULL, 0);
+        if (left == 0) {
+            ok++;
+            if (t1 - t0 > max_ns) max_ns = t1 - t0;
+        }
+        printf("drain trial %d: %d members, %s in %.1f us\n", t, made, left == 0 ? "empty" : "NOT empty",
+               (double)(t1 - t0) / 1e3);
+    }
+    printf("drain N=%d: %d of %d emptied; max %.1f us; patience (x2 the max) %.1f us\n", n, ok, k,
+           (double)max_ns / 1e3, 2.0 * (double)max_ns / 1e3);
+    return ok == k ? 0 : 1;
+}
+
 // nanoseconds, so a caller can sample a daemon's CPU across an interval. Used to measure the privileged
 // helper's CPU (step 2's "helper CPU <= 0.1% of a core" criterion), at rest and while it serves a box.
 static int do_cputime(pid_t pid) {
@@ -453,9 +593,13 @@ int main(int argc, char **argv) {
         return do_uid((uid_t)strtoul(argv[2], NULL, 10), atoi(argv[3]));
     if (argc >= 5 && strcmp(argv[1], "box") == 0)
         return do_box(strtoull(argv[2], NULL, 10), atoi(argv[3]), argv[4]);
+    if (argc >= 4 && strcmp(argv[1], "armlat") == 0)
+        return do_armlat((uid_t)strtoul(argv[2], NULL, 10), atoi(argv[3]));
+    if (argc >= 5 && strcmp(argv[1], "drain") == 0)
+        return do_drain((uid_t)strtoul(argv[2], NULL, 10), atoi(argv[3]), atoi(argv[4]));
     if (argc >= 3 && strcmp(argv[1], "cputime") == 0)
         return do_cputime((pid_t)strtol(argv[2], NULL, 10));
     fprintf(stderr, "usage: boxuser_probe priv MB | cap fatal MB | cap soft MB | fork CAP ALLOC | uid UID N "
-                    "| box B N steady|burst | cputime PID\n");
+                    "| box B N steady|burst | armlat UID K | drain UID N K | cputime PID\n");
     return 2;
 }

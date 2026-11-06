@@ -160,6 +160,10 @@ apple-oss-distributions/xnu main `f6217f891ac0` (2026-11-05):
 - So the node watches a box user's program's `NOTE_EXIT` on a kqueue of its own, and on it (or on `ESRCH`) asks
   the helper for the end, which the helper reaps as parent, waiting for the zombie as the process class does
   (`NOTE_EXIT` comes before `SZOMB`, `kern_exit.c:2561` then :2631).
+- So no request blocks, and no wait needs a bound: when the node asks, the helper's own watch holds the same
+  exit event (`proc_exit` posts it to every knote on the process at once, `kern_exit.c:2561`), so the helper takes
+  it without waiting and reaps the zombie the same exit path makes; a program still running answers "running" at
+  once. The helper serves one connection at a time and needs no thread per waiting program, nor a cap on them.
 - Falsified if a `NOTE_EXIT` watch of another user's process is refused unprivileged on a shipping macOS, or a box
   user's program's wait reads `Exit::Unknown` while it runs (the root lab's conformance run, `boxlab.sh`).
 

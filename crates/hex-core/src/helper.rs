@@ -29,10 +29,26 @@ pub const VERSION: u16 = 1;
 pub const FIRST: u16 = 1;
 /// The header: magic, version, kind, id.
 pub const HEADER_BYTES: usize = 16;
-/// Largest helper message. A request is a box id (≤128 bytes) and at most a program (its argv, environment,
-/// a working folder); 64 KiB holds any a caller passes in practice, and a larger one is refused by type
-/// before it is sent. Under the kernel's `SOCK_SEQPACKET` record bound, as [`crate::wire::MAX_MESSAGE`] is.
-pub const MAX_MESSAGE: usize = 64 << 10;
+/// The most bytes a macOS exec takes for its arguments and environment: `ARG_MAX`
+/// (`bsd/sys/syslimits.h:80-81`, xnu `f6217f891ac0`), charged per string as its bytes, its NUL and its
+/// pointer (`bsd/kern/kern_exec.c:6108-6112`, `E2BIG` past it).
+pub const ARG_MAX: usize = 1024 * 1024;
+/// The longest macOS path, its working folder's bound (`bsd/sys/syslimits.h:111`).
+pub const PATH_MAX: usize = 1024;
+/// The most supplementary groups a macOS process holds (`bsd/sys/syslimits.h:104`).
+pub const NGROUPS_MAX: usize = 16;
+/// Largest helper message: the largest [`Request::Start`], whose program is the largest a macOS exec takes,
+/// so any program the helper could start fits and none it couldn't is sent. A program string costs 4 bytes
+/// of length here against its NUL and 8-byte pointer in `ARG_MAX` (an environment pair 8 here against
+/// `=`, NUL and pointer), so its argv and environment take at most `ARG_MAX`; beside them go the header, the
+/// longest box id, two list counts, the working folder, the user and the leader flag.
+pub const MAX_MESSAGE: usize = HEADER_BYTES
+    + (4 + BoxId::MAX_LEN)
+    + ARG_MAX
+    + 2 * 4
+    + (1 + 4 + PATH_MAX)
+    + (1 + 4 + 4 + 4 + 4 * NGROUPS_MAX)
+    + 1;
 /// The descriptors a [`Request::Start`] carries: the program's stdin, stdout and stderr.
 pub const START_FDS: usize = 3;
 

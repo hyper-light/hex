@@ -539,10 +539,17 @@ evidence is `docs/research/runtime/native-platforms.md` (§n below are its secti
     QoS class, and background priority where the box's weight is low. A box that asks for confinement gets App
     Sandbox's, which every child inherits (§3). The class's own purpose is trusted code that must not starve
     the machine, and that purpose doesn't need it. Under the helper the ledger limits sum to the bound less a
-    reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there: each
-    turn of its exception loop (`Daemon::pump`) re-reads every box and ends one past its bound, whether a
-    crossing woke it or its timeout paced it, so a member unarmed in the fork window or a missed exception
-    is still caught (`docs/research/runtime/macos-box-user-and-ledger.md`). A node with no helper runs the
+    reserve (`hex_core::boxuser`), the fork window's room; the daemon's own sweep is layer three there, and
+    it is event-driven, with no period (the lead's call, 2026-11-06, under Ada's rule that no constant is
+    picked): the daemon watches every member for its forks and its end (`EVFILT_PROC`, which root may place on
+    any process), and each fork or end, like each crossing, wakes a sweep that re-reads every box, arms a forked
+    member at once, and ends a box past its bound (`Daemon::pump_members`, `Daemon::pump_crossings`). A member
+    that forks before its watch is placed is caught by the sweep listing the box again after each watch, until
+    a listing finds no member it hadn't watched (`docs/research/runtime/macos-box-user-and-ledger.md`). The
+    helper's privileged calls are `crates/hex-runtime/src/macos/helper_sys.rs`, CLAUDE.md §12: its lines
+    `d4252f3` (the file and its fork, user drop, ledger and exception arming) and `a960732` (the `mach_msg`
+    crossing receive) were approved by Ada on 2026-11-06, as written, and so was `caa6e9f` (the child's
+    `RLIMIT_NOFILE`). A node with no helper runs the
     class as step 1's, and says so in its inspect (`BoxInfo.membership`).
 
     **A program's end** is the helper's to collect, since it is the program's parent and `waitid` answers no

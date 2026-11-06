@@ -23,14 +23,15 @@ use hex_runtime::macos::MacRuntime;
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
-// Each wait is 2 x the max of 30 measured exec-to-exits of what it waits on, through this class's own path
-// on studio-2 at load ~10 (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt; Ada's rule, 2026-11-06), the x2 the lead's margin.
-/// A program that exits at once, from a cold start: 2 x 227.814 ms.
-const EXITS_AT_ONCE: Duration = Duration::from_micros(455_628);
-/// A hog ended at its box's 256 MiB bound: 2 x 465.469 ms.
+/// How long a test waits for a fact before calling it a hang: twice the slowest recorded run of the tests that
+/// wait (19.753 s, a kiln pacing stall, which stops a whole run tree and so can meet any wait;
+/// bench/native/macos/records/test-waits-macos.txt), as hex-runtime's macOS tests use. A guard only ends a
+/// hang; a passing test waits on its fact (Ada's rule, 2026-11-06).
+const HANG_GUARD: Duration = Duration::from_millis(39_507);
+/// When a bound kill's end counts as late, for the test that claims ends are seen when they happen: twice the
+/// max of 30 measured exec-to-exits of a hog ended at its 256 MiB bound, 465.469 ms
+/// (bench/native/macos/records/execexit-a82ce7b-20261106T161405Z.txt).
 const ENDED_AT_BOUND: Duration = Duration::from_micros(930_938);
-/// A program ended by a signal: 2 x 0.445 ms.
-const ENDED_BY_SIGNAL: Duration = Duration::from_micros(890);
 
 struct BinFixture {
     exe: String,
@@ -137,10 +138,7 @@ fn box_user_boxes_hold_the_contract() {
         .expect("exec in the probe box");
     let mut seen = String::new();
     std::io::Read::read_to_string(&mut out, &mut seen).expect("read");
-    assert_eq!(
-        p.wait_for(EXITS_AT_ONCE).expect("wait"),
-        Some(Exit::Code(0))
-    );
+    assert_eq!(p.wait_for(HANG_GUARD).expect("wait"), Some(Exit::Code(0)));
     let want = hex_core::limits::default_nofile(None);
     assert_eq!(
         seen.trim(),
@@ -176,10 +174,7 @@ fn a_box_past_its_bound_is_ended_as_memory() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Hog(2 * GIB)), Stdio::null())
         .expect("exec hog");
-    let exit = p
-        .wait_for(ENDED_AT_BOUND)
-        .expect("wait")
-        .expect("the hog ends");
+    let exit = p.wait_for(HANG_GUARD).expect("wait").expect("the hog ends");
     let usage = rt.usage(&id).expect("usage");
     rt.delete(&id).expect("delete");
     assert!(matches!(exit, Exit::Signal(_)), "the hog exited {exit:?}");
@@ -213,7 +208,7 @@ fn a_box_under_its_bound_runs_and_reports_its_exit() {
         .exec(&id, fx.act(&Act::Fail(7)), Stdio::null())
         .expect("exec");
     let exit = p
-        .wait_for(EXITS_AT_ONCE)
+        .wait_for(HANG_GUARD)
         .expect("wait")
         .expect("the program ends");
     assert_eq!(exit, Exit::Code(7));
@@ -246,7 +241,7 @@ fn delete_ends_a_running_box() {
     );
     rt.delete(&id).expect("delete");
     let exit = p
-        .wait_for(ENDED_BY_SIGNAL)
+        .wait_for(HANG_GUARD)
         .expect("wait")
         .expect("the program ends");
     assert!(
@@ -275,7 +270,7 @@ fn the_end_reason_is_memory() {
     let mut p = rt
         .exec(&id, fx.act(&Act::Hog(2 * GIB)), Stdio::null())
         .expect("exec hog");
-    let _ = p.wait_for(ENDED_AT_BOUND).expect("wait");
+    let _ = p.wait_for(HANG_GUARD).expect("wait");
     // The box map still holds it until delete; its status names why it ended.
     let b = rt.inspect(&id).expect("inspect");
     assert_eq!(b.state, hex_api::BoxState::Empty);
@@ -284,7 +279,7 @@ fn the_end_reason_is_memory() {
 }
 
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
-    let deadline = Instant::now() + EXITS_AT_ONCE;
+    let deadline = Instant::now() + HANG_GUARD;
     while Instant::now() < deadline {
         if cond() {
             return;
@@ -316,7 +311,7 @@ fn a_box_takes_a_named_signal() {
     );
     rt.signal(&id, Signal::TERM).expect("signal TERM");
     let exit = p
-        .wait_for(ENDED_BY_SIGNAL)
+        .wait_for(HANG_GUARD)
         .expect("wait")
         .expect("the program ends");
     rt.delete(&id).expect("delete");
@@ -343,10 +338,10 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
         class: ClassSpec::Process,
     })
     .expect("create");
-    // Late is past the measured bound kill's own wait; the budget is twice that, so a wait that runs out
-    // its budget reads as late, never as on time.
-    let late = ENDED_AT_BOUND;
-    let budget = late * 2;
+    // Late is past the measured bound kill's own wait; the budget is the hang guard, so a wait that runs
+    // out its budget reads as late, never as on time.
+    let late_after = ENDED_AT_BOUND;
+    let budget = HANG_GUARD;
     let mut late = Vec::new();
     for i in 0..60 {
         let mut p = rt
@@ -354,7 +349,7 @@ fn a_programs_end_is_seen_when_it_ends_not_at_the_waits_budget() {
             .expect("exec hog");
         let t = Instant::now();
         let exit = p.wait_for(budget).expect("wait");
-        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late {
+        if !matches!(exit, Some(Exit::Signal(_))) || t.elapsed() >= late_after {
             late.push((i, exit, t.elapsed()));
         }
     }
