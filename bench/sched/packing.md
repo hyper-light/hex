@@ -1,7 +1,8 @@
 # Stranded capacity at 90% load on the recorded microVM workload (AC-T7.4.3)
 
-**Bar:** stranded capacity at 90% load falls by at least 30% against best fit alone, measured by hex-sim on
-a recorded workload (`AC-T7.4.3`; G2 step 4). The workload of record is a day of Huawei Cloud's serverless
+**Bar:** "stranded capacity at 90% load, against best fit alone falls by at least 30% compared with best fit
+alone, measured by hex-sim with a recorded workload of OCI containers, Firecracker microVMs and Shards
+microVMs" (`AC-T7.4.3`, T7's plan, version 4; G2 step 4). The workload of record is a day of Huawei Cloud's serverless
 sandbox launches, each one of Hex's three kinds (an OCI container, a Firecracker microVM or a Shards
 microVM), on two node models (`huawei_workload.md`): EC2 m5d.metal hosts, each running every kind (the main
 one), and Hex's own fleet's host types beside it, each running the kinds its OS runs. **Result: MET on every

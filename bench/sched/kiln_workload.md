@@ -2,9 +2,11 @@
 
 `kiln-ci-20261022-20261105.trace` is fourteen days of kiln's own CI, as hex-sim replays it: every leg
 kiln ran for runs created from 2026-10-22T00:00:00Z up to 2026-11-05T00:00:00Z, on the runners that
-ran them. `AC-T7.4.3`'s text measures packing "by hex-sim with a recorded kiln workload", and this was
-that workload until Ada's correction of 2026-11-06: Hex's scheduler places microVMs, not kiln's CI.
-`AC-T7.4.3`'s workload of record is now `huawei_workload.md`'s. This one is kept as a side measurement:
+ran them. `AC-T7.4.3` measured packing "by hex-sim with a recorded kiln workload" until T7's plan, version
+4, which reads "measured by hex-sim with a recorded workload of OCI containers, Firecracker microVMs and
+Shards microVMs" after Ada's correction of 2026-11-06: "You are NOT Kiln's load balancer for jobs, CI, and
+general work. Your scheduler is for *microvms*." `AC-T7.4.3`'s workload of record is now
+`huawei_workload.md`'s. This one is kept as a side measurement:
 `a_recorded_kiln_workload_replays_the_same_twice` replayed it until `a50f4c0`, and `packing.md` says
 what it showed.
 

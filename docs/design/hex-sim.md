@@ -193,7 +193,8 @@ host), beside what Hex placed. A node admits a workload only when:
 - it runs the workload's kind;
 - the workload needs no GPU, or the node has GPUs and the workload's kind can be given one: only an OCI
   container can (`Class::takes_gpus`), so a Firecracker or Shards microVM that asks for one is admitted
-  nowhere and refused at admission;
+  nowhere and refused at admission. The lead approved this on 2026-11-06, until Shards says otherwise:
+  mainline Firecracker passes no device through, and Shards' API names none;
 - it has the room;
 - it isn't a benchmark beside a running build, or a build beside a running benchmark, whatever their
   kinds;
@@ -227,7 +228,9 @@ could be placed; `Class::takes_gpus` changes with it.
 ### H10. The recorded workload is a day of serverless sandbox launches, each one of Hex's three kinds
 
 **The choice.** Hex's scheduler places microVMs (Ada, 2026-11-06: "Your scheduler is for *microvms*."), of
-three kinds: OCI containers, Firecracker microVMs and Shards microVMs. `AC-T7.4.3`'s recorded workload is a
+three kinds: OCI containers, Firecracker microVMs and Shards microVMs ("we work with OCI containers,
+Firecracker, and Shards Microvms", the same day). T7's plan, version 4, measures `AC-T7.4.3` "by hex-sim
+with a recorded workload of OCI containers, Firecracker microVMs and Shards microVMs". That workload is a
 day of sandbox launches from a production cloud: Huawei Cloud's public serverless traces 2025, Region 5, day
 30 (`bench/sched/huawei-r5-day30.trace`, and `huawei-r5-day30.keepalive.trace` with Huawei's one-minute
 keep-alive added), converted by `bench/sched/huawei_trace.py` from raw files it checks by sha256.
@@ -303,6 +306,20 @@ to its overhead).
   every seed, so lifetimes enter as far as the nodes allow.
 - Best fit alone is measured two ways: by free CPU first (`Scorer::BestFit`) and across resources
   (`Scorer::MostAllocated`, Kubernetes' bin packing).
+
+The lead approved four of these on 2026-11-06, each for its reason:
+1. **The fewest-kinds tie** keeps eligibility from stranding: a node only some kinds can use is spent on
+   them first, leaving the nodes every kind can use for the kinds that need them. With most allocated as
+   the tie, the fleet's Shards microVMs spread over Linux and Windows, and 11,195 launches of the mix with
+   no completions found no node. Every early refusal the bench lists for it is a Firecracker microVM,
+   which only Linux runs.
+2. **GPUs only for OCI containers**, until Shards says otherwise (H9).
+3. **The completions ladder.** At one fixed speed, 2,000x, the one-minute keep-alive outlived the whole
+   fill, so lifetimes never entered. The slowest speed at which every arm reaches 90% on every seed lets
+   them enter as far as the nodes allow.
+4. **The wrap-around.** Seeds that started late in the day ran out of arrivals before 90%; that was the
+   earlier model's shortfall at 500x. Each seed now draws the whole day, its wrapped arrivals a day's
+   span later.
 
 **Sources.** Borg's stranding, resources "that cannot be used because another resource on the machine is
 fully allocated", and its hybrid of best fit and worst fit, which packs "about 3-5% better" than best fit

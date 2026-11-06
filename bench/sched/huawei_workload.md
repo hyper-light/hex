@@ -3,8 +3,9 @@
 Hex's scheduler places microVMs (Ada, 2026-11-06: "You are NOT Kiln's load balancer for jobs, CI, and
 general work. Your scheduler is for *microvms*."), of three kinds: OCI containers, Firecracker microVMs
 and Shards microVMs ("we work with OCI containers, Firecracker, and Shards Microvms", the same day). Its
-recorded workload is a day of serverless sandbox launches from a production cloud, each made a request of
-one of those kinds, on two node models:
+recorded workload, the one `AC-T7.4.3` measures packing on ("a recorded workload of OCI containers,
+Firecracker microVMs and Shards microVMs", T7's plan, version 4), is a day of serverless sandbox launches
+from a production cloud, each made a request of one of those kinds, on two node models:
 - `huawei-r5-day30.trace`, the main one: 10 EC2 m5d.metal hosts, each running all three kinds;
 - `huawei-r5-day30.fleet.trace`, beside it: Hex's own fleet's host types, five of each, each running the
   kinds its OS runs, so that where each kind may land matters.

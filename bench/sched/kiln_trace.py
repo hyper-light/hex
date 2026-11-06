@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Turn kiln_export.py's export of kiln CI legs into hex-sim's trace text
-(crates/hex-sim/src/replay.rs), for G2 step 3's recorded kiln workload (AC-T7.4.3).
+(crates/hex-sim/src/replay.rs), for the kiln-CI side measurement beside AC-T7.4.3's workload of record
+(bench/sched/kiln_workload.md).
 
 Every rule below is counted in the trace's header, so nothing is changed or left out unsaid.
 
