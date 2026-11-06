@@ -21,7 +21,7 @@ mod common;
 
 use common::{DAY, GIB, asked, burst_rows, describe, holds, quarter_cluster, recorded, run};
 use hex_sim::fair::Policy;
-use hex_sim::model::{NodeId, NodeSpec};
+use hex_sim::model::{Classes, NodeId, NodeSpec};
 
 /// Side measurement (kiln CI, not of record): AC-T7.5.2 over a recorded CI day, measured (`bench/sched/kiln_workload.md`): do
 /// 2026-10-25 of kiln's CI (kiln, slates, hyperscale and hyper-raft as four equal-weight owners;
@@ -47,6 +47,7 @@ fn four_recorded_repositories_on_the_largest_quarter_cluster() {
         id: NodeId(0),
         capacity: node,
         background_milli: 0,
+        classes: Classes::ALL,
     }];
     eprintln!(
         "kiln-CI side: AC-T7.5.2 2026-10-25: {} legs, one node of {} millicores and {:.2} GiB",

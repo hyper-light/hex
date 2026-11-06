@@ -454,6 +454,7 @@ mod tests {
                 gpus: 0,
             },
             background_milli: 0,
+            classes: crate::model::Classes::ALL,
         }
     }
 
@@ -470,7 +471,7 @@ mod tests {
                 gpus: 0,
             },
             kind: crate::model::Kind::Plain,
-            class: None,
+            class: crate::model::Class::Oci,
             arrives: 0,
             runs_for: Some(10),
             tenancy: crate::model::Tenancy {
@@ -483,6 +484,7 @@ mod tests {
             workloads: vec![work(0, 0), work(1, 1)],
             owners: vec![crate::model::Owner::default(); 2],
             groups: Vec::new(),
+            overheads: crate::model::Overheads::default(),
         };
         let ran = [
             Some(Ran {

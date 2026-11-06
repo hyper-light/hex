@@ -330,6 +330,11 @@ struct Plane {
     idle_workers: u32,
     /// In each queue, every pending workload at or before this sequence holds on no node now.
     cursors: BTreeMap<Queue, u64>,
+    /// In each queue, the first gang passed over since capacity last came back, by its first
+    /// member's sequence: the cursor stays before it ([`Plane::pass`]). A gang's members are placed
+    /// one by one on a sampled best fit, which isn't monotone in the free capacity, so a placement
+    /// elsewhere can make a gang that held nowhere hold; a single workload can't.
+    gang_floors: BTreeMap<Queue, u64>,
     /// Changes since which a commit already sent must be checked again: capacity given back (which
     /// voids `cursors`' claims), or a workload submitted ahead of the one in flight.
     resets: u64,
@@ -372,6 +377,7 @@ impl Plane {
             proposals: BTreeMap::new(),
             idle_workers: workers,
             cursors: BTreeMap::new(),
+            gang_floors: BTreeMap::new(),
             resets: 0,
             in_flight: None,
             changes: VecDeque::new(),
@@ -438,6 +444,30 @@ impl Plane {
     fn pending_id(&self, seq: u64) -> Option<WorkloadId> {
         let queue = self.queue_of.get(&seq)?;
         self.pending.get(queue)?.get(&seq).copied()
+    }
+
+    /// Moves `queue`'s cursor to `seq`, or to just before the first gang passed over in it.
+    fn pass(&mut self, queue: Queue, seq: u64) {
+        match self.gang_floors.get(&queue) {
+            Some(&floor) if floor <= seq => match floor.checked_sub(1) {
+                Some(before) => {
+                    self.cursors.insert(queue, before);
+                }
+                None => {
+                    self.cursors.remove(&queue);
+                }
+            },
+            _ => {
+                self.cursors.insert(queue, seq);
+            }
+        }
+    }
+
+    /// The gang whose first member is `seq` held nowhere now: keep `queue`'s cursor before it.
+    fn pass_gang(&mut self, queue: Queue, seq: u64) {
+        let floor = self.gang_floors.entry(queue).or_insert(seq);
+        *floor = (*floor).min(seq);
+        self.pass(queue, seq);
     }
 
     fn mark_undecided(&mut self, seq: u64) {
@@ -1137,6 +1167,7 @@ impl Sim<'_> {
             (&mut r.gpu, sampled.refused.gpu),
             (&mut r.shares, sampled.refused.shares),
             (&mut r.hot, sampled.refused.hot),
+            (&mut r.class, sampled.refused.class),
         ] {
             *total = total
                 .checked_add(now)
@@ -1231,7 +1262,7 @@ impl Sim<'_> {
                     GangState::First => {}
                 }
                 if self.decide_gang(gang)?.is_none() {
-                    self.plane.cursors.insert(q, seq);
+                    self.plane.pass_gang(q, seq);
                     continue;
                 }
                 self.plane.committing = true;
@@ -1248,7 +1279,7 @@ impl Sim<'_> {
                 if self.send_preemption(q, seq, id)? {
                     return Ok(());
                 }
-                self.plane.cursors.insert(q, seq);
+                self.plane.pass(q, seq);
                 self.report.class_skips = self
                     .report
                     .class_skips
@@ -1269,7 +1300,7 @@ impl Sim<'_> {
                 if self.send_preemption(q, seq, id)? {
                     return Ok(());
                 }
-                self.plane.cursors.insert(q, seq);
+                self.plane.pass(q, seq);
                 continue;
             }
             self.plane.committing = true;
@@ -1313,7 +1344,7 @@ impl Sim<'_> {
         let need = self.demand(id)?;
         let decision = self.late_bind(&need, decision)?;
         let Some(key) = decision.node() else {
-            self.plane.cursors.insert(queue, seq);
+            self.plane.pass(queue, seq);
             self.mark_infeasible(need)?;
             return self.sequence();
         };
@@ -1346,7 +1377,7 @@ impl Sim<'_> {
         self.plane.dequeue(seq);
         self.plane.versions.insert(id, version);
         if !reopened {
-            self.plane.cursors.insert(queue, seq);
+            self.plane.pass(queue, seq);
         }
         self.report.placements = self
             .report
@@ -1387,7 +1418,7 @@ impl Sim<'_> {
             .gang
             .ok_or(SimError::Config("a gang commit for a workload in no gang"))?;
         let Some(members) = self.decide_gang(gang)? else {
-            self.plane.cursors.insert(queue, seq);
+            self.plane.pass_gang(queue, seq);
             return self.sequence();
         };
         let write: Vec<(WorkloadId, NodeId, u64)> =
@@ -1423,8 +1454,11 @@ impl Sim<'_> {
             .gangs
             .checked_add(1)
             .ok_or(SimError::StepBudget(self.config.max_steps))?;
+        if self.plane.gang_floors.get(&queue) == Some(&seq) {
+            self.plane.gang_floors.remove(&queue);
+        }
         if !reopened {
-            self.plane.cursors.insert(queue, seq);
+            self.plane.pass(queue, seq);
         }
         self.sequence()
     }
@@ -1568,6 +1602,7 @@ impl Sim<'_> {
         );
         // Victims are pending again and may hold elsewhere: every claim of holding nowhere goes.
         self.plane.cursors.clear();
+        self.plane.gang_floors.clear();
         self.plane.infeasible.clear();
         self.plane.resets = self
             .plane
@@ -1805,6 +1840,7 @@ impl Sim<'_> {
                 self.plane.versions.remove(&id);
                 self.plane.placed.remove(&id);
                 self.plane.cursors.clear();
+                self.plane.gang_floors.clear();
                 self.plane.infeasible.clear();
                 self.plane.resets = self
                     .plane

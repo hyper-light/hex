@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Export kiln's CI legs over a window, read-only through kiln's HTTP API, for G2 step 3's
-recorded kiln workload (AC-T7.4.3). kiln_trace.py turns the export into hex-sim's trace.
+"""Export kiln's CI legs over a window, read-only through kiln's HTTP API, for the kiln-CI side
+measurement beside AC-T7.4.3's workload of record (bench/sched/kiln_workload.md). kiln_trace.py turns
+the export into hex-sim's trace.
 
 It reads what the running kiln serves today: `GET /api/runs` (newest first, paged on created_at,
 at most 500 a page), `GET /api/runs/:id` (a run's jobs: queued, started and finished times, the

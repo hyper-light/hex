@@ -17,8 +17,8 @@
 
 use hex_sim::generate::{self, Shape};
 use hex_sim::model::{
-    Cluster, Group, GroupId, Kind, NodeId, NodeSpec, Owner, Resources, Tenancy, WorkloadId,
-    WorkloadSpec,
+    Class, Classes, Cluster, Group, GroupId, Kind, NodeId, NodeSpec, Owner, Resources, Tenancy,
+    WorkloadId, WorkloadSpec,
 };
 use hex_sim::rng::Rng;
 use hex_sim::sim::{self, Config, Crash, Nemesis, Report, Run, When};
@@ -152,6 +152,7 @@ fn node(cpu: u64) -> NodeSpec {
             gpus: 0,
         },
         background_milli: 0,
+        classes: Classes::ALL,
     }
 }
 
@@ -164,7 +165,7 @@ fn work(id: u64, cpu: u64, band: u8, group: Option<u32>) -> WorkloadSpec {
             gpus: 0,
         },
         kind: Kind::Plain,
-        class: None,
+        class: Class::Oci,
         arrives: 0,
         runs_for: None,
         tenancy: Tenancy {

@@ -284,9 +284,11 @@ head-of-line blocking behind a large job". It works per task, in two parts: *fea
 plus "available" resources, counting resources held by lower-priority tasks that can be evicted) and
 *scoring*, driven by the number and priority of preempted tasks, package locality, spread across power and
 failure domains, and packing quality. Borg first used E-PVM scoring, which spread load and fragmented ("worst
-fit"), and pure best fit, which punished bursty loads; the hybrid it uses now "provides about 3-5% better
-packing efficiency ... than best fit for our workloads" ([1] §3.2). If the chosen machine lacks room Borg
-preempts lower-priority tasks "from lowest to highest priority" and requeues them rather than migrating them.
+fit"), and pure best fit, which punished bursty loads; the hybrid it uses now "tries to reduce the amount
+of stranded resources - ones that cannot be used because another resource on the machine is fully
+allocated" and "provides about 3-5% better packing efficiency ... than best fit for our workloads" ([1] §3.2).
+If the chosen machine lacks room Borg preempts lower-priority tasks "from lowest to highest priority" and
+requeues them rather than migrating them.
 
 **Why one scheduler keeps up** (`MEASURED-VENDOR`, [1] §3.4). Three techniques are named: *score caching*
 (scores are cached until machine or task properties change; ignoring small resource changes reduces

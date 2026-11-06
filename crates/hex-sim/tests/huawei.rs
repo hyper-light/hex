@@ -24,7 +24,7 @@ use common::{
     run_with,
 };
 use hex_sim::fair::Policy;
-use hex_sim::model::{NodeId, NodeSpec, Resources};
+use hex_sim::model::{Classes, NodeId, NodeSpec, Resources};
 
 const TRACE: &str = "huawei-r5-day30.trace";
 
@@ -84,6 +84,7 @@ fn four_workload_owners_on_the_largest_quarter_cluster() {
         id: NodeId(0),
         capacity: node,
         background_milli: 0,
+        classes: Classes::ALL,
     }];
     eprintln!(
         "AC-T7.5.2 huawei r5 day 30: owners {four:?} (by userID index), {} workloads, one node of {} millicores and {:.2} GiB",

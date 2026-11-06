@@ -622,6 +622,7 @@ mod tests {
                 gpus: 0,
             },
             background_milli: 0,
+            classes: crate::model::Classes::ALL,
         }];
         Store::new(&nodes, 4, 16).unwrap()
     }
@@ -635,10 +636,10 @@ mod tests {
                 gpus: 0,
             },
             kind: crate::model::Kind::Plain,
-            class: None,
             arrives: 0,
             runs_for: None,
             tenancy: crate::model::Tenancy::default(),
+            class: crate::model::Class::Oci,
         }
     }
 

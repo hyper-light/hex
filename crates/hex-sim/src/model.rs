@@ -49,6 +49,97 @@ pub struct NodeSpec {
     /// CPU in use by what runs there outside Hex's placements (co-tenants, the host itself), which
     /// the 90% CPU rule counts beside what Hex placed.
     pub background_milli: u64,
+    /// The classes it can run.
+    pub classes: Classes,
+}
+
+/// What runs a workload. Hex places three: OCI containers, Firecracker microVMs and Shards
+/// microVMs (Ada, 2026-11-06), each only on a node that can run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Class {
+    #[default]
+    Oci,
+    Firecracker,
+    Shards,
+}
+
+impl Class {
+    /// Whether it can be given a GPU (docs/research/scheduler/agentic-workloads.md, finding 8: GPU
+    /// access is a property of the node and the class). An OCI container can: its runtime passes the
+    /// device in, as Kubernetes' device plugins and CDI do ([21][55] there). A Firecracker microVM
+    /// can't: its mainline emulates six devices and passes none through ([25]-[28] there). Nor, yet,
+    /// can a Shards microVM: Shards' guest spec names disks, shares and vsock ports, and no device
+    /// (shards-api draft, hyper-light/shards a0cced87, `crates/api/src/lib.rs:41-62`).
+    pub fn takes_gpus(self) -> bool {
+        matches!(self, Class::Oci)
+    }
+}
+
+/// The classes a node can run, a bit each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Classes(u8);
+
+impl Classes {
+    pub const ALL: Self = Self(0b111);
+    pub const NONE: Self = Self(0);
+
+    pub fn with(self, class: Class) -> Self {
+        Self(self.0 | Self::bit(class))
+    }
+
+    pub fn has(self, class: Class) -> bool {
+        self.0 & Self::bit(class) != 0
+    }
+
+    /// Whether the two share a class.
+    pub fn meets(self, other: Classes) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// How many classes it holds.
+    pub fn count(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    fn bit(class: Class) -> u8 {
+        match class {
+            Class::Oci => 1,
+            Class::Firecracker => 2,
+            Class::Shards => 4,
+        }
+    }
+}
+
+/// What each class costs its node beside what a workload asks, in bytes of memory: its runtime's own
+/// (a container's shim, a microVM's VMM). A workload's need includes its class's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Overheads([u64; 3]);
+
+impl Overheads {
+    pub fn of(self, class: Class) -> u64 {
+        self.0.get(Self::at(class)).copied().unwrap_or(0)
+    }
+
+    pub fn set(&mut self, class: Class, bytes: u64) {
+        if let Some(slot) = self.0.get_mut(Self::at(class)) {
+            *slot = bytes;
+        }
+    }
+
+    fn at(class: Class) -> usize {
+        match class {
+            Class::Oci => 0,
+            Class::Firecracker => 1,
+            Class::Shards => 2,
+        }
+    }
+}
+
+impl Default for Classes {
+    /// A node that says nothing runs every class, so a trace written before classes reads as it did.
+    fn default() -> Self {
+        Self::ALL
+    }
 }
 
 /// What a workload is, for the filters that keep work off hosts it would harm or be harmed by
@@ -65,35 +156,13 @@ pub enum Kind {
     Session,
 }
 
-/// Which of Hex's runtimes a workload runs in: an OCI container, a Firecracker microVM or a Shards
-/// microVM (CP-T7.2's classes). The scheduler places all three alike by need and kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Class {
-    Oci,
-    Firecracker,
-    Shards,
-}
-
-impl Class {
-    /// The three, in order: a generator cycles through them by a workload's index.
-    pub const ALL: [Class; 3] = [Class::Oci, Class::Firecracker, Class::Shards];
-
-    /// The `n`th of [`Class::ALL`], cycling.
-    pub fn nth(n: u64) -> Class {
-        match n % 3 {
-            0 => Class::Oci,
-            1 => Class::Firecracker,
-            _ => Class::Shards,
-        }
-    }
-}
-
-/// A workload's equivalence class: what it needs and what it is. Workloads of one class are
-/// placed alike.
+/// A workload's equivalence class: what it needs, what it is and what runs it. Workloads of one
+/// class are placed alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Demand {
     pub need: Resources,
     pub kind: Kind,
+    pub class: Class,
 }
 
 /// Who a workload's capacity is charged to: the tenant or app an OCI container, a Firecracker microVM
@@ -124,14 +193,12 @@ pub struct WorkloadSpec {
     pub id: WorkloadId,
     pub need: Resources,
     pub kind: Kind,
-    /// Which of Hex's three workloads it is, where its source records it: a recorded trace that
-    /// doesn't has `None`, and places the same.
-    pub class: Option<Class>,
     /// When its client first submits it.
     pub arrives: Time,
     /// How long it runs once started; `None` runs until the run ends.
     pub runs_for: Option<Time>,
     pub tenancy: Tenancy,
+    pub class: Class,
 }
 
 impl WorkloadSpec {
@@ -139,6 +206,7 @@ impl WorkloadSpec {
         Demand {
             need: self.need,
             kind: self.kind,
+            class: self.class,
         }
     }
 }
@@ -171,16 +239,19 @@ pub struct Cluster {
     pub workloads: Vec<WorkloadSpec>,
     pub owners: Vec<Owner>,
     pub groups: Vec<Group>,
+    /// Already counted in each workload's need; kept to change a workload's class.
+    pub overheads: Overheads,
 }
 
 impl Cluster {
-    /// One owner of weight 1 and no groups: every workload's default tenancy.
+    /// One owner of weight 1, no groups and no class overheads: every workload's default tenancy.
     pub fn single_owner(nodes: Vec<NodeSpec>, workloads: Vec<WorkloadSpec>) -> Self {
         Self {
             nodes,
             workloads,
             owners: vec![Owner::default()],
             groups: Vec::new(),
+            overheads: Overheads::default(),
         }
     }
 }

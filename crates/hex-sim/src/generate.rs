@@ -1,10 +1,14 @@
-//! Generated clusters and workloads, from one seed. Each workload's need is drawn inside one node's
-//! capacity, so every workload fits somewhere and GPU work is drawn only against a GPU node.
+//! Generated clusters and workloads, from one seed. Each node runs the classes its platform can, as
+//! Hex's fleet's do: Linux all three, Windows OCI containers and Shards microVMs, macOS Shards
+//! microVMs alone (bench/sched/huawei_workload.md). Each workload's class and need are drawn against
+//! one node, a class it runs and a need inside its capacity, so every workload fits somewhere; GPU
+//! work is drawn only against a GPU node, and only as an OCI container, the one class a GPU can be
+//! given to ([`Class::takes_gpus`]).
 
 use crate::error::SimError;
 use crate::model::{
-    Class, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Owner, OwnerId, Resources,
-    Tenancy, Time, WorkloadId, WorkloadSpec,
+    Class, Classes, Cluster, GangId, Group, GroupId, Kind, NodeId, NodeSpec, Overheads, Owner,
+    OwnerId, Resources, Tenancy, Time, WorkloadId, WorkloadSpec,
 };
 use crate::rng::Rng;
 
@@ -44,6 +48,13 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             0
         };
         let cpu_milli = cores.checked_mul(1000).ok_or(SimError::Config("cores"))?;
+        // Six nodes in ten Linux, two Windows, two macOS: each class on many nodes, and some nodes
+        // that run only some.
+        let classes = match rng.range(0, 9) {
+            0..6 => Classes::ALL,
+            6..8 => Classes::NONE.with(Class::Oci).with(Class::Shards),
+            _ => Classes::NONE.with(Class::Shards),
+        };
         nodes.push(NodeSpec {
             id: NodeId(id),
             capacity: Resources {
@@ -54,6 +65,7 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             // Uniform up to the node's CPU: about one node in ten starts above 90% from its
             // co-tenants alone, and placements push others past it.
             background_milli: rng.range(0, cpu_milli),
+            classes,
         });
     }
     let mut workloads = Vec::new();
@@ -78,7 +90,8 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
                 .max(1);
             rng.range(1, most.min(of.max(1)))
         };
-        let wants_gpu = host.capacity.gpus > 0 && rng.chance(500);
+        let class = one_of(&mut rng, host.classes);
+        let wants_gpu = host.capacity.gpus > 0 && class.takes_gpus() && rng.chance(500);
         let need = Resources {
             cpu_milli: share(&mut rng, host.capacity.cpu_milli),
             mem_bytes: share(&mut rng, host.capacity.mem_bytes),
@@ -113,10 +126,10 @@ pub fn cluster(seed: u64, shape: &Shape) -> Result<Cluster, SimError> {
             id: WorkloadId(id),
             need,
             kind,
-            class: None,
             arrives,
             runs_for,
             tenancy: Tenancy::default(),
+            class,
         });
     }
     Ok(Cluster::single_owner(nodes, workloads))
@@ -150,7 +163,7 @@ pub fn tenants(
 
 /// `cluster` with a burst (`T-T7.5.1`): `count` workloads of `owner`'s, all arriving at `at`, each of
 /// 1 to `max_cores` cores and 2 GiB a core, running 1 minute to `2 * mean_run` less a minute, and
-/// OCI containers, Firecracker microVMs and Shards microVMs in turn ([`Class::nth`]). The
+/// OCI containers, Firecracker microVMs and Shards microVMs in turn ([`by_index`]). The
 /// workloads are put back in arrival order (the burst after what arrived at `at` before it) and their
 /// ids made dense again.
 pub fn burst(
@@ -186,7 +199,7 @@ pub fn burst(
                 gpus: 0,
             },
             kind: Kind::Plain,
-            class: Some(Class::nth(i)),
+            class: by_index(i),
             arrives: at,
             runs_for: Some(rng.range(minute, longest)),
             tenancy: Tenancy {
@@ -336,7 +349,7 @@ pub struct Day {
 }
 
 /// A generated day of workloads ([`Day`]): every tenant an owner, and the workloads OCI containers,
-/// Firecracker microVMs and Shards microVMs in turn by id ([`Class::nth`]), a third of each.
+/// Firecracker microVMs and Shards microVMs in turn by id ([`by_index`]), a third of each.
 pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
     if day.nodes == 0 || day.tenants.is_empty() {
         return Err(SimError::Config("a day has nodes and tenants"));
@@ -346,6 +359,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             id: NodeId(id),
             capacity: day.node,
             background_milli: 0,
+            classes: Classes::ALL,
         })
         .collect();
     let total_cpu = day
@@ -424,7 +438,7 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             id: WorkloadId(id),
             need,
             kind: Kind::Plain,
-            class: Some(Class::nth(id)),
+            class: by_index(id),
             arrives,
             runs_for: Some(runs_for),
             tenancy: Tenancy {
@@ -442,7 +456,18 @@ pub fn day(seed: u64, day: &Day) -> Result<Cluster, SimError> {
             .map(|r| Owner { weight: r.weight })
             .collect(),
         groups: Vec::new(),
+        overheads: Overheads::default(),
     })
+}
+
+/// One of the classes `classes` holds, each alike (OCI when it holds none).
+fn one_of(rng: &mut Rng, classes: Classes) -> Class {
+    let pick = rng.range(0, u64::from(classes.count().saturating_sub(1)));
+    [Class::Oci, Class::Firecracker, Class::Shards]
+        .into_iter()
+        .filter(|&c| classes.has(c))
+        .nth(usize::try_from(pick).unwrap_or(0))
+        .unwrap_or_default()
 }
 
 /// Above 90% CPU from its background alone: `index::HOT_PER_MILLE`, as busy * 1000 > capacity * 900.
@@ -451,6 +476,16 @@ fn hot(node: &NodeSpec) -> bool {
     let rhs =
         u128::from(node.capacity.cpu_milli).checked_mul(u128::from(crate::index::HOT_PER_MILLE));
     matches!((lhs, rhs), (Some(l), Some(r)) if l > r)
+}
+
+/// The `n`th of OCI container, Firecracker microVM and Shards microVM, cycling: a generated day's and a
+/// burst's classes, by index, so they take nothing from the generator's random stream.
+fn by_index(n: u64) -> Class {
+    match n % 3 {
+        0 => Class::Oci,
+        1 => Class::Firecracker,
+        _ => Class::Shards,
+    }
 }
 
 #[cfg(test)]
@@ -468,7 +503,8 @@ mod tests {
         }
     }
 
-    /// T-T7.4.1's generator: one seed, one cluster; every workload fits an empty node, arrivals in order.
+    /// T-T7.4.1's generator: one seed, one cluster; every workload fits an empty node, arrivals in
+    /// order; each class drawn, some nodes running only some, and GPU work only as OCI containers.
     #[test]
     fn a_seed_names_one_cluster_of_workloads_that_fit() {
         let a = cluster(3, &shape()).unwrap();
@@ -483,5 +519,14 @@ mod tests {
         }
         assert!(a.workloads.windows(2).all(|p| p[0].arrives <= p[1].arrives));
         assert!(a.workloads.iter().any(|w| w.need.gpus > 0));
+        for class in [Class::Oci, Class::Firecracker, Class::Shards] {
+            assert!(a.workloads.iter().any(|w| w.class == class), "{class:?}");
+        }
+        assert!(a.nodes.iter().any(|n| n.classes != Classes::ALL));
+        assert!(
+            a.workloads
+                .iter()
+                .all(|w| w.need.gpus == 0 || w.class == Class::Oci)
+        );
     }
 }

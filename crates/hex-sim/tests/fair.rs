@@ -70,12 +70,8 @@ fn four_tenants() -> Day {
 fn four_equal_weight_owners_each_hold_a_quarter_under_contention() {
     let day = generate::day(4, &four_tenants()).unwrap();
     // The day carries all three of Hex's workloads, a third each.
-    for class in Class::ALL {
-        let n = day
-            .workloads
-            .iter()
-            .filter(|w| w.class == Some(class))
-            .count();
+    for class in [Class::Oci, Class::Firecracker, Class::Shards] {
+        let n = day.workloads.iter().filter(|w| w.class == class).count();
         assert!(n * 3 + 3 > day.workloads.len(), "{class:?}: {n}");
     }
     let base = Config {
@@ -195,9 +191,14 @@ fn as_trace(cluster: &Cluster) -> String {
             Kind::Session => "session",
         };
         let t = w.tenancy;
+        let class = match w.class {
+            Class::Oci => "oci",
+            Class::Firecracker => "firecracker",
+            Class::Shards => "shards",
+        };
         let opt = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
         out += &format!(
-            "leg,{},{},{},{},{},{kind},{},{},{},{}\n",
+            "leg,{},{},{},{},{},{kind},{},{},{},{},{class}\n",
             w.arrives,
             w.runs_for.unwrap(),
             w.need.cpu_milli,
@@ -245,12 +246,7 @@ fn four_equal_weight_owners_over_a_recorded_day() {
     }
     let day = generate::day(4, &four_tenants()).unwrap();
     let read = replay::parse(&as_trace(&day), &replay::Limits::default()).unwrap();
-    // The format records no class: read back, each workload's is unrecorded.
-    let mut unclassed = day.clone();
-    for w in &mut unclassed.workloads {
-        w.class = None;
-    }
-    assert_eq!(read, unclassed);
+    assert_eq!(read, day);
     let run = sim::run(&read, &config).unwrap();
     let shares = fair::measure(&read, &run.ran, &run.refused, run.report.end).unwrap();
     assert!(shares.worst_from_equal_ppm() <= 5_000, "{shares:?}");
