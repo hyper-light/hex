@@ -132,8 +132,10 @@ fn serve() -> Result<(), OciError> {
     }
 }
 
-/// The data of the pruned root's tmpfs.
-pub(crate) const ROOT_TMPFS: &std::ffi::CStr = c"size=64k,mode=755";
+/// The data of the pruned root's tmpfs: one block, a page on any page size (`nr_blocks`,
+/// Documentation/filesystems/tmpfs.rst:82), the least bound tmpfs takes (0 is none, :94). It holds nothing and is
+/// remounted read-only; a container's root is attached on it, which takes no block.
+pub(crate) const ROOT_TMPFS: &std::ffi::CStr = c"nr_blocks=1,mode=755";
 
 /// Prunes the create seed's mount namespace once, at start (goal 5 plan step 2): unshare a mount
 /// namespace, make `/` private, mount a small tmpfs over `mountpoint`, pivot into it, detach the old

@@ -1311,10 +1311,13 @@ fn do_mount_pruned<'a>(
     Ok(())
 }
 
-/// The data of the empty read-only tmpfs a masked directory gets.
-pub(crate) const EMPTY_TMPFS: &str = "size=0k";
+/// The data of the empty read-only tmpfs a masked directory gets: one block, a page on any page size
+/// (`nr_blocks`, Documentation/filesystems/tmpfs.rst:82), the least bound tmpfs takes, for 0 is none at all
+/// (:94). Read-only and empty, it never holds a block; a bound costs the create nothing, the superblock's
+/// block counter being made whatever its bound (mm/shmem.c, `shmem_fill_super`).
+pub(crate) const EMPTY_TMPFS: &str = "nr_blocks=1";
 /// [`EMPTY_TMPFS`] for `mount(2)`.
-const EMPTY_TMPFS_C: &std::ffi::CStr = c"size=0k";
+const EMPTY_TMPFS_C: &std::ffi::CStr = c"nr_blocks=1";
 
 /// A filesystem made with the new mount API (`fsopen`/`fsconfig`/`fsmount`), its source, data options and
 /// flags the spec's: a detached mount descriptor the caller attaches with `move_mount`. The pruned path makes proc, sysfs, tmpfs, mqueue,
