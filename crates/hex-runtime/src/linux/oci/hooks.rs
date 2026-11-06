@@ -427,25 +427,22 @@ mod tests {
         assert_eq!(peek_start(r.as_fd()).unwrap(), None);
     }
 
-    /// CLAUDE.md §2. Do: run a hook that never reads its stdin, with a state bigger than a pipe holds,
-    /// and a one-second timeout. Expect: refused for outliving its timeout, not a write blocked for good.
+    /// CLAUDE.md §2. Do: run a hook that never reads its stdin and never ends by itself, with a state one byte more
+    /// than a new pipe holds (`F_GETPIPE_SZ`, pipe(7): the hook's stdin is a new pipe), and a one-second timeout.
+    /// Expect: refused for outliving its timeout, once that has passed: a write blocked for good would never return.
     #[test]
     fn a_hook_that_never_reads_its_stdin_ends_at_its_timeout() {
+        let (probe, _) = rustix::pipe::pipe().unwrap();
+        let holds = rustix::pipe::fcntl_getpipe_size(&probe).unwrap();
         let mut state = State::new("c1", "/bundle");
-        state
-            .annotations
-            .insert("big".to_owned(), "x".repeat(1 << 20));
+        state.annotations.insert("big".to_owned(), "x".repeat(holds + 1));
         let started = Instant::now();
-        let got = run("a hook", &[sh("exec sleep 30", Some(1))], &state);
+        let got = run("a hook", &[sh("exec sleep infinity", Some(1))], &state);
         assert!(
             matches!(&got, Err(OciError::Os { why, .. }) if why.contains("timeout")),
             "{got:?}"
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(20),
-            "{:?}",
-            started.elapsed()
-        );
+        assert!(started.elapsed() >= Duration::from_secs(1), "{:?}", started.elapsed());
     }
 
     /// AC-T7.1.4; Ada's 2026-11-06 rule (no picked constants): the runner waits on the facts it needs, the hook
@@ -531,6 +528,7 @@ mod tests {
                 "{hooks}: {got:?}"
             );
         }
+        // 5 is a fixture: any timeout above zero is taken, and the budget is it.
         let ok = spec(r#"{"startContainer":[{"path":"/bin/sh","timeout":5}]}"#).unwrap();
         assert_eq!(
             budget("startContainer", &ok.hooks.start_container).unwrap(),
