@@ -496,22 +496,93 @@ fn exercise(own: &Path, cache: &Path, exe: &str) {
     prepared_devs_preserve_order_and_are_never_shared(&lab, own);
 }
 
-/// AC-T7.1.4, goal 5 step 3: compare ordinary and prepopulated /dev on hostile mount layouts, on the pruned
-/// path and on the classic one a createRuntime hook takes through the shim (goal 5 extended step 3).
-/// Expect byte-identical refusals, matching devices/links/options on success, a pooled take for each case on
-/// each path, two actual pooled takes for live containers, and no cross-container mutation or
-/// host-namespace attachment.
+/// What a box's `/dev` holds by name, as its spec and the runtime spec make it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DevEntry {
+    /// A character device of this major and minor, mode 0666, owned by root (runtime spec, "Default Devices").
+    Char(u32, u32),
+    /// A link to this target (runtime spec, "Dev symbolic links").
+    Link(&'static str),
+    /// A directory owned by root: a later mount's target, made where the name was missing, which the default
+    /// device or link then leaves as it is.
+    Dir,
+}
+
+/// What a box made from one of the oracle's cases must show, derived from its spec alone: the mounts in the spec's
+/// order, the destination of each made as a directory where it is missing, and the default devices and links made
+/// after them in whatever `/dev` resolves to, a name already there left as it is (runtime spec, "Default Devices"
+/// and "Dev symbolic links"; runc's rootfs_linux.go makes them after the mounts too). `Err` holds what the
+/// refusal must name.
+struct DevExpected {
+    /// Where `/dev`'s mount lands: `/dev`, or where a rootfs whose `/dev` is a link resolves it inside the root.
+    dev_point: &'static str,
+    /// The late tmpfs's mount point, where the case adds one.
+    late_point: Option<&'static str>,
+    /// Each name in `/dev`, in the spec's order of devices then links.
+    entries: Vec<(&'static str, DevEntry)>,
+}
+
+/// The expectation for `case` with its late tmpfs at `target` (see [`DevExpected`]); `Err` with the words its
+/// refusal must hold.
+fn dev_expected(
+    case: &str,
+    target: Option<&'static str>,
+) -> Result<DevExpected, Vec<&'static str>> {
+    let shadowed = match case {
+        // A destination with `..` is refused by the mount plan before anything is mounted.
+        "parent" => return Err(vec!["/dev/shm/../null", "'..' component"]),
+        // The link /alias leads to /dev/null, missing while the mounts are made: a link to nothing in the root.
+        "alias" => return Err(vec!["/alias", "a link to nothing inside it"]),
+        // /blocked is a file, so /blocked/child can't be resolved, let alone made.
+        "file-component" => return Err(vec!["/blocked/child"]),
+        // The late tmpfs takes /dev/null (its root a directory) or a directory made at /dev/null for its child, and
+        // /dev/fd likewise, before the default device or link of that name is made.
+        "default-node" | "through-node" => Some("null"),
+        "default-link" => Some("fd"),
+        _ => None,
+    };
+    let mut entries = vec![
+        ("null", DevEntry::Char(1, 3)),
+        ("zero", DevEntry::Char(1, 5)),
+        ("full", DevEntry::Char(1, 7)),
+        ("random", DevEntry::Char(1, 8)),
+        ("urandom", DevEntry::Char(1, 9)),
+        ("tty", DevEntry::Char(5, 0)),
+        ("fd", DevEntry::Link("/proc/self/fd")),
+        ("stdin", DevEntry::Link("/proc/self/fd/0")),
+        ("stdout", DevEntry::Link("/proc/self/fd/1")),
+        ("stderr", DevEntry::Link("/proc/self/fd/2")),
+        ("ptmx", DevEntry::Link("pts/ptmx")),
+    ];
+    for (name, entry) in &mut entries {
+        if Some(*name) == shadowed {
+            *entry = DevEntry::Dir;
+        }
+    }
+    Ok(DevExpected {
+        dev_point: if case == "dev-symlink" {
+            "/devices"
+        } else {
+            "/dev"
+        },
+        late_point: target,
+        entries,
+    })
+}
+
+/// AC-T7.1.4, goal 5 step 3: prepared /dev on hostile mount layouts, on the pruned path and on the classic one a
+/// createRuntime hook takes through the shim (goal 5 extended step 3). Do: a box of each case on a root node, whose
+/// /dev pool is always on (Ada's 2026-11-06 rule removed its off switch; ordinary setup is for a rootless node and a
+/// dry pool). Expect what the spec alone derives ([`dev_expected`]): the refusals naming what they refuse; on success
+/// each default device and link, or the directory a later mount took, and the box's mounts under `/dev` in the
+/// spec's order with the spec's options; a pooled take for each case on each path, two actual pooled takes for live
+/// containers, and no cross-container mutation or host-namespace attachment.
 fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     if lab.rootless {
         return;
     }
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-    let ordinary_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
     let pooled_state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let ordinary = lab
-        .node(&own.join("devfs-ordinary"), ordinary_state.path())
-        .with_prepared_dev_mounts(false)
-        .unwrap();
     let pooled = lab.node(&own.join("devfs-pooled"), pooled_state.path());
     let before_mounts = agent_mount_points();
 
@@ -568,35 +639,73 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     let root_of = |node: &Node, id: &BoxId| {
         PathBuf::from(format!("/proc/{}/root", init_pid(&node.container_dir(id))))
     };
-    let snapshot = |node: &Node, id: &BoxId| {
+    // The box's `/dev` entries by name and its mounts at or under where `/dev` landed, or the late tmpfs's, in
+    // mountinfo's order (the order they were made), each checked against `want`.
+    let check = |node: &Node, id: &BoxId, want: &DevExpected, what: &str| {
         let root = root_of(node, id);
-        let mut out = Vec::new();
-        for name in [
-            "null", "zero", "full", "random", "urandom", "tty", "fd", "stdin", "stdout", "stderr",
-            "ptmx",
-        ] {
+        for (name, entry) in &want.entries {
             let path = root.join("dev").join(name);
-            let m = std::fs::symlink_metadata(&path).unwrap();
-            out.push(format!(
-                "{name} {:o} {} {} {} {:?}",
-                m.mode(),
-                m.uid(),
-                m.gid(),
-                m.rdev(),
-                std::fs::read_link(&path).ok()
-            ));
-        }
-        let pid = init_pid(&node.container_dir(id));
-        for m in listed_mounts(&std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).unwrap())
-        {
-            if m.point == "/dev" || m.source == "late" {
-                out.push(format!(
-                    "{} {} {} {:?} {:?}",
-                    m.point, m.fstype, m.source, m.opts, m.sb_opts
-                ));
+            let m = std::fs::symlink_metadata(&path)
+                .unwrap_or_else(|e| panic!("{what}: /dev/{name}: {e}"));
+            assert_eq!((m.uid(), m.gid()), (0, 0), "{what}: /dev/{name}'s owner");
+            match entry {
+                DevEntry::Char(major, minor) => {
+                    assert!(
+                        m.file_type().is_char_device(),
+                        "{what}: /dev/{name} is {m:?}"
+                    );
+                    assert_eq!(m.mode() & 0o7777, 0o666, "{what}: /dev/{name}'s mode");
+                    assert_eq!(
+                        m.rdev(),
+                        rustix::fs::makedev(*major, *minor),
+                        "{what}: /dev/{name} is {major}:{minor}"
+                    );
+                }
+                DevEntry::Link(target) => {
+                    assert!(m.file_type().is_symlink(), "{what}: /dev/{name} is {m:?}");
+                    assert_eq!(
+                        std::fs::read_link(&path).unwrap(),
+                        PathBuf::from(target),
+                        "{what}: /dev/{name}'s target"
+                    );
+                }
+                DevEntry::Dir => assert!(m.is_dir(), "{what}: /dev/{name} is {m:?}"),
             }
         }
-        out
+        let pid = init_pid(&node.container_dir(id));
+        let under = format!("{}/", want.dev_point);
+        let got: Vec<ListedMount> =
+            listed_mounts(&std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).unwrap())
+                .into_iter()
+                .filter(|m| {
+                    m.point == want.dev_point || m.point.starts_with(&under) || m.source == "late"
+                })
+                .collect();
+        let points: Vec<(&str, &str, &str)> = got
+            .iter()
+            .map(|m| (m.point.as_str(), m.fstype.as_str(), m.source.as_str()))
+            .collect();
+        let mut wanted = vec![(want.dev_point, "tmpfs", "tmpfs")];
+        wanted.extend(want.late_point.map(|p| (p, "tmpfs", "late")));
+        assert_eq!(
+            points, wanted,
+            "{what}: the mounts under /dev, in the spec's order"
+        );
+        let has = |m: &ListedMount, opts: &[&str], sb: &[&str]| {
+            opts.iter().all(|o| m.opts.iter().any(|x| x == o))
+                && sb.iter().all(|o| m.sb_opts.iter().any(|x| x == o))
+        };
+        assert!(
+            has(&got[0], &["nosuid"], &["mode=755", "size=65536k"]),
+            "{what}: /dev as its spec mounts it: {:?}",
+            got[0]
+        );
+        if let Some(late) = got.get(1) {
+            assert!(
+                has(late, &[], &["mode=701", "size=64k"]),
+                "{what}: the late tmpfs as its spec mounts it: {late:?}"
+            );
+        }
     };
     for (case, target, shim) in [
         ("plain", None),
@@ -613,16 +722,8 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
     {
         let dir = bundle(case, target, shim);
         let id = BoxId::new(&format!("{case}-{}", if shim { "shim" } else { "pruned" })).unwrap();
+        let what = format!("{case} (through the shim: {shim})");
         let through_shim = pooled.creates_through_shim();
-        let run = |node: &Node| match create(node, &id, &dir) {
-            Err(e) => Err(e),
-            Ok(_) => {
-                let got = snapshot(node, &id);
-                node.delete(&id).unwrap();
-                Ok(got)
-            }
-        };
-        let a = run(&ordinary);
         if case != "parent" {
             wait_for(
                 || {
@@ -633,21 +734,33 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
             );
         }
         let taken = pooled.dev_mounts().unwrap().taken;
-        let b = run(&pooled);
-        assert_eq!(
-            a, b,
-            "prepared /dev changed {case} (through the shim: {shim})"
-        );
+        match (dev_expected(case, target), create(&pooled, &id, &dir)) {
+            (Ok(want), Ok(_)) => {
+                check(&pooled, &id, &want, &what);
+                pooled.delete(&id).unwrap();
+            }
+            (Err(words), Err(e)) => {
+                let said = e.to_string();
+                for w in words {
+                    assert!(said.contains(w), "{what}: the refusal names {w:?}: {said}");
+                }
+            }
+            (Ok(_), Err(e)) => panic!("{what}: refused where its spec makes a box: {e}"),
+            (Err(_), Ok(_)) => {
+                pooled.delete(&id).unwrap();
+                panic!("{what}: made where its spec is refused");
+            }
+        }
         if case != "parent" {
             assert_eq!(
                 pooled.dev_mounts().unwrap().taken,
                 taken + 1,
-                "{case} must consume a prepared mount (including guarded fallback; through the shim: {shim})"
+                "{what} must consume a prepared mount (including guarded fallback)"
             );
             assert_eq!(
                 pooled.creates_through_shim() - through_shim,
                 u64::from(shim),
-                "{case} took the path it was meant to (through the shim: {shim})"
+                "{what} took the path it was meant to"
             );
         }
     }
@@ -697,7 +810,7 @@ fn prepared_devs_preserve_order_and_are_never_shared(lab: &Lab, own: &Path) {
         "prepared mounts never attach in the agent"
     );
     eprintln!(
-        "prepared /dev: fixed pool counters, hostile ordering/refusal oracle, exact devices/links/options, distinct superblocks and isolated mutation all pass"
+        "prepared /dev: fixed pool counters, the spec-derived ordering/refusal oracle, devices/links/options, distinct superblocks and isolated mutation all pass"
     );
 }
 
@@ -2744,10 +2857,7 @@ fn rootfs_propagation_shows_in_the_box_not_the_agent(lab: &Lab, own: &Path) {
             .collect::<BTreeSet<_>>()
     };
     let state = tempfile::tempdir_in(lab.bundles.path()).unwrap();
-    let node = lab
-        .node(&own.join("hex-oci-prop"), state.path())
-        .with_prepared_dev_mounts(false)
-        .unwrap();
+    let node = lab.node(&own.join("hex-oci-prop"), state.path());
     for prop in ["plain", "shared", "slave", "private"] {
         let case = tempfile::Builder::new()
             .prefix("shared-sources-")

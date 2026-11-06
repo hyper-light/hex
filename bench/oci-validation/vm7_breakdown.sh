@@ -20,9 +20,9 @@ mkdir -p "$D"/bin "$D"/out
 cp "$HEX" "$D/bin/hex"; cp "$SEAM" "$D/bin/seam_oci"
 gcc -O2 -pthread -o "$D/bin/idlethreads" "$COMP/probes/idlethreads.c"
 rm -rf "${D:?}/lab"; cp -r "$COMP" "$D/lab"
-# Only what's set reaches the guest; an unset one stays unset there (HEXBENCH_PROCFS unset is its pool on).
+# Only what's set reaches the guest; an unset one stays unset there.
 : > "$D/env"
-for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_PROCFS HEXBENCH_DEVFS HEXBENCH_OWNER \
+for v in AC_E AC_E_MOUNTS IDLE_THREADS LOOPS HEX_OCI_MNTNS HEXBENCH_OWNER \
   HEXBENCH_REUSE HEXBENCH_DOCKER_PATHS PROBE N SUPERBLOCKS SUPERBLOCKS_ALONE CSS_FNS_EXTRA; do
   [ -n "${!v+x}" ] && printf 'export %s=%q\n' "$v" "${!v}" >> "$D/env"
 done

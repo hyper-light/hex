@@ -291,7 +291,7 @@ mkdir -p "$HOME/.cache/hex-t7/ociseam"
     "($(findmnt -n -o FSTYPE,OPTIONS -T "$HOME/.cache/hex-t7/ociseam" | cut -c1-160))"
   echo "inside: /run on $(stat -f -c %T /run); the cgroup root's subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control)"
   echo "params: N=$N WARMUP=$WARMUP ROUNDS=$ROUNDS AC_E=${AC_E:-0} IDLE_AB=${IDLE_AB:-0} MOUNTS=${MOUNTS:-0}" \
-    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0} HEXBENCH_DEVFS=${HEXBENCH_DEVFS:-1} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
+    "MOUNTS_CONC=${MOUNTS_CONC:-1 8} MOUNTS_PATH=${MOUNTS_PATH:-pruned} CLASSIC=${CLASSIC:-0} AC_E_MOUNTS=${AC_E_MOUNTS:-0}"
 } >> "$OUT/env.txt"
 
 # with_idle <command...>: the command run while IDLE_AB idle threads are up in this container (idlethreads.c, built

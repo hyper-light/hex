@@ -1377,12 +1377,6 @@ mod linux {
                 Err(_) => node,
             }
             .with_oci_helper(PathBuf::from(hex));
-            let node = node
-                .with_prepared_dev_mounts(std::env::var("HEXBENCH_DEVFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared /dev pool: {e}"))
-                // HEXBENCH_PROCFS=0: no procs made ahead (decision 6's update, part 2's A/B).
-                .with_prepared_procs(std::env::var("HEXBENCH_PROCFS").as_deref() != Ok("0"))
-                .unwrap_or_else(|e| panic!("the prepared proc pool: {e}"));
             Driver::InProcess(Box::new(node))
         };
         let node = driver.runtime();

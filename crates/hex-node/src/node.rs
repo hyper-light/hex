@@ -399,16 +399,12 @@ impl Node {
         }
     }
 
-    /// Enables or disables fresh prepared `/dev` mounts; disabled creates use ordinary setup.
-    /// Rootless nodes always use ordinary setup in their containers' own user namespaces.
-    pub fn with_prepared_dev_mounts(mut self, enabled: bool) -> Result<Self, Refusal> {
-        let (_, procs, root) = self.devfs.enabled();
-        self.devfs = self.devfs.restart(enabled && root, procs)?;
-        Ok(self)
-    }
-
-    /// Enables or disables procs made ahead (decision 6's update, part 2), apart from `/dev`'s pool, for
-    /// the bench's A/B; disabled creates mount their own proc. Root nodes only, as `/dev`'s.
+    /// A test control, with no production or bench caller: `false` stops the procs made ahead (decision 6's update,
+    /// part 2), so each create mounts its own proc. Its one production consumer is a kernel up to 7.0, where the
+    /// pool stops itself at its first make (`MakeFailure::Namespace`); the bench's A/B knob (HEXBENCH_PROCFS) went by
+    /// Ada's 2026-11-06 rule. The parked-proc and masked-directory tests (oci_box.rs, AC-T7.1.4) use it to read a
+    /// create's own proc, which on 7.1 and later the pool would otherwise serve; a stalled maker would only make the
+    /// pool dry after it had made some, never from the first create. Root nodes only.
     pub fn with_prepared_procs(mut self, enabled: bool) -> Result<Self, Refusal> {
         let (dev, _, root) = self.devfs.enabled();
         self.devfs = self.devfs.restart(dev, enabled && root)?;
