@@ -31,7 +31,9 @@ use hex_api::{Bounds, BoxId, BoxSpec, ClassSpec, Exit, Program, Refusal, Runtime
 use hex_node::{Node, OCI_BOXES};
 
 const TEST: &str = "a_root_nodes_boxes_join_ipc_and_uts_namespaces_made_ahead";
-const PATIENCE: Duration = Duration::from_secs(30);
+/// The conformance suite's patience for a program's end, and for the pool's counts to show its making, not one of its
+/// own (Ada's 2026-11-06 rule).
+const PATIENCE: Duration = hex_api::conformance::PATIENCE;
 const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[test]
@@ -323,7 +325,9 @@ fn wait_for(mut fact: impl FnMut() -> bool, what: &str) {
         if fact() {
             return;
         }
-        std::thread::park_timeout(Duration::from_millis(1));
+        // The node publishes no event as its pool fills; its counts are read again once other threads have run, as
+        // oci_box.rs waits out the inits' refill, rather than after a picked sleep.
+        std::thread::yield_now();
     }
     panic!("no {what} within {PATIENCE:?}");
 }

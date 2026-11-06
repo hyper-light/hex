@@ -596,10 +596,21 @@ fn flat(cg: &Path, file: &str, key: &str) -> u64 {
     hex_core::cgroup::flat(&read(cg, file), key).unwrap_or(0)
 }
 
+/// What test 2's box A holds: 64 MiB, the bar B's own peak is held under. An idle cgroup handed on carries at most
+/// 7,471,104 bytes of A's charge (reuse_residual.md, test 2's six runs and the root lab's), none of it A's own memory,
+/// so a B whose peak reaches A's hold reports A's peak, not its own.
+const A_HOG: u64 = 64 << 20;
+
+/// The most CPU a whole lifecycle took in reuse_pass.md's records, the agent's and its box's together: 6.64 ms
+/// (run 13, 20261103T185413Z, concurrency 32 under about 7,500 host threads). B's start is a part of one, so B
+/// reports less than this as its own; A burns past it, so B reporting A's CPU fails. It was 1% of A's, picked
+/// (Ada's 2026-11-06 rule).
+const LIFECYCLE_CPU_MOST_US: u64 = 6_640;
+
 /// Test 2. Do: box A of owner O burns CPU, holds 64 MiB, has a program OOM-killed and forks refused, and
 /// is deleted; then box B of owner O is created and started. Expect: B is given A's slot; B's reported
-/// CPU is under 1% of A's, its peak under half A's, its OOM kills and refused forks 0, while the
-/// cgroup's own files still count A's; B's memory bound and the default of the pids bound A set and B
+/// CPU is under the most a lifecycle took on record, its peak under what A held, its OOM kills and refused forks 0,
+/// while the cgroup's own files still count A's; B's memory bound and the default of the pids bound A set and B
 /// doesn't are in force.
 fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &Path) {
     let (node, _state) = lab.node(&own.join("hex-reuse-ab"));
@@ -625,7 +636,7 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
         "head -c 3000000000 /dev/zero | sha256sum >/dev/null",
     ]);
     assert_eq!(run(&node, &a, burn), Exit::Code(0));
-    assert_eq!(run(&node, &a, selftest(&Act::Hog(64 << 20))), Exit::Code(0));
+    assert_eq!(run(&node, &a, selftest(&Act::Hog(A_HOG))), Exit::Code(0));
     assert_eq!(
         run(&node, &a, selftest(&Act::Hog(512 << 20))),
         Exit::Signal(9),
@@ -637,9 +648,11 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
         "a program past A's process bound fails"
     );
     let ua = node.usage(&a).unwrap();
+    // Non-vacuity: A's CPU and peak are past what B may report as its own, so B's counts carried over from A's would
+    // fail B's checks below.
     assert!(
-        ua.cpu_usec > 1_000_000
-            && ua.memory_peak_bytes >= 64 << 20
+        ua.cpu_usec > LIFECYCLE_CPU_MOST_US
+            && ua.memory_peak_bytes >= A_HOG
             && ua.oom_kills >= 1
             && ua.pids_refused >= 1,
         "A used what the test made it use: {ua:?}"
@@ -687,14 +700,15 @@ fn a_box_of_one_owner_is_given_the_cgroup_its_earlier_box_left(lab: &Lab, own: &
     node.start(&b).unwrap();
     let ub = node.usage(&b).unwrap();
     assert!(
-        ub.cpu_usec * 100 < ua.cpu_usec,
-        "B's CPU {} us is under 1% of A's {} us",
+        ub.cpu_usec < LIFECYCLE_CPU_MOST_US,
+        "B's CPU {} us is its own, under the most a whole lifecycle took on record ({LIFECYCLE_CPU_MOST_US} us), \
+         not A's {} us",
         ub.cpu_usec,
         ua.cpu_usec
     );
     assert!(
-        ub.memory_peak_bytes < ua.memory_peak_bytes / 2,
-        "B's peak {} is its own, not A's {}",
+        ub.memory_peak_bytes < A_HOG,
+        "B's peak {} is its own, under the {A_HOG} bytes A's program held, not A's {}",
         ub.memory_peak_bytes,
         ua.memory_peak_bytes
     );
