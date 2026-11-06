@@ -137,7 +137,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     let shared = [share(0, "/Users", false), share(1, "/etc", false)];
     let got = rewrite(
         oci(
-            Rootfs::Dir(PathBuf::from("/Users/ada/rootfs")),
+            Rootfs::Dir(PathBuf::from("/Users/ada/rootfs.tar")),
             vec![
                 mount("/etc", "/host-etc", false),
                 mount("/Users/ada/src", "/src", true),
@@ -164,12 +164,15 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
     assert_eq!(got.items[0].name, "root");
     assert_eq!(
         got.items[0].source,
-        Source::Path(PathBuf::from("/Users/ada/rootfs"))
+        Source::Tar(PathBuf::from("/Users/ada/rootfs.tar"))
     );
 
     let layered = rewrite(
         oci(
-            Rootfs::Layers(vec![PathBuf::from("/Users/l0"), PathBuf::from("/Users/l1")]),
+            Rootfs::Layers(vec![
+                PathBuf::from("/Users/l0.tar"),
+                PathBuf::from("/Users/l1.tar"),
+            ]),
             vec![],
         ),
         &shared,
@@ -189,7 +192,7 @@ fn an_oci_spec_is_rewritten_to_the_guests_paths() {
 
     let Err(Refusal::Platform { why, .. }) = rewrite(
         oci(
-            Rootfs::Dir(PathBuf::from("/Users/r")),
+            Rootfs::Dir(PathBuf::from("/Users/r.tar")),
             vec![mount("/opt/x", "/x", true)],
         ),
         &shared,
@@ -305,7 +308,7 @@ fn where_shards_has_no_backend_the_class_is_refused_before_anything_boots() {
     // An absolute path on this host (a drive's on Windows): the spec's own check passes it, so the
     // refusal that comes is the platform's.
     let host = tempfile::tempdir().unwrap();
-    let got = runtime.create(oci(Rootfs::Dir(host.path().join("rootfs")), vec![]));
+    let got = runtime.create(oci(Rootfs::Dir(host.path().join("rootfs.tar")), vec![]));
     let Err(Refusal::Platform { platform, why, .. }) = got else {
         panic!("expected the platform's refusal, got {got:?}");
     };
@@ -436,4 +439,25 @@ fn an_unrenderable_spec_is_refused_by_its_field_before_its_shares_or_a_boot() {
         }
     }
     assert_eq!(guests.boots.load(Ordering::SeqCst), 0);
+}
+
+/// HEX-GUEST-16 (§4a): rewrite an OciSpec whose root is a tarball, and one whose root is a directory: expect
+/// the tarball staged from its own entries everywhere, and the directory staged as it is on macOS and
+/// Linux but refused by name on Windows, whose NTFS keeps neither its modes nor its links' texts.
+#[test]
+fn a_tarball_root_stages_everywhere_and_a_directory_root_is_refused_on_windows() {
+    let host = tempfile::tempdir().unwrap();
+    let tarball = host.path().join("rootfs.tar.gz");
+    let got = rewrite(oci(Rootfs::Dir(tarball.clone()), vec![]), &[], STAGED).unwrap();
+    assert_eq!(got.items[0].source, Source::Tar(tarball));
+    let dir = host.path().join("rootfs");
+    let got = rewrite(oci(Rootfs::Dir(dir.clone()), vec![]), &[], STAGED);
+    if cfg!(windows) {
+        let Err(Refusal::Platform { why, .. }) = got else {
+            panic!("expected a Windows directory root refused, got {got:?}");
+        };
+        assert!(why.contains(".tar or .tar.gz"), "{why}");
+    } else {
+        assert_eq!(got.unwrap().items[0].source, Source::Path(dir));
+    }
 }

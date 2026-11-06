@@ -8,12 +8,12 @@ use std::collections::BTreeMap;
 use super::*;
 use hex_core::stream::files::{LIMITS, Step, Unpack};
 
-fn id() -> BoxId {
+pub(super) fn id() -> BoxId {
     BoxId::new("box-1").unwrap()
 }
 
 /// What an unpacker reads from a stage: each entry by its path, a file's bytes beside it, in order.
-fn unpack(bytes: &[u8]) -> Vec<(Entry, Vec<u8>)> {
+pub(super) fn unpack(bytes: &[u8]) -> Vec<(Entry, Vec<u8>)> {
     let mut u = Unpack::new(LIMITS);
     let mut out: Vec<(Entry, Vec<u8>)> = Vec::new();
     let mut rest = bytes;

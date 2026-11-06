@@ -11,7 +11,10 @@ publish.workspace = true
 [dependencies]
 hex-api.workspace = true
 hex-core.workspace = true
+# A root given as a tarball, staged from its own entries (docs/design/shards-guest.md §4a).
+flate2.workspace = true
 shards-api.workspace = true
+tar.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true

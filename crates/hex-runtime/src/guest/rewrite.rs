@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use hex_api::{BoxId, BoxSpec, ClassSpec, OciSpec, Refusal, Rootfs};
-use hex_client::guest::stage::{Item, Source, staged_path};
+use hex_client::guest::stage::{Item, Source, is_tarball, staged_path};
 use serde_json::Value;
 
 use super::shares::{self, Share};
@@ -30,7 +30,7 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
         ClassSpec::Oci(mut oci) => {
             oci.rootfs = match oci.rootfs {
                 Rootfs::Dir(dir) => {
-                    Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir))
+                    Rootfs::Dir(stage(staged, &id, &mut items, "root".to_owned(), dir)?)
                 }
                 Rootfs::Layers(layers) => Rootfs::Layers(
                     layers
@@ -39,7 +39,7 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
                         .map(|(i, layer)| {
                             stage(staged, &id, &mut items, format!("layer{i}"), layer)
                         })
-                        .collect(),
+                        .collect::<Result<_, _>>()?,
                 ),
             };
             for mount in &mut oci.mounts {
@@ -53,7 +53,7 @@ pub fn rewrite(spec: BoxSpec, shared: &[Share], staged: &str) -> Result<Rewritte
             let (root, config) = bundle(&dir, shared)?;
             items.push(Item {
                 name: "root".to_owned(),
-                source: Source::Path(root),
+                source: root_source(root)?,
             });
             items.push(Item {
                 name: "config.json".to_owned(),
@@ -115,14 +115,43 @@ pub fn check(spec: &OciSpec) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Adds `path` to stage as `name`, and returns its copy's path in the guest.
-fn stage(staged: &str, id: &BoxId, items: &mut Vec<Item>, name: String, path: PathBuf) -> PathBuf {
+/// Adds the root at `path` to stage as `name`, and returns its copy's path in the guest.
+fn stage(
+    staged: &str,
+    id: &BoxId,
+    items: &mut Vec<Item>,
+    name: String,
+    path: PathBuf,
+) -> Result<PathBuf, Refusal> {
     let guest = PathBuf::from(staged_path(staged, id, &name));
     items.push(Item {
         name,
-        source: Source::Path(path),
+        source: root_source(path)?,
     });
-    guest
+    Ok(guest)
+}
+
+/// What the root at `path` is staged from (§4a): a tarball's own entries (`.tar`, `.tar.gz`, `.tgz`), or
+/// the directory as this host reads it. On Windows a directory root is refused by name: NTFS keeps no
+/// Unix modes, and a Linux symbolic link unpacked there loses its target's text (Git Bash's tar on
+/// jupiter made the lab's `bin/ls` a link to `C:\Program Files\Git\usr\bin\busybox`), so its copy
+/// would be silently wrong (CLAUDE.md §3).
+pub fn root_source(path: PathBuf) -> Result<Source, Refusal> {
+    if is_tarball(&path) {
+        return Ok(Source::Tar(path));
+    }
+    if cfg!(windows) {
+        return Err(Refusal::Platform {
+            what: "a Linux root as a Windows directory",
+            platform: "windows",
+            why: format!(
+                "{} is a directory, and NTFS keeps neither a Linux root's modes nor its symbolic \
+                 links' targets; give the root as a .tar or .tar.gz",
+                path.display()
+            ),
+        });
+    }
+    Ok(Source::Path(path))
 }
 
 fn invalid(why: String) -> Refusal {

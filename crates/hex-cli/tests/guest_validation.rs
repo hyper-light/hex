@@ -10,7 +10,8 @@
 //! It needs a guest and the lab, so it runs only where they're given, and says SKIP and why elsewhere:
 //! - `HEX_GUEST_KERNEL`, `HEX_GUEST_INITRD`, `SHARDS_BIN`: the guest, as HEX-GUEST-19's;
 //! - `HEX_GUEST_LINUX_HEX`: the guest's static `hex`, put at the lab's /opt/hex;
-//! - `HEX_GUEST_LAB`: the lab's root (lab.sh's output for the guest's arch);
+//! - `HEX_GUEST_LAB`: the lab's root (lab.sh's output for the guest's arch), a directory or, on any host and
+//!   on Windows necessarily (§4a), its tarball (lab.sh's fourth argument), to which this adds `/opt/hex`;
 //! - `HEX_GUEST_RUNTIME_TOOLS`: runtime-tools built for the guest's arch (runtime_tools.sh), unpacked;
 //! - `HEX_GUEST_VALIDATION_OUT`: an empty directory for the results;
 //! - optionally `HEX_GUEST_CPUS` and `HEX_GUEST_MEMORY_MIB` (else 2 and 4096).
@@ -208,10 +209,15 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         "{} isn't empty",
         out.display()
     );
-    let hex = lab.join("opt/hex");
-    std::fs::copy(given("HEX_GUEST_LINUX_HEX").unwrap(), &hex).unwrap();
-    make_executable(&hex);
     let bundle = tempfile::tempdir().unwrap();
+    let hex = given("HEX_GUEST_LINUX_HEX").unwrap();
+    let lab = if hex_client::guest::stage::is_tarball(&lab) {
+        with_hex(&lab, &hex, &bundle.path().join("lab.tar"))
+    } else {
+        std::fs::copy(&hex, lab.join("opt/hex")).unwrap();
+        make_executable(&lab.join("opt/hex"));
+        lab
+    };
     std::fs::write(
         bundle.path().join("config.json"),
         serde_json::to_vec_pretty(&lab_config(&lab, &runtime_tools, &out)).unwrap(),
@@ -291,6 +297,40 @@ fn the_oci_runtime_spec_validation_passes_in_the_guest_as_on_linux() {
         1,
         "the node booted its guest more than once"
     );
+}
+
+/// The lab tarball `lab` copied to `out` with the guest's `hex` added at `opt/hex`, mode 0755: each of its
+/// entries re-written as it came, a symbolic link with its text.
+fn with_hex(lab: &Path, hex: &Path, out: &Path) -> PathBuf {
+    let file = std::fs::File::open(lab).unwrap();
+    let reader: Box<dyn std::io::Read> = if lab.to_str().unwrap().ends_with(".tar") {
+        Box::new(file)
+    } else {
+        Box::new(flate2::read::GzDecoder::new(file))
+    };
+    let mut from = tar::Archive::new(reader);
+    let mut to = tar::Builder::new(std::fs::File::create(out).unwrap());
+    for entry in from.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().into_owned();
+        let mut header = entry.header().clone();
+        match header.entry_type() {
+            tar::EntryType::Symlink => {
+                let target = entry.link_name().unwrap().unwrap().into_owned();
+                to.append_link(&mut header, &path, &target).unwrap();
+            }
+            _ => to.append_data(&mut header, &path, &mut entry).unwrap(),
+        }
+    }
+    let bytes = std::fs::read(hex).unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_mode(0o755);
+    header.set_size(u64::try_from(bytes.len()).unwrap());
+    to.append_data(&mut header, "opt/hex", bytes.as_slice())
+        .unwrap();
+    to.into_inner().unwrap();
+    out.to_owned()
 }
 
 #[cfg(unix)]
