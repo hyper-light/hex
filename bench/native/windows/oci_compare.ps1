@@ -8,13 +8,16 @@
 # alone) and recorded beside, never subtracted silently; the background load is recorded per round.
 #
 #   powershell -NoProfile -File oci_compare.ps1 -HexBin <dir with hex.exe> -HexBench <windows_oci.exe>
-#       -Layers <layer;...> -Out <json> [-N 50] [-W 3]
+#       -Layers <layer;...> -Out <json> [-N 299] [-W 3]
 param(
     [Parameter(Mandatory = $true)][string]$HexBin,
     [Parameter(Mandatory = $true)][string]$HexBench,
     [Parameter(Mandatory = $true)][string]$Layers,
     [Parameter(Mandatory = $true)][string]$Out,
-    [int]$N = 50,
+    # N for a stated p99 confidence (Ada's rule on constants, 2026-11-06): the largest of N samples is at
+    # or above the true p99 unless all N fall below it, which happens with probability 0.99^N, so N >=
+    # ln(0.05)/ln(0.99) = 298.07 gives 95% confidence that the reported p99 is not under the true one.
+    [int]$N = 299,
     [int]$W = 3,
     [string]$Root = "$env:USERPROFILE\.cache\hex-native-s4",
     [string]$Image = "mcr.microsoft.com/windows/nanoserver:ltsc2025"
