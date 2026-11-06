@@ -438,13 +438,23 @@ fn an_oversubscribed_box_ends_within_the_bar() {
                 assert!(Instant::now() < deadline, "the box never ended for memory");
                 std::thread::yield_now();
             };
+            // What the watcher read when it ended the box, beside the peak (which this test's own live reads
+            // raise, up to the members' deaths after the kill).
+            let at_end = match rt.status(&id).expect("status").ended {
+                Some(hex_runtime::macos::process::Ended::Over(hex_core::watch::Over::Memory {
+                    footprint,
+                    ..
+                })) => footprint,
+                _ => 0,
+            };
             rt.delete(&id).expect("delete");
             drop(procs);
             let over = peak.saturating_sub(256 * MIB);
             let (rates, early) = rt.pacing().expect("pacing");
             println!(
-                "OVERSUB members={members} pass={pass} overshoot_mib={:.1} bytes_per_s={} spawns_per_s={} early_us={}",
+                "OVERSUB members={members} pass={pass} overshoot_mib={:.1} at_end_mib={:.1} bytes_per_s={} spawns_per_s={} early_us={}",
                 over as f64 / MIB as f64,
+                at_end.saturating_sub(256 * MIB) as f64 / MIB as f64,
                 rates.bytes,
                 rates.processes,
                 early.as_micros()

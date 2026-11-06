@@ -132,6 +132,12 @@ impl MacRuntime {
             .map_err(|_| Refusal::Broken("the node's box map lock is poisoned".to_owned()))
     }
 
+    /// Box `id` as its watcher last recorded it, why it ended included (observability: the footprint the
+    /// watcher read when it ended a box, beside the peak).
+    pub fn status(&self, id: &BoxId) -> Result<process::Status, Refusal> {
+        self.get(id)?.status()
+    }
+
     fn get(&self, id: &BoxId) -> Result<Arc<ProcessBox>, Refusal> {
         self.boxes()?
             .get(id)
