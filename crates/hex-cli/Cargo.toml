@@ -28,9 +28,6 @@ socket2.workspace = true
 
 # The Windows oci class's launcher (`hex oci-launch`), which HCS runs inside each container
 # (hex_runtime::windows::oci::launch), and the selftest's device probe.
-[target.'cfg(target_os = "windows")'.dependencies]
-hex-runtime.workspace = true
-
 # `hex setup features` runs the Windows node's own bounded feature query for the installer.
 [target.'cfg(target_os = "windows")'.dependencies]
 hex-core.workspace = true
